@@ -4,4 +4,9 @@ version = "0.1.0"
 edition = "2024"
 
 [dependencies]
+axum = "0.8.4"
+axum-extra = "0.10.1"
+axum-server = { version = "0.7", features = ["tls-rustls"] }
 tokio = { version = "1.45.0", features = ["macros", "rt-multi-thread"] }
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }

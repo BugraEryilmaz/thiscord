@@ -1,5 +1,5 @@
 # HTTPS
-- [ ] Self signed certificate
+- [x] Self signed certificate
 - [ ] A real certificate
 # Signalling server
 - [ ] Register
