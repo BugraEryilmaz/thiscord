@@ -8,5 +8,6 @@ axum = "0.8.4"
 axum-extra = "0.10.1"
 axum-server = { version = "0.7", features = ["tls-rustls"] }
 tokio = { version = "1.45.0", features = ["macros", "rt-multi-thread"] }
+tower-http = { version = "0.6.4", features = ["trace"]}
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
