@@ -2,6 +2,7 @@
 - [x] Self signed certificate
 - [ ] A real certificate
 # Signalling server
+- [x] Database connection management (postgresql)
 - [ ] Register
 - [ ] Login
 - [ ] Logout

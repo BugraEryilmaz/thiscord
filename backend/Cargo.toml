@@ -4,10 +4,17 @@ version = "0.1.0"
 edition = "2024"
 
 [dependencies]
+argon2 = "0.5.3"
 axum = "0.8.4"
 axum-extra = "0.10.1"
+axum-login = "0.17.0"
 axum-server = { version = "0.7", features = ["tls-rustls"] }
+chrono = { version = "0.4.41", features = ["serde"] }
+diesel = { version = "2.2.10", features = ["chrono", "postgres", "r2d2", "uuid"] }
+diesel_migrations = { version = "2.2.0", features = ["postgres"] }
+dotenvy = "0.15.7"
 tokio = { version = "1.45.0", features = ["macros", "rt-multi-thread"] }
 tower-http = { version = "0.6.4", features = ["trace"]}
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+uuid = { version = "1.16.0", features = ["serde", "v4"] }
