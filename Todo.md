@@ -3,8 +3,9 @@
 - [ ] A real certificate
 # Signalling server
 - [x] Database connection management (postgresql)
-- [ ] Register
-- [ ] Login
+- [x] Register
+- [x] Login
+  - [ ] Move session to the database
 - [ ] Logout
 - [ ] Create server
 - [ ] Join server

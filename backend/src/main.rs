@@ -1,10 +1,13 @@
 pub mod auth;
 pub mod models;
 pub mod schema;
+pub mod err;
 
-use axum::{routing::get, Extension, Router};
+use axum::{routing::get, Router};
+use axum_login::{login_required, tower_sessions::{MemoryStore, SessionManagerLayer}, AuthManagerLayerBuilder};
 use axum_server::tls_rustls::RustlsConfig;
 use diesel::{r2d2::{ConnectionManager, Pool}, PgConnection};
+use models::PostgresBackend;
 use std::{net::SocketAddr, path::PathBuf};
 use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt};
 use tower_http::trace::TraceLayer;
@@ -42,6 +45,12 @@ async fn main() {
         .expect("Failed to run migrations");
     tracing::info!("Migrations completed successfully");
     drop(conn);
+    // session manager
+    let session_store = MemoryStore::default();
+    let session_manager_layer = SessionManagerLayer::new(session_store);
+    // create auth backend
+    let auth_backend = models::PostgresBackend::new(db_connection_pool);
+    let auth_layer = AuthManagerLayerBuilder::new(auth_backend, session_manager_layer).build();
 
     // configure certificate and private key used by https
     let config = RustlsConfig::from_pem_file(
@@ -59,7 +68,9 @@ async fn main() {
 
     let app = Router::new()
         .route("/", get(handler))
-        .layer(Extension(db_connection_pool))
+        .route_layer(login_required!(PostgresBackend, login_url = "/auth/login"))
+        .nest("/auth", crate::auth::web::router())
+        .layer(auth_layer)
         .layer(TraceLayer::new_for_http());
 
     // run https server

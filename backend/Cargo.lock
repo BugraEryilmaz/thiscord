@@ -228,6 +228,7 @@ name = "backend"
 version = "0.1.0"
 dependencies = [
  "argon2",
+ "async-trait",
  "axum",
  "axum-extra",
  "axum-login",
@@ -236,6 +237,10 @@ dependencies = [
  "diesel",
  "diesel_migrations",
  "dotenvy",
+ "r2d2",
+ "serde",
+ "serde_json",
+ "thiserror",
  "tokio",
  "tower-http",
  "tracing",
