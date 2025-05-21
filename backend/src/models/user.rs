@@ -6,7 +6,10 @@ use diesel::prelude::*;
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
-use crate::{schema::{user_activations, users}, Error};
+use crate::{
+    Error,
+    schema::{user_activations, users},
+};
 
 use super::Backend;
 
@@ -40,7 +43,6 @@ pub struct ActivationFull {
     pub activation_code: String,
     pub valid_until: Option<chrono::NaiveDateTime>,
 }
-
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
 pub struct Credentials {
@@ -112,7 +114,12 @@ impl Backend {
             .send_email(
                 &new_user.email,
                 "Thiscord activation code",
-                &format!("Your activation code is: {}", code),
+                &format!(
+                    "Your activation code is: {}\n\nLink: https://{}/auth/activate?token={}",
+                    code,
+                    std::env::var("HOST").unwrap_or("localhost".to_string()),
+                    code
+                ),
             )
             .await?;
         // Save code to database
@@ -130,10 +137,7 @@ impl Backend {
         Ok(new_user)
     }
 
-    pub fn try_activate_user(
-        &self,
-        token: &str,
-    ) -> Result<Option<()>, Error> {
+    pub fn try_activate_user(&self, token: &str) -> Result<Option<()>, Error> {
         let mut conn = self.get_connection()?;
         let user_activation = users::table
             .inner_join(user_activations::table)

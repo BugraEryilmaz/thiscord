@@ -84,10 +84,20 @@ mod post {
 }
 
 mod get {
+    use axum::extract::Query;
+
     use super::*;
 
-    pub async fn activate(auth: AuthSession, Json(token): Json<String>) -> impl IntoResponse {
-        match auth.backend.try_activate_user(token.as_str()) {
+    use serde::Deserialize;
+
+    #[derive(Deserialize)]
+    pub struct TokenQuery {
+        pub token: String,
+    }
+
+    pub async fn activate(auth: AuthSession, token: Query<TokenQuery>) -> impl IntoResponse {
+        let token = token.0.token.as_str();
+        match auth.backend.try_activate_user(token) {
             Ok(Some(_)) => {
                 tracing::info!("User activated");
                 (StatusCode::OK, "User activated".to_string())
