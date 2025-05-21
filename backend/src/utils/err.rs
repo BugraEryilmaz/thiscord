@@ -8,6 +8,14 @@ pub enum Error {
     InvalidCredentials,
     #[error("Password hash error: {0}")]
     PasswordHash(String),
+    #[error("File error: {0}")]
+    File(#[from] std::io::Error),
+    #[error("JSON error: {0}")]
+    Json(#[from] serde_json::Error),
+    #[error("Email error: {0}")]
+    Email(#[from] lettre::transport::smtp::Error),
+    #[error("Invalid Activation Code")]
+    InvalidActivationCode,
 }
 
 impl From<argon2::password_hash::Error> for Error {

@@ -1,5 +1,9 @@
+use crate::models::Signup;
+use axum::Json;
 use axum::Router;
-use axum::routing::post;
+use axum::http::StatusCode;
+use axum::response::IntoResponse;
+use axum::routing::{post, get};
 
 use crate::models::{AuthSession, Credentials};
 
@@ -7,14 +11,10 @@ pub fn router() -> Router {
     Router::new()
         .route("/login", post(self::post::login))
         .route("/signup", post(self::post::signup))
+        .route("/activate", get(self::get::activate))
 }
 
 mod post {
-    use crate::models::Signup;
-    use axum::Json;
-    use axum::http::StatusCode;
-    use axum::response::IntoResponse;
-
     use super::*;
 
     pub async fn login(
@@ -70,13 +70,34 @@ mod post {
                 return (StatusCode::INTERNAL_SERVER_ERROR, e.to_string());
             }
         }
-        match auth.backend.create_user(signup) {
+        match auth.backend.create_user(signup).await {
             Ok(user) => {
                 tracing::info!("User {} signed up", user.username);
                 (StatusCode::OK, "Signed up".to_string())
             }
             Err(e) => {
                 tracing::error!("Failed to signup user: {}", e);
+                (StatusCode::INTERNAL_SERVER_ERROR, e.to_string())
+            }
+        }
+    }
+}
+
+mod get {
+    use super::*;
+
+    pub async fn activate(auth: AuthSession, Json(token): Json<String>) -> impl IntoResponse {
+        match auth.backend.try_activate_user(token.as_str()) {
+            Ok(Some(_)) => {
+                tracing::info!("User activated");
+                (StatusCode::OK, "User activated".to_string())
+            }
+            Ok(None) => {
+                tracing::info!("Failed to activate user: Invalid token");
+                (StatusCode::BAD_REQUEST, "Invalid token".to_string())
+            }
+            Err(e) => {
+                tracing::error!("Failed to activate user: {}", e);
                 (StatusCode::INTERNAL_SERVER_ERROR, e.to_string())
             }
         }

@@ -4,19 +4,20 @@ mod user;
 
 pub use user::*;
 
-use crate::err::Error;
+use crate::{utils::GmailBackend, Error};
 
 #[derive(Clone, Debug)]
-pub struct PostgresBackend {
-    pub pool: Pool<ConnectionManager<PgConnection>>
+pub struct Backend {
+    pub pool: Pool<ConnectionManager<PgConnection>>,
+    pub email: GmailBackend,
 }
 
-impl PostgresBackend {
+impl Backend {
     pub fn new(pool: Pool<ConnectionManager<PgConnection>>) -> Self {
-        Self { pool }
+        Self { pool, email: GmailBackend::new() }
     }
     pub fn get_connection(&self) -> Result<PooledConnection<ConnectionManager<PgConnection>>, Error> {
         self.pool.get().map_err(|e| e.into())
     }
 }
-pub type AuthSession = axum_login::AuthSession<PostgresBackend>;
+pub type AuthSession = axum_login::AuthSession<Backend>;

@@ -1,6 +1,6 @@
 use argon2::{PasswordHash, PasswordVerifier};
 use axum_login::{AuthUser, AuthnBackend, UserId};
-use crate::{err::Error, models::{Credentials, PostgresBackend}};
+use crate::{Error, models::{Credentials, Backend}};
 use crate::models::Users;
 use diesel::prelude::*;
 use crate::schema::users;
@@ -19,7 +19,7 @@ impl AuthUser for Users {
 }
 
 #[async_trait]
-impl AuthnBackend for PostgresBackend {
+impl AuthnBackend for Backend {
     type User = Users;
     type Error = Error;
     type Credentials = Credentials;
@@ -37,7 +37,8 @@ impl AuthnBackend for PostgresBackend {
             return Ok(None);
         }
         let user = user.unwrap();
-        if user.deleted {
+        if user.deleted || user.activated == false {
+            tracing::info!("User {} is deleted or not activated", user.username);
             return Ok(None);
         }
         let parsed_hash = PasswordHash::new(user.password.as_str())?;
