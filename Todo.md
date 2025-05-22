@@ -4,6 +4,8 @@
 # Signalling server
 - [x] Database connection management (postgresql)
 - [x] Register
+  - [x] Activation email
+  - [x] Resend activation email
 - [x] Login
   - [ ] Move session to the database
 - [ ] Logout

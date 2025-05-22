@@ -1,3 +1,5 @@
+use std::sync::Arc;
+
 use argon2::{
     Argon2,
     password_hash::{PasswordHasher, SaltString, rand_core::OsRng},
@@ -108,24 +110,47 @@ impl Backend {
             })?;
 
         // Create 6 digit code
-        let code = rand::random::<u32>() % 1_000_000;
+        let user = new_user.clone();
+        let backend = Arc::new(self.clone());
+        tokio::spawn(async move {
+            backend.create_activation(
+                user.id,
+                &user.email,
+            ).await.unwrap_or_else(|e| {
+                tracing::error!("Failed to create activation code: {}", e);
+            });
+        });
+        Ok(new_user)
+    }
+
+    pub async fn create_activation(
+        &self,
+        user_id: Uuid,
+        user_email: &str,
+    ) -> Result<(), Error> {
+        let activation_code = rand::random::<u32>() % 1_000_000;
+        let activation_code = format!("{:06}", activation_code);
+        let mut conn = self.get_connection()?;
+        // delete if user has previous activation code
+        diesel::delete(user_activations::table.filter(user_activations::user_id.eq(user_id)))
+            .execute(&mut conn)?;
         // Send email to user with the code
         self.email
             .send_email(
-                &new_user.email,
+                user_email,
                 "Thiscord activation code",
                 &format!(
                     "Your activation code is: {}\n\nLink: https://{}/auth/activate?token={}",
-                    code,
+                    activation_code,
                     std::env::var("HOST").unwrap_or("localhost".to_string()),
-                    code
+                    activation_code
                 ),
             )
             .await?;
         // Save code to database
         let activation = Activation {
-            activation_code: code.to_string(),
-            user_id: new_user.id,
+            activation_code: activation_code.to_string(),
+            user_id: user_id,
         };
         diesel::insert_into(crate::schema::user_activations::table)
             .values(&activation)
@@ -134,10 +159,10 @@ impl Backend {
                 tracing::error!("Failed to create activation code: {}", e);
                 Error::Database(e)
             })?;
-        Ok(new_user)
+        Ok(())
     }
 
-    pub fn try_activate_user(&self, token: &str) -> Result<Option<()>, Error> {
+    pub fn try_activate_user(self, token: &str) -> Result<Option<()>, Error> {
         let mut conn = self.get_connection()?;
         let user_activation = users::table
             .inner_join(user_activations::table)
@@ -161,6 +186,18 @@ impl Backend {
             .set(users::activated.eq(true))
             .execute(&mut conn)?;
         Ok(Some(()))
+    }
+
+    pub fn get_user_by_username(
+        &self,
+        username: &str,
+    ) -> Result<Option<Users>, Error> {
+        let mut conn = self.get_connection()?;
+        let user = users::table
+            .filter(users::username.eq(username))
+            .first::<Users>(&mut conn)
+            .optional()?;
+        Ok(user)
     }
 }
 

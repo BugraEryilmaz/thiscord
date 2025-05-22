@@ -12,6 +12,7 @@ pub fn router() -> Router {
         .route("/login", post(self::post::login))
         .route("/signup", post(self::post::signup))
         .route("/activate", get(self::get::activate))
+        .route("/resend-activation", get(self::get::resend_activation))
 }
 
 mod post {
@@ -84,6 +85,8 @@ mod post {
 }
 
 mod get {
+    use std::sync::Arc;
+
     use axum::extract::Query;
 
     use super::*;
@@ -95,6 +98,43 @@ mod get {
         pub token: String,
     }
 
+    #[derive(Deserialize)]
+    pub struct UsernameQuery {
+        pub username: String,
+    }
+
+    pub async fn resend_activation(
+        auth: AuthSession,
+        Query(username): Query<UsernameQuery>,
+    ) -> impl IntoResponse {
+        let username = username.username.as_str();
+        let backend = Arc::new(auth.backend);
+        let user = match backend.get_user_by_username(username) {
+            Ok(Some(user)) => {
+                if user.activated {
+                    tracing::info!("Failed to resend activation email: User already activated");
+                    return (StatusCode::BAD_REQUEST, "User already activated".to_string());
+                }
+                user
+            }
+            Ok(None) => {
+                tracing::info!("Failed to resend activation email: User not found");
+                return (StatusCode::BAD_REQUEST, "User not found".to_string());
+            }
+            Err(e) => {
+                tracing::error!("Failed to get user by username: {}", e);
+                return (StatusCode::INTERNAL_SERVER_ERROR, e.to_string());
+            }
+        };
+        tokio::spawn(async move {
+            backend.create_activation(user.id, &user.email).await.unwrap_or_else(|e| {
+                tracing::error!("Failed to create activation: {}", e);
+            });
+        });
+        tracing::info!("Activation email resent to {}", username);
+        (StatusCode::OK, "Activation email resent".to_string())
+    }
+    
     pub async fn activate(auth: AuthSession, token: Query<TokenQuery>) -> impl IntoResponse {
         let token = token.0.token.as_str();
         match auth.backend.try_activate_user(token) {

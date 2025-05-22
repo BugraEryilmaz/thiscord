@@ -14,7 +14,7 @@ chrono = { version = "0.4.41", features = ["serde"] }
 diesel = { version = "2.2.10", features = ["chrono", "postgres", "r2d2", "uuid"] }
 diesel_migrations = { version = "2.2.0", features = ["postgres"] }
 dotenvy = "0.15.7"
-lettre = { version = "0.11.16", features = ["tokio1-native-tls"] }
+lettre = { version = "0.11.16", features = ["tokio1-native-tls", "pool"] }
 r2d2 = "0.8.10"
 rand = "0.9.1"
 serde = "1.0.219"
