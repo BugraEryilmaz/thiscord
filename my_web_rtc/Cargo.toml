@@ -1,0 +1,18 @@
+[package]
+name = "my_web_rtc"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+opus = "0.3.0"
+reqwest = {version = "0.12.15" , features = ["json", "stream"] }
+thiserror = "2.0.12"
+tokio = "1.45.0"
+webrtc = "0.13.0"
+futures-util = "0.3.31"
+axum = {version = "0.8.4", features = ["ws"]}
+serde_json = "1.0.140"
+serde = "1.0.219"
+tokio-tungstenite = {version = "0.26.2", features = ["native-tls"]}
+native-tls = "0.2.14"
+ringbuf = "0.4.8"

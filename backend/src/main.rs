@@ -2,6 +2,7 @@ pub mod auth;
 pub mod models;
 pub mod schema;
 pub mod utils;
+pub mod rooms;
 
 pub use utils::Error;
 
@@ -54,6 +55,12 @@ async fn main() {
     let auth_backend = models::Backend::new(db_connection_pool);
     let auth_layer = AuthManagerLayerBuilder::new(auth_backend, session_manager_layer).build();
 
+    tracing::info!("SSL certificate is being loaded from {}", PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("..")
+            .join("sslcert")
+            .join("key.pem").display());
+    rustls::crypto::aws_lc_rs::default_provider().install_default()
+        .expect("Failed to install default provider");
     // configure certificate and private key used by https
     let config = RustlsConfig::from_pem_file(
         PathBuf::from(env!("CARGO_MANIFEST_DIR"))
@@ -67,11 +74,13 @@ async fn main() {
     )
     .await
     .unwrap();
+    tracing::info!("SSL certificate loaded");
 
     let app = Router::new()
         .route("/", get(handler))
         .route_layer(login_required!(Backend, login_url = "/auth/login"))
         .nest("/auth", crate::auth::web::router())
+        .nest("/rooms", crate::rooms::web::router())
         .layer(auth_layer)
         .layer(TraceLayer::new_for_http());
 

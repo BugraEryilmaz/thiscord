@@ -16,6 +16,8 @@ pub enum Error {
     Email(#[from] lettre::transport::smtp::Error),
     #[error("Invalid Activation Code")]
     InvalidActivationCode,
+    #[error("WebRTC error: {0}")]
+    WebRTC(#[from] my_web_rtc::Error),
 }
 
 impl From<argon2::password_hash::Error> for Error {

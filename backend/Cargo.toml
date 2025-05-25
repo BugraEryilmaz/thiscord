@@ -6,11 +6,12 @@ edition = "2024"
 [dependencies]
 argon2 = "0.5.3"
 async-trait = "0.1.88"
-axum = "0.8.4"
+axum = {version = "0.8.4", features = ["ws"]}
 axum-extra = "0.10.1"
 axum-login = "0.17.0"
 axum-server = { version = "0.7", features = ["tls-rustls"] }
 chrono = { version = "0.4.41", features = ["serde"] }
+dashmap = "6.1.0"
 diesel = { version = "2.2.10", features = ["chrono", "postgres", "r2d2", "uuid"] }
 diesel_migrations = { version = "2.2.0", features = ["postgres"] }
 dotenvy = "0.15.7"
@@ -25,3 +26,7 @@ tower-http = { version = "0.6.4", features = ["trace"]}
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 uuid = { version = "1.16.0", features = ["serde", "v4"] }
+my_web_rtc = { path = "../my_web_rtc" }
+rustls = { version = "0.23.27", features = ["aws-lc-rs"] }
+futures-util = "0.3.31"
+ringbuf = "0.4.8"

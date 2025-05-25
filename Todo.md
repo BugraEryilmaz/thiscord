@@ -21,12 +21,16 @@
 - [ ] List messages
 - [ ] Send message
 # SFU Media server
-- [ ] WebRTC connection management
+- [x] WebRTC connection management
+  - [x] SDP negotiation
+  - [x] ICE candidate exchange
 - [ ] Quality of service detection
 - [ ] Media stream management
 # WebRTC Frontend
-- [ ] WebRTC connection management
-- [ ] Audio stream management
+- [x] WebRTC connection management
+  - [x] SDP negotiation
+  - [x] ICE candidate exchange
+- [x] Audio stream management
 - [ ] Video stream management
 - [ ] Screen sharing
 - [ ] Chat management

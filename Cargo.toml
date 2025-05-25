@@ -1,0 +1,7 @@
+[workspace]
+members = [
+    "frontend",
+    "frontend/src-tauri",
+    "backend", 
+    "my_web_rtc",
+]
