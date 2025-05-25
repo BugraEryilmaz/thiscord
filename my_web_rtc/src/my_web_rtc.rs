@@ -3,6 +3,9 @@ use ringbuf::HeapProd;
 use ringbuf::traits::Consumer;
 use ringbuf::traits::Observer;
 use ringbuf::traits::Producer;
+use webrtc::api::setting_engine::SettingEngine;
+use webrtc::ice::udp_network::EphemeralUDP;
+use webrtc::ice::udp_network::UDPNetwork;
 use std::sync::Arc;
 
 use crate::{Error, Reader, SignalingMessage, Writer};
@@ -160,7 +163,16 @@ impl WebRTCConnection {
         let mut m = MediaEngine::default();
         m.register_codec(Self::get_audio_codec(), RTPCodecType::Audio)?;
 
-        let api = webrtc::api::APIBuilder::new().with_media_engine(m).build();
+        let mut udp = EphemeralUDP::default();
+        udp.set_ports(12000, 13000)?;
+
+        let mut settings_engine = SettingEngine::default();
+        settings_engine.set_udp_network(UDPNetwork::Ephemeral(udp));
+
+        let api = webrtc::api::APIBuilder::new()
+            .with_media_engine(m)
+            .with_setting_engine(settings_engine)
+            .build();
 
         let config = Self::get_config();
         let peer_connection = api.new_peer_connection(config).await.map_err(|e| e.into());
