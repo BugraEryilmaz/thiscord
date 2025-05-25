@@ -1,6 +1,9 @@
 mod my_web_rtc;
 
-use futures_util::{stream::{SplitSink, SplitStream}, SinkExt, StreamExt as _};
+use futures_util::{
+    SinkExt, StreamExt as _,
+    stream::{SplitSink, SplitStream},
+};
 pub use my_web_rtc::WebRTCConnection;
 use serde::{Deserialize, Serialize};
 use tokio_tungstenite::tungstenite;

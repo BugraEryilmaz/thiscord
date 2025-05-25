@@ -3,7 +3,7 @@ use axum::Json;
 use axum::Router;
 use axum::http::StatusCode;
 use axum::response::IntoResponse;
-use axum::routing::{post, get};
+use axum::routing::{get, post};
 
 use crate::models::{AuthSession, Credentials};
 
@@ -113,7 +113,10 @@ mod get {
             Ok(Some(user)) => {
                 if user.activated {
                     tracing::info!("Failed to resend activation email: User already activated");
-                    return (StatusCode::BAD_REQUEST, "User already activated".to_string());
+                    return (
+                        StatusCode::BAD_REQUEST,
+                        "User already activated".to_string(),
+                    );
                 }
                 user
             }
@@ -127,14 +130,17 @@ mod get {
             }
         };
         tokio::spawn(async move {
-            backend.create_activation(user.id, &user.email).await.unwrap_or_else(|e| {
-                tracing::error!("Failed to create activation: {}", e);
-            });
+            backend
+                .create_activation(user.id, &user.email)
+                .await
+                .unwrap_or_else(|e| {
+                    tracing::error!("Failed to create activation: {}", e);
+                });
         });
         tracing::info!("Activation email resent to {}", username);
         (StatusCode::OK, "Activation email resent".to_string())
     }
-    
+
     pub async fn activate(auth: AuthSession, token: Query<TokenQuery>) -> impl IntoResponse {
         let token = token.0.token.as_str();
         match auth.backend.try_activate_user(token) {

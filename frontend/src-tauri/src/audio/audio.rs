@@ -1,38 +1,110 @@
-use ringbuf::{traits::{Consumer, Producer}, HeapCons, HeapProd};
-use std::sync::Arc;
+use ringbuf::{
+    traits::{Consumer, Producer},
+    HeapCons, HeapProd,
+};
+use std::sync::mpsc::channel;
+use std::sync::{Arc, Mutex};
 
-use cpal::{traits::{DeviceTrait, HostTrait, StreamTrait}, SampleRate, SupportedBufferSize, SupportedStreamConfig};
+use cpal::{
+    traits::{DeviceTrait, HostTrait, StreamTrait},
+    SampleRate, SupportedBufferSize, SupportedStreamConfig,
+};
 
 use crate::Error;
 
-use super::AudioElement;
+use super::{AudioCommand, AudioElement};
 
 impl AudioElement {
-    pub fn new() -> Result<Self, Error> {
-        let host = cpal::default_host();
-        let input_device = host.default_input_device();
-        let output_device = host.default_output_device();
+    pub fn new(input_buffer: HeapProd<i16>, output_buffer: HeapCons<i16>) -> Result<Self, Error> {
         Ok(AudioElement {
-            input_device: input_device.map(Arc::new),
-            output_device: output_device.map(Arc::new),
-            input_stream: None,
-            output_stream: None,
+            input_queue: Arc::new(Mutex::new(input_buffer)),
+            output_queue: Arc::new(Mutex::new(output_buffer)),
+            input_command_queue: Arc::new(Mutex::new(None)),
+            output_command_queue: Arc::new(Mutex::new(None)),
         })
     }
 
-    pub fn start_input_stream(&mut self, mut tx: HeapProd<i16>) -> Result<(), Error> {
-        let input_config = match self.input_device {
-            Some(ref device) => device.default_input_config()?,
+    pub fn start_input_stream(&mut self) -> Result<(), Error> {
+        let host = cpal::default_host();
+        let device = match host.default_input_device() {
+            Some(device) => device,
             None => return Err(Error::NoInputDevice),
         };
-        let device = self.input_device.as_ref().unwrap();
-        let sample_format = input_config.sample_format();
-        let config: cpal::StreamConfig = input_config.into();
 
-        let stream = match sample_format {
+        let tx = self.input_queue.clone();
+        let (command_tx, command_rx) = channel();
+        drop(self.input_command_queue.lock().unwrap().replace(command_tx));
+        std::thread::spawn(move || {
+            // This thread will handle the audio input stream
+            let mut current_stream = match Self::create_input_stream(device, tx.clone()) {
+                Ok(stream) => stream,
+                Err(e) => {
+                    eprintln!("Failed to create input stream: {}", e);
+                    return;
+                }
+            };
+            match current_stream.play() {
+                Ok(_) => println!("Input stream started successfully"),
+                Err(e) => eprintln!("Failed to start input stream: {}", e),
+            }
+            // Handle commands from the main thread
+            loop {
+                match command_rx.recv() {
+                    Ok(command) => {
+                        match command {
+                            // Handle commands like Stop, Pause, etc.
+                            // For now, we just print the command
+                            AudioCommand::Start => {
+                                println!("Received Start command");
+                                current_stream.play().unwrap_or_else(|e| {
+                                    eprintln!("Failed to play input stream: {}", e);
+                                });
+                            }
+                            AudioCommand::Stop => {
+                                println!("Received Stop command");
+                                current_stream.pause().unwrap_or_else(|e| {
+                                    eprintln!("Failed to pause input stream: {}", e);
+                                });
+                            }
+                            AudioCommand::AttachDevice(device) => {
+                                current_stream = match Self::create_input_stream(device, tx.clone())
+                                {
+                                    Ok(stream) => stream,
+                                    Err(e) => {
+                                        eprintln!("Failed to create input stream: {}", e);
+                                        continue;
+                                    }
+                                };
+                                // Restart the stream with the new device
+                                if let Err(e) = current_stream.play() {
+                                    eprintln!("Failed to play new input stream: {}", e);
+                                }
+                            }
+                        }
+                    }
+                    Err(e) => {
+                        eprintln!("Error receiving command: {}", e);
+                        break;
+                    }
+                }
+            }
+        });
+
+        Ok(())
+    }
+
+    pub fn create_input_stream(
+        device: cpal::Device,
+        tx: Arc<Mutex<HeapProd<i16>>>,
+    ) -> Result<cpal::Stream, Error> {
+        let supported_config = device.default_input_config()?;
+        let sample_format = supported_config.sample_format();
+        let config = supported_config.config();
+        Ok(match sample_format {
             cpal::SampleFormat::I16 => device.build_input_stream(
                 &config,
                 move |data: &[i16], _| {
+                    let mut tx = tx.lock().unwrap();
                     // Clone and send raw samples to encoder thread
                     let samples: Vec<i16> = data.to_vec();
                     // Note: This will block if the channel is full.
@@ -46,12 +118,12 @@ impl AudioElement {
             cpal::SampleFormat::F32 => device.build_input_stream(
                 &config,
                 move |data: &[f32], _| {
+                    let mut tx = tx.lock().unwrap();
                     // Convert f32 to i16 and send
-                    let samples: Vec<_>  =
+                    let samples: Vec<_> =
                         data.iter().map(|&f| (f * i16::MAX as f32) as i16).collect();
                     // Send the samples to the encoder thread
-                    let pushed = tx.push_slice(samples.as_slice());
-                    println!("Pushed {} samples from mic", pushed);
+                    let _ = tx.push_slice(samples.as_slice());
                 },
                 |e| {
                     eprintln!("Error: {}", e);
@@ -59,31 +131,92 @@ impl AudioElement {
                 None,
             )?,
             _ => return Err(Error::NotImplemented),
+        })
+    }
+
+    pub fn start_output_stream(&mut self) -> Result<(), Error> {
+        let host = cpal::default_host();
+        let device = match host.default_output_device() {
+            Some(device) => device,
+            None => return Err(Error::NoOutputDevice),
         };
-        stream.play()?;
-        self.input_stream = Some(Arc::new(stream));
+
+        let rx = self.output_queue.clone();
+        let (command_tx, command_rx) = channel();
+        drop(
+            self.output_command_queue
+                .lock()
+                .unwrap()
+                .replace(command_tx),
+        );
+
+        std::thread::spawn(move || {
+            // Handle commands from the main thread
+            let mut current_stream = match Self::create_output_stream(device, rx.clone()) {
+                Ok(stream) => stream,
+                Err(e) => {
+                    eprintln!("Failed to create output stream: {}", e);
+                    return;
+                }
+            };
+            match current_stream.play() {
+                Ok(_) => println!("Output stream started successfully"),
+                Err(e) => eprintln!("Failed to start output stream: {}", e),
+            }
+            loop {
+                match command_rx.recv() {
+                    Ok(command) => {
+                        match command {
+                            // Handle commands like Stop, Pause, etc.
+                            // For now, we just print the command
+                            AudioCommand::Start => {
+                                println!("Received Start command");
+                                current_stream.play().unwrap_or_else(|e| {
+                                    eprintln!("Failed to play output stream: {}", e);
+                                });
+                            }
+                            AudioCommand::Stop => {
+                                println!("Received Stop command");
+                                current_stream.pause().unwrap_or_else(|e| {
+                                    eprintln!("Failed to pause output stream: {}", e);
+                                });
+                            }
+                            AudioCommand::AttachDevice(device) => {
+                                current_stream = Self::create_output_stream(device, rx.clone())
+                                    .unwrap_or_else(|e| {
+                                        eprintln!("Failed to create output stream: {}", e);
+                                        return current_stream;
+                                    });
+                            }
+                        }
+                    }
+                    Err(e) => {
+                        eprintln!("Error receiving command: {}", e);
+                        break;
+                    }
+                }
+            }
+        });
         Ok(())
     }
 
-    pub fn start_output_stream(&mut self, mut rx: HeapCons<i16>) -> Result<(), Error> {
-        let output_config = match self.output_device {
-            Some(_) => {
-                SupportedStreamConfig::new(
-                    1u16, 
-                    SampleRate(48000), 
-                    SupportedBufferSize::Range { min: 960, max: 960 }, 
-                    cpal::SampleFormat::F32)
-            }
-            None => return Err(Error::NoInputDevice),
-        };
-        let device = self.output_device.as_ref().unwrap();
-        let sample_format = output_config.sample_format();
-        let config: cpal::StreamConfig = output_config.into();
-
-        let stream = match sample_format {
+    pub fn create_output_stream(
+        device: cpal::Device,
+        rx: Arc<Mutex<HeapCons<i16>>>,
+    ) -> Result<cpal::Stream, Error> {
+        let supported_config = SupportedStreamConfig::new(
+            1u16,
+            SampleRate(48000),
+            SupportedBufferSize::Range { min: 960, max: 960 },
+            cpal::SampleFormat::F32,
+        );
+        let sample_format = supported_config.sample_format();
+        let config = supported_config.config();
+        Ok(match sample_format {
             cpal::SampleFormat::I16 => device.build_output_stream(
                 &config,
                 move |data: &mut [i16], _| {
+                    let mut rx = rx.lock().unwrap();
                     // Receive raw samples from encoder thread
                     rx.pop_slice(data);
                 },
@@ -95,12 +228,15 @@ impl AudioElement {
             cpal::SampleFormat::F32 => device.build_output_stream(
                 &config,
                 move |data: &mut [f32], _| {
+                    let mut rx = rx.lock().unwrap();
                     // Receive raw samples from encoder thread
                     let mut samples: Vec<i16> = vec![0; data.len()];
-                    let read = rx.pop_slice(&mut samples);
-                    println!("Read {} samples from audio stream to {} samples to output", read, data.len());
+                    let _ = rx.pop_slice(&mut samples);
                     // Convert i16 to f32 and write to output buffer
-                    let f32samples: Vec<f32> = samples.iter().map(|&s| s as f32 / i16::MAX as f32).collect();
+                    let f32samples: Vec<f32> = samples
+                        .iter()
+                        .map(|&s| s as f32 / i16::MAX as f32)
+                        .collect();
                     data.copy_from_slice(f32samples.as_slice());
                 },
                 |e| {
@@ -109,9 +245,34 @@ impl AudioElement {
                 None,
             )?,
             _ => return Err(Error::NotImplemented),
-        };
-        stream.play()?;
-        self.output_stream = Some(Arc::new(stream));
+        })
+    }
+
+    pub fn mute(&self) -> Result<(), Error> {
+        if let Some(tx) = self.input_command_queue.lock().unwrap().as_mut() {
+            tx.send(AudioCommand::Stop)?;
+        }
+        Ok(())
+    }
+
+    pub fn unmute(&self) -> Result<(), Error> {
+        if let Some(tx) = self.input_command_queue.lock().unwrap().as_mut() {
+            tx.send(AudioCommand::Start)?;
+        }
+        Ok(())
+    }
+
+    pub fn deafen(&self) -> Result<(), Error> {
+        if let Some(tx) = self.output_command_queue.lock().unwrap().as_mut() {
+            tx.send(AudioCommand::Stop)?;
+        }
+        Ok(())
+    }
+
+    pub fn undeafen(&self) -> Result<(), Error> {
+        if let Some(tx) = self.output_command_queue.lock().unwrap().as_mut() {
+            tx.send(AudioCommand::Start)?;
+        }
         Ok(())
     }
 }

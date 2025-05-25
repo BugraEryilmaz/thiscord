@@ -113,21 +113,17 @@ impl Backend {
         let user = new_user.clone();
         let backend = Arc::new(self.clone());
         tokio::spawn(async move {
-            backend.create_activation(
-                user.id,
-                &user.email,
-            ).await.unwrap_or_else(|e| {
-                tracing::error!("Failed to create activation code: {}", e);
-            });
+            backend
+                .create_activation(user.id, &user.email)
+                .await
+                .unwrap_or_else(|e| {
+                    tracing::error!("Failed to create activation code: {}", e);
+                });
         });
         Ok(new_user)
     }
 
-    pub async fn create_activation(
-        &self,
-        user_id: Uuid,
-        user_email: &str,
-    ) -> Result<(), Error> {
+    pub async fn create_activation(&self, user_id: Uuid, user_email: &str) -> Result<(), Error> {
         let activation_code = rand::random::<u32>() % 1_000_000;
         let activation_code = format!("{:06}", activation_code);
         let mut conn = self.get_connection()?;
@@ -188,10 +184,7 @@ impl Backend {
         Ok(Some(()))
     }
 
-    pub fn get_user_by_username(
-        &self,
-        username: &str,
-    ) -> Result<Option<Users>, Error> {
+    pub fn get_user_by_username(&self, username: &str) -> Result<Option<Users>, Error> {
         let mut conn = self.get_connection()?;
         let user = users::table
             .filter(users::username.eq(username))

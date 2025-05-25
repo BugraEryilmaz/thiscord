@@ -7,20 +7,22 @@ use axum::routing::any;
 use futures_util::stream::StreamExt;
 
 pub fn router() -> Router {
-    Router::new().route("/join_room", any(self::post::join_room))
+    Router::new().route("/join_room/{_uuid}", any(self::post::join_room))
 }
 
 mod post {
 
     use std::sync::Arc;
 
+    use axum::extract::Path;
     use my_web_rtc::{Reader, Writer};
-    use ringbuf::{traits::Split, HeapRb};
+    use ringbuf::{HeapRb, traits::Split};
     use tokio::sync::Mutex;
+    use uuid::Uuid;
 
     use super::*;
 
-    pub async fn join_room(ws: WebSocketUpgrade) -> impl IntoResponse {
+    pub async fn join_room(ws: WebSocketUpgrade, Path(_uuid): Path<Uuid>) -> impl IntoResponse {
         // Upgrade the request to a WebSocket connection
         ws.on_upgrade(handle_room_ws)
     }

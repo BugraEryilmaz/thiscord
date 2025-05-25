@@ -1,11 +1,11 @@
 pub mod web;
 
 // static connection list
-use std::{sync::{Arc, OnceLock}};
+use std::sync::{Arc, OnceLock};
 
-use uuid::Uuid;
 use dashmap::DashMap;
 use my_web_rtc::WebRTCConnection;
+use uuid::Uuid;
 
 static ROOMS: OnceLock<DashMap<Uuid, Arc<WebRTCConnection>>> = OnceLock::new();
 

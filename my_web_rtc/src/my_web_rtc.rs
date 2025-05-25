@@ -1,9 +1,9 @@
-use std::sync::Arc;
+use ringbuf::HeapCons;
+use ringbuf::HeapProd;
 use ringbuf::traits::Consumer;
 use ringbuf::traits::Observer;
 use ringbuf::traits::Producer;
-use ringbuf::HeapCons;
-use ringbuf::HeapProd;
+use std::sync::Arc;
 
 use crate::{Error, Reader, SignalingMessage, Writer};
 
@@ -242,7 +242,6 @@ impl WebRTCConnection {
                 if data.occupied_len() < frame_size * (channels as usize) {
                     // Wait for enough data to fill a frame
                     tokio::time::sleep(std::time::Duration::from_millis(20)).await;
-                    println!("Waiting for enough data to fill a frame");
                     continue;
                 }
                 // Pop data from the ring buffer
@@ -254,12 +253,13 @@ impl WebRTCConnection {
                     continue;
                 }
                 let mut encoded = vec![0u8; opus_max_payload_size];
-                let encoded_bytes = opus_encoder
-                    .encode(&buffer, &mut encoded)
-                    .unwrap_or_else(|e| {
-                        eprintln!("Opus encoding error: {}", e);
-                        0
-                    });
+                let encoded_bytes =
+                    opus_encoder
+                        .encode(&buffer, &mut encoded)
+                        .unwrap_or_else(|e| {
+                            eprintln!("Opus encoding error: {}", e);
+                            0
+                        });
                 if encoded_bytes > 0 {
                     let sample = Sample {
                         data: encoded[..encoded_bytes].to_vec().into(),
@@ -337,37 +337,40 @@ impl WebRTCConnection {
         println!("Setting up background receive audio");
         // Wrap data in Arc<Mutex<...>> to make it thread-safe for the closure
         let data = std::sync::Arc::new(tokio::sync::Mutex::new(data));
-        self.peer_connection
-            .on_track(Box::new({
-                let data = data.clone();
-                move |track, _receiver, _| {
-                    println!("Received remote track: {}", track.kind());
+        self.peer_connection.on_track(Box::new({
+            let data = data.clone();
+            move |track, _receiver, _| {
+                println!("Received remote track: {}", track.kind());
 
-                    if track.kind() == webrtc::rtp_transceiver::rtp_codec::RTPCodecType::Audio {
-                        let data = data.clone();
-                        tokio::spawn(async move {
-                            let mut opus_decoder = audio_config.get_opus_decoder().unwrap();
-                            while let Ok((rtp, _)) = track.read_rtp().await {
-                                let mut decoded = vec![0i16; audio_config.frame_size * (audio_config.channels as usize)];
-                                let decoded_bytes = opus_decoder
-                                    .decode(&rtp.payload, &mut decoded, false)
-                                    .unwrap_or_else(|e| {
-                                        eprintln!("Opus decoding error: {}", e);
-                                        0
-                                    });
-                                if decoded_bytes == 0 {
-                                    eprintln!("No decoded bytes");
-                                    continue;
-                                }
-                                let mut data_guard = data.lock().await;
-                                data_guard.push_slice(&decoded[..decoded_bytes]);
+                if track.kind() == webrtc::rtp_transceiver::rtp_codec::RTPCodecType::Audio {
+                    let data = data.clone();
+                    tokio::spawn(async move {
+                        let mut opus_decoder = audio_config.get_opus_decoder().unwrap();
+                        while let Ok((rtp, _)) = track.read_rtp().await {
+                            let mut decoded = vec![
+                                0i16;
+                                audio_config.frame_size
+                                    * (audio_config.channels as usize)
+                            ];
+                            let decoded_bytes = opus_decoder
+                                .decode(&rtp.payload, &mut decoded, false)
+                                .unwrap_or_else(|e| {
+                                    eprintln!("Opus decoding error: {}", e);
+                                    0
+                                });
+                            if decoded_bytes == 0 {
+                                eprintln!("No decoded bytes");
+                                continue;
                             }
-                        });
-                    }
-
-                    Box::pin(async {})
+                            let mut data_guard = data.lock().await;
+                            data_guard.push_slice(&decoded[..decoded_bytes]);
+                        }
+                    });
                 }
-            }));
+
+                Box::pin(async {})
+            }
+        }));
         Ok(())
     }
 
@@ -384,14 +387,12 @@ impl WebRTCConnection {
                 let ws_writer = ws_writer.clone();
                 Box::pin(async move {
                     if let Some(candidate) = candidate {
-
                         // Send this candidate to the remote peer via your signaling channel
                         // You MUST implement this part!
                         match Self::send_ice_candidate_to_remote_peer(candidate, ws_writer.clone())
                             .await
                         {
-                            Ok(()) => {
-                            }
+                            Ok(()) => {}
                             Err(e) => {
                                 eprintln!("Failed to send ICE candidate: {}", e);
                             }

@@ -6398,6 +6398,7 @@ dependencies = [
  "tauri-plugin-opener",
  "thiserror 2.0.12",
  "tokio",
+ "uuid",
 ]
 
 [[package]]
@@ -6409,6 +6410,7 @@ dependencies = [
  "leptos",
  "serde",
  "serde-wasm-bindgen",
+ "uuid",
  "wasm-bindgen",
  "wasm-bindgen-futures",
 ]
