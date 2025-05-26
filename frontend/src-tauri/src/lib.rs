@@ -1,11 +1,13 @@
 pub mod audio;
 pub mod utils;
 
+use std::sync::Mutex;
 use std::{sync::Arc, vec};
 
 use audio::tauri::*;
 use audio::AudioElement;
 use my_web_rtc::WebRTCConnection;
+use ringbuf::HeapCons;
 use ringbuf::{traits::Split, HeapRb};
 use tauri::Manager;
 pub use utils::Error;
@@ -18,8 +20,8 @@ async fn join_room(app_handle: tauri::AppHandle, room_id: Uuid) {
     let web_rtc_connection = app_state.web_rtc_connection.clone();
 
     web_rtc_connection
-        .clone()
-        .connect_ws(format!("wss://localhost:8081/rooms/join_room/{}", room_id).as_str())
+        .clone() 
+        .connect_ws(format!("wss://192.168.1.126:8081/rooms/join_room/{}", room_id).as_str())
         .await
         .unwrap();
     web_rtc_connection.offer().await.unwrap();
@@ -36,18 +38,26 @@ struct AppState {
 pub async fn run() {
     // Initialize the WebRTC connection
     let (tx, rx) = HeapRb::<i16>::new(12000).split();
-    let (tx_srv, rx_srv) = HeapRb::<i16>::new(12000).split();
-    let mut audio_element = AudioElement::new(tx, rx_srv).unwrap();
+    let receiver_queues: Arc<Mutex<Vec<HeapCons<i16>>>> = Arc::new(Mutex::new(vec![]));
+    let mut audio_element = AudioElement::new(tx, receiver_queues.clone()).unwrap();
     audio_element.start_input_stream().unwrap();
     audio_element.start_output_stream().unwrap();
     let web_rtc_connection = WebRTCConnection::new().await.unwrap();
+    let audio_track = web_rtc_connection
+        .create_audio_track_sample(1)
+        .await
+        .unwrap()
+        .iter()
+        .map(|track| {
+            Arc::new(tokio::sync::Mutex::new(Some(track.clone())))
+        }).collect::<Vec<_>>();
 
     web_rtc_connection
-        .background_stream_audio(rx)
+        .background_stream_audio(rx, audio_track)
         .await
         .unwrap();
     web_rtc_connection
-        .background_receive_audio(tx_srv)
+        .background_receive_audio(receiver_queues.clone())
         .await
         .unwrap();
 

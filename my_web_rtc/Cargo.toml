@@ -16,3 +16,4 @@ serde = "1.0.219"
 tokio-tungstenite = {version = "0.26.2", features = ["native-tls"]}
 native-tls = "0.2.14"
 ringbuf = "0.4.8"
+dashmap = "6.1.0"

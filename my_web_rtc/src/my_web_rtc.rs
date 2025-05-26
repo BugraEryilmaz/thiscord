@@ -1,18 +1,23 @@
 use ringbuf::HeapCons;
-use ringbuf::HeapProd;
+use ringbuf::HeapRb;
 use ringbuf::traits::Consumer;
 use ringbuf::traits::Observer;
 use ringbuf::traits::Producer;
+use ringbuf::traits::Split;
+use std::sync::Arc;
 use webrtc::api::setting_engine::SettingEngine;
 use webrtc::ice::udp_network::EphemeralUDP;
 use webrtc::ice::udp_network::UDPNetwork;
-use std::sync::Arc;
+use webrtc::rtp::packet::Packet;
+use webrtc::track::track_local::TrackLocalWriter;
+use webrtc::track::track_local::track_local_static_rtp::TrackLocalStaticRTP;
 
 use crate::{Error, Reader, SignalingMessage, Writer};
 
 use futures_util::StreamExt;
 use native_tls::TlsConnector;
 use opus::{Application, Channels};
+use std::sync::Mutex as StdMutex;
 use tokio::sync::Mutex;
 use tokio_tungstenite::Connector;
 use tokio_tungstenite::connect_async_tls_with_config;
@@ -34,7 +39,6 @@ use webrtc::{
 
 pub struct WebRTCConnection {
     pub peer_connection: RTCPeerConnection,
-    pub audio_track: Arc<TrackLocalStaticSample>,
     pub audio_config: AudioConfig,
     pub ws_writer: Mutex<Option<Arc<Mutex<Writer>>>>,
 }
@@ -71,11 +75,10 @@ impl AudioConfig {
 impl WebRTCConnection {
     pub async fn new() -> Result<Self, Error> {
         let peer_connection = Self::create_peer_connection().await?;
-        let audio_track = Self::create_audio_track();
-        peer_connection.add_track(audio_track.clone()).await?;
+        // let audio_track = Self::create_audio_track();
+        // peer_connection.add_track(audio_track.clone()).await?;
         Ok(WebRTCConnection {
             peer_connection: peer_connection,
-            audio_track: audio_track,
             audio_config: AudioConfig::default(),
             ws_writer: Mutex::new(None),
         })
@@ -83,11 +86,8 @@ impl WebRTCConnection {
 
     pub async fn new_with_writer(ws_write: Arc<Mutex<Writer>>) -> Result<Self, Error> {
         let peer_connection = Self::create_peer_connection().await?;
-        let audio_track = Self::create_audio_track();
-        peer_connection.add_track(audio_track.clone()).await?;
         Ok(WebRTCConnection {
             peer_connection: peer_connection,
-            audio_track: audio_track,
             audio_config: AudioConfig::default(),
             ws_writer: Mutex::new(Some(ws_write)),
         })
@@ -217,12 +217,38 @@ impl WebRTCConnection {
         audio_codec
     }
 
-    pub fn create_audio_track() -> Arc<TrackLocalStaticSample> {
-        Arc::new(TrackLocalStaticSample::new(
-            Self::get_audio_codec().capability,
-            "audio".to_string(),
-            "thiscord".to_string(),
-        ))
+    pub async fn create_audio_track_sample(
+        &self,
+        n: usize,
+    ) -> Result<Vec<Arc<TrackLocalStaticSample>>, Error> {
+        let mut ret = Vec::new();
+        for id in 0..n {
+            let track = Arc::new(TrackLocalStaticSample::new(
+                Self::get_audio_codec().capability,
+                id.to_string(),
+                "thiscord".to_string(),
+            ));
+            self.peer_connection.add_track(track.clone()).await?;
+            ret.push(track);
+        }
+        Ok(ret)
+    }
+
+    pub async fn create_audio_track_rtp(
+        &self,
+        n: usize,
+    ) -> Result<Vec<Arc<TrackLocalStaticRTP>>, Error> {
+        let mut ret = Vec::new();
+        for id in 0..n {
+            let track = Arc::new(TrackLocalStaticRTP::new(
+                Self::get_audio_codec().capability,
+                id.to_string(),
+                "thiscord".to_string(),
+            ));
+            self.peer_connection.add_track(track.clone()).await?;
+            ret.push(track);
+        }
+        Ok(ret)
     }
 
     pub async fn create_offer(&self) -> Result<String, Error> {
@@ -241,8 +267,11 @@ impl WebRTCConnection {
         Ok(sdp)
     }
 
-    pub async fn background_stream_audio(&self, mut data: HeapCons<i16>) -> Result<(), Error> {
-        let audio_track = self.audio_track.clone();
+    pub async fn background_stream_audio(
+        &self,
+        mut data: HeapCons<i16>,
+        audio_tracks: Vec<Arc<Mutex<Option<Arc<TrackLocalStaticSample>>>>>,
+    ) -> Result<(), Error> {
         // Opus frames typically encode 20ms of audio
         let channels = self.audio_config.channels;
         let frame_size = self.audio_config.frame_size;
@@ -278,14 +307,54 @@ impl WebRTCConnection {
                         duration: std::time::Duration::from_millis(20), // 20ms
                         ..Default::default()
                     };
-                    let writer = audio_track.sample_writer();
-                    if let Err(e) = writer.write_sample(&sample).await {
-                        eprintln!("Error writing sample: {}", e);
-                    } else {
-                        // println!("Sent audio frame");
+                    for audio_track in &audio_tracks {
+                        let audio_track = audio_track.lock().await;
+                        if let Some(track) = audio_track.as_ref() {
+                            if let Err(e) = track.write_sample(&sample).await {
+                                eprintln!("Error writing sample: {}", e);
+                            } else {
+                                // println!("Sent audio frame");
+                            }
+                        }
                     }
                 } else {
                     eprintln!("No encoded bytes");
+                }
+            }
+        });
+        Ok(())
+    }
+
+    pub async fn background_stream_data(
+        &self,
+        data: Arc<Mutex<Option<HeapCons<Packet>>>>,
+        audio_tracks: Vec<Arc<Mutex<Option<Arc<TrackLocalStaticRTP>>>>>,
+    ) -> Result<(), Error> {
+        tokio::spawn(async move {
+            loop {
+                // Pop data from the ring buffer
+                let mut data_guard = data.lock().await;
+                if data_guard.is_none() {
+                    drop(data_guard);
+                    tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+                    continue;
+                }
+                if let Some(packet) = data_guard.as_mut().unwrap().try_pop() {
+                    drop(data_guard);
+                    for audio_track in &audio_tracks {
+                        let audio_track = audio_track.lock().await;
+                        if let Some(audio_track) = audio_track.as_ref() {
+                            if let Err(e) = audio_track.write_rtp(&packet).await {
+                                eprintln!("Error writing RTP packet: {}", e);
+                            } else {
+                                // println!("Sent RTP packet");
+                            }
+                        }
+                    }
+                } else {
+                    drop(data_guard);
+                    tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+                    continue;
                 }
             }
         });
@@ -344,19 +413,32 @@ impl WebRTCConnection {
         Ok(())
     }
 
-    pub async fn background_receive_audio(&self, data: HeapProd<i16>) -> Result<(), Error> {
+    pub async fn background_receive_audio(
+        &self,
+        receiver_queues: Arc<StdMutex<Vec<HeapCons<i16>>>>,
+    ) -> Result<(), Error> {
         let audio_config = self.audio_config.clone();
         println!("Setting up background receive audio");
         // Wrap data in Arc<Mutex<...>> to make it thread-safe for the closure
-        let data = std::sync::Arc::new(tokio::sync::Mutex::new(data));
+
+        // let track_map = Arc::new(DashMap::new());
+
         self.peer_connection.on_track(Box::new({
-            let data = data.clone();
+            // let receiver_queues = receiver_queues.clone();
             move |track, _receiver, _| {
                 println!("Received remote track: {}", track.kind());
 
                 if track.kind() == webrtc::rtp_transceiver::rtp_codec::RTPCodecType::Audio {
-                    let data = data.clone();
+                    let (tx, rx) = HeapRb::<i16>::new(12000).split();
+                    let data = Arc::new(Mutex::new(tx));
+                    let receiver_queues = receiver_queues.clone();
+                    let mut receiver_queues_guard = receiver_queues
+                        .lock()
+                        .expect("Failed to lock receiver queues");
+                    receiver_queues_guard.push(rx);
+                    drop(receiver_queues_guard);
                     tokio::spawn(async move {
+                        // let track_map = Arc::clone(&track_map);
                         let mut opus_decoder = audio_config.get_opus_decoder().unwrap();
                         while let Ok((rtp, _)) = track.read_rtp().await {
                             let mut decoded = vec![
@@ -374,8 +456,50 @@ impl WebRTCConnection {
                                 eprintln!("No decoded bytes");
                                 continue;
                             }
-                            let mut data_guard = data.lock().await;
-                            data_guard.push_slice(&decoded[..decoded_bytes]);
+                            let mut data = data.lock().await;
+
+                            // let mut data_guard = data.lock().await;
+                            data.push_slice(&decoded[..decoded_bytes]);
+                        }
+                    });
+                }
+
+                Box::pin(async {})
+            }
+        }));
+        Ok(())
+    }
+
+    pub async fn background_receive_data(
+        &self,
+        receiver_queue: Arc<Mutex<Option<HeapCons<Packet>>>>,
+    ) -> Result<(), Error> {
+        println!("Setting up background receive audio");
+
+        self.peer_connection.on_track(Box::new({
+            move |track, _receiver, _| {
+                println!("Received remote track: {}", track.kind());
+                if track.kind() == webrtc::rtp_transceiver::rtp_codec::RTPCodecType::Audio {
+                    let receiver_queue = Arc::clone(&receiver_queue);
+                    let (tx, rx) = HeapRb::<Packet>::new(10).split();
+                    let data = Mutex::new(tx);
+                    tokio::spawn(async move {
+                        let mut receiver_queues_guard = receiver_queue.lock().await;
+                        *receiver_queues_guard = Some(rx);
+                        drop(receiver_queues_guard);
+                        // let track_map = Arc::clone(&track_map);
+                        while let Ok((rtp, _)) = track.read_rtp().await {
+                            let mut data = data.lock().await;
+
+                            // let mut data_guard = data.lock().await;
+                            match data.try_push(rtp) {
+                                Ok(_) => {
+                                    // println!("Pushed packet to data");
+                                }
+                                Err(e) => {
+                                    eprintln!("Error pushing packet to data: {}", e);
+                                }
+                            }
                         }
                     });
                 }

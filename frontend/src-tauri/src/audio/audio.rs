@@ -15,10 +15,13 @@ use crate::Error;
 use super::{AudioCommand, AudioElement};
 
 impl AudioElement {
-    pub fn new(input_buffer: HeapProd<i16>, output_buffer: HeapCons<i16>) -> Result<Self, Error> {
+    pub fn new(
+        input_buffer: HeapProd<i16>,
+        output_queue: Arc<Mutex<Vec<HeapCons<i16>>>>,
+    ) -> Result<Self, Error> {
         Ok(AudioElement {
             input_queue: Arc::new(Mutex::new(input_buffer)),
-            output_queue: Arc::new(Mutex::new(output_buffer)),
+            output_queue: output_queue,
             input_command_queue: Arc::new(Mutex::new(None)),
             output_command_queue: Arc::new(Mutex::new(None)),
         })
@@ -202,7 +205,7 @@ impl AudioElement {
 
     pub fn create_output_stream(
         device: cpal::Device,
-        rx: Arc<Mutex<HeapCons<i16>>>,
+        rx: Arc<Mutex<Vec<HeapCons<i16>>>>,
     ) -> Result<cpal::Stream, Error> {
         let supported_config = SupportedStreamConfig::new(
             1u16,
@@ -218,7 +221,18 @@ impl AudioElement {
                 move |data: &mut [i16], _| {
                     let mut rx = rx.lock().unwrap();
                     // Receive raw samples from encoder thread
-                    rx.pop_slice(data);
+                    for sender in rx.iter_mut() {
+                        let mut temp_data: Vec<i16> = vec![0; data.len()];
+                        // Pop samples from the ring buffer
+                        let cnt = sender.pop_slice(&mut temp_data);
+                        // Copy the samples to the output buffer
+                        if cnt == 0 {
+                            continue; // No samples to process
+                        }
+                        for (d, s) in data.iter_mut().zip(temp_data.iter()) {
+                            *d = *d + *s;
+                        }
+                    }
                 },
                 |e| {
                     eprintln!("Error: {}", e);
@@ -230,14 +244,22 @@ impl AudioElement {
                 move |data: &mut [f32], _| {
                     let mut rx = rx.lock().unwrap();
                     // Receive raw samples from encoder thread
-                    let mut samples: Vec<i16> = vec![0; data.len()];
-                    let _ = rx.pop_slice(&mut samples);
-                    // Convert i16 to f32 and write to output buffer
-                    let f32samples: Vec<f32> = samples
-                        .iter()
-                        .map(|&s| s as f32 / i16::MAX as f32)
-                        .collect();
-                    data.copy_from_slice(f32samples.as_slice());
+                    for sender in rx.iter_mut() {
+                        let mut temp_data: Vec<i16> = vec![0; data.len()];
+                        // Pop samples from the ring buffer
+                        let cnt = sender.pop_slice(&mut temp_data);
+                        // Convert i16 to f32 and write to output buffer
+                        if cnt == 0 {
+                            continue; // No samples to process
+                        }
+                        for (d, s) in data.iter_mut().zip(temp_data.iter()) {
+                            *d = *d + (*s as f32 / i16::MAX as f32);
+                        }
+                    }
+                    // Clamp the output to prevent overflow
+                    for sample in data.iter_mut() {
+                        *sample = sample.clamp(-1.0, 1.0);
+                    }
                 },
                 |e| {
                     eprintln!("Error: {}", e);

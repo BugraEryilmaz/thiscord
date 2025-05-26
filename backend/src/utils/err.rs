@@ -6,6 +6,8 @@ pub enum Error {
     R2D2(#[from] r2d2::Error),
     #[error("Username or password is incorrect")]
     InvalidCredentials,
+    #[error("Room is full")]
+    RoomFull,
     #[error("Password hash error: {0}")]
     PasswordHash(String),
     #[error("File error: {0}")]

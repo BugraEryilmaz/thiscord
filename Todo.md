@@ -31,9 +31,21 @@
   - [x] SDP negotiation
   - [x] ICE candidate exchange
 - [x] Audio stream management
+  - [ ] Microphone selection
+  - [ ] Microphone volume control
+  - [ ] Microphone mute/unmute
+  - [ ] Activity detection
+  - [ ] Audio effects (e.g., noise suppression)
+  - [ ] Speaker selection
+  - [ ] Speaker volume control per user
+  - [ ] Speaker deafen/undeafen
 - [ ] Video stream management
 - [ ] Screen sharing
 - [ ] Chat management
 - [ ] User management
 - [ ] Room management
 - [ ] Server management
+
+# Random
+- [ ] Make webrtc handlers new threads instead of async
+- [ ] Background receive audio should not assume single audio track

@@ -7,6 +7,8 @@ use futures_util::{
 pub use my_web_rtc::WebRTCConnection;
 use serde::{Deserialize, Serialize};
 use tokio_tungstenite::tungstenite;
+pub use webrtc::track::track_local::track_local_static_rtp::TrackLocalStaticRTP;
+pub use webrtc::track::track_local::track_local_static_sample::TrackLocalStaticSample;
 
 #[derive(Debug, thiserror::Error)]
 pub enum Error {
@@ -30,6 +32,14 @@ pub enum Error {
     WebSocketNotConnected,
     #[error("Native TLS error: {0}")]
     NativeTls(#[from] native_tls::Error),
+    #[error("Mutex error")]
+    Mutex,
+}
+
+impl<T> From<std::sync::PoisonError<std::sync::MutexGuard<'_, T>>> for Error {
+    fn from(_: std::sync::PoisonError<std::sync::MutexGuard<'_, T>>) -> Self {
+        Error::Mutex
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

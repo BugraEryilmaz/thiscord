@@ -16,18 +16,20 @@ mod post {
 
     use axum::extract::Path;
     use my_web_rtc::{Reader, Writer};
-    use ringbuf::{HeapRb, traits::Split};
     use tokio::sync::Mutex;
     use uuid::Uuid;
+
+    use crate::rooms::Room;
+    use crate::rooms::Rooms;
 
     use super::*;
 
     pub async fn join_room(ws: WebSocketUpgrade, Path(_uuid): Path<Uuid>) -> impl IntoResponse {
         // Upgrade the request to a WebSocket connection
-        ws.on_upgrade(handle_room_ws)
+        ws.on_upgrade(move |ws| handle_room_ws(ws, _uuid))
     }
 
-    pub async fn handle_room_ws(ws: WebSocket) {
+    pub async fn handle_room_ws(ws: WebSocket, uuid: Uuid) {
         let (sender, receiver) = ws.split();
         // Convert the sender to the expected type
         let web_rtc_connection = Arc::new(
@@ -37,19 +39,18 @@ mod post {
             .await
             .expect("Failed to create WebRTC connection"),
         );
-
-        let (tx, rx) = HeapRb::<i16>::new(48000).split();
-        match web_rtc_connection.background_receive_audio(tx).await {
-            Ok(_) => tracing::info!("Background audio receive started"),
-            Err(e) => {
-                tracing::error!("Failed to start background audio receive: {}", e);
-                return;
+        let room = match Rooms::get_or_init().rooms.get(&uuid) {
+            Some(room) => room.value().clone(),
+            None => {
+                let room = Room::new(uuid);
+                Rooms::get_or_init().rooms.insert(uuid, room.clone());
+                room
             }
-        }
-        match web_rtc_connection.background_stream_audio(rx).await {
-            Ok(_) => tracing::info!("Background audio stream started"),
+        };
+        match room.join_user(web_rtc_connection.clone()).await {
+            Ok(_) => tracing::info!("User joined room {}", uuid),
             Err(e) => {
-                tracing::error!("Failed to start background audio stream: {}", e);
+                tracing::error!("Failed to join room {}: {}", uuid, e);
                 return;
             }
         }
