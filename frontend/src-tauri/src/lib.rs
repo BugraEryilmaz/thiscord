@@ -44,12 +44,17 @@ pub async fn run() {
     audio_element.start_output_stream().unwrap();
     let web_rtc_connection = WebRTCConnection::new().await.unwrap();
     let audio_track = web_rtc_connection
-        .create_audio_track_sample(1)
+        .create_audio_track_sample(10)
         .await
         .unwrap()
         .iter()
-        .map(|track| {
-            Arc::new(tokio::sync::Mutex::new(Some(track.clone())))
+        .enumerate()
+        .map(|(idx, track)| {
+            if idx == 0 {
+                Arc::new(tokio::sync::Mutex::new(Some(track.clone())))
+            } else {
+                Arc::new(tokio::sync::Mutex::new(None))
+            }
         }).collect::<Vec<_>>();
 
     web_rtc_connection

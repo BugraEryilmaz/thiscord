@@ -4,6 +4,7 @@ use ringbuf::traits::Consumer;
 use ringbuf::traits::Observer;
 use ringbuf::traits::Producer;
 use ringbuf::traits::Split;
+use webrtc::track::track_local::TrackLocal;
 use std::sync::Arc;
 use webrtc::api::setting_engine::SettingEngine;
 use webrtc::ice::udp_network::EphemeralUDP;
@@ -194,7 +195,7 @@ impl WebRTCConnection {
                 //     ..Default::default()
                 // },
             ],
-            bundle_policy: RTCBundlePolicy::MaxBundle,
+            bundle_policy: RTCBundlePolicy::Balanced,
             ice_candidate_pool_size: 2,
             ..Default::default()
         };
@@ -225,8 +226,8 @@ impl WebRTCConnection {
         for id in 0..n {
             let track = Arc::new(TrackLocalStaticSample::new(
                 Self::get_audio_codec().capability,
-                id.to_string(),
-                "thiscord".to_string(),
+                format!("client-audio-{}", id),
+                format!("client-audio-stream-{}", id),
             ));
             self.peer_connection.add_track(track.clone()).await?;
             ret.push(track);
@@ -242,8 +243,8 @@ impl WebRTCConnection {
         for id in 0..n {
             let track = Arc::new(TrackLocalStaticRTP::new(
                 Self::get_audio_codec().capability,
-                id.to_string(),
-                "thiscord".to_string(),
+                format!("server-audio-{}", id),
+                format!("server-audio-stream-{}", id),
             ));
             self.peer_connection.add_track(track.clone()).await?;
             ret.push(track);
