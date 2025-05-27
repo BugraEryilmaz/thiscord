@@ -52,7 +52,7 @@ impl Room {
         for (idx, slot) in connections.iter_mut().enumerate() {
             if slot.is_none() {
                 // Add 10 audio tracks for the new connection
-                let mut audio_tracks = self.audio_tracks.lock().await;
+                let audio_tracks = self.audio_tracks.lock().await;
                 let new_tracks = connection.create_audio_track_rtp(ROOM_SIZE).await?;
                 for (old, new) in audio_tracks[idx].iter().zip(new_tracks.iter()) {
                     *old.lock().await = Some(new.clone());

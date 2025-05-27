@@ -226,11 +226,13 @@ impl AudioElement {
                         // Pop samples from the ring buffer
                         let cnt = sender.pop_slice(&mut temp_data);
                         // Copy the samples to the output buffer
-                        if cnt == 0 {
-                            continue; // No samples to process
-                        }
-                        for (d, s) in data.iter_mut().zip(temp_data.iter()) {
-                            *d = *d + *s;
+                        for (idx, (d, s)) in data.iter_mut().zip(temp_data.iter()).enumerate() {
+                            if idx == 0 {
+                                println!("First sample: d = {}, s = {}", *d, *s);
+                                *d = *s; // First sample is directly assigned
+                            } else {
+                                *d = *d + *s;
+                            }
                         }
                     }
                 },
@@ -249,11 +251,14 @@ impl AudioElement {
                         // Pop samples from the ring buffer
                         let cnt = sender.pop_slice(&mut temp_data);
                         // Convert i16 to f32 and write to output buffer
-                        if cnt == 0 {
-                            continue; // No samples to process
-                        }
-                        for (d, s) in data.iter_mut().zip(temp_data.iter()) {
-                            *d = *d + (*s as f32 / i16::MAX as f32);
+                        println!("Processing {} samples, {:?}", cnt, temp_data);
+                        for (idx, (d, s)) in data.iter_mut().zip(temp_data.iter()).enumerate() {
+                            if idx == 0 {
+                                println!("First sample: d = {}, s = {}", *d, *s);
+                                *d = *s as f32 / i16::MAX as f32;
+                            } else {
+                                *d = *d + (*s as f32 / i16::MAX as f32);
+                            }
                         }
                     }
                     // Clamp the output to prevent overflow
