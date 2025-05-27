@@ -221,14 +221,13 @@ impl AudioElement {
                 move |data: &mut [i16], _| {
                     let mut rx = rx.lock().unwrap();
                     // Receive raw samples from encoder thread
-                    for sender in rx.iter_mut() {
+                    for (idx, sender) in rx.iter_mut().enumerate() {
                         let mut temp_data: Vec<i16> = vec![0; data.len()];
                         // Pop samples from the ring buffer
-                        let cnt = sender.pop_slice(&mut temp_data);
+                        let _cnt = sender.pop_slice(&mut temp_data);
                         // Copy the samples to the output buffer
-                        for (idx, (d, s)) in data.iter_mut().zip(temp_data.iter()).enumerate() {
+                        for (d, s) in data.iter_mut().zip(temp_data.iter()) {
                             if idx == 0 {
-                                println!("First sample: d = {}, s = {}", *d, *s);
                                 *d = *s; // First sample is directly assigned
                             } else {
                                 *d = *d + *s;
@@ -249,9 +248,8 @@ impl AudioElement {
                     for (idx, sender) in rx.iter_mut().enumerate() {
                         let mut temp_data: Vec<i16> = vec![0; data.len()];
                         // Pop samples from the ring buffer
-                        let cnt = sender.pop_slice(&mut temp_data);
+                        let _cnt = sender.pop_slice(&mut temp_data);
                         // Convert i16 to f32 and write to output buffer
-                        println!("Processing {} samples, {:?}", cnt, temp_data);
                         for (d, s) in data.iter_mut().zip(temp_data.iter()) {
                             if idx == 0 {
                                 *d = *s as f32 / i16::MAX as f32;
