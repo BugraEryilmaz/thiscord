@@ -16,7 +16,6 @@ mod post {
 
     use axum::extract::Path;
     use my_web_rtc::{Reader, Writer};
-    use tokio::sync::Mutex;
     use uuid::Uuid;
 
     use crate::rooms::Room;
@@ -33,11 +32,9 @@ mod post {
         let (sender, receiver) = ws.split();
         // Convert the sender to the expected type
         let web_rtc_connection = Arc::new(
-            my_web_rtc::WebRTCConnection::new_with_writer(Arc::new(Mutex::new(Writer::Server(
-                sender,
-            ))))
-            .await
-            .expect("Failed to create WebRTC connection"),
+            my_web_rtc::WebRTCConnection::new_with_writer(Writer::Server(sender))
+                .await
+                .expect("Failed to create WebRTC connection"),
         );
         let room = match Rooms::get_or_init().rooms.get(&uuid) {
             Some(room) => room.value().clone(),

@@ -40,7 +40,7 @@ use webrtc::{
 pub struct WebRTCConnection {
     pub peer_connection: RTCPeerConnection,
     pub audio_config: AudioConfig,
-    pub ws_writer: Mutex<Option<Arc<Mutex<Writer>>>>,
+    pub ws_writer: Arc<Mutex<Option<Writer>>>,
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -80,16 +80,16 @@ impl WebRTCConnection {
         Ok(WebRTCConnection {
             peer_connection: peer_connection,
             audio_config: AudioConfig::default(),
-            ws_writer: Mutex::new(None),
+            ws_writer: Arc::new(Mutex::new(None)),
         })
     }
 
-    pub async fn new_with_writer(ws_write: Arc<Mutex<Writer>>) -> Result<Self, Error> {
+    pub async fn new_with_writer(ws_write: Writer) -> Result<Self, Error> {
         let peer_connection = Self::create_peer_connection().await?;
         Ok(WebRTCConnection {
             peer_connection: peer_connection,
             audio_config: AudioConfig::default(),
-            ws_writer: Mutex::new(Some(ws_write)),
+            ws_writer: Arc::new(Mutex::new(Some(ws_write))),
         })
     }
 
@@ -106,7 +106,7 @@ impl WebRTCConnection {
             connect_async_tls_with_config(request, None, false, Some(connector)).await?;
         let (ws_writer, ws_reader) = ws_stream.split();
         let mut ws_writer_guard = self.ws_writer.lock().await;
-        *ws_writer_guard = Some(Arc::new(Mutex::new(Writer::Client(ws_writer))));
+        *ws_writer_guard = Some(Writer::Client(ws_writer));
         let self_clone: Arc<WebRTCConnection> = Arc::clone(&self);
 
         // Handle incoming messages
@@ -366,15 +366,15 @@ impl WebRTCConnection {
         self.peer_connection
             .set_local_description(RTCSessionDescription::offer(offer.clone())?)
             .await?;
-        let ws_writer_guard = self.ws_writer.lock().await;
-        let ws_writer = ws_writer_guard
-            .clone()
-            .ok_or(Error::WebSocketNotConnected)?;
-        let message = SignalingMessage::Offer(RTCSessionDescription::offer(offer)?);
-        let mut writer = ws_writer.lock().await;
-        writer.send(message).await?;
-        println!("Offer sent to remote peer");
-        Ok(())
+        let mut ws_writer_guard = self.ws_writer.lock().await;
+        match ws_writer_guard.as_mut() {
+            Some(writer) => {
+                let message = RTCSessionDescription::offer(offer)?;
+                writer.send(SignalingMessage::Offer(message)).await?;
+                Ok(())
+            }
+            None => Err(Error::WebSocketNotConnected),
+        }
     }
 
     pub async fn answer(&self, sdp: String) -> Result<(), Error> {
@@ -399,16 +399,16 @@ impl WebRTCConnection {
             .await?;
         eprintln!("Local description set successfully");
         // Send the answer back to the remote peer
-        let ws_writer = self
-            .ws_writer
-            .lock()
-            .await
-            .clone()
-            .ok_or(Error::WebSocketNotConnected)?;
         let message = SignalingMessage::Answer(answer);
-        let mut writer = ws_writer.lock().await;
-        writer.send(message).await?;
-        eprintln!("Answer sent to remote peer");
+        let mut ws_writer = self.ws_writer.lock().await;
+        match ws_writer.as_mut() {
+            Some(writer) => {
+                writer.send(message).await?;
+                eprintln!("Answer sent to remote peer");
+            }
+            None => return Err(Error::WebSocketNotConnected),
+        }
+        drop(ws_writer);
         self.setup_ice_handling().await?;
         Ok(())
     }
@@ -512,12 +512,7 @@ impl WebRTCConnection {
 
     pub async fn setup_ice_handling(&self) -> Result<(), Error> {
         // Set up ICE candidate handler
-        let ws_writer = self
-            .ws_writer
-            .lock()
-            .await
-            .clone()
-            .ok_or(Error::WebSocketNotConnected)?;
+        let ws_writer = self.ws_writer.clone();
         self.peer_connection
             .on_ice_candidate(Box::new(move |candidate| {
                 let ws_writer = ws_writer.clone();
@@ -525,7 +520,7 @@ impl WebRTCConnection {
                     if let Some(candidate) = candidate {
                         // Send this candidate to the remote peer via your signaling channel
                         // You MUST implement this part!
-                        match Self::send_ice_candidate_to_remote_peer(candidate, ws_writer.clone())
+                        match Self::send_ice_candidate_to_remote_peer(candidate, ws_writer)
                             .await
                         {
                             Ok(()) => {}
@@ -549,11 +544,15 @@ impl WebRTCConnection {
 
     pub async fn send_ice_candidate_to_remote_peer(
         candidate: RTCIceCandidate,
-        ws_writer: Arc<Mutex<Writer>>,
+        ws_writer: Arc<Mutex<Option<Writer>>>,
     ) -> Result<(), Error> {
         let candidate_init = candidate.to_json()?;
         let message = SignalingMessage::IceCandidate(candidate_init);
         let mut writer = ws_writer.lock().await;
+        if writer.is_none() {
+            return Err(Error::WebSocketNotConnected);
+        }
+        let writer = writer.as_mut().unwrap();
         writer.send(message).await?;
         Ok(())
     }
