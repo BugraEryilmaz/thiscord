@@ -254,7 +254,6 @@ impl AudioElement {
                         println!("Processing {} samples, {:?}", cnt, temp_data);
                         for (d, s) in data.iter_mut().zip(temp_data.iter()) {
                             if idx == 0 {
-                                println!("First sample: d = {}, s = {}", *d, *s);
                                 *d = *s as f32 / i16::MAX as f32;
                             } else {
                                 *d = *d + (*s as f32 / i16::MAX as f32);
