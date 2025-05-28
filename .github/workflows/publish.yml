@@ -79,8 +79,6 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          - platform: 'macos-latest' # for Arm based macs (M1 and above).
-            args: '--target aarch64-apple-darwin'
           - platform: 'windows-latest'
             args: ''
 
@@ -109,7 +107,17 @@ jobs:
           rustup toolchain install nightly
           rustup default nightly
 
+      - name: Install PostgreSQL Client Libraries
+        run: |
+          choco install postgresql --version=15.3 -y
+          echo "##[add-path]C:\\Program Files\\PostgreSQL\\15\\lib" >> $env:GITHUB_ENV
+          echo "##[add-path]C:\\Program Files\\PostgreSQL\\15\\include" >> $env:GITHUB_ENV
+        shell: powershell
+
       - name: Cargo build
+        env:
+          LIB: 'C:\Program Files\PostgreSQL\15\lib'
+          INCLUDE: 'C:\Program Files\PostgreSQL\15\include'
         run: |
           cd backend
           cargo build --release ${{ matrix.args }}
@@ -119,10 +127,4 @@ jobs:
         with:
           name: backend-${{ matrix.platform }}
           path: target/release/backend.exe
-
-      - name: Upload release artifact
-        uses: actions/upload-artifact@v4
-        with:
-          name: backend-${{ matrix.platform }}
-          path: target/release/backend
 
