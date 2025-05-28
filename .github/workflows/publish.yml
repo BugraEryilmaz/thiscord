@@ -55,7 +55,7 @@ jobs:
           TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
         with:
           tagName: ${{ github.ref }} # the action automatically replaces \_\_VERSION\_\_ with the app version.
-          releaseName: 'App v__VERSION__'
+          releaseName: ${{ github.ref }}
           releaseBody: 'See the assets to download this version and install.'
           releaseDraft: true
           prerelease: false
@@ -98,5 +98,8 @@ jobs:
           asset_name: backend-${{ matrix.platform }}.exe
           tag: ${{ github.ref }}
           overwrite: true
+          draft: true
+          prerelease: false
+          body: 'See the assets to download this version and install.'
 
 
