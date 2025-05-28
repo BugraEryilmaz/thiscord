@@ -22,6 +22,7 @@ jobs:
             args: ''
 
     runs-on: ${{ matrix.platform }}
+    environment: .env
     steps:
       - uses: actions/checkout@v4
       
@@ -83,6 +84,7 @@ jobs:
             args: ''
 
     runs-on: ${{ matrix.platform }}
+    environment: .env
     steps:
       - uses: actions/checkout@v4
       
@@ -107,17 +109,10 @@ jobs:
           rustup toolchain install nightly
           rustup default nightly
 
-      - name: Install PostgreSQL Client Libraries
-        run: |
-          choco install postgresql --version=15.3 -y
-          echo "##[add-path]C:\\Program Files\\PostgreSQL\\15\\lib" >> $env:GITHUB_ENV
-          echo "##[add-path]C:\\Program Files\\PostgreSQL\\15\\include" >> $env:GITHUB_ENV
-        shell: powershell
-
       - name: Cargo build
         env:
-          LIB: 'C:\Program Files\PostgreSQL\15\lib'
-          INCLUDE: 'C:\Program Files\PostgreSQL\15\include'
+          LIB: 'C:\Program Files\PostgreSQL\17\lib'
+          INCLUDE: 'C:\Program Files\PostgreSQL\17\include'
         run: |
           cd backend
           cargo build --release ${{ matrix.args }}
