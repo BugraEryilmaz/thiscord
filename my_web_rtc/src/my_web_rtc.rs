@@ -12,6 +12,7 @@ use webrtc::rtp::packet::Packet;
 use webrtc::track::track_local::TrackLocalWriter;
 use webrtc::track::track_local::track_local_static_rtp::TrackLocalStaticRTP;
 
+use crate::IsClosed;
 use crate::{Error, Reader, SignalingMessage, Writer};
 
 use futures_util::StreamExt;
@@ -75,8 +76,6 @@ impl AudioConfig {
 impl WebRTCConnection {
     pub async fn new() -> Result<Self, Error> {
         let peer_connection = Self::create_peer_connection().await?;
-        // let audio_track = Self::create_audio_track();
-        // peer_connection.add_track(audio_track.clone()).await?;
         Ok(WebRTCConnection {
             peer_connection: peer_connection,
             audio_config: AudioConfig::default(),
@@ -123,15 +122,20 @@ impl WebRTCConnection {
             loop {
                 match ws_reader.next().await {
                     Ok(Some(message)) => {
-                        self_clone
+                        let closed = self_clone
                             .handle_signaling_message(message)
                             .await
                             .unwrap_or_else(|e| {
-                                eprintln!("Error handling signaling message: {}", e);
+                                tracing::error!("Error handling signaling message: {}, Closing connection", e);
+                                IsClosed::NotClosed
                             });
+                        if closed == IsClosed::Closed {
+                            self.close().await;
+                            break;
+                        }
                     }
                     Err(e) => {
-                        eprintln!("WebSocket error: {}", e);
+                        tracing::error!("WebSocket error: {}", e);
                         break;
                     }
                     Ok(None) => continue,
@@ -141,7 +145,10 @@ impl WebRTCConnection {
         Ok(())
     }
 
-    pub async fn handle_signaling_message(&self, message: SignalingMessage) -> Result<(), Error> {
+    pub async fn handle_signaling_message(
+        &self,
+        message: SignalingMessage,
+    ) -> Result<IsClosed, Error> {
         match message {
             SignalingMessage::Offer(offer) => {
                 // Handle incoming offer
@@ -155,8 +162,13 @@ impl WebRTCConnection {
                 // Handle incoming ICE candidate
                 self.add_remote_ice_candidate(candidate_init).await?;
             }
+            SignalingMessage::Close => {
+                // Handle close message
+                tracing::info!("Received close message, closing WebRTC connection");
+                return Ok(IsClosed::Closed);
+            }
         }
-        Ok(())
+        Ok(IsClosed::NotClosed)
     }
 
     pub async fn create_peer_connection() -> Result<RTCPeerConnection, Error> {
@@ -290,7 +302,11 @@ impl WebRTCConnection {
                 let read_len = data.pop_slice(buffer.as_mut_slice());
                 if read_len < frame_size * (channels as usize) {
                     tokio::time::sleep(std::time::Duration::from_millis(20)).await;
-                    println!("popped only {} samples, waiting for more", read_len);
+                    tracing::warn!(
+                        "Not enough samples to encode, expected {}, got {}",
+                        frame_size * (channels as usize),
+                        read_len
+                    );
                     continue;
                 }
                 let mut encoded = vec![0u8; opus_max_payload_size];
@@ -298,7 +314,7 @@ impl WebRTCConnection {
                     opus_encoder
                         .encode(&buffer, &mut encoded)
                         .unwrap_or_else(|e| {
-                            eprintln!("Opus encoding error: {}", e);
+                            tracing::error!("Opus encoding error: {}", e);
                             0
                         });
                 if encoded_bytes > 0 {
@@ -311,9 +327,9 @@ impl WebRTCConnection {
                         let audio_track = audio_track.lock().await;
                         if let Some(track) = audio_track.as_ref() {
                             if let Err(e) = track.write_sample(&sample).await {
-                                eprintln!("Error writing sample: {}", e);
+                                tracing::error!("Error writing audio sample: {}", e);
                             } else {
-                                // println!("Sent audio frame");
+                                tracing::trace!("Sent audio frame: {:?}", sample);
                             }
                         }
                     }
@@ -345,9 +361,9 @@ impl WebRTCConnection {
                         let audio_track = audio_track.lock().await;
                         if let Some(audio_track) = audio_track.as_ref() {
                             if let Err(e) = audio_track.write_rtp(&packet).await {
-                                eprintln!("Error writing RTP packet: {}", e);
+                                tracing::error!("Error writing RTP packet: {}", e);
                             } else {
-                                // println!("Sent RTP packet");
+                                tracing::trace!("Sent RTP packet: {:?}", packet);
                             }
                         }
                     }
@@ -378,13 +394,12 @@ impl WebRTCConnection {
     }
 
     pub async fn answer(&self, sdp: String) -> Result<(), Error> {
-        eprintln!("Answering to SDP: {}", sdp);
         let remote_sdp = RTCSessionDescription::offer(sdp)?;
-        eprintln!("Parsed remote SDP: {:?}", remote_sdp);
+        tracing::debug!("Setting remote description: {:?}", remote_sdp);
         self.peer_connection
             .set_remote_description(remote_sdp)
             .await?;
-        eprintln!("Remote description set successfully");
+        tracing::info!("Remote description set successfully");
         // Create an answer
         let answer = self
             .peer_connection
@@ -392,19 +407,20 @@ impl WebRTCConnection {
                 voice_activity_detection: true,
             }))
             .await?;
-        eprintln!("Created answer: {:?}", answer);
+        tracing::debug!("Created answer: {:?}", answer);
         // Set the local description
         self.peer_connection
             .set_local_description(answer.clone())
             .await?;
-        eprintln!("Local description set successfully");
+        tracing::info!("Local description set successfully");
         // Send the answer back to the remote peer
         let message = SignalingMessage::Answer(answer);
         let mut ws_writer = self.ws_writer.lock().await;
         match ws_writer.as_mut() {
             Some(writer) => {
+                tracing::debug!("Sending answer: {:?}", message);
                 writer.send(message).await?;
-                eprintln!("Answer sent to remote peer");
+                tracing::info!("Sent answer to remote peer");
             }
             None => return Err(Error::WebSocketNotConnected),
         }
@@ -418,15 +434,12 @@ impl WebRTCConnection {
         receiver_queues: Arc<StdMutex<Vec<HeapCons<i16>>>>,
     ) -> Result<(), Error> {
         let audio_config = self.audio_config.clone();
-        println!("Setting up background receive audio");
-        // Wrap data in Arc<Mutex<...>> to make it thread-safe for the closure
-
-        // let track_map = Arc::new(DashMap::new());
+        tracing::info!("Setting up background receive audio");
 
         self.peer_connection.on_track(Box::new({
             // let receiver_queues = receiver_queues.clone();
             move |track, _receiver, _| {
-                println!("Received remote track: {}", track.kind());
+                tracing::info!("Received remote track: {}", track.kind());
 
                 if track.kind() == webrtc::rtp_transceiver::rtp_codec::RTPCodecType::Audio {
                     let (tx, rx) = HeapRb::<i16>::new(12000).split();
@@ -449,11 +462,11 @@ impl WebRTCConnection {
                             let decoded_bytes = opus_decoder
                                 .decode(&rtp.payload, &mut decoded, false)
                                 .unwrap_or_else(|e| {
-                                    eprintln!("Opus decoding error: {}", e);
+                                    tracing::error!("Opus decoding error: {}", e);
                                     0
                                 });
                             if decoded_bytes == 0 {
-                                eprintln!("No decoded bytes");
+                                tracing::warn!("No decoded bytes, skipping");
                                 continue;
                             }
                             let mut data = data.lock().await;
@@ -474,11 +487,11 @@ impl WebRTCConnection {
         &self,
         receiver_queue: Arc<Mutex<Option<HeapCons<Packet>>>>,
     ) -> Result<(), Error> {
-        println!("Setting up background receive audio");
+        tracing::info!("Setting up background receive data");
 
         self.peer_connection.on_track(Box::new({
             move |track, _receiver, _| {
-                println!("Received remote track: {}", track.kind());
+                tracing::info!("Received remote track: {}", track.kind());
                 if track.kind() == webrtc::rtp_transceiver::rtp_codec::RTPCodecType::Audio {
                     let receiver_queue = Arc::clone(&receiver_queue);
                     let (tx, rx) = HeapRb::<Packet>::new(10).split();
@@ -487,17 +500,15 @@ impl WebRTCConnection {
                         let mut receiver_queues_guard = receiver_queue.lock().await;
                         *receiver_queues_guard = Some(rx);
                         drop(receiver_queues_guard);
-                        // let track_map = Arc::clone(&track_map);
                         while let Ok((rtp, _)) = track.read_rtp().await {
                             let mut data = data.lock().await;
 
-                            // let mut data_guard = data.lock().await;
                             match data.try_push(rtp) {
                                 Ok(_) => {
-                                    // println!("Pushed packet to data");
+                                    tracing::trace!("Pushed packet to data");
                                 }
                                 Err(e) => {
-                                    eprintln!("Error pushing packet to data: {}", e);
+                                    tracing::error!("Failed to push packet to data: {}", e);
                                 }
                             }
                         }
@@ -519,13 +530,10 @@ impl WebRTCConnection {
                 Box::pin(async move {
                     if let Some(candidate) = candidate {
                         // Send this candidate to the remote peer via your signaling channel
-                        // You MUST implement this part!
-                        match Self::send_ice_candidate_to_remote_peer(candidate, ws_writer)
-                            .await
-                        {
+                        match Self::send_ice_candidate_to_remote_peer(candidate, ws_writer).await {
                             Ok(()) => {}
                             Err(e) => {
-                                eprintln!("Failed to send ICE candidate: {}", e);
+                                tracing::error!("Failed to send ICE candidate: {}", e);
                             }
                         }
                     }
@@ -546,6 +554,7 @@ impl WebRTCConnection {
         candidate: RTCIceCandidate,
         ws_writer: Arc<Mutex<Option<Writer>>>,
     ) -> Result<(), Error> {
+        tracing::debug!("Sending ICE candidate");
         let candidate_init = candidate.to_json()?;
         let message = SignalingMessage::IceCandidate(candidate_init);
         let mut writer = ws_writer.lock().await;
@@ -561,7 +570,18 @@ impl WebRTCConnection {
         &self,
         candidate: RTCIceCandidateInit,
     ) -> Result<(), Error> {
+        tracing::debug!("Adding remote ICE candidate");
         self.peer_connection.add_ice_candidate(candidate).await?;
         Ok(())
+    }
+
+    pub async fn close(&self) {
+        self.peer_connection.close().await.err();
+        let mut ws_writer_guard = self.ws_writer.lock().await;
+        if let Some(writer) = ws_writer_guard.as_mut() {
+            writer.send(SignalingMessage::Close).await.err();
+        }
+        ws_writer_guard.take();
+        tracing::info!("WebRTC connection closed");
     }
 }

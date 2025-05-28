@@ -75,4 +75,20 @@ impl Room {
         }
         Err(Error::RoomFull)
     }
+
+    pub async fn leave_user(&self, idx: usize) -> Result<(), Error> {
+        let mut connections = self.connections.lock().await;
+        if let Some(connection) = connections.get_mut(idx) {
+            if let Some(conn) = connection.take() {
+                conn.close().await;
+            }
+        } else {
+            return Err(Error::UserNotFoundInRoom);
+        }
+        let audio_tracks = self.audio_tracks.lock().await;
+        for track in audio_tracks[idx].iter() {
+            track.lock().await.take();
+        }
+        Ok(())
+    }
 }

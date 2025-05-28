@@ -3560,6 +3560,7 @@ dependencies = [
  "thiserror 2.0.12",
  "tokio",
  "tokio-tungstenite",
+ "tracing",
  "webrtc",
 ]
 
@@ -6399,6 +6400,8 @@ dependencies = [
  "tauri-plugin-opener",
  "thiserror 2.0.12",
  "tokio",
+ "tracing",
+ "tracing-subscriber",
  "uuid",
 ]
 

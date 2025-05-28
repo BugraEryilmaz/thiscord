@@ -2,8 +2,8 @@ use ringbuf::{
     traits::{Consumer, Producer},
     HeapCons, HeapProd,
 };
-use std::sync::mpsc::channel;
-use std::sync::{Arc, Mutex};
+use std::sync::{mpsc::channel};
+use std::sync::{Arc, Mutex as StdMutex};
 
 use cpal::{
     traits::{DeviceTrait, HostTrait, StreamTrait},
@@ -15,15 +15,12 @@ use crate::Error;
 use super::{AudioCommand, AudioElement};
 
 impl AudioElement {
-    pub fn new(
-        input_buffer: HeapProd<i16>,
-        output_queue: Arc<Mutex<Vec<HeapCons<i16>>>>,
-    ) -> Result<Self, Error> {
+    pub fn new(mic_producer: HeapProd<i16>) -> Result<Self, Error> {
         Ok(AudioElement {
-            input_queue: Arc::new(Mutex::new(input_buffer)),
-            output_queue: output_queue,
-            input_command_queue: Arc::new(Mutex::new(None)),
-            output_command_queue: Arc::new(Mutex::new(None)),
+            mic_producer: Arc::new(StdMutex::new(mic_producer)),
+            speaker_consumers: Arc::new(StdMutex::new(vec![])),
+            mic_command_queue: Arc::new(StdMutex::new(None)),
+            speaker_command_queue: Arc::new(StdMutex::new(None)),
         })
     }
 
@@ -34,9 +31,9 @@ impl AudioElement {
             None => return Err(Error::NoInputDevice),
         };
 
-        let tx = self.input_queue.clone();
+        let tx = self.mic_producer.clone();
         let (command_tx, command_rx) = channel();
-        drop(self.input_command_queue.lock().unwrap().replace(command_tx));
+        drop(self.mic_command_queue.lock().unwrap().replace(command_tx));
         std::thread::spawn(move || {
             // This thread will handle the audio input stream
             let mut current_stream = match Self::create_input_stream(device, tx.clone()) {
@@ -98,7 +95,7 @@ impl AudioElement {
 
     pub fn create_input_stream(
         device: cpal::Device,
-        tx: Arc<Mutex<HeapProd<i16>>>,
+        tx: Arc<StdMutex<HeapProd<i16>>>,
     ) -> Result<cpal::Stream, Error> {
         let supported_config = device.default_input_config()?;
         let sample_format = supported_config.sample_format();
@@ -144,10 +141,10 @@ impl AudioElement {
             None => return Err(Error::NoOutputDevice),
         };
 
-        let rx = self.output_queue.clone();
+        let rx = self.speaker_consumers.clone();
         let (command_tx, command_rx) = channel();
         drop(
-            self.output_command_queue
+            self.speaker_command_queue
                 .lock()
                 .unwrap()
                 .replace(command_tx),
@@ -205,7 +202,7 @@ impl AudioElement {
 
     pub fn create_output_stream(
         device: cpal::Device,
-        rx: Arc<Mutex<Vec<HeapCons<i16>>>>,
+        rx: Arc<StdMutex<Vec<HeapCons<i16>>>>,
     ) -> Result<cpal::Stream, Error> {
         let supported_config = SupportedStreamConfig::new(
             1u16,
@@ -273,28 +270,28 @@ impl AudioElement {
     }
 
     pub fn mute(&self) -> Result<(), Error> {
-        if let Some(tx) = self.input_command_queue.lock().unwrap().as_mut() {
+        if let Some(tx) = self.mic_command_queue.lock().unwrap().as_mut() {
             tx.send(AudioCommand::Stop)?;
         }
         Ok(())
     }
 
     pub fn unmute(&self) -> Result<(), Error> {
-        if let Some(tx) = self.input_command_queue.lock().unwrap().as_mut() {
+        if let Some(tx) = self.mic_command_queue.lock().unwrap().as_mut() {
             tx.send(AudioCommand::Start)?;
         }
         Ok(())
     }
 
     pub fn deafen(&self) -> Result<(), Error> {
-        if let Some(tx) = self.output_command_queue.lock().unwrap().as_mut() {
+        if let Some(tx) = self.speaker_command_queue.lock().unwrap().as_mut() {
             tx.send(AudioCommand::Stop)?;
         }
         Ok(())
     }
 
     pub fn undeafen(&self) -> Result<(), Error> {
-        if let Some(tx) = self.output_command_queue.lock().unwrap().as_mut() {
+        if let Some(tx) = self.speaker_command_queue.lock().unwrap().as_mut() {
             tx.send(AudioCommand::Start)?;
         }
         Ok(())

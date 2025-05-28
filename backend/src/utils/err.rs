@@ -20,6 +20,8 @@ pub enum Error {
     InvalidActivationCode,
     #[error("WebRTC error: {0}")]
     WebRTC(#[from] my_web_rtc::Error),
+    #[error("UserNotFound in the room")]
+    UserNotFoundInRoom,
 }
 
 impl From<argon2::password_hash::Error> for Error {

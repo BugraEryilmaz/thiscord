@@ -1,15 +1,17 @@
 pub mod audio;
 pub mod utils;
 
-use std::sync::Mutex;
+use std::sync::RwLock as StdRwLock;
 use std::{sync::Arc, vec};
 
 use audio::tauri::*;
 use audio::AudioElement;
 use my_web_rtc::WebRTCConnection;
-use ringbuf::HeapCons;
 use ringbuf::{traits::Split, HeapRb};
 use tauri::Manager;
+use tokio::sync::RwLock;
+use tracing_subscriber::layer::SubscriberExt;
+use tracing_subscriber::util::SubscriberInitExt;
 pub use utils::Error;
 use uuid::Uuid;
 
@@ -17,31 +19,17 @@ use uuid::Uuid;
 #[tauri::command]
 async fn join_room(app_handle: tauri::AppHandle, room_id: Uuid) {
     let app_state = app_handle.state::<AppState>();
-    let web_rtc_connection = app_state.web_rtc_connection.clone();
-
-    web_rtc_connection
-        .clone() 
-        .connect_ws(format!("wss://192.168.1.126:8081/rooms/join_room/{}", room_id).as_str())
-        .await
-        .unwrap();
-    web_rtc_connection.offer().await.unwrap();
-    web_rtc_connection.setup_ice_handling().await.unwrap();
-}
-
-struct AppState {
-    // Define any shared state here
-    audio_element: AudioElement,
-    web_rtc_connection: Arc<WebRTCConnection>,
-}
-
-#[cfg_attr(mobile, tauri::mobile_entry_point)]
-pub async fn run() {
-    // Initialize the WebRTC connection
-    let (tx, rx) = HeapRb::<i16>::new(12000).split();
-    let receiver_queues: Arc<Mutex<Vec<HeapCons<i16>>>> = Arc::new(Mutex::new(vec![]));
-    let mut audio_element = AudioElement::new(tx, receiver_queues.clone()).unwrap();
+    if let Some(_web_rtc_connection) = app_state.web_rtc_connection.read().await.clone() {
+        _web_rtc_connection.close().await;
+        app_state.web_rtc_connection.write().await.take();
+    }
+    // Create the audio element and start the input/output streams
+    let (mic_producer, mic_consumer) = HeapRb::<i16>::new(12000).split();
+    let mut audio_element = AudioElement::new(mic_producer).unwrap();
     audio_element.start_input_stream().unwrap();
     audio_element.start_output_stream().unwrap();
+
+    // Create the WebRTC connection and set up the audio tracks
     let web_rtc_connection = WebRTCConnection::new().await.unwrap();
     let audio_track = web_rtc_connection
         .create_audio_track_sample(10)
@@ -55,14 +43,15 @@ pub async fn run() {
             } else {
                 Arc::new(tokio::sync::Mutex::new(None))
             }
-        }).collect::<Vec<_>>();
+        })
+        .collect::<Vec<_>>();
 
     web_rtc_connection
-        .background_stream_audio(rx, audio_track)
+        .background_stream_audio(mic_consumer, audio_track)
         .await
         .unwrap();
     web_rtc_connection
-        .background_receive_audio(receiver_queues.clone())
+        .background_receive_audio(audio_element.speaker_consumers.clone())
         .await
         .unwrap();
 
@@ -73,17 +62,66 @@ pub async fn run() {
             Box::pin(async {})
         }));
 
+    let app_manager = app_handle.clone();
     web_rtc_connection
         .peer_connection
         .on_peer_connection_state_change(Box::new(move |state| {
             println!("Peer connection state: {:?}", state);
-            Box::pin(async {})
+            let app_manager = app_manager.clone();
+            Box::pin(async move {
+                if state == my_web_rtc::RTCPeerConnectionState::Closed {
+                    app_manager
+                        .state::<AppState>()
+                        .web_rtc_connection
+                        .write()
+                        .await                                          
+                        .take();
+                }
+            })
         }));
+    let web_rtc_connection = Arc::new(web_rtc_connection);
+    web_rtc_connection
+        .clone()
+        .connect_ws(format!("wss://192.168.1.126:8081/rooms/join_room/{}", room_id).as_str())
+        .await
+        .unwrap();
+    web_rtc_connection.offer().await.unwrap();
+    web_rtc_connection.setup_ice_handling().await.unwrap();
+    app_state
+        .audio_element
+        .write()
+        .unwrap()
+        .replace(audio_element);
+    app_state
+        .web_rtc_connection
+        .write()
+        .await
+        .replace(web_rtc_connection);
+    tracing::info!("Joined room {}", room_id);
+}
 
+struct AppState {
+    // Define any shared state here
+    audio_element: StdRwLock<Option<AudioElement>>,
+    web_rtc_connection: RwLock<Option<Arc<WebRTCConnection>>>,
+}
+
+#[cfg_attr(mobile, tauri::mobile_entry_point)]
+pub async fn run() {
+    
+    tracing_subscriber::registry()
+        .with(
+            tracing_subscriber::EnvFilter::try_from_default_env().unwrap_or_else(|_| {
+                format!("{}=debug,my_web_rtc=info", env!("CARGO_CRATE_NAME")).into()
+            }),
+        )
+        .with(tracing_subscriber::fmt::layer())
+        .init();
+    // Initialize the WebRTC connection
     tauri::Builder::default()
         .manage(AppState {
-            audio_element,
-            web_rtc_connection: Arc::new(web_rtc_connection),
+            audio_element: StdRwLock::new(None),
+            web_rtc_connection: RwLock::new(None),
         })
         .plugin(tauri_plugin_opener::init())
         .invoke_handler(tauri::generate_handler![

@@ -44,13 +44,44 @@ mod post {
                 room
             }
         };
-        match room.join_user(web_rtc_connection.clone()).await {
-            Ok(_) => tracing::info!("User joined room {}", uuid),
+        let room_id = match room.join_user(web_rtc_connection.clone()).await {
+            Ok(rid) => {tracing::info!("User joined room {}", uuid); rid},
             Err(e) => {
                 tracing::error!("Failed to join room {}: {}", uuid, e);
                 return;
             }
-        }
+        };
+        
+    web_rtc_connection
+        .peer_connection
+        .on_ice_connection_state_change(Box::new(move |state| {
+            println!("ICE connection state: {:?}", state);
+            Box::pin(async {})
+        }));
+
+    web_rtc_connection
+        .peer_connection
+        .on_peer_connection_state_change(Box::new(move |state| {
+            println!("Peer connection state: {:?}", state);
+            Box::pin(async move {
+                let room = match Rooms::get_or_init().rooms.get(&uuid) {
+                    Some(room) => room.value().clone(),
+                    None => {
+                        let room = Room::new(uuid);
+                        Rooms::get_or_init().rooms.insert(uuid, room.clone());
+                        room
+                    }
+                };
+
+                if state == my_web_rtc::RTCPeerConnectionState::Closed {
+                    if let Err(e) = room.leave_user(room_id).await {
+                        tracing::error!("Failed to leave room {}: {}", uuid, e);
+                    } else {
+                        tracing::info!("User left room {}", uuid);
+                    }
+                }
+            })
+        }));
         match web_rtc_connection
             .create_handler(Reader::Server(receiver))
             .await

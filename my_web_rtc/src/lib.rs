@@ -9,6 +9,8 @@ use serde::{Deserialize, Serialize};
 use tokio_tungstenite::tungstenite;
 pub use webrtc::track::track_local::track_local_static_rtp::TrackLocalStaticRTP;
 pub use webrtc::track::track_local::track_local_static_sample::TrackLocalStaticSample;
+pub use webrtc::stats;
+pub use webrtc::peer_connection::peer_connection_state::RTCPeerConnectionState;
 
 #[derive(Debug, thiserror::Error)]
 pub enum Error {
@@ -47,6 +49,13 @@ pub enum SignalingMessage {
     Offer(webrtc::peer_connection::sdp::session_description::RTCSessionDescription),
     Answer(webrtc::peer_connection::sdp::session_description::RTCSessionDescription),
     IceCandidate(webrtc::ice_transport::ice_candidate::RTCIceCandidateInit),
+    Close,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub enum IsClosed {
+    Closed,
+    NotClosed,
 }
 
 #[derive(Debug)]
@@ -65,7 +74,7 @@ pub enum Writer {
 impl Writer {
     pub async fn send(&mut self, message: SignalingMessage) -> Result<(), Error> {
         let serialized = serde_json::to_string(&message)?;
-        println!("Sending message: {}", serialized);
+        tracing::debug!("Sending message: {}", serialized);
         match self {
             Writer::Server(sender) => {
                 let serialized = axum::extract::ws::Utf8Bytes::from(serialized);
@@ -100,15 +109,22 @@ impl Reader {
     pub async fn next(&mut self) -> Result<Option<SignalingMessage>, Error> {
         match self {
             Reader::Server(receiver) => {
-                let msg = receiver.next().await;
-                println!("Received message: {:?}", msg);
-                if let Some(message) = msg {
-                    match message? {
-                        axum::extract::ws::Message::Text(text) => {
+                if let Some(message) = receiver.next().await {
+                    tracing::debug!("Received message: {:?}", message);
+                    match message {
+                        Ok(axum::extract::ws::Message::Text(text)) => {
                             let msg: SignalingMessage = serde_json::from_str(&text)?;
                             Ok(Some(msg))
                         }
-                        _ => Ok(None),
+                        Ok(axum::extract::ws::Message::Close(_)) => Ok(Some(SignalingMessage::Close)),
+                        Ok(_) => {
+                            tracing::warn!("Received unsupported message type");
+                            Ok(None)
+                        },
+                        Err(e) => {
+                            tracing::error!("Error receiving message: {}", e);
+                            Ok(Some(SignalingMessage::Close))
+                        },
                     }
                 } else {
                     Ok(None)
@@ -116,12 +132,23 @@ impl Reader {
             }
             Reader::Client(receiver) => {
                 if let Some(message) = receiver.next().await {
-                    match message? {
-                        tokio_tungstenite::tungstenite::Message::Text(text) => {
+                    tracing::debug!("Received message: {:?}", message);
+                    match message {
+                        Ok(tokio_tungstenite::tungstenite::Message::Text(text)) => {
                             let msg: SignalingMessage = serde_json::from_str(&text)?;
                             Ok(Some(msg))
                         }
-                        _ => Ok(None),
+                        Ok(tokio_tungstenite::tungstenite::Message::Close(_)) => {
+                            Ok(Some(SignalingMessage::Close))
+                        }
+                        Ok(_) => {
+                            tracing::warn!("Received unsupported message type");
+                            Ok(None)
+                        },
+                        Err(e) => {
+                            tracing::error!("Error receiving message: {}", e);
+                            Ok(Some(SignalingMessage::Close))
+                        },
                     }
                 } else {
                     Ok(None)
