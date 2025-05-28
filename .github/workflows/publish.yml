@@ -25,22 +25,11 @@ jobs:
     environment: .env
     steps:
       - uses: actions/checkout@v4
-      
-      - name: 'Create env file'
-        if: matrix.platform == 'windows-latest'
-        shell: "cmd"
-        run: |
-          echo DATABASE_URL=${{ secrets.DATABASE_URL }} > .env
-          echo GMAIL_PASSWORD=${{ secrets.GMAIL_PASSWORD }} >> .env
-          echo GMAIL_ADDRESS=${{ secrets.GMAIL_ADDRESS }} >> .env
 
-      - name: 'Create env file'
+      - name: 'Set env CI to true'
         if: matrix.platform == 'macos-latest'
         shell: "bash"
-        run: |
-          echo DATABASE_URL=${{ secrets.DATABASE_URL }} > .env
-          echo GMAIL_PASSWORD=${{ secrets.GMAIL_PASSWORD }} >> .env
-          echo GMAIL_ADDRESS=${{ secrets.GMAIL_ADDRESS }} >> .env
+        run: export CI=true
         
       - name: install Rust nightly
         run: |
@@ -65,7 +54,7 @@ jobs:
           TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
           TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
         with:
-          tagName: app-v__VERSION__ # the action automatically replaces \_\_VERSION\_\_ with the app version.
+          tagName: ${{ github.ref }} # the action automatically replaces \_\_VERSION\_\_ with the app version.
           releaseName: 'App v__VERSION__'
           releaseBody: 'See the assets to download this version and install.'
           releaseDraft: true
@@ -87,22 +76,6 @@ jobs:
     environment: .env
     steps:
       - uses: actions/checkout@v4
-      
-      - name: 'Create env file'
-        if: matrix.platform == 'windows-latest'
-        shell: "cmd"
-        run: |
-          echo DATABASE_URL=${{ secrets.DATABASE_URL }} > .env
-          echo GMAIL_PASSWORD=${{ secrets.GMAIL_PASSWORD }} >> .env
-          echo GMAIL_ADDRESS=${{ secrets.GMAIL_ADDRESS }} >> .env
-
-      - name: 'Create env file'
-        if: matrix.platform == 'macos-latest'
-        shell: "bash"
-        run: |
-          echo DATABASE_URL=${{ secrets.DATABASE_URL }} > .env
-          echo GMAIL_PASSWORD=${{ secrets.GMAIL_PASSWORD }} >> .env
-          echo GMAIL_ADDRESS=${{ secrets.GMAIL_ADDRESS }} >> .env
         
       - name: install Rust nightly
         run: |
@@ -117,9 +90,13 @@ jobs:
           cd backend
           cargo build --release ${{ matrix.args }}
 
-      - name: Upload release artifact
-        uses: actions/upload-artifact@v4
+      - name: Upload binaries to release
+        uses: svenstaro/upload-release-action@v2
         with:
-          name: backend-${{ matrix.platform }}
-          path: target/release/backend.exe
+          repo_token: ${{ secrets.GITHUB_TOKEN }}
+          file: target/release/backend.exe
+          asset_name: backend-${{ matrix.platform }}.exe
+          tag: ${{ github.ref }}
+          overwrite: true
+
 
