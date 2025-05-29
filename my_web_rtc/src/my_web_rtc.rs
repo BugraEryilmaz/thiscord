@@ -576,12 +576,13 @@ impl WebRTCConnection {
     }
 
     pub async fn close(&self) {
-        self.peer_connection.close().await.err();
         let mut ws_writer_guard = self.ws_writer.lock().await;
         if let Some(writer) = ws_writer_guard.as_mut() {
             writer.send(SignalingMessage::Close).await.err();
         }
         ws_writer_guard.take();
+        drop(ws_writer_guard);
+        self.peer_connection.close().await.err();
         tracing::info!("WebRTC connection closed");
     }
 }

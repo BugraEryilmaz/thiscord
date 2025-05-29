@@ -21,7 +21,7 @@ async fn join_room(app_handle: tauri::AppHandle, room_id: Uuid) {
     let app_state = app_handle.state::<AppState>();
     if let Some(_web_rtc_connection) = app_state.web_rtc_connection.read().await.clone() {
         _web_rtc_connection.close().await;
-        app_state.web_rtc_connection.write().await.take();
+        tracing::info!("WebRTC connection already exists, closing it before joining a new room.\n");
     }
     // Create the audio element and start the input/output streams
     let (mic_producer, mic_consumer) = HeapRb::<i16>::new(12000).split();
@@ -58,25 +58,15 @@ async fn join_room(app_handle: tauri::AppHandle, room_id: Uuid) {
     web_rtc_connection
         .peer_connection
         .on_ice_connection_state_change(Box::new(move |state| {
-            println!("ICE connection state: {:?}", state);
+            tracing::info!("ICE connection state: {:?}", state);
             Box::pin(async {})
         }));
 
-    let app_manager = app_handle.clone();
     web_rtc_connection
         .peer_connection
         .on_peer_connection_state_change(Box::new(move |state| {
-            println!("Peer connection state: {:?}", state);
-            let app_manager = app_manager.clone();
+            tracing::info!("Peer connection state: {:?}", state);
             Box::pin(async move {
-                if state == my_web_rtc::RTCPeerConnectionState::Closed {
-                    app_manager
-                        .state::<AppState>()
-                        .web_rtc_connection
-                        .write()
-                        .await                                          
-                        .take();
-                }
             })
         }));
     let web_rtc_connection = Arc::new(web_rtc_connection);
