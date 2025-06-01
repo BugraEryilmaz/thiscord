@@ -1,5 +1,5 @@
 use crate::{
-    models::{Backend, PermissionType}, schema, Error
+    models::{Backend, PermissionType, Server}, schema, Error
 };
 use diesel::prelude::*;
 use rand::{Rng, distr::Alphanumeric};
@@ -7,13 +7,13 @@ use strum::IntoEnumIterator;
 use uuid::Uuid;
 
 impl Backend {
-    pub async fn create_server(
+    pub fn create_server(
         &self,
         server_name: &str,
         server_image: Option<String>,
         user_id: Uuid,
     ) -> Result<String, Error> {
-        let connection_string = self.create_connection_string().await?;
+        let connection_string = self.create_connection_string()?;
         let mut conn = self.get_connection()?;
 
         let server_id = diesel::insert_into(schema::servers::table)
@@ -29,7 +29,8 @@ impl Backend {
         self.join_user_to_server(user_id, server_id)?;
         let owner_role = self.create_role("owner".to_string(), PermissionType::iter())?;
         self.add_user_role(user_id, server_id, owner_role)?;
-        let _user_role = self.create_role("user".to_string(), std::iter::empty::<PermissionType>())?;
+        let _user_role =
+            self.create_role("user".to_string(), std::iter::empty::<PermissionType>())?;
 
         Ok(connection_string)
     }
@@ -46,7 +47,11 @@ impl Backend {
         Ok(())
     }
 
-    pub fn create_role(&self, role: String, permissions: impl Iterator<Item = PermissionType>) -> Result<Uuid, Error> {
+    pub fn create_role(
+        &self,
+        role: String,
+        permissions: impl Iterator<Item = PermissionType>,
+    ) -> Result<Uuid, Error> {
         let mut conn = self.get_connection()?;
         let owner_role = diesel::insert_into(schema::roles::table)
             .values((schema::roles::name.eq(role),))
@@ -88,7 +93,7 @@ impl Backend {
         Ok(())
     }
 
-    pub async fn create_connection_string(&self) -> Result<String, Error> {
+    pub fn create_connection_string(&self) -> Result<String, Error> {
         let mut conn = self.get_connection()?;
         for _ in 0..10 {
             // create a random connection string of length 8
@@ -108,5 +113,28 @@ impl Backend {
             }
         }
         Err(Error::ConnectionStringGenerationFailed)
+    }
+
+    pub fn get_server_by_connection_string(
+        &self,
+        connection_string: &str,
+    ) -> Result<Option<Uuid>, Error> {
+        let mut conn = self.get_connection()?;
+        schema::servers::table
+            .filter(schema::servers::connection_string.eq(connection_string))
+            .select(schema::servers::id)
+            .first::<Uuid>(&mut conn)
+            .optional()
+            .map_err(|e| Error::from(e))
+    }
+
+    pub fn get_servers_for_user(&self, user_id: Uuid) -> Result<Vec<Server>, Error> {
+        let mut conn = self.get_connection()?;
+        schema::servers::table
+            .inner_join(schema::joined_users::table)
+            .filter(schema::joined_users::user_id.eq(user_id))
+            .select(Server::as_select())
+            .load::<Server>(&mut conn)
+            .map_err(|e| Error::from(e))
     }
 }

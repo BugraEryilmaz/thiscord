@@ -5,9 +5,11 @@ use diesel::{
 
 mod user;
 mod permissions;
+mod servers;
 
 pub use user::*;
 pub use permissions::*;
+pub use servers::*;
 
 use crate::{Error, utils::GmailBackend};
 

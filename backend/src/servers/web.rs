@@ -3,7 +3,7 @@ use crate::utils::images::upload_image;
 use axum::Router;
 use axum::extract::Multipart;
 use axum::response::IntoResponse;
-use axum::{extract::DefaultBodyLimit, routing::post};
+use axum::{extract::DefaultBodyLimit, routing::post, routing::get};
 use axum_login::login_required;
 use futures_util::TryStreamExt;
 use tokio_util::io::StreamReader;
@@ -11,6 +11,8 @@ use tower_http::limit::RequestBodyLimitLayer;
 
 pub fn router() -> Router {
     Router::new()
+        .route("/get-servers", get(get::get_servers))
+        .route("/join-server", post(post::join_server))
         .route("/create-server", post(post::create_server))
         .layer(RequestBodyLimitLayer::new(5 * 1024 * 1024)) // 5MB limit
         .layer(DefaultBodyLimit::max(5 * 1024 * 1024)) // 5MB limit
@@ -95,10 +97,11 @@ mod post {
         }
 
         let backend = auth.backend;
-        match backend
-            .create_server(server_name.unwrap().as_str(), server_image.clone(), auth.user.unwrap().id)
-            .await
-        {
+        match backend.create_server(
+            server_name.unwrap().as_str(),
+            server_image.clone(),
+            auth.user.unwrap().id,
+        ) {
             Ok(_) => {
                 tracing::info!("Server created successfully");
                 (axum::http::StatusCode::OK, "Server created".to_string())
@@ -109,6 +112,56 @@ mod post {
                 if let Some(image) = server_image {
                     let _ = tokio::fs::remove_file(image).await;
                 }
+                (axum::http::StatusCode::INTERNAL_SERVER_ERROR, e.to_string())
+            }
+        }
+    }
+
+    pub async fn join_server(auth: AuthSession, connection_string: String) -> impl IntoResponse {
+        let backend = auth.backend;
+        let server_id = match backend.get_server_by_connection_string(connection_string.as_str()) {
+            Ok(Some(id)) => id,
+            Ok(None) => {
+                return (
+                    axum::http::StatusCode::NOT_FOUND,
+                    "Server not found".to_string(),
+                );
+            }
+            Err(e) => {
+                tracing::error!(
+                    "Failed to find server with connection string: {}, error: {}",
+                    connection_string,
+                    e.to_string()
+                );
+                return (axum::http::StatusCode::INTERNAL_SERVER_ERROR, e.to_string());
+            }
+        };
+        match backend.join_user_to_server(auth.user.unwrap().id, server_id) {
+            Ok(_) => {}
+            Err(e) => {
+                tracing::error!("Failed to join server: {}", e);
+                return (axum::http::StatusCode::INTERNAL_SERVER_ERROR, e.to_string());
+            }
+        }
+        (
+            axum::http::StatusCode::OK,
+            "Joined server successfully".to_string(),
+        )
+    }
+
+}
+mod get {
+    use super::*;
+    
+    pub async fn get_servers(auth: AuthSession) -> impl IntoResponse {
+        let backend = auth.backend;
+        match backend.get_servers_for_user(auth.user.unwrap().id) {
+            Ok(servers) => {
+                tracing::info!("Retrieved {} servers for user", servers.len());
+                (axum::http::StatusCode::OK, serde_json::to_string(&servers).unwrap())
+            }
+            Err(e) => {
+                tracing::error!("Failed to retrieve servers: {}", e);
                 (axum::http::StatusCode::INTERNAL_SERVER_ERROR, e.to_string())
             }
         }
