@@ -2,6 +2,7 @@ use strum_macros::EnumIter;
 
 #[derive(diesel_derive_enum::DbEnum, Debug, Clone, PartialEq, Eq, EnumIter)]
 #[ExistingTypePath = "crate::schema::sql_types::PermissionType"]
+#[DbValueStyle = "PascalCase"]
 pub enum PermissionType {
     DeleteServer,
     CreateChannel,

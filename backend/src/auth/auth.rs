@@ -86,7 +86,6 @@ impl Backend {
             .inner_join(schema::user_roles::table)
             .filter(schema::user_roles::user_id.eq(user.id))
             .filter(schema::user_roles::server_id.eq(server_id))
-            .filter(schema::roles::server_id.eq(server_id))
             .filter(schema::permissions::type_.eq(permission))
             .select(schema::permissions::id)
             .first::<uuid::Uuid>(&mut conn)

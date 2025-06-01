@@ -22,7 +22,7 @@ use tower_http::trace::TraceLayer;
 use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt};
 
 use diesel_migrations::{EmbeddedMigrations, MigrationHarness, embed_migrations};
-pub const MIGRATIONS: EmbeddedMigrations = embed_migrations!("migrations");
+pub const MIGRATIONS: EmbeddedMigrations = embed_migrations!();
 
 pub type DbPool = diesel::r2d2::Pool<ConnectionManager<PgConnection>>;
 

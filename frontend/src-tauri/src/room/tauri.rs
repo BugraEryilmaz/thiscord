@@ -99,6 +99,7 @@ pub async fn leave_room(app_handle: tauri::AppHandle) {
     }
     
     if let Some(audio_element) = app_state.audio_element.write().unwrap().take() {
+        audio_element.quit().unwrap();
         tracing::info!("Stopped audio streams.");
     } else {
         tracing::warn!("No audio element to stop.");
