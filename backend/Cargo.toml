@@ -6,7 +6,7 @@ edition = "2024"
 [dependencies]
 argon2 = "0.5.3"
 async-trait = "0.1.88"
-axum = {version = "0.8.4", features = ["ws"]}
+axum = { version = "0.8.4", features = ["multipart", "ws"] }
 axum-extra = "0.10.1"
 axum-login = "0.17.0"
 axum-server = { version = "0.7", features = ["tls-rustls"] }
@@ -21,8 +21,8 @@ rand = "0.9.1"
 serde = "1.0.219"
 serde_json = "1.0.140"
 thiserror = "2.0.12"
-tokio = { version = "1.45.0", features = ["macros", "rt-multi-thread"] }
-tower-http = { version = "0.6.4", features = ["trace"]}
+tokio = { version = "1.45.0", features = ["io-util", "macros", "rt-multi-thread"] }
+tower-http = { version = "0.6.4", features = ["limit", "trace"] }
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 uuid = { version = "1.16.0", features = ["serde", "v4"] }
@@ -30,3 +30,7 @@ my_web_rtc = { path = "../my_web_rtc" }
 rustls = { version = "0.23.27", features = ["aws-lc-rs"] }
 futures-util = "0.3.31"
 ringbuf = "0.4.8"
+diesel-derive-enum = { version = "2.1.0", features = ["postgres"] }
+tokio-util = { version = "0.7.15", features = ["io"] }
+strum = "0.27"
+strum_macros = "0.27"

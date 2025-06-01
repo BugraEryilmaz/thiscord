@@ -18,12 +18,20 @@ mod post {
     use my_web_rtc::{Reader, Writer};
     use uuid::Uuid;
 
+    use crate::models::AuthSession;
     use crate::rooms::Room;
     use crate::rooms::Rooms;
 
     use super::*;
 
-    pub async fn join_room(ws: WebSocketUpgrade, Path(_uuid): Path<Uuid>) -> impl IntoResponse {
+    pub async fn join_room(ws: WebSocketUpgrade, Path(_uuid): Path<Uuid>, auth: AuthSession) -> impl IntoResponse {
+        // check if the user is authenticated
+        if auth.user.is_none() {
+            tracing::warn!("User is not authenticated");
+            return (axum::http::StatusCode::UNAUTHORIZED, "Unauthorized".to_string()).into_response();
+        }
+        let _backend = auth.backend;
+        // backend.
         // Upgrade the request to a WebSocket connection
         ws.on_upgrade(move |ws| handle_room_ws(ws, _uuid))
     }

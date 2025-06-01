@@ -2,7 +2,7 @@ use ringbuf::{
     traits::{Consumer, Producer},
     HeapCons, HeapProd,
 };
-use std::sync::{mpsc::channel};
+use std::sync::mpsc::channel;
 use std::sync::{Arc, Mutex as StdMutex};
 
 use cpal::{
@@ -80,6 +80,10 @@ impl AudioElement {
                                     eprintln!("Failed to play new input stream: {}", e);
                                 }
                             }
+                            AudioCommand::Quit => {
+                                println!("Received Quit command");
+                                break; // Exit the loop and stop the thread
+                            }
                         }
                     }
                     Err(e) => {
@@ -152,6 +156,7 @@ impl AudioElement {
 
         std::thread::spawn(move || {
             // Handle commands from the main thread
+            tracing::warn!("Ref count of mic producer: {}", Arc::strong_count(&rx));
             let mut current_stream = match Self::create_output_stream(device, rx.clone()) {
                 Ok(stream) => stream,
                 Err(e) => {
@@ -159,6 +164,7 @@ impl AudioElement {
                     return;
                 }
             };
+            tracing::warn!("Ref count of mic producer: {}", Arc::strong_count(&rx));
             match current_stream.play() {
                 Ok(_) => println!("Output stream started successfully"),
                 Err(e) => eprintln!("Failed to start output stream: {}", e),
@@ -187,6 +193,10 @@ impl AudioElement {
                                         eprintln!("Failed to create output stream: {}", e);
                                         return current_stream;
                                     });
+                            }
+                            AudioCommand::Quit => {
+                                println!("Received Quit command");
+                                break; // Exit the loop and stop the thread
                             }
                         }
                     }
@@ -293,6 +303,16 @@ impl AudioElement {
     pub fn undeafen(&self) -> Result<(), Error> {
         if let Some(tx) = self.speaker_command_queue.lock().unwrap().as_mut() {
             tx.send(AudioCommand::Start)?;
+        }
+        Ok(())
+    }
+
+    pub fn quit(&self) -> Result<(), Error> {
+        if let Some(tx) = self.speaker_command_queue.lock().unwrap().as_mut() {
+            tx.send(AudioCommand::Quit)?;
+        }
+        if let Some(tx) = self.mic_command_queue.lock().unwrap().as_mut() {
+            tx.send(AudioCommand::Quit)?;
         }
         Ok(())
     }

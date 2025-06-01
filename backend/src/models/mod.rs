@@ -4,8 +4,10 @@ use diesel::{
 };
 
 mod user;
+mod permissions;
 
 pub use user::*;
+pub use permissions::*;
 
 use crate::{Error, utils::GmailBackend};
 

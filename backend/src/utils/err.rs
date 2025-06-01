@@ -22,6 +22,14 @@ pub enum Error {
     WebRTC(#[from] my_web_rtc::Error),
     #[error("UserNotFound in the room")]
     UserNotFoundInRoom,
+    #[error("Permission denied")]
+    PermissionDenied,
+    #[error("Not implemented")]
+    NotImplemented,
+    #[error("Invalid file name: {0}")]
+    InvalidFileName(String),
+    #[error("ConnectionStringGenerationFailed")]
+    ConnectionStringGenerationFailed,
 }
 
 impl From<argon2::password_hash::Error> for Error {

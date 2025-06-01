@@ -16,6 +16,7 @@ pub enum AudioCommand {
     Start,
     Stop,
     AttachDevice(cpal::Device),
+    Quit,
     // SetVolume(f32),
     // etc.
 }

@@ -3,12 +3,13 @@ pub mod models;
 pub mod rooms;
 pub mod schema;
 pub mod utils;
+pub mod servers;
 
 pub use utils::Error;
 
 use axum::{Router, routing::get};
 use axum_login::{
-    AuthManagerLayerBuilder, login_required,
+    AuthManagerLayerBuilder,
     tower_sessions::{MemoryStore, SessionManagerLayer},
 };
 use axum_server::tls_rustls::RustlsConfig;
@@ -16,7 +17,6 @@ use diesel::{
     PgConnection,
     r2d2::{ConnectionManager, Pool},
 };
-use models::Backend;
 use std::{net::SocketAddr, path::PathBuf};
 use tower_http::trace::TraceLayer;
 use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt};
@@ -92,7 +92,7 @@ async fn main() {
 
     let app = Router::new()
         .route("/", get(handler))
-        .route_layer(login_required!(Backend, login_url = "/auth/login"))
+        .nest("/servers", crate::servers::web::router())
         .nest("/auth", crate::auth::web::router())
         .nest("/rooms", crate::rooms::web::router())
         .layer(auth_layer)

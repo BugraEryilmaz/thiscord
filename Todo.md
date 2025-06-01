@@ -8,8 +8,12 @@
   - [x] Resend activation email
 - [x] Login
   - [ ] Move session to the database
+  - [x] Permissions management
+  - [ ] Cache permissions per user per server
+  - [ ] Password reset
+  - [ ] Password change
 - [ ] Logout
-- [ ] Create server
+- [x] Create server
 - [ ] Join server
 - [ ] Leave server
 - [ ] List my servers
@@ -31,6 +35,7 @@
   - [x] SDP negotiation
   - [x] ICE candidate exchange
 - [x] Audio stream management
+  - [x] Background receive audio should not assume single audio track
   - [ ] Microphone selection
   - [ ] Microphone volume control
   - [ ] Microphone mute/unmute
@@ -47,5 +52,3 @@
 - [ ] Server management
 
 # Random
-- [ ] Make webrtc handlers new threads instead of async
-- [ ] Background receive audio should not assume single audio track

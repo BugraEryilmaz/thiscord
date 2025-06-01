@@ -444,7 +444,6 @@ impl WebRTCConnection {
                 if track.kind() == webrtc::rtp_transceiver::rtp_codec::RTPCodecType::Audio {
                     let (tx, rx) = HeapRb::<i16>::new(12000).split();
                     let data = Arc::new(Mutex::new(tx));
-                    let receiver_queues = receiver_queues.clone();
                     let mut receiver_queues_guard = receiver_queues
                         .lock()
                         .expect("Failed to lock receiver queues");

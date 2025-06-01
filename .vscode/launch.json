@@ -1,0 +1,158 @@
+{
+    // Use IntelliSense to learn about possible attributes.
+    // Hover to view descriptions of existing attributes.
+    // For more information, visit: https://go.microsoft.com/fwlink/?linkid=830387
+    "version": "0.2.0",
+    "configurations": [
+        
+        {
+            "type": "lldb",
+            "request": "launch",
+            "name": "Debug executable 'thiscord-ui'",
+            "cargo": {
+                "args": [
+                    "build",
+                    "--bin=thiscord-ui",
+                    "--package=thiscord-ui"
+                ],
+                "filter": {
+                    "name": "thiscord-ui",
+                    "kind": "bin"
+                }
+            },
+            "args": [],
+            "cwd": "${workspaceFolder}"
+        },
+        {
+            "type": "lldb",
+            "request": "launch",
+            "name": "Debug unit tests in executable 'thiscord-ui'",
+            "cargo": {
+                "args": [
+                    "test",
+                    "--no-run",
+                    "--bin=thiscord-ui",
+                    "--package=thiscord-ui"
+                ],
+                "filter": {
+                    "name": "thiscord-ui",
+                    "kind": "bin"
+                }
+            },
+            "args": [],
+            "cwd": "${workspaceFolder}"
+        },
+        {
+            "type": "lldb",
+            "request": "launch",
+            "name": "Debug unit tests in library 'thiscord_lib'",
+            "cargo": {
+                "args": [
+                    "test",
+                    "--no-run",
+                    "--lib",
+                    "--package=thiscord"
+                ],
+                "filter": {
+                    "name": "thiscord_lib",
+                    "kind": "lib"
+                }
+            },
+            "args": [],
+            "cwd": "${workspaceFolder}"
+        },
+        {
+            "type": "lldb",
+            "request": "launch",
+            "name": "Debug executable 'thiscord'",
+            "cargo": {
+                "args": [
+                    "build",
+                    "--bin=thiscord",
+                    "--package=thiscord"
+                ],
+                "filter": {
+                    "name": "thiscord",
+                    "kind": "bin"
+                }
+            },
+            "args": [],
+            "cwd": "${workspaceFolder}"
+        },
+        {
+            "type": "lldb",
+            "request": "launch",
+            "name": "Debug unit tests in executable 'thiscord'",
+            "cargo": {
+                "args": [
+                    "test",
+                    "--no-run",
+                    "--bin=thiscord",
+                    "--package=thiscord"
+                ],
+                "filter": {
+                    "name": "thiscord",
+                    "kind": "bin"
+                }
+            },
+            "args": [],
+            "cwd": "${workspaceFolder}"
+        },
+        {
+            "type": "lldb",
+            "request": "launch",
+            "name": "Debug unit tests in library 'my_web_rtc'",
+            "cargo": {
+                "args": [
+                    "test",
+                    "--no-run",
+                    "--lib",
+                    "--package=my_web_rtc"
+                ],
+                "filter": {
+                    "name": "my_web_rtc",
+                    "kind": "lib"
+                }
+            },
+            "args": [],
+            "cwd": "${workspaceFolder}"
+        },
+        {
+            "type": "lldb",
+            "request": "launch",
+            "name": "Debug executable 'backend'",
+            "cargo": {
+                "args": [
+                    "build",
+                    "--bin=backend",
+                    "--package=backend"
+                ],
+                "filter": {
+                    "name": "backend",
+                    "kind": "bin"
+                }
+            },
+            "args": [],
+            "cwd": "${workspaceFolder}"
+        },
+        {
+            "type": "lldb",
+            "request": "launch",
+            "name": "Debug unit tests in executable 'backend'",
+            "cargo": {
+                "args": [
+                    "test",
+                    "--no-run",
+                    "--bin=backend",
+                    "--package=backend"
+                ],
+                "filter": {
+                    "name": "backend",
+                    "kind": "bin"
+                }
+            },
+            "args": [],
+            "cwd": "${workspaceFolder}"
+        }
+    ]
+}
