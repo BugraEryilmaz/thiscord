@@ -18,4 +18,6 @@ pub enum Error {
     CpalPlayStream(#[from] cpal::PlayStreamError),
     #[error("Send error: {0}")]
     SendError(#[from] std::sync::mpsc::SendError<AudioCommand>),
+    #[error("Update error: {0}")]
+    UpdateError(#[from] tauri_plugin_updater::Error),
 }

@@ -5931,6 +5931,18 @@ dependencies = [
 ]
 
 [[package]]
+name = "shared"
+version = "0.1.0"
+dependencies = [
+ "js-sys",
+ "serde",
+ "serde-wasm-bindgen",
+ "serde_json",
+ "wasm-bindgen",
+ "wasm-bindgen-futures",
+]
+
+[[package]]
 name = "shared_child"
 version = "1.0.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -6784,6 +6796,7 @@ dependencies = [
  "ringbuf",
  "serde",
  "serde_json",
+ "shared",
  "tauri",
  "tauri-build",
  "tauri-plugin-dialog",
@@ -6806,6 +6819,7 @@ dependencies = [
  "leptos",
  "serde",
  "serde-wasm-bindgen",
+ "shared",
  "uuid",
  "wasm-bindgen",
  "wasm-bindgen-futures",

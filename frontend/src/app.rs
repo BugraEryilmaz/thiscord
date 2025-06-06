@@ -1,72 +1,61 @@
+use js_sys::Function;
+use leptos::leptos_dom::logging;
 use leptos::task::spawn_local;
 use leptos::{ev::SubmitEvent, prelude::*};
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 use wasm_bindgen::prelude::*;
+use shared::{DownloadProgress, FromEvent, UpdateState};
 
 #[wasm_bindgen]
 extern "C" {
     #[wasm_bindgen(js_namespace = ["window", "__TAURI__", "core"])]
     async fn invoke(cmd: &str, args: JsValue) -> JsValue;
+    #[wasm_bindgen(js_namespace = ["window", "__TAURI__", "event"])]
+    async fn listen(event: &str, handler: &Function) -> JsValue;
 }
 
-#[derive(Serialize, Deserialize)]
-struct JoinRoomArgs {
-    #[serde(rename = "roomId")]
-    room_id: Uuid,
+async fn listen_update_state(set_update_state: WriteSignal<UpdateState>) {
+    let handler = Closure::<dyn FnMut(JsValue)>::new(move |val: JsValue| {
+        logging::console_log(format!("Received update state event: {:?}", val).as_str());
+        let new_state: UpdateState = UpdateState::from_event_js(val).expect("Failed to deserialize UpdateState");
+        set_update_state.set(new_state);
+    });
+    listen("update_state", handler.as_ref().unchecked_ref()).await;
+    handler.forget(); // Prevents the closure from being garbage collected
+}
+
+async fn listen_download_progress(set_download_progress: WriteSignal<DownloadProgress>) {
+    let handler = Closure::<dyn FnMut(JsValue)>::new(move |val: JsValue| {
+        logging::console_log(format!("Received update state event: {:?}", val).as_str());
+        let new_state = DownloadProgress::from_event_js(val).expect("Failed to deserialize UpdateState");
+        set_download_progress.set(new_state);
+    });
+    listen("download_progress", handler.as_ref().unchecked_ref()).await;
+    handler.forget(); // Prevents the closure from being garbage collected
 }
 
 #[component]
 pub fn App() -> impl IntoView {
-    let (name, set_name) = signal(String::new());
-    let (greet_msg, set_greet_msg) = signal(String::new());
+    let (update_state, set_update_state) = signal(UpdateState::Checking);
+    let (download_progress, set_download_progress) = signal(DownloadProgress(0));
 
-    let update_name = move |ev| {
-        let v = event_target_value(&ev);
-        set_name.set(v);
-    };
-
-    let greet = move |ev: SubmitEvent| {
-        ev.prevent_default();
-        spawn_local(async move {
-            let name = name.get_untracked();
-            if name.is_empty() {
-                return;
-            }
-
-            let args = serde_wasm_bindgen::to_value(&JoinRoomArgs {
-                room_id: uuid::uuid!("12345678-1234-5678-1234-567812345678"),
-            })
-            .unwrap();
-            // Learn more about Tauri commands at https://tauri.app/develop/calling-rust/
-            let new_msg = invoke("join_room", args).await.as_string().unwrap();
-            set_greet_msg.set(new_msg);
-        });
-    };
+    spawn_local(listen_update_state(set_update_state));
+    spawn_local(listen_download_progress(set_download_progress));
 
     view! {
         <main class="container">
-            <h1>"Welcome to Tauri + Leptos"</h1>
-
-            <div class="row">
-                <a href="https://tauri.app" target="_blank">
-                    <img src="public/tauri.svg" class="logo tauri" alt="Tauri logo"/>
-                </a>
-                <a href="https://docs.rs/leptos/" target="_blank">
-                    <img src="public/leptos.svg" class="logo leptos" alt="Leptos logo"/>
-                </a>
-            </div>
-            <p>"Click on the Tauri and Leptos logos to learn more."</p>
-
-            <form class="row" on:submit=greet>
-                <input
-                    id="greet-input"
-                    placeholder="Enter a name..."
-                    on:input=update_name
-                />
-                <button type="submit">"Greet"</button>
-            </form>
-            <p>{ move || greet_msg.get() }</p>
+            <p>{ move || update_state.get().to_string() }</p>
+            <p>{ move || format!("Download Progress: {}%", download_progress.get().0) }</p>
+            <button
+                on:click=move |_| {
+                    spawn_local(async move {
+                        invoke("test_emit", JsValue::NULL).await;
+                    });
+                }
+            >
+                "Test Emit"
+            </button>
         </main>
     }
 }
