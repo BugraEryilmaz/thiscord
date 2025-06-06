@@ -33,6 +33,12 @@ async fn test_emit(app: tauri::AppHandle) {
     app.emit("update_state", UpdateState::Downloading).unwrap();
 }
 
+#[tauri::command]
+async fn check_updates(app: tauri::AppHandle) {
+    // Check for updates and emit the state
+    let _ = check_for_updates(&app).await;
+}
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub async fn run() {
     tracing_subscriber::registry()
@@ -69,6 +75,7 @@ pub async fn run() {
             deafen_speaker,
             undeafen_speaker,
             test_emit,
+            check_updates,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
