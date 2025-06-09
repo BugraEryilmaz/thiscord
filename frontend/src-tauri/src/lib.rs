@@ -8,9 +8,13 @@ use std::{sync::Arc, vec};
 use audio::tauri::*;
 use audio::AudioElement;
 use my_web_rtc::WebRTCConnection;
+use reqwest::cookie::{CookieStore, Jar};
+use reqwest::Client;
 use room::tauri::*;
-use shared::{DownloadProgress, UpdateState};
-use tauri::{AppHandle, Emitter};
+use shared::LoginRequest;
+use shared::{DownloadProgress, UpdateState, URL};
+use tauri::http::HeaderValue;
+use tauri::{AppHandle, Emitter, Manager, Url};
 use tauri_plugin_updater::UpdaterExt;
 use tokio::spawn;
 use tokio::sync::RwLock;
@@ -25,6 +29,24 @@ pub struct AppState {
     // Define any shared state here
     audio_element: StdRwLock<Option<AudioElement>>,
     web_rtc_connection: RwLock<Option<Arc<WebRTCConnection>>>,
+    client: Client,
+    cookie_store: Arc<Jar>,
+}
+
+impl AppState {
+    pub fn new() -> Self {
+        let cookie_store = Arc::new(Jar::default());
+        let client = Client::builder()
+            .cookie_provider(cookie_store.clone())
+            .build()
+            .expect("Failed to create HTTP client");
+        Self {
+            audio_element: StdRwLock::new(None),
+            web_rtc_connection: RwLock::new(None),
+            client,
+            cookie_store,
+        }
+    }
 }
 
 #[tauri::command]
@@ -39,6 +61,23 @@ async fn check_updates(app: tauri::AppHandle) {
     let _ = check_for_updates(&app).await;
 }
 
+#[tauri::command]
+async fn login(username: String, password: String, state: tauri::State<'_, AppState>) -> Result<(), String> {
+    let client = &state.client;
+    let _response = client
+        .post(format!("{}/auth/login", URL))
+        .json(&LoginRequest { username, password })
+        .send()
+        .await
+        .map_err(|e| e.to_string())?
+        .error_for_status()
+        .map_err(|e| e.to_string())?;
+    let cookie = state.cookie_store.clone();
+    let cookie = cookie.cookies(&Url::parse(URL).unwrap()).unwrap_or(HeaderValue::from_static(""));
+    tracing::info!("Cookies after login: {:?}", cookie);
+    Ok(())
+}
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub async fn run() {
     tracing_subscriber::registry()
@@ -51,10 +90,7 @@ pub async fn run() {
         .init();
     // Initialize the WebRTC connection
     tauri::Builder::default()
-        .manage(AppState {
-            audio_element: StdRwLock::new(None),
-            web_rtc_connection: RwLock::new(None),
-        })
+        .manage(AppState::new())
         .plugin(tauri_plugin_opener::init())
         .plugin(tauri_plugin_updater::Builder::new().build())
         .setup(|app| {
@@ -66,6 +102,11 @@ pub async fn run() {
                     sleep(std::time::Duration::from_secs(5)).await;
                 }
             });
+            let handle = app.handle().clone();
+            let state = handle.state::<AppState>();
+            let cookie = state.cookie_store.clone();
+            let cookie = cookie.cookies(&Url::parse(URL).unwrap()).unwrap_or(HeaderValue::from_static(""));
+            tracing::info!("Cookies: {:?}", cookie);
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![
@@ -76,6 +117,7 @@ pub async fn run() {
             undeafen_speaker,
             test_emit,
             check_updates,
+            login,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

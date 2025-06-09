@@ -1,7 +1,19 @@
+pub const URL: &str = "https://localhost:8081";
+
 use std::fmt::Display;
 
 use serde::{Deserialize, Serialize};
 use wasm_bindgen::JsValue;
+
+// #[derive(Debug, Clone, PartialEq, Deserialize, Serialize)]
+// pub struct SessionCookie(pub Option<String>);
+
+
+#[derive(Serialize, Deserialize, Debug, Clone)]
+pub struct LoginRequest {
+    pub username: String,
+    pub password: String,
+}
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum UpdateState {

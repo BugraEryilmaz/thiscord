@@ -38,6 +38,8 @@ uuid = { version = "1.17.0", features = ["v4"] }
 tracing = "0.1.41"
 tracing-subscriber = { version = "0.3.19", features = ["env-filter"] }
 shared = { path = "../shared" }
+tokio-tungstenite = { version = "0.26.2", features = ["native-tls"] }
+reqwest = { version = "0.12", features = ["cookies", "rustls-tls", "stream", "json"] }
 
 [target.'cfg(not(any(target_os = "android", target_os = "ios")))'.dependencies]
 tauri-plugin-updater = "2"

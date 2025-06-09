@@ -7,7 +7,7 @@ pub mod servers;
 
 pub use utils::Error;
 
-use axum::{Router, routing::get};
+use axum::{routing::get, Router};
 use axum_login::{
     AuthManagerLayerBuilder,
     tower_sessions::{MemoryStore, SessionManagerLayer},
@@ -69,7 +69,7 @@ async fn main() {
         PathBuf::from(env!("CARGO_MANIFEST_DIR"))
             .join("..")
             .join("sslcert")
-            .join("key.pem")
+            .join("localhost-key.pem")
             .display()
     );
     rustls::crypto::aws_lc_rs::default_provider()
@@ -80,11 +80,11 @@ async fn main() {
         PathBuf::from(env!("CARGO_MANIFEST_DIR"))
             .join("..")
             .join("sslcert")
-            .join("cert.pem"),
+            .join("localhost-cert.pem"),
         PathBuf::from(env!("CARGO_MANIFEST_DIR"))
             .join("..")
             .join("sslcert")
-            .join("key.pem"),
+            .join("localhost-key.pem"),
     )
     .await
     .unwrap();
