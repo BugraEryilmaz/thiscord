@@ -1,7 +1,7 @@
 
 use js_sys::Function;
 use leptos::task::spawn_local;
-use serde::{de::DeserializeOwned, Deserialize, Serialize};
+use serde::de::DeserializeOwned;
 use shared::FromEvent;
 use wasm_bindgen::prelude::*;
 

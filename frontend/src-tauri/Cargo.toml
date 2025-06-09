@@ -24,10 +24,7 @@ tauri-plugin-shell = "2"
 tauri-plugin-dialog = "2"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
-diesel = { version = "2.2.7", features = [
-    "sqlite",
-    "returning_clauses_for_sqlite_3_35",
-] }
+diesel = { version = "2.2.7", features = ["sqlite", "returning_clauses_for_sqlite_3_35"] }
 chrono = { version = "0.4.39", features = ["serde"] }
 my_web_rtc = {path = "../../my_web_rtc"}
 tokio = { version = "1.45.0", features = ["full"] }
@@ -40,6 +37,8 @@ tracing-subscriber = { version = "0.3.19", features = ["env-filter"] }
 shared = { path = "../shared" }
 tokio-tungstenite = { version = "0.26.2", features = ["native-tls"] }
 reqwest = { version = "0.12", features = ["cookies", "rustls-tls", "stream", "json"] }
+diesel_migrations = { version = "2.2.0", features = ["sqlite"] }
+rusqlite = { version = "0.33.0", features = ["bundled"] }
 
 [target.'cfg(not(any(target_os = "android", target_os = "ios")))'.dependencies]
 tauri-plugin-updater = "2"
