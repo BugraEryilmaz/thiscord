@@ -5,12 +5,12 @@ pub mod schema;
 pub mod utils;
 pub mod servers;
 
+use tower_sessions_sqlx_store::sqlx::PgPool;
 pub use utils::Error;
 
 use axum::{routing::get, Router};
 use axum_login::{
-    AuthManagerLayerBuilder,
-    tower_sessions::{MemoryStore, SessionManagerLayer},
+    tower_sessions::{self, MemoryStore, SessionManagerLayer}, AuthManagerLayerBuilder
 };
 use axum_server::tls_rustls::RustlsConfig;
 use diesel::{
@@ -22,7 +22,7 @@ use tower_http::trace::TraceLayer;
 use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt};
 
 use diesel_migrations::{EmbeddedMigrations, MigrationHarness, embed_migrations};
-pub const MIGRATIONS: EmbeddedMigrations = embed_migrations!();
+pub const MIGRATIONS: EmbeddedMigrations = embed_migrations!("migrations");
 
 pub type DbPool = diesel::r2d2::Pool<ConnectionManager<PgConnection>>;
 
@@ -44,6 +44,9 @@ async fn main() {
     let database_url =
         std::env::var("DATABASE_URL").expect("DATABASE_URL must be set in the .env file");
     // Then create a connection pool
+    let session_pool = PgPool::connect(&database_url)
+            .await
+            .expect("Failed to connect to the database");
     let manager = ConnectionManager::<PgConnection>::new(database_url);
     let db_connection_pool = Pool::builder()
         .build(manager)
@@ -58,7 +61,9 @@ async fn main() {
     tracing::info!("Migrations completed successfully");
     drop(conn);
     // session manager
-    let session_store = MemoryStore::default();
+    let session_store = tower_sessions_sqlx_store::PostgresStore::new(session_pool.clone());
+    session_store.migrate().await.expect("Failed to migrate session store");
+    let session_store = tower_sessions::CachingSessionStore::new(MemoryStore::default(), session_store);
     let session_manager_layer = SessionManagerLayer::new(session_store);
     // create auth backend
     let auth_backend = models::Backend::new(db_connection_pool);

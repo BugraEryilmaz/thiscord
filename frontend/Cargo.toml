@@ -16,8 +16,8 @@ uuid = { version = "1.17.0", features = ["js", "serde", "v4"] }
 shared = { path = "./shared" }
 stylance = { version = "0.6.0", features = ["nightly"] }
 
-# [workspace]
-# members = ["src-tauri"]
+[workspace]
+members = ["src-tauri"]
 
 [package.metadata.stylance]
 output_file = "./stylance.css"

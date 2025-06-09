@@ -34,3 +34,4 @@ diesel-derive-enum = { version = "2.1.0", features = ["postgres"] }
 tokio-util = { version = "0.7.15", features = ["io"] }
 strum = "0.27"
 strum_macros = "0.27"
+tower-sessions-sqlx-store = { version = "0.15.0", features = ["postgres"] }
