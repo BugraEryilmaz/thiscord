@@ -10,7 +10,7 @@ use crate::{app::SessionCookieSignal, utils::invoke};
 stylance::import_style!(
     #[allow(dead_code)]
     style,
-    "home.css"
+    "home/home.css"
 );
 
 #[component]
@@ -20,7 +20,7 @@ pub fn Home() -> impl IntoView {
 
     // Check if the user is logged in by checking the session cookie
     spawn_local(async move {
-        let is_logged_in = invoke("check_cookies", JsValue::UNDEFINED).await;
+        let is_logged_in = invoke("check_cookies", JsValue::UNDEFINED).await.unwrap_or_else(|_| JsValue::from(false));
         if let Ok(is_logged_in) = from_value::<bool>(is_logged_in) {
             cookie.set(is_logged_in);
         } else {

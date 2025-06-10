@@ -1,6 +1,6 @@
-use leptos::{context, html::Input, logging::error, prelude::*, task::spawn_local};
+use leptos::{context, html::Input, logging::{error, log}, prelude::*, task::spawn_local};
 use serde_wasm_bindgen::{from_value, to_value};
-use shared::LoginRequest;
+use shared::{LoginRequest, RegisterRequest};
 
 use crate::{app::SessionCookieSignal, utils::invoke};
 
@@ -30,11 +30,12 @@ pub fn Login() -> impl IntoView {
                 password,
             };
             let response = invoke("login", to_value(&request).unwrap()).await;
-            if let Ok(()) = from_value::<Result<(), String>>(response).unwrap() {
-                session_cookie.set(true);
-            } else {
+            log!("Response: {:?}", response);
+            if let Err(e) = response {
                 // Handle login failure (e.g., show an error message)
-                error!("Login failed");
+                error!("Login failed: {}", from_value::<String>(e).unwrap_or_else(|_| "Unknown error".to_string()));
+            } else {
+                session_cookie.set(true);
             } 
         });
     };
@@ -44,6 +45,23 @@ pub fn Login() -> impl IntoView {
         let username = username_ref.get().expect("Failed to get username").value();
         let password = password_ref.get().expect("Failed to get password").value();
         let confirm_password = confirm_password_ref.get().expect("Failed to get confirm password").value();
+        if password != confirm_password {
+            error!("Passwords do not match");
+            return;
+        }
+        spawn_local(async move {
+            let request = RegisterRequest {
+                username,
+                password,
+                email,
+            };
+            let response = invoke("signup", to_value(&request).unwrap()).await;
+            if let Err(e) = response {
+                error!("Registration failed: {}", from_value::<String>(e).unwrap_or_else(|_| "Unknown error".to_string()));
+            } else {
+                log!("Registration successful");
+            }
+        });
     };
 
     view! {

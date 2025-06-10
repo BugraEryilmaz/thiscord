@@ -42,7 +42,7 @@ pub fn App() -> impl IntoView {
                         <div>
                             <p>{move || update_state.get().to_string()}</p>
                             <button onclick=move || spawn_local(async move {
-                                invoke("check_updates", JsValue::UNDEFINED).await;
+                                invoke("check_updates", JsValue::UNDEFINED).await.unwrap();
                             })>"Check for Updates"</button>
                         </div>
                     }

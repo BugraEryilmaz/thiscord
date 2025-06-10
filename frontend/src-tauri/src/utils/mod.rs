@@ -1,11 +1,9 @@
 mod err;
 mod update;
-mod login;
 
 use std::sync::{Arc, RwLock as StdRwLock};
 
 use diesel::prelude::*;
-pub use login::*;
 pub use err::Error;
 use my_web_rtc::WebRTCConnection;
 use reqwest::{cookie::Jar, Client};

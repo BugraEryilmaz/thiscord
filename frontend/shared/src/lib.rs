@@ -15,6 +15,13 @@ pub struct LoginRequest {
     pub password: String,
 }
 
+#[derive(Serialize, Deserialize, Debug, Clone)]
+pub struct RegisterRequest {
+    pub username: String,
+    pub password: String,
+    pub email: String,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum UpdateState {
     Checking,

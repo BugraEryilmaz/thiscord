@@ -3,12 +3,12 @@ pub mod room;
 pub mod utils;
 pub mod models;
 pub mod schema;
+pub mod commands;
 
-
+use commands::*;
 use audio::tauri::*;
 use reqwest::cookie::CookieStore;
 use room::tauri::*;
-use utils::{check_cookies, login};
 use shared::{UpdateState, URL};
 use tauri::{Emitter, Manager, Url};
 use tokio::spawn;
@@ -102,6 +102,7 @@ pub async fn run() {
             check_updates,
             login,
             check_cookies,
+            signup,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

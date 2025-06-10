@@ -1,5 +1,5 @@
 use reqwest::cookie::CookieStore;
-use shared::{LoginRequest, URL};
+use shared::{LoginRequest, RegisterRequest, URL};
 use tauri::{Manager, Url};
 
 use crate::{models::Session, utils::{establish_connection, AppState}};
@@ -23,11 +23,27 @@ pub async fn login(username: String, password: String, handle: tauri::AppHandle)
         let cookie = Session::new(cookie.to_string());
         let conn = establish_connection(&handle);
         let _ = cookie.save(conn)
-            .map_err(|e| tracing::error!("Failed to save session cookie: {}", e));
+            .map_err(|e| {tracing::error!("Failed to save session cookie: {}", e); e.to_string()})?;
     } else {
         tracing::warn!("No cookies found after login.");
     }
     tracing::info!("Cookies after login: {:?}", cookie);
+    Ok(())
+}
+
+#[tauri::command]
+pub async fn signup(username: String, password: String, email: String, handle: tauri::AppHandle) -> Result<(), String> {
+    let state = handle.state::<AppState>();
+    let client = &state.client;
+    let _response = client
+        .post(format!("{}/auth/signup", URL))
+        .json(&RegisterRequest { username, password, email })
+        .send()
+        .await
+        .map_err(|e| e.to_string())?
+        .error_for_status()
+        .map_err(|e| e.to_string())?;
+    tracing::info!("User registered successfully.");
     Ok(())
 }
 
