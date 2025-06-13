@@ -1,8 +1,9 @@
 use reqwest::cookie::CookieStore;
-use shared::{LoginRequest, RegisterRequest, URL};
-use tauri::{Manager, Url};
+use shared::{LoginRequest, LoginStatus, RegisterRequest, URL};
+use tauri::{Emitter, Manager, Url};
+use diesel::prelude::*;
 
-use crate::{models::Session, utils::{establish_connection, AppState}};
+use crate::{models::Session, schema, utils::{establish_connection, AppState}};
 
 
 #[tauri::command]
@@ -57,4 +58,22 @@ pub async fn check_cookies(handle: tauri::AppHandle) -> bool {
     }
     tracing::warn!("No cookies found in the cookie store.");
     false
+}
+
+#[tauri::command]
+pub async fn logout(handle: tauri::AppHandle) -> Result<(), String> {
+    let state = handle.state::<AppState>();
+    let cookie_store = &state.cookie_store;
+    if let Some(cookie) = cookie_store.cookies(&Url::parse(URL).unwrap()) {
+        tracing::info!("Logging out, removing cookies: {:?}", cookie);
+        cookie_store.add_cookie_str("id=; HttpOnly; SameSite=Strict; Secure; Path=/; Expires=Thu, 01 Jan 1970 00:00:00 GMT", &Url::parse(URL).unwrap());
+    } else {
+        tracing::warn!("No cookies found to remove.");
+    }
+    let mut conn = establish_connection(&handle);
+    diesel::delete(schema::session::table)
+        .execute(&mut conn)
+        .map_err(|e| {tracing::error!("Failed to delete session cookie from database: {}", e); e.to_string()})?;
+    handle.emit("login_status", LoginStatus::LoggedOut).unwrap();
+    Ok(())
 }

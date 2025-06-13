@@ -103,6 +103,10 @@ pub async fn run() {
             login,
             check_cookies,
             signup,
+            logout,
+            create_server,
+            join_server,
+            get_servers,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

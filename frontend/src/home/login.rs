@@ -1,8 +1,8 @@
 use leptos::{context, html::Input, logging::{error, log}, prelude::*, task::spawn_local};
 use serde_wasm_bindgen::{from_value, to_value};
-use shared::{LoginRequest, RegisterRequest};
+use shared::{LoginRequest, LoginStatus, RegisterRequest};
 
-use crate::{app::SessionCookieSignal, utils::invoke};
+use crate::{app::LoggedInSignal, utils::invoke};
 
 use stylance::import_style;
 
@@ -11,8 +11,8 @@ import_style!(#[allow(dead_code)] style, "login.css");
 #[component]
 pub fn Login() -> impl IntoView {
     let (is_login, set_is_login) = signal(true);
-    let session_cookie =
-        context::use_context::<SessionCookieSignal>().expect("SessionCookie context not found");
+    let is_logged_in_signal =
+        context::use_context::<LoggedInSignal>().expect("SessionCookie context not found");
 
     let email_ref: NodeRef<Input> = NodeRef::new();
     let username_ref: NodeRef<Input> = NodeRef::new();
@@ -35,8 +35,8 @@ pub fn Login() -> impl IntoView {
                 // Handle login failure (e.g., show an error message)
                 error!("Login failed: {}", from_value::<String>(e).unwrap_or_else(|_| "Unknown error".to_string()));
             } else {
-                session_cookie.set(true);
-            } 
+                is_logged_in_signal.set(LoginStatus::LoggedIn);
+            }
         });
     };
 
@@ -60,6 +60,7 @@ pub fn Login() -> impl IntoView {
                 error!("Registration failed: {}", from_value::<String>(e).unwrap_or_else(|_| "Unknown error".to_string()));
             } else {
                 log!("Registration successful");
+                set_is_login.set(true);
             }
         });
     };

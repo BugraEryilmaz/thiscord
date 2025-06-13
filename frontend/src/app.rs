@@ -4,16 +4,16 @@ use crate::utils::*;
 use leptos::{context, leptos_dom::logging};
 use leptos::prelude::*;
 use leptos::task::spawn_local;
-use shared::{DownloadProgress, UpdateState};
+use shared::{DownloadProgress, LoginStatus, UpdateState};
 use wasm_bindgen::prelude::*;
 
-pub type SessionCookieSignal = RwSignal<bool>;
+pub type LoggedInSignal = RwSignal<LoginStatus>;
 
 #[component]
 pub fn App() -> impl IntoView {
     let (update_state, set_update_state) = signal(UpdateState::Checking);
     let (download_progress, set_download_progress) = signal(DownloadProgress(0));
-    let session_cookie = RwSignal::new(false);
+    let logged_in_signal = RwSignal::new(LoginStatus::LoggedOut);
 
     create_listener("update_state", move |input: UpdateState| {
         logging::console_log(format!("Update state changed: {:?}", input).as_str());
@@ -25,7 +25,12 @@ pub fn App() -> impl IntoView {
         set_download_progress.set(input);
     });
 
-    context::provide_context(session_cookie);
+    create_listener("login_status", move |input: LoginStatus| {
+        logging::console_log(format!("Login status changed: {:?}", input).as_str());
+        logged_in_signal.set(input);
+    });
+
+    context::provide_context(logged_in_signal);
 
     view! {
         <main>

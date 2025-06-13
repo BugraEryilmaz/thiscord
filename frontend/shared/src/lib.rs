@@ -1,9 +1,10 @@
 pub const URL: &str = "https://localhost:8081";
 
-use std::fmt::Display;
+use std::{fmt::Display, ops::Not};
 
 use serde::{Deserialize, Serialize};
 use wasm_bindgen::JsValue;
+use uuid::Uuid;
 
 // #[derive(Debug, Clone, PartialEq, Deserialize, Serialize)]
 // pub struct SessionCookie(pub Option<String>);
@@ -35,6 +36,36 @@ impl FromEvent for UpdateState {}
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct DownloadProgress(pub u32);
 impl FromEvent for DownloadProgress {}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub enum LoginStatus {
+    LoggedIn,
+    LoggedOut,
+}
+impl FromEvent for LoginStatus {}
+impl Not for LoginStatus {
+    type Output = bool;
+
+    fn not(self) -> Self::Output {
+        matches!(self, LoginStatus::LoggedOut)
+    }
+}
+impl From<bool> for LoginStatus {
+    fn from(value: bool) -> Self {
+        if value {
+            LoginStatus::LoggedIn
+        } else {
+            LoginStatus::LoggedOut
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Server{
+    pub id: Uuid,
+    pub name: String,
+    pub image: String,
+}
 
 impl Display for UpdateState {
     fn fmt(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
