@@ -23,6 +23,11 @@ pub enum Error {
 }
 
 pub async fn handle_request_error(response: Result<reqwest::Response, reqwest::Error>, app: tauri::AppHandle) -> Result<reqwest::Response, String> {
+    let response = if let Ok(resp) = response {
+        resp.error_for_status()
+    } else {
+        response
+    };
     match response {
         Ok(resp) => Ok(resp),
         Err(e) => {

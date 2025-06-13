@@ -1,7 +1,7 @@
 use shared::{Server, URL};
 use tauri::Manager;
 
-use crate::{commands::logout, utils::{handle_request_error, AppState}};
+use crate::utils::{handle_request_error, AppState};
 
 #[tauri::command]
 pub async fn create_server(_app: tauri::AppHandle) -> Result<(), String> {

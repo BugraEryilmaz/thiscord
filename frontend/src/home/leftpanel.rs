@@ -44,7 +44,7 @@ pub fn Sidebar() -> impl IntoView {
                         view! {
                             <li>
                                 <span>{server.name}</span>
-                                <span>{server.image}</span>
+                                <span>{server.image_url}</span>
                             </li>
                         }
                     }

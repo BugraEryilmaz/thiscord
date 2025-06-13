@@ -64,7 +64,7 @@ impl From<bool> for LoginStatus {
 pub struct Server{
     pub id: Uuid,
     pub name: String,
-    pub image: String,
+    pub image_url: String,
 }
 
 impl Display for UpdateState {

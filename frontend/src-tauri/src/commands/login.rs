@@ -62,14 +62,6 @@ pub async fn check_cookies(handle: tauri::AppHandle) -> bool {
 
 #[tauri::command]
 pub async fn logout(handle: tauri::AppHandle) -> Result<(), String> {
-    let state = handle.state::<AppState>();
-    let cookie_store = &state.cookie_store;
-    if let Some(cookie) = cookie_store.cookies(&Url::parse(URL).unwrap()) {
-        tracing::info!("Logging out, removing cookies: {:?}", cookie);
-        cookie_store.add_cookie_str("id=; HttpOnly; SameSite=Strict; Secure; Path=/; Expires=Thu, 01 Jan 1970 00:00:00 GMT", &Url::parse(URL).unwrap());
-    } else {
-        tracing::warn!("No cookies found to remove.");
-    }
     let mut conn = establish_connection(&handle);
     diesel::delete(schema::session::table)
         .execute(&mut conn)
