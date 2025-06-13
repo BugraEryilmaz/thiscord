@@ -1,7 +1,7 @@
 use shared::{Server, URL};
 use tauri::Manager;
 
-use crate::{commands::logout, utils::AppState};
+use crate::{commands::logout, utils::{handle_request_error, AppState}};
 
 #[tauri::command]
 pub async fn create_server(_app: tauri::AppHandle) -> Result<(), String> {
@@ -24,18 +24,7 @@ pub async fn get_servers(app: tauri::AppHandle) -> Result<Vec<Server>, String> {
         .send()
         .await;
 
-    if let Err(e) = resp {
-        tracing::error!("Failed to fetch servers: {}", e);
-        if let Some(status) = e.status() {
-            if status.as_str() == "401" {
-                logout(app.clone()).await?;
-                return Err("Unauthorized access. Please log in again.".to_string());
-            }
-            return Err(format!("Failed to fetch servers: {}", e));
-        }
-        return Err(format!("Failed to fetch servers: {}", e));
-    }
-    let resp = resp.unwrap();
+    let resp = handle_request_error(resp, app).await?;
 
     let servers: Vec<Server> = resp.json().await.map_err(|e| e.to_string())?;
     Ok(servers)

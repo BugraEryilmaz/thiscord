@@ -4,7 +4,7 @@ mod update;
 use std::sync::{Arc, RwLock as StdRwLock};
 
 use diesel::prelude::*;
-pub use err::Error;
+pub use err::*;
 use my_web_rtc::WebRTCConnection;
 use reqwest::{cookie::Jar, Client};
 use tokio::sync::RwLock;
