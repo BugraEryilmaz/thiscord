@@ -22,24 +22,19 @@ pub enum Error {
     UpdateError(#[from] tauri_plugin_updater::Error),
 }
 
-pub async fn handle_request_error(response: Result<reqwest::Response, reqwest::Error>, app: tauri::AppHandle) -> Result<reqwest::Response, String> {
+pub async fn handle_auth_error(response: Result<reqwest::Response, reqwest::Error>, app: tauri::AppHandle) -> Result<reqwest::Response, reqwest::Error> {
     let response = if let Ok(resp) = response {
         resp.error_for_status()
     } else {
         response
     };
-    match response {
-        Ok(resp) => Ok(resp),
-        Err(e) => {
-            tracing::error!("Request failed: {}", e);
-            if let Some(status) = e.status() {
-                if status.as_str() == "401" {
-                    logout(app.clone()).await?;
-                    return Err("Unauthorized access. Please log in again.".to_string());
-                }
-                return Err(format!("Request failed with status {}: {}", status, e));
+    if let Err(e) = &response {
+        if let Some(status) = e.status() {
+            if status.as_str() == "401" {
+                tracing::warn!("Unauthorized access detected, attempting to log out.");
+                let _ = logout(app.clone()).await;
             }
-            Err(format!("Request failed: {}", e))
         }
     }
+    response
 }

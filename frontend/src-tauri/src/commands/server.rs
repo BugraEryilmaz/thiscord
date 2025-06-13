@@ -1,7 +1,7 @@
 use shared::{Server, URL};
 use tauri::Manager;
 
-use crate::utils::{handle_request_error, AppState};
+use crate::utils::{handle_auth_error, AppState};
 
 #[tauri::command]
 pub async fn create_server(_app: tauri::AppHandle) -> Result<(), String> {
@@ -24,7 +24,7 @@ pub async fn get_servers(app: tauri::AppHandle) -> Result<Vec<Server>, String> {
         .send()
         .await;
 
-    let resp = handle_request_error(resp, app).await?;
+    let resp = handle_auth_error(resp, app).await.map_err(|e| e.to_string())?;
 
     let servers: Vec<Server> = resp.json().await.map_err(|e| e.to_string())?;
     Ok(servers)
