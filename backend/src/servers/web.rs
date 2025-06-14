@@ -20,6 +20,8 @@ pub fn router() -> Router {
 }
 
 mod post {
+    use axum::Json;
+
     use super::*;
 
     pub async fn create_server(auth: AuthSession, mut multipart: Multipart) -> impl IntoResponse {
@@ -102,9 +104,9 @@ mod post {
             server_image.clone(),
             auth.user.unwrap().id,
         ) {
-            Ok(_) => {
+            Ok(connection_string) => {
                 tracing::info!("Server created successfully");
-                (axum::http::StatusCode::OK, "Server created".to_string())
+                (axum::http::StatusCode::OK, connection_string)
             }
             Err(e) => {
                 tracing::error!("Failed to create server: {}", e);
@@ -117,13 +119,25 @@ mod post {
         }
     }
 
-    pub async fn join_server(auth: AuthSession, connection_string: String) -> impl IntoResponse {
+    #[derive(serde::Deserialize)]
+    pub struct ConnectionString  {
+        pub connection_string: String,
+    }
+
+    pub async fn join_server(auth: AuthSession, Json(connection_string): Json<ConnectionString>) -> impl IntoResponse {
+        let user = auth.user.unwrap();
+        let connection_string = connection_string.connection_string;
+        tracing::info!(
+            "User {} is attempting to join server with connection string: {}",
+            &user.username,
+            connection_string
+        );
         let backend = auth.backend;
         let server_id = match backend.get_server_by_connection_string(connection_string.as_str()) {
             Ok(Some(id)) => id,
             Ok(None) => {
                 return (
-                    axum::http::StatusCode::NOT_FOUND,
+                    axum::http::StatusCode::BAD_REQUEST,
                     "Server not found".to_string(),
                 );
             }
@@ -136,7 +150,7 @@ mod post {
                 return (axum::http::StatusCode::INTERNAL_SERVER_ERROR, e.to_string());
             }
         };
-        match backend.join_user_to_server(auth.user.unwrap().id, server_id) {
+        match backend.join_user_to_server(user.id, server_id) {
             Ok(_) => {}
             Err(e) => {
                 tracing::error!("Failed to join server: {}", e);

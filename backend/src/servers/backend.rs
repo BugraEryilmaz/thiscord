@@ -15,12 +15,24 @@ impl Backend {
     ) -> Result<String, Error> {
         let connection_string = self.create_connection_string()?;
         let mut conn = self.get_connection()?;
+        let image_path = server_image.clone();
+        let image_url = server_image
+            .map(|image| {
+                // get the filename from the image path
+                let image = image
+                    .rsplit('/')
+                    .next()
+                    .unwrap_or(image.as_str());
+                // save the image folder as a static path
+                format!("static/server/{}", image)
+            });
 
         let server_id = diesel::insert_into(schema::servers::table)
             .values((
                 schema::servers::name.eq(server_name),
                 schema::servers::connection_string.eq(&connection_string),
-                schema::servers::image_url.eq(server_image),
+                schema::servers::image_url.eq(image_url),
+                schema::servers::image_path.eq(image_path),
             ))
             .returning(schema::servers::id)
             .get_result::<Uuid>(&mut conn)

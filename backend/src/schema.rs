@@ -63,6 +63,7 @@ diesel::table! {
         connection_string -> Text,
         image_url -> Nullable<Text>,
         created_at -> Timestamptz,
+        image_path -> Nullable<Text>,
     }
 }
 

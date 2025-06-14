@@ -18,7 +18,7 @@ use diesel::{
     r2d2::{ConnectionManager, Pool},
 };
 use std::{net::SocketAddr, path::PathBuf};
-use tower_http::trace::TraceLayer;
+use tower_http::{services::ServeDir, trace::TraceLayer};
 use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt};
 
 use diesel_migrations::{EmbeddedMigrations, MigrationHarness, embed_migrations};
@@ -95,13 +95,20 @@ async fn main() {
     .unwrap();
     tracing::info!("SSL certificate loaded");
 
+    let static_files = ServeDir::new(
+        PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("..")
+            .join("images")
+    );
+
     let app = Router::new()
         .route("/", get(handler))
         .nest("/servers", crate::servers::web::router())
         .nest("/auth", crate::auth::web::router())
         .nest("/rooms", crate::rooms::web::router())
         .layer(auth_layer)
-        .layer(TraceLayer::new_for_http());
+        .layer(TraceLayer::new_for_http())
+        .nest_service("/static", static_files);
 
     // run https server
     let addr = SocketAddr::from(([0, 0, 0, 0], 8081));

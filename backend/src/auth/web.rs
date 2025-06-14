@@ -26,7 +26,7 @@ mod post {
             Ok(Some(user)) => user,
             Ok(None) => {
                 tracing::info!("Failed to login user: Invalid credentials");
-                return (StatusCode::UNAUTHORIZED, "Invalid credentials".to_string());
+                return (StatusCode::BAD_REQUEST, "Invalid credentials".to_string());
             }
             Err(e) => {
                 tracing::error!("Failed to login user: {}", e);
