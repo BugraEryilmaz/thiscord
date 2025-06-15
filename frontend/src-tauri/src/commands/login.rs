@@ -1,13 +1,20 @@
+use diesel::prelude::*;
 use reqwest::cookie::CookieStore;
 use shared::{LoginRequest, LoginStatus, RegisterRequest, URL};
 use tauri::{Emitter, Manager, Url};
-use diesel::prelude::*;
 
-use crate::{models::Session, schema, utils::{establish_connection, AppState}};
-
+use crate::{
+    models::Session,
+    schema,
+    utils::{establish_connection, AppState},
+};
 
 #[tauri::command]
-pub async fn login(username: String, password: String, handle: tauri::AppHandle) -> Result<(), String> {
+pub async fn login(
+    username: String,
+    password: String,
+    handle: tauri::AppHandle,
+) -> Result<(), String> {
     let state = handle.state::<AppState>();
     let client = &state.client;
     let _response = client
@@ -23,8 +30,10 @@ pub async fn login(username: String, password: String, handle: tauri::AppHandle)
         let cookie = cookie.to_str().unwrap_or_default();
         let cookie = Session::new(cookie.to_string());
         let conn = establish_connection(&handle);
-        let _ = cookie.save(conn)
-            .map_err(|e| {tracing::error!("Failed to save session cookie: {}", e); e.to_string()})?;
+        let _ = cookie.save(conn).map_err(|e| {
+            tracing::error!("Failed to save session cookie: {}", e);
+            e.to_string()
+        })?;
     } else {
         tracing::warn!("No cookies found after login.");
     }
@@ -33,12 +42,21 @@ pub async fn login(username: String, password: String, handle: tauri::AppHandle)
 }
 
 #[tauri::command]
-pub async fn signup(username: String, password: String, email: String, handle: tauri::AppHandle) -> Result<(), String> {
+pub async fn signup(
+    username: String,
+    password: String,
+    email: String,
+    handle: tauri::AppHandle,
+) -> Result<(), String> {
     let state = handle.state::<AppState>();
     let client = &state.client;
     let _response = client
         .post(format!("{}/auth/signup", URL))
-        .json(&RegisterRequest { username, password, email })
+        .json(&RegisterRequest {
+            username,
+            password,
+            email,
+        })
         .send()
         .await
         .map_err(|e| e.to_string())?
@@ -65,7 +83,10 @@ pub async fn logout(handle: tauri::AppHandle) -> Result<(), String> {
     let mut conn = establish_connection(&handle);
     diesel::delete(schema::session::table)
         .execute(&mut conn)
-        .map_err(|e| {tracing::error!("Failed to delete session cookie from database: {}", e); e.to_string()})?;
+        .map_err(|e| {
+            tracing::error!("Failed to delete session cookie from database: {}", e);
+            e.to_string()
+        })?;
     handle.emit("login_status", LoginStatus::LoggedOut).unwrap();
     Ok(())
 }

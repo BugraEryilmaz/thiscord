@@ -1,12 +1,12 @@
 pub mod audio;
-pub mod room;
-pub mod utils;
-pub mod models;
-pub mod schema;
 pub mod commands;
+pub mod models;
+pub mod room;
+pub mod schema;
+pub mod utils;
 
-use commands::*;
 use audio::tauri::*;
+use commands::*;
 use reqwest::cookie::CookieStore;
 use room::tauri::*;
 use shared::{UpdateState, URL};
@@ -25,14 +25,12 @@ async fn test_emit(app: tauri::AppHandle) {
     app.emit("update_state", UpdateState::Downloading).unwrap();
 }
 
-
 use diesel_migrations::{embed_migrations, EmbeddedMigrations, MigrationHarness};
 
 use crate::models::Session;
 use crate::utils::{check_for_updates, check_updates, establish_connection, AppState};
 
 pub const MIGRATIONS: EmbeddedMigrations = embed_migrations!("migrations");
-
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub async fn run() {
@@ -46,6 +44,7 @@ pub async fn run() {
         .init();
     // Initialize the WebRTC connection
     tauri::Builder::default()
+        .plugin(tauri_plugin_dialog::init())
         .manage(AppState::new())
         .plugin(tauri_plugin_opener::init())
         .plugin(tauri_plugin_updater::Builder::new().build())
@@ -58,7 +57,7 @@ pub async fn run() {
                     sleep(std::time::Duration::from_secs(5)).await;
                 }
             });
-            
+
             let path = app
                 .path()
                 .data_dir()
@@ -78,12 +77,10 @@ pub async fn run() {
             let state = handle.state::<AppState>();
             let cookie_store = state.cookie_store.clone();
             let cookie = Session::get(conn)
-                .map_err(|e| tracing::error!("Failed to get session cookie: {}", e)).unwrap_or_default();
+                .map_err(|e| tracing::error!("Failed to get session cookie: {}", e))
+                .unwrap_or_default();
             if !cookie.token.is_empty() {
-                cookie_store.add_cookie_str(
-                    &cookie.token,
-                    &Url::parse(URL).unwrap(),
-                );
+                cookie_store.add_cookie_str(&cookie.token, &Url::parse(URL).unwrap());
             }
             if let Some(cookie) = cookie_store.cookies(&Url::parse(URL).unwrap()) {
                 tracing::info!("Cookies found: {:?}", cookie);
@@ -107,6 +104,7 @@ pub async fn run() {
             create_server,
             join_server,
             get_servers,
+            pick_file,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

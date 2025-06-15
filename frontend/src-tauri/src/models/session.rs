@@ -1,7 +1,9 @@
 use diesel::prelude::*;
 use serde::{Deserialize, Serialize};
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Queryable, Selectable, Insertable)]
+#[derive(
+    Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Queryable, Selectable, Insertable,
+)]
 #[diesel(table_name = crate::schema::session)]
 #[diesel(check_for_backend(diesel::sqlite::Sqlite))]
 pub struct Session {
@@ -13,7 +15,7 @@ impl Session {
     pub fn new(token: String) -> Self {
         Session { id: 0, token }
     }
-    
+
     pub fn get(mut conn: SqliteConnection) -> Result<Self, diesel::result::Error> {
         use crate::schema::session::dsl::*;
         Ok(session

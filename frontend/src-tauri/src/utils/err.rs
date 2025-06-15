@@ -22,7 +22,10 @@ pub enum Error {
     UpdateError(#[from] tauri_plugin_updater::Error),
 }
 
-pub async fn handle_auth_error(response: Result<reqwest::Response, reqwest::Error>, app: tauri::AppHandle) -> Result<reqwest::Response, reqwest::Error> {
+pub async fn handle_auth_error(
+    response: Result<reqwest::Response, reqwest::Error>,
+    app: tauri::AppHandle,
+) -> Result<reqwest::Response, reqwest::Error> {
     let response = if let Ok(resp) = response {
         resp.error_for_status()
     } else {

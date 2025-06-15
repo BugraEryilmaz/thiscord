@@ -1,12 +1,14 @@
 mod leftpanel;
 mod login;
+mod lefticon;
+mod create_server;
 
 use leptos::{context, logging::error, prelude::*, task::spawn_local};
 use serde_wasm_bindgen::from_value;
 use shared::LoginStatus;
 use wasm_bindgen::JsValue;
 
-use crate::{app::LoggedInSignal, utils::invoke};
+use crate::{app::LoggedInSignal, utils::{invoke, ActiveServerSignal}};
 
 stylance::import_style!(
     #[allow(dead_code)]
@@ -18,6 +20,8 @@ stylance::import_style!(
 pub fn Home() -> impl IntoView {
     let is_logged_in_signal =
         context::use_context::<LoggedInSignal>().expect("SessionCookie context not found");
+    let active_server_signal: ActiveServerSignal = RwSignal::new(None);
+    context::provide_context(active_server_signal.clone());
 
     // Check if the user is logged in by checking the session cookie
     spawn_local(async move {

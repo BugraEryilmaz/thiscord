@@ -7,12 +7,11 @@ use diesel::prelude::*;
 pub use err::*;
 use my_web_rtc::WebRTCConnection;
 use reqwest::{cookie::Jar, Client};
+use tauri::{AppHandle, Manager};
 use tokio::sync::RwLock;
 pub use update::*;
-use tauri::{AppHandle, Manager};
 
 use crate::audio::AudioElement;
-
 
 pub struct AppState {
     // Define any shared state here

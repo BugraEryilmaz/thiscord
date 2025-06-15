@@ -4,7 +4,6 @@ use tauri_plugin_updater::UpdaterExt;
 
 use crate::Error;
 
-
 #[tauri::command]
 pub async fn check_updates(app: tauri::AppHandle) {
     // Check for updates and emit the state

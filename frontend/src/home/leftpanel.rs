@@ -2,7 +2,10 @@ use leptos::{context, logging::log, prelude::*, task::spawn_local};
 use shared::{Server, URL};
 use wasm_bindgen::{JsCast, JsValue};
 
-use crate::{app::LoggedInSignal, utils::invoke};
+use super::lefticon::LeftIcon;
+use crate::{
+    app::LoggedInSignal, home::create_server::CreateServerPopup, utils::{invoke, ActiveServer, ActiveServerSignal}
+};
 
 stylance::import_style!(
     #[allow(dead_code)]
@@ -15,6 +18,9 @@ pub fn Sidebar() -> impl IntoView {
     let (servers, set_servers) = signal(vec![]);
     let is_logged_in_signal =
         context::use_context::<LoggedInSignal>().expect("SessionCookie context not found");
+    let active_server_signal =
+        context::use_context::<ActiveServerSignal>().expect("ActiveServerSignal context not found");
+    let (create_server_popup, set_create_server_popup) = signal(true);
 
     Effect::new(move || {
         if !is_logged_in_signal.get() {
@@ -42,39 +48,31 @@ pub fn Sidebar() -> impl IntoView {
                     each=move || servers.get()
                     key=|server| server.id
                     children=move |server| {
-                        let parent = NodeRef::new();
-                        let (top_signal, set_top_signal) = signal("0px".to_string());
                         view! {
-                            <li
-                                class=style::server_list_item
-                                node_ref=parent
-                                on:mouseover=move |_| {
-                                    if let Some(parent) = parent.get() {
-                                        let top = parent.get_bounding_client_rect().top();
-                                        set_top_signal.set(format!("{}px", top + 32.0));
-                                    }
+                            <LeftIcon
+                                img_url=format!("{}/{}", URL, server.image_url)
+                                name=server.name
+                                onclick=move || {
+                                    active_server_signal.set(Some(ActiveServer { id: server.id }));
                                 }
-                            >
-                                <img
-                                    src=format!("{}/{}", URL, server.image_url)
-                                    class=style::server_list_icon
-                                    on:error=move |event: web_sys::ErrorEvent| {
-                                        log!("Failed to load server icon: {:?}", event);
-                                        // Optionally set a default icon or handle the error
-                                        let target = event.target().unwrap();
-                                        if let Some(img) = target.dyn_ref::<web_sys::HtmlImageElement>() {
-                                            img.set_src("/public/leptos.svg");
-                                        }
-                                    }
-                                />
-                                <span class=style::server_list_name style:top=top_signal>
-                                    {server.name.clone()}
-                                </span>
-                            </li>
+                            />
                         }
                     }
                 />
+                <LeftIcon
+                    img_url="/public/new_server.svg".to_string()
+                    name="Add Server".to_string()
+                    onclick=move || {
+                        set_create_server_popup.set(true);
+                    }
+                />
             </ul>
+            <Show when=move || create_server_popup.get()>
+                <div class=style::overlay on:click=move |_| set_create_server_popup.set(false) />
+                <CreateServerPopup on_create=move |name, image_url| {
+                    // Handle server creation logic here
+                } />
+            </Show>
         </div>
     }
 }

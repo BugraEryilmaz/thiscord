@@ -1,10 +1,10 @@
 use std::sync::Arc;
 
+pub use crate::utils::Error;
 use crate::{audio::AudioElement, AppState};
 use my_web_rtc::WebRTCConnection;
 use ringbuf::{traits::Split, HeapRb};
 use tauri::Manager;
-pub use crate::utils::Error;
 use uuid::Uuid;
 
 #[tauri::command]
@@ -12,7 +12,9 @@ pub async fn join_room(app_handle: tauri::AppHandle, room_id: Uuid) {
     let app_state = app_handle.state::<AppState>();
     if let Some(audio_element) = app_state.audio_element.write().unwrap().take() {
         match audio_element.quit() {
-            Ok(_) => tracing::info!("Audio element already exists, stopped it before joining a new room."),
+            Ok(_) => tracing::info!(
+                "Audio element already exists, stopped it before joining a new room."
+            ),
             Err(e) => tracing::error!("Failed to stop audio element: {}", e),
         }
     }
@@ -63,8 +65,7 @@ pub async fn join_room(app_handle: tauri::AppHandle, room_id: Uuid) {
         .peer_connection
         .on_peer_connection_state_change(Box::new(move |state| {
             tracing::info!("Peer connection state: {:?}", state);
-            Box::pin(async move {
-            })
+            Box::pin(async move {})
         }));
     let web_rtc_connection = Arc::new(web_rtc_connection);
     web_rtc_connection
@@ -87,7 +88,6 @@ pub async fn join_room(app_handle: tauri::AppHandle, room_id: Uuid) {
     tracing::info!("Joined room {}", room_id);
 }
 
-
 #[tauri::command]
 pub async fn leave_room(app_handle: tauri::AppHandle) {
     let app_state = app_handle.state::<AppState>();
@@ -97,7 +97,7 @@ pub async fn leave_room(app_handle: tauri::AppHandle) {
     } else {
         tracing::warn!("No WebRTC connection to close.");
     }
-    
+
     if let Some(audio_element) = app_state.audio_element.write().unwrap().take() {
         audio_element.quit().unwrap();
         tracing::info!("Stopped audio streams.");
