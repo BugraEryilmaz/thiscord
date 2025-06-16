@@ -1,5 +1,4 @@
 use leptos::{logging::log, prelude::*};
-use shared::URL;
 use wasm_bindgen::JsCast;
 
 stylance::import_style!(

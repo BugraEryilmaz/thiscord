@@ -1,0 +1,7 @@
+<svg width="160" height="160" viewBox="0 0 160 160" fill="none" xmlns="http://www.w3.org/2000/svg">
+  <rect width="160" height="160" rx="24" fill="#2F3136"/>
+  <circle cx="80" cy="70" r="40" fill="#3C3F45" stroke="#B9BBBE" stroke-dasharray="6,6" stroke-width="2"/>
+  <path d="M65 70C65 69.4477 65.4477 69 66 69H94C94.5523 69 95 69.4477 95 70C95 70.5523 94.5523 71 94 71H66C65.4477 71 65 70.5523 65 70Z" fill="#B9BBBE"/>
+  <path d="M80 55C80.5523 55 81 55.4477 81 56V84C81 84.5523 80.5523 85 80 85C79.4477 85 79 84.5523 79 84V56C79 55.4477 79.4477 55 80 55Z" fill="#B9BBBE"/>
+  <text x="80" y="140" text-anchor="middle" fill="#B9BBBE" font-size="20" font-family="sans-serif">Drop Image Here</text>
+</svg>

@@ -64,7 +64,13 @@ impl From<bool> for LoginStatus {
 pub struct Server{
     pub id: Uuid,
     pub name: String,
-    pub image_url: String,
+    pub image_url: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CreateServerRequest {
+    pub name: String,
+    pub imageurl: Option<String>,
 }
 
 impl Display for UpdateState {

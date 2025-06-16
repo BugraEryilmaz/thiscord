@@ -1,6 +1,6 @@
 use leptos::{context, logging::log, prelude::*, task::spawn_local};
 use shared::{Server, URL};
-use wasm_bindgen::{JsCast, JsValue};
+use wasm_bindgen::JsValue;
 
 use super::lefticon::LeftIcon;
 use crate::{
@@ -36,6 +36,7 @@ pub fn Sidebar() -> impl IntoView {
                 log!("Fetched servers: {:?}", servers);
                 let servers: Vec<Server> =
                     serde_wasm_bindgen::from_value(servers).unwrap_or_default();
+                log!("Parsed servers: {:?}", servers);
                 set_servers.set(servers);
             });
             log!("User is logged in");
@@ -50,7 +51,7 @@ pub fn Sidebar() -> impl IntoView {
                     children=move |server| {
                         view! {
                             <LeftIcon
-                                img_url=format!("{}/{}", URL, server.image_url)
+                                img_url=format!("{}/{}", URL, server.image_url.unwrap_or("/static/server/NOTFOUND.png".to_string()))
                                 name=server.name
                                 onclick=move || {
                                     active_server_signal.set(Some(ActiveServer { id: server.id }));
@@ -69,8 +70,9 @@ pub fn Sidebar() -> impl IntoView {
             </ul>
             <Show when=move || create_server_popup.get()>
                 <div class=style::overlay on:click=move |_| set_create_server_popup.set(false) />
-                <CreateServerPopup on_create=move |name, image_url| {
-                    // Handle server creation logic here
+                <CreateServerPopup on_create=move || {
+                    set_create_server_popup.set(false);
+                    is_logged_in_signal.update(|_| {});
                 } />
             </Show>
         </div>

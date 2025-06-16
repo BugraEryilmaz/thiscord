@@ -1,3 +1,4 @@
+use reqwest::multipart;
 use shared::{Server, URL};
 use tauri::Manager;
 use tauri_plugin_dialog::{DialogExt, FilePath};
@@ -5,7 +6,28 @@ use tauri_plugin_dialog::{DialogExt, FilePath};
 use crate::utils::{handle_auth_error, AppState};
 
 #[tauri::command]
-pub async fn create_server(_app: tauri::AppHandle) -> Result<(), String> {
+pub async fn create_server(
+    app: tauri::AppHandle,
+    name: String,
+    imageurl: Option<String>,
+) -> Result<(), String> {
+    let state = app.state::<AppState>();
+    let client = &state.client;
+    let form = if let Some(imageurl) = imageurl {
+        multipart::Form::new()
+            .text("server-name", name)
+            .file("server-image", imageurl)
+            .await
+            .map_err(|e| e.to_string())?
+    } else {
+        multipart::Form::new().text("server-name", name)
+    };
+    let resp = client
+        .post(format!("{}/servers/create-server", URL))
+        .multipart(form)
+        .send()
+        .await;
+    let _ = handle_auth_error(resp, app).await.map_err(|e| e.to_string())?;
     Ok(())
 }
 
@@ -35,5 +57,8 @@ pub async fn get_servers(app: tauri::AppHandle) -> Result<Vec<Server>, String> {
 
 #[tauri::command]
 pub async fn pick_file(app: tauri::AppHandle) -> Option<FilePath> {
-    app.dialog().file().add_filter("Images", &["jpg", "png", "jpeg"]).blocking_pick_file()
+    app.dialog()
+        .file()
+        .add_filter("Images", &["jpg", "png", "jpeg"])
+        .blocking_pick_file()
 }
