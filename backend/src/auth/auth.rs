@@ -1,4 +1,4 @@
-use crate::models::{PermissionType, PermissionsOfUser, Users};
+use crate::models::{PermissionContext, PermissionType, PermissionsOfUser, Users};
 use crate::schema;
 use crate::{
     Error,
@@ -72,31 +72,25 @@ impl AuthnBackend for Backend {
 }
 
 impl Backend {
-    pub async fn has_permission(
+    pub fn has_permission(
         &self,
-        user: <Backend as AuthnBackend>::User,
+        user: &<Backend as AuthnBackend>::User,
         server_id: uuid::Uuid,
         permission: PermissionType,
+        context: Option<&PermissionContext>,
     ) -> Result<bool, Error> {
-        let mut conn = self.get_connection()?;
-
-        // If the query returns a result, the user has the permission
-        schema::roles::table
-            .inner_join(schema::permissions::table)
-            .inner_join(schema::user_roles::table)
-            .filter(schema::user_roles::user_id.eq(user.id))
-            .filter(schema::user_roles::server_id.eq(server_id))
-            .filter(schema::permissions::type_.eq(permission))
-            .select(schema::permissions::id)
-            .first::<uuid::Uuid>(&mut conn)
-            .optional()
-            .map(|res| res.is_some())
-            .map_err(|e| e.into())
+        // TODO cache permissions
+        let permissions = self.get_user_permissions(user, server_id)?;
+        if permissions.permission_type.contains(&permission) {
+            Ok(permission.permission_check(context))
+        } else {
+            Ok(false)
+        }
     }
 
-    pub async fn get_user_permissions(
+    pub fn get_user_permissions(
         &self,
-        user: <Backend as AuthnBackend>::User,
+        user: &<Backend as AuthnBackend>::User,
         server_id: uuid::Uuid,
     ) -> Result<PermissionsOfUser, Error> {
         let mut conn = self.get_connection()?;

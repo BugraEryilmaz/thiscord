@@ -1,9 +1,11 @@
 pub mod auth;
 pub mod models;
-pub mod rooms;
+// pub mod rooms;
 pub mod schema;
 pub mod utils;
 pub mod servers;
+pub mod channels;
+pub mod websocket;
 
 use tower_sessions_sqlx_store::sqlx::PgPool;
 pub use utils::Error;
@@ -105,7 +107,8 @@ async fn main() {
         .route("/", get(handler))
         .nest("/servers", crate::servers::web::router())
         .nest("/auth", crate::auth::web::router())
-        .nest("/rooms", crate::rooms::web::router())
+        .nest("/channels", crate::channels::web::router())
+        .nest("/websocket", crate::websocket::web::router())
         .layer(auth_layer)
         .layer(TraceLayer::new_for_http())
         .nest_service("/static", static_files);

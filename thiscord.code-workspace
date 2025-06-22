@@ -8,6 +8,9 @@
 		},
 		{
 			"path": "frontend"
+		},
+		{
+			"path": "my_web_rtc"
 		}
 	],
 	"settings": {}

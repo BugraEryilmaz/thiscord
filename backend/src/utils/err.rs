@@ -1,3 +1,5 @@
+use my_web_rtc::WebSocketMessage;
+
 #[derive(Debug, thiserror::Error)]
 pub enum Error {
     #[error("Database error: {0}")]
@@ -30,6 +32,16 @@ pub enum Error {
     InvalidFileName(String),
     #[error("ConnectionStringGenerationFailed")]
     ConnectionStringGenerationFailed,
+    #[error("WebRTC error: {0}")]
+    WebRTCinternal(#[from] my_web_rtc::WebRTCError),
+    #[error("WebRTC connection is not initialized")]
+    WebRTCConnectionNotInitialized,
+    #[error("Axum Websocket error: {0}")]
+    WebSocket(#[from] axum::Error),
+    #[error("Tokio mpsc error: {0}")]
+    TokioMpsc(#[from] tokio::sync::mpsc::error::SendError<WebSocketMessage>),
+    #[error("WebSocket error")]
+    WebSocketError(#[from] my_web_rtc::WebSocketError),
 }
 
 impl From<argon2::password_hash::Error> for Error {

@@ -1,9 +1,8 @@
 use crate::{
-    models::{Backend, PermissionType, Server}, schema, Error
+    models::{Backend, PermissionType, Server, DEFAULT_OWNER_PERMISSIONS, DEFAULT_USER_PERMISSIONS}, schema::{self}, Error
 };
 use diesel::prelude::*;
 use rand::{Rng, distr::Alphanumeric};
-use strum::IntoEnumIterator;
 use uuid::Uuid;
 
 impl Backend {
@@ -39,10 +38,10 @@ impl Backend {
             .map_err(|e| Error::from(e))?;
 
         self.join_user_to_server(user_id, server_id)?;
-        let owner_role = self.create_role("owner".to_string(), PermissionType::iter())?;
+        let owner_role = self.create_role("owner".to_string(), server_id, DEFAULT_OWNER_PERMISSIONS.iter())?;
         self.add_user_role(user_id, server_id, owner_role)?;
         let _user_role =
-            self.create_role("user".to_string(), std::iter::empty::<PermissionType>())?;
+            self.create_role("user".to_string(), server_id, DEFAULT_USER_PERMISSIONS.iter())?;
 
         Ok(connection_string)
     }
@@ -56,17 +55,26 @@ impl Backend {
             ))
             .execute(&mut conn)
             .map_err(|e| Error::from(e))?;
+        // Ensure the user has the default user role
+        let user_role = self.get_role_id(server_id, "user")?;
+        if let Some(role_id) = user_role {
+            self.add_user_role(user_id, server_id, role_id)?;
+        } 
         Ok(())
     }
 
-    pub fn create_role(
+    pub fn create_role<'a>(
         &self,
         role: String,
-        permissions: impl Iterator<Item = PermissionType>,
+        server_id: Uuid,
+        permissions: impl Iterator<Item = &'a PermissionType>,
     ) -> Result<Uuid, Error> {
         let mut conn = self.get_connection()?;
         let owner_role = diesel::insert_into(schema::roles::table)
-            .values((schema::roles::name.eq(role),))
+            .values((
+                schema::roles::name.eq(role),
+                schema::roles::server_id.eq(server_id),
+            ))
             .returning(schema::roles::id)
             .get_result::<Uuid>(&mut conn)
             .map_err(|e| Error::from(e))?;
@@ -87,6 +95,22 @@ impl Backend {
         Ok(owner_role)
     }
 
+    pub fn get_role_id(
+        &self,
+        server_id: Uuid,
+        role_name: &str,
+    ) -> Result<Option<Uuid>, Error> {
+        let mut conn = self.get_connection()?;
+        schema::roles::table
+            .filter(schema::roles::server_id.eq(server_id))
+            .filter(schema::roles::name.eq(role_name))
+            .select(schema::roles::id)
+            .first::<Uuid>(&mut conn)
+            .optional()
+            .map_err(|e| Error::from(e))
+    }
+
+    
     pub fn add_user_role(
         &self,
         user_id: Uuid,

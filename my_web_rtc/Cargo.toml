@@ -18,3 +18,4 @@ native-tls = "0.2.14"
 ringbuf = "0.4.8"
 dashmap = "6.1.0"
 tracing = "0.1.41"
+uuid = { version = "1.17.0", features = ["v4", "serde"] }

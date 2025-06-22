@@ -12,7 +12,7 @@ axum-login = "0.17.0"
 axum-server = { version = "0.7", features = ["tls-rustls"] }
 chrono = { version = "0.4.41", features = ["serde"] }
 dashmap = "6.1.0"
-diesel = { version = "2.2.10", features = ["chrono", "postgres", "r2d2", "uuid"] }
+diesel = { version = "2.2.11", features = ["chrono", "postgres", "r2d2", "uuid"] }
 diesel_migrations = { version = "2.2.0", features = ["postgres"] }
 dotenvy = "0.15.7"
 lettre = { version = "0.11.16", features = ["tokio1-native-tls", "pool"] }
@@ -25,7 +25,7 @@ tokio = { version = "1.45.0", features = ["io-util", "macros", "rt-multi-thread"
 tower-http = { version = "0.6.4", features = ["limit", "trace", "fs"] }
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
-uuid = { version = "1.16.0", features = ["serde", "v4"] }
+uuid = { version = "1.17.0", features = ["serde", "v4"] }
 my_web_rtc = { path = "../my_web_rtc" }
 rustls = { version = "0.23.27", features = ["aws-lc-rs"] }
 futures-util = "0.3.31"

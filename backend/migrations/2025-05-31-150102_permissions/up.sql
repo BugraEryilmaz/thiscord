@@ -2,7 +2,10 @@
 
 CREATE TABLE IF NOT EXISTS roles (
     id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
-    name VARCHAR(255) NOT NULL
+    name VARCHAR(255) NOT NULL,
+    server_id UUID NOT NULL,
+    UNIQUE (name, server_id),
+    FOREIGN KEY (server_id) REFERENCES servers(id) ON DELETE CASCADE
 );
 
 CREATE TABLE IF NOT EXISTS user_roles (
@@ -22,7 +25,15 @@ CREATE TYPE permission_type AS ENUM (
     'CreateHiddenChannel',
     'DeleteHiddenChannel',
     'ListHiddenChannels',
-    'AdjustChannelPermissions'
+    'AdjustChannelPermissions',
+    'ListChannels', 
+    'ListUsersInServer',
+    'JoinAudioChannel', 
+    'JoinAudioChannelInHiddenChannels', 
+    'SendMessages', 
+    'SendMessagesInHiddenChannels', 
+    'DeleteMessages',
+    'DeleteMessagesSelf'
 );
 
 CREATE TABLE IF NOT EXISTS permissions (
