@@ -23,7 +23,7 @@ pub async fn create_server(
         multipart::Form::new().text("server-name", name)
     };
     let resp = client
-        .post(format!("{}/servers/create-server", URL))
+        .post(format!("https://{}/servers/create-server", URL))
         .multipart(form)
         .send()
         .await;
@@ -43,7 +43,7 @@ pub async fn get_servers(app: tauri::AppHandle) -> Result<Vec<Server>, String> {
     let state = app.state::<AppState>();
     let resp = state
         .client
-        .get(format!("{}/servers/get-servers", URL))
+        .get(format!("https://{}/servers/get-servers", URL))
         .send()
         .await;
 

@@ -1,4 +1,4 @@
-pub const URL: &str = "https://localhost:8081";
+pub const URL: &str = "localhost:8081";
 
 use std::{fmt::Display, ops::Not};
 

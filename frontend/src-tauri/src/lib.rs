@@ -1,17 +1,17 @@
 pub mod audio;
 pub mod commands;
 pub mod models;
-pub mod room;
 pub mod schema;
 pub mod utils;
+pub mod websocket;
 
 use audio::tauri::*;
 use commands::*;
 use reqwest::cookie::CookieStore;
-use room::tauri::*;
 use shared::{UpdateState, URL};
 use tauri::{Emitter, Manager, Url};
 use tokio::spawn;
+use tokio::sync::Mutex;
 use tokio::time::sleep;
 use tracing_subscriber::layer::SubscriberExt;
 use tracing_subscriber::util::SubscriberInitExt;
@@ -43,9 +43,10 @@ pub async fn run() {
         .with(tracing_subscriber::fmt::layer())
         .init();
     // Initialize the WebRTC connection
+    let (websocket_tx, websocket_rx) = tokio::sync::mpsc::channel(100);
     tauri::Builder::default()
         .plugin(tauri_plugin_dialog::init())
-        .manage(AppState::new())
+        .manage(AppState::new(Mutex::new(websocket_tx)))
         .plugin(tauri_plugin_opener::init())
         .plugin(tauri_plugin_updater::Builder::new().build())
         .setup(|app| {
@@ -80,17 +81,22 @@ pub async fn run() {
                 .map_err(|e| tracing::error!("Failed to get session cookie: {}", e))
                 .unwrap_or_default();
             if !cookie.token.is_empty() {
-                cookie_store.add_cookie_str(&cookie.token, &Url::parse(URL).unwrap());
+                cookie_store.add_cookie_str(
+                    &cookie.token,
+                    &Url::parse(format!("https://{}", URL).as_str()).unwrap(),
+                );
             }
-            if let Some(cookie) = cookie_store.cookies(&Url::parse(URL).unwrap()) {
+            if let Some(cookie) =
+                cookie_store.cookies(&Url::parse(format!("https://{}", URL).as_str()).unwrap())
+            {
                 tracing::info!("Cookies found: {:?}", cookie);
             } else {
                 tracing::warn!("No cookies found in the cookie store.");
             }
+            connect_ws(handle, websocket_rx);
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![
-            join_room,
             mute_microphone,
             unmute_microphone,
             deafen_speaker,

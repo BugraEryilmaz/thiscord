@@ -51,7 +51,7 @@ pub fn Sidebar() -> impl IntoView {
                     children=move |server| {
                         view! {
                             <LeftIcon
-                                img_url=format!("{}/{}", URL, server.image_url.unwrap_or("/static/server/NOTFOUND.png".to_string()))
+                                img_url=format!("https://{}/{}", URL, server.image_url.unwrap_or("/static/server/NOTFOUND.png".to_string()))
                                 name=server.name
                                 onclick=move || {
                                     active_server_signal.set(Some(ActiveServer { id: server.id }));

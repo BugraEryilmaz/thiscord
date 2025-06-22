@@ -1,36 +1,35 @@
 mod err;
 mod update;
 
-use std::sync::{Arc, RwLock as StdRwLock};
+use std::sync::Arc;
 
 use diesel::prelude::*;
 pub use err::*;
-use my_web_rtc::WebRTCConnection;
 use reqwest::{cookie::Jar, Client};
 use tauri::{AppHandle, Manager};
-use tokio::sync::RwLock;
+use tokio::sync::{mpsc::Sender, Mutex};
 pub use update::*;
 
-use crate::audio::AudioElement;
+use crate::{audio::AudioElement, websocket::WebSocketRequest};
 
 pub struct AppState {
     // Define any shared state here
-    pub audio_element: StdRwLock<Option<AudioElement>>,
-    pub web_rtc_connection: RwLock<Option<Arc<WebRTCConnection>>>,
+    pub audio_element: AudioElement,
+    pub websocket: Mutex<Sender<WebSocketRequest>>,
     pub client: Client,
     pub cookie_store: Arc<Jar>,
 }
 
 impl AppState {
-    pub fn new() -> Self {
+    pub fn new(websocket: Mutex<Sender<WebSocketRequest>>) -> Self {
         let cookie_store = Arc::new(Jar::default());
         let client = Client::builder()
             .cookie_provider(cookie_store.clone())
             .build()
             .expect("Failed to create HTTP client");
         Self {
-            audio_element: StdRwLock::new(None),
-            web_rtc_connection: RwLock::new(None),
+            audio_element: AudioElement::new(),
+            websocket,
             client,
             cookie_store,
         }

@@ -1,3 +1,5 @@
+use my_web_rtc::{WebRTCError, WebSocketMessage};
+
 use crate::{audio::AudioCommand, commands::logout};
 
 #[derive(Debug, thiserror::Error)]
@@ -20,6 +22,18 @@ pub enum Error {
     SendError(#[from] std::sync::mpsc::SendError<AudioCommand>),
     #[error("Update error: {0}")]
     UpdateError(#[from] tauri_plugin_updater::Error),
+    #[error("WebSocket error: {0}")]
+    WebSocketError(#[from] my_web_rtc::WebSocketError),
+    #[error("Tokio tungstenite error: {0}")]
+    TokioTungsteniteError(#[from] tokio_tungstenite::tungstenite::Error),
+    #[error("Native TLS error: {0}")]
+    NativeTlsError(#[from] native_tls::Error),
+    #[error("WebRTC error: {0}")]
+    WebRTCError(#[from] my_web_rtc::Error),
+    #[error("WebRTC error: {0}")]
+    WebRTCInternalError(#[from] WebRTCError),
+    #[error("Tokio Channel error: {0}")]
+    TokioChannelError(#[from] tokio::sync::mpsc::error::SendError<WebSocketMessage>),
 }
 
 pub async fn handle_auth_error(

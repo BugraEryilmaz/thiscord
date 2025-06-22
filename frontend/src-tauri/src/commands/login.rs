@@ -4,6 +4,7 @@ use shared::{LoginRequest, LoginStatus, RegisterRequest, URL};
 use tauri::{Emitter, Manager, Url};
 
 use crate::{
+    commands::connect_ws,
     models::Session,
     schema,
     utils::{establish_connection, AppState},
@@ -18,7 +19,7 @@ pub async fn login(
     let state = handle.state::<AppState>();
     let client = &state.client;
     let _response = client
-        .post(format!("{}/auth/login", URL))
+        .post(format!("https://{}/auth/login", URL))
         .json(&LoginRequest { username, password })
         .send()
         .await
@@ -26,7 +27,8 @@ pub async fn login(
         .error_for_status()
         .map_err(|e| e.to_string())?;
     let cookie = state.cookie_store.clone();
-    if let Some(cookie) = cookie.cookies(&Url::parse(URL).unwrap()) {
+    if let Some(cookie) = cookie.cookies(&Url::parse(format!("https://{}", URL).as_str()).unwrap())
+    {
         let cookie = cookie.to_str().unwrap_or_default();
         let cookie = Session::new(cookie.to_string());
         let conn = establish_connection(&handle);
@@ -38,6 +40,12 @@ pub async fn login(
         tracing::warn!("No cookies found after login.");
     }
     tracing::info!("Cookies after login: {:?}", cookie);
+    let (websocket_tx, websocket_rx) = tokio::sync::mpsc::channel(100);
+    {
+        let mut websocket = state.websocket.lock().await;
+        *websocket = websocket_tx;
+    }
+    connect_ws(handle, websocket_rx);
     Ok(())
 }
 
@@ -51,7 +59,7 @@ pub async fn signup(
     let state = handle.state::<AppState>();
     let client = &state.client;
     let _response = client
-        .post(format!("{}/auth/signup", URL))
+        .post(format!("https://{}/auth/signup", URL))
         .json(&RegisterRequest {
             username,
             password,
@@ -70,7 +78,9 @@ pub async fn signup(
 pub async fn check_cookies(handle: tauri::AppHandle) -> bool {
     let state = handle.state::<AppState>();
     let cookie_store = &state.cookie_store;
-    if let Some(cookie) = cookie_store.cookies(&Url::parse(URL).unwrap()) {
+    if let Some(cookie) =
+        cookie_store.cookies(&Url::parse(format!("https://{}", URL).as_str()).unwrap())
+    {
         tracing::info!("Cookies found: {:?}", cookie);
         return true;
     }

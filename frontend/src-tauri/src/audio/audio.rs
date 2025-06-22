@@ -1,12 +1,13 @@
+use my_web_rtc::Split;
 use ringbuf::{
     traits::{Consumer, Producer},
-    HeapCons, HeapProd,
+    HeapCons, HeapProd, HeapRb,
 };
-use std::sync::mpsc::channel;
+use std::sync::{atomic::{AtomicBool, Ordering}, mpsc::channel};
 use std::sync::{Arc, Mutex as StdMutex};
 
 use cpal::{
-    traits::{DeviceTrait, HostTrait, StreamTrait},
+    traits::{DeviceTrait, StreamTrait},
     SampleRate, SupportedBufferSize, SupportedStreamConfig,
 };
 
@@ -15,28 +16,22 @@ use crate::Error;
 use super::{AudioCommand, AudioElement};
 
 impl AudioElement {
-    pub fn new(mic_producer: HeapProd<i16>) -> Result<Self, Error> {
-        Ok(AudioElement {
-            mic_producer: Arc::new(StdMutex::new(mic_producer)),
-            speaker_consumers: Arc::new(StdMutex::new(vec![])),
+    pub fn new() -> Self {
+        AudioElement {
             mic_command_queue: Arc::new(StdMutex::new(None)),
             speaker_command_queue: Arc::new(StdMutex::new(None)),
-        })
+        }
     }
 
-    pub fn start_input_stream(&mut self) -> Result<(), Error> {
-        let host = cpal::default_host();
-        let device = match host.default_input_device() {
-            Some(device) => device,
-            None => return Err(Error::NoInputDevice),
-        };
-
-        let tx = self.mic_producer.clone();
+    pub fn start_input_stream(&self, device: cpal::Device, dropped: Arc<AtomicBool>) -> Result<HeapCons<i16>, Error> {
+        let (mic_producer, mic_consumer) = HeapRb::<i16>::new(12000).split();
         let (command_tx, command_rx) = channel();
-        drop(self.mic_command_queue.lock().unwrap().replace(command_tx));
+        {
+            self.mic_command_queue.lock().unwrap().replace(command_tx);
+        }
         std::thread::spawn(move || {
             // This thread will handle the audio input stream
-            let mut current_stream = match Self::create_input_stream(device, tx.clone()) {
+            let current_stream = match Self::create_input_stream(device, mic_producer) {
                 Ok(stream) => stream,
                 Err(e) => {
                     eprintln!("Failed to create input stream: {}", e);
@@ -66,20 +61,6 @@ impl AudioElement {
                                     eprintln!("Failed to pause input stream: {}", e);
                                 });
                             }
-                            AudioCommand::AttachDevice(device) => {
-                                current_stream = match Self::create_input_stream(device, tx.clone())
-                                {
-                                    Ok(stream) => stream,
-                                    Err(e) => {
-                                        eprintln!("Failed to create input stream: {}", e);
-                                        continue;
-                                    }
-                                };
-                                // Restart the stream with the new device
-                                if let Err(e) = current_stream.play() {
-                                    eprintln!("Failed to play new input stream: {}", e);
-                                }
-                            }
                             AudioCommand::Quit => {
                                 println!("Received Quit command");
                                 break; // Exit the loop and stop the thread
@@ -92,14 +73,15 @@ impl AudioElement {
                     }
                 }
             }
+            dropped.store(true, Ordering::Relaxed);
         });
 
-        Ok(())
+        Ok(mic_consumer)
     }
 
     pub fn create_input_stream(
         device: cpal::Device,
-        tx: Arc<StdMutex<HeapProd<i16>>>,
+        mut tx: HeapProd<i16>,
     ) -> Result<cpal::Stream, Error> {
         let supported_config = device.default_input_config()?;
         let sample_format = supported_config.sample_format();
@@ -108,7 +90,6 @@ impl AudioElement {
             cpal::SampleFormat::I16 => device.build_input_stream(
                 &config,
                 move |data: &[i16], _| {
-                    let mut tx = tx.lock().unwrap();
                     // Clone and send raw samples to encoder thread
                     let samples: Vec<i16> = data.to_vec();
                     // Note: This will block if the channel is full.
@@ -122,7 +103,6 @@ impl AudioElement {
             cpal::SampleFormat::F32 => device.build_input_stream(
                 &config,
                 move |data: &[f32], _| {
-                    let mut tx = tx.lock().unwrap();
                     // Convert f32 to i16 and send
                     let samples: Vec<_> =
                         data.iter().map(|&f| (f * i16::MAX as f32) as i16).collect();
@@ -138,33 +118,29 @@ impl AudioElement {
         })
     }
 
-    pub fn start_output_stream(&mut self) -> Result<(), Error> {
-        let host = cpal::default_host();
-        let device = match host.default_output_device() {
-            Some(device) => device,
-            None => return Err(Error::NoOutputDevice),
-        };
-
-        let rx = self.speaker_consumers.clone();
+    pub fn start_output_stream(
+        &self,
+        device: cpal::Device,
+        speaker_consumers: Vec<HeapCons<i16>>,
+    ) -> Result<(), Error> {
         let (command_tx, command_rx) = channel();
-        drop(
+
+        {
             self.speaker_command_queue
                 .lock()
                 .unwrap()
-                .replace(command_tx),
-        );
+                .replace(command_tx);
+        }
 
         std::thread::spawn(move || {
             // Handle commands from the main thread
-            tracing::warn!("Ref count of mic producer: {}", Arc::strong_count(&rx));
-            let mut current_stream = match Self::create_output_stream(device, rx.clone()) {
+            let current_stream = match Self::create_output_stream(device, speaker_consumers) {
                 Ok(stream) => stream,
                 Err(e) => {
                     eprintln!("Failed to create output stream: {}", e);
                     return;
                 }
             };
-            tracing::warn!("Ref count of mic producer: {}", Arc::strong_count(&rx));
             match current_stream.play() {
                 Ok(_) => println!("Output stream started successfully"),
                 Err(e) => eprintln!("Failed to start output stream: {}", e),
@@ -187,13 +163,6 @@ impl AudioElement {
                                     eprintln!("Failed to pause output stream: {}", e);
                                 });
                             }
-                            AudioCommand::AttachDevice(device) => {
-                                current_stream = Self::create_output_stream(device, rx.clone())
-                                    .unwrap_or_else(|e| {
-                                        eprintln!("Failed to create output stream: {}", e);
-                                        return current_stream;
-                                    });
-                            }
                             AudioCommand::Quit => {
                                 println!("Received Quit command");
                                 break; // Exit the loop and stop the thread
@@ -212,7 +181,7 @@ impl AudioElement {
 
     pub fn create_output_stream(
         device: cpal::Device,
-        rx: Arc<StdMutex<Vec<HeapCons<i16>>>>,
+        mut rx: Vec<HeapCons<i16>>,
     ) -> Result<cpal::Stream, Error> {
         let supported_config = SupportedStreamConfig::new(
             1u16,
@@ -226,19 +195,22 @@ impl AudioElement {
             cpal::SampleFormat::I16 => device.build_output_stream(
                 &config,
                 move |data: &mut [i16], _| {
-                    let mut rx = rx.lock().unwrap();
+                    // Initialize output buffer with silence
+                    for d in data.iter_mut() {
+                        *d = 0;
+                    }
                     // Receive raw samples from encoder thread
-                    for (idx, sender) in rx.iter_mut().enumerate() {
+                    for sender in rx.iter_mut() {
                         let mut temp_data: Vec<i16> = vec![0; data.len()];
                         // Pop samples from the ring buffer
-                        let _cnt = sender.pop_slice(&mut temp_data);
+                        let cnt = sender.pop_slice(&mut temp_data);
+                        if cnt == 0 {
+                            // If no samples were received, fill with silence
+                            continue;
+                        }
                         // Copy the samples to the output buffer
                         for (d, s) in data.iter_mut().zip(temp_data.iter()) {
-                            if idx == 0 {
-                                *d = *s; // First sample is directly assigned
-                            } else {
-                                *d = *d + *s;
-                            }
+                            *d = *d + *s;
                         }
                     }
                 },
@@ -250,19 +222,22 @@ impl AudioElement {
             cpal::SampleFormat::F32 => device.build_output_stream(
                 &config,
                 move |data: &mut [f32], _| {
-                    let mut rx = rx.lock().unwrap();
+                    // Initialize output buffer with silence
+                    for d in data.iter_mut() {
+                        *d = 0.0;
+                    }
                     // Receive raw samples from encoder thread
-                    for (idx, sender) in rx.iter_mut().enumerate() {
+                    for sender in rx.iter_mut() {
                         let mut temp_data: Vec<i16> = vec![0; data.len()];
                         // Pop samples from the ring buffer
-                        let _cnt = sender.pop_slice(&mut temp_data);
+                        let cnt = sender.pop_slice(&mut temp_data);
+                        if cnt == 0 {
+                            // If no samples were received, fill with silence
+                            continue;
+                        }
                         // Convert i16 to f32 and write to output buffer
                         for (d, s) in data.iter_mut().zip(temp_data.iter()) {
-                            if idx == 0 {
-                                *d = *s as f32 / i16::MAX as f32;
-                            } else {
-                                *d = *d + (*s as f32 / i16::MAX as f32);
-                            }
+                            *d = *d + (*s as f32 / i16::MAX as f32);
                         }
                     }
                     // Clamp the output to prevent overflow
@@ -308,11 +283,15 @@ impl AudioElement {
     }
 
     pub fn quit(&self) -> Result<(), Error> {
-        if let Some(tx) = self.speaker_command_queue.lock().unwrap().as_mut() {
+        let mut speaker_command_queue = self.speaker_command_queue.lock().unwrap();
+        if let Some(tx) = speaker_command_queue.as_mut() {
             tx.send(AudioCommand::Quit)?;
+            *speaker_command_queue = None; 
         }
-        if let Some(tx) = self.mic_command_queue.lock().unwrap().as_mut() {
+        let mut mic_command_queue = self.mic_command_queue.lock().unwrap();
+        if let Some(tx) = mic_command_queue.as_mut() {
             tx.send(AudioCommand::Quit)?;
+            *mic_command_queue = None;
         }
         Ok(())
     }
