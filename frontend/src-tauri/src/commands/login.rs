@@ -1,6 +1,8 @@
 use diesel::prelude::*;
 use reqwest::cookie::CookieStore;
-use front_shared::{LoginRequest, LoginStatus, RegisterRequest, URL};
+use front_shared::{LoginStatus, URL};
+use shared::models::Signup;
+use shared::models::Credentials;
 use tauri::{Emitter, Manager, Url};
 
 use crate::{
@@ -20,7 +22,7 @@ pub async fn login(
     let client = &state.client;
     let _response = client
         .post(format!("https://{}/auth/login", URL))
-        .json(&LoginRequest { username, password })
+        .json(&Credentials { username, password })
         .send()
         .await
         .map_err(|e| e.to_string())?
@@ -60,7 +62,7 @@ pub async fn signup(
     let client = &state.client;
     let _response = client
         .post(format!("https://{}/auth/signup", URL))
-        .json(&RegisterRequest {
+        .json(&Signup {
             username,
             password,
             email,

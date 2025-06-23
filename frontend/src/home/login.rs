@@ -1,7 +1,8 @@
 use leptos::{context, html::Input, logging::{error, log}, prelude::*, task::spawn_local};
 use serde_wasm_bindgen::{from_value, to_value};
-use front_shared::{LoginRequest, LoginStatus, RegisterRequest};
-
+use front_shared::{LoginStatus};
+use shared::models::Signup;
+use shared::models::Credentials;
 use crate::{app::LoggedInSignal, utils::invoke};
 
 use stylance::import_style;
@@ -25,7 +26,7 @@ pub fn Login() -> impl IntoView {
         // Send a login request to the server
         // Example: fetch(url + "/login", { method: "POST", body: JSON.stringify({ username, password }) })
         spawn_local(async move {
-            let request = LoginRequest {
+            let request = Credentials {
                 username,
                 password,
             };
@@ -50,7 +51,7 @@ pub fn Login() -> impl IntoView {
             return;
         }
         spawn_local(async move {
-            let request = RegisterRequest {
+            let request = Signup {
                 username,
                 password,
                 email,

@@ -1,5 +1,6 @@
 use leptos::{context, logging::log, prelude::*, task::spawn_local};
-use front_shared::{Server, URL};
+use front_shared::{URL};
+use shared::models::Server;
 use wasm_bindgen::JsValue;
 
 use super::lefticon::LeftIcon;

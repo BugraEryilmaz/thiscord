@@ -4,24 +4,6 @@ use std::{fmt::Display, ops::Not};
 
 use serde::{Deserialize, Serialize};
 use wasm_bindgen::JsValue;
-use uuid::Uuid;
-
-// #[derive(Debug, Clone, PartialEq, Deserialize, Serialize)]
-// pub struct SessionCookie(pub Option<String>);
-
-
-#[derive(Serialize, Deserialize, Debug, Clone)]
-pub struct LoginRequest {
-    pub username: String,
-    pub password: String,
-}
-
-#[derive(Serialize, Deserialize, Debug, Clone)]
-pub struct RegisterRequest {
-    pub username: String,
-    pub password: String,
-    pub email: String,
-}
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum UpdateState {
@@ -58,46 +40,6 @@ impl From<bool> for LoginStatus {
             LoginStatus::LoggedOut
         }
     }
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub enum ChannelType {
-    Text,
-    Voice,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct Channel  {
-    pub id: Uuid,
-    pub name: String,
-    pub type_: ChannelType,
-    pub hidden: bool,
-    pub server_id: Uuid,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct VoiceUser {
-    pub id: Uuid,
-    pub username: String,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct ChannelWithUsers {
-    pub channel: Channel,
-    pub users: Vec<VoiceUser>,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct Server{
-    pub id: Uuid,
-    pub name: String,
-    pub image_url: Option<String>,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct CreateServerRequest {
-    pub name: String,
-    pub imageurl: Option<String>,
 }
 
 impl Display for UpdateState {

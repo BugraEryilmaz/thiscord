@@ -1,7 +1,8 @@
 use std::vec;
 
 use leptos::prelude::*;
-use front_shared::{ChannelWithUsers, Server};
+use shared::models::Server;
+use shared::models::ChannelWithUsers;
 use uuid::Uuid;
 
 use crate::utils::invoke;

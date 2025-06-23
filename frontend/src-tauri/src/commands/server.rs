@@ -1,22 +1,23 @@
 use reqwest::multipart;
-use front_shared::{Server, URL};
+use front_shared::{URL};
+use shared::models::Server;
 use tauri::Manager;
 use tauri_plugin_dialog::{DialogExt, FilePath};
 
 use crate::utils::{handle_auth_error, AppState};
 
-#[tauri::command]
+#[tauri::command(rename_all = "snake_case")]
 pub async fn create_server(
     app: tauri::AppHandle,
     name: String,
-    imageurl: Option<String>,
+    image_url: Option<String>,
 ) -> Result<(), String> {
     let state = app.state::<AppState>();
     let client = &state.client;
-    let form = if let Some(imageurl) = imageurl {
+    let form = if let Some(image_url) = image_url {
         multipart::Form::new()
             .text("server-name", name)
-            .file("server-image", imageurl)
+            .file("server-image", image_url)
             .await
             .map_err(|e| e.to_string())?
     } else {

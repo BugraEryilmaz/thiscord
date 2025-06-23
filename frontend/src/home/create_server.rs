@@ -1,6 +1,6 @@
 use leptos::{logging::log, prelude::*, task::spawn_local};
 use serde_wasm_bindgen::{from_value, to_value};
-use front_shared::CreateServerRequest;
+use shared::models::ServerWithoutID;
 use wasm_bindgen::JsValue;
 
 use crate::utils::{convert_file_src, invoke};
@@ -25,9 +25,9 @@ pub fn CreateServerPopup(on_create: impl FnMut() -> () + 'static + Clone) -> imp
                 let name = name_ref.get().unwrap().value();
                 let img = img_url.get();
                 log!("Creating server with name: {}, img: {:?}", name, img);
-                let create_server_request = CreateServerRequest {
+                let create_server_request = ServerWithoutID {
                     name: name,
-                    imageurl: img,
+                    image_url: img,
                 };
                 let mut on_create = on_create.clone();
                 spawn_local(async move {

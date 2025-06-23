@@ -1,4 +1,5 @@
-use front_shared::{ChannelWithUsers, URL};
+use front_shared::{URL};
+use shared::models::ChannelWithUsers;
 use tauri::Manager;
 use uuid::Uuid;
 

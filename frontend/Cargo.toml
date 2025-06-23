@@ -16,6 +16,7 @@ uuid = { version = "1.17.0", features = ["js", "serde", "v4"] }
 front-shared = { path = "./front-shared" }
 stylance = { version = "0.6.0", features = ["nightly"] }
 web-sys = { version = "0.3.77", features = ["DomRect", "Element", "FileList", "HtmlInputElement", "File"] }
+shared = { path = "../shared" }
 
 [workspace]
 members = ["src-tauri"]
