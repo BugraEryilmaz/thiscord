@@ -1,7 +1,8 @@
 #![allow(unused_imports)]
 use crate::{
-    channels::{VoiceRooms, VOICE_ROOMS}, models::{Backend, Channel, ChannelType, ChannelWithUsers, NewChannel, PermissionType, Server, VoiceUser}, schema, Error
+    channels::{VoiceRooms, VOICE_ROOMS}, Error, models::Backend,
 };
+use shared::{models::{Channel, ChannelType, ChannelWithUsers, NewChannel, PermissionType, Server, VoiceUser}, schema};
 use diesel::prelude::*;
 use rand::{Rng, distr::Alphanumeric};
 use strum::IntoEnumIterator;
@@ -33,16 +34,14 @@ impl Backend {
             .get_result::<Channel>(&mut conn)?;
         Ok(channel)
     }
-}
 
-impl Channel {
-    pub async fn convert_to_with_users(
-        self,
+    pub async fn convert_channel_to_with_users(
+        channel: Channel,
     ) -> ChannelWithUsers {
         let mut users = vec![];
         let rooms = VoiceRooms::get_or_init();
-        if self.type_ == ChannelType::Voice {
-            let room = rooms.get_room_or_init(self.id);
+        if channel.type_ == ChannelType::Voice {
+            let room = rooms.get_room_or_init(channel.id);
             {
                 let people = room.people.lock().await;
                 for person in people.iter() {
@@ -57,7 +56,7 @@ impl Channel {
             }
         }
         ChannelWithUsers {
-            channel: self,
+            channel,
             users,
         }
     }

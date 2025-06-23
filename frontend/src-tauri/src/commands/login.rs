@@ -1,6 +1,6 @@
 use diesel::prelude::*;
 use reqwest::cookie::CookieStore;
-use shared::{LoginRequest, LoginStatus, RegisterRequest, URL};
+use front_shared::{LoginRequest, LoginStatus, RegisterRequest, URL};
 use tauri::{Emitter, Manager, Url};
 
 use crate::{

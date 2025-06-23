@@ -1,4 +1,4 @@
-use my_web_rtc::WebSocketMessage;
+use shared::WebSocketMessage;
 
 #[derive(Debug, thiserror::Error)]
 pub enum Error {
@@ -21,7 +21,7 @@ pub enum Error {
     #[error("Invalid Activation Code")]
     InvalidActivationCode,
     #[error("WebRTC error: {0}")]
-    WebRTC(#[from] my_web_rtc::Error),
+    WebRTC(#[from] shared::Error),
     #[error("UserNotFound in the room")]
     UserNotFoundInRoom,
     #[error("Permission denied")]
@@ -33,7 +33,7 @@ pub enum Error {
     #[error("ConnectionStringGenerationFailed")]
     ConnectionStringGenerationFailed,
     #[error("WebRTC error: {0}")]
-    WebRTCinternal(#[from] my_web_rtc::WebRTCError),
+    WebRTCinternal(#[from] shared::WebRTCError),
     #[error("WebRTC connection is not initialized")]
     WebRTCConnectionNotInitialized,
     #[error("Axum Websocket error: {0}")]
@@ -41,7 +41,7 @@ pub enum Error {
     #[error("Tokio mpsc error: {0}")]
     TokioMpsc(#[from] tokio::sync::mpsc::error::SendError<WebSocketMessage>),
     #[error("WebSocket error")]
-    WebSocketError(#[from] my_web_rtc::WebSocketError),
+    WebSocketError(#[from] shared::WebSocketError),
 }
 
 impl From<argon2::password_hash::Error> for Error {

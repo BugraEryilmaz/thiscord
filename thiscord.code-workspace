@@ -10,7 +10,7 @@
 			"path": "frontend"
 		},
 		{
-			"path": "my_web_rtc"
+			"path": "shared"
 		}
 	],
 	"settings": {}

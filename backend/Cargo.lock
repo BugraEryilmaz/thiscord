@@ -357,13 +357,13 @@ dependencies = [
  "dotenvy",
  "futures-util",
  "lettre",
- "my_web_rtc",
  "r2d2",
  "rand 0.9.1",
  "ringbuf",
  "rustls",
  "serde",
  "serde_json",
+ "shared",
  "strum",
  "strum_macros",
  "thiserror 2.0.12",
@@ -1996,27 +1996,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "my_web_rtc"
-version = "0.1.0"
-dependencies = [
- "axum",
- "dashmap",
- "futures-util",
- "native-tls",
- "opus",
- "reqwest",
- "ringbuf",
- "serde",
- "serde_json",
- "thiserror 2.0.12",
- "tokio",
- "tokio-tungstenite",
- "tracing",
- "uuid",
- "webrtc",
-]
-
-[[package]]
 name = "native-tls"
 version = "0.2.14"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -3050,6 +3029,32 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "f40ca3c46823713e0d4209592e8d6e826aa57e928f09752619fc696c499637f6"
 dependencies = [
  "lazy_static",
+]
+
+[[package]]
+name = "shared"
+version = "0.1.0"
+dependencies = [
+ "axum",
+ "chrono",
+ "dashmap",
+ "diesel",
+ "diesel-derive-enum",
+ "futures-util",
+ "native-tls",
+ "opus",
+ "reqwest",
+ "ringbuf",
+ "serde",
+ "serde_json",
+ "strum",
+ "strum_macros",
+ "thiserror 2.0.12",
+ "tokio",
+ "tokio-tungstenite",
+ "tracing",
+ "uuid",
+ "webrtc",
 ]
 
 [[package]]

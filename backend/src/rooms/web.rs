@@ -15,7 +15,7 @@ mod post {
     use std::sync::Arc;
 
     use axum::extract::Path;
-    use my_web_rtc::{Reader, Writer};
+    use shared::{Reader, Writer};
     use uuid::Uuid;
 
     use crate::models::AuthSession;
@@ -40,7 +40,7 @@ mod post {
         let (sender, receiver) = ws.split();
         // Convert the sender to the expected type
         let web_rtc_connection = Arc::new(
-            my_web_rtc::WebRTCConnection::new_with_writer(Writer::Server(sender))
+            shared::WebRTCConnection::new_with_writer(Writer::Server(sender))
                 .await
                 .expect("Failed to create WebRTC connection"),
         );
@@ -81,7 +81,7 @@ mod post {
                     }
                 };
 
-                if state == my_web_rtc::RTCPeerConnectionState::Closed {
+                if state == shared::RTCPeerConnectionState::Closed {
                     if let Err(e) = room.leave_user(room_id).await {
                         tracing::error!("Failed to leave room {}: {}", uuid, e);
                     } else {

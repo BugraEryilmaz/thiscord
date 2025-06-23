@@ -1,11 +1,12 @@
-use crate::models::Signup;
+use shared::models::Signup;
 use axum::Json;
 use axum::Router;
 use axum::http::StatusCode;
 use axum::response::IntoResponse;
 use axum::routing::{get, post};
 
-use crate::models::{AuthSession, Credentials};
+use shared::models::Credentials;
+use crate::models::AuthSession;
 
 pub fn router() -> Router {
     Router::new()
@@ -35,11 +36,11 @@ mod post {
         };
         match auth.login(&user).await {
             Ok(_) => {
-                tracing::info!("User {} logged in", user.username);
+                tracing::info!("User {} logged in", user.0.username);
                 (StatusCode::OK, "Logged in".to_string())
             }
             Err(e) => {
-                tracing::error!("Failed to login user {}: {}", user.username, e);
+                tracing::error!("Failed to login user {}: {}", user.0.username, e);
                 (StatusCode::INTERNAL_SERVER_ERROR, e.to_string())
             }
         }

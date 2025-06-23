@@ -2,8 +2,8 @@ use axum::http::StatusCode;
 use uuid::Uuid;
 
 use crate::Error;
-use crate::models::NewChannel;
-use crate::models::PermissionType;
+use shared::models::NewChannel;
+use shared::models::PermissionType;
 use crate::models::{AuthSession, Backend};
 use axum::Json;
 use axum::Router;
@@ -107,7 +107,7 @@ mod get {
             });
         // Convert the channels to channels with users
         let channels = channels.into_iter().map(async |channel| {
-            channel.convert_to_with_users().await
+            Backend::convert_channel_to_with_users(channel).await
         }).collect::<Vec<_>>();
         let channels = join_all(channels).await;
         (StatusCode::OK, serde_json::to_string(&channels).unwrap()).into_response()

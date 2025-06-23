@@ -103,7 +103,7 @@ mod post {
         match backend.create_server(
             server_name.unwrap().as_str(),
             server_image.clone(),
-            auth.user.unwrap().id,
+            auth.user.unwrap().0.id,
         ) {
             Ok(connection_string) => {
                 tracing::info!("Server created successfully");
@@ -130,7 +130,7 @@ mod post {
         let connection_string = connection_string.connection_string;
         tracing::info!(
             "User {} is attempting to join server with connection string: {}",
-            &user.username,
+            &user.0.username,
             connection_string
         );
         let backend = auth.backend;
@@ -151,7 +151,7 @@ mod post {
                 return (axum::http::StatusCode::INTERNAL_SERVER_ERROR, e.to_string());
             }
         };
-        match backend.join_user_to_server(user.id, server_id) {
+        match backend.join_user_to_server(user.0.id, server_id) {
             Ok(_) => {}
             Err(e) => {
                 tracing::error!("Failed to join server: {}", e);
@@ -173,7 +173,7 @@ mod get {
     
     pub async fn get_servers(auth: AuthSession) -> impl IntoResponse {
         let backend = auth.backend;
-        match backend.get_servers_for_user(auth.user.unwrap().id) {
+        match backend.get_servers_for_user(auth.user.unwrap().0.id) {
             Ok(servers) => {
                 tracing::info!("Retrieved {} servers for user", servers.len());
                 (axum::http::StatusCode::OK, serde_json::to_string(&servers).unwrap())
@@ -190,11 +190,11 @@ mod get {
         let user = auth.user.unwrap();
         match backend.get_user_permissions(&user, server_id) {
             Ok(permissions) => {
-                tracing::info!("Retrieved permissions for user {} on server {}", user.id, server_id);
+                tracing::info!("Retrieved permissions for user {} on server {}", user.0.id, server_id);
                 (axum::http::StatusCode::OK, serde_json::to_string(&permissions).unwrap())
             }
             Err(e) => {
-                tracing::error!("Failed to retrieve permissions for user {} on server {}: {}", user.id, server_id, e);
+                tracing::error!("Failed to retrieve permissions for user {} on server {}: {}", user.0.id, server_id, e);
                 (axum::http::StatusCode::INTERNAL_SERVER_ERROR, e.to_string())
             }
         }

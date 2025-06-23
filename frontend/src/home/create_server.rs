@@ -1,6 +1,6 @@
 use leptos::{logging::log, prelude::*, task::spawn_local};
 use serde_wasm_bindgen::{from_value, to_value};
-use shared::CreateServerRequest;
+use front_shared::CreateServerRequest;
 use wasm_bindgen::JsValue;
 
 use crate::utils::{convert_file_src, invoke};

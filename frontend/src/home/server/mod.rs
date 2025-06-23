@@ -3,7 +3,7 @@ mod channels;
 use leptos::prelude::*;
 
 use channels::Channels;
-use shared::Server;
+use front_shared::Server;
 
 stylance::import_style!(
     #[allow(dead_code)]

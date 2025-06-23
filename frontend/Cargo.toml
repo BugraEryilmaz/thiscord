@@ -13,7 +13,7 @@ serde = { version = "1", features = ["derive"] }
 serde-wasm-bindgen = "0.6"
 console_error_panic_hook = "0.1.7"
 uuid = { version = "1.17.0", features = ["js", "serde", "v4"] }
-shared = { path = "./shared" }
+front-shared = { path = "./front-shared" }
 stylance = { version = "0.6.0", features = ["nightly"] }
 web-sys = { version = "0.3.77", features = ["DomRect", "Element", "FileList", "HtmlInputElement", "File"] }
 

@@ -1,4 +1,6 @@
 mod my_web_rtc;
+pub mod models;
+pub mod schema;
 
 pub use my_web_rtc::WebRTCConnection;
 pub use ringbuf::HeapCons;

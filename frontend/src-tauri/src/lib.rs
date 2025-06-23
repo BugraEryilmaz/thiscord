@@ -8,7 +8,7 @@ pub mod websocket;
 use audio::tauri::*;
 use commands::*;
 use reqwest::cookie::CookieStore;
-use shared::{UpdateState, URL};
+use front_shared::{UpdateState, URL};
 use tauri::{Emitter, Manager, Url};
 use tokio::spawn;
 use tokio::sync::Mutex;

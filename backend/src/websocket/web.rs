@@ -4,7 +4,7 @@ use std::sync::atomic::AtomicBool;
 use axum::extract::ws::{Message::Text, WebSocket, WebSocketUpgrade};
 use axum::response::IntoResponse;
 use axum_login::login_required;
-use my_web_rtc::{Packet, Split, WebRTCConnection, WebSocketMessage};
+use shared::{Packet, Split, WebRTCConnection, WebSocketMessage};
 use ringbuf::HeapRb;
 use tokio::sync::Mutex;
 use tokio::sync::mpsc::{Sender, channel};
@@ -20,9 +20,9 @@ pub fn router() -> axum::Router {
 }
 
 mod post {
-    use my_web_rtc::WebSocketError;
+    use shared::WebSocketError;
 
-    use crate::models::PermissionType;
+    use shared::models::PermissionType;
 
     use super::*;
     pub async fn ws_connection(
@@ -131,7 +131,7 @@ mod post {
                 if !backend
                     .has_permission(user, server_id, permission, None)?
                 {
-                    tracing::error!("User {} not authorized to join channel: {}", user.id, channel_id);
+                    tracing::error!("User {} not authorized to join channel: {}", user.0.id, channel_id);
                     socket
                         .send(WebSocketMessage::Error {
                             err: WebSocketError::NotAuthorized,
@@ -146,7 +146,7 @@ mod post {
                 let recv_tracks = web_rtc_connection.create_audio_track_rtp(ROOM_SIZE).await?;
                 // Join the voice room
                 let room = VoiceRooms::get_or_init().get_room_or_init(channel_id);
-                let person_id = room.join_person(user, recv_tracks).await?;
+                let person_id = room.join_person(&user.0, recv_tracks).await?;
                 // Set up the data forwarding
                 let tracks = room.get_track_i_of_all(person_id).await;
                 let (prod, cons) = HeapRb::<Packet>::new(100).split();

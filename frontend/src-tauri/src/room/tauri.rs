@@ -2,7 +2,7 @@ use std::sync::Arc;
 
 pub use crate::utils::Error;
 use crate::{audio::AudioElement, AppState};
-use my_web_rtc::WebRTCConnection;
+use shared::WebRTCConnection;
 use ringbuf::{traits::Split, HeapRb};
 use tauri::Manager;
 use uuid::Uuid;

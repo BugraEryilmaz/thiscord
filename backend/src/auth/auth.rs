@@ -1,29 +1,28 @@
-use crate::models::{PermissionContext, PermissionType, PermissionsOfUser, Users};
-use crate::schema;
-use crate::{
-    Error,
-    models::{Backend, Credentials},
-};
+use shared::models::{Credentials, PermissionContext, PermissionType, PermissionsOfUser, Users};
+use shared::schema;
+use crate::models::{Backend, BackendUser};
+use crate::Error;
+
 use argon2::{PasswordHash, PasswordVerifier};
 use async_trait::async_trait;
 use axum_login::{AuthUser, AuthnBackend, UserId};
 use diesel::prelude::*;
 
-impl AuthUser for Users {
+impl AuthUser for BackendUser {
     type Id = uuid::Uuid;
 
     fn id(&self) -> Self::Id {
-        self.id
+        self.0.id
     }
 
     fn session_auth_hash(&self) -> &[u8] {
-        self.password.as_bytes()
+        self.0.password.as_bytes()
     }
 }
 
 #[async_trait]
 impl AuthnBackend for Backend {
-    type User = Users;
+    type User = BackendUser;
     type Error = Error;
     type Credentials = Credentials;
 
@@ -50,7 +49,7 @@ impl AuthnBackend for Backend {
             .verify_password(password.as_bytes(), &parsed_hash)
             .is_ok()
         {
-            Ok(Some(user))
+            Ok(Some(BackendUser(user)))
         } else {
             Ok(None)
         }
@@ -67,7 +66,7 @@ impl AuthnBackend for Backend {
                 return Ok(None);
             }
         }
-        Ok(user)
+        Ok(user.map(BackendUser))
     }
 }
 
@@ -99,7 +98,7 @@ impl Backend {
         schema::roles::table
             .left_join(schema::permissions::table)
             .inner_join(schema::user_roles::table)
-            .filter(schema::user_roles::user_id.eq(user.id))
+            .filter(schema::user_roles::user_id.eq(user.0.id))
             .filter(schema::user_roles::server_id.eq(server_id))
             .select((schema::roles::name, schema::permissions::type_.nullable()))
             .load::<(String, Option<PermissionType>)>(&mut conn)

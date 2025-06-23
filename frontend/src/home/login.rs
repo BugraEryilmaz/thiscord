@@ -1,6 +1,6 @@
 use leptos::{context, html::Input, logging::{error, log}, prelude::*, task::spawn_local};
 use serde_wasm_bindgen::{from_value, to_value};
-use shared::{LoginRequest, LoginStatus, RegisterRequest};
+use front_shared::{LoginRequest, LoginStatus, RegisterRequest};
 
 use crate::{app::LoggedInSignal, utils::invoke};
 

@@ -1,6 +1,5 @@
-use crate::{
-    models::{Backend, ChannelType, NewChannel, PermissionType, Server, DEFAULT_OWNER_PERMISSIONS, DEFAULT_USER_PERMISSIONS}, schema::{self}, Error
-};
+use crate::{models::Backend, Error};
+use shared::{models::{ChannelType, NewChannel, PermissionType, Server, DEFAULT_OWNER_PERMISSIONS, DEFAULT_USER_PERMISSIONS}, schema};
 use diesel::prelude::*;
 use rand::{Rng, distr::Alphanumeric};
 use uuid::Uuid;

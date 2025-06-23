@@ -5,13 +5,9 @@ use diesel::{
 
 mod user;
 mod permissions;
-mod servers;
-mod channels;
 
-pub use user::*;
 pub use permissions::*;
-pub use servers::*;
-pub use channels::*;
+use shared::models::Users;
 
 use crate::{Error, utils::GmailBackend};
 
@@ -20,6 +16,9 @@ pub struct Backend {
     pub pool: Pool<ConnectionManager<PgConnection>>,
     pub email: GmailBackend,
 }
+
+#[derive(Clone, Debug)]
+pub struct BackendUser(pub Users);
 
 impl Backend {
     pub fn new(pool: Pool<ConnectionManager<PgConnection>>) -> Self {

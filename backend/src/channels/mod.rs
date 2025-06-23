@@ -1,11 +1,11 @@
 use std::sync::{Arc, OnceLock};
 
 use dashmap::DashMap;
-use my_web_rtc::TrackLocalStaticRTP;
+use shared::{models::Users, TrackLocalStaticRTP};
 use tokio::sync::Mutex;
 use uuid::Uuid;
 
-use crate::{models::Users, Error};
+use crate::Error;
 
 pub mod web;
 pub mod backend;

@@ -5,61 +5,13 @@ use argon2::{
     password_hash::{PasswordHasher, SaltString, rand_core::OsRng},
 };
 use diesel::prelude::*;
-use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
-use crate::{
-    Error,
-    schema::{user_activations, users},
-};
+use crate::Error;
+use shared::{models::{Activation, ActivationFull, Signup, Users}, schema::{user_activations, users}};
 
 use super::Backend;
 
-#[derive(Clone, Queryable, Selectable, Insertable)]
-#[diesel(table_name = crate::schema::users)]
-#[diesel(check_for_backend(diesel::pg::Pg))]
-pub struct Users {
-    pub id: uuid::Uuid,
-    pub username: String,
-    pub email: String,
-    pub password: String,
-    pub deleted: bool,
-    pub created_at: chrono::NaiveDateTime,
-    pub activated: bool,
-}
-
-#[derive(Clone, Queryable, Selectable, Insertable)]
-#[diesel(table_name = crate::schema::user_activations)]
-#[diesel(check_for_backend(diesel::pg::Pg))]
-pub struct Activation {
-    pub activation_code: String,
-    pub user_id: Uuid,
-}
-
-#[derive(Clone, Queryable, Selectable, Insertable)]
-#[diesel(table_name = crate::schema::user_activations)]
-#[diesel(check_for_backend(diesel::pg::Pg))]
-pub struct ActivationFull {
-    pub id: Uuid,
-    pub user_id: Uuid,
-    pub activation_code: String,
-    pub valid_until: Option<chrono::NaiveDateTime>,
-}
-
-#[derive(Clone, Debug, Deserialize, Serialize)]
-pub struct Credentials {
-    pub username: String,
-    pub password: String,
-}
-
-#[derive(Clone, Debug, Deserialize, Serialize, Insertable)]
-#[diesel(table_name = crate::schema::users)]
-#[diesel(check_for_backend(diesel::pg::Pg))]
-pub struct Signup {
-    pub username: String,
-    pub email: String,
-    pub password: String,
-}
 
 impl Backend {
     pub fn check_username_exists(&self, username: &str) -> Result<bool, Error> {
@@ -100,7 +52,7 @@ impl Backend {
             email,
             password,
         };
-        let new_user = diesel::insert_into(crate::schema::users::table)
+        let new_user = diesel::insert_into(shared::schema::users::table)
             .values(&new_user)
             .returning(users::all_columns)
             .get_result::<Users>(&mut conn)
@@ -148,7 +100,7 @@ impl Backend {
             activation_code: activation_code.to_string(),
             user_id: user_id,
         };
-        diesel::insert_into(crate::schema::user_activations::table)
+        diesel::insert_into(shared::schema::user_activations::table)
             .values(&activation)
             .execute(&mut conn)
             .map_err(|e| {
@@ -194,14 +146,3 @@ impl Backend {
     }
 }
 
-impl std::fmt::Debug for Users {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("Users")
-            .field("id", &self.id)
-            .field("username", &self.username)
-            .field("email", &self.email)
-            .field("deleted", &self.deleted)
-            .field("created_at", &self.created_at)
-            .finish()
-    }
-}

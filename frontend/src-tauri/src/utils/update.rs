@@ -1,4 +1,4 @@
-use shared::{DownloadProgress, UpdateState};
+use front_shared::{DownloadProgress, UpdateState};
 use tauri::{AppHandle, Emitter};
 use tauri_plugin_updater::UpdaterExt;
 

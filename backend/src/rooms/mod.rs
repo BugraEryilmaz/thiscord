@@ -5,7 +5,7 @@ pub mod web;
 use std::sync::{Arc, OnceLock};
 
 use dashmap::DashMap;
-use my_web_rtc::{TrackLocalStaticRTP, WebRTCConnection};
+use shared::{TrackLocalStaticRTP, WebRTCConnection};
 use tokio::sync::Mutex;
 use uuid::Uuid;
 

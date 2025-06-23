@@ -6,7 +6,7 @@ mod server;
 
 use leptos::{context, logging::error, prelude::*, task::spawn_local};
 use serde_wasm_bindgen::from_value;
-use shared::LoginStatus;
+use front_shared::LoginStatus;
 use wasm_bindgen::JsValue;
 
 use crate::{app::LoggedInSignal, home::server::ServerComponent, utils::{invoke}};

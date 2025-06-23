@@ -4,7 +4,7 @@ use crate::utils::*;
 use leptos::{context, leptos_dom::logging};
 use leptos::prelude::*;
 use leptos::task::spawn_local;
-use shared::{DownloadProgress, LoginStatus, UpdateState};
+use front_shared::{DownloadProgress, LoginStatus, UpdateState};
 use wasm_bindgen::prelude::*;
 
 pub type LoggedInSignal = RwSignal<LoginStatus>;

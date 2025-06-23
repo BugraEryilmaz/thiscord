@@ -3,12 +3,12 @@ use std::sync::Arc;
 
 use cpal::traits::HostTrait;
 use futures_util::{SinkExt, StreamExt};
-use my_web_rtc::{Split, WebRTCConnection, WebSocketMessage};
+use shared::{Split, WebRTCConnection, WebSocketMessage};
 use native_tls::TlsConnector;
 use reqwest::cookie::CookieStore;
 use reqwest::header;
 use ringbuf::HeapRb;
-use shared::URL;
+use front_shared::URL;
 use tauri::{AppHandle, Manager};
 use tokio::sync::mpsc::Sender;
 use tokio::{select, sync::mpsc::Receiver};

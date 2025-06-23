@@ -1,4 +1,4 @@
-use my_web_rtc::Split;
+use shared::Split;
 use ringbuf::{
     traits::{Consumer, Producer},
     HeapCons, HeapProd, HeapRb,

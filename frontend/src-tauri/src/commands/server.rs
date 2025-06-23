@@ -1,5 +1,5 @@
 use reqwest::multipart;
-use shared::{Server, URL};
+use front_shared::{Server, URL};
 use tauri::Manager;
 use tauri_plugin_dialog::{DialogExt, FilePath};
 

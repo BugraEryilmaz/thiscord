@@ -1,7 +1,5 @@
 pub mod auth;
 pub mod models;
-// pub mod rooms;
-pub mod schema;
 pub mod utils;
 pub mod servers;
 pub mod channels;
