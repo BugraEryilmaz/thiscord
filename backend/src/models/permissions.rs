@@ -1,8 +1,9 @@
+use serde::Serialize;
 use strum::IntoEnumIterator;
 use strum_macros::EnumIter;
 use uuid::Uuid;
 
-#[derive(diesel_derive_enum::DbEnum, Debug, Clone, PartialEq, Eq, EnumIter, Hash)]
+#[derive(diesel_derive_enum::DbEnum, Debug, Clone, PartialEq, Eq, EnumIter, Hash, Serialize)]
 #[ExistingTypePath = "crate::schema::sql_types::PermissionType"]
 #[DbValueStyle = "PascalCase"]
 pub enum PermissionType {
@@ -30,22 +31,16 @@ pub struct PermissionContext {
 
 impl PermissionType {
     pub fn requires_owner(&self) -> bool {
-        matches!(
-            self,
-            PermissionType::DeleteMessagesSelf
-        )
+        matches!(self, PermissionType::DeleteMessagesSelf)
     }
-    pub fn permission_check(
-        &self,
-        context: Option<&PermissionContext>,
-    ) -> bool {
+    pub fn permission_check(&self, context: Option<&PermissionContext>) -> bool {
         if !self.requires_owner() {
             return true;
         }
         if let Some(context) = context {
             if self.requires_owner() && context.user_id == context.resource_owner_id {
                 return true;
-            } 
+            }
         }
         false
     }
@@ -66,7 +61,7 @@ pub static DEFAULT_USER_PERMISSIONS: &[PermissionType] = &[
     PermissionType::DeleteMessagesSelf,
 ];
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize)]
 pub struct PermissionsOfUser {
     pub role: String,
     pub permission_type: HashSet<PermissionType>,

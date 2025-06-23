@@ -111,6 +111,7 @@ pub async fn run() {
             join_server,
             get_servers,
             pick_file,
+            get_channels,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

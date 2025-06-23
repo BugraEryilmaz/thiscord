@@ -1,5 +1,4 @@
 .home-container {
-    background-color: aqua;
     padding: 0;
     margin: 0;
     height: 100vh;
@@ -14,7 +13,7 @@
     background-color: var(--primary-color);
     padding: 0em;
     box-shadow: 2px 0 5px rgba(0, 0, 0, 0.1);
-    height: 100%;
+    height: calc(100% - 10rem);
     overflow: hidden;
 }
 

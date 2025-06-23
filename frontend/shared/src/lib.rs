@@ -61,6 +61,33 @@ impl From<bool> for LoginStatus {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub enum ChannelType {
+    Text,
+    Voice,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Channel  {
+    pub id: Uuid,
+    pub name: String,
+    pub type_: ChannelType,
+    pub hidden: bool,
+    pub server_id: Uuid,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct VoiceUser {
+    pub id: Uuid,
+    pub username: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ChannelWithUsers {
+    pub channel: Channel,
+    pub users: Vec<VoiceUser>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Server{
     pub id: Uuid,
     pub name: String,

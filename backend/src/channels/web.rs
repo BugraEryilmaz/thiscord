@@ -60,6 +60,8 @@ mod post {
     }
 }
 mod get {
+    use futures_util::future::join_all;
+
     use super::*;
 
     pub async fn list_channels(
@@ -98,12 +100,16 @@ mod get {
             }
         };
         let channels = channels
-            .iter()
+            .into_iter()
             .filter(|channel| {
                 (channel.hidden && user_can_see_hidden_channels)
                     || (!channel.hidden && user_can_see_channel)
-            })
-            .collect::<Vec<_>>();
+            });
+        // Convert the channels to channels with users
+        let channels = channels.into_iter().map(async |channel| {
+            channel.convert_to_with_users().await
+        }).collect::<Vec<_>>();
+        let channels = join_all(channels).await;
         (StatusCode::OK, serde_json::to_string(&channels).unwrap()).into_response()
     }
 }

@@ -4,7 +4,9 @@ use wasm_bindgen::JsValue;
 
 use super::lefticon::LeftIcon;
 use crate::{
-    app::LoggedInSignal, home::create_server::CreateServerPopup, utils::{invoke, ActiveServer, ActiveServerSignal}
+    app::LoggedInSignal,
+    home::create_server::CreateServerPopup,
+    utils::{invoke},
 };
 
 stylance::import_style!(
@@ -14,17 +16,16 @@ stylance::import_style!(
 );
 
 #[component]
-pub fn Sidebar() -> impl IntoView {
+pub fn Sidebar(set_active_server: WriteSignal<Option<Server>>) -> impl IntoView {
     let (servers, set_servers) = signal(vec![]);
     let is_logged_in_signal =
         context::use_context::<LoggedInSignal>().expect("SessionCookie context not found");
-    let active_server_signal =
-        context::use_context::<ActiveServerSignal>().expect("ActiveServerSignal context not found");
-    let (create_server_popup, set_create_server_popup) = signal(true);
+    let (create_server_popup, set_create_server_popup) = signal(false);
 
     Effect::new(move || {
         if !is_logged_in_signal.get() {
             set_servers.set(vec![]); // Clear servers for not logged-in users
+            set_active_server.set(None);
         } else {
             spawn_local(async move {
                 let servers = invoke("get_servers", JsValue::null()).await;
@@ -37,6 +38,11 @@ pub fn Sidebar() -> impl IntoView {
                 let servers: Vec<Server> =
                     serde_wasm_bindgen::from_value(servers).unwrap_or_default();
                 log!("Parsed servers: {:?}", servers);
+                set_active_server.update(|old| {
+                    if old.is_none() {
+                        *old = servers.first().cloned()
+                    }
+                });
                 set_servers.set(servers);
             });
             log!("User is logged in");
@@ -51,10 +57,11 @@ pub fn Sidebar() -> impl IntoView {
                     children=move |server| {
                         view! {
                             <LeftIcon
-                                img_url=format!("https://{}/{}", URL, server.image_url.unwrap_or("/static/server/NOTFOUND.png".to_string()))
-                                name=server.name
+                                img_url=format!("https://{}/{}", URL, server.image_url.clone().unwrap_or("/static/server/NOTFOUND.png".to_string()))
+                                name=server.name.clone()
                                 onclick=move || {
-                                    active_server_signal.set(Some(ActiveServer { id: server.id }));
+                                    log!("Setting active server: {:?}", server);
+                                    set_active_server.set(Some(server.clone()));
                                 }
                             />
                         }

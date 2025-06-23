@@ -25,6 +25,17 @@ pub struct Channel {
     pub updated_at: chrono::NaiveDateTime,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct VoiceUser {
+    pub id: Uuid,
+    pub username: String,
+}
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ChannelWithUsers {
+    pub channel: Channel,
+    pub users: Vec<VoiceUser>,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, Queryable, Selectable, Insertable)]
 #[diesel(table_name = crate::schema::channels)]
 #[diesel(check_for_backend(diesel::pg::Pg))]

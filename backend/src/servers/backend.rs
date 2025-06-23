@@ -1,5 +1,5 @@
 use crate::{
-    models::{Backend, PermissionType, Server, DEFAULT_OWNER_PERMISSIONS, DEFAULT_USER_PERMISSIONS}, schema::{self}, Error
+    models::{Backend, ChannelType, NewChannel, PermissionType, Server, DEFAULT_OWNER_PERMISSIONS, DEFAULT_USER_PERMISSIONS}, schema::{self}, Error
 };
 use diesel::prelude::*;
 use rand::{Rng, distr::Alphanumeric};
@@ -42,6 +42,25 @@ impl Backend {
         self.add_user_role(user_id, server_id, owner_role)?;
         let _user_role =
             self.create_role("user".to_string(), server_id, DEFAULT_USER_PERMISSIONS.iter())?;
+
+        // Create the default channels for the server
+        let default_channels = vec![
+            NewChannel {
+                name: "General".to_string(),
+                server_id,
+                type_: ChannelType::Text,
+                hidden: false,
+            },
+            NewChannel {
+                name: "Voice".to_string(),
+                server_id,
+                type_: ChannelType::Voice,
+                hidden: false,
+            },
+        ];
+        for channel in default_channels {
+            self.create_channel(&channel)?;
+        }
 
         Ok(connection_string)
     }

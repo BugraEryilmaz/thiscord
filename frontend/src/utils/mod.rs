@@ -29,12 +29,6 @@ pub fn convert_file_src(path: &str) -> String {
     })
 }
 
-pub type ActiveServerSignal = RwSignal<Option<ActiveServer>>;
-#[derive(Clone, Debug, PartialEq, Eq, Deserialize, Serialize)]
-pub struct ActiveServer {
-    pub id: uuid::Uuid,
-}
-
 pub fn create_listener<F, T>(event: &'static str, mut handler: F)
 where
     F: FnMut(T) + 'static,

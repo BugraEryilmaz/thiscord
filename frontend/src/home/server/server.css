@@ -1,0 +1,10 @@
+.server-container {
+    display: flex;
+    flex-direction: row;
+    height: calc(100% - 10rem);
+}
+
+.channel-list-container {
+    width: 10rem;
+    background-color: color-mix(in srgb, var(--primary-color) 50%, var(--quinary-color) 50%);
+}

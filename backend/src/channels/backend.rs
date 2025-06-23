@@ -1,8 +1,6 @@
 #![allow(unused_imports)]
 use crate::{
-    Error,
-    models::{Backend, Channel, NewChannel, PermissionType, Server},
-    schema,
+    channels::{VoiceRooms, VOICE_ROOMS}, models::{Backend, Channel, ChannelType, ChannelWithUsers, NewChannel, PermissionType, Server, VoiceUser}, schema, Error
 };
 use diesel::prelude::*;
 use rand::{Rng, distr::Alphanumeric};
@@ -34,5 +32,33 @@ impl Backend {
             .values(new_channel)
             .get_result::<Channel>(&mut conn)?;
         Ok(channel)
+    }
+}
+
+impl Channel {
+    pub async fn convert_to_with_users(
+        self,
+    ) -> ChannelWithUsers {
+        let mut users = vec![];
+        let rooms = VoiceRooms::get_or_init();
+        if self.type_ == ChannelType::Voice {
+            let room = rooms.get_room_or_init(self.id);
+            {
+                let people = room.people.lock().await;
+                for person in people.iter() {
+                    if let Some(user_id) = person.id {
+                        users.push(VoiceUser {
+                            id: user_id,
+                            username: person.name.clone().unwrap(),
+                        });
+                    }
+                }
+
+            }
+        }
+        ChannelWithUsers {
+            channel: self,
+            users,
+        }
     }
 }

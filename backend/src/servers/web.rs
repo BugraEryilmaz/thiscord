@@ -14,6 +14,7 @@ pub fn router() -> Router {
         .route("/get-servers", get(get::get_servers))
         .route("/join-server", post(post::join_server))
         .route("/create-server", post(post::create_server))
+        .route("/get-permissions/{server_id}", get(get::get_permissions))
         .layer(RequestBodyLimitLayer::new(5 * 1024 * 1024)) // 5MB limit
         .layer(DefaultBodyLimit::max(5 * 1024 * 1024)) // 5MB limit
         .route_layer(login_required!(Backend))
@@ -165,6 +166,9 @@ mod post {
 
 }
 mod get {
+    use axum::extract::Path;
+    use uuid::Uuid;
+
     use super::*;
     
     pub async fn get_servers(auth: AuthSession) -> impl IntoResponse {
@@ -176,6 +180,21 @@ mod get {
             }
             Err(e) => {
                 tracing::error!("Failed to retrieve servers: {}", e);
+                (axum::http::StatusCode::INTERNAL_SERVER_ERROR, e.to_string())
+            }
+        }
+    }
+
+    pub async fn get_permissions(auth: AuthSession, Path(server_id): Path<Uuid>) -> impl IntoResponse {
+        let backend = auth.backend;
+        let user = auth.user.unwrap();
+        match backend.get_user_permissions(&user, server_id) {
+            Ok(permissions) => {
+                tracing::info!("Retrieved permissions for user {} on server {}", user.id, server_id);
+                (axum::http::StatusCode::OK, serde_json::to_string(&permissions).unwrap())
+            }
+            Err(e) => {
+                tracing::error!("Failed to retrieve permissions for user {} on server {}: {}", user.id, server_id, e);
                 (axum::http::StatusCode::INTERNAL_SERVER_ERROR, e.to_string())
             }
         }

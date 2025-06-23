@@ -2,13 +2,14 @@ mod leftpanel;
 mod login;
 mod lefticon;
 mod create_server;
+mod server;
 
 use leptos::{context, logging::error, prelude::*, task::spawn_local};
 use serde_wasm_bindgen::from_value;
 use shared::LoginStatus;
 use wasm_bindgen::JsValue;
 
-use crate::{app::LoggedInSignal, utils::{invoke, ActiveServerSignal}};
+use crate::{app::LoggedInSignal, home::server::ServerComponent, utils::{invoke}};
 
 stylance::import_style!(
     #[allow(dead_code)]
@@ -20,8 +21,6 @@ stylance::import_style!(
 pub fn Home() -> impl IntoView {
     let is_logged_in_signal =
         context::use_context::<LoggedInSignal>().expect("SessionCookie context not found");
-    let active_server_signal: ActiveServerSignal = RwSignal::new(None);
-    context::provide_context(active_server_signal.clone());
 
     // Check if the user is logged in by checking the session cookie
     spawn_local(async move {
@@ -33,11 +32,13 @@ pub fn Home() -> impl IntoView {
         }
     });
 
+    let (active_server, set_active_server) = signal(None);
+
     view! {
         <main class=style::home_container>
-            <leftpanel::Sidebar />
+            <leftpanel::Sidebar set_active_server=set_active_server />
             <Show when=move || is_logged_in_signal.get() == LoginStatus::LoggedIn fallback=move || view! { <login::Login /> }>
-                <h1>"Welcome to the Home Page"</h1>
+                <ServerComponent active_server=active_server />
             </Show>
         </main>
     }
