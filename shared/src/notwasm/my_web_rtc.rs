@@ -1,8 +1,4 @@
-use ringbuf::HeapCons;
-use ringbuf::HeapProd;
-use ringbuf::traits::Consumer;
-use ringbuf::traits::Observer;
-use ringbuf::traits::Producer;
+use ringbuf::{HeapCons, HeapProd, traits::{Consumer, Observer, Producer}};
 use std::sync::Arc;
 use std::sync::atomic::AtomicBool;
 use std::sync::atomic::Ordering;

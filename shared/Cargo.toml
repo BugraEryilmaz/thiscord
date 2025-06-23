@@ -3,24 +3,23 @@ name = "shared"
 version = "0.1.0"
 edition = "2024"
 
+[target.'cfg(not(target_arch = "wasm32"))'.dependencies]
+ringbuf = {version = "0.4.8"}
+opus = {version = "0.3.0"}
+thiserror = {version = "2.0.12"}
+tokio = {version = "1.45.0"}
+webrtc = {version = "0.13.0"}
+tracing = {version = "0.1.41"}
+
 [dependencies]
-opus = "0.3.0"
-reqwest = {version = "0.12.15" , features = ["json", "stream"] }
-thiserror = "2.0.12"
-tokio = "1.45.0"
-webrtc = "0.13.0"
-futures-util = "0.3.31"
-axum = {version = "0.8.4", features = ["ws"]}
-serde_json = "1.0.140"
-serde = "1.0.219"
-tokio-tungstenite = {version = "0.26.2", features = ["native-tls"]}
-native-tls = "0.2.14"
-ringbuf = "0.4.8"
-dashmap = "6.1.0"
-tracing = "0.1.41"
-uuid = { version = "1.17.0", features = ["v4", "serde"] }
-strum = "0.27"
-diesel = { version = "2.2.11", features = ["chrono", "postgres", "r2d2", "uuid"] }
-diesel-derive-enum = { version = "2.1.0", features = ["postgres"] }
+diesel = { version = "2.2.11", features = ["chrono", "postgres", "r2d2", "uuid"] , optional = true }
+diesel-derive-enum = { version = "2.1.0", features = ["postgres"] , optional = true }
+serde_json = {version = "1.0.140"}
+serde = {version = "1.0.219"}
+uuid = { version = "1.17.0", features = ["v4", "serde", "js"] }
 chrono = { version = "0.4.41", features = ["serde"] }
-strum_macros = "0.27"
+strum = {version = "0.27"}
+strum_macros = { version = "0.27" }
+
+[features]
+diesel = ["dep:diesel", "dep:diesel-derive-enum"]

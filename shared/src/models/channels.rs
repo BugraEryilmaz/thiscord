@@ -1,20 +1,23 @@
+#[cfg(feature = "diesel")]
 use diesel::prelude::*;
 use serde::{Deserialize, Serialize};
 use strum_macros::EnumIter;
 use uuid::Uuid;
 
-#[derive(diesel_derive_enum::DbEnum, Debug, Clone, PartialEq, Eq, EnumIter, Serialize, Deserialize)]
-#[ExistingTypePath = "crate::schema::sql_types::ChannelType"]
-#[DbValueStyle = "PascalCase"]
+#[derive(Debug, Clone, PartialEq, Eq, EnumIter, Serialize, Deserialize)]
+#[cfg_attr(feature = "diesel", derive(diesel_derive_enum::DbEnum))]
+#[cfg_attr(feature = "diesel", ExistingTypePath = "crate::schema::sql_types::ChannelType")]
+#[cfg_attr(feature = "diesel", DbValueStyle = "PascalCase")]
 pub enum ChannelType {
     Text,
     Voice,
 }
 
 
-#[derive(Debug, Clone, Serialize, Deserialize, Queryable, Selectable)]
-#[diesel(table_name = crate::schema::channels)]
-#[diesel(check_for_backend(diesel::pg::Pg))]
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[cfg_attr(feature = "diesel", derive(Queryable, Selectable))]
+#[cfg_attr(feature = "diesel", diesel(table_name = crate::schema::channels))]
+#[cfg_attr(feature = "diesel", diesel(check_for_backend(diesel::pg::Pg)))]
 pub struct Channel {
     pub id: Uuid,
     pub name: String,
@@ -36,9 +39,10 @@ pub struct ChannelWithUsers {
     pub users: Vec<VoiceUser>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, Queryable, Selectable, Insertable)]
-#[diesel(table_name = crate::schema::channels)]
-#[diesel(check_for_backend(diesel::pg::Pg))]
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[cfg_attr(feature = "diesel", derive(Queryable, Selectable, Insertable))]
+#[cfg_attr(feature = "diesel", diesel(table_name = crate::schema::channels))]
+#[cfg_attr(feature = "diesel", diesel(check_for_backend(diesel::pg::Pg)))]
 pub struct NewChannel {
     pub name: String,
     pub type_: ChannelType,

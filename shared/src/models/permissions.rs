@@ -1,11 +1,12 @@
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use strum::IntoEnumIterator;
 use strum_macros::EnumIter;
 use uuid::Uuid;
 
-#[derive(diesel_derive_enum::DbEnum, Debug, Clone, PartialEq, Eq, EnumIter, Hash, Serialize)]
-#[ExistingTypePath = "crate::schema::sql_types::PermissionType"]
-#[DbValueStyle = "PascalCase"]
+#[derive(Debug, Clone, PartialEq, Eq, EnumIter, Serialize, Deserialize, Hash)]
+#[cfg_attr(feature = "diesel", derive(diesel_derive_enum::DbEnum))]
+#[cfg_attr(feature = "diesel", ExistingTypePath = "crate::schema::sql_types::PermissionType")]
+#[cfg_attr(feature = "diesel", DbValueStyle = "PascalCase")]
 pub enum PermissionType {
     DeleteServer,
     CreateChannel,

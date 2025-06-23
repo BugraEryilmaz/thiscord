@@ -1,12 +1,14 @@
 
+#[cfg(feature = "diesel")]
 use diesel::prelude::*;
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
 
-#[derive(Clone, Queryable, Selectable, Insertable)]
-#[diesel(table_name = crate::schema::users)]
-#[diesel(check_for_backend(diesel::pg::Pg))]
+#[derive(Clone)]
+#[cfg_attr(feature = "diesel", derive(Queryable, Selectable, Insertable))]
+#[cfg_attr(feature = "diesel", diesel(table_name = crate::schema::users))]
+#[cfg_attr(feature = "diesel", diesel(check_for_backend(diesel::pg::Pg)))]
 pub struct Users {
     pub id: uuid::Uuid,
     pub username: String,
@@ -17,17 +19,19 @@ pub struct Users {
     pub activated: bool,
 }
 
-#[derive(Clone, Queryable, Selectable, Insertable)]
-#[diesel(table_name = crate::schema::user_activations)]
-#[diesel(check_for_backend(diesel::pg::Pg))]
+#[derive(Clone)]
+#[cfg_attr(feature = "diesel", derive(Queryable, Selectable, Insertable))]
+#[cfg_attr(feature = "diesel", diesel(table_name = crate::schema::user_activations))]
+#[cfg_attr(feature = "diesel", diesel(check_for_backend(diesel::pg::Pg)))]
 pub struct Activation {
     pub activation_code: String,
     pub user_id: Uuid,
 }
 
-#[derive(Clone, Queryable, Selectable, Insertable)]
-#[diesel(table_name = crate::schema::user_activations)]
-#[diesel(check_for_backend(diesel::pg::Pg))]
+#[derive(Clone)]
+#[cfg_attr(feature = "diesel", derive(Queryable, Selectable, Insertable))]
+#[cfg_attr(feature = "diesel", diesel(table_name = crate::schema::user_activations))]
+#[cfg_attr(feature = "diesel", diesel(check_for_backend(diesel::pg::Pg)))]
 pub struct ActivationFull {
     pub id: Uuid,
     pub user_id: Uuid,
@@ -41,9 +45,10 @@ pub struct Credentials {
     pub password: String,
 }
 
-#[derive(Clone, Debug, Deserialize, Serialize, Insertable)]
-#[diesel(table_name = crate::schema::users)]
-#[diesel(check_for_backend(diesel::pg::Pg))]
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[cfg_attr(feature = "diesel", derive(Queryable, Selectable, Insertable))]
+#[cfg_attr(feature = "diesel", diesel(table_name = crate::schema::users))]
+#[cfg_attr(feature = "diesel", diesel(check_for_backend(diesel::pg::Pg)))]
 pub struct Signup {
     pub username: String,
     pub email: String,

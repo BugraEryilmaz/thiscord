@@ -26,7 +26,7 @@ tower-http = { version = "0.6.4", features = ["limit", "trace", "fs"] }
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 uuid = { version = "1.17.0", features = ["serde", "v4"] }
-shared = { path = "../shared" }
+shared = { path = "../shared", features = ["diesel"] }
 rustls = { version = "0.23.27", features = ["aws-lc-rs"] }
 futures-util = "0.3.31"
 ringbuf = "0.4.8"
