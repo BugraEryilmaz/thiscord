@@ -49,3 +49,9 @@ pub struct NewChannel {
     pub hidden: bool,
     pub server_id: Uuid,
 }   
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct JoinChannel {
+    pub server_id: Uuid,
+    pub channel_id: Uuid,
+}

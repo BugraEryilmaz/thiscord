@@ -12,7 +12,7 @@ stylance::import_style!(
 );
 
 #[component]
-pub fn ServerComponent(active_server: ReadSignal<Option<Server>>) -> impl IntoView {
+pub fn ServerComponent(active_server: RwSignal<Option<Server>>) -> impl IntoView {
     view! {
         <div class=style::server_container>
             <Channels active_server=active_server />

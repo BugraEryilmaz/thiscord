@@ -308,6 +308,7 @@ impl WebRTCConnection {
             // let receiver_queues = receiver_queues.clone();
             move |track, _receiver, _| {
                 tracing::info!("Received remote track: {}", track.kind());
+                println!("Track ID: {}", track.id());
 
                 if track.kind() == webrtc::rtp_transceiver::rtp_codec::RTPCodecType::Audio {
                     // track_id = server-audio-{id}
@@ -357,6 +358,7 @@ impl WebRTCConnection {
 
         self.peer_connection.on_track(Box::new({
             move |track, _receiver, _| {
+                println!("Track ID: {}", track.id());
                 tracing::info!("Received remote track: {}", track.kind());
                 if track.kind() == webrtc::rtp_transceiver::rtp_codec::RTPCodecType::Audio {
                     let receiver_queue = receiver_queue.clone();

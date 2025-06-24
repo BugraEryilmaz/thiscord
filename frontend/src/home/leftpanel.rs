@@ -17,7 +17,7 @@ stylance::import_style!(
 );
 
 #[component]
-pub fn Sidebar(set_active_server: WriteSignal<Option<Server>>) -> impl IntoView {
+pub fn Sidebar(active_server: RwSignal<Option<Server>>) -> impl IntoView {
     let (servers, set_servers) = signal(vec![]);
     let is_logged_in_signal =
         context::use_context::<LoggedInSignal>().expect("SessionCookie context not found");
@@ -26,7 +26,7 @@ pub fn Sidebar(set_active_server: WriteSignal<Option<Server>>) -> impl IntoView 
     Effect::new(move || {
         if !is_logged_in_signal.get() {
             set_servers.set(vec![]); // Clear servers for not logged-in users
-            set_active_server.set(None);
+            active_server.set(None);
         } else {
             spawn_local(async move {
                 let servers = invoke("get_servers", JsValue::null()).await;
@@ -39,7 +39,7 @@ pub fn Sidebar(set_active_server: WriteSignal<Option<Server>>) -> impl IntoView 
                 let servers: Vec<Server> =
                     serde_wasm_bindgen::from_value(servers).unwrap_or_default();
                 log!("Parsed servers: {:?}", servers);
-                set_active_server.update(|old| {
+                active_server.update(|old| {
                     if old.is_none() {
                         *old = servers.first().cloned()
                     }
@@ -62,7 +62,7 @@ pub fn Sidebar(set_active_server: WriteSignal<Option<Server>>) -> impl IntoView 
                                 name=server.name.clone()
                                 onclick=move || {
                                     log!("Setting active server: {:?}", server);
-                                    set_active_server.set(Some(server.clone()));
+                                    active_server.set(Some(server.clone()));
                                 }
                             />
                         }

@@ -32,11 +32,11 @@ pub fn Home() -> impl IntoView {
         }
     });
 
-    let (active_server, set_active_server) = signal(None);
+    let active_server = RwSignal::new(None);
 
     view! {
         <main class=style::home_container>
-            <leftpanel::Sidebar set_active_server=set_active_server />
+            <leftpanel::Sidebar active_server=active_server />
             <Show when=move || is_logged_in_signal.get() == LoginStatus::LoggedIn fallback=move || view! { <login::Login /> }>
                 <ServerComponent active_server=active_server />
             </Show>

@@ -112,6 +112,7 @@ impl Backend {
                     .filter_map(|(_, perm)| perm)
                     .collect();
                 PermissionsOfUser {
+                    user_id: user.0.id,
                     role,
                     permission_type: permission_types,
                 }

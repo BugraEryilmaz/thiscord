@@ -3,7 +3,7 @@ use shared::models::ChannelWithUsers;
 use tauri::Manager;
 use uuid::Uuid;
 
-use crate::utils::handle_auth_error;
+use crate::{utils::handle_auth_error, websocket::WebSocketRequest};
 
 #[tauri::command(rename_all = "snake_case")]
 pub async fn get_channels(
@@ -22,4 +22,24 @@ pub async fn get_channels(
     let channels: Vec<ChannelWithUsers> = resp.json().await.map_err(|e| e.to_string())?;
 
     Ok(channels)
+}
+
+
+#[tauri::command(rename_all = "snake_case")]
+pub async fn join_channel(
+    channel_id: Uuid,
+    server_id: Uuid,
+    handle: tauri::AppHandle,
+) -> Result<(), String> {
+    let state = handle.state::<crate::AppState>();
+    let ws = &state.websocket;
+
+    {
+        let ws = ws.lock().await;
+        ws.send(WebSocketRequest::JoinAudioChannel { server_id, channel_id })
+            .await
+            .map_err(|e| e.to_string())?;
+    }
+
+    Ok(())
 }

@@ -64,6 +64,7 @@ pub static DEFAULT_USER_PERMISSIONS: &[PermissionType] = &[
 
 #[derive(Debug, Clone, Serialize)]
 pub struct PermissionsOfUser {
+    pub user_id: Uuid,
     pub role: String,
     pub permission_type: HashSet<PermissionType>,
 }
