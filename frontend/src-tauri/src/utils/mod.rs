@@ -24,6 +24,7 @@ impl AppState {
     pub fn new(websocket: RwLock<Sender<WebSocketRequest>>) -> Self {
         let cookie_store = Arc::new(Jar::default());
         let client = Client::builder()
+            .danger_accept_invalid_certs(true)
             .cookie_provider(cookie_store.clone())
             .build()
             .expect("Failed to create HTTP client");
