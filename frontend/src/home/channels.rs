@@ -29,7 +29,7 @@ async fn get_channels(server_id: Uuid) -> Result<Vec<ChannelWithUsers>, String> 
 stylance::import_style!(
     #[allow(dead_code)]
     style,
-    "server.css"
+    "channels.css"
 );
 
 #[component]

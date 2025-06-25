@@ -1,8 +1,5 @@
-mod channels;
-
 use leptos::prelude::*;
 
-use channels::Channels;
 use shared::models::Server;
 
 stylance::import_style!(
@@ -15,7 +12,6 @@ stylance::import_style!(
 pub fn ServerComponent(active_server: RwSignal<Option<Server>>) -> impl IntoView {
     view! {
         <div class=style::server_container>
-            <Channels active_server=active_server />
             <p>"This is a placeholder for the server component."</p>
         </div>
     }
