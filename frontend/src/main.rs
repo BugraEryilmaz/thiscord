@@ -1,6 +1,7 @@
 mod app;
 pub mod utils;
 mod home;
+mod server;
 
 use app::*;
 use leptos::prelude::*;

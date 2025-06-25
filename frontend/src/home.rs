@@ -1,16 +1,13 @@
 mod leftpanel;
 mod login;
-mod lefticon;
 mod create_server;
-mod channels;
-mod server;
 
 use leptos::{context, logging::error, prelude::*, task::spawn_local};
 use serde_wasm_bindgen::from_value;
 use front_shared::LoginStatus;
 use wasm_bindgen::JsValue;
 
-use crate::{app::LoggedInSignal, home::{channels::Channels, server::ServerComponent}, utils::invoke};
+use crate::{app::LoggedInSignal, server::{channels::Channels, ServerComponent}, utils::invoke};
 
 stylance::import_style!(
     #[allow(dead_code)]

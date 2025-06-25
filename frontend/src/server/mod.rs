@@ -1,3 +1,4 @@
+pub mod channels;
 use leptos::prelude::*;
 
 use shared::models::Server;
