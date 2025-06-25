@@ -35,7 +35,7 @@ pub async fn join_channel(
     let ws = &state.websocket;
 
     {
-        let ws = ws.lock().await;
+        let ws = ws.read().await;
         ws.send(WebSocketRequest::JoinAudioChannel { server_id, channel_id })
             .await
             .map_err(|e| e.to_string())?;

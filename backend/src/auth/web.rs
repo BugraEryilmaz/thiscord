@@ -37,7 +37,7 @@ mod post {
         match auth.login(&user).await {
             Ok(_) => {
                 tracing::info!("User {} logged in", user.0.username);
-                (StatusCode::OK, "Logged in".to_string())
+                (StatusCode::OK, serde_json::to_string(&user.0.id).unwrap())
             }
             Err(e) => {
                 tracing::error!("Failed to login user {}: {}", user.0.username, e);

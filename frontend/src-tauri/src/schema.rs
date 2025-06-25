@@ -4,5 +4,6 @@ diesel::table! {
     session (id) {
         id -> Integer,
         token -> Text,
+        user_id -> Text,
     }
 }

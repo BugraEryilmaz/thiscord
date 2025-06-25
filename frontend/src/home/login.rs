@@ -31,12 +31,15 @@ pub fn Login() -> impl IntoView {
                 password,
             };
             let response = invoke("login", to_value(&request).unwrap()).await;
-            log!("Response: {:?}", response);
-            if let Err(e) = response {
-                // Handle login failure (e.g., show an error message)
-                error!("Login failed: {}", from_value::<String>(e).unwrap_or_else(|_| "Unknown error".to_string()));
-            } else {
-                is_logged_in_signal.set(LoginStatus::LoggedIn);
+            match response {
+                Ok(value) => {
+                    let session: LoginStatus = from_value(value).unwrap();
+                    log!("Login successful: {:?}", session);
+                    is_logged_in_signal.set(session);
+                }
+                Err(e) => {
+                    error!("Login failed: {}", from_value::<String>(e).unwrap_or_else(|_| "Unknown error".to_string()));
+                }
             }
         });
     };

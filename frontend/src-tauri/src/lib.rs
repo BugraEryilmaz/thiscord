@@ -8,10 +8,10 @@ pub mod websocket;
 use audio::tauri::*;
 use commands::*;
 use reqwest::cookie::CookieStore;
-use front_shared::{UpdateState, URL};
+use front_shared::{Session, UpdateState, URL};
 use tauri::{Emitter, Manager, Url};
 use tokio::spawn;
-use tokio::sync::Mutex;
+use tokio::sync::RwLock;
 use tokio::time::sleep;
 use tracing_subscriber::layer::SubscriberExt;
 use tracing_subscriber::util::SubscriberInitExt;
@@ -27,8 +27,7 @@ async fn test_emit(app: tauri::AppHandle) {
 
 use diesel_migrations::{embed_migrations, EmbeddedMigrations, MigrationHarness};
 
-use crate::models::Session;
-use crate::utils::{check_for_updates, check_updates, establish_connection, AppState};
+use crate::{models::SessionStore, utils::{check_for_updates, check_updates, establish_connection, AppState}};
 
 pub const MIGRATIONS: EmbeddedMigrations = embed_migrations!("migrations");
 
@@ -46,7 +45,7 @@ pub async fn run() {
     let (websocket_tx, websocket_rx) = tokio::sync::mpsc::channel(100);
     tauri::Builder::default()
         .plugin(tauri_plugin_dialog::init())
-        .manage(AppState::new(Mutex::new(websocket_tx)))
+        .manage(AppState::new(RwLock::new(websocket_tx)))
         .plugin(tauri_plugin_opener::init())
         .plugin(tauri_plugin_updater::Builder::new().build())
         .setup(|app| {

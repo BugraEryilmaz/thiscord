@@ -7,7 +7,7 @@ use diesel::prelude::*;
 pub use err::*;
 use reqwest::{cookie::Jar, Client};
 use tauri::{AppHandle, Manager};
-use tokio::sync::{mpsc::Sender, Mutex};
+use tokio::sync::{mpsc::Sender, RwLock};
 pub use update::*;
 
 use crate::{audio::AudioElement, websocket::WebSocketRequest};
@@ -15,13 +15,13 @@ use crate::{audio::AudioElement, websocket::WebSocketRequest};
 pub struct AppState {
     // Define any shared state here
     pub audio_element: AudioElement,
-    pub websocket: Mutex<Sender<WebSocketRequest>>,
+    pub websocket: RwLock<Sender<WebSocketRequest>>,
     pub client: Client,
     pub cookie_store: Arc<Jar>,
 }
 
 impl AppState {
-    pub fn new(websocket: Mutex<Sender<WebSocketRequest>>) -> Self {
+    pub fn new(websocket: RwLock<Sender<WebSocketRequest>>) -> Self {
         let cookie_store = Arc::new(Jar::default());
         let client = Client::builder()
             .cookie_provider(cookie_store.clone())

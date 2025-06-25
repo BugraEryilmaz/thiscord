@@ -24,11 +24,16 @@ pub fn Home() -> impl IntoView {
 
     // Check if the user is logged in by checking the session cookie
     spawn_local(async move {
-        let is_logged_in = invoke("check_cookies", JsValue::UNDEFINED).await.unwrap_or_else(|_| JsValue::from(false));
-        if let Ok(is_logged_in) = from_value::<bool>(is_logged_in) {
-            is_logged_in_signal.set(is_logged_in.into());
-        } else {
-            error!("Failed to check cookies");
+        let is_logged_in = invoke("check_cookies", JsValue::UNDEFINED).await;
+        match is_logged_in {
+            Ok(value) => {
+                let status: LoginStatus = from_value(value).unwrap();
+                is_logged_in_signal.set(status);
+            }
+            Err(e) => {
+                error!("Failed to check login status: {}", e.as_string().unwrap_or_else(|| "Unknown error".to_string()));
+                is_logged_in_signal.set(LoginStatus::LoggedOut);
+            }
         }
     });
 
@@ -37,7 +42,7 @@ pub fn Home() -> impl IntoView {
     view! {
         <main class=style::home_container>
             <leftpanel::Sidebar active_server=active_server />
-            <Show when=move || is_logged_in_signal.get() == LoginStatus::LoggedIn fallback=move || view! { <login::Login /> }>
+            <Show when=move || !matches!(is_logged_in_signal.get(), LoginStatus::LoggedOut) fallback=move || view! { <login::Login /> }>
                 <ServerComponent active_server=active_server />
             </Show>
         </main>
