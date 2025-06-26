@@ -3,7 +3,7 @@ use diesel::{
     r2d2::{ConnectionManager, Pool, PooledConnection},
 };
 
-mod user;
+pub mod user;
 mod permissions;
 
 pub use permissions::*;

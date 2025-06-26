@@ -3,9 +3,9 @@ use std::vec;
 use leptos::logging::log;
 use leptos::prelude::*;
 use leptos::task::spawn_local;
+use shared::models::ChannelWithUsers;
 use shared::models::JoinChannel;
 use shared::models::Server;
-use shared::models::ChannelWithUsers;
 use uuid::Uuid;
 
 use crate::utils::invoke;
@@ -37,9 +37,9 @@ pub fn Channels(active_server: RwSignal<Option<Server>>) -> impl IntoView {
     let channels = LocalResource::new(move || async move {
         if let Some(server) = active_server.get() {
             get_channels(server.id).await.map(|channels| {
-                channels.into_iter().partition(|channel| {
-                    channel.channel.type_ == shared::models::ChannelType::Text
-                })
+                channels
+                    .into_iter()
+                    .partition(|channel| channel.channel.type_ == shared::models::ChannelType::Text)
             })
         } else {
             Ok((vec![], vec![]))
@@ -52,7 +52,7 @@ pub fn Channels(active_server: RwSignal<Option<Server>>) -> impl IntoView {
                     match channels.await {
                         Ok((text_channels, voice_channels)) => {
                             view! {
-                                <ChannelList 
+                                <ChannelList
                                     server_name=active_server
                                     text_channels=text_channels
                                     voice_channels=voice_channels
@@ -135,7 +135,7 @@ pub fn ChannelList(
                     each=move || voice_channels.get()
                     key=|channel| channel.channel.id
                     children=move |channel| view! {
-                        <li class=style::channel_list_item
+                        <ChannelItem channel=channel.clone()
                             on:click=move |_| {
                                 let channel_name = channel.channel.name.clone();
                                 spawn_local(async move {
@@ -152,12 +152,35 @@ pub fn ChannelList(
                                     }
                                 });
                             }
-                        >
-                            <h3>{ channel.channel.name.clone() }</h3>
-                        </li>
+                        />
                     }
                 />
             </Show>
+        </ul>
+    }
+}
+
+#[component]
+pub fn ChannelItem(channel: ChannelWithUsers) -> impl IntoView {
+    view! {
+        <li class=style::channel_list_item>
+            <h3>{ channel.channel.name }</h3>
+            <span>
+                { channel.users.len() } " users"
+            </span>
+            </li>
+        <ul>
+            <For
+                each=move || channel.users.clone()
+                key=|user| user.id
+                children=move |user| view! {
+                    <li>
+                        <span class=style::channel_user>
+                            { user.username.clone() }
+                        </span>
+                    </li>
+                }
+            />
         </ul>
     }
 }

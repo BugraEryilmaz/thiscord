@@ -1,17 +1,22 @@
-use std::sync::Arc;
+use std::{cell::Ref, sync::{Arc, Mutex as StdMutex, OnceLock}};
 
 use argon2::{
     Argon2,
     password_hash::{PasswordHasher, SaltString, rand_core::OsRng},
 };
+use dashmap::DashMap;
 use diesel::prelude::*;
+use tokio::sync::mpsc::Sender;
 use uuid::Uuid;
 
 use crate::Error;
-use shared::{models::{Activation, ActivationFull, Signup, Users}, schema::{user_activations, users}};
+use shared::{
+    WebSocketMessage,
+    models::{Activation, ActivationFull, Signup, Users},
+    schema::{user_activations, users},
+};
 
 use super::Backend;
-
 
 impl Backend {
     pub fn check_username_exists(&self, username: &str) -> Result<bool, Error> {
@@ -146,3 +151,47 @@ impl Backend {
     }
 }
 
+static ONLINE_USERS: OnceLock<OnlineUsers> = OnceLock::new();
+
+pub struct OnlineUsers {
+    pub users: DashMap<Uuid, OnlineUser>,
+}
+impl OnlineUsers {
+    pub fn get_or_init() -> &'static OnlineUsers {
+        ONLINE_USERS.get_or_init(|| OnlineUsers {
+            users: DashMap::new(),
+        })
+    }
+
+    pub fn add_user(&self, user: OnlineUser) {
+        self.users.insert(user.user.id, user);
+    }
+}
+
+pub struct OnlineUser {
+    pub user: Users,
+    pub websocket: Sender<WebSocketMessage>,
+    pub audio_channel: StdMutex<Option<Uuid>>,
+}
+
+impl OnlineUser {
+    pub fn new(user: Users, websocket: Sender<WebSocketMessage>) -> Self {
+        Self {
+            user,
+            websocket,
+            audio_channel: StdMutex::new(None),
+        }
+    }
+    pub fn set_audio_channel(&self, channel_id: Uuid) {
+        let mut audio_channel = self.audio_channel.lock().unwrap();
+        *audio_channel = Some(channel_id);
+    }
+    pub fn clear_audio_channel(&self) {
+        let mut audio_channel = self.audio_channel.lock().unwrap();
+        *audio_channel = None;
+    }
+    pub fn get_audio_channel(&self) -> Option<Uuid> {
+        let audio_channel = self.audio_channel.lock().unwrap();
+        *audio_channel
+    }
+}
