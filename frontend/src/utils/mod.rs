@@ -1,3 +1,5 @@
+pub mod hover_menu;
+
 use js_sys::Function;
 use leptos::{logging::log, task::spawn_local};
 use serde::de::DeserializeOwned;

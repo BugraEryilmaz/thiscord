@@ -147,28 +147,17 @@
 }
 
 .server-list-name-49f3174 {
-    position: absolute;
-    top: 50%;
-    left: 4rem;
-    transform: translateY(-50%);
-    background-color: var(--quinary-color);
+    /* background-color: var(--quinary-color); */
+    background-color: red !important;
     text-align: center;
     border-radius: 0.25rem;
     box-shadow: 0 2px 5px rgba(0, 0, 0, 0.1);
-    z-index: 1;
     font-size: 1.3rem;
+    margin-left: 1rem;
+    padding: 0.5rem;
 
-    visibility: hidden;
-    opacity: 0;
-    transition: opacity 0.2s;
     pointer-events: none;
     white-space: nowrap;
-}
-
-.server-list-item-49f3174:hover .server-list-name-49f3174 {
-    /* display: block; */
-    visibility: visible;
-    opacity: 1;
 }
 
 .create_server_popup-49f3174 {
@@ -220,6 +209,32 @@
     height: 100%;
     background-color: rgba(0, 0, 0, 0.7);
     z-index: 1000; /* Ensure it covers other content */
+}
+
+.hover_menu_item-115e1fe{}
+
+.hover_menu_popup_hidden-115e1fe {
+    opacity: 0;
+    transition: opacity 0.2s;
+    visibility: hidden;
+}
+
+.hover_menu_popup_visible-115e1fe {
+    opacity: 1;
+    transition: opacity 0.2s;
+    visibility: visible;
+    will-change: transform;
+}
+
+.hover_menu_popup_whenhover-115e1fe {
+    opacity: 0;
+    transition: opacity 0.2s;
+    visibility: hidden;
+}
+
+.hover_menu_item-115e1fe:hover + .hover_menu_popup_whenhover-115e1fe {
+    opacity: 1;
+    visibility: visible;
 }
 
 .login-container-179dd24 {

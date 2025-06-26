@@ -6,7 +6,7 @@ use wasm_bindgen::{JsCast, JsValue};
 use crate::{
     app::LoggedInSignal,
     home::create_server::CreateServerPopup,
-    utils::{invoke},
+    utils::{hover_menu::{HoverMenu, HoverMenuDirection, HoverMenuTrigger}, invoke},
 };
 
 stylance::import_style!(
@@ -88,38 +88,36 @@ pub fn Sidebar(active_server: RwSignal<Option<Server>>) -> impl IntoView {
 
 #[component]
 pub fn LeftIcon(img_url: String, name: String, mut onclick: impl FnMut() -> () + 'static) -> impl IntoView {
-    let parent = NodeRef::new();
-    let (top_signal, set_top_signal) = signal("0px".to_string());
     view! {
-        <li
-            class=style::server_list_item
-            node_ref=parent
-            on:mouseover=move |_| {
-                if let Some(parent) = parent.get() {
-                    let top = parent.get_bounding_client_rect().top();
-                    set_top_signal.set(format!("{}px", top + 32.0));
+        <div class=style::server_list_item>
+            <HoverMenu
+                on:click=move |_| {
+                    onclick();
                 }
-            }
-            on:click=move |_| {
-                onclick();
-            }
-        >
-            <img
-                src=img_url
-                class=style::server_list_icon
-                on:error=move |event: web_sys::ErrorEvent| {
-                    log!("Failed to load server icon: {:?}", event);
-                    let target = event.target().unwrap();
-                    if let Some(img) = target
-                        .dyn_ref::<web_sys::HtmlImageElement>()
-                    {
-                        img.set_src("/public/leptos.svg");
-                    }
+                item=view! {
+                    <img
+                        src=img_url
+                        class=style::server_list_icon
+                        on:error=move |event: web_sys::ErrorEvent| {
+                            log!("Failed to load server icon: {:?}", event);
+                            let target = event.target().unwrap();
+                            if let Some(img) = target
+                                .dyn_ref::<web_sys::HtmlImageElement>()
+                            {
+                                img.set_src("/public/leptos.svg");
+                            }
+                        }
+                    />
                 }
+                popup = view! {
+                    <span class=style::server_list_name>
+                        {name}
+                    </span>
+                }
+                direction = HoverMenuDirection::Right
+                trigger = HoverMenuTrigger::Hover
             />
-            <span class=style::server_list_name style:top=top_signal>
-                {name}
-            </span>
-        </li>
-    }
+        </div>
+}
+    
 }

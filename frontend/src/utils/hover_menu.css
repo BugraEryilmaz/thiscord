@@ -1,0 +1,25 @@
+.hover_menu_item{}
+
+.hover_menu_popup_hidden {
+    opacity: 0;
+    transition: opacity 0.2s;
+    visibility: hidden;
+}
+
+.hover_menu_popup_visible {
+    opacity: 1;
+    transition: opacity 0.2s;
+    visibility: visible;
+    will-change: transform;
+}
+
+.hover_menu_popup_whenhover {
+    opacity: 0;
+    transition: opacity 0.2s;
+    visibility: hidden;
+}
+
+.hover_menu_item:hover + .hover_menu_popup_whenhover {
+    opacity: 1;
+    visibility: visible;
+}
