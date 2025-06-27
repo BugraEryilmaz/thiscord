@@ -129,12 +129,12 @@ pub fn HoverMenu<I: IntoView, P: IntoView>(
                 style:left=move || format!("{}px", x.get())
                 style:top=move || format!("{}px", y.get())
                 style:position="absolute"
+                style:z-index="1000"
                 class=move || {classes!(
                     if trigger == HoverMenuTrigger::Click && visible.get() { style::hover_menu_popup_visible }
                     else if trigger == HoverMenuTrigger::Click { style::hover_menu_popup_hidden }
                     else { style::hover_menu_popup_whenhover }
                 )}
-                style:z_index="1000"
             >
                 {popup}
             </div>
@@ -146,7 +146,7 @@ pub fn HoverMenu<I: IntoView, P: IntoView>(
                 style:left="0"
                 style:right="0"
                 style:bottom="0"
-                style:z_index="999"
+                style:z-index="999"
                 style:width="100%"
                 style:height="100%"
                 class=move || {classes!(

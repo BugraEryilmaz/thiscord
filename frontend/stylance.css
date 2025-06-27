@@ -147,8 +147,7 @@
 }
 
 .server-list-name-49f3174 {
-    /* background-color: var(--quinary-color); */
-    background-color: red !important;
+    background-color: var(--quinary-color);
     text-align: center;
     border-radius: 0.25rem;
     box-shadow: 0 2px 5px rgba(0, 0, 0, 0.1);
