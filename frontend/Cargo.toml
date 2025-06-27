@@ -15,8 +15,9 @@ console_error_panic_hook = "0.1.7"
 uuid = { version = "1.17.0", features = ["js", "serde", "v4"] }
 front-shared = { path = "./front-shared" }
 stylance = { version = "0.6.0", features = ["nightly"] }
-web-sys = { version = "0.3.77", features = ["DomRect", "Element", "FileList", "HtmlInputElement", "File"] }
+web-sys = { version = "0.3.77", features = ["DomRect", "Element", "FileList", "HtmlInputElement", "File", "Clipboard", "Navigator"] }
 shared = { path = "../shared", default-features = false}
+gloo-timers = { version = "0.3.0", features = ["futures"] }
     
 [workspace]
 members = ["src-tauri"]

@@ -1,3 +1,4 @@
+use std::time::Duration;
 use std::vec;
 
 use leptos::logging::log;
@@ -6,8 +7,13 @@ use leptos::task::spawn_local;
 use shared::models::ChannelWithUsers;
 use shared::models::JoinChannel;
 use shared::models::Server;
+use stylance::classes;
 use uuid::Uuid;
 
+use crate::utils::hover_menu::HoverMenu;
+use crate::utils::hover_menu::HoverMenuBackgroundStyle;
+use crate::utils::hover_menu::HoverMenuDirection;
+use crate::utils::hover_menu::HoverMenuTrigger;
 use crate::utils::invoke;
 
 #[derive(serde::Serialize, serde::Deserialize)]
@@ -88,11 +94,48 @@ pub fn ChannelList(
     let (show_voice_channels, set_show_voice_channels) = signal(true);
     let (text_channels, _set_text_channels) = signal(text_channels);
     let (voice_channels, _set_voice_channels) = signal(voice_channels);
+
     view! {
         <ul class=style::channel_list>
-            <li class=style::channel_list_servername>
-                <h2>{ move || server_name.get().map_or("No active server".to_string(), |s| s.name.clone()) }</h2>
-            </li>
+            <HoverMenu
+                item=move || {
+                    view! {
+                        <li class=style::channel_list_servername>
+                            <h2>{ move || server_name.get().map_or("No active server".to_string(), |s| s.name.clone()) }</h2>
+                        </li>
+                    }
+                }
+                popup=move || {
+                    let (is_copied, set_is_copied) = signal(false);
+                    view! {
+                        <div class=style::channel_list_servername>
+                            <p>"Join Channel: "
+                                <div class=move || classes!(style::channel_copiable_text, { if is_copied.get() { Some(style::copied) } else { None } })
+                                    on:click=move |_| {
+                                        if let Some(server) = server_name.get() {
+                                            let clipboard = window().navigator().clipboard();
+                                            let connection_string = server.connection_string.clone();
+                                            let _ = clipboard.write_text(connection_string.as_str());
+                                            set_is_copied.set(true);
+                                            spawn_local(async move {
+                                                gloo_timers::future::sleep(Duration::from_millis(500)).await;
+                                                set_is_copied.set(false);
+                                            });
+                                        } else {
+                                            log!("No active server to copy connection string from.");
+                                        }
+                                    }
+                                >
+                                     { move || if is_copied.get() { "Copied!".to_string() } else { server_name.get().map_or("No channel".to_string(), |c| c.connection_string.clone()) } }
+                                </div>
+                            </p>
+                        </div>
+                    }
+                }
+                direction=HoverMenuDirection::Down
+                trigger=HoverMenuTrigger::Click
+                background_style=vec![HoverMenuBackgroundStyle::Brightness]
+            />
             <li class=style::channel_list_groupname
                 on:click=move |_| {
                     set_show_text_channels.update(|v| *v = !*v);

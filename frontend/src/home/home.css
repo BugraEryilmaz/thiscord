@@ -70,16 +70,9 @@
 }
 
 .server-list-name {
-    background-color: var(--quinary-color);
     text-align: center;
-    border-radius: 0.25rem;
     box-shadow: 0 2px 5px rgba(0, 0, 0, 0.1);
     font-size: 1.3rem;
-    margin-left: 1rem;
-    padding: 0.5rem;
-
-    pointer-events: none;
-    white-space: nowrap;
 }
 
 .create_server_popup {

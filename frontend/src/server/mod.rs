@@ -11,6 +11,7 @@ stylance::import_style!(
 
 #[component]
 pub fn ServerComponent(active_server: RwSignal<Option<Server>>) -> impl IntoView {
+    let _ = active_server; // Use this signal to manage the active server state
     view! {
         <div class=style::server_container>
             <p>"This is a placeholder for the server component."</p>

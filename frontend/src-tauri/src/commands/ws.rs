@@ -2,7 +2,7 @@ use front_shared::LoginStatus;
 use tauri::{http, AppHandle};
 use tokio::sync::mpsc::Receiver;
 
-use crate::{commands::{check_cookies, logout}, utils::handle_auth_error, websocket::{websocket_handler, WebSocketRequest}, Error};
+use crate::{commands::{check_cookies, logout}, websocket::{websocket_handler, WebSocketRequest}, Error};
 
 pub fn connect_ws(handle: AppHandle, mut rx: Receiver<WebSocketRequest>) {
     tokio::spawn(async move {

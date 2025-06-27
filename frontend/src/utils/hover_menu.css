@@ -1,5 +1,14 @@
 .hover_menu_item{}
 
+.hover_menu_popup {
+    position: absolute;
+    z-index: 1000;
+    padding: 1rem;
+    background-color: var(--quinary-color);
+    border-radius: 0.25rem;
+    margin: 1rem;
+}
+
 .hover_menu_popup_hidden {
     opacity: 0;
     transition: opacity 0.2s;
@@ -10,7 +19,6 @@
     opacity: 1;
     transition: opacity 0.2s;
     visibility: visible;
-    will-change: transform;
 }
 
 .hover_menu_popup_whenhover {
@@ -22,4 +30,23 @@
 .hover_menu_item:hover + .hover_menu_popup_whenhover {
     opacity: 1;
     visibility: visible;
+}
+
+.hover_menu_popup_background {
+    position: fixed;
+    top: 0;
+    left: 0;
+    right: 0;
+    bottom: 0;
+    z-index: 999;
+    width: 100%;
+    height: 100%;
+}
+
+.hover_menu_popup_background_blur {
+    backdrop-filter: blur(5px);
+}
+
+.hover_menu_popup_background_brightness {
+    backdrop-filter: brightness(0.8);
 }

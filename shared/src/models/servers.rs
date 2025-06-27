@@ -10,6 +10,7 @@ use uuid::Uuid;
 pub struct Server {
     pub id: Uuid,
     pub name: String,
+    pub connection_string: String,
     pub image_url: Option<String>,
 }
 

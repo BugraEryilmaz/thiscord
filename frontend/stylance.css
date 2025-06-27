@@ -75,6 +75,20 @@
     
 }
 
+.channel_copiable_text-1153e2d {
+    display: inline-block;
+    padding: 0.2rem 0.5rem;
+    border-radius: 0.25rem;
+    background-color: var(--primary-color);
+    color: var(--text-color);
+    cursor: pointer;
+    transition: background-color 0.5s ease;
+}
+
+.channel_copiable_text-1153e2d.copied-1153e2d {
+    background-color: green;
+}
+
 .home-container-49f3174 {
     padding: 0;
     margin: 0;
@@ -147,16 +161,9 @@
 }
 
 .server-list-name-49f3174 {
-    background-color: var(--quinary-color);
     text-align: center;
-    border-radius: 0.25rem;
     box-shadow: 0 2px 5px rgba(0, 0, 0, 0.1);
     font-size: 1.3rem;
-    margin-left: 1rem;
-    padding: 0.5rem;
-
-    pointer-events: none;
-    white-space: nowrap;
 }
 
 .create_server_popup-49f3174 {
@@ -212,6 +219,15 @@
 
 .hover_menu_item-115e1fe{}
 
+.hover_menu_popup-115e1fe {
+    position: absolute;
+    z-index: 1000;
+    padding: 1rem;
+    background-color: var(--quinary-color);
+    border-radius: 0.25rem;
+    margin: 1rem;
+}
+
 .hover_menu_popup_hidden-115e1fe {
     opacity: 0;
     transition: opacity 0.2s;
@@ -222,7 +238,6 @@
     opacity: 1;
     transition: opacity 0.2s;
     visibility: visible;
-    will-change: transform;
 }
 
 .hover_menu_popup_whenhover-115e1fe {
@@ -234,6 +249,25 @@
 .hover_menu_item-115e1fe:hover + .hover_menu_popup_whenhover-115e1fe {
     opacity: 1;
     visibility: visible;
+}
+
+.hover_menu_popup_background-115e1fe {
+    position: fixed;
+    top: 0;
+    left: 0;
+    right: 0;
+    bottom: 0;
+    z-index: 999;
+    width: 100%;
+    height: 100%;
+}
+
+.hover_menu_popup_background_blur-115e1fe {
+    backdrop-filter: blur(5px);
+}
+
+.hover_menu_popup_background_brightness-115e1fe {
+    backdrop-filter: brightness(0.8);
 }
 
 .login-container-179dd24 {

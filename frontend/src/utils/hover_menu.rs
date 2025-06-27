@@ -16,6 +16,12 @@ pub enum HoverMenuTrigger {
     Hover,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub enum HoverMenuBackgroundStyle {
+    Brightness,
+    Blur,
+}
+
 struct BoundingClientRect {
     left: f64,
     top: f64,
@@ -50,6 +56,8 @@ pub fn HoverMenu<I: IntoView, P: IntoView>(
     popup: P,
     direction: HoverMenuDirection,
     trigger: HoverMenuTrigger,
+    #[prop(optional)]
+    background_style: Vec<HoverMenuBackgroundStyle>,
 ) -> impl IntoView {
     let parent_ref = NodeRef::new();
     let popup_ref = NodeRef::new();
@@ -64,7 +72,9 @@ pub fn HoverMenu<I: IntoView, P: IntoView>(
                 let parent: HtmlDivElement = parent;
                 let popup: HtmlDivElement = popup;
                 let parent_rect: BoundingClientRect = parent.get_bounding_client_rect().into();
-                let popup_rect: BoundingClientRect = popup.get_bounding_client_rect().into();
+                let mut popup_rect: BoundingClientRect = popup.get_bounding_client_rect().into();
+                popup_rect.width += 32.0; // Adjust for padding and margin 2rem
+                popup_rect.height += 32.0; // Adjust for padding and margin 2rem
                 match direction {
                     HoverMenuDirection::Up => {
                         set_x.set(
@@ -128,12 +138,11 @@ pub fn HoverMenu<I: IntoView, P: IntoView>(
             <div node_ref=popup_ref
                 style:left=move || format!("{}px", x.get())
                 style:top=move || format!("{}px", y.get())
-                style:position="absolute"
-                style:z-index="1000"
                 class=move || {classes!(
                     if trigger == HoverMenuTrigger::Click && visible.get() { style::hover_menu_popup_visible }
                     else if trigger == HoverMenuTrigger::Click { style::hover_menu_popup_hidden }
-                    else { style::hover_menu_popup_whenhover }
+                    else { style::hover_menu_popup_whenhover },
+                    style::hover_menu_popup,
                 )}
             >
                 {popup}
@@ -141,18 +150,21 @@ pub fn HoverMenu<I: IntoView, P: IntoView>(
             <div on:click=move |_| {
                     set_visible.set(false);
                 }
-                style:position="fixed"
-                style:top="0"
-                style:left="0"
-                style:right="0"
-                style:bottom="0"
-                style:z-index="999"
-                style:width="100%"
-                style:height="100%"
                 class=move || {classes!(
                     if trigger == HoverMenuTrigger::Click && visible.get() { style::hover_menu_popup_visible }
                     else if trigger == HoverMenuTrigger::Click { style::hover_menu_popup_hidden }
-                    else { style::hover_menu_popup_whenhover }
+                    else { style::hover_menu_popup_whenhover },
+                    if background_style.contains(&HoverMenuBackgroundStyle::Blur) {
+                        Some(style::hover_menu_popup_background_blur)
+                    } else {
+                        None
+                    },
+                    if background_style.contains(&HoverMenuBackgroundStyle::Brightness) {
+                        Some(style::hover_menu_popup_background_brightness)
+                    } else {
+                        None
+                    },
+                    style::hover_menu_popup_background
                 )}
             >
                 // This div is used to close the popup when clicking outside

@@ -1,4 +1,4 @@
-use std::{cell::Ref, sync::{Arc, Mutex as StdMutex, OnceLock}};
+use std::sync::{Arc, Mutex as StdMutex, OnceLock};
 
 use argon2::{
     Argon2,
