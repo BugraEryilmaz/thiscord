@@ -41,8 +41,7 @@ impl Backend {
         let mut users = vec![];
         let rooms = VoiceRooms::get_or_init();
         if channel.type_ == ChannelType::Voice {
-            let room = rooms.get_room_or_init(channel.id);
-            {
+            if let Some(room) = rooms.get_room(&channel) {
                 let people = room.people.lock().await;
                 for person in people.iter() {
                     if let Some(user_id) = person.id {

@@ -20,11 +20,11 @@ pub fn router() -> axum::Router {
 }
 
 mod post {
-    use shared::{models::AudioChannelMemberUpdate, WebSocketError};
+    use shared::WebSocketError;
 
-    use shared::models::{PermissionType, VoiceUser};
+    use shared::models::PermissionType;
 
-    use crate::{models::user::{OnlineUser, OnlineUsers}, utils::SubscribableOnce};
+    use crate::models::user::{OnlineUser, OnlineUsers};
 
     use super::*;
     pub async fn ws_connection(
@@ -48,8 +48,8 @@ mod post {
             // Add the user to the online users list
             let online_users = OnlineUsers::get();
             let user = auth.user.as_ref().unwrap();
-            let user = OnlineUser::new(user.0.clone(), tx.clone());
-            online_users.add_user(user);
+            let online_user = OnlineUser::new(user.0.clone(), tx.clone());
+            online_users.add_user(online_user.clone());
             loop {
                 tokio::select! {
                     msg = socket.recv() => {
@@ -93,6 +93,13 @@ mod post {
                     }
                 }
             }
+            if let Some(voice_room) = online_user.get_audio_channel() {
+                tracing::info!("Disconnecting from audio channel: {}", voice_room.channel.id);
+                if let Err(err) = voice_room.leave_person(user.0.id).await {
+                    tracing::error!("Failed to leave audio channel: {}", err);
+                }
+            }
+            online_users.remove_user(online_user);
         })
     }
 
@@ -164,44 +171,18 @@ mod post {
                 // Create audio tracks for the user
                 let recv_tracks = web_rtc_connection.create_audio_track_rtp(ROOM_SIZE).await?;
                 // Disconnect old audio channel
-                if let Some(old_channel_id) = online_user.get_audio_channel() {
-                    let old_server = backend.get_server_from_channel(old_channel_id)?;
-                    let old_channel = backend.get_channel(old_server.id, old_channel_id)?.
-                        ok_or(WebSocketError::NotFound)?;
-                    if old_server.id != server_id {
-                        old_server.notify_subscribers(WebSocketMessage::SomeoneLeftAudioChannel {
-                            data: AudioChannelMemberUpdate {
-                                channel: old_channel,
-                                user: VoiceUser {
-                                    id: user.0.id,
-                                    username: user.0.username.clone(),
-                                },
-                            },
-                        }).await;
-                    }
-                    tracing::info!("Leaving audio channel: {}", old_channel_id);
-                    let old_room = VoiceRooms::get_or_init().get_room_or_init(old_channel_id);
-                    if let Err(err) = old_room.leave_person(user.0.id).await {
+                if let Some(old_channel) = online_user.get_audio_channel() {
+                    tracing::info!("Leaving audio channel: {}", old_channel.channel.id);
+                    if let Err(err) = old_channel.leave_person(user.0.id).await {
                         tracing::error!("Failed to leave audio channel: {}", err);
                     }
                 }
                 // Join the voice room
-                let room = VoiceRooms::get_or_init().get_room_or_init(channel_id);
+                let room = VoiceRooms::get_or_init().get_room_or_init(&server, &channel);
                 let person_id = room.join_person(&user.0, recv_tracks).await?;
-                online_user.set_audio_channel(channel_id);
-                server.notify_subscribers(
-                    WebSocketMessage::SomeoneJoinedAudioChannel {
-                        data: AudioChannelMemberUpdate {
-                            channel,
-                            user: VoiceUser {
-                                id: user.0.id,
-                                username: user.0.username.clone(),
-                            },
-                        },
-                    },
-                ).await;
-                // Set up the data forwarding
                 let tracks = room.get_track_i_of_all(person_id).await;
+                online_user.set_audio_channel(room);
+                // Set up the data forwarding
                 let (prod, cons) = HeapRb::<Packet>::new(100).split();
                 let dropped = Arc::new(AtomicBool::new(false));
                 web_rtc_connection
@@ -241,7 +222,7 @@ mod post {
                 tracing::warn!("Received WebRTC offer as the server, this should not happen");
             }
             WebSocketMessage::WebRTCAnswer(rtcsession_description) => {
-                tracing::info!("Received WebRTC answer: {:?}", rtcsession_description);
+                tracing::info!("Received WebRTC answer");
                 // Logic to handle the WebRTC answer
                 // This could involve setting the remote description, etc.
                 if let Some(web_rtc_connection) = web_rtc_connection {
@@ -269,19 +250,15 @@ mod post {
                 }
             }
             WebSocketMessage::DisconnectFromAudioChannel => {
-                if let Some(online_user) = OnlineUsers::get().users.get(&user.0.id) {
-                    let online_user = online_user.value();
-                    if let Some(channel_id) = online_user.get_audio_channel() {
-                        tracing::info!("Disconnecting from audio channel: {}", channel_id);
-                        let room = VoiceRooms::get_or_init().get_room_or_init(channel_id);
-                        if let Err(err) = room.leave_person(user.0.id).await {
-                            tracing::error!("Failed to leave audio channel: {}", err);
-                        }
-                    } else {
-                        tracing::warn!("User {} is not in any audio channel", user.0.id);
+                if let Some(voice_room) = online_user.get_audio_channel() {
+                    tracing::info!("Disconnecting from audio channel: {}", voice_room.channel.id);
+                    if let Err(err) = voice_room.leave_person(user.0.id).await {
+                        tracing::error!("Failed to leave audio channel: {}", err);
                     }
-                    online_user.clear_audio_channel();
+                } else {
+                    tracing::warn!("User {} is not in any audio channel", user.0.id);
                 }
+                online_user.clear_audio_channel();
             },
             WebSocketMessage::Disconnect => todo!(),
             WebSocketMessage::Error { err } => {

@@ -9,11 +9,9 @@ use diesel::prelude::*;
 use tokio::sync::mpsc::Sender;
 use uuid::Uuid;
 
-use crate::Error;
+use crate::{channels::VoiceRoom, utils::SubscribableOnce, Error};
 use shared::{
-    WebSocketMessage,
-    models::{Activation, ActivationFull, Signup, Users},
-    schema::{user_activations, users},
+    models::{Activation, ActivationFull, Server, Signup, Users}, schema::{user_activations, users}, WebSocketMessage
 };
 
 use super::Backend;
@@ -170,13 +168,18 @@ impl OnlineUsers {
     pub fn get_user(&self, user_id: Uuid) -> Option<OnlineUser> {
         self.users.get(&user_id).map(|entry| entry.value().clone())
     }
+
+    pub fn remove_user(&self, user: OnlineUser) {
+        Server::unsubscribe(&user);
+        self.users.remove(&user.user.id);
+    }
 }
 
 #[derive(Clone)]
 pub struct OnlineUser {
     pub user: Users,
     pub websocket: Sender<WebSocketMessage>,
-    pub audio_channel: Arc<StdMutex<Option<Uuid>>>,
+    pub audio_channel: Arc<StdMutex<Option<VoiceRoom>>>,
 }
 
 impl Hash for OnlineUser {
@@ -201,16 +204,16 @@ impl OnlineUser {
             audio_channel: Arc::new(StdMutex::new(None)),
         }
     }
-    pub fn set_audio_channel(&self, channel_id: Uuid) {
+    pub fn set_audio_channel(&self, channel: VoiceRoom) {
         let mut audio_channel = self.audio_channel.lock().unwrap();
-        *audio_channel = Some(channel_id);
+        *audio_channel = Some(channel);
     }
     pub fn clear_audio_channel(&self) {
         let mut audio_channel = self.audio_channel.lock().unwrap();
         *audio_channel = None;
     }
-    pub fn get_audio_channel(&self) -> Option<Uuid> {
+    pub fn get_audio_channel(&self) -> Option<VoiceRoom> {
         let audio_channel = self.audio_channel.lock().unwrap();
-        *audio_channel
+        audio_channel.clone()
     }
 }

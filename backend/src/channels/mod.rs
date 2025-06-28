@@ -1,14 +1,16 @@
 use std::sync::{Arc, OnceLock};
 
 use dashmap::DashMap;
-use shared::{models::Users, TrackLocalStaticRTP};
+use shared::{
+    models::{AudioChannelMemberUpdate, Channel, Server, Users, VoiceUser}, TrackLocalStaticRTP
+};
 use tokio::sync::Mutex;
 use uuid::Uuid;
 
-use crate::Error;
+use crate::{utils::SubscribableOnce, Error};
 
-pub mod web;
 pub mod backend;
+pub mod web;
 
 pub static ROOM_SIZE: usize = 10;
 
@@ -25,28 +27,35 @@ impl VoiceRooms {
             rooms
         })
     }
-    pub fn get_room_or_init(&self, id: Uuid) -> VoiceRoom {
+
+    pub fn get_room_or_init(&self, server: &Server, channel: &Channel) -> VoiceRoom {
         self.voice_rooms
-            .entry(id)
-            .or_insert_with(|| VoiceRoom::new(id))
+            .entry(channel.id)
+            .or_insert_with(|| VoiceRoom::new(server.clone(), channel.clone()))
             .value()
             .clone()
+    }
+
+    pub fn get_room(&self, channel: &Channel) -> Option<VoiceRoom> {
+        self.voice_rooms
+            .get(&channel.id)
+            .map(|entry| entry.value().clone())
     }
 }
 
 #[derive(Clone)]
 pub struct VoiceRoom {
-    pub id: Uuid,
+    pub server: Server,
+    pub channel: Channel,
     pub people: Arc<Mutex<[MaybeVoicePerson; ROOM_SIZE]>>,
 }
 
 impl VoiceRoom {
-    pub fn new(id: Uuid) -> Self {
+    pub fn new(server: Server, channel: Channel) -> Self {
         VoiceRoom {
-            id,
-            people: Arc::new(Mutex::new(
-                std::array::from_fn(|_| MaybeVoicePerson::new()),
-            )),
+            server,
+            channel,
+            people: Arc::new(Mutex::new(std::array::from_fn(|_| MaybeVoicePerson::new()))),
         }
     }
 
@@ -58,7 +67,19 @@ impl VoiceRoom {
         let mut people = self.people.lock().await;
         for (i, slot) in people.iter_mut().enumerate() {
             if slot.id.is_none() {
+                self.server.notify_subscribers(
+                    shared::WebSocketMessage::SomeoneJoinedAudioChannel {
+                        data: AudioChannelMemberUpdate {
+                            channel: self.channel.clone(),
+                            user: VoiceUser {
+                                id: user.id,
+                                username: user.username.clone(),
+                            },
+                        },
+                    },
+                ).await;
                 slot.set_person(user, recv_tracks).await;
+
                 return Ok(i);
             }
         }
@@ -69,6 +90,17 @@ impl VoiceRoom {
         let mut people = self.people.lock().await;
         for slot in people.iter_mut() {
             if slot.id == Some(person_id) {
+                self.server.notify_subscribers(
+                    shared::WebSocketMessage::SomeoneLeftAudioChannel {
+                        data: AudioChannelMemberUpdate {
+                            channel: self.channel.clone(),
+                            user: VoiceUser {
+                                id: person_id,
+                                username: slot.name.clone().unwrap_or_default(),
+                            },
+                        },
+                    },
+                ).await;
                 slot.reset_person().await;
                 return Ok(());
             }
