@@ -61,6 +61,7 @@ mod post {
 }
 mod get {
     use futures_util::future::join_all;
+    use shared::models::Server;
 
     use crate::{models::user::OnlineUsers, utils::SubscribableOnce};
 
@@ -120,6 +121,7 @@ mod get {
         }).collect::<Vec<_>>();
         let channels = join_all(channels).await;
         if let Some(online_user) = online_user {
+            Server::unsubscribe(&online_user);
             server.subscribe(&online_user);
         }
         (StatusCode::OK, serde_json::to_string(&channels).unwrap()).into_response()

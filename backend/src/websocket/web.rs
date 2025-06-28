@@ -166,10 +166,12 @@ mod post {
                 // Disconnect old audio channel
                 if let Some(old_channel_id) = online_user.get_audio_channel() {
                     let old_server = backend.get_server_from_channel(old_channel_id)?;
+                    let old_channel = backend.get_channel(old_server.id, old_channel_id)?.
+                        ok_or(WebSocketError::NotFound)?;
                     if old_server.id != server_id {
                         old_server.notify_subscribers(WebSocketMessage::SomeoneLeftAudioChannel {
                             data: AudioChannelMemberUpdate {
-                                channel: channel.clone(),
+                                channel: old_channel,
                                 user: VoiceUser {
                                     id: user.0.id,
                                     username: user.0.username.clone(),
