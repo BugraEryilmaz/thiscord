@@ -22,6 +22,7 @@ pub fn router() -> Router {
 
 mod post {
     use axum::Json;
+    use shared::models::ConnectionString;
 
     use super::*;
 
@@ -118,11 +119,6 @@ mod post {
                 (axum::http::StatusCode::INTERNAL_SERVER_ERROR, e.to_string())
             }
         }
-    }
-
-    #[derive(serde::Deserialize)]
-    pub struct ConnectionString  {
-        pub connection_string: String,
     }
 
     pub async fn join_server(auth: AuthSession, Json(connection_string): Json<ConnectionString>) -> impl IntoResponse {

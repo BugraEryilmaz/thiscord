@@ -1,6 +1,6 @@
 use leptos::{logging::log, prelude::*, task::spawn_local};
 use serde_wasm_bindgen::{from_value, to_value};
-use shared::models::ServerWithoutID;
+use shared::models::{ConnectionString, ServerWithoutID};
 use wasm_bindgen::JsValue;
 
 use crate::utils::{convert_file_src, invoke};
@@ -68,6 +68,47 @@ pub fn CreateServerPopup(on_create: impl FnMut() -> () + 'static + Clone) -> imp
                 <input type="text" placeholder="Server Name" required node_ref=name_ref />
 
                 <button type="submit">"Create"</button>
+            </form>
+        </div>
+    }
+}
+
+
+#[component]
+pub fn JoinServerPopup(on_join: impl FnMut() -> () + 'static + Clone) -> impl IntoView {
+    let connection_string_ref = NodeRef::new();
+
+    view! {
+        <div class=style::create_server_popup>
+            <form 
+            class=style::create_server_form
+            on:submit=move |event| {
+                event.prevent_default();
+                let connection_string = connection_string_ref.get().unwrap().value();
+                log!("Joining server with name: {}", connection_string);
+                let join_server_request = ConnectionString {
+                    connection_string,
+                };
+                let mut on_join = on_join.clone();
+                spawn_local(async move {
+                    match invoke("join_server", to_value(&join_server_request).unwrap()).await {
+                        Ok(_) => {
+                            log!("Server joined successfully");
+                            on_join();
+                        }
+                        Err(err) => {
+                            log!("Error joining server: {:?}", err);
+                        }
+                    }
+                });
+            }
+
+            >
+                <h2>"Join Server"</h2>
+
+                <input type="text" placeholder="Join String (like OiclsjAz)" required node_ref=connection_string_ref />
+
+                <button type="submit">"Join"</button>
             </form>
         </div>
     }

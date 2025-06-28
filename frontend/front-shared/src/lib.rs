@@ -1,6 +1,7 @@
 pub const URL: &str = "localhost:8081";
 
 mod update;
+use shared::models::AudioChannelMemberUpdate;
 pub use update::{DownloadProgress, UpdateState};
 
 mod login;
@@ -24,3 +25,5 @@ pub trait FromEvent {
     }
     
 }
+
+impl FromEvent for AudioChannelMemberUpdate {}

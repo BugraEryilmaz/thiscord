@@ -9,7 +9,7 @@ use reqwest::cookie::CookieStore;
 use reqwest::header;
 use ringbuf::HeapRb;
 use front_shared::URL;
-use tauri::{AppHandle, Manager};
+use tauri::{AppHandle, Emitter, Manager};
 use tokio::sync::mpsc::Sender;
 use tokio::{select, sync::mpsc::Receiver};
 use tokio_tungstenite::{
@@ -71,7 +71,7 @@ pub async fn websocket_handler(
                                 continue;
                             }
                         };
-                        if let Err(e) = handle_websocket_message(message, &mut web_rtc_connection, ws_tx.clone(), &state).await {
+                        if let Err(e) = handle_websocket_message(message, &mut web_rtc_connection, ws_tx.clone(), handle.clone()).await {
                             tracing::error!("Failed to handle WebSocket message: {}", e);
                             continue;
                         }
@@ -105,7 +105,7 @@ pub async fn websocket_handler(
             msg = cmd_rx.recv() => {
                 let msg = match msg {
                     Some(message) => {
-                        handle_internal_request(message, &mut web_rtc_connection, ws_tx.clone(), &state).await
+                        handle_internal_request(message, &mut web_rtc_connection, ws_tx.clone(), handle.clone()).await
                     },
                     None => {
                         tracing::error!("WebSocket internal message channel closed");
@@ -126,8 +126,9 @@ pub async fn handle_internal_request(
     request: WebSocketRequest,
     web_rtc_connection: &mut Option<WebRTCConnection>,
     socket: Sender<WebSocketMessage>,
-    state: &AppState,
+    handle: AppHandle,
 ) -> Result<(), Error> {
+    let state = handle.state::<AppState>();
     match request {
         WebSocketRequest::JoinAudioChannel {
             server_id,
@@ -215,7 +216,7 @@ pub async fn handle_websocket_message(
     message: WebSocketMessage,
     web_rtc_connection: &mut Option<WebRTCConnection>,
     tx: Sender<WebSocketMessage>,
-    _state: &AppState,
+    handle: AppHandle,
 ) -> Result<(), Error> {
     match message {
         WebSocketMessage::JoinAudioChannel {
@@ -266,6 +267,22 @@ pub async fn handle_websocket_message(
             tracing::error!("WebSocket error: {}", err);
             return Err(Error::WebSocketError(err));
         },
+        WebSocketMessage::SomeoneJoinedAudioChannel { data } => {
+            tracing::info!("User {} joined audio channel {} on server {}", data.user.username, data.channel.id, data.channel.server_id);
+            let handle = handle;
+            // Fails only when the event name is invalid
+            if handle.emit("someone-joined-audio-channel", data).is_err() {
+                tracing::error!("Event name 'someone-joined-audio-channel' is invalid");
+            }
+        }
+        WebSocketMessage::SomeoneLeftAudioChannel { data } => {
+            tracing::info!("User {} left audio channel {} on server {}", data.user.username, data.channel.id, data.channel.server_id);
+            let handle = handle;
+            // Fails only when the event name is invalid
+            if handle.emit("someone-left-audio-channel", data).is_err() {
+                tracing::error!("Event name 'someone-left-audio-channel' is invalid");
+            }
+        }
     }
     Ok(())
 }

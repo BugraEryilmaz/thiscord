@@ -62,6 +62,8 @@ mod post {
 mod get {
     use futures_util::future::join_all;
 
+    use crate::{models::user::OnlineUsers, utils::SubscribableOnce};
+
     use super::*;
 
     pub async fn list_channels(
@@ -71,6 +73,13 @@ mod get {
         let user = session.user.unwrap();
         let internal_err =
             |e: Error| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()).into_response();
+        let server = match session.backend.get_server(server_id) {
+            Ok(server) => server,
+            Err(e) => {
+                return internal_err(e);
+            }
+        };
+        let online_user = OnlineUsers::get().get_user(user.0.id);
         let channels = match session.backend.list_channels(server_id) {
             Ok(channels) => channels,
             Err(e) => {
@@ -110,6 +119,9 @@ mod get {
             Backend::convert_channel_to_with_users(channel).await
         }).collect::<Vec<_>>();
         let channels = join_all(channels).await;
+        if let Some(online_user) = online_user {
+            server.subscribe(&online_user);
+        }
         (StatusCode::OK, serde_json::to_string(&channels).unwrap()).into_response()
     }
 }

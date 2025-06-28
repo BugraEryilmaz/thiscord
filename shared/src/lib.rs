@@ -26,6 +26,8 @@ mod notwasm {
         ice_transport::ice_candidate::RTCIceCandidateInit,
         peer_connection::sdp::session_description::RTCSessionDescription,
     };
+
+    use crate::models::AudioChannelMemberUpdate;
     
     #[derive(Debug, thiserror::Error)]
     pub enum Error {
@@ -54,6 +56,8 @@ mod notwasm {
     #[derive(Debug, Clone, Serialize, Deserialize)]
     pub enum WebSocketMessage {
         JoinAudioChannel { server_id: Uuid, channel_id: Uuid },
+        SomeoneJoinedAudioChannel { data: AudioChannelMemberUpdate },
+        SomeoneLeftAudioChannel { data: AudioChannelMemberUpdate },
         WebRTCOffer(RTCSessionDescription),
         WebRTCAnswer(RTCSessionDescription),
         IceCandidate(RTCIceCandidateInit),

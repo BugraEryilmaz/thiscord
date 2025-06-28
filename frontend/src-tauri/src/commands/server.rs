@@ -32,9 +32,21 @@ pub async fn create_server(
     Ok(())
 }
 
-#[tauri::command]
-pub async fn join_server(_app: tauri::AppHandle, _connection_string: String) -> Result<(), String> {
+#[tauri::command(rename_all = "snake_case")]
+pub async fn join_server(_app: tauri::AppHandle, connection_string: String) -> Result<(), String> {
     // Implementation for joining a server
+    let state = _app.state::<AppState>();
+    let resp = state
+        .client
+        .post(format!("https://{}/servers/join-server", URL))
+        .json(&shared::models::ConnectionString {
+            connection_string,
+        })
+        .send()
+        .await;
+
+    let _ = handle_auth_error(resp, _app).await.map_err(|e| e.to_string())?;
+    // Handle the response as needed, e.g., check if the server was joined successfully
     Ok(())
 }
 

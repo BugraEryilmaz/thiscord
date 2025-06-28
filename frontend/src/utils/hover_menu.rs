@@ -63,7 +63,7 @@ pub fn HoverMenu<I: IntoView, P: IntoView>(
     let popup_ref = NodeRef::new();
     let (x, set_x) = signal(0);
     let (y, set_y) = signal(0);
-    let (modified, set_modified) = signal(true);
+    let (_modified, set_modified) = signal(true);
     let (visible, set_visible) = signal(trigger == HoverMenuTrigger::Hover);
 
     let calc = move || {
@@ -115,7 +115,7 @@ pub fn HoverMenu<I: IntoView, P: IntoView>(
                 class=style::hover_menu_item
                 node_ref=parent_ref
                 on:mouseover=move |_| {
-                    if matches!(trigger.clone(), HoverMenuTrigger::Hover) && modified.get() {
+                    if matches!(trigger.clone(), HoverMenuTrigger::Hover) {
                         calc();
                         log!("HoverMenu: Mouse entered, calculating position and showing popup");
                         set_modified.set(false);

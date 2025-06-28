@@ -28,7 +28,7 @@ pub struct Channel {
     pub updated_at: chrono::NaiveDateTime,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Hash)]
 pub struct VoiceUser {
     pub id: Uuid,
     pub username: String,
@@ -37,6 +37,12 @@ pub struct VoiceUser {
 pub struct ChannelWithUsers {
     pub channel: Channel,
     pub users: Vec<VoiceUser>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct AudioChannelMemberUpdate {
+    pub channel: Channel,
+    pub user: VoiceUser,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

@@ -1,4 +1,4 @@
-use std::sync::{Arc, Mutex as StdMutex, OnceLock};
+use std::{hash::Hash, sync::{Arc, Mutex as StdMutex, OnceLock}};
 
 use argon2::{
     Argon2,
@@ -157,7 +157,7 @@ pub struct OnlineUsers {
     pub users: DashMap<Uuid, OnlineUser>,
 }
 impl OnlineUsers {
-    pub fn get_or_init() -> &'static OnlineUsers {
+    pub fn get() -> &'static OnlineUsers {
         ONLINE_USERS.get_or_init(|| OnlineUsers {
             users: DashMap::new(),
         })
@@ -166,20 +166,39 @@ impl OnlineUsers {
     pub fn add_user(&self, user: OnlineUser) {
         self.users.insert(user.user.id, user);
     }
+
+    pub fn get_user(&self, user_id: Uuid) -> Option<OnlineUser> {
+        self.users.get(&user_id).map(|entry| entry.value().clone())
+    }
 }
 
+#[derive(Clone)]
 pub struct OnlineUser {
     pub user: Users,
     pub websocket: Sender<WebSocketMessage>,
-    pub audio_channel: StdMutex<Option<Uuid>>,
+    pub audio_channel: Arc<StdMutex<Option<Uuid>>>,
 }
+
+impl Hash for OnlineUser {
+    fn hash<H: std::hash::Hasher>(&self, state: &mut H) {
+        self.user.id.hash(state);
+    }
+}
+
+impl PartialEq for OnlineUser {
+    fn eq(&self, other: &Self) -> bool {
+        self.user.id == other.user.id
+    }
+}
+
+impl Eq for OnlineUser {}
 
 impl OnlineUser {
     pub fn new(user: Users, websocket: Sender<WebSocketMessage>) -> Self {
         Self {
             user,
             websocket,
-            audio_channel: StdMutex::new(None),
+            audio_channel: Arc::new(StdMutex::new(None)),
         }
     }
     pub fn set_audio_channel(&self, channel_id: Uuid) {

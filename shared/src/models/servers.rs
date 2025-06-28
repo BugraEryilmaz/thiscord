@@ -34,3 +34,8 @@ pub struct ServerFull {
     pub image_url: Option<String>,
     pub image_path: Option<String>,
 }
+
+#[derive(Serialize, Deserialize, Debug, Clone)]
+pub struct ConnectionString {
+    pub connection_string: String,
+}

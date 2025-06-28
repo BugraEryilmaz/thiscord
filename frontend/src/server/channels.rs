@@ -7,6 +7,7 @@ use leptos::task::spawn_local;
 use shared::models::ChannelWithUsers;
 use shared::models::JoinChannel;
 use shared::models::Server;
+use shared::models::AudioChannelMemberUpdate;
 use stylance::classes;
 use uuid::Uuid;
 
@@ -15,6 +16,7 @@ use crate::utils::hover_menu::HoverMenuBackgroundStyle;
 use crate::utils::hover_menu::HoverMenuDirection;
 use crate::utils::hover_menu::HoverMenuTrigger;
 use crate::utils::invoke;
+use crate::utils::create_listener;
 
 #[derive(serde::Serialize, serde::Deserialize)]
 struct GetChannels {
@@ -49,6 +51,21 @@ pub fn Channels(active_server: RwSignal<Option<Server>>) -> impl IntoView {
             })
         } else {
             Ok((vec![], vec![]))
+        }
+    });
+    // Create a listener for the "someone-joined-audio-channel" event
+    create_listener("someone-joined-audio-channel", move |data: AudioChannelMemberUpdate| {
+        log!("User {} joined audio channel {} on server {}", data.user.username, data.channel.id, data.channel.server_id);
+        if active_server.get().map_or(false, |s| s.id == data.channel.server_id) {
+            // Update the UI to reflect the new user in the audio channel
+            active_server.update(|_| {});
+        }
+    });
+    create_listener("someone-left-audio-channel", move |data: AudioChannelMemberUpdate| {
+        log!("User {} left audio channel {} on server {}", data.user.username, data.channel.id, data.channel.server_id);
+        if active_server.get().map_or(false, |s| s.id == data.channel.server_id) {
+            // Update the UI to reflect the new user in the audio channel
+            active_server.update(|_| {});
         }
     });
     view! {

@@ -1,4 +1,6 @@
-use crate::{models::Backend, Error};
+use std::collections::HashSet;
+
+use crate::{models::{user::OnlineUser, Backend}, servers::UsersActiveServers, utils::SubscribableOnce, Error};
 use shared::{models::{ChannelType, NewChannel, PermissionType, Server, DEFAULT_OWNER_PERMISSIONS, DEFAULT_USER_PERMISSIONS}, schema};
 use diesel::prelude::*;
 use rand::{Rng, distr::Alphanumeric};
@@ -190,5 +192,43 @@ impl Backend {
             .select(Server::as_select())
             .load::<Server>(&mut conn)
             .map_err(|e| Error::from(e))
+    }
+
+    pub fn get_server(&self, server_id: Uuid) -> Result<Server, Error> {
+        let mut conn = self.get_connection()?;
+        schema::servers::table
+            .filter(schema::servers::id.eq(server_id))
+            .select(Server::as_select())
+            .first::<Server>(&mut conn)
+            .map_err(|e| Error::from(e))
+    }
+
+    pub fn get_server_from_channel(&self, channel_id: Uuid) -> Result<Server, Error> {
+        let mut conn = self.get_connection()?;
+        schema::channels::table
+            .inner_join(schema::servers::table.on(schema::servers::id.eq(schema::channels::server_id)))
+            .filter(schema::channels::id.eq(channel_id))
+            .select(Server::as_select())
+            .first::<Server>(&mut conn)
+            .map_err(|e| Error::from(e))
+    }
+}
+
+impl SubscribableOnce for Server {
+    fn subscribe(&self, user: &OnlineUser) {
+        UsersActiveServers::get().add_user_to_server(user, self);
+    }
+
+    fn unsubscribe(user: &OnlineUser) {
+        UsersActiveServers::get().remove_user_from_server(user);
+    }
+
+    fn get_subscribers(&self) -> HashSet<OnlineUser> {
+        UsersActiveServers::get().get_users_for_server(self)
+    }
+
+    fn get_subscribed(user: &OnlineUser) -> Option<Self> {
+        UsersActiveServers::get().get_server_for_user(user)
+            .map(|server| server.clone())
     }
 }

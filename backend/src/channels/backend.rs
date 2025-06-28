@@ -1,6 +1,6 @@
 #![allow(unused_imports)]
 use crate::{
-    channels::{VoiceRooms, VOICE_ROOMS}, Error, models::Backend,
+    channels::{VoiceRooms, VOICE_ROOMS}, models::Backend, servers::UsersActiveServers, Error
 };
 use shared::{models::{Channel, ChannelType, ChannelWithUsers, NewChannel, PermissionType, Server, VoiceUser}, schema};
 use diesel::prelude::*;
