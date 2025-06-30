@@ -8,8 +8,8 @@ pub mod websocket;
 use audio::tauri::*;
 use commands::*;
 use reqwest::cookie::CookieStore;
-use front_shared::{Session, UpdateState, URL};
-use tauri::{Emitter, Manager, Url};
+use front_shared::{Session, URL};
+use tauri::{Manager, Url};
 use tokio::spawn;
 use tokio::sync::RwLock;
 use tokio::time::sleep;
@@ -18,12 +18,6 @@ use tracing_subscriber::util::SubscriberInitExt;
 pub use utils::Error;
 
 // Learn more about Tauri commands at https://tauri.app/develop/calling-rust/
-
-#[tauri::command]
-async fn test_emit(app: tauri::AppHandle) {
-    // Emit an event to the frontend
-    app.emit("update_state", UpdateState::Downloading).unwrap();
-}
 
 use diesel_migrations::{embed_migrations, EmbeddedMigrations, MigrationHarness};
 
@@ -100,7 +94,6 @@ pub async fn run() {
             unmute_microphone,
             deafen_speaker,
             undeafen_speaker,
-            test_emit,
             check_updates,
             login,
             check_cookies,
@@ -112,6 +105,8 @@ pub async fn run() {
             pick_file,
             get_channels,
             join_channel,
+            disconnect_call,
+            get_status,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

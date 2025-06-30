@@ -10,6 +10,7 @@ pub struct Session {
     pub id: i32,
     pub token: String,
     pub user_id: Uuid,
+    pub username: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -32,6 +33,7 @@ impl Default for Session {
             id: 0,
             token: String::new(),
             user_id: Uuid::default(),
+            username: String::new(),
         }
     }
 }

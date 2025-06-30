@@ -259,6 +259,10 @@ mod post {
                     tracing::warn!("User {} is not in any audio channel", user.0.id);
                 }
                 online_user.clear_audio_channel();
+                // Reset the WebRTC connection
+                if let Some(web_rtc_connection) = web_rtc_connection.take() {
+                    web_rtc_connection.close().await;
+                }
             },
             WebSocketMessage::Disconnect => todo!(),
             WebSocketMessage::Error { err } => {

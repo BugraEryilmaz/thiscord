@@ -60,4 +60,5 @@ pub struct NewChannel {
 pub struct JoinChannel {
     pub server_id: Uuid,
     pub channel_id: Uuid,
+    pub channel_name: String,
 }

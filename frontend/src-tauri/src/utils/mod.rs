@@ -5,9 +5,11 @@ use std::sync::Arc;
 
 use diesel::prelude::*;
 pub use err::*;
+use front_shared::Status;
 use reqwest::{cookie::Jar, Client};
-use tauri::{AppHandle, Manager};
+use tauri::{AppHandle, Emitter, Manager};
 use tokio::sync::{mpsc::Sender, RwLock};
+use std::sync::Mutex as StdMutex;
 pub use update::*;
 
 use crate::{audio::AudioElement, websocket::WebSocketRequest};
@@ -18,6 +20,7 @@ pub struct AppState {
     pub websocket: RwLock<Sender<WebSocketRequest>>,
     pub client: Client,
     pub cookie_store: Arc<Jar>,
+    pub conn_status: Arc<StdMutex<Status>>,
 }
 
 impl AppState {
@@ -33,7 +36,16 @@ impl AppState {
             websocket,
             client,
             cookie_store,
+            conn_status: Arc::new(StdMutex::new(Status::Offline)),
         }
+    }
+
+    pub fn change_status(&self, status: Status, handle: &AppHandle) {
+        {
+            let mut conn_status = self.conn_status.lock().unwrap();
+            *conn_status = status.clone();
+        }
+        let _ = handle.emit("status_change", status);
     }
 }
 

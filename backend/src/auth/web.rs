@@ -1,12 +1,13 @@
-use shared::models::Signup;
 use axum::Json;
 use axum::Router;
 use axum::http::StatusCode;
 use axum::response::IntoResponse;
 use axum::routing::{get, post};
+use shared::models::LoginResponse;
+use shared::models::Signup;
 
-use shared::models::Credentials;
 use crate::models::AuthSession;
+use shared::models::Credentials;
 
 pub fn router() -> Router {
     Router::new()
@@ -36,8 +37,12 @@ mod post {
         };
         match auth.login(&user).await {
             Ok(_) => {
+                let response: LoginResponse = LoginResponse {
+                    id: user.0.id,
+                    username: user.0.username.clone(),
+                };
                 tracing::info!("User {} logged in", user.0.username);
-                (StatusCode::OK, serde_json::to_string(&user.0.id).unwrap())
+                (StatusCode::OK, serde_json::to_string(&response).unwrap())
             }
             Err(e) => {
                 tracing::error!("Failed to login user {}: {}", user.0.username, e);

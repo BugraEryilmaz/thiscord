@@ -1,13 +1,14 @@
 mod leftpanel;
 mod login;
 mod create_server;
+mod status;
 
 use leptos::{context, logging::error, prelude::*, task::spawn_local};
 use serde_wasm_bindgen::from_value;
 use front_shared::LoginStatus;
 use wasm_bindgen::JsValue;
 
-use crate::{app::LoggedInSignal, home::leftpanel::Sidebar, server::{channels::Channels, ServerComponent}, utils::invoke};
+use crate::{app::LoggedInSignal, home::{leftpanel::Sidebar, status::StatusBox}, server::{channels::Channels, ServerComponent}, utils::invoke};
 
 stylance::import_style!(
     #[allow(dead_code)]
@@ -44,8 +45,7 @@ pub fn Home() -> impl IntoView {
                     <Sidebar active_server=active_server />
                     <Channels active_server=active_server />
                 </div>
-                <div class=style::status_box>
-                </div>
+                <StatusBox />
             </div>
             <Show when=move || !matches!(is_logged_in_signal.get(), LoginStatus::LoggedOut) fallback=move || view! { <login::Login /> }>
                 <ServerComponent active_server=active_server />

@@ -202,6 +202,7 @@ pub fn ChannelList(
                                     let join_args = JoinChannel {
                                         server_id: channel.channel.server_id,
                                         channel_id: channel.channel.id,
+                                        channel_name: channel_name.clone(),
                                     };
                                     let join_args = serde_wasm_bindgen::to_value(&join_args).unwrap();
                                     let result = invoke("join_channel", join_args).await;

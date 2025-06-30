@@ -7,6 +7,9 @@ pub use update::{DownloadProgress, UpdateState};
 mod login;
 pub use login::{LoginStatus, Session};
 
+mod status;
+pub use status::*;
+
 use serde::{Deserialize};
 use wasm_bindgen::JsValue;
 

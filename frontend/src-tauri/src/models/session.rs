@@ -12,6 +12,7 @@ pub struct SessionWString {
     pub id: i32,
     pub token: String,
     pub user_id: String,
+    pub username: String,
 }
 impl From<SessionWString> for Session {
     fn from(session: SessionWString) -> Self {
@@ -19,6 +20,7 @@ impl From<SessionWString> for Session {
             id: session.id,
             token: session.token,
             user_id: Uuid::parse_str(&session.user_id).unwrap_or_default(),
+            username: session.username,
         }
     }
 }
@@ -29,12 +31,13 @@ impl From<Session> for SessionWString {
             id: session.id,
             token: session.token,
             user_id: session.user_id.to_string(),
+            username: session.username,
         }
     }
 }
 
 pub trait SessionStore {
-    fn new(token: String, user_id: Uuid) -> Self;
+    fn new(token: String, user_id: Uuid, username: String) -> Self;
     fn get(conn: SqliteConnection) -> Result<Self, diesel::result::Error>
     where
         Self: Sized;
@@ -42,11 +45,12 @@ pub trait SessionStore {
 }
 
 impl SessionStore for Session {
-    fn new(token: String, user_id: Uuid) -> Self {
+    fn new(token: String, user_id: Uuid, username: String) -> Self {
         Session {
             id: 0,
             token,
             user_id,
+            username,
         }
     }
 
@@ -79,6 +83,7 @@ impl Default for SessionWString {
             id: 0,
             token: String::new(),
             user_id: String::new(),
+            username: String::new(),
         }
     }
 }

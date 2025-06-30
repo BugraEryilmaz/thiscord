@@ -2,10 +2,10 @@ use diesel::prelude::*;
 use front_shared::Session;
 use reqwest::cookie::CookieStore;
 use front_shared::{LoginStatus, URL};
+use shared::models::LoginResponse;
 use shared::models::Signup;
 use shared::models::Credentials;
 use tauri::{Emitter, Manager, Url};
-use uuid::Uuid;
 
 use crate::models::SessionStore;
 use crate::models::SessionWString;
@@ -31,7 +31,7 @@ pub async fn login(
         .map_err(|e| e.to_string())?
         .error_for_status()
         .map_err(|e| e.to_string())?;
-    let user_id = response.json::<Uuid>().await.map_err(|e| {
+    let login_response = response.json::<LoginResponse>().await.map_err(|e| {
         tracing::error!("Failed to parse user ID from response: {}", e);
         e.to_string()
     })?;
@@ -39,7 +39,7 @@ pub async fn login(
     let cookie = if let Some(cookie) = cookie.cookies(&Url::parse(format!("https://{}", URL).as_str()).unwrap())
     {
         let cookie = cookie.to_str().unwrap_or_default();
-        let cookie = Session::new(cookie.to_string(), user_id);
+        let cookie = Session::new(cookie.to_string(), login_response.id, login_response.username);
         let conn = establish_connection(&handle);
         let _ = cookie.save(conn).map_err(|e| {
             tracing::error!("Failed to save session cookie: {}", e);

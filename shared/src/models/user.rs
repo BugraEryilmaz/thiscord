@@ -46,6 +46,12 @@ pub struct Credentials {
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct LoginResponse {
+    pub id: Uuid,
+    pub username: String,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
 #[cfg_attr(feature = "diesel", derive(Queryable, Selectable, Insertable))]
 #[cfg_attr(feature = "diesel", diesel(table_name = crate::schema::users))]
 #[cfg_attr(feature = "diesel", diesel(check_for_backend(diesel::pg::Pg)))]

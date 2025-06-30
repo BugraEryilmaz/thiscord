@@ -3,12 +3,12 @@ use std::sync::Arc;
 
 use cpal::traits::HostTrait;
 use futures_util::{SinkExt, StreamExt};
-use shared::{Split, WebRTCConnection, WebSocketMessage};
+use shared::{RTCPeerConnectionState, Split, WebRTCConnection, WebSocketMessage};
 use native_tls::TlsConnector;
 use reqwest::cookie::CookieStore;
 use reqwest::header;
 use ringbuf::HeapRb;
-use front_shared::URL;
+use front_shared::{Status, URL};
 use tauri::{AppHandle, Emitter, Manager};
 use tokio::sync::mpsc::Sender;
 use tokio::{select, sync::mpsc::Receiver};
@@ -19,7 +19,7 @@ use tokio_tungstenite::{
 use uuid::Uuid;
 
 pub enum WebSocketRequest {
-    JoinAudioChannel { server_id: Uuid, channel_id: Uuid },
+    JoinAudioChannel { server_id: Uuid, channel_id: Uuid, channel_name: String },
     DisconnectFromAudioChannel,
     Disconnect,
 }
@@ -31,6 +31,7 @@ pub async fn websocket_handler(
     cmd_rx: &mut Receiver<WebSocketRequest>,
 ) -> Result<(), Error> {
     let state = handle.state::<AppState>();
+    state.change_status(Status::Connecting, &handle);
     let (ws_tx, mut ws_rx) = tokio::sync::mpsc::channel(100);
     let url = format!("wss://{}/websocket", URL);
     let mut web_rtc_connection: Option<WebRTCConnection> = None;
@@ -51,6 +52,7 @@ pub async fn websocket_handler(
     let connector = Connector::NativeTls(connector);
     let (mut ws_stream, _) =
         connect_async_tls_with_config(request, None, false, Some(connector)).await?;
+    state.change_status(Status::Online, &handle);
     loop {
         select! {
             msg = ws_stream.next() => {
@@ -119,6 +121,7 @@ pub async fn websocket_handler(
             }
         }
     }
+    state.change_status(Status::Offline, &handle);
     Ok(())
 }
 
@@ -133,6 +136,7 @@ pub async fn handle_internal_request(
         WebSocketRequest::JoinAudioChannel {
             server_id,
             channel_id,
+            channel_name,
         } => {
             *web_rtc_connection = Some(WebRTCConnection::new().await?);
             let web_rtc_connection = web_rtc_connection.as_ref().unwrap();
@@ -174,6 +178,10 @@ pub async fn handle_internal_request(
                 .peer_connection
                 .on_peer_connection_state_change(Box::new(move |state| {
                     tracing::debug!("Peer connection state: {:?}", state);
+                    let appstate = handle.state::<AppState>();
+                    if state == RTCPeerConnectionState::Connected {
+                        appstate.change_status(Status::OnCall(channel_name.clone()), &handle);
+                    }
                     Box::pin(async move {})
                 }));
             let socket_clone = socket.clone();
@@ -199,13 +207,16 @@ pub async fn handle_internal_request(
             }
         }
         WebSocketRequest::DisconnectFromAudioChannel => {
-            web_rtc_connection.take();
+            if let Some(web_rtc_connection) = web_rtc_connection.take() {
+                web_rtc_connection.close().await;
+            }
             let audio_element = &state.audio_element;
             audio_element.quit()?;
             let disconnect_message = WebSocketMessage::DisconnectFromAudioChannel;
             if let Err(e) = socket.send(disconnect_message).await {
                 tracing::error!("Failed to send disconnect audio channel message: {}", e);
             }
+            state.change_status(Status::Online, &handle);
         }
         WebSocketRequest::Disconnect => todo!(),
     }

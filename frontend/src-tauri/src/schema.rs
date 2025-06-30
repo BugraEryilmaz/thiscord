@@ -5,5 +5,6 @@ diesel::table! {
         id -> Integer,
         token -> Text,
         user_id -> Text,
+        username -> Text,
     }
 }
