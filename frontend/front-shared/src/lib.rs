@@ -1,4 +1,4 @@
-pub const URL: &str = "localhost:8081";
+pub const URL: &str = "localhost:443";
 
 mod update;
 use shared::models::AudioChannelMemberUpdate;

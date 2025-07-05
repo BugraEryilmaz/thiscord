@@ -112,7 +112,7 @@ async fn main() {
         .nest_service("/static", static_files);
 
     // run https server
-    let addr = SocketAddr::from(([0, 0, 0, 0], 8081));
+    let addr = SocketAddr::from(([0, 0, 0, 0], 443));
     tracing::info!("listening on {}", addr);
     axum_server::bind_rustls(addr, config)
         .serve(app.into_make_service())
