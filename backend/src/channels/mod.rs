@@ -74,6 +74,7 @@ impl VoiceRoom {
                             user: VoiceUser {
                                 id: user.id,
                                 username: user.username.clone(),
+                                slot: i,
                             },
                         },
                     },
@@ -88,7 +89,7 @@ impl VoiceRoom {
 
     pub async fn leave_person(&self, person_id: Uuid) -> Result<(), Error> {
         let mut people = self.people.lock().await;
-        for slot in people.iter_mut() {
+        for (i, slot) in people.iter_mut().enumerate() {
             if slot.id == Some(person_id) {
                 self.server.notify_subscribers(
                     shared::WebSocketMessage::SomeoneLeftAudioChannel {
@@ -97,6 +98,7 @@ impl VoiceRoom {
                             user: VoiceUser {
                                 id: person_id,
                                 username: slot.name.clone().unwrap_or_default(),
+                                slot: i,
                             },
                         },
                     },

@@ -43,11 +43,12 @@ impl Backend {
         if channel.type_ == ChannelType::Voice {
             if let Some(room) = rooms.get_room(&channel) {
                 let people = room.people.lock().await;
-                for person in people.iter() {
+                for (slot, person) in people.iter().enumerate() {
                     if let Some(user_id) = person.id {
                         users.push(VoiceUser {
                             id: user_id,
                             username: person.name.clone().unwrap(),
+                            slot,
                         });
                     }
                 }
