@@ -1,3 +1,5 @@
 /target
 .env
 build.rs
+perf.data*
+flamegraph.svg
