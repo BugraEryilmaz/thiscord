@@ -34,9 +34,5 @@ fn bench_signup(c: &mut Criterion) {
     });
 }
 
-fn bench_login(c: &mut Criterion) {}
-
-fn bench_logout(c: &mut Criterion) {}
-
 criterion_group!(benches, bench_signup);
 criterion_main!(benches);
