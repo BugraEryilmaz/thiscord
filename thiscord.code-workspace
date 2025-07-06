@@ -1,9 +1,11 @@
 {
 	"folders": [
 		{
+			"name": "thiscord",
 			"path": "."
 		},
 		{
+			"name": "backend",
 			"path": "backend"
 		},
 		{
@@ -13,5 +15,4 @@
 			"path": "shared"
 		}
 	],
-	"settings": {}
 }
