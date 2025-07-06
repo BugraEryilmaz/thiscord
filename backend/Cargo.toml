@@ -38,7 +38,7 @@ strum = "0.27"
 strum_macros = "0.27"
 tower-sessions-sqlx-store = { version = "0.15.0", features = ["postgres"] }
 
-# [dev-dependencies]
+[dev-dependencies]
 criterion = { version = "0.6.0", features = ["async_tokio"] }
 tower = { version = "0.5", features = ["util"] }
 
