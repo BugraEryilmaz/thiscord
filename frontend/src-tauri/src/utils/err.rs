@@ -8,6 +8,8 @@ pub enum Error {
     NotImplemented,
     #[error("CPAL getting default stream config error: {0}")]
     CpaldefaultStreamConfig(#[from] cpal::DefaultStreamConfigError),
+    #[error("CPAL getting stream config error: {0}")]
+    CpalSupportedStreamConfigsError(#[from] cpal::SupportedStreamConfigsError),
     #[error("No input device found")]
     NoInputDevice,
     #[error("No output device found")]

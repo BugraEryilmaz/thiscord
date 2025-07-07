@@ -1,297 +1,267 @@
-use shared::Split;
 use ringbuf::{
     traits::{Consumer, Producer},
     HeapCons, HeapProd, HeapRb,
 };
-use std::sync::{atomic::{AtomicBool, Ordering}, mpsc::channel};
+use shared::{Split, ROOM_SIZE};
 use std::sync::{Arc, Mutex as StdMutex};
+use std::ops::Add;
 
 use cpal::{
-    traits::{DeviceTrait, StreamTrait},
-    SampleRate, SupportedBufferSize, SupportedStreamConfig,
+    traits::{DeviceTrait, HostTrait, StreamTrait},
+    FromSample, SizedSample,
+    SupportedStreamConfigRange,
 };
 
 use crate::Error;
 
-use super::{AudioCommand, AudioElement};
+use super::AudioElement;
 
 impl AudioElement {
     pub fn new() -> Self {
+        let host = cpal::default_host();
+        let mic = host.default_input_device();
+        let speaker = host.default_output_device();
         AudioElement {
-            mic_command_queue: Arc::new(StdMutex::new(None)),
-            speaker_command_queue: Arc::new(StdMutex::new(None)),
+            speaker,
+            mic,
+            speaker_stream: None,
+            mic_stream: None,
+            mic_consumer: None,
+            speaker_producers: None,
         }
     }
 
-    pub fn start_input_stream(&self, device: cpal::Device, dropped: Arc<AtomicBool>) -> Result<HeapCons<i16>, Error> {
-        let (mic_producer, mic_consumer) = HeapRb::<i16>::new(12000).split();
-        let (command_tx, command_rx) = channel();
-        {
-            self.mic_command_queue.lock().unwrap().replace(command_tx);
+    pub fn start_speaker(&mut self) -> Result<Vec<Arc<StdMutex<HeapProd<f32>>>>, Error> {
+        // If there is previously created speaker stream, stop it
+        drop(self.speaker_stream.take());
+        // Create ringbuffers for each person in the room
+        let (tx_clone, (tx, rx)): (Vec<_>, (Vec<_>, Vec<_>)) = (0..ROOM_SIZE)
+            .map(|_| {
+                let (tx, rx) = HeapRb::<f32>::new(12000).split();
+                let tx = Arc::new(StdMutex::new(tx));
+                (tx.clone(), (tx, rx))
+            })
+            .unzip();
+        self.speaker_producers = Some(tx_clone);
+        if let Some(speaker) = self.speaker.as_ref() {
+            // Start the output stream with the created ringbuffers
+            let mut supported_config = speaker.supported_output_configs()?;
+            let supported_config: SupportedStreamConfigRange = supported_config
+                .find(|c| c.channels() == 1)
+                .ok_or(Error::NotImplemented)?;
+            let config = supported_config.try_with_sample_rate(cpal::SampleRate(48000))
+                .ok_or(Error::NotImplemented)?;
+            let stream = Self::make_speaker_stream(speaker, &config, rx)?;
+            self.speaker_stream = Some(stream);
+            // Start the stream
+            self.speaker_stream.as_ref().unwrap().play()?;
         }
-        std::thread::spawn(move || {
-            // This thread will handle the audio input stream
-            let current_stream = match Self::create_input_stream(device, mic_producer) {
-                Ok(stream) => stream,
-                Err(e) => {
-                    eprintln!("Failed to create input stream: {}", e);
-                    return;
-                }
-            };
-            match current_stream.play() {
-                Ok(_) => println!("Input stream started successfully"),
-                Err(e) => eprintln!("Failed to start input stream: {}", e),
-            }
-            // Handle commands from the main thread
-            loop {
-                match command_rx.recv() {
-                    Ok(command) => {
-                        match command {
-                            // Handle commands like Stop, Pause, etc.
-                            // For now, we just print the command
-                            AudioCommand::Start => {
-                                println!("Received Start command");
-                                current_stream.play().unwrap_or_else(|e| {
-                                    eprintln!("Failed to play input stream: {}", e);
-                                });
-                            }
-                            AudioCommand::Stop => {
-                                println!("Received Stop command");
-                                current_stream.pause().unwrap_or_else(|e| {
-                                    eprintln!("Failed to pause input stream: {}", e);
-                                });
-                            }
-                            AudioCommand::Quit => {
-                                println!("Received Quit command");
-                                break; // Exit the loop and stop the thread
-                            }
-                        }
-                    }
-                    Err(e) => {
-                        eprintln!("Error receiving command: {}", e);
-                        break;
-                    }
-                }
-            }
-            dropped.store(true, Ordering::Relaxed);
-        });
 
+        Ok(tx)
+    }
+
+    pub fn make_speaker_stream(
+        device: &cpal::Device,
+        config: &cpal::SupportedStreamConfig,
+        consumers: Vec<HeapCons<f32>>,
+    ) -> Result<cpal::Stream, Error> {
+        match config.sample_format() {
+            cpal::SampleFormat::I16 => {
+                Self::make_speaker_stream_from::<i16>(device, &config.config(), consumers)
+            }
+            cpal::SampleFormat::F32 => {
+                Self::make_speaker_stream_from::<f32>(device, &config.config(), consumers)
+            }
+            cpal::SampleFormat::I8 => {
+                Self::make_speaker_stream_from::<i8>(device, &config.config(), consumers)
+            }
+            cpal::SampleFormat::I32 => {
+                Self::make_speaker_stream_from::<i32>(device, &config.config(), consumers)
+            }
+            cpal::SampleFormat::I64 => {
+                Self::make_speaker_stream_from::<i64>(device, &config.config(), consumers)
+            }
+            cpal::SampleFormat::U8 => {
+                Self::make_speaker_stream_from::<u8>(device, &config.config(), consumers)
+            }
+            cpal::SampleFormat::U16 => {
+                Self::make_speaker_stream_from::<u16>(device, &config.config(), consumers)
+            }
+            cpal::SampleFormat::U32 => {
+                Self::make_speaker_stream_from::<u32>(device, &config.config(), consumers)
+            }
+            cpal::SampleFormat::U64 => {
+                Self::make_speaker_stream_from::<u64>(device, &config.config(), consumers)
+            }
+            cpal::SampleFormat::F64 => {
+                Self::make_speaker_stream_from::<f64>(device, &config.config(), consumers)
+            }
+            _ => todo!(),
+        }
+    }
+
+    pub fn make_speaker_stream_from<T: SizedSample + FromSample<f32> + Add<Output = T>>(
+        device: &cpal::Device,
+        config: &cpal::StreamConfig,
+        mut consumers: Vec<HeapCons<f32>>,
+    ) -> Result<cpal::Stream, Error> {
+        let stream = device.build_output_stream(
+            &config,
+            move |data: &mut [T], _| {
+                // Initialize output buffer with silence
+                for d in data.iter_mut() {
+                    *d = T::from_sample(0.0);
+                }
+                // Receive raw samples from encoder thread
+                for sender in consumers.iter_mut() {
+                    let sender: &mut HeapCons<f32> = sender;
+                    let mut temp_data: Vec<f32> = vec![0.0; data.len()];
+                    // Pop samples from the ring buffer
+                    let cnt = sender.pop_slice(&mut temp_data);
+                    if cnt == 0 {
+                        // If no samples were received, fill with silence
+                        continue;
+                    }
+                    // Convert f32 to T and write to output buffer
+                    for (d, s) in data.iter_mut().zip(temp_data.iter()) {
+                        *d = *d + T::from_sample(*s);
+                    }
+                }
+            },
+            |e| {
+                eprintln!("Error: {}", e);
+            },
+            None,
+        )?;
+        Ok(stream)
+    }
+
+    pub fn start_mic(&mut self) -> Result<Arc<StdMutex<HeapCons<f32>>>, Error> {
+        // If there is previously created mic stream, stop it
+        drop(self.mic_stream.take());
+        // Create a ringbuffer for microphone input
+        let (mic_producer, mic_consumer) = HeapRb::<f32>::new(12000).split();
+        let mic_consumer = Arc::new(StdMutex::new(mic_consumer));
+        self.mic_consumer = Some(mic_consumer.clone());
+        if let Some(mic) = self.mic.as_ref() {
+            let mut supported_config = mic.supported_input_configs()?;
+            let supported_config: SupportedStreamConfigRange = supported_config
+                .find(|c| c.channels() == 1)
+                .ok_or(Error::NotImplemented)?;
+            let config = supported_config.try_with_sample_rate(cpal::SampleRate(48000))
+                .ok_or(Error::NotImplemented)?;
+            // Start the input stream with the created ringbuffer
+            let stream = Self::make_mic_stream(mic, &config, mic_producer)?;
+            self.mic_stream = Some(stream);
+            // Start the stream
+            self.mic_stream.as_ref().unwrap().play()?;
+        }
         Ok(mic_consumer)
     }
 
-    pub fn create_input_stream(
-        device: cpal::Device,
-        mut tx: HeapProd<i16>,
+    pub fn make_mic_stream(
+        device: &cpal::Device,
+        config: &cpal::SupportedStreamConfig,
+        tx: HeapProd<f32>,
     ) -> Result<cpal::Stream, Error> {
-        let supported_config = device.default_input_config()?;
-        let sample_format = supported_config.sample_format();
-        let config = supported_config.config();
-        Ok(match sample_format {
-            cpal::SampleFormat::I16 => device.build_input_stream(
-                &config,
-                move |data: &[i16], _| {
-                    // Clone and send raw samples to encoder thread
-                    let samples: Vec<i16> = data.to_vec();
-                    // Note: This will block if the channel is full.
-                    tx.push_slice(&samples);
-                },
-                |e| {
-                    eprintln!("Error: {}", e);
-                },
-                None,
-            )?,
-            cpal::SampleFormat::F32 => device.build_input_stream(
-                &config,
-                move |data: &[f32], _| {
-                    // Convert f32 to i16 and send
-                    let samples: Vec<_> =
-                        data.iter().map(|&f| (f * i16::MAX as f32) as i16).collect();
-                    // Send the samples to the encoder thread
-                    let _ = tx.push_slice(samples.as_slice());
-                },
-                |e| {
-                    eprintln!("Error: {}", e);
-                },
-                None,
-            )?,
-            _ => return Err(Error::NotImplemented),
-        })
-    }
-
-    pub fn start_output_stream(
-        &self,
-        device: cpal::Device,
-        speaker_consumers: Vec<HeapCons<i16>>,
-    ) -> Result<(), Error> {
-        let (command_tx, command_rx) = channel();
-
-        {
-            self.speaker_command_queue
-                .lock()
-                .unwrap()
-                .replace(command_tx);
+        match config.sample_format() {
+            cpal::SampleFormat::I16 => {
+                Self::make_mic_stream_from::<i16>(device, &config.config(), tx)
+            }
+            cpal::SampleFormat::F32 => {
+                Self::make_mic_stream_from::<f32>(device, &config.config(), tx)
+            }
+            cpal::SampleFormat::I8 => {
+                Self::make_mic_stream_from::<i8>(device, &config.config(), tx)
+            }
+            cpal::SampleFormat::I32 => {
+                Self::make_mic_stream_from::<i32>(device, &config.config(), tx)
+            }
+            cpal::SampleFormat::I64 => {
+                Self::make_mic_stream_from::<i64>(device, &config.config(), tx)
+            }
+            cpal::SampleFormat::U8 => {
+                Self::make_mic_stream_from::<u8>(device, &config.config(), tx)
+            }
+            cpal::SampleFormat::U16 => {
+                Self::make_mic_stream_from::<u16>(device, &config.config(), tx)
+            }
+            cpal::SampleFormat::U32 => {
+                Self::make_mic_stream_from::<u32>(device, &config.config(), tx)
+            }
+            cpal::SampleFormat::U64 => {
+                Self::make_mic_stream_from::<u64>(device, &config.config(), tx)
+            }
+            cpal::SampleFormat::F64 => {
+                Self::make_mic_stream_from::<f64>(device, &config.config(), tx)
+            }
+            _ => todo!(),
         }
-
-        std::thread::spawn(move || {
-            // Handle commands from the main thread
-            let current_stream = match Self::create_output_stream(device, speaker_consumers) {
-                Ok(stream) => stream,
-                Err(e) => {
-                    eprintln!("Failed to create output stream: {}", e);
-                    return;
-                }
-            };
-            match current_stream.play() {
-                Ok(_) => println!("Output stream started successfully"),
-                Err(e) => eprintln!("Failed to start output stream: {}", e),
-            }
-            loop {
-                match command_rx.recv() {
-                    Ok(command) => {
-                        match command {
-                            // Handle commands like Stop, Pause, etc.
-                            // For now, we just print the command
-                            AudioCommand::Start => {
-                                println!("Received Start command");
-                                current_stream.play().unwrap_or_else(|e| {
-                                    eprintln!("Failed to play output stream: {}", e);
-                                });
-                            }
-                            AudioCommand::Stop => {
-                                println!("Received Stop command");
-                                current_stream.pause().unwrap_or_else(|e| {
-                                    eprintln!("Failed to pause output stream: {}", e);
-                                });
-                            }
-                            AudioCommand::Quit => {
-                                println!("Received Quit command");
-                                break; // Exit the loop and stop the thread
-                            }
-                        }
-                    }
-                    Err(e) => {
-                        eprintln!("Error receiving command: {}", e);
-                        break;
-                    }
-                }
-            }
-        });
-        Ok(())
     }
 
-    pub fn create_output_stream(
-        device: cpal::Device,
-        mut rx: Vec<HeapCons<i16>>,
-    ) -> Result<cpal::Stream, Error> {
-        let supported_config = SupportedStreamConfig::new(
-            1u16,
-            SampleRate(48000),
-            SupportedBufferSize::Range { min: 960, max: 960 },
-            cpal::SampleFormat::F32,
-        );
-        let sample_format = supported_config.sample_format();
-        let config = supported_config.config();
-        Ok(match sample_format {
-            cpal::SampleFormat::I16 => device.build_output_stream(
-                &config,
-                move |data: &mut [i16], _| {
-                    // Initialize output buffer with silence
-                    for d in data.iter_mut() {
-                        *d = 0;
-                    }
-                    // Receive raw samples from encoder thread
-                    for sender in rx.iter_mut() {
-                        let mut temp_data: Vec<i16> = vec![0; data.len()];
-                        // Pop samples from the ring buffer
-                        let cnt = sender.pop_slice(&mut temp_data);
-                        if cnt == 0 {
-                            // If no samples were received, fill with silence
-                            continue;
-                        }
-                        // Copy the samples to the output buffer
-                        for (d, s) in data.iter_mut().zip(temp_data.iter()) {
-                            *d = *d + *s;
-                        }
-                    }
-                },
-                |e| {
-                    eprintln!("Error: {}", e);
-                },
-                None,
-            )?,
-            cpal::SampleFormat::F32 => device.build_output_stream(
-                &config,
-                move |data: &mut [f32], _| {
-                    // Initialize output buffer with silence
-                    for d in data.iter_mut() {
-                        *d = 0.0;
-                    }
-                    // Receive raw samples from encoder thread
-                    for sender in rx.iter_mut() {
-                        let mut temp_data: Vec<i16> = vec![0; data.len()];
-                        // Pop samples from the ring buffer
-                        let cnt = sender.pop_slice(&mut temp_data);
-                        if cnt == 0 {
-                            // If no samples were received, fill with silence
-                            continue;
-                        }
-                        // Convert i16 to f32 and write to output buffer
-                        for (d, s) in data.iter_mut().zip(temp_data.iter()) {
-                            *d = *d + (*s as f32 / i16::MAX as f32);
-                        }
-                    }
-                    // Clamp the output to prevent overflow
-                    for sample in data.iter_mut() {
-                        *sample = sample.clamp(-1.0, 1.0);
-                    }
-                },
-                |e| {
-                    eprintln!("Error: {}", e);
-                },
-                None,
-            )?,
-            _ => return Err(Error::NotImplemented),
-        })
+    pub fn make_mic_stream_from<T>(
+        device: &cpal::Device,
+        config: &cpal::StreamConfig,
+        mut tx: HeapProd<f32>,
+    ) -> Result<cpal::Stream, Error> 
+    where
+        T: SizedSample,
+        f32: FromSample<T>,
+    {
+        let stream = device.build_input_stream(
+            &config,
+            move |data: &[T], _| {
+                // Convert T to f32 and send to the encoder thread
+                let samples= data.iter().map(|s| s.to_sample()).collect::<Vec<f32>>();
+                // Note: This will block if the channel is full.
+                tx.push_slice(&samples);
+            },
+            |e| {
+                eprintln!("Error: {}", e);
+            },
+            None,
+        )?;
+        Ok(stream)
     }
 
     pub fn mute(&self) -> Result<(), Error> {
-        if let Some(tx) = self.mic_command_queue.lock().unwrap().as_mut() {
-            tx.send(AudioCommand::Stop)?;
+        if let Some(mic_stream) = self.mic_stream.as_ref() {
+            mic_stream.pause()?;
         }
         Ok(())
     }
 
     pub fn unmute(&self) -> Result<(), Error> {
-        if let Some(tx) = self.mic_command_queue.lock().unwrap().as_mut() {
-            tx.send(AudioCommand::Start)?;
+        if let Some(mic_stream) = self.mic_stream.as_ref() {
+            mic_stream.play()?;
         }
         Ok(())
     }
 
     pub fn deafen(&self) -> Result<(), Error> {
-        if let Some(tx) = self.speaker_command_queue.lock().unwrap().as_mut() {
-            tx.send(AudioCommand::Stop)?;
+        if let Some(speaker_stream) = self.speaker_stream.as_ref() {
+            speaker_stream.pause()?;
         }
         Ok(())
     }
 
     pub fn undeafen(&self) -> Result<(), Error> {
-        if let Some(tx) = self.speaker_command_queue.lock().unwrap().as_mut() {
-            tx.send(AudioCommand::Start)?;
+        if let Some(speaker_stream) = self.speaker_stream.as_ref() {
+            speaker_stream.play()?;
         }
         Ok(())
     }
 
-    pub fn quit(&self) -> Result<(), Error> {
-        let mut speaker_command_queue = self.speaker_command_queue.lock().unwrap();
-        if let Some(tx) = speaker_command_queue.as_mut() {
-            tx.send(AudioCommand::Quit)?;
-            *speaker_command_queue = None; 
+    pub fn quit(&mut self) -> Result<(), Error> {
+        if let Some(mic_stream) = self.mic_stream.take() {
+            mic_stream.pause()?;
         }
-        let mut mic_command_queue = self.mic_command_queue.lock().unwrap();
-        if let Some(tx) = mic_command_queue.as_mut() {
-            tx.send(AudioCommand::Quit)?;
-            *mic_command_queue = None;
+        if let Some(speaker_stream) = self.speaker_stream.take() {
+            speaker_stream.pause()?;
+        }
+        {
+            self.mic_consumer.take();
+            self.speaker_producers.take();
         }
         Ok(())
     }

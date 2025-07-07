@@ -1,43 +1,55 @@
 use tauri::Manager;
 
-use crate::AppState;
+use crate::{audio::AudioCommand, websocket::WebSocketRequest, AppState};
 
 #[tauri::command]
 pub async fn mute_microphone(app_handle: tauri::AppHandle) {
     let app_state = app_handle.state::<AppState>();
-    let audio_element = &app_state.audio_element;
-    match audio_element.mute() {
-        Ok(_) => println!("Microphone muted successfully."),
-        Err(e) => eprintln!("Failed to mute microphone: {}", e),
+    let ws = &app_state.websocket;
+    {
+        let ws = ws.read().await;
+        ws.send(WebSocketRequest::AudioCommand(AudioCommand::Mute))
+            .await
+            .map_err(|e| e.to_string())
+            .unwrap_or_else(|e| eprintln!("Failed to send mute command: {}", e));
     }
 }
 
 #[tauri::command]
 pub async fn unmute_microphone(app_handle: tauri::AppHandle) {
     let app_state = app_handle.state::<AppState>();
-    let audio_element = &app_state.audio_element;
-    match audio_element.unmute() {
-        Ok(_) => println!("Microphone unmuted successfully."),
-        Err(e) => eprintln!("Failed to unmute microphone: {}", e),
+    let ws = &app_state.websocket;
+    {
+        let ws = ws.read().await;
+        ws.send(WebSocketRequest::AudioCommand(AudioCommand::Unmute))
+            .await
+            .map_err(|e| e.to_string())
+            .unwrap_or_else(|e| eprintln!("Failed to send unmute command: {}", e));
     }
 }
 
 #[tauri::command]
 pub async fn deafen_speaker(app_handle: tauri::AppHandle) {
     let app_state = app_handle.state::<AppState>();
-    let audio_element = &app_state.audio_element;
-    match audio_element.deafen() {
-        Ok(_) => println!("Speaker deafened successfully."),
-        Err(e) => eprintln!("Failed to deafen speaker: {}", e),
+    let ws = &app_state.websocket;
+    {
+        let ws = ws.read().await;
+        ws.send(WebSocketRequest::AudioCommand(AudioCommand::Deafen))
+            .await
+            .map_err(|e| e.to_string())
+            .unwrap_or_else(|e| eprintln!("Failed to send deafen command: {}", e));
     }
 }
 
 #[tauri::command]
 pub async fn undeafen_speaker(app_handle: tauri::AppHandle) {
     let app_state = app_handle.state::<AppState>();
-    let audio_element = &app_state.audio_element;
-    match audio_element.undeafen() {
-        Ok(_) => println!("Speaker undeafened successfully."),
-        Err(e) => eprintln!("Failed to undeafen speaker: {}", e),
+    let ws = &app_state.websocket;
+    {
+        let ws = ws.read().await;
+        ws.send(WebSocketRequest::AudioCommand(AudioCommand::Undeafen))
+            .await
+            .map_err(|e| e.to_string())
+            .unwrap_or_else(|e| eprintln!("Failed to send undeafen command: {}", e));
     }
 }

@@ -12,11 +12,10 @@ use tokio::sync::{mpsc::Sender, RwLock};
 use std::sync::Mutex as StdMutex;
 pub use update::*;
 
-use crate::{audio::AudioElement, websocket::WebSocketRequest};
+use crate::websocket::WebSocketRequest;
 
 pub struct AppState {
     // Define any shared state here
-    pub audio_element: AudioElement,
     pub websocket: RwLock<Sender<WebSocketRequest>>,
     pub client: Client,
     pub cookie_store: Arc<Jar>,
@@ -32,7 +31,6 @@ impl AppState {
             .build()
             .expect("Failed to create HTTP client");
         Self {
-            audio_element: AudioElement::new(),
             websocket,
             client,
             cookie_store,

@@ -1,13 +1,11 @@
-use std::sync::atomic::AtomicBool;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex as StdMutex};
 
-use cpal::traits::HostTrait;
 use futures_util::{SinkExt, StreamExt};
-use shared::{RTCPeerConnectionState, Split, WebRTCConnection, WebSocketMessage};
+use shared::{HeapCons, RTCPeerConnectionState, WebRTCConnection, WebSocketMessage, ROOM_SIZE};
 use native_tls::TlsConnector;
 use reqwest::cookie::CookieStore;
 use reqwest::header;
-use ringbuf::HeapRb;
+use ringbuf::HeapProd;
 use front_shared::{Status, URL};
 use tauri::{AppHandle, Emitter, Manager};
 use tokio::sync::mpsc::Sender;
@@ -22,8 +20,10 @@ pub enum WebSocketRequest {
     JoinAudioChannel { server_id: Uuid, channel_id: Uuid, channel_name: String },
     DisconnectFromAudioChannel,
     Disconnect,
+    AudioCommand(AudioCommand),
 }
 
+use crate::audio::{AudioCommand, AudioElement};
 use crate::{utils::AppState, Error};
 
 pub async fn websocket_handler(
@@ -35,6 +35,7 @@ pub async fn websocket_handler(
     let (ws_tx, mut ws_rx) = tokio::sync::mpsc::channel(100);
     let url = format!("wss://{}/websocket", URL);
     let mut web_rtc_connection: Option<WebRTCConnection> = None;
+    let mut audio: Option<AudioElement> = None;
 
     let mut request = url.into_client_request()?;
     let cookie_store = state.cookie_store.clone();
@@ -73,7 +74,7 @@ pub async fn websocket_handler(
                                 continue;
                             }
                         };
-                        if let Err(e) = handle_websocket_message(message, &mut web_rtc_connection, ws_tx.clone(), handle.clone()).await {
+                        if let Err(e) = handle_websocket_message(message, &mut web_rtc_connection, &mut audio, ws_tx.clone(), handle.clone()).await {
                             tracing::error!("Failed to handle WebSocket message: {}", e);
                             continue;
                         }
@@ -107,7 +108,7 @@ pub async fn websocket_handler(
             msg = cmd_rx.recv() => {
                 let msg = match msg {
                     Some(message) => {
-                        handle_internal_request(message, &mut web_rtc_connection, ws_tx.clone(), handle.clone()).await
+                        handle_internal_request(message, &mut web_rtc_connection, &mut audio, ws_tx.clone(), handle.clone()).await
                     },
                     None => {
                         tracing::error!("WebSocket internal message channel closed");
@@ -128,6 +129,7 @@ pub async fn websocket_handler(
 pub async fn handle_internal_request(
     request: WebSocketRequest,
     web_rtc_connection: &mut Option<WebRTCConnection>,
+    audio: &mut Option<AudioElement>,
     socket: Sender<WebSocketMessage>,
     handle: AppHandle,
 ) -> Result<(), Error> {
@@ -138,30 +140,20 @@ pub async fn handle_internal_request(
             channel_id,
             channel_name,
         } => {
-            *web_rtc_connection = Some(WebRTCConnection::new().await?);
+            *web_rtc_connection = Some(WebRTCConnection::new(channel_id).await?);
             let web_rtc_connection = web_rtc_connection.as_ref().unwrap();
-            let audio_element = &state.audio_element;
-            let host = cpal::default_host();
-            let input_device = host
-                .default_input_device()
-                .ok_or_else(|| Error::NoInputDevice)?;
-            let output_device = host
-                .default_output_device()
-                .ok_or_else(|| Error::NoOutputDevice)?;
+            *audio = Some(AudioElement::new());
+            let audio_element = audio.as_mut().unwrap();
 
             // Start the audio element streams
-            let dropped = Arc::new(AtomicBool::new(false));
-            let (speaker_producers, speaker_consumers): (Vec<_>, Vec<_>) =
-                (1..10).map(|_| HeapRb::<i16>::new(12000).split()).unzip();
-
-            let mic_consumer = audio_element.start_input_stream(input_device, dropped.clone())?;
-            audio_element.start_output_stream(output_device, speaker_consumers)?;
+            let mic_consumer: Arc<StdMutex<HeapCons<f32>>> = audio_element.start_mic()?;
+            let speaker_producers: Vec<Arc<StdMutex<HeapProd<f32>>>> = audio_element.start_speaker()?;
 
             // Create the WebRTC streams
-            let audio_track = web_rtc_connection.create_audio_track_sample(10).await?;
+            let audio_track = web_rtc_connection.create_audio_track_sample(ROOM_SIZE).await?;
             let audio_track = audio_track[0].clone();
             web_rtc_connection
-                .background_stream_audio(mic_consumer, dropped, audio_track)
+                .background_stream_audio(mic_consumer, audio_track)
                 .await?;
             web_rtc_connection
                 .background_receive_audio(speaker_producers)
@@ -210,8 +202,9 @@ pub async fn handle_internal_request(
             if let Some(web_rtc_connection) = web_rtc_connection.take() {
                 web_rtc_connection.close().await;
             }
-            let audio_element = &state.audio_element;
-            audio_element.quit()?;
+            if let Some(mut audio_element) = audio.take() {
+                audio_element.quit()?;
+            }
             let disconnect_message = WebSocketMessage::DisconnectFromAudioChannel;
             if let Err(e) = socket.send(disconnect_message).await {
                 tracing::error!("Failed to send disconnect audio channel message: {}", e);
@@ -219,6 +212,38 @@ pub async fn handle_internal_request(
             state.change_status(Status::Online, &handle);
         }
         WebSocketRequest::Disconnect => todo!(),
+        WebSocketRequest::AudioCommand(command) => {
+            if let Some(audio_element) = audio {
+                match command {
+                    AudioCommand::Mute => {
+                        if let Err(e) = audio_element.mute() {
+                            tracing::error!("Failed to mute audio: {}", e);
+                        }
+                    }
+                    AudioCommand::Unmute => {
+                        if let Err(e) = audio_element.unmute() {
+                            tracing::error!("Failed to unmute audio: {}", e);
+                        }
+                    }
+                    AudioCommand::Deafen => {
+                        if let Err(e) = audio_element.deafen() {
+                            tracing::error!("Failed to deafen audio: {}", e);
+                        }
+                    }
+                    AudioCommand::Undeafen => {
+                        if let Err(e) = audio_element.undeafen() {
+                            tracing::error!("Failed to undeafen audio: {}", e);
+                        }
+                    }
+                    AudioCommand::Quit => {
+                        if let Err(e) = audio_element.quit() {
+                            tracing::error!("Failed to quit audio: {}", e);
+                        }
+                        *audio = None; // Clear the audio element
+                    }
+                }
+            }
+        }
     }
     Ok(())
 }
@@ -226,6 +251,7 @@ pub async fn handle_internal_request(
 pub async fn handle_websocket_message(
     message: WebSocketMessage,
     web_rtc_connection: &mut Option<WebRTCConnection>,
+    _audio: &mut Option<AudioElement>,
     tx: Sender<WebSocketMessage>,
     handle: AppHandle,
 ) -> Result<(), Error> {

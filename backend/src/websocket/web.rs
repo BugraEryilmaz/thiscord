@@ -10,7 +10,7 @@ use tokio::sync::Mutex;
 use tokio::sync::mpsc::{Sender, channel};
 
 use crate::Error;
-use crate::channels::{ROOM_SIZE, VoiceRooms};
+use crate::channels::VoiceRooms;
 use crate::models::{AuthSession, Backend};
 
 pub fn router() -> axum::Router {
@@ -20,7 +20,7 @@ pub fn router() -> axum::Router {
 }
 
 mod post {
-    use shared::WebSocketError;
+    use shared::{WebSocketError, ROOM_SIZE};
 
     use shared::models::PermissionType;
 
@@ -166,7 +166,7 @@ mod post {
                     return Err(WebSocketError::NotAuthorized.into());
                 }
                 // Initialize the WebRTC connection (dropping the previous one if it exists)
-                *web_rtc_connection = Some(WebRTCConnection::new().await?);
+                *web_rtc_connection = Some(WebRTCConnection::new(channel_id).await?);
                 let web_rtc_connection = web_rtc_connection.as_ref().unwrap();
                 // Create audio tracks for the user
                 let recv_tracks = web_rtc_connection.create_audio_track_rtp(ROOM_SIZE).await?;

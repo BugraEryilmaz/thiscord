@@ -1,19 +1,24 @@
-use std::sync::mpsc::Sender;
 use std::sync::{Arc, Mutex as StdMutex};
+
+use ringbuf::HeapProd;
+use ringbuf::HeapCons;
 
 mod audio;
 pub mod tauri;
 
 pub struct AudioElement {
-    pub mic_command_queue: Arc<StdMutex<Option<Sender<AudioCommand>>>>,
-    pub speaker_command_queue: Arc<StdMutex<Option<Sender<AudioCommand>>>>,
+    pub speaker: Option<cpal::Device>,
+    pub mic: Option<cpal::Device>,
+    pub speaker_stream: Option<cpal::Stream>,
+    pub mic_stream: Option<cpal::Stream>,
+    pub mic_consumer: Option<Arc<StdMutex<HeapCons<f32>>>>,
+    pub speaker_producers: Option<Vec<Arc<StdMutex<HeapProd<f32>>>>>,
 }
 
 pub enum AudioCommand {
-    Start,
-    Stop,
-    // AttachDevice(cpal::Device),
+    Mute,
+    Unmute,
+    Deafen,
+    Undeafen,
     Quit,
-    // SetVolume(f32),
-    // etc.
 }

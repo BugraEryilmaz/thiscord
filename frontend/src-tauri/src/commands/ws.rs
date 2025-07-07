@@ -5,7 +5,7 @@ use tokio::sync::mpsc::Receiver;
 use crate::{commands::{check_cookies, logout}, websocket::{websocket_handler, WebSocketRequest}, Error};
 
 pub fn connect_ws(handle: AppHandle, mut rx: Receiver<WebSocketRequest>) {
-    tokio::spawn(async move {
+    tokio::task::spawn_local(async move {
         loop {
             // Check for cookies
             let handle = handle.clone();

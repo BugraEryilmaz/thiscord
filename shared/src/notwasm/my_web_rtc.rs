@@ -1,5 +1,6 @@
 use ringbuf::{HeapCons, HeapProd, traits::{Consumer, Observer, Producer}};
-use std::sync::Arc;
+use uuid::Uuid;
+use std::sync::{Arc, Mutex as StdMutex};
 use std::sync::atomic::AtomicBool;
 use std::sync::atomic::Ordering;
 use webrtc::api::setting_engine::SettingEngine;
@@ -32,6 +33,7 @@ use webrtc::{
 pub struct WebRTCConnection {
     pub peer_connection: RTCPeerConnection,
     pub audio_config: AudioConfig,
+    pub room_id: Uuid,
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -64,11 +66,12 @@ impl AudioConfig {
 }
 
 impl WebRTCConnection {
-    pub async fn new() -> Result<Self, Error> {
+    pub async fn new(room_id: Uuid) -> Result<Self, Error> {
         let peer_connection = Self::create_peer_connection().await?;
         Ok(WebRTCConnection {
             peer_connection: peer_connection,
             audio_config: AudioConfig::default(),
+            room_id,
         })
     }
 
@@ -181,8 +184,7 @@ impl WebRTCConnection {
 
     pub async fn background_stream_audio(
         &self,
-        mut data: HeapCons<i16>,
-        dropped: Arc<AtomicBool>,
+        data: Arc<StdMutex<HeapCons<f32>>>,
         audio_tracks: Arc<TrackLocalStaticSample>,
     ) -> Result<(), Error> {
         // Opus frames typically encode 20ms of audio
@@ -193,18 +195,16 @@ impl WebRTCConnection {
 
         tokio::spawn(async move {
             loop {
-                if dropped.load(Ordering::Relaxed) {
-                    tracing::info!("Audio stream dropped, exiting background task");
-                    break;
-                }
-                if data.occupied_len() < frame_size * (channels as usize) {
+                if data.lock().unwrap().occupied_len() < frame_size * (channels as usize) {
                     // Wait for enough data to fill a frame
                     tokio::time::sleep(std::time::Duration::from_millis(20)).await;
                     continue;
                 }
                 // Pop data from the ring buffer
-                let mut buffer = vec![0i16; frame_size * (channels as usize)];
-                let read_len = data.pop_slice(buffer.as_mut_slice());
+                let mut buffer = vec![0f32; frame_size * (channels as usize)];
+                let read_len = {
+                    data.lock().unwrap().pop_slice(buffer.as_mut_slice())
+                };
                 if read_len < frame_size * (channels as usize) {
                     tokio::time::sleep(std::time::Duration::from_millis(20)).await;
                     tracing::warn!(
@@ -217,7 +217,7 @@ impl WebRTCConnection {
                 let mut encoded = vec![0u8; opus_max_payload_size];
                 let encoded_bytes =
                     opus_encoder
-                        .encode(&buffer, &mut encoded)
+                        .encode_float(&buffer, &mut encoded)
                         .unwrap_or_else(|e| {
                             tracing::error!("Opus encoding error: {}", e);
                             0
@@ -298,11 +298,12 @@ impl WebRTCConnection {
 
     pub async fn background_receive_audio(
         &self,
-        receiver_queues: Vec<HeapProd<i16>>,
+        receiver_queues: Vec<Arc<StdMutex<HeapProd<f32>>>>,
     ) -> Result<(), Error> {
         let audio_config = self.audio_config.clone();
         tracing::info!("Setting up background receive audio");
-        let data = receiver_queues.into_iter().map(|q| Arc::new(Mutex::new(q))).collect::<Vec<_>>();
+        // let data = receiver_queues.into_iter().map(|q| Arc::new(Mutex::new(q))).collect::<Vec<_>>();
+        let data = receiver_queues;
 
         self.peer_connection.on_track(Box::new({
             // let receiver_queues = receiver_queues.clone();
@@ -321,12 +322,12 @@ impl WebRTCConnection {
                         let mut opus_decoder = audio_config.get_opus_decoder().unwrap();
                         while let Ok((rtp, _)) = track.read_rtp().await {
                             let mut decoded = vec![
-                                0i16;
+                                0f32;
                                 audio_config.frame_size
                                     * (audio_config.channels as usize)
                             ];
                             let decoded_bytes = opus_decoder
-                                .decode(&rtp.payload, &mut decoded, false)
+                                .decode_float(&rtp.payload, &mut decoded, false)
                                 .unwrap_or_else(|e| {
                                     tracing::error!("Opus decoding error: {}", e);
                                     0
@@ -335,7 +336,7 @@ impl WebRTCConnection {
                                 tracing::warn!("No decoded bytes, skipping");
                                 continue;
                             }
-                            let mut data = data.lock().await;
+                            let mut data = data.lock().unwrap();
 
                             // let mut data_guard = data.lock().await;
                             data.push_slice(&decoded[..decoded_bytes]);

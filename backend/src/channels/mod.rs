@@ -2,7 +2,7 @@ use std::sync::{Arc, OnceLock};
 
 use dashmap::DashMap;
 use shared::{
-    models::{AudioChannelMemberUpdate, Channel, Server, Users, VoiceUser}, TrackLocalStaticRTP
+    models::{AudioChannelMemberUpdate, Channel, Server, Users, VoiceUser}, TrackLocalStaticRTP, ROOM_SIZE
 };
 use tokio::sync::Mutex;
 use uuid::Uuid;
@@ -12,7 +12,6 @@ use crate::{utils::SubscribableOnce, Error};
 pub mod backend;
 pub mod web;
 
-pub static ROOM_SIZE: usize = 10;
 
 pub struct VoiceRooms {
     pub voice_rooms: DashMap<Uuid, VoiceRoom>,

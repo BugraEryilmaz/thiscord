@@ -2,6 +2,8 @@ pub mod models;
 #[cfg(feature = "diesel")]
 pub mod schema;
 
+pub static ROOM_SIZE: usize = 10;
+
 #[cfg(not(target_arch = "wasm32"))]
 mod notwasm {
     mod my_web_rtc;
