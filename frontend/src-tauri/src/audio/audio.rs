@@ -3,13 +3,12 @@ use ringbuf::{
     HeapCons, HeapProd, HeapRb,
 };
 use shared::{Split, ROOM_SIZE};
-use std::sync::{Arc, Mutex as StdMutex};
 use std::ops::Add;
+use std::sync::{Arc, Mutex as StdMutex};
 
 use cpal::{
     traits::{DeviceTrait, HostTrait, StreamTrait},
-    FromSample, SizedSample,
-    SupportedStreamConfigRange,
+    FromSample, SizedSample, SupportedStreamConfig,
 };
 
 use crate::Error;
@@ -31,6 +30,15 @@ impl AudioElement {
         }
     }
 
+    pub fn get_config(&self) -> cpal::SupportedStreamConfig {
+        SupportedStreamConfig::new(
+            1,
+            cpal::SampleRate(48000),
+            cpal::SupportedBufferSize::Range { min: 960, max: 960 },
+            cpal::SampleFormat::F32,
+        )
+    }
+
     pub fn start_speaker(&mut self) -> Result<Vec<Arc<StdMutex<HeapProd<f32>>>>, Error> {
         // If there is previously created speaker stream, stop it
         drop(self.speaker_stream.take());
@@ -45,12 +53,7 @@ impl AudioElement {
         self.speaker_producers = Some(tx_clone);
         if let Some(speaker) = self.speaker.as_ref() {
             // Start the output stream with the created ringbuffers
-            let mut supported_config = speaker.supported_output_configs()?;
-            let supported_config: SupportedStreamConfigRange = supported_config
-                .find(|c| c.channels() == 1)
-                .ok_or(Error::NotImplemented)?;
-            let config = supported_config.try_with_sample_rate(cpal::SampleRate(48000))
-                .ok_or(Error::NotImplemented)?;
+            let config = self.get_config();
             let stream = Self::make_speaker_stream(speaker, &config, rx)?;
             self.speaker_stream = Some(stream);
             // Start the stream
@@ -144,12 +147,7 @@ impl AudioElement {
         let mic_consumer = Arc::new(StdMutex::new(mic_consumer));
         self.mic_consumer = Some(mic_consumer.clone());
         if let Some(mic) = self.mic.as_ref() {
-            let mut supported_config = mic.supported_input_configs()?;
-            let supported_config: SupportedStreamConfigRange = supported_config
-                .find(|c| c.channels() == 1)
-                .ok_or(Error::NotImplemented)?;
-            let config = supported_config.try_with_sample_rate(cpal::SampleRate(48000))
-                .ok_or(Error::NotImplemented)?;
+            let config = self.get_config();
             // Start the input stream with the created ringbuffer
             let stream = Self::make_mic_stream(mic, &config, mic_producer)?;
             self.mic_stream = Some(stream);
@@ -203,7 +201,7 @@ impl AudioElement {
         device: &cpal::Device,
         config: &cpal::StreamConfig,
         mut tx: HeapProd<f32>,
-    ) -> Result<cpal::Stream, Error> 
+    ) -> Result<cpal::Stream, Error>
     where
         T: SizedSample,
         f32: FromSample<T>,
@@ -212,7 +210,7 @@ impl AudioElement {
             &config,
             move |data: &[T], _| {
                 // Convert T to f32 and send to the encoder thread
-                let samples= data.iter().map(|s| s.to_sample()).collect::<Vec<f32>>();
+                let samples = data.iter().map(|s| s.to_sample()).collect::<Vec<f32>>();
                 // Note: This will block if the channel is full.
                 tx.push_slice(&samples);
             },
