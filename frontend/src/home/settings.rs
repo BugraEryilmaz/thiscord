@@ -3,10 +3,7 @@ use leptos::{logging::log, prelude::*, task::spawn_local};
 use serde_wasm_bindgen::to_value;
 use wasm_bindgen::JsValue;
 
-use crate::utils::{
-    hover_menu::{HoverMenu, HoverMenuDirection, HoverMenuTrigger},
-    invoke,
-};
+use crate::utils::{dropdown::Dropdown, invoke};
 
 stylance::import_style!(
     #[allow(dead_code)]
@@ -35,8 +32,6 @@ pub fn Settings() -> impl IntoView {
             }
         }
     });
-    let mic_popup_visible = RwSignal::new(false);
-    let speaker_popup_visible = RwSignal::new(false);
     view! {
         <div>
             <h2>{"Settings"}</h2>
@@ -45,96 +40,50 @@ pub fn Settings() -> impl IntoView {
             <div class=style::audio_settings>
                 <div class=style::audio_setting_type>
                     <p>Input Device:</p>
-                    <HoverMenu
+                    <Dropdown
                         item=move || {
-                            view! {
-                                <p class=style::audio_setting_current>
-                                    {devices
-                                        .get()
-                                        .last_used_devices
-                                        .map(|d| d.mic.clone().unwrap_or("No Microphone Selected".to_string()))
-                                        .unwrap_or("No Microphone Selected".to_string())}
-                                </p>
-                            }
+                            devices
+                                .get()
+                                .last_used_devices
+                                .map(|d| {
+                                    d.mic.clone().unwrap_or("No Microphone Selected".to_string())
+                                })
+                                .unwrap_or("No Microphone Selected".to_string())
                         }
-                        popup={
-                            view! {
-                                <div class=style::audio_setting_popup>
-                                    <For
-                                        each=move || devices.get().mics.into_iter()
-                                        key=|mic| mic.clone()
-                                        let(mic)
-                                    >
-                                        <p
-                                            class=style::audio_setting_option
-                                            on:click=move |_| {
-                                                mic_popup_visible.set(false);
-                                                let mic = mic.clone();
-                                                spawn_local(async move {
-                                                    let _ = invoke(
-                                                            "set_mic",
-                                                            to_value(&SetDeviceArgs { device: mic }).unwrap(),
-                                                        )
-                                                        .await;
-                                                });
-                                            }
-                                        >
-                                            {mic.clone()}
-                                        </p>
-                                    </For>
-                                </div>
-                            }
+                        drop_list=move || devices.get().mics.clone()
+                        callback=move |mic| {
+                            spawn_local(async move {
+                                let _ = invoke(
+                                        "set_mic",
+                                        to_value(&SetDeviceArgs { device: mic }).unwrap(),
+                                    )
+                                    .await;
+                            });
                         }
-                        direction=HoverMenuDirection::Down
-                        trigger=HoverMenuTrigger::Click
-                        visible=mic_popup_visible
                     />
                 </div>
                 <div class=style::audio_setting_type>
                     <p>Output Device:</p>
-                    <HoverMenu
+                    <Dropdown
                         item=move || {
-                            view! {
-                                <p class=style::audio_setting_current>
-                                    {devices
-                                        .get()
-                                        .last_used_devices
-                                        .map(|d| d.speaker.clone().unwrap_or("No Speaker Selected".to_string()))
-                                        .unwrap_or("No Speaker Selected".to_string())}
-                                </p>
-                            }
+                            devices
+                                .get()
+                                .last_used_devices
+                                .map(|d| {
+                                    d.speaker.clone().unwrap_or("No Speaker Selected".to_string())
+                                })
+                                .unwrap_or("No Speaker Selected".to_string())
                         }
-                        popup={
-                            view! {
-                                <div class=style::audio_setting_popup>
-                                    <For
-                                        each=move || devices.get().speakers.into_iter()
-                                        key=|speaker| speaker.clone()
-                                        let(speaker)
-                                    >
-                                        <p
-                                            class=style::audio_setting_option
-                                            on:click=move |_| {
-                                                speaker_popup_visible.set(false);
-                                                let speaker = speaker.clone();
-                                                spawn_local(async move {
-                                                    let _ = invoke(
-                                                            "set_speaker",
-                                                            to_value(&SetDeviceArgs { device: speaker }).unwrap(),
-                                                        )
-                                                        .await;
-                                                });
-                                            }
-                                        >
-                                            {speaker.clone()}
-                                        </p>
-                                    </For>
-                                </div>
-                            }
+                        drop_list=move || devices.get().speakers.clone()
+                        callback=move |speaker| {
+                            spawn_local(async move {
+                                let _ = invoke(
+                                        "set_speaker",
+                                        to_value(&SetDeviceArgs { device: speaker }).unwrap(),
+                                    )
+                                    .await;
+                            });
                         }
-                        direction=HoverMenuDirection::Down
-                        trigger=HoverMenuTrigger::Click
-                        visible=speaker_popup_visible
                     />
                 </div>
             </div>

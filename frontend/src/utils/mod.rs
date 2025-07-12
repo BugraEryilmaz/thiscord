@@ -1,5 +1,6 @@
 pub mod hover_menu;
 pub mod popup;
+pub mod dropdown;
 
 use js_sys::Function;
 use leptos::{logging::log, task::spawn_local};
