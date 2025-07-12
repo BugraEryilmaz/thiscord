@@ -61,11 +61,11 @@ pub async fn get_devices(state: tauri::State<'_, AppState>) -> Result<AudioDevic
         .map_err(|e| e.to_string())?;
     let mics = AudioElement::list_mics()
         .map_err(|e| e.to_string())?;
+    let last_used_audio_devices = state.last_used_audio_devices.lock().unwrap();
     Ok(AudioDevices {
         mics: mics,
-        mic: state.current_mic.lock().unwrap().clone(),
         speakers: speakers,
-        speaker: state.current_speaker.lock().unwrap().clone(),
+        last_used_devices: last_used_audio_devices.clone().map(Into::into),
     })
 }
 

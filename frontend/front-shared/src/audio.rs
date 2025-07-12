@@ -1,10 +1,11 @@
 use serde::{Deserialize, Serialize};
 
+pub mod last_used_devices;
+use last_used_devices::LastUsedAudioDevicesWString;
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct AudioDevices {
     pub mics: Vec<String>,
-    pub mic: Option<String>,
     pub speakers: Vec<String>,
-    pub speaker: Option<String>,
+    pub last_used_devices: Option<LastUsedAudioDevicesWString>,
 }

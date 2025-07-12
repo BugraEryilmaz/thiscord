@@ -3,40 +3,33 @@ use ringbuf::{
     HeapCons, HeapProd, HeapRb,
 };
 use shared::{Split, ROOM_SIZE};
-use tauri::{AppHandle, Manager};
 use std::ops::Add;
 use std::sync::{Arc, Mutex as StdMutex};
+use tauri::{AppHandle, Manager};
 
 use cpal::{
     traits::{DeviceTrait, HostTrait, StreamTrait},
     FromSample, SizedSample, SupportedStreamConfig,
 };
 
-use crate::{models::{LastUsedAudioDevices, LastUsedAudioDevicesWString}, utils::{establish_connection, AppState}, Error};
+use crate::{
+    models::{LastUsedAudioDevices, LastUsedAudioDevicesWString},
+    utils::{establish_connection, AppState},
+    Error,
+};
 
 use super::AudioElement;
 
 impl AudioElement {
     pub fn new(handle: AppHandle) -> Self {
         let state = handle.state::<AppState>();
-        let devices = LastUsedAudioDevices::get_from_db_or_default(&mut establish_connection(&handle))
-            .unwrap_or_default();
+        let devices =
+            LastUsedAudioDevices::get_from_db_or_default(&mut establish_connection(&handle))
+                .unwrap_or_default();
         // Set the current mic and speaker in the app state
         {
-            let mut current_mic = state.current_mic.lock().unwrap();
-            *current_mic = Some(
-                devices.mic.as_ref()
-                    .map_or("No Microphone Selected".to_string(), |d| {
-                        d.name().unwrap_or("No Microphone Selected".to_string())
-                    }),
-            );
-            let mut current_speaker = state.current_speaker.lock().unwrap();
-            *current_speaker = Some(
-                devices.speaker.as_ref()
-                    .map_or("No Speaker Selected".to_string(), |d| {
-                        d.name().unwrap_or("No Speaker Selected".to_string())
-                    }),
-            );
+            let mut last_used_audio_devices = state.last_used_audio_devices.lock().unwrap();
+            *last_used_audio_devices = Some(devices.clone().into());
         }
         AudioElement {
             speaker: devices.speaker,
@@ -102,8 +95,10 @@ impl AudioElement {
     pub fn change_speaker(&mut self, device_name: &str, state: &AppState) -> Result<(), Error> {
         // Set the current speaker in the app state
         {
-            let mut current_speaker = state.current_speaker.lock().unwrap();
-            *current_speaker = Some(device_name.to_string());
+            let mut last_used_audio_devices = state.last_used_audio_devices.lock().unwrap();
+            last_used_audio_devices
+                .as_mut()
+                .map(|devices| devices.speaker = Some(device_name.to_string()));
         }
         // If there is previously created speaker stream, stop it
         drop(self.speaker_stream.take());
@@ -134,8 +129,7 @@ impl AudioElement {
 
     pub fn set_default_speaker(device_name: &str, handle: AppHandle) {
         let conn = &mut establish_connection(&handle);
-        let devices = LastUsedAudioDevices::get_from_db_or_default(conn)
-            .unwrap_or_default();
+        let devices = LastUsedAudioDevices::get_from_db_or_default(conn).unwrap_or_default();
         let mut devices: LastUsedAudioDevicesWString = devices.into();
         devices.speaker = Some(device_name.to_string());
         devices.save_to_db(conn).unwrap_or_else(|e| {
@@ -146,8 +140,10 @@ impl AudioElement {
     pub fn change_mic(&mut self, device_name: &str, state: &AppState) -> Result<(), Error> {
         // Set the current mic in the app state
         {
-            let mut current_mic = state.current_mic.lock().unwrap();
-            *current_mic = Some(device_name.to_string());
+            let mut last_used_audio_devices = state.last_used_audio_devices.lock().unwrap();
+            last_used_audio_devices
+                .as_mut()
+                .map(|devices| devices.mic = Some(device_name.to_string()));
         }
         // If there is previously created mic stream, stop it
         drop(self.mic_stream.take());
@@ -176,8 +172,7 @@ impl AudioElement {
 
     pub fn set_default_mic(device_name: &str, handle: AppHandle) {
         let conn = &mut establish_connection(&handle);
-        let devices = LastUsedAudioDevices::get_from_db_or_default(conn)
-            .unwrap_or_default();
+        let devices = LastUsedAudioDevices::get_from_db_or_default(conn).unwrap_or_default();
         let mut devices: LastUsedAudioDevicesWString = devices.into();
         devices.mic = Some(device_name.to_string());
         devices.save_to_db(conn).unwrap_or_else(|e| {

@@ -5,6 +5,8 @@ diesel::table! {
         id -> Nullable<Integer>,
         mic -> Nullable<Text>,
         speaker -> Nullable<Text>,
+        mic_boost -> Nullable<Integer>,
+        speaker_boost -> Nullable<Integer>,
     }
 }
 

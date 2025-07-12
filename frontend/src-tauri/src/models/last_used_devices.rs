@@ -8,12 +8,14 @@ use serde::{Deserialize, Serialize};
 #[derive(Clone)]
 pub struct LastUsedAudioDevices {
     pub mic: Option<Device>,
+    pub mic_boost: Option<i32>,
     pub speaker: Option<Device>,
+    pub speaker_boost: Option<i32>,
 }
 
 impl LastUsedAudioDevices {
-    pub fn new(mic: Option<Device>, speaker: Option<Device>) -> Self {
-        LastUsedAudioDevices { mic, speaker }
+    pub fn new(mic: Option<Device>, mic_boost: Option<i32>, speaker: Option<Device>, speaker_boost: Option<i32>) -> Self {
+        LastUsedAudioDevices { mic, mic_boost, speaker, speaker_boost }
     }
 
     pub fn get_from_db_or_default(conn: &mut SqliteConnection) -> Result<Self, diesel::result::Error> {
@@ -38,7 +40,9 @@ impl Default for LastUsedAudioDevices {
         let host = cpal::default_host();
         LastUsedAudioDevices {
             mic: host.default_input_device(),
+            mic_boost: None,
             speaker: host.default_output_device(),
+            speaker_boost: None,
         }
     }
 }
@@ -84,7 +88,9 @@ impl From<LastUsedAudioDevices> for LastUsedAudioDevicesWString {
         LastUsedAudioDevicesWString {
             id: Some(1),
             mic,
+            mic_boost: devices.mic_boost,
             speaker,
+            speaker_boost: devices.speaker_boost,
         }
     }
 }
@@ -112,7 +118,7 @@ impl From<LastUsedAudioDevicesWString> for LastUsedAudioDevices {
             },
             None => host.default_output_device(),
         };
-        LastUsedAudioDevices { mic, speaker }
+        LastUsedAudioDevices { mic, speaker, mic_boost: devices.mic_boost, speaker_boost: devices.speaker_boost }
     }
 }
 
@@ -123,6 +129,8 @@ pub struct LastUsedAudioDevicesWString {
     pub id: Option<i32>,
     pub mic: Option<String>,
     pub speaker: Option<String>,
+    pub mic_boost: Option<i32>,
+    pub speaker_boost: Option<i32>,
 }
 
 impl LastUsedAudioDevicesWString {
@@ -143,5 +151,29 @@ impl LastUsedAudioDevicesWString {
             .set(self)
             .execute(conn)?;
         Ok(())
+    }
+}
+
+impl From<front_shared::last_used_devices::LastUsedAudioDevicesWString> for LastUsedAudioDevicesWString {
+    fn from(devices: front_shared::last_used_devices::LastUsedAudioDevicesWString) -> Self {
+        LastUsedAudioDevicesWString {
+            id: devices.id,
+            mic: devices.mic,
+            speaker: devices.speaker,
+            mic_boost: devices.mic_boost,
+            speaker_boost: devices.speaker_boost,
+        }
+    }
+}
+
+impl From<LastUsedAudioDevicesWString> for front_shared::last_used_devices::LastUsedAudioDevicesWString {
+    fn from(devices: LastUsedAudioDevicesWString) -> Self {
+        front_shared::last_used_devices::LastUsedAudioDevicesWString {
+            id: devices.id,
+            mic: devices.mic,
+            speaker: devices.speaker,
+            mic_boost: devices.mic_boost,
+            speaker_boost: devices.speaker_boost,
+        }
     }
 }

@@ -46,7 +46,17 @@ pub fn Settings() -> impl IntoView {
                 <div class=style::audio_setting_type>
                     <p>Input Device:</p>
                     <HoverMenu
-                        item=move || view!{<p class=style::audio_setting_current>{devices.get().mic.unwrap_or("No Microphone Selected".to_string())}</p>}
+                        item=move || {
+                            view! {
+                                <p class=style::audio_setting_current>
+                                    {devices
+                                        .get()
+                                        .last_used_devices
+                                        .map(|d| d.mic.clone().unwrap_or("No Microphone Selected".to_string()))
+                                        .unwrap_or("No Microphone Selected".to_string())}
+                                </p>
+                            }
+                        }
                         popup={
                             view! {
                                 <div class=style::audio_setting_popup>
@@ -55,16 +65,22 @@ pub fn Settings() -> impl IntoView {
                                         key=|mic| mic.clone()
                                         let(mic)
                                     >
-                                        <p class=style::audio_setting_option
-                                            on:click={
-                                                move |_| {
+                                        <p
+                                            class=style::audio_setting_option
+                                            on:click=move |_| {
                                                 mic_popup_visible.set(false);
                                                 let mic = mic.clone();
                                                 spawn_local(async move {
-                                                    let _ = invoke("set_mic", to_value(&SetDeviceArgs { device: mic }).unwrap()).await;
+                                                    let _ = invoke(
+                                                            "set_mic",
+                                                            to_value(&SetDeviceArgs { device: mic }).unwrap(),
+                                                        )
+                                                        .await;
                                                 });
-                                            }}
-                                        >{mic.clone()}</p>
+                                            }
+                                        >
+                                            {mic.clone()}
+                                        </p>
                                     </For>
                                 </div>
                             }
@@ -77,7 +93,17 @@ pub fn Settings() -> impl IntoView {
                 <div class=style::audio_setting_type>
                     <p>Output Device:</p>
                     <HoverMenu
-                        item=move || view!{<p class=style::audio_setting_current>{devices.get().speaker.unwrap_or("No Speaker Selected".to_string())}</p>}
+                        item=move || {
+                            view! {
+                                <p class=style::audio_setting_current>
+                                    {devices
+                                        .get()
+                                        .last_used_devices
+                                        .map(|d| d.speaker.clone().unwrap_or("No Speaker Selected".to_string()))
+                                        .unwrap_or("No Speaker Selected".to_string())}
+                                </p>
+                            }
+                        }
                         popup={
                             view! {
                                 <div class=style::audio_setting_popup>
@@ -86,16 +112,22 @@ pub fn Settings() -> impl IntoView {
                                         key=|speaker| speaker.clone()
                                         let(speaker)
                                     >
-                                        <p class=style::audio_setting_option
-                                            on:click={
-                                                move |_| {
+                                        <p
+                                            class=style::audio_setting_option
+                                            on:click=move |_| {
                                                 speaker_popup_visible.set(false);
                                                 let speaker = speaker.clone();
                                                 spawn_local(async move {
-                                                    let _ = invoke("set_speaker", to_value(&SetDeviceArgs { device: speaker }).unwrap()).await;
+                                                    let _ = invoke(
+                                                            "set_speaker",
+                                                            to_value(&SetDeviceArgs { device: speaker }).unwrap(),
+                                                        )
+                                                        .await;
                                                 });
-                                            }}
-                                        >{speaker.clone()}</p>
+                                            }
+                                        >
+                                            {speaker.clone()}
+                                        </p>
                                     </For>
                                 </div>
                             }

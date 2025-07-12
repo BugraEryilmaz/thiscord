@@ -13,6 +13,7 @@ use std::sync::Mutex as StdMutex;
 pub use update::*;
 
 use crate::websocket::WebSocketRequest;
+use crate::models::LastUsedAudioDevicesWString;
 
 pub struct AppState {
     // Define any shared state here
@@ -20,8 +21,7 @@ pub struct AppState {
     pub client: Client,
     pub cookie_store: Arc<Jar>,
     pub conn_status: Arc<StdMutex<Status>>,
-    pub current_mic: Arc<StdMutex<Option<String>>>,
-    pub current_speaker: Arc<StdMutex<Option<String>>>,
+    pub last_used_audio_devices: StdMutex<Option<LastUsedAudioDevicesWString>>,
 }
 
 impl AppState {
@@ -37,8 +37,7 @@ impl AppState {
             client,
             cookie_store,
             conn_status: Arc::new(StdMutex::new(Status::Offline)),
-            current_mic: Arc::new(StdMutex::new(None)),
-            current_speaker: Arc::new(StdMutex::new(None)),
+            last_used_audio_devices: StdMutex::new(None),
         }
     }
 
