@@ -68,28 +68,13 @@ async fn main() {
     // create auth backend
     let auth_backend = models::Backend::new(db_connection_pool);
     let auth_layer = AuthManagerLayerBuilder::new(auth_backend, session_manager_layer).build();
-
-    tracing::info!(
-        "SSL certificate is being loaded from {}",
-        PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-            .join("..")
-            .join("sslcert")
-            .join("localhost-key.pem")
-            .display()
-    );
     rustls::crypto::aws_lc_rs::default_provider()
         .install_default()
         .expect("Failed to install default provider");
     // configure certificate and private key used by https
     let config = RustlsConfig::from_pem_file(
-        PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-            .join("..")
-            .join("sslcert")
-            .join("localhost-cert.pem"),
-        PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-            .join("..")
-            .join("sslcert")
-            .join("localhost-key.pem"),
+        PathBuf::from("/etc/letsencrypt/live/thiscord.com.tr/fullchain.pem"),
+        PathBuf::from("/etc/letsencrypt/live/thiscord.com.tr/privkey.pem"),
     )
     .await
     .unwrap();

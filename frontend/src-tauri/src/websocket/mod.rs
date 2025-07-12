@@ -51,8 +51,8 @@ pub async fn websocket_handler(
     }
 
     let connector = TlsConnector::builder()
-        .danger_accept_invalid_certs(true)
-        .danger_accept_invalid_hostnames(true)
+        // .danger_accept_invalid_certs(true)
+        // .danger_accept_invalid_hostnames(true)
         .build()?;
     let connector = Connector::NativeTls(connector);
     let (mut ws_stream, _) =

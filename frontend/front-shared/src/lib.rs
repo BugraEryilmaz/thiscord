@@ -1,4 +1,4 @@
-pub const URL: &str = "localhost:443";
+pub const URL: &str = "thiscord.com.tr";
 
 mod update;
 use shared::models::AudioChannelMemberUpdate;
