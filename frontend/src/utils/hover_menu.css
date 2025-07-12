@@ -1,9 +1,8 @@
 .hover_menu_item{}
 
 .hover_menu_popup {
-    position: absolute;
+    position: fixed;
     z-index: 1000;
-    padding: 1rem;
     background-color: var(--quinary-color);
     border-radius: 0.25rem;
     margin: 1rem;

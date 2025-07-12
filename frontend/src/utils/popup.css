@@ -1,0 +1,32 @@
+.overlay {
+    position: fixed;
+    top: 0;
+    left: 0;
+    right: 0;
+    bottom: 0;
+    z-index: 997; /* Ensure it covers other content */
+}
+
+.popup_background_blur {
+    backdrop-filter: blur(5px);
+}
+
+.popup_background_brightness {
+    backdrop-filter: brightness(0.8);
+}
+
+.popup_content {
+    position: fixed;
+    top: 0;
+    left: 0;
+    right: 0;
+    bottom: 0;
+    margin: auto;
+    width: fit-content;
+    height: fit-content;
+    background-color: var(--quinary-color);
+    padding: 3rem;
+    z-index: 998; /* Ensure it appears above other content */
+    box-shadow: 0 4px 10px rgba(0, 0, 0, 0.2);
+    border-radius: 1rem;
+}

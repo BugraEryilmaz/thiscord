@@ -208,7 +208,7 @@ pub fn ChannelList(
                 popup=move || {
                     let (is_copied, set_is_copied) = signal(false);
                     view! {
-                        <div class=style::channel_list_servername>
+                        <div class=style::channel_list_servername_popup>
                             <p>
                                 "Join Channel: "
                                 <div

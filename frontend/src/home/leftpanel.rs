@@ -6,7 +6,7 @@ use wasm_bindgen::{JsCast, JsValue};
 use crate::{
     app::LoggedInSignal,
     home::create_server::{CreateServerPopup, JoinServerPopup},
-    utils::{hover_menu::{HoverMenu, HoverMenuDirection, HoverMenuTrigger}, invoke},
+    utils::{hover_menu::{HoverMenu, HoverMenuDirection, HoverMenuTrigger}, invoke, popup::{Popup, PopupBackgroundStyle}},
 };
 
 stylance::import_style!(
@@ -20,8 +20,8 @@ pub fn Sidebar(active_server: RwSignal<Option<Server>>) -> impl IntoView {
     let (servers, set_servers) = signal(vec![]);
     let is_logged_in_signal =
         context::use_context::<LoggedInSignal>().expect("SessionCookie context not found");
-    let (create_server_popup, set_create_server_popup) = signal(false);
-    let (join_server_popup, set_join_server_popup) = signal(false);
+    let create_server_popup = RwSignal::new(false);
+    let join_server_popup = RwSignal::new(false);
 
     Effect::new(move || {
         if !is_logged_in_signal.get() {
@@ -72,31 +72,35 @@ pub fn Sidebar(active_server: RwSignal<Option<Server>>) -> impl IntoView {
                     img_url="/public/new_server.svg".to_string()
                     name="Add Server".to_string()
                     onclick=move || {
-                        set_create_server_popup.set(true);
+                        create_server_popup.set(true);
                     }
                 />
                 <LeftIcon
                     img_url="/public/join_server.svg".to_string()
                     name="Join Server".to_string()
                     onclick=move || {
-                        set_join_server_popup.set(true);
+                        join_server_popup.set(true);
                     }
                 />
             </ul>
-            <Show when=move || create_server_popup.get()>
-                <div class=style::overlay on:click=move |_| set_create_server_popup.set(false) />
+            <Popup
+                visible=create_server_popup
+                background_style=vec![PopupBackgroundStyle::Blur, PopupBackgroundStyle::Brightness]
+            >
                 <CreateServerPopup on_create=move || {
-                    set_create_server_popup.set(false);
+                    create_server_popup.set(false);
                     is_logged_in_signal.update(|_| {});
                 } />
-            </Show>
-            <Show when=move || join_server_popup.get()>
-                <div class=style::overlay on:click=move |_| set_join_server_popup.set(false) />
+            </Popup>
+            <Popup
+                visible=join_server_popup
+                background_style=vec![PopupBackgroundStyle::Blur, PopupBackgroundStyle::Brightness]
+            >
                 <JoinServerPopup on_join=move || {
-                    set_join_server_popup.set(false);
+                    join_server_popup.set(false);
                     is_logged_in_signal.update(|_| {});
                 } />
-            </Show>
+            </Popup>
         </div>
     }
 }

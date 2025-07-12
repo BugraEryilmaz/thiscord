@@ -1,0 +1,48 @@
+.audio_settings {
+    display: flex;
+    flex-direction: row;
+}
+
+.audio_setting_type {
+    margin: 3rem;
+    max-width: 20rem;
+}
+
+.audio_setting_type p {
+}
+
+.audio_setting_current {
+    font-weight: bold;
+    background-color: color-mix(in srgb, var(--quinary-color) 50%, rgba(0, 0, 0, 0.5) 50%);
+    padding: 0.5rem;
+    border-radius: 0.25rem;
+    cursor: pointer;
+}
+
+.audio_setting_current:hover {
+    background-color: color-mix(in srgb, var(--quinary-color) 30%, rgba(0, 0, 0, 0.5) 80%);
+}
+
+.audio_setting_popup {
+    max-width: 20rem;
+    background-color: var(--quinary-color);
+    padding: 0.5rem;
+    border-radius: 0.25rem;
+    box-shadow: 0 0px 10px rgba(0, 0, 0, 0.5);
+    max-height: 20rem;
+    overflow-y: auto;
+    margin: 0;
+}
+
+.audio_setting_option {
+    background-color: color-mix(in srgb, var(--quinary-color) 50%, rgba(0, 0, 0, 0.5) 50%);
+    border-radius: 0.25rem;
+    margin: 0.25rem;
+    padding: 0.5rem;
+    box-shadow: 0 0px 5px rgba(0, 0, 0, 0.2);
+    /* Add a hover effect */
+    &:hover {
+        background-color: color-mix(in srgb, var(--primary-color) 70%, rgba(0, 0, 0, 0.5) 30%);
+    }
+    cursor: pointer;
+}

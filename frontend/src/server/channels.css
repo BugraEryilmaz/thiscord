@@ -40,6 +40,14 @@
     margin-top: 0.5rem;
 }
 
+.channel-list-servername-popup {
+    font-size: 0.9rem;
+    padding: 1rem;
+}
+.channel-list-servername-popup p {
+    margin: 0;
+}
+
 .channel-list-groupname {
     font-size: 0.8rem;
     cursor: default;

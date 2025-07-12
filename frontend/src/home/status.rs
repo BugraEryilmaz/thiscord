@@ -5,8 +5,7 @@ use stylance::classes;
 use wasm_bindgen::JsValue;
 
 use crate::{
-    app::LoggedInSignal,
-    utils::{create_listener, invoke},
+    app::LoggedInSignal, home::settings::Settings, utils::{create_listener, invoke, popup::{Popup, PopupBackgroundStyle}}
 };
 
 stylance::import_style!(
@@ -55,9 +54,28 @@ pub fn StatusBox() -> impl IntoView {
         set_status.set(new_status);
     });
 
+    let settings_popup = RwSignal::new(false);
+
     view! {
         <div class=style::status_box>
-            <span class=style::username>{username}</span>
+            <div class=style::user_info>
+                <span class=style::username>{username}</span>
+                <div class=style::icon_div>
+                    <img
+                        class=style::icon
+                        src="public/settings.png"
+                        on:click=move |_| {
+                            settings_popup.set(true);
+                        }
+                    />
+                </div>
+                <Popup
+                    visible=settings_popup
+                    background_style=vec![PopupBackgroundStyle::Blur, PopupBackgroundStyle::Brightness]
+                >
+                    <Settings/>
+                </Popup>
+            </div>
             <div class=style::call_status>
                 <span class=style::status>{move || format!("{:?}", status.get())}</span>
                 <Show when=move || matches!(status.get(), Status::OnCall(_)) fallback=move || {}>

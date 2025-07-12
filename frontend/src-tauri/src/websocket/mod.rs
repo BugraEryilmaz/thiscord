@@ -35,7 +35,7 @@ pub async fn websocket_handler(
     let (ws_tx, mut ws_rx) = tokio::sync::mpsc::channel(100);
     let url = format!("wss://{}/websocket", URL);
     let mut web_rtc_connection: Option<WebRTCConnection> = None;
-    let mut audio: Option<AudioElement> = None;
+    let mut audio: Option<AudioElement> = Some(AudioElement::new(handle.clone()));
 
     let mut request = url.into_client_request()?;
     let cookie_store = state.cookie_store.clone();
@@ -142,7 +142,7 @@ pub async fn handle_internal_request(
         } => {
             *web_rtc_connection = Some(WebRTCConnection::new(channel_id).await?);
             let web_rtc_connection = web_rtc_connection.as_ref().unwrap();
-            *audio = Some(AudioElement::new());
+            *audio = Some(AudioElement::new(handle.clone()));
             let audio_element = audio.as_mut().unwrap();
 
             // Start the audio element streams
@@ -214,7 +214,7 @@ pub async fn handle_internal_request(
         WebSocketRequest::Disconnect => todo!(),
         WebSocketRequest::AudioCommand(command) => {
             if let Some(audio_element) = audio {
-                match command {
+                match &command {
                     AudioCommand::Mute => {
                         if let Err(e) = audio_element.mute() {
                             tracing::error!("Failed to mute audio: {}", e);
@@ -241,7 +241,26 @@ pub async fn handle_internal_request(
                         }
                         *audio = None; // Clear the audio element
                     }
+                    AudioCommand::SetMic(device_name) => {
+                        if let Err(e) = audio_element.change_mic(&device_name, &state) {
+                            tracing::error!("Failed to set microphone: {}", e);
+                        }
+                    }
+                    AudioCommand::SetSpeaker(device_name) => {
+                        if let Err(e) = audio_element.change_speaker(&device_name, &state) {
+                            tracing::error!("Failed to set speaker: {}", e);
+                        }
+                    }
                 }
+            } 
+            match &command {
+                AudioCommand::SetMic(device_name) => {
+                    AudioElement::set_default_mic(device_name, handle);
+                }
+                AudioCommand::SetSpeaker(device_name) => {
+                    AudioElement::set_default_speaker(device_name, handle);
+                }
+                _ => {}
             }
         }
     }

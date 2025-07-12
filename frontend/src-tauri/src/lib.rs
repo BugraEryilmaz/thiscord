@@ -5,7 +5,6 @@ pub mod schema;
 pub mod utils;
 pub mod websocket;
 
-use audio::tauri::*;
 use commands::*;
 use reqwest::cookie::CookieStore;
 use front_shared::{Session, URL};
@@ -90,6 +89,9 @@ pub async fn run() {
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![
+            get_devices,
+            set_mic,
+            set_speaker,
             mute_microphone,
             unmute_microphone,
             deafen_speaker,

@@ -10,6 +10,9 @@ pub use login::{LoginStatus, Session};
 mod status;
 pub use status::*;
 
+mod audio;
+pub use audio::*;
+
 use serde::{Deserialize};
 use wasm_bindgen::JsValue;
 

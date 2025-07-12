@@ -17,7 +17,7 @@ pub fn CreateServerPopup(on_create: impl FnMut() -> () + 'static + Clone) -> imp
     let (img_url, set_img_url) = signal(Option::<String>::None);
 
     view! {
-        <div class=style::create_server_popup>
+        <div>
             <form 
             class=style::create_server_form
             on:submit=move |event| {
@@ -79,7 +79,7 @@ pub fn JoinServerPopup(on_join: impl FnMut() -> () + 'static + Clone) -> impl In
     let connection_string_ref = NodeRef::new();
 
     view! {
-        <div class=style::create_server_popup>
+        <div>
             <form 
             class=style::create_server_form
             on:submit=move |event| {

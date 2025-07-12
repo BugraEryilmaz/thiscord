@@ -3,6 +3,7 @@ use ringbuf::{
     HeapCons, HeapProd, HeapRb,
 };
 use shared::{Split, ROOM_SIZE};
+use tauri::{AppHandle, Manager};
 use std::ops::Add;
 use std::sync::{Arc, Mutex as StdMutex};
 
@@ -11,18 +12,35 @@ use cpal::{
     FromSample, SizedSample, SupportedStreamConfig,
 };
 
-use crate::Error;
+use crate::{models::{LastUsedAudioDevices, LastUsedAudioDevicesWString}, utils::{establish_connection, AppState}, Error};
 
 use super::AudioElement;
 
 impl AudioElement {
-    pub fn new() -> Self {
-        let host = cpal::default_host();
-        let mic = host.default_input_device();
-        let speaker = host.default_output_device();
+    pub fn new(handle: AppHandle) -> Self {
+        let state = handle.state::<AppState>();
+        let devices = LastUsedAudioDevices::get_from_db_or_default(&mut establish_connection(&handle))
+            .unwrap_or_default();
+        // Set the current mic and speaker in the app state
+        {
+            let mut current_mic = state.current_mic.lock().unwrap();
+            *current_mic = Some(
+                devices.mic.as_ref()
+                    .map_or("No Microphone Selected".to_string(), |d| {
+                        d.name().unwrap_or("No Microphone Selected".to_string())
+                    }),
+            );
+            let mut current_speaker = state.current_speaker.lock().unwrap();
+            *current_speaker = Some(
+                devices.speaker.as_ref()
+                    .map_or("No Speaker Selected".to_string(), |d| {
+                        d.name().unwrap_or("No Speaker Selected".to_string())
+                    }),
+            );
+        }
         AudioElement {
-            speaker,
-            mic,
+            speaker: devices.speaker,
+            mic: devices.mic,
             speaker_stream: None,
             mic_stream: None,
             mic_consumer: None,
@@ -30,7 +48,7 @@ impl AudioElement {
         }
     }
 
-    pub fn get_config(&self) -> cpal::SupportedStreamConfig {
+    pub fn get_config() -> cpal::SupportedStreamConfig {
         SupportedStreamConfig::new(
             1,
             cpal::SampleRate(48000),
@@ -53,7 +71,7 @@ impl AudioElement {
         self.speaker_producers = Some(tx_clone);
         if let Some(speaker) = self.speaker.as_ref() {
             // Start the output stream with the created ringbuffers
-            let config = self.get_config();
+            let config = Self::get_config();
             let stream = Self::make_speaker_stream(speaker, &config, rx)?;
             self.speaker_stream = Some(stream);
             // Start the stream
@@ -61,6 +79,134 @@ impl AudioElement {
         }
 
         Ok(tx)
+    }
+
+    pub fn start_mic(&mut self) -> Result<Arc<StdMutex<HeapCons<f32>>>, Error> {
+        // If there is previously created mic stream, stop it
+        drop(self.mic_stream.take());
+        // Create a ringbuffer for microphone input
+        let (mic_producer, mic_consumer) = HeapRb::<f32>::new(12000).split();
+        let mic_consumer = Arc::new(StdMutex::new(mic_consumer));
+        self.mic_consumer = Some(mic_consumer.clone());
+        if let Some(mic) = self.mic.as_ref() {
+            let config = Self::get_config();
+            // Start the input stream with the created ringbuffer
+            let stream = Self::make_mic_stream(mic, &config, mic_producer)?;
+            self.mic_stream = Some(stream);
+            // Start the stream
+            self.mic_stream.as_ref().unwrap().play()?;
+        }
+        Ok(mic_consumer)
+    }
+
+    pub fn change_speaker(&mut self, device_name: &str, state: &AppState) -> Result<(), Error> {
+        // Set the current speaker in the app state
+        {
+            let mut current_speaker = state.current_speaker.lock().unwrap();
+            *current_speaker = Some(device_name.to_string());
+        }
+        // If there is previously created speaker stream, stop it
+        drop(self.speaker_stream.take());
+        // Find the device by name
+        let host = cpal::default_host();
+        let device = host
+            .output_devices()?
+            .find(|d| d.name().unwrap_or_default() == device_name)
+            .ok_or_else(|| Error::DeviceNotFound(device_name.to_string()))?;
+        // Create ringbuffers for each person in the room
+        let (tx, rx): (Vec<_>, Vec<_>) = (0..ROOM_SIZE)
+            .map(|_| HeapRb::<f32>::new(12000).split())
+            .unzip();
+        if let Some(speaker_producers) = self.speaker_producers.as_ref() {
+            for (speaker_producer, tx) in speaker_producers.iter().zip(tx.into_iter()) {
+                *speaker_producer.lock().unwrap() = tx;
+            }
+        }
+        // Start the output stream with the created ringbuffers
+        let config = Self::get_config();
+        let stream = Self::make_speaker_stream(&device, &config, rx)?;
+        self.speaker = Some(device);
+        self.speaker_stream = Some(stream);
+        // Start the stream
+        self.speaker_stream.as_ref().unwrap().play()?;
+        Ok(())
+    }
+
+    pub fn set_default_speaker(device_name: &str, handle: AppHandle) {
+        let conn = &mut establish_connection(&handle);
+        let devices = LastUsedAudioDevices::get_from_db_or_default(conn)
+            .unwrap_or_default();
+        let mut devices: LastUsedAudioDevicesWString = devices.into();
+        devices.speaker = Some(device_name.to_string());
+        devices.save_to_db(conn).unwrap_or_else(|e| {
+            tracing::error!("Failed to save default speaker: {}", e);
+        });
+    }
+
+    pub fn change_mic(&mut self, device_name: &str, state: &AppState) -> Result<(), Error> {
+        // Set the current mic in the app state
+        {
+            let mut current_mic = state.current_mic.lock().unwrap();
+            *current_mic = Some(device_name.to_string());
+        }
+        // If there is previously created mic stream, stop it
+        drop(self.mic_stream.take());
+        // Find the device by name
+        let host = cpal::default_host();
+        let device = host
+            .input_devices()?
+            .find(|d| d.name().unwrap_or_default() == device_name)
+            .ok_or_else(|| Error::DeviceNotFound(device_name.to_string()))?;
+        // Create a ringbuffer for microphone input
+        let (mic_producer, mic_consumer) = HeapRb::<f32>::new(12000).split();
+        {
+            if let Some(mic_consumer_arc) = self.mic_consumer.as_ref() {
+                *mic_consumer_arc.lock().unwrap() = mic_consumer;
+            }
+        }
+        // Start the input stream with the created ringbuffer
+        let config = Self::get_config();
+        let stream = Self::make_mic_stream(&device, &config, mic_producer)?;
+        self.mic = Some(device);
+        self.mic_stream = Some(stream);
+        // Start the stream
+        self.mic_stream.as_ref().unwrap().play()?;
+        Ok(())
+    }
+
+    pub fn set_default_mic(device_name: &str, handle: AppHandle) {
+        let conn = &mut establish_connection(&handle);
+        let devices = LastUsedAudioDevices::get_from_db_or_default(conn)
+            .unwrap_or_default();
+        let mut devices: LastUsedAudioDevicesWString = devices.into();
+        devices.mic = Some(device_name.to_string());
+        devices.save_to_db(conn).unwrap_or_else(|e| {
+            tracing::error!("Failed to save default mic: {}", e);
+        });
+    }
+
+    pub fn list_speakers() -> Result<Vec<String>, Error> {
+        let host = cpal::default_host();
+        let devices = host.output_devices()?;
+        let mut speakers = Vec::new();
+        for device in devices {
+            if let Ok(name) = device.name() {
+                speakers.push(name);
+            }
+        }
+        Ok(speakers)
+    }
+
+    pub fn list_mics() -> Result<Vec<String>, Error> {
+        let host = cpal::default_host();
+        let devices = host.input_devices()?;
+        let mut mics = Vec::new();
+        for device in devices {
+            if let Ok(name) = device.name() {
+                mics.push(name);
+            }
+        }
+        Ok(mics)
     }
 
     pub fn make_speaker_stream(
@@ -137,24 +283,6 @@ impl AudioElement {
             None,
         )?;
         Ok(stream)
-    }
-
-    pub fn start_mic(&mut self) -> Result<Arc<StdMutex<HeapCons<f32>>>, Error> {
-        // If there is previously created mic stream, stop it
-        drop(self.mic_stream.take());
-        // Create a ringbuffer for microphone input
-        let (mic_producer, mic_consumer) = HeapRb::<f32>::new(12000).split();
-        let mic_consumer = Arc::new(StdMutex::new(mic_consumer));
-        self.mic_consumer = Some(mic_consumer.clone());
-        if let Some(mic) = self.mic.as_ref() {
-            let config = self.get_config();
-            // Start the input stream with the created ringbuffer
-            let stream = Self::make_mic_stream(mic, &config, mic_producer)?;
-            self.mic_stream = Some(stream);
-            // Start the stream
-            self.mic_stream.as_ref().unwrap().play()?;
-        }
-        Ok(mic_consumer)
     }
 
     pub fn make_mic_stream(

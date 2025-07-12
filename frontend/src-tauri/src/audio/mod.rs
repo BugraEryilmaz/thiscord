@@ -4,7 +4,6 @@ use ringbuf::HeapProd;
 use ringbuf::HeapCons;
 
 mod audio;
-pub mod tauri;
 
 pub struct AudioElement {
     pub speaker: Option<cpal::Device>,
@@ -21,4 +20,6 @@ pub enum AudioCommand {
     Deafen,
     Undeafen,
     Quit,
+    SetMic(String),
+    SetSpeaker(String),
 }

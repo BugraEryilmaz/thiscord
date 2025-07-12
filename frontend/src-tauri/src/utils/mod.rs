@@ -20,6 +20,8 @@ pub struct AppState {
     pub client: Client,
     pub cookie_store: Arc<Jar>,
     pub conn_status: Arc<StdMutex<Status>>,
+    pub current_mic: Arc<StdMutex<Option<String>>>,
+    pub current_speaker: Arc<StdMutex<Option<String>>>,
 }
 
 impl AppState {
@@ -35,6 +37,8 @@ impl AppState {
             client,
             cookie_store,
             conn_status: Arc::new(StdMutex::new(Status::Offline)),
+            current_mic: Arc::new(StdMutex::new(None)),
+            current_speaker: Arc::new(StdMutex::new(None)),
         }
     }
 

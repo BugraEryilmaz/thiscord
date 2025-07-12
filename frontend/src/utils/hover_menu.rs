@@ -58,13 +58,14 @@ pub fn HoverMenu<I: IntoView, P: IntoView>(
     trigger: HoverMenuTrigger,
     #[prop(optional)]
     background_style: Vec<HoverMenuBackgroundStyle>,
+    #[prop(default = RwSignal::new(false))]
+    visible: RwSignal<bool>,
 ) -> impl IntoView {
     let parent_ref = NodeRef::new();
     let popup_ref = NodeRef::new();
     let (x, set_x) = signal(0);
     let (y, set_y) = signal(0);
     let (_modified, set_modified) = signal(true);
-    let (visible, set_visible) = signal(trigger == HoverMenuTrigger::Hover);
 
     let calc = move || {
         if let Some(parent) = parent_ref.get() {
@@ -129,7 +130,7 @@ pub fn HoverMenu<I: IntoView, P: IntoView>(
                 on:click=move |_| {
                     if matches!(trigger.clone(), HoverMenuTrigger::Click) {
                         calc();
-                        set_visible.set(true);
+                        visible.set(true);
                     }
                 }
             >
@@ -148,7 +149,7 @@ pub fn HoverMenu<I: IntoView, P: IntoView>(
                 {popup}
             </div>
             <div on:click=move |_| {
-                    set_visible.set(false);
+                    visible.set(false);
                 }
                 class=move || {classes!(
                     if trigger == HoverMenuTrigger::Click && visible.get() { style::hover_menu_popup_visible }

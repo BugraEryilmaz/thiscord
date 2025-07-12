@@ -69,18 +69,8 @@
     text-align: center;
     box-shadow: 0 2px 5px rgba(0, 0, 0, 0.1);
     font-size: 1.3rem;
-}
-
-.create_server_popup {
-    position: absolute;
-    top: 50%;
-    left: 50%;
-    transform: translate(-50%, -50%);
-    background-color: var(--quinary-color);
     padding: 1rem;
-    z-index: 1001; /* Ensure it appears above other content */
-    box-shadow: 0 4px 10px rgba(0, 0, 0, 0.2);
-    border-radius: 1rem;
+    border-radius: 0.5rem;
 }
 
 .create_server_form {

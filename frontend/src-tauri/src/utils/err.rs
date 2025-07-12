@@ -14,6 +14,10 @@ pub enum Error {
     NoInputDevice,
     #[error("No output device found")]
     NoOutputDevice,
+    #[error("Devices error: {0}")]
+    DevicesError(#[from] cpal::DevicesError),
+    #[error("Device not found: {0}")]
+    DeviceNotFound(String),
     #[error("CPAL Pause stream error: {0}")]
     MuteMicrophone(#[from] cpal::PauseStreamError),
     #[error("CPAL build stream error: {0}")]

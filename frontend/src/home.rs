@@ -2,6 +2,7 @@ mod leftpanel;
 mod login;
 mod create_server;
 mod status;
+mod settings;
 
 use leptos::{context, logging::error, prelude::*, task::spawn_local};
 use serde_wasm_bindgen::from_value;
