@@ -94,3 +94,29 @@ pub async fn set_speaker(app_handle: tauri::AppHandle, device: String) {
             .unwrap_or_else(|e| eprintln!("Failed to send set speaker command: {}", e));
     }
 }
+
+#[tauri::command]
+pub async fn set_mic_boost(app_handle: tauri::AppHandle, boost: i32) {
+    let app_state = app_handle.state::<AppState>();
+    let ws = &app_state.websocket;
+    {
+        let ws = ws.read().await;
+        ws.send(WebSocketRequest::AudioCommand(AudioCommand::SetMicBoost(boost)))
+            .await
+            .map_err(|e| e.to_string())
+            .unwrap_or_else(|e| eprintln!("Failed to send set mic boost command: {}", e));
+    }
+}
+
+#[tauri::command]
+pub async fn set_speaker_boost(app_handle: tauri::AppHandle, boost: i32) {
+    let app_state = app_handle.state::<AppState>();
+    let ws = &app_state.websocket;
+    {
+        let ws = ws.read().await;
+        ws.send(WebSocketRequest::AudioCommand(AudioCommand::SetSpeakerBoost(boost)))
+            .await
+            .map_err(|e| e.to_string())
+            .unwrap_or_else(|e| eprintln!("Failed to send set speaker boost command: {}", e));
+    }
+}

@@ -3,11 +3,12 @@ use std::sync::{Arc, Mutex as StdMutex};
 use ringbuf::HeapProd;
 use ringbuf::HeapCons;
 
+use crate::models::LastUsedAudioDevices;
+
 mod audio;
 
 pub struct AudioElement {
-    pub speaker: Option<cpal::Device>,
-    pub mic: Option<cpal::Device>,
+    pub devices: LastUsedAudioDevices,
     pub speaker_stream: Option<cpal::Stream>,
     pub mic_stream: Option<cpal::Stream>,
     pub mic_consumer: Option<Arc<StdMutex<HeapCons<f32>>>>,
@@ -22,4 +23,6 @@ pub enum AudioCommand {
     Quit,
     SetMic(String),
     SetSpeaker(String),
+    SetMicBoost(i32),
+    SetSpeakerBoost(i32),
 }

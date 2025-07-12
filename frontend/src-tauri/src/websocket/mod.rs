@@ -1,12 +1,12 @@
 use std::sync::{Arc, Mutex as StdMutex};
 
+use front_shared::{Status, URL};
 use futures_util::{SinkExt, StreamExt};
-use shared::{HeapCons, RTCPeerConnectionState, WebRTCConnection, WebSocketMessage, ROOM_SIZE};
 use native_tls::TlsConnector;
 use reqwest::cookie::CookieStore;
 use reqwest::header;
 use ringbuf::HeapProd;
-use front_shared::{Status, URL};
+use shared::{HeapCons, RTCPeerConnectionState, WebRTCConnection, WebSocketMessage, ROOM_SIZE};
 use tauri::{AppHandle, Emitter, Manager};
 use tokio::sync::mpsc::Sender;
 use tokio::{select, sync::mpsc::Receiver};
@@ -17,7 +17,11 @@ use tokio_tungstenite::{
 use uuid::Uuid;
 
 pub enum WebSocketRequest {
-    JoinAudioChannel { server_id: Uuid, channel_id: Uuid, channel_name: String },
+    JoinAudioChannel {
+        server_id: Uuid,
+        channel_id: Uuid,
+        channel_name: String,
+    },
     DisconnectFromAudioChannel,
     Disconnect,
     AudioCommand(AudioCommand),
@@ -39,11 +43,11 @@ pub async fn websocket_handler(
 
     let mut request = url.into_client_request()?;
     let cookie_store = state.cookie_store.clone();
-    
-    if let Some(cookies) = cookie_store.cookies(&reqwest::Url::parse(format!("https://{}", URL).as_str()).unwrap()) {
-        request
-            .headers_mut()
-            .insert(header::COOKIE, cookies);
+
+    if let Some(cookies) =
+        cookie_store.cookies(&reqwest::Url::parse(format!("https://{}", URL).as_str()).unwrap())
+    {
+        request.headers_mut().insert(header::COOKIE, cookies);
     }
 
     let connector = TlsConnector::builder()
@@ -147,10 +151,13 @@ pub async fn handle_internal_request(
 
             // Start the audio element streams
             let mic_consumer: Arc<StdMutex<HeapCons<f32>>> = audio_element.start_mic()?;
-            let speaker_producers: Vec<Arc<StdMutex<HeapProd<f32>>>> = audio_element.start_speaker()?;
+            let speaker_producers: Vec<Arc<StdMutex<HeapProd<f32>>>> =
+                audio_element.start_speaker()?;
 
             // Create the WebRTC streams
-            let audio_track = web_rtc_connection.create_audio_track_sample(ROOM_SIZE).await?;
+            let audio_track = web_rtc_connection
+                .create_audio_track_sample(ROOM_SIZE)
+                .await?;
             let audio_track = audio_track[0].clone();
             web_rtc_connection
                 .background_stream_audio(mic_consumer, audio_track)
@@ -251,8 +258,14 @@ pub async fn handle_internal_request(
                             tracing::error!("Failed to set speaker: {}", e);
                         }
                     }
+                    AudioCommand::SetMicBoost(boost) => {
+                        audio_element.change_mic_boost(*boost, &state);
+                    }
+                    AudioCommand::SetSpeakerBoost(boost) => {
+                        audio_element.change_speaker_boost(*boost, &state);
+                    }
                 }
-            } 
+            }
             match &command {
                 AudioCommand::SetMic(device_name) => {
                     AudioElement::set_default_mic(device_name, handle);
@@ -260,7 +273,17 @@ pub async fn handle_internal_request(
                 AudioCommand::SetSpeaker(device_name) => {
                     AudioElement::set_default_speaker(device_name, handle);
                 }
-                _ => {}
+                AudioCommand::SetMicBoost(boost) => {
+                    AudioElement::set_default_mic_boost(*boost, handle);
+                }
+                AudioCommand::SetSpeakerBoost(boost) => {
+                    AudioElement::set_default_speaker_boost(*boost, handle);
+                }
+                AudioCommand::Mute
+                | AudioCommand::Deafen
+                | AudioCommand::Quit
+                | AudioCommand::Undeafen
+                | AudioCommand::Unmute => {}
             }
         }
     }
@@ -308,23 +331,27 @@ pub async fn handle_websocket_message(
                     tracing::error!("Failed to send WebRTC answer: {}", e);
                     return Err(e.into());
                 }
-                
             } else {
                 tracing::warn!("Received WebRTC offer but no WebRTC connection exists");
             }
-        },
+        }
         WebSocketMessage::WebRTCAnswer(_) => {
             tracing::warn!("Received WebRTCAnswer message, but this is client");
-        },
+        }
         WebSocketMessage::Disconnect => {
             tracing::info!("Received Disconnect message, but this is client");
-        },
+        }
         WebSocketMessage::Error { err } => {
             tracing::error!("WebSocket error: {}", err);
             return Err(Error::WebSocketError(err));
-        },
+        }
         WebSocketMessage::SomeoneJoinedAudioChannel { data } => {
-            tracing::info!("User {} joined audio channel {} on server {}", data.user.username, data.channel.id, data.channel.server_id);
+            tracing::info!(
+                "User {} joined audio channel {} on server {}",
+                data.user.username,
+                data.channel.id,
+                data.channel.server_id
+            );
             let handle = handle;
             // Fails only when the event name is invalid
             if handle.emit("someone-joined-audio-channel", data).is_err() {
@@ -332,7 +359,12 @@ pub async fn handle_websocket_message(
             }
         }
         WebSocketMessage::SomeoneLeftAudioChannel { data } => {
-            tracing::info!("User {} left audio channel {} on server {}", data.user.username, data.channel.id, data.channel.server_id);
+            tracing::info!(
+                "User {} left audio channel {} on server {}",
+                data.user.username,
+                data.channel.id,
+                data.channel.server_id
+            );
             let handle = handle;
             // Fails only when the event name is invalid
             if handle.emit("someone-left-audio-channel", data).is_err() {

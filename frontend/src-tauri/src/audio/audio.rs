@@ -3,7 +3,7 @@ use ringbuf::{
     HeapCons, HeapProd, HeapRb,
 };
 use shared::{Split, ROOM_SIZE};
-use std::ops::Add;
+use std::ops::{Add, Div, Mul};
 use std::sync::{Arc, Mutex as StdMutex};
 use tauri::{AppHandle, Manager};
 
@@ -32,8 +32,7 @@ impl AudioElement {
             *last_used_audio_devices = Some(devices.clone().into());
         }
         AudioElement {
-            speaker: devices.speaker,
-            mic: devices.mic,
+            devices,
             speaker_stream: None,
             mic_stream: None,
             mic_consumer: None,
@@ -62,10 +61,10 @@ impl AudioElement {
             })
             .unzip();
         self.speaker_producers = Some(tx_clone);
-        if let Some(speaker) = self.speaker.as_ref() {
+        if let Some(speaker) = self.devices.speaker.as_ref() {
             // Start the output stream with the created ringbuffers
             let config = Self::get_config();
-            let stream = Self::make_speaker_stream(speaker, &config, rx)?;
+            let stream = self.make_speaker_stream(speaker, &config, rx)?;
             self.speaker_stream = Some(stream);
             // Start the stream
             self.speaker_stream.as_ref().unwrap().play()?;
@@ -81,10 +80,10 @@ impl AudioElement {
         let (mic_producer, mic_consumer) = HeapRb::<f32>::new(12000).split();
         let mic_consumer = Arc::new(StdMutex::new(mic_consumer));
         self.mic_consumer = Some(mic_consumer.clone());
-        if let Some(mic) = self.mic.as_ref() {
+        if let Some(mic) = self.devices.mic.as_ref() {
             let config = Self::get_config();
             // Start the input stream with the created ringbuffer
-            let stream = Self::make_mic_stream(mic, &config, mic_producer)?;
+            let stream = self.make_mic_stream(mic, &config, mic_producer)?;
             self.mic_stream = Some(stream);
             // Start the stream
             self.mic_stream.as_ref().unwrap().play()?;
@@ -119,21 +118,45 @@ impl AudioElement {
         }
         // Start the output stream with the created ringbuffers
         let config = Self::get_config();
-        let stream = Self::make_speaker_stream(&device, &config, rx)?;
-        self.speaker = Some(device);
+        let stream = self.make_speaker_stream(&device, &config, rx)?;
+        self.devices.speaker = Some(device);
         self.speaker_stream = Some(stream);
         // Start the stream
         self.speaker_stream.as_ref().unwrap().play()?;
         Ok(())
     }
 
+    pub fn change_speaker_boost(&mut self, boost: i32, state: &AppState) {
+        {
+            let mut last_used_audio_devices = state.last_used_audio_devices.lock().unwrap();
+            if let Some(devices) = last_used_audio_devices.as_mut() {
+                devices.speaker_boost = Some(boost);
+            }
+        }
+        self.devices.speaker_boost = Some(boost);
+        if let Some(speaker) = self.devices.speaker.as_ref() {
+            let speaker_name = speaker.name().unwrap_or_default();
+            if let Err(e) = self.change_speaker(&speaker_name, state) {
+                tracing::error!("Failed to restart speaker with boost: {}", e);
+            }
+        }
+    }
+
     pub fn set_default_speaker(device_name: &str, handle: AppHandle) {
         let conn = &mut establish_connection(&handle);
-        let devices = LastUsedAudioDevices::get_from_db_or_default(conn).unwrap_or_default();
-        let mut devices: LastUsedAudioDevicesWString = devices.into();
+        let mut devices = LastUsedAudioDevicesWString::get_from_db(conn).unwrap_or_default();
         devices.speaker = Some(device_name.to_string());
         devices.save_to_db(conn).unwrap_or_else(|e| {
             tracing::error!("Failed to save default speaker: {}", e);
+        });
+    }
+
+    pub fn set_default_speaker_boost(boost: i32, handle: AppHandle) {
+        let conn = &mut establish_connection(&handle);
+        let mut devices = LastUsedAudioDevicesWString::get_from_db(conn).unwrap_or_default();
+        devices.speaker_boost = Some(boost);
+        devices.save_to_db(conn).unwrap_or_else(|e| {
+            tracing::error!("Failed to save default speaker boost: {}", e);
         });
     }
 
@@ -162,21 +185,45 @@ impl AudioElement {
         }
         // Start the input stream with the created ringbuffer
         let config = Self::get_config();
-        let stream = Self::make_mic_stream(&device, &config, mic_producer)?;
-        self.mic = Some(device);
+        let stream = self.make_mic_stream(&device, &config, mic_producer)?;
+        self.devices.mic = Some(device);
         self.mic_stream = Some(stream);
         // Start the stream
         self.mic_stream.as_ref().unwrap().play()?;
         Ok(())
     }
 
+    pub fn change_mic_boost(&mut self, boost: i32, state: &AppState) {
+        {
+            let mut last_used_audio_devices = state.last_used_audio_devices.lock().unwrap();
+            if let Some(devices) = last_used_audio_devices.as_mut() {
+                devices.mic_boost = Some(boost);
+            }
+        }
+        self.devices.mic_boost = Some(boost);
+        if let Some(mic) = self.devices.mic.as_ref() {
+            let mic_name = mic.name().unwrap_or_default();
+            if let Err(e) = self.change_mic(&mic_name, state) {
+                tracing::error!("Failed to restart mic with boost: {}", e);
+            }
+        }
+    }
+
     pub fn set_default_mic(device_name: &str, handle: AppHandle) {
         let conn = &mut establish_connection(&handle);
-        let devices = LastUsedAudioDevices::get_from_db_or_default(conn).unwrap_or_default();
-        let mut devices: LastUsedAudioDevicesWString = devices.into();
+        let mut devices = LastUsedAudioDevicesWString::get_from_db(conn).unwrap_or_default();
         devices.mic = Some(device_name.to_string());
         devices.save_to_db(conn).unwrap_or_else(|e| {
             tracing::error!("Failed to save default mic: {}", e);
+        });
+    }
+
+    pub fn set_default_mic_boost(boost: i32, handle: AppHandle) {
+        let conn = &mut establish_connection(&handle);
+        let mut devices = LastUsedAudioDevicesWString::get_from_db(conn).unwrap_or_default();
+        devices.mic_boost = Some(boost);
+        devices.save_to_db(conn).unwrap_or_else(|e| {
+            tracing::error!("Failed to save default mic boost: {}", e);
         });
     }
 
@@ -205,50 +252,60 @@ impl AudioElement {
     }
 
     pub fn make_speaker_stream(
+        &self,
         device: &cpal::Device,
         config: &cpal::SupportedStreamConfig,
         consumers: Vec<HeapCons<f32>>,
     ) -> Result<cpal::Stream, Error> {
         match config.sample_format() {
             cpal::SampleFormat::I16 => {
-                Self::make_speaker_stream_from::<i16>(device, &config.config(), consumers)
+                self.make_speaker_stream_from::<i16>(device, &config.config(), consumers)
             }
             cpal::SampleFormat::F32 => {
-                Self::make_speaker_stream_from::<f32>(device, &config.config(), consumers)
+                self.make_speaker_stream_from::<f32>(device, &config.config(), consumers)
             }
             cpal::SampleFormat::I8 => {
-                Self::make_speaker_stream_from::<i8>(device, &config.config(), consumers)
+                self.make_speaker_stream_from::<i8>(device, &config.config(), consumers)
             }
             cpal::SampleFormat::I32 => {
-                Self::make_speaker_stream_from::<i32>(device, &config.config(), consumers)
+                self.make_speaker_stream_from::<i32>(device, &config.config(), consumers)
             }
             cpal::SampleFormat::I64 => {
-                Self::make_speaker_stream_from::<i64>(device, &config.config(), consumers)
+                self.make_speaker_stream_from::<i64>(device, &config.config(), consumers)
             }
             cpal::SampleFormat::U8 => {
-                Self::make_speaker_stream_from::<u8>(device, &config.config(), consumers)
+                self.make_speaker_stream_from::<u8>(device, &config.config(), consumers)
             }
             cpal::SampleFormat::U16 => {
-                Self::make_speaker_stream_from::<u16>(device, &config.config(), consumers)
+                self.make_speaker_stream_from::<u16>(device, &config.config(), consumers)
             }
             cpal::SampleFormat::U32 => {
-                Self::make_speaker_stream_from::<u32>(device, &config.config(), consumers)
+                self.make_speaker_stream_from::<u32>(device, &config.config(), consumers)
             }
             cpal::SampleFormat::U64 => {
-                Self::make_speaker_stream_from::<u64>(device, &config.config(), consumers)
+                self.make_speaker_stream_from::<u64>(device, &config.config(), consumers)
             }
             cpal::SampleFormat::F64 => {
-                Self::make_speaker_stream_from::<f64>(device, &config.config(), consumers)
+                self.make_speaker_stream_from::<f64>(device, &config.config(), consumers)
             }
             _ => todo!(),
         }
     }
 
-    pub fn make_speaker_stream_from<T: SizedSample + FromSample<f32> + Add<Output = T>>(
+    pub fn make_speaker_stream_from<
+        T: SizedSample
+            + FromSample<f32>
+            + FromSample<i32>
+            + Add<Output = T>
+            + Mul<Output = T>
+            + Div<Output = T>,
+    >(
+        &self,
         device: &cpal::Device,
         config: &cpal::StreamConfig,
         mut consumers: Vec<HeapCons<f32>>,
     ) -> Result<cpal::Stream, Error> {
+        let boost = self.devices.speaker_boost.unwrap_or(100);
         let stream = device.build_output_stream(
             &config,
             move |data: &mut [T], _| {
@@ -271,6 +328,11 @@ impl AudioElement {
                         *d = *d + T::from_sample(*s);
                     }
                 }
+
+                // Apply the speaker boost
+                for d in data.iter_mut() {
+                    *d = *d * T::from_sample(boost) / T::from_sample(100);
+                }
             },
             |e| {
                 eprintln!("Error: {}", e);
@@ -281,46 +343,44 @@ impl AudioElement {
     }
 
     pub fn make_mic_stream(
+        &self,
         device: &cpal::Device,
         config: &cpal::SupportedStreamConfig,
         tx: HeapProd<f32>,
     ) -> Result<cpal::Stream, Error> {
         match config.sample_format() {
             cpal::SampleFormat::I16 => {
-                Self::make_mic_stream_from::<i16>(device, &config.config(), tx)
+                self.make_mic_stream_from::<i16>(device, &config.config(), tx)
             }
             cpal::SampleFormat::F32 => {
-                Self::make_mic_stream_from::<f32>(device, &config.config(), tx)
+                self.make_mic_stream_from::<f32>(device, &config.config(), tx)
             }
-            cpal::SampleFormat::I8 => {
-                Self::make_mic_stream_from::<i8>(device, &config.config(), tx)
-            }
+            cpal::SampleFormat::I8 => self.make_mic_stream_from::<i8>(device, &config.config(), tx),
             cpal::SampleFormat::I32 => {
-                Self::make_mic_stream_from::<i32>(device, &config.config(), tx)
+                self.make_mic_stream_from::<i32>(device, &config.config(), tx)
             }
             cpal::SampleFormat::I64 => {
-                Self::make_mic_stream_from::<i64>(device, &config.config(), tx)
+                self.make_mic_stream_from::<i64>(device, &config.config(), tx)
             }
-            cpal::SampleFormat::U8 => {
-                Self::make_mic_stream_from::<u8>(device, &config.config(), tx)
-            }
+            cpal::SampleFormat::U8 => self.make_mic_stream_from::<u8>(device, &config.config(), tx),
             cpal::SampleFormat::U16 => {
-                Self::make_mic_stream_from::<u16>(device, &config.config(), tx)
+                self.make_mic_stream_from::<u16>(device, &config.config(), tx)
             }
             cpal::SampleFormat::U32 => {
-                Self::make_mic_stream_from::<u32>(device, &config.config(), tx)
+                self.make_mic_stream_from::<u32>(device, &config.config(), tx)
             }
             cpal::SampleFormat::U64 => {
-                Self::make_mic_stream_from::<u64>(device, &config.config(), tx)
+                self.make_mic_stream_from::<u64>(device, &config.config(), tx)
             }
             cpal::SampleFormat::F64 => {
-                Self::make_mic_stream_from::<f64>(device, &config.config(), tx)
+                self.make_mic_stream_from::<f64>(device, &config.config(), tx)
             }
             _ => todo!(),
         }
     }
 
     pub fn make_mic_stream_from<T>(
+        &self,
         device: &cpal::Device,
         config: &cpal::StreamConfig,
         mut tx: HeapProd<f32>,
@@ -329,11 +389,15 @@ impl AudioElement {
         T: SizedSample,
         f32: FromSample<T>,
     {
+        let boost = self.devices.mic_boost.unwrap_or(100);
         let stream = device.build_input_stream(
             &config,
             move |data: &[T], _| {
                 // Convert T to f32 and send to the encoder thread
-                let samples = data.iter().map(|s| s.to_sample()).collect::<Vec<f32>>();
+                let samples = data
+                    .iter()
+                    .map(|s| s.to_sample::<f32>() * (boost as f32) / 100.0)
+                    .collect::<Vec<f32>>();
                 // Note: This will block if the channel is full.
                 tx.push_slice(&samples);
             },
