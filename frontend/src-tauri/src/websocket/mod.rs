@@ -148,12 +148,14 @@ pub async fn handle_internal_request(
             // First get TURN credentials
             let client = handle.state::<AppState>().client.clone();
             let resp = client.get(format!(
-                "{}/utils/turn/get-creds", URL
+                "https://{}/utils/turn/get-creds", URL
             )).send().await;
-            let turn_creds: Option<TurnCreds> = if let Ok(response) = resp {
-                response.json().await.ok()
-            } else {
-                None
+            let turn_creds: Option<TurnCreds> = match resp {
+                Ok(response) => response.json().await.ok(),
+                Err(e) => {
+                    tracing::error!("Failed to get TURN credentials: {}", e);
+                    None
+                }
             };
             *web_rtc_connection = Some(WebRTCConnection::new(channel_id, turn_creds).await?);
             let web_rtc_connection = web_rtc_connection.as_ref().unwrap();

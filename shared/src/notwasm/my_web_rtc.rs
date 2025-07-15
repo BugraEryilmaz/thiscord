@@ -117,7 +117,8 @@ impl WebRTCConnection {
         if let Some(turn_creds) = turn_creds {
             config.ice_servers.push(RTCIceServer {
                 urls: vec![
-                    format!("turns:{}:{}", turn_creds.realm, turn_creds.username),
+                    format!("turns:{}:5349", turn_creds.realm),
+                    format!("turns:{}:5350", turn_creds.realm),
                 ],
                 username: turn_creds.username,
                 credential: turn_creds.credential,
