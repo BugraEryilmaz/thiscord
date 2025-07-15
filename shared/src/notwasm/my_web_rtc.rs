@@ -10,7 +10,7 @@ use webrtc::rtp::packet::Packet;
 use webrtc::track::track_local::TrackLocalWriter;
 use webrtc::track::track_local::track_local_static_rtp::TrackLocalStaticRTP;
 
-use crate::Error;
+use crate::{models::TurnCreds, Error};
 use crate::WebSocketMessage;
 
 use opus::{Application, Channels};
@@ -66,8 +66,8 @@ impl AudioConfig {
 }
 
 impl WebRTCConnection {
-    pub async fn new(room_id: Uuid) -> Result<Self, Error> {
-        let peer_connection = Self::create_peer_connection().await?;
+    pub async fn new(room_id: Uuid, turn_creds: Option<TurnCreds>) -> Result<Self, Error> {
+        let peer_connection = Self::create_peer_connection(turn_creds).await?;
         Ok(WebRTCConnection {
             peer_connection: peer_connection,
             audio_config: AudioConfig::default(),
@@ -75,7 +75,7 @@ impl WebRTCConnection {
         })
     }
 
-    pub async fn create_peer_connection() -> Result<RTCPeerConnection, Error> {
+    pub async fn create_peer_connection(turn_creds: Option<TurnCreds>) -> Result<RTCPeerConnection, Error> {
         let mut m = MediaEngine::default();
         m.register_codec(Self::get_audio_codec(), RTPCodecType::Audio)?;
 
@@ -90,13 +90,13 @@ impl WebRTCConnection {
             .with_setting_engine(settings_engine)
             .build();
 
-        let config = Self::get_config();
+        let config = Self::get_config(turn_creds);
         let peer_connection = api.new_peer_connection(config).await.map_err(|e| e.into());
         peer_connection
     }
 
-    pub fn get_config() -> RTCConfiguration {
-        let config = RTCConfiguration {
+    pub fn get_config(turn_creds: Option<TurnCreds>) -> RTCConfiguration {
+        let mut config = RTCConfiguration {
             ice_servers: vec![
                 RTCIceServer {
                     urls: vec!["stun:stun.l.google.com:19302".to_owned()],
@@ -114,6 +114,15 @@ impl WebRTCConnection {
             ice_candidate_pool_size: 2,
             ..Default::default()
         };
+        if let Some(turn_creds) = turn_creds {
+            config.ice_servers.push(RTCIceServer {
+                urls: vec![
+                    format!("turns:{}:{}", turn_creds.realm, turn_creds.username),
+                ],
+                username: turn_creds.username,
+                credential: turn_creds.credential,
+            });
+        }
 
         config
     }

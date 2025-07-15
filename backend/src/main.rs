@@ -92,6 +92,7 @@ async fn main() {
         .nest("/auth", crate::auth::web::router())
         .nest("/channels", crate::channels::web::router())
         .nest("/websocket", crate::websocket::web::router())
+        .nest("/utils", crate::utils::router())
         .layer(auth_layer)
         .layer(TraceLayer::new_for_http())
         .nest_service("/static", static_files);

@@ -166,7 +166,7 @@ mod post {
                     return Err(WebSocketError::NotAuthorized.into());
                 }
                 // Initialize the WebRTC connection (dropping the previous one if it exists)
-                *web_rtc_connection = Some(WebRTCConnection::new(channel_id).await?);
+                *web_rtc_connection = Some(WebRTCConnection::new(channel_id, None).await?);
                 let web_rtc_connection = web_rtc_connection.as_ref().unwrap();
                 // Create audio tracks for the user
                 let recv_tracks = web_rtc_connection.create_audio_track_rtp(ROOM_SIZE).await?;

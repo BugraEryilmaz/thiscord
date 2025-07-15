@@ -37,6 +37,9 @@ tokio-util = { version = "0.7.15", features = ["io"] }
 strum = "0.27"
 strum_macros = "0.27"
 tower-sessions-sqlx-store = { version = "0.15.0", features = ["postgres"] }
+hmac = "0.12.1"
+sha1 = "0.10.6"
+base64 = "0.22.1"
 
 [dev-dependencies]
 criterion = { version = "0.6.0", features = ["async_tokio"] }

@@ -1,14 +1,22 @@
 mod err;
 mod gmail;
+pub mod turn;
 pub mod images;
 
 use std::collections::HashSet;
 
+use axum::Router;
 pub use err::Error;
 pub use gmail::GmailBackend;
 use shared::WebSocketMessage;
 
 use crate::models::user::OnlineUser;
+
+pub fn router() -> Router {
+    Router::new()
+        .nest("/turn", turn::router())
+}
+
 
 pub trait SubscribableOnce {
     fn subscribe(&self, user: &OnlineUser);

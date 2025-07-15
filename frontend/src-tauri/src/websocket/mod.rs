@@ -6,6 +6,7 @@ use native_tls::TlsConnector;
 use reqwest::cookie::CookieStore;
 use reqwest::header;
 use ringbuf::HeapProd;
+use shared::models::TurnCreds;
 use shared::{HeapCons, RTCPeerConnectionState, WebRTCConnection, WebSocketMessage, ROOM_SIZE};
 use tauri::{AppHandle, Emitter, Manager};
 use tokio::sync::mpsc::Sender;
@@ -144,7 +145,17 @@ pub async fn handle_internal_request(
             channel_id,
             channel_name,
         } => {
-            *web_rtc_connection = Some(WebRTCConnection::new(channel_id).await?);
+            // First get TURN credentials
+            let client = handle.state::<AppState>().client.clone();
+            let resp = client.get(format!(
+                "{}/utils/turn/get-creds", URL
+            )).send().await;
+            let turn_creds: Option<TurnCreds> = if let Ok(response) = resp {
+                response.json().await.ok()
+            } else {
+                None
+            };
+            *web_rtc_connection = Some(WebRTCConnection::new(channel_id, turn_creds).await?);
             let web_rtc_connection = web_rtc_connection.as_ref().unwrap();
             *audio = Some(AudioElement::new(handle.clone()));
             let audio_element = audio.as_mut().unwrap();
