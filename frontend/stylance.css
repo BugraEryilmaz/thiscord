@@ -425,14 +425,17 @@
 }
 
 
+.audio_settings_header-a806e5e {
+    margin-top: 10rem;
+}
 .audio_settings-a806e5e {
     display: flex;
     flex-direction: row;
 }
 
 .audio_setting_type-a806e5e {
-    margin: 3rem;
     max-width: 20rem;
+    margin: 0 3rem 3rem 3rem;
 }
 
 .audio_setting_type-a806e5e p {

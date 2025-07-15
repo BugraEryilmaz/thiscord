@@ -1,11 +1,14 @@
+.audio_settings_header {
+    margin-top: 10rem;
+}
 .audio_settings {
     display: flex;
     flex-direction: row;
 }
 
 .audio_setting_type {
-    margin: 3rem;
     max-width: 20rem;
+    margin: 0 3rem 3rem 3rem;
 }
 
 .audio_setting_type p {
