@@ -1,12 +1,12 @@
 use std::sync::{Arc, Mutex as StdMutex};
 
-use front_shared::{Status, URL};
+use front_shared::{CallStatus, Status, URL};
 use futures_util::{SinkExt, StreamExt};
 use native_tls::TlsConnector;
 use reqwest::cookie::CookieStore;
 use reqwest::header;
 use ringbuf::HeapProd;
-use shared::models::TurnCreds;
+use shared::models::{ChannelWithUsers, TurnCreds};
 use shared::{HeapCons, RTCPeerConnectionState, WebRTCConnection, WebSocketMessage, ROOM_SIZE};
 use tauri::{AppHandle, Emitter, Manager};
 use tokio::sync::mpsc::Sender;
@@ -15,13 +15,10 @@ use tokio_tungstenite::{
     connect_async_tls_with_config, tungstenite::client::IntoClientRequest,
     tungstenite::Message::Text, Connector,
 };
-use uuid::Uuid;
 
 pub enum WebSocketRequest {
     JoinAudioChannel {
-        server_id: Uuid,
-        channel_id: Uuid,
-        channel_name: String,
+        channel_with_users: ChannelWithUsers,
     },
     DisconnectFromAudioChannel,
     Disconnect,
@@ -140,16 +137,16 @@ pub async fn handle_internal_request(
 ) -> Result<(), Error> {
     let state = handle.state::<AppState>();
     match request {
-        WebSocketRequest::JoinAudioChannel {
-            server_id,
-            channel_id,
-            channel_name,
-        } => {
+        WebSocketRequest::JoinAudioChannel { channel_with_users } => {
+            let channel_id = channel_with_users.channel.id;
+            let server_id = channel_with_users.channel.server_id;
+            let channel_name = channel_with_users.channel.name.clone();
             // First get TURN credentials
             let client = handle.state::<AppState>().client.clone();
-            let resp = client.get(format!(
-                "https://{}/utils/turn/get-creds", URL
-            )).send().await;
+            let resp = client
+                .get(format!("https://{}/utils/turn/get-creds", URL))
+                .send()
+                .await;
             let turn_creds: Option<TurnCreds> = match resp {
                 Ok(response) => response.json().await.ok(),
                 Err(e) => {
@@ -161,6 +158,7 @@ pub async fn handle_internal_request(
             let web_rtc_connection = web_rtc_connection.as_ref().unwrap();
             *audio = Some(AudioElement::new(handle.clone()));
             let audio_element = audio.as_mut().unwrap();
+            audio_element.set_channel(&channel_with_users, handle.clone());
 
             // Start the audio element streams
             let mic_consumer: Arc<StdMutex<HeapCons<f32>>> = audio_element.start_mic()?;
@@ -186,16 +184,57 @@ pub async fn handle_internal_request(
                     tracing::debug!("ICE connection state: {:?}", state);
                     Box::pin(async {})
                 }));
+            let handle_clone = handle.clone();
+            let channel_name_clone = channel_name.clone();
             web_rtc_connection
                 .peer_connection
                 .on_peer_connection_state_change(Box::new(move |state| {
                     tracing::debug!("Peer connection state: {:?}", state);
-                    let appstate = handle.state::<AppState>();
-                    if state == RTCPeerConnectionState::Connected {
-                        appstate.change_status(Status::OnCall(channel_name.clone()), &handle);
+                    let appstate = handle_clone.state::<AppState>();
+                    match state {
+                        RTCPeerConnectionState::Connecting => {
+                            appstate.change_status(
+                                Status::OnCall(channel_name_clone.clone(), CallStatus::Connecting),
+                                &handle_clone,
+                            );
+                        }
+                        RTCPeerConnectionState::Connected => {
+                            appstate.change_status(
+                                Status::OnCall(channel_name_clone.clone(), CallStatus::Connected),
+                                &handle_clone,
+                            );
+                        }
+                        RTCPeerConnectionState::Disconnected => {
+                            appstate.change_status(
+                                Status::OnCall(channel_name_clone.clone(), CallStatus::Disconnected),
+                                &handle_clone,
+                            );
+                        }
+                        RTCPeerConnectionState::Failed => {
+                            appstate.change_status(
+                                Status::OnCall(channel_name_clone.clone(), CallStatus::Failed),
+                                &handle_clone,
+                            );
+                        }
+                        RTCPeerConnectionState::Closed => {
+                            appstate.change_status(
+                                Status::OnCall(channel_name_clone.clone(), CallStatus::Closed),
+                                &handle_clone,
+                            );
+                        }
+                        RTCPeerConnectionState::New | RTCPeerConnectionState::Unspecified => {
+                            appstate.change_status(
+                                Status::OnCall(channel_name_clone.clone(), CallStatus::Connecting),
+                                &handle_clone,
+                            );
+                        }
                     }
                     Box::pin(async move {})
                 }));
+            state.change_status(
+                Status::OnCall(channel_name.clone(), CallStatus::Connecting),
+                &handle,
+            );
             let socket_clone = socket.clone();
             web_rtc_connection.setup_ice_handling(move |ws_candidate| {
                 let socket_clone = socket_clone.clone();
@@ -223,6 +262,7 @@ pub async fn handle_internal_request(
                 web_rtc_connection.close().await;
             }
             if let Some(mut audio_element) = audio.take() {
+                audio_element.clear_channel();
                 audio_element.quit()?;
             }
             let disconnect_message = WebSocketMessage::DisconnectFromAudioChannel;
@@ -277,6 +317,16 @@ pub async fn handle_internal_request(
                     AudioCommand::SetSpeakerBoost(boost) => {
                         audio_element.change_speaker_boost(*boost, &state);
                     }
+                    AudioCommand::SetUserBoost {
+                        user_id,
+                        boost_level,
+                    } => {
+                        if let Err(e) =
+                            audio_element.set_user_boost(*user_id, *boost_level, handle.clone())
+                        {
+                            tracing::error!("Failed to set user boost: {}", e);
+                        }
+                    }
                 }
             }
             match &command {
@@ -292,6 +342,14 @@ pub async fn handle_internal_request(
                 AudioCommand::SetSpeakerBoost(boost) => {
                     AudioElement::set_default_speaker_boost(*boost, handle);
                 }
+                AudioCommand::SetUserBoost {
+                    user_id,
+                    boost_level,
+                } => {
+                    if let Err(e) = AudioElement::set_default_user_boost(*user_id, *boost_level, handle) {
+                        tracing::error!("Failed to set user boost: {}", e);
+                    }
+                }
                 AudioCommand::Mute
                 | AudioCommand::Deafen
                 | AudioCommand::Quit
@@ -306,7 +364,7 @@ pub async fn handle_internal_request(
 pub async fn handle_websocket_message(
     message: WebSocketMessage,
     web_rtc_connection: &mut Option<WebRTCConnection>,
-    _audio: &mut Option<AudioElement>,
+    audio: &mut Option<AudioElement>,
     tx: Sender<WebSocketMessage>,
     handle: AppHandle,
 ) -> Result<(), Error> {
@@ -366,6 +424,11 @@ pub async fn handle_websocket_message(
                 data.channel.server_id
             );
             let handle = handle;
+            if let Some(audio_element) = audio {
+                if let Err(e) = audio_element.handle_join_channel(&data, handle.clone()) {
+                    tracing::error!("Failed to handle join channel: {}", e);
+                }
+            }
             // Fails only when the event name is invalid
             if handle.emit("someone-joined-audio-channel", data).is_err() {
                 tracing::error!("Event name 'someone-joined-audio-channel' is invalid");
@@ -379,6 +442,11 @@ pub async fn handle_websocket_message(
                 data.channel.server_id
             );
             let handle = handle;
+            if let Some(audio_element) = audio {
+                if let Err(e) = audio_element.handle_leave_channel(&data) {
+                    tracing::error!("Failed to handle leave channel: {}", e);
+                }
+            }
             // Fails only when the event name is invalid
             if handle.emit("someone-left-audio-channel", data).is_err() {
                 tracing::error!("Event name 'someone-left-audio-channel' is invalid");

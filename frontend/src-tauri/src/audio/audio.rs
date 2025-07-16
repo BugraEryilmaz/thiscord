@@ -2,7 +2,7 @@ use ringbuf::{
     traits::{Consumer, Producer},
     HeapCons, HeapProd, HeapRb,
 };
-use shared::{Split, ROOM_SIZE};
+use shared::{models::{AudioChannelMemberUpdate, ChannelWithUsers}, Split, ROOM_SIZE};
 use std::ops::{Add, Div, Mul};
 use std::sync::{Arc, Mutex as StdMutex};
 use tauri::{AppHandle, Manager};
@@ -13,9 +13,7 @@ use cpal::{
 };
 
 use crate::{
-    models::{LastUsedAudioDevices, LastUsedAudioDevicesWString},
-    utils::{establish_connection, AppState},
-    Error,
+    audio::ChannelWithBoosts, models::{LastUsedAudioDevices, LastUsedAudioDevicesWString, PerUserBoost}, utils::{establish_connection, AppState}, Error
 };
 
 use super::AudioElement;
@@ -32,12 +30,86 @@ impl AudioElement {
             *last_used_audio_devices = Some(devices.clone().into());
         }
         AudioElement {
+            channel_with_boosts: None,
             devices,
             speaker_stream: None,
             mic_stream: None,
             mic_consumer: None,
             speaker_producers: None,
         }
+    }
+
+    pub fn set_channel(&mut self, channel_with_users: &ChannelWithUsers, handle: AppHandle) {
+        self.channel_with_boosts = Some(ChannelWithBoosts {
+            channel: channel_with_users.channel.clone(),
+            users: channel_with_users.users.iter().map(|user| {
+                Some(PerUserBoost::get(&mut establish_connection(&handle), user.id))
+            }).collect(),
+        });
+    }
+
+    pub fn clear_channel(&mut self) {
+        self.channel_with_boosts = None;
+    }
+
+    pub fn handle_join_channel(
+        &mut self,
+        data: &AudioChannelMemberUpdate,
+        handle: AppHandle,
+    ) -> Result<(), Error> {
+        if let Some(channel_with_boosts) = &mut self.channel_with_boosts {
+            if channel_with_boosts.channel.id != data.channel.id {
+                return Ok(());
+            }
+            let boost = PerUserBoost::get(&mut establish_connection(&handle), data.user.id);
+            channel_with_boosts.users[data.user.slot] = Some(boost);
+        }
+        Ok(())
+    }
+
+    pub fn handle_leave_channel(
+        &mut self,
+        data: &AudioChannelMemberUpdate,
+    ) -> Result<(), Error> {
+        if let Some(channel_with_boosts) = &mut self.channel_with_boosts {
+            if channel_with_boosts.channel.id != data.channel.id {
+                return Ok(());
+            }
+            channel_with_boosts.users[data.user.slot] = None;
+        }
+        Ok(())
+    }
+
+    pub fn set_user_boost(
+        &mut self,
+        user_id: uuid::Uuid,
+        boost: i32,
+        handle: AppHandle,
+    ) -> Result<(), Error> {
+        if let Some(channel_with_boosts) = &mut self.channel_with_boosts {
+            for user in channel_with_boosts.users.iter() {
+                if let Some(user) = user {
+                    if user.user_id == user_id {
+                        user.boost_level.store(boost, std::sync::atomic::Ordering::Relaxed);
+                        user.save(&mut establish_connection(&handle))?;
+                        break;
+                    }
+                }
+            }
+        }
+        Ok(())
+    }
+
+    pub fn set_default_user_boost(
+        user_id: uuid::Uuid,
+        boost: i32,
+        handle: AppHandle,
+    ) -> Result<(), Error> {
+        let conn = &mut establish_connection(&handle);
+        let user_boost = PerUserBoost::get(conn, user_id);
+        user_boost.boost_level.store(boost, std::sync::atomic::Ordering::Relaxed);
+        user_boost.save(conn)?;
+        Ok(())
     }
 
     pub fn get_config() -> cpal::SupportedStreamConfig {

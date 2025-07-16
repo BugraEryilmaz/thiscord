@@ -27,9 +27,7 @@ pub async fn get_channels(
 
 #[tauri::command(rename_all = "snake_case")]
 pub async fn join_channel(
-    channel_id: Uuid,
-    server_id: Uuid,
-    channel_name: String,
+    channel_with_users: ChannelWithUsers,
     handle: tauri::AppHandle,
 ) -> Result<(), String> {
     let state = handle.state::<crate::AppState>();
@@ -37,7 +35,7 @@ pub async fn join_channel(
 
     {
         let ws = ws.read().await;
-        ws.send(WebSocketRequest::JoinAudioChannel { server_id, channel_id, channel_name })
+        ws.send(WebSocketRequest::JoinAudioChannel { channel_with_users })
             .await
             .map_err(|e| e.to_string())?;
     }

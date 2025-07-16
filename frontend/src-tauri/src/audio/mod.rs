@@ -2,12 +2,15 @@ use std::sync::{Arc, Mutex as StdMutex};
 
 use ringbuf::HeapProd;
 use ringbuf::HeapCons;
+use shared::models::Channel;
 
 use crate::models::LastUsedAudioDevices;
+use crate::models::PerUserBoost;
 
 mod audio;
 
 pub struct AudioElement {
+    pub channel_with_boosts: Option<ChannelWithBoosts>,
     pub devices: LastUsedAudioDevices,
     pub speaker_stream: Option<cpal::Stream>,
     pub mic_stream: Option<cpal::Stream>,
@@ -25,4 +28,13 @@ pub enum AudioCommand {
     SetSpeaker(String),
     SetMicBoost(i32),
     SetSpeakerBoost(i32),
+    SetUserBoost {
+        user_id: uuid::Uuid,
+        boost_level: i32,
+    },
+}
+
+pub struct ChannelWithBoosts {
+    pub channel: Channel,
+    pub users: Vec<Option<PerUserBoost>>,
 }

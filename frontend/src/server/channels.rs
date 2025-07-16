@@ -310,12 +310,11 @@ pub fn ChannelList(
                             <ChannelItem
                                 channel=channel.clone()
                                 on:click=move |_| {
-                                    let channel_name = channel.channel.name.clone();
+                                    let channel = channel.clone();
                                     spawn_local(async move {
+                                        let channel_name = channel.channel.name.clone();
                                         let join_args = JoinChannel {
-                                            server_id: channel.channel.server_id,
-                                            channel_id: channel.channel.id,
-                                            channel_name: channel_name.clone(),
+                                            channel_with_users: channel,
                                         };
                                         let join_args = serde_wasm_bindgen::to_value(&join_args)
                                             .unwrap();

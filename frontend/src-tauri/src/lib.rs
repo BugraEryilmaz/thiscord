@@ -94,6 +94,7 @@ pub async fn run() {
             set_speaker,
             set_mic_boost,
             set_speaker_boost,
+            set_user_boost,
             mute_microphone,
             unmute_microphone,
             deafen_speaker,

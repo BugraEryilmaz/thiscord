@@ -40,6 +40,8 @@ pub enum Error {
     WebRTCInternalError(#[from] WebRTCError),
     #[error("Tokio Channel error: {0}")]
     TokioChannelError(#[from] tokio::sync::mpsc::error::SendError<WebSocketMessage>),
+    #[error("Diesel error: {0}")]
+    DieselError(#[from] diesel::result::Error),
 }
 
 pub async fn handle_auth_error(

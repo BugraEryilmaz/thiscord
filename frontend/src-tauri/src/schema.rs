@@ -11,6 +11,14 @@ diesel::table! {
 }
 
 diesel::table! {
+    per_user_boost (id) {
+        id -> Nullable<Integer>,
+        user_id -> Text,
+        boost_level -> Integer,
+    }
+}
+
+diesel::table! {
     session (id) {
         id -> Integer,
         token -> Text,
@@ -21,5 +29,6 @@ diesel::table! {
 
 diesel::allow_tables_to_appear_in_same_query!(
     last_used_audio_devices,
+    per_user_boost,
     session,
 );

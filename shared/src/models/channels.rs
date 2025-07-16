@@ -59,7 +59,5 @@ pub struct NewChannel {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct JoinChannel {
-    pub server_id: Uuid,
-    pub channel_id: Uuid,
-    pub channel_name: String,
+    pub channel_with_users: ChannelWithUsers,
 }

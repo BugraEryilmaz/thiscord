@@ -47,7 +47,7 @@ pub fn StatusBox() -> impl IntoView {
     get_status(set_status);
 
     create_listener("status_change", move |new_status: Status| {
-        if matches!(new_status, Status::OnCall(_)) {
+        if matches!(new_status, Status::OnCall(_, _)) {
             set_mic_muted.set(false);
             set_speaker_muted.set(false);
         }
@@ -78,7 +78,7 @@ pub fn StatusBox() -> impl IntoView {
             </div>
             <div class=style::call_status>
                 <span class=style::status>{move || format!("{:?}", status.get())}</span>
-                <Show when=move || matches!(status.get(), Status::OnCall(_)) fallback=move || {}>
+                <Show when=move || matches!(status.get(), Status::OnCall(_, _)) fallback=move || {}>
                     <div class=style::call_container>
                         <div class=style::icon_div>
                             <img
