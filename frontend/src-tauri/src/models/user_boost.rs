@@ -1,13 +1,14 @@
-use std::sync::atomic::{AtomicI32, Ordering};
+use std::sync::{atomic::{AtomicI32, Ordering}, Arc};
 
 use diesel::prelude::*;
 use uuid::Uuid;
 
 use crate::schema::per_user_boost;
 
+#[derive(Default)]
 pub struct PerUserBoost {
-    pub user_id: Uuid,
-    pub boost_level: AtomicI32,
+    pub user_id: Option<Uuid>,
+    pub boost_level: Arc<AtomicI32>,
 }
 
 impl PerUserBoost {
@@ -19,25 +20,27 @@ impl PerUserBoost {
             .first::<PerUserBoostWString>(conn);
         match user_boost {
             Ok(boost) => PerUserBoost {
-                user_id,
-                boost_level: AtomicI32::new(boost.boost_level),
+                user_id: Some(user_id),
+                boost_level: Arc::new(AtomicI32::new(boost.boost_level)),
             },
             Err(_) => PerUserBoost {
-                user_id,
-                boost_level: AtomicI32::new(100),
+                user_id: Some(user_id),
+                boost_level: Arc::new(AtomicI32::new(100)),
             },
         }
     }
     pub fn save(&self, conn: &mut SqliteConnection) -> Result<(), diesel::result::Error> {
-        diesel::insert_into(per_user_boost::dsl::per_user_boost)
-            .values(PerUserBoostWString {
-                user_id: self.user_id.to_string(),
-                boost_level: self.boost_level.load(Ordering::Relaxed),
-            })
-            .on_conflict(per_user_boost::dsl::user_id)
-            .do_update()
-            .set(per_user_boost::dsl::boost_level.eq(self.boost_level.load(Ordering::Relaxed)))
-            .execute(conn)?;
+        if let Some(user_id) = self.user_id {
+            diesel::insert_into(per_user_boost::dsl::per_user_boost)
+                .values(PerUserBoostWString {
+                    user_id: user_id.to_string(),
+                    boost_level: self.boost_level.load(Ordering::Relaxed),
+                })
+                .on_conflict(per_user_boost::dsl::user_id)
+                .do_update()
+                .set(per_user_boost::dsl::boost_level.eq(self.boost_level.load(Ordering::Relaxed)))
+                .execute(conn)?;
+        }
         Ok(())
     }
 }

@@ -49,6 +49,7 @@ impl Backend {
                             id: user_id,
                             username: person.name.clone().unwrap(),
                             slot,
+                            boost: None,
                         });
                     }
                 }

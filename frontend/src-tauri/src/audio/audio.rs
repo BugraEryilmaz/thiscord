@@ -2,9 +2,16 @@ use ringbuf::{
     traits::{Consumer, Producer},
     HeapCons, HeapProd, HeapRb,
 };
-use shared::{models::{AudioChannelMemberUpdate, ChannelWithUsers}, Split, ROOM_SIZE};
-use std::ops::{Add, Div, Mul};
-use std::sync::{Arc, Mutex as StdMutex};
+use shared::{
+    models::{AudioChannelMemberUpdate, ChannelWithUsers},
+    Split, ROOM_SIZE,
+};
+use std::sync::{atomic::AtomicI32, Arc, Mutex as StdMutex};
+use std::{
+    iter,
+    ops::{Add, Div, Mul},
+    sync::atomic::Ordering,
+};
 use tauri::{AppHandle, Manager};
 
 use cpal::{
@@ -13,7 +20,10 @@ use cpal::{
 };
 
 use crate::{
-    audio::ChannelWithBoosts, models::{LastUsedAudioDevices, LastUsedAudioDevicesWString, PerUserBoost}, utils::{establish_connection, AppState}, Error
+    audio::ChannelWithBoosts,
+    models::{LastUsedAudioDevices, LastUsedAudioDevicesWString, PerUserBoost},
+    utils::{establish_connection, AppState},
+    Error,
 };
 
 use super::AudioElement;
@@ -40,11 +50,14 @@ impl AudioElement {
     }
 
     pub fn set_channel(&mut self, channel_with_users: &ChannelWithUsers, handle: AppHandle) {
+        let mut user_boosts: [PerUserBoost; ROOM_SIZE] = Default::default();
+
+        for user in &channel_with_users.users {
+            user_boosts[user.slot] = PerUserBoost::get(&mut establish_connection(&handle), user.id);
+        }
         self.channel_with_boosts = Some(ChannelWithBoosts {
             channel: channel_with_users.channel.clone(),
-            users: channel_with_users.users.iter().map(|user| {
-                Some(PerUserBoost::get(&mut establish_connection(&handle), user.id))
-            }).collect(),
+            users: user_boosts,
         });
     }
 
@@ -62,20 +75,23 @@ impl AudioElement {
                 return Ok(());
             }
             let boost = PerUserBoost::get(&mut establish_connection(&handle), data.user.id);
-            channel_with_boosts.users[data.user.slot] = Some(boost);
+            channel_with_boosts.users[data.user.slot].user_id = Some(data.user.id);
+            channel_with_boosts.users[data.user.slot]
+                .boost_level
+                .store(boost.boost_level.load(Ordering::Relaxed), Ordering::Relaxed);
         }
         Ok(())
     }
 
-    pub fn handle_leave_channel(
-        &mut self,
-        data: &AudioChannelMemberUpdate,
-    ) -> Result<(), Error> {
+    pub fn handle_leave_channel(&mut self, data: &AudioChannelMemberUpdate) -> Result<(), Error> {
         if let Some(channel_with_boosts) = &mut self.channel_with_boosts {
             if channel_with_boosts.channel.id != data.channel.id {
                 return Ok(());
             }
-            channel_with_boosts.users[data.user.slot] = None;
+            channel_with_boosts.users[data.user.slot].user_id = None;
+            channel_with_boosts.users[data.user.slot]
+                .boost_level
+                .store(100, Ordering::Relaxed);
         }
         Ok(())
     }
@@ -88,9 +104,10 @@ impl AudioElement {
     ) -> Result<(), Error> {
         if let Some(channel_with_boosts) = &mut self.channel_with_boosts {
             for user in channel_with_boosts.users.iter() {
-                if let Some(user) = user {
-                    if user.user_id == user_id {
-                        user.boost_level.store(boost, std::sync::atomic::Ordering::Relaxed);
+                if let Some(id) = user.user_id {
+                    if id == user_id {
+                        user.boost_level
+                            .store(boost, std::sync::atomic::Ordering::Relaxed);
                         user.save(&mut establish_connection(&handle))?;
                         break;
                     }
@@ -107,7 +124,9 @@ impl AudioElement {
     ) -> Result<(), Error> {
         let conn = &mut establish_connection(&handle);
         let user_boost = PerUserBoost::get(conn, user_id);
-        user_boost.boost_level.store(boost, std::sync::atomic::Ordering::Relaxed);
+        user_boost
+            .boost_level
+            .store(boost, std::sync::atomic::Ordering::Relaxed);
         user_boost.save(conn)?;
         Ok(())
     }
@@ -378,6 +397,22 @@ impl AudioElement {
         mut consumers: Vec<HeapCons<f32>>,
     ) -> Result<cpal::Stream, Error> {
         let boost = self.devices.speaker_boost.unwrap_or(100);
+        let user_boosts = self
+            .channel_with_boosts
+            .as_ref()
+            .map(|c| {
+                c.users
+                    .as_ref()
+                    .iter()
+                    .map(|b| b.boost_level.clone())
+                    .collect::<Vec<_>>()
+            })
+            .unwrap_or_else(|| {
+                tracing::warn!("No channel with boosts set, using default boosts (NOT CHANGEABLE AFTERWARDS)");
+                iter::repeat(Arc::new(AtomicI32::new(100)))
+                    .take(ROOM_SIZE)
+                    .collect::<Vec<_>>()
+            });
         let stream = device.build_output_stream(
             &config,
             move |data: &mut [T], _| {
@@ -386,7 +421,7 @@ impl AudioElement {
                     *d = T::from_sample(0.0);
                 }
                 // Receive raw samples from encoder thread
-                for sender in consumers.iter_mut() {
+                for (idx, sender) in consumers.iter_mut().enumerate() {
                     let sender: &mut HeapCons<f32> = sender;
                     let mut temp_data: Vec<f32> = vec![0.0; data.len()];
                     // Pop samples from the ring buffer
@@ -395,9 +430,14 @@ impl AudioElement {
                         // If no samples were received, fill with silence
                         continue;
                     }
+                    // Apply user boosts
+                    let user_boost = user_boosts[idx].clone();
                     // Convert f32 to T and write to output buffer
                     for (d, s) in data.iter_mut().zip(temp_data.iter()) {
-                        *d = *d + T::from_sample(*s);
+                        *d = *d
+                            + T::from_sample(
+                                *s * user_boost.load(Ordering::Relaxed) as f32 / 100.0,
+                            );
                     }
                 }
 

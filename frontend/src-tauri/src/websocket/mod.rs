@@ -1,3 +1,4 @@
+use std::sync::atomic::Ordering;
 use std::sync::{Arc, Mutex as StdMutex};
 
 use front_shared::{CallStatus, Status, URL};
@@ -26,6 +27,8 @@ pub enum WebSocketRequest {
 }
 
 use crate::audio::{AudioCommand, AudioElement};
+use crate::models::PerUserBoost;
+use crate::utils::establish_connection;
 use crate::{utils::AppState, Error};
 
 pub async fn websocket_handler(
@@ -416,7 +419,7 @@ pub async fn handle_websocket_message(
             tracing::error!("WebSocket error: {}", err);
             return Err(Error::WebSocketError(err));
         }
-        WebSocketMessage::SomeoneJoinedAudioChannel { data } => {
+        WebSocketMessage::SomeoneJoinedAudioChannel { mut data } => {
             tracing::info!(
                 "User {} joined audio channel {} on server {}",
                 data.user.username,
@@ -429,6 +432,13 @@ pub async fn handle_websocket_message(
                     tracing::error!("Failed to handle join channel: {}", e);
                 }
             }
+            // Get boost level for the user
+            let mut conn = establish_connection(&handle);
+            data.user.boost = Some(
+                PerUserBoost::get(&mut conn, data.user.id)
+                    .boost_level
+                    .load(Ordering::Relaxed),
+            );
             // Fails only when the event name is invalid
             if handle.emit("someone-joined-audio-channel", data).is_err() {
                 tracing::error!("Event name 'someone-joined-audio-channel' is invalid");

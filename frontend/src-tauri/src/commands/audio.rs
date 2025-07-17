@@ -120,7 +120,7 @@ pub async fn set_speaker_boost(app_handle: tauri::AppHandle, boost: i32) {
     }
 }
 
-#[tauri::command]
+#[tauri::command(rename_all = "snake_case")]
 pub async fn set_user_boost(
     app_handle: tauri::AppHandle,
     user_id: uuid::Uuid,

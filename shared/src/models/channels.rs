@@ -33,6 +33,7 @@ pub struct VoiceUser {
     pub id: Uuid,
     pub username: String,
     pub slot: usize,
+    pub boost: Option<i32>,
 }
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ChannelWithUsers {

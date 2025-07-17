@@ -3,6 +3,7 @@ use std::sync::{Arc, Mutex as StdMutex};
 use ringbuf::HeapProd;
 use ringbuf::HeapCons;
 use shared::models::Channel;
+use shared::ROOM_SIZE;
 
 use crate::models::LastUsedAudioDevices;
 use crate::models::PerUserBoost;
@@ -36,5 +37,5 @@ pub enum AudioCommand {
 
 pub struct ChannelWithBoosts {
     pub channel: Channel,
-    pub users: Vec<Option<PerUserBoost>>,
+    pub users: [PerUserBoost; ROOM_SIZE],
 }

@@ -14,6 +14,7 @@ pub enum HoverMenuDirection {
 pub enum HoverMenuTrigger {
     Click,
     Hover,
+    RightClick,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -56,10 +57,8 @@ pub fn HoverMenu<I: IntoView, P: IntoView>(
     popup: P,
     direction: HoverMenuDirection,
     trigger: HoverMenuTrigger,
-    #[prop(optional)]
-    background_style: Vec<HoverMenuBackgroundStyle>,
-    #[prop(default = RwSignal::new(false))]
-    visible: RwSignal<bool>,
+    #[prop(optional)] background_style: Vec<HoverMenuBackgroundStyle>,
+    #[prop(default = RwSignal::new(false))] visible: RwSignal<bool>,
 ) -> impl IntoView {
     let parent_ref = NodeRef::new();
     let popup_ref = NodeRef::new();
@@ -112,7 +111,7 @@ pub fn HoverMenu<I: IntoView, P: IntoView>(
 
     view! {
         <div>
-            <div 
+            <div
                 class=style::hover_menu_item
                 node_ref=parent_ref
                 on:mouseover=move |_| {
@@ -133,27 +132,39 @@ pub fn HoverMenu<I: IntoView, P: IntoView>(
                         visible.set(true);
                     }
                 }
+                on:contextmenu=move |event: web_sys::MouseEvent| {
+                    event.prevent_default();
+                    if matches!(trigger.clone(), HoverMenuTrigger::RightClick) {
+                        calc();
+                        visible.set(true);
+                    }
+                }
             >
                 {item}
             </div>
-            <div node_ref=popup_ref
+            <div
+                node_ref=popup_ref
                 style:left=move || format!("{}px", x.get())
                 style:top=move || format!("{}px", y.get())
-                class=move || {classes!(
-                    if trigger == HoverMenuTrigger::Click && visible.get() { style::hover_menu_popup_visible }
-                    else if trigger == HoverMenuTrigger::Click { style::hover_menu_popup_hidden }
+                class=move || {
+                    classes!(
+                        if !matches!(trigger, HoverMenuTrigger::Hover) && visible.get() { style::hover_menu_popup_visible }
+                    else if !matches!(trigger, HoverMenuTrigger::Hover) { style::hover_menu_popup_hidden }
                     else { style::hover_menu_popup_whenhover },
                     style::hover_menu_popup,
-                )}
+                    )
+                }
             >
                 {popup}
             </div>
-            <div on:click=move |_| {
+            <div
+                on:click=move |_| {
                     visible.set(false);
                 }
-                class=move || {classes!(
-                    if trigger == HoverMenuTrigger::Click && visible.get() { style::hover_menu_popup_visible }
-                    else if trigger == HoverMenuTrigger::Click { style::hover_menu_popup_hidden }
+                class=move || {
+                    classes!(
+                        if !matches!(trigger, HoverMenuTrigger::Hover) && visible.get() { style::hover_menu_popup_visible }
+                    else if !matches!(trigger, HoverMenuTrigger::Hover) { style::hover_menu_popup_hidden }
                     else { style::hover_menu_popup_whenhover },
                     if background_style.contains(&HoverMenuBackgroundStyle::Blur) {
                         Some(style::hover_menu_popup_background_blur)
@@ -166,9 +177,9 @@ pub fn HoverMenu<I: IntoView, P: IntoView>(
                         None
                     },
                     style::hover_menu_popup_background
-                )}
-            >
-                // This div is used to close the popup when clicking outside
+                    )
+                }
+            >// This div is used to close the popup when clicking outside
             </div>
         </div>
     }

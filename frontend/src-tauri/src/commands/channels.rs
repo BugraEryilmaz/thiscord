@@ -1,9 +1,11 @@
+use std::sync::atomic::Ordering;
+
 use front_shared::{URL};
 use shared::models::ChannelWithUsers;
 use tauri::Manager;
 use uuid::Uuid;
 
-use crate::{utils::handle_auth_error, websocket::WebSocketRequest};
+use crate::{models::PerUserBoost, utils::{establish_connection, handle_auth_error}, websocket::WebSocketRequest};
 
 #[tauri::command(rename_all = "snake_case")]
 pub async fn get_channels(
@@ -15,11 +17,19 @@ pub async fn get_channels(
     let url = format!("https://{}/channels/{}/list", URL, server_id);
     let response = client.get(&url).send().await;
 
-    let resp = handle_auth_error(response, handle)
+    let resp = handle_auth_error(response, handle.clone())
         .await
         .map_err(|e| e.to_string())?;
 
-    let channels: Vec<ChannelWithUsers> = resp.json().await.map_err(|e| e.to_string())?;
+    let mut channels: Vec<ChannelWithUsers> = resp.json().await.map_err(|e| e.to_string())?;
+
+    // Get the boost level for each user in the channels
+    let mut conn = establish_connection(&handle);
+    channels.iter_mut().for_each(|channel| {
+        channel.users.iter_mut().for_each(|user| {
+            user.boost = Some(PerUserBoost::get(&mut conn, user.id).boost_level.load(Ordering::Relaxed));
+        });
+    });
 
     Ok(channels)
 }

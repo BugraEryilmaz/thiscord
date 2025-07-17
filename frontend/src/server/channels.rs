@@ -5,6 +5,7 @@ use leptos::logging::log;
 use leptos::logging::warn;
 use leptos::prelude::*;
 use leptos::task::spawn_local;
+use serde_wasm_bindgen::to_value;
 use shared::models::AudioChannelMemberUpdate;
 use shared::models::ChannelWithUsers;
 use shared::models::JoinChannel;
@@ -22,6 +23,12 @@ use crate::utils::invoke;
 #[derive(serde::Serialize, serde::Deserialize)]
 struct GetChannels {
     server_id: Uuid,
+}
+
+#[derive(serde::Serialize, serde::Deserialize)]
+struct SetBoostArgs {
+    user_id: Uuid,
+    boost_level: i32,
 }
 
 async fn get_channels(server_id: Uuid) -> Result<Vec<ChannelWithUsers>, String> {
@@ -76,7 +83,7 @@ pub fn Channels(active_server: RwSignal<Option<Server>>) -> impl IntoView {
                 data.channel.server_id
             );
             if active_server
-                .get()
+                .get_untracked()
                 .map_or(false, |s| s.id == data.channel.server_id)
             {
                 // Update the UI to reflect the new user in the audio channel
@@ -110,7 +117,7 @@ pub fn Channels(active_server: RwSignal<Option<Server>>) -> impl IntoView {
                 data.channel.server_id
             );
             if active_server
-                .get()
+                .get_untracked()
                 .map_or(false, |s| s.id == data.channel.server_id)
             {
                 // Update the UI to reflect the new user in the audio channel
@@ -309,7 +316,7 @@ pub fn ChannelList(
                         view! {
                             <ChannelItem
                                 channel=channel.clone()
-                                on:click=move |_| {
+                                join_fn=move || {
                                     let channel = channel.clone();
                                     spawn_local(async move {
                                         let channel_name = channel.channel.name.clone();
@@ -336,9 +343,13 @@ pub fn ChannelList(
 }
 
 #[component]
-pub fn ChannelItem(channel: ChannelWithUsers) -> impl IntoView {
+pub fn ChannelItem(channel: ChannelWithUsers, join_fn: impl Fn() + 'static) -> impl IntoView {
     view! {
-        <li class=style::channel_list_item>
+        <li class=style::channel_list_item
+            on:click=move |_| {
+                join_fn();
+            }
+        >
             <h3>{channel.channel.name}</h3>
             <span>{channel.users.len()} " users"</span>
         </li>
@@ -347,10 +358,51 @@ pub fn ChannelItem(channel: ChannelWithUsers) -> impl IntoView {
                 each=move || channel.users.clone()
                 key=|user| user.id
                 children=move |user| {
+                    let boost = RwSignal::new(user.boost.unwrap_or(100).to_string());
                     view! {
-                        <li>
-                            <span class=style::channel_user>{user.username.clone()}</span>
-                        </li>
+                        <HoverMenu
+                            item=move || {
+                                view! {
+                                    <span class=style::channel_user>
+                                        {user.username.clone()}
+                                    </span>
+                                }
+                            }
+                            popup=move || {
+                                view! {
+                                    <div>
+                                        "User Volume: "
+                                        <input
+                                            type="range"
+                                            min="0"
+                                            max="100"
+                                            bind:value=boost
+                                            on:change=move |_| {
+                                                let boost_value = boost.get().parse::<i32>().unwrap_or(100);
+                                                spawn_local(async move {
+                                                    if let Err(e) = invoke(
+                                                        "set_user_boost",
+                                                        to_value(&SetBoostArgs {
+                                                            user_id: user.id,
+                                                            boost_level: boost_value,
+                                                        })
+                                                        .unwrap(),
+                                                    )
+                                                    .await
+                                                    {
+                                                        log!("Failed to set user boost: {:?}", e);
+                                                        return;
+                                                    }
+                                                    log!("User boost set to: {}", boost_value);
+                                                });
+                                            }
+                                        />
+                                    </div>
+                                }
+                            }
+                            direction=HoverMenuDirection::Right
+                            trigger=HoverMenuTrigger::RightClick
+                        />
                     }
                 }
             />
