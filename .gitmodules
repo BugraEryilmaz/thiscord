@@ -1,0 +1,3 @@
+[submodule "webrtc-audio-processing"]
+	path = webrtc-audio-processing
+	url = https://github.com/BugraEryilmaz/webrtc-audio-processing.git
