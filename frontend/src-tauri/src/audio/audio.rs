@@ -13,6 +13,7 @@ use std::{
     sync::atomic::Ordering,
 };
 use tauri::{AppHandle, Manager};
+use webrtc_audio_processing::{InitializationConfig, Processor};
 
 use cpal::{
     traits::{DeviceTrait, HostTrait, StreamTrait},
@@ -21,7 +22,7 @@ use cpal::{
 
 use crate::{
     audio::ChannelWithBoosts,
-    models::{LastUsedAudioDevices, LastUsedAudioDevicesWString, PerUserBoost},
+    models::{AudioConfig, LastUsedAudioDevices, LastUsedAudioDevicesWString, PerUserBoost},
     utils::{establish_connection, AppState},
     Error,
 };
@@ -39,7 +40,20 @@ impl AudioElement {
             let mut last_used_audio_devices = state.last_used_audio_devices.lock().unwrap();
             *last_used_audio_devices = Some(devices.clone().into());
         }
+        let initialization_config = InitializationConfig {
+            num_capture_channels: 1,
+            num_render_channels: 1,
+            sample_rate_hz: 48_000,
+        };
+        // SAFETY: we have just created the processor with a valid config
+        let mut audio_processor =
+            Processor::new(&initialization_config).expect("Failed to create audio processor");
+        let audio_processor_config = AudioConfig::get(handle);
+        audio_processor.set_config(audio_processor_config.cfg.clone());
+        audio_processor.initialize();
         AudioElement {
+            audio_processor,
+            audio_processor_config,
             channel_with_boosts: None,
             devices,
             speaker_stream: None,
@@ -397,6 +411,7 @@ impl AudioElement {
         mut consumers: Vec<HeapCons<f32>>,
     ) -> Result<cpal::Stream, Error> {
         let boost = self.devices.speaker_boost.unwrap_or(100);
+        let mut processor = self.audio_processor.clone();
         let user_boosts = self
             .channel_with_boosts
             .as_ref()
@@ -408,7 +423,9 @@ impl AudioElement {
                     .collect::<Vec<_>>()
             })
             .unwrap_or_else(|| {
-                tracing::warn!("No channel with boosts set, using default boosts (NOT CHANGEABLE AFTERWARDS)");
+                tracing::warn!(
+                    "No channel with boosts set, using default boosts (NOT CHANGEABLE AFTERWARDS)"
+                );
                 iter::repeat(Arc::new(AtomicI32::new(100)))
                     .take(ROOM_SIZE)
                     .collect::<Vec<_>>()
@@ -416,10 +433,7 @@ impl AudioElement {
         let stream = device.build_output_stream(
             &config,
             move |data: &mut [T], _| {
-                // Initialize output buffer with silence
-                for d in data.iter_mut() {
-                    *d = T::from_sample(0.0);
-                }
+                let mut data_f32: Vec<f32> = vec![0.0; data.len()];
                 // Receive raw samples from encoder thread
                 for (idx, sender) in consumers.iter_mut().enumerate() {
                     let sender: &mut HeapCons<f32> = sender;
@@ -433,21 +447,27 @@ impl AudioElement {
                     // Apply user boosts
                     let user_boost = user_boosts[idx].clone();
                     // Convert f32 to T and write to output buffer
-                    for (d, s) in data.iter_mut().zip(temp_data.iter()) {
-                        *d = *d
-                            + T::from_sample(
-                                *s * user_boost.load(Ordering::Relaxed) as f32 / 100.0,
-                            );
+                    for (d, s) in data_f32.iter_mut().zip(temp_data.iter()) {
+                        *d = *d + *s * user_boost.load(Ordering::Relaxed) as f32 / 100.0;
                     }
                 }
-
                 // Apply the speaker boost
-                for d in data.iter_mut() {
-                    *d = *d * T::from_sample(boost) / T::from_sample(100);
+                for d in data_f32.iter_mut() {
+                    *d = *d * boost as f32 / 100.0;
+                }
+                // Process the samples with the audio processor
+                if let Err(processed_samples) =
+                    processor.process_render_frame(data_f32.as_mut_slice())
+                {
+                    tracing::error!("Error processing audio frame: {}", processed_samples);
+                }
+                // Convert f32 to T and write to output buffer
+                for (d, s) in data.iter_mut().zip(data_f32.iter()) {
+                    *d = T::from_sample(*s);
                 }
             },
             |e| {
-                eprintln!("Error: {}", e);
+                tracing::error!("Error in speaker stream: {}", e);
             },
             None,
         )?;
@@ -502,19 +522,26 @@ impl AudioElement {
         f32: FromSample<T>,
     {
         let boost = self.devices.mic_boost.unwrap_or(100);
+        let mut processor = self.audio_processor.clone();
         let stream = device.build_input_stream(
             &config,
             move |data: &[T], _| {
                 // Convert T to f32 and send to the encoder thread
-                let samples = data
+                let mut samples = data
                     .iter()
                     .map(|s| s.to_sample::<f32>() * (boost as f32) / 100.0)
                     .collect::<Vec<f32>>();
+                // Process the samples with the audio processor
+                if let Err(processed_samples) =
+                    processor.process_capture_frame(samples.as_mut_slice())
+                {
+                    tracing::error!("Error processing audio frame: {}", processed_samples);
+                }
                 // Note: This will block if the channel is full.
                 tx.push_slice(&samples);
             },
             |e| {
-                eprintln!("Error: {}", e);
+                tracing::error!("Error in mic stream: {}", e);
             },
             None,
         )?;
