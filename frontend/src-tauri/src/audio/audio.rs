@@ -51,6 +51,11 @@ impl AudioElement {
         let audio_processor_config = AudioConfig::get(handle);
         audio_processor.set_config(audio_processor_config.cfg.clone());
         audio_processor.initialize();
+        // Give an zero speaker stream to initialize
+        let mut speaker_stream: [f32; 480] = [0.0; 480]; // 10 ms of silence at 48 kHz
+        audio_processor
+            .process_render_frame(&mut speaker_stream)
+            .expect("Failed to process initial speaker stream");
         AudioElement {
             audio_processor,
             audio_processor_config,
