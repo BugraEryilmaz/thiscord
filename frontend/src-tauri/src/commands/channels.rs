@@ -1,11 +1,11 @@
 use std::sync::atomic::Ordering;
 
-use front_shared::{URL};
+use front_shared::{models::user_boost::PerUserBoost, URL};
 use shared::models::ChannelWithUsers;
 use tauri::Manager;
 use uuid::Uuid;
 
-use crate::{models::PerUserBoost, utils::{establish_connection, handle_auth_error}, websocket::WebSocketRequest};
+use crate::{utils::{establish_connection, handle_auth_error}, websocket::WebSocketRequest};
 
 #[tauri::command(rename_all = "snake_case")]
 pub async fn get_channels(

@@ -1,13 +1,12 @@
 pub mod audio;
 pub mod commands;
-pub mod models;
-pub mod schema;
 pub mod utils;
 pub mod websocket;
 
+use front_shared::models::session::SessionStore;
 use commands::*;
 use reqwest::cookie::CookieStore;
-use front_shared::{Session, URL};
+use front_shared::{do_migrations, Session, URL};
 use tauri::{Manager, Url};
 use tokio::spawn;
 use tokio::sync::RwLock;
@@ -18,11 +17,9 @@ pub use utils::Error;
 
 // Learn more about Tauri commands at https://tauri.app/develop/calling-rust/
 
-use diesel_migrations::{embed_migrations, EmbeddedMigrations, MigrationHarness};
 
-use crate::{models::SessionStore, utils::{check_for_updates, check_updates, establish_connection, AppState}};
+use crate::{utils::{check_for_updates, check_updates, establish_connection, AppState}};
 
-pub const MIGRATIONS: EmbeddedMigrations = embed_migrations!("migrations");
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub async fn run() {
@@ -62,7 +59,7 @@ pub async fn run() {
                 std::fs::File::create(&path).unwrap();
             }
             let mut conn = establish_connection(app.handle());
-            let migrated = conn.run_pending_migrations(MIGRATIONS);
+            let migrated = do_migrations(&mut conn);
 
             tracing::info!("Migrated: {:?}", migrated);
 

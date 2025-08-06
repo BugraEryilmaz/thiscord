@@ -12,3 +12,27 @@ serde = { version = "1", features = ["derive"] }
 serde-wasm-bindgen = "0.6"
 uuid = { version = "1.17.0", features = ["v4"] }
 shared = { path = "../../shared" }
+partial_modify_derive = { path = "../../partial_modify_derive", version = "0.1.0"}
+diesel = { version = "2.2.7", features = [
+    "sqlite",
+    "returning_clauses_for_sqlite_3_35",
+], optional = true }
+diesel_migrations = { version = "2.2.0", features = [
+    "sqlite",
+], optional = true }
+rusqlite = { version = "0.37", features = ["bundled"], optional = true }
+webrtc-audio-processing = { path = "../../webrtc-audio-processing", version = "0.6.0", features = [
+    "bundled",
+    "derive_serde",
+    "serde",
+], optional = true }
+cpal = { version = "0.15.3", optional = true }
+
+[features]
+diesel = [
+    "dep:diesel",
+    "dep:diesel_migrations",
+    "dep:rusqlite",
+    "dep:webrtc-audio-processing",
+    "dep:cpal",
+]

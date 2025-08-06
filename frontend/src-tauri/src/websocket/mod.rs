@@ -27,7 +27,7 @@ pub enum WebSocketRequest {
 }
 
 use crate::audio::{AudioCommand, AudioElement};
-use crate::models::PerUserBoost;
+use front_shared::models::user_boost::PerUserBoost;
 use crate::utils::establish_connection;
 use crate::{utils::AppState, Error};
 

@@ -13,7 +13,7 @@ use std::sync::Mutex as StdMutex;
 pub use update::*;
 
 use crate::websocket::WebSocketRequest;
-use crate::models::LastUsedAudioDevicesWString;
+use front_shared::models::last_used_devices::LastUsedAudioDevicesWString;
 
 pub struct AppState {
     // Define any shared state here

@@ -154,8 +154,8 @@ impl LastUsedAudioDevicesWString {
     }
 }
 
-impl From<front_shared::last_used_devices::LastUsedAudioDevicesWString> for LastUsedAudioDevicesWString {
-    fn from(devices: front_shared::last_used_devices::LastUsedAudioDevicesWString) -> Self {
+impl From<crate::last_used_devices::LastUsedAudioDevicesWString> for LastUsedAudioDevicesWString {
+    fn from(devices: crate::last_used_devices::LastUsedAudioDevicesWString) -> Self {
         LastUsedAudioDevicesWString {
             id: devices.id,
             mic: devices.mic,
@@ -166,9 +166,9 @@ impl From<front_shared::last_used_devices::LastUsedAudioDevicesWString> for Last
     }
 }
 
-impl From<LastUsedAudioDevicesWString> for front_shared::last_used_devices::LastUsedAudioDevicesWString {
+impl From<LastUsedAudioDevicesWString> for crate::last_used_devices::LastUsedAudioDevicesWString {
     fn from(devices: LastUsedAudioDevicesWString) -> Self {
-        front_shared::last_used_devices::LastUsedAudioDevicesWString {
+        crate::last_used_devices::LastUsedAudioDevicesWString {
             id: devices.id,
             mic: devices.mic,
             speaker: devices.speaker,

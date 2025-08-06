@@ -20,9 +20,12 @@ use cpal::{
     FromSample, SizedSample, SupportedStreamConfig,
 };
 
+use front_shared::models::last_used_devices::{LastUsedAudioDevices, LastUsedAudioDevicesWString};
+use front_shared::models::audio_config::AudioConfig;
+use front_shared::models::user_boost::PerUserBoost;
+
 use crate::{
     audio::ChannelWithBoosts,
-    models::{AudioConfig, LastUsedAudioDevices, LastUsedAudioDevicesWString, PerUserBoost},
     utils::{establish_connection, AppState},
     Error,
 };
@@ -48,14 +51,17 @@ impl AudioElement {
         // SAFETY: we have just created the processor with a valid config
         let mut audio_processor =
             Processor::new(&initialization_config).expect("Failed to create audio processor");
-        let audio_processor_config = AudioConfig::get(handle);
+        let mut conn = establish_connection(&handle);
+        let audio_processor_config = AudioConfig::get(&mut conn);
         audio_processor.set_config(audio_processor_config.cfg.clone());
-        audio_processor.initialize();
         // Give an zero speaker stream to initialize
         let mut speaker_stream: [f32; 480] = [0.0; 480]; // 10 ms of silence at 48 kHz
-        audio_processor
-            .process_render_frame(&mut speaker_stream)
-            .expect("Failed to process initial speaker stream");
+        for _ in 0..15 {
+            audio_processor
+                .process_render_frame(&mut speaker_stream)
+                .expect("Failed to process initial speaker stream");
+        }
+        audio_processor.initialize();
         AudioElement {
             audio_processor,
             audio_processor_config,
@@ -154,7 +160,7 @@ impl AudioElement {
         SupportedStreamConfig::new(
             1,
             cpal::SampleRate(48000),
-            cpal::SupportedBufferSize::Range { min: 960, max: 960 },
+            cpal::SupportedBufferSize::Range { min: 480, max: 480 },
             cpal::SampleFormat::F32,
         )
     }
@@ -461,10 +467,17 @@ impl AudioElement {
                     *d = *d * boost as f32 / 100.0;
                 }
                 // Process the samples with the audio processor
-                if let Err(processed_samples) =
-                    processor.process_render_frame(data_f32.as_mut_slice())
-                {
-                    tracing::error!("Error processing audio frame: {}", processed_samples);
+                // SAFETY: we need to ensure that each frame is 480 samples long
+                let mut data_f32_chunks = data_f32.chunks_exact_mut(480);
+                for chunk in &mut data_f32_chunks {
+                    if let Err(processed_samples) =
+                        processor.process_render_frame(chunk)
+                    {
+                        tracing::error!("Error processing audio frame: {}", processed_samples);
+                    }
+                }
+                if data_f32_chunks.into_remainder().len() > 0 {
+                    tracing::warn!("Speaker stream received a frame with less than 480 samples, this is not supported by the audio processor");
                 }
                 // Convert f32 to T and write to output buffer
                 for (d, s) in data.iter_mut().zip(data_f32.iter()) {
@@ -537,10 +550,17 @@ impl AudioElement {
                     .map(|s| s.to_sample::<f32>() * (boost as f32) / 100.0)
                     .collect::<Vec<f32>>();
                 // Process the samples with the audio processor
-                if let Err(processed_samples) =
-                    processor.process_capture_frame(samples.as_mut_slice())
-                {
-                    tracing::error!("Error processing audio frame: {}", processed_samples);
+                // SAFETY: we need to ensure that each frame is 480 samples long
+                let mut samples_chunks = samples.chunks_exact_mut(480);
+                for chunk in &mut samples_chunks {
+                    if let Err(processed_samples) =
+                        processor.process_capture_frame(chunk)
+                    {
+                        tracing::error!("Error processing audio frame: {}", processed_samples);
+                    }
+                }
+                if samples_chunks.into_remainder().len() > 0 {
+                    tracing::warn!("Mic stream received a frame with less than 480 samples, this is not supported by the audio processor");
                 }
                 // Note: This will block if the channel is full.
                 tx.push_slice(&samples);

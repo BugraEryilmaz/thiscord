@@ -34,13 +34,11 @@ ringbuf = "0.4.8"
 uuid = { version = "1.17.0", features = ["v4"] }
 tracing = "0.1.41"
 tracing-subscriber = { version = "0.3.19", features = ["env-filter"] }
-front-shared = { path = "../front-shared" }
+front-shared = { path = "../front-shared", features = ["diesel"] }
 tokio-tungstenite = { version = "0.26.2", features = ["native-tls"] }
 native-tls = "0.2.14"
 futures-util = "0.3.31"
 reqwest = { version = "0.12", features = ["cookies", "rustls-tls", "stream", "json", "multipart"] }
-diesel_migrations = { version = "2.2.0", features = ["sqlite"] }
-rusqlite = { version = "0.33.0", features = ["bundled"] }
 webrtc-audio-processing = { path = "../../webrtc-audio-processing", version = "0.6.0", features = ["bundled", "derive_serde", "serde"] }
 webrtc-vad = "0.4.0"
 

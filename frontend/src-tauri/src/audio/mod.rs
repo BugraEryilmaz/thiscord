@@ -6,9 +6,9 @@ use shared::models::Channel;
 use shared::ROOM_SIZE;
 use webrtc_audio_processing::Processor;
 
-use crate::models::AudioConfig;
-use crate::models::LastUsedAudioDevices;
-use crate::models::PerUserBoost;
+use front_shared::models::audio_config::AudioConfig;
+use front_shared::models::last_used_devices::LastUsedAudioDevices;
+use front_shared::models::user_boost::PerUserBoost;
 
 mod audio;
 
@@ -37,6 +37,9 @@ pub enum AudioCommand {
         user_id: uuid::Uuid,
         boost_level: i32,
     },
+    ChangeSetting {
+        
+    }
 }
 
 pub struct ChannelWithBoosts {

@@ -1,5 +1,5 @@
 use diesel::prelude::*;
-use front_shared::Session;
+use crate::Session;
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 

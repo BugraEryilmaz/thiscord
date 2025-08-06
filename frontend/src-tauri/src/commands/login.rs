@@ -1,4 +1,6 @@
 use diesel::prelude::*;
+use front_shared::models::session::SessionWString;
+use front_shared::schema;
 use front_shared::Session;
 use reqwest::cookie::CookieStore;
 use front_shared::{LoginStatus, URL};
@@ -6,12 +8,10 @@ use shared::models::LoginResponse;
 use shared::models::Signup;
 use shared::models::Credentials;
 use tauri::{Emitter, Manager, Url};
+use front_shared::models::session::SessionStore;
 
-use crate::models::SessionStore;
-use crate::models::SessionWString;
 use crate::{
     commands::connect_ws,
-    schema,
     utils::{establish_connection, AppState},
 };
 
