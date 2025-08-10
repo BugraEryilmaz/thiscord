@@ -31,6 +31,7 @@ pub enum VoiceActivityDetectionCfg {
     },
 }
 
+#[cfg(feature = "diesel")]
 #[derive(Debug, Clone)]
 pub struct AudioConfig {
     pub cfg: webrtc_audio_processing::Config,
@@ -137,6 +138,7 @@ impl Default for AudioConfigDB {
     }
 }
 
+#[cfg(feature = "diesel")]
 impl From<&AudioConfig> for AudioConfigDB {
     fn from(cfg: &AudioConfig) -> Self {
         AudioConfigDB {
@@ -177,6 +179,7 @@ impl From<&AudioConfig> for AudioConfigDB {
     }
 }
 
+#[cfg(feature = "diesel")]
 impl From<&AudioConfigDB> for AudioConfig {
     fn from(db_config: &AudioConfigDB) -> Self {
         AudioConfig {
