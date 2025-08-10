@@ -1,6 +1,7 @@
 use std::sync::atomic::Ordering;
 use std::sync::{Arc, Mutex as StdMutex};
 
+use front_shared::models::audio_config::AudioConfigDB;
 use front_shared::{CallStatus, Status, URL};
 use futures_util::{SinkExt, StreamExt};
 use native_tls::TlsConnector;
@@ -27,9 +28,9 @@ pub enum WebSocketRequest {
 }
 
 use crate::audio::{AudioCommand, AudioElement};
-use front_shared::models::user_boost::PerUserBoost;
 use crate::utils::establish_connection;
 use crate::{utils::AppState, Error};
+use front_shared::models::user_boost::PerUserBoost;
 
 pub async fn websocket_handler(
     handle: AppHandle,
@@ -209,7 +210,10 @@ pub async fn handle_internal_request(
                         }
                         RTCPeerConnectionState::Disconnected => {
                             appstate.change_status(
-                                Status::OnCall(channel_name_clone.clone(), CallStatus::Disconnected),
+                                Status::OnCall(
+                                    channel_name_clone.clone(),
+                                    CallStatus::Disconnected,
+                                ),
                                 &handle_clone,
                             );
                         }
@@ -330,6 +334,12 @@ pub async fn handle_internal_request(
                             tracing::error!("Failed to set user boost: {}", e);
                         }
                     }
+                    AudioCommand::ChangeSetting { cfg } => {
+                        let mut conn = establish_connection(&handle);
+                        if let Err(e) = audio_element.change_audio_config(cfg.clone(), &mut conn) {
+                            tracing::error!("Failed to change audio config: {}", e);
+                        }
+                    }
                 }
             }
             match &command {
@@ -349,9 +359,17 @@ pub async fn handle_internal_request(
                     user_id,
                     boost_level,
                 } => {
-                    if let Err(e) = AudioElement::set_default_user_boost(*user_id, *boost_level, handle) {
+                    if let Err(e) =
+                        AudioElement::set_default_user_boost(*user_id, *boost_level, handle)
+                    {
                         tracing::error!("Failed to set user boost: {}", e);
                     }
+                }
+                AudioCommand::ChangeSetting { cfg } => {
+                    let mut conn = establish_connection(&handle);
+                    AudioConfigDB::get(&mut conn)
+                        .apply(cfg.clone())
+                        .save(&mut conn)?;
                 }
                 AudioCommand::Mute
                 | AudioCommand::Deafen

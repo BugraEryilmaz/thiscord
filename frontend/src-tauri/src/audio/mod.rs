@@ -1,5 +1,6 @@
 use std::sync::{Arc, Mutex as StdMutex};
 
+use front_shared::models::audio_config::AudioConfigDBPartial;
 use ringbuf::HeapProd;
 use ringbuf::HeapCons;
 use shared::models::Channel;
@@ -38,7 +39,7 @@ pub enum AudioCommand {
         boost_level: i32,
     },
     ChangeSetting {
-        
+        cfg: AudioConfigDBPartial
     }
 }
 

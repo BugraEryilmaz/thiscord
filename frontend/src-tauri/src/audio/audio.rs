@@ -1,3 +1,4 @@
+use diesel::SqliteConnection;
 use ringbuf::{
     traits::{Consumer, Producer},
     HeapCons, HeapProd, HeapRb,
@@ -6,11 +7,14 @@ use shared::{
     models::{AudioChannelMemberUpdate, ChannelWithUsers},
     Split, ROOM_SIZE,
 };
-use std::sync::{atomic::AtomicI32, Arc, Mutex as StdMutex};
 use std::{
     iter,
     ops::{Add, Div, Mul},
     sync::atomic::Ordering,
+};
+use std::{
+    ops::Deref,
+    sync::{atomic::AtomicI32, Arc, Mutex as StdMutex},
 };
 use tauri::{AppHandle, Manager};
 use webrtc_audio_processing::{InitializationConfig, Processor};
@@ -20,9 +24,12 @@ use cpal::{
     FromSample, SizedSample, SupportedStreamConfig,
 };
 
-use front_shared::models::last_used_devices::{LastUsedAudioDevices, LastUsedAudioDevicesWString};
-use front_shared::models::audio_config::AudioConfig;
+use front_shared::models::audio_config::{AudioConfig, AudioConfigDB};
 use front_shared::models::user_boost::PerUserBoost;
+use front_shared::models::{
+    audio_config::AudioConfigDBPartial,
+    last_used_devices::{LastUsedAudioDevices, LastUsedAudioDevicesWString},
+};
 
 use crate::{
     audio::ChannelWithBoosts,
@@ -323,6 +330,41 @@ impl AudioElement {
                 tracing::error!("Failed to restart mic with boost: {}", e);
             }
         }
+    }
+
+    pub fn change_audio_config(
+        &mut self,
+        config: AudioConfigDBPartial, 
+        conn: &mut SqliteConnection,
+    ) -> Result<(), Error> {
+        let new_cfg_db = AudioConfigDB::get(conn).apply(config.clone());
+        new_cfg_db.save(conn)?;
+        let new_cfg = AudioConfig::from(&new_cfg_db);
+        match config {
+            AudioConfigDBPartial::HighPassFilter(_)
+            | AudioConfigDBPartial::EchoCancellation(_)
+            | AudioConfigDBPartial::NoiseSuppressionLevel(_)
+            | AudioConfigDBPartial::GainController(_) => {
+                self.audio_processor_config.cfg = new_cfg.cfg.clone();
+                self.audio_processor.set_config(new_cfg.cfg);
+            }
+            AudioConfigDBPartial::InputMode(_)
+            | AudioConfigDBPartial::PttKeyCode(_)
+            | AudioConfigDBPartial::VadThreshold(_) => {
+                let mut input_mode = self.audio_processor_config.input_mode.lock().unwrap();
+                *input_mode = new_cfg.input_mode.lock().unwrap().clone();
+            }
+            AudioConfigDBPartial::GlobalAttenuation(_)
+            | AudioConfigDBPartial::GlobalAttenuationTrigger(_) => {
+                let mut global_attenuation = self
+                    .audio_processor_config
+                    .global_attenuation
+                    .lock()
+                    .unwrap();
+                *global_attenuation = new_cfg.global_attenuation.lock().unwrap().clone();
+            }
+        }
+        Ok(())
     }
 
     pub fn set_default_mic(device_name: &str, handle: AppHandle) {

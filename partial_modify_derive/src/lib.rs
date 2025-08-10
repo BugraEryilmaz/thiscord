@@ -77,10 +77,11 @@ pub fn partial_modify_derive(input: TokenStream) -> TokenStream {
         }
 
         impl #struct_name {
-            pub fn apply(&mut self, partial: #enum_name) {
+            pub fn apply(mut self, partial: #enum_name) -> Self{
                 match partial {
                     #(#match_arms),*
                 }
+                self
             }
         }
     };

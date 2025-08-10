@@ -29,6 +29,7 @@ webrtc-audio-processing = { path = "../../webrtc-audio-processing", version = "0
 cpal = { version = "0.15.3", optional = true }
 
 [features]
+default = ["diesel"]
 diesel = [
     "dep:diesel",
     "dep:diesel_migrations",
