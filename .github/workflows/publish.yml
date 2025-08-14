@@ -81,9 +81,9 @@ jobs:
         uses: mozilla-actions/sccache-action@v0.0.6
 
       # MSVC environment for Windows builds (needed for Tauri native)
-      - name: Set up MSVC (Windows)
-        if: startsWith(runner.os, 'Windows')
-        uses: ilammy/msvc-dev-cmd@v1
+      # - name: Set up MSVC (Windows)
+      #   if: startsWith(runner.os, 'Windows')
+      #   uses: ilammy/msvc-dev-cmd@v1
 
       # Cache Cargo home (binaries + registry + git), keyed by tool versions
       - name: Cache cargo home
