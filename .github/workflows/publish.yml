@@ -20,8 +20,8 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          - platform: 'macos-latest' # for Arm based macs (M1 and above).
-            args: '--target aarch64-apple-darwin'
+          # - platform: 'macos-latest' # for Arm based macs (M1 and above).
+          #   args: '--target aarch64-apple-darwin'
           - platform: 'windows-latest'
             args: ''
 
@@ -55,7 +55,7 @@ jobs:
       - name: Add wasm32-unknown-unknown
         run: rustup target add wasm32-unknown-unknown
 
-  # Cache Cargo home (binaries + registry + git), keyed by tool versions
+      # Cache Cargo home (binaries + registry + git), keyed by tool versions
       - name: Cache cargo home
         uses: actions/cache@v4
         with:
@@ -101,44 +101,44 @@ jobs:
           includeUpdaterJson: true
           args: ${{ matrix.args }}
 
-  publish-backend:
-    permissions:
-      contents: write
-    strategy:
-      fail-fast: false
-      matrix:
-        include:
-          - platform: 'windows-latest'
-            args: ''
+  # publish-backend:
+  #   permissions:
+  #     contents: write
+  #   strategy:
+  #     fail-fast: false
+  #     matrix:
+  #       include:
+  #         - platform: 'windows-latest'
+  #           args: ''
 
-    runs-on: ${{ matrix.platform }}
-    environment: .env
-    steps:
-      - uses: actions/checkout@v4
+  #   runs-on: ${{ matrix.platform }}
+  #   environment: .env
+  #   steps:
+  #     - uses: actions/checkout@v4
         
-      - name: install Rust nightly
-        run: |
-          rustup toolchain install nightly
-          rustup default nightly
+  #     - name: install Rust nightly
+  #       run: |
+  #         rustup toolchain install nightly
+  #         rustup default nightly
 
-      - name: Cargo build
-        env:
-          LIB: 'C:\Program Files\PostgreSQL\17\lib'
-          INCLUDE: 'C:\Program Files\PostgreSQL\17\include'
-        run: |
-          cd backend
-          cargo build --release ${{ matrix.args }}
+  #     - name: Cargo build
+  #       env:
+  #         LIB: 'C:\Program Files\PostgreSQL\17\lib'
+  #         INCLUDE: 'C:\Program Files\PostgreSQL\17\include'
+  #       run: |
+  #         cd backend
+  #         cargo build --release ${{ matrix.args }}
 
-      - name: Upload binaries to release
-        uses: svenstaro/upload-release-action@v2
-        with:
-          repo_token: ${{ secrets.GITHUB_TOKEN }}
-          file: target/release/backend.exe
-          asset_name: backend-${{ matrix.platform }}.exe
-          tag: ${{ github.ref }}
-          overwrite: true
-          draft: true
-          prerelease: false
-          body: 'See the assets to download this version and install.'
+  #     - name: Upload binaries to release
+  #       uses: svenstaro/upload-release-action@v2
+  #       with:
+  #         repo_token: ${{ secrets.GITHUB_TOKEN }}
+  #         file: target/release/backend.exe
+  #         asset_name: backend-${{ matrix.platform }}.exe
+  #         tag: ${{ github.ref }}
+  #         overwrite: true
+  #         draft: true
+  #         prerelease: false
+  #         body: 'See the assets to download this version and install.'
 
 
