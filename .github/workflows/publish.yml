@@ -104,6 +104,10 @@ jobs:
         # Install tools (prefer prebuilt; fall back to cargo install if needed)
       - name: Install trunk and stylance (fast)
         shell: bash
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          CARGO_BINSTALL_GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           set -euxo pipefail
           cargo binstall -y "trunk@${TRUNK_VERSION}" || \
