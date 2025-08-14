@@ -1,6 +1,16 @@
 env:
-  TRUNK_VERSION: "0.21.14"         # pin for reproducible caching
-  STYLANCE_VERSION: "0.7.0"       # adjust to the version you need
+  # Share build artifacts across all crates (frontend + src-tauri)
+  CARGO_TARGET_DIR: ${{ github.workspace }}/target
+
+  # Compiler cache for both native and wasm targets
+  RUSTC_WRAPPER: sccache
+  SCCACHE_GHA_ENABLED: "true"
+  SCCACHE_CACHE_SIZE: "10G"
+  CARGO_INCREMENTAL: "0"
+
+  # Pin versions 
+  TRUNK_VERSION: "0.21.14"
+  STYLANCE_VERSION: "0.7.0"
 
 name: 'publish'
 
@@ -48,13 +58,33 @@ jobs:
         shell: "bash"
         run: export CI=true
         
-      - name: install Rust nightly
-        run: |
-          rustup toolchain install nightly
-          rustup default nightly
+      # Rust toolchain + wasm target for Leptos
+      - name: Set up Rust
+        uses: dtolnay/rust-toolchain@nightly
+        with:
+          targets: wasm32-unknown-unknown
 
-      - name: Add wasm32-unknown-unknown
-        run: rustup target add wasm32-unknown-unknown
+      # Cache Cargo registries/git + target/ for both:
+      # - workspace root (frontend)
+      # - src-tauri crate (if it has its own Cargo.toml/Cargo.lock)
+      - name: Rust cache
+        uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: |
+            frontend -> target
+            frontend/src-tauri -> target
+          prefix-key: v1-tauri-leptos
+          cache-on-failure: true
+
+
+      # Compiler cache across clean runners
+      - name: sccache
+        uses: mozilla-actions/sccache-action@v0.0.6
+
+      # MSVC environment for Windows builds (needed for Tauri native)
+      - name: Set up MSVC (Windows)
+        if: startsWith(runner.os, 'Windows')
+        uses: ilammy/msvc-dev-cmd@v1
 
       # Cache Cargo home (binaries + registry + git), keyed by tool versions
       - name: Cache cargo home
@@ -62,8 +92,6 @@ jobs:
         with:
           path: |
             ~/.cargo/bin
-            ~/.cargo/registry
-            ~/.cargo/git
           key: ${{ runner.os }}-cargo-tools-trunk-${{ env.TRUNK_VERSION }}-stylance-${{ env.STYLANCE_VERSION }}
           restore-keys: |
             ${{ runner.os }}-cargo-tools-
@@ -81,7 +109,6 @@ jobs:
           set -euxo pipefail
           cargo binstall -y "trunk@${TRUNK_VERSION}" || \
             cargo install --locked --version "${TRUNK_VERSION}" trunk
-
           cargo binstall -y "stylance-cli@${STYLANCE_VERSION}" || \
             cargo install --locked --version "${STYLANCE_VERSION}" stylance-cli
 
