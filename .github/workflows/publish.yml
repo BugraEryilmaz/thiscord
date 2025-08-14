@@ -1,3 +1,7 @@
+env:
+  TRUNK_VERSION: "0.21.14"         # pin for reproducible caching
+  STYLANCE_VERSION: "0.7.0"       # adjust to the version you need
+
 name: 'publish'
 
 on:
@@ -50,12 +54,35 @@ jobs:
 
       - name: Add wasm32-unknown-unknown
         run: rustup target add wasm32-unknown-unknown
-        
-      - name: Install Trunk
-        run: cargo install trunk
 
-      - name: Install stylance
-        run: cargo install stylance-cli
+  # Cache Cargo home (binaries + registry + git), keyed by tool versions
+      - name: Cache cargo home
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/bin
+            ~/.cargo/registry
+            ~/.cargo/git
+          key: ${{ runner.os }}-cargo-tools-trunk-${{ env.TRUNK_VERSION }}-stylance-${{ env.STYLANCE_VERSION }}
+          restore-keys: |
+            ${{ runner.os }}-cargo-tools-
+
+        # Fast installer for Rust binaries (downloads prebuilt if available)
+      - name: Install cargo-binstall
+        uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-binstall
+  
+        # Install tools (prefer prebuilt; fall back to cargo install if needed)
+      - name: Install trunk and stylance (fast)
+        shell: bash
+        run: |
+          set -euxo pipefail
+          cargo binstall -y "trunk@${TRUNK_VERSION}" || \
+            cargo install --locked --version "${TRUNK_VERSION}" trunk
+
+          cargo binstall -y "stylance-cli@${STYLANCE_VERSION}" || \
+            cargo install --locked --version "${STYLANCE_VERSION}" stylance-cli
 
       - name: App directory
         run: cd frontend
