@@ -70,7 +70,7 @@ On a fresh Debian/Ubuntu-based WSL distribution, install Rust and these packages
 
 ```sh
 sudo apt update
-sudo apt install build-essential pkg-config libpq-dev postgresql postgresql-contrib
+sudo apt install build-essential cmake pkg-config libpq-dev postgresql postgresql-contrib
 sudo service postgresql start
 sudo -u postgres createuser --pwprompt thiscord
 sudo -u postgres createdb --owner=thiscord thiscord

@@ -32,7 +32,7 @@ media compatibility spike can happen before chat to expose platform constraints.
   unverified email matching and removal of the last usable login method.
 - [x] Profile/settings and account deletion behavior (display name/bio; identifiers immutable).
 - [x] Test invalid credentials, expired/replayed sessions, throttling and OAuth failures.
-- [ ] Configure Google web-client credentials and SMTP; complete live provider acceptance.
+- [ ] Configure Google web-client credentials and Resend; complete live provider acceptance.
 - [ ] Verify browser handoff and OS-store prompts interactively on Windows/macOS/Linux.
   Windows credential-store round trip and Windows/Linux loopback tests pass locally;
   macOS execution remains a CI/manual check. See docs/accounts.md.

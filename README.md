@@ -7,7 +7,8 @@ supporting assets. No Node.js or handwritten JavaScript/TypeScript is required.
 
 The app includes account registration/login, recovery and verification, profile and
 device management, OS-backed desktop sessions, and Google OIDC integration. Local
-emails go to ignored `backend/.mail/`; Google and SMTP need provider credentials.
+emails default to ignored `backend/.mail/`; Resend, SMTP and Google use provider
+credentials configured in `backend/.env` (see `docs/accounts.md`).
 See [account setup and security](docs/accounts.md). Liveness/readiness, request IDs,
 shared API contracts and Diesel migrations underpin the backend. Chat and voice are
 planned in [TODO.md](TODO.md). Contributor rules are in [AGENTS.md](AGENTS.md).

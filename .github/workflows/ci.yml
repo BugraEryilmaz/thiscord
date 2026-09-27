@@ -47,8 +47,8 @@ jobs:
       TEST_DATABASE_URL: postgres://thiscord:ci-test-only@localhost:5432/thiscord_test?connect_timeout=3
     steps:
       - uses: actions/checkout@v5
-      - name: PostgreSQL build dependencies
-        run: sudo apt-get update && sudo apt-get install -y libpq-dev pkg-config
+      - name: PostgreSQL and TLS build dependencies
+        run: sudo apt-get update && sudo apt-get install -y libpq-dev pkg-config cmake
       - name: Install pinned toolchain
         run: rustup show
       - uses: Swatinem/rust-cache@v2

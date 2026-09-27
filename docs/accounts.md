@@ -15,7 +15,7 @@ in shared models, logs or checked-in configuration.
    accept 3–32 letters, numbers or underscores. Emails are lowercase ASCII,
    validated and unique. Passwords need 12 characters and may use up to 1024 bytes.
 2. Within five seconds the email worker writes a `.txt` message to `backend/.mail/`.
-   Open the verification URL in that local file. With SMTP configured, click the
+   Open the verification URL in that local file. With Resend or SMTP configured, click the
    link directly in your email. It automatically verifies the address and opens a
    confirmation page; there is no verification-code input. Return to Thiscord to
    refresh your status automatically, or use **Refresh account**. Tokens are never
@@ -44,7 +44,34 @@ email through foreign-key cascades. Database backups and already delivered email
 have their own retention policy. Future chat/guild ownership deletion semantics
 must be decided before those features are introduced.
 
-## SMTP later
+## Email delivery with Resend
+
+Set these values in ignored `backend/.env`, then restart the backend:
+
+```dotenv
+MAIL_MODE=resend
+RESEND_API_KEY=re_xxxxxxxxx
+RESEND_FROM=onboarding@resend.dev
+```
+
+Replace `re_xxxxxxxxx` with your real Resend API key locally. The backend uses the
+official `resend-rs` SDK over HTTPS; the key never goes to the frontend. Verification
+and password-reset messages are sent to the account's email address, with both HTML
+and plain text. No provider response or message content is logged. Missing or
+placeholder keys disable sending until configured and the backend is restarted.
+
+The testing sender `onboarding@resend.dev` can only send to the email associated
+with your Resend account. To send to other users, verify your domain in Resend and
+set `RESEND_FROM="Thiscord <noreply@thiscord.com.tr>"` (or a sender on the domain you
+verified). See [Resend's testing-domain restrictions](https://resend.com/docs/knowledge-base/403-error-resend-dev-domain).
+Domain ownership alone does not configure the required DNS records.
+
+The worker retries queued mail every five seconds until its 30-minute expiry.
+Each outbox message uses a stable Resend idempotency key, including after a restart.
+Messages are removed from the queue only after a successful send. API calls have a
+15-second timeout and run without holding a database connection. Run one mail
+worker per deployment until database claims/multi-worker delivery are added.
+Use `MAIL_MODE=file` for offline development or `MAIL_MODE=smtp` for the SMTP option.
 
 Set `PUBLIC_BACKEND_URL` to the origin users can reach, such as
 `https://api.thiscord.com.tr`; the local default is `http://localhost:3000`.
@@ -54,6 +81,8 @@ allowed only for localhost development. Exclude query strings on this route from
 reverse-proxy logs. Verification responses use no-store and no-referrer headers;
 HEAD requests do not consume the link. Resend verification from the profile page
 to replace any older code-only email.
+
+### Optional SMTP delivery
 
 Set `MAIL_MODE=smtp`, `SMTP_HOST`, `SMTP_USERNAME`, `SMTP_PASSWORD` and `SMTP_FROM`
 in ignored `backend/.env`, then restart the backend. SMTP uses TLS with certificate
@@ -143,6 +172,8 @@ the RSA fixture key is deliberately public and never used by the application.
 
 Native callback tests run in the desktop CI matrix. The optional
 `credential_store_round_trip` test needs an unlocked OS store and uses a separate
-test-only service entry, removed afterwards. Google consent, SMTP delivery and
+test-only service entry, removed afterwards. Resend request construction and provider
+failures are tested against a local mock, without sending real emails. Google consent,
+live Resend/SMTP delivery and
 desktop browser/credential prompts on each OS still need live acceptance checks
 with the configured providers. Compilation does not establish macOS runtime behavior.
