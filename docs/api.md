@@ -91,4 +91,12 @@ snapshots within enforced installation/guild capacity limits, described in
 `shared/src/permissions.rs`. Every command requires an active bearer session. Guild
 changes include the last viewed revision; stale revisions return `409 Conflict`.
 See [permissions.md](permissions.md) for bootstrap, hierarchy, override precedence
-and the transport enforcement still needed when WebSocket/media handlers are added.
+and media enforcement still needed when those handlers are added.
+
+## Chat
+
+`POST /api/v1/chat` and `/api/v1/socket` use shared contracts in `shared/src/chat.rs`.
+See [chat.md](chat.md) for authentication, socket versioning, history, deduplication
+and reconnect behavior. History uses a reverse keyset `before` cursor to load older
+pages, returning each page in ascending order; ordinary forward pagination retains
+the strict greater-than convention above.

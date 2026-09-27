@@ -53,8 +53,10 @@ roles assigned to its memberships; a user can have different roles in each guild
   editing/deleting messages, moderation and voice join/speak/mute/deafen/move.
 - [x] Central backend permission evaluator; shared permission identifiers/types.
 - [x] Authorize every implemented membership/role/channel-management HTTP operation.
-- [ ] Wire chat, WebSocket event/subscription and media authorization when those handlers exist.
-- [ ] Revoke active socket/voice access immediately on membership/role changes.
+- [x] Authorize chat HTTP operations and WebSocket subscriptions/deliveries.
+- [ ] Wire media authorization when media handlers exist.
+- [x] Invalidate active sockets on membership/role/session changes (single backend process).
+- [ ] Revoke active voice access when media handlers exist.
 - [x] Role editors, assignment UI and effective-permissions preview.
 - [x] Test cross-guild isolation, overrides, hierarchy, ownership transfer,
   last-owner protection, stale access and concurrent updates.
@@ -76,15 +78,15 @@ and transport enforcement still required by the chat/media milestones.
 
 ## 4. Text chat and real-time transport
 
-- [ ] Shared versioned client/server socket event envelopes and errors.
-- [ ] Socket authentication, authorized subscriptions and event rate limits.
-- [ ] Heartbeats, disconnect cleanup, reconnect/backoff and resynchronization.
-- [ ] Persist/send messages, server IDs/ordering and client deduplication.
-- [ ] Cursor-paginated history, permission-checked edit/delete and live updates.
-- [ ] History/composer UI with pending/failed/retry states and scroll behavior.
-- [ ] Unread markers, mentions, typing indicators and online presence.
-- [ ] Safe message rendering, bounded payloads and spam controls.
-- [ ] Reconnect, duplicate delivery, channel isolation and channel deletion tests.
+- [x] Shared versioned client/server socket event envelopes and errors.
+- [x] Socket authentication, authorized subscriptions and event rate limits.
+- [x] Heartbeats, disconnect cleanup, reconnect/backoff and resynchronization.
+- [x] Persist/send messages, server IDs/ordering and client deduplication.
+- [x] Cursor-paginated history, permission-checked edit/delete and live updates.
+- [x] History/composer UI with pending/failed/retry states and scroll behavior.
+- [x] Unread markers, mentions, typing indicators and online presence.
+- [x] Safe message rendering, bounded payloads and spam controls.
+- [x] Reconnect, duplicate delivery, channel isolation and channel deletion tests.
 - [ ] Later: access-controlled attachments/quotas, search and desktop notifications.
 
 ## 5. Frontend audio and media feasibility

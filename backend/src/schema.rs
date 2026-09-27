@@ -42,11 +42,31 @@ diesel::table! {
 }
 
 diesel::table! {
+    channel_reads (guild_id, channel_id, account_id) {
+        guild_id -> Uuid,
+        channel_id -> Uuid,
+        account_id -> Uuid,
+        through -> Int8,
+    }
+}
+
+diesel::table! {
     channels (guild_id, id) {
         guild_id -> Uuid,
         id -> Uuid,
         name -> Text,
         kind -> Text,
+    }
+}
+
+diesel::table! {
+    chat_presence (id) {
+        id -> Uuid,
+        guild_id -> Uuid,
+        channel_id -> Uuid,
+        account_id -> Uuid,
+        expires_at -> Timestamptz,
+        typing_until -> Timestamptz,
     }
 }
 
@@ -123,6 +143,33 @@ diesel::table! {
 }
 
 diesel::table! {
+    message_events (sequence) {
+        sequence -> Int8,
+        guild_id -> Uuid,
+        channel_id -> Uuid,
+        message_id -> Uuid,
+    }
+}
+
+diesel::table! {
+    messages (id) {
+        id -> Uuid,
+        guild_id -> Uuid,
+        channel_id -> Uuid,
+        author_id -> Nullable<Uuid>,
+        client_id -> Uuid,
+        request_hash -> Text,
+        content -> Text,
+        mentions -> Jsonb,
+        created_at -> Timestamptz,
+        edited_at -> Nullable<Timestamptz>,
+        deleted -> Bool,
+        revision -> Int4,
+        sequence -> Int8,
+    }
+}
+
+diesel::table! {
     oauth_attempts (state_hash) {
         state_hash -> Text,
         ticket_hash -> Text,
@@ -168,6 +215,8 @@ diesel::joinable!(identities -> accounts (account_id));
 diesel::joinable!(instance -> accounts (owner_account_id));
 diesel::joinable!(instance_admins -> accounts (account_id));
 diesel::joinable!(mail_outbox -> accounts (account_id));
+diesel::joinable!(message_events -> messages (message_id));
+diesel::joinable!(messages -> accounts (author_id));
 diesel::joinable!(oauth_attempts -> accounts (account_id));
 diesel::joinable!(oauth_attempts -> sessions (session_id));
 diesel::joinable!(session_tokens -> sessions (session_id));
@@ -178,7 +227,9 @@ diesel::allow_tables_to_appear_in_same_query!(
     accounts,
     auth_limits,
     channel_overrides,
+    channel_reads,
     channels,
+    chat_presence,
     guild_member_roles,
     guild_members,
     guild_roles,
@@ -187,6 +238,8 @@ diesel::allow_tables_to_appear_in_same_query!(
     instance,
     instance_admins,
     mail_outbox,
+    message_events,
+    messages,
     oauth_attempts,
     session_tokens,
     sessions,

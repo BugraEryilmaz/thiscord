@@ -1,12 +1,14 @@
 use crate::account_client as client;
 use leptos::prelude::*;
 use thiscord_shared::account::*;
+mod chat;
 mod login;
 mod permissions;
 mod servers;
 
 #[derive(Clone, Copy)]
 struct Ui {
+    chat_epoch: RwSignal<u64>,
     guilds: RwSignal<Vec<thiscord_shared::permissions::Guild>>,
     server: RwSignal<Option<thiscord_shared::permissions::GuildHome>>,
     can_create_server: RwSignal<bool>,
@@ -235,8 +237,34 @@ fn Field(
     </label> }
 }
 #[component]
+fn StatusNotice(ui: Ui) -> impl IntoView {
+    let visible = RwSignal::new(false);
+    let generation = RwSignal::new(0_u64);
+    Effect::new(move |_| {
+        let message = ui.status.get();
+        let current = generation.get_untracked().wrapping_add(1);
+        generation.set(current);
+        visible.set(!message.is_empty());
+        leptos::task::spawn_local(async move {
+            gloo_timers::future::TimeoutFuture::new(5000).await;
+            if generation.try_get_untracked() == Some(current) {
+                visible.set(false);
+            }
+        });
+    });
+    view! {
+        <Show when=move || visible.get()>
+            <div class="fixed bottom-5 right-5 z-50 flex max-w-sm items-start gap-4 rounded-lg border border-white/10 bg-slate-900 p-4 shadow-lg">
+                <p class="text-sm" role="status" aria-live="polite">{move || ui.status.get()}</p>
+                <button class="text-white/60 hover:text-white" aria-label="Dismiss notification" on:click=move |_| visible.set(false)>"×"</button>
+            </div>
+        </Show>
+    }
+}
+#[component]
 pub fn App() -> impl IntoView {
     let ui = Ui {
+        chat_epoch: RwSignal::new(0),
         guilds: RwSignal::new(vec![]),
         server: RwSignal::new(None),
         can_create_server: RwSignal::new(false),
@@ -311,19 +339,19 @@ pub fn App() -> impl IntoView {
     view! {
         <Show when=move ||ui.account.get().is_some() fallback=move ||view!{<login::Login ui=ui/>}>
         <servers::ServerRail ui=ui/>
-        <main class="ml-20 min-h-screen space-y-6 p-5 md:p-8">
-            <header class="flex flex-wrap items-center justify-between gap-4">
+        <main class="ml-20 flex h-dvh min-w-0 flex-col gap-4 overflow-hidden p-4 md:p-6">
+            <header class="flex shrink-0 flex-wrap items-center justify-between gap-4">
                 <div><h1 class="text-4xl font-bold">"Thiscord"</h1><p class="mt-2 text-white/60">"Your place to chat and hang out."</p></div>
                 <Show when=move ||ui.account.get().is_some()><button class="rounded-md bg-white/10 px-4 py-2" disabled=move ||ui.busy.get() on:click=move |_|run(ui,AccountRequest::Logout)>"Sign out"</button></Show>
             </header>
-            <div class="rounded-lg border border-white/10 bg-white/5 p-6" role="status" aria-live="polite">{move ||ui.status.get()}</div>
+            <StatusNotice ui=ui/>
             <Show when=move ||ui.ticket.get().is_some()><div class="flex flex-wrap gap-4 rounded-lg bg-white/5 p-4">
                 {move ||ui.authorization_url.get().map(|url|view!{<a class="text-brand underline" href=url target="_blank" rel="noopener noreferrer">"Continue in Google"</a>})}
                 <button class="underline" on:click=cancel>"Cancel Google sign-in"</button>
             </div></Show>
-            <Show when=move ||ui.page.get()=="servers"><servers::ServerHome ui=ui/></Show>
+            <Show when=move ||ui.page.get()=="servers"><div class="min-h-0 min-w-0 flex-1"><servers::ServerHome ui=ui/></div></Show>
             <Show when=move ||ui.page.get()!="servers">
-            <div class="grid gap-6 md:grid-cols-[220px_1fr]">
+            <div class="grid min-h-0 flex-1 gap-6 overflow-y-auto md:grid-cols-[220px_1fr]">
                 <nav class="flex flex-col gap-2" aria-label="Account navigation">
                     {move || {
                         let tabs = vec![("profile","Profile"),("permissions","Guilds & roles"),("reauthenticate","Reauthenticate"),("password","Set / change password"),("devices","Devices & identities"),("delete","Delete account")];

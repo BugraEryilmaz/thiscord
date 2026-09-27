@@ -26,7 +26,7 @@ impl Editor {
             .await;
             match result {
                 Ok(response) => {
-                    self.ui.status.set("Permissions updated".into());
+                    self.ui.status.set(String::new());
                     match response {
                         PermissionResponse::Joined { .. } | PermissionResponse::Home { .. } => {}
                         PermissionResponse::Instance { access } => self.access.set(Some(access)),

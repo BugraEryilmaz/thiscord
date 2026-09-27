@@ -18,7 +18,7 @@ reqwest = { version = "0.12", default-features = false, features = ["rustls-tls"
 lettre = { version = "0.11", default-features = false, features = ["builder", "smtp-transport", "rustls-tls"] }
 resend-rs = { version = "0.32.3", default-features = false, features = ["rustls-tls"] }
 thiscord-shared.workspace = true
-axum = "0.8"
+axum = { version = "0.8", features = ["ws"] }
 diesel = { version = "2.3", default-features = false, features = ["postgres", "r2d2", "uuid", "chrono", "serde_json"] }
 diesel_migrations = { version = "2.3", features = ["postgres"] }
 uuid = { workspace = true, features = ["v4"] }
@@ -30,6 +30,8 @@ tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 
 [dev-dependencies]
+tokio-tungstenite = "0.29"
+futures-util = { version = "0.3", features = ["sink"] }
 serde_json.workspace = true
 tower = { version = "0.5", features = ["util"] }
 url = "2"

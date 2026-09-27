@@ -723,6 +723,15 @@ async fn password_protected_join_and_member_channel_visibility() {
     .await;
     assert_eq!(home["home"]["channels"], json!([]));
     assert_eq!(home["home"]["can_manage_roles"], false);
+    assert_eq!(home["home"]["can_manage_channels"], false);
+    let owner_home = command(
+        &app,
+        &owner,
+        json!({"action":"view_guild","guild_id":guild}),
+        StatusCode::OK,
+    )
+    .await;
+    assert_eq!(owner_home["home"]["can_manage_channels"], true);
     assert!(!home.to_string().contains("password"));
     let open = command(
         &app,

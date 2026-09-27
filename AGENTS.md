@@ -49,6 +49,10 @@
   in the same transaction. Never authorize using a client snapshot or cached grants.
 - Check permissions for HTTP actions, socket subscriptions/events and SFU joins.
   Membership/role changes must also revoke ongoing subscriptions and voice access.
+- Follow `docs/chat.md` for message deduplication, history and socket lifecycles.
+  Keep access-changing HTTP handlers under the chat access gate and invalidate
+  subscriptions after successful commits; never log frame bodies or tokens.
+  Current socket invalidation assumes one backend process.
 - Conventional login and Google OIDC attach to a single account model. Keep provider
   secrets on backend; use system-browser login with PKCE/state/nonce and a reviewed
   desktop callback. Never collect Google passwords in the app.

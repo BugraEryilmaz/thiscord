@@ -137,6 +137,21 @@ async fn handle(
     headers: HeaderMap,
     body: Result<Json<AccountRequest>, JsonRejection>,
 ) -> Response {
+    let _access = crate::chat::gate().write().await;
+    let mutation = matches!(
+        &body,
+        Ok(Json(
+            AccountRequest::Logout
+                | AccountRequest::LogoutAll
+                | AccountRequest::RevokeSession { .. }
+                | AccountRequest::DeleteAccount { .. }
+                | AccountRequest::ChangePassword { .. }
+                | AccountRequest::ResetPassword { .. }
+                | AccountRequest::UnlinkIdentity { .. }
+                | AccountRequest::Rotate
+                | AccountRequest::GoogleComplete { .. }
+        ))
+    );
     let result = async {
         let Json(command) = body.map_err(|_| Failure::Invalid("Invalid account request"))?;
         let pool = pool.ok_or(Failure::Unavailable)?;
@@ -186,6 +201,11 @@ async fn handle(
         }
     }
     .await;
+    if (mutation && result.is_ok() && !matches!(&result, Ok(AccountResponse::Pending)))
+        || matches!(&result, Ok(AccountResponse::Session { .. }))
+    {
+        crate::chat::invalidate();
+    }
     let mut response = match result {
         Ok(body) => Json(body).into_response(),
         Err(e) => e.response(id),

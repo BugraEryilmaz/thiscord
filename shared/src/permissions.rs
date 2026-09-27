@@ -239,4 +239,6 @@ pub struct GuildHome {
     pub guild: Guild,
     pub channels: Vec<Channel>,
     pub can_manage_roles: bool,
+    #[serde(default)]
+    pub can_manage_channels: bool,
 }

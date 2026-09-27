@@ -125,14 +125,12 @@ assign/unassign roles. Channel overrides have separate allow/deny checkboxes and
 unsaved form changes. Destructive actions require typing the guild name; ownership
 transfer also requires recent reauthentication through the account navigation.
 
-Permission identifiers cover chat/history, moderation and voice, but no chat,
-WebSocket, signaling or SFU endpoints exist yet. Their operation-specific checks,
-subscription filtering and immediate socket/voice eviction are **not implemented**.
-Do not treat an effective-permissions snapshot as a reusable authorization ticket.
-Future transports must recheck authorization for every action and invalidate
-active subscriptions/media on role, membership, override, session and account
-changes, including deletion. Shared event envelopes and media lifecycle work remain
-in their respective roadmap sections. There is no pretend in-memory eviction layer.
+Chat HTTP operations and socket deliveries now use current database permissions.
+Membership/role/session changes invalidate active sockets; the single-process access
+gate closes all subscriptions conservatively and eligible clients reconnect.
+See [chat.md](chat.md). Do not treat client snapshots as reusable authorization tickets.
+Signaling/SFU endpoints and voice eviction are still unimplemented; they must adopt
+equivalent checks and lifecycle invalidation when introduced.
 
 EditOwnMessages/DeleteOwnMessages additionally require message authorship;
 ManageMessages permits moderation. MoveMembers will require access to both source

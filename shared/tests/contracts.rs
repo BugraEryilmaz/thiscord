@@ -10,6 +10,32 @@ use uuid::Uuid;
 const ID: &str = "f8f72890-fbae-4e56-9e7b-8038b5c3a094";
 
 #[test]
+fn chat_envelopes_and_bounds_are_stable() {
+    use thiscord_shared::chat::*;
+    let frame = ClientFrame {
+        version: SOCKET_VERSION,
+        event: ClientEvent::Ping {},
+    };
+    assert_eq!(
+        to_value(frame).unwrap(),
+        json!({"version":1,"event":{"type":"ping"}})
+    );
+    assert!(
+        from_value::<ChatRequest>(
+            json!({"action":"history","guild_id":ID,"channel_id":ID,"limit":101})
+        )
+        .is_err()
+    );
+    assert!(
+        from_value::<ClientFrame>(
+            json!({"version":1,"event":{"type":"typing","active":true,"admin":true}})
+        )
+        .is_err()
+    );
+    assert!(from_value::<ChatRequest>(json!({"action":"send","guild_id":ID,"channel_id":ID,"client_id":"invalid","content":"hello"})).is_err());
+}
+
+#[test]
 fn permission_contracts_reject_unknown_names_and_preserve_scope() {
     use thiscord_shared::{GuildId, RoleId, permissions::*};
     assert_eq!(

@@ -44,7 +44,8 @@ email through foreign-key cascades. Database backups and already delivered email
 have their own retention policy. Instance owners must transfer ownership, and guild
 owners must transfer or delete their guilds first. Other memberships and role
 assignments cascade on account deletion. See [permissions.md](permissions.md).
-Future chat-content retention semantics must be decided before chat is introduced.
+Authored chat content is retained with an anonymized Deleted account author label;
+guild/channel deletion removes that channel's chat history. See [chat.md](chat.md).
 
 ## Email delivery with Resend
 

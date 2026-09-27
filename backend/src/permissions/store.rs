@@ -94,7 +94,7 @@ pub(super) fn bootstrap(pool: &DbPool, username: &str) -> Result<(), Failure> {
         Ok(())
     })
 }
-fn load(c: &mut PgConnection, id: GuildId) -> Result<GuildState, Failure> {
+pub(crate) fn load(c: &mut PgConnection, id: GuildId) -> Result<GuildState, Failure> {
     let id = id.to_string();
     let guild = query(
         c,
@@ -240,7 +240,7 @@ pub(super) fn dispatch(
                 match command {
                     PermissionRequest::ViewGuild {..} => {
                         let channels=state.channels.iter().filter(|ch|effective(&state,actor,Some(ch.id)).contains(&Permission::ViewChannel)).cloned().collect();
-                        Ok(PermissionResponse::Home {home:GuildHome {can_manage_roles:effective(&state,actor,None).contains(&Permission::ManageRoles),guild:state.guild,channels}})
+                        Ok(PermissionResponse::Home {home:GuildHome {can_manage_roles:effective(&state,actor,None).contains(&Permission::ManageRoles),can_manage_channels:effective(&state,actor,None).contains(&Permission::ManageChannels),guild:state.guild,channels}})
                     }
                     PermissionRequest::Inspect {..} => {
                         require(effective(&state,actor,None).contains(&Permission::ManageRoles))?;

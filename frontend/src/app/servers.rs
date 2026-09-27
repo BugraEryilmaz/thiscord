@@ -170,20 +170,169 @@ pub(super) fn ServerRail(ui: Ui) -> impl IntoView {
 
 #[component]
 pub(super) fn ServerHome(ui: Ui) -> impl IntoView {
+    let selected = RwSignal::new(None::<Channel>);
+    let dialog = NodeRef::<leptos::html::Dialog>::new();
+    let target = RwSignal::new(None::<Guild>);
+    let name = RwSignal::new(String::new());
+    let voice = RwSignal::new(false);
+    let error = RwSignal::new(String::new());
+    let submit = move |ev: leptos::ev::SubmitEvent| {
+        ev.prevent_default();
+        if ui.busy.get_untracked() {
+            return;
+        }
+        let Some(guild) = target.get_untracked() else {
+            return;
+        };
+        let command = PermissionRequest::Change {
+            guild_id: guild.id,
+            revision: guild.revision,
+            change: GuildChange::CreateChannel {
+                name: name.get_untracked().trim().to_owned(),
+                kind: if voice.get_untracked() {
+                    ChannelKind::Voice
+                } else {
+                    ChannelKind::Text
+                },
+            },
+        };
+        error.set(String::new());
+        ui.busy.set(true);
+        leptos::task::spawn_local(async move {
+            let result = request(ui, command).await;
+            // The user may have navigated away while the request was pending.
+            if target.try_get_untracked().is_none() {
+                ui.busy.set(false);
+                return;
+            }
+            match result {
+                Ok(PermissionResponse::State { state }) => {
+                    if ui
+                        .server
+                        .get_untracked()
+                        .is_some_and(|s| s.guild.id == guild.id)
+                    {
+                        let created = state
+                            .channels
+                            .iter()
+                            .find(|c| {
+                                ui.server
+                                    .get_untracked()
+                                    .is_some_and(|s| !s.channels.iter().any(|old| old.id == c.id))
+                            })
+                            .cloned();
+                        refresh(ui).await;
+                        if selected.try_get_untracked().is_some()
+                            && ui
+                                .server
+                                .get_untracked()
+                                .is_some_and(|s| s.guild.id == guild.id)
+                            && let Some(channel) = created.filter(|c| c.kind == ChannelKind::Text)
+                        {
+                            selected.set(Some(channel));
+                        }
+                    }
+                    if let Some(dialog) = dialog.get() {
+                        dialog.close();
+                    }
+                }
+                Ok(_) => error.set("Unexpected server response".into()),
+                Err(message) => {
+                    error.set(message);
+                    refresh(ui).await;
+                    if target.try_get_untracked().is_some()
+                        && let Some(home) =
+                            ui.server.get_untracked().filter(|s| s.guild.id == guild.id)
+                    {
+                        target.set(Some(home.guild));
+                    }
+                }
+            }
+            ui.busy.set(false);
+        });
+    };
+    let unread = RwSignal::new(Vec::<thiscord_shared::chat::Unread>::new());
+    Effect::new(move |_| {
+        if let Some(channel) = selected.get()
+            && ui
+                .server
+                .get()
+                .is_none_or(|s| !s.channels.iter().any(|c| c.id == channel.id))
+        {
+            selected.set(None);
+        }
+    });
+    let (abort, registration) = futures_util::future::AbortHandle::new_pair();
+    on_cleanup(move || abort.abort());
+    leptos::task::spawn_local(async move {
+        let _ = futures_util::future::Abortable::new(
+            async move {
+                loop {
+                    if let Some(home) = ui.server.get_untracked() {
+                        let token = ui.token.get_untracked();
+                        if let Ok(thiscord_shared::chat::ChatResponse::Unread { channels }) =
+                            crate::account_client::api_request(
+                                thiscord_shared::chat::CHAT_PATH,
+                                &thiscord_shared::chat::ChatRequest::Unread {
+                                    guild_id: home.guild.id,
+                                },
+                                token.as_deref(),
+                            )
+                            .await
+                            && ui
+                                .server
+                                .get_untracked()
+                                .is_some_and(|s| s.guild.id == home.guild.id)
+                        {
+                            unread.set(channels);
+                        }
+                    }
+                    gloo_timers::future::TimeoutFuture::new(5000).await;
+                }
+            },
+            registration,
+        )
+        .await;
+    });
     view! {
         <Show when=move ||ui.server.get().is_some() fallback=move ||view!{
-            <section class="flex min-h-[60vh] flex-col items-center justify-center gap-4 text-center"><h2 class="text-3xl font-bold">"Welcome to Thiscord"</h2><p class="max-w-md text-white/60">"Choose a server on the left, or join one with its server ID."</p><Show when=move ||ui.can_create_server.get()><p class="text-white/60">"Use + to create your own server."</p></Show></section>
+            <section class="flex h-full min-h-0 flex-col items-center justify-center gap-4 text-center"><h2 class="text-3xl font-bold">"Welcome to Thiscord"</h2><p class="max-w-md text-white/60">"Choose a server on the left, or join one with its server ID."</p><Show when=move ||ui.can_create_server.get()><p class="text-white/60">"Use + to create your own server."</p></Show></section>
         }>
             {move ||ui.server.get().map(|home|view!{
-                <section class="grid min-h-[65vh] gap-6 md:grid-cols-[240px_1fr]">
-                    <nav class="space-y-5 rounded-xl bg-white/5 p-5" aria-label="Server channels"><h2 class="break-words text-xl font-bold">{home.guild.name}</h2><p class="text-xs text-white/50">"SERVER ID"</p><p class="select-all break-all text-xs text-white/70">{home.guild.id.to_string()}</p>
-                        <h3 class="text-xs font-semibold uppercase tracking-widest text-white/50">"Channels"</h3>
-                        <ul class="space-y-3 text-white/70">{home.channels.into_iter().map(|ch|view!{<li>{format!("{} {}",if ch.kind==ChannelKind::Voice{"◖"}else{"#"},ch.name)}</li>}).collect_view()}</ul>
+                <section class="grid h-full min-h-0 min-w-0 grid-cols-[160px_minmax(0,1fr)] gap-3 lg:grid-cols-[220px_minmax(0,1fr)] lg:gap-5">
+                    <nav class="flex min-h-0 min-w-0 flex-col gap-5 rounded-xl bg-white/5 p-3 lg:p-4" aria-label="Server channels">
+                        <div class="flex items-center gap-2"><h2 class="min-w-0 flex-1 break-words text-lg font-bold">{home.guild.name.clone()}</h2>
+                            <button class="shrink-0 rounded p-1 text-white/50 hover:bg-white/10 hover:text-white" title=format!("Copy server ID: {}",home.guild.id) aria-label="Copy server ID" on:click=move |_| {
+                                let id = home.guild.id.to_string();
+                                leptos::task::spawn_local(async move {
+                                    let result = wasm_bindgen_futures::JsFuture::from(window().navigator().clipboard().write_text(&id)).await;
+                                    ui.status.set(if result.is_ok() {"Server ID copied".into()} else {"Could not copy server ID".into()});
+                                });
+                            }><svg viewBox="0 0 24 24" class="h-4 w-4" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true"><rect x="8" y="8" width="12" height="12" rx="2"/><path d="M16 8V4a1 1 0 0 0-1-1H4a1 1 0 0 0-1 1v11a1 1 0 0 0 1 1h4"/></svg></button>
+                        </div>
+                        <div class="flex items-center justify-between"><h3 class="text-xs font-semibold uppercase tracking-widest text-white/50">"Channels"</h3>
+                            <Show when=move ||home.can_manage_channels><button class="rounded px-2 text-xl text-white/60 hover:bg-white/10 hover:text-white" title="Create channel" aria-label="Create channel" disabled=move ||ui.busy.get() on:click=move |_| {
+                                target.set(ui.server.get_untracked().map(|s|s.guild));name.set(String::new());voice.set(false);error.set(String::new());
+                                if let Some(dialog)=dialog.get(){let _=dialog.show_modal();}
+                            }>"+"</button></Show>
+                        </div>
+                        <ul class="min-h-0 flex-1 space-y-2 overflow-y-auto text-white/70">{home.channels.into_iter().map(move |ch|{let id=ch.id;let label=format!("{} {}",if ch.kind==ChannelKind::Voice{"◖"}else{"#"},ch.name);view!{<li><button class="flex w-full items-center justify-between gap-2 rounded p-2 text-left hover:bg-white/10 disabled:opacity-40" disabled=ch.kind==ChannelKind::Voice on:click=move |_|selected.set(Some(ch.clone()))><span class="truncate">{label}</span><span class="shrink-0 text-xs text-brand">{move||unread.get().iter().find(|u|u.channel_id==id&&u.count>0).map(|u|format!("{}{}",u.count,if u.mentions>0{" @"}else{""}))}</span></button></li>}}).collect_view()}</ul>
                         <Show when=move ||home.can_manage_roles><button class="text-sm text-brand underline" on:click=move |_|ui.page.set("permissions")>"Server roles & settings"</button></Show>
                     </nav>
-                    <div class="flex flex-col items-center justify-center gap-3 rounded-xl border border-white/10 p-8 text-center"><h3 class="text-2xl font-semibold">"You're in!"</h3><p class="max-w-md text-white/60">"Your server is ready. Text chat and voice are coming next."</p></div>
+                    <Show when=move||selected.get().is_some() fallback=move||view!{<div class="flex items-center justify-center rounded-xl border border-white/10 p-8 text-white/60">"Choose a text channel to start chatting."</div>}>
+                        {move||selected.get().map(|ch|view!{<super::chat::ChatPanel ui=ui guild=home.guild.id channel=ch.id name=ch.name/>})}
+                    </Show>
                 </section>
             })}
         </Show>
+        <dialog node_ref=dialog aria-labelledby="channel-dialog-title" class="m-auto max-h-[85vh] w-[calc(100%-2rem)] max-w-md overflow-y-auto rounded-2xl border border-white/15 bg-surface p-6 text-white shadow-2xl backdrop:bg-black/70" on:cancel=move |ev: web_sys::Event|{if ui.busy.get_untracked(){ev.prevent_default();}}>
+            <header class="mb-5 flex items-center justify-between"><h2 id="channel-dialog-title" class="text-xl font-semibold">"Create channel"</h2><button aria-label="Close dialog" disabled=move ||ui.busy.get() on:click=move |_|if let Some(dialog)=dialog.get(){dialog.close();}>"×"</button></header>
+            <form class="space-y-5" on:submit=submit>
+                <Field label="Channel name" value=name/>
+                <label class="block space-y-2"><span>"Channel type"</span><select class="w-full rounded bg-slate-900 p-2" prop:value=move ||if voice.get(){"voice"}else{"text"} on:change=move |ev|voice.set(event_target_value(&ev)=="voice")><option value="text">"Text"</option><option value="voice">"Voice (calling not available yet)"</option></select></label>
+                <p class="text-sm text-red-300" role="alert">{move ||error.get()}</p>
+                <button class="w-full rounded-lg bg-brand px-5 py-3 font-semibold disabled:opacity-50" disabled=move ||ui.busy.get()||name.get().trim().is_empty()>"Create channel"</button>
+            </form>
+        </dialog>
     }
 }

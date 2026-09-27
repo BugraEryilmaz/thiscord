@@ -47,7 +47,7 @@ pub(super) fn secret() -> String {
     OsRng.fill_bytes(&mut b);
     URL_SAFE_NO_PAD.encode(b)
 }
-pub(super) fn digest(value: &str) -> String {
+pub(crate) fn digest(value: &str) -> String {
     URL_SAFE_NO_PAD.encode(Sha256::digest(value.as_bytes()))
 }
 pub(crate) fn connection(
@@ -111,16 +111,22 @@ pub(crate) fn authenticate(c: &mut PgConnection, token: &str) -> Result<Session,
     }
     let hash = digest(token);
     // Commit replay revocation even though authentication itself fails.
-    c.transaction::<_, Failure, _>(|c| {
+    let mut replay_revoked = false;
+    let session=c.transaction::<_, Failure, _>(|c| {
         let sessions: Vec<Session> = query(c, "SELECT to_jsonb(s) AS data FROM sessions s JOIN session_tokens t ON t.session_id=s.id WHERE t.token_hash=$1 AND NOT s.revoked AND s.expires_at>now() AND s.last_seen_at>now()-interval '7 days' FOR UPDATE OF s", &[&hash])?;
         let Some(session) = sessions.into_iter().next() else { return Ok(None); };
         let active: Vec<bool> = query(c, "SELECT to_jsonb(active) AS data FROM session_tokens WHERE token_hash=$1", &[&hash])?;
         if active != [true] {
             execute(c, "UPDATE sessions SET revoked=TRUE WHERE id=$1::uuid", &[&session.id.to_string()])?;
+            replay_revoked=true;
             return Ok(None);
         }
         Ok(Some(session))
-    })?.ok_or(Failure::Unauthorized)
+    })?;
+    if replay_revoked {
+        crate::chat::invalidate();
+    }
+    session.ok_or(Failure::Unauthorized)
 }
 pub(crate) fn lock_session(
     c: &mut PgConnection,
