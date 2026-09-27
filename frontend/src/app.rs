@@ -1,6 +1,6 @@
 use gloo_net::http::Request;
 use leptos::prelude::*;
-use thiscord_shared::{HEALTH_PATH, HealthResponse, HealthStatus};
+use thiscord_shared::{ApiError, READY_PATH, ReadinessResponse};
 
 #[component]
 pub fn App() -> impl IntoView {
@@ -12,25 +12,25 @@ pub fn App() -> impl IntoView {
         leptos::task::spawn_local(async move {
             let base = option_env!("THISCORD_API_URL").unwrap_or("http://localhost:3000");
             let result = async {
-                let response =
-                    Request::get(&format!("{}{HEALTH_PATH}", base.trim_end_matches('/')))
-                        .send()
-                        .await
-                        .map_err(|error| error.to_string())?;
+                let response = Request::get(&format!("{}{READY_PATH}", base.trim_end_matches('/')))
+                    .send()
+                    .await
+                    .map_err(|error| error.to_string())?;
                 if !response.ok() {
+                    if let Ok(error) = response.json::<ApiError>().await {
+                        return Err(format!("{} (request {})", error.message, error.request_id));
+                    }
                     return Err(format!("Backend returned HTTP {}", response.status()));
                 }
                 response
-                    .json::<HealthResponse>()
+                    .json::<ReadinessResponse>()
                     .await
                     .map_err(|error| error.to_string())
             }
             .await;
             set_status.set(match result {
-                Ok(HealthResponse {
-                    status: HealthStatus::Ok,
-                }) => "Backend is online".into(),
-                Err(error) => format!("Could not reach backend: {error}"),
+                Ok(_) => "Backend and database are ready".into(),
+                Err(error) => format!("Backend check failed: {error}"),
             });
             set_checking.set(false);
         });

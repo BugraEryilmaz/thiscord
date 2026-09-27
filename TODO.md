@@ -10,10 +10,10 @@ media compatibility spike can happen before chat to expose platform constraints.
 - [x] Tailwind CSS styling through Trunk, with Rust source scanning and shared theme tokens.
 - [x] Axum health endpoint consumed by the UI, optional Diesel pool and migration setup.
 - [x] Setup documentation and project rules in AGENTS.md.
-- [ ] Set up local PostgreSQL in WSL and verify connectivity/first migration.
-- [ ] Add typed IDs, wire errors, validation, pagination and timestamps as needed.
-- [ ] CI: format/Clippy, backend/shared tests, WASM build and native desktop matrix.
-- [ ] Database readiness endpoint and request IDs, separate from process liveness.
+- [x] Set up local PostgreSQL in WSL and verify connectivity/first migration.
+- [x] Add typed IDs, wire errors, validation, pagination and timestamps as needed.
+- [x] CI: format/Clippy, backend/shared tests, WASM build and native desktop matrix.
+- [x] Database readiness endpoint and request IDs, separate from process liveness.
 
 ## 1. Accounts and login: backend and frontend
 

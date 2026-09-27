@@ -36,6 +36,10 @@
 
 - Version JSON HTTP routes under `/api/v1`. Define shared contracts before their
   consumers. Use authenticated WebSockets for events/signaling and WebRTC for media.
+- Follow `docs/api.md` for UUID newtypes, UTC timestamps, bounded keyset pagination,
+  validation and the error envelope. Keep request IDs in errors and logs, and keep
+  liveness independent of database readiness. Map future input-extractor failures
+  into the shared wire-error format instead of returning framework-specific text.
 - Distinguish deployment-wide instance roles from community server/guild roles.
   Guild roles apply only to membership in that guild. Specify ownership, hierarchy,
   multiple-role composition and channel override precedence before role editors.
@@ -52,6 +56,10 @@
 
 - Store reviewed migrations under `backend/migrations`, including rollback behavior.
   Generate `backend/src/schema.rs` using Diesel after schema changes.
+- Startup applies embedded migrations; `--migrate-only` is available for setup.
+  Local PostgreSQL lives in the `kali-linux` WSL distribution; connection secrets
+  are in ignored `backend/.env`. See `docs/database.md` before database operations.
+  Integration tests use `TEST_DATABASE_URL` and their own temporary schema.
 - Use a bounded pool. Run synchronous Diesel queries and pool checkout through
   `spawn_blocking`, off Tokio request workers. Use transactions for related writes;
   do not hold connections across unrelated async waits.
@@ -75,3 +83,5 @@
   compatibility and media lifecycle when implementing those features.
 - Report unavailable checks; a Windows build does not establish Linux/macOS
   runtime compatibility. Keep README and TODO accurate; stubs are not completed features.
+- Keep the CI workflow's shared/backend tests (including ignored PostgreSQL tests),
+  WASM build and native desktop matrix current when changing build requirements.

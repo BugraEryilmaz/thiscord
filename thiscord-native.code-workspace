@@ -21,6 +21,23 @@
       "--message-format=json"
     ]
   },
+  "tasks": {
+    "version": "2.0.0",
+    "tasks": [
+      {
+        "label": "Backend: run in WSL",
+        "type": "process",
+        "command": "bash",
+        "args": ["./run.sh"],
+        "options": { "cwd": "${workspaceFolder}/backend" },
+        "windows": {
+          "command": "powershell.exe",
+          "args": ["-NoProfile", "-File", "${workspaceFolder}/backend/run-wsl.ps1"]
+        },
+        "problemMatcher": []
+      }
+    ]
+  },
   "extensions": {
     "recommendations": ["rust-lang.rust-analyzer"]
   }

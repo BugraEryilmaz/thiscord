@@ -7,3 +7,9 @@ publish.workspace = true
 
 [dependencies]
 serde.workspace = true
+uuid.workspace = true
+chrono.workspace = true
+base64 = "0.22"
+
+[dev-dependencies]
+serde_json.workspace = true

@@ -5,8 +5,9 @@ an Axum backend running in WSL, and locally hosted PostgreSQL managed by Diesel.
 HTML/CSS, configuration, SQL migrations and generated WASM JavaScript glue are
 supporting assets. No Node.js or handwritten JavaScript/TypeScript is required.
 
-This minimal template contains a desktop launcher, a UI with a backend check,
-`GET /api/v1/health`, and an optional database pool. Chat, login and voice are
+The foundation contains a desktop launcher, a UI with a database readiness check,
+separate liveness/readiness endpoints, request IDs, shared API primitives, and
+Diesel migrations for a persistent installation identity. Chat, login and voice are
 planned in [TODO.md](TODO.md). Contributor rules are in [AGENTS.md](AGENTS.md).
 
 ## Layout
@@ -48,41 +49,76 @@ cargo install tauri-cli --version '^2' --locked
 
 ## Backend in WSL
 
-For Ubuntu/Debian WSL:
+The existing local PostgreSQL installation is **PostgreSQL 17 in `kali-linux`**,
+cluster `17/main`, listening on `localhost:5432`. The application database and
+role are both named `thiscord`; the separate test database is `thiscord_test`.
+The role is not a superuser and cannot create roles or databases.
 
-```sh
-sudo apt update
-sudo apt install build-essential pkg-config libpq-dev postgresql postgresql-contrib
+Credentials have been generated and saved only in ignored `backend/.env`.
+Do not overwrite it with the example file. PostgreSQL is configured to start
+with systemd in that WSL distribution; starting WSL is still required.
+
+Start directly from PowerShell (the launcher uses Kali's Rust installation and
+a separate Linux build directory):
+
+```powershell
+cd C:\thiscord\backend
+.\run-wsl.ps1
+# Apply migrations and exit:
+.\run-wsl.ps1 -MigrateOnly
 ```
 
-Prefer a checkout inside the WSL filesystem for faster builds, or access this
-checkout using a separate Linux target directory:
+Or use **Tasks: Run Task > Backend: run in WSL** in the native VS Code workspace.
+Plain `cargo run` in a Windows terminal launches a Windows executable; it does
+not automatically run the backend in WSL.
+
+To work interactively in WSL, from PowerShell:
+
+```powershell
+wsl -d kali-linux
+```
+
+Then in WSL:
 
 ```sh
+source ~/.cargo/env
+pg_lsclusters
+# If the cluster is stopped:
+sudo pg_ctlcluster 17 main start
 export CARGO_TARGET_DIR="$HOME/.cache/thiscord-target"
 cd /mnt/c/thiscord/backend
-cp .env.example .env
-cargo run -p thiscord-backend
+cargo run -p thiscord-backend --locked
 ```
 
-With `DATABASE_URL` commented out, the backend starts without a database.
-`curl http://localhost:3000/api/v1/health` returns `{"status":"ok"}`.
-This measures process liveness, not database readiness. Ctrl-C or SIGTERM shuts
-the backend down gracefully.
-
-Enable the local database:
+Startup connects to PostgreSQL and applies pending embedded migrations. A
+configured but unreachable database or failed migration prevents startup.
+Ctrl-C or SIGTERM shuts down gracefully. To apply migrations without serving:
 
 ```sh
-sudo service postgresql start
-sudo -u postgres createuser --pwprompt thiscord
-sudo -u postgres createdb --owner=thiscord thiscord
-cargo install diesel_cli --version '~2.3' --no-default-features --features postgres --locked
+cargo run -p thiscord-backend --locked -- --migrate-only
 ```
 
-Uncomment `DATABASE_URL` in `backend/.env`, set your chosen password (URL-encode
-reserved characters), and restart. A configured but unreachable database fails
-startup. PostgreSQL stays private; clients talk only to the API. There are no
-application tables yet. Add the first model from `backend/` with:
+```sh
+curl -i http://localhost:3000/api/v1/health
+curl -i http://localhost:3000/api/v1/ready
+```
+
+Liveness returns `{"status":"ok"}` even without a database. Readiness queries
+the `instance` table and returns HTTP 200 with a stable installation ID and UTC
+check timestamp, or HTTP 503 with a safe API error. Every response includes a
+server-generated `x-request-id`, also included in errors and request logs.
+The UI's **Check backend** button uses readiness.
+
+The legacy `public` and `tower_sessions` schemas were reset after a full backup.
+The backup is retained in Kali at
+`/var/backups/thiscord/legacy-20260927T105457Z.dump` (root-only). It contains the
+previous tables/data, including 523 user rows and 7 sessions. No other database
+was reset. See [database operations](docs/database.md) for inspection, restore,
+new-machine setup and test instructions.
+
+The first migration creates one `instance` record with a UUID and creation
+timestamp; authentication tables are still future work. Add subsequent models
+with Diesel, from `backend/`:
 
 ```sh
 diesel migration generate create_users
@@ -90,6 +126,10 @@ diesel migration generate create_users
 diesel migration run
 diesel print-schema > src/schema.rs
 ```
+
+The installed/CI Diesel CLI version is 2.3.13. Its `diesel.toml` configuration
+updates `schema.rs` after migrations. Keep `up.sql`, `down.sql` and generated
+schema changes together. Rollbacks are destructive and are not run on startup.
 
 ## Frontend
 
@@ -102,7 +142,7 @@ cargo tauri dev
 
 On macOS/Linux, also run `cargo tauri dev` from `frontend/`, with access to the
 backend. For a browser preview, use `trunk serve` and visit
-`http://127.0.0.1:1420`. Select **Check backend** to exercise the shared JSON type.
+`http://127.0.0.1:1420`. Select **Check backend** to check API/database readiness.
 
 Windows normally reaches WSL via `localhost:3000`; if forwarding is unavailable,
 configure WSL networking and `BACKEND_BIND` deliberately. Remote machines need a
@@ -185,10 +225,11 @@ replaced by these two files.
 
 ```sh
 cargo fmt --all -- --check
-cargo check -p thiscord-shared --locked
+cargo test -p thiscord-shared --locked
 cargo check -p thiscord-frontend --bin thiscord-ui --target wasm32-unknown-unknown --locked
 # In WSL with libpq-dev:
-cargo check -p thiscord-backend --locked
+cargo clippy -p thiscord-shared -p thiscord-backend --all-targets --locked -- -D warnings
+cargo test -p thiscord-shared -p thiscord-backend --locked -- --include-ignored
 # On a desktop host, from frontend/:
 trunk build
 cargo check -p thiscord-frontend --bin thiscord-desktop --features desktop --locked
@@ -197,18 +238,22 @@ cargo check -p thiscord-frontend --bin thiscord-desktop --features desktop --loc
 Use Clippy with the same package/target/features. Do not build all workspace
 features for WASM: backend and native launcher are native programs.
 
-Initial verification: formatting and targeted Clippy passed; Trunk built the
-WASM assets; the Tauri CLI produced a Windows debug executable with embedded
-assets; the backend built in Ubuntu 22.04 WSL and passed an HTTP/CORS health
-smoke check and SIGTERM shutdown. No live database connection or macOS/Linux
-desktop runtime was verified. The development prerequisites installed for these
-checks were Rust 1.93.1 on Windows/WSL and libpq development packages in WSL;
-no PostgreSQL database or domain deployment was created.
+PostgreSQL integration tests load `TEST_DATABASE_URL` from the environment or
+`backend/.env`, require a database name ending in `_test`, and create/drop only
+a uniquely named test schema. They are ignored in a normal `cargo test`; use
+`--include-ignored` to require them. Missing database configuration then fails
+the test rather than silently skipping it.
 
-After upgrading to Rust 1.98.1, formatting and Clippy checks passed for shared,
-the WASM UI, the Windows launcher and the WSL backend. Cargo reports an upstream
-future-compatibility warning in `proc-macro-error2 2.0.1`; it does not block this
-toolchain. The toolchain's rust-analyzer component was also verified.
+[CI](.github/workflows/ci.yml) runs formatting, shared/backend Clippy and tests
+against PostgreSQL 17, a generated-schema check, and a release WASM/Tailwind
+build. A Windows/macOS/Linux matrix lints and builds native executables with
+those web assets embedded, then uploads them as artifacts. CI does not sign,
+package installers, launch GUI applications or deploy services. Remote CI and
+macOS runtime verification require their respective runners.
+
+Shared transport conventions are described in [docs/api.md](docs/api.md).
+Cargo currently reports an upstream future-compatibility warning in
+`proc-macro-error2 2.0.1`; it does not block the pinned toolchain.
 
 References: [Leptos CSR](https://book.leptos.dev/getting_started/index.html),
 [Tauri + Leptos](https://v2.tauri.app/start/frontend/leptos/),

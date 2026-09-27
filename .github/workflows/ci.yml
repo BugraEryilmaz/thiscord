@@ -1,0 +1,125 @@
+name: CI
+
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  format:
+    name: Rust formatting
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v5
+      - name: Install pinned toolchain
+        run: rustup show
+      - run: cargo fmt --all -- --check
+
+  backend:
+    name: Backend and shared contracts
+    runs-on: ubuntu-24.04
+    services:
+      postgres:
+        image: postgres:17
+        env:
+          POSTGRES_USER: thiscord
+          POSTGRES_PASSWORD: ci-test-only
+          POSTGRES_DB: thiscord_test
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U thiscord -d thiscord_test"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 12
+    env:
+      DATABASE_URL: postgres://thiscord:ci-test-only@localhost:5432/thiscord_test?connect_timeout=3
+      TEST_DATABASE_URL: postgres://thiscord:ci-test-only@localhost:5432/thiscord_test?connect_timeout=3
+    steps:
+      - uses: actions/checkout@v5
+      - name: PostgreSQL build dependencies
+        run: sudo apt-get update && sudo apt-get install -y libpq-dev pkg-config
+      - name: Install pinned toolchain
+        run: rustup show
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: backend
+      - run: cargo clippy -p thiscord-shared -p thiscord-backend --all-targets --locked -- -D warnings
+      - name: Unit, wire-contract and PostgreSQL integration tests
+        run: cargo test -p thiscord-shared -p thiscord-backend --locked -- --include-ignored
+      - name: Apply application migrations
+        run: cargo run -p thiscord-backend --locked -- --migrate-only
+      - name: Verify generated Diesel schema
+        working-directory: backend
+        run: |
+          cargo install diesel_cli --version 2.3.13 --no-default-features --features postgres --locked
+          diesel print-schema > ../target/schema.rs
+          diff -u src/schema.rs ../target/schema.rs
+
+  wasm:
+    name: Leptos and Tailwind build
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v5
+      - name: Install pinned toolchain
+        run: rustup show
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: wasm
+      - run: cargo clippy -p thiscord-frontend --bin thiscord-ui --target wasm32-unknown-unknown --locked -- -D warnings
+      - name: Install Trunk
+        run: cargo install trunk --version 0.21.14 --locked
+      - name: Build production web assets
+        working-directory: frontend
+        run: trunk build --release --locked
+      - uses: actions/upload-artifact@v4
+        with:
+          name: frontend-assets
+          path: frontend/dist/
+          if-no-files-found: error
+
+  desktop:
+    name: Desktop (${{ matrix.os }})
+    needs: wasm
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [windows-latest, macos-latest, ubuntu-24.04]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v5
+      - name: Linux desktop dependencies
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libwebkit2gtk-4.1-dev build-essential libssl-dev libxdo-dev libayatana-appindicator3-dev librsvg2-dev patchelf
+      - name: Install pinned toolchain
+        run: rustup show
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: desktop-${{ matrix.os }}
+      - uses: actions/download-artifact@v4
+        with:
+          name: frontend-assets
+          path: frontend/dist
+      - name: Lint native launcher
+        run: cargo clippy -p thiscord-frontend --bin thiscord-desktop --features desktop,custom-protocol --locked -- -D warnings
+      - name: Build native executable with embedded web assets
+        run: cargo build -p thiscord-frontend --bin thiscord-desktop --features desktop,custom-protocol --locked
+      - uses: actions/upload-artifact@v4
+        with:
+          name: desktop-${{ matrix.os }}
+          path: |
+            target/debug/thiscord-desktop
+            target/debug/thiscord-desktop.exe
+          if-no-files-found: error

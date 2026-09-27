@@ -1,19 +1,11 @@
-mod db;
-mod schema;
+use std::{env, net::SocketAddr};
 
-use std::{env, error::Error, net::SocketAddr};
-
-use axum::{
-    Json, Router,
-    http::{HeaderValue, Method},
-    routing::get,
-};
-use thiscord_shared::{HEALTH_PATH, HealthResponse, HealthStatus};
-use tower_http::{cors::CorsLayer, trace::TraceLayer};
+use axum::http::HeaderValue;
+use thiscord_backend::{BoxError, api, db};
 use tracing_subscriber::EnvFilter;
 
 #[tokio::main]
-async fn main() -> Result<(), Box<dyn Error>> {
+async fn main() -> Result<(), BoxError> {
     dotenvy::dotenv().ok();
     tracing_subscriber::fmt()
         .with_env_filter(EnvFilter::try_from_default_env().unwrap_or_else(|_| "info".into()))
@@ -31,38 +23,43 @@ async fn main() -> Result<(), Box<dyn Error>> {
         .map(|origin| origin.trim().parse::<HeaderValue>())
         .collect::<Result<Vec<_>, _>>()?;
 
-    // Startup fails if a configured database is unavailable. Without a URL,
-    // the skeleton serves only liveness and can run before PostgreSQL setup.
+    let args = env::args().skip(1).collect::<Vec<_>>();
+    let migrate_only = args == ["--migrate-only"];
+    if !args.is_empty() && !migrate_only {
+        return Err("usage: thiscord-backend [--migrate-only]".into());
+    }
+
+    // A configured database must connect and migrate before serving requests.
+    // Without a URL, liveness stays available but readiness returns 503.
     let pool = match env::var("DATABASE_URL") {
-        Ok(url) => Some(tokio::task::spawn_blocking(move || db::connect(&url)).await??),
+        Ok(url) => Some(tokio::task::spawn_blocking(move || db::connect_and_migrate(&url))
+            .await?
+            .map_err(|_| {
+                if cfg!(windows) {
+                    "database initialization failed; the local database runs inside WSL. Run ./run-wsl.ps1 from backend/ in PowerShell; see docs/database.md"
+                } else {
+                    "database initialization failed; check PostgreSQL is running (pg_lsclusters), DATABASE_URL credentials and migrations; see docs/database.md"
+                }
+            })?),
+        Err(env::VarError::NotPresent) if migrate_only => return Err("DATABASE_URL is required for --migrate-only".into()),
         Err(env::VarError::NotPresent) => {
             tracing::warn!("DATABASE_URL is unset; running without a database");
             None
         }
-        Err(error) => return Err(error.into()),
+        Err(_) => return Err("DATABASE_URL must contain valid Unicode".into()),
     };
 
-    let app = Router::new()
-        .route(HEALTH_PATH, get(health))
-        .layer(
-            CorsLayer::new()
-                .allow_origin(origins)
-                .allow_methods([Method::GET]),
-        )
-        .layer(TraceLayer::new_for_http())
-        .with_state(pool);
+    if migrate_only {
+        tracing::info!("database migrations applied");
+        return Ok(());
+    }
+    let app = api::router(pool, origins);
     let listener = tokio::net::TcpListener::bind(bind).await?;
     tracing::info!(%bind, "Thiscord backend listening");
     axum::serve(listener, app)
         .with_graceful_shutdown(shutdown())
         .await?;
     Ok(())
-}
-
-async fn health() -> Json<HealthResponse> {
-    Json(HealthResponse {
-        status: HealthStatus::Ok,
-    })
 }
 
 async fn shutdown() {
