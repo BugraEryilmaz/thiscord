@@ -108,6 +108,79 @@ async fn change(
 
 #[tokio::test]
 #[ignore = "requires TEST_DATABASE_URL; CI runs with --include-ignored"]
+async fn creator_without_assigned_roles_can_grant_administrator() {
+    let db = database();
+    let (owner, owner_token) = user(&db, "creator");
+    let (member, member_token) = user(&db, "recipient");
+    permissions::bootstrap_owner(&db.pool, "creator").unwrap();
+    let app = api::router(Some(db.pool.clone()), vec![]);
+    let mut state = command(
+        &app,
+        &owner_token,
+        json!({"action":"create_guild","name":"Owner access"}),
+        StatusCode::OK,
+    )
+    .await["state"]
+        .clone();
+    let guild = state["guild"]["id"].clone();
+    assert_eq!(state["guild"]["owner"], json!(owner));
+    assert_eq!(state["members"][0]["roles"], json!([]));
+    let preview = command(
+        &app,
+        &owner_token,
+        json!({"action":"preview","guild_id":guild,"account_id":owner}),
+        StatusCode::OK,
+    )
+    .await;
+    for permission in ["administrator", "manage_roles", "manage_channels"] {
+        assert!(
+            preview["permissions"]
+                .as_array()
+                .unwrap()
+                .contains(&json!(permission))
+        );
+    }
+    change(
+        &app,
+        &owner_token,
+        &mut state,
+        json!({"action":"add_member","username":"recipient"}),
+        StatusCode::OK,
+    )
+    .await;
+    change(&app, &owner_token, &mut state, json!({"action":"create_role","name":"Admin","position":10000,"permissions":["administrator"]}), StatusCode::OK).await;
+    let role = state["roles"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|r| r["name"] == "Admin")
+        .unwrap()["id"]
+        .clone();
+    change(
+        &app,
+        &owner_token,
+        &mut state,
+        json!({"action":"assign_role","account_id":member,"role_id":role,"assigned":true}),
+        StatusCode::OK,
+    )
+    .await;
+    let preview = command(
+        &app,
+        &member_token,
+        json!({"action":"preview","guild_id":guild,"account_id":member}),
+        StatusCode::OK,
+    )
+    .await;
+    assert!(
+        preview["permissions"]
+            .as_array()
+            .unwrap()
+            .contains(&json!("manage_roles"))
+    );
+}
+
+#[tokio::test]
+#[ignore = "requires TEST_DATABASE_URL; CI runs with --include-ignored"]
 async fn ownership_hierarchy_isolation_stale_access_and_concurrency() {
     let db = database();
     let (owner, ot) = user(&db, "owner");

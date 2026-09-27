@@ -65,6 +65,12 @@ channel overrides. Administrator does not bypass role hierarchy or ownership-onl
 actions. The owner's hierarchy rank is higher than every role. Other members use
 the highest rank of their assigned roles, independently of permissions.
 
+Creating a guild makes its creator the owner immediately, even with no explicit
+role assignments. The editor labels that membership Owner with full administrator
+access. To delegate access, save a named role with the desired permissions (including
+Administrator when appropriate), select another member and assign it. Newly saved
+roles are selected automatically. Everyone is implicit, not an assignable admin role.
+
 ManageRoles permits editing/deleting roles below the actor's highest role and
 creating/moving roles strictly below it. Actors can only grant permissions they
 already have in their guild base permissions; editing/removing roles also checks
@@ -119,11 +125,18 @@ editor state (including hidden-channel configuration). Members may preview their
 own effective permissions; role managers may preview other members.
 
 Sign in and open **Guilds & roles**. **Instance access** loads the instance controls.
-Choose **Manage roles** on a guild, select a member and role, edit permissions or
+Choose **Server settings** on a guild, select a member and role, edit permissions or
 assign/unassign roles. Channel overrides have separate allow/deny checkboxes and a
 **Load saved override** action. Preview reports saved effective permissions, not
 unsaved form changes. Destructive actions require typing the guild name; ownership
 transfer also requires recent reauthentication through the account navigation.
+
+Opening settings from a server selects that server automatically. Owners see a
+Delete server form at the bottom, with its own server-name confirmation and submit
+button. Deletion requires recent authentication and removes channels and messages.
+Owners cannot leave without transferring ownership; their Leave server button is
+disabled with an explanatory hover tooltip. Other members can confirm Leave server.
+The server list refreshes after a successful leave or deletion.
 
 Chat HTTP operations and socket deliveries now use current database permissions.
 Membership/role/session changes invalidate active sockets; the single-process access
