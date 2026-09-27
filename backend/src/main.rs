@@ -53,12 +53,18 @@ async fn main() -> Result<(), BoxError> {
         tracing::info!("database migrations applied");
         return Ok(());
     }
+    if let Some(pool) = pool.as_ref() {
+        thiscord_backend::auth::mail::start(pool.clone());
+    }
     let app = api::router(pool, origins);
     let listener = tokio::net::TcpListener::bind(bind).await?;
     tracing::info!(%bind, "Thiscord backend listening");
-    axum::serve(listener, app)
-        .with_graceful_shutdown(shutdown())
-        .await?;
+    axum::serve(
+        listener,
+        app.into_make_service_with_connect_info::<SocketAddr>(),
+    )
+    .with_graceful_shutdown(shutdown())
+    .await?;
     Ok(())
 }
 

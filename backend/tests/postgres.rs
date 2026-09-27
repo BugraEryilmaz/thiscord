@@ -114,7 +114,7 @@ async fn migrations_and_readiness_work_against_postgresql() {
     // Rollback removes the schema dependency, but liveness must still succeed.
     pool.get()
         .unwrap()
-        .revert_last_migration(db::MIGRATIONS)
+        .revert_all_migrations(db::MIGRATIONS)
         .unwrap();
     assert_eq!(
         response(&app, READY_PATH).await.status(),

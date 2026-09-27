@@ -1,7 +1,13 @@
-# Foundation API contracts
+# API contracts
 
 `shared` owns Serde transport types. Database models and HTTP status mappings
 stay on the backend. Existing liveness JSON remains backward compatible.
+
+Account commands/responses are defined in `shared/src/account.rs`; see
+[account API, sessions and provider setup](accounts.md). Authenticated commands
+use a bearer header on `POST /api/v1/account`. Account failures use this same
+request-correlated error envelope, with `unauthorized`, `forbidden`, `conflict`
+and `rate_limited` codes in addition to the foundation codes.
 
 | Route | Result |
 | --- | --- |

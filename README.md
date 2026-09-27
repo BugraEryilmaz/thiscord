@@ -5,9 +5,11 @@ an Axum backend running in WSL, and locally hosted PostgreSQL managed by Diesel.
 HTML/CSS, configuration, SQL migrations and generated WASM JavaScript glue are
 supporting assets. No Node.js or handwritten JavaScript/TypeScript is required.
 
-The foundation contains a desktop launcher, a UI with a database readiness check,
-separate liveness/readiness endpoints, request IDs, shared API primitives, and
-Diesel migrations for a persistent installation identity. Chat, login and voice are
+The app includes account registration/login, recovery and verification, profile and
+device management, OS-backed desktop sessions, and Google OIDC integration. Local
+emails go to ignored `backend/.mail/`; Google and SMTP need provider credentials.
+See [account setup and security](docs/accounts.md). Liveness/readiness, request IDs,
+shared API contracts and Diesel migrations underpin the backend. Chat and voice are
 planned in [TODO.md](TODO.md). Contributor rules are in [AGENTS.md](AGENTS.md).
 
 ## Layout
@@ -107,7 +109,7 @@ Liveness returns `{"status":"ok"}` even without a database. Readiness queries
 the `instance` table and returns HTTP 200 with a stable installation ID and UTC
 check timestamp, or HTTP 503 with a safe API error. Every response includes a
 server-generated `x-request-id`, also included in errors and request logs.
-The UI's **Check backend** button uses readiness.
+The account UI connects to this same backend.
 
 The legacy `public` and `tower_sessions` schemas were reset after a full backup.
 The backup is retained in Kali at
@@ -117,7 +119,8 @@ was reset. See [database operations](docs/database.md) for inspection, restore,
 new-machine setup and test instructions.
 
 The first migration creates one `instance` record with a UUID and creation
-timestamp; authentication tables are still future work. Add subsequent models
+timestamp; the second adds accounts, identities, sessions, email and OAuth state.
+Add subsequent models
 with Diesel, from `backend/`:
 
 ```sh
@@ -142,7 +145,8 @@ cargo tauri dev
 
 On macOS/Linux, also run `cargo tauri dev` from `frontend/`, with access to the
 backend. For a browser preview, use `trunk serve` and visit
-`http://127.0.0.1:1420`. Select **Check backend** to check API/database readiness.
+`http://127.0.0.1:1420`. Browser sessions stay in memory; desktop sessions use the
+OS credential store. Restart an existing backend and desktop process after updating.
 
 Windows normally reaches WSL via `localhost:3000`; if forwarding is unavailable,
 configure WSL networking and `BACKEND_BIND` deliberately. Remote machines need a

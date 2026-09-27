@@ -3,6 +3,7 @@
 /frontend/.stage/
 /frontend/gen/
 .env
+backend/.mail/
 .env.*
 !.env.example
 *.log

@@ -8,7 +8,7 @@ default-run = "thiscord-desktop"
 
 [features]
 default = []
-desktop = ["dep:tauri", "dep:tauri-build"]
+desktop = ["dep:tauri", "dep:tauri-build", "dep:keyring", "dep:open", "dep:tokio", "dep:rand", "dep:base64", "dep:url"]
 custom-protocol = ["desktop", "tauri/custom-protocol"]
 
 [[bin]]
@@ -22,14 +22,28 @@ required-features = ["desktop"]
 
 [dependencies]
 thiscord-shared.workspace = true
+serde.workspace = true
+serde_json.workspace = true
 
 [target.'cfg(target_arch = "wasm32")'.dependencies]
 leptos = { version = "0.8", features = ["csr"] }
 gloo-net = "0.6"
 console_error_panic_hook = "0.1"
+wasm-bindgen = "0.2"
+wasm-bindgen-futures = "0.4"
+serde-wasm-bindgen = "0.6"
+js-sys = "0.3"
+web-sys = { version = "0.3", features = ["Window", "HtmlDialogElement", "DomRect"] }
+gloo-timers = { version = "0.3", features = ["futures"] }
 
 [target.'cfg(not(target_arch = "wasm32"))'.dependencies]
 tauri = { version = "2", optional = true , features = [] }
+keyring = { version = "3.6", optional = true, features = ["apple-native", "windows-native", "sync-secret-service", "crypto-rust"] }
+open = { version = "5", optional = true }
+tokio = { version = "1", optional = true, features = ["net", "time", "io-util", "sync", "macros"] }
+rand = { version = "0.8", optional = true }
+base64 = { version = "0.22", optional = true }
+url = { version = "2", optional = true }
 
 [build-dependencies]
 tauri-build = { version = "2", optional = true }

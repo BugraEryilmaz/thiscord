@@ -6,6 +6,10 @@ use crate::{RequestId, validation::FieldError};
 #[serde(rename_all = "snake_case")]
 pub enum ErrorCode {
     BadRequest,
+    Unauthorized,
+    Forbidden,
+    Conflict,
+    RateLimited,
     ValidationFailed,
     NotFound,
     MethodNotAllowed,

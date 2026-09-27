@@ -23,12 +23,17 @@ pub fn router(pool: Option<DbPool>, origins: Vec<HeaderValue>) -> Router {
     Router::new()
         .route(HEALTH_PATH, get(health))
         .route(READY_PATH, get(ready))
+        .merge(crate::auth::router())
         .fallback(not_found)
         .method_not_allowed_fallback(method_not_allowed)
         .layer(
             CorsLayer::new()
                 .allow_origin(origins)
-                .allow_methods([Method::GET])
+                .allow_methods([Method::GET, Method::POST])
+                .allow_headers([
+                    axum::http::header::AUTHORIZATION,
+                    axum::http::header::CONTENT_TYPE,
+                ])
                 .expose_headers([HeaderName::from_static(REQUEST_ID_HEADER)]),
         )
         // Outermost: even CORS preflight, fallback and error responses get an ID.

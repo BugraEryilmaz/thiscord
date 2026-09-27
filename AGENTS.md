@@ -48,6 +48,15 @@
 - Conventional login and Google OIDC attach to a single account model. Keep provider
   secrets on backend; use system-browser login with PKCE/state/nonce and a reviewed
   desktop callback. Never collect Google passwords in the app.
+- Account wire commands live in `shared/src/account.rs`; implementation and threat
+  boundaries are documented in `docs/accounts.md`. Use parameterized Diesel queries,
+  hash bearer/code tokens, preserve replay revocation and account-level locking,
+  and require recent reauthentication for identity/credential changes and deletion.
+  Never automatically link by email. Keep Argon2 work bounded and off async workers.
+- Desktop tokens belong in the OS credential store, browser-preview tokens in memory.
+  Do not add plaintext persistence or token logging. Google callback URLs carry
+  notifications only; session tickets are redeemed separately. Provider configuration
+  is local-only; development mail files contain sensitive codes and stay ignored.
 - Select Rust WebRTC/SFU libraries after a three-platform compatibility spike.
   Do not silently substitute a non-Rust application server. Document native codec,
   WebView and STUN/TURN infrastructure dependencies and encryption boundaries.

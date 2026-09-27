@@ -1,6 +1,7 @@
 # Thiscord roadmap
 
-Only scaffolding is implemented. Work roughly in the order below; the early
+Foundation and account-management code are implemented; provider/platform acceptance
+checks are tracked below. Work roughly in order; the early
 media compatibility spike can happen before chat to expose platform constraints.
 
 ## 0. Foundation
@@ -17,20 +18,25 @@ media compatibility spike can happen before chat to expose platform constraints.
 
 ## 1. Accounts and login: backend and frontend
 
-- [ ] Migrations for accounts, unique usernames/emails, credential identities and sessions.
-- [ ] Registration, standard password login, logout and current-user API/UI.
-- [ ] Argon2id password hashing, input validation and registration/login rate limits.
-- [ ] Email verification, password change, forgotten-password and reset flows.
-- [ ] Session expiry, rotation, revocation, multi-device management and logout-all.
-- [ ] Desktop session storage using OS credential storage through Rust integration.
-- [ ] Google OIDC authorization-code login with PKCE, state and nonce validation.
-- [ ] System-browser login and secure desktop callback/deep-link or loopback flow
+- [x] Migrations for accounts, unique usernames/emails, credential identities and sessions.
+- [x] Registration, standard password login, logout and current-user API/UI.
+- [x] Argon2id password hashing, input validation and registration/login rate limits.
+- [x] Email verification, password change, forgotten-password and reset flows.
+- [x] Session expiry, rotation, revocation, multi-device management and logout-all.
+- [x] Desktop session storage using OS credential storage through Rust integration.
+- [x] Google OIDC authorization-code login with PKCE, state and nonce validation.
+- [x] System-browser login and secure desktop loopback implementation targeting
   on all three OSes, including cancellation, failures and replay rejection.
-- [ ] Validate provider issuer/audience/signature; keep Google secrets on backend.
-- [ ] Link/unlink login identities after reauthentication; prevent takeover through
+- [x] Validate provider issuer/audience/signature; keep Google secrets on backend.
+- [x] Link/unlink login identities after reauthentication; prevent takeover through
   unverified email matching and removal of the last usable login method.
-- [ ] Profile/settings and account deletion behavior.
-- [ ] Test invalid credentials, expired/replayed sessions, throttling and OAuth failures.
+- [x] Profile/settings and account deletion behavior (display name/bio; identifiers immutable).
+- [x] Test invalid credentials, expired/replayed sessions, throttling and OAuth failures.
+- [ ] Configure Google web-client credentials and SMTP; complete live provider acceptance.
+- [ ] Verify browser handoff and OS-store prompts interactively on Windows/macOS/Linux.
+  Windows credential-store round trip and Windows/Linux loopback tests pass locally;
+  macOS execution remains a CI/manual check. See docs/accounts.md.
+- [ ] Future: confirmed email/username changes and account export.
 
 ## 2. Membership and detailed permissions
 

@@ -40,3 +40,5 @@ macro_rules! uuid_id {
 // Generation lives on the backend; shared/WASM requires no random-number source.
 uuid_id!(InstanceId);
 uuid_id!(RequestId);
+uuid_id!(AccountId);
+uuid_id!(SessionId);
