@@ -1,0 +1,21 @@
+@import "tailwindcss" source(none);
+
+/* Paths are relative to this stylesheet, including nested Leptos components. */
+@source "./src/**/*.rs";
+@source "./index.html";
+
+@theme {
+  --color-surface: #202127;
+  --color-content: #f2f3f5;
+  --color-brand: #5865f2;
+}
+
+@layer base {
+  :root {
+    color-scheme: dark;
+  }
+
+  body {
+    @apply bg-surface font-sans text-content;
+  }
+}

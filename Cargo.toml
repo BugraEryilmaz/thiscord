@@ -1,0 +1,18 @@
+[workspace]
+members = ["frontend", "backend", "shared"]
+default-members = ["shared"]
+resolver = "3"
+
+[workspace.package]
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.98"
+publish = false
+
+[workspace.dependencies]
+thiscord-shared = { path = "shared" }
+serde = { version = "1", features = ["derive"] }
+
+[profile.release]
+lto = "thin"
+codegen-units = 1

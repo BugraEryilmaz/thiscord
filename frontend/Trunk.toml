@@ -1,0 +1,15 @@
+[build]
+target = "index.html"
+dist = "dist"
+minify = "on_release"
+
+[tools]
+tailwindcss = "4.3.3"
+
+[watch]
+ignore = ["dist", "gen", "capabilities", "src/desktop.rs"]
+
+[serve]
+addresses = ["127.0.0.1"]
+port = 1420
+open = false

@@ -1,0 +1,27 @@
+{
+  "folders": [
+    { "name": "Thiscord (native)", "path": "." }
+  ],
+  "settings": {
+    "rust-analyzer.linkedProjects": ["Cargo.toml"],
+    "rust-analyzer.cargo.target": null,
+    "rust-analyzer.cargo.features": ["thiscord-frontend/desktop"],
+    "rust-analyzer.cargo.noDefaultFeatures": false,
+    "rust-analyzer.cargo.targetDir": "target/rust-analyzer-native",
+    "rust-analyzer.cargo.buildScripts.overrideCommand": [
+      "cargo", "check", "--locked", "--workspace", "--all-targets",
+      "--features", "thiscord-frontend/desktop",
+      "--target-dir", "target/rust-analyzer-native",
+      "--message-format=json"
+    ],
+    "rust-analyzer.check.overrideCommand": [
+      "cargo", "check", "--locked", "--workspace", "--all-targets",
+      "--features", "thiscord-frontend/desktop",
+      "--target-dir", "target/rust-analyzer-native",
+      "--message-format=json"
+    ]
+  },
+  "extensions": {
+    "recommendations": ["rust-lang.rust-analyzer"]
+  }
+}

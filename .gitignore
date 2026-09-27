@@ -1,0 +1,9 @@
+/target/
+/frontend/dist/
+/frontend/.stage/
+/frontend/gen/
+.env
+.env.*
+!.env.example
+*.log
+.DS_Store

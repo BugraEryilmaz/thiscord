@@ -1,0 +1,7 @@
+{
+  "$schema": "../gen/schemas/desktop-schema.json",
+  "identifier": "main",
+  "description": "Main application window; no native IPC permissions required yet.",
+  "windows": ["main"],
+  "permissions": []
+}

@@ -1,0 +1,3 @@
+[env]
+# Leptos macro-heavy debug builds can exceed rustc's default Windows stack.
+RUST_MIN_STACK = "16777216"
