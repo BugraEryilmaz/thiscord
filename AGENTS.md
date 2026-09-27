@@ -43,6 +43,10 @@
 - Distinguish deployment-wide instance roles from community server/guild roles.
   Guild roles apply only to membership in that guild. Specify ownership, hierarchy,
   multiple-role composition and channel override precedence before role editors.
+- Follow `docs/permissions.md` for the implemented rules. Bootstrap ownership only
+  through the local CLI; instance admins have no implicit guild access. Guild writes
+  must lock the guild, evaluate current permissions and check the submitted revision
+  in the same transaction. Never authorize using a client snapshot or cached grants.
 - Check permissions for HTTP actions, socket subscriptions/events and SFU joins.
   Membership/role changes must also revoke ongoing subscriptions and voice access.
 - Conventional login and Google OIDC attach to a single account model. Keep provider

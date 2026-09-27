@@ -21,7 +21,7 @@ struct Row {
 }
 
 // Only fixed SQL strings reach these helpers. Every user value is a bound parameter.
-pub(super) fn query<T: DeserializeOwned>(
+pub(crate) fn query<T: DeserializeOwned>(
     c: &mut PgConnection,
     sql: &str,
     params: &[&str],
@@ -35,7 +35,7 @@ pub(super) fn query<T: DeserializeOwned>(
         .map(|r| serde_json::from_value(r.data).map_err(|_| Failure::Unavailable))
         .collect()
 }
-pub(super) fn execute(c: &mut PgConnection, sql: &str, params: &[&str]) -> Result<usize, Failure> {
+pub(crate) fn execute(c: &mut PgConnection, sql: &str, params: &[&str]) -> Result<usize, Failure> {
     let mut q = diesel::sql_query(sql).into_boxed::<Pg>();
     for p in params {
         q = q.bind::<Text, _>(*p);
@@ -50,7 +50,7 @@ pub(super) fn secret() -> String {
 pub(super) fn digest(value: &str) -> String {
     URL_SAFE_NO_PAD.encode(Sha256::digest(value.as_bytes()))
 }
-pub(super) fn connection(
+pub(crate) fn connection(
     pool: &DbPool,
 ) -> Result<diesel::r2d2::PooledConnection<diesel::r2d2::ConnectionManager<PgConnection>>, Failure>
 {
@@ -99,13 +99,13 @@ pub(super) fn account(c: &mut PgConnection, id: AccountId) -> Result<Account, Fa
     query(c, "SELECT to_jsonb(a) || jsonb_build_object('identities', (SELECT jsonb_agg(provider ORDER BY provider) FROM identities WHERE account_id=a.id)) AS data FROM accounts a WHERE id=$1::uuid", &[&id.to_string()])?.pop().ok_or(Failure::Unauthorized)
 }
 #[derive(Deserialize, Clone)]
-pub(super) struct Session {
+pub(crate) struct Session {
     pub id: SessionId,
     pub account_id: AccountId,
     pub reauthenticated_at: Option<DateTime<Utc>>,
 }
 
-pub(super) fn authenticate(c: &mut PgConnection, token: &str) -> Result<Session, Failure> {
+pub(crate) fn authenticate(c: &mut PgConnection, token: &str) -> Result<Session, Failure> {
     if token.len() != 43 {
         return Err(Failure::Unauthorized);
     }
@@ -122,7 +122,7 @@ pub(super) fn authenticate(c: &mut PgConnection, token: &str) -> Result<Session,
         Ok(Some(session))
     })?.ok_or(Failure::Unauthorized)
 }
-pub(super) fn lock_session(
+pub(crate) fn lock_session(
     c: &mut PgConnection,
     token: &str,
     session: &Session,
@@ -148,7 +148,7 @@ pub(super) fn lock_session(
     )?;
     Ok(())
 }
-pub(super) fn recent(session: &Session) -> Result<(), Failure> {
+pub(crate) fn recent(session: &Session) -> Result<(), Failure> {
     if session
         .reauthenticated_at
         .is_some_and(|t| t > Utc::now() - chrono::Duration::minutes(5))
@@ -210,7 +210,7 @@ fn done(message: &str) -> AccountResponse {
     }
 }
 
-pub(super) fn rate_limit(
+pub(crate) fn rate_limit(
     pool: &DbPool,
     ip: &str,
     identifier: Option<&str>,
@@ -407,6 +407,11 @@ pub(super) fn dispatch(
                     AccountRequest::DeleteAccount { confirmation } => {
                         recent(&session)?;
                         if confirmation!=account(c,id)?.username { return Err(Failure::Invalid("Enter your username to confirm permanent deletion")); }
+                        let owns: Vec<bool> = query(c,"SELECT to_jsonb(EXISTS(SELECT 1 FROM instance WHERE owner_account_id=$1::uuid) OR EXISTS(SELECT 1 FROM guilds WHERE owner=$1::uuid)) AS data", &[&id.to_string()])?;
+                        if owns == [true] { return Err(Failure::Invalid("Transfer instance ownership and transfer or delete owned guilds before deleting your account")); }
+                        // Membership cascades also invalidate editor revisions. Lock in UUID order.
+                        execute(c,"SELECT id FROM guilds WHERE id IN (SELECT guild_id FROM guild_members WHERE account_id=$1::uuid) ORDER BY id FOR UPDATE", &[&id.to_string()])?;
+                        execute(c,"UPDATE guilds SET revision=revision+1 WHERE id IN (SELECT guild_id FROM guild_members WHERE account_id=$1::uuid)", &[&id.to_string()])?;
                         execute(c,"DELETE FROM accounts WHERE id=$1::uuid", &[&id.to_string()])?;
                         Ok(done("Account and credentials permanently deleted"))
                     }

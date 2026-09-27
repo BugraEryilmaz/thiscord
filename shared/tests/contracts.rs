@@ -10,6 +10,32 @@ use uuid::Uuid;
 const ID: &str = "f8f72890-fbae-4e56-9e7b-8038b5c3a094";
 
 #[test]
+fn permission_contracts_reject_unknown_names_and_preserve_scope() {
+    use thiscord_shared::{GuildId, RoleId, permissions::*};
+    assert_eq!(
+        to_value(Permission::ManageRoles).unwrap(),
+        json!("manage_roles")
+    );
+    assert!(from_value::<Permission>(json!("super_admin")).is_err());
+    let target = OverrideTarget::Role(ID.parse::<RoleId>().unwrap());
+    assert_eq!(to_value(target).unwrap(), json!({"kind":"role","id":ID}));
+    assert_eq!(
+        to_value(PermissionRequest::Inspect {
+            guild_id: ID.parse::<GuildId>().unwrap()
+        })
+        .unwrap(),
+        json!({"action":"inspect","guild_id":ID})
+    );
+    assert!(
+        from_value::<PermissionRequest>(
+            json!({"action":"inspect","guild_id":ID,"administrator":true})
+        )
+        .is_err()
+    );
+    assert!(from_value::<Permissions>(json!(["manage_roles", "new_unknown_permission"])).is_err());
+}
+
+#[test]
 fn ids_and_health_keep_their_wire_representations() {
     let id: InstanceId = ID.parse().unwrap();
     assert_eq!(to_value(id).unwrap(), json!(ID));

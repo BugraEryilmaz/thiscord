@@ -30,6 +30,65 @@ diesel::table! {
 }
 
 diesel::table! {
+    channel_overrides (id) {
+        id -> Uuid,
+        guild_id -> Uuid,
+        channel_id -> Uuid,
+        role_id -> Nullable<Uuid>,
+        account_id -> Nullable<Uuid>,
+        allow -> Jsonb,
+        deny -> Jsonb,
+    }
+}
+
+diesel::table! {
+    channels (guild_id, id) {
+        guild_id -> Uuid,
+        id -> Uuid,
+        name -> Text,
+        kind -> Text,
+    }
+}
+
+diesel::table! {
+    guild_member_roles (guild_id, account_id, role_id) {
+        guild_id -> Uuid,
+        account_id -> Uuid,
+        role_id -> Uuid,
+    }
+}
+
+diesel::table! {
+    guild_members (guild_id, account_id) {
+        guild_id -> Uuid,
+        account_id -> Uuid,
+        joined_at -> Timestamptz,
+    }
+}
+
+diesel::table! {
+    guild_roles (guild_id, id) {
+        guild_id -> Uuid,
+        id -> Uuid,
+        name -> Text,
+        position -> Int4,
+        everyone -> Bool,
+        permissions -> Jsonb,
+    }
+}
+
+diesel::table! {
+    guilds (id) {
+        id -> Uuid,
+        name -> Text,
+        owner -> Uuid,
+        revision -> Int8,
+        created_at -> Timestamptz,
+        password_hash -> Nullable<Text>,
+    }
+}
+
+diesel::table! {
     identities (provider, subject) {
         account_id -> Uuid,
         provider -> Text,
@@ -43,6 +102,13 @@ diesel::table! {
         singleton -> Bool,
         id -> Uuid,
         created_at -> Timestamptz,
+        owner_account_id -> Nullable<Uuid>,
+    }
+}
+
+diesel::table! {
+    instance_admins (account_id) {
+        account_id -> Uuid,
     }
 }
 
@@ -94,7 +160,13 @@ diesel::table! {
 }
 
 diesel::joinable!(account_codes -> accounts (account_id));
+diesel::joinable!(channels -> guilds (guild_id));
+diesel::joinable!(guild_members -> accounts (account_id));
+diesel::joinable!(guild_roles -> guilds (guild_id));
+diesel::joinable!(guilds -> accounts (owner));
 diesel::joinable!(identities -> accounts (account_id));
+diesel::joinable!(instance -> accounts (owner_account_id));
+diesel::joinable!(instance_admins -> accounts (account_id));
 diesel::joinable!(mail_outbox -> accounts (account_id));
 diesel::joinable!(oauth_attempts -> accounts (account_id));
 diesel::joinable!(oauth_attempts -> sessions (session_id));
@@ -105,8 +177,15 @@ diesel::allow_tables_to_appear_in_same_query!(
     account_codes,
     accounts,
     auth_limits,
+    channel_overrides,
+    channels,
+    guild_member_roles,
+    guild_members,
+    guild_roles,
+    guilds,
     identities,
     instance,
+    instance_admins,
     mail_outbox,
     oauth_attempts,
     session_tokens,

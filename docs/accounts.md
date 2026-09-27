@@ -41,8 +41,10 @@ in this version; changing verified identifiers needs a separate confirmation flo
 Permanent deletion requires recent reauthentication and typing the username. It
 deletes the profile, identities, sessions, codes, pending OAuth attempts and queued
 email through foreign-key cascades. Database backups and already delivered email
-have their own retention policy. Future chat/guild ownership deletion semantics
-must be decided before those features are introduced.
+have their own retention policy. Instance owners must transfer ownership, and guild
+owners must transfer or delete their guilds first. Other memberships and role
+assignments cascade on account deletion. See [permissions.md](permissions.md).
+Future chat-content retention semantics must be decided before chat is introduced.
 
 ## Email delivery with Resend
 

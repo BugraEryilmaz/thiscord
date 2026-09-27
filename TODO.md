@@ -44,23 +44,29 @@ media compatibility spike can happen before chat to expose platform constraints.
 A main/instance role administers the deployment. Each guild has independent
 roles assigned to its memberships; a user can have different roles in each guild.
 
-- [ ] Instance owner/admin/user permissions and secure first-owner bootstrap.
-- [ ] Guild ownership, memberships, role definitions and membership-role assignments.
-- [ ] Everyone/default role, multiple-role composition and owner/admin behavior.
-- [ ] Role hierarchy, grant/edit restrictions and privilege-escalation prevention.
-- [ ] Channel role/member overrides with deterministic allow/deny precedence.
-- [ ] Permissions for guild/channel/role management, invites, history, sending,
+- [x] Instance owner/admin/user permissions and secure first-owner bootstrap.
+- [x] Guild ownership, memberships, role definitions and membership-role assignments.
+- [x] Everyone/default role, multiple-role composition and owner/admin behavior.
+- [x] Role hierarchy, grant/edit restrictions and privilege-escalation prevention.
+- [x] Channel role/member overrides with deterministic allow/deny precedence.
+- [x] Shared permission identifiers for guild/channel/role management, invites, history, sending,
   editing/deleting messages, moderation and voice join/speak/mute/deafen/move.
-- [ ] Central backend permission evaluator; shared permission identifiers/types.
-- [ ] HTTP, WebSocket event/subscription and media authorization on every operation.
+- [x] Central backend permission evaluator; shared permission identifiers/types.
+- [x] Authorize every implemented membership/role/channel-management HTTP operation.
+- [ ] Wire chat, WebSocket event/subscription and media authorization when those handlers exist.
 - [ ] Revoke active socket/voice access immediately on membership/role changes.
-- [ ] Role editors, assignment UI and effective-permissions preview.
-- [ ] Test cross-guild isolation, overrides, hierarchy, ownership transfer,
+- [x] Role editors, assignment UI and effective-permissions preview.
+- [x] Test cross-guild isolation, overrides, hierarchy, ownership transfer,
   last-owner protection, stale access and concurrent updates.
+
+See docs/permissions.md for local owner bootstrap, precedence, bounded guild sizes
+and transport enforcement still required by the chat/media milestones.
 
 ## 3. Server and channel management
 
-- [ ] Create/edit/delete guilds, list memberships, join and leave.
+- [x] Create/edit/delete guild HTTP commands, list memberships, join by ID/password and leave.
+- [x] Joined-server rail with circular initials avatars, names on hover, create/join dialogs.
+- [ ] Custom server images and password-change settings UI.
 - [ ] Invite links with expiry/use limits, revocation and join validation.
 - [ ] Ownership transfer, kick/ban/unban and administrative audit events.
 - [ ] Create/edit/delete/reorder text and voice channels and categories.

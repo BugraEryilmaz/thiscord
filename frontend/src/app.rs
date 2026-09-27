@@ -2,9 +2,14 @@ use crate::account_client as client;
 use leptos::prelude::*;
 use thiscord_shared::account::*;
 mod login;
+mod permissions;
+mod servers;
 
 #[derive(Clone, Copy)]
 struct Ui {
+    guilds: RwSignal<Vec<thiscord_shared::permissions::Guild>>,
+    server: RwSignal<Option<thiscord_shared::permissions::GuildHome>>,
+    can_create_server: RwSignal<bool>,
     account: RwSignal<Option<Account>>,
     token: RwSignal<Option<String>>,
     status: RwSignal<String>,
@@ -20,7 +25,7 @@ async fn apply(ui: Ui, response: AccountResponse) {
             let persistence = client::persist(Some(&session.token)).await;
             ui.token.set(Some(session.token));
             ui.account.set(Some(session.account));
-            ui.page.set("profile");
+            ui.page.set("servers");
             ui.status.set(
                 persistence
                     .err()
@@ -30,6 +35,7 @@ async fn apply(ui: Ui, response: AccountResponse) {
         }
         AccountResponse::Account { account } => {
             ui.account.set(Some(account));
+            servers::refresh(ui).await;
             ui.status.set("Account loaded".into());
         }
         AccountResponse::Sessions { sessions } => {
@@ -42,6 +48,9 @@ async fn apply(ui: Ui, response: AccountResponse) {
     }
 }
 async fn clear_local(ui: Ui) {
+    ui.guilds.set(vec![]);
+    ui.server.set(None);
+    ui.can_create_server.set(false);
     ui.token.set(None);
     ui.account.set(None);
     ui.sessions.set(vec![]);
@@ -228,6 +237,9 @@ fn Field(
 #[component]
 pub fn App() -> impl IntoView {
     let ui = Ui {
+        guilds: RwSignal::new(vec![]),
+        server: RwSignal::new(None),
+        can_create_server: RwSignal::new(false),
         account: RwSignal::new(None),
         token: RwSignal::new(None),
         status: RwSignal::new("Welcome to Thiscord".into()),
@@ -298,7 +310,8 @@ pub fn App() -> impl IntoView {
     });
     view! {
         <Show when=move ||ui.account.get().is_some() fallback=move ||view!{<login::Login ui=ui/>}>
-        <main class="mx-auto max-w-5xl space-y-6 p-6 md:p-12">
+        <servers::ServerRail ui=ui/>
+        <main class="ml-20 min-h-screen space-y-6 p-5 md:p-8">
             <header class="flex flex-wrap items-center justify-between gap-4">
                 <div><h1 class="text-4xl font-bold">"Thiscord"</h1><p class="mt-2 text-white/60">"Your place to chat and hang out."</p></div>
                 <Show when=move ||ui.account.get().is_some()><button class="rounded-md bg-white/10 px-4 py-2" disabled=move ||ui.busy.get() on:click=move |_|run(ui,AccountRequest::Logout)>"Sign out"</button></Show>
@@ -308,10 +321,12 @@ pub fn App() -> impl IntoView {
                 {move ||ui.authorization_url.get().map(|url|view!{<a class="text-brand underline" href=url target="_blank" rel="noopener noreferrer">"Continue in Google"</a>})}
                 <button class="underline" on:click=cancel>"Cancel Google sign-in"</button>
             </div></Show>
+            <Show when=move ||ui.page.get()=="servers"><servers::ServerHome ui=ui/></Show>
+            <Show when=move ||ui.page.get()!="servers">
             <div class="grid gap-6 md:grid-cols-[220px_1fr]">
                 <nav class="flex flex-col gap-2" aria-label="Account navigation">
                     {move || {
-                        let tabs = vec![("profile","Profile"),("reauthenticate","Reauthenticate"),("password","Set / change password"),("devices","Devices & identities"),("delete","Delete account")];
+                        let tabs = vec![("profile","Profile"),("permissions","Guilds & roles"),("reauthenticate","Reauthenticate"),("password","Set / change password"),("devices","Devices & identities"),("delete","Delete account")];
                         tabs.into_iter().map(move |(page,label)|view!{
                             <button class="rounded-md px-4 py-3 text-left hover:bg-white/10 disabled:opacity-50" class:bg-brand=move ||ui.page.get()==page disabled=move ||ui.busy.get()
                                 on:click=move |_| {password.set(String::new());ui.page.set(page);if page=="devices" {run(ui,AccountRequest::Sessions);}}>{label}</button>
@@ -319,6 +334,7 @@ pub fn App() -> impl IntoView {
                     }}
                 </nav>
                 <section class="space-y-5 rounded-xl border border-white/10 bg-white/5 p-6">
+                    <Show when=move ||ui.page.get()=="permissions"><permissions::PermissionEditor ui=ui/></Show>
                     <Show when=move ||ui.page.get()=="devices">
                         <h2 class="text-xl font-semibold">"Devices & identities"</h2>
                         <ul class="space-y-3">{move ||ui.sessions.get().into_iter().map(|s| {let id=s.id; view!{
@@ -333,7 +349,7 @@ pub fn App() -> impl IntoView {
                         }).collect_view())}
                         <button class="rounded-md bg-brand px-4 py-2" disabled=move ||ui.busy.get() on:click=move |_|google(ui,GooglePurpose::Link)>"Link Google account"</button>
                     </Show>
-                    <Show when=move ||ui.page.get()!="devices">
+                    <Show when=move ||!matches!(ui.page.get(),"devices"|"permissions")>
                         <h2 class="text-xl font-semibold">{move ||match ui.page.get(){"register"=>"Create your account","login"=>"Welcome back","forgot"=>"Request a password reset","reset"=>"Reset your password","verify"=>"Verify your email","reauthenticate"=>"Confirm it’s you","password"=>"Set or change password","delete"=>"Permanently delete account",_=>"Your profile"}}</h2>
                         <form class="space-y-4" on:submit=submit>
                             <Show when=move ||ui.page.get()=="reauthenticate"><Field label="Current password" value=password kind="password" autocomplete="current-password"/></Show>
@@ -357,6 +373,7 @@ pub fn App() -> impl IntoView {
                     </Show>
                 </section>
             </div>
+            </Show>
         </main>
         </Show>
     }

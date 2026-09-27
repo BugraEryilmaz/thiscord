@@ -1,7 +1,7 @@
 //! Account entry points. Database and Argon2 work run on bounded blocking workers.
 mod google;
 pub mod mail;
-mod store;
+pub(crate) mod store;
 mod verification;
 
 use crate::db::DbPool;
@@ -50,7 +50,7 @@ impl From<diesel::result::Error> for Failure {
     }
 }
 impl Failure {
-    fn response(self, request_id: RequestId) -> Response {
+    pub(crate) fn response(self, request_id: RequestId) -> Response {
         let (status, code, message) = match self {
             Self::Unauthorized => (
                 StatusCode::UNAUTHORIZED,
@@ -61,12 +61,12 @@ impl Failure {
             Self::Conflict => (
                 StatusCode::CONFLICT,
                 ErrorCode::Conflict,
-                "Account or identity is unavailable",
+                "Resource conflict; refresh and try again",
             ),
             Self::Forbidden => (
                 StatusCode::FORBIDDEN,
                 ErrorCode::Forbidden,
-                "Reauthenticate first; keep at least one usable login method",
+                "Operation not permitted; check permissions, ownership and recent reauthentication",
             ),
             Self::Limited => (
                 StatusCode::TOO_MANY_REQUESTS,
@@ -120,7 +120,7 @@ pub fn router() -> Router<Option<DbPool>> {
         .layer(DefaultBodyLimit::max(16 * 1024))
 }
 
-fn bearer(headers: &HeaderMap) -> String {
+pub(crate) fn bearer(headers: &HeaderMap) -> String {
     headers
         .get("authorization")
         .and_then(|h| h.to_str().ok())

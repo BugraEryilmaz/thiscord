@@ -25,8 +25,9 @@ async fn main() -> Result<(), BoxError> {
 
     let args = env::args().skip(1).collect::<Vec<_>>();
     let migrate_only = args == ["--migrate-only"];
-    if !args.is_empty() && !migrate_only {
-        return Err("usage: thiscord-backend [--migrate-only]".into());
+    let bootstrap = args.len() == 2 && args[0] == "--bootstrap-owner";
+    if !args.is_empty() && !migrate_only && !bootstrap {
+        return Err("usage: thiscord-backend [--migrate-only | --bootstrap-owner USERNAME]".into());
     }
 
     // A configured database must connect and migrate before serving requests.
@@ -51,6 +52,16 @@ async fn main() -> Result<(), BoxError> {
 
     if migrate_only {
         tracing::info!("database migrations applied");
+        return Ok(());
+    }
+    if bootstrap {
+        let pool = pool.ok_or("DATABASE_URL is required for owner bootstrap")?;
+        let username = args[1].clone();
+        tokio::task::spawn_blocking(move || {
+            thiscord_backend::permissions::bootstrap_owner(&pool, &username)
+        })
+        .await??;
+        tracing::info!("Initial instance owner configured");
         return Ok(());
     }
     if let Some(pool) = pool.as_ref() {

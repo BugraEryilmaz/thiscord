@@ -29,8 +29,15 @@ pub async fn request(
     command: &AccountRequest,
     token: Option<&str>,
 ) -> Result<AccountResponse, String> {
+    api_request(ACCOUNT_PATH, command, token).await
+}
+pub async fn api_request<T: serde::Serialize, R: serde::de::DeserializeOwned>(
+    path: &str,
+    command: &T,
+    token: Option<&str>,
+) -> Result<R, String> {
     let base = option_env!("THISCORD_API_URL").unwrap_or("http://localhost:3000");
-    let mut request = Request::post(&format!("{}{ACCOUNT_PATH}", base.trim_end_matches('/')));
+    let mut request = Request::post(&format!("{}{path}", base.trim_end_matches('/')));
     if let Some(token) = token {
         request = request.header("Authorization", &format!("Bearer {token}"));
     }

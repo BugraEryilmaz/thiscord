@@ -81,4 +81,14 @@ Invalid length, encoding, version and timestamps are rejected. List endpoints
 must order ascending by `(created_at, id)`, apply a strict greater-than predicate,
 and fetch `limit + 1` rows to determine the next cursor. UUID breaks timestamp
 ties. Cursors are positions, not signed authorization tokens; permissions and
-filters must be applied on every query. No list endpoint exists yet.
+filters must be applied on every query. The permission editor currently uses complete
+snapshots within enforced installation/guild capacity limits, described in
+[permissions.md](permissions.md); larger collections must adopt this pagination.
+
+## Membership and permissions
+
+`POST /api/v1/permissions` uses `PermissionRequest`/`PermissionResponse` from
+`shared/src/permissions.rs`. Every command requires an active bearer session. Guild
+changes include the last viewed revision; stale revisions return `409 Conflict`.
+See [permissions.md](permissions.md) for bootstrap, hierarchy, override precedence
+and the transport enforcement still needed when WebSocket/media handlers are added.

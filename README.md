@@ -9,6 +9,14 @@ The app includes account registration/login, recovery and verification, profile 
 device management, OS-backed desktop sessions, and Google OIDC integration. Local
 emails default to ignored `backend/.mail/`; Resend, SMTP and Google use provider
 credentials configured in `backend/.env` (see `docs/accounts.md`).
+
+Guild memberships, role hierarchy, channel overrides and the role editor are
+implemented. After verifying an account, run `./run-wsl.ps1 -BootstrapOwner YOUR_USERNAME`
+from `backend/`, then open **Guilds & roles**. See [permission rules and setup](docs/permissions.md).
+WebSocket and voice enforcement will be added with those transports.
+The main screen lists joined servers in a left rail. Use **+** (verified instance
+owner/admin) to create a server with an optional password, or **Join** with a server
+ID and password. Server selection shows its ID and permission-filtered channels.
 See [account setup and security](docs/accounts.md). Liveness/readiness, request IDs,
 shared API contracts and Diesel migrations underpin the backend. Chat and voice are
 planned in [TODO.md](TODO.md). Contributor rules are in [AGENTS.md](AGENTS.md).
@@ -121,6 +129,8 @@ new-machine setup and test instructions.
 
 The first migration creates one `instance` record with a UUID and creation
 timestamp; the second adds accounts, identities, sessions, email and OAuth state.
+The third adds instance ownership, guild membership, roles, channels and overrides.
+The fourth adds optional Argon2id-protected server joining.
 Add subsequent models
 with Diesel, from `backend/`:
 

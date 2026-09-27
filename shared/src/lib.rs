@@ -7,10 +7,11 @@ pub mod account;
 pub mod error;
 pub mod ids;
 pub mod pagination;
+pub mod permissions;
 pub mod validation;
 
 pub use error::{ApiError, ErrorCode};
-pub use ids::{AccountId, InstanceId, RequestId, SessionId};
+pub use ids::{AccountId, ChannelId, GuildId, InstanceId, RequestId, RoleId, SessionId};
 
 /// RFC 3339 on the wire, normalized to UTC. No OS clock is needed in shared code.
 pub type Timestamp = chrono::DateTime<chrono::Utc>;

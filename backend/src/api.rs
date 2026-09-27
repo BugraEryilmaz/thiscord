@@ -24,6 +24,7 @@ pub fn router(pool: Option<DbPool>, origins: Vec<HeaderValue>) -> Router {
         .route(HEALTH_PATH, get(health))
         .route(READY_PATH, get(ready))
         .merge(crate::auth::router())
+        .merge(crate::permissions::router())
         .fallback(not_found)
         .method_not_allowed_fallback(method_not_allowed)
         .layer(
