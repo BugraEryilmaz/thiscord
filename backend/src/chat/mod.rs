@@ -26,7 +26,7 @@ pub(crate) fn gate() -> &'static RwLock<()> {
     static GATE: OnceLock<RwLock<()>> = OnceLock::new();
     GATE.get_or_init(|| RwLock::new(()))
 }
-fn changes() -> &'static watch::Sender<u64> {
+pub(crate) fn changes() -> &'static watch::Sender<u64> {
     static CHANGES: OnceLock<watch::Sender<u64>> = OnceLock::new();
     CHANGES.get_or_init(|| watch::channel(0).0)
 }

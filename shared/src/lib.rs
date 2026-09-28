@@ -47,3 +47,6 @@ pub struct ReadinessResponse {
 pub enum ReadinessStatus {
     Ready,
 }
+
+pub mod audio;
+pub mod voice;

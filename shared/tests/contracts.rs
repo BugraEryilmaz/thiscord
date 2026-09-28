@@ -163,3 +163,32 @@ fn cursors_round_trip_timestamp_ties_and_reject_bad_tokens() {
     invalid_time[1..9].copy_from_slice(&i64::MAX.to_be_bytes());
     assert!(PageCursor::try_from(URL_SAFE_NO_PAD.encode(invalid_time)).is_err());
 }
+#[test]
+fn voice_and_audio_contract_bounds() {
+    use thiscord_shared::{
+        audio::AudioSettings,
+        voice::{ClientEvent, ClientFrame},
+    };
+    let frame = ClientFrame {
+        version: 1,
+        event: ClientEvent::State {
+            muted: true,
+            deafened: false,
+        },
+    };
+    assert_eq!(
+        to_value(frame).unwrap(),
+        json!({"version":1,"event":{"type":"state","muted":true,"deafened":false}})
+    );
+    assert!(
+        from_value::<ClientFrame>(json!({"version":1,"event":{"type":"ping","token":"extra"}}))
+            .is_err()
+    );
+    let mut settings = AudioSettings::default();
+    assert!(settings.validate().is_ok());
+    for volume in [f32::NAN, f32::INFINITY, -0.1, 2.1] {
+        settings.output_volume = volume;
+        assert!(settings.validate().is_err());
+    }
+    assert!(from_value::<AudioSettings>(json!({"password":"must not be here"})).is_err());
+}

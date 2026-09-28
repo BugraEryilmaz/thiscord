@@ -28,6 +28,11 @@ tokio = { version = "1", features = ["macros", "rt-multi-thread", "net", "signal
 tower-http = { version = "0.6", features = ["cors"] }
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+webrtc = "0.21.0"
+rtc = "0.21.0"
+async-trait = "0.1"
+hmac = "0.12"
+sha1 = "0.10"
 
 [dev-dependencies]
 tokio-tungstenite = "0.29"

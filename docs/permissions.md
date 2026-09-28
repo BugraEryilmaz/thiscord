@@ -142,8 +142,11 @@ Chat HTTP operations and socket deliveries now use current database permissions.
 Membership/role/session changes invalidate active sockets; the single-process access
 gate closes all subscriptions conservatively and eligible clients reconnect.
 See [chat.md](chat.md). Do not treat client snapshots as reusable authorization tickets.
-Signaling/SFU endpoints and voice eviction are still unimplemented; they must adopt
-equivalent checks and lifecycle invalidation when introduced.
+Voice signaling checks current sessions, membership, ViewChannel and JoinVoice.
+SFU routing also enforces Speak and self mute/deafen. Publisher/receiver writes
+hold the same access gate and check its generation; successful access-changing
+commits evict active voice sessions. See [audio.md](audio.md). Moderator voice
+operations remain pending and must enforce the target hierarchy.
 
 EditOwnMessages/DeleteOwnMessages additionally require message authorship;
 ManageMessages permits moderation. MoveMembers will require access to both source

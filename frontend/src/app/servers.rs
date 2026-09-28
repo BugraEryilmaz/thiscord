@@ -316,11 +316,11 @@ pub(super) fn ServerHome(ui: Ui) -> impl IntoView {
                                 if let Some(dialog)=dialog.get(){let _=dialog.show_modal();}
                             }>"+"</button></Show>
                         </div>
-                        <ul class="min-h-0 flex-1 space-y-2 overflow-y-auto text-white/70">{home.channels.into_iter().map(move |ch|{let id=ch.id;let label=format!("{} {}",if ch.kind==ChannelKind::Voice{"◖"}else{"#"},ch.name);view!{<li><button class="flex w-full items-center justify-between gap-2 rounded p-2 text-left hover:bg-white/10 disabled:opacity-40" disabled=ch.kind==ChannelKind::Voice on:click=move |_|selected.set(Some(ch.clone()))><span class="truncate">{label}</span><span class="shrink-0 text-xs text-brand">{move||unread.get().iter().find(|u|u.channel_id==id&&u.count>0).map(|u|format!("{}{}",u.count,if u.mentions>0{" @"}else{""}))}</span></button></li>}}).collect_view()}</ul>
+                        <ul class="min-h-0 flex-1 space-y-2 overflow-y-auto text-white/70">{home.channels.into_iter().map(move |ch|{let id=ch.id;let label=format!("{} {}",if ch.kind==ChannelKind::Voice{"◖"}else{"#"},ch.name);view!{<li><button class="flex w-full items-center justify-between gap-2 rounded p-2 text-left hover:bg-white/10 disabled:opacity-40" on:click=move |_|selected.set(Some(ch.clone()))><span class="truncate">{label}</span><span class="shrink-0 text-xs text-brand">{move||unread.get().iter().find(|u|u.channel_id==id&&u.count>0).map(|u|format!("{}{}",u.count,if u.mentions>0{" @"}else{""}))}</span></button></li>}}).collect_view()}</ul>
                         <Show when=move ||home.can_manage_roles><button class="text-sm text-brand underline" on:click=move |_|ui.page.set("permissions")>"Server roles & settings"</button></Show>
                     </nav>
                     <Show when=move||selected.get().is_some() fallback=move||view!{<div class="flex items-center justify-center rounded-xl border border-white/10 p-8 text-white/60">"Choose a text channel to start chatting."</div>}>
-                        {move||selected.get().map(|ch|view!{<super::chat::ChatPanel ui=ui guild=home.guild.id channel=ch.id name=ch.name/>})}
+                        {move||selected.get().map(|ch|if ch.kind==ChannelKind::Voice {view!{<super::audio::VoiceChannel ui=ui guild=home.guild.id channel=ch.id name=ch.name/>}.into_any()}else{view!{<super::chat::ChatPanel ui=ui guild=home.guild.id channel=ch.id name=ch.name/>}.into_any()})}
                     </Show>
                 </section>
             })}
@@ -329,7 +329,7 @@ pub(super) fn ServerHome(ui: Ui) -> impl IntoView {
             <header class="mb-5 flex items-center justify-between"><h2 id="channel-dialog-title" class="text-xl font-semibold">"Create channel"</h2><button aria-label="Close dialog" disabled=move ||ui.busy.get() on:click=move |_|if let Some(dialog)=dialog.get(){dialog.close();}>"×"</button></header>
             <form class="space-y-5" on:submit=submit>
                 <Field label="Channel name" value=name/>
-                <label class="block space-y-2"><span>"Channel type"</span><select class="w-full rounded bg-slate-900 p-2" prop:value=move ||if voice.get(){"voice"}else{"text"} on:change=move |ev|voice.set(event_target_value(&ev)=="voice")><option value="text">"Text"</option><option value="voice">"Voice (calling not available yet)"</option></select></label>
+                <label class="block space-y-2"><span>"Channel type"</span><select class="w-full rounded bg-slate-900 p-2" prop:value=move ||if voice.get(){"voice"}else{"text"} on:change=move |ev|voice.set(event_target_value(&ev)=="voice")><option value="text">"Text"</option><option value="voice">"Voice"</option></select></label>
                 <p class="text-sm text-red-300" role="alert">{move ||error.get()}</p>
                 <button class="w-full rounded-lg bg-brand px-5 py-3 font-semibold disabled:opacity-50" disabled=move ||ui.busy.get()||name.get().trim().is_empty()>"Create channel"</button>
             </form>

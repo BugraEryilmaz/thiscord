@@ -54,15 +54,15 @@ roles assigned to its memberships; a user can have different roles in each guild
 - [x] Central backend permission evaluator; shared permission identifiers/types.
 - [x] Authorize every implemented membership/role/channel-management HTTP operation.
 - [x] Authorize chat HTTP operations and WebSocket subscriptions/deliveries.
-- [ ] Wire media authorization when media handlers exist.
+- [x] Authorize signaling admission and every SFU publisher/receiver route.
 - [x] Invalidate active sockets on membership/role/session changes (single backend process).
-- [ ] Revoke active voice access when media handlers exist.
+- [x] Revoke active voice access after membership/role/session changes.
 - [x] Role editors, assignment UI and effective-permissions preview.
 - [x] Test cross-guild isolation, overrides, hierarchy, ownership transfer,
   last-owner protection, stale access and concurrent updates.
 
 See docs/permissions.md for local owner bootstrap, precedence, bounded guild sizes
-and transport enforcement still required by the chat/media milestones.
+and single-process chat/media enforcement.
 
 ## 3. Server and channel management
 
@@ -91,45 +91,56 @@ and transport enforcement still required by the chat/media milestones.
 
 ## 5. Frontend audio and media feasibility
 
-- [ ] Spike capture/playback/WebRTC in Tauri on Windows, macOS and Linux; choose
-  WebView APIs through Rust bindings or a native Rust audio path based on results.
-- [ ] Select compatible maintained Rust media libraries.
-- [ ] Enumerate/select input/output devices, persist settings and handle hot-plug.
-- [ ] Microphone permission UX, device failures, input levels and test playback.
-- [ ] Mute/deafen, per-user volume, voice activation and push-to-talk.
-- [ ] Echo cancellation, noise suppression and automatic gain control evaluation.
-- [ ] Global push-to-talk permissions and native platform integration.
-- [ ] Release devices on leave/logout/suspend/shutdown; test headset changes.
+- [x] Native CPAL capture/playback, per-stream SPSC ring buffers and Opus codecs.
+- [x] Windows/Linux encrypted WebRTC software probes; three-OS CI build/test matrix.
+- [x] Select Rust media libraries and document native dependencies in docs/audio.md.
+- [x] Enumerate/select devices, persist settings, refresh device lists and stop on failures.
+- [x] Microphone permission/error UX, input levels and bounded playback/loopback tests.
+- [x] Mute/deafen, independent speaker volume, voice activation and in-app push-to-talk.
+- [x] Optional Rust echo cancellation, noise suppression and automatic gain processing.
+- [x] Optional global Ctrl+Shift+Space integration with conflict/error reporting.
+- [x] Release devices on leave/logout/window destruction and UI/suspend timeout.
+- [ ] Physical microphone/headset, suspend and acoustic acceptance on all three OSes.
+- [ ] macOS runtime/permission spike; Wayland global shortcut portal integration.
+- [ ] Arbitrary sample-rate resampling and Bluetooth hands-free format support.
 
 ## 6. WebRTC transport and signaling
 
-- [ ] Shared join/leave/offer/answer/ICE contracts over authenticated signaling.
-- [ ] Peer lifecycle, SDP negotiation, ICE candidates/restarts and reconnects.
-- [ ] Opus negotiation, DTLS-SRTP and connection-quality metrics.
-- [ ] STUN/TURN deployment, short-lived relay credentials and NAT traversal tests.
-- [ ] WSL/Windows/router public/private addressing and UDP port mapping.
-- [ ] Validate voice permissions and reject stale/replayed signaling sessions.
-- [ ] Restrictive NAT, relay fallback, packet loss/jitter and device-change tests.
+- [x] Shared versioned authenticated join/leave/offer/answer/state/error contracts.
+- [x] Bounded peer negotiation, gathered SDP ICE candidates and disconnect cleanup.
+- [x] Opus negotiation and per-hop DTLS-SRTP; encrypted two-hop probe.
+- [x] Configurable STUN/TURN and backend-generated short-lived TURN credentials.
+- [x] Validate current sessions/voice permissions; reject duplicate negotiation.
+- [x] Document WSL/Windows UDP addressing and firewall requirements.
+- [ ] Automatic ICE restart/reconnect and long-call relay credential refresh.
+- [ ] Deploy STUN/TURN; restrictive NAT, relay fallback and public UDP acceptance.
+- [ ] Packet-loss/jitter network trials, connection quality metrics and adaptive bitrate.
 
 ## 7. Backend Rust SFU
 
-- [ ] Evaluate Rust SFU libraries/implementation and record the architecture choice.
-- [ ] Rooms, publishers/subscribers and participant lifecycle in backend modules.
-- [ ] Terminate WebRTC transports and forward authorized RTP/RTCP audio streams.
-- [ ] RTCP feedback, congestion, slow receivers and per-room resource limits.
-- [ ] Permission-controlled admission/eviction tied to guild roles, channels and bans.
-- [ ] Cleanup abandoned sessions, metrics and graceful room draining on shutdown.
-- [ ] Multi-party load tests and capacity/bandwidth budgets.
-- [ ] Document encryption boundaries: SFU transport encryption is not automatic E2EE.
+- [x] Native Rust WebRTC SFU architecture recorded in docs/audio.md.
+- [x] In-memory rooms, publisher/subscriber slots and participant lifecycle.
+- [x] Forward encoded audio without transcoding; per-hop RTCP interceptors.
+- [x] Bounded ingress/egress, slow-receiver deadlines and eight-person room limits.
+- [x] Permission-controlled admission and eviction tied to channel/session changes.
+- [x] Abandoned connection cleanup and conservative access-change invalidation.
+- [x] Document bandwidth estimate and transport encryption versus E2EE.
+- [ ] Sustained multi-party load tests and measured capacity/congestion budgets.
+- [ ] Production metrics and coordinated graceful room draining on shutdown.
 
 ## 8. Voice channels end to end
 
-- [ ] Join/leave/move voice channels, participants UI and synchronized presence.
-- [ ] Wire frontend audio to SFU streams; speaking indicators and quality UI.
-- [ ] User mute/deafen and moderator mute/deafen/move/disconnect controls.
-- [ ] Capacity, join/speak permissions and live permission-change enforcement.
-- [ ] Recovery after network changes, suspend/resume, restart and deleted channels.
-- [ ] Multi-user acceptance tests on Windows/macOS/Linux with real microphones.
+- [x] Join/leave and move yourself between voice channels; live participant list.
+- [x] Connect native capture/playback to SFU streams with per-speaker volume sliders.
+- [x] User mute/deafen enforced locally and by the server; persistent voice controls.
+- [x] Capacity, join/speak permissions and live permission-change enforcement.
+- [x] Real-peer forwarding, channel isolation, self-mute/deafen, revocation,
+  Speak denial, publisher slot reuse, deleted-channel and cleanup integration tests.
+- [x] Device/network/access failures stop audio and allow explicit rejoin.
+- [ ] Moderator mute/deafen/move/disconnect controls with hierarchy enforcement.
+- [ ] Remote speaking indicators and connection-quality UI.
+- [ ] Automatic recovery after network changes, suspend/resume and server restart.
+- [ ] Multi-user acceptance on Windows/macOS/Linux with real microphones.
 
 ## 9. Hosting and releases
 

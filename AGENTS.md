@@ -68,6 +68,11 @@
 - Select Rust WebRTC/SFU libraries after a three-platform compatibility spike.
   Do not silently substitute a non-Rust application server. Document native codec,
   WebView and STUN/TURN infrastructure dependencies and encryption boundaries.
+- Follow `docs/audio.md` for the native CPAL/Opus path, per-stream SPSC queues,
+  optional Rust DSP and single-process SFU. Keep PCM out of Tauri IPC and avoid
+  allocations, locks, codecs or networking in audio callbacks. Preserve bounded
+  queues, stop/PTT-release signaling and permission invalidation on both media
+  ingress and egress. Never log SDP, TURN credentials or audio packet contents.
 
 ## Persistence and configuration
 

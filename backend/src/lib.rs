@@ -6,3 +6,4 @@ pub mod permissions;
 pub mod schema;
 
 pub type BoxError = Box<dyn std::error::Error + Send + Sync>;
+pub mod voice;

@@ -89,7 +89,8 @@ an existing session. Multiple replicas need shared invalidation and are not supp
 This targets a personal deployment, not measured large-installation capacity.
 Polling and full guild evaluation favor reuse of the current permission policy.
 Event-log compaction, cross-process fanout, full-guild presence and load tests are
-future work. Attachments, search, desktop notifications and media remain pending.
+future work. Attachments, search and desktop notifications remain pending.
+Native voice uses a separate signaling socket and the same access gate; see [audio.md](audio.md).
 
 ## Checks
 

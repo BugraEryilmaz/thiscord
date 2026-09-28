@@ -14,13 +14,16 @@ Guild memberships, role hierarchy, channel overrides and the role editor are
 implemented. After verifying an account, run `./run-wsl.ps1 -BootstrapOwner YOUR_USERNAME`
 from `backend/`, then open **Guilds & roles**. See [permission rules and setup](docs/permissions.md).
 Text chat includes persisted history, edits/deletes, unread mentions and authenticated
-live sockets. See [chat protocol and limits](docs/chat.md). Voice remains future work.
+live sockets. See [chat protocol and limits](docs/chat.md). Desktop voice channels
+use native Rust audio, independent speaker volume controls and a Rust WebRTC SFU.
+Open **Settings > Audio & voice** to select devices and test audio, then join a
+voice channel. See [audio setup, networking and remaining checks](docs/audio.md).
 The main screen lists joined servers in a left rail. Use **+** (verified instance
 owner/admin) to create a server with an optional password, or **Join** with a server
 ID and password. Server selection shows its ID and permission-filtered channels.
 See [account setup and security](docs/accounts.md). Liveness/readiness, request IDs,
-shared API contracts and Diesel migrations underpin the backend. Voice and later chat features are
-planned in [TODO.md](TODO.md). Contributor rules are in [AGENTS.md](AGENTS.md).
+shared API contracts and Diesel migrations underpin the backend. Remaining media
+and chat work is tracked in [TODO.md](TODO.md). Contributor rules are in [AGENTS.md](AGENTS.md).
 
 ## Layout
 
@@ -51,6 +54,10 @@ on each desktop host: MSVC C++ tools and WebView2 on Windows, Xcode tools on
 macOS, and WebKitGTK/GTK development libraries on Linux. Build desktop releases
 on their respective OSes. This template targets all three; runtime verification,
 installer packaging, icons and signing remain roadmap work.
+Native audio also needs CMake and a C compiler for bundled libopus; Linux needs
+`libasound2-dev` and `pkg-config`. macOS uses CoreAudio and Windows uses WASAPI.
+The initial native path requires 48 kHz mono/stereo devices. Hardware acceptance,
+macOS runtime and public STUN/TURN deployment remain open; see docs/audio.md.
 
 Install frontend tools on the desktop host:
 
