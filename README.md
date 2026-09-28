@@ -68,6 +68,9 @@ cargo install tauri-cli --version '^2' --locked
 
 ## Backend in WSL
 
+For direct HTTPS with the existing Let's Encrypt certificate, see
+[HTTPS setup and certificate renewal](docs/https.md).
+
 The existing local PostgreSQL installation is **PostgreSQL 17 in `kali-linux`**,
 cluster `17/main`, listening on `localhost:5432`. The application database and
 role are both named `thiscord`; the separate test database is `thiscord_test`.
@@ -173,7 +176,7 @@ configure WSL networking and `BACKEND_BIND` deliberately. Remote machines need a
 reachable backend address. Set the compile-time UI URL before starting Trunk/Tauri:
 
 ```powershell
-$env:THISCORD_API_URL = "https://api.thiscord.com.tr"
+$env:THISCORD_API_URL = "https://thiscord.com.tr"
 cargo tauri dev
 ```
 

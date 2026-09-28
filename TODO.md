@@ -144,7 +144,8 @@ and single-process chat/media enforcement.
 
 ## 9. Hosting and releases
 
-- [ ] DNS for `thiscord.com.tr`/`api.thiscord.com.tr`, HTTPS and WSS.
+- [x] Direct backend HTTPS/WSS using Let's Encrypt PEM files, TLS tests and SIGHUP reload.
+- [ ] Finalize public hostname/DNS, browser hosting and certificate renewal automation.
 - [ ] Reverse proxy, WSL service startup/supervision, Windows networking/firewall,
   SFU/TURN UDP exposure; keep PostgreSQL private.
 - [ ] OAuth redirect registration and per-environment CORS/CSP configuration.

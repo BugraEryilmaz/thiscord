@@ -20,18 +20,27 @@ use std::time::Duration;
 use thiscord_shared::{AccountId, RequestId, SessionId, account::*};
 
 fn config() -> Result<(String, String, String), Failure> {
-    let get = |name| {
+    let get = |name: &'static str| {
         std::env::var(name)
             .ok()
             .filter(|s| !s.is_empty())
-            .ok_or(Failure::Unavailable)
+            .ok_or(Failure::Configuration(name))
     };
     let redirect = get("GOOGLE_REDIRECT_URL")?;
-    let url = url::Url::parse(&redirect).map_err(|_| Failure::Unavailable)?;
+    let url =
+        url::Url::parse(&redirect).map_err(|_| Failure::Configuration("GOOGLE_REDIRECT_URL"))?;
     if url.scheme() != "https"
         && !(url.scheme() == "http" && matches!(url.host_str(), Some("localhost" | "127.0.0.1")))
     {
-        return Err(Failure::Unavailable);
+        return Err(Failure::Configuration("GOOGLE_REDIRECT_URL"));
+    }
+    if !url.username().is_empty()
+        || url.password().is_some()
+        || url.query().is_some()
+        || url.fragment().is_some()
+        || url.path() != GOOGLE_CALLBACK_PATH
+    {
+        return Err(Failure::Configuration("GOOGLE_REDIRECT_URL"));
     }
     Ok((
         get("GOOGLE_CLIENT_ID")?,

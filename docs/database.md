@@ -37,7 +37,13 @@ machine, a pre-existing `netsh interface portproxy` rule forwards Windows port
 5432 to WSL's network address, while PostgreSQL listens only on WSL loopback.
 That route cannot reach PostgreSQL. Running the backend in the same WSL
 distribution uses the correct localhost and requires no database port forwarding.
-The desktop frontend connects to the backend's HTTP port 3000.
+Local development uses HTTP port 3000. The direct HTTPS deployment uses port 443;
+see [HTTPS setup](https.md).
+
+`BACKEND_BIND` is a numeric local IP address and port, normally `127.0.0.1:3000`.
+Do not set it to a domain or URL such as `thiscord.com.tr:80`; domains belong in
+DNS/public URL configuration. TLS can terminate directly in the backend or at a
+reverse proxy. Invalid bind values fail before database startup.
 
 Check PostgreSQL inside WSL with `wsl -d kali-linux -- pg_lsclusters`. If stopped,
 run `sudo pg_ctlcluster 17 main start` inside Kali. Existing process environment

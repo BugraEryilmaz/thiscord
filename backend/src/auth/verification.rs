@@ -12,7 +12,8 @@ use thiscord_shared::account::{AccountRequest, EMAIL_VERIFICATION_PATH, EmailVer
 pub(super) fn link(token: &str) -> Result<String, Failure> {
     let base =
         std::env::var("PUBLIC_BACKEND_URL").unwrap_or_else(|_| "http://localhost:3000".into());
-    let mut url = url::Url::parse(&base).map_err(|_| Failure::Unavailable)?;
+    let mut url =
+        url::Url::parse(&base).map_err(|_| Failure::Configuration("PUBLIC_BACKEND_URL"))?;
     if (url.scheme() != "https"
         && !(url.scheme() == "http" && matches!(url.host_str(), Some("localhost" | "127.0.0.1"))))
         || !url.username().is_empty()
@@ -21,7 +22,7 @@ pub(super) fn link(token: &str) -> Result<String, Failure> {
         || url.fragment().is_some()
         || url.path() != "/"
     {
-        return Err(Failure::Unavailable);
+        return Err(Failure::Configuration("PUBLIC_BACKEND_URL"));
     }
     url.set_path(EMAIL_VERIFICATION_PATH);
     url.query_pairs_mut().append_pair("token", token);

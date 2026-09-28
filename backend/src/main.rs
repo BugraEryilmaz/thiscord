@@ -13,7 +13,9 @@ async fn main() -> Result<(), BoxError> {
 
     let bind: SocketAddr = env::var("BACKEND_BIND")
         .unwrap_or_else(|_| "127.0.0.1:3000".into())
-        .parse()?;
+        .trim()
+        .parse()
+        .map_err(|_| "BACKEND_BIND must be a numeric IP address and port, such as 127.0.0.1:3000 or [::1]:3000. Set the public hostname in PUBLIC_BACKEND_URL and DNS, not BACKEND_BIND.")?;
     let origins = env::var("ALLOWED_ORIGINS")
         .unwrap_or_else(|_| {
             "http://localhost:1420,http://127.0.0.1:1420,http://tauri.localhost,tauri://localhost"
@@ -64,18 +66,39 @@ async fn main() -> Result<(), BoxError> {
         tracing::info!("Initial instance owner configured");
         return Ok(());
     }
+    let tls = thiscord_backend::tls::Tls::from_env().await?;
     if let Some(pool) = pool.as_ref() {
         thiscord_backend::auth::mail::start(pool.clone());
     }
     let app = api::router(pool, origins);
     let listener = tokio::net::TcpListener::bind(bind).await?;
-    tracing::info!(%bind, "Thiscord backend listening");
-    axum::serve(
-        listener,
-        app.into_make_service_with_connect_info::<SocketAddr>(),
-    )
-    .with_graceful_shutdown(shutdown())
-    .await?;
+    let address = listener.local_addr()?;
+    if let Some(tls) = tls {
+        let config = tls.config.clone();
+        let renewals = tokio::spawn(tls.watch_renewals());
+        let handle = axum_server::Handle::new();
+        let stopping = handle.clone();
+        let signals = tokio::spawn(async move {
+            shutdown().await;
+            stopping.graceful_shutdown(Some(std::time::Duration::from_secs(10)));
+        });
+        tracing::info!(bind = %address, scheme = "https", "Thiscord backend listening");
+        let result = axum_server::from_tcp_rustls(listener.into_std()?, config)?
+            .handle(handle)
+            .serve(app.into_make_service_with_connect_info::<SocketAddr>())
+            .await;
+        renewals.abort();
+        signals.abort();
+        result?;
+    } else {
+        tracing::info!(bind = %address, scheme = "http", "Thiscord backend listening");
+        axum::serve(
+            listener,
+            app.into_make_service_with_connect_info::<SocketAddr>(),
+        )
+        .with_graceful_shutdown(shutdown())
+        .await?;
+    }
     Ok(())
 }
 

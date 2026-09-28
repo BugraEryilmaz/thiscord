@@ -26,6 +26,7 @@ pub(super) enum Failure {
     Forbidden,
     Limited,
     Unavailable,
+    Configuration(&'static str),
     Database(diesel::result::Error),
 }
 impl std::fmt::Display for Failure {
@@ -78,6 +79,14 @@ impl Failure {
                 ErrorCode::ServiceUnavailable,
                 "Account service or provider is unavailable",
             ),
+            Self::Configuration(setting) => {
+                tracing::error!(%request_id, setting, "Invalid or missing account configuration; public account URLs require HTTPS");
+                (
+                    StatusCode::SERVICE_UNAVAILABLE,
+                    ErrorCode::ServiceUnavailable,
+                    "Account service or provider is unavailable",
+                )
+            }
             Self::Database(e) => {
                 // Never log database error text, which may contain credentials or submitted values.
                 let _ = e;
