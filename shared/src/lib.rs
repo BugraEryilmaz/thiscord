@@ -49,4 +49,5 @@ pub enum ReadinessStatus {
 }
 
 pub mod audio;
+pub mod update;
 pub mod voice;

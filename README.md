@@ -63,7 +63,7 @@ Install frontend tools on the desktop host:
 
 ```sh
 cargo install trunk --locked
-cargo install tauri-cli --version '^2' --locked
+cargo install tauri-cli --version 2.12.0 --locked
 ```
 
 ## Backend in WSL
@@ -274,9 +274,12 @@ the test rather than silently skipping it.
 [CI](.github/workflows/ci.yml) runs formatting, shared/backend Clippy and tests
 against PostgreSQL 17, a generated-schema check, and a release WASM/Tailwind
 build. A Windows/macOS/Linux matrix lints and builds native executables with
-those web assets embedded, then uploads them as artifacts. CI does not sign,
-package installers, launch GUI applications or deploy services. Remote CI and
-macOS runtime verification require their respective runners.
+those web assets embedded, then uploads them as artifacts. Tagged client releases
+run that CI first, then build Windows, Linux and both macOS architectures, sign
+updater artifacts and publish a complete GitHub release. Clients check automatically
+but install/restart only on request. See [release setup and signing secrets](docs/releases.md)
+before pushing the first `client-vMAJOR.MINOR.PATCH` tag. GUI/installer smoke tests
+and macOS runtime verification require their respective hosts; services are not deployed.
 
 Shared transport conventions are described in [docs/api.md](docs/api.md).
 Cargo currently reports an upstream future-compatibility warning in

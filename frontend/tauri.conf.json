@@ -4,19 +4,67 @@
   "version": "0.1.0",
   "identifier": "tr.com.thiscord.desktop",
   "build": {
-    "beforeDevCommand": { "script": "trunk serve", "cwd": "." },
-    "beforeBuildCommand": { "script": "trunk build --release", "cwd": "." },
+    "beforeDevCommand": {
+      "script": "trunk serve",
+      "cwd": "."
+    },
+    "beforeBuildCommand": {
+      "script": "trunk build --release",
+      "cwd": "."
+    },
     "devUrl": "http://127.0.0.1:1420",
     "frontendDist": "dist",
-    "features": ["desktop"]
+    "features": [
+      "desktop"
+    ]
   },
   "app": {
     "withGlobalTauri": true,
-    "windows": [{ "label": "main", "title": "Thiscord", "width": 1100, "height": 750, "minWidth": 700, "minHeight": 500 }],
+    "windows": [
+      {
+        "label": "main",
+        "title": "Thiscord",
+        "width": 1100,
+        "height": 750,
+        "minWidth": 700,
+        "minHeight": 500
+      }
+    ],
     "security": {
       "csp": "default-src 'self'; script-src 'self' 'wasm-unsafe-eval'; style-src 'self'; img-src 'self' asset: http://asset.localhost; connect-src 'self' ipc: http://ipc.localhost http://localhost:3000 http://127.0.0.1:3000 ws://localhost:3000 ws://127.0.0.1:3000 https://thiscord.com.tr wss://thiscord.com.tr https://api.thiscord.com.tr wss://api.thiscord.com.tr",
       "devCsp": "default-src 'self'; script-src 'self' 'wasm-unsafe-eval'; style-src 'self'; connect-src 'self' ipc: http://ipc.localhost http://localhost:3000 http://127.0.0.1:3000 ws://localhost:3000 ws://127.0.0.1:3000 ws://127.0.0.1:1420 ws://localhost:1420 https://thiscord.com.tr wss://thiscord.com.tr https://api.thiscord.com.tr wss://api.thiscord.com.tr"
     }
   },
-  "bundle": { "active": false, "icon": ["icons/icon.png", "icons/icon.ico", "icons/icon.icns"] }
+  "bundle": {
+    "active": true,
+    "icon": [
+      "icons/icon.png",
+      "icons/icon.ico",
+      "icons/icon.icns"
+    ],
+    "targets": "all",
+    "createUpdaterArtifacts": true,
+    "category": "SocialNetworking",
+    "shortDescription": "Private communities, text chat and voice.",
+    "windows": {
+      "nsis": {
+        "installMode": "currentUser"
+      }
+    },
+    "macOS": {
+      "entitlements": "Entitlements.plist"
+    }
+  },
+  "plugins": {
+    "updater": {
+      "pubkey": "dW50cnVzdGVkIGNvbW1lbnQ6IG1pbmlzaWduIHB1YmxpYyBrZXk6IDdDNTUwQUJFMDNBMDRCRTMKUldUalM2QUR2Z3BWZkpVWkh2ZVd5RnN0VFVLUy9LMUFwd2NNOElYcGRwdmVhdkR5Z05XeUxmci8K",
+      "endpoints": [
+        "https://github.com/BugraEryilmaz/thiscord/releases/latest/download/latest.json"
+      ],
+      "windows": {
+        "installMode": "passive"
+      },
+      "requireSignedVersion": true
+    }
+  }
 }

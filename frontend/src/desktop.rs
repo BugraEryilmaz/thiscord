@@ -2,10 +2,17 @@
 
 mod native_account;
 mod native_audio;
+mod native_update;
 mod native_voice;
 
 fn main() {
     tauri::Builder::default()
+        .plugin(tauri_plugin_updater::Builder::new().build())
+        .manage(native_update::UpdateState::default())
+        .setup(|app| {
+            native_update::start(app.handle());
+            Ok(())
+        })
         .plugin(tauri_plugin_global_shortcut::Builder::new().build())
         .manage(native_audio::AudioState::default())
         .manage(native_voice::VoiceState::default())
@@ -41,7 +48,10 @@ fn main() {
             native_audio::audio_webrtc_probe,
             native_voice::voice_join,
             native_voice::voice_leave,
-            native_voice::voice_status
+            native_voice::voice_status,
+            native_update::update_status,
+            native_update::update_check,
+            native_update::update_install
         ])
         .run(tauri::generate_context!())
         .expect("failed to run Thiscord");

@@ -151,7 +151,11 @@ and single-process chat/media enforcement.
 - [ ] OAuth redirect registration and per-environment CORS/CSP configuration.
 - [ ] Database backups/restore tests and migration/rollback deployment procedures.
 - [ ] Logs/metrics, resource/disk limits and operations runbook.
-- [ ] App icons/installer metadata and Windows/macOS/Linux installers.
-- [ ] Signing/notarization and authenticated update distribution.
+- [x] Installer metadata/configuration and tagged Windows/Linux/macOS release pipeline.
+- [x] Signed updater artifacts, complete release feed and verification before publishing.
+- [x] Automatic launch/periodic checks with explicit install/restart and voice protection.
+- [ ] Configure GitHub signing secrets and run the first installer release pipeline.
+- [ ] Windows Authenticode and Apple Developer ID/notarization configuration.
+- [ ] Initial-install and version-to-version update acceptance on all three OSes.
 - [ ] Accessibility, keyboard navigation, failure recovery and platform smoke tests.
 - [ ] Review session security, authorization, file access and media permissions.

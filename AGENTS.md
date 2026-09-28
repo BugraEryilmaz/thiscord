@@ -107,3 +107,7 @@
   runtime compatibility. Keep README and TODO accurate; stubs are not completed features.
 - Keep the CI workflow's shared/backend tests (including ignored PostgreSQL tests),
   WASM build and native desktop matrix current when changing build requirements.
+- Follow `docs/releases.md` for client publishing. Keep updater private keys outside
+  the repository, enforce signed versions, and publish a complete platform feed only
+  after all checks/builds pass. Updates require explicit install/restart and must not
+  interrupt voice. Keep the Cargo/Tauri versions and `client-v` release tag aligned.

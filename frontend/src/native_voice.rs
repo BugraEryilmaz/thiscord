@@ -111,6 +111,15 @@ pub async fn voice_join(
     settings: AudioSettings,
 ) -> Result<(), String> {
     settings.validate()?;
+    let update_app = app.clone();
+    let update_state = update_app.state::<crate::native_update::UpdateState>();
+    let _voice_admission = update_state
+        .voice_admission
+        .try_lock()
+        .map_err(|_| "An update or voice connection is already starting")?;
+    if crate::native_update::installing(&app) {
+        return Err("Wait for the update to finish before joining voice.".into());
+    }
     if token.len() != 43 {
         return Err("Sign in before joining voice".into());
     }

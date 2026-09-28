@@ -7,4 +7,10 @@ backend/.mail/
 .env.*
 !.env.example
 *.log
+/release-artifacts/
+/release-output/
+/frontend/tauri.ci.conf.json
+# Private updater keys must remain outside the repository.
+*.key
+*updater-password*
 .DS_Store

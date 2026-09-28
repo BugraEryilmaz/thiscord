@@ -103,6 +103,11 @@ pub async fn audio_test(
     microphone: bool,
 ) -> Result<AudioStatus, String> {
     settings.validate()?;
+    let update_state = app.state::<crate::native_update::UpdateState>();
+    let _admission = update_state
+        .voice_admission
+        .try_lock()
+        .map_err(|_| "Wait for the update or voice connection to finish")?;
     if microphone {
         register_ptt(&app, &settings)?;
     }
