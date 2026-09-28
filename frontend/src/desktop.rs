@@ -2,10 +2,33 @@
 
 mod native_account;
 mod native_audio;
+mod native_signaling;
 mod native_update;
 mod native_voice;
 
 fn main() {
+    // Run from a Terminal to diagnose the exact installed native network path.
+    // No WebView, microphone, account token or TURN allocation is involved.
+    if std::env::args().any(|arg| arg == "--check-voice-connection") {
+        let runtime = tokio::runtime::Runtime::new().expect("create diagnostic runtime");
+        let base = option_env!("THISCORD_API_URL").unwrap_or("http://localhost:3000");
+        println!(
+            "Thiscord {} native voice connection check",
+            env!("CARGO_PKG_VERSION")
+        );
+        let result = runtime.block_on(native_signaling::connect(base));
+        let code = match result {
+            Ok(_) => {
+                println!("Voice TLS/WebSocket connection succeeded.");
+                0
+            }
+            Err(error) => {
+                eprintln!("{error}");
+                1
+            }
+        };
+        std::process::exit(code);
+    }
     tauri::Builder::default()
         .plugin(tauri_plugin_updater::Builder::new().build())
         .manage(native_update::UpdateState::default())

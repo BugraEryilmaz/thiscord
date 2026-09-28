@@ -113,7 +113,8 @@ and single-process chat/media enforcement.
 - [x] Validate current sessions/voice permissions; reject duplicate negotiation.
 - [x] Document WSL/Windows UDP addressing and firewall requirements.
 - [ ] Automatic ICE restart/reconnect and long-call relay credential refresh.
-- [ ] Deploy STUN/TURN; restrictive NAT, relay fallback and public UDP acceptance.
+- [x] Docker coturn deployment, shared-secret configuration and local relay tests.
+- [ ] Restrictive NAT, forced WebRTC relay fallback and off-site public UDP acceptance.
 - [ ] Packet-loss/jitter network trials, connection quality metrics and adaptive bitrate.
 
 ## 7. Backend Rust SFU

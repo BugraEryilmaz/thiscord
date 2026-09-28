@@ -134,14 +134,41 @@ interface. `:0` allocates one UDP port per peer. Windows must be able to reach t
 advertised WSL address, and both host firewall directions must permit the media.
 Do not configure a single fixed UDP port for multiple connections.
 
-For other networks, deploy STUN/TURN and configure THISCORD_STUN_URL,
-THISCORD_TURN_URL and THISCORD_TURN_SECRET in backend/.env. No public service is
-assumed or silently contacted. The backend issues account-bound, one-hour
+Docker coturn deployment and public port requirements are documented in
+[turn.md](turn.md). Configure THISCORD_STUN_URL, THISCORD_TURN_URL and
+THISCORD_TURN_SECRET in backend/.env and restart the backend. No third-party
+service is assumed or silently contacted. The backend issues account-bound, one-hour
 [TURN REST credentials](https://github.com/coturn/coturn/blob/master/README.turnserver)
 using HMAC-SHA1; only the temporary credential goes to clients. The static secret
 stays on the backend. Long calls need rejoining before relay credentials expire
-until refresh/ICE restart is implemented. DNS, WSS, router/firewall configuration,
-relay deployment and hostile-NAT acceptance are not configured by this change.
+until refresh/ICE restart is implemented. Router/firewall forwarding and off-site,
+restrictive-NAT acceptance still require verification for each deployment.
+
+## Native voice connection diagnostics
+
+Text chat uses the WebView's network stack; voice signaling uses a native Rust
+WebSocket. Working text chat alone therefore does not establish native voice
+connectivity. The native connector reports DNS, TCP and TLS/WebSocket failures
+separately, includes the configured signaling endpoint, and tries alternate
+IPv4/IPv6 addresses with staggered concurrent connections. TLS certificate and
+hostname verification remain enabled. Tokens are sent only after the upgrade;
+errors never include response bodies, tokens or SDP.
+
+On macOS, the bundle declares a local-network usage description. Check System
+Settings > Privacy & Security > Local Network when native networking is blocked.
+An enabled permission does not rule out DNS, routing, VPN or connection failures.
+See [Apple's local-network privacy guidance](https://developer.apple.com/documentation/technotes/tn3179-understanding-local-network-privacy).
+
+New builds support a native-only check from Terminal, without opening a microphone
+or using an account:
+
+```sh
+/Applications/Thiscord.app/Contents/MacOS/thiscord-desktop --check-voice-connection
+```
+
+Older installed releases do not have this command or the detailed errors. The
+intermittent macOS signaling timeout reported on 2026-09-29 recovered before these
+changes were installed; its cause and macOS runtime behavior remain unverified.
 
 ## Verification and remaining work
 

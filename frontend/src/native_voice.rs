@@ -10,7 +10,7 @@ use tauri::{Manager, State};
 use thiscord_frontend::audio::{AudioEngine, Command};
 use thiscord_shared::{ChannelId, GuildId, audio::AudioSettings, voice::*};
 use tokio::sync::{Notify, mpsc, oneshot};
-use tokio_tungstenite::tungstenite::{Message, client::IntoClientRequest};
+use tokio_tungstenite::tungstenite::Message;
 use webrtc::{
     media_stream::{
         track_local::TrackLocal,
@@ -196,36 +196,7 @@ async fn run(
     peer: &mut Option<Arc<dyn PeerConnection>>,
 ) -> Result<(), String> {
     let base = option_env!("THISCORD_API_URL").unwrap_or("http://localhost:3000");
-    let mut url = url::Url::parse(base).map_err(|_| "Invalid API URL")?;
-    let scheme = match url.scheme() {
-        "http" => "ws",
-        "https" => "wss",
-        _ => return Err("Invalid API URL".into()),
-    };
-    url.set_scheme(scheme).map_err(|_| "Invalid API URL")?;
-    url.set_path(VOICE_PATH);
-    url.set_query(None);
-    let mut req = url
-        .as_str()
-        .into_client_request()
-        .map_err(|_| "Invalid voice URL")?;
-    req.headers_mut()
-        .insert("origin", "http://tauri.localhost".parse().unwrap());
-    let (ws, _) = tokio::time::timeout(
-        Duration::from_secs(10),
-        tokio_tungstenite::connect_async_with_config(
-            req,
-            Some(
-                tokio_tungstenite::tungstenite::protocol::WebSocketConfig::default()
-                    .max_message_size(Some(128 * 1024))
-                    .max_frame_size(Some(128 * 1024)),
-            ),
-            false,
-        ),
-    )
-    .await
-    .map_err(|_| "Voice signaling timed out")?
-    .map_err(|_| "Cannot connect to voice server")?;
+    let ws = crate::native_signaling::connect(base).await?;
     let (mut send, mut receive) = ws.split();
     send.send(frame(ClientEvent::Join {
         token: token.into(),

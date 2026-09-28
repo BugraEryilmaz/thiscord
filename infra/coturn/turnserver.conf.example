@@ -1,0 +1,39 @@
+# Generated private copy is turnserver.conf (ignored by Git).
+listening-port=3478
+listening-ip=0.0.0.0
+realm=thiscord.com.tr
+server-name=thiscord.com.tr
+fingerprint
+use-auth-secret
+static-auth-secret=REPLACE_WITH_THE_BACKEND_THISCORD_TURN_SECRET
+# Public WAN IPv4, never the WSL or Docker bridge address.
+relay-ip=172.29.250.2
+external-ip=REPLACE_WITH_PUBLIC_IPV4/172.29.250.2
+min-port=49160
+max-port=49259
+user-quota=16
+total-quota=64
+relay-threads=2
+no-tls
+no-dtls
+no-cli
+no-tcp-relay
+no-multicast-peers
+no-rfc5780
+no-software-attribute
+# Minimize session/address logging; do not enable verbose in production.
+no-stdout-log
+log-file=/dev/null
+pidfile=/tmp/turnserver.pid
+# Restrict access to private networks. Only the SFU's specific WSL IP is allowed.
+denied-peer-ip=0.0.0.0-0.255.255.255
+denied-peer-ip=10.0.0.0-10.255.255.255
+denied-peer-ip=100.64.0.0-100.127.255.255
+denied-peer-ip=127.0.0.0-127.255.255.255
+denied-peer-ip=169.254.0.0-169.254.255.255
+denied-peer-ip=172.16.0.0-172.31.255.255
+denied-peer-ip=192.168.0.0-192.168.255.255
+denied-peer-ip=240.0.0.0-255.255.255.255
+allowed-peer-ip=REPLACE_WITH_SFU_WSL_IPV4
+# Allow two allocations on this same coturn to communicate after address mapping.
+allowed-peer-ip=172.29.250.2

@@ -13,4 +13,5 @@ backend/.mail/
 # Private updater keys must remain outside the repository.
 *.key
 *updater-password*
+/infra/coturn/turnserver.conf
 .DS_Store
