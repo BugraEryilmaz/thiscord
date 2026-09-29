@@ -1,4 +1,5 @@
 mod format;
+mod frames;
 mod health;
 pub mod jitter;
 pub mod mixer;
@@ -8,7 +9,6 @@ use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
 use format::config;
 use health::StreamHealth;
 use mixer::*;
-use ringbuf::{HeapCons, HeapRb, traits::*};
 use std::{
     sync::{
         Arc,
@@ -90,7 +90,10 @@ where
     device
         .build_output_stream(
             *config,
-            move |data: &mut [T], _| mixer.render(data, channels),
+            move |data: &mut [T], info| {
+                mixer.reference_time(frames::playback_time(Instant::now(), info.timestamp()));
+                mixer.render(data, channels);
+            },
             move |error| {
                 health.report(false, error.kind());
             },
@@ -101,7 +104,7 @@ where
 fn input<T>(
     device: &cpal::Device,
     config: &cpal::StreamConfig,
-    mut writer: ringbuf::HeapProd<f32>,
+    mut writer: frames::Writer,
     control: Arc<Controls>,
     health: Arc<StreamHealth>,
 ) -> Result<cpal::Stream, String>
@@ -113,15 +116,14 @@ where
     device
         .build_input_stream(
             *config,
-            move |data: &[T], _| {
+            move |data: &[T], info| {
+                writer.begin(frames::capture_time(Instant::now(), info.timestamp()));
                 let mut peak = 0.0_f32;
                 let mut dropped = 0;
                 for frame in data.chunks_exact(channels) {
                     let mono = capture_mono(frame);
                     peak = peak.max(mono.abs());
-                    if writer.try_push(mono).is_err() {
-                        dropped += 1;
-                    }
+                    dropped += writer.push(mono);
                 }
                 control.peak.store(peak.to_bits(), Ordering::Relaxed);
                 control.dropped.fetch_add(dropped, Ordering::Relaxed);
@@ -240,7 +242,7 @@ struct Remote {
 struct Session {
     _output: cpal::Stream,
     _input: Option<cpal::Stream>,
-    capture: HeapCons<f32>,
+    capture: frames::Reader,
     writers: Vec<StreamWriter>,
     control: Arc<Controls>,
     health: Arc<StreamHealth>,
@@ -254,7 +256,8 @@ struct Session {
     outgoing: Option<tokio::sync::mpsc::Sender<bytes::Bytes>>,
     remotes: Vec<Option<Remote>>,
     playback: Instant,
-    reference: HeapCons<f32>,
+    reference: frames::Reader,
+    processed_level: f32,
     processing: processing::Processing,
 }
 impl Session {
@@ -264,7 +267,7 @@ impl Session {
         let health = Arc::new(StreamHealth::default());
         apply(&control, settings);
         let (writers, mixer) = mixer(control.clone());
-        let (reference_writer, reference) = HeapRb::<f32>::new(CAPACITY).split();
+        let (reference_writer, reference) = frames::queue();
         let mixer = mixer.with_reference(reference_writer);
         let output_device = device(settings.output.as_deref(), false)?;
         let output_config = config(&output_device, false)?;
@@ -277,7 +280,7 @@ impl Session {
                 health.clone()
             )
         )?;
-        let (producer, capture) = HeapRb::<f32>::new(CAPACITY).split();
+        let (producer, capture) = frames::queue();
         let input = if microphone {
             let d = device(settings.input.as_deref(), true)?;
             let c = config(&d, true)?;
@@ -298,6 +301,8 @@ impl Session {
         if !microphone {
             writers[1].control.active.store(true, Ordering::Release);
         }
+        // Build the DSP before starting devices so startup cannot overflow queues.
+        let processing = processing::Processing::new(settings);
         output.play().map_err(|e| e.to_string())?;
         if let Some(input) = &input {
             input.play().map_err(|e| e.to_string())?;
@@ -320,16 +325,13 @@ impl Session {
             remotes: (0..MAX_STREAMS).map(|_| None).collect(),
             playback: Instant::now(),
             reference,
-            processing: processing::Processing::new(settings),
+            processed_level: 0.0,
+            processing,
         })
     }
-    fn tick(&mut self) -> Result<(), String> {
+    fn tick(&mut self, stop: &AtomicBool, pressed: &AtomicBool) -> Result<(), String> {
         self.health.check()?;
-        while self.reference.occupied_len() >= 480 {
-            let mut reference = [0.0; 480];
-            self.reference.pop_slice(&mut reference);
-            self.processing.render(&reference)?;
-        }
+        self.processing.render_queued(&mut self.reference)?;
         if self.outgoing.is_some() && Instant::now() >= self.playback {
             self.playback += Duration::from_millis(20);
             if self.playback.elapsed() > Duration::from_millis(100) {
@@ -370,17 +372,29 @@ impl Session {
             self.writers[1].write(&high);
             return Ok(());
         }
-        while self.capture.occupied_len() > FRAME * 3 {
-            let _ = self.capture.try_pop();
-            self.control.dropped.fetch_add(1, Ordering::Relaxed);
+        // Drain complete 20 ms packets, including large device callbacks. The
+        // ring itself bounds latency; trimming each callback to 60 ms destroys
+        // capture continuity and prevents the echo filter from converging.
+        for _ in 0..CAPACITY / FRAME {
+            if stop.load(Ordering::Acquire) {
+                break;
+            }
+            let Some(pcm) = self.processing.capture_queued(&mut self.capture)? else {
+                break;
+            };
+            if stop.load(Ordering::Acquire) {
+                break;
+            }
+            self.control
+                .pressed
+                .store(pressed.load(Ordering::Acquire), Ordering::Relaxed);
+            self.capture_packet(pcm)?;
         }
-        if self.capture.occupied_len() < FRAME {
-            return Ok(());
-        }
-        let mut pcm = [0.0; FRAME];
-        self.capture.pop_slice(&mut pcm);
-        self.processing.capture(&mut pcm)?;
+        Ok(())
+    }
+    fn capture_packet(&mut self, mut pcm: [f32; FRAME]) -> Result<(), String> {
         let peak = pcm.iter().fold(0.0_f32, |p, v| p.max(v.abs()));
+        self.processed_level = peak;
         if peak >= f32::from_bits(self.control.threshold.load(Ordering::Relaxed)) {
             self.hold = 10;
         } else {
@@ -420,7 +434,9 @@ impl Session {
     fn status(&self) -> AudioStatus {
         AudioStatus {
             running: true,
-            input_level: f32::from_bits(self.control.peak.load(Ordering::Relaxed)),
+            input_level: self.processed_level,
+            raw_input_level: f32::from_bits(self.control.peak.load(Ordering::Relaxed)),
+            processing_resets: self.processing.resets,
             transmitting: self.control.transmitting.load(Ordering::Relaxed),
             message: if self.outgoing.is_some() {
                 "Voice audio active"
@@ -459,7 +475,8 @@ impl Session {
                     })
                     .collect()
             },
-            dropped_samples: self.control.dropped.load(Ordering::Relaxed),
+            dropped_samples: self.control.dropped.load(Ordering::Relaxed)
+                + self.control.reference_dropped.load(Ordering::Relaxed),
             underrun_samples: self.control.underruns.load(Ordering::Relaxed),
         }
     }
@@ -477,6 +494,8 @@ fn stopped(message: String) -> AudioStatus {
     AudioStatus {
         running: false,
         input_level: 0.0,
+        raw_input_level: 0.0,
+        processing_resets: 0,
         transmitting: false,
         message,
         streams: vec![],
@@ -631,7 +650,7 @@ fn run(receiver: mpsc::Receiver<Request>, stop: Arc<AtomicBool>, pressed: Arc<At
             {
                 session = None;
                 message = "Test finished; devices released".into();
-            } else if let Err(error) = s.tick() {
+            } else if let Err(error) = s.tick(&stop, &pressed) {
                 session = None;
                 message = error;
             }

@@ -1,9 +1,11 @@
 //! Fixed-capacity SPSC queues. The device callback never allocates, locks or waits.
+use super::frames;
 use ringbuf::{HeapCons, HeapProd, HeapRb, traits::*};
 use std::sync::{
     Arc,
     atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering},
 };
+use std::time::Instant;
 
 pub const RATE: u32 = 48_000;
 pub const FRAME: usize = 960;
@@ -18,6 +20,7 @@ pub struct Controls {
     pub threshold: AtomicU32,
     pub master: AtomicU32,
     pub peak: AtomicU32,
+    pub reference_dropped: AtomicU64,
     pub transmitting: AtomicBool,
     pub dropped: AtomicU64,
     pub underruns: AtomicU64,
@@ -32,6 +35,7 @@ impl Default for Controls {
             threshold: AtomicU32::new(0.015_f32.to_bits()),
             master: AtomicU32::new(1.0_f32.to_bits()),
             peak: AtomicU32::new(0),
+            reference_dropped: 0.into(),
             transmitting: false.into(),
             dropped: 0.into(),
             underruns: 0.into(),
@@ -55,7 +59,7 @@ struct StreamReader {
 pub struct Mixer {
     streams: Vec<StreamReader>,
     controls: Arc<Controls>,
-    reference: Option<HeapProd<f32>>,
+    reference: Option<frames::Writer>,
 }
 
 pub fn mixer(controls: Arc<Controls>) -> (Vec<StreamWriter>, Mixer) {
@@ -100,9 +104,14 @@ impl StreamWriter {
     }
 }
 impl Mixer {
-    pub fn with_reference(mut self, reference: HeapProd<f32>) -> Self {
+    pub fn with_reference(mut self, reference: frames::Writer) -> Self {
         self.reference = Some(reference);
         self
+    }
+    pub fn reference_time(&mut self, at: Instant) {
+        if let Some(reference) = &mut self.reference {
+            reference.begin(at);
+        }
     }
     pub fn render<T: cpal::Sample + cpal::FromSample<f32>>(
         &mut self,
@@ -126,6 +135,7 @@ impl Mixer {
             }
         }
         let mut underruns = 0;
+        let mut reference_dropped = 0;
         for frame in output.chunks_mut(channels) {
             let mut mix = 0.0;
             for stream in &mut self.streams {
@@ -154,18 +164,48 @@ impl Mixer {
                 *channel = T::from_sample(sample);
             }
             if let Some(reference) = &mut self.reference {
-                let _ = reference.try_push(sample);
+                reference_dropped += reference.push(sample);
             }
         }
         self.controls
             .underruns
             .fetch_add(underruns, Ordering::Relaxed);
+        self.controls
+            .reference_dropped
+            .fetch_add(reference_dropped, Ordering::Relaxed);
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn echo_reference_matches_post_volume_clipped_playback_and_deafen() {
+        let controls = Arc::new(Controls::default());
+        let (mut writers, mix) = mixer(controls.clone());
+        let (producer, mut reference) = frames::queue();
+        let mut mix = mix.with_reference(producer);
+        let at = Instant::now();
+        writers[0].control.active.store(true, Ordering::Release);
+        writers[0].volume(2.0).unwrap();
+        controls.master.store(1.5_f32.to_bits(), Ordering::Relaxed);
+        writers[0].write(&[0.4; frames::SAMPLES]);
+        let mut out = [0.0_f32; frames::SAMPLES * 2];
+        mix.reference_time(at);
+        mix.render(&mut out, 2);
+        let (frame, gap) = reference.pop().unwrap();
+        assert!(!gap);
+        assert_eq!(frame.at, at);
+        assert_eq!(frame.samples, [1.0; frames::SAMPLES]);
+        for (sample, pair) in frame.samples.iter().zip(out.as_chunks::<2>().0) {
+            assert_eq!(pair, &[*sample, *sample]);
+        }
+        controls.deafen.store(true, Ordering::Relaxed);
+        writers[0].write(&[0.4; frames::SAMPLES]);
+        mix.reference_time(at + std::time::Duration::from_millis(10));
+        mix.render(&mut out, 2);
+        assert_eq!(reference.pop().unwrap().0.samples, [0.0; frames::SAMPLES]);
+    }
     #[test]
     fn surround_output_uses_first_pair_and_silences_remaining_channels() {
         let (mut writers, mut mix) = mixer(Arc::new(Controls::default()));

@@ -63,8 +63,12 @@ falls back to the in-app button; portal integration remains future work.
 - [Sonora 0.2](https://github.com/dignifiedquire/sonora): pure Rust AEC3, noise
   suppression and AGC2. All are optional and initially off. Ten-millisecond
   processing runs on the audio worker, with post-mix playback as the echo
-  reference. Initial delay is 40 ms; AEC3 estimates/refines delay internally.
-  Hardware acoustic quality is unverified, so headphones remain recommended.
+  reference. Noise suppression uses the High setting. Automatic gain explicitly
+  enables adaptive digital gain, starts at unity and caps gain at 20 dB with the
+  library's -50 dBFS output-noise limit; it does not change OS microphone volume.
+  Echo buffering delay comes from CPAL capture/playback timestamps, mapped onto
+  a common monotonic clock. AEC3 estimates/refines the acoustic delay internally.
+  Hardware acoustic quality still needs acceptance, so headphones remain recommended.
 
 The native path is selected per the project requirement. Windows and Linux
 software probes run locally; CI runs the same tests and desktop builds on all
@@ -76,6 +80,13 @@ WebView capture was not substituted for the requested native path.
 
 Capture is averaged to mono, processed at 48 kHz and encoded as 20 ms Opus frames
 at 32 kbit/s. Capture callbacks only convert/copy samples and update atomics.
+Capture and post-mix reference callbacks assemble timestamped 10 ms blocks into
+preallocated 120 ms SPSC rings. Partial callbacks retain their samples. The worker
+drains complete capture packets instead of discarding audio from callbacks longer
+than 60 ms. Work per tick stays bounded, and stop/PTT release are checked while
+draining. Lost blocks carry a sequence gap that restarts DSP adaptation; playback
+reference overflows are counted too. No per-sample allocation or DSP runs on the
+device callback. The processor is constructed before starting either device.
 Each received speaker owns a separate bounded packet jitter buffer, Opus decoder,
 PCM ring and gain. Jitter starts at roughly 60 ms, reorders sequence numbers,
 rejects duplicates/late packets, handles wrap, and requests bounded Opus packet
@@ -87,6 +98,14 @@ latency rather than accumulating stale speech; underruns produce silence and
 overflows are counted. Output clips to [-1,1]. The mixer supports 32 preallocated
 queues; the initial room limit is eight participants. This is a bounded initial
 deployment, not a measured promise of production capacity.
+
+Audio settings show raw and processed microphone peaks (before mute/PTT gating)
+and processing reset counts. To check cancellation, enable it on the person using
+speakers, let the other person talk for several seconds, and compare levels while
+the speaker user stays quiet. Then test both people talking simultaneously. Echo
+cancellation only has a reference for Thiscord playback, not other applications.
+Room acoustics, speaker distortion, microphone clipping and device clock drift
+still need real-device validation; synthetic tests are not a guarantee for them.
 
 Run `cargo run -p thiscord-frontend --example audio_bench --features native-audio
 --release --locked` for a synthetic eight-stream mixer timing. This excludes
@@ -201,6 +220,15 @@ real peer connections to exercise forwarding, isolation, self-mute/deafen,
 Speak denial and live changes, targeted permission/session revocation, unrelated
 session and guild changes with continued bidirectional media, publisher slot reuse,
 channel deletion and cleanup. Windows device enumeration is read-only and opens no mic.
+
+DSP tests measure stationary-noise attenuation, delayed/reflected echo reduction,
+preservation of near-end audio without playback, live bypass and recovery after
+queue loss. The production queue path is tested with both 20 ms and 100 ms device
+batches, with independent input/output timing. Locally, deterministic fixtures
+measured approximately 20 dB stationary-noise reduction (previously 15 dB) and
+54 dB echo reduction after warmup. These are synthetic results, not measurements
+of the affected user's microphone or room. Mixer tests verify that the echo
+reference includes individual/master gains, clipping and deafen silence.
 
 Still required: physical multi-user microphone/headset acceptance on each OS,
 macOS runtime results, Wayland global-shortcut portal support, arbitrary sample

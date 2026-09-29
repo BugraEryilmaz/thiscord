@@ -180,14 +180,15 @@ pub(super) fn AudioSettingsPanel(ui: Ui) -> impl IntoView {
             <label class="flex flex-wrap gap-3"><span>"Activation threshold"</span><input type="range" min="1" max="100" prop:value=move||(ui.audio.get().activation_threshold*1000.0).to_string() on:change=move|e|{if let Ok(v)=event_target_value(&e).parse::<f32>(){ui.audio.update(|s|s.activation_threshold=v/1000.0);save(ui);}}/></label>
             <label class="flex items-center gap-3"><input type="checkbox" disabled=move||ui.audio_status.get().is_some_and(|s|s.running) prop:checked=move||ui.audio.get().global_push_to_talk on:change=move|e|{ui.audio.update(|s|s.global_push_to_talk=event_target_checked(&e));save(ui);}/>"Global push-to-talk: Ctrl+Shift+Space (Windows, macOS, Linux/X11)"</label>
             <div class="space-y-2">
-                <label class="flex gap-3"><input type="checkbox" prop:checked=move||ui.audio.get().noise_suppression on:change=move|e|{ui.audio.update(|s|s.noise_suppression=event_target_checked(&e));save(ui);}/>"Noise suppression"</label>
+                <label class="flex gap-3"><input type="checkbox" prop:checked=move||ui.audio.get().noise_suppression on:change=move|e|{ui.audio.update(|s|s.noise_suppression=event_target_checked(&e));save(ui);}/>"Noise suppression (strong)"</label>
                 <label class="flex gap-3"><input type="checkbox" prop:checked=move||ui.audio.get().automatic_gain on:change=move|e|{ui.audio.update(|s|s.automatic_gain=event_target_checked(&e));save(ui);}/>"Automatic microphone gain"</label>
-                <label class="flex gap-3"><input type="checkbox" prop:checked=move||ui.audio.get().echo_cancellation on:change=move|e|{ui.audio.update(|s|s.echo_cancellation=event_target_checked(&e));save(ui);}/>"Echo cancellation (evaluate with your headset/speakers)"</label>
+                <label class="flex gap-3"><input type="checkbox" prop:checked=move||ui.audio.get().echo_cancellation on:change=move|e|{ui.audio.update(|s|s.echo_cancellation=event_target_checked(&e));save(ui);}/>"Echo cancellation"</label>
             </div>
             <VoiceControls ui=ui/>
-            <label class="block">"Microphone level"<meter class="ml-3 w-48" min="0" max="1" value=move||ui.audio_status.get().map(|s|s.input_level).unwrap_or(0.0) /></label>
-            <p class="text-sm" role="status">{move||ui.audio_status.get().map(|s|format!("{} · dropped {} · underruns {}",s.message,s.dropped_samples,s.underrun_samples))}</p>
-            <p class="text-sm text-white/60">"Allow microphone access in your OS privacy settings. Use headphones for the microphone test. Processing is optional; echo cancellation still needs validation with your devices."</p>
+            <label class="block">"Raw microphone"<meter class="ml-3 w-48" min="0" max="1" value=move||ui.audio_status.get().map(|s|s.raw_input_level).unwrap_or(0.0) /></label>
+            <label class="block">"After noise / echo processing"<meter class="ml-3 w-48" min="0" max="1" value=move||ui.audio_status.get().map(|s|s.input_level).unwrap_or(0.0) /></label>
+            <p class="text-sm" role="status">{move||ui.audio_status.get().map(|s|format!("{} · dropped {} · underruns {} · processing resets {}",s.message,s.dropped_samples,s.underrun_samples,s.processing_resets))}</p>
+            <p class="text-sm text-white/60">"Allow microphone access in your OS privacy settings. Use headphones for the microphone test. Echo cancellation removes Thiscord playback from your microphone; it cannot remove sound from other apps. Allow a few seconds for it to adapt. Compare the meters while someone else speaks and you stay quiet."</p>
             <div class="flex flex-wrap gap-3">
                 <button class="rounded bg-brand px-4 py-2 disabled:opacity-50" disabled=move||busy.get()||ui.voice.get().channel_id.is_some() on:click=move |_|test(false)>"Test playback (5 seconds)"</button>
                 <button class="rounded bg-white/10 px-4 py-2 disabled:opacity-50" disabled=move||busy.get()||ui.voice.get().channel_id.is_some() on:click=move |_|test(true)>"Test microphone (60 seconds)"</button>

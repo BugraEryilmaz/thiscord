@@ -74,6 +74,12 @@ pub struct StreamLevel {
 pub struct AudioStatus {
     pub running: bool,
     pub input_level: f32,
+    /// Microphone peak before echo/noise processing. No PCM crosses IPC.
+    #[serde(default)]
+    pub raw_input_level: f32,
+    /// Adaptation restarts caused by lost capture or playback-reference blocks.
+    #[serde(default)]
+    pub processing_resets: u64,
     pub transmitting: bool,
     pub message: String,
     pub streams: Vec<StreamLevel>,

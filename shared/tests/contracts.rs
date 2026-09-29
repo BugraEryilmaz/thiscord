@@ -166,7 +166,7 @@ fn cursors_round_trip_timestamp_ties_and_reject_bad_tokens() {
 #[test]
 fn voice_and_audio_contract_bounds() {
     use thiscord_shared::{
-        audio::AudioSettings,
+        audio::{AudioSettings, AudioStatus},
         voice::{ClientEvent, ClientFrame},
     };
     let frame = ClientFrame {
@@ -191,4 +191,13 @@ fn voice_and_audio_contract_bounds() {
         assert!(settings.validate().is_err());
     }
     assert!(from_value::<AudioSettings>(json!({"password":"must not be here"})).is_err());
+    // Additive diagnostics must still accept an older native status envelope.
+    let status: AudioStatus = from_value(json!({
+        "running": true, "input_level": 0.25, "transmitting": false,
+        "message": "Voice audio active", "streams": [],
+        "dropped_samples": 0, "underrun_samples": 0
+    }))
+    .unwrap();
+    assert_eq!(status.raw_input_level, 0.0);
+    assert_eq!(status.processing_resets, 0);
 }
