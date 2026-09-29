@@ -8,11 +8,9 @@ use diesel::{connection::SimpleConnection, prelude::*, sql_types::Text};
 use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
 use thiscord_backend::{api, db, permissions};
-use thiscord_shared::{AccountId, permissions::*};
+use thiscord_shared::{AccountId, account::ACCOUNT_PATH, permissions::*};
 use tower::ServiceExt;
 use uuid::Uuid;
-// The running backend deliberately invalidates all sockets on permission changes.
-// Keep independent database fixtures from invalidating each other's sockets.
 
 struct Database {
     connection: PgConnection,
@@ -27,7 +25,9 @@ impl Drop for Database {
     }
 }
 fn database() -> Database {
-    dotenvy::from_path(concat!(env!("CARGO_MANIFEST_DIR"), "/.env")).ok();
+    if std::env::var_os("TEST_DATABASE_URL").is_none() {
+        dotenvy::from_path(concat!(env!("CARGO_MANIFEST_DIR"), "/.env")).ok();
+    }
     let value = std::env::var("TEST_DATABASE_URL").expect("TEST_DATABASE_URL required");
     let mut url = url::Url::parse(&value).unwrap();
     assert!(url.path().ends_with("_test"));
@@ -167,6 +167,17 @@ async fn send(socket: &mut Socket, event: ClientEvent) {
         .await
         .unwrap();
 }
+async fn still_connected(socket: &mut Socket) {
+    send(socket, ClientEvent::Ping {}).await;
+    loop {
+        match event(socket).await {
+            ServerEvent::Pong {} => break,
+            ServerEvent::Participants { .. } => {}
+            ServerEvent::Revoked {} => panic!("Authorized voice connection was revoked"),
+            _ => panic!("Unexpected event on an authorized voice connection"),
+        }
+    }
+}
 async fn join(addr: std::net::SocketAddr, token: &str, guild: Value, channel: Value) -> Socket {
     let mut req = format!("ws://{addr}{}", voice::VOICE_PATH)
         .into_client_request()
@@ -283,6 +294,21 @@ impl Peer {
         self.pc.close().await.unwrap();
     }
 }
+async fn forwarded(source: &mut Peer, receiver: &mut Peer) -> rtp::Packet {
+    while receiver.packets.try_recv().is_ok() {}
+    tokio::time::timeout(Duration::from_secs(10), async {
+        loop {
+            source.publish().await;
+            if let Ok(Some(packet)) =
+                tokio::time::timeout(Duration::from_millis(20), receiver.packets.recv()).await
+            {
+                return packet;
+            }
+        }
+    })
+    .await
+    .expect("Authorized participants must still exchange media")
+}
 #[tokio::test]
 #[ignore = "requires TEST_DATABASE_URL; CI runs with --include-ignored"]
 async fn sfu_forwarding_permissions_isolation_and_cleanup() {
@@ -363,7 +389,27 @@ async fn sfu_forwarding_permissions_isolation_and_cleanup() {
     assert_eq!(packet.payload.as_ref(), [0xf8, 0xff, 0xfe]);
     assert!(a.packets.try_recv().is_err());
     assert!(isolated.packets.try_recv().is_err());
-    let old_sequence = packet.header.sequence_number;
+    // A session response for another account must not disconnect active calls.
+    let (status, _) = call(&app, ACCOUNT_PATH, &outsider, json!({"action":"rotate"})).await;
+    assert_eq!(status, StatusCode::OK);
+    still_connected(&mut a.socket).await;
+    still_connected(&mut b.socket).await;
+    still_connected(&mut isolated.socket).await;
+    forwarded(&mut a, &mut b).await;
+    forwarded(&mut b, &mut a).await;
+    // A guild mutation that does not change either participant's media grants
+    // must also keep both existing forwarding tasks alive.
+    change(
+        &app,
+        &ot,
+        &mut state,
+        json!({"action":"create_channel","name":"unrelated","kind":"text"}),
+        StatusCode::OK,
+    )
+    .await;
+    still_connected(&mut a.socket).await;
+    still_connected(&mut b.socket).await;
+    let old_sequence = forwarded(&mut a, &mut b).await.header.sequence_number;
     a.close().await;
     tokio::time::sleep(Duration::from_millis(200)).await;
     while b.packets.try_recv().is_ok() {}
@@ -389,6 +435,22 @@ async fn sfu_forwarding_permissions_isolation_and_cleanup() {
             > 0,
         "A reused publisher slot must preserve SRTP sequence continuity"
     );
+
+    // Speak changes require renegotiating the native microphone setup, even
+    // when the participant still has JoinVoice. Other participants stay joined.
+    change(&app,&ot,&mut state,json!({"action":"set_override","channel_id":channel,"target":{"kind":"member","id":member},"allow":[],"deny":["speak"]}),StatusCode::OK).await;
+    loop {
+        if matches!(event(&mut b.socket).await, ServerEvent::Revoked {}) {
+            break;
+        }
+    }
+    still_connected(&mut a.socket).await;
+    still_connected(&mut isolated.socket).await;
+    b.close().await;
+    tokio::time::sleep(Duration::from_millis(200)).await;
+    change(&app,&ot,&mut state,json!({"action":"set_override","channel_id":channel,"target":{"kind":"member","id":member},"allow":[],"deny":[]}),StatusCode::OK).await;
+    let mut b = Peer::new(join(addr, &mt, guild.clone(), channel.clone()).await).await;
+    forwarded(&mut a, &mut b).await;
 
     send(
         &mut b.socket,
@@ -463,6 +525,8 @@ async fn sfu_forwarding_permissions_isolation_and_cleanup() {
         event(&mut denied).await,
         ServerEvent::Error { .. }
     ));
+    still_connected(&mut a.socket).await;
+    still_connected(&mut isolated.socket).await;
     a.close().await;
     b.close().await;
     isolated.close().await;
@@ -494,6 +558,18 @@ async fn sfu_forwarding_permissions_isolation_and_cleanup() {
         "JoinVoice must not grant Speak"
     );
 
+    let (status, _) = call(&app, ACCOUNT_PATH, &mt, json!({"action":"logout"})).await;
+    assert_eq!(status, StatusCode::OK);
+    loop {
+        if matches!(
+            event(&mut listener_only.socket).await,
+            ServerEvent::Revoked {}
+        ) {
+            break;
+        }
+    }
+    still_connected(&mut c.socket).await;
+
     change(
         &app,
         &ot,
@@ -507,7 +583,7 @@ async fn sfu_forwarding_permissions_isolation_and_cleanup() {
             break;
         }
     }
-    let mut deleted = join(addr, &mt, guild.clone(), channel.clone()).await;
+    let mut deleted = join(addr, &ot, guild.clone(), channel.clone()).await;
     assert!(matches!(
         event(&mut deleted).await,
         ServerEvent::Error { .. }

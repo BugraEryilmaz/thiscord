@@ -109,10 +109,14 @@ authentication deadline and bounded negotiation. Signaling is capped at 128 KiB
 and 30 incoming frames/second. Publisher ingress is capped at 100 packets/second
 and 1500 bytes/packet. Media queues and write deadlines isolate slow receivers.
 
-Current sessions are rechecked every second. Successful access-changing commits
-invalidate all voice connections conservatively. Both publisher routing and
-receiver writes check the invalidation generation under the access gate, so
-cached grants cannot continue forwarding after revocation. Each receiver gets
+Current sessions are rechecked every second and immediately after access-changing
+commits. Each participant is reauthorized against the database; unrelated account
+or guild changes leave authorized calls connected. Lost session/channel access or
+a changed Speak grant closes only affected connections (Speak determines native
+microphone setup in the offer). Both publisher routing and receiver writes check
+the participant's validated generation under the access gate. Forwarding pauses
+until reauthorization, and packets queued under an older generation are discarded,
+so cached grants cannot continue forwarding after revocation. Each receiver gets
 only its channel's streams; own audio is not looped back. Self mute/deafen is also
 enforced by the SFU. This assumes a single backend process.
 
@@ -176,8 +180,9 @@ Native library tests cover independent mixing/gain, deafen backlog, queue bounds
 jitter ordering/replay/wrap, finite DSP output and Opus forwarding across two
 encrypted WebRTC hops. Backend PostgreSQL tests use disposable test schemas and
 real peer connections to exercise forwarding, isolation, self-mute/deafen,
-Speak denial, permission revocation, publisher slot reuse, channel deletion and
-cleanup. Windows device enumeration is read-only and opens no mic.
+Speak denial and live changes, targeted permission/session revocation, unrelated
+session and guild changes with continued bidirectional media, publisher slot reuse,
+channel deletion and cleanup. Windows device enumeration is read-only and opens no mic.
 
 Still required: physical multi-user microphone/headset acceptance on each OS,
 macOS runtime results, Wayland global-shortcut portal support, arbitrary sample

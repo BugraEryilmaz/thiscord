@@ -96,8 +96,60 @@ from Windows and WSL; authenticated relay-to-relay traffic delivered 10/10 test
 packets; TURN-to-WSL traffic delivered 5/5; access to an unrelated private peer was
 rejected with 403; invalid passwords and expired credentials were rejected with
 401. These tests ran inside the hosting network, not off-site.
-Backend process liveness and database readiness remained HTTP 200. Loading the
-new backend settings still requires the manual restart described above.
+Backend process liveness and database readiness remained HTTP 200.
+
+### Forced-relay WebRTC verification
+
+From WSL in the repository root, with the backend's configured `.env`:
+
+```sh
+cargo run -p thiscord-backend --example turn_probe --locked
+```
+
+This manual probe uses the application's WebRTC library and temporary REST
+credentials. It opens no microphone, uses no account/session or database, and
+prints no credentials, SDP or packet contents. It tests encrypted synthetic Opus
+in both directions, first between two relay-only peers, then between a relay-only
+peer and a host-only peer on the WSL interface. It checks the selected candidate
+types, requires ten received packets each direction and closes both peers.
+Direct fallback cannot make the relay-only test pass. It is deliberately an
+example rather than a CI test that would require a live TURN deployment.
+
+Verification on 2026-09-29 through `thiscord.com.tr:3478`:
+
+- STUN binding responses succeeded from both Windows and WSL.
+- Both local STUN responses reported Docker gateway `172.29.250.1` as the mapped
+  address. The hosting network/Docker forwarding path hides the original source
+  address on these probes. This is not a usable public server-reflexive address;
+  a successful STUN response alone does not prove public NAT discovery works.
+- Forced WebRTC selected `relay -> relay`, then `relay -> host`, with ten encrypted
+  RTP packets received each direction in each test.
+- Authenticated CreatePermission requests accepted WSL SFU `172.31.185.21` and
+  coturn relay `172.29.250.2`; Docker gateway `172.29.250.1` and Windows LAN
+  `192.168.1.126` were rejected with 403, matching the configured peer restrictions.
+
+All these checks ran inside the hosting network. They verify TURN data forwarding,
+including public-hostname access, but do not establish off-site router/firewall
+reachability or the STUN mapped address seen by an external client. Repeat from
+another network before claiming that coverage.
+
+### Reading voice connection logs
+
+After restarting a backend containing the route diagnostic, each joined voice
+connection logs `voice media route selected` once its first ICE pair is selected.
+The `local_candidate_type` and `remote_candidate_type` fields contain only types:
+`relay` on either side means that selected route includes TURN. `host`, `srflx`
+(server reflexive), or `prflx` (peer reflexive), without `relay`, means direct media
+was selected. A later ICE route change is not tracked by this one-time diagnostic.
+
+The library can try relay permissions for private candidates even when another
+candidate succeeds. A 403 means coturn rejected that requested peer address,
+not that every relay allocation failed; see [TURN CreatePermission processing](https://www.rfc-editor.org/rfc/rfc8656.html#section-9.2).
+The local forbidden-address probes reproduce this error. Preserve the private
+peer restrictions; do not allow the entire LAN just to suppress these logs.
+`unhandled STUN packet` is a library ICE-handler diagnostic, not proof of a
+successful or failed relay path. Use selected candidate types and actual packet
+delivery to assess the route; the historical warnings alone do not identify it.
 
 One-hour credentials currently have no automatic refresh/ICE restart. Long calls
 may require leaving and rejoining; this remains tracked in TODO.md. coturn is a
