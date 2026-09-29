@@ -24,7 +24,9 @@ if ($Tag -cnotmatch '^client-v(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$
 }
 $version = $Tag.Substring(8)
 $config = Get-Content frontend/tauri.conf.json -Raw | ConvertFrom-Json
-$metadataText = & cargo metadata --no-deps --format-version 1 --locked
+# Resolve every optional/platform dependency too: --no-deps misses corrupted
+# registry versions/checksums in Cargo.lock and can approve an unbuildable tag.
+$metadataText = & cargo metadata --all-features --format-version 1 --locked
 if ($LASTEXITCODE) { throw 'Cargo metadata failed' }
 $metadata = $metadataText | ConvertFrom-Json
 $package = $metadata.packages | Where-Object name -EQ 'thiscord-frontend'
@@ -43,7 +45,6 @@ $targets = @{
     'windows-x86_64' = @{ Triple = 'x86_64-pc-windows-msvc'; Update = '.exe'; UpdateDir = 'nsis'; Extra = $null; ExtraDir = $null }
     'linux-x86_64' = @{ Triple = 'x86_64-unknown-linux-gnu'; Update = '.AppImage'; UpdateDir = 'appimage'; Extra = '.deb'; ExtraDir = 'deb' }
     'darwin-aarch64' = @{ Triple = 'aarch64-apple-darwin'; Update = '.app.tar.gz'; UpdateDir = 'macos'; Extra = '.dmg'; ExtraDir = 'dmg' }
-    'darwin-x86_64' = @{ Triple = 'x86_64-apple-darwin'; Update = '.app.tar.gz'; UpdateDir = 'macos'; Extra = '.dmg'; ExtraDir = 'dmg' }
 }
 # This independently verifies the client's actual public key and signed version.
 # Tauri's bundler only warns when its signing key and configured public key differ.
@@ -85,7 +86,7 @@ if (Test-Path -LiteralPath $OutputDirectory) {
 }
 $output = New-Item -ItemType Directory -Force -Path $OutputDirectory
 $records = @(Get-ChildItem -LiteralPath $InputDirectory -Filter platform.json -Recurse -File)
-if ($records.Count -ne $targets.Count) { throw 'All four platform artifacts are required.' }
+if ($records.Count -ne $targets.Count) { throw 'All configured platform artifacts are required.' }
 $platforms = [ordered]@{}
 foreach ($record in $records) {
     $data = Get-Content -LiteralPath $record.FullName -Raw | ConvertFrom-Json

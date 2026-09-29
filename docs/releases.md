@@ -40,7 +40,12 @@ that distributes the new trust configuration first.
 
 1. Update `[workspace.package].version` in root `Cargo.toml` and `version` in
    `frontend/tauri.conf.json` to the same stable `MAJOR.MINOR.PATCH`, then refresh
-   `Cargo.lock` with `cargo check -p thiscord-shared`.
+   `Cargo.lock` with `cargo check -p thiscord-shared`. Let Cargo update the three
+   workspace package entries; do not use global version replacement in
+   `Cargo.lock`, because dependencies can have the same version as Thiscord.
+   Run `./scripts/release-client.ps1 -Mode Validate -Tag client-vMAJOR.MINOR.PATCH`
+   with the actual version to verify the complete locked dependency graph before
+   tagging, including optional and platform-specific dependencies.
 2. Commit and push the changes. Tag that commit and push the tag, for example:
 
    ```powershell
@@ -52,12 +57,12 @@ that distributes the new trust configuration first.
    version must be higher than every previously published stable client version.
 3. Watch [Client release](../.github/workflows/release-client.yml). It validates
    versions/secrets, runs the existing format, Clippy, database, shared, WASM and
-   desktop checks, and then builds four installer targets. Production WASM assets
+   desktop checks, and then builds three installer targets. Production WASM assets
    compile with `THISCORD_API_URL=https://thiscord.com.tr`.
 4. The final job downloads every platform artifact and independently verifies
    each updater signature against the embedded public key and signed version.
    It creates a draft release, uploads all installers, signatures, SHA256SUMS and
-   the complete four-platform `latest.json`, then publishes and marks it latest.
+   the complete three-platform `latest.json`, then publishes and marks it latest.
    A failed build never advertises a partial update. A failed upload leaves a draft;
    rerun failed jobs to complete it. Concurrent release runs are serialized.
 
@@ -71,7 +76,6 @@ clients. There is no Node/npm build step and no fourth Rust package.
 | --- | --- | --- |
 | Windows x64 | NSIS `.exe`, per-user install | Same signed `.exe` |
 | macOS Apple Silicon | `.dmg` | `.app.tar.gz` |
-| macOS Intel | `.dmg` | `.app.tar.gz` |
 | Linux x64 | `.AppImage` or `.deb` | `.AppImage` only |
 
 An older executable without updater support must be replaced once by installing
