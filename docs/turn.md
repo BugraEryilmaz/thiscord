@@ -138,9 +138,21 @@ another network before claiming that coverage.
 After restarting a backend containing the route diagnostic, each joined voice
 connection logs `voice media route selected` once its first ICE pair is selected.
 The `local_candidate_type` and `remote_candidate_type` fields contain only types:
-`relay` on either side means that selected route includes TURN. `host`, `srflx`
-(server reflexive), or `prflx` (peer reflexive), without `relay`, means direct media
-was selected. A later ICE route change is not tracked by this one-time diagnostic.
+`relay` on either side confirms that the selected route includes TURN. Absence of
+`relay` in the backend log does **not** rule out a client relay: the receiving
+agent can learn its translated source address as `prflx` (peer reflexive), even
+when the sending client selected a local relay candidate. See [ICE peer-reflexive
+candidate discovery](https://www.rfc-editor.org/rfc/rfc8445.html#section-7.3.1.3).
+A later ICE route change is not tracked by this one-time diagnostic.
+
+The forced-relay probe now prints both peers' selected candidate types. On
+2026-09-29 the relay-to-WSL test reproduced `local=relay, remote=host` at the
+relay-only sender and `local=host, remote=prflx` at the receiver, while delivering
+ten encrypted RTP packets in each direction. Therefore the backend's `host/prflx`
+pair alone cannot distinguish a direct client from one using TURN. Inspect the
+client's selected **local** candidate, or confirm a rebuilt relay-only client
+successfully exchanges audio. The local reproduction does not prove which route
+an uninstrumented installed client used.
 
 The library can try relay permissions for private candidates even when another
 candidate succeeds. A 403 means coturn rejected that requested peer address,

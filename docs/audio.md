@@ -20,6 +20,14 @@ transmit mode and processing choices persist in the OS app config directory's
 devices. A vanished device stops capture/playback and displays an error; it does
 not silently switch to a different microphone. Select devices and join again.
 
+CPAL buffer underrun/overrun (`Xrun`) and real-time scheduling (`RealtimeDenied`)
+notifications keep the stream running. They may indicate an audible glitch or
+reduced scheduling priority, not a disconnected device. Fatal notifications stop
+audio and identify the microphone/output stream and CPAL error category. Route
+changes still require explicit restart, including when CPAL could automatically
+switch to another device. Callbacks record only an atomic failure code; error
+formatting and stream cleanup happen on the audio worker.
+
 Tests in settings include five seconds of two independently adjustable tones,
 a microphone/Opus loopback limited to 60 seconds, and a synthetic encrypted WebRTC
 forwarding probe. Tests do not save recordings. Use headphones for microphone
@@ -178,7 +186,9 @@ changes were installed; its cause and macOS runtime behavior remain unverified.
 
 Native library tests cover independent mixing/gain, deafen backlog, queue bounds,
 jitter ordering/replay/wrap, finite DSP output and Opus forwarding across two
-encrypted WebRTC hops. Backend PostgreSQL tests use disposable test schemas and
+encrypted WebRTC hops. Audio error tests cover recoverable notifications, fatal
+device/route changes, error direction and preserving the first failure. Backend
+PostgreSQL tests use disposable test schemas and
 real peer connections to exercise forwarding, isolation, self-mute/deafen,
 Speak denial and live changes, targeted permission/session revocation, unrelated
 session and guild changes with continued bidirectional media, publisher slot reuse,

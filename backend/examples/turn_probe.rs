@@ -184,9 +184,11 @@ async fn probe(bind: &str, both_relay: bool) -> Result<()> {
         direction(&a, &mut b).await?;
         direction(&b, &mut a).await?;
         let (local, remote) = a.selected_types().await?;
+        let (other_local, other_remote) = b.selected_types().await?;
         if local != "relay" || (both_relay && remote != "relay") {
             return Err("Probe did not select the required relay candidates".into());
         }
+        println!("Peer A: local={local}, remote={remote}; peer B: local={other_local}, remote={other_remote}");
         println!("PASS {label}: selected {local} -> {remote}; received 10 encrypted RTP packets each direction");
         Ok::<_, Box<dyn Error>>(())
     }).await;

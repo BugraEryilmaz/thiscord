@@ -19,7 +19,6 @@ pub struct Controls {
     pub master: AtomicU32,
     pub peak: AtomicU32,
     pub transmitting: AtomicBool,
-    pub failed: AtomicBool,
     pub dropped: AtomicU64,
     pub underruns: AtomicU64,
 }
@@ -34,7 +33,6 @@ impl Default for Controls {
             master: AtomicU32::new(1.0_f32.to_bits()),
             peak: AtomicU32::new(0),
             transmitting: false.into(),
-            failed: false.into(),
             dropped: 0.into(),
             underruns: 0.into(),
         }

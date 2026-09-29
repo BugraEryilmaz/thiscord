@@ -1,8 +1,10 @@
+mod health;
 pub mod jitter;
 pub mod mixer;
 pub mod processing;
 pub mod transport;
 use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
+use health::StreamHealth;
 use mixer::*;
 use ringbuf::{HeapCons, HeapRb, traits::*};
 use std::{
@@ -72,7 +74,7 @@ fn output<T>(
     device: &cpal::Device,
     config: &cpal::StreamConfig,
     mut mixer: Mixer,
-    control: Arc<Controls>,
+    health: Arc<StreamHealth>,
 ) -> Result<cpal::Stream, String>
 where
     T: cpal::SizedSample + cpal::FromSample<f32>,
@@ -82,8 +84,8 @@ where
         .build_output_stream(
             *config,
             move |data: &mut [T], _| mixer.render(data, channels),
-            move |_| {
-                control.failed.store(true, Ordering::Release);
+            move |error| {
+                health.report(false, error.kind());
             },
             None,
         )
@@ -94,13 +96,13 @@ fn input<T>(
     config: &cpal::StreamConfig,
     mut writer: ringbuf::HeapProd<f32>,
     control: Arc<Controls>,
+    health: Arc<StreamHealth>,
 ) -> Result<cpal::Stream, String>
 where
     T: cpal::SizedSample,
     f32: cpal::FromSample<T>,
 {
     let channels = config.channels as usize;
-    let error_control = control.clone();
     device
         .build_input_stream(
             *config,
@@ -126,8 +128,8 @@ where
                 control.peak.store(peak.to_bits(), Ordering::Relaxed);
                 control.dropped.fetch_add(dropped, Ordering::Relaxed);
             },
-            move |_| {
-                error_control.failed.store(true, Ordering::Release);
+            move |error| {
+                health.report(true, error.kind());
             },
             None,
         )
@@ -227,6 +229,7 @@ struct Session {
     capture: HeapCons<f32>,
     writers: Vec<StreamWriter>,
     control: Arc<Controls>,
+    health: Arc<StreamHealth>,
     encoder: opus::Encoder,
     decoder: opus::Decoder,
     microphone: bool,
@@ -244,6 +247,7 @@ impl Session {
     fn start(settings: &AudioSettings, microphone: bool) -> Result<Self, String> {
         settings.validate()?;
         let control = Arc::new(Controls::default());
+        let health = Arc::new(StreamHealth::default());
         apply(&control, settings);
         let (writers, mixer) = mixer(control.clone());
         let (reference_writer, reference) = HeapRb::<f32>::new(CAPACITY).split();
@@ -255,19 +259,19 @@ impl Session {
                 &output_device,
                 &output_config.config(),
                 mixer,
-                control.clone(),
+                health.clone(),
             ),
             cpal::SampleFormat::I16 => output::<i16>(
                 &output_device,
                 &output_config.config(),
                 mixer,
-                control.clone(),
+                health.clone(),
             ),
             _ => output::<u16>(
                 &output_device,
                 &output_config.config(),
                 mixer,
-                control.clone(),
+                health.clone(),
             ),
         }?;
         let (producer, capture) = HeapRb::<f32>::new(CAPACITY).split();
@@ -275,9 +279,13 @@ impl Session {
             let d = device(settings.input.as_deref(), true)?;
             let c = config(&d, true)?;
             Some(match c.sample_format() {
-                cpal::SampleFormat::F32 => input::<f32>(&d, &c.config(), producer, control.clone()),
-                cpal::SampleFormat::I16 => input::<i16>(&d, &c.config(), producer, control.clone()),
-                _ => input::<u16>(&d, &c.config(), producer, control.clone()),
+                cpal::SampleFormat::F32 => {
+                    input::<f32>(&d, &c.config(), producer, control.clone(), health.clone())
+                }
+                cpal::SampleFormat::I16 => {
+                    input::<i16>(&d, &c.config(), producer, control.clone(), health.clone())
+                }
+                _ => input::<u16>(&d, &c.config(), producer, control.clone(), health.clone()),
             }?)
         } else {
             None
@@ -302,6 +310,7 @@ impl Session {
             capture,
             writers,
             control,
+            health,
             encoder,
             decoder,
             microphone,
@@ -317,11 +326,7 @@ impl Session {
         })
     }
     fn tick(&mut self) -> Result<(), String> {
-        if self.control.failed.load(Ordering::Acquire) {
-            return Err(
-                "Audio device disconnected or changed. Select devices and start again.".into(),
-            );
-        }
+        self.health.check()?;
         while self.reference.occupied_len() >= 480 {
             let mut reference = [0.0; 480];
             self.reference.pop_slice(&mut reference);
