@@ -1,9 +1,11 @@
+mod format;
 mod health;
 pub mod jitter;
 pub mod mixer;
 pub mod processing;
 pub mod transport;
 use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
+use format::config;
 use health::StreamHealth;
 use mixer::*;
 use ringbuf::{HeapCons, HeapRb, traits::*};
@@ -54,21 +56,26 @@ fn device(id: Option<&str>, input: bool) -> Result<cpal::Device, String> {
         "Selected audio device is unavailable. Refresh devices and select another.".into()
     })
 }
-fn config(device: &cpal::Device, input: bool) -> Result<cpal::SupportedStreamConfig, String> {
-    let configs: Vec<_> = if input {
-        device
-            .supported_input_configs()
-            .map_err(|e| e.to_string())?
-            .collect()
-    } else {
-        device
-            .supported_output_configs()
-            .map_err(|e| e.to_string())?
-            .collect()
+// Dispatch to the actual PCM storage type. In particular, never reinterpret
+// 24/32-bit audio as u16. Conversion is done in the existing bounded callbacks.
+macro_rules! pcm_stream {
+    ($sample:expr, $function:ident($($arg:expr),* $(,)?)) => {
+        match $sample {
+            cpal::SampleFormat::I8 => $function::<i8>($($arg),*),
+            cpal::SampleFormat::I16 => $function::<i16>($($arg),*),
+            cpal::SampleFormat::I24 => $function::<cpal::I24>($($arg),*),
+            cpal::SampleFormat::I32 => $function::<i32>($($arg),*),
+            cpal::SampleFormat::I64 => $function::<i64>($($arg),*),
+            cpal::SampleFormat::U8 => $function::<u8>($($arg),*),
+            cpal::SampleFormat::U16 => $function::<u16>($($arg),*),
+            cpal::SampleFormat::U24 => $function::<cpal::U24>($($arg),*),
+            cpal::SampleFormat::U32 => $function::<u32>($($arg),*),
+            cpal::SampleFormat::U64 => $function::<u64>($($arg),*),
+            cpal::SampleFormat::F32 => $function::<f32>($($arg),*),
+            cpal::SampleFormat::F64 => $function::<f64>($($arg),*),
+            _ => Err("Unsupported non-PCM audio sample format".into()),
+        }
     };
-    configs.into_iter().filter(|c|c.min_sample_rate()<=RATE&&c.max_sample_rate()>=RATE&&(1..=2).contains(&c.channels())&&matches!(c.sample_format(),cpal::SampleFormat::F32|cpal::SampleFormat::I16|cpal::SampleFormat::U16))
-        .min_by_key(|c|if c.sample_format()==cpal::SampleFormat::F32{0}else{1})
-        .map(|c|c.with_sample_rate(RATE)).ok_or_else(||"This device needs a 48 kHz mono/stereo format. Choose another device or set its OS format to 48 kHz.".into())
 }
 fn output<T>(
     device: &cpal::Device,
@@ -110,16 +117,7 @@ where
                 let mut peak = 0.0_f32;
                 let mut dropped = 0;
                 for frame in data.chunks_exact(channels) {
-                    let mono = frame
-                        .iter()
-                        .map(|v| cpal::Sample::to_sample::<f32>(*v))
-                        .sum::<f32>()
-                        / channels as f32;
-                    let mono = if mono.is_finite() {
-                        mono.clamp(-1.0, 1.0)
-                    } else {
-                        0.0
-                    };
+                    let mono = capture_mono(frame);
                     peak = peak.max(mono.abs());
                     if writer.try_push(mono).is_err() {
                         dropped += 1;
@@ -136,6 +134,22 @@ where
         .map_err(|e| {
             format!("Cannot open microphone. Check OS microphone permission and device access: {e}")
         })
+}
+
+fn capture_mono<T: cpal::Sample>(frame: &[T]) -> f32
+where
+    f32: cpal::FromSample<T>,
+{
+    let mono = frame
+        .iter()
+        .map(|v| cpal::Sample::to_sample::<f32>(*v))
+        .sum::<f32>()
+        / frame.len() as f32;
+    if mono.is_finite() {
+        mono.clamp(-1.0, 1.0)
+    } else {
+        0.0
+    }
 }
 
 pub enum Command {
@@ -254,39 +268,23 @@ impl Session {
         let mixer = mixer.with_reference(reference_writer);
         let output_device = device(settings.output.as_deref(), false)?;
         let output_config = config(&output_device, false)?;
-        let output = match output_config.sample_format() {
-            cpal::SampleFormat::F32 => output::<f32>(
+        let output = pcm_stream!(
+            output_config.sample_format(),
+            output(
                 &output_device,
                 &output_config.config(),
                 mixer,
-                health.clone(),
-            ),
-            cpal::SampleFormat::I16 => output::<i16>(
-                &output_device,
-                &output_config.config(),
-                mixer,
-                health.clone(),
-            ),
-            _ => output::<u16>(
-                &output_device,
-                &output_config.config(),
-                mixer,
-                health.clone(),
-            ),
-        }?;
+                health.clone()
+            )
+        )?;
         let (producer, capture) = HeapRb::<f32>::new(CAPACITY).split();
         let input = if microphone {
             let d = device(settings.input.as_deref(), true)?;
             let c = config(&d, true)?;
-            Some(match c.sample_format() {
-                cpal::SampleFormat::F32 => {
-                    input::<f32>(&d, &c.config(), producer, control.clone(), health.clone())
-                }
-                cpal::SampleFormat::I16 => {
-                    input::<i16>(&d, &c.config(), producer, control.clone(), health.clone())
-                }
-                _ => input::<u16>(&d, &c.config(), producer, control.clone(), health.clone()),
-            }?)
+            Some(pcm_stream!(
+                c.sample_format(),
+                input(&d, &c.config(), producer, control.clone(), health.clone())
+            )?)
         } else {
             None
         };
@@ -644,6 +642,13 @@ fn run(receiver: mpsc::Receiver<Request>, stop: Arc<AtomicBool>, pressed: Arc<At
 #[cfg(test)]
 mod lifecycle_tests {
     use super::*;
+    #[test]
+    fn integer_microphone_samples_convert_to_normalized_mono() {
+        assert_eq!(capture_mono(&[cpal::I24::new(4194304).unwrap()]), 0.5);
+        assert_eq!(capture_mono(&[1073741824_i32, -536870912_i32]), 0.125);
+        assert_eq!(capture_mono(&[32768_u16, 32768]), 0.0);
+        assert_eq!(capture_mono(&[f32::NAN]), 0.0);
+    }
     #[test]
     fn saturated_media_queue_cannot_lose_stop_or_ptt_release() {
         let (sender, _receiver) = mpsc::sync_channel(1);

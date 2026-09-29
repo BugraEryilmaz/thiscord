@@ -146,7 +146,13 @@ impl Mixer {
             } else {
                 (mix * master).clamp(-1.0, 1.0)
             };
-            frame.fill(T::from_sample(sample));
+            // Device layouts may expose 5.1/7.1 or interface channels. Place
+            // voice in the first stereo pair (mono if one channel); leave the
+            // remaining channels, including any LFE channel, silent.
+            frame.fill(T::from_sample(0.0));
+            for channel in frame.iter_mut().take(2) {
+                *channel = T::from_sample(sample);
+            }
             if let Some(reference) = &mut self.reference {
                 let _ = reference.try_push(sample);
             }
@@ -160,6 +166,32 @@ impl Mixer {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn surround_output_uses_first_pair_and_silences_remaining_channels() {
+        let (mut writers, mut mix) = mixer(Arc::new(Controls::default()));
+        writers[0].control.active.store(true, Ordering::Release);
+        writers[0].write(&[0.5, -0.5]);
+        let mut out = [0_u16; 12];
+        mix.render(&mut out, 6);
+        assert_eq!(
+            out,
+            [
+                49152, 49152, 32768, 32768, 32768, 32768, 16384, 16384, 32768, 32768, 32768, 32768
+            ]
+        );
+    }
+    #[test]
+    fn signed_24_and_32_bit_output_preserve_level_and_polarity() {
+        let (mut writers, mut mix) = mixer(Arc::new(Controls::default()));
+        writers[0].control.active.store(true, Ordering::Release);
+        writers[0].write(&[0.5, -0.5, 0.5, -0.5]);
+        let mut out24 = [cpal::I24::new(0).unwrap(); 2];
+        mix.render(&mut out24, 1);
+        assert_eq!(out24.map(|v| v.inner()), [4194304, -4194304]);
+        let mut out32 = [0_i32; 2];
+        mix.render(&mut out32, 1);
+        assert_eq!(out32, [1073741824, -1073741824]);
+    }
     #[test]
     fn streams_have_independent_gain_and_deafen_discards_backlog() {
         let controls = Arc::new(Controls::default());

@@ -44,8 +44,14 @@ falls back to the in-app button; portal integration remains future work.
 ## Libraries and compatibility decision
 
 - [CPAL 0.18.2](https://github.com/RustAudio/cpal): native WASAPI/CoreAudio/ALSA.
-  Initial devices must support 48 kHz mono or stereo, f32/i16/u16. This includes
-  common desktop devices but not every Bluetooth hands-free configuration.
+  Devices must support 48 kHz PCM with 1-32 channels. Integer PCM at 8/16/24/32/64
+  bits (signed or unsigned) and f32/f64 samples are converted by native callbacks.
+  Mono capture and stereo playback are preferred. Multichannel capture is averaged
+  to mono; playback uses the first one/two channels and silences the rest. A
+  compatible default format is also considered when enumerated formats are missing.
+  Rejection messages identify input/output, device name, default format and a bounded
+  summary of reported formats; 48 kHz alone does not guarantee a compatible device.
+  This includes common desktop devices but not every Bluetooth hands-free configuration.
   Arbitrary-rate resampling and Bluetooth mode switching remain pending.
 - [ringbuf 0.5.2](https://docs.rs/ringbuf/0.5.2/ringbuf/): bounded SPSC queues.
 - [WebRTC-rs 0.21](https://github.com/webrtc-rs/webrtc): native ICE/DTLS/SRTP,
@@ -187,7 +193,9 @@ changes were installed; its cause and macOS runtime behavior remain unverified.
 Native library tests cover independent mixing/gain, deafen backlog, queue bounds,
 jitter ordering/replay/wrap, finite DSP output and Opus forwarding across two
 encrypted WebRTC hops. Audio error tests cover recoverable notifications, fatal
-device/route changes, error direction and preserving the first failure. Backend
+device/route changes, error direction and preserving the first failure. Device
+format tests cover 24/32-bit PCM, multichannel selection/routing, input conversion
+and rejection of incompatible rates/channel counts/non-PCM formats. Backend
 PostgreSQL tests use disposable test schemas and
 real peer connections to exercise forwarding, isolation, self-mute/deafen,
 Speak denial and live changes, targeted permission/session revocation, unrelated
