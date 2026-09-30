@@ -69,6 +69,11 @@ falls back to the in-app button; portal integration remains future work.
   Echo buffering delay comes from CPAL capture/playback timestamps, mapped onto
   a common monotonic clock. AEC3 estimates/refines the acoustic delay internally.
   Hardware acoustic quality still needs acceptance, so headphones remain recommended.
+- DeepFilterNet3: optional native Rust/tract denoising, bundled in desktop builds.
+  Select it in Audio & voice while stopped, enable Noise suppression, then join
+  or test the microphone. Suppression can be toggled live; model changes require
+  stopping audio. Existing settings retain Sonora. See [deep-filter.md](deep-filter.md)
+  for the pinned runtime/model, stage interface, tests and performance results.
 
 The native path is selected per the project requirement. Windows and Linux
 software probes run locally; CI runs the same tests and desktop builds on all
@@ -106,6 +111,22 @@ the speaker user stays quiet. Then test both people talking simultaneously. Echo
 cancellation only has a reference for Thiscord playback, not other applications.
 Room acoustics, speaker distortion, microphone clipping and device clock drift
 still need real-device validation; synthetic tests are not a guarantee for them.
+
+The expandable **Echo diagnostics** section shows playback-reference peak,
+estimated filter reduction/delay, percentage of full-scale mono input samples
+over the last completed second, and automatic-gain state. Filter reduction is
+AEC3's internal linear-filter estimate, **not** a measurement of total audible
+echo or a guarantee of cancellation. Estimates are withheld during initial warmup
+and when the playback reference is silent. Restarting adaptation clears these
+measurements. Only numerical values cross IPC; no speech is recorded or logged.
+
+For echo that mainly appears when both people talk, compare diagnostics while
+only the remote person speaks and while both speak. Voice activation can mask
+residual echo while the microphone user is quiet, then transmit it alongside
+local speech when the gate opens; this symptom alone does not prove the filter
+has stopped working. Also compare with automatic gain disabled on the speaker
+user's client. The synthetic double-talk probe has not reproduced the reported
+failure, so gain is a hypothesis, not an established cause.
 
 Run `cargo run -p thiscord-frontend --example audio_bench --features native-audio
 --release --locked` for a synthetic eight-stream mixer timing. This excludes
@@ -209,6 +230,12 @@ changes were installed; its cause and macOS runtime behavior remain unverified.
 
 ## Verification and remaining work
 
+The planned voice-isolation work, candidate models, published computation costs
+and acceptance criteria are in [voice-isolation.md](voice-isolation.md) and
+[TODO section 5a](../TODO.md#5a-voice-isolation-and-speech-quality).
+DeepFilterNet3 is implemented as an experimental denoiser; the remaining models
+and personalized speaker isolation are still research candidates.
+
 Native library tests cover independent mixing/gain, deafen backlog, queue bounds,
 jitter ordering/replay/wrap, finite DSP output and Opus forwarding across two
 encrypted WebRTC hops. Audio error tests cover recoverable notifications, fatal
@@ -229,6 +256,14 @@ measured approximately 20 dB stationary-noise reduction (previously 15 dB) and
 54 dB echo reduction after warmup. These are synthetic results, not measurements
 of the affected user's microphone or room. Mixer tests verify that the echo
 reference includes individual/master gains, clipping and deafen silence.
+
+Double-talk regression coverage uses overlapping, independently modulated voiced
+harmonics, a reflected echo path, and optional speaker clipping, with automatic
+gain both on and off. It checks correlated echo reduction and local-voice
+retention against a noise-suppressed clean control. Correlation measures only
+the source-correlated component; these synthetic signals do not establish real
+speech intelligibility or performance in the affected room. Diagnostic tests
+cover clipping percentages, warmup, silent-reference expiry and resets.
 
 Still required: physical multi-user microphone/headset acceptance on each OS,
 macOS runtime results, Wayland global-shortcut portal support, arbitrary sample

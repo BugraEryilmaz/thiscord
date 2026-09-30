@@ -4,7 +4,7 @@ default-members = ["shared"]
 resolver = "3"
 
 [workspace.package]
-version = "0.1.5"
+version = "0.1.6"
 edition = "2024"
 rust-version = "1.98"
 publish = false
@@ -19,3 +19,29 @@ chrono = { version = "0.4", default-features = false, features = ["std", "serde"
 [profile.release]
 lto = "thin"
 codegen-units = 1
+
+# Neural DSP must meet the same 10 ms deadlines in `tauri dev`. Keep app debug
+# checks; optimize only the hot inference/FFT dependencies. tract 0.21.4's debug
+# graph-name validation rejects duplicate optimizer-generated Conv.bias labels
+# in DFN3 (not duplicate tensor identities); use its release path in dev as well.
+[profile.dev.package.tract-core]
+opt-level = 3
+debug-assertions = false
+
+[profile.dev.package.tract-linalg]
+opt-level = 3
+
+[profile.dev.package.tract-data]
+opt-level = 3
+
+[profile.dev.package.deep_filter]
+opt-level = 3
+
+[profile.dev.package.rustfft]
+opt-level = 3
+
+[profile.dev.package.realfft]
+opt-level = 3
+
+[profile.dev.package.ndarray]
+opt-level = 3

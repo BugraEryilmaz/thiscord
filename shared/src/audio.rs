@@ -9,6 +9,15 @@ pub enum TransmitMode {
     PushToTalk,
 }
 
+/// The enable switch is separate so disabling processing preserves the selection.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum NoiseSuppressionModel {
+    #[default]
+    Sonora,
+    DeepFilterNet3,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default, deny_unknown_fields)]
 pub struct AudioSettings {
@@ -19,6 +28,7 @@ pub struct AudioSettings {
     pub mode: TransmitMode,
     pub global_push_to_talk: bool,
     pub noise_suppression: bool,
+    pub noise_suppression_model: NoiseSuppressionModel,
     pub automatic_gain: bool,
     pub echo_cancellation: bool,
     pub muted: bool,
@@ -34,6 +44,7 @@ impl Default for AudioSettings {
             mode: TransmitMode::VoiceActivity,
             global_push_to_talk: false,
             noise_suppression: false,
+            noise_suppression_model: NoiseSuppressionModel::Sonora,
             automatic_gain: false,
             echo_cancellation: false,
             muted: false,
@@ -70,6 +81,17 @@ pub struct StreamLevel {
     pub label: String,
     pub volume: f32,
 }
+/// Local, numeric diagnostics only; never includes PCM or recorded speech.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct EchoDiagnostics {
+    pub reference_level: f32,
+    /// AEC's linear-filter estimate, not total audible echo attenuation.
+    pub filter_reduction_db: Option<f32>,
+    pub estimated_delay_ms: Option<i32>,
+    /// Percentage of mono input samples at full scale in the last completed second.
+    pub clipped_input_percent: f32,
+    pub automatic_gain: bool,
+}
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct AudioStatus {
     pub running: bool,
@@ -80,6 +102,8 @@ pub struct AudioStatus {
     /// Adaptation restarts caused by lost capture or playback-reference blocks.
     #[serde(default)]
     pub processing_resets: u64,
+    #[serde(default)]
+    pub echo: Option<EchoDiagnostics>,
     pub transmitting: bool,
     pub message: String,
     pub streams: Vec<StreamLevel>,

@@ -6,23 +6,48 @@ use sonora::{
     },
 };
 use std::time::Instant;
-use thiscord_shared::audio::AudioSettings;
+use thiscord_shared::audio::{AudioSettings, EchoDiagnostics, NoiseSuppressionModel};
+#[cfg(feature = "deep-filter")]
+pub mod deep_filter;
+mod denormals;
+#[cfg(test)]
+mod double_talk;
+#[cfg(all(test, feature = "deep-filter"))]
+mod neural_tests;
+pub mod stages;
 pub struct Processing {
     apm: AudioProcessing,
     config: Config,
     render_at: Option<Instant>,
     pub resets: u64,
+    reference_level: f32,
+    capture_frames: u64,
+    clipped_samples: usize,
+    clipped_input_percent: f32,
+    chain: stages::CaptureChain,
+    model: NoiseSuppressionModel,
+    automatic_gain: bool,
 }
 fn config(s: &AudioSettings) -> Config {
     Config {
         echo_canceller: s.echo_cancellation.then(EchoCanceller::default),
-        noise_suppression: s.noise_suppression.then_some(NoiseSuppression {
+        ..Default::default()
+    }
+}
+fn noise_config() -> Config {
+    Config {
+        noise_suppression: Some(NoiseSuppression {
             level: NoiseSuppressionLevel::High,
             ..Default::default()
         }),
+        ..Default::default()
+    }
+}
+fn gain_config() -> Config {
+    Config {
         // The library default only enables a limiter, not adaptive gain.
         // Start at unity and bound amplification of residual room noise.
-        gain_controller2: s.automatic_gain.then_some(GainController2 {
+        gain_controller2: Some(GainController2 {
             adaptive_digital: Some(AdaptiveDigital {
                 initial_gain_db: 0.0,
                 max_gain_db: 20.0,
@@ -34,10 +59,38 @@ fn config(s: &AudioSettings) -> Config {
     }
 }
 impl Processing {
-    pub fn new(s: &AudioSettings) -> Self {
-        Self::with_config(config(s))
+    pub fn new(s: &AudioSettings) -> Result<Self, String> {
+        s.validate()?;
+        let mut chain = stages::CaptureChain::default();
+        match s.noise_suppression_model {
+            NoiseSuppressionModel::Sonora => chain.push(
+                s.noise_suppression,
+                stages::SonoraStage::new("Sonora noise suppression", noise_config()),
+            ),
+            NoiseSuppressionModel::DeepFilterNet3 => {
+                #[cfg(feature = "deep-filter")]
+                chain.push(s.noise_suppression, deep_filter::DeepFilter::new()?);
+                #[cfg(not(feature = "deep-filter"))]
+                return Err("This build does not include DeepFilterNet3".into());
+            }
+        }
+        chain.push(
+            s.automatic_gain,
+            stages::SonoraStage::new("Automatic gain", gain_config()),
+        );
+        Ok(Self::with_chain(
+            config(s),
+            chain,
+            s.noise_suppression_model,
+            s.automatic_gain,
+        ))
     }
-    fn with_config(config: Config) -> Self {
+    fn with_chain(
+        config: Config,
+        chain: stages::CaptureChain,
+        model: NoiseSuppressionModel,
+        automatic_gain: bool,
+    ) -> Self {
         Self {
             apm: AudioProcessing::builder()
                 .config(config.clone())
@@ -47,24 +100,62 @@ impl Processing {
             config,
             render_at: None,
             resets: 0,
+            reference_level: 0.0,
+            capture_frames: 0,
+            clipped_samples: 0,
+            clipped_input_percent: 0.0,
+            chain,
+            model,
+            automatic_gain,
         }
     }
     pub fn reset(&mut self) {
-        let resets = self.resets + 1;
-        *self = Self::with_config(self.config.clone());
-        self.resets = resets;
+        self.apm = AudioProcessing::builder()
+            .config(self.config.clone())
+            .capture_config(StreamConfig::new(48_000, 1))
+            .render_config(StreamConfig::new(48_000, 1))
+            .build();
+        self.chain.reset();
+        self.render_at = None;
+        self.reference_level = 0.0;
+        self.capture_frames = 0;
+        self.clipped_samples = 0;
+        self.clipped_input_percent = 0.0;
+        self.resets += 1;
     }
-    pub fn settings(&mut self, s: &AudioSettings) {
+    pub fn settings(&mut self, s: &AudioSettings) -> Result<(), String> {
+        s.validate()?;
+        if s.noise_suppression_model != self.model {
+            return Err("Stop audio before changing the noise suppression model".into());
+        }
+        self.chain.set_enabled(0, s.noise_suppression);
+        self.chain.set_enabled(1, s.automatic_gain);
+        self.automatic_gain = s.automatic_gain;
         let config = config(s);
         if config.echo_canceller != self.config.echo_canceller
             || config.noise_suppression != self.config.noise_suppression
             || config.gain_controller2 != self.config.gain_controller2
         {
+            if config.echo_canceller != self.config.echo_canceller {
+                self.capture_frames = 0;
+                self.clipped_samples = 0;
+                self.clipped_input_percent = 0.0;
+            }
             self.apm.apply_config(config.clone());
             self.config = config;
         }
+        Ok(())
+    }
+    /// Explicit block buffering in active stages. Excludes filter-bank phase/
+    /// group delay, AEC, devices, Opus and network latency.
+    pub fn enhancement_delay_samples(&self) -> usize {
+        self.chain.delay_samples()
     }
     pub fn render(&mut self, frame: &[f32; 480]) -> Result<(), String> {
+        let _float_mode = denormals::Guard::new();
+        let peak = frame.iter().fold(0.0_f32, |peak, v| peak.max(v.abs()));
+        // Hold short peaks for the UI poll; silence makes old metrics unavailable.
+        self.reference_level = peak.max(self.reference_level * 0.95);
         let mut out = [0.0; 480];
         self.apm
             .process_render_f32(&[frame], &mut [&mut out])
@@ -108,7 +199,18 @@ impl Processing {
         }
         Ok(Some(pcm))
     }
-    fn capture_frame(&mut self, frame: &mut [f32; 480], delay_ms: i32) -> Result<(), String> {
+    pub fn capture_frame(&mut self, frame: &mut [f32; 480], delay_ms: i32) -> Result<(), String> {
+        let _float_mode = denormals::Guard::new();
+        if frame.iter().any(|x| !x.is_finite()) {
+            frame.fill(0.0);
+            return Err("Non-finite microphone samples".into());
+        }
+        self.clipped_samples += frame.iter().filter(|v| v.abs() >= 0.999).count();
+        self.capture_frames += 1;
+        if self.capture_frames.is_multiple_of(100) {
+            self.clipped_input_percent = self.clipped_samples as f32 / 480.0;
+            self.clipped_samples = 0;
+        }
         // Device timestamps account for buffering; AEC3 estimates the acoustic
         // path, including room reflections, from the actual playback reference.
         self.apm
@@ -119,7 +221,27 @@ impl Processing {
             .process_capture_f32(&[frame], &mut [&mut out])
             .map_err(|e| e.to_string())?;
         frame.copy_from_slice(&out);
+        self.chain.process(frame)?;
+        for sample in frame.iter_mut() {
+            *sample = sample.clamp(-1.0, 1.0);
+        }
         Ok(())
+    }
+    pub fn echo_diagnostics(&self) -> Option<EchoDiagnostics> {
+        self.config.echo_canceller.as_ref()?;
+        let stats = self.apm.statistics();
+        let active = self.capture_frames >= 100 && self.reference_level > 0.0001;
+        Some(EchoDiagnostics {
+            reference_level: self.reference_level,
+            filter_reduction_db: active
+                .then_some(stats.echo_return_loss_enhancement)
+                .flatten()
+                .filter(|v| v.is_finite())
+                .map(|v| v as f32),
+            estimated_delay_ms: active.then_some(stats.delay_ms).flatten(),
+            clipped_input_percent: self.clipped_input_percent,
+            automatic_gain: self.automatic_gain,
+        })
     }
     #[cfg(test)]
     pub fn capture(&mut self, pcm: &mut [f32; 960], delay_ms: i32) -> Result<(), String> {
@@ -143,11 +265,41 @@ mod tests {
     }
 
     #[test]
+    fn echo_diagnostics_report_clipping_and_expire_without_a_reference() {
+        let mut p = Processing::new(&AudioSettings {
+            echo_cancellation: true,
+            ..Default::default()
+        })
+        .unwrap();
+        assert!(p.echo_diagnostics().unwrap().filter_reduction_db.is_none());
+        for _ in 0..100 {
+            p.render(&[0.05; 480]).unwrap();
+            let mut input = [0.1; 480];
+            input[..48].fill(1.0);
+            p.capture_frame(&mut input, 60).unwrap();
+        }
+        let stats = p.echo_diagnostics().unwrap();
+        assert_eq!(stats.clipped_input_percent, 10.0);
+        assert!(stats.estimated_delay_ms.is_some());
+        assert!(stats.filter_reduction_db.is_some_and(f32::is_finite));
+        // A silent reference must not advertise an old estimate as current.
+        for _ in 0..200 {
+            p.render(&[0.0; 480]).unwrap();
+        }
+        assert!(p.echo_diagnostics().unwrap().filter_reduction_db.is_none());
+        p.reset();
+        assert_eq!(p.echo_diagnostics().unwrap().clipped_input_percent, 0.0);
+        p.settings(&AudioSettings::default()).unwrap();
+        assert!(p.echo_diagnostics().is_none());
+    }
+
+    #[test]
     fn stationary_noise_is_attenuated() {
         let mut p = Processing::new(&AudioSettings {
             noise_suppression: true,
             ..Default::default()
-        });
+        })
+        .unwrap();
         let mut state = 42;
         let (mut before, mut after) = (0.0, 0.0);
         for frame in 0..400 {
@@ -170,7 +322,8 @@ mod tests {
             let mut p = Processing::new(&AudioSettings {
                 echo_cancellation: true,
                 ..Default::default()
-            });
+            })
+            .unwrap();
             let (mut render, mut references) = frames::queue();
             let (mut capture, mut captures) = frames::queue();
             let mut state = 456;
@@ -216,7 +369,8 @@ mod tests {
         let mut p = Processing::new(&AudioSettings {
             echo_cancellation: true,
             ..Default::default()
-        });
+        })
+        .unwrap();
         let (mut before, mut after) = (0.0, 0.0);
         for frame in 0..300 {
             // Voiced harmonics, independent of the silent speaker reference.
@@ -248,11 +402,12 @@ mod tests {
         let mut p = Processing::new(&AudioSettings {
             noise_suppression: true,
             ..Default::default()
-        });
+        })
+        .unwrap();
         for _ in 0..50 {
             p.capture(&mut [0.01; 960], 0).unwrap();
         }
-        p.settings(&AudioSettings::default());
+        p.settings(&AudioSettings::default()).unwrap();
         let mut state = 789;
         let input = std::array::from_fn(|_| noise(&mut state) * 0.1);
         let mut output = input;
@@ -266,7 +421,8 @@ mod tests {
             let mut p = Processing::new(&AudioSettings {
                 echo_cancellation: true,
                 ..Default::default()
-            });
+            })
+            .unwrap();
             let (mut writer, mut reader) = frames::queue();
             for _ in 0..(frames::BLOCKS + 2) * frames::SAMPLES {
                 writer.push(0.0);
@@ -294,7 +450,8 @@ mod tests {
         let mut p = Processing::new(&AudioSettings {
             echo_cancellation: true,
             ..Default::default()
-        });
+        })
+        .unwrap();
         let mut state = 123;
         let mut history = vec![0.0; 48_000 * 12];
         let (mut before, mut after) = (0.0, 0.0);
@@ -331,7 +488,7 @@ mod tests {
             echo_cancellation: true,
             ..Default::default()
         };
-        let mut p = Processing::new(&s);
+        let mut p = Processing::new(&s).unwrap();
         for _ in 0..20 {
             p.render(&[0.0; 480]).unwrap();
             let mut input = [0.001; 960];

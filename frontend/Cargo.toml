@@ -8,8 +8,9 @@ default-run = "thiscord-desktop"
 
 [features]
 default = []
-desktop = ["dep:tauri", "dep:tauri-build", "dep:keyring", "dep:open", "dep:tokio", "dep:rand", "dep:base64", "dep:url", "native-audio", "dep:tauri-plugin-global-shortcut", "dep:tauri-plugin-updater", "dep:tokio-tungstenite", "dep:futures-util"]
+desktop = ["dep:tauri", "dep:tauri-build", "dep:keyring", "dep:open", "dep:tokio", "dep:rand", "dep:base64", "dep:url", "native-audio", "deep-filter", "dep:tauri-plugin-global-shortcut", "dep:tauri-plugin-updater", "dep:tokio-tungstenite", "dep:futures-util"]
 native-audio = ["dep:cpal", "dep:ringbuf", "dep:opus", "dep:webrtc", "dep:tokio", "dep:bytes", "dep:rtc", "dep:async-trait", "dep:sonora"]
+deep-filter = ["native-audio", "dep:deep_filter", "dep:ndarray", "dep:tract-core", "dep:tract-hir", "dep:tract-onnx", "dep:tract-pulse"]
 release-tools = ["dep:base64", "dep:minisign-verify"]
 custom-protocol = ["desktop", "tauri/custom-protocol"]
 
@@ -25,6 +26,13 @@ required-features = ["desktop"]
 [[example]]
 name = "verify_update"
 required-features = ["release-tools"]
+
+[[example]]
+name = "processing_bench"
+required-features = ["deep-filter"]
+
+[target.'cfg(not(target_arch = "wasm32"))'.dev-dependencies]
+hound = "3.5"
 
 [dependencies]
 thiscord-shared.workspace = true
@@ -53,6 +61,14 @@ base64 = { version = "0.22", optional = true }
 url = { version = "2", optional = true }
 cpal = { version = "0.18.2", optional = true }
 sonora = { version = "0.2.0", optional = true }
+deep_filter = { git = "https://github.com/Rikorose/DeepFilterNet", rev = "d375b2d8309e0935d165700c91da9de862a99c31", default-features = false, features = ["tract", "default-model"], optional = true }
+ndarray = { version = "0.15", optional = true }
+# DFN's ^0.21.4 constraint permits incompatible ndarray/API changes in later
+# tract patch releases. Keep all four upstream inference entry points aligned.
+tract-core = { version = "=0.21.4", optional = true }
+tract-hir = { version = "=0.21.4", optional = true }
+tract-onnx = { version = "=0.21.4", optional = true }
+tract-pulse = { version = "=0.21.4", optional = true }
 ringbuf = { version = "0.5.2", optional = true }
 opus = { version = "0.4.0", optional = true }
 webrtc = { version = "0.21.0", optional = true }

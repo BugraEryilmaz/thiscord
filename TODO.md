@@ -104,6 +104,46 @@ and single-process chat/media enforcement.
 - [ ] macOS runtime/permission spike; Wayland global shortcut portal integration.
 - [ ] Arbitrary sample-rate resampling and Bluetooth hands-free format support.
 
+## 5a. Voice isolation and speech quality
+
+Research, model costs and proposed acceptance budgets: [voice-isolation.md](docs/voice-isolation.md).
+DeepFilterNet3 denoising is available as an experimental option. Personalized
+speaker isolation and physical acoustic acceptance remain future work.
+
+- [ ] Establish reproducible acoustic/listening baselines against current Sonora
+  processing and Discord, with matched devices, levels and processing settings.
+- [ ] Build an opt-in fixture/benchmark harness for fan/keyboard/music noise,
+  nearby/TV speech, overlapping speakers, target absence and acoustic double-talk;
+  include Turkish/English, quiet speech and different microphones/rooms.
+- [x] Add optional DeepFilterNet3 at 48 kHz behind replaceable ordered capture
+  stages, with Sonora fallback selection, live bypass and persisted model choice.
+- [x] Add deterministic noise/speech, reset, bypass, composition and queue-gap
+  regressions; offline CPU/latency/quality benchmarks and three-OS CI artifacts.
+- [ ] Compare nnnoiseless and GTCRN against the measured DeepFilterNet3 baseline,
+  including resampling delay and lost high frequencies.
+- [ ] Spike streaming target-speaker extraction using SpeakerBeam-SS or another
+  waveform-output personalized model; verify checkpoint availability, enrollment
+  encoder cost, Rust inference compatibility and redistribution licenses first.
+- [ ] Evaluate reference-aware neural echo suppression/AEC against AEC3 for
+  double-talk and nonlinear speaker echo; keep external background speech tests separate.
+- [ ] Record pinned model/runtime versions, weight hashes, code/weight licenses,
+  training-data terms, maintenance status and Windows/macOS/Linux compatibility.
+- [ ] Compare release-build CPU/RTF, p50/p95/p99 processing times, algorithmic delay,
+  peak memory, startup, underruns and battery/thermal behavior on all three OSes.
+- [x] Integrate DeepFilterNet3 on the bounded native capture worker; preserve
+  AEC reference timing, per-stream rings, urgent mute/PTT/leave and SFU forwarding.
+- [ ] Add optional local voice-profile enrollment, quality checks, re-enrollment
+  and deletion; protect embeddings and keep samples out of logs, IPC and backend.
+- [ ] Add explicit noise-suppression versus personal-isolation modes, strength
+  controls and bounded listening tests; handle missing profiles, model failures,
+  CPU overload and target absence without silently transmitting unintended speech.
+- [ ] Test state resets, silence, clipping, queue gaps, device changes, suspend,
+  simultaneous speakers and eight-participant calls under CPU contention.
+- [ ] Set release quality/performance gates from measurements; run blind A/B
+  acceptance and an opt-in rollout before changing defaults or claiming improvement.
+- [ ] Later: evaluate quantization/distillation and microphone-array beamforming
+  only where measured costs or compatible hardware justify the extra complexity.
+
 ## 6. WebRTC transport and signaling
 
 - [x] Shared versioned authenticated join/leave/offer/answer/state/error contracts.

@@ -200,4 +200,27 @@ fn voice_and_audio_contract_bounds() {
     .unwrap();
     assert_eq!(status.raw_input_level, 0.0);
     assert_eq!(status.processing_resets, 0);
+    assert!(status.echo.is_none());
+}
+
+#[test]
+fn audio_model_selection_preserves_old_settings_and_rejects_unknown_models() {
+    use thiscord_shared::audio::{AudioSettings, NoiseSuppressionModel};
+    let old: AudioSettings = from_value(json!({"noise_suppression":true})).unwrap();
+    assert!(old.noise_suppression);
+    assert_eq!(old.noise_suppression_model, NoiseSuppressionModel::Sonora);
+    let selected: AudioSettings = from_value(json!({
+        "noise_suppression":false, "noise_suppression_model":"deep_filter_net3"
+    }))
+    .unwrap();
+    assert_eq!(
+        selected.noise_suppression_model,
+        NoiseSuppressionModel::DeepFilterNet3
+    );
+    assert!(!selected.noise_suppression);
+    assert_eq!(
+        to_value(selected).unwrap()["noise_suppression_model"],
+        "deep_filter_net3"
+    );
+    assert!(from_value::<AudioSettings>(json!({"noise_suppression_model":"unknown"})).is_err());
 }

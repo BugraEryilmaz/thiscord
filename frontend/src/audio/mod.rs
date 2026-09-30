@@ -185,6 +185,7 @@ pub struct AudioEngine {
     sender: mpsc::SyncSender<Request>,
     stop: Arc<AtomicBool>,
     pressed: Arc<AtomicBool>,
+    inhibit: Arc<AtomicBool>,
 }
 impl Default for AudioEngine {
     fn default() -> Self {
@@ -202,14 +203,17 @@ impl AudioEngine {
         let pressed = Arc::new(AtomicBool::new(false));
         let worker_stop = stop.clone();
         let worker_pressed = pressed.clone();
+        let inhibit = Arc::new(AtomicBool::new(false));
+        let worker_inhibit = inhibit.clone();
         thread::Builder::new()
             .name("thiscord-audio-control".into())
-            .spawn(move || run(receiver, worker_stop, worker_pressed))
+            .spawn(move || run(receiver, worker_stop, worker_pressed, worker_inhibit))
             .expect("audio worker");
         Self {
             sender,
             stop,
             pressed,
+            inhibit,
         }
     }
     fn urgent(&self, command: &Command) {
@@ -219,6 +223,12 @@ impl AudioEngine {
             }
             Command::Pressed(value) => {
                 self.pressed.store(*value, Ordering::Release);
+            }
+            Command::Settings(settings)
+            | Command::Start { settings, .. }
+            | Command::VoiceStart { settings, .. } => {
+                self.inhibit
+                    .store(settings.muted || settings.deafened, Ordering::Release);
             }
             _ => {}
         }
@@ -302,7 +312,7 @@ impl Session {
             writers[1].control.active.store(true, Ordering::Release);
         }
         // Build the DSP before starting devices so startup cannot overflow queues.
-        let processing = processing::Processing::new(settings);
+        let processing = processing::Processing::new(settings)?;
         output.play().map_err(|e| e.to_string())?;
         if let Some(input) = &input {
             input.play().map_err(|e| e.to_string())?;
@@ -329,7 +339,12 @@ impl Session {
             processing,
         })
     }
-    fn tick(&mut self, stop: &AtomicBool, pressed: &AtomicBool) -> Result<(), String> {
+    fn tick(
+        &mut self,
+        stop: &AtomicBool,
+        pressed: &AtomicBool,
+        inhibit: &AtomicBool,
+    ) -> Result<(), String> {
         self.health.check()?;
         self.processing.render_queued(&mut self.reference)?;
         if self.outgoing.is_some() && Instant::now() >= self.playback {
@@ -388,11 +403,15 @@ impl Session {
             self.control
                 .pressed
                 .store(pressed.load(Ordering::Acquire), Ordering::Relaxed);
-            self.capture_packet(pcm)?;
+            self.capture_packet(pcm, inhibit)?;
         }
         Ok(())
     }
-    fn capture_packet(&mut self, mut pcm: [f32; FRAME]) -> Result<(), String> {
+    fn capture_packet(
+        &mut self,
+        mut pcm: [f32; FRAME],
+        inhibit: &AtomicBool,
+    ) -> Result<(), String> {
         let peak = pcm.iter().fold(0.0_f32, |p, v| p.max(v.abs()));
         self.processed_level = peak;
         if peak >= f32::from_bits(self.control.threshold.load(Ordering::Relaxed)) {
@@ -400,7 +419,8 @@ impl Session {
         } else {
             self.hold = self.hold.saturating_sub(1);
         }
-        let active = !self.control.mute.load(Ordering::Relaxed)
+        let active = !inhibit.load(Ordering::Acquire)
+            && !self.control.mute.load(Ordering::Relaxed)
             && !self.control.deafen.load(Ordering::Relaxed)
             && if self.control.push_to_talk.load(Ordering::Relaxed) {
                 self.control.pressed.load(Ordering::Relaxed)
@@ -437,6 +457,7 @@ impl Session {
             input_level: self.processed_level,
             raw_input_level: f32::from_bits(self.control.peak.load(Ordering::Relaxed)),
             processing_resets: self.processing.resets,
+            echo: self.processing.echo_diagnostics(),
             transmitting: self.control.transmitting.load(Ordering::Relaxed),
             message: if self.outgoing.is_some() {
                 "Voice audio active"
@@ -496,6 +517,7 @@ fn stopped(message: String) -> AudioStatus {
         input_level: 0.0,
         raw_input_level: 0.0,
         processing_resets: 0,
+        echo: None,
         transmitting: false,
         message,
         streams: vec![],
@@ -504,7 +526,12 @@ fn stopped(message: String) -> AudioStatus {
     }
 }
 type Request = (Command, Option<mpsc::Sender<Result<AudioStatus, String>>>);
-fn run(receiver: mpsc::Receiver<Request>, stop: Arc<AtomicBool>, pressed: Arc<AtomicBool>) {
+fn run(
+    receiver: mpsc::Receiver<Request>,
+    stop: Arc<AtomicBool>,
+    pressed: Arc<AtomicBool>,
+    inhibit: Arc<AtomicBool>,
+) {
     let mut session: Option<Session> = None;
     let mut message = String::new();
     let mut lease = Instant::now();
@@ -608,7 +635,7 @@ fn run(receiver: mpsc::Receiver<Request>, stop: Arc<AtomicBool>, pressed: Arc<At
                         Command::Settings(settings) => {
                             settings.validate()?;
                             if let Some(s) = &mut session {
-                                s.processing.settings(&settings);
+                                s.processing.settings(&settings)?;
                                 if settings.deafened {
                                     for remote in s.remotes.iter_mut().flatten() {
                                         remote.jitter = Default::default();
@@ -650,7 +677,7 @@ fn run(receiver: mpsc::Receiver<Request>, stop: Arc<AtomicBool>, pressed: Arc<At
             {
                 session = None;
                 message = "Test finished; devices released".into();
-            } else if let Err(error) = s.tick(&stop, &pressed) {
+            } else if let Err(error) = s.tick(&stop, &pressed, &inhibit) {
                 session = None;
                 message = error;
             }
@@ -675,11 +702,17 @@ mod lifecycle_tests {
             sender,
             stop: Arc::new(AtomicBool::new(false)),
             pressed: Arc::new(AtomicBool::new(true)),
+            inhibit: Arc::new(AtomicBool::new(false)),
         };
         engine.notify(Command::Peek);
         engine.notify(Command::Pressed(false));
         engine.notify(Command::Stop);
+        engine.notify(Command::Settings(AudioSettings {
+            muted: true,
+            ..Default::default()
+        }));
         assert!(!engine.pressed.load(Ordering::Acquire));
         assert!(engine.stop.load(Ordering::Acquire));
+        assert!(engine.inhibit.load(Ordering::Acquire));
     }
 }

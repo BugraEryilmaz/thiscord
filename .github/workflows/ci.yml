@@ -126,7 +126,17 @@ jobs:
       - name: Native callback tests
         run: cargo test -p thiscord-frontend --bin thiscord-desktop --features desktop,custom-protocol --locked
       - name: Native audio mixer, DSP, jitter and encrypted WebRTC probe
-        run: cargo test -p thiscord-frontend --lib --features native-audio --locked
+        run: cargo test -p thiscord-frontend --lib --features deep-filter --release --locked
+      - name: Lint audio stages, regressions and benchmarks
+        run: cargo clippy -p thiscord-frontend --lib --tests --examples --features deep-filter --locked -- -D warnings
+      - name: Audio processing benchmark (informational, shared runner)
+        shell: bash
+        run: cargo run -p thiscord-frontend --example processing_bench --features deep-filter --release --locked -- 300 > processing-bench.jsonl
+      - uses: actions/upload-artifact@v4
+        with:
+          name: audio-processing-${{ matrix.os }}
+          path: processing-bench.jsonl
+          if-no-files-found: error
       - uses: actions/upload-artifact@v4
         with:
           name: desktop-${{ matrix.os }}
