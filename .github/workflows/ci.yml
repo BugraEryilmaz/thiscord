@@ -126,7 +126,7 @@ jobs:
       - name: Native callback tests
         run: cargo test -p thiscord-frontend --bin thiscord-desktop --features desktop,custom-protocol --locked
       - name: Native audio mixer, DSP, jitter and encrypted WebRTC probe
-        run: cargo test -p thiscord-frontend --lib --features deep-filter,neural-echo --release --locked
+        run: cargo test -p thiscord-frontend --lib --example audio_replay --features deep-filter,neural-echo --release --locked
       - name: Lint audio stages, regressions and benchmarks
         run: cargo clippy -p thiscord-frontend --lib --tests --examples --features deep-filter,neural-echo-probe --locked -- -D warnings
       - name: Audio processing benchmark (informational, shared runner)

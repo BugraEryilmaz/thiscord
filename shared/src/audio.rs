@@ -104,6 +104,9 @@ pub struct EchoDiagnostics {
 }
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct AudioStatus {
+    /// Local diagnostic recording state only; audio bytes never cross IPC.
+    #[serde(default)]
+    pub recording: Option<AudioRecordingStatus>,
     pub running: bool,
     pub input_level: f32,
     /// Microphone peak before echo/noise processing. No PCM crosses IPC.
@@ -119,4 +122,14 @@ pub struct AudioStatus {
     pub streams: Vec<StreamLevel>,
     pub dropped_samples: u64,
     pub underrun_samples: u64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct AudioRecordingStatus {
+    pub active: bool,
+    pub saving: bool,
+    pub elapsed_ms: u64,
+    pub directory: String,
+    pub dropped_blocks: u64,
+    pub error: Option<String>,
 }

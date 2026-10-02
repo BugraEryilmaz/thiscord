@@ -78,9 +78,46 @@ fn VoiceControls(ui: Ui) -> impl IntoView {
 pub(super) fn VoiceBar(ui: Ui) -> impl IntoView {
     view! {<Show when=move||ui.voice.get().channel_id.is_some()><aside class="flex shrink-0 flex-wrap items-center justify-between gap-3 rounded-lg bg-black/20 p-3" aria-label="Voice controls">
         <span class="text-sm">{move||ui.voice.get().message}</span><VoiceControls ui=ui/>
+        <Show when=move||ui.audio_status.get().and_then(|s|s.recording).is_some_and(|r|r.active)>
+            <button class="rounded bg-red-700 px-3 py-2 text-sm text-white" on:click=move |_|debug_command(ui,"audio_debug_stop")>
+                {move||format!("● Recording {}s · Stop",ui.audio_status.get().and_then(|s|s.recording).map_or(0,|r|r.elapsed_ms/1000))}
+            </button>
+        </Show>
         <button class="text-sm underline" on:click=move |_|ui.page.set("audio")>"Audio settings"</button>
         <button class="text-sm text-red-300" on:click=move |_|leave(ui)>"Disconnect"</button>
     </aside></Show>}
+}
+fn debug_command(ui: Ui, command: &'static str) {
+    leptos::task::spawn_local(async move {
+        match native::<AudioStatus>(command, json!({})).await {
+            Ok(status) => ui.audio_status.set(Some(status)),
+            Err(error) => ui.status.set(error),
+        }
+    });
+}
+#[component]
+fn DebugRecording(ui: Ui) -> impl IntoView {
+    view! {<section class="space-y-2 rounded-lg border border-white/15 p-4" aria-label="Echo debug recording">
+        <h3 class="font-semibold">"Echo debug recording"</h3>
+        <p class="text-sm text-white/70">"Save up to 60 seconds of speaker output, raw microphone, and outgoing audio for troubleshooting. Raw microphone is recorded even while muted. Tell the other participants before starting. Files stay on this computer until you choose to share them."</p>
+        <button class="rounded bg-brand px-3 py-2 text-sm disabled:opacity-50"
+            disabled=move||ui.voice.get().channel_id.is_none() || ui.audio_status.get().is_none_or(|s|!s.running || s.recording.is_some_and(|r|r.active || r.saving))
+            on:click=move |_|debug_command(ui,"audio_debug_start")>"Start debug recording"</button>
+        <Show when=move||ui.audio_status.get().and_then(|s|s.recording).is_some()>
+            <p class="text-sm" role="status">{move||ui.audio_status.get().and_then(|s|s.recording).map(|r| {
+                if let Some(error)=r.error { error }
+                else if r.active { format!("● Recording — {} / 60 seconds",r.elapsed_ms/1000) }
+                else if r.saving { "Saving recording…".into() }
+                else { format!("Saved to {}. Share the entire folder, including timing metadata.",r.directory) }
+            })}</p>
+            <Show when=move||ui.audio_status.get().and_then(|s|s.recording).is_some_and(|r|r.active)>
+                <button class="rounded bg-red-700 px-3 py-2 text-sm" on:click=move |_|debug_command(ui,"audio_debug_stop")>"Stop and save"</button>
+            </Show>
+            <button class="text-sm underline disabled:opacity-50" disabled=move||ui.audio_status.get().and_then(|s|s.recording).is_none_or(|r|r.active||r.saving)
+                on:click=move |_|leptos::task::spawn_local(async move {if let Err(error)=native::<()>("audio_debug_folder",json!({})).await{ui.status.set(error);}})>"Open recording folder"</button>
+        </Show>
+        <p class="text-xs text-white/60">"Join voice first. For a useful sample, have one person speak for 5–10 seconds, then talk at the same time. Delete the recording when it is no longer needed."</p>
+    </section>}
 }
 #[component]
 fn StreamVolumes(ui: Ui) -> impl IntoView {
@@ -194,6 +231,7 @@ pub(super) fn AudioSettingsPanel(ui: Ui) -> impl IntoView {
                 </Show>
             </div>
             <VoiceControls ui=ui/>
+            <DebugRecording ui=ui/>
             <label class="block">"Raw microphone"<meter class="ml-3 w-48" min="0" max="1" value=move||ui.audio_status.get().map(|s|s.raw_input_level).unwrap_or(0.0) /></label>
             <label class="block">"After noise / echo processing"<meter class="ml-3 w-48" min="0" max="1" value=move||ui.audio_status.get().map(|s|s.input_level).unwrap_or(0.0) /></label>
             <p class="text-sm" role="status">{move||ui.audio_status.get().map(|s|format!("{} · dropped {} · underruns {} · processing resets {}",s.message,s.dropped_samples,s.underrun_samples,s.processing_resets))}</p>

@@ -4,6 +4,7 @@ mod health;
 pub mod jitter;
 pub mod mixer;
 pub mod processing;
+mod recording;
 pub mod transport;
 use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
 use format::config;
@@ -155,6 +156,8 @@ where
 }
 
 pub enum Command {
+    DebugStart(std::path::PathBuf),
+    DebugStop,
     VoiceStart {
         settings: AudioSettings,
         outgoing: tokio::sync::mpsc::Sender<bytes::Bytes>,
@@ -186,6 +189,7 @@ pub struct AudioEngine {
     stop: Arc<AtomicBool>,
     pressed: Arc<AtomicBool>,
     inhibit: Arc<AtomicBool>,
+    debug_stop: Arc<AtomicBool>,
 }
 impl Default for AudioEngine {
     fn default() -> Self {
@@ -205,19 +209,33 @@ impl AudioEngine {
         let worker_pressed = pressed.clone();
         let inhibit = Arc::new(AtomicBool::new(false));
         let worker_inhibit = inhibit.clone();
+        let debug_stop = Arc::new(AtomicBool::new(false));
+        let worker_debug_stop = debug_stop.clone();
         thread::Builder::new()
             .name("thiscord-audio-control".into())
-            .spawn(move || run(receiver, worker_stop, worker_pressed, worker_inhibit))
+            .spawn(move || {
+                run(
+                    receiver,
+                    worker_stop,
+                    worker_pressed,
+                    worker_inhibit,
+                    worker_debug_stop,
+                )
+            })
             .expect("audio worker");
         Self {
             sender,
             stop,
             pressed,
             inhibit,
+            debug_stop,
         }
     }
     fn urgent(&self, command: &Command) {
         match command {
+            Command::DebugStop => {
+                self.debug_stop.store(true, Ordering::Release);
+            }
             Command::Stop => {
                 self.stop.store(true, Ordering::Release);
             }
@@ -250,6 +268,8 @@ struct Remote {
     decoder: opus::Decoder,
 }
 struct Session {
+    settings: AudioSettings,
+    devices: serde_json::Value,
     _output: cpal::Stream,
     _input: Option<cpal::Stream>,
     capture: frames::Reader,
@@ -291,9 +311,12 @@ impl Session {
             )
         )?;
         let (producer, capture) = frames::queue();
+        let mut input_info = serde_json::Value::Null;
         let input = if microphone {
             let d = device(settings.input.as_deref(), true)?;
             let c = config(&d, true)?;
+            input_info = serde_json::json!({"name":d.description().ok().map(|d|d.name().to_owned()),
+                "channels":c.channels(),"sample_rate":c.sample_rate(),"format":format!("{:?}",c.sample_format())});
             Some(pcm_stream!(
                 c.sample_format(),
                 input(&d, &c.config(), producer, control.clone(), health.clone())
@@ -318,6 +341,11 @@ impl Session {
             input.play().map_err(|e| e.to_string())?;
         }
         Ok(Self {
+            settings: settings.clone(),
+            devices: serde_json::json!({"input":input_info,"output":{
+                "name":output_device.description().ok().map(|d|d.name().to_owned()),
+                "channels":output_config.channels(),"sample_rate":output_config.sample_rate(),
+                "format":format!("{:?}",output_config.sample_format())}}),
             _output: output,
             _input: input,
             capture,
@@ -344,9 +372,20 @@ impl Session {
         stop: &AtomicBool,
         pressed: &AtomicBool,
         inhibit: &AtomicBool,
+        debug: &mut recording::Recorder,
     ) -> Result<(), String> {
         self.health.check()?;
-        self.processing.render_queued(&mut self.reference)?;
+        self.processing
+            .render_tapped(&mut self.reference, &mut |frame, gap| {
+                debug.block(
+                    recording::Track::Speaker,
+                    frame.at,
+                    &frame.samples,
+                    gap.into(),
+                    0,
+                    None,
+                );
+            })?;
         if self.outgoing.is_some() && Instant::now() >= self.playback {
             self.playback += Duration::from_millis(20);
             if self.playback.elapsed() > Duration::from_millis(100) {
@@ -394,7 +433,20 @@ impl Session {
             if stop.load(Ordering::Acquire) {
                 break;
             }
-            let Some(pcm) = self.processing.capture_queued(&mut self.capture)? else {
+            let Some(packet) = self.processing.capture_tapped(
+                &mut self.capture,
+                &mut |frame, gap, reset, delay| {
+                    debug.block(
+                        recording::Track::Microphone,
+                        frame.at,
+                        &frame.samples,
+                        recording::Continuity { gap, reset },
+                        delay,
+                        None,
+                    );
+                },
+            )?
+            else {
                 break;
             };
             if stop.load(Ordering::Acquire) {
@@ -403,15 +455,17 @@ impl Session {
             self.control
                 .pressed
                 .store(pressed.load(Ordering::Acquire), Ordering::Relaxed);
-            self.capture_packet(pcm, inhibit)?;
+            self.capture_packet(packet, inhibit, debug)?;
         }
         Ok(())
     }
     fn capture_packet(
         &mut self,
-        mut pcm: [f32; FRAME],
+        captured: processing::Captured,
         inhibit: &AtomicBool,
+        debug: &mut recording::Recorder,
     ) -> Result<(), String> {
+        let mut pcm = captured.pcm;
         let peak = pcm.iter().fold(0.0_f32, |p, v| p.max(v.abs()));
         self.processed_level = peak;
         if peak >= f32::from_bits(self.control.threshold.load(Ordering::Relaxed)) {
@@ -437,7 +491,22 @@ impl Session {
             .encode_float(&pcm, &mut packet)
             .map_err(|e| e.to_string())?;
         if let Some(outgoing) = &self.outgoing {
-            let _ = outgoing.try_send(bytes::Bytes::copy_from_slice(&packet[..n]));
+            let accepted = outgoing
+                .try_send(bytes::Bytes::copy_from_slice(&packet[..n]))
+                .is_ok();
+            for (index, frame) in pcm.as_chunks::<480>().0.iter().enumerate() {
+                debug.block(
+                    recording::Track::Transmit,
+                    captured.at[index],
+                    frame,
+                    recording::Continuity {
+                        gap: captured.gap[index],
+                        reset: false,
+                    },
+                    0,
+                    Some((accepted, active)),
+                );
+            }
             return Ok(());
         }
         let mut decoded = [0.0; FRAME];
@@ -453,6 +522,7 @@ impl Session {
     }
     fn status(&self) -> AudioStatus {
         AudioStatus {
+            recording: None,
             running: true,
             input_level: self.processed_level,
             raw_input_level: f32::from_bits(self.control.peak.load(Ordering::Relaxed)),
@@ -513,6 +583,7 @@ fn apply(c: &Controls, s: &AudioSettings) {
 }
 fn stopped(message: String) -> AudioStatus {
     AudioStatus {
+        recording: None,
         running: false,
         input_level: 0.0,
         raw_input_level: 0.0,
@@ -531,19 +602,27 @@ fn run(
     stop: Arc<AtomicBool>,
     pressed: Arc<AtomicBool>,
     inhibit: Arc<AtomicBool>,
+    debug_stop: Arc<AtomicBool>,
 ) {
+    let mut debug = recording::Recorder::default();
     let mut session: Option<Session> = None;
     let mut message = String::new();
     let mut lease = Instant::now();
     let mut previous = Instant::now();
     loop {
+        debug.poll();
+        if debug_stop.swap(false, Ordering::AcqRel) {
+            debug.stop();
+        }
         // Release requests and PTT key-up cannot be lost behind a full media queue.
         if stop.swap(false, Ordering::AcqRel) {
+            debug.stop();
             session = None;
             pressed.store(false, Ordering::Release);
             message = "Audio stopped; devices released".into();
         }
         if previous.elapsed() > Duration::from_secs(2) || lease.elapsed() > Duration::from_secs(3) {
+            debug.stop();
             session = None;
             message = "Audio stopped after inactivity or suspend".into();
         }
@@ -558,10 +637,21 @@ fn run(
                 }
                 let result = (|| -> Result<(), String> {
                     match command {
+                        Command::DebugStart(parent) => {
+                            let s = session
+                                .as_ref()
+                                .filter(|s| s.microphone && s.outgoing.is_some())
+                                .ok_or(
+                                    "Join a voice channel with microphone access before recording",
+                                )?;
+                            debug.start(parent, s.settings.clone(), s.devices.clone())?;
+                        }
+                        Command::DebugStop => debug.stop(),
                         Command::Start {
                             settings,
                             microphone,
                         } => {
+                            debug.stop();
                             session = None;
                             session = Some(Session::start(&settings, microphone)?);
                             message.clear();
@@ -571,6 +661,7 @@ fn run(
                             outgoing,
                             microphone,
                         } => {
+                            debug.stop();
                             session = None;
                             let mut s = Session::start(&settings, microphone)?;
                             for writer in &s.writers {
@@ -629,6 +720,7 @@ fn run(
                             }
                         }
                         Command::Stop => {
+                            debug.stop();
                             session = None;
                             message = "Audio stopped; devices released".into();
                         }
@@ -636,6 +728,8 @@ fn run(
                             settings.validate()?;
                             if let Some(s) = &mut session {
                                 s.processing.settings(&settings)?;
+                                s.settings = settings.clone();
+                                debug.settings(&settings);
                                 if settings.deafened {
                                     for remote in s.remotes.iter_mut().flatten() {
                                         remote.jitter = Default::default();
@@ -658,10 +752,12 @@ fn run(
                 })();
                 if let Some(reply) = reply {
                     let _ = reply.send(result.map(|_| {
-                        session
+                        let mut status = session
                             .as_ref()
                             .map(|s| s.status())
-                            .unwrap_or_else(|| stopped(message.clone()))
+                            .unwrap_or_else(|| stopped(message.clone()));
+                        status.recording = debug.status();
+                        status
                     }));
                 }
             }
@@ -677,7 +773,8 @@ fn run(
             {
                 session = None;
                 message = "Test finished; devices released".into();
-            } else if let Err(error) = s.tick(&stop, &pressed, &inhibit) {
+            } else if let Err(error) = s.tick(&stop, &pressed, &inhibit, &mut debug) {
+                debug.stop();
                 session = None;
                 message = error;
             }
@@ -703,16 +800,19 @@ mod lifecycle_tests {
             stop: Arc::new(AtomicBool::new(false)),
             pressed: Arc::new(AtomicBool::new(true)),
             inhibit: Arc::new(AtomicBool::new(false)),
+            debug_stop: Arc::new(AtomicBool::new(false)),
         };
         engine.notify(Command::Peek);
         engine.notify(Command::Pressed(false));
         engine.notify(Command::Stop);
+        engine.notify(Command::DebugStop);
         engine.notify(Command::Settings(AudioSettings {
             muted: true,
             ..Default::default()
         }));
         assert!(!engine.pressed.load(Ordering::Acquire));
         assert!(engine.stop.load(Ordering::Acquire));
+        assert!(engine.debug_stop.load(Ordering::Acquire));
         assert!(engine.inhibit.load(Ordering::Acquire));
     }
 }

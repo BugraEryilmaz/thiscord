@@ -133,6 +133,10 @@ speaker isolation and physical acoustic acceptance remain future work.
   continuous extraction separately on all three desktop OSes.
 - [ ] Evaluate reference-aware neural echo suppression/AEC against AEC3 for
   double-talk and nonlinear speaker echo; keep external background speech tests separate.
+- [x] Add opt-in bounded echo debug recording of playback, raw microphone and
+  gated encoder input, timing/settings metadata and offline Rust DSP replay.
+- [ ] Validate diagnostic capture/replay with consented real echo samples on
+  Windows, macOS and Linux; compare warmup, double-talk and local speech retention.
 - [x] Extend Sonora with a mono residual-estimator injection point and add optional
   Rust REE v2 inference, local model selection, reset/bypass and failure handling.
 - [x] Validate recurrent inference against LiteRT; add neural echo regressions and

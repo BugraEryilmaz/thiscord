@@ -146,6 +146,51 @@ pub async fn audio_status(
     Ok(result)
 }
 #[tauri::command]
+pub async fn audio_debug_start(
+    app: tauri::AppHandle,
+    state: State<'_, AudioState>,
+) -> Result<AudioStatus, String> {
+    let parent = app
+        .path()
+        .app_local_data_dir()
+        .map_err(|_| "Recording directory unavailable")?
+        .join("audio-debug");
+    command(state.engine.clone(), Command::DebugStart(parent)).await
+}
+#[tauri::command]
+pub async fn audio_debug_stop(state: State<'_, AudioState>) -> Result<AudioStatus, String> {
+    command(state.engine.clone(), Command::DebugStop).await
+}
+#[tauri::command]
+pub async fn audio_debug_folder(state: State<'_, AudioState>) -> Result<(), String> {
+    let status = command(state.engine.clone(), Command::Peek).await?;
+    let recording = status.recording.ok_or("No diagnostic recording yet")?;
+    if recording.active || recording.saving {
+        return Err("Stop recording and wait for files to finish saving".into());
+    }
+    tauri::async_runtime::spawn_blocking(move || {
+        open::that(recording.directory).map_err(|_| "Cannot open recording folder".to_string())
+    })
+    .await
+    .map_err(|_| "Cannot open recording folder")?
+}
+
+/// Graceful shutdown gives the independent writer time to finalize WAV headers.
+/// The writer also checkpoints headers during recording for interrupted exits.
+pub fn finish_recording_on_exit(app: &tauri::AppHandle) {
+    let engine = &app.state::<AudioState>().engine;
+    engine.notify(Command::Stop);
+    let started = std::time::Instant::now();
+    while started.elapsed() < std::time::Duration::from_secs(3) {
+        if let Ok(status) = engine.command(Command::Peek)
+            && status.recording.is_none_or(|r| !r.active && !r.saving)
+        {
+            break;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(20));
+    }
+}
+#[tauri::command]
 pub async fn audio_volume(
     state: State<'_, AudioState>,
     stream: usize,

@@ -201,6 +201,7 @@ fn voice_and_audio_contract_bounds() {
     assert_eq!(status.raw_input_level, 0.0);
     assert_eq!(status.processing_resets, 0);
     assert!(status.echo.is_none());
+    assert!(status.recording.is_none());
 }
 
 #[test]

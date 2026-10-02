@@ -203,7 +203,15 @@ impl Processing {
             .process_render_f32(&[frame], &mut [&mut out])
             .map_err(|e| e.to_string())
     }
+    #[cfg(test)]
     pub(super) fn render_queued(&mut self, queue: &mut frames::Reader) -> Result<(), String> {
+        self.render_tapped(queue, &mut |_, _| {})
+    }
+    pub(super) fn render_tapped(
+        &mut self,
+        queue: &mut frames::Reader,
+        tap: &mut impl FnMut(&frames::Frame, bool),
+    ) -> Result<(), String> {
         for _ in 0..frames::BLOCKS {
             let Some((frame, gap)) = queue.pop() else {
                 break;
@@ -211,15 +219,26 @@ impl Processing {
             if gap {
                 self.reset();
             }
+            tap(&frame, gap);
             self.render(&frame.samples)?;
             self.render_at = Some(frame.at);
         }
         Ok(())
     }
+    #[cfg(test)]
     pub(super) fn capture_queued(
         &mut self,
         queue: &mut frames::Reader,
     ) -> Result<Option<[f32; 960]>, String> {
+        Ok(self
+            .capture_tapped(queue, &mut |_, _, _, _| {})?
+            .map(|p| p.pcm))
+    }
+    pub(super) fn capture_tapped(
+        &mut self,
+        queue: &mut frames::Reader,
+        tap: &mut impl FnMut(&frames::Frame, bool, bool, i32),
+    ) -> Result<Option<Captured>, String> {
         if queue.len() < 2 {
             return Ok(None);
         }
@@ -228,6 +247,18 @@ impl Processing {
         if first_gap || second_gap {
             self.reset();
         }
+        tap(
+            &first,
+            first_gap,
+            first_gap || second_gap,
+            frames::delay_ms(self.render_at, first.at),
+        );
+        tap(
+            &second,
+            second_gap,
+            false,
+            frames::delay_ms(self.render_at, second.at),
+        );
         let mut pcm = [0.0; 960];
         pcm[..480].copy_from_slice(&first.samples);
         pcm[480..].copy_from_slice(&second.samples);
@@ -239,7 +270,11 @@ impl Processing {
         {
             self.capture_frame(frame, frames::delay_ms(self.render_at, at))?;
         }
-        Ok(Some(pcm))
+        Ok(Some(Captured {
+            pcm,
+            at: [first.at, second.at],
+            gap: [first_gap, second_gap],
+        }))
     }
     pub fn capture_frame(&mut self, frame: &mut [f32; 480], delay_ms: i32) -> Result<(), String> {
         let _float_mode = denormals::Guard::new();
@@ -313,9 +348,43 @@ impl Processing {
         Ok(())
     }
 }
+pub(super) struct Captured {
+    pub pcm: [f32; 960],
+    pub at: [Instant; 2],
+    pub gap: [bool; 2],
+}
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn recording_marks_second_frame_loss_separately_from_packet_reset() {
+        let (mut writer, mut reader) = frames::queue();
+        let at = Instant::now();
+        writer.begin(at);
+        for _ in 0..(frames::BLOCKS + 1) * 480 {
+            writer.push(0.1);
+        }
+        for _ in 0..frames::BLOCKS - 1 {
+            reader.pop().unwrap();
+        }
+        writer.begin(at + frames::sample_duration((frames::BLOCKS + 1) * 480));
+        for _ in 0..480 {
+            writer.push(0.2);
+        }
+        let mut p = Processing::new(&AudioSettings::default()).unwrap();
+        let mut taps = Vec::new();
+        let captured = p
+            .capture_tapped(&mut reader, &mut |frame, gap, reset, delay| {
+                taps.push((frame.samples[0], gap, reset, delay))
+            })
+            .unwrap()
+            .unwrap();
+        assert_eq!(captured.gap, [false, true]);
+        assert_eq!(taps, [(0.1, false, true, 0), (0.2, true, false, 0)]);
+        assert_eq!(&captured.pcm[..480], &[0.1; 480]);
+        assert_eq!(&captured.pcm[480..], &[0.2; 480]);
+        assert_eq!(p.resets, 1);
+    }
 
     fn noise(state: &mut u32) -> f32 {
         *state = state.wrapping_mul(1664525).wrapping_add(1013904223);

@@ -66,6 +66,9 @@ fn main() {
             native_audio::audio_test,
             native_audio::audio_stop,
             native_audio::audio_status,
+            native_audio::audio_debug_start,
+            native_audio::audio_debug_stop,
+            native_audio::audio_debug_folder,
             native_audio::audio_volume,
             native_audio::audio_pressed,
             native_audio::audio_webrtc_probe,
@@ -76,6 +79,11 @@ fn main() {
             native_update::update_check,
             native_update::update_install
         ])
-        .run(tauri::generate_context!())
-        .expect("failed to run Thiscord");
+        .build(tauri::generate_context!())
+        .expect("failed to build Thiscord")
+        .run(|app, event| {
+            if matches!(event, tauri::RunEvent::Exit) {
+                native_audio::finish_recording_on_exit(app);
+            }
+        });
 }

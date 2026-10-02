@@ -9,7 +9,7 @@ default-run = "thiscord-desktop"
 [features]
 default = []
 desktop = ["dep:tauri", "dep:tauri-build", "dep:keyring", "dep:open", "dep:tokio", "dep:rand", "dep:base64", "dep:url", "native-audio", "deep-filter", "neural-echo", "dep:tauri-plugin-global-shortcut", "dep:tauri-plugin-updater", "dep:tokio-tungstenite", "dep:futures-util"]
-native-audio = ["dep:cpal", "dep:ringbuf", "dep:opus", "dep:webrtc", "dep:tokio", "dep:bytes", "dep:rtc", "dep:async-trait", "dep:sonora"]
+native-audio = ["dep:cpal", "dep:ringbuf", "dep:opus", "dep:webrtc", "dep:tokio", "dep:bytes", "dep:rtc", "dep:async-trait", "dep:sonora", "dep:hound"]
 deep-filter = ["native-audio", "dep:deep_filter", "dep:ndarray", "dep:tract-core", "dep:tract-hir", "dep:tract-onnx", "dep:tract-pulse"]
 release-tools = ["dep:base64", "dep:minisign-verify"]
 neural-echo = ["native-audio", "dep:tract-tflite", "dep:sha2", "dep:rustfft"]
@@ -41,6 +41,10 @@ required-features = ["neural-echo-probe"]
 name = "neural_echo_bench"
 required-features = ["neural-echo", "deep-filter"]
 
+[[example]]
+name = "audio_replay"
+required-features = ["neural-echo", "deep-filter"]
+
 [target.'cfg(not(target_arch = "wasm32"))'.dev-dependencies]
 hound = "3.5"
 
@@ -62,6 +66,7 @@ web-sys = { version = "0.3", features = ["Window", "HtmlDialogElement", "DomRect
 gloo-timers = { version = "0.3", features = ["futures"] }
 
 [target.'cfg(not(target_arch = "wasm32"))'.dependencies]
+hound = { version = "3.5", optional = true }
 tauri = { version = "2", optional = true , features = [] }
 keyring = { version = "3.6", optional = true, features = ["apple-native", "windows-native", "sync-secret-service", "crypto-rust"] }
 open = { version = "5", optional = true }

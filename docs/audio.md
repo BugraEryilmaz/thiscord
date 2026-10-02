@@ -125,7 +125,8 @@ over the last completed second, and automatic-gain state. Filter reduction is
 AEC3's internal linear-filter estimate, **not** a measurement of total audible
 echo or a guarantee of cancellation. Estimates are withheld during initial warmup
 and when the playback reference is silent. Restarting adaptation clears these
-measurements. Only numerical values cross IPC; no speech is recorded or logged.
+measurements. These metrics contain no speech. PCM never crosses IPC or logs;
+the separate, opt-in recording tool below writes local files only.
 
 For echo that mainly appears when both people talk, compare diagnostics while
 only the remote person speaks and while both speak. Voice activation can mask
@@ -144,6 +145,74 @@ release signals use atomics so a saturated media queue cannot lose them.
 At about 60 kbit/s per encrypted
 audio stream including packet overhead, eight active speakers imply roughly
 3.4 Mbit/s SFU egress (8 × 7 streams), plus signaling/RTCP.
+
+## Echo debug recordings and offline replay
+
+Since client 0.1.8, join a voice channel, open **Settings > Audio & voice**, and
+select **Start debug recording**. The control explains that raw microphone audio
+is captured even while muted and includes other participants' playback. Tell
+participants before recording. A red recording/stop control remains visible in
+the voice bar when navigating away from settings. Use **Stop and save**, or wait
+for the automatic 60-second limit, then **Open recording folder**. Share the entire
+folder manually; nothing is uploaded automatically. Files remain under Tauri's
+application-local-data `audio-debug/echo-...` directory until manually deleted.
+
+| File | Signal |
+| --- | --- |
+| `speaker-output.wav` | Thiscord's mono playback mix after per-speaker/master volume, clipping and deafen, before device conversion and OS volume. It is not system-wide audio or a recording of the physical speakers. |
+| `microphone-input.wav` | Mono CPAL microphone input before Thiscord DSP, gain, voice activation, mute and PTT. OS/hardware processing may already have occurred. |
+| `transmit-input.wav` | Microphone signal after all Thiscord processing and mute/PTT/VAD gating, as presented to Opus. It is not the decoded SFU/listener signal. |
+| `timeline.jsonl` | Versioned settings/device-format metadata, processing order, original timestamps, dropped-input gaps, capture delay, transmit-gate state and transport-queue acceptance. |
+| `README.txt` | Sharing and interpretation instructions. |
+
+All WAVs are 48 kHz mono 32-bit float, padded to a common start/end, with a maximum
+of about 35 MB of PCM per recording. Continuous samples are preserved despite
+callback timestamp jitter; the original per-block timestamps expose input/output
+clock drift. Sequence gaps produce silence padding where possible and are flagged.
+Each block's `offset`, `count` and `prefix` locate its original 480-sample frame
+within the WAV. Timing metadata preserves the worker's render/capture order so
+future processing can consume exactly the recorded reference and microphone blocks.
+`gap` marks missing input on that stream; the separate `reset` marker identifies
+when the DSP actually restarted, including gaps in the second half of a packet.
+`accepted` means the voice transport queue accepted an encoded packet, not that
+the server or remote participant received it. Audio rejected by that queue remains
+in the diagnostic encoder-input WAV, with `accepted: false` in the timeline.
+
+Device callbacks are unchanged: the audio worker taps their existing bounded
+queues and copies blocks into a separate 256-event diagnostic queue. File creation,
+WAV encoding and disk writes run on a dedicated thread. Disk errors/queue saturation
+stop the recording and report an incomplete result without stopping voice. Recording
+stops on leave, logout, session replacement, suspend/inactivity or device failure.
+Stop recording uses an atomic signal as well as the command queue. Normal application
+exit allows finalization; WAV headers are checkpointed every second during activity.
+A forced kill may leave incomplete files. Missing `end` metadata or `complete:false`
+must not be treated as a complete regression fixture. Unix recording directories
+are mode 0700 and WAV/metadata files 0600; Windows uses the user's app-data ACLs.
+Device IDs, model paths, account/channel IDs, tokens and packet contents are omitted.
+
+For a useful sample, let the remote person talk alone for 5–10 seconds, then talk
+simultaneously and reproduce the problem. Recording starts with the live DSP already
+adapted, whereas replay starts with fresh state; discard the warmup when comparing.
+These files preserve the acoustic signals from that call, but cannot recreate future
+room changes, device behavior, OS volume, codec effects or networking. Different
+denoisers may also add different delays; align comparisons accordingly.
+
+Replay with the recorded settings, or override the estimator/denoiser:
+
+```powershell
+cargo run -p thiscord-frontend --release --locked --features deep-filter,neural-echo --example audio_replay -- C:\path\echo-recording C:\path\baseline.wav
+cargo run -p thiscord-frontend --release --locked --features deep-filter,neural-echo --example audio_replay -- C:\path\echo-recording C:\path\candidate.wav --neural-echo on --noise-suppression deep_filter_net3
+```
+
+Overrides accept `--neural-echo on|off` and `--noise-suppression off|sonora|deep_filter_net3`.
+Replay preserves the recorded transmit gates and refuses to overwrite output files
+or accept incomplete/oversized input. Change the Rust processing modules to evaluate
+future algorithms against the same inputs. Listening and speech-preservation checks
+are still needed; a lower output level alone does not establish better cancellation.
+
+CI includes synchronized WAV/metadata, privacy-field omission, gap/timestamp handling,
+duration bounds, writer failure, queue overload, finalization and replay/gate tests.
+Actual microphone/speaker and macOS GUI/shutdown acceptance require their native hosts.
 
 ## Signaling, SFU and authorization
 
