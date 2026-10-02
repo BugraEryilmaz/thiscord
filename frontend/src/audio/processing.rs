@@ -1,3 +1,7 @@
+#[cfg(all(test, any(feature = "neural-echo", feature = "deep-filter")))]
+#[path = "../../tests/support/audio_fixture.rs"]
+#[allow(dead_code)]
+mod fixture;
 use super::frames;
 use sonora::{
     AudioProcessing, Config, StreamConfig,
@@ -12,6 +16,10 @@ pub mod deep_filter;
 mod denormals;
 #[cfg(test)]
 mod double_talk;
+#[cfg(feature = "neural-echo")]
+pub mod neural_echo;
+#[cfg(all(test, feature = "neural-echo"))]
+mod neural_echo_tests;
 #[cfg(all(test, feature = "deep-filter"))]
 mod neural_tests;
 pub mod stages;
@@ -27,6 +35,12 @@ pub struct Processing {
     chain: stages::CaptureChain,
     model: NoiseSuppressionModel,
     automatic_gain: bool,
+    neural_requested: bool,
+    neural_model_path: Option<String>,
+    #[cfg(feature = "neural-echo")]
+    neural_model: Option<neural_echo::model::Model>,
+    #[cfg(feature = "neural-echo")]
+    neural_failed: std::sync::Arc<std::sync::atomic::AtomicBool>,
 }
 fn config(s: &AudioSettings) -> Config {
     Config {
@@ -78,12 +92,27 @@ impl Processing {
             s.automatic_gain,
             stages::SonoraStage::new("Automatic gain", gain_config()),
         );
-        Ok(Self::with_chain(
+        let mut processing = Self::with_chain(
             config(s),
             chain,
             s.noise_suppression_model,
             s.automatic_gain,
-        ))
+        );
+        processing.neural_requested = s.neural_echo;
+        processing.neural_model_path = s.neural_echo_model.clone();
+        if s.neural_echo {
+            #[cfg(feature = "neural-echo")]
+            {
+                processing.neural_model = Some(match s.neural_echo_model.as_deref() {
+                    Some(path) => neural_echo::model::Model::load(std::path::Path::new(path))?,
+                    None => neural_echo::model::Model::bundled()?,
+                });
+                processing.attach_neural();
+            }
+            #[cfg(not(feature = "neural-echo"))]
+            return Err("This build does not include the neural echo estimator".into());
+        }
+        Ok(processing)
     }
     fn with_chain(
         config: Config,
@@ -107,6 +136,12 @@ impl Processing {
             chain,
             model,
             automatic_gain,
+            neural_requested: false,
+            neural_model_path: None,
+            #[cfg(feature = "neural-echo")]
+            neural_model: None,
+            #[cfg(feature = "neural-echo")]
+            neural_failed: Default::default(),
         }
     }
     pub fn reset(&mut self) {
@@ -115,6 +150,8 @@ impl Processing {
             .capture_config(StreamConfig::new(48_000, 1))
             .render_config(StreamConfig::new(48_000, 1))
             .build();
+        #[cfg(feature = "neural-echo")]
+        self.attach_neural();
         self.chain.reset();
         self.render_at = None;
         self.reference_level = 0.0;
@@ -125,6 +162,9 @@ impl Processing {
     }
     pub fn settings(&mut self, s: &AudioSettings) -> Result<(), String> {
         s.validate()?;
+        if s.neural_echo != self.neural_requested || s.neural_echo_model != self.neural_model_path {
+            return Err("Stop audio before changing the neural echo model or mode".into());
+        }
         if s.noise_suppression_model != self.model {
             return Err("Stop audio before changing the noise suppression model".into());
         }
@@ -143,6 +183,8 @@ impl Processing {
             }
             self.apm.apply_config(config.clone());
             self.config = config;
+            #[cfg(feature = "neural-echo")]
+            self.attach_neural();
         }
         Ok(())
     }
@@ -220,6 +262,14 @@ impl Processing {
         self.apm
             .process_capture_f32(&[frame], &mut [&mut out])
             .map_err(|e| e.to_string())?;
+        #[cfg(feature = "neural-echo")]
+        if self
+            .neural_failed
+            .load(std::sync::atomic::Ordering::Relaxed)
+        {
+            frame.fill(0.0);
+            return Err("Neural echo processing failed. Stop audio and select conventional echo cancellation or reload the model.".into());
+        }
         frame.copy_from_slice(&out);
         self.chain.process(frame)?;
         for sample in frame.iter_mut() {
@@ -242,6 +292,18 @@ impl Processing {
             clipped_input_percent: self.clipped_input_percent,
             automatic_gain: self.automatic_gain,
         })
+    }
+    #[cfg(feature = "neural-echo")]
+    fn attach_neural(&mut self) {
+        if self.config.echo_canceller.is_some()
+            && let Some(model) = &self.neural_model
+        {
+            let estimator = neural_echo::NeuralEcho::new(model.clone(), self.neural_failed.clone());
+            if !self.apm.set_neural_estimator(Box::new(estimator)) {
+                self.neural_failed
+                    .store(true, std::sync::atomic::Ordering::Relaxed);
+            }
+        }
     }
     #[cfg(test)]
     pub fn capture(&mut self, pcm: &mut [f32; 960], delay_ms: i32) -> Result<(), String> {

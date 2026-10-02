@@ -31,6 +31,10 @@ pub struct AudioSettings {
     pub noise_suppression_model: NoiseSuppressionModel,
     pub automatic_gain: bool,
     pub echo_cancellation: bool,
+    /// Experimental residual estimator, independent of the noise suppressor.
+    pub neural_echo: bool,
+    /// Optional local override; None uses the bundled model. Never sent to the backend.
+    pub neural_echo_model: Option<String>,
     pub muted: bool,
     pub deafened: bool,
 }
@@ -47,6 +51,8 @@ impl Default for AudioSettings {
             noise_suppression_model: NoiseSuppressionModel::Sonora,
             automatic_gain: false,
             echo_cancellation: false,
+            neural_echo: false,
+            neural_echo_model: None,
             muted: false,
             deafened: false,
         }
@@ -63,6 +69,10 @@ impl AudioSettings {
                 .iter()
                 .chain(self.output.iter())
                 .any(|s| s.len() > 2048)
+            || self
+                .neural_echo_model
+                .as_ref()
+                .is_some_and(|s| s.trim().is_empty() || s.len() > 4096 || s.contains('\0'))
         {
             return Err("Invalid audio settings");
         }

@@ -2087,6 +2087,16 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "aedcfb3409746eddb02b9e19ebda1c3394f759a152e48ee875a0844d1b955484"
 
 [[package]]
+name = "flatbuffers"
+version = "23.5.26"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "4dac53e22462d78c16d64a1cd22371b54cc3fe94aa15e7886a2fa6e5d1ab8640"
+dependencies = [
+ "bitflags 1.3.2",
+ "rustc_version",
+]
+
+[[package]]
 name = "flate2"
 version = "1.1.10"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -6909,8 +6919,6 @@ dependencies = [
 [[package]]
 name = "sonora"
 version = "0.2.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "2e1ce442ab5cb392c4067b8f2cced20be4cf12e479f6dfbf44acbe9b14ac9250"
 dependencies = [
  "sonora-aec3",
  "sonora-agc2",
@@ -6923,8 +6931,6 @@ dependencies = [
 [[package]]
 name = "sonora-aec3"
 version = "0.2.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "50280e31256d09f7838aff6715ed4b7640e514dc1092a1e14013c01e552380db"
 dependencies = [
  "sonora-common-audio",
  "sonora-fft",
@@ -7626,7 +7632,7 @@ dependencies = [
 
 [[package]]
 name = "thiscord-backend"
-version = "0.1.6"
+version = "0.1.7"
 dependencies = [
  "argon2",
  "async-trait",
@@ -7665,7 +7671,7 @@ dependencies = [
 
 [[package]]
 name = "thiscord-frontend"
-version = "0.1.6"
+version = "0.1.7"
 dependencies = [
  "async-trait",
  "base64 0.22.1",
@@ -7687,9 +7693,11 @@ dependencies = [
  "rand 0.8.8",
  "ringbuf",
  "rtc",
+ "rustfft",
  "serde",
  "serde-wasm-bindgen",
  "serde_json",
+ "sha2",
  "sonora",
  "tauri",
  "tauri-build",
@@ -7702,6 +7710,7 @@ dependencies = [
  "tract-hir",
  "tract-onnx",
  "tract-pulse",
+ "tract-tflite",
  "url",
  "wasm-bindgen",
  "wasm-bindgen-futures",
@@ -7711,7 +7720,7 @@ dependencies = [
 
 [[package]]
 name = "thiscord-shared"
-version = "0.1.6"
+version = "0.1.7"
 dependencies = [
  "base64 0.22.1",
  "chrono",
@@ -8276,6 +8285,17 @@ dependencies = [
  "downcast-rs 1.2.1",
  "lazy_static",
  "tract-nnef",
+]
+
+[[package]]
+name = "tract-tflite"
+version = "0.21.4"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "2fa4e7d4eaf716ddc3b9367966ba28075b23e836487cd54bf8257baa5e60b7e7"
+dependencies = [
+ "derive-new",
+ "flatbuffers",
+ "tract-core",
 ]
 
 [[package]]

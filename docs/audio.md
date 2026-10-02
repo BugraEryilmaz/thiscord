@@ -69,6 +69,13 @@ falls back to the in-app button; portal integration remains future work.
   Echo buffering delay comes from CPAL capture/playback timestamps, mapped onto
   a common monotonic clock. AEC3 estimates/refines the acoustic delay internally.
   Hardware acoustic quality still needs acceptance, so headphones remain recommended.
+  Conventional residual estimation remains the default. A vendored Sonora
+  extension also supports an optional Rust neural residual estimator inside AEC3,
+  independent of the selected denoiser. Enable the experimental checkbox while
+  stopped and enable Echo cancellation. Native clients include the pinned model;
+  an optional local file override is available under Advanced model settings.
+  See [neural echo integration](voice-isolation.md#neural-residual-echo-estimator-extension-2026-10-02)
+  for setup, model provenance limits, reference tests and measured worker costs.
 - DeepFilterNet3: optional native Rust/tract denoising, bundled in desktop builds.
   Select it in Audio & voice while stopped, enable Noise suppression, then join
   or test the microphone. Suppression can be toggled live; model changes require

@@ -1,8 +1,9 @@
 # Voice isolation research and implementation plan
 
 Research date: 2026-09-30. DeepFilterNet3 is now implemented as an experimental
-denoiser. See [integration and local measurements](deep-filter.md). Other model
-candidates and personalized speaker extraction remain research work.
+denoiser. See [integration and local measurements](deep-filter.md). SpeakerBeam-SS
+source feasibility was reviewed below; live integration is blocked on a suitable
+streaming checkpoint. Other candidates and personalized extraction remain research.
 Implementation checklist: [TODO section 5a](../TODO.md#5a-voice-isolation-and-speech-quality).
 
 ## Goal and current baseline
@@ -69,6 +70,222 @@ runtime behind Rust bindings. GPU acceleration, large offline separators and
 training a model from scratch are outside the first implementation spike.
 Audit code and checkpoint licenses separately and verify maintenance/build health
 at the pinned revision; a published paper is not a redistributable working model.
+
+## SpeakerBeam-SS feasibility review (2026-09-30)
+
+**Status: source audit only; no SpeakerBeam-SS inference, quality tests or local
+performance measurements have run. No SpeakerBeam-SS setting is implemented.**
+The original authors' downloadable streaming checkpoint and matching inference
+implementation were not located in this review. This is an availability finding,
+not proof that no such release exists. The paper's causal d1 results above cannot
+be attributed to a different implementation.
+
+Reviewed artifacts:
+
+- [OpenSpeakerBeam-SS](https://github.com/helloooideeeeea/OpenSpeakerBeam-SS/tree/bbbae73f74fc14eafdf7abb93f9094eafccd21df),
+  commit `bbbae73f74fc14eafdf7abb93f9094eafccd21df`, is an independent
+  reimplementation. Its README reports 7.64M parameters and 21.60 GFLOPs for one
+  second of 16 kHz audio; neither establishes streaming latency or laptop CPU cost.
+  It uses Resemblyzer speaker embeddings. The code is MIT licensed; its linked
+  [checkpoint dataset](https://huggingface.co/datasets/helloidea/OpenSpeakerBeam-SS-dataset/tree/82e6d7646126d1fa33b30c0b44f1d076496cca71)
+  has no separate license metadata/model card in the reviewed revision. Clarify
+  the weights' redistribution terms before bundling them.
+- [Another SpeakerBeam-SS checkpoint repository](https://huggingface.co/gabrielmbmb/voce-speakerbeam-ss-librimix-train360/tree/aeba4a5d8373116d856b2d6cab689c7b08dd1729)
+  contains training checkpoints, but no model card, configuration, inference
+  source or license was present in that revision. Its name alone does not establish
+  compatibility with the paper or the independent implementation.
+- [BUTSpeechFIT SpeakerBeam](https://github.com/BUTSpeechFIT/speakerbeam) is the
+  earlier time-domain model released for the 2021 tutorial, not SpeakerBeam-SS.
+
+The independent implementation has two concrete streaming obstacles:
+
+1. Its [separator](https://github.com/helloooideeeeea/OpenSpeakerBeam-SS/blob/bbbae73f74fc14eafdf7abb93f9094eafccd21df/model/__init__.py)
+   requests Asteroid `gLN` inside the convolutional blocks. Asteroid's
+   [normalization](https://github.com/asteroid-team/asteroid/blob/c15708a04d3d28e9a1cd50553c456299dbc6d236/asteroid/masknn/norms.py)
+   computes statistics over channels **and time**. The
+   [causal flag](https://github.com/asteroid-team/asteroid/blob/c15708a04d3d28e9a1cd50553c456299dbc6d236/asteroid/masknn/convolutional.py)
+   trims convolution padding; it does not replace that normalization. Consequently,
+   future samples can change an earlier normalized activation. Chunking or replacing
+   `gLN` changes inference semantics; quality must be revalidated and retraining may
+   be necessary. This conclusion is from source inspection, not a model experiment.
+2. Its [S4D forward path](https://github.com/helloooideeeeea/OpenSpeakerBeam-SS/blob/bbbae73f74fc14eafdf7abb93f9094eafccd21df/model/s4d.py)
+   computes convolution over the supplied sequence and returns no recurrent state.
+   Its [inference script](https://github.com/helloooideeeeea/OpenSpeakerBeam-SS/blob/bbbae73f74fc14eafdf7abb93f9094eafccd21df/inference.py)
+   processes a whole waveform. A stateful implementation needs a parity check;
+   independently processing 10 ms blocks would lose context. No ONNX artifact or
+   export/streaming implementation was found in the reviewed source tree, despite
+   the README mentioning ONNX support.
+
+### Requirements to resume integration
+
+Obtain compatible, redistributable extractor and enrollment-encoder weights,
+architecture/configuration and a runnable streaming reference. Alternatively,
+develop and validate a causal adaptation as a separate model-development effort.
+Do not label such an adaptation as the paper's measured d1 model.
+
+Once these inputs exist, reuse `CaptureStage`/`CaptureChain` for a separately
+enabled personal-isolation stage. Keep enrollment independent of the denoiser
+choice, with an optional DeepFilterNet3 composition evaluated in both orders.
+Define state, latency and profile format/version explicitly. Run 48-to-16-to-48 kHz
+resampling off callbacks with bounded buffers; do not mix unfiltered high-band
+microphone audio back into the isolated output. Bind local profiles to the exact
+encoder/model identity, and reject mismatches rather than silently bypassing.
+
+Required regressions and benchmarks, in addition to the existing DSP suite:
+
+- Reference-versus-Rust output parity and chunk-size invariance with persistent
+  state; prefix causality (changing future input cannot change output already due).
+- Different enrollment and target utterances; two-speaker overlap, similar voices,
+  target absence, room reverberation and Turkish/English speech. Measure target
+  preservation as well as interfering-speech attenuation; muting everything fails.
+- Missing/corrupt/incompatible profiles, explicit bypass and stage combinations;
+  reset after gaps/device changes, and immediate mute/PTT/leave under overload.
+- Separate enrollment/startup costs from warmed continuous inference. Extend the
+  existing offline benchmark with reference extraction quality, resampling/framing
+  delay, p50/p95/p99/max frame time, RTF, deadline misses and peak memory. Measure
+  release builds on Windows, macOS and Linux; paper timings are not acceptance data.
+
+## Neural residual echo estimator extension (2026-10-02)
+
+The desktop now has an **experimental, default-off Rust neural residual echo
+estimator** inside Sonora AEC3. Conventional AEC3 remains the default. The new
+checkbox is independent of Sonora/DeepFilterNet3 noise suppression. This targets
+playback echo, including double-talk and speaker distortion; it does not isolate
+an enrolled speaker or remove unrelated TV dialogue using the playback reference.
+
+### Implementation and replacement boundary
+
+Unmodified Sonora 0.2.0 omits this integration. Two small source patches, in
+`vendor/sonora` and `vendor/sonora-aec3`, expose a mono `NeuralResidualEstimator`
+trait and inject its residual-power estimates before suppression. These are
+excluded third-party dependencies; the workspace still has exactly frontend,
+backend and shared. See `vendor/THISCORD_PATCH.txt` for provenance and maintenance.
+
+The frontend adapter lives in `audio/processing/neural_echo/`. It follows the
+[WebRTC interface](https://webrtc.googlesource.com/src/+/526e228d25f83b1023760d3835f33d622c7b9f5f/api/audio/neural_residual_echo_estimator.h),
+[feature extractor](https://webrtc.googlesource.com/src/+/526e228d25f83b1023760d3835f33d622c7b9f5f/modules/audio_processing/aec3/neural_residual_echo_estimator/neural_feature_extractor.cc)
+and [model implementation](https://webrtc.googlesource.com/src/+/526e228d25f83b1023760d3835f33d622c7b9f5f/modules/audio_processing/aec3/neural_residual_echo_estimator/neural_residual_echo_estimator_impl.cc)
+at revision `526e228d25f83b1023760d3835f33d622c7b9f5f`:
+
+- Internal mono 16 kHz, 64-sample AEC blocks; aligned render and linear-cancelled
+  inputs. The v2 upstream extractor leaves the `mic_frame` tensor zero.
+- 256-point symmetric sqrt-Hann spectrum, 128-sample/8 ms hop, power compression
+  exponent 0.15 and normalization from APM's PCM16 float scale. Previous raw
+  samples are preserved; masks are held between hops. No extra PCM output queue.
+- 864-float recurrent state, decayed by 0.999 after inference. Two 129-bin masks
+  become 65-bin residual power estimates; dominant near-end uses the unbounded
+  mask. Neural history advances during adaptation; estimates replace conventional
+  ones only when the linear canceller is usable. The adapter supplies neural
+  suppression tuning while installed, including during initial adaptation.
+- Optional 12 ms reference headroom when estimated delay and buffered history
+  permit. Queue gaps/configuration rebuilds reset and reattach the adapter.
+- A bounded, hash-pinned graph executor supports this model's 11 operations and
+  hybrid INT8 dense layers. `tract-tflite = 0.21.4` is used for schema parsing;
+  its unsupported general importer is not used and DFN's tract pins stay intact.
+  Buffers/index maps/FFT plans are allocated at startup, inference on the worker.
+- An inference failure latches, zeros capture and stops audio through the existing
+  error path. A gap/reset cannot silently clear that failure. No PCM, tensor
+  state, SDP, credentials or model file contents are logged or sent over IPC.
+
+This Rust extension avoids another native runtime and a C++ build/FFI surface.
+It does not port every feature of current C++ AEC3 or claim full end-to-end C++
+bit parity. To replace the estimator, implement the Sonora trait and adapt the
+frontend constructor; to change graph execution, replace `neural_echo/model.rs`.
+The existing `CaptureChain` remains the independent denoiser composition point.
+Building `native-audio` without `neural-echo` excludes this inference dependency;
+requesting the unavailable mode returns an error. Desktop includes the feature.
+
+### Bundled model and controls
+
+Stop audio, open Audio & voice, enable Echo cancellation and **Neural residual
+echo estimation (experimental)**, then start a microphone test or join voice.
+Version 0.1.7 embeds `frontend/models/ree-v2.tflite` in every native client using
+`include_bytes!`; no resource path resolution or runtime download is required.
+Size/hash validation runs for embedded bytes and optional local files.
+Model selection requires stopping audio; Echo
+cancellation can still bypass/re-enable it live. Disable the neural checkbox
+while stopped to return to conventional AEC3. Existing saved settings default off.
+Leave the optional override under Advanced model settings empty to use the bundled
+model. Existing explicit overrides are preserved and validated; clear an obsolete
+path to return to the bundled model. Backend/SFU setup is unchanged.
+
+The tested candidate comes from an
+[unverified third-party mirror](https://huggingface.co/dejanseo/chrome_models/tree/7713774a49fddeae5d620d897b2a01f6204a1294/71/63922A0C010C80A5/BA3548C2C434AE16).
+It is 425,264 bytes, SHA-256
+`3a18833eaeb08bfffb88a588c10db67885f246ba4794fd0f1609f2ccf6c30b77`.
+Only this graph is accepted; its hash fixes tensor contracts and supported
+operators. The hash does **not** authenticate provenance or establish permission
+to redistribute the weights. Version 0.1.7 includes the model at the project owner's
+request. Provenance and distribution terms remain unverified; no model license is
+asserted here. Source and hash are recorded in `frontend/models/ree-v2.txt` and the
+shipped `THIRD_PARTY_AUDIO.txt` notice. Builds and clients do not fetch weights.
+
+### Reference validation and regression coverage
+
+`frontend/tests/support/neural_echo_reference.py` generates 100 recurrent test
+steps with nonzero features, startup silence and a silence tail using the official
+`ai-edge-litert==2.2.0` interpreter (no delegates, one thread). Python is an offline
+validation tool only; the application and builds do not need it. Float bit
+patterns prevent JSON rounding from contaminating comparisons. The Rust probe
+checks full recurrent rollout and transitions given identical reference state,
+with a maximum absolute-error gate of 0.0001 for outputs and state.
+
+Windows release result: maximum mask error `1.79e-7`; maximum recurrent-rollout
+error including state `2.29e-5`. A regression specifically covers rounding the
+hybrid quantized input **before** adding its zero-point offset, which otherwise
+caused recurrent drift. This validates graph inference, not acoustic quality or
+an entire C++ AEC3 pipeline.
+
+```powershell
+# Generate the independent reference in a disposable Python environment:
+python -m pip install ai-edge-litert==2.2.0 numpy
+python frontend/tests/support/neural_echo_reference.py frontend/models/ree-v2.tflite reference.json
+cargo run -p thiscord-frontend --release --locked --features neural-echo-probe --example neural_echo_probe -- frontend/models/ree-v2.tflite 1000 reference.json
+
+# The normal native test suite exercises the embedded model (also in CI):
+cargo test -p thiscord-frontend --lib --features deep-filter,neural-echo --release --locked
+cargo run -p thiscord-frontend --release --locked --features deep-filter,neural-echo --example neural_echo_bench -- frontend/models/ree-v2.tflite
+```
+
+Regular CI tests cover bounded/corrupt model rejection, quantization, mask
+conversion, injection of aligned internal AEC blocks, settings compatibility,
+mode-switch restrictions and latched failure/silencing. Bundled-model tests
+cover reset determinism, nonfinite input rejection, bypass/re-enable, NS/AGC
+composition, echo energy reduction and retention of speech during double-talk.
+The benchmark compares conventional/neural AEC, linear/clipped speakers and
+DeepFilterNet3 on/off using the same synthetic speech and room response.
+
+### Local release performance and remaining acceptance
+
+Windows x64, Intel i7-13700K, Rust 1.98.1: model-only mean **0.099 ms**, p99
+**0.187 ms** per 8 ms inference hop (1,000 measured steps, 20 warm-up, load 2.13 ms).
+For the 16-second simulated room, complete render+capture processing per 10 ms:
+
+| Mode | Mean ms, linear / clipped speaker | p99 ms, linear / clipped speaker |
+| --- | --- | --- |
+| Conventional AEC3 | 0.054 / 0.052 | 0.132 / 0.147 |
+| Neural AEC3 | 0.182 / 0.217 | 0.366 / 0.501 |
+| Conventional AEC3 + DFN3 | 0.450 / 0.365 | 1.127 / 1.259 |
+| Neural AEC3 + DFN3 | 0.588 / 0.822 | 1.433 / 2.133 |
+
+The WSL/Linux x64 run matched the same reference errors. Model-only mean was
+0.107 ms (p99 0.319 ms). Neural AEC3 + DFN3 measured 0.695/0.890 ms mean and
+1.752/2.166 ms p99 for linear/clipped speakers; these WSL timings are informational
+and not representative of a native Linux laptop. All 44 native tests, including
+the two model-dependent tests, passed on Windows and Linux.
+
+No 10 ms deadline misses in the eight runs on either OS. Timings exclude device callbacks,
+networking and Opus; they are local measurements, not a slow-device guarantee.
+The double-talk correlated local-speech gain improved from 0.378 to 0.541 with a
+linear speaker, and 0.408 to 0.510 with clipping (AEC without DFN). Correlation is
+only a diagnostic: delay search is coarse and cannot establish intelligibility,
+sound quality or real-room echo performance. Very high synthetic far-end
+correlation reductions are not claimed as acoustic attenuation results.
+
+Remain default-off until real double-talk listening tests, changing echo paths,
+reference timing drift, AGC/denoiser combinations, peak memory, thermal/battery
+load and slow Windows/macOS/Linux hardware are evaluated. A Windows/WSL software
+probe does not establish macOS microphone or acoustic compatibility.
 
 ## Recommended sequence
 

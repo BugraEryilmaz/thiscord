@@ -121,11 +121,26 @@ speaker isolation and physical acoustic acceptance remain future work.
   regressions; offline CPU/latency/quality benchmarks and three-OS CI artifacts.
 - [ ] Compare nnnoiseless and GTCRN against the measured DeepFilterNet3 baseline,
   including resampling delay and lost high frequencies.
-- [ ] Spike streaming target-speaker extraction using SpeakerBeam-SS or another
-  waveform-output personalized model; verify checkpoint availability, enrollment
-  encoder cost, Rust inference compatibility and redistribution licenses first.
+- [x] Audit public SpeakerBeam-SS sources/checkpoints for live integration; record
+  the streaming and model-availability blockers in [voice-isolation.md](docs/voice-isolation.md#speakerbeam-ss-feasibility-review-2026-09-30).
+- [ ] Obtain a compatible streaming extractor/enrollment checkpoint and reference
+  with redistribution terms; the reviewed public reimplementation uses global
+  time normalization and lacks a stateful inference path. No live integration yet.
+- [ ] Integrate an optional personalized `CaptureStage` with local enrollment,
+  bounded resampling/state and independently selectable DeepFilterNet3 composition.
+- [ ] Verify reference parity, prefix causality, chunk-size invariance, target
+  absence/overlap, resets/bypass and urgent controls; benchmark enrollment and
+  continuous extraction separately on all three desktop OSes.
 - [ ] Evaluate reference-aware neural echo suppression/AEC against AEC3 for
   double-talk and nonlinear speaker echo; keep external background speech tests separate.
+- [x] Extend Sonora with a mono residual-estimator injection point and add optional
+  Rust REE v2 inference, local model selection, reset/bypass and failure handling.
+- [x] Validate recurrent inference against LiteRT; add neural echo regressions and
+  conventional/neural AEC + DeepFilterNet3 comparison benchmarks.
+- [ ] Verify neural residual model provenance and distribution terms for the
+  owner-requested bundled model; hash-pinning does not establish a model license.
+- [ ] Compare neural/conventional residual estimates for double-talk, nonlinear
+  echo, path changes and resets; benchmark full pipeline cost on three platforms.
 - [ ] Record pinned model/runtime versions, weight hashes, code/weight licenses,
   training-data terms, maintenance status and Windows/macOS/Linux compatibility.
 - [ ] Compare release-build CPU/RTF, p50/p95/p99 processing times, algorithmic delay,

@@ -8,10 +8,12 @@ default-run = "thiscord-desktop"
 
 [features]
 default = []
-desktop = ["dep:tauri", "dep:tauri-build", "dep:keyring", "dep:open", "dep:tokio", "dep:rand", "dep:base64", "dep:url", "native-audio", "deep-filter", "dep:tauri-plugin-global-shortcut", "dep:tauri-plugin-updater", "dep:tokio-tungstenite", "dep:futures-util"]
+desktop = ["dep:tauri", "dep:tauri-build", "dep:keyring", "dep:open", "dep:tokio", "dep:rand", "dep:base64", "dep:url", "native-audio", "deep-filter", "neural-echo", "dep:tauri-plugin-global-shortcut", "dep:tauri-plugin-updater", "dep:tokio-tungstenite", "dep:futures-util"]
 native-audio = ["dep:cpal", "dep:ringbuf", "dep:opus", "dep:webrtc", "dep:tokio", "dep:bytes", "dep:rtc", "dep:async-trait", "dep:sonora"]
 deep-filter = ["native-audio", "dep:deep_filter", "dep:ndarray", "dep:tract-core", "dep:tract-hir", "dep:tract-onnx", "dep:tract-pulse"]
 release-tools = ["dep:base64", "dep:minisign-verify"]
+neural-echo = ["native-audio", "dep:tract-tflite", "dep:sha2", "dep:rustfft"]
+neural-echo-probe = ["neural-echo"]
 custom-protocol = ["desktop", "tauri/custom-protocol"]
 
 [[bin]]
@@ -30,6 +32,14 @@ required-features = ["release-tools"]
 [[example]]
 name = "processing_bench"
 required-features = ["deep-filter"]
+
+[[example]]
+name = "neural_echo_probe"
+required-features = ["neural-echo-probe"]
+
+[[example]]
+name = "neural_echo_bench"
+required-features = ["neural-echo", "deep-filter"]
 
 [target.'cfg(not(target_arch = "wasm32"))'.dev-dependencies]
 hound = "3.5"
@@ -69,6 +79,9 @@ tract-core = { version = "=0.21.4", optional = true }
 tract-hir = { version = "=0.21.4", optional = true }
 tract-onnx = { version = "=0.21.4", optional = true }
 tract-pulse = { version = "=0.21.4", optional = true }
+tract-tflite = { version = "=0.21.4", optional = true }
+sha2 = { version = "0.10", optional = true }
+rustfft = { version = "6", optional = true }
 ringbuf = { version = "0.5.2", optional = true }
 opus = { version = "0.4.0", optional = true }
 webrtc = { version = "0.21.0", optional = true }

@@ -1,0 +1,44 @@
+Thiscord optional mono AEC3 neural residual estimator extension, 2026-10-02
+
+Upstream: https://github.com/dignifiedquire/sonora, published crates 0.2.0
+Source copied from crates.io source archives, retaining their license notices.
+sonora 0.2.0 crates.io SHA-256: 2e1ce442ab5cb392c4067b8f2cced20be4cf12e479f6dfbf44acbe9b14ac9250
+sonora-aec3 0.2.0 crates.io SHA-256: 50280e31256d09f7838aff6715ed4b7640e514dc1092a1e14013c01e552380db
+
+These are patched third-party dependencies excluded from the three-package
+first-party workspace. Cargo [patch.crates-io] ensures one Sonora implementation.
+Other Sonora crates still come from the registry and remain pinned by Cargo.lock.
+Model weights are embedded from frontend/models/ree-v2.tflite; none are stored
+in this vendor directory or downloaded at build/runtime.
+
+Changes:
+- sonora-aec3/src/neural_residual.rs: optional Send + Debug estimator trait,
+  aligned internal mono inputs, per-block residual/unbounded power outputs,
+  reset and suppressor configuration hooks.
+- sonora-aec3/src/{lib,block_processor,echo_remover}.rs: expose/inject estimator,
+  reject non-mono configurations, advance its history, select valid estimates
+  only with a usable linear filter, reset after audio-path changes.
+- sonora-aec3/src/residual_echo_estimator.rs: update the omission comment;
+  the conventional algorithm is unchanged.
+- sonora/src/{lib,audio_processing,audio_processing_impl,echo_canceller3}.rs:
+  propagate public injection to AEC3. APM configuration rebuild drops the hook;
+  the frontend owns, resets and reattaches its model without filesystem I/O.
+
+With no estimator injected, conventional processing is unchanged. This is a
+focused extension of Sonora 0.2.0, not a complete current C++ AEC3 port. Neural
+suppression tuning applies while the estimator is installed, including startup;
+classical residual estimation is retained until linear adaptation is usable.
+Application inference/feature extraction remains in frontend's neural_echo module.
+That module follows WebRTC revision 526e228d25f83b1023760d3835f33d622c7b9f5f;
+see WEBRTC_LICENSE.txt, WEBRTC_PATENTS.txt and TENSORFLOW_LICENSE.txt. Copies are
+included in the desktop's THIRD_PARTY_AUDIO.txt resource.
+
+Updating Sonora: compare these files against the new registry source; rebase the
+hook deliberately, preserve PCM scale/reference alignment and failure behavior,
+and rerun conventional and neural regression suites, reference parity and full
+pipeline benchmarks. Do not blindly overwrite this directory during dependency
+updates. Review upstream support before retaining the patch indefinitely.
+
+Checks: docs/voice-isolation.md records commands, model hash, reference interpreter,
+local measurements and remaining real-device/provenance acceptance. Native CI runs
+regressions using the bundled model and builds on three platforms.

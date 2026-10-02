@@ -17,6 +17,23 @@ pub fn noise(state: &mut u32) -> f32 {
 pub fn energy(samples: &[f32]) -> f64 {
     samples.iter().map(|&s| f64::from(s).powi(2)).sum()
 }
+
+/// Correlated amplitude with up to 50 ms processing delay; diagnostic only.
+#[allow(dead_code)]
+pub fn correlated_gain(source: &[f32], output: &[f32], start: usize, end: usize) -> f64 {
+    (0..=2400)
+        .step_by(24)
+        .map(|lag| {
+            let (mut xy, mut xx) = (0.0, 0.0);
+            for n in (start..end).step_by(12) {
+                let x = source[n - lag] as f64;
+                xy += x * output[n] as f64;
+                xx += x * x;
+            }
+            xy.abs() / xx.max(1e-12)
+        })
+        .fold(0.0, f64::max)
+}
 /// Aligned conventional SNR, penalizing gain/distortion rather than hiding it.
 pub fn snr(clean: &[f32], output: &[f32]) -> f64 {
     let error: f64 = clean

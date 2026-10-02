@@ -1,6 +1,4 @@
 use super::*;
-#[path = "../../../tests/support/audio_fixture.rs"]
-mod fixture;
 
 fn settings() -> AudioSettings {
     AudioSettings {

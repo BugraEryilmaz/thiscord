@@ -1,10 +1,15 @@
 [workspace]
 members = ["frontend", "backend", "shared"]
+exclude = ["vendor/sonora", "vendor/sonora-aec3"]
 default-members = ["shared"]
 resolver = "3"
 
+[patch.crates-io]
+sonora = { path = "vendor/sonora" }
+sonora-aec3 = { path = "vendor/sonora-aec3" }
+
 [workspace.package]
-version = "0.1.6"
+version = "0.1.7"
 edition = "2024"
 rust-version = "1.98"
 publish = false

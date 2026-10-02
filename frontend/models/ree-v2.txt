@@ -1,0 +1,13 @@
+Experimental REE v2 model bundled in Thiscord 0.1.7
+
+File: ree-v2.tflite (425264 bytes)
+SHA-256: 3a18833eaeb08bfffb88a588c10db67885f246ba4794fd0f1609f2ccf6c30b77
+Retrieved from an unverified third-party mirror, pinned revision:
+https://huggingface.co/dejanseo/chrome_models/tree/7713774a49fddeae5d620d897b2a01f6204a1294/71/63922A0C010C80A5/BA3548C2C434AE16
+
+Included at the project owner's request. Origin, training data and redistribution
+terms have not been verified. No model license is asserted here; the Sonora,
+WebRTC and TensorFlow code licenses do not establish rights to these weights.
+The SHA-256 pins the reviewed graph for runtime compatibility, not provenance.
+The feature is experimental, optional and off by default. The model is embedded
+in native clients and processed locally; no runtime download is performed.

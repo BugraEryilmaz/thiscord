@@ -20,6 +20,9 @@ Open **Settings > Audio & voice** to select devices and test audio, then join a
 voice channel. See [audio setup, networking and remaining checks](docs/audio.md).
 Experimental DeepFilterNet3 noise suppression is available in Audio & voice;
 see [model selection, regression tests and benchmarks](docs/deep-filter.md).
+Experimental neural residual echo estimation is also available, independently
+of denoising. Its model is bundled with native clients; enable echo cancellation
+and the neural estimator to try it. See [setup and measured results](docs/voice-isolation.md#neural-residual-echo-estimator-extension-2026-10-02).
 The main screen lists joined servers in a left rail. Use **+** (verified instance
 owner/admin) to create a server with an optional password, or **Join** with a server
 ID and password. Server selection shows its ID and permission-filtered channels.

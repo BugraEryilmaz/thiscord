@@ -209,6 +209,14 @@ fn audio_model_selection_preserves_old_settings_and_rejects_unknown_models() {
     let old: AudioSettings = from_value(json!({"noise_suppression":true})).unwrap();
     assert!(old.noise_suppression);
     assert_eq!(old.noise_suppression_model, NoiseSuppressionModel::Sonora);
+    assert!(!old.neural_echo);
+    assert!(old.neural_echo_model.is_none());
+    let mut neural: AudioSettings =
+        from_value(json!({"neural_echo":true,"neural_echo_model":"/local/ree.tflite"})).unwrap();
+    assert!(neural.validate().is_ok());
+    assert_eq!(to_value(&neural).unwrap()["neural_echo"], true);
+    neural.neural_echo_model = Some("\0invalid".into());
+    assert!(neural.validate().is_err());
     let selected: AudioSettings = from_value(json!({
         "noise_suppression":false, "noise_suppression_model":"deep_filter_net3"
     }))
