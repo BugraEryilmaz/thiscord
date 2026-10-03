@@ -10,6 +10,31 @@ use uuid::Uuid;
 const ID: &str = "f8f72890-fbae-4e56-9e7b-8038b5c3a094";
 
 #[test]
+fn screen_commands_are_explicit_and_older_rosters_default_to_no_share() {
+    use thiscord_shared::voice::*;
+    let event = ClientEvent::Screen {
+        active: true,
+        audio: true,
+    };
+    assert_eq!(
+        to_value(event).unwrap(),
+        json!({"type":"screen","active":true,"audio":true})
+    );
+    assert!(from_value::<ClientEvent>(json!({"type":"screen","active":true})).is_err());
+    let member: Participant = from_value(json!({"account_id":ID,"username":"member","slot":0,"muted":false,"deafened":false,"can_speak":true})).unwrap();
+    assert!(!member.sharing_screen && !member.sharing_audio);
+    let offer: ServerEvent =
+        from_value(json!({"type":"offer","sdp":"","slot":0,"can_speak":true})).unwrap();
+    assert!(matches!(
+        offer,
+        ServerEvent::Offer {
+            screen_video: false,
+            ..
+        }
+    ));
+}
+
+#[test]
 fn chat_envelopes_and_bounds_are_stable() {
     use thiscord_shared::chat::*;
     let frame = ClientFrame {

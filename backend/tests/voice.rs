@@ -203,6 +203,8 @@ struct Peer {
     packets: mpsc::Receiver<rtp::Packet>,
     slot: usize,
     sequence: u16,
+    screen_tracks: [Arc<TrackLocalStaticRTP>; 2],
+    screen_sequences: [u16; 2],
 }
 impl Peer {
     async fn new(mut socket: Socket) -> Self {
@@ -251,6 +253,43 @@ impl Peer {
         pc.add_track(track.clone() as Arc<dyn TrackLocal>)
             .await
             .unwrap();
+        let screen_tracks = std::array::from_fn(|index| {
+            let video = index == 0;
+            Arc::new(TrackLocalStaticRTP::new(MediaStreamTrack::new(
+                format!("screen-{index}"),
+                format!("screen-{index}"),
+                format!("screen-{index}"),
+                if video {
+                    RtpCodecKind::Video
+                } else {
+                    RtpCodecKind::Audio
+                },
+                vec![RTCRtpEncodingParameters {
+                    rtp_coding_parameters: RTCRtpCodingParameters {
+                        ssrc: Some(901 + index as u32),
+                        ..Default::default()
+                    },
+                    codec: RTCRtpCodec {
+                        mime_type: if video { "video/H264" } else { "audio/opus" }.into(),
+                        clock_rate: if video { 90000 } else { 48000 },
+                        channels: if video { 0 } else { 2 },
+                        sdp_fmtp_line: if video {
+                            "level-asymmetry-allowed=1;packetization-mode=1;profile-level-id=42e01f"
+                        } else {
+                            "minptime=10;useinbandfec=1"
+                        }
+                        .into(),
+                        ..Default::default()
+                    },
+                    ..Default::default()
+                }],
+            )))
+        });
+        for track in &screen_tracks {
+            pc.add_track(track.clone() as Arc<dyn TrackLocal>)
+                .await
+                .unwrap();
+        }
         let answer = pc.create_answer(None).await.unwrap();
         pc.set_local_description(answer).await.unwrap();
         tokio::time::timeout(Duration::from_secs(5), gathered.notified())
@@ -270,6 +309,8 @@ impl Peer {
             packets: rx,
             slot,
             sequence: 0,
+            screen_tracks,
+            screen_sequences: [0; 2],
         }
     }
     async fn publish(&mut self) {
@@ -285,6 +326,30 @@ impl Peer {
                     ..Default::default()
                 },
                 payload: vec![0xf8, 0xff, 0xfe].into(),
+            })
+            .await
+            .unwrap();
+    }
+    async fn publish_screen(&mut self, kind: usize) {
+        self.screen_sequences[kind] = self.screen_sequences[kind].wrapping_add(1);
+        let sequence = self.screen_sequences[kind];
+        self.screen_tracks[kind]
+            .write_rtp(rtp::Packet {
+                header: rtp::header::Header {
+                    version: 2,
+                    payload_type: if kind == 0 { 125 } else { 111 },
+                    ssrc: 901 + kind as u32,
+                    sequence_number: sequence,
+                    timestamp: sequence as u32 * if kind == 0 { 9000 } else { 960 },
+                    marker: true,
+                    ..Default::default()
+                },
+                payload: if kind == 0 {
+                    vec![0x65, 1, 2, 3]
+                } else {
+                    vec![0xf8, 0xff, 0xfe]
+                }
+                .into(),
             })
             .await
             .unwrap();
@@ -308,6 +373,41 @@ async fn forwarded(source: &mut Peer, receiver: &mut Peer) -> rtp::Packet {
     })
     .await
     .expect("Authorized participants must still exchange media")
+}
+async fn screen_forwarded(source: &mut Peer, receiver: &mut Peer, kind: usize) -> rtp::Packet {
+    while receiver.packets.try_recv().is_ok() {}
+    let base = if kind == 0 {
+        thiscord_shared::screen::SSRC_BASE
+    } else {
+        thiscord_shared::screen::AUDIO_SSRC_BASE
+    };
+    tokio::time::timeout(Duration::from_secs(5), async {
+        loop {
+            source.publish_screen(kind).await;
+            if let Ok(Some(packet)) =
+                tokio::time::timeout(Duration::from_millis(25), receiver.packets.recv()).await
+                && packet.header.ssrc == base + source.slot as u32
+            {
+                return packet;
+            }
+        }
+    })
+    .await
+    .unwrap_or_else(|_| panic!("Screen media kind {kind} must be forwarded"))
+}
+async fn screen_blocked(source: &mut Peer, receiver: &mut Peer) {
+    tokio::time::sleep(Duration::from_millis(150)).await;
+    while receiver.packets.try_recv().is_ok() {}
+    for _ in 0..6 {
+        source.publish_screen(0).await;
+        source.publish_screen(1).await;
+        assert!(
+            tokio::time::timeout(Duration::from_millis(40), receiver.packets.recv())
+                .await
+                .is_err(),
+            "Stopped or unauthorized screen media was forwarded"
+        );
+    }
 }
 #[tokio::test]
 #[ignore = "requires TEST_DATABASE_URL; CI runs with --include-ignored"]
@@ -389,6 +489,108 @@ async fn sfu_forwarding_permissions_isolation_and_cleanup() {
     assert_eq!(packet.payload.as_ref(), [0xf8, 0xff, 0xfe]);
     assert!(a.packets.try_recv().is_err());
     assert!(isolated.packets.try_recv().is_err());
+    // Screen publishing requires explicit state, even for an authorized speaker.
+    screen_blocked(&mut a, &mut b).await;
+    send(
+        &mut a.socket,
+        ClientEvent::Screen {
+            active: true,
+            audio: true,
+        },
+    )
+    .await;
+    still_connected(&mut a.socket).await;
+    let video = screen_forwarded(&mut a, &mut b, 0).await;
+    assert_eq!(video.payload.as_ref(), [0x65, 1, 2, 3]);
+    assert!(video.header.marker);
+    assert_eq!(video.header.csrc.len(), 1);
+    assert_eq!(
+        screen_forwarded(&mut a, &mut b, 1).await.payload.as_ref(),
+        [0xf8, 0xff, 0xfe]
+    );
+    assert!(isolated.packets.try_recv().is_err());
+    send(
+        &mut a.socket,
+        ClientEvent::State {
+            muted: true,
+            deafened: false,
+        },
+    )
+    .await;
+    still_connected(&mut a.socket).await;
+    screen_forwarded(&mut a, &mut b, 0).await;
+    screen_forwarded(&mut a, &mut b, 1).await;
+    send(
+        &mut b.socket,
+        ClientEvent::State {
+            muted: false,
+            deafened: true,
+        },
+    )
+    .await;
+    still_connected(&mut b.socket).await;
+    screen_blocked(&mut a, &mut b).await;
+    send(
+        &mut b.socket,
+        ClientEvent::State {
+            muted: false,
+            deafened: false,
+        },
+    )
+    .await;
+    send(
+        &mut a.socket,
+        ClientEvent::Screen {
+            active: false,
+            audio: false,
+        },
+    )
+    .await;
+    still_connected(&mut a.socket).await;
+    screen_blocked(&mut a, &mut b).await;
+    send(
+        &mut a.socket,
+        ClientEvent::Screen {
+            active: true,
+            audio: true,
+        },
+    )
+    .await;
+    assert!(
+        screen_forwarded(&mut a, &mut b, 0)
+            .await
+            .header
+            .sequence_number
+            .wrapping_sub(video.header.sequence_number) as i16
+            > 0
+    );
+    send(
+        &mut a.socket,
+        ClientEvent::Screen {
+            active: false,
+            audio: false,
+        },
+    )
+    .await;
+    send(
+        &mut a.socket,
+        ClientEvent::State {
+            muted: false,
+            deafened: false,
+        },
+    )
+    .await;
+    still_connected(&mut a.socket).await;
+    while b.packets.try_recv().is_ok() {}
+    send(
+        &mut a.socket,
+        ClientEvent::Screen {
+            active: true,
+            audio: true,
+        },
+    )
+    .await;
+    still_connected(&mut a.socket).await;
     // Hold the guild row without changing access. Wait until a periodic voice
     // check actually blocks in PostgreSQL, then require media while it is held.
     // Previously that check held the global write gate and stalled every stream.
@@ -418,11 +620,26 @@ async fn sfu_forwarding_permissions_isolation_and_cleanup() {
     })
     .await
     .expect("A periodic voice query must reach the held guild lock");
-    let during_check =
-        tokio::time::timeout(Duration::from_millis(350), forwarded(&mut a, &mut b)).await;
+    let during_check = tokio::time::timeout(Duration::from_millis(350), async {
+        forwarded(&mut a, &mut b).await;
+        screen_forwarded(&mut a, &mut b, 0).await;
+        screen_forwarded(&mut a, &mut b, 1).await;
+    })
+    .await;
     blocker.batch_execute("ROLLBACK").unwrap();
     drop(blocker);
-    during_check.expect("A blocked authorization query must not stall media");
+    during_check
+        .expect("A blocked authorization query must not stall voice, screen video or shared audio");
+    send(
+        &mut a.socket,
+        ClientEvent::Screen {
+            active: false,
+            audio: false,
+        },
+    )
+    .await;
+    still_connected(&mut a.socket).await;
+    while b.packets.try_recv().is_ok() {}
     // A session response for another account must not disconnect active calls.
     let (status, _) = call(&app, ACCOUNT_PATH, &outsider, json!({"action":"rotate"})).await;
     assert_eq!(status, StatusCode::OK);
@@ -470,6 +687,37 @@ async fn sfu_forwarding_permissions_isolation_and_cleanup() {
         "A reused publisher slot must preserve SRTP sequence continuity"
     );
 
+    send(
+        &mut b.socket,
+        ClientEvent::Screen {
+            active: true,
+            audio: true,
+        },
+    )
+    .await;
+    screen_forwarded(&mut b, &mut a, 0).await;
+    screen_forwarded(&mut b, &mut a, 1).await;
+    send(
+        &mut a.socket,
+        ClientEvent::Screen {
+            active: true,
+            audio: false,
+        },
+    )
+    .await;
+    let reused_video = screen_forwarded(&mut a, &mut b, 0).await;
+    assert_ne!(
+        video.header.csrc, reused_video.header.csrc,
+        "Reused slots must have a new screen epoch"
+    );
+    send(
+        &mut a.socket,
+        ClientEvent::Screen {
+            active: false,
+            audio: false,
+        },
+    )
+    .await;
     // Speak changes require renegotiating the native microphone setup, even
     // when the participant still has JoinVoice. Other participants stay joined.
     change(&app,&ot,&mut state,json!({"action":"set_override","channel_id":channel,"target":{"kind":"member","id":member},"allow":[],"deny":["speak"]}),StatusCode::OK).await;
@@ -480,6 +728,7 @@ async fn sfu_forwarding_permissions_isolation_and_cleanup() {
     }
     still_connected(&mut a.socket).await;
     still_connected(&mut isolated.socket).await;
+    screen_blocked(&mut b, &mut a).await;
     b.close().await;
     tokio::time::sleep(Duration::from_millis(200)).await;
     change(&app,&ot,&mut state,json!({"action":"set_override","channel_id":channel,"target":{"kind":"member","id":member},"allow":[],"deny":[]}),StatusCode::OK).await;
@@ -569,6 +818,7 @@ async fn sfu_forwarding_permissions_isolation_and_cleanup() {
     let mut c = Peer::new(join(addr, &ot, guild.clone(), channel.clone()).await).await;
     assert_eq!(c.slot, 0);
     let mut listener_only = Peer::new(join(addr, &mt, guild.clone(), channel.clone()).await).await;
+    screen_blocked(&mut listener_only, &mut c).await;
     // Confirm the transport works in the permitted direction first.
     tokio::time::timeout(Duration::from_secs(10), async {
         loop {

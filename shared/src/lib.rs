@@ -9,6 +9,7 @@ pub mod error;
 pub mod ids;
 pub mod pagination;
 pub mod permissions;
+pub mod screen;
 pub mod validation;
 
 pub use error::{ApiError, ErrorCode};

@@ -212,6 +212,20 @@ speaker isolation and physical acoustic acceptance remain future work.
   explicit local device suspend/resume recovery without unexpected capture.
 - [ ] Multi-user acceptance on Windows/macOS/Linux with real microphones.
 
+## 8a. Screen sharing (Windows first)
+
+- [x] Native Windows screen/window capture, explicit source picker and persistent stop control.
+- [x] Selectable 720p/1080p/1440p/4K and 15/30/60 fps targets, default 1080p/30.
+- [x] Windows system-audio loopback excluding Thiscord, separate from microphone mute/PTT.
+- [x] H.264/Opus WebRTC tracks, permission-gated SFU forwarding and native decoded-frame viewer.
+- [x] Bounded media queues, loss recovery, stop/reconnect cleanup and wire/codec/SFU regression tests.
+- [ ] Two-client Windows capture/audio acceptance, mixed-DPI/protected windows and suspend/network checks.
+- [ ] macOS/Linux publishing and OS permission acceptance; portable receiving code is included.
+- [ ] Stereo system audio, adaptive bitrate, demand-based subscriptions and measured multi-share capacity.
+- [ ] GPU presentation/hardware encoding and measured high-resolution/high-frame-rate performance.
+
+See [screen-sharing.md](docs/screen-sharing.md) for limits and remaining platform checks.
+
 ## 9. Hosting and releases
 
 - [x] Direct backend HTTPS/WSS using Let's Encrypt PEM files, TLS tests and SIGHUP reload.

@@ -37,6 +37,7 @@ struct Handler {
     connected: Arc<AtomicBool>,
     connection: Connection,
     closed: watch::Receiver<bool>,
+    screen: crate::native_screen::ScreenState,
 }
 #[async_trait::async_trait]
 impl PeerConnectionEventHandler for Handler {
@@ -58,6 +59,10 @@ impl PeerConnectionEventHandler for Handler {
         }
     }
     async fn on_track(&self, track: Arc<dyn TrackRemote>) {
+        let ssrc = track.ssrcs().await.first().copied().unwrap_or(0);
+        let decoder = MediaKind::from_relay_ssrc(ssrc)
+            .filter(|(kind, _)| *kind == MediaKind::ScreenVideo)
+            .map(|(_, slot)| self.screen.decoder(self.connection.clone(), slot));
         let engine = self.engine.clone();
         let connection = self.connection.clone();
         let mut closed = self.closed.clone();
@@ -70,19 +75,21 @@ impl PeerConnectionEventHandler for Handler {
                     _ = closed.changed() => break,
                     event = track.poll() => match event { Some(event) => event, None => break },
                 };
-                if let TrackRemoteEvent::OnRtpPacket(packet) = event
-                    && let Some(slot) = packet
-                        .header
-                        .ssrc
-                        .checked_sub(SSRC_BASE)
-                        .filter(|s| (*s as usize) < ROOM_CAPACITY)
-                {
-                    engine.notify(Command::Packet {
-                        connection: connection.clone(),
-                        slot: slot as usize,
-                        sequence: packet.header.sequence_number,
-                        payload: packet.payload,
-                    });
+                if let TrackRemoteEvent::OnRtpPacket(packet) = event {
+                    if let Some(decoder) = &decoder {
+                        decoder.push(packet, Instant::now());
+                        continue;
+                    }
+                    let slot = MediaKind::from_relay_ssrc(packet.header.ssrc)
+                        .and_then(|(kind, slot)| kind.mixer_slot(slot));
+                    if let Some(slot) = slot {
+                        engine.notify(Command::Packet {
+                            connection: connection.clone(),
+                            slot,
+                            sequence: packet.header.sequence_number,
+                            payload: packet.payload,
+                        });
+                    }
                 }
             }
         });
@@ -93,6 +100,7 @@ pub async fn voice_leave(
     app: tauri::AppHandle,
     state: State<'_, VoiceState>,
 ) -> Result<(), String> {
+    app.state::<crate::native_screen::ScreenState>().clear();
     let mut guard = state.job.lock().await;
     if let Some((stop, mut task)) = guard.take() {
         let _ = stop.send(());
@@ -231,6 +239,9 @@ struct Runtime {
 }
 impl Runtime {
     async fn close(&mut self) {
+        self.app
+            .state::<crate::native_screen::ScreenState>()
+            .clear();
         self.attempt.connection.close();
         self.attempt.closed.send_replace(true);
         self.engine.notify(Command::Stop);
@@ -373,14 +384,15 @@ async fn run(
     if first.version != VOICE_VERSION {
         return Err("Unsupported voice version".into());
     }
-    let (sdp, own_slot, can_speak, ice_servers) = match first.event {
+    let (sdp, own_slot, can_speak, ice_servers, screen_video) = match first.event {
         ServerEvent::Offer {
             sdp,
             slot,
             can_speak,
             ice_servers,
+            screen_video,
         } if first.version == VOICE_VERSION && slot < ROOM_CAPACITY => {
-            (sdp, slot, can_speak, ice_servers)
+            (sdp, slot, can_speak, ice_servers, screen_video)
         }
         ServerEvent::Error { error } => return Err(Failure::server(error)),
         _ => return Err("Invalid voice offer".into()),
@@ -389,6 +401,20 @@ async fn run(
     let failed = Arc::new(AtomicBool::new(false));
     let connected = Arc::new(AtomicBool::new(false));
     let mut media = MediaEngine::default();
+    media
+        .register_codec(
+            rtc::rtp_transceiver::rtp_sender::RTCRtpCodecParameters {
+                rtp_codec: rtc::rtp_transceiver::rtp_sender::RTCRtpCodec {
+                    mime_type: "video/H264".into(),
+                    clock_rate: 90_000,
+                    sdp_fmtp_line: thiscord_shared::screen::H264_FMTP.into(),
+                    ..Default::default()
+                },
+                payload_type: MediaKind::ScreenVideo.payload_type(),
+            },
+            rtc::rtp_transceiver::rtp_sender::RtpCodecKind::Video,
+        )
+        .expect("valid screen codec");
     media.register_default_codecs().map_err(|e| e.to_string())?;
     let registry =
         register_default_interceptors(Registry::new(), &mut media).map_err(|e| e.to_string())?;
@@ -416,6 +442,10 @@ async fn run(
                 connected: connected.clone(),
                 connection: attempt.connection.clone(),
                 closed: attempt.closed.subscribe(),
+                screen: app
+                    .state::<crate::native_screen::ScreenState>()
+                    .inner()
+                    .clone(),
             }))
             .with_udp_addrs(vec![bind().map_err(Failure::temporary)?])
             .build()
@@ -427,10 +457,21 @@ async fn run(
     pc.set_remote_description(offer)
         .await
         .map_err(|_| "Cannot accept server offer")?;
-    let track = thiscord_frontend::audio::transport::track(900);
+    let track = thiscord_frontend::audio::transport::track(MediaKind::Microphone.publisher_ssrc());
     pc.add_track(track.clone() as Arc<dyn TrackLocal>)
         .await
         .map_err(|_| "Cannot add microphone track")?;
+    let screen_track = thiscord_frontend::screen::track(MediaKind::ScreenVideo.publisher_ssrc());
+    let system_track =
+        thiscord_frontend::audio::transport::track(MediaKind::SystemAudio.publisher_ssrc());
+    if screen_video {
+        pc.add_track(screen_track.clone() as Arc<dyn TrackLocal>)
+            .await
+            .map_err(|_| "Cannot add screen video track")?;
+        pc.add_track(system_track.clone() as Arc<dyn TrackLocal>)
+            .await
+            .map_err(|_| "Cannot add shared audio track")?;
+    }
     let answer = pc
         .create_answer(None)
         .await
@@ -451,6 +492,7 @@ async fn run(
     let mut ticker = tokio::time::interval(Duration::from_millis(500));
     let start = Instant::now();
     let mut heard = Instant::now();
+    let mut screen_state = (false, false);
     let mut sequence = 0_u16;
     let mut timestamp = 0_u32;
     loop {
@@ -464,6 +506,7 @@ async fn run(
                 match message.event{
                     ServerEvent::Participants{members}=>{
                         if members.len()>ROOM_CAPACITY||members.iter().any(|m|m.slot>=ROOM_CAPACITY){return Err("Invalid participant list".into());}
+                        app.state::<crate::native_screen::ScreenState>().roster(if settings.lock().map_err(|_|"Settings unavailable")?.deafened { &[] } else { &members });
                         roster = members.iter().filter(|m|m.slot!=own_slot).cloned().collect();
                         engine.notify(Command::Roster{connection:attempt.connection.clone(),members:roster.clone()});
                         if let Ok(mut s)=status.lock(){s.participants=members;}
@@ -471,7 +514,7 @@ async fn run(
                 }
             },
             Some(payload)=outgoing.recv()=>{
-                sequence=sequence.wrapping_add(1);timestamp=timestamp.wrapping_add(960);let packet=rtc::rtp::Packet{header:rtc::rtp::header::Header{version:2,payload_type:111,ssrc:900,sequence_number:sequence,timestamp,..Default::default()},payload};
+                sequence=sequence.wrapping_add(1);timestamp=timestamp.wrapping_add(960);let packet=rtc::rtp::Packet{header:rtc::rtp::header::Header{version:2,payload_type:MediaKind::Microphone.payload_type(),ssrc:MediaKind::Microphone.publisher_ssrc(),sequence_number:sequence,timestamp,..Default::default()},payload};
                 tokio::time::timeout(Duration::from_millis(100),track.write_rtp(packet)).await.map_err(|_|Failure::temporary("Voice sender stalled"))?.map_err(|_|Failure::temporary("Voice media connection failed"))?;
             },
             _=ticker.tick()=>{
@@ -479,9 +522,13 @@ async fn run(
                 if !audio_started{
                     if start.elapsed()>Duration::from_secs(15){return Err(Failure::temporary("Media connection timed out"));}
                     if connected.load(Ordering::Acquire){
-                        let configuration=settings.lock().map_err(|_|"Settings unavailable")?.clone();let app=app.clone();let tx=tx.clone();let connection=attempt.connection.clone();
-                        tauri::async_runtime::spawn_blocking(move||crate::native_audio::start_voice(&app,guild_id,connection,configuration,tx,can_speak)).await.map_err(|_|"Audio task failed")??;
+                        let configuration=settings.lock().map_err(|_|"Settings unavailable")?.clone();let audio_app=app.clone();let tx=tx.clone();let connection=attempt.connection.clone();
+                        tauri::async_runtime::spawn_blocking(move||crate::native_audio::start_voice(&audio_app,guild_id,connection,configuration,tx,can_speak)).await.map_err(|_|"Audio task failed")??;
                         audio_started=true;attempt.connected_at=Some(Instant::now());
+                        if screen_video { app.state::<crate::native_screen::ScreenState>().bind(crate::native_screen::Binding {
+                            connection: attempt.connection.clone(), video: screen_track.clone(), audio: system_track.clone(), can_publish: can_speak,
+                            video_sequence: Default::default(), audio_sequence: Default::default(), audio_timestamp: Default::default(), started: Instant::now(),
+                        }); }
                         engine.notify(Command::Roster{connection:attempt.connection.clone(),members:roster.clone()});
                         if let Ok(mut s)=status.lock(){s.connected=true;s.message="Connected".into();}
                     }
@@ -493,6 +540,12 @@ async fn run(
                     if !audio.running {return Err(audio.message.into());}
                     if connected.load(Ordering::Acquire) { disconnected_since=None; }
                     else if disconnected_since.get_or_insert_with(Instant::now).elapsed()>Duration::from_secs(5) {return Err(Failure::temporary("Voice media connection interrupted"));}
+                }
+                if configuration.deafened { crate::native_screen::screen_stop(app.state::<crate::native_screen::ScreenState>()); }
+                let current_screen = app.state::<crate::native_screen::ScreenState>().sharing();
+                if current_screen != screen_state {
+                    send_event(&mut send, ClientEvent::Screen { active: current_screen.0, audio: current_screen.1 }).await?;
+                    screen_state = current_screen;
                 }
                 send_event(&mut send, ClientEvent::State{muted:configuration.muted,deafened:configuration.deafened}).await?;
             }

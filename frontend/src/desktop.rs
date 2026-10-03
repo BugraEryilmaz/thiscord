@@ -2,9 +2,12 @@
 
 mod native_account;
 mod native_audio;
+mod native_screen;
 mod native_signaling;
 mod native_update;
 mod native_voice;
+#[cfg(target_os = "windows")]
+mod system_audio;
 
 fn main() {
     // Run from a Terminal to diagnose the exact installed native network path.
@@ -39,11 +42,16 @@ fn main() {
         .plugin(tauri_plugin_global_shortcut::Builder::new().build())
         .manage(native_audio::AudioState::default())
         .manage(native_voice::VoiceState::default())
+        .manage(native_screen::ScreenState::default())
+        .register_uri_scheme_protocol("screen", |ctx, request| {
+            native_screen::protocol(ctx.app_handle(), request)
+        })
         .on_window_event(|window, event| {
             use tauri::Manager;
             let engine = &window.state::<native_audio::AudioState>().engine;
             match event {
                 tauri::WindowEvent::Destroyed => {
+                    window.state::<native_screen::ScreenState>().clear();
                     engine.notify(thiscord_frontend::audio::Command::Stop)
                 }
                 tauri::WindowEvent::Focused(false) => {
@@ -74,6 +82,11 @@ fn main() {
             native_audio::audio_volume,
             native_audio::audio_pressed,
             native_audio::audio_webrtc_probe,
+            native_screen::screen_status,
+            native_screen::screen_frame_state,
+            native_screen::screen_sources,
+            native_screen::screen_start,
+            native_screen::screen_stop,
             native_voice::voice_join,
             native_voice::voice_leave,
             native_voice::voice_status,

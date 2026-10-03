@@ -8,7 +8,8 @@ default-run = "thiscord-desktop"
 
 [features]
 default = []
-desktop = ["dep:tauri", "dep:tauri-build", "dep:keyring", "dep:open", "dep:tokio", "dep:rand", "dep:base64", "dep:url", "native-audio", "deep-filter", "neural-echo", "dep:tauri-plugin-global-shortcut", "dep:tauri-plugin-updater", "dep:tokio-tungstenite", "dep:futures-util"]
+desktop = ["screen-share", "dep:tauri", "dep:tauri-build", "dep:keyring", "dep:open", "dep:tokio", "dep:rand", "dep:base64", "dep:url", "native-audio", "deep-filter", "neural-echo", "dep:tauri-plugin-global-shortcut", "dep:tauri-plugin-updater", "dep:tokio-tungstenite", "dep:futures-util"]
+screen-share = ["native-audio", "dep:xcap", "dep:openh264", "dep:image", "dep:wasapi"]
 native-audio = ["dep:cpal", "dep:ringbuf", "dep:opus", "dep:webrtc", "dep:tokio", "dep:bytes", "dep:rtc", "dep:async-trait", "dep:sonora", "dep:hound"]
 deep-filter = ["native-audio", "dep:deep_filter", "dep:ndarray", "dep:tract-core", "dep:tract-hir", "dep:tract-onnx", "dep:tract-pulse"]
 release-tools = ["dep:base64", "dep:minisign-verify"]
@@ -66,6 +67,8 @@ web-sys = { version = "0.3", features = ["Window", "HtmlDialogElement", "DomRect
 gloo-timers = { version = "0.3", features = ["futures"] }
 
 [target.'cfg(not(target_arch = "wasm32"))'.dependencies]
+openh264 = { version = "=0.9.8", optional = true }
+image = { version = "0.25", default-features = false, features = ["jpeg"], optional = true }
 hound = { version = "3.5", optional = true }
 tauri = { version = "2", optional = true , features = [] }
 keyring = { version = "3.6", optional = true, features = ["apple-native", "windows-native", "sync-secret-service", "crypto-rust"] }
@@ -98,6 +101,10 @@ tauri-plugin-updater = { version = "2.13", optional = true }
 minisign-verify = { version = "0.2.5", optional = true }
 tokio-tungstenite = { version = "0.29", optional = true, features = ["rustls-tls-webpki-roots"] }
 futures-util = { version = "0.3", features = ["sink"], optional = true }
+
+[target.'cfg(target_os = "windows")'.dependencies]
+xcap = { version = "=0.9.8", optional = true }
+wasapi = { version = "0.22", optional = true }
 
 [build-dependencies]
 tauri-build = { version = "2", optional = true , features = [] }

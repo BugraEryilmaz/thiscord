@@ -184,12 +184,22 @@ mod tests {
             jitter: Default::default(),
             decoder: opus::Decoder::new(RATE, opus::Channels::Mono).unwrap(),
         });
+        s.remotes[11] = Some(super::super::Remote {
+            id,
+            label: "Shared audio".into(),
+            jitter: Default::default(),
+            decoder: opus::Decoder::new(RATE, opus::Channels::Mono).unwrap(),
+        });
         let target = thiscord_shared::audio::SpeakerVolumeTarget {
             guild_id: guild,
             account_id: id,
         };
         s.set_volume(3, Some(target), 0.37).unwrap();
         assert_eq!(s.volumes.as_ref().unwrap().gain(id), 0.37);
+        assert_eq!(
+            f32::from_bits(s.devices.writers[11].control.volume.load(Ordering::Relaxed)),
+            0.37
+        );
         assert!(s.set_volume(3, None, 0.0).is_err());
         assert!(
             s.set_volume(

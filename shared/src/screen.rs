@@ -1,0 +1,102 @@
+//! Screen-sharing metadata only. Pixels travel on encrypted WebRTC video tracks.
+use serde::{Deserialize, Serialize};
+
+pub const SSRC_BASE: u32 = crate::voice::MediaKind::ScreenVideo.ssrc_base();
+pub const AUDIO_SSRC_BASE: u32 = crate::voice::MediaKind::SystemAudio.ssrc_base();
+pub const MAX_WIDTH: u32 = 3840;
+pub const MAX_HEIGHT: u32 = 2160;
+pub const H264_FMTP: &str =
+    "level-asymmetry-allowed=1;packetization-mode=1;profile-level-id=42e034";
+pub const MAX_PACKETS_PER_SECOND: usize = 12_000;
+pub const MAX_BYTES_PER_SECOND: usize = 12_000_000;
+pub const MAX_FRAME_BYTES: usize = 4 * 1024 * 1024;
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "kind", content = "id", rename_all = "snake_case")]
+pub enum SourceId {
+    Monitor(u32),
+    Window(u32),
+}
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct Source {
+    pub id: SourceId,
+    pub label: String,
+}
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct Status {
+    pub available: bool,
+    pub sharing: bool,
+    pub message: String,
+}
+
+/// Requested capture targets; actual throughput depends on the source and host.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize)]
+pub struct Quality {
+    pub height: u32,
+    pub fps: u32,
+}
+impl Default for Quality {
+    fn default() -> Self {
+        Self {
+            height: 1080,
+            fps: 30,
+        }
+    }
+}
+impl Quality {
+    pub fn valid(self) -> bool {
+        matches!(self.height, 720 | 1080 | 1440 | 2160) && matches!(self.fps, 15 | 30 | 60)
+    }
+    pub fn width(self) -> u32 {
+        self.height * 16 / 9
+    }
+    pub fn bitrate(self) -> u32 {
+        let base = match self.height {
+            720 => 2_500_000,
+            1080 => 5_000_000,
+            1440 => 9_000_000,
+            _ => 16_000_000,
+        };
+        base * self.fps / 30
+    }
+}
+#[cfg(test)]
+mod tests {
+    use super::*;
+    #[test]
+    fn quality_presets_are_bounded_and_untrusted_values_are_rejected() {
+        for height in [720, 1080, 1440, 2160] {
+            for fps in [15, 30, 60] {
+                let q = Quality { height, fps };
+                assert!(q.valid());
+                assert!(q.width() <= MAX_WIDTH && q.height <= MAX_HEIGHT);
+                assert!(q.bitrate() <= 32_000_000);
+            }
+        }
+        for q in [
+            Quality {
+                height: 4320,
+                fps: 60,
+            },
+            Quality {
+                height: 1080,
+                fps: 0,
+            },
+            Quality {
+                height: 720,
+                fps: 999,
+            },
+        ] {
+            assert!(!q.valid());
+        }
+        assert!(Quality::default().valid());
+    }
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize)]
+pub struct Watch {
+    pub slot: usize,
+    pub owner: crate::AccountId,
+    pub epoch: u32,
+    pub viewer: u32,
+}
