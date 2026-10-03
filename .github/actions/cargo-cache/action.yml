@@ -15,7 +15,7 @@ runs:
         CACHE_RUNNER: ${{ runner.name }}
         CACHE_ENVIRONMENT: ${{ runner.environment }}
         CACHE_PR: ${{ github.event.pull_request.number }}
-        CACHE_DISABLED: ${{ vars.THISCORD_DISABLE_LOCAL_CACHE }}
+        CACHE_DISABLED: ${{ env.THISCORD_DISABLE_LOCAL_CACHE }}
       run: |
         $local = $env:CACHE_ENVIRONMENT -eq 'self-hosted' -and $env:CACHE_DISABLED -ne 'true'
         $target = Join-Path $env:GITHUB_WORKSPACE 'target'

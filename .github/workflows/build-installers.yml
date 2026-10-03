@@ -8,6 +8,7 @@ permissions:
 
 env:
   CARGO_TERM_COLOR: always
+  THISCORD_DISABLE_LOCAL_CACHE: ${{ vars.THISCORD_DISABLE_LOCAL_CACHE }}
   THISCORD_API_URL: https://thiscord.com.tr
 
 jobs:

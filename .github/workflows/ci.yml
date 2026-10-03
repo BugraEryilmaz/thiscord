@@ -24,6 +24,7 @@ concurrency:
 
 env:
   CARGO_TERM_COLOR: always
+  THISCORD_DISABLE_LOCAL_CACHE: ${{ vars.THISCORD_DISABLE_LOCAL_CACHE }}
   THISCORD_API_URL: ${{ inputs.api_url || 'http://localhost:3000' }}
 
 jobs:
@@ -157,7 +158,8 @@ jobs:
       - name: Build native executable with embedded web assets
         run: cargo build -p thiscord-frontend --bin thiscord-desktop --features desktop,custom-protocol --locked
       - name: Screen codec and bounded RTP tests
-        run: cargo test -p thiscord-frontend --lib --features screen-share --locked screen::
+        run: |
+          cargo test -p thiscord-frontend --lib --features screen-share --locked screen::
       - name: Native callback tests
         run: cargo test -p thiscord-frontend --bin thiscord-desktop --features desktop,custom-protocol --locked
       - uses: actions/upload-artifact@v4
