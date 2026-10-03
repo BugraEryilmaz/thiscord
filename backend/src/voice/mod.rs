@@ -44,6 +44,11 @@ struct Member {
     source_id: uuid::Uuid,
     tx: mpsc::Sender<Delivery>,
     media_tx: mpsc::Sender<Delivery>,
+    keyframes: mpsc::Sender<u32>,
+    last_keyframe: Option<Instant>,
+    feedback_enabled: bool,
+    generation: Arc<AtomicU64>,
+    metrics: Arc<[AtomicU64; 5]>,
     active: Arc<AtomicBool>,
 }
 struct Delivery {
@@ -52,6 +57,7 @@ struct Delivery {
     source: uuid::Uuid,
     source_active: Arc<AtomicBool>,
     packet: rtp::Packet,
+    queued_at: Instant,
 }
 #[derive(Default)]
 struct Room {
@@ -199,6 +205,7 @@ async fn access_failed(socket: &mut WebSocket, id: RequestId, failure: Failure) 
     }
 }
 struct Handler {
+    metrics: Arc<[AtomicU64; 5]>,
     gathered: Arc<Notify>,
     packets: mpsc::Sender<(u64, MediaKind, rtp::Packet)>,
     media_packets: mpsc::Sender<(u64, MediaKind, rtp::Packet)>,
@@ -250,6 +257,7 @@ impl PeerConnectionEventHandler for Handler {
         } else {
             self.media_packets.clone()
         };
+        let metrics = self.metrics.clone();
         let active = self.active.clone();
         let generation = self.generation.clone();
         tokio::spawn(async move {
@@ -285,7 +293,16 @@ impl PeerConnectionEventHandler for Handler {
                         active.store(false, Ordering::Release);
                         break;
                     }
-                    let _ = tx.try_send((generation.load(Ordering::Acquire), kind, packet));
+                    if kind == MediaKind::ScreenVideo {
+                        metrics[0].fetch_add(1, Ordering::Relaxed);
+                    }
+                    if tx
+                        .try_send((generation.load(Ordering::Acquire), kind, packet))
+                        .is_err()
+                        && kind == MediaKind::ScreenVideo
+                    {
+                        metrics[1].fetch_add(1, Ordering::Relaxed);
+                    }
                 }
             }
         });
@@ -384,9 +401,54 @@ async fn handle_signal(
         Some(ClientEvent::Screen { active, audio }) => {
             update_screen_state(room, slot, active, audio).await.is_ok()
         }
+        Some(ClientEvent::ScreenKeyframe {
+            slot: publisher,
+            epoch,
+        }) => {
+            request_keyframe(room, slot, publisher, epoch).await;
+            true
+        }
         Some(ClientEvent::Leave {}) | None => false,
         _ => false,
     }
+}
+async fn request_keyframe(room: &Room, viewer: usize, publisher: usize, epoch: u32) {
+    let mut members = room.members.write().await;
+    let Some(viewer_epoch) = members
+        .get(&viewer)
+        .map(|m| m.generation.load(Ordering::Acquire))
+    else {
+        return;
+    };
+    let Some(_permit) = access::global().packet(viewer_epoch, viewer_epoch) else {
+        return;
+    };
+    if viewer == publisher
+        || !members
+            .get(&viewer)
+            .is_some_and(|m| m.active.load(Ordering::Acquire) && !m.info.deafened)
+    {
+        return;
+    }
+    let Some(source) = members.get_mut(&publisher) else {
+        return;
+    };
+    if !source.feedback_enabled
+        || source.generation.load(Ordering::Acquire) != viewer_epoch
+        || !source.active.load(Ordering::Acquire)
+        || !may_publish(&source.info, MediaKind::ScreenVideo)
+        || source.info.screen_epoch != epoch
+    {
+        return;
+    }
+    if source
+        .last_keyframe
+        .is_some_and(|at| at.elapsed() < Duration::from_millis(250))
+    {
+        return;
+    }
+    source.last_keyframe = Some(Instant::now());
+    let _ = source.keyframes.try_send(epoch);
 }
 async fn log_selected_route(pc: &dyn PeerConnection, id: RequestId) -> bool {
     for sender in pc.get_senders().await {
@@ -476,6 +538,8 @@ async fn serve(mut socket: WebSocket, pool: DbPool, id: RequestId) {
     let active = Arc::new(AtomicBool::new(true));
     let (out_tx, mut out_rx) = mpsc::channel::<Delivery>(32);
     let (media_out_tx, mut media_out_rx) = mpsc::channel::<Delivery>(4096);
+    let metrics: Arc<[AtomicU64; 5]> = Arc::new(std::array::from_fn(|_| AtomicU64::new(0)));
+    let (keyframe_tx, mut keyframe_rx) = mpsc::channel(1);
     let source_id = uuid::Uuid::new_v4();
     info.screen_epoch = room
         .screen_epoch
@@ -516,6 +580,11 @@ async fn serve(mut socket: WebSocket, pool: DbPool, id: RequestId) {
                 source_id,
                 tx: out_tx,
                 media_tx: media_out_tx,
+                keyframes: keyframe_tx,
+                last_keyframe: None,
+                feedback_enabled: false,
+                generation: generation.clone(),
+                metrics: metrics.clone(),
                 active: active.clone(),
             },
         );
@@ -547,6 +616,7 @@ async fn serve(mut socket: WebSocket, pool: DbPool, id: RequestId) {
         .with_interceptor_registry(registry)
         .with_media_engine(engine)
         .with_handler(Arc::new(Handler {
+            metrics: metrics.clone(),
             gathered: gathered.clone(),
             packets: in_tx,
             media_packets: media_in_tx,
@@ -565,6 +635,7 @@ async fn serve(mut socket: WebSocket, pool: DbPool, id: RequestId) {
     };
     let pc: Arc<dyn PeerConnection> = Arc::new(pc);
     let mut tracks = Vec::new();
+    let mut screen_feedback = false;
     let negotiated = tokio::time::timeout(Duration::from_secs(15), async {
         for slot in 0..MediaKind::TRACK_COUNT {
             let track = local_track(slot);
@@ -585,6 +656,7 @@ async fn serve(mut socket: WebSocket, pool: DbPool, id: RequestId) {
                 slot,
                 can_speak: info.can_speak,
                 screen_video: true,
+                screen_feedback: true,
                 ice_servers,
             },
         )
@@ -592,9 +664,17 @@ async fn serve(mut socket: WebSocket, pool: DbPool, id: RequestId) {
         let Some(Ok(answer)) = socket.recv().await else {
             return Err(());
         };
-        let Some(ClientEvent::Answer { sdp }) = parse(answer) else {
+        let Some(ClientEvent::Answer {
+            sdp,
+            screen_feedback: enabled,
+        }) = parse(answer)
+        else {
             return Err(());
         };
+        screen_feedback = enabled;
+        if let Some(member) = room.members.write().await.get_mut(&slot) {
+            member.feedback_enabled = enabled;
+        }
         let answer: RTCSessionDescription = serde_json::from_str(&sdp).map_err(|_| ())?;
         if answer.sdp_type != RTCSdpType::Answer {
             return Err(());
@@ -646,13 +726,20 @@ async fn serve(mut socket: WebSocket, pool: DbPool, id: RequestId) {
                         } else {
                             &m.media_tx
                         };
-                        let _ = tx.try_send(Delivery {
-                            epoch,
-                            slot: kind.track_index(slot),
-                            source: source_id,
-                            source_active: relay_active.clone(),
-                            packet: packet.clone(),
-                        });
+                        if tx
+                            .try_send(Delivery {
+                                epoch,
+                                slot: kind.track_index(slot),
+                                source: source_id,
+                                source_active: relay_active.clone(),
+                                packet: packet.clone(),
+                                queued_at: Instant::now(),
+                            })
+                            .is_err()
+                            && kind == MediaKind::ScreenVideo
+                        {
+                            m.metrics[2].fetch_add(1, Ordering::Relaxed);
+                        }
                     }
                 }
             }
@@ -661,6 +748,7 @@ async fn serve(mut socket: WebSocket, pool: DbPool, id: RequestId) {
         let writer_generation = generation.clone();
         let writer_room = room.clone();
         let receiver_slot = slot;
+        let writer_metrics = metrics.clone();
         let writer = tokio::spawn(async move {
             let mut sources = [None; MediaKind::TRACK_COUNT];
             let mut offsets = [(0_u16, 0_u32); MediaKind::TRACK_COUNT];
@@ -671,12 +759,26 @@ async fn serve(mut socket: WebSocket, pool: DbPool, id: RequestId) {
                 source,
                 source_active,
                 mut packet,
+                queued_at,
             }) = tokio::select! { biased; packet = out_rx.recv() => packet, packet = media_out_rx.recv() => packet }
             {
                 if !writer_active.load(Ordering::Acquire) {
                     break;
                 }
                 let (kind, source_slot) = MediaKind::from_track(slot).expect("delivery track");
+                if kind == MediaKind::ScreenVideo
+                    && queued_at.elapsed() > Duration::from_millis(150)
+                {
+                    writer_metrics[2].fetch_add(1, Ordering::Relaxed);
+                    request_keyframe(
+                        &writer_room,
+                        receiver_slot,
+                        source_slot,
+                        packet.header.csrc.first().copied().unwrap_or(0),
+                    )
+                    .await;
+                    continue;
+                }
                 // A slot may be reused, but its SRTP sequence must not rewind.
                 // Preserve sequence gaps/reordering within the publisher stream.
                 if sources[slot] != Some(source) {
@@ -702,33 +804,42 @@ async fn serve(mut socket: WebSocket, pool: DbPool, id: RequestId) {
                 if packet.header.sequence_number.wrapping_sub(last[slot].0) as i16 > 0 {
                     last[slot] = (packet.header.sequence_number, packet.header.timestamp);
                 }
-                if !matches!(
-                    tokio::time::timeout(
-                        Duration::from_millis(100),
-                        authorized_write(
-                            &writer_room,
-                            || access::global()
-                                .packet(epoch, writer_generation.load(Ordering::Acquire)),
-                            |members| {
-                                writer_active.load(Ordering::Acquire)
-                                    && source_active.load(Ordering::Acquire)
-                                    && members.get(&source_slot).is_some_and(|m| {
-                                        m.active.load(Ordering::Acquire)
-                                            && m.source_id == source
-                                            && may_publish(&m.info, kind)
-                                    })
-                                    && members.get(&receiver_slot).is_some_and(|m| {
-                                        !m.info.deafened && m.active.load(Ordering::Acquire)
-                                    })
-                            },
-                            tracks[slot].write_rtp(packet)
-                        )
-                    )
-                    .await,
-                    Ok(Ok(Ok(_))) | Ok(Err(()))
-                ) {
+                let delivered = tokio::time::timeout(
+                    Duration::from_millis(100),
+                    authorized_write(
+                        &writer_room,
+                        || {
+                            access::global()
+                                .packet(epoch, writer_generation.load(Ordering::Acquire))
+                        },
+                        |members| {
+                            writer_active.load(Ordering::Acquire)
+                                && source_active.load(Ordering::Acquire)
+                                && members.get(&source_slot).is_some_and(|m| {
+                                    m.active.load(Ordering::Acquire)
+                                        && m.source_id == source
+                                        && may_publish(&m.info, kind)
+                                })
+                                && members.get(&receiver_slot).is_some_and(|m| {
+                                    !m.info.deafened && m.active.load(Ordering::Acquire)
+                                })
+                        },
+                        tracks[slot].write_rtp(packet),
+                    ),
+                )
+                .await;
+                if matches!(delivered, Ok(Err(()))) {
+                    continue;
+                }
+                if !matches!(delivered, Ok(Ok(Ok(_)))) {
                     writer_active.store(false, Ordering::Release);
+                    if kind == MediaKind::ScreenVideo {
+                        writer_metrics[4].fetch_add(1, Ordering::Relaxed);
+                    }
                     break;
+                }
+                if kind == MediaKind::ScreenVideo {
+                    writer_metrics[3].fetch_add(1, Ordering::Relaxed);
                 }
             }
         });
@@ -745,6 +856,7 @@ async fn serve(mut socket: WebSocket, pool: DbPool, id: RequestId) {
         let mut last = Instant::now();
         let mut budget = 0;
         let mut route_logged = false;
+        let mut diagnostic_tick = 0;
         loop {
             tokio::select! {biased;
                 result=changed.changed()=>{
@@ -754,11 +866,22 @@ async fn serve(mut socket: WebSocket, pool: DbPool, id: RequestId) {
                         break;
                     }
                 },
+                Some(epoch)=keyframe_rx.recv()=>{
+                    // Revalidate the publisher and generation after queued feedback.
+                    let allowed = access::global().packet(access.generation.load(Ordering::Acquire), access.generation.load(Ordering::Acquire)).is_some()
+                        && room.members.read().await.get(&slot).is_some_and(|m| m.feedback_enabled && m.active.load(Ordering::Acquire) && m.info.sharing_screen && m.info.screen_epoch == epoch);
+                    if allowed && send(&mut socket, ServerEvent::ScreenKeyframe { epoch }).await.is_err() { break; }
+                },
                 message=socket.recv()=>{
                     let Some(Ok(message))=message else{break;};budget+=1;if budget>30{break;}last=Instant::now();
                     if !handle_signal(&mut socket, &room, slot, parse(message)).await { break; }
                 },
                 _=tick.tick()=>{
+                    diagnostic_tick += 1;
+                    if screen_feedback && diagnostic_tick % 5 == 0 {
+                        let counters = ["sfu_video_ingress_packets", "sfu_video_ingress_dropped", "sfu_video_egress_dropped", "sfu_video_sent_packets", "sfu_video_send_timeouts"].into_iter().enumerate().map(|(i,n)| (n.to_owned(), metrics[i].load(Ordering::Relaxed))).collect();
+                        if send(&mut socket, ServerEvent::MediaDiagnostics { counters }).await.is_err() { break; }
+                    }
                     budget=0;if last.elapsed()>Duration::from_secs(20)||!active.load(Ordering::Acquire){break;}
                     let members=match access.refresh(&room,slot,&mut changed).await {
                         Ok(members)=>members,
@@ -816,6 +939,74 @@ where
 #[cfg(test)]
 mod send_tests {
     use super::*;
+    #[tokio::test]
+    async fn keyframe_feedback_checks_membership_epoch_deafen_speak_and_coalescing() {
+        let room = Room::default();
+        let epoch = access::global().snapshot().unwrap();
+        let mut receivers = Vec::new();
+        for slot in 0..2 {
+            let (tx, _) = mpsc::channel(1);
+            let (keyframes, rx) = mpsc::channel(1);
+            receivers.push(rx);
+            room.members.write().await.insert(
+                slot,
+                Member {
+                    info: Participant {
+                        account_id: uuid::Uuid::new_v4().to_string().parse().unwrap(),
+                        username: "test".into(),
+                        slot,
+                        muted: false,
+                        deafened: false,
+                        can_speak: true,
+                        sharing_screen: slot == 1,
+                        sharing_audio: false,
+                        screen_epoch: 7,
+                    },
+                    source_id: uuid::Uuid::new_v4(),
+                    tx: tx.clone(),
+                    media_tx: tx,
+                    keyframes,
+                    last_keyframe: None,
+                    feedback_enabled: true,
+                    generation: Arc::new(AtomicU64::new(epoch)),
+                    active: Arc::new(AtomicBool::new(true)),
+                    metrics: Arc::new(std::array::from_fn(|_| AtomicU64::new(0))),
+                },
+            );
+        }
+        for (viewer, publisher, stream_epoch) in [(7, 1, 7), (0, 7, 7), (1, 1, 7), (0, 1, 6)] {
+            request_keyframe(&room, viewer, publisher, stream_epoch).await;
+            assert!(receivers[1].try_recv().is_err());
+        }
+        room.members
+            .write()
+            .await
+            .get_mut(&0)
+            .unwrap()
+            .info
+            .deafened = true;
+        request_keyframe(&room, 0, 1, 7).await;
+        assert!(receivers[1].try_recv().is_err());
+        room.members
+            .write()
+            .await
+            .get_mut(&0)
+            .unwrap()
+            .info
+            .deafened = false;
+        request_keyframe(&room, 0, 1, 7).await;
+        assert_eq!(receivers[1].try_recv().unwrap(), 7);
+        request_keyframe(&room, 0, 1, 7).await;
+        assert!(receivers[1].try_recv().is_err());
+        {
+            let mut members = room.members.write().await;
+            let publisher = members.get_mut(&1).unwrap();
+            publisher.last_keyframe = None;
+            publisher.info.can_speak = false;
+        }
+        request_keyframe(&room, 0, 1, 7).await;
+        assert!(receivers[1].try_recv().is_err());
+    }
     #[tokio::test]
     async fn blocked_transport_releases_room_and_revalidates_before_enqueue() {
         let room = Arc::new(Room::default());

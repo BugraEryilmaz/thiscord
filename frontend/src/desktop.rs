@@ -80,6 +80,8 @@ fn main() {
             native_audio::audio_pressed,
             native_audio::audio_webrtc_probe,
             native_screen::screen_status,
+            native_screen::screen_view_diagnostics,
+            native_screen::screen_view_keyframe,
             native_screen::screen_view_open,
             native_screen::screen_view_keepalive,
             native_screen::screen_sources,

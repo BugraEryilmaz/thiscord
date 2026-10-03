@@ -172,7 +172,7 @@ async fn still_connected(socket: &mut Socket) {
     loop {
         match event(socket).await {
             ServerEvent::Pong {} => break,
-            ServerEvent::Participants { .. } => {}
+            ServerEvent::Participants { .. } | ServerEvent::MediaDiagnostics { .. } => {}
             ServerEvent::Revoked {} => panic!("Authorized voice connection was revoked"),
             _ => panic!("Unexpected event on an authorized voice connection"),
         }
@@ -298,6 +298,7 @@ impl Peer {
         send(
             &mut socket,
             ClientEvent::Answer {
+                screen_feedback: true,
                 sdp: serde_json::to_string(&pc.local_description().await.unwrap()).unwrap(),
             },
         )
@@ -504,6 +505,30 @@ async fn sfu_forwarding_permissions_isolation_and_cleanup() {
     assert_eq!(video.payload.as_ref(), [0x65, 1, 2, 3]);
     assert!(video.header.marker);
     assert_eq!(video.header.csrc.len(), 1);
+    // Authenticated receiver feedback is routed to the current publisher epoch.
+    send(
+        &mut b.socket,
+        ClientEvent::ScreenKeyframe {
+            slot: a.slot,
+            epoch: video.header.csrc[0],
+        },
+    )
+    .await;
+    tokio::time::timeout(Duration::from_secs(2), async {
+        loop {
+            match event(&mut a.socket).await {
+                ServerEvent::ScreenKeyframe { epoch } => {
+                    assert_eq!(epoch, video.header.csrc[0]);
+                    break;
+                }
+                ServerEvent::Participants { .. } | ServerEvent::MediaDiagnostics { .. } => {}
+                _ => panic!("Unexpected feedback event"),
+            }
+        }
+    })
+    .await
+    .expect("keyframe feedback must not wait for the next periodic IDR");
+
     assert_eq!(
         screen_forwarded(&mut a, &mut b, 1).await.payload.as_ref(),
         [0xf8, 0xff, 0xfe]

@@ -1,6 +1,6 @@
 //! Hardware-only Media Foundation H.264 encoder. COM/MFT work stays on the
-//! dedicated encoder thread. System-memory NV12 is supported by hardware MFTs;
-//! capture readback/color conversion remain CPU work, not a zero-copy claim.
+//! dedicated encoder thread. Production uses same-adapter D3D11 NV12 surfaces;
+//! the system-memory input method is retained only for synthetic codec probes.
 use openh264::formats::{YUVBuffer, YUVSource};
 use std::{
     collections::VecDeque,
@@ -8,11 +8,13 @@ use std::{
     mem::ManuallyDrop,
     ptr,
     rc::Rc,
+    sync::Arc,
     time::{Duration, Instant},
 };
 use thiscord_shared::screen::{MAX_FRAME_BYTES, Quality};
 use windows::{
     Win32::{
+        Graphics::Direct3D11::{ID3D11Device, ID3D11Texture2D},
         Media::MediaFoundation::*,
         System::{
             Com::{COINIT_MULTITHREADED, CoInitializeEx, CoTaskMemFree, CoUninitialize},
@@ -57,6 +59,8 @@ pub struct HardwareEncoder {
     pub name: String,
     sps: Vec<u8>,
     pps: Vec<u8>,
+    _manager: Option<IMFDXGIDeviceManager>,
+    surfaces: Vec<(u64, Arc<ID3D11Texture2D>)>,
     _runtime: Runtime,
 }
 pub struct Encoded {
@@ -68,6 +72,22 @@ fn fail() -> windows::core::Error {
 }
 impl HardwareEncoder {
     pub fn new(width: usize, height: usize, quality: Quality) -> Result<Self> {
+        Self::create(width, height, quality, None)
+    }
+    pub fn new_gpu(
+        width: usize,
+        height: usize,
+        quality: Quality,
+        device: &ID3D11Device,
+    ) -> Result<Self> {
+        Self::create(width, height, quality, Some(device))
+    }
+    fn create(
+        width: usize,
+        height: usize,
+        quality: Quality,
+        device: Option<&ID3D11Device>,
+    ) -> Result<Self> {
         if !quality.valid()
             || width < 2
             || height < 2
@@ -90,14 +110,36 @@ impl HardwareEncoder {
         let mut pointer: *mut Option<IMFActivate> = ptr::null_mut();
         let mut count = 0;
         unsafe {
-            MFTEnumEx(
-                MFT_CATEGORY_VIDEO_ENCODER,
-                MFT_ENUM_FLAG_HARDWARE | MFT_ENUM_FLAG_SORTANDFILTER,
-                Some(&input),
-                Some(&output),
-                &mut pointer,
-                &mut count,
-            )?;
+            if let Some(device) = device {
+                let adapter = device
+                    .cast::<windows::Win32::Graphics::Dxgi::IDXGIDevice>()?
+                    .GetAdapter()?
+                    .GetDesc()?;
+                let luid = (u64::from(adapter.AdapterLuid.HighPart as u32) << 32)
+                    | u64::from(adapter.AdapterLuid.LowPart);
+                let mut attributes = None;
+                MFCreateAttributes(&mut attributes, 1)?;
+                let attributes = attributes.ok_or_else(fail)?;
+                attributes.SetUINT64(&MFT_ENUM_ADAPTER_LUID, luid)?;
+                MFTEnum2(
+                    MFT_CATEGORY_VIDEO_ENCODER,
+                    MFT_ENUM_FLAG_HARDWARE | MFT_ENUM_FLAG_SORTANDFILTER,
+                    Some(&input),
+                    Some(&output),
+                    &attributes,
+                    &mut pointer,
+                    &mut count,
+                )?;
+            } else {
+                MFTEnumEx(
+                    MFT_CATEGORY_VIDEO_ENCODER,
+                    MFT_ENUM_FLAG_HARDWARE | MFT_ENUM_FLAG_SORTANDFILTER,
+                    Some(&input),
+                    Some(&output),
+                    &mut pointer,
+                    &mut count,
+                )?;
+            }
         }
         // Take ownership of every COM reference before releasing the array.
         let activations = if pointer.is_null() {
@@ -115,8 +157,8 @@ impl HardwareEncoder {
         for activation in activations {
             let transform: Result<IMFTransform> = unsafe { activation.ActivateObject() };
             if let Ok(transform) = transform {
-                match Self::configure(&transform, width, height, quality) {
-                    Ok((events, codec, input, output)) => {
+                match Self::configure(&transform, width, height, quality, device) {
+                    Ok((events, codec, input, output, manager)) => {
                         let name = unsafe {
                             let mut text = [0u16; 256];
                             activation
@@ -146,6 +188,8 @@ impl HardwareEncoder {
                             name,
                             sps: Vec::new(),
                             pps: Vec::new(),
+                            _manager: manager,
+                            surfaces: Vec::new(),
                             _runtime: runtime,
                         });
                     }
@@ -162,11 +206,32 @@ impl HardwareEncoder {
         width: usize,
         height: usize,
         quality: Quality,
-    ) -> Result<(IMFMediaEventGenerator, ICodecAPI, u32, u32)> {
+        device: Option<&ID3D11Device>,
+    ) -> Result<(
+        IMFMediaEventGenerator,
+        ICodecAPI,
+        u32,
+        u32,
+        Option<IMFDXGIDeviceManager>,
+    )> {
         unsafe {
             let attributes = transform.GetAttributes()?;
             attributes.SetUINT32(&MF_TRANSFORM_ASYNC_UNLOCK, 1)?;
             let _ = attributes.SetUINT32(&MF_LOW_LATENCY, 1);
+            let manager = if let Some(device) = device {
+                if attributes.GetUINT32(&MF_SA_D3D11_AWARE)? == 0 {
+                    return Err(fail());
+                }
+                let mut manager = None;
+                let mut token = 0;
+                MFCreateDXGIDeviceManager(&mut token, &mut manager)?;
+                let manager = manager.ok_or_else(fail)?;
+                manager.ResetDevice(device, token)?;
+                transform.ProcessMessage(MFT_MESSAGE_SET_D3D_MANAGER, manager.as_raw() as usize)?;
+                Some(manager)
+            } else {
+                None
+            };
             let events = transform.cast::<IMFMediaEventGenerator>()?;
             let codec = transform.cast::<ICodecAPI>()?;
             // Baseline + low latency prevents frame reordering on the RTP path.
@@ -179,6 +244,10 @@ impl HardwareEncoder {
             let _ = codec.SetValue(
                 &CODECAPI_AVEncCommonMeanBitRate,
                 &VARIANT::from(quality.bitrate()),
+            );
+            let _ = codec.SetValue(
+                &CODECAPI_AVEncCommonBufferSize,
+                &VARIANT::from(quality.bitrate() / 4),
             );
             let _ = codec.SetValue(&CODECAPI_AVEncMPVGOPSize, &VARIANT::from(quality.fps));
             let (mut input, mut output) = ([0], [0]);
@@ -195,7 +264,16 @@ impl HardwareEncoder {
                 media.SetUINT64(&MF_MT_PIXEL_ASPECT_RATIO, (1 << 32) | 1)?;
                 media.SetUINT32(&MF_MT_INTERLACE_MODE, MFVideoInterlace_Progressive.0 as u32)?;
                 // OpenH264's RGBA conversion produces limited-range BT.601.
-                media.SetUINT32(&MF_MT_YUV_MATRIX, MFVideoTransferMatrix_BT601.0 as u32)?;
+                media.SetUINT32(
+                    &MF_MT_YUV_MATRIX,
+                    if device.is_some() {
+                        MFVideoTransferMatrix_BT709.0
+                    } else {
+                        MFVideoTransferMatrix_BT601.0
+                    } as u32,
+                )?;
+                media.SetUINT32(&MF_MT_VIDEO_PRIMARIES, MFVideoPrimaries_BT709.0 as u32)?;
+                media.SetUINT32(&MF_MT_TRANSFER_FUNCTION, MFVideoTransFunc_709.0 as u32)?;
                 media.SetUINT32(&MF_MT_VIDEO_NOMINAL_RANGE, MFNominalRange_16_235.0 as u32)?;
                 Ok(media)
             };
@@ -207,7 +285,7 @@ impl HardwareEncoder {
             codec.SetValue(&CODECAPI_AVEncVideoForceKeyFrame, &VARIANT::from(1u32))?;
             transform.ProcessMessage(MFT_MESSAGE_NOTIFY_BEGIN_STREAMING, 0)?;
             transform.ProcessMessage(MFT_MESSAGE_NOTIFY_START_OF_STREAM, 0)?;
-            Ok((events, codec, input[0], output[0]))
+            Ok((events, codec, input[0], output[0], manager))
         }
     }
     pub fn force_keyframe(&self) -> Result<()> {
@@ -294,6 +372,37 @@ impl HardwareEncoder {
         out.extend(self.poll()?);
         Ok(out)
     }
+    pub fn encode_texture(
+        &mut self,
+        texture: Arc<ID3D11Texture2D>,
+        timestamp: u64,
+    ) -> Result<Vec<Encoded>> {
+        let mut out = self.poll()?;
+        // Backpressure is handled before submitting another reference frame.
+        if self.requests == 0 || self.pending.len() >= 4 {
+            return Ok(out);
+        }
+        unsafe {
+            let buffer =
+                MFCreateDXGISurfaceBuffer(&ID3D11Texture2D::IID, texture.as_ref(), 0, false)?;
+            let sample = MFCreateSample()?;
+            sample.AddBuffer(&buffer)?;
+            sample.SetSampleTime((timestamp * 10) as i64)?;
+            sample.SetSampleDuration(10_000_000 / i64::from(self.fps))?;
+            self.transform.ProcessInput(self.input, &sample, 0)?;
+            self.surfaces.push((timestamp, texture));
+            self.pending.push_back((timestamp, Instant::now()));
+            self.requests -= 1;
+        }
+        out.extend(self.poll()?);
+        Ok(out)
+    }
+    pub fn pending(&self) -> usize {
+        self.pending.len()
+    }
+    pub fn ready(&self) -> bool {
+        self.requests > 0 && self.pending.len() < 4
+    }
     fn output(&mut self) -> Result<Option<Encoded>> {
         unsafe {
             let info = self.transform.GetOutputStreamInfo(self.output)?;
@@ -332,6 +441,8 @@ impl HardwareEncoder {
                 .position(|(timestamp, _)| *timestamp == (time as u64 / 10))
             {
                 self.pending.remove(index);
+                self.surfaces
+                    .retain(|(stamp, _)| *stamp != time as u64 / 10);
             } else {
                 return Err(fail());
             }

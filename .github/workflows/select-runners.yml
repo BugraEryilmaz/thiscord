@@ -1,0 +1,31 @@
+name: Select available runners
+
+on:
+  workflow_call:
+    secrets:
+      RUNNER_STATUS_TOKEN:
+        required: false
+    outputs:
+      routes:
+        description: Platform to runs-on label array mapping
+        value: ${{ jobs.select.outputs.routes }}
+
+permissions:
+  contents: read
+
+jobs:
+  select:
+    # The routing job must not depend on a self-hosted machine being available.
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    outputs:
+      routes: ${{ steps.select.outputs.routes }}
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          persist-credentials: false
+      - name: Check initial availability
+        id: select
+        env:
+          RUNNER_STATUS_TOKEN: ${{ github.event_name != 'pull_request' && secrets.RUNNER_STATUS_TOKEN || '' }}
+        run: python3 scripts/select-runners.py

@@ -38,6 +38,7 @@ struct Handler {
     connection: Connection,
     closed: watch::Receiver<bool>,
     screen: crate::native_screen::ScreenState,
+    keyframes: mpsc::Sender<(usize, u32)>,
 }
 #[async_trait::async_trait]
 impl PeerConnectionEventHandler for Handler {
@@ -63,16 +64,25 @@ impl PeerConnectionEventHandler for Handler {
         let screen_receiver = MediaKind::from_relay_ssrc(ssrc)
             .filter(|(kind, _)| *kind == MediaKind::ScreenVideo)
             .map(|(_, slot)| self.screen.receiver(self.connection.clone(), slot));
+        let keyframes = self.keyframes.clone();
         let engine = self.engine.clone();
         let connection = self.connection.clone();
         let mut closed = self.closed.clone();
         tokio::spawn(async move {
+            let mut tick = tokio::time::interval(Duration::from_millis(10));
+            tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
             loop {
                 if !connection.active() {
                     break;
                 }
                 let event = tokio::select! { biased;
                     _ = closed.changed() => break,
+                    _ = tick.tick(), if screen_receiver.is_some() => {
+                        let receiver = screen_receiver.as_ref().unwrap();
+                        receiver.tick(Instant::now());
+                        if let Some(epoch) = receiver.keyframe_request(Instant::now()) && let Some((_, slot)) = MediaKind::from_relay_ssrc(ssrc) { let _ = keyframes.try_send((slot, epoch)); }
+                        continue;
+                    },
                     event = track.poll() => match event { Some(event) => event, None => break },
                 };
                 if let TrackRemoteEvent::OnRtpPacket(packet) = event {
@@ -384,16 +394,22 @@ async fn run(
     if first.version != VOICE_VERSION {
         return Err("Unsupported voice version".into());
     }
-    let (sdp, own_slot, can_speak, ice_servers, screen_video) = match first.event {
+    let (sdp, own_slot, can_speak, ice_servers, screen_video, screen_feedback) = match first.event {
         ServerEvent::Offer {
             sdp,
             slot,
             can_speak,
             ice_servers,
             screen_video,
-        } if first.version == VOICE_VERSION && slot < ROOM_CAPACITY => {
-            (sdp, slot, can_speak, ice_servers, screen_video)
-        }
+            screen_feedback,
+        } if first.version == VOICE_VERSION && slot < ROOM_CAPACITY => (
+            sdp,
+            slot,
+            can_speak,
+            ice_servers,
+            screen_video,
+            screen_feedback,
+        ),
         ServerEvent::Error { error } => return Err(Failure::server(error)),
         _ => return Err("Invalid voice offer".into()),
     };
@@ -416,6 +432,8 @@ async fn run(
         )
         .expect("valid screen codec");
     media.register_default_codecs().map_err(|e| e.to_string())?;
+    let (keyframe_tx, mut keyframe_rx) = mpsc::channel(ROOM_CAPACITY);
+    let force_keyframe = Arc::new(AtomicBool::new(false));
     let registry =
         register_default_interceptors(Registry::new(), &mut media).map_err(|e| e.to_string())?;
     let configuration = RTCConfigurationBuilder::new()
@@ -442,6 +460,7 @@ async fn run(
                 connected: connected.clone(),
                 connection: attempt.connection.clone(),
                 closed: attempt.closed.subscribe(),
+                keyframes: keyframe_tx,
                 screen: app
                     .state::<crate::native_screen::ScreenState>()
                     .inner()
@@ -453,6 +472,28 @@ async fn run(
             .map_err(|_| Failure::temporary("Cannot initialize voice media connection"))?,
     );
     attempt.peer = Some(pc.clone());
+    let diagnostics_peer = pc.clone();
+    let diagnostics_connection = attempt.connection.clone();
+    let diagnostics_screen = app
+        .state::<crate::native_screen::ScreenState>()
+        .inner()
+        .clone();
+    tokio::spawn(async move {
+        while diagnostics_connection.active() {
+            if let Ok(report) = tokio::time::timeout(
+                Duration::from_millis(100),
+                diagnostics_peer.get_stats(Instant::now(), rtc::statistics::StatsSelector::None),
+            )
+            .await
+            {
+                diagnostics_screen.network_diagnostics(
+                    &diagnostics_connection,
+                    thiscord_frontend::screen::metrics::network(&report),
+                );
+            }
+            tokio::time::sleep(Duration::from_secs(1)).await;
+        }
+    });
     let offer: RTCSessionDescription = serde_json::from_str(&sdp).map_err(|_| "Invalid SDP")?;
     pc.set_remote_description(offer)
         .await
@@ -484,11 +525,18 @@ async fn run(
         .map_err(|_| Failure::temporary("ICE gathering timed out"))?;
     let sdp = serde_json::to_string(&pc.local_description().await.ok_or("Missing answer")?)
         .map_err(|_| "Invalid answer")?;
-    send_event(&mut send, ClientEvent::Answer { sdp }).await?;
+    send_event(
+        &mut send,
+        ClientEvent::Answer {
+            sdp,
+            screen_feedback,
+        },
+    )
+    .await?;
     let (tx, mut outgoing) = mpsc::channel(5);
     let mut audio_started = false;
     let mut disconnected_since: Option<Instant> = None;
-    let mut roster = Vec::new();
+    let mut roster: Vec<Participant> = Vec::new();
     let mut ticker = tokio::time::interval(Duration::from_millis(500));
     let start = Instant::now();
     let mut heard = Instant::now();
@@ -497,6 +545,11 @@ async fn run(
     let mut timestamp = 0_u32;
     loop {
         tokio::select! {
+            Some((slot, epoch))=keyframe_rx.recv()=>{
+                if screen_feedback && app.state::<crate::native_screen::ScreenState>().watching(slot, epoch) && roster.iter().any(|m| m.slot == slot && m.screen_epoch == epoch && m.sharing_screen) {
+                    send_event(&mut send, ClientEvent::ScreenKeyframe { slot, epoch }).await?;
+                }
+            },
             message=receive.next()=>{
                 let message=message.ok_or_else(||Failure::temporary("Voice connection closed"))?.map_err(|_|Failure::temporary("Voice socket failed"))?;
                 if message.is_close(){return Err(closed(&message));}
@@ -504,6 +557,10 @@ async fn run(
                 let message:ServerFrame=serde_json::from_str(message.to_text().map_err(|_|"Invalid voice event")?).map_err(|_|"Invalid voice event")?;
                 if message.version!=VOICE_VERSION{return Err("Unsupported voice version".into());}heard=Instant::now();
                 match message.event{
+                    ServerEvent::MediaDiagnostics{counters}=>{ app.state::<crate::native_screen::ScreenState>().server_diagnostics(counters); },
+                    ServerEvent::ScreenKeyframe{epoch}=>{
+                        if status.lock().ok().is_some_and(|s| s.participants.iter().any(|m| m.slot == own_slot && m.screen_epoch == epoch && m.sharing_screen)) { force_keyframe.store(true, Ordering::Release); }
+                    },
                     ServerEvent::Participants{members}=>{
                         if members.len()>ROOM_CAPACITY||members.iter().any(|m|m.slot>=ROOM_CAPACITY){return Err("Invalid participant list".into());}
                         app.state::<crate::native_screen::ScreenState>().roster(if settings.lock().map_err(|_|"Settings unavailable")?.deafened { &[] } else { &members });
@@ -527,6 +584,7 @@ async fn run(
                         audio_started=true;attempt.connected_at=Some(Instant::now());
                         if screen_video { app.state::<crate::native_screen::ScreenState>().bind(crate::native_screen::Binding {
                             connection: attempt.connection.clone(), video: screen_track.clone(), audio: system_track.clone(), can_publish: can_speak,
+                            force_keyframe: force_keyframe.clone(), metrics: Default::default(),
                             video_sequence: Default::default(), audio_sequence: Default::default(), audio_timestamp: Default::default(), started: Instant::now(),
                         }); }
                         engine.notify(Command::Roster{connection:attempt.connection.clone(),members:roster.clone()});

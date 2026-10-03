@@ -222,10 +222,13 @@ speaker isolation and physical acoustic acceptance remain future work.
 - [ ] Two-client Windows capture/audio acceptance, mixed-DPI/protected windows and suspend/network checks.
 - [ ] macOS/Linux publishing and OS permission acceptance; portable receiving code is included.
 - [ ] Stereo system audio, adaptive bitrate, demand-based subscriptions and measured multi-share capacity.
-- [x] Continuous Windows Graphics Capture, hardware-first Media Foundation H.264
-  with visible software fallback, and WebRTC video-element presentation without JPEGs.
-- [ ] GPU-only capture/resize/color-conversion/encode path (current capture frames
-  are read back and converted on CPU before hardware encoding).
+- [x] Continuous Windows Graphics Capture and WebRTC video-element presentation without JPEGs.
+- [x] GPU FP16 capture/copy, scaling, HDR-to-SDR tone mapping, NV12 conversion and
+  same-adapter Media Foundation surface encoding; synthetic NVIDIA GPU validation.
+- [x] Native/SFU/browser diagnostics, measured FPS and copyable bounded event history.
+- [x] Bounded packet reordering, negotiated/authenticated keyframe feedback, byte
+  pacing and bounded recovery queues with loss/wrap/backlog/permission tests.
+- [ ] Live HDR/SDR capture acceptance across Intel/AMD/NVIDIA and mixed-HDR displays.
 - [ ] Measured end-to-end 30/60 fps, high-resolution performance and real WebView
   hardware-decoder verification on Windows/macOS/Linux.
 

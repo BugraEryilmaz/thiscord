@@ -36,6 +36,30 @@ Do not generate a different key: already installed clients trust the public key
 embedded in their binary. Key rotation needs an update signed with the old key
 that distributes the new trust configuration first.
 
+## Runner selection
+
+CI and release workflows call `select-runners.yml` on GitHub-hosted Ubuntu before
+scheduling build jobs. An online, idle runner with matching `self-hosted`, OS and
+architecture labels is preferred (Windows x64, Linux x64, macOS ARM64). Otherwise
+that platform uses `windows-latest`, `ubuntu-24.04` or `macos-latest`. Selection is
+reported in the routing job summary. Installer jobs reuse CI's initial selection.
+This is a snapshot, not a reservation: jobs can queue behind each other, and a
+runner going offline after selection does not trigger another fallback check.
+
+Add repository Actions secret `RUNNER_STATUS_TOKEN`: a fine-grained PAT scoped
+only to this repository with **Administration: read-only**. GitHub requires this
+permission for the runner-list API; the normal `GITHUB_TOKEN` is insufficient.
+Missing/expired tokens and API failures emit a warning and select hosted runners.
+Do not copy a broadly scoped personal CLI credential into this secret. Pull request
+jobs always use hosted runners, and their router never receives the PAT.
+
+Self-hosted machines must already have Rust/rustup, PowerShell 7, Git and the
+platform build prerequisites available to the runner account. Linux also needs
+Python 3, passwordless package installation and a running Docker daemon accessible
+to that account for the PostgreSQL service container. CI uses a dynamically
+assigned database port to avoid the locally hosted development PostgreSQL port.
+The router checks availability and labels, not installed software or GPU readiness.
+
 ## Publish a version
 
 1. Update `[workspace.package].version` in root `Cargo.toml` and `version` in

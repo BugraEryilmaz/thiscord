@@ -2,6 +2,11 @@ name: Build client installers
 
 on:
   workflow_call:
+    inputs:
+      runner_routes:
+        description: Initial platform runner selections from CI
+        type: string
+        required: true
 
 permissions:
   contents: read
@@ -26,7 +31,7 @@ jobs:
           - os: macos-latest
             target: aarch64-apple-darwin
             platform: darwin-aarch64
-    runs-on: ${{ matrix.os }}
+    runs-on: ${{ fromJSON(inputs.runner_routes)[matrix.os] }}
     steps:
       - uses: actions/checkout@v5
       - name: Linux build and packaging dependencies

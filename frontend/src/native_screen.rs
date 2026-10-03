@@ -8,6 +8,7 @@ use std::{
     time::{Duration, Instant},
 };
 use tauri::State;
+const VIEWER_LEASE: Duration = Duration::from_secs(3);
 use thiscord_frontend::{
     audio::connection::Connection,
     screen::receive::{Inbox, MAX_AGE, Sender},
@@ -38,6 +39,8 @@ pub struct Binding {
     pub audio_sequence: Arc<AtomicU32>,
     pub audio_timestamp: Arc<AtomicU32>,
     pub started: Instant,
+    pub force_keyframe: Arc<AtomicBool>,
+    pub metrics: thiscord_frontend::screen::metrics::Metrics,
 }
 #[derive(Default)]
 struct Inner {
@@ -48,6 +51,10 @@ struct Inner {
     owners: [Option<(AccountId, u32)>; ROOM_CAPACITY],
     viewers: [Option<Viewer>; ROOM_CAPACITY],
     audio: bool,
+    server: std::collections::BTreeMap<String, u64>,
+    network: std::collections::BTreeMap<String, String>,
+    inboxes: [Option<Inbox>; ROOM_CAPACITY],
+    receivers: [Option<thiscord_frontend::screen::metrics::Metrics>; ROOM_CAPACITY],
 }
 struct Viewer {
     watch: Watch,
@@ -63,6 +70,38 @@ impl Drop for Viewer {
 #[derive(Clone, Default)]
 pub struct ScreenState(Arc<Mutex<Inner>>);
 impl ScreenState {
+    pub fn network_diagnostics(
+        &self,
+        connection: &Connection,
+        labels: std::collections::BTreeMap<String, String>,
+    ) {
+        if let Ok(mut inner) = self.0.lock()
+            && inner
+                .binding
+                .as_ref()
+                .is_some_and(|b| b.connection.accepts(connection))
+        {
+            inner.network = labels;
+        }
+    }
+    pub fn watching(&self, slot: usize, epoch: u32) -> bool {
+        self.0.lock().ok().is_some_and(|s| {
+            s.viewers
+                .get(slot)
+                .and_then(Option::as_ref)
+                .is_some_and(|v| {
+                    v.watch.epoch == epoch
+                        && v.connection.active()
+                        && v.touched.elapsed() < VIEWER_LEASE
+                })
+        })
+    }
+    pub fn server_diagnostics(&self, counters: std::collections::BTreeMap<String, u64>) {
+        if let Ok(mut s) = self.0.lock() {
+            s.server = counters;
+        }
+    }
+
     pub fn bind(&self, binding: Binding) {
         self.clear();
         if let Ok(mut inner) = self.0.lock() {
@@ -82,6 +121,12 @@ impl ScreenState {
                 stop.store(true, Ordering::Release);
             }
             inner.binding = None;
+            inner.server.clear();
+            inner.network.clear();
+            inner.receivers = Default::default();
+            for inbox in inner.inboxes.iter_mut().filter_map(Option::take) {
+                inbox.close();
+            }
             inner.status = Status::default();
             inner.owners = [None; ROOM_CAPACITY];
             inner.viewers = std::array::from_fn(|_| None);
@@ -120,6 +165,13 @@ impl ScreenState {
     }
     pub fn receiver(&self, connection: Connection, slot: usize) -> Sender {
         let (tx, rx) = Inbox::channel();
+        if let Ok(mut inner) = self.0.lock() {
+            inner.receivers[slot] = Some(rx.metrics());
+            if let Some(old) = inner.inboxes[slot].replace(rx.clone()) {
+                old.close();
+            }
+        }
+        let metrics = rx.metrics();
         let state = self.clone();
         // Assembly is bounded; this worker only forwards compressed H.264.
         // The WebView's real video decoder owns decoding and presentation.
@@ -142,7 +194,7 @@ impl ScreenState {
                     let viewer = s.viewers[slot].as_ref()?;
                     let preview = viewer.preview.as_ref()?;
                     (viewer.connection.active()
-                        && viewer.touched.elapsed() < Duration::from_secs(1)
+                        && viewer.touched.elapsed() < VIEWER_LEASE
                         && preview.connected.load(Ordering::Acquire))
                     .then(|| (preview.clone(), viewer.connection.clone()))
                 });
@@ -172,6 +224,7 @@ impl ScreenState {
                     rx.resync();
                     continue;
                 };
+                let submit = Instant::now();
                 let sent = tauri::async_runtime::block_on(async {
                     for packet in packets {
                         if !connection.active()
@@ -190,7 +243,13 @@ impl ScreenState {
                     }
                     true
                 });
+                metrics.time("preview_submit", submit.elapsed());
+                if sent {
+                    metrics.add("preview_frames", 1);
+                }
                 if !sent {
+                    metrics.add("preview_errors", 1);
+                    metrics.event("local WebRTC write timed out or frame expired");
                     rx.resync();
                 }
             }
@@ -246,6 +305,10 @@ pub async fn screen_view_open(
         {
             return Err("Screen share is no longer available".into());
         }
+        if let Some(metrics) = &inner.receivers[watch.slot] {
+            metrics.add("viewer_connections", 1);
+            metrics.event("viewer connection opened");
+        }
         inner.viewers[watch.slot] = Some(Viewer {
             watch,
             touched: Instant::now(),
@@ -283,8 +346,12 @@ pub async fn screen_view_open(
                 break;
             };
             if inner.viewers[watch.slot].as_ref().is_some_and(|v| {
-                v.connection.accepts(&lease) && v.touched.elapsed() >= Duration::from_secs(1)
+                v.connection.accepts(&lease) && v.touched.elapsed() >= VIEWER_LEASE
             }) {
+                if let Some(metrics) = &inner.receivers[watch.slot] {
+                    metrics.add("viewer_expirations", 1);
+                    metrics.event("viewer heartbeat expired");
+                }
                 inner.viewers[watch.slot] = None;
             }
         }
@@ -293,13 +360,59 @@ pub async fn screen_view_open(
 }
 
 #[tauri::command]
+pub fn screen_view_keyframe(state: State<'_, ScreenState>, watch: Watch) -> bool {
+    let Ok(inner) = state.0.lock() else {
+        return false;
+    };
+    if inner
+        .viewers
+        .get(watch.slot)
+        .and_then(Option::as_ref)
+        .is_none_or(|v| {
+            v.watch != watch || !v.connection.active() || v.touched.elapsed() >= VIEWER_LEASE
+        })
+    {
+        return false;
+    }
+    if let Some(inbox) = &inner.inboxes[watch.slot] {
+        inbox.request_keyframe();
+        return true;
+    }
+    false
+}
+#[tauri::command]
+pub fn screen_view_diagnostics(
+    state: State<'_, ScreenState>,
+    watch: Watch,
+) -> Result<Diagnostics, String> {
+    let inner = state.0.lock().map_err(|_| "Screen state unavailable")?;
+    if inner.owners.get(watch.slot) != Some(&Some((watch.owner, watch.epoch)))
+        || !inner
+            .viewers
+            .get(watch.slot)
+            .and_then(Option::as_ref)
+            .is_some_and(|v| v.watch == watch)
+    {
+        return Err("Screen viewer no longer active".into());
+    }
+    let mut snapshot = inner.receivers[watch.slot]
+        .as_ref()
+        .map(|m| m.snapshot())
+        .unwrap_or_default();
+    snapshot.counters.extend(inner.server.clone());
+    snapshot.labels.extend(inner.network.clone());
+    Ok(snapshot)
+}
+#[tauri::command]
 pub fn screen_status(state: State<'_, ScreenState>) -> Result<Status, String> {
-    Ok(state
-        .0
-        .lock()
-        .map_err(|_| "Screen state unavailable")?
-        .status
-        .clone())
+    let inner = state.0.lock().map_err(|_| "Screen state unavailable")?;
+    let mut status = inner.status.clone();
+    if let Some(binding) = &inner.binding {
+        status.diagnostics = binding.metrics.snapshot();
+    }
+    status.diagnostics.counters.extend(inner.server.clone());
+    status.diagnostics.labels.extend(inner.network.clone());
+    Ok(status)
 }
 #[tauri::command]
 pub fn screen_stop(state: State<'_, ScreenState>) {
@@ -346,33 +459,54 @@ pub async fn screen_start(
     if inner.worker.as_ref().is_some_and(|w| !w.is_finished()) {
         return Err("Stop the current share and wait for capture to finish.".into());
     }
-    let binding = inner
+    let mut binding = inner
         .binding
         .clone()
         .filter(|b| b.connection.active() && b.can_publish)
         .ok_or("Join voice with Speak permission before sharing.")?;
+    binding.metrics = Default::default();
+    binding.force_keyframe.store(true, Ordering::Release);
+    inner.binding = Some(binding.clone());
     let stop = Arc::new(AtomicBool::new(false));
     inner.stop = Some(stop.clone());
     inner.audio = audio;
     inner.status.message = "Starting screen capture…".into();
     inner.status.encoder = None;
     let state = state.inner().clone();
-    let (tx, mut rx) = mpsc::channel::<(Instant, Vec<rtc::rtp::Packet>)>(2);
+    let (tx, mut rx) = mpsc::channel::<thiscord_frontend::screen::Outgoing>(2);
     let sender_stop = stop.clone();
     let sender_binding = binding.clone();
-    let sender_state = state.clone();
     tauri::async_runtime::spawn(async move {
-        while let Some((captured_at, packets)) = rx.recv().await {
-            if captured_at.elapsed() > Duration::from_millis(500) {
-                sender_state.finish(
-                    &sender_stop,
-                    Some("Screen capture paused; start sharing again.".into()),
-                );
-                return;
+        let mut pacer = thiscord_frontend::screen::pacing::Pacer::new(quality.bitrate() * 12 / 10);
+        let mut waiting = false;
+        'frames: while let Some(frame) = rx.recv().await {
+            let captured_at = frame.captured_at;
+            if captured_at.elapsed() > Duration::from_millis(250) || (waiting && !frame.keyframe) {
+                sender_binding.metrics.add("encode_dropped", 1);
+                sender_binding
+                    .metrics
+                    .event("paced sender dropped stale or dependent frame");
+                sender_binding.force_keyframe.store(true, Ordering::Release);
+                waiting = true;
+                continue;
             }
-            for mut packet in packets {
+            for mut packet in frame.packets {
+                let bytes = packet.payload.len() + 64;
+                let at = pacer.reserve(Instant::now(), bytes);
+                if at > Instant::now() {
+                    tokio::time::sleep_until(at.into()).await;
+                }
                 if sender_stop.load(Ordering::Acquire) || !sender_binding.connection.active() {
                     return;
+                }
+                if captured_at.elapsed() > Duration::from_millis(350) {
+                    waiting = true;
+                    sender_binding.force_keyframe.store(true, Ordering::Release);
+                    sender_binding.metrics.add("encode_dropped", 1);
+                    sender_binding
+                        .metrics
+                        .event("paced sender dropped stale or dependent frame");
+                    continue 'frames;
                 }
                 packet.header.sequence_number = sender_binding
                     .video_sequence
@@ -386,13 +520,22 @@ pub async fn screen_start(
                     .await,
                     Ok(Ok(_))
                 ) {
-                    sender_state.finish(
-                        &sender_stop,
-                        Some("Screen connection stalled; sharing stopped".into()),
-                    );
-                    return;
+                    waiting = true;
+                    sender_binding.force_keyframe.store(true, Ordering::Release);
+                    sender_binding.metrics.add("encode_dropped", 1);
+                    sender_binding
+                        .metrics
+                        .event("paced sender dropped stale or dependent frame");
+                    continue 'frames;
                 }
+                sender_binding.metrics.add("sent_packets", 1);
+                sender_binding.metrics.add("sent_bytes", bytes as u64);
             }
+            waiting = false;
+            sender_binding.metrics.add("sent_frames", 1);
+            sender_binding
+                .metrics
+                .time("send_age", captured_at.elapsed());
         }
     });
     inner.worker = Some(
@@ -413,7 +556,7 @@ fn capture(
     source: &SourceId,
     options: (bool, Quality),
     stop: &Arc<AtomicBool>,
-    tx: mpsc::Sender<(Instant, Vec<rtc::rtp::Packet>)>,
+    tx: mpsc::Sender<thiscord_frontend::screen::Outgoing>,
 ) -> Result<(), String> {
     let (audio, quality) = options;
     let audio_job = if audio {
@@ -444,6 +587,8 @@ fn capture(
         binding.connection.clone(),
         binding.started,
         tx,
+        binding.metrics.clone(),
+        binding.force_keyframe.clone(),
         |encoder| {
             if let Ok(mut inner) = state.0.lock()
                 && inner.stop.as_ref().is_some_and(|s| Arc::ptr_eq(s, stop))
@@ -466,7 +611,7 @@ fn capture(
     _: &SourceId,
     _: (bool, Quality),
     _: &Arc<AtomicBool>,
-    _: mpsc::Sender<(Instant, Vec<rtc::rtp::Packet>)>,
+    _: mpsc::Sender<thiscord_frontend::screen::Outgoing>,
 ) -> Result<(), String> {
     Err("Screen publishing is currently available on Windows.".into())
 }
@@ -495,6 +640,16 @@ mod tests {
                 preview: None,
             });
         }
+        assert!(state.watch(watch, true));
+        state.0.lock().unwrap().viewers[0].as_mut().unwrap().touched =
+            Instant::now() - Duration::from_millis(1500);
+        assert!(
+            state.watching(0, 1),
+            "short UI stalls should not reconnect the video transport"
+        );
+        state.0.lock().unwrap().viewers[0].as_mut().unwrap().touched =
+            Instant::now() - VIEWER_LEASE;
+        assert!(!state.watching(0, 1));
         assert!(state.watch(watch, true));
         assert!(!state.watch(Watch { epoch: 2, ..watch }, true));
         let replacement = Connection::default();

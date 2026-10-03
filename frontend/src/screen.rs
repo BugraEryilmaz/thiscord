@@ -3,8 +3,17 @@ pub mod cadence;
 #[cfg(target_os = "windows")]
 pub mod capture;
 #[cfg(target_os = "windows")]
+pub mod gpu;
+#[cfg(target_os = "windows")]
 pub mod hardware;
+pub mod metrics;
+pub mod pacing;
 pub mod preview;
+pub struct Outgoing {
+    pub captured_at: std::time::Instant,
+    pub packets: Vec<rtc::rtp::Packet>,
+    pub keyframe: bool,
+}
 
 pub fn recovery_frame(data: &[u8]) -> bool {
     let mut kinds = [false; 32];
@@ -50,7 +59,8 @@ pub fn track(ssrc: u32) -> Arc<TrackLocalStaticRTP> {
 }
 
 /// Drop an entire damaged frame. Do not accumulate unbounded FU-A fragments or
-/// decode a partial access unit after loss. Periodic IDRs recover without PLI.
+/// decode a partial access unit after loss. The receive queue owns reordering
+/// and recovery feedback; periodic IDRs are a compatibility fallback.
 #[derive(Default)]
 pub struct Assembler {
     timestamp: Option<u32>,
@@ -169,7 +179,7 @@ pub fn packetize(
         .collect())
 }
 
-/// Restrict remote SPS dimensions/reference counts before the native decoder can
+/// Restrict remote SPS dimensions/reference counts before the video decoder can
 /// allocate its picture buffers. Only progressive baseline is negotiated here.
 pub fn bounded_parameter_sets(data: &[u8]) -> bool {
     openh264::nal_units(data).all(|nal| {
@@ -401,183 +411,4 @@ mod quality_tests {
 
 /// Complete-frame backlog. Lost dependencies discard queued work and require a
 /// fresh SPS/PPS + IDR, rather than decoding a growing FIFO of stale packets.
-pub mod receive {
-    use super::Assembler;
-    use std::{
-        collections::VecDeque,
-        sync::{Arc, Condvar, Mutex},
-        time::{Duration, Instant},
-    };
-    pub const MAX_AGE: Duration = Duration::from_millis(250);
-    pub struct Frame {
-        pub data: Vec<u8>,
-        pub arrived: Instant,
-        pub epoch: u32,
-        pub reset: bool,
-        pub timestamp: u32,
-    }
-    #[derive(Default)]
-    struct State {
-        assembler: Assembler,
-        frames: VecDeque<Frame>,
-        sequence: Option<u16>,
-        epoch: Option<u32>,
-        timestamp: Option<u32>,
-        arrived: Option<Instant>,
-        synchronized: bool,
-        closed: bool,
-    }
-    #[derive(Clone, Default)]
-    pub struct Inbox(Arc<Shared>);
-    #[derive(Default)]
-    struct Shared {
-        state: Mutex<State>,
-        ready: Condvar,
-    }
-    pub struct Sender {
-        inbox: Inbox,
-    }
-    impl Drop for Sender {
-        fn drop(&mut self) {
-            let mut s = self.inbox.0.state.lock().unwrap();
-            s.closed = true;
-            self.inbox.0.ready.notify_one();
-        }
-    }
-    impl Sender {
-        pub fn push(&self, packet: rtc::rtp::Packet, arrived: Instant) {
-            let Some(epoch) = packet.header.csrc.first().copied() else {
-                return;
-            };
-            let mut s = self.inbox.0.state.lock().unwrap();
-            if s.closed {
-                return;
-            }
-            if s.epoch != Some(epoch)
-                || s.sequence
-                    .is_some_and(|n| n.wrapping_add(1) != packet.header.sequence_number)
-            {
-                s.frames.clear();
-                s.assembler = Assembler::default();
-                s.synchronized = false;
-                s.timestamp = None;
-            }
-            s.epoch = Some(epoch);
-            s.sequence = Some(packet.header.sequence_number);
-            if s.timestamp != Some(packet.header.timestamp) {
-                s.timestamp = Some(packet.header.timestamp);
-                s.arrived = Some(arrived);
-            }
-            let Some(data) = s.assembler.push(&packet) else {
-                return;
-            };
-            let at = s.arrived.unwrap_or(arrived);
-            if s.frames.len() >= 2
-                || s.frames
-                    .front()
-                    .is_some_and(|f| arrived.saturating_duration_since(f.arrived) > MAX_AGE)
-            {
-                s.frames.clear();
-                s.synchronized = false;
-            }
-            if arrived.saturating_duration_since(at) > MAX_AGE {
-                s.synchronized = false;
-                s.frames.clear();
-                return;
-            }
-            let reset = !s.synchronized;
-            if reset && !super::recovery_frame(&data) {
-                return;
-            }
-            s.synchronized = true;
-            s.frames.push_back(Frame {
-                data,
-                arrived: at,
-                epoch,
-                reset,
-                timestamp: packet.header.timestamp,
-            });
-            self.inbox.0.ready.notify_one();
-        }
-    }
-    impl Inbox {
-        pub fn channel() -> (Sender, Self) {
-            let inbox = Self::default();
-            (
-                Sender {
-                    inbox: inbox.clone(),
-                },
-                inbox,
-            )
-        }
-        pub fn close(&self) {
-            let mut s = self.0.state.lock().unwrap();
-            s.closed = true;
-            s.frames.clear();
-            self.0.ready.notify_one();
-        }
-        pub fn resync(&self) {
-            let mut s = self.0.state.lock().unwrap();
-            s.frames.clear();
-            s.synchronized = false;
-        }
-        pub fn next(&self) -> Option<Frame> {
-            let mut s = self.0.state.lock().unwrap();
-            loop {
-                if let Some(frame) = s.frames.pop_front() {
-                    if frame.arrived.elapsed() <= MAX_AGE {
-                        return Some(frame);
-                    }
-                    s.frames.clear();
-                    s.synchronized = false;
-                }
-                if s.closed {
-                    return None;
-                }
-                s = self.0.ready.wait(s).unwrap();
-            }
-        }
-    }
-    #[cfg(test)]
-    mod tests {
-        use super::*;
-        fn frame(sender: &Sender, seq: &mut u16, key: bool, at: Instant) {
-            let data = if key {
-                vec![0, 0, 1, 0x67, 66, 0, 0, 1, 0x68, 1, 0, 0, 1, 0x65, 1]
-            } else {
-                vec![0, 0, 1, 0x61, 1]
-            };
-            for mut packet in crate::screen::packetize(data, seq, *seq as u32 * 9000).unwrap() {
-                packet.header.csrc = vec![1];
-                sender.push(packet, at);
-            }
-        }
-        #[test]
-        fn backlog_discards_dependencies_until_fresh_keyframe() {
-            let (tx, rx) = Inbox::channel();
-            let mut seq = 0;
-            frame(&tx, &mut seq, true, Instant::now());
-            frame(&tx, &mut seq, false, Instant::now());
-            frame(&tx, &mut seq, false, Instant::now());
-            assert!(rx.0.state.lock().unwrap().frames.is_empty());
-            frame(&tx, &mut seq, false, Instant::now());
-            assert!(rx.0.state.lock().unwrap().frames.is_empty());
-            frame(&tx, &mut seq, true, Instant::now());
-            assert!(rx.next().unwrap().reset);
-            seq += 1; // Packet loss invalidates inter-frame references.
-            frame(&tx, &mut seq, false, Instant::now());
-            assert!(rx.0.state.lock().unwrap().frames.is_empty());
-            frame(&tx, &mut seq, true, Instant::now());
-            assert!(rx.next().unwrap().reset);
-        }
-        #[test]
-        fn age_is_measured_at_arrival_not_after_processing() {
-            let (tx, rx) = Inbox::channel();
-            let mut seq = 0;
-            frame(&tx, &mut seq, true, Instant::now() - Duration::from_secs(1));
-            drop(tx);
-            assert!(rx.next().is_none());
-            assert!(!rx.0.state.lock().unwrap().synchronized);
-        }
-    }
-}
+pub mod receive;

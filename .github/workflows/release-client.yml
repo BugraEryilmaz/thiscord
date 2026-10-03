@@ -18,8 +18,13 @@ env:
   THISCORD_API_URL: https://thiscord.com.tr
 
 jobs:
+  runners:
+    uses: ./.github/workflows/select-runners.yml
+    secrets: inherit
+
   validate:
-    runs-on: ubuntu-24.04
+    needs: runners
+    runs-on: ${{ fromJSON(needs.runners.outputs.routes)['ubuntu-24.04'] }}
     steps:
       - uses: actions/checkout@v5
       - run: rustup show
@@ -44,8 +49,8 @@ jobs:
     secrets: inherit
 
   publish:
-    needs: checks
-    runs-on: ubuntu-24.04
+    needs: [checks, runners]
+    runs-on: ${{ fromJSON(needs.runners.outputs.routes)['ubuntu-24.04'] }}
     permissions:
       contents: write
     steps:

@@ -20,9 +20,10 @@ Open **Settings > Audio & voice** to select devices and test audio, then join a
 voice channel. See [audio setup, networking and remaining checks](docs/audio.md).
 Windows desktop clients can share a screen or window with system audio from the
 voice bar, with selectable quality up to 4K/60 fps (hardware/network dependent).
-Capture uses continuous Windows Graphics Capture, prefers hardware H.264 encoding,
-and plays received video through the WebView's WebRTC video player. The sharing
-bar reports the encoder, including any software fallback.
+Capture uses continuous FP16 Windows Graphics Capture with GPU scaling, HDR-to-SDR
+tone mapping, NV12 conversion and H.264 surface encoding. Windows publishing
+requires a compatible D3D11 hardware encoder. Received video uses the WebView's
+WebRTC video player. Sender/playback diagnostics report measured rates and drops.
 See [screen sharing, requirements and acceptance checks](docs/screen-sharing.md).
 For echo troubleshooting, Audio & voice can save a 60-second local debug recording
 of playback, raw microphone and outgoing audio, with metadata for offline DSP replay.

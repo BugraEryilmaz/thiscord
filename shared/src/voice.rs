@@ -20,6 +20,8 @@ pub enum ClientEvent {
     },
     Answer {
         sdp: String,
+        #[serde(default, skip_serializing_if = "is_false")]
+        screen_feedback: bool,
     },
     State {
         muted: bool,
@@ -29,8 +31,15 @@ pub enum ClientEvent {
         active: bool,
         audio: bool,
     },
+    ScreenKeyframe {
+        slot: usize,
+        epoch: u32,
+    },
     Ping {},
     Leave {},
+}
+fn is_false(value: &bool) -> bool {
+    !value
 }
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Participant {
@@ -55,12 +64,20 @@ pub struct ServerFrame {
 #[derive(Clone, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum ServerEvent {
+    ScreenKeyframe {
+        epoch: u32,
+    },
+    MediaDiagnostics {
+        counters: std::collections::BTreeMap<String, u64>,
+    },
     Offer {
         sdp: String,
         slot: usize,
         can_speak: bool,
         #[serde(default)]
         screen_video: bool,
+        #[serde(default)]
+        screen_feedback: bool,
         #[serde(default)]
         ice_servers: Vec<IceServer>,
     },

@@ -28,18 +28,26 @@ env:
   THISCORD_API_URL: ${{ inputs.api_url || 'http://localhost:3000' }}
 
 jobs:
+  runners:
+    uses: ./.github/workflows/select-runners.yml
+    secrets: inherit
+
   format:
     name: Rust formatting
-    runs-on: ubuntu-24.04
+    needs: runners
+    runs-on: ${{ fromJSON(needs.runners.outputs.routes)['ubuntu-24.04'] }}
     steps:
       - uses: actions/checkout@v5
       - name: Install pinned toolchain
         run: rustup show
       - run: cargo fmt --all -- --check
+      - name: Runner routing regression tests
+        run: python3 scripts/test-select-runners.py
 
   backend:
     name: Backend and shared contracts
-    runs-on: ubuntu-24.04
+    needs: runners
+    runs-on: ${{ fromJSON(needs.runners.outputs.routes)['ubuntu-24.04'] }}
     services:
       postgres:
         image: postgres:17
@@ -48,17 +56,20 @@ jobs:
           POSTGRES_PASSWORD: ci-test-only
           POSTGRES_DB: thiscord_test
         ports:
-          - 5432:5432
+          - 5432/tcp
         options: >-
           --health-cmd "pg_isready -U thiscord -d thiscord_test"
           --health-interval 5s
           --health-timeout 5s
           --health-retries 12
-    env:
-      DATABASE_URL: postgres://thiscord:ci-test-only@localhost:5432/thiscord_test?connect_timeout=3
-      TEST_DATABASE_URL: postgres://thiscord:ci-test-only@localhost:5432/thiscord_test?connect_timeout=3
     steps:
       - uses: actions/checkout@v5
+      - name: Use the isolated test database port
+        env:
+          POSTGRES_PORT: ${{ job.services.postgres.ports['5432'] }}
+        run: |
+          echo "DATABASE_URL=postgres://thiscord:ci-test-only@localhost:${POSTGRES_PORT}/thiscord_test?connect_timeout=3" >> "$GITHUB_ENV"
+          echo "TEST_DATABASE_URL=postgres://thiscord:ci-test-only@localhost:${POSTGRES_PORT}/thiscord_test?connect_timeout=3" >> "$GITHUB_ENV"
       - name: PostgreSQL and TLS build dependencies
         run: sudo apt-get update && sudo apt-get install -y libpq-dev pkg-config cmake
       - name: Install pinned toolchain
@@ -90,7 +101,8 @@ jobs:
 
   voice-load-macos:
     name: macOS voice load generator
-    runs-on: macos-latest
+    needs: runners
+    runs-on: ${{ fromJSON(needs.runners.outputs.routes)['macos-latest'] }}
     steps:
       - uses: actions/checkout@v5
       - name: Native build dependencies
@@ -107,7 +119,8 @@ jobs:
 
   wasm:
     name: Leptos and Tailwind build
-    runs-on: ubuntu-24.04
+    needs: runners
+    runs-on: ${{ fromJSON(needs.runners.outputs.routes)['ubuntu-24.04'] }}
     steps:
       - uses: actions/checkout@v5
       - name: Install pinned toolchain
@@ -131,12 +144,12 @@ jobs:
 
   desktop:
     name: Desktop (${{ matrix.os }})
-    needs: wasm
+    needs: [wasm, runners]
     strategy:
       fail-fast: false
       matrix:
         os: [windows-latest, macos-latest, ubuntu-24.04]
-    runs-on: ${{ matrix.os }}
+    runs-on: ${{ fromJSON(needs.runners.outputs.routes)[matrix.os] }}
     steps:
       - uses: actions/checkout@v5
       - name: Linux desktop dependencies
@@ -161,7 +174,7 @@ jobs:
         run: |
           cargo test -p thiscord-frontend --lib --features screen-share --locked screen::
       - name: Lint screen diagnostics
-        run: cargo clippy -p thiscord-frontend --example screen_encode_probe --example screen_preview_probe --features screen-share --locked -- -D warnings
+        run: cargo clippy -p thiscord-frontend --example screen_encode_probe --example screen_gpu_probe --example screen_preview_probe --features screen-share --locked -- -D warnings
       - name: Native callback tests
         run: cargo test -p thiscord-frontend --bin thiscord-desktop --features desktop,custom-protocol --locked
       - uses: actions/upload-artifact@v4
@@ -173,12 +186,13 @@ jobs:
           if-no-files-found: error
 
   audio:
+    needs: runners
     name: Audio (${{ matrix.os }})
     strategy:
       fail-fast: false
       matrix:
         os: [windows-latest, macos-latest, ubuntu-24.04]
-    runs-on: ${{ matrix.os }}
+    runs-on: ${{ fromJSON(needs.runners.outputs.routes)[matrix.os] }}
     steps:
       - uses: actions/checkout@v5
       - name: Linux audio dependencies
@@ -212,6 +226,8 @@ jobs:
 
   installers:
     if: inputs.build_installers && startsWith(github.ref, 'refs/tags/client-v')
-    needs: wasm
+    needs: [wasm, runners]
     uses: ./.github/workflows/build-installers.yml
+    with:
+      runner_routes: ${{ needs.runners.outputs.routes }}
     secrets: inherit

@@ -28,14 +28,27 @@ the display stops capture; it never falls back to another window/display.
   frames before they become inter-frame dependencies. Capture throttling preserves
   cadence phase, including 59.94 Hz displays, instead of discarding every second
   frame near a 60 fps limit. The system capture border is preserved.
-- Video encoding: Windows Media Foundation enumerates **hardware-only H.264 MFTs**
-  first, with Baseline profile, NV12 input, low-latency mode and bounded asynchronous
-  input/output. The UI shows the selected encoder. Unsupported configurations or
-  driver failures fall back explicitly to OpenH264 0.9.8 (bundled Cisco C/C++ via
-  Rust bindings); fallback is visible in the sharing bar. This is hardware encoding,
-  **not yet a zero-copy GPU pipeline**: capture textures are read back to RGBA,
-  resized when necessary and converted on CPU before hardware encoding. Native
-  C/C++ tools remain required for the portable software codec; NASM is optional.
+- Pixel processing and encoding: capture requests **FP16 linear scRGB** surfaces.
+  Three owned capture textures decouple WGC callbacks from the encoder. A D3D11
+  shader scales the selected source and normalizes by its monitor's SDR reference
+  white (Windows HDR brightness setting; scRGB 1.0 = 80 nits). An HDR luminance
+  shoulder compresses highlights; BT.709 transfer and a video processor produce
+  limited-range BT.709 NV12. The encoder consumes these D3D11 textures through
+  an MF DXGI device manager. No raw-pixel readback, CPU resizing/color conversion,
+  CPU upload, or software encoding occurs in the production sharing path.
+  Capture, processing and hardware MFT selection use the same adapter/device;
+  the shared immediate context is multithread-protected. Six NV12 surfaces remain
+  owned until encoder output retires the corresponding sample. GPU pool pressure
+  replaces/skips raw frames before H.264 reference dependencies are created.
+- HDR output is deliberately **SDR H.264**, suitable for SDR viewers; this is not
+  HDR10 passthrough. Monitor white level is refreshed once per second, using the
+  dominant monitor for a window. SDR mids are preserved; HDR highlights above
+  75% normalized reference white use a smooth shoulder. Unsupported GPU surface
+  encoding or color-processing failures stop sharing with an explicit error.
+  The Windows path requires D3D11 FP16 shader/video-processor support,
+  D3DCompiler_47 (Windows system component), and an MF D3D11-aware hardware MFT.
+  OpenH264 remains a portable test decoder/diagnostic encoder, not a hidden CPU
+  fallback. AMD/Intel and mixed-display visual acceptance remain required.
 - Video offers 720p, 1080p, 1440p and 2160p (4K), each at 15/30/60 fps; default
   1080p/30. Aspect ratio is preserved without upscaling. These are targets, not
   measured throughput guarantees. Bitrate targets range from 1.25 to 32 Mbit/s.
@@ -44,11 +57,25 @@ the display stops capture; it never falls back to another window/display.
   a refresh of the last captured frame for a static source. Overload no longer
   stretches recovery to several seconds by counting nominal-fps frames. Hardware
   input is capped at four outstanding samples with a 500 ms stall deadline.
-- The network remains the existing Rust WebRTC client and single-process SFU;
-  the SFU forwards compressed video without transcoding. Receivers assemble RTP
-  into a two-frame bounded queue. Loss, overflow or arrivals older than 250 ms
-  discard dependencies and wait for SPS/PPS + IDR. SPS dimensions/reference counts
-  are validated, including macroblock padding (1080p can be coded as 1088 lines).
+  Prompt recovery requests supplement periodic IDRs; the hardware buffer target
+  is one quarter-second of the configured bitrate, where the driver supports it.
+- The network remains the Rust WebRTC client and single-process SFU; the SFU
+  forwards compressed video without transcoding. The publisher byte-paces packets
+  at 1.2 times target codec bitrate (transport overhead allowance), with at most
+  3 ms of burst credit to accommodate OS timer granularity. It does not accumulate
+  catch-up credit during stalls. Stale/partially sent frames trigger IDR recovery
+  instead of terminating the share. Encoded queues remain bounded to two frames.
+  SFU video deliveries expire after 150 ms in its egress queue, with aggregate
+  queue-drop/send-timeout diagnostics and rate-limited recovery feedback.
+- Receivers reorder up to 256 packets for 40 ms, handle sequence wraparound and
+  reject duplicates/late packets. A 10 ms timer resolves gaps even if no more
+  packets arrive. Complete-frame queues allow eight frames, at most 8 MiB and
+  250 ms age. Short backlogs drain in order; overflow can retain a newer queued
+  keyframe and its suffix. Unrecoverable dependency loss requests a fresh IDR.
+  Feedback is coalesced to one request per stream per 500 ms and per publisher
+  per 250 ms at the SFU, with a 200 ms minimum forced-IDR interval at the encoder. Viewer decode PLI counters also feed the same recovery
+  control. Publisher responses are consumed before the next available GPU input.
+  SPS dimensions/reference counts remain bounded.
 - Presentation: compressed H.264 is forwarded to a **local WebRTC peer** bound
   exclusively to `127.0.0.1`, with no STUN/TURN and no audio track. Rust/WASM
   negotiates this peer using control-only Tauri commands, and attaches its
@@ -58,7 +85,7 @@ the display stops capture; it never falls back to another window/display.
   timing and GPU composition; actual hardware decode depends on its codec/driver
   support and must be checked on each host. This adds a local encrypted transport
   hop, not another encode. No raw pixels or PCM cross Tauri IPC.
-- Viewers send control heartbeats at 250 ms, expire after one second, and close on
+- Viewers send control heartbeats at 250 ms, expire after three seconds (tolerating short UI stalls), and close on
   unmount/document hiding. Replacement viewers have distinct leases. Roster/epoch,
   deafen and connection changes revoke forwarding and close the local peer;
   pending work checks its lease and arrival deadline. Negotiations are bounded.
@@ -103,7 +130,13 @@ voice never restarts a share automatically. A stalled OS capture call retains
 the single worker slot until it returns; users cannot accumulate capture threads
 by repeatedly pressing Start. Captured frames awaiting send are age-limited.
 
-The version-1 voice offer adds `screen_video`; older offers default to false.
+The version-1 voice offer adds `screen_video` and `screen_feedback`; older offers
+default both to false. A new client opts into feedback/diagnostic events in its
+answer only when the server advertises support. Older clients never receive new
+event variants; newer clients use periodic recovery with older backends. Deploy
+the updated backend to enable prompt feedback and SFU counters. Feedback checks
+current membership/access generation, deafen, publisher Speak/sharing state and
+stream epoch, and coalesces requests across viewers.
 Participant snapshots add `sharing_screen` and `sharing_audio`, both defaulting
 to false, and a `screen_epoch` identifying the publisher connection. The SFU
 stamps that epoch in video CSRC metadata; receivers discard packets from reused
@@ -136,27 +169,56 @@ warning for duplicate `dct.o` object names; linking and tests succeeded.
 
 ## Pipeline diagnostics and validation
 
-`cargo run -p thiscord-frontend --example screen_encode_probe --features screen-share --profile ci --locked`
-uses synthetic pixels only and requires Windows hardware H.264 support. It verifies
-120 encoded frames at both 720p/60 and 1080p/60 by decoding the emitted bitstreams.
-On the development RTX 4070 Ti, it selected `NVIDIA H.264 Encoder MFT` and all 240
-frames decoded. This is an encoder/bitstream check, not a capture-to-display fps
-measurement. Intel/AMD hardware selection and driver-failure fallback still need
-physical-device acceptance.
+Expand **Screen pipeline diagnostics** by the sharing controls or **Playback
+diagnostics** under a received stream. **Copy diagnostics** copies aggregate
+values only. Native counters include capture events/throttling, raw replacement,
+encoded/sent/received frames and bytes, reordered/late/lost packets, queue peaks,
+expired frames, recovery requests and local bridge errors. Timing aggregates
+contain sample count, mean and maximum for capture/GPU command submission,
+capture-to-encoded-output, sender age, assembly and preview submission. GPU submit
+time measures CPU command submission, not a GPU timestamp query. A bounded
+64-event history records recovery reasons with times since stream start.
 
-`screen_preview_probe` (same Cargo feature/profile) serves a synthetic video
-interop harness on `http://127.0.0.1:18741`: a video element and a local `/offer`
-endpoint for an automated browser's recvonly WebRTC offer. It runs one video
-session for 20 seconds and never captures the screen or accesses an account.
-It is a developer example, not an application HTTP endpoint. In the browser,
-inspect inbound WebRTC `framesDecoded`, `framesDropped`, `framesPerSecond`,
-`decoderImplementation` and `powerEfficientDecoder` when supported.
+Native WebRTC reports add network jitter/loss and nominated-pair RTT/bandwidth
+estimates. These are library-reported values: unsupported estimates may be zero.
+SFU counters distinguish ingress and egress queue drops from transport timeouts;
+they update every five seconds. They are cumulative, not per-sample rates.
+Browser statistics show decoded FPS, decoder drops, freezes, local-hop loss/jitter,
+decode/jitter-buffer time and decoder identity/efficiency when supported. Presented
+FPS is measured separately from video presentation counters, since decoding 60 FPS
+need not mean displaying 60 FPS. Missing browser fields mean unavailable, not zero.
+No SDP, candidate addresses, credentials, frame contents or recordings are included.
 
-Portable codec tests also negotiate a video-only local peer using a different
-payload number and lower advertised H.264 level, then check that the received
-access unit is byte-identical. Native tests cover viewer replacement/revocation
-and stale capture completion; cadence tests cover source jitter and overload.
-CI keeps those tests on the Windows/macOS/Linux matrix. Native WebView playback
-still requires acceptance on all three platforms; Linux needs a WebKitGTK build
-with working WebRTC/H.264 support. Browser automation was unavailable in the local
-implementation session, so no real-WebView playback/fps result is claimed.
+Read diagnostics in pipeline order: raw replacements/GPU busy and encode latency
+identify publisher pressure; sender drops/age identify pacing backlog; SFU drops
+and native receive gaps identify transport/relay pressure; preview errors identify
+the local bridge; browser decode/presentation differences identify WebView pressure.
+Compare a moving source (static sources naturally produce fewer capture events).
+Rates derive from counter deltas, not the selected quality. Times use local clocks;
+there is no synchronized one-way capture-to-display latency measurement.
+
+`cargo run -p thiscord-frontend --example screen_gpu_probe --features screen-share --profile ci --locked`
+uses synthetic FP16 textures, GPU scale/tone-map/NV12 conversion and GPU H.264,
+then decodes the output to check expected SDR levels. It also reads monitor HDR
+metadata without capturing pixels. Local NVIDIA validation passed 360 frames:
+720p SDR, 1440p-to-1080p HDR normalization and 4K-to-720p HDR highlights. The attached
+HDR monitor reported 240-nit SDR white. Intel/AMD acceptance remains outstanding.
+
+`screen_encode_probe` tests the legacy system-memory input encoder API with
+synthetic data; that API is not the production capture path. `screen_preview_probe`
+serves a synthetic local WebRTC video session at `http://127.0.0.1:18741` for 20
+seconds. No desktop pixels, accounts, microphones, recording, STUN or TURN are used.
+A local browser run decoded 60 FPS with zero reported decoder freezes/loss; the
+hidden preview dropped presentation frames. This does not establish two-client
+capture-to-display performance or hardware decoder selection in the actual app.
+
+Tests cover sequence wrap, duplicates, bounded reordering deadlines, recoverable
+and overflowing backlogs, feedback throttling/permissions and compatible wire
+negotiation, plus existing codec/lease/permission tests. CI compiles diagnostics
+and runs portable tests on Windows/macOS/Linux. Linux needs a WebKitGTK build with
+working WebRTC/H.264. Live capture, HDR appearance, Intel/AMD drivers, multi-client
+network conditions and actual WebView hardware decode still require acceptance.
+
+HDR/device references: [Microsoft Advanced Color](https://learn.microsoft.com/en-us/windows/win32/direct3darticles/high-dynamic-range),
+[MF D3D device manager](https://learn.microsoft.com/en-us/windows/win32/medfound/mft-message-set-d3d-manager),
+[WebRTC statistics](https://www.w3.org/TR/webrtc-stats/).

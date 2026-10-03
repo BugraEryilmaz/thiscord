@@ -14,13 +14,20 @@ pub(super) fn ScreenControls(ui: Ui) -> impl IntoView {
     let quality = RwSignal::new(Quality::default());
     let busy = RwSignal::new(false);
     let error = RwSignal::new(String::new());
+    let diagnostics = RwSignal::new(String::new());
     let (abort, registration) = futures_util::future::AbortHandle::new_pair();
     on_cleanup(move || abort.abort());
     leptos::task::spawn_local(async move {
         let _ = futures_util::future::Abortable::new(
             async move {
+                let mut previous = thiscord_shared::screen::Diagnostics::default();
                 loop {
                     if let Ok(value) = native::<Status>("screen_status", json!({})).await {
+                        diagnostics.set(super::screen_player::describe(
+                            &value.diagnostics,
+                            &previous,
+                        ));
+                        previous = value.diagnostics.clone();
                         status.set(value);
                     }
                     gloo_timers::future::TimeoutFuture::new(300).await;
@@ -56,6 +63,7 @@ pub(super) fn ScreenControls(ui: Ui) -> impl IntoView {
                     });
                 }>"Stop sharing"</button>
             </Show>
+            <DiagnosticsPanel label="Screen pipeline diagnostics" text=diagnostics/>
             <Show when=move || picking.get()>
                 <section class="w-full space-y-3 rounded-lg border border-white/20 bg-zinc-900 p-4" aria-label="Choose what to share">
                     <p class="text-sm">"Choose a screen or window. Everyone in this voice channel can watch. Sharing a screen includes notifications and other visible windows."</p>
@@ -122,6 +130,7 @@ pub(super) fn ScreenViewer(ui: Ui) -> impl IntoView {
 fn ScreenVideo(watch: thiscord_shared::screen::Watch) -> impl IntoView {
     let video = NodeRef::<leptos::html::Video>::new();
     let message = RwSignal::new("Connecting screen video...".to_owned());
+    let diagnostics = RwSignal::new(String::new());
     let (abort, registration) = futures_util::future::AbortHandle::new_pair();
     let registration = std::cell::RefCell::new(Some(registration));
     on_cleanup(move || {
@@ -144,7 +153,7 @@ fn ScreenVideo(watch: thiscord_shared::screen::Watch) -> impl IntoView {
         let video: web_sys::HtmlVideoElement = video.clone();
         leptos::task::spawn_local(async move {
             let _ = futures_util::future::Abortable::new(
-                super::screen_player::run(video, watch, message),
+                super::screen_player::run(video, watch, message, diagnostics),
                 registration,
             )
             .await;
@@ -152,6 +161,28 @@ fn ScreenVideo(watch: thiscord_shared::screen::Watch) -> impl IntoView {
     });
     view! {
         <Show when=move || !message.get().is_empty()><p class="p-4 text-sm text-white/60" role="status">{move || message.get()}</p></Show>
+        <DiagnosticsPanel label="Playback diagnostics" text=diagnostics/>
         <video node_ref=video autoplay muted playsinline class="max-h-[65vh] w-full object-contain" aria-label="Live shared screen"/>
+    }
+}
+
+#[component]
+fn DiagnosticsPanel(label: &'static str, text: RwSignal<String>) -> impl IntoView {
+    let copied = RwSignal::new(String::new());
+    view! {
+        <details class="w-full p-3 text-xs text-white/60">
+            <summary>{label}</summary>
+            <button class="my-2 rounded bg-white/10 px-3 py-1" on:click=move |_| {
+                let data = text.get_untracked();
+                leptos::task::spawn_local(async move {
+                    if let Some(window) = web_sys::window() {
+                        let result = wasm_bindgen_futures::JsFuture::from(window.navigator().clipboard().write_text(&data)).await;
+                        if copied.try_get_untracked().is_some() { copied.set(if result.is_ok() { "Copied" } else { "Copy failed; select the text below" }.into()); }
+                    }
+                });
+            }>"Copy diagnostics"</button>
+            <span class="ml-2" role="status">{move || copied.get()}</span>
+            <pre class="max-h-72 overflow-auto whitespace-pre-wrap">{move || text.get()}</pre>
+        </details>
     }
 }

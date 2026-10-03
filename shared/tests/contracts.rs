@@ -290,3 +290,34 @@ fn audio_model_selection_preserves_old_settings_and_rejects_unknown_models() {
     );
     assert!(from_value::<AudioSettings>(json!({"noise_suppression_model":"unknown"})).is_err());
 }
+
+#[test]
+fn screen_feedback_capabilities_are_opt_in_and_legacy_answers_stay_compatible() {
+    use thiscord_shared::voice::*;
+    let old: ClientEvent = serde_json::from_str(r#"{"type":"answer","sdp":"test"}"#).unwrap();
+    assert!(matches!(
+        old,
+        ClientEvent::Answer {
+            screen_feedback: false,
+            ..
+        }
+    ));
+    assert_eq!(
+        serde_json::to_value(old).unwrap(),
+        serde_json::json!({"type":"answer","sdp":"test"})
+    );
+    let offer: ServerEvent =
+        serde_json::from_str(r#"{"type":"offer","sdp":"test","slot":0,"can_speak":true}"#).unwrap();
+    assert!(matches!(
+        offer,
+        ServerEvent::Offer {
+            screen_feedback: false,
+            ..
+        }
+    ));
+    let event = ClientEvent::ScreenKeyframe { slot: 2, epoch: 3 };
+    assert_eq!(
+        serde_json::to_value(event).unwrap(),
+        serde_json::json!({"type":"screen_keyframe","slot":2,"epoch":3})
+    );
+}

@@ -29,6 +29,26 @@ pub struct Status {
     pub message: String,
     #[serde(default)]
     pub encoder: Option<String>,
+    #[serde(default)]
+    pub diagnostics: Diagnostics,
+}
+
+/// Aggregate counters only: never screen contents, addresses, SDP or credentials.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct Diagnostics {
+    #[serde(default)]
+    pub labels: std::collections::BTreeMap<String, String>,
+    #[serde(default)]
+    pub events: Vec<(u64, String)>,
+    pub elapsed_ms: u64,
+    pub counters: std::collections::BTreeMap<String, u64>,
+    pub timings: std::collections::BTreeMap<String, Timing>,
+}
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct Timing {
+    pub count: u64,
+    pub total_us: u64,
+    pub max_us: u64,
 }
 
 /// Requested capture targets; actual throughput depends on the source and host.
