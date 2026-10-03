@@ -20,11 +20,30 @@ use uuid::Uuid;
 use crate::db::{self, DbPool};
 
 pub fn router(pool: Option<DbPool>, origins: Vec<HeaderValue>) -> Router {
+    routes(pool, origins.clone(), crate::voice::router(origins))
+}
+
+/// For the disposable load-test server only. Does not change production limits.
+#[cfg(feature = "load-test")]
+pub fn load_test_router(pool: DbPool, origins: Vec<HeaderValue>, connections: usize) -> Router {
+    assert!((2..=500).contains(&connections));
+    routes(
+        Some(pool),
+        origins.clone(),
+        crate::voice::router_with_limit(origins, connections),
+    )
+}
+
+fn routes(
+    pool: Option<DbPool>,
+    origins: Vec<HeaderValue>,
+    voice: Router<Option<DbPool>>,
+) -> Router {
     Router::new()
         .route(HEALTH_PATH, get(health))
         .route(READY_PATH, get(ready))
         .merge(crate::chat::router(origins.clone()))
-        .merge(crate::voice::router(origins.clone()))
+        .merge(voice)
         .merge(crate::auth::router())
         .merge(crate::permissions::router())
         .fallback(not_found)

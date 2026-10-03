@@ -1,0 +1,42 @@
+name: Cargo build cache
+description: Keep self-hosted build artifacts on disk; use GitHub caching on hosted runners.
+inputs:
+  key:
+    description: Distinct build job and platform identifier
+    required: true
+runs:
+  using: composite
+  steps:
+    - name: Select Cargo target directory
+      shell: pwsh
+      env:
+        CACHE_JOB: ${{ inputs.key }}
+        CACHE_REPOSITORY: ${{ github.repository }}
+        CACHE_RUNNER: ${{ runner.name }}
+        CACHE_ENVIRONMENT: ${{ runner.environment }}
+        CACHE_PR: ${{ github.event.pull_request.number }}
+        CACHE_DISABLED: ${{ vars.THISCORD_DISABLE_LOCAL_CACHE }}
+      run: |
+        $local = $env:CACHE_ENVIRONMENT -eq 'self-hosted' -and $env:CACHE_DISABLED -ne 'true'
+        $target = Join-Path $env:GITHUB_WORKSPACE 'target'
+        if ($local) {
+          # Different runner services/jobs never share a writable target directory.
+          # PR builds also stay separate from branch/tag builds.
+          $scope = "$env:CACHE_REPOSITORY/$env:CACHE_RUNNER/$env:CACHE_JOB/pr-$env:CACHE_PR"
+          $sha = [System.Security.Cryptography.SHA256]::Create()
+          $hash = [BitConverter]::ToString($sha.ComputeHash([Text.Encoding]::UTF8.GetBytes($scope))).Replace('-', '').ToLowerInvariant()
+          $sha.Dispose()
+          $target = Join-Path (Split-Path $env:RUNNER_TEMP -Parent) "thiscord-cargo/$hash"
+        }
+        New-Item -ItemType Directory -Force -Path $target | Out-Null
+        "CARGO_TARGET_DIR=$target" >> $env:GITHUB_ENV
+        "THISCORD_LOCAL_CACHE=$($local.ToString().ToLowerInvariant())" >> $env:GITHUB_ENV
+        Write-Output "Cargo target directory: $target (persistent: $local)"
+    - uses: Swatinem/rust-cache@v2
+      if: env.THISCORD_LOCAL_CACHE != 'true'
+      with:
+        key: ${{ inputs.key }}
+        cache-workspace-crates: 'true'
+        cache-on-failure: 'true'
+        # Pinned tools have their own independent caches.
+        cache-bin: 'false'

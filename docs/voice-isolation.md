@@ -197,14 +197,14 @@ requesting the unavailable mode returns an error. Desktop includes the feature.
 
 ### Bundled model and controls
 
-Stop audio, open Audio & voice, enable Echo cancellation and **Neural residual
+Open Audio & voice (also during a call), enable Echo cancellation and **Neural residual
 echo estimation (experimental)**, then start a microphone test or join voice.
 Version 0.1.7 embeds `frontend/models/ree-v2.tflite` in every native client using
 `include_bytes!`; no resource path resolution or runtime download is required.
 Size/hash validation runs for embedded bytes and optional local files.
-Model selection requires stopping audio; Echo
-cancellation can still bypass/re-enable it live. Disable the neural checkbox
-while stopped to return to conventional AEC3. Existing saved settings default off.
+Model selection is prepared in the background during calls; Echo cancellation
+and the neural checkbox can bypass/re-enable it live. Disable the neural checkbox
+to return to conventional AEC3. Existing saved settings default off.
 Leave the optional override under Advanced model settings empty to use the bundled
 model. Existing explicit overrides are preserved and validated; clear an obsolete
 path to return to the bundled model. Backend/SFU setup is unchanged.

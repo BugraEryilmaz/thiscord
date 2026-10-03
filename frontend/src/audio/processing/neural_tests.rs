@@ -86,13 +86,16 @@ fn deepfilter_reset_bypass_reenable_and_channel_isolation() {
         run(&mut p, &[0.0; 480 * 10]).iter().all(|x| x.abs() < 1e-8),
         "old stream leaked into new silence"
     );
-    // Reject an unsupported hot model swap before touching the active chain.
-    let bad = AudioSettings {
+    // Switching away and back starts fresh, without retaining delayed speech.
+    let standard = AudioSettings {
         noise_suppression_model: NoiseSuppressionModel::Sonora,
         ..s.clone()
     };
-    assert!(p.settings(&bad).is_err());
+    p.settings(&standard).unwrap();
+    assert_eq!(p.enhancement_delay_samples(), 0);
+    p.settings(&s).unwrap();
     assert!(p.enhancement_delay_samples() > 0);
+    assert_eq!(run(&mut p, &speech[..480 * 40]), first);
     // AEC and AGC remain independently composable with the neural stage.
     s.automatic_gain = true;
     s.echo_cancellation = true;

@@ -251,7 +251,7 @@ pub(super) fn ServerHome(ui: Ui) -> impl IntoView {
             ui.busy.set(false);
         });
     };
-    let unread = RwSignal::new(Vec::<thiscord_shared::chat::Unread>::new());
+    let unread = ui.unread;
     Effect::new(move |_| {
         if let Some(channel) = selected.get()
             && ui
@@ -261,38 +261,6 @@ pub(super) fn ServerHome(ui: Ui) -> impl IntoView {
         {
             selected.set(None);
         }
-    });
-    let (abort, registration) = futures_util::future::AbortHandle::new_pair();
-    on_cleanup(move || abort.abort());
-    leptos::task::spawn_local(async move {
-        let _ = futures_util::future::Abortable::new(
-            async move {
-                loop {
-                    if let Some(home) = ui.server.get_untracked() {
-                        let token = ui.token.get_untracked();
-                        if let Ok(thiscord_shared::chat::ChatResponse::Unread { channels }) =
-                            crate::account_client::api_request(
-                                thiscord_shared::chat::CHAT_PATH,
-                                &thiscord_shared::chat::ChatRequest::Unread {
-                                    guild_id: home.guild.id,
-                                },
-                                token.as_deref(),
-                            )
-                            .await
-                            && ui
-                                .server
-                                .get_untracked()
-                                .is_some_and(|s| s.guild.id == home.guild.id)
-                        {
-                            unread.set(channels);
-                        }
-                    }
-                    gloo_timers::future::TimeoutFuture::new(5000).await;
-                }
-            },
-            registration,
-        )
-        .await;
     });
     view! {
         <Show when=move ||ui.server.get().is_some() fallback=move ||view!{

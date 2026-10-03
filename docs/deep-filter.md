@@ -1,8 +1,8 @@
 # Experimental DeepFilterNet3 audio processing
 
-In **Settings > Audio & voice**, stop audio, select **DeepFilterNet3 (experimental)**,
-check **Noise suppression**, then test the microphone or rejoin voice. The checkbox
-can change during a call; the model selection requires stopping audio. Existing
+In **Settings > Audio & voice**, select **DeepFilterNet3 (experimental)**,
+check **Noise suppression**, then test the microphone or join voice. Both the
+checkbox and model selection can also be changed during an existing call. Existing
 settings keep Sonora selected, and suppression remains off unless enabled.
 DeepFilterNet3 enhances speech generally; it is not an enrolled-speaker isolator.
 
@@ -20,8 +20,8 @@ The default chain selects exactly one denoiser, avoiding accidental Sonora + DFN
 double suppression. Independent AEC and gain controls still work in either mode.
 
 Graph construction and model warmup happen on the native worker before playback
-and capture start. The chosen model stays loaded while bypassed so re-enabling
-does not compile a model during a call. Bypass skips inference. Changing enable
+and capture start. Live sessions prewarm and retain both denoisers on the worker, so neither
+switching models nor re-enabling suppression compiles tract during a call. Bypass skips inference. Changing enable
 states clears delayed samples and gain history; a short discontinuity/warmup is
 possible. Reset restores pristine neural state without reparsing model files:
 upstream `init()` does not clear all rolling/recurrent history.

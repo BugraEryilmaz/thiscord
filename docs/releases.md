@@ -57,7 +57,9 @@ that distributes the new trust configuration first.
    version must be higher than every previously published stable client version.
 3. Watch [Client release](../.github/workflows/release-client.yml). It validates
    versions/secrets, runs the existing format, Clippy, database, shared, WASM and
-   desktop checks, and then builds three installer targets. Production WASM assets
+   desktop/audio checks, and builds three installer targets concurrently with the
+   remaining checks once the WASM assets are ready. Publication waits for all
+   checks and all installers to succeed. Production WASM assets
    compile with `THISCORD_API_URL=https://thiscord.com.tr`.
 4. The final job downloads every platform artifact and independently verifies
    each updater signature against the embedded public key and signed version.
@@ -96,7 +98,66 @@ Gatekeeper may block downloaded applications. For trusted macOS distribution add
 
 The macOS entitlement enables microphone access under the hardened runtime;
 `Info.plist` supplies the microphone usage prompt. Certificate purchase, Windows
-signing configuration and Apple account setup remain deployment work.
+signing configuration and Apple account setup remain deployment work. The existing
+workflow passes these Apple secrets to Tauri; adding them enables Developer ID
+signing and notarization on the macOS runner. Updater keys and HTTPS certificates
+cannot substitute for platform code-signing credentials.
+
+### Enroll and configure macOS signing
+
+1. Enroll in the [Apple Developer Program](https://developer.apple.com/programs/enroll/).
+   Apple lists USD 99 per membership year, with regional pricing. An individual
+   membership can distribute Developer ID applications outside the App Store.
+2. On a Mac, generate a certificate signing request in Keychain Access and use it
+   to create a **Developer ID Application** certificate in the developer account.
+   Install the certificate into the keychain containing the corresponding private
+   key. Follow [Apple's certificate instructions](https://developer.apple.com/help/account/certificates/create-developer-id-certificates).
+3. Export the certificate with its private key as a password-protected `.p12`.
+   Encode it into a local file, outside the repository:
+
+   ```sh
+   openssl base64 -A -in /path/to/developer-id.p12 -out /path/to/certificate-base64.txt
+   security find-identity -v -p codesigning
+   ```
+
+4. Put the encoded file's contents in the repository's `APPLE_CERTIFICATE` Actions
+   secret and its export password in `APPLE_CERTIFICATE_PASSWORD`. Set
+   `APPLE_SIGNING_IDENTITY` to the full `Developer ID Application: ... (TEAMID)`
+   identity reported by `security`. Use GitHub secrets, not backend `.env`.
+5. Add `APPLE_ID`, an **app-specific** password as `APPLE_PASSWORD`, and
+   `APPLE_TEAM_ID`. These authenticate notarization; do not use the Apple account's
+   normal password. See [Tauri's macOS signing guide](https://v2.tauri.app/distribute/sign/macos/).
+6. Publish a new version through the release workflow and verify the downloaded
+   app's signature, notarization ticket and first launch on a separate Mac.
+   Until credentials are configured, CI continues to produce ad-hoc signed builds.
+
+### Choose Windows signing before configuring CI
+
+Windows needs a publicly trusted Authenticode certificate/signing service issued
+to the publisher. Choose a provider that supports the publisher's country and
+individual/company status, plus unattended GitHub Actions signing. Modern public
+code-signing keys require protected storage; do not assume an ordinary exportable
+PFX can be bought and uploaded to CI. See
+[Tauri's Windows signing guide](https://v2.tauri.app/distribute/sign/windows/).
+
+One option is Microsoft Azure Artifact Signing (formerly Trusted Signing), subject
+to [Microsoft's current eligibility requirements](https://learn.microsoft.com/en-us/azure/artifact-signing/quickstart).
+At the time of this setup review, public-trust individual enrollment is limited
+to the US and Canada; organizations have a broader supported-country list including
+Switzerland. A Swiss individual does not qualify through that organization list. Private
+Trust is not a substitute for public trust on friends' unmanaged computers.
+Otherwise, select a certificate authority's cloud/HSM signing service that accepts
+the publisher's location and status. For example, [SSL.com eSigner](https://www.ssl.com/faqs/esigner-faq/)
+supports individual code signing and cloud keys; confirm Swiss individual
+eligibility and unattended CI access with the issuer before purchasing.
+Provider selection and identity validation
+are still pending; no Windows signing provider is configured in this repository.
+
+Once selected, integrate its signer using Tauri's `bundle.windows.signCommand` so
+both the application and installer are signed during packaging, before updater
+signatures and release checksums are produced. Verify Authenticode on the final
+downloaded installer and installed executable. Code signing identifies the
+publisher but does not guarantee immediate Windows SmartScreen reputation.
 
 ## Local checks
 

@@ -4,7 +4,7 @@ Select a text channel from a server's channel list. Messages render as plain tex
 HTML, links and Markdown are not executed. Use `@username` to mention a guild
 member. Mentioned messages are highlighted; channel badges show unread counts and
 an `@` for unread mentions. Online/typing indicators describe people viewing the
-same channel, not deployment-wide availability. Voice channels remain disabled.
+same channel, not deployment-wide availability. Voice uses its separate media transport.
 
 The composer shows sending/failed states. Retry reuses the original client UUID,
 so a response lost after commit cannot create a duplicate. Drafts and pending sends
@@ -49,23 +49,42 @@ Migration rollback permanently deletes chat data.
 
 ## Real-time transport
 
-`/api/v1/socket` upgrades only an explicitly allowed Origin. A socket has five
-seconds to send a version-1 authenticate frame containing its bearer token, guild
-and channel. Tokens never appear in URLs. One socket subscribes to one channel;
-changing channels closes it. Writes use HTTP; versioned ready/message/presence/
-pong/error/revoked events use the socket.
+`/api/v1/socket` upgrades only an explicitly allowed Origin. The app opens one
+socket after login/session restoration, even before a guild/channel is selected,
+and closes it on logout/token replacement. Its first version-1 `connect` frame
+contains the bearer token; tokens never appear in URLs. `authenticated` confirms
+session validation. `subscribe` replaces the selected guild and optional text
+channel without replacing the socket. Null guild/channel unsubscribes everything.
+An incrementing subscription ID labels snapshots and updates; the UI ignores
+late events from an old view. Every subscription is authorized server-side.
 
-Ready contains a history snapshot and event position read under the same guild
-lock. The backend tails committed channel events every 750 ms, rechecking session
-and permissions for every batch. Reconnect loads a fresh latest-history snapshot;
-message IDs/revisions merge duplicate updates. Older history remains accessible
-by cursor. This recovers missed sends, edits and deletions after disconnect/restart.
+`subscribed` returns the channel history snapshot and effective permissions.
+`update` wraps unread counts, message events and presence for that subscription.
+Guild-only subscriptions receive permission-filtered unread/mention counts even
+when no text channel is open. Read acknowledgements update other devices' badges.
+There is no five-second HTTP unread poll or per-channel permissions-preview fetch.
+User commands (send/edit/delete/read and loading older history) still use HTTP.
 
-Clients send heartbeats every ten seconds, abandon silent connections after 25
-seconds, and reconnect with exponential backoff plus jitter (one to thirty seconds).
-The server closes clients silent for 35 seconds. Typing expires after four seconds.
-Disconnect removes presence; process-crash leftovers expire after 35 seconds.
+Committed chat mutations wake a bounded/coalesced in-process watch channel.
+Subscribers recheck session/access under the access gate before reading and sending
+current unread counts and durable message events. Event batches are capped at 100
+and drained without waiting for a polling interval. Join/leave/typing transitions
+also wake presence delivery; unchanged snapshots are not resent. Initial history
+and its event cursor are read under the same guild lock. Reconnect subscribes again
+and reloads a fresh snapshot, recovering missed sends, edits and deletions.
+
+Heartbeats use the socket every ten seconds; clients abandon silent connections
+after 25 seconds and reconnect with exponential backoff plus jitter (1-30 seconds).
+The server closes clients silent for 35 seconds. Ten-second maintenance checks
+session/access expiry and refreshes/reaps presence leases, not message history or
+unread counts. Typing expires after four seconds. Disconnect removes presence and
+notifies remaining clients; process-crash leftovers expire after 35 seconds.
 Multiple devices are combined per user.
+
+Compatibility: existing installed clients can still begin with `authenticate`
+(token/guild/channel). That legacy path retains its per-channel socket and 750 ms
+backend polling until those clients are upgraded. Deploy the updated backend before
+the new frontend. This change does not alter the HTTP message contracts.
 
 Successful permission/membership changes, channel deletion, session revocation,
 account deletion and rotation invalidate sockets immediately after commit. An
@@ -87,7 +106,8 @@ an existing session. Multiple replicas need shared invalidation and are not supp
 - Frontend HTTP requests time out after 15 seconds; failed sends retain retry IDs.
 
 This targets a personal deployment, not measured large-installation capacity.
-Polling and full guild evaluation favor reuse of the current permission policy.
+Full guild evaluation reuses the current permission policy; commit notifications
+currently wake all session sockets, which filter their subscribed state.
 Event-log compaction, cross-process fanout, full-guild presence and load tests are
 future work. Attachments, search and desktop notifications remain pending.
 Native voice uses a separate signaling socket and the same access gate; see [audio.md](audio.md).

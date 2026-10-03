@@ -2,7 +2,8 @@ name: CI
 
 on:
   push:
-    branches: ['**']
+    # Feature branches are checked through pull requests; main is checked after merge.
+    branches: [main]
   pull_request:
   workflow_dispatch:
   workflow_call:
@@ -10,12 +11,15 @@ on:
       api_url:
         type: string
         default: http://localhost:3000
+      build_installers:
+        type: boolean
+        default: false
 
 permissions:
   contents: read
 
 concurrency:
-  group: ${{ github.workflow }}-${{ github.ref }}
+  group: ci-${{ github.workflow }}-${{ github.ref }}
   cancel-in-progress: true
 
 env:
@@ -58,20 +62,47 @@ jobs:
         run: sudo apt-get update && sudo apt-get install -y libpq-dev pkg-config cmake
       - name: Install pinned toolchain
         run: rustup show
-      - uses: Swatinem/rust-cache@v2
+      - uses: ./.github/actions/cargo-cache
         with:
           key: backend
-      - run: cargo clippy -p thiscord-shared -p thiscord-backend --all-targets --locked -- -D warnings
+      - run: cargo clippy -p thiscord-shared -p thiscord-backend --all-targets --features thiscord-backend/load-test --locked -- -D warnings
       - name: Unit, wire-contract and PostgreSQL integration tests
         run: cargo test -p thiscord-shared -p thiscord-backend --locked -- --include-ignored
+      - name: Voice load generator tests and real-peer smoke checks
+        shell: bash
+        run: |
+          cargo test -p thiscord-backend --features load-test --example voice_load --example voice_load_server --locked -- --include-ignored
+          cargo build -p thiscord-backend --features load-test --example voice_load --example voice_load_server --locked
+          python3 scripts/voice-load-smoke.py "${CARGO_TARGET_DIR:-target}/debug/examples/voice_load_server" "${CARGO_TARGET_DIR:-target}/debug/examples/voice_load"
       - name: Apply application migrations
         run: cargo run -p thiscord-backend --locked -- --migrate-only
+      - uses: ./.github/actions/cargo-tool
+        with:
+          crate: diesel_cli
+          version: 2.3.13
+          args: --no-default-features --features postgres
       - name: Verify generated Diesel schema
         working-directory: backend
         run: |
-          cargo install diesel_cli --version 2.3.13 --no-default-features --features postgres --locked
-          diesel print-schema > ../target/schema.rs
-          diff -u src/schema.rs ../target/schema.rs
+          diesel print-schema > "$RUNNER_TEMP/schema.rs"
+          diff -u src/schema.rs "$RUNNER_TEMP/schema.rs"
+
+  voice-load-macos:
+    name: macOS voice load generator
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v5
+      - name: Native build dependencies
+        run: |
+          brew install libpq pkg-config cmake
+          echo "PQ_LIB_DIR=$(brew --prefix libpq)/lib" >> "$GITHUB_ENV"
+      - name: Install pinned toolchain
+        run: rustup show
+      - uses: ./.github/actions/cargo-cache
+        with:
+          key: voice-load-macos
+      - run: cargo clippy -p thiscord-backend --example voice_load --locked -- -D warnings
+      - run: cargo test -p thiscord-backend --example voice_load --locked
 
   wasm:
     name: Leptos and Tailwind build
@@ -80,12 +111,14 @@ jobs:
       - uses: actions/checkout@v5
       - name: Install pinned toolchain
         run: rustup show
-      - uses: Swatinem/rust-cache@v2
+      - uses: ./.github/actions/cargo-cache
         with:
           key: wasm
       - run: cargo clippy -p thiscord-frontend --bin thiscord-ui --target wasm32-unknown-unknown --locked -- -D warnings
-      - name: Install Trunk
-        run: cargo install trunk --version 0.21.14 --locked
+      - uses: ./.github/actions/cargo-tool
+        with:
+          crate: trunk
+          version: 0.21.14
       - name: Build production web assets
         working-directory: frontend
         run: trunk build --release --locked
@@ -112,7 +145,7 @@ jobs:
           sudo apt-get install -y libwebkit2gtk-4.1-dev build-essential libssl-dev libdbus-1-dev libxdo-dev libayatana-appindicator3-dev librsvg2-dev patchelf libasound2-dev cmake
       - name: Install pinned toolchain
         run: rustup show
-      - uses: Swatinem/rust-cache@v2
+      - uses: ./.github/actions/cargo-cache
         with:
           key: desktop-${{ matrix.os }}
       - uses: actions/download-artifact@v4
@@ -125,11 +158,40 @@ jobs:
         run: cargo build -p thiscord-frontend --bin thiscord-desktop --features desktop,custom-protocol --locked
       - name: Native callback tests
         run: cargo test -p thiscord-frontend --bin thiscord-desktop --features desktop,custom-protocol --locked
+      - uses: actions/upload-artifact@v4
+        with:
+          name: desktop-${{ matrix.os }}
+          path: |
+            ${{ env.CARGO_TARGET_DIR }}/debug/thiscord-desktop
+            ${{ env.CARGO_TARGET_DIR }}/debug/thiscord-desktop.exe
+          if-no-files-found: error
+
+  audio:
+    name: Audio (${{ matrix.os }})
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [windows-latest, macos-latest, ubuntu-24.04]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v5
+      - name: Linux audio dependencies
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y build-essential pkg-config libasound2-dev cmake
+      - name: Install pinned toolchain
+        run: rustup show
+      - uses: ./.github/actions/cargo-cache
+        with:
+          key: audio-${{ matrix.os }}
       - name: Native audio mixer, DSP, jitter and encrypted WebRTC probe
-        run: cargo test -p thiscord-frontend --lib --example audio_replay --features deep-filter,neural-echo --release --locked
+        run: cargo test -p thiscord-frontend --lib --example audio_replay --features deep-filter,neural-echo-probe --profile ci --locked
       - name: Lint audio stages, regressions and benchmarks
-        run: cargo clippy -p thiscord-frontend --lib --tests --examples --features deep-filter,neural-echo-probe --locked -- -D warnings
-      - name: Audio processing benchmark (informational, shared runner)
+        run: cargo clippy -p thiscord-frontend --lib --tests --examples --features deep-filter,neural-echo-probe --profile ci --locked -- -D warnings
+      - name: Build production benchmark executables together
+        run: cargo build -p thiscord-frontend --example processing_bench --example neural_echo_bench --features deep-filter,neural-echo --release --locked
+      - name: Audio processing benchmark (informational)
         shell: bash
         run: |
           cargo run -p thiscord-frontend --example processing_bench --features deep-filter,neural-echo --release --locked -- 300 > processing-bench.jsonl
@@ -141,10 +203,9 @@ jobs:
             processing-bench.jsonl
             neural-echo-bench.jsonl
           if-no-files-found: error
-      - uses: actions/upload-artifact@v4
-        with:
-          name: desktop-${{ matrix.os }}
-          path: |
-            target/debug/thiscord-desktop
-            target/debug/thiscord-desktop.exe
-          if-no-files-found: error
+
+  installers:
+    if: inputs.build_installers && startsWith(github.ref, 'refs/tags/client-v')
+    needs: wasm
+    uses: ./.github/workflows/build-installers.yml
+    secrets: inherit

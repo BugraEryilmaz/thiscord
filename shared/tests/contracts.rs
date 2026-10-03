@@ -36,6 +36,38 @@ fn chat_envelopes_and_bounds_are_stable() {
 }
 
 #[test]
+fn chat_session_subscription_contracts_are_additive() {
+    use thiscord_shared::chat::*;
+    let connect =
+        from_value::<ClientFrame>(json!({"version":1,"event":{"type":"connect","token":"test"}}))
+            .unwrap();
+    assert!(matches!(connect.event, ClientEvent::Connect { .. }));
+    let unsubscribe = ClientFrame {
+        version: SOCKET_VERSION,
+        event: ClientEvent::Subscribe {
+            subscription: 7,
+            guild_id: None,
+            channel_id: None,
+        },
+    };
+    assert_eq!(
+        to_value(unsubscribe).unwrap(),
+        json!({"version":1,"event":{"type":"subscribe","subscription":7,"guild_id":null,"channel_id":null}})
+    );
+    let update = ServerFrame {
+        version: SOCKET_VERSION,
+        event: ServerEvent::Update {
+            subscription: 7,
+            event: Box::new(ServerEvent::Unread { channels: vec![] }),
+        },
+    };
+    assert_eq!(
+        to_value(update).unwrap()["event"],
+        json!({"type":"update","subscription":7,"event":{"type":"unread","channels":[]}})
+    );
+}
+
+#[test]
 fn permission_contracts_reject_unknown_names_and_preserve_scope() {
     use thiscord_shared::{GuildId, RoleId, permissions::*};
     assert_eq!(

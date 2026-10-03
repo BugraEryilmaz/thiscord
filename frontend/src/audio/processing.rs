@@ -34,6 +34,7 @@ pub struct Processing {
     clipped_input_percent: f32,
     chain: stages::CaptureChain,
     model: NoiseSuppressionModel,
+    spare_noise: Option<Box<dyn stages::CaptureStage>>,
     automatic_gain: bool,
     neural_requested: bool,
     neural_model_path: Option<String>,
@@ -41,6 +42,44 @@ pub struct Processing {
     neural_model: Option<neural_echo::model::Model>,
     #[cfg(feature = "neural-echo")]
     neural_failed: std::sync::Arc<std::sync::atomic::AtomicBool>,
+}
+/// Only movable echo state crosses the preparation thread. DeepFilterNet's
+/// thread-local tract runtime is cached on the processing worker instead.
+pub(super) struct Prepared {
+    settings: AudioSettings,
+    apm: AudioProcessing,
+    #[cfg(feature = "neural-echo")]
+    model: Option<neural_echo::model::Model>,
+}
+impl Prepared {
+    pub fn new(s: &AudioSettings) -> Result<Self, String> {
+        s.validate()?;
+        #[cfg(not(feature = "deep-filter"))]
+        if s.noise_suppression_model == NoiseSuppressionModel::DeepFilterNet3 {
+            return Err("This build does not include DeepFilterNet3".into());
+        }
+        #[cfg(not(feature = "neural-echo"))]
+        if s.neural_echo {
+            return Err("This build does not include the neural echo estimator".into());
+        }
+        Ok(Self {
+            settings: s.clone(),
+            apm: AudioProcessing::builder()
+                .config(config(s))
+                .capture_config(StreamConfig::new(48_000, 1))
+                .render_config(StreamConfig::new(48_000, 1))
+                .build(),
+            #[cfg(feature = "neural-echo")]
+            model: if s.neural_echo {
+                Some(match s.neural_echo_model.as_deref() {
+                    Some(path) => neural_echo::model::Model::load(std::path::Path::new(path))?,
+                    None => neural_echo::model::Model::bundled()?,
+                })
+            } else {
+                None
+            },
+        })
+    }
 }
 fn config(s: &AudioSettings) -> Config {
     Config {
@@ -135,6 +174,7 @@ impl Processing {
             clipped_input_percent: 0.0,
             chain,
             model,
+            spare_noise: None,
             automatic_gain,
             neural_requested: false,
             neural_model_path: None,
@@ -160,13 +200,76 @@ impl Processing {
         self.clipped_input_percent = 0.0;
         self.resets += 1;
     }
+    pub(super) fn needs_replacement(&self, s: &AudioSettings) -> bool {
+        s.neural_echo != self.neural_requested
+            || s.neural_echo_model != self.neural_model_path
+            || s.noise_suppression_model != self.model
+    }
+    /// Called before live device playback, so selecting either denoiser later
+    /// never initializes tract on the media-processing path.
+    pub(super) fn prewarm(&mut self) -> Result<(), String> {
+        if self.spare_noise.is_none() {
+            self.spare_noise = match self.model {
+                NoiseSuppressionModel::Sonora => {
+                    #[cfg(feature = "deep-filter")]
+                    {
+                        Some(Box::new(deep_filter::DeepFilter::new()?))
+                    }
+                    #[cfg(not(feature = "deep-filter"))]
+                    {
+                        None
+                    }
+                }
+                NoiseSuppressionModel::DeepFilterNet3 => Some(Box::new(stages::SonoraStage::new(
+                    "Sonora noise suppression",
+                    noise_config(),
+                ))),
+            };
+        }
+        Ok(())
+    }
+    pub(super) fn install(&mut self, mut prepared: Prepared) -> Result<Prepared, String> {
+        let s = &prepared.settings;
+        if s.noise_suppression_model != self.model {
+            self.prewarm()?;
+            let mut next = self
+                .spare_noise
+                .take()
+                .ok_or("This build does not include DeepFilterNet3")?;
+            next.reset();
+            self.spare_noise = Some(self.chain.replace(0, next));
+            self.model = s.noise_suppression_model;
+        }
+        self.chain.reset();
+        self.chain.set_enabled(0, s.noise_suppression);
+        self.chain.set_enabled(1, s.automatic_gain);
+        self.automatic_gain = s.automatic_gain;
+        self.config = config(s);
+        self.neural_requested = s.neural_echo;
+        self.neural_model_path = s.neural_echo_model.clone();
+        std::mem::swap(&mut self.apm, &mut prepared.apm);
+        #[cfg(feature = "neural-echo")]
+        {
+            std::mem::swap(&mut self.neural_model, &mut prepared.model);
+            self.neural_failed
+                .store(false, std::sync::atomic::Ordering::Relaxed);
+            self.attach_neural();
+        }
+        self.render_at = None;
+        self.reference_level = 0.0;
+        self.capture_frames = 0;
+        self.clipped_samples = 0;
+        self.clipped_input_percent = 0.0;
+        self.resets += 1;
+        Ok(prepared)
+    }
     pub fn settings(&mut self, s: &AudioSettings) -> Result<(), String> {
         s.validate()?;
-        if s.neural_echo != self.neural_requested || s.neural_echo_model != self.neural_model_path {
-            return Err("Stop audio before changing the neural echo model or mode".into());
-        }
-        if s.noise_suppression_model != self.model {
-            return Err("Stop audio before changing the noise suppression model".into());
+        if self.needs_replacement(s) {
+            // Offline replay may rebuild synchronously. Live audio prepares this
+            // replacement on a separate thread before calling into the session.
+            self.install(Prepared::new(s)?)?;
+            return Ok(());
         }
         self.chain.set_enabled(0, s.noise_suppression);
         self.chain.set_enabled(1, s.automatic_gain);

@@ -13,9 +13,13 @@ struct Ui {
     updates: RwSignal<thiscord_shared::update::UpdateStatus>,
     update_error: RwSignal<String>,
     audio: RwSignal<thiscord_shared::audio::AudioSettings>,
+    audio_saving: RwSignal<bool>,
+    audio_revision: RwSignal<u64>,
     audio_status: RwSignal<Option<thiscord_shared::audio::AudioStatus>>,
     voice: RwSignal<thiscord_shared::voice::VoiceStatus>,
     chat_epoch: RwSignal<u64>,
+    active_chat: RwSignal<Option<chat::Chat>>,
+    unread: RwSignal<Vec<thiscord_shared::chat::Unread>>,
     guilds: RwSignal<Vec<thiscord_shared::permissions::Guild>>,
     server: RwSignal<Option<thiscord_shared::permissions::GuildHome>>,
     can_create_server: RwSignal<bool>,
@@ -274,9 +278,13 @@ pub fn App() -> impl IntoView {
         updates: RwSignal::new(Default::default()),
         update_error: RwSignal::new(String::new()),
         audio: RwSignal::new(Default::default()),
+        audio_saving: RwSignal::new(false),
+        audio_revision: RwSignal::new(0),
         audio_status: RwSignal::new(None),
         voice: RwSignal::new(Default::default()),
         chat_epoch: RwSignal::new(0),
+        active_chat: RwSignal::new(None),
+        unread: RwSignal::new(vec![]),
         guilds: RwSignal::new(vec![]),
         server: RwSignal::new(None),
         can_create_server: RwSignal::new(false),
@@ -353,6 +361,7 @@ pub fn App() -> impl IntoView {
         <Show when=move ||ui.account.get().is_some() fallback=move ||view!{<login::Login ui=ui/>}>
         <servers::ServerRail ui=ui/>
         <audio::AudioHost ui=ui/>
+        <chat::ChatHost ui=ui/>
         <main class="ml-20 flex h-dvh min-w-0 flex-col gap-4 overflow-hidden p-4 md:p-6">
             <header class="flex shrink-0 flex-wrap items-center justify-between gap-4">
                 <div><h1 class="text-4xl font-bold">"Thiscord"</h1><p class="mt-2 text-white/60">"Your place to chat and hang out."</p></div>

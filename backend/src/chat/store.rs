@@ -316,23 +316,9 @@ pub(super) fn dispatch(
                 )?;
                 Ok(ChatResponse::Done)
             }
-            ChatRequest::Unread { .. } => {
-                let channels: Vec<Unread> = query(
-                    c,
-                    "SELECT jsonb_build_object('channel_id',m.channel_id,'count',count(*),'mentions',count(*) FILTER (WHERE m.mentions @> jsonb_build_array($2::uuid))) AS data FROM messages m LEFT JOIN channel_reads r ON r.guild_id=m.guild_id AND r.channel_id=m.channel_id AND r.account_id=$2::uuid WHERE m.guild_id=$1::uuid AND NOT m.deleted AND m.author_id IS DISTINCT FROM $2::uuid AND m.sequence>COALESCE(r.through,0) GROUP BY m.channel_id",
-                    &[&guild.to_string(), &actor.to_string()],
-                )?;
-                Ok(ChatResponse::Unread {
-                    channels: channels
-                        .into_iter()
-                        .filter(|ch| {
-                            let p = effective(state, actor, Some(ch.channel_id));
-                            p.contains(&Permission::ViewChannel)
-                                && p.contains(&Permission::ReadHistory)
-                        })
-                        .collect(),
-                })
-            }
+            ChatRequest::Unread { .. } => Ok(ChatResponse::Unread {
+                channels: unread(c, guild, actor, state)?,
+            }),
         },
     )
 }
@@ -441,4 +427,49 @@ pub(super) fn cleanup(pool: &DbPool, id: Uuid) {
             &[&id.to_string()],
         );
     }
+}
+
+pub(super) fn unread(
+    c: &mut PgConnection,
+    guild: GuildId,
+    actor: AccountId,
+    state: &GuildState,
+) -> Result<Vec<Unread>, Failure> {
+    let channels: Vec<Unread> = query(
+        c,
+        "SELECT jsonb_build_object('channel_id',m.channel_id,'count',count(*),'mentions',count(*) FILTER (WHERE m.mentions @> jsonb_build_array($2::uuid))) AS data FROM messages m LEFT JOIN channel_reads r ON r.guild_id=m.guild_id AND r.channel_id=m.channel_id AND r.account_id=$2::uuid WHERE m.guild_id=$1::uuid AND NOT m.deleted AND m.author_id IS DISTINCT FROM $2::uuid AND m.sequence>COALESCE(r.through,0) GROUP BY m.channel_id",
+        &[&guild.to_string(), &actor.to_string()],
+    )?;
+    Ok(channels
+        .into_iter()
+        .filter(|ch| {
+            let p = effective(state, actor, Some(ch.channel_id));
+            p.contains(&Permission::ViewChannel) && p.contains(&Permission::ReadHistory)
+        })
+        .collect())
+}
+
+pub(super) fn maintain(
+    pool: &DbPool,
+    token: &str,
+    guild: GuildId,
+    channel: Option<ChannelId>,
+    connection_id: Uuid,
+) -> Result<bool, Failure> {
+    checked(
+        pool,
+        token,
+        guild,
+        channel,
+        Some(Permission::ReadHistory),
+        |c, _, _| {
+            let removed = execute(c, "DELETE FROM chat_presence WHERE expires_at<now()", &[])?;
+            execute(
+                c,
+                "UPDATE chat_presence SET expires_at=now()+interval '35 seconds' WHERE id=$1::uuid",
+                &[&connection_id.to_string()],
+            )?;
+            Ok(removed > 0)
+        },
+    )
 }

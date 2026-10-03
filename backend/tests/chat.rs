@@ -433,3 +433,130 @@ async fn sockets_authenticate_reconnect_and_revoke() {
     drop(socket);
     server.abort();
 }
+
+async fn session_socket(address: std::net::SocketAddr, token: &str) -> Socket {
+    let mut request = format!("ws://{address}{SOCKET_PATH}")
+        .into_client_request()
+        .unwrap();
+    request
+        .headers_mut()
+        .insert("origin", "http://localhost:1420".parse().unwrap());
+    let (mut socket, _) = connect_async(request).await.unwrap();
+    socket
+        .send(WsMessage::Text(
+            json!({"version":1,"event":{"type":"connect","token":token}})
+                .to_string()
+                .into(),
+        ))
+        .await
+        .unwrap();
+    socket
+}
+async fn subscribe(socket: &mut Socket, serial: u64, guild: Value, channel: Value) -> Value {
+    socket.send(WsMessage::Text(json!({"version":1,"event":{"type":"subscribe","subscription":serial,"guild_id":guild,"channel_id":channel}}).to_string().into())).await.unwrap();
+    let ready = event(socket, "subscribed").await;
+    assert_eq!(ready["subscription"], serial);
+    ready
+}
+async fn pushed(socket: &mut Socket, serial: u64, kind: &str) -> Value {
+    tokio::time::timeout(std::time::Duration::from_secs(3), async {
+        loop {
+            let update = event(socket, "update").await;
+            if update["subscription"] == serial && update["event"]["type"] == kind {
+                return update["event"].clone();
+            }
+        }
+    })
+    .await
+    .expect("commit did not push an update")
+}
+#[tokio::test]
+#[ignore = "requires TEST_DATABASE_URL; CI runs with --include-ignored"]
+async fn session_socket_subscriptions_push_unread_switch_resync_and_revoke() {
+    let _guard = TEST_LOCK.lock().await;
+    let db = database();
+    let (app, owner, guest, guest_id, mut state, channel) = setup(&db).await;
+    let guild = state["guild"]["id"].clone();
+    change(
+        &app,
+        &owner,
+        &mut state,
+        json!({"action":"create_channel","name":"second","kind":"text"}),
+        StatusCode::OK,
+    )
+    .await;
+    let second = state["channels"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|c| c["id"] != channel)
+        .unwrap()["id"]
+        .clone();
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let address = listener.local_addr().unwrap();
+    let router = app.clone();
+    let server = tokio::spawn(async move {
+        axum::serve(listener, router).await.unwrap();
+    });
+    let mut invalid = session_socket(address, "invalid").await;
+    event(&mut invalid, "error").await;
+    let mut socket = session_socket(address, &guest).await;
+    event(&mut socket, "authenticated").await;
+    // Authentication is independent of selecting a guild or channel.
+    assert!(subscribe(&mut socket, 1, Value::Null, Value::Null).await["history"].is_null());
+    subscribe(&mut socket, 2, guild.clone(), Value::Null).await;
+    assert_eq!(
+        pushed(&mut socket, 2, "unread").await["channels"],
+        json!([])
+    );
+    let sent = chat(&app, &owner, json!({"action":"send","guild_id":guild,"channel_id":channel,"client_id":Uuid::new_v4(),"content":"push unread"}), StatusCode::OK).await;
+    assert_eq!(
+        pushed(&mut socket, 2, "unread").await["channels"][0]["count"],
+        1
+    );
+    let ready = subscribe(&mut socket, 3, guild.clone(), channel.clone()).await;
+    assert_eq!(ready["history"]["messages"][0]["content"], "push unread");
+    pushed(&mut socket, 3, "unread").await;
+    chat(&app, &guest, json!({"action":"read","guild_id":guild,"channel_id":channel,"through":sent["message"]["sequence"]}), StatusCode::OK).await;
+    assert_eq!(
+        pushed(&mut socket, 3, "unread").await["channels"],
+        json!([])
+    );
+    // Reuse the same transport for another channel; the old channel's body
+    // must never arrive under the new subscription ID.
+    subscribe(&mut socket, 4, guild.clone(), second.clone()).await;
+    pushed(&mut socket, 4, "unread").await;
+    chat(&app, &owner, json!({"action":"send","guild_id":guild,"channel_id":channel,"client_id":Uuid::new_v4(),"content":"old channel"}), StatusCode::OK).await;
+    chat(&app, &owner, json!({"action":"send","guild_id":guild,"channel_id":second,"client_id":Uuid::new_v4(),"content":"new channel"}), StatusCode::OK).await;
+    assert_eq!(
+        pushed(&mut socket, 4, "message").await["message"]["content"],
+        "new channel"
+    );
+    socket.close(None).await.unwrap();
+    let mut socket = session_socket(address, &guest).await;
+    event(&mut socket, "authenticated").await;
+    assert_eq!(
+        subscribe(&mut socket, 1, guild.clone(), second.clone()).await["history"]["messages"][0]["content"],
+        "new channel"
+    );
+    change(
+        &app,
+        &owner,
+        &mut state,
+        json!({"action":"remove_member","account_id":guest_id}),
+        StatusCode::OK,
+    )
+    .await;
+    event(&mut socket, "revoked").await;
+    let mut denied = session_socket(address, &guest).await;
+    event(&mut denied, "authenticated").await;
+    denied.send(WsMessage::Text(json!({"version":1,"event":{"type":"subscribe","subscription":1,"guild_id":guild,"channel_id":second}}).to_string().into())).await.unwrap();
+    assert_eq!(
+        pushed(&mut denied, 1, "error").await["error"]["code"],
+        "forbidden"
+    );
+    drop(denied);
+    drop(socket);
+    drop(invalid);
+    server.abort();
+}

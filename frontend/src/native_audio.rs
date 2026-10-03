@@ -57,24 +57,60 @@ pub async fn audio_load(app: tauri::AppHandle) -> Result<AudioSettings, String> 
     .map_err(|_| "Settings task failed")?
 }
 #[tauri::command]
+pub async fn audio_current(app: tauri::AppHandle) -> Result<AudioSettings, String> {
+    let engine = app.state::<AudioState>().engine.clone();
+    if let Some(settings) = tauri::async_runtime::spawn_blocking(move || engine.current_settings())
+        .await
+        .map_err(|_| "Audio worker stopped")??
+    {
+        return Ok(settings);
+    }
+    audio_load(app).await
+}
+#[tauri::command]
+pub fn audio_restrict(state: State<'_, AudioState>, settings: AudioSettings) -> Result<(), String> {
+    settings.validate()?;
+    state.engine.restrict(&settings);
+    Ok(())
+}
+#[tauri::command]
 pub async fn audio_save(app: tauri::AppHandle, settings: AudioSettings) -> Result<(), String> {
     settings.validate()?;
     tauri::async_runtime::spawn_blocking(move || {
         let state = app.state::<AudioState>();
+        state.engine.restrict(&settings);
         let _guard = state.file_lock.lock().map_err(|_| "Settings unavailable")?;
-        // Apply controls before disk I/O: a failed save must not leave a mic unmuted.
-        state.engine.command(Command::Settings(settings.clone()))?;
-        if let Ok(mut configuration) = app
-            .state::<crate::native_voice::VoiceState>()
+        let voice = app.state::<crate::native_voice::VoiceState>();
+        let previous = voice
             .settings
             .lock()
-        {
-            if (configuration.mode != settings.mode
-                || configuration.global_push_to_talk != settings.global_push_to_talk)
-                && state.engine.command(Command::Peek)?.running
-            {
-                register_ptt(&app, &settings)?;
+            .map_err(|_| "Voice settings unavailable")?
+            .clone();
+        let shortcut_changed = (previous.mode != settings.mode
+            || previous.global_push_to_talk != settings.global_push_to_talk)
+            && state.engine.command(Command::Peek)?.running;
+        if shortcut_changed && let Err(error) = register_ptt(&app, &settings) {
+            let _ = register_ptt(&app, &previous);
+            return Err(error);
+        }
+        // Apply controls before disk I/O: a failed save must not leave a mic unmuted.
+        if let Err(error) = state.engine.command(Command::Settings(settings.clone())) {
+            if shortcut_changed {
+                if state.engine.command(Command::Peek).is_ok_and(|s| s.running) {
+                    // Do not replace a newer session's shortcut after cancellation.
+                    if voice.settings.lock().is_ok_and(|current| {
+                        current.mode == previous.mode
+                            && current.global_push_to_talk == previous.global_push_to_talk
+                    }) {
+                        let _ = register_ptt(&app, &previous);
+                    }
+                } else {
+                    unregister_ptt(&app);
+                }
             }
+            return Err(error);
+        }
+        if let Ok(mut configuration) = voice.settings.lock() {
             *configuration = settings.clone();
         }
         let directory = app
@@ -190,13 +226,62 @@ pub fn finish_recording_on_exit(app: &tauri::AppHandle) {
         std::thread::sleep(std::time::Duration::from_millis(20));
     }
 }
+pub fn start_voice(
+    app: &tauri::AppHandle,
+    guild: thiscord_shared::GuildId,
+    connection: audio::connection::Connection,
+    settings: AudioSettings,
+    outgoing: tokio::sync::mpsc::Sender<bytes::Bytes>,
+    microphone: bool,
+) -> Result<AudioStatus, String> {
+    let state = app.state::<AudioState>();
+    let _guard = state.file_lock.lock().map_err(|_| "Settings unavailable")?;
+    let path = app
+        .path()
+        .app_config_dir()
+        .map_err(|_| "Settings directory unavailable")?
+        .join("speaker-volumes.json");
+    let volumes = audio::volumes::Store::load(&path)?.profile(guild);
+    state.engine.command(Command::VoiceStart {
+        volumes,
+        connection,
+        settings,
+        outgoing,
+        microphone,
+    })
+}
 #[tauri::command]
 pub async fn audio_volume(
-    state: State<'_, AudioState>,
+    app: tauri::AppHandle,
     stream: usize,
     gain: f32,
+    target: Option<SpeakerVolumeTarget>,
 ) -> Result<AudioStatus, String> {
-    command(state.engine.clone(), Command::Volume { stream, gain }).await
+    tauri::async_runtime::spawn_blocking(move || {
+        let state = app.state::<AudioState>();
+        let _guard = state.file_lock.lock().map_err(|_| "Settings unavailable")?;
+        let path = app
+            .path()
+            .app_config_dir()
+            .map_err(|_| "Settings directory unavailable")?
+            .join("speaker-volumes.json");
+        let mut store = if target.is_some() {
+            Some(audio::volumes::Store::load(&path)?)
+        } else {
+            None
+        };
+        let status = state.engine.command(Command::Volume {
+            stream,
+            gain,
+            target,
+        })?;
+        if let (Some(store), Some(target)) = (&mut store, target) {
+            store.save(&path, target, gain)?;
+        }
+        Ok(status)
+    })
+    .await
+    .map_err(|_| "Settings task failed")?
 }
 #[tauri::command]
 pub async fn audio_pressed(

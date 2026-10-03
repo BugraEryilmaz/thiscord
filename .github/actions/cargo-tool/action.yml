@@ -1,0 +1,40 @@
+name: Pinned Cargo tool
+description: Install an exact CLI version into an independently cached root.
+inputs:
+  crate:
+    description: Cargo CLI crate name
+    required: true
+  version:
+    description: Exact crate version
+    required: true
+  args:
+    description: Additional space-separated cargo install flags
+    default: ''
+runs:
+  using: composite
+  steps:
+    - name: Select tool directory
+      id: directory
+      shell: pwsh
+      env:
+        TOOL_CRATE: ${{ inputs.crate }}
+        TOOL_VERSION: ${{ inputs.version }}
+      run: |
+        $root = Join-Path $env:RUNNER_TEMP "thiscord-tools/$env:TOOL_CRATE-$env:TOOL_VERSION"
+        "root=$root" >> $env:GITHUB_OUTPUT
+        (Join-Path $root 'bin') >> $env:GITHUB_PATH
+    - uses: actions/cache@v4
+      with:
+        path: ${{ steps.directory.outputs.root }}
+        key: cargo-tool-${{ runner.os }}-${{ runner.arch }}-${{ inputs.crate }}-${{ inputs.version }}-${{ hashFiles('rust-toolchain.toml') }}-${{ inputs.args }}
+    - name: Install pinned tool if missing
+      shell: pwsh
+      env:
+        TOOL_CRATE: ${{ inputs.crate }}
+        TOOL_VERSION: ${{ inputs.version }}
+        TOOL_ARGS: ${{ inputs.args }}
+        TOOL_ROOT: ${{ steps.directory.outputs.root }}
+      run: |
+        $extra = @($env:TOOL_ARGS -split ' ' | Where-Object { $_ })
+        cargo install $env:TOOL_CRATE --version "=$env:TOOL_VERSION" --locked --root $env:TOOL_ROOT @extra
+        if ($LASTEXITCODE) { exit $LASTEXITCODE }

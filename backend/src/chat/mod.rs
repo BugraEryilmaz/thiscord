@@ -1,3 +1,4 @@
+mod session;
 mod store;
 use crate::{
     auth::{self, Failure},
@@ -30,6 +31,14 @@ pub(crate) fn changes() -> &'static watch::Sender<u64> {
     static CHANGES: OnceLock<watch::Sender<u64>> = OnceLock::new();
     CHANGES.get_or_init(|| watch::channel(0).0)
 }
+// Coalesced commit notifications; subscribers re-read authorized durable state.
+pub(super) fn updates() -> &'static watch::Sender<u64> {
+    static UPDATES: OnceLock<watch::Sender<u64>> = OnceLock::new();
+    UPDATES.get_or_init(|| watch::channel(0).0)
+}
+pub(super) fn notify() {
+    updates().send_modify(|v| *v = v.wrapping_add(1));
+}
 pub(crate) fn invalidate() {
     changes().send_modify(|v| *v = v.wrapping_add(1));
 }
@@ -49,6 +58,10 @@ async fn handle(
     let _guard = gate().write().await;
     let result = async {
         let Json(command) = body.map_err(|_| Failure::Invalid("Invalid chat request"))?;
+        let mutation = !matches!(
+            command,
+            ChatRequest::History { .. } | ChatRequest::Unread { .. }
+        );
         let pool = pool.ok_or(Failure::Unavailable)?;
         let token = auth::bearer(&headers);
         static WORKERS: OnceLock<Arc<Semaphore>> = OnceLock::new();
@@ -57,12 +70,16 @@ async fn handle(
             .clone()
             .try_acquire_owned()
             .map_err(|_| Failure::Limited)?;
-        tokio::task::spawn_blocking(move || {
+        let result = tokio::task::spawn_blocking(move || {
             let _permit = permit;
             store::dispatch(&pool, &token, command)
         })
         .await
-        .map_err(|_| Failure::Unavailable)?
+        .map_err(|_| Failure::Unavailable)?;
+        if mutation && result.is_ok() {
+            notify();
+        }
+        result
     }
     .await;
     let mut response = match result {
@@ -142,11 +159,16 @@ async fn serve(mut socket: WebSocket, pool: DbPool, id: RequestId) {
     let Ok(Some(Ok(message))) = first else {
         return;
     };
+    let event = frame(message);
+    if let Some(ClientEvent::Connect { token }) = event {
+        session::serve(socket, pool, id, token, changed).await;
+        return;
+    }
     let Some(ClientEvent::Authenticate {
         token,
         guild_id,
         channel_id,
-    }) = frame(message)
+    }) = event
     else {
         let _ = send(
             &mut socket,
@@ -232,7 +254,7 @@ async fn serve(mut socket: WebSocket, pool: DbPool, id: RequestId) {
                 let Ok(Ok(poll))=result else{let _=send(&mut socket,ServerEvent::Revoked{}).await;break;};
                 let delivery=async {
                     for (seq,message) in poll.events{send(&mut socket,ServerEvent::Message{message,cursor:seq}).await?;cursor=seq;}
-                    if poll.members!=last_members{last_members=poll.members.clone();send(&mut socket,ServerEvent::Presence{members:poll.members}).await?;}
+                    if poll.members!=last_members{notify();last_members=poll.members.clone();send(&mut socket,ServerEvent::Presence{members:poll.members}).await?;}
                     Ok::<(),()>(())
                 };
                 if !matches!(tokio::time::timeout(Duration::from_secs(2),delivery).await,Ok(Ok(()))){break;}
@@ -241,4 +263,5 @@ async fn serve(mut socket: WebSocket, pool: DbPool, id: RequestId) {
     }
     let _ = tokio::time::timeout(Duration::from_secs(1), socket.send(Message::Close(None))).await;
     let _ = tokio::task::spawn_blocking(move || store::cleanup(&pool, connection_id)).await;
+    notify();
 }

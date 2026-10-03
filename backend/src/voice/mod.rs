@@ -104,14 +104,22 @@ async fn room(id: ChannelId) -> Arc<Room> {
     room
 }
 pub fn router(origins: Vec<HeaderValue>) -> Router<Option<DbPool>> {
+    router_with_limit(origins, 64)
+}
+pub(crate) fn router_with_limit(
+    origins: Vec<HeaderValue>,
+    connections: usize,
+) -> Router<Option<DbPool>> {
     Router::new()
         .route(VOICE_PATH, get(upgrade))
         .layer(Extension(Arc::new(origins)))
+        .layer(Extension(Arc::new(Semaphore::new(connections))))
 }
 async fn upgrade(
     State(pool): State<Option<DbPool>>,
     Extension(id): Extension<RequestId>,
     Extension(origins): Extension<Arc<Vec<HeaderValue>>>,
+    Extension(limit): Extension<Arc<Semaphore>>,
     headers: HeaderMap,
     ws: Result<WebSocketUpgrade, WebSocketUpgradeRejection>,
 ) -> Response {
@@ -124,12 +132,7 @@ async fn upgrade(
     let Ok(ws) = ws else {
         return Failure::Invalid("Invalid voice socket upgrade").response(id);
     };
-    static LIMIT: OnceLock<Arc<Semaphore>> = OnceLock::new();
-    let Ok(permit) = LIMIT
-        .get_or_init(|| Arc::new(Semaphore::new(64)))
-        .clone()
-        .try_acquire_owned()
-    else {
+    let Ok(permit) = limit.try_acquire_owned() else {
         return Failure::Limited.response(id);
     };
     ws.max_message_size(128 * 1024)

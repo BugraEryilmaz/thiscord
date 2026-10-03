@@ -68,16 +68,32 @@ fn model_failure_silences_capture_and_stays_latched_across_gap_reset() {
     }
 }
 #[test]
-fn rejects_mode_changes_while_running_and_missing_models() {
+fn live_mode_changes_and_missing_models_preserve_the_working_pipeline() {
     let mut p = Processing::new(&AudioSettings::default()).unwrap();
     let mut s = AudioSettings {
         neural_echo: true,
         ..Default::default()
     };
-    assert!(p.settings(&s).is_err());
-    assert!(Processing::new(&s).is_ok());
+    p.settings(&s).unwrap();
+    assert!(p.neural_requested);
     s.neural_echo_model = Some("missing-neural-echo-model-do-not-create.tflite".into());
-    assert!(Processing::new(&s).is_err());
+    assert!(p.settings(&s).is_err());
+    assert!(p.neural_requested);
+    assert!(p.neural_model_path.is_none());
+    for _ in 0..3 {
+        p.settings(&AudioSettings::default()).unwrap();
+        assert!(!p.neural_requested);
+        p.settings(&AudioSettings {
+            neural_echo: true,
+            echo_cancellation: true,
+            ..Default::default()
+        })
+        .unwrap();
+        let mut block = [0.01; 480];
+        p.render(&block).unwrap();
+        p.capture_frame(&mut block, 20).unwrap();
+        assert!(block.iter().all(|v| v.is_finite()));
+    }
 }
 
 #[test]

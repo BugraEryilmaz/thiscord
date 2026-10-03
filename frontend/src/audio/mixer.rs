@@ -1,9 +1,9 @@
 //! Fixed-capacity SPSC queues. The device callback never allocates, locks or waits.
-use super::frames;
+use super::{cues, frames};
 use ringbuf::{HeapCons, HeapProd, HeapRb, traits::*};
 use std::sync::{
     Arc,
-    atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering},
+    atomic::{AtomicBool, AtomicU8, AtomicU32, AtomicU64, Ordering},
 };
 use std::time::Instant;
 
@@ -13,6 +13,7 @@ pub const MAX_STREAMS: usize = 32;
 pub const CAPACITY: usize = FRAME * 6;
 
 pub struct Controls {
+    pub(super) cues: AtomicU8,
     pub mute: AtomicBool,
     pub deafen: AtomicBool,
     pub push_to_talk: AtomicBool,
@@ -28,6 +29,7 @@ pub struct Controls {
 impl Default for Controls {
     fn default() -> Self {
         Self {
+            cues: 0.into(),
             mute: false.into(),
             deafen: false.into(),
             push_to_talk: false.into(),
@@ -57,6 +59,7 @@ struct StreamReader {
     generation: u64,
 }
 pub struct Mixer {
+    cues: cues::Player,
     streams: Vec<StreamReader>,
     controls: Arc<Controls>,
     reference: Option<frames::Writer>,
@@ -85,6 +88,7 @@ pub fn mixer(controls: Arc<Controls>) -> (Vec<StreamWriter>, Mixer) {
     (
         writers,
         Mixer {
+            cues: cues::Player::new(),
             streams: readers,
             controls,
             reference: None,
@@ -119,6 +123,8 @@ impl Mixer {
         channels: usize,
     ) {
         let deafened = self.controls.deafen.load(Ordering::Relaxed);
+        self.cues
+            .request(self.controls.cues.swap(0, Ordering::Relaxed), deafened);
         let master = f32::from_bits(self.controls.master.load(Ordering::Relaxed));
         // Catch up after a stall; never play a growing backlog of old speech.
         for stream in &mut self.streams {
@@ -137,7 +143,7 @@ impl Mixer {
         let mut underruns = 0;
         let mut reference_dropped = 0;
         for frame in output.chunks_mut(channels) {
-            let mut mix = 0.0;
+            let mut mix = self.cues.next();
             for stream in &mut self.streams {
                 if !stream.control.active.load(Ordering::Relaxed) {
                     continue;
@@ -179,6 +185,28 @@ impl Mixer {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn membership_cues_follow_master_and_reach_echo_reference() {
+        let controls = Arc::new(Controls::default());
+        let (_, mix) = mixer(controls.clone());
+        let (producer, mut reference) = frames::queue();
+        let mut mix = mix.with_reference(producer);
+        controls.master.store(0.5_f32.to_bits(), Ordering::Relaxed);
+        controls.cues.store(cues::JOIN, Ordering::Relaxed);
+        let mut out = [0.0_f32; frames::SAMPLES];
+        mix.reference_time(Instant::now());
+        mix.render(&mut out, 1);
+        assert!(out.iter().any(|s| s.abs() > 0.001));
+        assert!(out.iter().all(|s| s.abs() <= 0.06));
+        assert_eq!(reference.pop().unwrap().0.samples, out);
+        controls.deafen.store(true, Ordering::Relaxed);
+        mix.render(&mut out, 1);
+        assert_eq!(out, [0.0; frames::SAMPLES]);
+        controls.deafen.store(false, Ordering::Relaxed);
+        mix.render(&mut out, 1);
+        assert_eq!(out, [0.0; frames::SAMPLES]);
+    }
+
     #[test]
     fn echo_reference_matches_post_volume_clipped_playback_and_deafen() {
         let controls = Arc::new(Controls::default());

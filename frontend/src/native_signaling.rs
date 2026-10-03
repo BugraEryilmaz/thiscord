@@ -2,6 +2,7 @@
 //! Diagnose each stage without logging account tokens, HTTP bodies or SDP.
 use futures_util::{StreamExt, stream::FuturesUnordered};
 use std::{io, net::SocketAddr, time::Duration};
+use thiscord_frontend::audio::reconnect::Failure;
 use tokio::{net::TcpStream, time::timeout};
 use tokio_tungstenite::{
     MaybeTlsStream, WebSocketStream,
@@ -81,25 +82,20 @@ async fn dial(addresses: Vec<SocketAddr>, stagger: Duration) -> io::Result<TcpSt
     Err(last_error)
 }
 
-fn handshake_error(error: Error, endpoint: &url::Url) -> String {
+fn handshake_error(error: Error, endpoint: &url::Url) -> Failure {
     match error {
-        Error::Http(response) => format!(
-            "Voice WebSocket rejected by {endpoint} (HTTP {}).",
-            response.status().as_u16()
-        ),
-        Error::Tls(_) => format!(
-            "Voice TLS verification or negotiation failed for {endpoint}. Check the Mac/PC clock, server certificate and any network TLS inspection."
-        ),
-        Error::Io(error) => format!(
-            "Voice TLS/WebSocket connection to {endpoint} failed ({:?}).{}",
-            error.kind(),
-            network_hint()
-        ),
-        _ => format!("Invalid voice WebSocket handshake from {endpoint}."),
+        Error::Http(response) => {
+            let status = response.status().as_u16();
+            let message = format!("Voice WebSocket rejected by {endpoint} (HTTP {status}).");
+            if status == 429 || status >= 500 { Failure::temporary(message) } else { message.into() }
+        }
+        Error::Tls(_) => format!("Voice TLS verification or negotiation failed for {endpoint}. Check the Mac/PC clock, server certificate and any network TLS inspection.").into(),
+        Error::Io(error) => Failure::temporary(format!("Voice TLS/WebSocket connection to {endpoint} failed ({:?}).{}", error.kind(), network_hint())),
+        _ => format!("Invalid voice WebSocket handshake from {endpoint}.").into(),
     }
 }
 
-pub async fn connect(base: &str) -> Result<Socket, String> {
+pub async fn connect(base: &str) -> Result<Socket, Failure> {
     connect_with_deadlines(base, DNS_TIMEOUT, TCP_TIMEOUT, HANDSHAKE_TIMEOUT).await
 }
 
@@ -108,7 +104,7 @@ async fn connect_with_deadlines(
     dns_timeout: Duration,
     tcp_timeout: Duration,
     handshake_timeout: Duration,
-) -> Result<Socket, String> {
+) -> Result<Socket, Failure> {
     let endpoint = endpoint(base)?;
     let port = endpoint
         .port_or_known_default()
@@ -119,27 +115,31 @@ async fn connect_with_deadlines(
         url::Host::Domain(host) => timeout(dns_timeout, tokio::net::lookup_host((host, port)))
             .await
             .map_err(|_| {
-                format!("Voice DNS lookup timed out for {host}. Check DNS and VPN settings.")
+                Failure::temporary(format!(
+                    "Voice DNS lookup timed out for {host}. Check DNS and VPN settings."
+                ))
             })?
             .map_err(|_| {
-                format!("Cannot resolve voice server {host}. Check DNS and VPN settings.")
+                Failure::temporary(format!(
+                    "Cannot resolve voice server {host}. Check DNS and VPN settings."
+                ))
             })?
             .collect(),
     };
     let stream = timeout(tcp_timeout, dial(addresses, Duration::from_millis(250)))
         .await
         .map_err(|_| {
-            format!(
+            Failure::temporary(format!(
                 "Voice TCP connection to {endpoint} timed out.{}",
                 network_hint()
-            )
+            ))
         })?
         .map_err(|error| {
-            format!(
+            Failure::temporary(format!(
                 "Voice TCP connection to {endpoint} failed ({:?}).{}",
                 error.kind(),
                 network_hint()
-            )
+            ))
         })?;
     let _ = stream.set_nodelay(true);
     let mut request = endpoint
@@ -161,7 +161,7 @@ async fn connect_with_deadlines(
         ),
     )
     .await
-    .map_err(|_| format!("Voice TLS/WebSocket handshake with {endpoint} timed out. Check VPN, proxy and firewall settings."))?
+    .map_err(|_| Failure::temporary(format!("Voice TLS/WebSocket handshake with {endpoint} timed out. Check VPN, proxy and firewall settings.")))?
     .map_err(|error| handshake_error(error, &endpoint))?;
     Ok(socket)
 }
@@ -241,8 +241,9 @@ mod tests {
         .await
         .unwrap_err();
         server.abort();
-        assert!(error.contains("TLS/WebSocket handshake"));
-        assert!(error.contains("timed out"));
+        assert!(error.message.contains("TLS/WebSocket handshake"));
+        assert!(error.message.contains("timed out"));
+        assert!(error.retryable);
     }
 
     #[tokio::test]
@@ -252,16 +253,42 @@ mod tests {
         let server = tokio::spawn(async move {
             let (mut socket, _) = listener.accept().await.unwrap();
             let mut request = vec![0; 2048];
-            socket.read(&mut request).await.unwrap();
+            assert!(socket.read(&mut request).await.unwrap() > 0);
             socket.write_all(b"HTTP/1.1 403 Forbidden\r\nContent-Length: 12\r\nConnection: close\r\n\r\nprivate-data").await.unwrap();
         });
         let error = connect(&base).await.unwrap_err();
         server.await.unwrap();
-        assert!(error.contains("HTTP 403"));
-        assert!(!error.contains("private-data"));
+        assert!(error.message.contains("HTTP 403"));
+        assert!(!error.message.contains("private-data"));
+        assert!(!error.retryable);
+    }
+
+    #[test]
+    fn transient_upgrade_statuses_retry_but_auth_and_bad_endpoints_do_not() {
+        let url = endpoint("https://example.com").unwrap();
+        for (status, retryable) in [
+            (401, false),
+            (403, false),
+            (404, false),
+            (429, true),
+            (502, true),
+            (503, true),
+        ] {
+            let response = tokio_tungstenite::tungstenite::http::Response::builder()
+                .status(status)
+                .body(Some(b"private-response".to_vec()))
+                .unwrap();
+            let error = handshake_error(Error::Http(Box::new(response)), &url);
+            assert_eq!(error.retryable, retryable);
+            assert!(!error.message.contains("private-response"));
+        }
     }
 
     #[tokio::test]
+    #[allow(
+        clippy::result_large_err,
+        reason = "The tungstenite handshake callback fixes the response error type"
+    )]
     async fn native_upgrade_preserves_voice_path_and_origin() {
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let base = format!("http://{}", listener.local_addr().unwrap());

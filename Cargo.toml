@@ -25,6 +25,13 @@ chrono = { version = "0.4", default-features = false, features = ["std", "serde"
 lto = "thin"
 codegen-units = 1
 
+# Functional audio checks need optimized inference, but not production link-time
+# optimization. Installers and performance benchmarks still use release.
+[profile.ci]
+inherits = "release"
+lto = "off"
+codegen-units = 16
+
 # Neural DSP must meet the same 10 ms deadlines in `tauri dev`. Keep app debug
 # checks; optimize only the hot inference/FFT dependencies. tract 0.21.4's debug
 # graph-name validation rejects duplicate optimizer-generated Conv.bias labels

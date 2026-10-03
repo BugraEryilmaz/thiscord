@@ -9,9 +9,7 @@ use thiscord_shared::{
     ChannelId, ClientMessageId, GuildId, MessageId,
     chat::*,
     pagination::PageCursor,
-    permissions::{
-        PERMISSIONS_PATH, Permission, PermissionRequest, PermissionResponse, Permissions,
-    },
+    permissions::{Permission, Permissions},
 };
 
 #[derive(Clone)]
@@ -21,7 +19,7 @@ struct Pending {
     failed: bool,
 }
 #[derive(Clone, Copy)]
-struct Chat {
+pub(super) struct Chat {
     ui: Ui,
     epoch: u64,
     guild: GuildId,
@@ -154,27 +152,96 @@ impl Chat {
     }
 }
 
-async fn connected(chat: Chat) -> Result<(), String> {
+#[derive(Clone, Copy, PartialEq, Eq)]
+struct Subscription {
+    guild: Option<GuildId>,
+    channel: Option<ChannelId>,
+    epoch: u64,
+}
+fn desired(ui: Ui) -> Subscription {
+    let guild = ui.server.get_untracked().map(|s| s.guild.id);
+    let chat = ui
+        .active_chat
+        .get_untracked()
+        .filter(|c| c.alive() && Some(c.guild) == guild);
+    Subscription {
+        guild,
+        channel: chat.map(|c| c.channel),
+        epoch: chat.map_or(0, |c| c.epoch),
+    }
+}
+
+#[component]
+pub(super) fn ChatHost(ui: Ui) -> impl IntoView {
+    let abort = StoredValue::new(None::<AbortHandle>);
+    on_cleanup(move || {
+        if let Some(abort) = abort.get_value() {
+            abort.abort();
+        }
+    });
+    Effect::new(move |_| {
+        let token = ui.token.get();
+        if let Some(previous) = abort.get_value() {
+            previous.abort();
+        }
+        ui.unread.set(vec![]);
+        let Some(token) = token else {
+            return;
+        };
+        let (handle, registration) = AbortHandle::new_pair();
+        abort.set_value(Some(handle));
+        leptos::task::spawn_local(async move {
+            let _ = Abortable::new(
+                async move {
+                    let mut delay = 1000;
+                    loop {
+                        let started = js_sys::Date::now();
+                        let error = connected(ui, &token)
+                            .await
+                            .err()
+                            .unwrap_or_else(|| "Disconnected".into());
+                        if let Some(chat) = ui.active_chat.get_untracked() {
+                            chat.online.set(vec![]);
+                            chat.status.set(format!("{error}. Retrying..."));
+                        }
+                        if js_sys::Date::now() - started > 10000.0 {
+                            delay = 1000;
+                        }
+                        gloo_timers::future::TimeoutFuture::new(
+                            delay + (js_sys::Math::random() * 500.0) as u32,
+                        )
+                        .await;
+                        delay = (delay * 2).min(30000);
+                    }
+                },
+                registration,
+            )
+            .await;
+        });
+    });
+}
+
+async fn connected(ui: Ui, token: &str) -> Result<(), String> {
+    use std::{cell::Cell, rc::Rc};
     let base = option_env!("THISCORD_API_URL")
         .unwrap_or("http://localhost:3000")
         .trim_end_matches('/');
-    let url = format!("{}{SOCKET_PATH}", base.replacen("http", "ws", 1));
-    let socket = WebSocket::open(&url).map_err(|_| "Cannot open chat connection")?;
+    let socket = WebSocket::open(&format!("{}{SOCKET_PATH}", base.replacen("http", "ws", 1)))
+        .map_err(|_| "Cannot open chat connection")?;
     let (mut sink, mut stream) = socket.split();
-    let token = chat.ui.token.get_untracked().ok_or("Sign in again")?;
-    let frame = ClientFrame {
-        version: SOCKET_VERSION,
-        event: ClientEvent::Authenticate {
-            token,
-            guild_id: chat.guild,
-            channel_id: chat.channel,
-        },
-    };
     sink.send(Message::Text(
-        serde_json::to_string(&frame).map_err(|_| "Invalid socket request")?,
+        serde_json::to_string(&ClientFrame {
+            version: SOCKET_VERSION,
+            event: ClientEvent::Connect {
+                token: token.into(),
+            },
+        })
+        .map_err(|_| "Invalid socket request")?,
     ))
     .await
     .map_err(|_| "Connection failed")?;
+    let authenticated = Rc::new(Cell::new(false));
+    let sent = Rc::new(Cell::new(None::<(u64, Subscription)>));
     let reader = async {
         loop {
             let incoming = futures_util::future::select(
@@ -182,80 +249,167 @@ async fn connected(chat: Chat) -> Result<(), String> {
                 Box::pin(gloo_timers::future::TimeoutFuture::new(25000)),
             )
             .await;
-            let message = match incoming {
+            let text = match incoming {
                 futures_util::future::Either::Left((Some(Ok(Message::Text(text))), _)) => text,
                 _ => return Err("Connection interrupted".to_string()),
             };
-            if !chat.alive() {
-                return Err("Channel closed".into());
-            }
             let frame: ServerFrame =
-                serde_json::from_str(&message).map_err(|_| "Invalid socket response")?;
+                serde_json::from_str(&text).map_err(|_| "Invalid socket response")?;
             if frame.version != SOCKET_VERSION {
                 return Err("Unsupported socket version".into());
             }
             match frame.event {
-                ServerEvent::Ready { history } => {
-                    chat.messages.set(history.messages);
-                    chat.older.set(history.older);
-                    let delivered = chat.messages.get_untracked();
-                    chat.pending
-                        .update(|p| p.retain(|p| !delivered.iter().any(|m| m.client_id == p.id)));
-                    chat.status.set("Connected".into());
-                    chat.scroll();
-                    chat.read();
-                }
-                ServerEvent::Message { message, .. } => {
-                    chat.merge(message);
-                    chat.read();
-                }
-                ServerEvent::Presence { members } => chat.online.set(members),
+                ServerEvent::Authenticated {} => authenticated.set(true),
                 ServerEvent::Pong {} => {}
                 ServerEvent::Revoked {} => {
-                    chat.messages.set(vec![]);
-                    chat.online.set(vec![]);
-                    chat.permissions.set(Permissions::new());
-                    return Err("Access changed; reconnecting".into());
+                    ui.unread.set(vec![]);
+                    if let Some(chat) = ui.active_chat.get_untracked() {
+                        let _ = deliver(chat, ServerEvent::Revoked {});
+                    }
+                    return Err("Access changed".into());
                 }
-                ServerEvent::Error { error } => {
-                    chat.messages.set(vec![]);
-                    chat.permissions.set(Permissions::new());
-                    return Err(error.message);
+                ServerEvent::Error { error } => return Err(error.message),
+                ServerEvent::Subscribed {
+                    subscription,
+                    history,
+                    permissions,
+                } => {
+                    if !sent
+                        .get()
+                        .is_some_and(|(id, sub)| id == subscription && sub == desired(ui))
+                    {
+                        continue;
+                    }
+                    if let Some(chat) = ui
+                        .active_chat
+                        .get_untracked()
+                        .filter(|c| Some(c.channel) == desired(ui).channel)
+                    {
+                        chat.permissions.set(permissions);
+                        if let Some(history) = history {
+                            deliver(chat, ServerEvent::Ready { history })?;
+                        }
+                    }
                 }
+                ServerEvent::Update {
+                    subscription,
+                    event,
+                } => {
+                    if !sent
+                        .get()
+                        .is_some_and(|(id, sub)| id == subscription && sub == desired(ui))
+                    {
+                        continue;
+                    }
+                    match *event {
+                        ServerEvent::Unread { channels } => ui.unread.set(channels),
+                        event => {
+                            if let Some(chat) = ui
+                                .active_chat
+                                .get_untracked()
+                                .filter(|c| Some(c.channel) == desired(ui).channel)
+                            {
+                                deliver(chat, event)?;
+                            }
+                        }
+                    }
+                }
+                _ => return Err("Unexpected socket event".into()),
             }
         }
     };
     let writer = async {
-        let mut count = 0;
+        let mut count = 0_u32;
+        let mut serial = 0;
         loop {
-            gloo_timers::future::TimeoutFuture::new(1000).await;
-            if !chat.alive() {
-                return Err("Channel closed".to_string());
+            // Local scheduling only: no network request unless a subscription,
+            // typing state, read position or heartbeat actually needs sending.
+            gloo_timers::future::TimeoutFuture::new(100).await;
+            if !authenticated.get() {
+                continue;
             }
-            count += 1;
-            chat.read();
-            let event = if chat.typing.get_untracked() {
-                chat.typing.set(false);
-                Some(ClientEvent::Typing { active: true })
-            } else if count % 10 == 0 {
+            count = count.wrapping_add(1);
+            let wanted = desired(ui);
+            let event = if sent.get().is_none_or(|(_, sub)| sub != wanted) {
+                serial += 1;
+                sent.set(Some((serial, wanted)));
+                ui.unread.set(vec![]);
+                Some(ClientEvent::Subscribe {
+                    subscription: serial,
+                    guild_id: wanted.guild,
+                    channel_id: wanted.channel,
+                })
+            } else if count.is_multiple_of(100) {
                 Some(ClientEvent::Ping {})
+            } else if count.is_multiple_of(10)
+                && ui
+                    .active_chat
+                    .get_untracked()
+                    .is_some_and(|c| Some(c.channel) == wanted.channel && c.typing.get_untracked())
+            {
+                if let Some(chat) = ui.active_chat.get_untracked() {
+                    chat.typing.set(false);
+                }
+                Some(ClientEvent::Typing { active: true })
             } else {
                 None
             };
-            if let Some(event) = event {
-                sink.send(Message::Text(
-                    serde_json::to_string(&ClientFrame {
-                        version: SOCKET_VERSION,
-                        event,
-                    })
-                    .map_err(|_| "Invalid socket event")?,
-                ))
-                .await
-                .map_err(|_| "Connection interrupted")?;
+            if count.is_multiple_of(10)
+                && let Some(chat) = ui.active_chat.get_untracked()
+            {
+                chat.read();
+            }
+            if let Some(event) = event
+                && sink
+                    .send(Message::Text(
+                        serde_json::to_string(&ClientFrame {
+                            version: SOCKET_VERSION,
+                            event,
+                        })
+                        .map_err(|_| "Invalid socket request")?,
+                    ))
+                    .await
+                    .is_err()
+            {
+                return Err("Connection interrupted".to_string());
             }
         }
     };
     futures_util::try_join!(reader, writer).map(|_: ((), ())| ())
+}
+
+fn deliver(chat: Chat, event: ServerEvent) -> Result<(), String> {
+    match event {
+        ServerEvent::Ready { history } => {
+            chat.messages.set(history.messages);
+            chat.older.set(history.older);
+            let delivered = chat.messages.get_untracked();
+            chat.pending
+                .update(|p| p.retain(|p| !delivered.iter().any(|m| m.client_id == p.id)));
+            chat.status.set("Connected".into());
+            chat.scroll();
+            chat.read();
+        }
+        ServerEvent::Message { message, .. } => {
+            chat.merge(message);
+            chat.read();
+        }
+        ServerEvent::Presence { members } => chat.online.set(members),
+        ServerEvent::Pong {} => {}
+        ServerEvent::Revoked {} => {
+            chat.messages.set(vec![]);
+            chat.online.set(vec![]);
+            chat.permissions.set(Permissions::new());
+            return Err("Access changed; reconnecting".into());
+        }
+        ServerEvent::Error { error } => {
+            chat.messages.set(vec![]);
+            chat.permissions.set(Permissions::new());
+            return Err(error.message);
+        }
+        _ => {}
+    }
+    Ok(())
 }
 
 #[component]
@@ -281,64 +435,12 @@ pub(super) fn ChatPanel(ui: Ui, guild: GuildId, channel: ChannelId, name: String
     let draft = RwSignal::new(String::new());
     let editing = RwSignal::new(None::<MessageId>);
     let loading = RwSignal::new(false);
-    let (abort, registration) = AbortHandle::new_pair();
+    ui.active_chat.set(Some(chat));
     on_cleanup(move || {
-        abort.abort();
         if chat.alive() {
+            ui.active_chat.set(None);
             ui.chat_epoch.update(|e| *e += 1);
         }
-    });
-    leptos::task::spawn_local(async move {
-        let _ = Abortable::new(
-            async move {
-                let mut delay = 1000;
-                loop {
-                    if !chat.alive() {
-                        break;
-                    }
-                    if let Some(account) = ui.account.get_untracked() {
-                        let token = ui.token.get_untracked();
-                        if let Ok(PermissionResponse::Effective { permissions, .. }) =
-                            crate::account_client::api_request(
-                                PERMISSIONS_PATH,
-                                &PermissionRequest::Preview {
-                                    guild_id: guild,
-                                    account_id: account.id,
-                                    channel_id: Some(channel),
-                                },
-                                token.as_deref(),
-                            )
-                            .await
-                        {
-                            if !chat.alive() {
-                                break;
-                            }
-                            chat.permissions.set(permissions);
-                        }
-                    }
-                    let started = js_sys::Date::now();
-                    let error = connected(chat)
-                        .await
-                        .err()
-                        .unwrap_or_else(|| "Disconnected".into());
-                    if !chat.alive() {
-                        break;
-                    }
-                    chat.online.set(vec![]);
-                    chat.status.set(format!("{error}. Retrying…"));
-                    if js_sys::Date::now() - started > 10000.0 {
-                        delay = 1000;
-                    }
-                    gloo_timers::future::TimeoutFuture::new(
-                        delay + (js_sys::Math::random() * 500.0) as u32,
-                    )
-                    .await;
-                    delay = (delay * 2).min(30000);
-                }
-            },
-            registration,
-        )
-        .await;
     });
     let submit = move |ev: leptos::ev::SubmitEvent| {
         ev.prevent_default();

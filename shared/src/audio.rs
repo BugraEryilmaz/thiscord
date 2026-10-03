@@ -88,8 +88,16 @@ pub struct AudioDevice {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct StreamLevel {
     pub id: String,
+    #[serde(default)]
+    pub target: Option<SpeakerVolumeTarget>,
     pub label: String,
     pub volume: f32,
+}
+/// Stable local preference identity; slots and display names can change.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub struct SpeakerVolumeTarget {
+    pub guild_id: crate::GuildId,
+    pub account_id: crate::AccountId,
 }
 /// Local, numeric diagnostics only; never includes PCM or recorded speech.
 #[derive(Debug, Clone, Serialize, Deserialize)]

@@ -42,7 +42,10 @@ pub async fn save_session(token: String) -> Result<(), String> {
     .map_err(|_| "Credential storage task failed".to_string())?
 }
 #[tauri::command]
-pub async fn clear_session() -> Result<(), String> {
+pub async fn clear_session(app: tauri::AppHandle) -> Result<(), String> {
+    use tauri::Manager;
+    // Clearing credentials also cancels a sleeping/in-flight voice retry.
+    crate::native_voice::voice_leave(app.clone(), app.state()).await?;
     tauri::async_runtime::spawn_blocking(|| match entry()?.delete_credential() {
         Ok(()) | Err(keyring::Error::NoEntry) => Ok(()),
         Err(_) => Err("Could not remove the stored session".into()),

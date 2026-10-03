@@ -13,11 +13,25 @@ Device lists refresh every three seconds. Open a voice channel and click Join
 voice. Select another voice channel and join to move yourself. The voice bar stays
 available while reading text channels. Disconnect releases the devices.
 
-Each speaker has an independent 0–200% volume slider. These gains last for that
-voice connection; device IDs, master gain, activation threshold, mute/deafen,
+Short local two-note sounds announce your own successful voice join and other
+participants joining/leaving the connected channel. Reconnecting plays a fresh
+join sound. Initial members produce one cue, not one per participant; repeated
+snapshots, slot reordering and mute/deafen updates stay silent. Bursts coalesce
+into bounded join/leave cues. Sounds follow the selected output device, master
+volume and deafen, and are included in the echo reference/debug speaker track.
+They are not inserted into the outgoing microphone stream. PCM is synthesized
+before device startup; callback playback uses no allocation, locks or file I/O.
+
+Each speaker has an independent 0-200% volume slider. Gains persist locally per
+guild/account ID in `speaker-volumes.json`, including 0% mutes, and restore on
+rejoin/reconnect/restart regardless of username or stream slot. The same person
+can have different gains in different guilds. Preferences belong to this local
+installation, are not synced to the backend and are shared by accounts using this
+OS profile. Test-stream gains are temporary. Device IDs, master gain, activation
+threshold, mute/deafen,
 transmit mode and processing choices persist in the OS app config directory's
-`audio.json`. No tokens or recorded audio go there. Stop audio before changing
-devices. A vanished device stops capture/playback and displays an error; it does
+`audio.json`. No tokens or recorded audio go there. Device and processing settings
+can be changed during a call without leaving the voice channel. A vanished device stops capture/playback and displays an error; it does
 not silently switch to a different microphone. Select devices and join again.
 
 CPAL buffer underrun/overrun (`Xrun`) and real-time scheduling (`RealtimeDenied`)
@@ -40,6 +54,39 @@ The in-app Hold to talk button handles pointer cancellation, key release and
 focus loss. Optional global Ctrl+Shift+Space uses the Tauri 2 Rust shortcut plugin
 on Windows/macOS/X11. Registration conflicts are reported. Wayland explicitly
 falls back to the in-app button; portal integration remains future work.
+
+## Changing settings during a call
+
+Model loading and replacement device opening run on one background preparation
+thread while the existing media worker continues servicing capture, playback,
+packets and control requests. Successful changes commit between complete processing
+ticks. A device switch replaces local streams/queues only: the WebRTC connection,
+Opus encoders/decoders, roster and per-user volume settings stay in place. Echo
+adaptation restarts, and switching devices may produce a brief audio gap.
+
+DeepFilterNet's tract state is not `Send`. Both denoisers are therefore initialized
+on the audio worker before live playback starts and retained there for subsequent
+switches; bypassed stages perform no inference. This adds initialization time and
+resident memory for DeepFilterNet even when Sonora is selected. Neural echo-model
+loading and movable AEC state are prepared in the background. No unsafe thread
+transfer or PCM over Tauri IPC is used; device callbacks remain unchanged.
+
+Failure to prepare/start a replacement preserves the working setup. Drivers that
+cannot open another shared stream may reject a live switch; the app does not tear
+down working audio to force an exclusive device open. Cancellation, leaving voice,
+suspend or a session replacement prevents a late preparation from reviving audio.
+Preparation has an eight-second deadline; a timed-out worker keeps the single job
+slot until it finishes, preventing unbounded background work. Mute/deafen can
+restrict audio immediately while a settings change is pending. Changes are saved
+in order; unsupported global PTT registration rolls back to the previous shortcut.
+
+A successful device switch finishes any debug recording because the device clocks
+and formats changed. Start another recording for the new setup. Model changes are
+recorded as settings events and can be reproduced by the offline replay tool.
+Regression tests use fake streams to cover swap failure, stale completion, timeout,
+transport/roster/volume retention and processing switches. Actual shared/exclusive
+driver behavior and audible transitions still need Windows/macOS/Linux hardware
+acceptance; these software tests do not establish gapless device switching.
 
 ## Libraries and compatibility decision
 
@@ -71,15 +118,13 @@ falls back to the in-app button; portal integration remains future work.
   Hardware acoustic quality still needs acceptance, so headphones remain recommended.
   Conventional residual estimation remains the default. A vendored Sonora
   extension also supports an optional Rust neural residual estimator inside AEC3,
-  independent of the selected denoiser. Enable the experimental checkbox while
-  stopped and enable Echo cancellation. Native clients include the pinned model;
+  independent of the selected denoiser. Enable the experimental checkbox and Echo cancellation, including during a call. Native clients include the pinned model;
   an optional local file override is available under Advanced model settings.
   See [neural echo integration](voice-isolation.md#neural-residual-echo-estimator-extension-2026-10-02)
   for setup, model provenance limits, reference tests and measured worker costs.
 - DeepFilterNet3: optional native Rust/tract denoising, bundled in desktop builds.
-  Select it in Audio & voice while stopped, enable Noise suppression, then join
-  or test the microphone. Suppression can be toggled live; model changes require
-  stopping audio. Existing settings retain Sonora. See [deep-filter.md](deep-filter.md)
+  Select it in Audio & voice and enable Noise suppression. Both bypass and model
+  changes apply during a call. Existing settings retain Sonora. See [deep-filter.md](deep-filter.md)
   for the pinned runtime/model, stage interface, tests and performance results.
 
 The native path is selected per the project requirement. Windows and Linux
@@ -250,11 +295,35 @@ so cached grants cannot continue forwarding after revocation. Each receiver gets
 only its channel's streams; own audio is not looped back. Self mute/deafen is also
 enforced by the SFU. This assumes a single backend process.
 
-Disconnect, logout, errors, deleted channels and expiry close the peer and audio
-devices. Missing UI heartbeats or suspend gaps stop the audio worker within three
-seconds. Rejoining is explicit after access/network/device changes; automatic ICE
-restart/reconnect is not yet implemented. Server shutdown closes sockets/UDP with
-the process; coordinated drain and production metrics remain pending.
+Temporary signaling/ICE/heartbeat/media-write failures now reconnect automatically.
+The selected room stays in the voice bar with a reconnect message and an available
+Disconnect button. Each retry obtains a new authenticated offer, current permissions
+and fresh ICE/TURN configuration, creates a new peer and reopens local audio using
+the latest settings. The old peer, media readers, devices and debug recording are
+closed first. This is full reconnection, not in-place ICE restart. Participant
+snapshots are rebuilt, and saved per-speaker volumes are restored for the new
+connection; master volume, mute/deafen and processing settings persist.
+
+Retries use 1/2/4/8/16/30-second backoff plus up to 500 ms jitter, capped thereafter;
+30 seconds of connected audio resets the backoff. They continue until successful or
+cancelled. DNS/TCP failures, timeouts, HTTP 429/5xx, transient server errors and a
+previous connection still being cleaned up are retryable. A disconnected media
+state gets five seconds to recover before creating a new peer. Every attempt still
+passes the backend's join rate limits and current authorization checks.
+
+Explicit Disconnect/logout, revoked/expired sessions, denied access, deleted
+channels, incompatible protocol, certificate verification failures and local
+device/DSP failures end retrying. Missing UI heartbeats or suspend gaps stop the
+audio worker within three seconds; automatic recovery from local device suspension
+remains pending. Update installation remains blocked while a reconnecting channel
+is selected. Cancellation covers negotiation, active calls and backoff. Connection
+leases invalidate queued starts, rosters and packets from previous attempts, and
+track readers receive an explicit shutdown signal. Regression tests cover retry
+policy, cancellation, stale leases and transient versus terminal upgrade errors.
+Physical network switching and multi-host outage recovery still need acceptance.
+
+Server shutdown closes sockets/UDP with the process; coordinated drain and
+production metrics remain pending.
 
 This is transport encryption between client and SFU, **not end-to-end encryption**:
 the SFU terminates DTLS-SRTP and can access encoded Opus. Do not log SDP, tokens,
@@ -305,6 +374,11 @@ intermittent macOS signaling timeout reported on 2026-09-29 recovered before the
 changes were installed; its cause and macOS runtime behavior remain unverified.
 
 ## Verification and remaining work
+
+The [voice load generator](voice-load.md) drives the real SFU from a separate
+machine, with disposable accounts and per-stream packet/latency reports. Its
+synthetic transport workload does not establish microphone quality or measured
+desktop/Pi capacity until run on the target hardware.
 
 The planned voice-isolation work, candidate models, published computation costs
 and acceptance criteria are in [voice-isolation.md](voice-isolation.md) and

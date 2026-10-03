@@ -133,6 +133,10 @@ speaker isolation and physical acoustic acceptance remain future work.
   continuous extraction separately on all three desktop OSes.
 - [ ] Evaluate reference-aware neural echo suppression/AEC against AEC3 for
   double-talk and nonlinear speaker echo; keep external background speech tests separate.
+- [x] Apply device/model changes during voice without reconnecting; retain transport,
+  roster and volumes, with bounded background preparation and failure/cancellation tests.
+- [ ] Validate live device/model switching and audible adaptation on Windows, macOS
+  and Linux hardware, including exclusive drivers and unplugging during a change.
 - [x] Add opt-in bounded echo debug recording of playback, raw microphone and
   gated encoder input, timing/settings metadata and offline Rust DSP replay.
 - [ ] Validate diagnostic capture/replay with consented real echo samples on
@@ -171,7 +175,8 @@ speaker isolation and physical acoustic acceptance remain future work.
 - [x] Configurable STUN/TURN and backend-generated short-lived TURN credentials.
 - [x] Validate current sessions/voice permissions; reject duplicate negotiation.
 - [x] Document WSL/Windows UDP addressing and firewall requirements.
-- [ ] Automatic ICE restart/reconnect and long-call relay credential refresh.
+- [x] Automatic full peer reconnection with fresh offers and relay credentials.
+- [ ] In-place ICE restart and proactive long-call relay credential refresh.
 - [x] Docker coturn deployment, shared-secret configuration and local relay tests.
 - [ ] Restrictive NAT, forced WebRTC relay fallback and off-site public UDP acceptance.
 - [ ] Packet-loss/jitter network trials, connection quality metrics and adaptive bitrate.
@@ -186,6 +191,8 @@ speaker isolation and physical acoustic acceptance remain future work.
 - [x] Abandoned connection cleanup and conservative access-change invalidation.
 - [x] Document bandwidth estimate and transport encryption versus E2EE.
 - [ ] Sustained multi-party load tests and measured capacity/congestion budgets.
+- [x] Opt-in Rust voice load generator and disposable benchmark server; per-stream
+  delivery/latency reports and loopback smoke checks (docs/voice-load.md).
 - [ ] Production metrics and coordinated graceful room draining on shutdown.
 
 ## 8. Voice channels end to end
@@ -196,10 +203,13 @@ speaker isolation and physical acoustic acceptance remain future work.
 - [x] Capacity, join/speak permissions and live permission-change enforcement.
 - [x] Real-peer forwarding, channel isolation, self-mute/deafen, revocation,
   Speak denial, publisher slot reuse, deleted-channel and cleanup integration tests.
-- [x] Device/network/access failures stop audio and allow explicit rejoin.
+- [x] Device/access failures stop audio; transient network/ICE/signaling failures
+  reconnect with bounded backoff, fresh authorization and cancellable media leases.
 - [ ] Moderator mute/deafen/move/disconnect controls with hierarchy enforcement.
 - [ ] Remote speaking indicators and connection-quality UI.
-- [ ] Automatic recovery after network changes, suspend/resume and server restart.
+- [x] Automatic transport reconnection after network failure or server restart.
+- [ ] Validate real network switching/server outages across native hosts; support
+  explicit local device suspend/resume recovery without unexpected capture.
 - [ ] Multi-user acceptance on Windows/macOS/Linux with real microphones.
 
 ## 9. Hosting and releases

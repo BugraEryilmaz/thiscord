@@ -257,6 +257,10 @@ replaced by these two files.
 
 ### Command-line checks
 
+For desktop/Pi voice capacity measurements from another machine, use the
+[Rust voice load generator](docs/voice-load.md). It includes a disposable test
+server and Mac instructions; measured capacity on real hardware remains pending.
+
 ```sh
 cargo fmt --all -- --check
 cargo test -p thiscord-shared --locked
@@ -281,9 +285,12 @@ the test rather than silently skipping it.
 [CI](.github/workflows/ci.yml) runs formatting, shared/backend Clippy and tests
 against PostgreSQL 17, a generated-schema check, and a release WASM/Tailwind
 build. A Windows/macOS/Linux matrix lints and builds native executables with
-those web assets embedded, then uploads them as artifacts. Tagged client releases
-run that CI first, then build Windows, Linux and both macOS architectures, sign
-updater artifacts and publish a complete GitHub release. Clients check automatically
+those web assets embedded, then uploads them as artifacts. Independent native audio
+jobs run on all three platforms. CI runs on pull requests, pushes to `main`, and
+manual dispatch; feature-branch pushes do not duplicate PR runs. Tagged client
+releases build Windows x64, Linux x64 and macOS Apple Silicon installers alongside
+checks once the WASM assets are ready. Publication waits for every check and build.
+See [CI caching and runner setup](docs/ci.md). Clients check automatically
 but install/restart only on request. See [release setup and signing secrets](docs/releases.md)
 before pushing the first `client-vMAJOR.MINOR.PATCH` tag. GUI/installer smoke tests
 and macOS runtime verification require their respective hosts; services are not deployed.

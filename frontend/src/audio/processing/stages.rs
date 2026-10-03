@@ -22,6 +22,13 @@ pub struct CaptureChain {
     stages: Vec<(bool, Box<dyn CaptureStage>)>,
 }
 impl CaptureChain {
+    pub(super) fn replace(
+        &mut self,
+        index: usize,
+        stage: Box<dyn CaptureStage>,
+    ) -> Box<dyn CaptureStage> {
+        std::mem::replace(&mut self.stages[index].1, stage)
+    }
     pub fn push(&mut self, enabled: bool, stage: impl CaptureStage + 'static) {
         self.stages.push((enabled, Box::new(stage)));
     }

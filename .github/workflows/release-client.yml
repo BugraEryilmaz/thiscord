@@ -39,90 +39,18 @@ jobs:
     uses: ./.github/workflows/ci.yml
     with:
       api_url: https://thiscord.com.tr
-
-  installers:
-    needs: checks
-    strategy:
-      fail-fast: false
-      matrix:
-        include:
-          - os: windows-latest
-            target: x86_64-pc-windows-msvc
-            platform: windows-x86_64
-          - os: ubuntu-24.04
-            target: x86_64-unknown-linux-gnu
-            platform: linux-x86_64
-          - os: macos-latest
-            target: aarch64-apple-darwin
-            platform: darwin-aarch64
-    runs-on: ${{ matrix.os }}
-    steps:
-      - uses: actions/checkout@v5
-      - name: Linux build and packaging dependencies
-        if: runner.os == 'Linux'
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y libwebkit2gtk-4.1-dev build-essential libssl-dev libdbus-1-dev libxdo-dev libayatana-appindicator3-dev librsvg2-dev patchelf libasound2-dev cmake libfuse2t64
-      - name: Install pinned Rust and target
-        env:
-          BUILD_TARGET: ${{ matrix.target }}
-        shell: pwsh
-        run: |
-          rustup show
-          if ($LASTEXITCODE) { exit $LASTEXITCODE }
-          rustup target add $env:BUILD_TARGET
-          if ($LASTEXITCODE) { exit $LASTEXITCODE }
-      - uses: Swatinem/rust-cache@v2
-        with:
-          key: release-${{ matrix.target }}
-      - name: Install pinned Tauri CLI
-        run: cargo install tauri-cli --version 2.12.0 --locked
-      - uses: actions/download-artifact@v4
-        with:
-          name: frontend-assets
-          path: frontend/dist
-      - name: Build and sign installers
-        working-directory: frontend
-        shell: pwsh
-        env:
-          BUILD_TARGET: ${{ matrix.target }}
-          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
-          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
-          APPLE_CERTIFICATE: ${{ secrets.APPLE_CERTIFICATE }}
-          APPLE_CERTIFICATE_PASSWORD: ${{ secrets.APPLE_CERTIFICATE_PASSWORD }}
-          APPLE_SIGNING_IDENTITY: ${{ secrets.APPLE_SIGNING_IDENTITY }}
-          APPLE_ID: ${{ secrets.APPLE_ID }}
-          APPLE_PASSWORD: ${{ secrets.APPLE_PASSWORD }}
-          APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
-        run: |
-          # Assets already passed the production WASM build in the reusable CI.
-          '{"build":{"beforeBuildCommand":""}}' | Set-Content tauri.ci.conf.json
-          if ($IsMacOS -and !$env:APPLE_SIGNING_IDENTITY) { $env:APPLE_SIGNING_IDENTITY = '-' }
-          Get-ChildItem Env:APPLE_* | Where-Object { !$_.Value } | Remove-Item
-          cargo tauri build --ci --target $env:BUILD_TARGET --config tauri.ci.conf.json -- --locked
-          if ($LASTEXITCODE) { exit $LASTEXITCODE }
-      - name: Verify signatures and collect release artifacts
-        shell: pwsh
-        env:
-          RELEASE_TAG: ${{ github.ref_name }}
-          BUILD_TARGET: ${{ matrix.target }}
-          UPDATE_PLATFORM: ${{ matrix.platform }}
-        run: ./scripts/release-client.ps1 -Mode Collect -Tag $env:RELEASE_TAG -Target $env:BUILD_TARGET -Platform $env:UPDATE_PLATFORM
-      - uses: actions/upload-artifact@v4
-        with:
-          name: client-${{ matrix.platform }}
-          path: release-artifacts/
-          if-no-files-found: error
+      build_installers: true
+    secrets: inherit
 
   publish:
-    needs: installers
+    needs: checks
     runs-on: ubuntu-24.04
     permissions:
       contents: write
     steps:
       - uses: actions/checkout@v5
       - run: rustup show
-      - uses: Swatinem/rust-cache@v2
+      - uses: ./.github/actions/cargo-cache
         with:
           key: release-verifier
       - uses: actions/download-artifact@v4

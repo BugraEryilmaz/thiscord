@@ -29,7 +29,7 @@ pub struct History {
     pub older: Option<PageCursor>,
     pub event_cursor: i64,
 }
-#[derive(Clone, Serialize, Deserialize)]
+#[derive(Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct Unread {
     pub channel_id: ChannelId,
     pub count: i64,
@@ -98,6 +98,14 @@ pub struct ClientFrame {
 #[derive(Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case", deny_unknown_fields)]
 pub enum ClientEvent {
+    Connect {
+        token: String,
+    },
+    Subscribe {
+        subscription: u64,
+        guild_id: Option<GuildId>,
+        channel_id: Option<ChannelId>,
+    },
     Authenticate {
         token: String,
         guild_id: GuildId,
@@ -116,10 +124,32 @@ pub struct ServerFrame {
 #[derive(Clone, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum ServerEvent {
-    Ready { history: History },
-    Message { message: ChatMessage, cursor: i64 },
-    Presence { members: Vec<OnlineMember> },
+    Authenticated {},
+    Subscribed {
+        subscription: u64,
+        history: Option<History>,
+        permissions: crate::permissions::Permissions,
+    },
+    Update {
+        subscription: u64,
+        event: Box<ServerEvent>,
+    },
+    Unread {
+        channels: Vec<Unread>,
+    },
+    Ready {
+        history: History,
+    },
+    Message {
+        message: ChatMessage,
+        cursor: i64,
+    },
+    Presence {
+        members: Vec<OnlineMember>,
+    },
     Pong {},
     Revoked {},
-    Error { error: ApiError },
+    Error {
+        error: ApiError,
+    },
 }

@@ -95,14 +95,33 @@ once: a crash after send and before acknowledgement can duplicate an email. Run
 one mail worker per deployment until database claims/multi-worker delivery are added.
 File mode is deliberately a local development default, not an email provider.
 
-## Google later
+## Google sign-in setup
 
 Create a Google OAuth **Web application** client. Keep `GOOGLE_CLIENT_ID` and
 `GOOGLE_CLIENT_SECRET` on the backend. Register the exact `GOOGLE_REDIRECT_URL`:
 
 - Local: `http://localhost:3000/api/v1/account/google/callback`.
-- Hosted, after DNS/TLS is configured: e.g.
-  `https://api.thiscord.com.tr/api/v1/account/google/callback`.
+- Production: `https://thiscord.com.tr/api/v1/account/google/callback`.
+
+In Google Cloud, open **Google Auth Platform > Clients** (or **APIs & Services >
+Credentials**), select the Web application client whose ID matches the backend's
+`GOOGLE_CLIENT_ID`, and add that URL under **Authorized redirect URIs**. The
+consent screen's **Authorized domains** entry `thiscord.com.tr` does not register
+a redirect URI. Authorized JavaScript origins are also a separate setting.
+
+For `redirect_uri_mismatch`, compare the `redirect_uri` in Google's error details
+with the selected client's registered URI and the running backend's
+`GOOGLE_REDIRECT_URL`. Scheme, hostname, path, case and trailing slash must match
+exactly. Production uses HTTPS, no `api.` subdomain and no trailing slash. Save
+the console changes and start a fresh sign-in attempt. Restart the backend if
+you change its environment; a console-only change does not require a client
+release. Do not share the full authorization URL (it includes state and PKCE
+parameters) or client secrets while troubleshooting. See
+[Google's redirect URI requirements](https://developers.google.com/identity/protocols/oauth2/web-server#httprest).
+
+Use a Web application OAuth client even for the installed desktop application:
+Google returns to the backend, not directly to the desktop's ephemeral loopback
+listener. Do not register that changing local port as Google's redirect URI.
 
 Configure the consent screen/test users as required by your Google project.
 Missing configuration produces a safe unavailable response; there is no fake
