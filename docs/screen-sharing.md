@@ -67,8 +67,10 @@ Speak also grants screen/system-audio publishing in this first version. There
 is no separate screen-sharing permission/editor yet. Explicit `screen` signaling
 state gates both publisher ingress and receiver egress. Queued packets are
 checked against the current publisher identity, share state, receiver deafen
-state and access epoch, including slot reuse. Access changes remain serialized
-with the chat access gate and conservative voice revocation.
+state and access epoch, including slot reuse. Voice uses mutation-only packet
+admission/draining: ordinary database authorization checks do not hold the chat
+gate or stall media. Access-changing commits invalidate queued media and require
+fresh authorization, with conservative voice revocation.
 
 Leave, channel switch, logout/session replacement, connection failure, window
 destruction and capture/sender errors cancel the capture lease. A scheduling gap

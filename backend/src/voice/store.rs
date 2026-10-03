@@ -24,7 +24,8 @@ pub(super) fn authorize(
         auth::lock_session(c, token, &session)?;
         execute(
             c,
-            "SELECT id FROM guilds WHERE id=$1::uuid FOR UPDATE",
+            // Stable permission snapshot against guild writes, without serializing readers.
+            "SELECT id FROM guilds WHERE id=$1::uuid FOR SHARE",
             &[&guild.to_string()],
         )?;
         let state = load(c, guild)?;

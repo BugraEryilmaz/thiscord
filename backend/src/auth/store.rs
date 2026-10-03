@@ -112,11 +112,13 @@ pub(crate) fn authenticate(c: &mut PgConnection, token: &str) -> Result<Session,
     let hash = digest(token);
     // Commit replay revocation even though authentication itself fails.
     let mut replay_revoked = false;
+    let mut _voice_revocation = None;
     let session=c.transaction::<_, Failure, _>(|c| {
         let sessions: Vec<Session> = query(c, "SELECT to_jsonb(s) AS data FROM sessions s JOIN session_tokens t ON t.session_id=s.id WHERE t.token_hash=$1 AND NOT s.revoked AND s.expires_at>now() AND s.last_seen_at>now()-interval '7 days' FOR UPDATE OF s", &[&hash])?;
         let Some(session) = sessions.into_iter().next() else { return Ok(None); };
         let active: Vec<bool> = query(c, "SELECT to_jsonb(active) AS data FROM session_tokens WHERE token_hash=$1", &[&hash])?;
         if active != [true] {
+            _voice_revocation = Some(crate::voice::access::global().pause());
             execute(c, "UPDATE sessions SET revoked=TRUE WHERE id=$1::uuid", &[&session.id.to_string()])?;
             replay_revoked=true;
             return Ok(None);
@@ -284,6 +286,19 @@ pub(super) fn dispatch(
     command: AccountRequest,
 ) -> Result<AccountResponse, Failure> {
     let mut c = connection(pool)?;
+    // Owned by the blocking worker through commit, even if the HTTP task exits.
+    let _voice_change = matches!(
+        &command,
+        AccountRequest::Logout
+            | AccountRequest::LogoutAll
+            | AccountRequest::RevokeSession { .. }
+            | AccountRequest::DeleteAccount { .. }
+            | AccountRequest::ChangePassword { .. }
+            | AccountRequest::ResetPassword { .. }
+            | AccountRequest::UnlinkIdentity { .. }
+            | AccountRequest::Rotate
+    )
+    .then(|| crate::voice::access::global().pause());
     match command {
         AccountRequest::Register {
             username,
@@ -334,6 +349,8 @@ pub(super) fn dispatch(
             if !verify(&password, &credential.password_hash) {
                 return Err(Failure::Unauthorized);
             }
+            // A successful login can evict the oldest device session.
+            let _voice_change = crate::voice::access::global().pause();
             c.transaction(|c| {
                 execute(c,"SELECT id FROM accounts WHERE id=$1::uuid FOR UPDATE", &[&credential.account_id.to_string()])?;
                 let unchanged: Vec<bool> = query(c,"SELECT to_jsonb(TRUE) AS data FROM identities WHERE account_id=$1::uuid AND provider='password' AND password_hash=$2", &[&credential.account_id.to_string(), &credential.password_hash])?;

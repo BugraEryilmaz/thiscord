@@ -582,6 +582,64 @@ async fn sfu_forwarding_permissions_isolation_and_cleanup() {
     .await;
     still_connected(&mut a.socket).await;
     while b.packets.try_recv().is_ok() {}
+    send(
+        &mut a.socket,
+        ClientEvent::Screen {
+            active: true,
+            audio: true,
+        },
+    )
+    .await;
+    still_connected(&mut a.socket).await;
+    // Hold the guild row without changing access. Wait until a periodic voice
+    // check actually blocks in PostgreSQL, then require media while it is held.
+    // Previously that check held the global write gate and stalled every stream.
+    let mut blocker = db.pool.get().unwrap();
+    blocker.batch_execute("BEGIN").unwrap();
+    diesel::sql_query("SELECT id FROM guilds WHERE id=$1::uuid FOR UPDATE")
+        .bind::<Text, _>(guild.as_str().unwrap())
+        .execute(&mut blocker)
+        .unwrap();
+    #[derive(QueryableByName)]
+    struct Waiting {
+        #[diesel(sql_type = diesel::sql_types::Bool)]
+        waiting: bool,
+    }
+    tokio::time::timeout(Duration::from_secs(3), async {
+        loop {
+            let waiting: Waiting = diesel::sql_query(
+                "SELECT EXISTS (SELECT 1 FROM pg_stat_activity WHERE pg_backend_pid() = ANY(pg_blocking_pids(pid))) AS waiting",
+            )
+            .get_result(&mut blocker)
+            .unwrap();
+            if waiting.waiting {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .expect("A periodic voice query must reach the held guild lock");
+    let during_check = tokio::time::timeout(Duration::from_millis(350), async {
+        forwarded(&mut a, &mut b).await;
+        screen_forwarded(&mut a, &mut b, 0).await;
+        screen_forwarded(&mut a, &mut b, 1).await;
+    })
+    .await;
+    blocker.batch_execute("ROLLBACK").unwrap();
+    drop(blocker);
+    during_check
+        .expect("A blocked authorization query must not stall voice, screen video or shared audio");
+    send(
+        &mut a.socket,
+        ClientEvent::Screen {
+            active: false,
+            audio: false,
+        },
+    )
+    .await;
+    still_connected(&mut a.socket).await;
+    while b.packets.try_recv().is_ok() {}
     // A session response for another account must not disconnect active calls.
     let (status, _) = call(&app, ACCOUNT_PATH, &outsider, json!({"action":"rotate"})).await;
     assert_eq!(status, StatusCode::OK);

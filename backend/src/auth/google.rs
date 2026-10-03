@@ -311,6 +311,9 @@ pub(super) fn complete(c: &mut PgConnection, ticket: &str) -> Result<AccountResp
     if ticket.len() != 43 {
         return Err(Failure::Unauthorized);
     }
+    // Pending ticket polls do not affect voice. A completed login can evict a
+    // device; keep its drain guard outside the closure so it survives commit.
+    let mut _voice_change = None;
     c.transaction(|c| {
         let initial = query_attempt(c,"SELECT to_jsonb(o) AS data FROM oauth_attempts o WHERE ticket_hash=$1 AND expires_at>now()", &digest(ticket))?;
         if initial.status=="pending" || initial.status=="processing" { return Ok(AccountResponse::Pending); }
@@ -319,7 +322,10 @@ pub(super) fn complete(c: &mut PgConnection, ticket: &str) -> Result<AccountResp
         if a.status=="pending" || a.status=="processing" { return Ok(AccountResponse::Pending); }
         if a.status!="ready" { return Err(Failure::Invalid("Google sign-in failed. If the email already has an account, sign in there first and link Google")); }
         execute(c,"DELETE FROM oauth_attempts WHERE ticket_hash=$1", &[&digest(ticket)])?;
-        if a.purpose=="login" { grant(c,a.account_id.ok_or(Failure::Unauthorized)?,&a.device) }
+        if a.purpose=="login" {
+            _voice_change = Some(crate::voice::access::global().pause());
+            grant(c,a.account_id.ok_or(Failure::Unauthorized)?,&a.device)
+        }
         else { Ok(AccountResponse::Done {message:"Google identity operation completed".into()}) }
     })
 }

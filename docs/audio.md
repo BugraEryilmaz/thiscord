@@ -291,9 +291,15 @@ commits. Each participant is reauthorized against the database; unrelated accoun
 or guild changes leave authorized calls connected. Lost session/channel access or
 a changed Speak grant closes only affected connections (Speak determines native
 microphone setup in the offer). Both publisher routing and receiver writes check
-the participant's validated generation under the access gate. Forwarding pauses
-until reauthorization, and packets queued under an older generation are discarded,
-so cached grants cannot continue forwarding after revocation. Each receiver gets
+the participant's validated generation using atomic media permits. Periodic DB
+checks run concurrently without taking the global chat/auth gate; guild snapshots
+use compatible shared row locks. Checks overlapping an access change retry instead
+of publishing a stale grant. Only access-changing DB workers close media admission
+and drain in-flight application writes, retaining that guard through commit or
+rollback even if the HTTP task is canceled. These changes invalidate the generation
+and pause forwarding until reauthorization; packets queued under an older generation
+are discarded. Receiver queues also reject publishers whose session has closed.
+Thus cached grants cannot continue forwarding after revocation. Each receiver gets
 only its channel's streams; own audio is not looped back. Self mute/deafen is also
 enforced by the SFU. This assumes a single backend process.
 
