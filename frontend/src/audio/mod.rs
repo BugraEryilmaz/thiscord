@@ -429,6 +429,13 @@ impl Session {
                 return Err("Speaker changed; adjust the current speaker instead".into());
             }
             profile.set(target, gain)?;
+            // The speaker slider also controls that account's shared audio.
+            for (remote, writer) in self.remotes.iter().zip(&self.devices.writers) {
+                if remote.as_ref().is_some_and(|r| r.id == target.account_id) {
+                    writer.volume(gain)?;
+                }
+            }
+            return Ok(());
         } else if target.is_some() {
             return Err("Voice connection changed".into());
         }
@@ -661,6 +668,7 @@ impl Session {
                 self.remotes
                     .iter()
                     .enumerate()
+                    .filter(|(i, _)| *i < thiscord_shared::voice::ROOM_CAPACITY)
                     .filter_map(|(i, r)| {
                         r.as_ref().map(|r| StreamLevel {
                             id: i.to_string(),
@@ -865,7 +873,17 @@ fn run(
                                     s.devices.control.cues.fetch_or(cue, Ordering::Relaxed);
                                 }
                                 for slot in 0..MAX_STREAMS {
-                                    let member = members.iter().find(|m| m.slot == slot);
+                                    let shared_audio =
+                                        slot >= thiscord_shared::voice::ROOM_CAPACITY;
+                                    let member = members.iter().find(|m| {
+                                        if shared_audio {
+                                            m.sharing_audio
+                                                && m.slot + thiscord_shared::voice::ROOM_CAPACITY
+                                                    == slot
+                                        } else {
+                                            m.slot == slot
+                                        }
+                                    });
                                     if s.remotes[slot].as_ref().map(|r| r.id)
                                         != member.map(|m| m.account_id)
                                     {
@@ -888,7 +906,11 @@ fn run(
                                             .map(|m| {
                                                 Ok::<_, String>(Remote {
                                                     id: m.account_id,
-                                                    label: m.username.clone(),
+                                                    label: if shared_audio {
+                                                        format!("{} - shared audio", m.username)
+                                                    } else {
+                                                        m.username.clone()
+                                                    },
                                                     jitter: Default::default(),
                                                     decoder: opus::Decoder::new(
                                                         RATE,

@@ -5,6 +5,7 @@ mod audio;
 mod chat;
 mod login;
 mod permissions;
+mod screen;
 mod servers;
 mod updates;
 

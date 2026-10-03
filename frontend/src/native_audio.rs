@@ -68,9 +68,17 @@ pub async fn audio_current(app: tauri::AppHandle) -> Result<AudioSettings, Strin
     audio_load(app).await
 }
 #[tauri::command]
-pub fn audio_restrict(state: State<'_, AudioState>, settings: AudioSettings) -> Result<(), String> {
+pub fn audio_restrict(
+    app: tauri::AppHandle,
+    state: State<'_, AudioState>,
+    settings: AudioSettings,
+) -> Result<(), String> {
     settings.validate()?;
     state.engine.restrict(&settings);
+    if settings.deafened {
+        crate::native_screen::screen_stop(app.state::<crate::native_screen::ScreenState>());
+        app.state::<crate::native_screen::ScreenState>().roster(&[]);
+    }
     Ok(())
 }
 #[tauri::command]

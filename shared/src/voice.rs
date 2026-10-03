@@ -25,6 +25,10 @@ pub enum ClientEvent {
         muted: bool,
         deafened: bool,
     },
+    Screen {
+        active: bool,
+        audio: bool,
+    },
     Ping {},
     Leave {},
 }
@@ -36,6 +40,12 @@ pub struct Participant {
     pub muted: bool,
     pub deafened: bool,
     pub can_speak: bool,
+    #[serde(default)]
+    pub sharing_screen: bool,
+    #[serde(default)]
+    pub sharing_audio: bool,
+    #[serde(default)]
+    pub screen_epoch: u32,
 }
 #[derive(Clone, Serialize, Deserialize)]
 pub struct ServerFrame {
@@ -49,6 +59,8 @@ pub enum ServerEvent {
         sdp: String,
         slot: usize,
         can_speak: bool,
+        #[serde(default)]
+        screen_video: bool,
         #[serde(default)]
         ice_servers: Vec<IceServer>,
     },

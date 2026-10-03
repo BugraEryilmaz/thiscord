@@ -167,3 +167,8 @@ bootstrap races, ownership/deletion protection, multiple roles, overrides,
 cross-guild IDs, hierarchy/escalation attempts, stale grants and concurrent writes.
 The existing migration test verifies rollback/reapply. WASM checks cover the editor;
 native platform runtime acceptance remains a separate check.
+
+Screen and system-audio publishing currently require `Speak` in addition to
+`ViewChannel`/`JoinVoice`. Microphone mute does not mute an explicitly active
+screen share. Deafen stops publishing and blocks reception. See
+[screen-sharing.md](screen-sharing.md) for the media state and revocation rules.

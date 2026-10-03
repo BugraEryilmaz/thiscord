@@ -1,6 +1,8 @@
 # Native audio and voice
 
 Voice channels use native Rust capture/playback and a Rust SFU in the backend.
+Screen/window sharing with system audio is available on Windows; see
+[screen-sharing.md](screen-sharing.md) for the separate native capture/video path.
 Only settings, levels and participant metadata cross Tauri IPC. PCM and encoded
 audio never pass through WASM or handwritten JavaScript. Browser preview supports
 text chat; voice requires the desktop executable. Exactly three packages remain.

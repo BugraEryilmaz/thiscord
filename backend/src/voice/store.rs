@@ -53,6 +53,9 @@ pub(super) fn authorize(
             muted: false,
             deafened: false,
             can_speak: permissions.contains(&Permission::Speak),
+            sharing_screen: false,
+            sharing_audio: false,
+            screen_epoch: 0,
         })
     })
 }

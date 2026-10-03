@@ -18,6 +18,9 @@ live sockets. See [chat protocol and limits](docs/chat.md). Desktop voice channe
 use native Rust audio, independent speaker volume controls and a Rust WebRTC SFU.
 Open **Settings > Audio & voice** to select devices and test audio, then join a
 voice channel. See [audio setup, networking and remaining checks](docs/audio.md).
+Windows desktop clients can share a screen or window with system audio from the
+voice bar, with selectable quality up to 4K/60 fps (hardware/network dependent).
+See [screen sharing, requirements and acceptance checks](docs/screen-sharing.md).
 For echo troubleshooting, Audio & voice can save a 60-second local debug recording
 of playback, raw microphone and outgoing audio, with metadata for offline DSP replay.
 Experimental DeepFilterNet3 noise suppression is available in Audio & voice;
