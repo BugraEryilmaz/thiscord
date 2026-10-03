@@ -6,6 +6,7 @@ mod chat;
 mod login;
 mod permissions;
 mod screen;
+mod screen_player;
 mod servers;
 mod updates;
 

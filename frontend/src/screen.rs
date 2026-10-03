@@ -1,4 +1,20 @@
 //! Native H.264 video transport; independent of the real-time audio worker.
+pub mod cadence;
+#[cfg(target_os = "windows")]
+pub mod capture;
+#[cfg(target_os = "windows")]
+pub mod hardware;
+pub mod preview;
+
+pub fn recovery_frame(data: &[u8]) -> bool {
+    let mut kinds = [false; 32];
+    for nal in openh264::nal_units(data) {
+        if let Some(byte) = nal.strip_prefix(&[0, 0, 1]).unwrap_or(nal).first() {
+            kinds[(byte & 31) as usize] = true;
+        }
+    }
+    kinds[5] && kinds[7] && kinds[8]
+}
 use bytes::Bytes;
 use rtc::{
     media_stream::MediaStreamTrack,
@@ -398,6 +414,7 @@ pub mod receive {
         pub arrived: Instant,
         pub epoch: u32,
         pub reset: bool,
+        pub timestamp: u32,
     }
     #[derive(Default)]
     struct State {
@@ -468,14 +485,8 @@ pub mod receive {
                 s.frames.clear();
                 return;
             }
-            let mut types = [false; 32];
-            for nal in openh264::nal_units(&data) {
-                if let Some(n) = nal.strip_prefix(&[0, 0, 1]).unwrap_or(nal).first() {
-                    types[(n & 31) as usize] = true;
-                }
-            }
             let reset = !s.synchronized;
-            if reset && !(types[5] && types[7] && types[8]) {
+            if reset && !super::recovery_frame(&data) {
                 return;
             }
             s.synchronized = true;
@@ -484,6 +495,7 @@ pub mod receive {
                 arrived: at,
                 epoch,
                 reset,
+                timestamp: packet.header.timestamp,
             });
             self.inbox.0.ready.notify_one();
         }

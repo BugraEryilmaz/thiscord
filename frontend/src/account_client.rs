@@ -4,8 +4,6 @@ use wasm_bindgen::prelude::*;
 
 #[wasm_bindgen]
 extern "C" {
-    #[wasm_bindgen(js_namespace = ["__TAURI__", "core"], js_name = convertFileSrc)]
-    fn convert_media_src(path: &str, protocol: &str) -> String;
     #[wasm_bindgen(catch, js_namespace = ["__TAURI__", "core"], js_name = invoke)]
     async fn native_invoke(command: &str, args: JsValue) -> Result<JsValue, JsValue>;
 }
@@ -71,8 +69,4 @@ pub async fn persist(token: Option<&str>) -> Result<(), String> {
     } else {
         Ok(())
     }
-}
-
-pub fn media_url(slot: &str) -> String {
-    convert_media_src(slot, "screen")
 }

@@ -60,9 +60,9 @@ impl PeerConnectionEventHandler for Handler {
     }
     async fn on_track(&self, track: Arc<dyn TrackRemote>) {
         let ssrc = track.ssrcs().await.first().copied().unwrap_or(0);
-        let decoder = MediaKind::from_relay_ssrc(ssrc)
+        let screen_receiver = MediaKind::from_relay_ssrc(ssrc)
             .filter(|(kind, _)| *kind == MediaKind::ScreenVideo)
-            .map(|(_, slot)| self.screen.decoder(self.connection.clone(), slot));
+            .map(|(_, slot)| self.screen.receiver(self.connection.clone(), slot));
         let engine = self.engine.clone();
         let connection = self.connection.clone();
         let mut closed = self.closed.clone();
@@ -76,8 +76,8 @@ impl PeerConnectionEventHandler for Handler {
                     event = track.poll() => match event { Some(event) => event, None => break },
                 };
                 if let TrackRemoteEvent::OnRtpPacket(packet) = event {
-                    if let Some(decoder) = &decoder {
-                        decoder.push(packet, Instant::now());
+                    if let Some(receiver) = &screen_receiver {
+                        receiver.push(packet, Instant::now());
                         continue;
                     }
                     let slot = MediaKind::from_relay_ssrc(packet.header.ssrc)

@@ -14,8 +14,8 @@ pub const MAX_FRAME_BYTES: usize = 4 * 1024 * 1024;
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "kind", content = "id", rename_all = "snake_case")]
 pub enum SourceId {
-    Monitor(u32),
-    Window(u32),
+    Monitor(u64),
+    Window(u64),
 }
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Source {
@@ -27,6 +27,8 @@ pub struct Status {
     pub available: bool,
     pub sharing: bool,
     pub message: String,
+    #[serde(default)]
+    pub encoder: Option<String>,
 }
 
 /// Requested capture targets; actual throughput depends on the source and host.
@@ -64,6 +66,17 @@ impl Quality {
 mod tests {
     use super::*;
     #[test]
+    fn local_source_ids_preserve_native_handles_and_old_status_stays_readable() {
+        let source = SourceId::Window(0x0000_0001_1234_5678);
+        assert_eq!(
+            serde_json::from_str::<SourceId>(&serde_json::to_string(&source).unwrap()).unwrap(),
+            source
+        );
+        let status: Status =
+            serde_json::from_str(r#"{"available":true,"sharing":false,"message":""}"#).unwrap();
+        assert!(status.encoder.is_none());
+    }
+    #[test]
     fn quality_presets_are_bounded_and_untrusted_values_are_rejected() {
         for height in [720, 1080, 1440, 2160] {
             for fps in [15, 30, 60] {
@@ -93,10 +106,22 @@ mod tests {
     }
 }
 
-#[derive(Debug, Clone, Copy, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Watch {
     pub slot: usize,
     pub owner: crate::AccountId,
     pub epoch: u32,
     pub viewer: u32,
+}
+
+/// Local native-to-WebView WebRTC negotiation. No account credentials or pixels.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ViewOffer {
+    pub watch: Watch,
+    pub sdp: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ViewAnswer {
+    pub sdp: String,
 }

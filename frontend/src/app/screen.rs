@@ -49,6 +49,7 @@ pub(super) fn ScreenControls(ui: Ui) -> impl IntoView {
                     }>"Share screen"</button>
             }>
                 <span class="text-sm text-green-300">{move || status.get().message}</span>
+                <span class="text-xs text-white/60">{move || status.get().encoder.unwrap_or_default()}</span>
                 <button class="rounded bg-red-700 px-3 py-2 text-sm" on:click=move |_| {
                     leptos::task::spawn_local(async move {
                         if let Err(message) = native::<()>("screen_stop", json!({})).await && error.try_get_untracked().is_some() { error.set(message); }
@@ -107,37 +108,50 @@ pub(super) fn ScreenViewer(ui: Ui) -> impl IntoView {
     view! { <div class="grid gap-4">
         <For each=move || { ui.voice.get().participants.into_iter().filter(|m| m.sharing_screen && !ui.audio.get().deafened).collect::<Vec<_>>() } key=|m| (m.account_id, m.slot, m.screen_epoch)
             children=move |member| {
-                let ready = RwSignal::new(false);
-                let revision = RwSignal::new(None::<u64>);
-                let pending = RwSignal::new(false);
-                let (abort, registration) = futures_util::future::AbortHandle::new_pair();
-                let watch = thiscord_shared::screen::Watch { slot: member.slot, owner: member.account_id, epoch: member.screen_epoch, viewer: NEXT_VIEWER.fetch_add(1, std::sync::atomic::Ordering::Relaxed) };
-                on_cleanup(move || {
-                    abort.abort();
-                    leptos::task::spawn_local(async move { let _ = native::<Option<u64>>("screen_frame_state", json!({"watch":watch,"visible":false})).await; });
-                });
                 let own = ui.account.get_untracked().is_some_and(|a| a.id == member.account_id);
-                let path = crate::account_client::media_url(&format!("{}-{}-{}", member.slot, member.screen_epoch, member.account_id));
-                if !own {
-                    leptos::task::spawn_local(async move {
-                        let _ = futures_util::future::Abortable::new(async move {
-                            loop {
-                                gloo_timers::future::TimeoutFuture::new(16).await;
-                                let visible = web_sys::window().and_then(|w| w.document()).is_some_and(|d| !d.hidden());
-                                if let Ok(next) = native::<Option<u64>>("screen_frame_state", json!({"watch":watch,"visible":visible})).await
-                                    && !pending.get_untracked() && next != revision.get_untracked() {
-                                        pending.set(next.is_some());
-                                        if next.is_none() { ready.set(false); }
-                                        revision.set(next);
-                                }
-                            }
-                        }, registration).await;
-                    });
-                }
+                let watch = thiscord_shared::screen::Watch { slot: member.slot, owner: member.account_id, epoch: member.screen_epoch, viewer: NEXT_VIEWER.fetch_add(1, std::sync::atomic::Ordering::Relaxed) };
                 view! { <figure class="overflow-hidden rounded-lg border border-white/15 bg-black">
                     <figcaption class="p-3 text-sm">{member.username}" is sharing"{if own { " (you)" } else { "" }}</figcaption>
-                    {(!own).then(|| view! { <Show when=move || !ready.get()><p class="p-4 text-sm text-white/60">"Waiting for screen video..."</p></Show><img class=move || if ready.get() { "max-h-[65vh] w-full object-contain" } else { "hidden" } on:load=move |_| { ready.set(true); pending.set(false); } on:error=move |_| { ready.set(false); pending.set(false); } alt="Live shared screen" src=move || revision.get().map(|n| format!("{path}?frame={n}"))/> })}
+                    {(!own).then(|| view! { <ScreenVideo watch=watch/> })}
                 </figure> }
             }/>
     </div> }
+}
+
+#[component]
+fn ScreenVideo(watch: thiscord_shared::screen::Watch) -> impl IntoView {
+    let video = NodeRef::<leptos::html::Video>::new();
+    let message = RwSignal::new("Connecting screen video...".to_owned());
+    let (abort, registration) = futures_util::future::AbortHandle::new_pair();
+    let registration = std::cell::RefCell::new(Some(registration));
+    on_cleanup(move || {
+        abort.abort();
+        leptos::task::spawn_local(async move {
+            let _ = native::<bool>(
+                "screen_view_keepalive",
+                json!({"watch":watch,"visible":false}),
+            )
+            .await;
+        });
+    });
+    Effect::new(move |_| {
+        let Some(video) = video.get() else {
+            return;
+        };
+        let Some(registration) = registration.borrow_mut().take() else {
+            return;
+        };
+        let video: web_sys::HtmlVideoElement = video.clone();
+        leptos::task::spawn_local(async move {
+            let _ = futures_util::future::Abortable::new(
+                super::screen_player::run(video, watch, message),
+                registration,
+            )
+            .await;
+        });
+    });
+    view! {
+        <Show when=move || !message.get().is_empty()><p class="p-4 text-sm text-white/60" role="status">{move || message.get()}</p></Show>
+        <video node_ref=video autoplay muted playsinline class="max-h-[65vh] w-full object-contain" aria-label="Live shared screen"/>
+    }
 }

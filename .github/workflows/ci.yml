@@ -160,6 +160,8 @@ jobs:
       - name: Screen codec and bounded RTP tests
         run: |
           cargo test -p thiscord-frontend --lib --features screen-share --locked screen::
+      - name: Lint screen diagnostics
+        run: cargo clippy -p thiscord-frontend --example screen_encode_probe --example screen_preview_probe --features screen-share --locked -- -D warnings
       - name: Native callback tests
         run: cargo test -p thiscord-frontend --bin thiscord-desktop --features desktop,custom-protocol --locked
       - uses: actions/upload-artifact@v4

@@ -43,9 +43,6 @@ fn main() {
         .manage(native_audio::AudioState::default())
         .manage(native_voice::VoiceState::default())
         .manage(native_screen::ScreenState::default())
-        .register_uri_scheme_protocol("screen", |ctx, request| {
-            native_screen::protocol(ctx.app_handle(), request)
-        })
         .on_window_event(|window, event| {
             use tauri::Manager;
             let engine = &window.state::<native_audio::AudioState>().engine;
@@ -83,7 +80,8 @@ fn main() {
             native_audio::audio_pressed,
             native_audio::audio_webrtc_probe,
             native_screen::screen_status,
-            native_screen::screen_frame_state,
+            native_screen::screen_view_open,
+            native_screen::screen_view_keepalive,
             native_screen::screen_sources,
             native_screen::screen_start,
             native_screen::screen_stop,

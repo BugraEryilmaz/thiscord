@@ -217,12 +217,17 @@ speaker isolation and physical acoustic acceptance remain future work.
 - [x] Native Windows screen/window capture, explicit source picker and persistent stop control.
 - [x] Selectable 720p/1080p/1440p/4K and 15/30/60 fps targets, default 1080p/30.
 - [x] Windows system-audio loopback excluding Thiscord, separate from microphone mute/PTT.
-- [x] H.264/Opus WebRTC tracks, permission-gated SFU forwarding and native decoded-frame viewer.
+- [x] H.264/Opus WebRTC tracks, permission-gated SFU forwarding and WebView video player.
 - [x] Bounded media queues, loss recovery, stop/reconnect cleanup and wire/codec/SFU regression tests.
 - [ ] Two-client Windows capture/audio acceptance, mixed-DPI/protected windows and suspend/network checks.
 - [ ] macOS/Linux publishing and OS permission acceptance; portable receiving code is included.
 - [ ] Stereo system audio, adaptive bitrate, demand-based subscriptions and measured multi-share capacity.
-- [ ] GPU presentation/hardware encoding and measured high-resolution/high-frame-rate performance.
+- [x] Continuous Windows Graphics Capture, hardware-first Media Foundation H.264
+  with visible software fallback, and WebRTC video-element presentation without JPEGs.
+- [ ] GPU-only capture/resize/color-conversion/encode path (current capture frames
+  are read back and converted on CPU before hardware encoding).
+- [ ] Measured end-to-end 30/60 fps, high-resolution performance and real WebView
+  hardware-decoder verification on Windows/macOS/Linux.
 
 See [screen-sharing.md](docs/screen-sharing.md) for limits and remaining platform checks.
 

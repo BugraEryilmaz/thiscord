@@ -21,48 +21,57 @@ the display stops capture; it never falls back to another window/display.
 
 ## Media and dependencies
 
-- Windows capture: [XCap 0.9.8](https://docs.rs/xcap/0.9.8/xcap/), using its
-  screen/window capture APIs on a dedicated worker. No screenshots are saved.
-- Video: [OpenH264 0.9.8 Rust bindings](https://docs.rs/openh264/0.9.8/openh264/),
-  building the bundled Cisco C/C++ codec from source. Native C/C++ tools are
-  required; NASM is optional. This is not a pure-Rust codec or Cisco's separately
-  distributed binary. See the bundled third-party license notice.
-- Windows audio: [wasapi 0.22](https://docs.rs/wasapi/0.22.0/wasapi/), process
-  loopback with `include_tree=false`, excluding the current process tree.
-  Capture/Opus encoding runs separately from video and the microphone worker.
-  No allocations, codecs or network operations are added to CPAL callbacks.
-- Video offers 720p, 1080p, 1440p and 2160p (4K), each at 15/30/60 fps;
-  the default is 1080p/30. These are capture targets, not measured throughput
-  guarantees. Aspect ratio is preserved without upscaling. Encoder targets range
-  from 1.25 to 32 Mbit/s, with 4 MiB encoded access-unit bounds. H.264 baseline
-  [level 5.2](https://github.com/cisco/openh264#encoder-features) is advertised,
-  using a 90 kHz RTP clock and a keyframe every second
-  of captured frames; malformed/incomplete frames are discarded. Incoming SPS
-  dimensions/reference counts are checked before native decoding, allowing
-  macroblock padding (e.g. 1080p coded as 1088 lines).
-  Shared audio uses 48 kHz mono Opus, 20 ms packets and 64 kbit/s.
-- A voice peer negotiates eight microphone, eight screen-video and eight shared
-  audio tracks. Microphone queues are separate and prioritized over screen
-  traffic. Screen ingress/egress queues, encoder batches and decoder queues are
-  bounded. Receivers assemble RTP before a two-frame decode queue. Packet loss,
-  overflow or arrivals older than 250 ms discard backlog and wait for a complete
-  SPS/PPS + IDR frame. Presentation timestamps preserve first-packet arrival time.
-  This is an initial selectable-rate implementation, without adaptive video
-  bitrate, simulcast or demand-based subscriptions. Sustained multi-share and
+- Windows capture: [windows-capture 2.0.1](https://docs.rs/windows-capture/2.0.1/windows_capture/)
+  wraps Windows Graphics Capture. One persistent capture session delivers compositor
+  frame events for the selected monitor/window. There is no screenshot loop. A
+  latest-frame mailbox decouples capture from encoding; overload replaces raw
+  frames before they become inter-frame dependencies. Capture throttling preserves
+  cadence phase, including 59.94 Hz displays, instead of discarding every second
+  frame near a 60 fps limit. The system capture border is preserved.
+- Video encoding: Windows Media Foundation enumerates **hardware-only H.264 MFTs**
+  first, with Baseline profile, NV12 input, low-latency mode and bounded asynchronous
+  input/output. The UI shows the selected encoder. Unsupported configurations or
+  driver failures fall back explicitly to OpenH264 0.9.8 (bundled Cisco C/C++ via
+  Rust bindings); fallback is visible in the sharing bar. This is hardware encoding,
+  **not yet a zero-copy GPU pipeline**: capture textures are read back to RGBA,
+  resized when necessary and converted on CPU before hardware encoding. Native
+  C/C++ tools remain required for the portable software codec; NASM is optional.
+- Video offers 720p, 1080p, 1440p and 2160p (4K), each at 15/30/60 fps; default
+  1080p/30. Aspect ratio is preserved without upscaling. These are targets, not
+  measured throughput guarantees. Bitrate targets range from 1.25 to 32 Mbit/s.
+  Access units are bounded to 4 MiB. H.264 Baseline level 5.2 is advertised with a
+  90 kHz RTP clock. Keyframes are requested by elapsed time (one second), including
+  a refresh of the last captured frame for a static source. Overload no longer
+  stretches recovery to several seconds by counting nominal-fps frames. Hardware
+  input is capped at four outstanding samples with a 500 ms stall deadline.
+- The network remains the existing Rust WebRTC client and single-process SFU;
+  the SFU forwards compressed video without transcoding. Receivers assemble RTP
+  into a two-frame bounded queue. Loss, overflow or arrivals older than 250 ms
+  discard dependencies and wait for SPS/PPS + IDR. SPS dimensions/reference counts
+  are validated, including macroblock padding (1080p can be coded as 1088 lines).
+- Presentation: compressed H.264 is forwarded to a **local WebRTC peer** bound
+  exclusively to `127.0.0.1`, with no STUN/TURN and no audio track. Rust/WASM
+  negotiates this peer using control-only Tauri commands, and attaches its
+  MediaStream to a real HTML `video` element. There is no native H.264 decode,
+  RGB/JPEG conversion, image protocol or frame polling. RTP payload numbers are
+  remapped to the WebView's negotiated codec. The WebView owns video decoding,
+  timing and GPU composition; actual hardware decode depends on its codec/driver
+  support and must be checked on each host. This adds a local encrypted transport
+  hop, not another encode. No raw pixels or PCM cross Tauri IPC.
+- Viewers send control heartbeats at 250 ms, expire after one second, and close on
+  unmount/document hiding. Replacement viewers have distinct leases. Roster/epoch,
+  deafen and connection changes revoke forwarding and close the local peer;
+  pending work checks its lease and arrival deadline. Negotiations are bounded.
+  No images, video or SDP are recorded/logged. A browser preview without Tauri
+  cannot join this native presentation bridge.
+- System audio is unchanged: [wasapi 0.22](https://docs.rs/wasapi/0.22.0/wasapi/)
+  process loopback excludes Thiscord's process tree. Audio capture/Opus encoding
+  runs separately from video and microphone work. Shared audio uses 48 kHz mono
+  Opus, 20 ms packets and 64 kbit/s. No codec/network work enters CPAL callbacks.
+- Eight microphone, eight screen-video and eight shared-audio tracks are negotiated.
+  Microphone queues are separate and prioritized. There is no adaptive video
+  bitrate, simulcast or demand-based network subscription yet. Multi-share and
   constrained-network capacity remain unmeasured.
-- Decoded frames stay in native memory. The Leptos viewer refreshes an uncached
-  JPEG through a narrowly scoped Tauri `screen:` protocol; no video frames or
-  PCM cross control IPC. There is one latest frame per source, expiring after
-  two seconds from arrival. The viewer polls lightweight frame revisions at up to
-  60 Hz and loads JPEGs only when the revision changes, with one image request
-  outstanding per share. Mount-scoped viewer leases expire after 500 ms and are
-  released on unmount/document hiding. Without a lease, H.264 reference decoding
-  continues but RGB conversion and JPEG encoding stop. RGB and JPEG buffers are
-  reused, as is the capture YUV buffer through OpenH264's packed RGBA conversion.
-  Software capture, encoding, decoding and JPEG presentation can limit
-  achieved frame rate, especially at 4K/60; native GPU presentation/hardware
-  encoding and live high-resolution performance testing remain future work.
-  Stop/roster changes clear frames. Nothing is recorded to disk.
 
 Existing voice STUN/TURN, UDP addressing, certificates and per-hop DTLS-SRTP
 apply. The SFU forwards encoded video/audio without transcoding. This is transport
@@ -103,7 +112,7 @@ slots whose epoch no longer matches their roster. Clients only send the new scre
 ## Compatibility and acceptance
 
 This delivery prioritizes Windows publishing, as requested. macOS/Linux desktop
-builds retain the receiving/decoding path; their publishing controls are disabled.
+builds retain the receiving/video-player path; their publishing controls are disabled.
 Their native screen/audio permission and capture implementations remain follow-up
 work. The existing Rust WebRTC implementation is retained. No new SFU or WebView
 capture library is selected in place of the native transport.
@@ -124,3 +133,30 @@ Local Windows validation used `_CL_=/Ob1` to work around MSVC 19.42 spending
 over 15 minutes optimizing Opus `NSQ_del_dec.c` at `/Ob2`. Repository/CI build
 settings were not changed. Native tests also emitted the codec's LNK4255 debug-symbol
 warning for duplicate `dct.o` object names; linking and tests succeeded.
+
+## Pipeline diagnostics and validation
+
+`cargo run -p thiscord-frontend --example screen_encode_probe --features screen-share --profile ci --locked`
+uses synthetic pixels only and requires Windows hardware H.264 support. It verifies
+120 encoded frames at both 720p/60 and 1080p/60 by decoding the emitted bitstreams.
+On the development RTX 4070 Ti, it selected `NVIDIA H.264 Encoder MFT` and all 240
+frames decoded. This is an encoder/bitstream check, not a capture-to-display fps
+measurement. Intel/AMD hardware selection and driver-failure fallback still need
+physical-device acceptance.
+
+`screen_preview_probe` (same Cargo feature/profile) serves a synthetic video
+interop harness on `http://127.0.0.1:18741`: a video element and a local `/offer`
+endpoint for an automated browser's recvonly WebRTC offer. It runs one video
+session for 20 seconds and never captures the screen or accesses an account.
+It is a developer example, not an application HTTP endpoint. In the browser,
+inspect inbound WebRTC `framesDecoded`, `framesDropped`, `framesPerSecond`,
+`decoderImplementation` and `powerEfficientDecoder` when supported.
+
+Portable codec tests also negotiate a video-only local peer using a different
+payload number and lower advertised H.264 level, then check that the received
+access unit is byte-identical. Native tests cover viewer replacement/revocation
+and stale capture completion; cadence tests cover source jitter and overload.
+CI keeps those tests on the Windows/macOS/Linux matrix. Native WebView playback
+still requires acceptance on all three platforms; Linux needs a WebKitGTK build
+with working WebRTC/H.264 support. Browser automation was unavailable in the local
+implementation session, so no real-WebView playback/fps result is claimed.
