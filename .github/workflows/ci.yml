@@ -212,10 +212,12 @@ jobs:
       - name: Build production benchmark executables together
         run: cargo build -p thiscord-frontend --example processing_bench --example neural_echo_bench --features deep-filter,neural-echo --release --locked
       - name: Audio processing benchmark (informational)
-        shell: bash
+        shell: pwsh
         run: |
           cargo run -p thiscord-frontend --example processing_bench --features deep-filter,neural-echo --release --locked -- 300 > processing-bench.jsonl
+          if ($LASTEXITCODE) { exit $LASTEXITCODE }
           cargo run -p thiscord-frontend --example neural_echo_bench --features deep-filter,neural-echo --release --locked -- frontend/models/ree-v2.tflite > neural-echo-bench.jsonl
+          if ($LASTEXITCODE) { exit $LASTEXITCODE }
       - uses: actions/upload-artifact@v4
         with:
           name: audio-processing-${{ matrix.os }}
