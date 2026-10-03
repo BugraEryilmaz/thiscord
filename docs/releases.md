@@ -43,6 +43,12 @@ scheduling build jobs. An online, idle runner with matching `self-hosted`, OS an
 architecture labels is preferred (Windows x64, Linux x64, macOS ARM64). Otherwise
 that platform uses `windows-latest`, `ubuntu-24.04` or `macos-latest`. Selection is
 reported in the routing job summary. Installer jobs reuse CI's initial selection.
+Linux installers additionally require the `thiscord-ubuntu-24.04` label on a real
+Ubuntu 24.04 x64 runner; otherwise they use GitHub-hosted Ubuntu. The packaging job
+verifies `/etc/os-release` before installing dependencies. Do not apply that label
+to Kali: general Linux checks may run there, but released binaries must preserve
+the Ubuntu system-library baseline. The existing `ubuntu-24.04` label alone does
+not establish installer eligibility.
 This is a snapshot, not a reservation: jobs can queue behind each other, and a
 runner going offline after selection does not trigger another fallback check.
 

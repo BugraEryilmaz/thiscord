@@ -10,11 +10,16 @@ PLATFORMS = {
     "macos-latest": ["self-hosted", "macOS", "ARM64"],
     "ubuntu-24.04": ["self-hosted", "Linux", "X64"],
 }
+INSTALLER_LABELS = ["self-hosted", "Linux", "X64", "thiscord-ubuntu-24.04"]
 
 
 def select(runners):
     routes = {}
-    for hosted, required in PLATFORMS.items():
+    choices = [(key, key, labels) for key, labels in PLATFORMS.items()]
+    # General Linux checks can use Kali. Distributed binaries must retain the
+    # Ubuntu 24.04 system-library baseline, even when another distro is idle.
+    choices.append(("linux-installer", "ubuntu-24.04", INSTALLER_LABELS))
+    for key, hosted, required in choices:
         eligible = any(
             r.get("status") == "online"
             and r.get("busy") is False
@@ -23,7 +28,7 @@ def select(runners):
             )
             for r in runners
         )
-        routes[hosted] = required if eligible else [hosted]
+        routes[key] = required if eligible else [hosted]
     return routes
 
 

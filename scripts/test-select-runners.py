@@ -31,7 +31,16 @@ class RoutingTests(unittest.TestCase):
 
     def test_all_platforms_and_case_insensitive_labels(self):
         runners = [runner([s.lower() for s in labels]) for labels in routing.PLATFORMS.values()]
-        self.assertEqual(routing.select(runners), routing.PLATFORMS)
+        self.assertEqual(routing.select(runners),
+                         {**routing.PLATFORMS, "linux-installer": ["ubuntu-24.04"]})
+
+    def test_installers_require_verified_distribution_label(self):
+        kali = runner(["self-hosted", "Linux", "X64", "ubuntu-24.04"])
+        self.assertEqual(routing.select([kali])["linux-installer"], ["ubuntu-24.04"])
+        ubuntu = runner(routing.INSTALLER_LABELS)
+        self.assertEqual(routing.select([kali, ubuntu])["linux-installer"], routing.INSTALLER_LABELS)
+        ubuntu["busy"] = True
+        self.assertEqual(routing.select([kali, ubuntu])["linux-installer"], ["ubuntu-24.04"])
 
     def test_missing_token_pr_and_api_failure_fall_back(self):
         for event, token in [("push", ""), ("pull_request", "test"), ("push", "test")]:
@@ -45,7 +54,8 @@ class RoutingTests(unittest.TestCase):
                     routing.main()
                 self.assertEqual(fetch.call_count, int(event == "push" and bool(token)))
                 self.assertEqual(json.loads(output.read_text().split("=", 1)[1]),
-                                 {platform: [platform] for platform in routing.PLATFORMS})
+                                 {**{platform: [platform] for platform in routing.PLATFORMS},
+                                  "linux-installer": ["ubuntu-24.04"]})
 
     def test_paginated_lookup(self):
         from io import BytesIO
