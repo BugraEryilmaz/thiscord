@@ -1,0 +1,65 @@
+{
+  "attempted": 5998,
+  "complete": true,
+  "duration_seconds": 60,
+  "expected_deliveries": 5998,
+  "failed_clients": 0,
+  "format_version": 1,
+  "generator_max_scheduling_lag_us": 27631,
+  "generator_scheduling_over_20ms": 2,
+  "generator_skipped": 2,
+  "invalid_or_cross_room": 0,
+  "late": 4,
+  "late_threshold_ms": 100,
+  "latency_note": "Generator send to generator receive via SFU, single monotonic clock; includes both network legs, queues and client processing. 1001 means >=1001ms. Not server-only delay.",
+  "missing": 2,
+  "missing_percent": 0.03334444814938313,
+  "packets_per_second_per_sender": 50,
+  "passed": false,
+  "path_p50_ms": 4,
+  "path_p95_ms": 74,
+  "path_p99_ms": 93,
+  "payload_bytes": 80,
+  "relay_required": false,
+  "room_size": 8,
+  "routes": [
+    {
+      "client": 0,
+      "local_candidate": "host",
+      "remote_candidate": "prflx"
+    },
+    {
+      "client": 1,
+      "local_candidate": "host",
+      "remote_candidate": "prflx"
+    }
+  ],
+  "scheduled": 6000,
+  "send_errors": 0,
+  "sent": 5998,
+  "streams": [
+    {
+      "duplicates": 0,
+      "expected": 2999,
+      "late": 2,
+      "missing": 1,
+      "path_p99_ms": 93,
+      "received_unique": 2998,
+      "receiver": 0,
+      "reordered": 0,
+      "sender": 1
+    },
+    {
+      "duplicates": 0,
+      "expected": 2999,
+      "late": 2,
+      "missing": 1,
+      "path_p99_ms": 93,
+      "received_unique": 2998,
+      "receiver": 1,
+      "reordered": 0,
+      "sender": 0
+    }
+  ],
+  "users": 2
+}

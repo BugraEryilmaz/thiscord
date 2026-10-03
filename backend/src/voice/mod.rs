@@ -1,7 +1,8 @@
 //! Bounded, single-process audio SFU. One WebRTC transport per participant.
+pub(crate) mod access;
 mod ice;
 mod store;
-use crate::{auth::Failure, chat, db::DbPool};
+use crate::{auth::Failure, db::DbPool};
 use axum::{
     Extension, Router,
     extract::{
@@ -40,8 +41,15 @@ use webrtc::{
 #[derive(Clone)]
 struct Member {
     info: Participant,
-    tx: mpsc::Sender<(u64, usize, uuid::Uuid, rtp::Packet)>,
+    tx: mpsc::Sender<Delivery>,
     active: Arc<AtomicBool>,
+}
+struct Delivery {
+    epoch: u64,
+    slot: usize,
+    source: uuid::Uuid,
+    source_active: Arc<AtomicBool>,
+    packet: rtp::Packet,
 }
 #[derive(Default)]
 struct Room {
@@ -62,18 +70,22 @@ impl VoiceAccess {
         slot: usize,
         changed: &mut watch::Receiver<u64>,
     ) -> Result<Vec<Participant>, Failure> {
-        // Serialize authorization with access-changing commits. Media remains
-        // blocked at both ends until this participant validates the new epoch.
-        let _gate = chat::gate().write().await;
-        let pool = self.pool.clone();
-        let token = self.token.clone();
-        let (guild, channel) = (self.guild, self.channel);
-        let result =
-            tokio::task::spawn_blocking(move || store::authorize(&pool, &token, guild, channel))
-                .await
-                .unwrap_or(Err(Failure::Unavailable));
+        let result = access::global()
+            .authorize(changed, || {
+                let pool = self.pool.clone();
+                let token = self.token.clone();
+                let (guild, channel) = (self.guild, self.channel);
+                async move {
+                    tokio::task::spawn_blocking(move || {
+                        store::authorize(&pool, &token, guild, channel)
+                    })
+                    .await
+                    .unwrap_or(Err(Failure::Unavailable))
+                }
+            })
+            .await;
         let mut members = room.members.write().await;
-        let result = result.and_then(|info| {
+        let result = result.and_then(|(info, epoch)| {
             let member = members.get_mut(&slot).ok_or(Failure::Forbidden)?;
             // Speak controls native microphone setup in the negotiated offer.
             // A changed grant requires a fresh join; unrelated grants do not.
@@ -82,8 +94,7 @@ impl VoiceAccess {
                 return Err(Failure::Forbidden);
             }
             member.info.username = info.username;
-            self.generation
-                .store(*changed.borrow_and_update(), Ordering::Release);
+            self.generation.store(epoch, Ordering::Release);
             Ok(members.values().map(|m| m.info.clone()).collect())
         });
         if result.is_err() {
@@ -299,7 +310,7 @@ async fn log_selected_route(pc: &dyn PeerConnection, id: RequestId) -> bool {
     false
 }
 async fn serve(mut socket: WebSocket, pool: DbPool, id: RequestId) {
-    let mut changed = chat::changes().subscribe();
+    let mut changed = access::global().subscribe();
     let Ok(Some(Ok(first))) = tokio::time::timeout(Duration::from_secs(5), socket.recv()).await
     else {
         return;
@@ -318,32 +329,45 @@ async fn serve(mut socket: WebSocket, pool: DbPool, id: RequestId) {
         .await;
         return;
     };
-    let access = chat::gate().write().await;
-    let p = pool.clone();
-    let t = token.clone();
-    let authorized = tokio::task::spawn_blocking(move || {
-        let info = store::authorize(&p, &t, guild_id, channel_id)?;
-        crate::auth::store::rate_limit(
-            &p,
-            &format!("voice:{}", info.account_id),
-            Some(&format!("voice:{}", info.account_id)),
-            true,
-        )?;
-        Ok::<_, Failure>(info)
-    })
-    .await;
-    let mut info = match authorized {
-        Ok(Ok(info)) => info,
-        Ok(Err(error)) => {
+    let authorized = access::global()
+        .authorize(&mut changed, || {
+            let p = pool.clone();
+            let t = token.clone();
+            async move {
+                tokio::task::spawn_blocking(move || store::authorize(&p, &t, guild_id, channel_id))
+                    .await
+                    .unwrap_or(Err(Failure::Unavailable))
+            }
+        })
+        .await;
+    let (mut info, epoch) = match authorized {
+        Ok(info) => info,
+        Err(error) => {
             fail(&mut socket, id, error).await;
             return;
         }
-        Err(_) => {
-            fail(&mut socket, id, Failure::Unavailable).await;
+    };
+    // Rate-limit once per join, not once per optimistic authorization retry.
+    let p = pool.clone();
+    let account = info.account_id;
+    match tokio::task::spawn_blocking(move || {
+        crate::auth::store::rate_limit(
+            &p,
+            &format!("voice:{account}"),
+            Some(&format!("voice:{account}")),
+            true,
+        )
+    })
+    .await
+    .unwrap_or(Err(Failure::Unavailable))
+    {
+        Ok(()) => {}
+        Err(error) => {
+            fail(&mut socket, id, error).await;
             return;
         }
-    };
-    let generation = Arc::new(AtomicU64::new(*changed.borrow_and_update()));
+    }
+    let generation = Arc::new(AtomicU64::new(epoch));
     let ice_servers = match ice::servers(info.account_id) {
         Ok(servers) => servers,
         Err(_) => {
@@ -353,7 +377,7 @@ async fn serve(mut socket: WebSocket, pool: DbPool, id: RequestId) {
     };
     let room = room(channel_id).await;
     let active = Arc::new(AtomicBool::new(true));
-    let (out_tx, mut out_rx) = mpsc::channel::<(u64, usize, uuid::Uuid, rtp::Packet)>(32);
+    let (out_tx, mut out_rx) = mpsc::channel::<Delivery>(32);
     let source_id = uuid::Uuid::new_v4();
     let slot = {
         let mut members = room.members.write().await;
@@ -361,6 +385,7 @@ async fn serve(mut socket: WebSocket, pool: DbPool, id: RequestId) {
             .values()
             .any(|m| m.info.account_id == info.account_id)
         {
+            drop(members);
             fail(
                 &mut socket,
                 id,
@@ -370,7 +395,15 @@ async fn serve(mut socket: WebSocket, pool: DbPool, id: RequestId) {
             return;
         }
         let Some(slot) = (0..ROOM_CAPACITY).find(|s| !members.contains_key(s)) else {
+            drop(members);
             fail(&mut socket, id, Failure::Limited).await;
+            return;
+        };
+        // Commit membership only while the original DB grant is current.
+        // A mutation may have overlapped the rate-limit or room-lock await.
+        let Some(_admission) = access::global().packet(epoch, epoch) else {
+            drop(members);
+            fail(&mut socket, id, Failure::Unavailable).await;
             return;
         };
         info.slot = slot;
@@ -384,7 +417,6 @@ async fn serve(mut socket: WebSocket, pool: DbPool, id: RequestId) {
         );
         slot
     };
-    drop(access);
     let gathered = Arc::new(Notify::new());
     let (in_tx, mut in_rx) = mpsc::channel::<(u64, rtp::Packet)>(8);
     let mut engine = MediaEngine::default();
@@ -456,14 +488,14 @@ async fn serve(mut socket: WebSocket, pool: DbPool, id: RequestId) {
         let relay_generation = generation.clone();
         let relay = tokio::spawn(async move {
             while let Some((epoch, mut packet)) = in_rx.recv().await {
-                let _gate = chat::gate().read().await;
                 if !relay_active.load(Ordering::Acquire) {
                     break;
                 }
-                let current = *chat::changes().borrow();
-                if relay_generation.load(Ordering::Acquire) != current || epoch != current {
+                let Some(_permit) =
+                    access::global().packet(epoch, relay_generation.load(Ordering::Acquire))
+                else {
                     continue;
-                }
+                };
                 let members = relay_room.members.read().await;
                 let Some(source) = members.get(&slot) else {
                     break;
@@ -481,7 +513,13 @@ async fn serve(mut socket: WebSocket, pool: DbPool, id: RequestId) {
                 };
                 for (&other, m) in members.iter() {
                     if other != slot && !m.info.deafened && m.active.load(Ordering::Acquire) {
-                        let _ = m.tx.try_send((epoch, slot, source_id, packet.clone()));
+                        let _ = m.tx.try_send(Delivery {
+                            epoch,
+                            slot,
+                            source: source_id,
+                            source_active: relay_active.clone(),
+                            packet: packet.clone(),
+                        });
                     }
                 }
             }
@@ -492,13 +530,23 @@ async fn serve(mut socket: WebSocket, pool: DbPool, id: RequestId) {
             let mut sources = [None; ROOM_CAPACITY];
             let mut offsets = [(0_u16, 0_u32); ROOM_CAPACITY];
             let mut last = [(0_u16, 0_u32); ROOM_CAPACITY];
-            while let Some((epoch, slot, source, mut packet)) = out_rx.recv().await {
-                let _gate = chat::gate().read().await;
+            while let Some(Delivery {
+                epoch,
+                slot,
+                source,
+                source_active,
+                mut packet,
+            }) = out_rx.recv().await
+            {
                 if !writer_active.load(Ordering::Acquire) {
                     break;
                 }
-                let current = *chat::changes().borrow();
-                if writer_generation.load(Ordering::Acquire) != current || epoch != current {
+                let Some(_permit) =
+                    access::global().packet(epoch, writer_generation.load(Ordering::Acquire))
+                else {
+                    continue;
+                };
+                if !source_active.load(Ordering::Acquire) {
                     continue;
                 }
                 // A slot may be reused, but its SRTP sequence must not rewind.
@@ -536,6 +584,7 @@ async fn serve(mut socket: WebSocket, pool: DbPool, id: RequestId) {
             }
         });
         let mut tick = tokio::time::interval(Duration::from_secs(1));
+        tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
         let access = VoiceAccess {
             pool,
             token,

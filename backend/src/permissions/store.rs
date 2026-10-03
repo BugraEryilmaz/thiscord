@@ -176,6 +176,14 @@ pub(super) fn dispatch(
         ),
     )?;
     let mut c = connection(pool)?;
+    let _voice_change = matches!(
+        &command,
+        PermissionRequest::Change { .. }
+            | PermissionRequest::JoinGuild { .. }
+            | PermissionRequest::TransferInstance { .. }
+            | PermissionRequest::SetInstanceAdmin { .. }
+    )
+    .then(|| crate::voice::access::global().pause());
     c.transaction(|c| {
         auth::lock_session(c,token,&session)?;
         let actor = session.account_id;

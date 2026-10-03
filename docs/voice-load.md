@@ -200,8 +200,10 @@ production capacity.
 On the desktop monitor backend **per-core** CPU, PostgreSQL CPU, memory/swap,
 network and disk latency. On the Mac monitor the generator's CPU/memory and
 Wi-Fi. This generator does not yet instrument backend lock waits or query
-latency. The current once-per-second authorization path can stall media while
-CPU utilization looks low; investigate that separately if loss/delay rises.
+latency. Periodic voice authorization no longer takes the global chat/auth gate
+or pauses packet forwarding. Access-changing operations still drain media and
+require reauthorization. Database contention, media queues and network waits can
+still cause delay with low CPU utilization; repeat measurements after rebuilding.
 
 Same-LAN Wi-Fi tests exercise the access point and desktop network stack, **not
 your ISP's upload limit**. All simulated clients share one radio and one machine;
