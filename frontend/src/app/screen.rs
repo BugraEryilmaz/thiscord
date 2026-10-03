@@ -100,16 +100,22 @@ pub(super) fn ScreenControls(ui: Ui) -> impl IntoView {
     }
 }
 
+static NEXT_VIEWER: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(1);
+
 #[component]
 pub(super) fn ScreenViewer(ui: Ui) -> impl IntoView {
     view! { <div class="grid gap-4">
         <For each=move || { ui.voice.get().participants.into_iter().filter(|m| m.sharing_screen && !ui.audio.get().deafened).collect::<Vec<_>>() } key=|m| (m.account_id, m.slot, m.screen_epoch)
             children=move |member| {
                 let ready = RwSignal::new(false);
-                let tick = RwSignal::new(0_u64);
-                let pending = RwSignal::new(true);
+                let revision = RwSignal::new(None::<u64>);
+                let pending = RwSignal::new(false);
                 let (abort, registration) = futures_util::future::AbortHandle::new_pair();
-                on_cleanup(move || abort.abort());
+                let watch = thiscord_shared::screen::Watch { slot: member.slot, owner: member.account_id, epoch: member.screen_epoch, viewer: NEXT_VIEWER.fetch_add(1, std::sync::atomic::Ordering::Relaxed) };
+                on_cleanup(move || {
+                    abort.abort();
+                    leptos::task::spawn_local(async move { let _ = native::<Option<u64>>("screen_frame_state", json!({"watch":watch,"visible":false})).await; });
+                });
                 let own = ui.account.get_untracked().is_some_and(|a| a.id == member.account_id);
                 let path = crate::account_client::media_url(&format!("{}-{}-{}", member.slot, member.screen_epoch, member.account_id));
                 if !own {
@@ -117,10 +123,12 @@ pub(super) fn ScreenViewer(ui: Ui) -> impl IntoView {
                         let _ = futures_util::future::Abortable::new(async move {
                             loop {
                                 gloo_timers::future::TimeoutFuture::new(16).await;
-                                // One request at a time: do not cancel slow high-resolution loads.
-                                if !pending.get_untracked() {
-                                    pending.set(true);
-                                    tick.update(|n| *n = n.wrapping_add(1));
+                                let visible = web_sys::window().and_then(|w| w.document()).is_some_and(|d| !d.hidden());
+                                if let Ok(next) = native::<Option<u64>>("screen_frame_state", json!({"watch":watch,"visible":visible})).await
+                                    && !pending.get_untracked() && next != revision.get_untracked() {
+                                        pending.set(next.is_some());
+                                        if next.is_none() { ready.set(false); }
+                                        revision.set(next);
                                 }
                             }
                         }, registration).await;
@@ -128,7 +136,7 @@ pub(super) fn ScreenViewer(ui: Ui) -> impl IntoView {
                 }
                 view! { <figure class="overflow-hidden rounded-lg border border-white/15 bg-black">
                     <figcaption class="p-3 text-sm">{member.username}" is sharing"{if own { " (you)" } else { "" }}</figcaption>
-                    {(!own).then(|| view! { <Show when=move || !ready.get()><p class="p-4 text-sm text-white/60">"Waiting for screen video..."</p></Show><img class=move || if ready.get() { "max-h-[65vh] w-full object-contain" } else { "hidden" } on:load=move |_| { ready.set(true); pending.set(false); } on:error=move |_| { ready.set(false); pending.set(false); } alt="Live shared screen" src=move || format!("{path}?frame={}", tick.get())/> })}
+                    {(!own).then(|| view! { <Show when=move || !ready.get()><p class="p-4 text-sm text-white/60">"Waiting for screen video..."</p></Show><img class=move || if ready.get() { "max-h-[65vh] w-full object-contain" } else { "hidden" } on:load=move |_| { ready.set(true); pending.set(false); } on:error=move |_| { ready.set(false); pending.set(false); } alt="Live shared screen" src=move || revision.get().map(|n| format!("{path}?frame={n}"))/> })}
                 </figure> }
             }/>
     </div> }

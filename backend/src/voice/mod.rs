@@ -200,8 +200,8 @@ async fn access_failed(socket: &mut WebSocket, id: RequestId, failure: Failure) 
 }
 struct Handler {
     gathered: Arc<Notify>,
-    packets: mpsc::Sender<(u64, rtp::Packet)>,
-    media_packets: mpsc::Sender<(u64, rtp::Packet)>,
+    packets: mpsc::Sender<(u64, MediaKind, rtp::Packet)>,
+    media_packets: mpsc::Sender<(u64, MediaKind, rtp::Packet)>,
     active: Arc<AtomicBool>,
     generation: Arc<AtomicU64>,
     track_seen: [AtomicBool; 3],
@@ -229,21 +229,23 @@ impl PeerConnectionEventHandler for Handler {
         let Some(codec) = track.codec(ssrc).await else {
             return;
         };
-        let kind = if codec.mime_type.eq_ignore_ascii_case("video/H264")
-            && codec.clock_rate == 90_000
-        {
-            1
-        } else if codec.mime_type.eq_ignore_ascii_case("audio/opus") && codec.clock_rate == 48_000 {
-            if ssrc == 902 { 2 } else { 0 }
-        } else {
+        let Some(kind) = MediaKind::from_publisher_ssrc(ssrc) else {
             self.active.store(false, Ordering::Release);
             return;
         };
-        if self.track_seen[kind].swap(true, Ordering::AcqRel) {
+        let mime = if kind == MediaKind::ScreenVideo {
+            "video/H264"
+        } else {
+            "audio/opus"
+        };
+        if !codec.mime_type.eq_ignore_ascii_case(mime)
+            || codec.clock_rate != kind.clock_rate()
+            || self.track_seen[kind as usize].swap(true, Ordering::AcqRel)
+        {
             self.active.store(false, Ordering::Release);
             return;
         }
-        let tx = if kind == 0 {
+        let tx = if kind == MediaKind::Microphone {
             self.packets.clone()
         } else {
             self.media_packets.clone()
@@ -258,7 +260,7 @@ impl PeerConnectionEventHandler for Handler {
                 if !active.load(Ordering::Acquire) {
                     break;
                 }
-                if let TrackRemoteEvent::OnRtpPacket(mut packet) = event {
+                if let TrackRemoteEvent::OnRtpPacket(packet) = event {
                     if since.elapsed() > Duration::from_secs(1) {
                         since = Instant::now();
                         count = 0;
@@ -267,14 +269,14 @@ impl PeerConnectionEventHandler for Handler {
                     count += 1;
                     bytes += packet.payload.len();
                     if count
-                        > (if kind == 1 {
+                        > (if kind == MediaKind::ScreenVideo {
                             thiscord_shared::screen::MAX_PACKETS_PER_SECOND
                         } else {
                             100
                         })
                         || packet.payload.len() > 1500
                         || bytes
-                            > if kind == 1 {
+                            > if kind == MediaKind::ScreenVideo {
                                 thiscord_shared::screen::MAX_BYTES_PER_SECOND
                             } else {
                                 150_000
@@ -283,9 +285,7 @@ impl PeerConnectionEventHandler for Handler {
                         active.store(false, Ordering::Release);
                         break;
                     }
-                    // Internal media kind; the relay replaces the untrusted publisher SSRC.
-                    packet.header.ssrc = kind as u32;
-                    let _ = tx.try_send((generation.load(Ordering::Acquire), packet));
+                    let _ = tx.try_send((generation.load(Ordering::Acquire), kind, packet));
                 }
             }
         });
@@ -303,8 +303,8 @@ fn local_bind() -> Result<String, String> {
     ))
 }
 fn local_track(slot: usize) -> Arc<TrackLocalStaticRTP> {
-    let kind = slot / ROOM_CAPACITY;
-    let video = kind == 1;
+    let (kind, _) = MediaKind::from_track(slot).expect("negotiated track index");
+    let video = kind == MediaKind::ScreenVideo;
     Arc::new(TrackLocalStaticRTP::new(MediaStreamTrack::new(
         format!("speaker-{slot}"),
         format!("speaker-{slot}"),
@@ -336,21 +336,57 @@ fn local_track(slot: usize) -> Arc<TrackLocalStaticRTP> {
     )))
 }
 fn media_ssrc(index: usize) -> u32 {
-    match index / ROOM_CAPACITY {
-        1 => thiscord_shared::screen::SSRC_BASE + (index % ROOM_CAPACITY) as u32,
-        2 => thiscord_shared::screen::AUDIO_SSRC_BASE + (index % ROOM_CAPACITY) as u32,
-        _ => SSRC_BASE + index as u32,
-    }
+    let (kind, slot) = MediaKind::from_track(index).expect("negotiated track index");
+    kind.relay_ssrc(slot)
 }
-fn may_publish(info: &Participant, kind: usize) -> bool {
+fn may_publish(info: &Participant, kind: MediaKind) -> bool {
     info.can_speak
         && !info.deafened
         && match kind {
-            0 => !info.muted,
-            1 => info.sharing_screen,
-            2 => info.sharing_screen && info.sharing_audio,
-            _ => false,
+            MediaKind::Microphone => !info.muted,
+            MediaKind::ScreenVideo => info.sharing_screen,
+            MediaKind::SystemAudio => info.sharing_screen && info.sharing_audio,
         }
+}
+async fn update_voice_state(room: &Room, slot: usize, muted: bool, deafened: bool) {
+    if let Some(member) = room.members.write().await.get_mut(&slot) {
+        member.info.muted = muted;
+        member.info.deafened = deafened;
+    }
+}
+async fn update_screen_state(
+    room: &Room,
+    slot: usize,
+    active: bool,
+    audio: bool,
+) -> Result<(), ()> {
+    let mut members = room.members.write().await;
+    let member = members.get_mut(&slot).ok_or(())?;
+    if active && (!member.info.can_speak || member.info.deafened) {
+        return Err(());
+    }
+    member.info.sharing_screen = active;
+    member.info.sharing_audio = active && audio;
+    Ok(())
+}
+async fn handle_signal(
+    socket: &mut WebSocket,
+    room: &Room,
+    slot: usize,
+    event: Option<ClientEvent>,
+) -> bool {
+    match event {
+        Some(ClientEvent::Ping {}) => send(socket, ServerEvent::Pong {}).await.is_ok(),
+        Some(ClientEvent::State { muted, deafened }) => {
+            update_voice_state(room, slot, muted, deafened).await;
+            true
+        }
+        Some(ClientEvent::Screen { active, audio }) => {
+            update_screen_state(room, slot, active, audio).await.is_ok()
+        }
+        Some(ClientEvent::Leave {}) | None => false,
+        _ => false,
+    }
 }
 async fn log_selected_route(pc: &dyn PeerConnection, id: RequestId) -> bool {
     for sender in pc.get_senders().await {
@@ -486,8 +522,8 @@ async fn serve(mut socket: WebSocket, pool: DbPool, id: RequestId) {
         slot
     };
     let gathered = Arc::new(Notify::new());
-    let (in_tx, mut in_rx) = mpsc::channel::<(u64, rtp::Packet)>(8);
-    let (media_in_tx, mut media_in_rx) = mpsc::channel::<(u64, rtp::Packet)>(4096);
+    let (in_tx, mut in_rx) = mpsc::channel::<(u64, MediaKind, rtp::Packet)>(8);
+    let (media_in_tx, mut media_in_rx) = mpsc::channel::<(u64, MediaKind, rtp::Packet)>(4096);
     let mut engine = MediaEngine::default();
     engine
         .register_codec(
@@ -498,7 +534,7 @@ async fn serve(mut socket: WebSocket, pool: DbPool, id: RequestId) {
                     sdp_fmtp_line: thiscord_shared::screen::H264_FMTP.into(),
                     ..Default::default()
                 },
-                payload_type: 125,
+                payload_type: MediaKind::ScreenVideo.payload_type(),
             },
             rtc::rtp_transceiver::rtp_sender::RtpCodecKind::Video,
         )
@@ -530,7 +566,7 @@ async fn serve(mut socket: WebSocket, pool: DbPool, id: RequestId) {
     let pc: Arc<dyn PeerConnection> = Arc::new(pc);
     let mut tracks = Vec::new();
     let negotiated = tokio::time::timeout(Duration::from_secs(15), async {
-        for slot in 0..ROOM_CAPACITY * 3 {
+        for slot in 0..MediaKind::TRACK_COUNT {
             let track = local_track(slot);
             pc.add_track(track.clone() as Arc<dyn TrackLocal>)
                 .await
@@ -572,7 +608,7 @@ async fn serve(mut socket: WebSocket, pool: DbPool, id: RequestId) {
         let relay_active = active.clone();
         let relay_generation = generation.clone();
         let relay = tokio::spawn(async move {
-            while let Some((epoch, mut packet)) = tokio::select! { biased; packet = in_rx.recv() => packet, packet = media_in_rx.recv() => packet }
+            while let Some((epoch, kind, mut packet)) = tokio::select! { biased; packet = in_rx.recv() => packet, packet = media_in_rx.recv() => packet }
             {
                 if !relay_active.load(Ordering::Acquire) {
                     break;
@@ -586,16 +622,15 @@ async fn serve(mut socket: WebSocket, pool: DbPool, id: RequestId) {
                 let Some(source) = members.get(&slot) else {
                     break;
                 };
-                let kind = packet.header.ssrc as usize;
                 if !may_publish(&source.info, kind) {
                     continue;
                 }
                 packet.header = rtp::header::Header {
                     version: 2,
-                    payload_type: if kind == 1 { 125 } else { 111 },
-                    ssrc: media_ssrc(slot + kind * ROOM_CAPACITY),
+                    payload_type: kind.payload_type(),
+                    ssrc: media_ssrc(kind.track_index(slot)),
                     marker: packet.header.marker,
-                    csrc: if kind == 0 {
+                    csrc: if kind == MediaKind::Microphone {
                         vec![]
                     } else {
                         vec![source.info.screen_epoch]
@@ -606,10 +641,14 @@ async fn serve(mut socket: WebSocket, pool: DbPool, id: RequestId) {
                 };
                 for (&other, m) in members.iter() {
                     if other != slot && !m.info.deafened && m.active.load(Ordering::Acquire) {
-                        let tx = if kind == 0 { &m.tx } else { &m.media_tx };
+                        let tx = if kind == MediaKind::Microphone {
+                            &m.tx
+                        } else {
+                            &m.media_tx
+                        };
                         let _ = tx.try_send(Delivery {
                             epoch,
-                            slot: slot + kind * ROOM_CAPACITY,
+                            slot: kind.track_index(slot),
                             source: source_id,
                             source_active: relay_active.clone(),
                             packet: packet.clone(),
@@ -623,9 +662,9 @@ async fn serve(mut socket: WebSocket, pool: DbPool, id: RequestId) {
         let writer_room = room.clone();
         let receiver_slot = slot;
         let writer = tokio::spawn(async move {
-            let mut sources = [None; ROOM_CAPACITY * 3];
-            let mut offsets = [(0_u16, 0_u32); ROOM_CAPACITY * 3];
-            let mut last = [(0_u16, 0_u32); ROOM_CAPACITY * 3];
+            let mut sources = [None; MediaKind::TRACK_COUNT];
+            let mut offsets = [(0_u16, 0_u32); MediaKind::TRACK_COUNT];
+            let mut last = [(0_u16, 0_u32); MediaKind::TRACK_COUNT];
             while let Some(Delivery {
                 epoch,
                 slot,
@@ -637,28 +676,7 @@ async fn serve(mut socket: WebSocket, pool: DbPool, id: RequestId) {
                 if !writer_active.load(Ordering::Acquire) {
                     break;
                 }
-                let Some(_permit) =
-                    access::global().packet(epoch, writer_generation.load(Ordering::Acquire))
-                else {
-                    continue;
-                };
-                if !source_active.load(Ordering::Acquire) {
-                    continue;
-                }
-                let members = writer_room.members.read().await;
-                if !members.get(&(slot % ROOM_CAPACITY)).is_some_and(|m| {
-                    m.active.load(Ordering::Acquire)
-                        && m.source_id == source
-                        && may_publish(&m.info, slot / ROOM_CAPACITY)
-                }) {
-                    continue;
-                }
-                if !members
-                    .get(&receiver_slot)
-                    .is_some_and(|m| !m.info.deafened && m.active.load(Ordering::Acquire))
-                {
-                    continue;
-                }
+                let (kind, source_slot) = MediaKind::from_track(slot).expect("delivery track");
                 // A slot may be reused, but its SRTP sequence must not rewind.
                 // Preserve sequence gaps/reordering within the publisher stream.
                 if sources[slot] != Some(source) {
@@ -670,7 +688,11 @@ async fn serve(mut socket: WebSocket, pool: DbPool, id: RequestId) {
                             .wrapping_sub(packet.header.sequence_number),
                         last[slot]
                             .1
-                            .wrapping_add(if slot / ROOM_CAPACITY == 1 { 9000 } else { 960 })
+                            .wrapping_add(if kind == MediaKind::ScreenVideo {
+                                9000
+                            } else {
+                                960
+                            })
                             .wrapping_sub(packet.header.timestamp),
                     );
                 }
@@ -683,10 +705,27 @@ async fn serve(mut socket: WebSocket, pool: DbPool, id: RequestId) {
                 if !matches!(
                     tokio::time::timeout(
                         Duration::from_millis(100),
-                        tracks[slot].write_rtp(packet)
+                        authorized_write(
+                            &writer_room,
+                            || access::global()
+                                .packet(epoch, writer_generation.load(Ordering::Acquire)),
+                            |members| {
+                                writer_active.load(Ordering::Acquire)
+                                    && source_active.load(Ordering::Acquire)
+                                    && members.get(&source_slot).is_some_and(|m| {
+                                        m.active.load(Ordering::Acquire)
+                                            && m.source_id == source
+                                            && may_publish(&m.info, kind)
+                                    })
+                                    && members.get(&receiver_slot).is_some_and(|m| {
+                                        !m.info.deafened && m.active.load(Ordering::Acquire)
+                                    })
+                            },
+                            tracks[slot].write_rtp(packet)
+                        )
                     )
                     .await,
-                    Ok(Ok(_))
+                    Ok(Ok(Ok(_))) | Ok(Err(()))
                 ) {
                     writer_active.store(false, Ordering::Release);
                     break;
@@ -717,12 +756,7 @@ async fn serve(mut socket: WebSocket, pool: DbPool, id: RequestId) {
                 },
                 message=socket.recv()=>{
                     let Some(Ok(message))=message else{break;};budget+=1;if budget>30{break;}last=Instant::now();
-                    match parse(message){
-                        Some(ClientEvent::Ping{})=>{if send(&mut socket,ServerEvent::Pong{}).await.is_err(){break;}},
-                        Some(ClientEvent::State{muted,deafened})=>{if let Some(m)=room.members.write().await.get_mut(&slot){m.info.muted=muted;m.info.deafened=deafened;}},
-                        Some(ClientEvent::Screen{active,audio})=>{if let Some(m)=room.members.write().await.get_mut(&slot){if active && (!m.info.can_speak || m.info.deafened){break;}m.info.sharing_screen=active;m.info.sharing_audio=active && audio;}},
-                        Some(ClientEvent::Leave{})=>break,_=>break,
-                    }
+                    if !handle_signal(&mut socket, &room, slot, parse(message)).await { break; }
                 },
                 _=tick.tick()=>{
                     budget=0;if last.elapsed()>Duration::from_secs(20)||!active.load(Ordering::Acquire){break;}
@@ -745,4 +779,80 @@ async fn serve(mut socket: WebSocket, pool: DbPool, id: RequestId) {
     room.members.write().await.remove(&slot);
     let _ = tokio::time::timeout(Duration::from_secs(2), pc.close()).await;
     let _ = tokio::time::timeout(Duration::from_secs(1), socket.send(Message::Close(None))).await;
+}
+
+/// Poll the bounded transport send only while authorization is current. No lock
+/// or mutation permit survives Pending; queue capacity wakes us to revalidate.
+/// write_rtp enqueues atomically on its final poll (pinned webrtc 0.21).
+async fn authorized_write<F, T>(
+    room: &Room,
+    permit: impl Fn() -> Option<access::Packet>,
+    allowed: impl Fn(&HashMap<usize, Member>) -> bool,
+    send: F,
+) -> Result<T, ()>
+where
+    F: std::future::Future<Output = T>,
+{
+    use std::{future::Future, task::Poll};
+    let mut send = std::pin::pin!(send);
+    let mut lock = Box::pin(room.members.read());
+    std::future::poll_fn(|cx| {
+        let members = match lock.as_mut().poll(cx) {
+            Poll::Pending => return Poll::Pending,
+            Poll::Ready(members) => members,
+        };
+        lock = Box::pin(room.members.read());
+        let Some(_permit) = permit() else {
+            return Poll::Ready(Err(()));
+        };
+        if !allowed(&members) {
+            return Poll::Ready(Err(()));
+        }
+        send.as_mut().poll(cx).map(Ok)
+    })
+    .await
+}
+
+#[cfg(test)]
+mod send_tests {
+    use super::*;
+    #[tokio::test]
+    async fn blocked_transport_releases_room_and_revalidates_before_enqueue() {
+        let room = Arc::new(Room::default());
+        let allowed = Arc::new(AtomicBool::new(true));
+        let (tx, mut rx) = mpsc::channel(1);
+        tx.send(1).await.unwrap();
+        let (entered, waiting) = tokio::sync::oneshot::channel();
+        let epoch = access::global().snapshot().unwrap();
+        let task_room = room.clone();
+        let task_allowed = allowed.clone();
+        let writer = tokio::spawn(async move {
+            authorized_write(
+                &task_room,
+                || access::global().packet(epoch, epoch),
+                |_| task_allowed.load(Ordering::Acquire),
+                async {
+                    entered.send(()).unwrap();
+                    tx.send(2).await
+                },
+            )
+            .await
+        });
+        waiting.await.unwrap();
+        // A waiting room writer and subsequent readers must not wait for the
+        // congested transport. Change state before releasing queue capacity.
+        let members = tokio::time::timeout(Duration::from_millis(100), room.members.write())
+            .await
+            .expect("transport held room lock");
+        allowed.store(false, Ordering::Release);
+        drop(members);
+        drop(
+            tokio::time::timeout(Duration::from_millis(100), room.members.read())
+                .await
+                .unwrap(),
+        );
+        assert_eq!(rx.recv().await, Some(1));
+        assert!(writer.await.unwrap().is_err());
+        assert_eq!(rx.recv().await, None, "revoked packet was enqueued");
+    }
 }

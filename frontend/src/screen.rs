@@ -140,8 +140,8 @@ pub fn packetize(
             rtp::Packet {
                 header: rtp::header::Header {
                     version: 2,
-                    payload_type: 125,
-                    ssrc: 901,
+                    payload_type: thiscord_shared::voice::MediaKind::ScreenVideo.payload_type(),
+                    ssrc: thiscord_shared::voice::MediaKind::ScreenVideo.publisher_ssrc(),
                     sequence_number: *sequence,
                     timestamp,
                     marker: i + 1 == count,
@@ -303,17 +303,17 @@ mod quality_tests {
     use super::*;
     use openh264::{
         encoder::{BitRate, Encoder, EncoderConfig, FrameRate, Level, Profile, UsageType},
-        formats::{RgbSliceU8, YUVBuffer, YUVSource},
+        formats::{RgbaSliceU8, YUVBuffer, YUVSource},
     };
     #[test]
     fn higher_resolutions_round_trip_through_rtp_and_decoder() {
         for height in [1080, 1440, 2160] {
             let quality = Quality { height, fps: 60 };
             let (w, h) = (quality.width() as usize, height as usize);
-            let mut rgb = vec![0; w * h * 3];
+            let mut rgb = vec![0; w * h * 4];
             for y in 0..h {
                 for x in 0..w {
-                    let i = (y * w + x) * 3;
+                    let i = (y * w + x) * 4;
                     rgb[i] = (x % 256) as u8;
                     rgb[i + 1] = (y % 256) as u8;
                     rgb[i + 2] = 120;
@@ -329,20 +329,23 @@ mod quality_tests {
                     .bitrate(BitRate::from_bps(quality.bitrate())),
             )
             .unwrap();
-            let frame = encoder
-                .encode(&YUVBuffer::from_rgb_source(RgbSliceU8::new(&rgb, (w, h))))
-                .unwrap()
-                .to_vec();
+            let mut yuv = YUVBuffer::from_rgba8_source(RgbaSliceU8::new(&rgb, (w, h)));
+            yuv.read_rgba8(RgbaSliceU8::new(&rgb, (w, h)));
+            let frame = encoder.encode(&yuv).unwrap().to_vec();
             assert!(!frame.is_empty() && frame.len() <= MAX_FRAME_BYTES);
             assert!(bounded_parameter_sets(&frame));
-            let mut assembler = Assembler::default();
+            let (sender, inbox) = receive::Inbox::channel();
             let mut sequence = 0;
-            let packets = packetize(frame, &mut sequence, 9000).unwrap();
-            let frame = packets
-                .iter()
-                .filter_map(|p| assembler.push(p))
-                .last()
-                .unwrap();
+            for mut packet in packetize(frame, &mut sequence, 9000).unwrap() {
+                packet.header.csrc = vec![1];
+                sender.push(packet, std::time::Instant::now());
+            }
+            drop(sender);
+            let frame = inbox
+                .next()
+                .expect("encoded keyframe must resynchronize the receiver");
+            assert!(frame.reset);
+            let frame = frame.data;
             let mut decoder = openh264::decoder::Decoder::new().unwrap();
             let decoded = decoder.decode(&frame).unwrap().unwrap();
             assert_eq!(decoded.dimensions(), (w, h));
@@ -377,5 +380,192 @@ mod quality_tests {
         assert_eq!(bounded_sps(&sps(3840, 2160)), Some(true));
         assert_eq!(bounded_sps(&sps(3856, 2160)), Some(false));
         assert_eq!(bounded_sps(&sps(3840, 2176)), Some(false));
+    }
+}
+
+/// Complete-frame backlog. Lost dependencies discard queued work and require a
+/// fresh SPS/PPS + IDR, rather than decoding a growing FIFO of stale packets.
+pub mod receive {
+    use super::Assembler;
+    use std::{
+        collections::VecDeque,
+        sync::{Arc, Condvar, Mutex},
+        time::{Duration, Instant},
+    };
+    pub const MAX_AGE: Duration = Duration::from_millis(250);
+    pub struct Frame {
+        pub data: Vec<u8>,
+        pub arrived: Instant,
+        pub epoch: u32,
+        pub reset: bool,
+    }
+    #[derive(Default)]
+    struct State {
+        assembler: Assembler,
+        frames: VecDeque<Frame>,
+        sequence: Option<u16>,
+        epoch: Option<u32>,
+        timestamp: Option<u32>,
+        arrived: Option<Instant>,
+        synchronized: bool,
+        closed: bool,
+    }
+    #[derive(Clone, Default)]
+    pub struct Inbox(Arc<Shared>);
+    #[derive(Default)]
+    struct Shared {
+        state: Mutex<State>,
+        ready: Condvar,
+    }
+    pub struct Sender {
+        inbox: Inbox,
+    }
+    impl Drop for Sender {
+        fn drop(&mut self) {
+            let mut s = self.inbox.0.state.lock().unwrap();
+            s.closed = true;
+            self.inbox.0.ready.notify_one();
+        }
+    }
+    impl Sender {
+        pub fn push(&self, packet: rtc::rtp::Packet, arrived: Instant) {
+            let Some(epoch) = packet.header.csrc.first().copied() else {
+                return;
+            };
+            let mut s = self.inbox.0.state.lock().unwrap();
+            if s.closed {
+                return;
+            }
+            if s.epoch != Some(epoch)
+                || s.sequence
+                    .is_some_and(|n| n.wrapping_add(1) != packet.header.sequence_number)
+            {
+                s.frames.clear();
+                s.assembler = Assembler::default();
+                s.synchronized = false;
+                s.timestamp = None;
+            }
+            s.epoch = Some(epoch);
+            s.sequence = Some(packet.header.sequence_number);
+            if s.timestamp != Some(packet.header.timestamp) {
+                s.timestamp = Some(packet.header.timestamp);
+                s.arrived = Some(arrived);
+            }
+            let Some(data) = s.assembler.push(&packet) else {
+                return;
+            };
+            let at = s.arrived.unwrap_or(arrived);
+            if s.frames.len() >= 2
+                || s.frames
+                    .front()
+                    .is_some_and(|f| arrived.saturating_duration_since(f.arrived) > MAX_AGE)
+            {
+                s.frames.clear();
+                s.synchronized = false;
+            }
+            if arrived.saturating_duration_since(at) > MAX_AGE {
+                s.synchronized = false;
+                s.frames.clear();
+                return;
+            }
+            let mut types = [false; 32];
+            for nal in openh264::nal_units(&data) {
+                if let Some(n) = nal.strip_prefix(&[0, 0, 1]).unwrap_or(nal).first() {
+                    types[(n & 31) as usize] = true;
+                }
+            }
+            let reset = !s.synchronized;
+            if reset && !(types[5] && types[7] && types[8]) {
+                return;
+            }
+            s.synchronized = true;
+            s.frames.push_back(Frame {
+                data,
+                arrived: at,
+                epoch,
+                reset,
+            });
+            self.inbox.0.ready.notify_one();
+        }
+    }
+    impl Inbox {
+        pub fn channel() -> (Sender, Self) {
+            let inbox = Self::default();
+            (
+                Sender {
+                    inbox: inbox.clone(),
+                },
+                inbox,
+            )
+        }
+        pub fn close(&self) {
+            let mut s = self.0.state.lock().unwrap();
+            s.closed = true;
+            s.frames.clear();
+            self.0.ready.notify_one();
+        }
+        pub fn resync(&self) {
+            let mut s = self.0.state.lock().unwrap();
+            s.frames.clear();
+            s.synchronized = false;
+        }
+        pub fn next(&self) -> Option<Frame> {
+            let mut s = self.0.state.lock().unwrap();
+            loop {
+                if let Some(frame) = s.frames.pop_front() {
+                    if frame.arrived.elapsed() <= MAX_AGE {
+                        return Some(frame);
+                    }
+                    s.frames.clear();
+                    s.synchronized = false;
+                }
+                if s.closed {
+                    return None;
+                }
+                s = self.0.ready.wait(s).unwrap();
+            }
+        }
+    }
+    #[cfg(test)]
+    mod tests {
+        use super::*;
+        fn frame(sender: &Sender, seq: &mut u16, key: bool, at: Instant) {
+            let data = if key {
+                vec![0, 0, 1, 0x67, 66, 0, 0, 1, 0x68, 1, 0, 0, 1, 0x65, 1]
+            } else {
+                vec![0, 0, 1, 0x61, 1]
+            };
+            for mut packet in crate::screen::packetize(data, seq, *seq as u32 * 9000).unwrap() {
+                packet.header.csrc = vec![1];
+                sender.push(packet, at);
+            }
+        }
+        #[test]
+        fn backlog_discards_dependencies_until_fresh_keyframe() {
+            let (tx, rx) = Inbox::channel();
+            let mut seq = 0;
+            frame(&tx, &mut seq, true, Instant::now());
+            frame(&tx, &mut seq, false, Instant::now());
+            frame(&tx, &mut seq, false, Instant::now());
+            assert!(rx.0.state.lock().unwrap().frames.is_empty());
+            frame(&tx, &mut seq, false, Instant::now());
+            assert!(rx.0.state.lock().unwrap().frames.is_empty());
+            frame(&tx, &mut seq, true, Instant::now());
+            assert!(rx.next().unwrap().reset);
+            seq += 1; // Packet loss invalidates inter-frame references.
+            frame(&tx, &mut seq, false, Instant::now());
+            assert!(rx.0.state.lock().unwrap().frames.is_empty());
+            frame(&tx, &mut seq, true, Instant::now());
+            assert!(rx.next().unwrap().reset);
+        }
+        #[test]
+        fn age_is_measured_at_arrival_not_after_processing() {
+            let (tx, rx) = Inbox::channel();
+            let mut seq = 0;
+            frame(&tx, &mut seq, true, Instant::now() - Duration::from_secs(1));
+            drop(tx);
+            assert!(rx.next().is_none());
+            assert!(!rx.0.state.lock().unwrap().synchronized);
+        }
     }
 }

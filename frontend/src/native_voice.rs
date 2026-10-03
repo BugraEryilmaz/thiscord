@@ -60,11 +60,9 @@ impl PeerConnectionEventHandler for Handler {
     }
     async fn on_track(&self, track: Arc<dyn TrackRemote>) {
         let ssrc = track.ssrcs().await.first().copied().unwrap_or(0);
-        let video_slot = ssrc
-            .checked_sub(thiscord_shared::screen::SSRC_BASE)
-            .filter(|s| (*s as usize) < ROOM_CAPACITY);
-        let decoder =
-            video_slot.map(|slot| self.screen.decoder(self.connection.clone(), slot as usize));
+        let decoder = MediaKind::from_relay_ssrc(ssrc)
+            .filter(|(kind, _)| *kind == MediaKind::ScreenVideo)
+            .map(|(_, slot)| self.screen.decoder(self.connection.clone(), slot));
         let engine = self.engine.clone();
         let connection = self.connection.clone();
         let mut closed = self.closed.clone();
@@ -79,23 +77,11 @@ impl PeerConnectionEventHandler for Handler {
                 };
                 if let TrackRemoteEvent::OnRtpPacket(packet) = event {
                     if let Some(decoder) = &decoder {
-                        let _ = decoder.try_send(packet);
+                        decoder.push(packet, Instant::now());
                         continue;
                     }
-                    let slot = packet
-                        .header
-                        .ssrc
-                        .checked_sub(SSRC_BASE)
-                        .filter(|s| (*s as usize) < ROOM_CAPACITY)
-                        .map(|s| s as usize)
-                        .or_else(|| {
-                            packet
-                                .header
-                                .ssrc
-                                .checked_sub(thiscord_shared::screen::AUDIO_SSRC_BASE)
-                                .filter(|s| (*s as usize) < ROOM_CAPACITY)
-                                .map(|s| s as usize + ROOM_CAPACITY)
-                        });
+                    let slot = MediaKind::from_relay_ssrc(packet.header.ssrc)
+                        .and_then(|(kind, slot)| kind.mixer_slot(slot));
                     if let Some(slot) = slot {
                         engine.notify(Command::Packet {
                             connection: connection.clone(),
@@ -424,7 +410,7 @@ async fn run(
                     sdp_fmtp_line: thiscord_shared::screen::H264_FMTP.into(),
                     ..Default::default()
                 },
-                payload_type: 125,
+                payload_type: MediaKind::ScreenVideo.payload_type(),
             },
             rtc::rtp_transceiver::rtp_sender::RtpCodecKind::Video,
         )
@@ -471,12 +457,13 @@ async fn run(
     pc.set_remote_description(offer)
         .await
         .map_err(|_| "Cannot accept server offer")?;
-    let track = thiscord_frontend::audio::transport::track(900);
+    let track = thiscord_frontend::audio::transport::track(MediaKind::Microphone.publisher_ssrc());
     pc.add_track(track.clone() as Arc<dyn TrackLocal>)
         .await
         .map_err(|_| "Cannot add microphone track")?;
-    let screen_track = thiscord_frontend::screen::track(901);
-    let system_track = thiscord_frontend::audio::transport::track(902);
+    let screen_track = thiscord_frontend::screen::track(MediaKind::ScreenVideo.publisher_ssrc());
+    let system_track =
+        thiscord_frontend::audio::transport::track(MediaKind::SystemAudio.publisher_ssrc());
     if screen_video {
         pc.add_track(screen_track.clone() as Arc<dyn TrackLocal>)
             .await
@@ -527,7 +514,7 @@ async fn run(
                 }
             },
             Some(payload)=outgoing.recv()=>{
-                sequence=sequence.wrapping_add(1);timestamp=timestamp.wrapping_add(960);let packet=rtc::rtp::Packet{header:rtc::rtp::header::Header{version:2,payload_type:111,ssrc:900,sequence_number:sequence,timestamp,..Default::default()},payload};
+                sequence=sequence.wrapping_add(1);timestamp=timestamp.wrapping_add(960);let packet=rtc::rtp::Packet{header:rtc::rtp::header::Header{version:2,payload_type:MediaKind::Microphone.payload_type(),ssrc:MediaKind::Microphone.publisher_ssrc(),sequence_number:sequence,timestamp,..Default::default()},payload};
                 tokio::time::timeout(Duration::from_millis(100),track.write_rtp(packet)).await.map_err(|_|Failure::temporary("Voice sender stalled"))?.map_err(|_|Failure::temporary("Voice media connection failed"))?;
             },
             _=ticker.tick()=>{

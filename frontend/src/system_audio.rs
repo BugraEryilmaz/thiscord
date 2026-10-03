@@ -112,8 +112,8 @@ fn capture(binding: &Binding, stop: &AtomicBool) -> Result<(), String> {
                 let packet = rtc::rtp::Packet {
                     header: rtc::rtp::header::Header {
                         version: 2,
-                        payload_type: 111,
-                        ssrc: 902,
+                        payload_type: thiscord_shared::voice::MediaKind::SystemAudio.payload_type(),
+                        ssrc: thiscord_shared::voice::MediaKind::SystemAudio.publisher_ssrc(),
                         sequence_number: binding.audio_sequence.fetch_add(1, Ordering::Relaxed)
                             as u16,
                         timestamp: binding.audio_timestamp.fetch_add(960, Ordering::Relaxed),

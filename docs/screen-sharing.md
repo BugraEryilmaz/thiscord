@@ -44,14 +44,22 @@ the display stops capture; it never falls back to another window/display.
 - A voice peer negotiates eight microphone, eight screen-video and eight shared
   audio tracks. Microphone queues are separate and prioritized over screen
   traffic. Screen ingress/egress queues, encoder batches and decoder queues are
-  bounded. This is an initial selectable-rate implementation, without adaptive video
+  bounded. Receivers assemble RTP before a two-frame decode queue. Packet loss,
+  overflow or arrivals older than 250 ms discard backlog and wait for a complete
+  SPS/PPS + IDR frame. Presentation timestamps preserve first-packet arrival time.
+  This is an initial selectable-rate implementation, without adaptive video
   bitrate, simulcast or demand-based subscriptions. Sustained multi-share and
   constrained-network capacity remain unmeasured.
 - Decoded frames stay in native memory. The Leptos viewer refreshes an uncached
   JPEG through a narrowly scoped Tauri `screen:` protocol; no video frames or
   PCM cross control IPC. There is one latest frame per source, expiring after
-  two seconds. The viewer requests at up to 60 Hz with one outstanding request
-  per share. Software capture, encoding, decoding and JPEG presentation can limit
+  two seconds from arrival. The viewer polls lightweight frame revisions at up to
+  60 Hz and loads JPEGs only when the revision changes, with one image request
+  outstanding per share. Mount-scoped viewer leases expire after 500 ms and are
+  released on unmount/document hiding. Without a lease, H.264 reference decoding
+  continues but RGB conversion and JPEG encoding stop. RGB and JPEG buffers are
+  reused, as is the capture YUV buffer through OpenH264's packed RGBA conversion.
+  Software capture, encoding, decoding and JPEG presentation can limit
   achieved frame rate, especially at 4K/60; native GPU presentation/hardware
   encoding and live high-resolution performance testing remain future work.
   Stop/roster changes clear frames. Nothing is recorded to disk.
@@ -70,7 +78,14 @@ checked against the current publisher identity, share state, receiver deafen
 state and access epoch, including slot reuse. Voice uses mutation-only packet
 admission/draining: ordinary database authorization checks do not hold the chat
 gate or stall media. Access-changing commits invalidate queued media and require
-fresh authorization, with conservative voice revocation.
+fresh authorization, with conservative voice revocation. Transport writes hold
+room locks and packet permits only during individual nonblocking polls. A pending
+write releases both and revalidates before resuming; a slow receiver cannot hold
+up room updates or subsequent media readers. This relies on the pinned WebRTC
+`write_rtp` implementation enqueuing atomically on its final poll.
+
+`shared::voice::MediaKind` owns publisher SSRCs, relay ranges, payload types and
+track/mixer slot mappings. Internal SFU queues carry the kind explicitly.
 
 Leave, channel switch, logout/session replacement, connection failure, window
 destruction and capture/sender errors cancel the capture lease. A scheduling gap

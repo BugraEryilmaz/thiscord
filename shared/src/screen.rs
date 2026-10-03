@@ -1,8 +1,8 @@
 //! Screen-sharing metadata only. Pixels travel on encrypted WebRTC video tracks.
 use serde::{Deserialize, Serialize};
 
-pub const SSRC_BASE: u32 = 20_000;
-pub const AUDIO_SSRC_BASE: u32 = 30_000;
+pub const SSRC_BASE: u32 = crate::voice::MediaKind::ScreenVideo.ssrc_base();
+pub const AUDIO_SSRC_BASE: u32 = crate::voice::MediaKind::SystemAudio.ssrc_base();
 pub const MAX_WIDTH: u32 = 3840;
 pub const MAX_HEIGHT: u32 = 2160;
 pub const H264_FMTP: &str =
@@ -91,4 +91,12 @@ mod tests {
         }
         assert!(Quality::default().valid());
     }
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize)]
+pub struct Watch {
+    pub slot: usize,
+    pub owner: crate::AccountId,
+    pub epoch: u32,
+    pub viewer: u32,
 }

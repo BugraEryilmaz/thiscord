@@ -7,7 +7,10 @@ use std::{
     time::{Duration, Instant},
 };
 use tauri::{Manager, State};
-use thiscord_frontend::{audio::connection::Connection, screen::Assembler};
+use thiscord_frontend::{
+    audio::connection::Connection,
+    screen::receive::{Inbox, MAX_AGE, Sender},
+};
 use thiscord_shared::{
     AccountId,
     screen::*,
@@ -43,6 +46,8 @@ struct Inner {
     status: Status,
     owners: [Option<(AccountId, u32)>; ROOM_CAPACITY],
     frames: [Option<(Instant, Vec<u8>)>; ROOM_CAPACITY],
+    revisions: [u64; ROOM_CAPACITY],
+    viewers: [Option<(u32, Instant)>; ROOM_CAPACITY],
     audio: bool,
 }
 #[derive(Clone, Default)]
@@ -70,6 +75,7 @@ impl ScreenState {
             inner.status = Status::default();
             inner.owners = [None; ROOM_CAPACITY];
             inner.frames = std::array::from_fn(|_| None);
+            inner.viewers = [None; ROOM_CAPACITY];
         }
     }
     pub fn sharing(&self) -> (bool, bool) {
@@ -87,6 +93,7 @@ impl ScreenState {
                     .map(|m| (m.account_id, m.screen_epoch));
                 if owner != inner.owners[slot] {
                     inner.frames[slot] = None;
+                    inner.viewers[slot] = None;
                     inner.owners[slot] = owner;
                 }
             }
@@ -103,36 +110,28 @@ impl ScreenState {
             inner.status.sharing = false;
         }
     }
-    pub fn decoder(
-        &self,
-        connection: Connection,
-        slot: usize,
-    ) -> std::sync::mpsc::SyncSender<rtc::rtp::Packet> {
-        let (tx, rx) = std::sync::mpsc::sync_channel::<rtc::rtp::Packet>(4096);
+    pub fn decoder(&self, connection: Connection, slot: usize) -> Sender {
+        let (tx, rx) = Inbox::channel();
         let state = self.clone();
         std::thread::spawn(move || {
             use openh264::formats::YUVSource;
             let mut owner = None;
             let mut decoder = None;
-            let mut assembler = Assembler::default();
-            while let Ok(packet) = rx.recv() {
+            let mut rgb = Vec::new();
+            let mut jpeg = Vec::new();
+            while let Some(frame) = rx.next() {
                 if !connection.active() {
                     break;
                 }
                 let current = state.0.lock().ok().and_then(|s| s.owners[slot]);
-                if current != owner {
+                if current != owner || frame.reset {
                     owner = current;
                     decoder = openh264::decoder::Decoder::new().ok();
-                    assembler = Assembler::default();
                 }
-                if owner.is_none()
-                    || packet.header.csrc.first().copied() != owner.map(|(_, epoch)| epoch)
-                {
+                if owner.is_none() || Some(frame.epoch) != owner.map(|(_, epoch)| epoch) {
                     continue;
                 }
-                let Some(data) = assembler.push(&packet) else {
-                    continue;
-                };
+                let data = frame.data;
                 if !thiscord_frontend::screen::bounded_parameter_sets(&data) {
                     break;
                 }
@@ -140,15 +139,19 @@ impl ScreenState {
                     continue;
                 };
                 let Ok(Some(yuv)) = decoder.decode(&data) else {
+                    rx.resync();
                     continue;
                 };
                 let (width, height) = yuv.dimensions();
                 if width > MAX_WIDTH as usize || height > MAX_HEIGHT as usize {
                     break;
                 }
-                let mut rgb = vec![0; width * height * 3];
+                if frame.arrived.elapsed() > MAX_AGE || !state.visible(slot) {
+                    continue;
+                }
+                rgb.resize(width * height * 3, 0);
                 yuv.write_rgb8(&mut rgb);
-                let mut jpeg = Vec::new();
+                jpeg.clear();
                 if image::codecs::jpeg::JpegEncoder::new_with_quality(&mut jpeg, 80)
                     .encode(
                         &rgb,
@@ -163,12 +166,39 @@ impl ScreenState {
                 if let Ok(mut inner) = state.0.lock()
                     && connection.active()
                     && inner.owners[slot] == owner
+                    && frame.arrived.elapsed() <= MAX_AGE
+                    && viewer_live(&inner, slot)
                 {
-                    inner.frames[slot] = Some((Instant::now(), jpeg));
+                    inner.revisions[slot] = inner.revisions[slot].wrapping_add(1);
+                    let previous =
+                        inner.frames[slot].replace((frame.arrived, std::mem::take(&mut jpeg)));
+                    if let Some((_, buffer)) = previous {
+                        jpeg = buffer;
+                    }
                 }
             }
+            rx.close();
         });
         tx
+    }
+    fn visible(&self, slot: usize) -> bool {
+        self.0.lock().is_ok_and(|s| viewer_live(&s, slot))
+    }
+    fn watch(&self, watch: Watch, visible: bool) -> Option<u64> {
+        let mut inner = self.0.lock().ok()?;
+        if inner.owners.get(watch.slot)? != &Some((watch.owner, watch.epoch)) {
+            return None;
+        }
+        if visible {
+            inner.viewers[watch.slot] = Some((watch.viewer, Instant::now()));
+        } else if inner.viewers[watch.slot].is_some_and(|(id, _)| id == watch.viewer) {
+            inner.viewers[watch.slot] = None;
+            inner.frames[watch.slot] = None;
+        }
+        inner.frames[watch.slot]
+            .as_ref()
+            .filter(|(at, _)| at.elapsed() < Duration::from_secs(2))
+            .map(|_| inner.revisions[watch.slot])
     }
     pub fn frame(&self, slot: usize, owner: AccountId, epoch: u32) -> Option<Vec<u8>> {
         let inner = self.0.lock().ok()?;
@@ -181,6 +211,18 @@ impl ScreenState {
         let (at, data) = inner.frames.get(slot)?.as_ref()?;
         (at.elapsed() < Duration::from_secs(2)).then(|| data.clone())
     }
+}
+
+fn viewer_live(inner: &Inner, slot: usize) -> bool {
+    inner.viewers[slot].is_some_and(|(_, at)| at.elapsed() < Duration::from_millis(500))
+}
+#[tauri::command]
+pub fn screen_frame_state(
+    state: State<'_, ScreenState>,
+    watch: Watch,
+    visible: bool,
+) -> Option<u64> {
+    state.watch(watch, visible)
 }
 
 #[tauri::command]
@@ -386,6 +428,7 @@ fn capture(
     let mut sequence = 0;
     let started = binding.started;
     let mut frame = 0;
+    let mut yuv_buffer: Option<YUVBuffer> = None;
     let mut previous = Instant::now();
     let result = (|| {
         while !stop.load(Ordering::Acquire) && binding.connection.active() {
@@ -416,12 +459,18 @@ fn capture(
             } else {
                 image::imageops::resize(&captured, w, h, image::imageops::FilterType::Triangle)
             };
-            let yuv = YUVBuffer::from_rgb_source(RgbaSliceU8::new(&rgba, (w as usize, h as usize)));
+            let dimensions = (w as usize, h as usize);
+            use openh264::formats::YUVSource;
+            let yuv = yuv_buffer.get_or_insert_with(|| YUVBuffer::new(dimensions.0, dimensions.1));
+            if yuv.dimensions() != dimensions {
+                *yuv = YUVBuffer::new(dimensions.0, dimensions.1);
+            }
+            yuv.read_rgba8(RgbaSliceU8::new(&rgba, dimensions));
             if frame % quality.fps == 0 {
                 encoder.force_intra_frame();
             }
             let data = encoder
-                .encode(&yuv)
+                .encode(yuv)
                 .map_err(|_| "Screen encoding failed")?
                 .to_vec();
             if data.len() <= MAX_FRAME_BYTES {
@@ -500,6 +549,41 @@ mod tests {
             audio_timestamp: Default::default(),
             started: Instant::now(),
         }
+    }
+    #[test]
+    fn viewer_demand_expires_and_revisions_do_not_change_on_poll() {
+        let state = ScreenState::default();
+        state.bind(binding());
+        let owner: AccountId = "00000000-0000-0000-0000-000000000001".parse().unwrap();
+        let watch = Watch {
+            slot: 0,
+            owner,
+            epoch: 1,
+            viewer: 7,
+        };
+        {
+            let mut inner = state.0.lock().unwrap();
+            inner.owners[0] = Some((owner, 1));
+            inner.frames[0] = Some((Instant::now(), vec![1]));
+            inner.revisions[0] = 42;
+        }
+        assert!(!state.visible(0));
+        assert_eq!(state.watch(watch, true), Some(42));
+        assert!(state.visible(0));
+        assert_eq!(state.watch(watch, true), Some(42));
+        state.0.lock().unwrap().viewers[0] = Some((7, Instant::now() - Duration::from_secs(1)));
+        assert!(!state.visible(0));
+        let replacement = Watch { viewer: 8, ..watch };
+        state.watch(replacement, true);
+        state.watch(watch, false);
+        assert!(
+            state.visible(0),
+            "old cleanup must not stop replacement viewer"
+        );
+        state.watch(replacement, false);
+        assert!(!state.visible(0));
+        assert!(state.frame(0, owner, 1).is_none());
+        assert!(state.watch(Watch { epoch: 2, ..watch }, true).is_none());
     }
     #[test]
     fn stop_and_new_voice_binding_cannot_revive_old_capture_or_cached_frames() {
