@@ -34,17 +34,8 @@ jobs:
     runs-on: ${{ fromJSON(inputs.runner_routes)[matrix.os == 'ubuntu-24.04' && 'linux-installer' || matrix.os] }}
     steps:
       - uses: actions/checkout@v5
-      - name: Linux build and packaging dependencies
-        if: runner.os == 'Linux'
-        run: |
-          . /etc/os-release
-          if [ "$ID" != ubuntu ] || [ "$VERSION_ID" != 24.04 ]; then
-            echo "::error::Linux installers require Ubuntu 24.04; correct this runner's thiscord-ubuntu-24.04 label."
-            exit 1
-          fi
-          sudo apt-get update
-          sudo apt-get install -y libwebkit2gtk-4.1-dev build-essential libssl-dev libdbus-1-dev libxdo-dev libayatana-appindicator3-dev librsvg2-dev patchelf libasound2-dev cmake libfuse2t64
       - name: Install pinned Rust and target
+        if: runner.os != 'Linux'
         env:
           BUILD_TARGET: ${{ matrix.target }}
         shell: pwsh
@@ -55,8 +46,9 @@ jobs:
           if ($LASTEXITCODE) { exit $LASTEXITCODE }
       - uses: ./.github/actions/cargo-cache
         with:
-          key: release-${{ matrix.target }}
+          key: release-${{ matrix.target }}${{ runner.os == 'Linux' && '-ubuntu24-container' || '' }}
       - uses: ./.github/actions/cargo-tool
+        if: runner.os != 'Linux'
         with:
           crate: tauri-cli
           version: 2.12.0
@@ -65,6 +57,7 @@ jobs:
           name: frontend-assets
           path: frontend/dist
       - name: Build and sign installers
+        if: runner.os != 'Linux'
         working-directory: frontend
         shell: pwsh
         env:
@@ -85,12 +78,21 @@ jobs:
           cargo tauri build --ci --target $env:BUILD_TARGET --config tauri.ci.conf.json -- --locked
           if ($LASTEXITCODE) { exit $LASTEXITCODE }
       - name: Verify signatures and collect release artifacts
+        if: runner.os != 'Linux'
         shell: pwsh
         env:
           RELEASE_TAG: ${{ github.ref_name }}
           BUILD_TARGET: ${{ matrix.target }}
           UPDATE_PLATFORM: ${{ matrix.platform }}
         run: ./scripts/release-client.ps1 -Mode Collect -Tag $env:RELEASE_TAG -Target $env:BUILD_TARGET -Platform $env:UPDATE_PLATFORM
+      - name: Build, sign and verify Linux installers in Ubuntu 24.04
+        if: runner.os == 'Linux'
+        shell: bash
+        env:
+          RELEASE_TAG: ${{ github.ref_name }}
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
+        run: bash scripts/build-linux-installer.sh
       - uses: actions/upload-artifact@v4
         with:
           name: client-${{ matrix.platform }}

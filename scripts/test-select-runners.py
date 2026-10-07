@@ -32,21 +32,23 @@ class RoutingTests(unittest.TestCase):
     def test_all_platforms_and_case_insensitive_labels(self):
         runners = [runner([s.lower() for s in labels]) for labels in routing.PLATFORMS.values()]
         self.assertEqual(routing.select(runners),
-                         {**routing.PLATFORMS, "linux-installer": ["ubuntu-24.04"]})
+                         {**routing.PLATFORMS, "linux-installer": routing.INSTALLER_LABELS})
 
     def test_busy_online_runners_remain_eligible(self):
         runners = [runner(labels, busy=True) for labels in routing.PLATFORMS.values()]
         self.assertEqual(routing.select(runners),
-                         {**routing.PLATFORMS, "linux-installer": ["ubuntu-24.04"]})
+                         {**routing.PLATFORMS, "linux-installer": routing.INSTALLER_LABELS})
 
-    def test_installers_require_verified_distribution_label(self):
+    def test_installers_use_kali_host_for_ubuntu_container(self):
         kali = runner(["self-hosted", "Linux", "X64", "ubuntu-24.04"])
-        self.assertEqual(routing.select([kali])["linux-installer"], ["ubuntu-24.04"])
+        self.assertEqual(routing.select([kali])["linux-installer"], routing.INSTALLER_LABELS)
         ubuntu = runner(routing.INSTALLER_LABELS)
         self.assertEqual(routing.select([kali, ubuntu])["linux-installer"], routing.INSTALLER_LABELS)
         ubuntu["busy"] = True
         self.assertEqual(routing.select([kali, ubuntu])["linux-installer"], routing.INSTALLER_LABELS)
         ubuntu["status"] = "offline"
+        self.assertEqual(routing.select([kali, ubuntu])["linux-installer"], routing.INSTALLER_LABELS)
+        kali["status"] = "offline"
         self.assertEqual(routing.select([kali, ubuntu])["linux-installer"], ["ubuntu-24.04"])
 
     def test_missing_token_pr_and_api_failure_fall_back(self):

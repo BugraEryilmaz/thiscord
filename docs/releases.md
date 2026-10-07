@@ -45,12 +45,19 @@ that platform uses `windows-latest`, `ubuntu-24.04` or `macos-latest`. Selection
 reported in the routing job summary. Busy online runners remain eligible; jobs
 queue behind their existing work instead of falling back to hosted machines.
 Installer jobs reuse CI's initial selection.
-Linux installers additionally require the `thiscord-ubuntu-24.04` label on a real
-Ubuntu 24.04 x64 runner; otherwise they use GitHub-hosted Ubuntu. The packaging job
-verifies `/etc/os-release` before installing dependencies. Do not apply that label
-to Kali: general Linux checks may run there, but released binaries must preserve
-the Ubuntu system-library baseline. The existing `ubuntu-24.04` label alone does
-not establish installer eligibility.
+Linux installers also prefer the online Linux x64 self-hosted runner, including
+Kali. They always build inside an Ubuntu 24.04 Docker image so released binaries
+preserve the Ubuntu system-library baseline. No distribution-specific runner label
+is required. The runner account needs a working Linux Docker daemon without sudo.
+The image contains Rust, PowerShell, Tauri CLI and packaging dependencies; image
+layers and a separate Ubuntu build cache remain on the host between releases.
+The initial image build is slower; subsequent releases reuse it. Containers run
+with the runner's UID/GID so generated files remain owned by the runner, and
+AppImage extraction works without privileged containers or `/dev/fuse` access.
+Compilation defaults to two jobs to fit memory-limited Docker/WSL instances;
+set `CARGO_BUILD_JOBS` in the installer job if the daemon has more RAM available.
+The image is defined in `infra/ci/linux-installer.Dockerfile`; packaging and
+signature verification run through `scripts/build-linux-installer.sh`.
 This is a snapshot, not a reservation: jobs can queue behind each other, and a
 runner going offline after selection does not trigger another fallback check.
 

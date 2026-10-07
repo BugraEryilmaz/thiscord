@@ -10,14 +10,13 @@ PLATFORMS = {
     "macos-latest": ["self-hosted", "macOS", "ARM64"],
     "ubuntu-24.04": ["self-hosted", "Linux", "X64"],
 }
-INSTALLER_LABELS = ["self-hosted", "Linux", "X64", "thiscord-ubuntu-24.04"]
+INSTALLER_LABELS = ["self-hosted", "Linux", "X64"]
 
 
 def select(runners):
     routes = {}
     choices = [(key, key, labels) for key, labels in PLATFORMS.items()]
-    # General Linux checks can use Kali. Distributed binaries must retain the
-    # Ubuntu 24.04 system-library baseline, even when another distro is idle.
+    # Installers build inside Ubuntu 24.04 Docker, even on Kali hosts.
     choices.append(("linux-installer", "ubuntu-24.04", INSTALLER_LABELS))
     for key, hosted, required in choices:
         eligible = any(
