@@ -22,7 +22,8 @@ def select(runners):
     for key, hosted, required in choices:
         eligible = any(
             r.get("status") == "online"
-            and r.get("busy") is False
+            # Busy is temporary: let GitHub queue behind the current job.
+            # Otherwise simultaneous main/tag workflows push releases to hosted.
             and set(s.lower() for s in required).issubset(
                 label["name"].lower() for label in r.get("labels", [])
             )
