@@ -63,7 +63,8 @@ jobs always use hosted runners, and their router never receives the PAT.
 
 Self-hosted machines must already have Rust/rustup, PowerShell 7, Git and the
 platform build prerequisites available to the runner account. Linux also needs
-Python 3, passwordless package installation and a running Docker daemon accessible
+GitHub CLI (`gh`) for release publication, Python 3, passwordless package
+installation and a running Docker daemon accessible
 to that account for the PostgreSQL service container. CI uses a dynamically
 assigned database port to avoid the locally hosted development PostgreSQL port.
 The router checks availability and labels, not installed software or GPU readiness.
