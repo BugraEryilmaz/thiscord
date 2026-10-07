@@ -442,8 +442,15 @@ pub(super) fn ChatPanel(ui: Ui, guild: GuildId, channel: ChannelId, name: String
             ui.chat_epoch.update(|e| *e += 1);
         }
     });
-    let submit = move |ev: leptos::ev::SubmitEvent| {
-        ev.prevent_default();
+    let send = move || {
+        if loading.get_untracked()
+            || !chat
+                .permissions
+                .get_untracked()
+                .contains(&Permission::SendMessages)
+        {
+            return;
+        }
         let content = draft.get_untracked();
         if content.trim().is_empty() || content.chars().count() > MAX_MESSAGE_CHARS {
             return;
@@ -500,6 +507,19 @@ pub(super) fn ChatPanel(ui: Ui, guild: GuildId, channel: ChannelId, name: String
             }
         }
     };
+    let submit = move |ev: leptos::ev::SubmitEvent| {
+        ev.prevent_default();
+        send();
+    };
+    let keydown = move |ev: leptos::ev::KeyboardEvent| {
+        // Leave Enter available for IME candidate selection and Shift+Enter newlines.
+        if ev.key() == "Enter" && !ev.shift_key() && !ev.is_composing() && ev.key_code() != 229 {
+            ev.prevent_default();
+            if !ev.repeat() {
+                send();
+            }
+        }
+    };
     view! {
         <section class="flex h-full min-h-0 min-w-0 flex-col overflow-hidden rounded-xl border border-white/10 bg-white/5" aria-label="Text chat">
             <header class="shrink-0 border-b border-white/10 p-4"><h2 class="truncate text-lg font-semibold">{format!("# {name}")}</h2><p class="break-words text-xs text-white/60" role="status">{move||chat.status.get()}</p></header>
@@ -528,7 +548,7 @@ pub(super) fn ChatPanel(ui: Ui, guild: GuildId, channel: ChannelId, name: String
                 <p class="text-xs text-white/50">{move||format!("Online here: {}",chat.online.get().iter().map(|m|m.username.clone()).collect::<Vec<_>>().join(", "))}</p>
                 <p class="min-h-4 text-xs text-white/60" aria-live="polite">{move||{let names=chat.online.get().into_iter().filter(|m|m.typing&&ui.account.get().is_none_or(|a|a.id!=m.account_id)).map(|m|m.username).collect::<Vec<_>>();if names.is_empty(){String::new()}else{format!("{} typing…",names.join(", "))}}}</p>
                 <Show when=move||editing.get().is_some()><button class="text-sm text-brand underline" on:click=move |_|{editing.set(None);draft.set(String::new());}>"Cancel edit"</button></Show>
-                <form class="flex gap-3" on:submit=submit><label class="min-w-0 flex-1"><span class="sr-only">"Message"</span><textarea class="w-full resize-none rounded-lg bg-black/20 p-3 outline-none focus:ring-2 focus:ring-brand" rows="2" maxlength="4000" placeholder="Message this channel · @username to mention" prop:value=move||draft.get() disabled=move||!chat.permissions.get().contains(&Permission::SendMessages) on:input=move|ev|{draft.set(event_target_value(&ev));chat.typing.set(true);}/></label><button class="self-end rounded-lg bg-brand px-4 py-3 disabled:opacity-50" disabled=move||loading.get()||draft.get().trim().is_empty()||!chat.permissions.get().contains(&Permission::SendMessages)>{move||if editing.get().is_some(){"Save"}else{"Send"}}</button></form>
+                <form class="flex gap-3" on:submit=submit><label class="min-w-0 flex-1"><span class="sr-only">"Message"</span><textarea class="w-full resize-none rounded-lg bg-black/20 p-3 outline-none focus:ring-2 focus:ring-brand" on:keydown=keydown rows="2" maxlength="4000" placeholder="Message this channel · @username to mention" prop:value=move||draft.get() disabled=move||!chat.permissions.get().contains(&Permission::SendMessages) on:input=move|ev|{draft.set(event_target_value(&ev));chat.typing.set(true);}/></label><button class="self-end rounded-lg bg-brand px-4 py-3 disabled:opacity-50" disabled=move||loading.get()||draft.get().trim().is_empty()||!chat.permissions.get().contains(&Permission::SendMessages)>{move||if editing.get().is_some(){"Save"}else{"Send"}}</button></form>
             </footer>
         </section>
     }
