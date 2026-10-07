@@ -9,8 +9,17 @@ pub mod hardware;
 pub mod metrics;
 pub mod pacing;
 pub mod preview;
+pub const SENDER_QUEUE_AGE: std::time::Duration = std::time::Duration::from_millis(200);
+pub fn sender_queue_frames(fps: u32) -> usize {
+    (fps.clamp(1, 60) as usize).div_ceil(5)
+}
+/// Reserve queue slots for hardware output that has not completed yet.
+pub fn encoder_has_capacity(available: usize, pending: usize) -> bool {
+    available > pending
+}
 pub struct Outgoing {
     pub captured_at: std::time::Instant,
+    pub enqueued_at: std::time::Instant,
     pub packets: Vec<rtc::rtp::Packet>,
     pub keyframe: bool,
 }
@@ -257,6 +266,29 @@ impl Bits<'_> {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn sender_admission_reserves_space_for_unfinished_encodes() {
+        for fps in [30, 60] {
+            let slots = super::sender_queue_frames(fps);
+            assert_eq!(slots, fps as usize / 5);
+            let mut available = slots;
+            let mut pending = 0;
+            while super::encoder_has_capacity(available, pending) {
+                pending += 1;
+            }
+            assert_eq!(pending, slots);
+            // Every admitted encode can complete even while the sender stalls.
+            while pending > 0 {
+                available -= 1;
+                pending -= 1;
+                assert!(!super::encoder_has_capacity(available, pending));
+            }
+            available += 1; // Sending a queued frame permits one new encode.
+            assert!(super::encoder_has_capacity(available, pending));
+            pending += 1;
+            assert!(!super::encoder_has_capacity(available, pending));
+        }
+    }
     use super::*;
     #[test]
     fn fragmentation_loss_bounds_and_recovery() {

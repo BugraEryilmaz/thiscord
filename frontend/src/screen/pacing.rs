@@ -12,12 +12,23 @@ impl Pacer {
         }
     }
     pub fn reserve(&mut self, now: Instant, bytes: usize) -> Instant {
-        // At most 3 ms of burst credit amortizes OS timer resolution. A stall
+        // At most 8 ms of burst credit amortizes OS timer resolution. A stall
         // never accumulates an entire frame/second of catch-up credit.
-        let at = self.next.unwrap_or(now).max(now - Duration::from_millis(3));
+        let quantum = Duration::from_millis(8);
+        let at = self.next.unwrap_or(now).max(now - quantum);
         self.next =
             Some(at + Duration::from_secs_f64(bytes as f64 / self.bytes_per_second.max(1) as f64));
-        at.max(now)
+        if at <= now {
+            now
+        } else {
+            // Sleep once for a packet batch, not once per sub-millisecond
+            // packet interval. Keep byte debt anchored to the original clock.
+            now + quantum
+                * (at
+                    .duration_since(now)
+                    .as_nanos()
+                    .div_ceil(quantum.as_nanos()) as u32)
+        }
     }
 }
 #[cfg(test)]
@@ -28,12 +39,32 @@ mod tests {
         let mut p = Pacer::new(8_000_000);
         let now = Instant::now();
         assert_eq!(p.reserve(now, 1000), now);
-        assert_eq!(p.reserve(now, 1000), now + Duration::from_millis(1));
+        assert_eq!(p.reserve(now, 1000), now + Duration::from_millis(8));
         let later = now + Duration::from_secs(1);
         assert_eq!(p.reserve(later, 1000), later);
-        assert_eq!(p.reserve(later, 1000), later);
-        assert_eq!(p.reserve(later, 1000), later);
-        assert_eq!(p.reserve(later, 1000), later);
-        assert_eq!(p.reserve(later, 1000), later + Duration::from_millis(1));
+        for _ in 0..8 {
+            assert_eq!(p.reserve(later, 1000), later);
+        }
+        assert_eq!(p.reserve(later, 1000), later + Duration::from_millis(8));
+    }
+    #[test]
+    fn batching_preserves_rate_with_coarse_wakeups() {
+        let start = Instant::now();
+        let mut now = start;
+        let mut p = Pacer::new(8_000_000);
+        let mut sleeps = 0;
+        for _ in 0..1000 {
+            let at = p.reserve(now, 1000);
+            if at > now {
+                sleeps += 1;
+                now = at + Duration::from_millis(2);
+            }
+        }
+        assert!(now.duration_since(start) >= Duration::from_millis(990));
+        assert!(now.duration_since(start) <= Duration::from_millis(1010));
+        assert!(
+            sleeps < 150,
+            "must batch instead of sleeping for every packet"
+        );
     }
 }

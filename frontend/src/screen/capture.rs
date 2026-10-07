@@ -338,6 +338,17 @@ fn encode(
             guard.latest.take().or(pending)
         };
         let mut captured_at = Instant::now();
+        if !super::encoder_has_capacity(
+            tx.capacity(),
+            hardware.as_ref().map_or(0, |hw| hw.pending()),
+        ) {
+            // Dropping raw input preserves the H.264 dependency chain. Poll
+            // hardware above even when congested, but submit no new surfaces.
+            if pixels.is_some() {
+                metrics.add("encode_backpressure", 1);
+            }
+            continue;
+        }
         if let Some(pixels) = pixels {
             if pixels.arrived.elapsed() > Duration::from_millis(250) {
                 metrics.add("expired_frames", 1);
@@ -445,6 +456,7 @@ fn record_frames(frames: &[super::hardware::Encoded], started: Instant, metrics:
     for frame in frames {
         metrics.add("encoded_frames", 1);
         metrics.add("encoded_bytes", frame.data.len() as u64);
+        metrics.peak("encoded_peak_frame_bytes", frame.data.len() as u64);
         if super::recovery_frame(&frame.data) {
             metrics.add("keyframes", 1);
         }
@@ -471,15 +483,17 @@ fn send_frames(
         let at = started
             .checked_add(Duration::from_micros(frame.timestamp))
             .ok_or("Invalid video timestamp")?;
-        if at.elapsed() > Duration::from_millis(250) {
+        if at.elapsed() > super::SENDER_QUEUE_AGE {
             *waiting_for_keyframe = true;
             metrics.add("encode_dropped", 1);
+            metrics.add("encode_stale", 1);
             complete = false;
             continue;
         }
         if *waiting_for_keyframe && !super::recovery_frame(&frame.data) {
             metrics.add("encode_dropped", 1);
-            complete = false;
+            metrics.add("encode_dependent", 1);
+            // Recovery is already requested. Do not relatch it for each delta.
             continue;
         }
         let recovery = super::recovery_frame(&frame.data);
@@ -487,6 +501,7 @@ fn send_frames(
         if tx
             .try_send(super::Outgoing {
                 captured_at: at,
+                enqueued_at: Instant::now(),
                 packets,
                 keyframe: recovery,
             })
@@ -494,6 +509,7 @@ fn send_frames(
         {
             *waiting_for_keyframe = true;
             metrics.add("encode_dropped", 1);
+            metrics.add("encode_queue_full", 1);
             complete = false;
         } else {
             *waiting_for_keyframe = false;
@@ -544,7 +560,7 @@ mod tests {
         );
         rx.try_recv().unwrap();
         assert!(
-            !send_frames(
+            send_frames(
                 vec![frame(false)],
                 started,
                 &tx,
@@ -571,6 +587,8 @@ mod tests {
         );
         assert!(!waiting);
         assert_eq!(metrics.snapshot().counters["encode_dropped"], 2);
+        assert_eq!(metrics.snapshot().counters["encode_queue_full"], 1);
+        assert_eq!(metrics.snapshot().counters["encode_dependent"], 1);
         assert!(rx.try_recv().is_ok());
     }
 }

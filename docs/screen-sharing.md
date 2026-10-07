@@ -70,9 +70,16 @@ the display stops capture; it never falls back to another window/display.
 - The network remains the Rust WebRTC client and single-process SFU; the SFU
   forwards compressed video without transcoding. The publisher byte-paces packets
   at 1.2 times target codec bitrate (transport overhead allowance), with at most
-  3 ms of burst credit to accommodate OS timer granularity. It does not accumulate
+  8 ms of burst credit and batched wakeups to accommodate OS timer granularity. It does not accumulate
   catch-up credit during stalls. Stale/partially sent frames trigger IDR recovery
-  instead of terminating the share. Encoded queues remain bounded to two frames.
+  instead of terminating the share. Encoded queues hold 200 ms of target-rate
+  frames (six at 30 FPS, twelve at 60 FPS); frames older than 200 ms are rejected
+  before sending. The in-flight frame retains a 350 ms capture-age deadline, and
+  each RTP write has a 100 ms timeout, so this is not an end-to-end latency bound.
+  Admission reserves queue space for pending hardware output and skips raw
+  captures before GPU processing/encoding under backpressure. This avoids breaking
+  H.264 reference chains. Discarding dependent frames during recovery does not
+  request another keyframe for each skipped delta.
   SFU video deliveries expire after 150 ms in its egress queue, with aggregate
   queue-drop/send-timeout diagnostics and rate-limited recovery feedback.
 - Receivers reorder up to 256 packets for 40 ms, handle sequence wraparound and
@@ -204,6 +211,19 @@ the local bridge; browser decode/presentation differences identify WebView press
 Compare a moving source (static sources naturally produce fewer capture events).
 Rates derive from counter deltas, not the selected quality. Times use local clocks;
 there is no synchronized one-way capture-to-display latency measurement.
+
+Publisher diagnostics now include `sender_queue_wait` (enqueue to dequeue),
+`pacing_wait` (actual sleep), `pacing_lateness` (wake delay beyond the requested
+deadline), `rtp_write` (each WebRTC write, including failed/timed-out attempts),
+and `frame_send` (packet pacing plus writes for completed frames). All report
+sample count, mean and maximum. `pacing_sleeps` counts batch wakeups;
+`encoded_peak_frame_bytes` and `sender_peak_frame_packets` expose large bursts.
+`encode_backpressure` counts raw captures skipped before encoding. Encoded losses
+are separated into `encode_queue_full`, `encode_stale`, `encode_dependent`,
+`sender_stale`, `sender_dependent`, `send_timeouts` and `send_errors`, while
+`encode_dropped` remains their aggregate. Large wake delays implicate scheduling;
+large write times implicate the WebRTC write path. Low times with large frames
+and growing queue wait implicate offered load versus the configured pacing rate.
 
 `cargo run -p thiscord-frontend --example screen_gpu_probe --features screen-share --profile ci --locked`
 uses synthetic FP16 textures, GPU scale/tone-map/NV12 conversion and GPU H.264,

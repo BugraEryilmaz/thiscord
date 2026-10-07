@@ -473,7 +473,10 @@ pub async fn screen_start(
     inner.status.message = "Starting screen capture…".into();
     inner.status.encoder = None;
     let state = state.inner().clone();
-    let (tx, mut rx) = mpsc::channel::<thiscord_frontend::screen::Outgoing>(2);
+    let queue_frames = thiscord_frontend::screen::sender_queue_frames(quality.fps);
+    binding.metrics.label("sender_queue_capacity", queue_frames);
+    binding.metrics.label("sender_queue_budget_ms", 200);
+    let (tx, mut rx) = mpsc::channel::<thiscord_frontend::screen::Outgoing>(queue_frames);
     let sender_stop = stop.clone();
     let sender_binding = binding.clone();
     tauri::async_runtime::spawn(async move {
@@ -481,20 +484,47 @@ pub async fn screen_start(
         let mut waiting = false;
         'frames: while let Some(frame) = rx.recv().await {
             let captured_at = frame.captured_at;
-            if captured_at.elapsed() > Duration::from_millis(250) || (waiting && !frame.keyframe) {
+            sender_binding
+                .metrics
+                .time("sender_queue_wait", frame.enqueued_at.elapsed());
+            let stale = captured_at.elapsed() > thiscord_frontend::screen::SENDER_QUEUE_AGE;
+            if stale || (waiting && !frame.keyframe) {
+                sender_binding.metrics.add(
+                    if stale {
+                        "sender_stale"
+                    } else {
+                        "sender_dependent"
+                    },
+                    1,
+                );
                 sender_binding.metrics.add("encode_dropped", 1);
                 sender_binding
                     .metrics
                     .event("paced sender dropped stale or dependent frame");
-                sender_binding.force_keyframe.store(true, Ordering::Release);
+                if !waiting || frame.keyframe {
+                    sender_binding.force_keyframe.store(true, Ordering::Release);
+                }
                 waiting = true;
                 continue;
             }
+            let send_started = Instant::now();
+            sender_binding
+                .metrics
+                .peak("sender_peak_frame_packets", frame.packets.len() as u64);
             for mut packet in frame.packets {
                 let bytes = packet.payload.len() + 64;
                 let at = pacer.reserve(Instant::now(), bytes);
                 if at > Instant::now() {
+                    let sleep_started = Instant::now();
+                    sender_binding.metrics.add("pacing_sleeps", 1);
                     tokio::time::sleep_until(at.into()).await;
+                    sender_binding
+                        .metrics
+                        .time("pacing_wait", sleep_started.elapsed());
+                    sender_binding.metrics.time(
+                        "pacing_lateness",
+                        Instant::now().saturating_duration_since(at),
+                    );
                 }
                 if sender_stop.load(Ordering::Acquire) || !sender_binding.connection.active() {
                     return;
@@ -503,6 +533,7 @@ pub async fn screen_start(
                     waiting = true;
                     sender_binding.force_keyframe.store(true, Ordering::Release);
                     sender_binding.metrics.add("encode_dropped", 1);
+                    sender_binding.metrics.add("sender_stale", 1);
                     sender_binding
                         .metrics
                         .event("paced sender dropped stale or dependent frame");
@@ -512,14 +543,24 @@ pub async fn screen_start(
                     .video_sequence
                     .fetch_add(1, Ordering::Relaxed)
                     as u16;
-                if !matches!(
-                    tokio::time::timeout(
-                        Duration::from_millis(100),
-                        sender_binding.video.write_rtp(packet)
-                    )
-                    .await,
-                    Ok(Ok(_))
-                ) {
+                let write_started = Instant::now();
+                let result = tokio::time::timeout(
+                    Duration::from_millis(100),
+                    sender_binding.video.write_rtp(packet),
+                )
+                .await;
+                sender_binding
+                    .metrics
+                    .time("rtp_write", write_started.elapsed());
+                if !matches!(result, Ok(Ok(_))) {
+                    sender_binding.metrics.add(
+                        if result.is_err() {
+                            "send_timeouts"
+                        } else {
+                            "send_errors"
+                        },
+                        1,
+                    );
                     waiting = true;
                     sender_binding.force_keyframe.store(true, Ordering::Release);
                     sender_binding.metrics.add("encode_dropped", 1);
@@ -532,6 +573,9 @@ pub async fn screen_start(
                 sender_binding.metrics.add("sent_bytes", bytes as u64);
             }
             waiting = false;
+            sender_binding
+                .metrics
+                .time("frame_send", send_started.elapsed());
             sender_binding.metrics.add("sent_frames", 1);
             sender_binding
                 .metrics
