@@ -120,11 +120,14 @@ IPv6 HTTPS and authenticated TURN were also tested locally on the VPS; an
 external IPv6 connection could not be established from the migration workstation.
 External IPv6 media acceptance remains unverified.
 
-At the last check, Cloudflare served the API successfully, but some resolvers
-still used the old Dynu delegation. Creation of the DNS-only TURN records and
-switching production `THISCORD_STUN_URL` / `THISCORD_TURN_URL` to the new hostname
-are pending. Set them to `stun:turn.thiscord.com.tr:3478` and
-`turn:turn.thiscord.com.tr:3478?transport=udp` after verifying those records.
-Verify `certbot renew --dry-run` after propagation before treating renewal as
-tested. Do not restart the old backend to bridge DNS propagation: its database
+Cloudflare serves the API successfully. DNS-only A/AAAA records for
+`turn.thiscord.com.tr` were verified and production `THISCORD_STUN_URL` /
+`THISCORD_TURN_URL` now use `stun:turn.thiscord.com.tr:3478` and
+`turn:turn.thiscord.com.tr:3478?transport=udp`. After restarting the backend,
+the native relay-to-relay and relay-to-host probes passed using this hostname,
+with ten encrypted RTP packets received in each direction in each test.
+Certbot's simulated renewal passed through Cloudflare on 2026-10-07 using
+`certbot renew --dry-run --no-random-sleep-on-renew`. Public HTTPS readiness
+also passed without a DNS override. Do not restart the old backend to bridge
+DNS propagation: its database
 is retained for rollback, not as a second writable production instance.
