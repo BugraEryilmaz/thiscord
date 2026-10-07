@@ -26,7 +26,10 @@ runs:
           $sha = [System.Security.Cryptography.SHA256]::Create()
           $hash = [BitConverter]::ToString($sha.ComputeHash([Text.Encoding]::UTF8.GetBytes($scope))).Replace('-', '').ToLowerInvariant()
           $sha.Dispose()
-          $target = Join-Path (Split-Path $env:RUNNER_TEMP -Parent) "thiscord-cargo/$hash"
+          # MSVC/CMake append deep scratch and PDB paths. Keep Windows roots short
+          # while retaining a 128-bit scope hash for runner/job isolation.
+          $relative = if ($IsWindows) { "tc/$($hash.Substring(0, 32))" } else { "thiscord-cargo/$hash" }
+          $target = Join-Path (Split-Path $env:RUNNER_TEMP -Parent) $relative
         }
         New-Item -ItemType Directory -Force -Path $target | Out-Null
         "CARGO_TARGET_DIR=$target" >> $env:GITHUB_ENV
