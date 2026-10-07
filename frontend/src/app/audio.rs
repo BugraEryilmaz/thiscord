@@ -147,12 +147,82 @@ fn DebugRecording(ui: Ui) -> impl IntoView {
 }
 #[component]
 fn StreamVolumes(ui: Ui) -> impl IntoView {
-    view! {<div class="space-y-3"><For each=move||ui.audio_status.get().map(|s|s.streams).unwrap_or_default() key=|s| (s.id.clone(),s.label.clone(),s.target) children=move|stream|{
-        let id=stream.id.parse::<usize>().unwrap_or(0);
-        let target=stream.target;
-        let gain=RwSignal::new((stream.volume*100.0).round());
-        view!{<label class="flex flex-wrap items-center gap-3"><span class="min-w-24 text-sm">{stream.label}</span><input aria-label="Speaker volume" type="range" min="0" max="200" step="1" prop:value=move||gain.get().to_string() on:input=move|e|{if let Ok(v)=event_target_value(&e).parse::<f32>(){gain.set(v);}} on:change=move|e|{if let Ok(value)=event_target_value(&e).parse::<f32>(){leptos::task::spawn_local(async move{match native::<AudioStatus>("audio_volume",json!({"stream":id,"gain":value/100.0,"target":target})).await{Ok(s)=>ui.audio_status.set(Some(s)),Err(e)=>ui.status.set(e)}});}}/><span class="text-xs">{move||format!("{}%",gain.get())}</span></label>}
-    }/></div>}
+    view! {<div class="space-y-3"><For each=move || { ui.audio_status.get().map(|s| s.streams).unwrap_or_default().into_iter().filter(|s| !s.target.is_some_and(|t| t.shared_audio)).collect::<Vec<_>>() } key=|s| (s.id.clone(), s.target) children=move |stream| view! { <StreamVolume ui=ui stream=stream/> }/></div>}
+}
+
+#[component]
+pub(super) fn StreamVolume(ui: Ui, stream: StreamLevel) -> impl IntoView {
+    let id = stream.id.parse::<usize>().unwrap_or(0);
+    let target = stream.target;
+    let shared_audio = target.is_some_and(|t| t.shared_audio);
+    let gain = RwSignal::new((stream.volume * 100.0).round());
+    let restore = RwSignal::new(if stream.volume > 0.0 {
+        stream.volume
+    } else {
+        1.0
+    });
+    let busy = RwSignal::new(false);
+    let error = RwSignal::new(String::new());
+    let current_volume = Memo::new(move |_| {
+        ui.audio_status.get().and_then(|s| {
+            s.streams
+                .into_iter()
+                .find(|s| s.id == id.to_string() && s.target == target)
+                .map(|s| s.volume)
+        })
+    });
+    Effect::new(move |_| {
+        if let Some(current) = current_volume.get() {
+            gain.set((current * 100.0).round());
+        }
+    });
+    let save = move |value: f32| {
+        busy.set(true);
+        error.set(String::new());
+        leptos::task::spawn_local(async move {
+            let result = native::<AudioStatus>(
+                "audio_volume",
+                json!({"stream":id,"gain":value,"target":target}),
+            )
+            .await;
+            if busy.try_get_untracked().is_none() {
+                return;
+            }
+            match result {
+                Ok(status) => ui.audio_status.set(Some(status)),
+                Err(message) => {
+                    error.set(message);
+                    if let Some(current) = current_volume.get_untracked() {
+                        gain.set((current * 100.0).round());
+                    }
+                }
+            }
+            busy.set(false);
+        });
+    };
+    view! {
+        <div class="flex flex-wrap items-center gap-3">
+            <label class="flex flex-wrap items-center gap-3">
+                <span class="min-w-24 text-sm">{if shared_audio { "Screen share audio".to_owned() } else { stream.label }}</span>
+                <input aria-label=if shared_audio { "Screen share volume" } else { "Speaker volume" } type="range" min="0" max="200" step="1"
+                    disabled=move || busy.get() prop:value=move || gain.get().to_string()
+                    on:input=move |e| { if let Ok(value) = event_target_value(&e).parse::<f32>() { gain.set(value); } }
+                    on:change=move |e| { if let Ok(value) = event_target_value(&e).parse::<f32>() { save(value / 100.0); } }/>
+                <span class="text-xs">{move || format!("{}%", gain.get())}</span>
+            </label>
+            {shared_audio.then(|| view! {
+                <button class="rounded bg-white/10 px-3 py-2 text-sm disabled:opacity-50" disabled=move || busy.get()
+                    aria-pressed=move || (gain.get() == 0.0).to_string()
+                    on:click=move |_| {
+                        if gain.get_untracked() > 0.0 {
+                            restore.set(gain.get_untracked() / 100.0);
+                            save(0.0);
+                        } else { save(restore.get_untracked()); }
+                    }>{move || if gain.get() == 0.0 { "Unmute screen share" } else { "Mute screen share" }}</button>
+            })}
+            <Show when=move || !error.get().is_empty()><p class="w-full text-sm text-red-300" role="alert">{move || error.get()}</p></Show>
+        </div>
+    }
 }
 #[component]
 pub(super) fn VoiceChannel(

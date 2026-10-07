@@ -10,8 +10,16 @@ System audio captures all other applications, even for a single-window share.
 It excludes Thiscord's process tree, so received voice and shared audio are not
 sent back into the call. Microphone mute and push-to-talk affect the microphone
 only. Stop sharing stops both screen and shared audio. Deafen also stops local
-sharing and blocks received media. Each speaker's volume controls their voice
-and shared audio together. System audio is currently downmixed to mono.
+sharing and blocks received media. Each received screen share has its own 0-200%
+volume and mute/unmute controls beside the video, independent of the sharer's voice
+volume. Both levels persist locally per guild/account. Existing voice preferences
+are preserved; shared audio defaults to 100%. System audio is currently downmixed
+to mono.
+
+**Full screen** expands the received video within the app window while keeping its
+audio controls available. **Exit full screen** or Escape restores the inline view.
+The existing player continues running through the layout change; this does not
+enter operating-system fullscreen.
 
 Windows system audio requires build 20348 or newer, normally Windows 11.
 Unsupported or unavailable loopback capture stops the share with an error;

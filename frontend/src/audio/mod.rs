@@ -428,13 +428,11 @@ impl Session {
             {
                 return Err("Speaker changed; adjust the current speaker instead".into());
             }
-            profile.set(target, gain)?;
-            // The speaker slider also controls that account's shared audio.
-            for (remote, writer) in self.remotes.iter().zip(&self.devices.writers) {
-                if remote.as_ref().is_some_and(|r| r.id == target.account_id) {
-                    writer.volume(gain)?;
-                }
+            if target.shared_audio != (stream >= thiscord_shared::voice::ROOM_CAPACITY) {
+                return Err("Audio stream kind changed".into());
             }
+            profile.set(target, gain)?;
+            self.devices.writers[stream].volume(gain)?;
             return Ok(());
         } else if target.is_some() {
             return Err("Voice connection changed".into());
@@ -668,13 +666,13 @@ impl Session {
                 self.remotes
                     .iter()
                     .enumerate()
-                    .filter(|(i, _)| *i < thiscord_shared::voice::ROOM_CAPACITY)
                     .filter_map(|(i, r)| {
                         r.as_ref().map(|r| StreamLevel {
                             id: i.to_string(),
                             target: self.volumes.as_ref().map(|p| SpeakerVolumeTarget {
                                 guild_id: p.guild_id,
                                 account_id: r.id,
+                                shared_audio: i >= thiscord_shared::voice::ROOM_CAPACITY,
                             }),
                             label: r.label.clone(),
                             volume: f32::from_bits(
@@ -898,7 +896,9 @@ fn run(
                                         s.devices.writers[slot].volume(
                                             member
                                                 .and_then(|m| {
-                                                    s.volumes.as_ref().map(|p| p.gain(m.account_id))
+                                                    s.volumes
+                                                        .as_ref()
+                                                        .map(|p| p.gain(m.account_id, shared_audio))
                                                 })
                                                 .unwrap_or(1.0),
                                         )?;

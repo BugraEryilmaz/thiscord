@@ -118,16 +118,37 @@ pub(super) fn ScreenViewer(ui: Ui) -> impl IntoView {
             children=move |member| {
                 let own = ui.account.get_untracked().is_some_and(|a| a.id == member.account_id);
                 let watch = thiscord_shared::screen::Watch { slot: member.slot, owner: member.account_id, epoch: member.screen_epoch, viewer: NEXT_VIEWER.fetch_add(1, std::sync::atomic::Ordering::Relaxed) };
-                view! { <figure class="overflow-hidden rounded-lg border border-white/15 bg-black">
-                    <figcaption class="p-3 text-sm">{member.username}" is sharing"{if own { " (you)" } else { "" }}</figcaption>
-                    {(!own).then(|| view! { <ScreenVideo watch=watch/> })}
+                let expanded = RwSignal::new(false);
+                let escape = window_event_listener(leptos::ev::keydown, move |event| {
+                    if event.key() == "Escape" { expanded.set(false); }
+                });
+                on_cleanup(move || escape.remove());
+                view! { <figure class=move || if expanded.get() {
+                    "fixed inset-0 z-50 flex min-h-0 flex-col overflow-auto bg-black text-white"
+                } else { "overflow-hidden rounded-lg border border-white/15 bg-black" }>
+                    <figcaption class="flex shrink-0 flex-wrap items-center justify-between gap-3 p-3 text-sm">
+                        <span>{member.username}" is sharing"{if own { " (you)" } else { "" }}</span>
+                        {(!own).then(|| view! {
+                            <button class="rounded bg-white/10 px-3 py-2" aria-pressed=move || expanded.get().to_string()
+                                on:click=move |_| expanded.update(|value| *value = !*value)>
+                                {move || if expanded.get() { "Exit full screen" } else { "Full screen" }}
+                            </button>
+                        })}
+                    </figcaption>
+                    {(!own).then(|| view! {
+                        <div class="shrink-0 px-3 pb-3">
+                            <For each=move || { ui.audio_status.get().map(|s| s.streams).unwrap_or_default().into_iter().filter(|s| s.target.is_some_and(|t| t.account_id == watch.owner && t.shared_audio)).collect::<Vec<_>>() } key=|s| (s.id.clone(), s.target)
+                                children=move |stream| view! { <super::audio::StreamVolume ui=ui stream=stream/> }/>
+                        </div>
+                        <ScreenVideo watch=watch expanded=expanded/>
+                    })}
                 </figure> }
             }/>
     </div> }
 }
 
 #[component]
-fn ScreenVideo(watch: thiscord_shared::screen::Watch) -> impl IntoView {
+fn ScreenVideo(watch: thiscord_shared::screen::Watch, expanded: RwSignal<bool>) -> impl IntoView {
     let video = NodeRef::<leptos::html::Video>::new();
     let message = RwSignal::new("Connecting screen video...".to_owned());
     let diagnostics = RwSignal::new(String::new());
@@ -162,7 +183,7 @@ fn ScreenVideo(watch: thiscord_shared::screen::Watch) -> impl IntoView {
     view! {
         <Show when=move || !message.get().is_empty()><p class="p-4 text-sm text-white/60" role="status">{move || message.get()}</p></Show>
         <DiagnosticsPanel label="Playback diagnostics" text=diagnostics/>
-        <video node_ref=video autoplay muted playsinline class="max-h-[65vh] w-full object-contain" aria-label="Live shared screen"/>
+        <video node_ref=video autoplay muted playsinline class=move || if expanded.get() { "min-h-0 w-full flex-1 object-contain" } else { "max-h-[65vh] w-full object-contain" } aria-label="Live shared screen"/>
     }
 }
 

@@ -10,6 +10,26 @@ use uuid::Uuid;
 const ID: &str = "f8f72890-fbae-4e56-9e7b-8038b5c3a094";
 
 #[test]
+fn speaker_volume_targets_default_to_voice_and_distinguish_shared_audio() {
+    use thiscord_shared::audio::SpeakerVolumeTarget;
+    let voice: SpeakerVolumeTarget = from_value(json!({"guild_id": ID, "account_id": ID})).unwrap();
+    assert!(!voice.shared_audio);
+    let screen = SpeakerVolumeTarget {
+        shared_audio: true,
+        ..voice
+    };
+    assert_ne!(voice, screen);
+    assert_eq!(
+        to_value(screen).unwrap(),
+        json!({"guild_id": ID, "account_id": ID, "shared_audio": true})
+    );
+    assert_eq!(
+        from_value::<SpeakerVolumeTarget>(to_value(screen).unwrap()).unwrap(),
+        screen
+    );
+}
+
+#[test]
 fn screen_commands_are_explicit_and_older_rosters_default_to_no_share() {
     use thiscord_shared::voice::*;
     let event = ClientEvent::Screen {

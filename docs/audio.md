@@ -24,7 +24,9 @@ volume and deafen, and are included in the echo reference/debug speaker track.
 They are not inserted into the outgoing microphone stream. PCM is synthesized
 before device startup; callback playback uses no allocation, locks or file I/O.
 
-Each speaker has an independent 0-200% volume slider. Gains persist locally per
+Each speaker has an independent 0-200% voice volume slider. Received screen shares
+have separate volume and mute controls beside their video; changing either level
+does not change the other. Gains persist locally per
 guild/account ID in `speaker-volumes.json`, including 0% mutes, and restore on
 rejoin/reconnect/restart regardless of username or stream slot. The same person
 can have different gains in different guilds. Preferences belong to this local
