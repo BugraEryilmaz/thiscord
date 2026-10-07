@@ -85,6 +85,10 @@ cargo install tauri-cli --version 2.12.0 --locked
 
 ## Backend in WSL
 
+Production hosting is documented in [VPS deployment and backups](docs/vps.md).
+After the VPS cutover, the local `thiscord` database is a read-only rollback copy;
+`thiscord_test` remains available for local integration tests.
+
 For direct HTTPS with the existing Let's Encrypt certificate, see
 [HTTPS setup and certificate renewal](docs/https.md).
 

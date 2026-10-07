@@ -1,0 +1,8 @@
+[Unit]
+Description=Back up the Thiscord database
+After=postgresql.service
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/sbin/thiscord-backup
+UMask=0077
