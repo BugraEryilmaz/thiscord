@@ -2,9 +2,16 @@
 
 The backend is deployed through `ssh vps` to Ubuntu 26.04 at `57.129.178.14`.
 The public origin remains `https://thiscord.com.tr`; desktop clients and Google
-OAuth callback URLs do not need changing. Production DNS uses the VPS IPv4 A
-record. Remove the old home-network AAAA record; this deployment initially serves
-HTTP and TURN over IPv4. PostgreSQL 18 listens only on loopback.
+OAuth callback URLs do not need changing. Cloudflare proxies this hostname, with
+A origin `57.129.178.14` and AAAA origin `2001:41d0:801:2000::1151`; use SSL/TLS
+Full (strict). The API readiness check passes through Cloudflare.
+STUN/TURN must use a separate `turn.thiscord.com.tr` hostname with the same A/AAAA
+addresses and **DNS-only** records. Cloudflare's ordinary HTTP proxy does not
+forward TURN UDP traffic. This exposes the VPS address; media traffic relies on
+the hosting provider's network protection, not Cloudflare's HTTP protection.
+HTTPS binds `[::]:443` with dual-stack sockets;
+coturn listens and relays on both public address families. PostgreSQL 18 listens
+only on loopback.
 
 ## Layout and services
 
@@ -32,8 +39,9 @@ curl --fail https://thiscord.com.tr/api/v1/ready
 
 Coturn uses host networking on native Linux, avoiding the Docker Desktop NAT
 translation used by the old installation. Its pinned image and sandbox settings
-are in `infra/vps/compose.yml`. The relay address and backend voice bind address
-are the VPS's public IPv4. Private/loopback relay peers remain denied.
+are in `infra/vps/compose.yml`. Coturn uses both public relay addresses.
+The native backend SFU bind remains IPv4, while
+coturn also accepts IPv6 clients. Private/loopback relay peers remain denied.
 
 UFW allows SSH TCP 22, ACME HTTP TCP 80, backend HTTPS TCP 443, STUN/TURN UDP/TCP
 3478 and UDP 32768–60999. The last range covers the OS-selected ephemeral SFU
@@ -53,7 +61,10 @@ sudo systemctl list-timers thiscord-backup.timer certbot.timer
 sudo certbot renew --dry-run
 ```
 
-Certbot uses standalone HTTP validation on port 80. DNS must reach this VPS.
+Certbot uses standalone HTTP validation on port 80. Cloudflare must forward
+`/.well-known/acme-challenge/*` to this VPS on HTTP port 80 without redirecting it
+to the application's HTTPS listener, caching it, or requiring a browser challenge.
+Verify this with a renewal dry run after DNS delegation has propagated.
 Its deploy hook `/etc/letsencrypt/renewal-hooks/deploy/thiscord` installs the new
 certificate pair with restricted permissions and sends SIGHUP to the backend.
 This reloads TLS without disconnecting active sessions. The source hook is
@@ -105,8 +116,15 @@ with zero loss. The local older `turnutils_uclient` channel-bind mode returned
 400, so that diagnostic alone is not evidence of app-client playback failure;
 real desktop voice/screen-sharing acceptance remains necessary.
 
-Until DNS points to the VPS and the old AAAA record is removed, domain-based
-client access and Certbot renewal validation still target the old installation.
+IPv6 HTTPS and authenticated TURN were also tested locally on the VPS; an
+external IPv6 connection could not be established from the migration workstation.
+External IPv6 media acceptance remains unverified.
+
+At the last check, Cloudflare served the API successfully, but some resolvers
+still used the old Dynu delegation. Creation of the DNS-only TURN records and
+switching production `THISCORD_STUN_URL` / `THISCORD_TURN_URL` to the new hostname
+are pending. Set them to `stun:turn.thiscord.com.tr:3478` and
+`turn:turn.thiscord.com.tr:3478?transport=udp` after verifying those records.
 Verify `certbot renew --dry-run` after propagation before treating renewal as
 tested. Do not restart the old backend to bridge DNS propagation: its database
 is retained for rollback, not as a second writable production instance.
