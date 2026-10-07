@@ -1,7 +1,7 @@
 use crate::{
     auth::{
         Failure,
-        store::{self as auth, connection, execute},
+        store::{self as auth, connection, execute, query},
     },
     db::DbPool,
     permissions::{evaluator::effective, store::load},
@@ -17,7 +17,7 @@ pub(super) fn authorize(
     token: &str,
     guild: GuildId,
     channel: ChannelId,
-) -> Result<Participant, Failure> {
+) -> Result<(Participant, i64), Failure> {
     let mut c = connection(pool)?;
     let session = auth::authenticate(&mut c, token)?;
     c.transaction(|c| {
@@ -47,7 +47,8 @@ pub(super) fn authorize(
         {
             return Err(Failure::Forbidden);
         }
-        Ok(Participant {
+        let revision = query::<i64>(c,"SELECT to_jsonb(voice_revision) AS data FROM guild_moderation WHERE guild_id=$1::uuid AND account_id=$2::uuid", &[&guild.to_string(), &session.account_id.to_string()])?.pop().unwrap_or(0);
+        Ok((Participant {
             account_id: session.account_id,
             username: member.username.clone(),
             slot: 0,
@@ -57,6 +58,6 @@ pub(super) fn authorize(
             sharing_screen: false,
             sharing_audio: false,
             screen_epoch: 0,
-        })
+        }, revision))
     })
 }

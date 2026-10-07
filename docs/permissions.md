@@ -32,7 +32,7 @@ Each guild has exactly one owner who is also a member. Ownership transfer requir
 recent reauthentication and an existing verified member. The former owner keeps
 their ordinary membership and previously assigned roles, losing the owner bypass.
 For now, a member with ManageInvites adds an existing verified username directly;
-invite links, bans and acceptance workflows remain separate roadmap work.
+invite links and acceptance workflows remain separate roadmap work.
 
 The main screen has a left server rail with circular initials avatars and server
 names on hover and accessible labels. Select a server to see its ID and visible channels. Custom
@@ -44,7 +44,8 @@ name and optional password. **Join** opens a dialog for a server UUID and option
 password. Verified accounts can join unprotected servers by ID; protected servers
 require the password. Existing members can reopen/join their server without
 creating another membership. A removal is not a ban: someone who still knows the
-join credentials can rejoin until ban support is implemented. ManageInvites permits
+join credentials can rejoin. A ban blocks both join-by-ID and direct additions until
+a member with BanMembers removes it. ManageInvites permits
 direct member additions without requiring the server password.
 
 Server passwords are salted Argon2id hashes on the backend, never returned in DTOs
@@ -145,8 +146,8 @@ See [chat.md](chat.md). Do not treat client snapshots as reusable authorization 
 Voice signaling checks current sessions, membership, ViewChannel and JoinVoice.
 SFU routing also enforces Speak and self mute/deafen. Publisher/receiver writes
 hold the same access gate and check its generation; successful access-changing
-commits evict active voice sessions. See [audio.md](audio.md). Moderator voice
-operations remain pending and must enforce the target hierarchy.
+commits pause media until sessions revalidate; revoked sessions are evicted. See [audio.md](audio.md). Moderator voice
+disconnects now enforce the target hierarchy; mute/deafen/move remain pending.
 
 EditOwnMessages/DeleteOwnMessages additionally require message authorship;
 ManageMessages permits moderation. MoveMembers will require access to both source
@@ -172,3 +173,53 @@ Screen and system-audio publishing currently require `Speak` in addition to
 `ViewChannel`/`JoinVoice`. Microphone mute does not mute an explicitly active
 screen share. Deafen stops publishing and blocks reception. See
 [screen-sharing.md](screen-sharing.md) for the media state and revocation rules.
+
+## Server moderation
+
+Select a server and open **Moderation**, or choose **Moderate** beside a voice
+participant. This panel is available to members with KickMembers, BanMembers,
+ModerateMembers or MoveMembers; ManageRoles is not required. It returns a bounded
+member list and per-target allowed actions without exposing hidden channels or
+role configuration. Bans are visible only to BanMembers holders (maximum 1000
+active bans per guild). Confirmations identify the target and consequences.
+
+- **Kick from server** requires KickMembers. It removes membership and assigned
+  roles; the user may rejoin with the server's credentials.
+- **Ban / Unban** requires BanMembers. Banning removes membership/roles and blocks
+  both join paths. Unbanning permits joining but does not restore membership or
+  roles. Previous messages remain. Bans are scoped to one server.
+- **Timeout / Remove timeout** requires ModerateMembers. The API accepts 1 second
+  through 28 days; the UI offers 1 minute, 10 minutes, 1 hour, 1 day, 1 week and
+  28 days. A null duration clears it. Timeouts retain only ViewChannel/ReadHistory
+  from the member's channel grants: sending, edits/deletes, typing, moderation,
+  voice and screen sharing are blocked. Overrides and Administrator cannot bypass
+  an active timeout; the owner is protected. The restriction survives leaving and
+  rejoining. It expires by UTC time without requiring a scheduled database write.
+- **Disconnect from voice** requires guild-base MoveMembers. It ends all current
+  voice/screen connections for that member in this guild, without banning future
+  explicit joins. This is a guild-wide disconnect, not a move to another channel.
+
+Kick, ban, timeout (including clearing) and disconnect require a strictly lower
+ranked target member, never the actor or owner. Instance administrators receive no
+implicit access. Unban operates on a ban record after membership has been removed.
+All writes recheck current grants and the submitted guild revision under the guild
+transaction lock. Stale requests return 409; the panel reloads for review without
+retrying the action automatically. Revoking a moderator's role takes effect on the
+next request, including from a previously opened panel.
+
+The moderation migration stores restrictions independently of membership, with
+account/guild deletion cascades. Its rollback permanently removes restrictions.
+A persistent per-member voice revision makes existing transports fail revalidation
+following a disconnect, kick, ban or applied timeout, even if access is restored
+before revalidation. Other users revalidate and continue. Media admission
+is paused/drained through commit, preventing packets in either direction from
+using stale grants. The existing terminal `revoked` event stops native automatic
+reconnection. Chat sockets are invalidated after commits; eligible readers reconnect.
+On timeout expiry, the ten-second session maintenance check refreshes composer
+permissions through reconnection (or selecting the channel reloads them immediately).
+
+Tests cover DTO compatibility, hierarchy/self/owner/foreign targets, delegated
+moderators without ManageRoles, stale requests, timeout bounds/expiry/removal and
+rejoin persistence, chat restrictions, both banned join paths, unban, socket expiry,
+and live voice/screen removal with unaffected participants and explicit rejoining.
+Three-platform interactive moderation acceptance remains a manual check.

@@ -104,6 +104,8 @@ async fn change(
     let body=command(app,token,json!({"action":"change","guild_id":state["guild"]["id"],"revision":state["guild"]["revision"],"change":change}),expected).await;
     if body["result"] == "state" {
         *state = body["state"].clone();
+    } else if body["result"] == "moderation" {
+        state["guild"] = body["state"]["guild"].clone();
     }
     body
 }
@@ -743,6 +745,79 @@ async fn sfu_forwarding_permissions_isolation_and_cleanup() {
         },
     )
     .await;
+    // A moderator disconnect revokes only the target's current transports.
+    // It stops screen media too, while permitting a later explicit join.
+    change(
+        &app,
+        &ot,
+        &mut state,
+        json!({"action":"disconnect_voice","account_id":member}),
+        StatusCode::OK,
+    )
+    .await;
+    loop {
+        if matches!(event(&mut b.socket).await, ServerEvent::Revoked {}) {
+            break;
+        }
+    }
+    still_connected(&mut a.socket).await;
+    still_connected(&mut isolated.socket).await;
+    screen_blocked(&mut b, &mut a).await;
+    b.close().await;
+    tokio::time::sleep(Duration::from_millis(200)).await;
+    let mut b = Peer::new(join(addr, &mt, guild.clone(), channel.clone()).await).await;
+    forwarded(&mut a, &mut b).await;
+    for action in ["timeout_member", "ban_member"] {
+        let change_request = if action == "timeout_member" {
+            json!({"action":action,"account_id":member,"duration_seconds":60})
+        } else {
+            json!({"action":action,"account_id":member})
+        };
+        change(&app, &ot, &mut state, change_request, StatusCode::OK).await;
+        loop {
+            if matches!(event(&mut b.socket).await, ServerEvent::Revoked {}) {
+                break;
+            }
+        }
+        still_connected(&mut a.socket).await;
+        screen_blocked(&mut b, &mut a).await;
+        b.close().await;
+        let mut denied = join(addr, &mt, guild.clone(), channel.clone()).await;
+        assert!(matches!(
+            event(&mut denied).await,
+            ServerEvent::Error { .. }
+        ));
+        if action == "timeout_member" {
+            change(
+                &app,
+                &ot,
+                &mut state,
+                json!({"action":"timeout_member","account_id":member,"duration_seconds":null}),
+                StatusCode::OK,
+            )
+            .await;
+        } else {
+            change(
+                &app,
+                &ot,
+                &mut state,
+                json!({"action":"unban_member","account_id":member}),
+                StatusCode::OK,
+            )
+            .await;
+            change(
+                &app,
+                &ot,
+                &mut state,
+                json!({"action":"add_member","username":"voice_member"}),
+                StatusCode::OK,
+            )
+            .await;
+        }
+        tokio::time::sleep(Duration::from_millis(200)).await;
+        b = Peer::new(join(addr, &mt, guild.clone(), channel.clone()).await).await;
+        forwarded(&mut a, &mut b).await;
+    }
     // Speak changes require renegotiating the native microphone setup, even
     // when the participant still has JoinVoice. Other participants stay joined.
     change(&app,&ot,&mut state,json!({"action":"set_override","channel_id":channel,"target":{"kind":"member","id":member},"allow":[],"deny":["speak"]}),StatusCode::OK).await;

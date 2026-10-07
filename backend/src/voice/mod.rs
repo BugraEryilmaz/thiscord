@@ -69,6 +69,7 @@ struct VoiceAccess {
     token: String,
     guild: GuildId,
     channel: ChannelId,
+    voice_revision: i64,
     generation: Arc<AtomicU64>,
     active: Arc<AtomicBool>,
 }
@@ -94,11 +95,13 @@ impl VoiceAccess {
             })
             .await;
         let mut members = room.members.write().await;
-        let result = result.and_then(|(info, epoch)| {
+        let result = result.and_then(|((info, voice_revision), epoch)| {
             let member = members.get_mut(&slot).ok_or(Failure::Forbidden)?;
             // Speak controls native microphone setup in the negotiated offer.
             // A changed grant requires a fresh join; unrelated grants do not.
-            if info.account_id != member.info.account_id || info.can_speak != member.info.can_speak
+            if voice_revision != self.voice_revision
+                || info.account_id != member.info.account_id
+                || info.can_speak != member.info.can_speak
             {
                 return Err(Failure::Forbidden);
             }
@@ -499,7 +502,7 @@ async fn serve(mut socket: WebSocket, pool: DbPool, id: RequestId) {
             }
         })
         .await;
-    let (mut info, epoch) = match authorized {
+    let ((mut info, voice_revision), epoch) = match authorized {
         Ok(info) => info,
         Err(error) => {
             fail(&mut socket, id, error).await;
@@ -850,6 +853,7 @@ async fn serve(mut socket: WebSocket, pool: DbPool, id: RequestId) {
             token,
             guild: guild_id,
             channel: channel_id,
+            voice_revision,
             generation,
             active: active.clone(),
         };

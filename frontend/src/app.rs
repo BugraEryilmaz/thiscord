@@ -4,6 +4,7 @@ use thiscord_shared::account::*;
 mod audio;
 mod chat;
 mod login;
+mod moderation;
 mod permissions;
 mod screen;
 mod screen_player;
@@ -25,6 +26,7 @@ struct Ui {
     guilds: RwSignal<Vec<thiscord_shared::permissions::Guild>>,
     server: RwSignal<Option<thiscord_shared::permissions::GuildHome>>,
     can_create_server: RwSignal<bool>,
+    moderation_target: RwSignal<Option<thiscord_shared::AccountId>>,
     account: RwSignal<Option<Account>>,
     token: RwSignal<Option<String>>,
     status: RwSignal<String>,
@@ -290,6 +292,7 @@ pub fn App() -> impl IntoView {
         guilds: RwSignal::new(vec![]),
         server: RwSignal::new(None),
         can_create_server: RwSignal::new(false),
+        moderation_target: RwSignal::new(None),
         account: RwSignal::new(None),
         token: RwSignal::new(None),
         status: RwSignal::new("Welcome to Thiscord".into()),
@@ -387,6 +390,7 @@ pub fn App() -> impl IntoView {
                     }}
                 </nav>
                 <section class="space-y-5 rounded-xl border border-white/10 bg-white/5 p-6">
+                    <Show when=move ||ui.page.get()=="moderation"><moderation::ModerationPanel ui=ui/></Show>
                     <Show when=move ||ui.page.get()=="permissions"><permissions::PermissionEditor ui=ui/></Show>
                     <Show when=move ||ui.page.get()=="audio"><audio::AudioSettingsPanel ui=ui/></Show>
                     <Show when=move ||ui.page.get()=="updates"><updates::Panel ui=ui/></Show>
@@ -404,7 +408,7 @@ pub fn App() -> impl IntoView {
                         }).collect_view())}
                         <button class="rounded-md bg-brand px-4 py-2" disabled=move ||ui.busy.get() on:click=move |_|google(ui,GooglePurpose::Link)>"Link Google account"</button>
                     </Show>
-                    <Show when=move ||!matches!(ui.page.get(),"devices"|"permissions"|"audio"|"updates")>
+                    <Show when=move ||!matches!(ui.page.get(),"devices"|"permissions"|"moderation"|"audio"|"updates")>
                         <h2 class="text-xl font-semibold">{move ||match ui.page.get(){"register"=>"Create your account","login"=>"Welcome back","forgot"=>"Request a password reset","reset"=>"Reset your password","verify"=>"Verify your email","reauthenticate"=>"Confirm it’s you","password"=>"Set or change password","delete"=>"Permanently delete account",_=>"Your profile"}}</h2>
                         <form class="space-y-4" on:submit=submit>
                             <Show when=move ||ui.page.get()=="reauthenticate"><Field label="Current password" value=password kind="password" autocomplete="current-password"/></Show>

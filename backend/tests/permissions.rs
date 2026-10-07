@@ -102,8 +102,363 @@ async fn change(
     let body=command(app,token,json!({"action":"change","guild_id":state["guild"]["id"],"revision":state["guild"]["revision"],"change":change}),expected).await;
     if body["result"] == "state" {
         *state = body["state"].clone();
+    } else if body["result"] == "moderation" {
+        state["guild"] = body["state"]["guild"].clone();
     }
     body
+}
+
+#[tokio::test]
+#[ignore = "requires TEST_DATABASE_URL; CI runs with --include-ignored"]
+async fn moderation_hierarchy_timeouts_bans_and_rejoining() {
+    let db = database();
+    let (owner, ot) = user(&db, "mod_owner");
+    let (moderator, mt) = user(&db, "moderator");
+    let (peer, pt) = user(&db, "peer");
+    let (member, ut) = user(&db, "mod_member");
+    let (outsider, xt) = user(&db, "mod_outsider");
+    permissions::bootstrap_owner(&db.pool, "mod_owner").unwrap();
+    let app = api::router(Some(db.pool.clone()), vec![]);
+    let mut state = command(
+        &app,
+        &ot,
+        json!({"action":"create_guild","name":"Moderation"}),
+        StatusCode::OK,
+    )
+    .await["state"]
+        .clone();
+    let guild = state["guild"]["id"].clone();
+    for username in ["moderator", "peer", "mod_member"] {
+        change(
+            &app,
+            &ot,
+            &mut state,
+            json!({"action":"add_member","username":username}),
+            StatusCode::OK,
+        )
+        .await;
+    }
+    change(
+        &app,
+        &ot,
+        &mut state,
+        json!({"action":"create_channel","name":"chat","kind":"text"}),
+        StatusCode::OK,
+    )
+    .await;
+    let channel = state["channels"][0]["id"].clone();
+    change(&app,&ot,&mut state,json!({"action":"create_role","name":"Moderator","position":10,"permissions":["kick_members","ban_members","moderate_members","move_members"]}),StatusCode::OK).await;
+    let role = state["roles"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|r| r["name"] == "Moderator")
+        .unwrap()["id"]
+        .clone();
+    for account in [moderator, peer] {
+        change(
+            &app,
+            &ot,
+            &mut state,
+            json!({"action":"assign_role","account_id":account,"role_id":role,"assigned":true}),
+            StatusCode::OK,
+        )
+        .await;
+    }
+    // Moderators need no ManageRoles access and receive no hidden channel/role state.
+    command(
+        &app,
+        &mt,
+        json!({"action":"inspect","guild_id":guild}),
+        StatusCode::FORBIDDEN,
+    )
+    .await;
+    let view = command(
+        &app,
+        &mt,
+        json!({"action":"inspect_moderation","guild_id":guild}),
+        StatusCode::OK,
+    )
+    .await;
+    assert!(view["state"].get("roles").is_none());
+    for m in view["state"]["members"].as_array().unwrap() {
+        assert_eq!(
+            m["actions"].as_array().unwrap().is_empty(),
+            m["account_id"] != json!(member)
+        );
+    }
+    command(
+        &app,
+        &ut,
+        json!({"action":"inspect_moderation","guild_id":guild}),
+        StatusCode::FORBIDDEN,
+    )
+    .await;
+    command(
+        &app,
+        &xt,
+        json!({"action":"inspect_moderation","guild_id":guild}),
+        StatusCode::FORBIDDEN,
+    )
+    .await;
+    // Hierarchy, self-targets and foreign accounts are checked for every action.
+    for action in [
+        "ban_member",
+        "timeout_member",
+        "disconnect_voice",
+        "remove_member",
+    ] {
+        for target in [owner, moderator, peer, outsider] {
+            let mut change_request = json!({"action":action,"account_id":target});
+            if action == "timeout_member" {
+                change_request["duration_seconds"] = json!(60);
+            }
+            change(&app, &mt, &mut state, change_request, StatusCode::FORBIDDEN).await;
+        }
+    }
+    change(
+        &app,
+        &ut,
+        &mut state,
+        json!({"action":"ban_member","account_id":peer}),
+        StatusCode::FORBIDDEN,
+    )
+    .await;
+    for duration in [0, 2_419_201] {
+        change(
+            &app,
+            &mt,
+            &mut state,
+            json!({"action":"timeout_member","account_id":member,"duration_seconds":duration}),
+            StatusCode::BAD_REQUEST,
+        )
+        .await;
+    }
+    let stale = state.clone();
+    change(
+        &app,
+        &mt,
+        &mut state,
+        json!({"action":"timeout_member","account_id":member,"duration_seconds":60}),
+        StatusCode::OK,
+    )
+    .await;
+    command(&app,&mt,json!({"action":"change","guild_id":guild,"revision":stale["guild"]["revision"],"change":{"action":"ban_member","account_id":member}}),StatusCode::CONFLICT).await;
+    let send = || json!({"action":"send","guild_id":guild,"channel_id":channel,"client_id":Uuid::new_v4(),"content":"timeout check"});
+    assert_eq!(
+        call(&app, thiscord_shared::chat::CHAT_PATH, &ut, send())
+            .await
+            .0,
+        StatusCode::FORBIDDEN
+    );
+    assert_eq!(
+        call(
+            &app,
+            thiscord_shared::chat::CHAT_PATH,
+            &ut,
+            json!({"action":"history","guild_id":guild,"channel_id":channel})
+        )
+        .await
+        .0,
+        StatusCode::OK
+    );
+    // Explicit channel grants cannot override a timeout.
+    change(&app,&ot,&mut state,json!({"action":"set_override","channel_id":channel,"target":{"kind":"member","id":member},"allow":["send_messages","join_voice","speak"],"deny":[]}),StatusCode::OK).await;
+    assert_eq!(
+        call(&app, thiscord_shared::chat::CHAT_PATH, &ut, send())
+            .await
+            .0,
+        StatusCode::FORBIDDEN
+    );
+    // Leaving and rejoining does not discard the restriction.
+    change(
+        &app,
+        &ut,
+        &mut state,
+        json!({"action":"leave"}),
+        StatusCode::OK,
+    )
+    .await;
+    command(
+        &app,
+        &ut,
+        json!({"action":"join_guild","guild_id":guild}),
+        StatusCode::OK,
+    )
+    .await;
+    state = command(
+        &app,
+        &ot,
+        json!({"action":"inspect","guild_id":guild}),
+        StatusCode::OK,
+    )
+    .await["state"]
+        .clone();
+    assert_eq!(
+        call(&app, thiscord_shared::chat::CHAT_PATH, &ut, send())
+            .await
+            .0,
+        StatusCode::FORBIDDEN
+    );
+    change(
+        &app,
+        &mt,
+        &mut state,
+        json!({"action":"timeout_member","account_id":member,"duration_seconds":null}),
+        StatusCode::OK,
+    )
+    .await;
+    assert_eq!(
+        call(&app, thiscord_shared::chat::CHAT_PATH, &ut, send())
+            .await
+            .0,
+        StatusCode::OK
+    );
+    change(
+        &app,
+        &mt,
+        &mut state,
+        json!({"action":"timeout_member","account_id":member,"duration_seconds":60}),
+        StatusCode::OK,
+    )
+    .await;
+    diesel::sql_query("UPDATE guild_moderation SET timeout_until=now()-interval '1 second' WHERE guild_id=$1::uuid AND account_id=$2::uuid").bind::<Text,_>(guild.as_str().unwrap()).bind::<Text,_>(member.to_string()).execute(&mut db.pool.get().unwrap()).unwrap();
+    assert_eq!(
+        call(&app, thiscord_shared::chat::CHAT_PATH, &ut, send())
+            .await
+            .0,
+        StatusCode::OK
+    );
+    // Bans revoke membership and both direct additions and self-service joins.
+    change(
+        &app,
+        &mt,
+        &mut state,
+        json!({"action":"ban_member","account_id":member}),
+        StatusCode::OK,
+    )
+    .await;
+    command(
+        &app,
+        &ut,
+        json!({"action":"view_guild","guild_id":guild}),
+        StatusCode::FORBIDDEN,
+    )
+    .await;
+    command(
+        &app,
+        &ut,
+        json!({"action":"join_guild","guild_id":guild}),
+        StatusCode::FORBIDDEN,
+    )
+    .await;
+    change(
+        &app,
+        &ot,
+        &mut state,
+        json!({"action":"add_member","username":"mod_member"}),
+        StatusCode::FORBIDDEN,
+    )
+    .await;
+    assert_eq!(
+        call(
+            &app,
+            thiscord_shared::chat::CHAT_PATH,
+            &ut,
+            json!({"action":"history","guild_id":guild,"channel_id":channel})
+        )
+        .await
+        .0,
+        StatusCode::FORBIDDEN
+    );
+    let view = command(
+        &app,
+        &mt,
+        json!({"action":"inspect_moderation","guild_id":guild}),
+        StatusCode::OK,
+    )
+    .await;
+    assert_eq!(view["state"]["bans"][0]["account_id"], json!(member));
+    change(
+        &app,
+        &mt,
+        &mut state,
+        json!({"action":"unban_member","account_id":member}),
+        StatusCode::OK,
+    )
+    .await;
+    command(
+        &app,
+        &ut,
+        json!({"action":"join_guild","guild_id":guild}),
+        StatusCode::OK,
+    )
+    .await;
+    state = command(
+        &app,
+        &ot,
+        json!({"action":"inspect","guild_id":guild}),
+        StatusCode::OK,
+    )
+    .await["state"]
+        .clone();
+    change(
+        &app,
+        &ot,
+        &mut state,
+        json!({"action":"assign_role","account_id":moderator,"role_id":role,"assigned":false}),
+        StatusCode::OK,
+    )
+    .await;
+    // Cached moderator UI state cannot authorize after role removal, even at a current revision.
+    change(
+        &app,
+        &mt,
+        &mut state,
+        json!({"action":"ban_member","account_id":member}),
+        StatusCode::FORBIDDEN,
+    )
+    .await;
+    change(
+        &app,
+        &ot,
+        &mut state,
+        json!({"action":"ban_member","account_id":member}),
+        StatusCode::OK,
+    )
+    .await;
+    // The same user is unaffected in another guild, and foreign bans cannot be cleared.
+    let mut other = command(
+        &app,
+        &ot,
+        json!({"action":"create_guild","name":"Other"}),
+        StatusCode::OK,
+    )
+    .await["state"]
+        .clone();
+    change(
+        &app,
+        &ot,
+        &mut other,
+        json!({"action":"unban_member","account_id":member}),
+        StatusCode::CONFLICT,
+    )
+    .await;
+    change(
+        &app,
+        &ot,
+        &mut other,
+        json!({"action":"add_member","username":"mod_member"}),
+        StatusCode::OK,
+    )
+    .await;
+    command(
+        &app,
+        &pt,
+        json!({"action":"inspect_moderation","guild_id":other["guild"]["id"]}),
+        StatusCode::FORBIDDEN,
+    )
+    .await;
 }
 
 #[tokio::test]
@@ -632,11 +987,13 @@ fn combined_roles_overrides_and_admin_behavior() {
             Member {
                 account_id: owner,
                 username: "owner".into(),
+                timeout_until: None,
                 roles: vec![],
             },
             Member {
                 account_id: member,
                 username: "member".into(),
+                timeout_until: None,
                 roles: vec![a.id, b.id],
             },
         ],
@@ -688,6 +1045,19 @@ fn combined_roles_overrides_and_admin_behavior() {
             Some(ChannelId::from_uuid(Uuid::new_v4()))
         )
         .is_empty()
+    );
+    // Administrator/channel allowances cannot bypass a timeout, even when
+    // granted after it was applied. Expiry restores the administrator grants.
+    state.members[1].timeout_until = Some(chrono::Utc::now() + chrono::Duration::minutes(1));
+    let restricted = permissions::evaluator::effective(&state, member, Some(channel));
+    assert!(restricted.contains(&Permission::ViewChannel));
+    assert!(!restricted.contains(&Permission::Administrator));
+    assert!(!restricted.contains(&Permission::SendMessages));
+    assert!(!restricted.contains(&Permission::JoinVoice));
+    state.members[1].timeout_until = Some(chrono::Utc::now() - chrono::Duration::seconds(1));
+    assert_eq!(
+        permissions::evaluator::effective(&state, member, Some(channel)).len(),
+        Permission::ALL.len()
     );
 }
 

@@ -110,7 +110,7 @@ pub(crate) fn load(c: &mut PgConnection, id: GuildId) -> Result<GuildState, Fail
     )?;
     let members = query(
         c,
-        "SELECT jsonb_build_object('account_id',m.account_id,'username',a.username,'roles',COALESCE((SELECT jsonb_agg(role_id ORDER BY role_id) FROM guild_member_roles r WHERE r.guild_id=m.guild_id AND r.account_id=m.account_id),'[]'::jsonb)) AS data FROM guild_members m JOIN accounts a ON a.id=m.account_id WHERE m.guild_id=$1::uuid ORDER BY m.account_id",
+        "SELECT jsonb_build_object('account_id',m.account_id,'username',a.username,'timeout_until',(SELECT timeout_until FROM guild_moderation x WHERE x.guild_id=m.guild_id AND x.account_id=m.account_id),'roles',COALESCE((SELECT jsonb_agg(role_id ORDER BY role_id) FROM guild_member_roles r WHERE r.guild_id=m.guild_id AND r.account_id=m.account_id),'[]'::jsonb)) AS data FROM guild_members m JOIN accounts a ON a.id=m.account_id WHERE m.guild_id=$1::uuid ORDER BY m.account_id",
         &[&id],
     )?;
     let channels = query(
@@ -229,6 +229,7 @@ pub(super) fn dispatch(
                 let password=guild_password(password.as_deref())?.unwrap_or("");
                 execute(c,"SELECT id FROM guilds WHERE id=$1::uuid FOR UPDATE", &[&guild_id.to_string()])?;
                 let state=load(c,guild_id)?;
+                not_banned(c,guild_id,actor)?;
                 if !state.members.iter().any(|m|m.account_id==actor) {
                     let hash: Option<String>=query(c,"SELECT COALESCE(to_jsonb(password_hash),'null'::jsonb) AS data FROM guilds WHERE id=$1::uuid", &[&guild_id.to_string()])?.pop().ok_or(Failure::Forbidden)?;
                     if let Some(hash)=hash {require(PasswordHash::new(&hash).ok().is_some_and(|h|Argon2::default().verify_password(password.as_bytes(),&h).is_ok()))?;}
@@ -240,7 +241,7 @@ pub(super) fn dispatch(
                 Ok(PermissionResponse::Joined {guild})
             }
             command => {
-                let guild_id=match &command { PermissionRequest::ViewGuild{guild_id} | PermissionRequest::Inspect{guild_id} | PermissionRequest::Change{guild_id,..} | PermissionRequest::Preview{guild_id,..} => *guild_id, _=>unreachable!() };
+                let guild_id=match &command { PermissionRequest::ViewGuild{guild_id} | PermissionRequest::InspectModeration{guild_id} | PermissionRequest::Inspect{guild_id} | PermissionRequest::Change{guild_id,..} | PermissionRequest::Preview{guild_id,..} => *guild_id, _=>unreachable!() };
                 // One lock order for every operation. All decisions and writes share this lock.
                 execute(c,"SELECT id FROM guilds WHERE id=$1::uuid FOR UPDATE", &[&guild_id.to_string()])?;
                 let state=load(c,guild_id)?;
@@ -248,8 +249,9 @@ pub(super) fn dispatch(
                 match command {
                     PermissionRequest::ViewGuild {..} => {
                         let channels=state.channels.iter().filter(|ch|effective(&state,actor,Some(ch.id)).contains(&Permission::ViewChannel)).cloned().collect();
-                        Ok(PermissionResponse::Home {home:GuildHome {can_manage_roles:effective(&state,actor,None).contains(&Permission::ManageRoles),can_manage_channels:effective(&state,actor,None).contains(&Permission::ManageChannels),guild:state.guild,channels}})
+                        Ok(PermissionResponse::Home {home:GuildHome {can_moderate:can_moderate(&state,actor),can_manage_roles:effective(&state,actor,None).contains(&Permission::ManageRoles),can_manage_channels:effective(&state,actor,None).contains(&Permission::ManageChannels),guild:state.guild,channels}})
                     }
+                    PermissionRequest::InspectModeration {..} => Ok(PermissionResponse::Moderation {state:moderation(c,&state,actor)?}),
                     PermissionRequest::Inspect {..} => {
                         require(effective(&state,actor,None).contains(&Permission::ManageRoles))?;
                         Ok(PermissionResponse::State {state})
@@ -263,11 +265,13 @@ pub(super) fn dispatch(
                     PermissionRequest::Change {revision, change,..} => {
                         if state.guild.revision!=revision { return Err(Failure::Conflict); }
                         if matches!(change,GuildChange::TransferOwner{..}|GuildChange::Delete {}) { auth::recent(&session)?; }
+                        let moderation_change=matches!(change,GuildChange::BanMember{..}|GuildChange::UnbanMember{..}|GuildChange::TimeoutMember{..}|GuildChange::DisconnectVoice{..});
                         let gone=change_guild(c,&state,actor,change)?;
                         if gone { return Ok(PermissionResponse::Done); }
                         execute(c,"UPDATE guilds SET revision=revision+1 WHERE id=$1::uuid", &[&guild_id.to_string()])?;
                         // Assignments can remove the actor's editor access; never return privileged state then.
                         let state=load(c,guild_id)?;
+                        if moderation_change { return Ok(PermissionResponse::Moderation {state:moderation(c,&state,actor)?}); }
                         if !effective(&state,actor,None).contains(&Permission::ManageRoles) { return Ok(PermissionResponse::Done); }
                         Ok(PermissionResponse::State {state})
                     }
@@ -312,6 +316,7 @@ fn change_guild(
             )?
             .pop()
             .ok_or(Failure::Invalid("Verified account not found"))?;
+            not_banned(c, state.guild.id, id)?;
             execute(
                 c,
                 "INSERT INTO guild_members(guild_id,account_id) VALUES($1::uuid,$2::uuid)",
@@ -321,14 +326,74 @@ fn change_guild(
         GuildChange::RemoveMember { account_id } => {
             need(Permission::KickMembers)?;
             below(state, actor, account_id)?;
+            disconnect_voice(c, &guild, account_id)?;
             execute(
                 c,
                 "DELETE FROM guild_members WHERE guild_id=$1::uuid AND account_id=$2::uuid",
                 &[&guild, &account_id.to_string()],
             )?;
         }
+        GuildChange::BanMember { account_id } => {
+            need(Permission::BanMembers)?;
+            below(state, actor, account_id)?;
+            let count: i64 = query(c,"SELECT to_jsonb(count(*)) AS data FROM guild_moderation WHERE guild_id=$1::uuid AND banned", &[&guild])?.pop().unwrap_or(0);
+            if count >= 1000 {
+                return Err(Failure::Invalid("Server ban limit reached (1000)"));
+            }
+            execute(
+                c,
+                "INSERT INTO guild_moderation(guild_id,account_id,banned,voice_revision) VALUES($1::uuid,$2::uuid,TRUE,1) ON CONFLICT (guild_id,account_id) DO UPDATE SET banned=TRUE,voice_revision=guild_moderation.voice_revision+1",
+                &[&guild, &account_id.to_string()],
+            )?;
+            execute(
+                c,
+                "DELETE FROM guild_members WHERE guild_id=$1::uuid AND account_id=$2::uuid",
+                &[&guild, &account_id.to_string()],
+            )?;
+        }
+        GuildChange::UnbanMember { account_id } => {
+            need(Permission::BanMembers)?;
+            if execute(
+                c,
+                "UPDATE guild_moderation SET banned=FALSE WHERE guild_id=$1::uuid AND account_id=$2::uuid AND banned",
+                &[&guild, &account_id.to_string()],
+            )? != 1
+            {
+                return Err(Failure::Conflict);
+            }
+        }
+        GuildChange::TimeoutMember {
+            account_id,
+            duration_seconds,
+        } => {
+            need(Permission::ModerateMembers)?;
+            below(state, actor, account_id)?;
+            if duration_seconds.is_some_and(|s| !(1..=2_419_200).contains(&s)) {
+                return Err(Failure::Invalid(
+                    "Timeout must be between 1 second and 28 days",
+                ));
+            }
+            execute(
+                c,
+                "INSERT INTO guild_moderation(guild_id,account_id,timeout_until) VALUES($1::uuid,$2::uuid,CASE WHEN $3='' THEN NULL ELSE clock_timestamp()+($3||' seconds')::interval END) ON CONFLICT (guild_id,account_id) DO UPDATE SET timeout_until=EXCLUDED.timeout_until",
+                &[
+                    &guild,
+                    &account_id.to_string(),
+                    &duration_seconds.map(|s| s.to_string()).unwrap_or_default(),
+                ],
+            )?;
+            if duration_seconds.is_some() {
+                disconnect_voice(c, &guild, account_id)?;
+            }
+        }
+        GuildChange::DisconnectVoice { account_id } => {
+            need(Permission::MoveMembers)?;
+            below(state, actor, account_id)?;
+            disconnect_voice(c, &guild, account_id)?;
+        }
         GuildChange::Leave {} => {
             require(actor != state.guild.owner)?;
+            disconnect_voice(c, &guild, actor)?;
             execute(
                 c,
                 "DELETE FROM guild_members WHERE guild_id=$1::uuid AND account_id=$2::uuid",
@@ -562,4 +627,65 @@ fn delete_override(
         )?,
     };
     Ok(())
+}
+
+const MODERATION_PERMISSIONS: [Permission; 4] = [
+    Permission::KickMembers,
+    Permission::BanMembers,
+    Permission::ModerateMembers,
+    Permission::MoveMembers,
+];
+fn disconnect_voice(c: &mut PgConnection, guild: &str, account: AccountId) -> Result<(), Failure> {
+    execute(
+        c,
+        "INSERT INTO guild_moderation(guild_id,account_id,voice_revision) VALUES($1::uuid,$2::uuid,1) ON CONFLICT (guild_id,account_id) DO UPDATE SET voice_revision=guild_moderation.voice_revision+1",
+        &[guild, &account.to_string()],
+    )?;
+    Ok(())
+}
+fn can_moderate(state: &GuildState, actor: AccountId) -> bool {
+    let permissions = effective(state, actor, None);
+    MODERATION_PERMISSIONS
+        .iter()
+        .any(|p| permissions.contains(p))
+}
+fn not_banned(c: &mut PgConnection, guild: GuildId, account: AccountId) -> Result<(), Failure> {
+    require(query::<bool>(c,"SELECT to_jsonb(banned) AS data FROM guild_moderation WHERE guild_id=$1::uuid AND account_id=$2::uuid AND banned", &[&guild.to_string(),&account.to_string()])?.is_empty())
+}
+fn moderation(
+    c: &mut PgConnection,
+    state: &GuildState,
+    actor: AccountId,
+) -> Result<ModerationState, Failure> {
+    require(can_moderate(state, actor))?;
+    let permissions = effective(state, actor, None);
+    let can_unban = permissions.contains(&Permission::BanMembers);
+    let members = state
+        .members
+        .iter()
+        .map(|m| ModerationMember {
+            account_id: m.account_id,
+            username: m.username.clone(),
+            timeout_until: m.timeout_until,
+            actions: MODERATION_PERMISSIONS
+                .into_iter()
+                .filter(|p| permissions.contains(p) && below(state, actor, m.account_id).is_ok())
+                .collect(),
+        })
+        .collect();
+    let bans = if can_unban {
+        query(
+            c,
+            "SELECT jsonb_build_object('account_id',m.account_id,'username',a.username) AS data FROM guild_moderation m JOIN accounts a ON a.id=m.account_id WHERE m.guild_id=$1::uuid AND m.banned ORDER BY a.username",
+            &[&state.guild.id.to_string()],
+        )?
+    } else {
+        vec![]
+    };
+    Ok(ModerationState {
+        guild: state.guild.clone(),
+        members,
+        bans,
+        can_unban,
+    })
 }

@@ -77,7 +77,8 @@ Heartbeats use the socket every ten seconds; clients abandon silent connections
 after 25 seconds and reconnect with exponential backoff plus jitter (1-30 seconds).
 The server closes clients silent for 35 seconds. Ten-second maintenance checks
 session/access expiry and refreshes/reaps presence leases, not message history or
-unread counts. Typing expires after four seconds. Disconnect removes presence and
+unread counts. Maintenance also detects grants restored by timeout expiry and
+reconnects that socket so the composer receives current permissions. Typing expires after four seconds. Disconnect removes presence and
 notifies remaining clients; process-crash leftovers expire after 35 seconds.
 Multiple devices are combined per user.
 

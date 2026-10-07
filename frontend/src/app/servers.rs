@@ -2,7 +2,10 @@ use super::{Field, Ui};
 use leptos::prelude::*;
 use thiscord_shared::{GuildId, permissions::*};
 
-async fn request(ui: Ui, command: PermissionRequest) -> Result<PermissionResponse, String> {
+pub(super) async fn request(
+    ui: Ui,
+    command: PermissionRequest,
+) -> Result<PermissionResponse, String> {
     let token = ui.token.get_untracked();
     let response =
         crate::account_client::api_request(PERMISSIONS_PATH, &command, token.as_deref()).await;
@@ -285,6 +288,7 @@ pub(super) fn ServerHome(ui: Ui) -> impl IntoView {
                             }>"+"</button></Show>
                         </div>
                         <ul class="min-h-0 flex-1 space-y-2 overflow-y-auto text-white/70">{home.channels.into_iter().map(move |ch|{let id=ch.id;let label=format!("{} {}",if ch.kind==ChannelKind::Voice{"◖"}else{"#"},ch.name);view!{<li><button class="flex w-full items-center justify-between gap-2 rounded p-2 text-left hover:bg-white/10 disabled:opacity-40" on:click=move |_|selected.set(Some(ch.clone()))><span class="truncate">{label}</span><span class="shrink-0 text-xs text-brand">{move||unread.get().iter().find(|u|u.channel_id==id&&u.count>0).map(|u|format!("{}{}",u.count,if u.mentions>0{" @"}else{""}))}</span></button></li>}}).collect_view()}</ul>
+                        <Show when=move ||home.can_moderate><button class="text-sm text-brand underline" on:click=move |_|{ui.moderation_target.set(None);ui.page.set("moderation");}>"Moderation"</button></Show>
                         <Show when=move ||home.can_manage_roles><button class="text-sm text-brand underline" on:click=move |_|ui.page.set("permissions")>"Server roles & settings"</button></Show>
                     </nav>
                     <Show when=move||selected.get().is_some() fallback=move||view!{<div class="flex items-center justify-center rounded-xl border border-white/10 p-8 text-white/60">"Choose a text channel to start chatting."</div>}>

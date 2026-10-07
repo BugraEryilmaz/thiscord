@@ -429,3 +429,12 @@ Still required: physical multi-user microphone/headset acceptance on each OS,
 macOS runtime results, Wayland global-shortcut portal support, arbitrary sample
 rates, long-call recovery, moderator voice controls, detailed speaking/quality
 indicators, load/packet-loss/NAT trials and public deployment.
+
+
+Moderator **Disconnect from voice**, timeouts and bans are available from each
+server's Moderation panel, with a shortcut beside voice participants. Disconnect
+ends that member's current transports in the server; an explicit rejoin is allowed.
+Timeouts deny JoinVoice/Speak until expiry or removal, and bans deny membership.
+All three stop screen media as well as microphone audio. They share media epoch
+revocation and enforce guild roles/hierarchy; see [permissions.md](permissions.md#server-moderation).
+Moderator mute, deafen and move-to-channel controls remain pending.
