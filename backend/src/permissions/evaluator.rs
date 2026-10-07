@@ -18,7 +18,13 @@ pub fn effective(
         .filter(|r| r.everyone || member.roles.contains(&r.id))
         .flat_map(|r| r.permissions.iter().copied())
         .collect();
-    if state.guild.owner == account || permissions.contains(&Permission::Administrator) {
+    let timed_out = member
+        .timeout_until
+        .is_some_and(|until| until > chrono::Utc::now())
+        && state.guild.owner != account;
+    if !timed_out
+        && (state.guild.owner == account || permissions.contains(&Permission::Administrator))
+    {
         return Permission::ALL.into_iter().collect();
     }
     if let Some(channel) = channel {
@@ -62,12 +68,17 @@ pub fn effective(
                         | Permission::ManageInvites
                         | Permission::KickMembers
                         | Permission::BanMembers
+                        | Permission::ModerateMembers
                 )
             });
         }
         if !permissions.contains(&Permission::JoinVoice) {
             permissions.remove(&Permission::Speak);
         }
+    }
+    // Apply last so role/member allowances cannot bypass a timeout. Reading stays available.
+    if timed_out {
+        permissions.retain(|p| matches!(p, Permission::ViewChannel | Permission::ReadHistory));
     }
     permissions
 }

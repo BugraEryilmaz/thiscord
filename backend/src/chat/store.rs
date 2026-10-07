@@ -455,21 +455,21 @@ pub(super) fn maintain(
     guild: GuildId,
     channel: Option<ChannelId>,
     connection_id: Uuid,
-) -> Result<bool, Failure> {
+) -> Result<(bool, thiscord_shared::permissions::Permissions), Failure> {
     checked(
         pool,
         token,
         guild,
         channel,
         Some(Permission::ReadHistory),
-        |c, _, _| {
+        |c, actor, state| {
             let removed = execute(c, "DELETE FROM chat_presence WHERE expires_at<now()", &[])?;
             execute(
                 c,
                 "UPDATE chat_presence SET expires_at=now()+interval '35 seconds' WHERE id=$1::uuid",
                 &[&connection_id.to_string()],
             )?;
-            Ok(removed > 0)
+            Ok((removed > 0, effective(state, actor, channel)))
         },
     )
 }

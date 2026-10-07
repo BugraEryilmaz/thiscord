@@ -11,7 +11,9 @@ emails default to ignored `backend/.mail/`; Resend, SMTP and Google use provider
 credentials configured in `backend/.env` (see `docs/accounts.md`).
 
 Guild memberships, role hierarchy, channel overrides and the role editor are
-implemented. After verifying an account, run `./run-wsl.ps1 -BootstrapOwner YOUR_USERNAME`
+implemented. Each server has a **Moderation** panel for voice disconnects,
+timeouts, kicks, bans and unbans, with server-side permission and hierarchy checks.
+After verifying an account, run `./run-wsl.ps1 -BootstrapOwner YOUR_USERNAME`
 from `backend/`, then open **Guilds & roles**. See [permission rules and setup](docs/permissions.md).
 Text chat includes persisted history, edits/deletes, unread mentions and authenticated
 live sockets. See [chat protocol and limits](docs/chat.md). Desktop voice channels

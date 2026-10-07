@@ -76,6 +76,7 @@ pub(super) async fn serve(
     let mut cursor = 0;
     let mut last_members = Vec::new();
     let mut last_unread = Vec::new();
+    let mut last_permissions = Permissions::new();
     let mut last_seen = Instant::now();
     let mut window = Instant::now();
     let mut count = 0;
@@ -116,6 +117,7 @@ pub(super) async fn serve(
                             };
                             cursor = ready.history.as_ref().map_or(0, |h| h.event_cursor);
                             last_unread = ready.unread.clone();
+                            last_permissions = ready.permissions.clone();
                             if send(&mut socket, ServerEvent::Subscribed { subscription: serial, history: ready.history, permissions: ready.permissions }).await.is_err() { break; }
                             if update(&mut socket, sub, ServerEvent::Unread { channels: ready.unread }).await.is_err() { break; }
                             subscription = Some(sub); dirty = true;
@@ -178,8 +180,15 @@ pub(super) async fn serve(
                     let _guard = gate().read().await;
                     let p = pool.clone(); let t = token.clone();
                     match tokio::task::spawn_blocking(move || store::maintain(&p, &t, sub.guild, sub.channel, connection)).await {
-                        Ok(Ok(true)) => notify(),
-                        Ok(Ok(false)) => {},
+                        Ok(Ok((presence_changed, permissions))) => {
+                            // Expiring timeouts change grants without a write. Reconnect
+                            // to refresh the client composer from an authorized snapshot.
+                            if permissions != last_permissions {
+                                let _ = send(&mut socket, ServerEvent::Revoked {}).await;
+                                break;
+                            }
+                            if presence_changed { notify(); }
+                        },
                         _ => { let _ = send(&mut socket, ServerEvent::Revoked {}).await; break; }
                     }
                 }

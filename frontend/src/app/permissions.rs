@@ -36,6 +36,7 @@ impl Editor {
                 Ok(response) => {
                     self.ui.status.set(String::new());
                     match response {
+                        PermissionResponse::Moderation { .. } => {}
                         PermissionResponse::Joined { .. } | PermissionResponse::Home { .. } => {}
                         PermissionResponse::Instance { access } => self.access.set(Some(access)),
                         PermissionResponse::Guilds { guilds } => self.guilds.set(guilds),

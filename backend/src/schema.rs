@@ -87,6 +87,16 @@ diesel::table! {
 }
 
 diesel::table! {
+    guild_moderation (guild_id, account_id) {
+        guild_id -> Uuid,
+        account_id -> Uuid,
+        banned -> Bool,
+        timeout_until -> Nullable<Timestamptz>,
+        voice_revision -> Int8,
+    }
+}
+
+diesel::table! {
     guild_roles (guild_id, id) {
         guild_id -> Uuid,
         id -> Uuid,
@@ -209,6 +219,8 @@ diesel::table! {
 diesel::joinable!(account_codes -> accounts (account_id));
 diesel::joinable!(channels -> guilds (guild_id));
 diesel::joinable!(guild_members -> accounts (account_id));
+diesel::joinable!(guild_moderation -> accounts (account_id));
+diesel::joinable!(guild_moderation -> guilds (guild_id));
 diesel::joinable!(guild_roles -> guilds (guild_id));
 diesel::joinable!(guilds -> accounts (owner));
 diesel::joinable!(identities -> accounts (account_id));
@@ -232,6 +244,7 @@ diesel::allow_tables_to_appear_in_same_query!(
     chat_presence,
     guild_member_roles,
     guild_members,
+    guild_moderation,
     guild_roles,
     guilds,
     identities,

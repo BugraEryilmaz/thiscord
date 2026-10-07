@@ -70,7 +70,9 @@ and single-process chat/media enforcement.
 - [x] Joined-server rail with circular initials avatars, names on hover, create/join dialogs.
 - [ ] Custom server images and password-change settings UI.
 - [ ] Invite links with expiry/use limits, revocation and join validation.
-- [ ] Ownership transfer, kick/ban/unban and administrative audit events.
+- [x] Ownership transfer, kick/ban/unban and per-server moderation controls.
+- [x] Timeouts with expiry/removal, chat/voice enforcement and join-bypass protection.
+- [ ] Administrative audit events and moderation reasons.
 - [ ] Create/edit/delete/reorder text and voice channels and categories.
 - [ ] Guild navigation, channel/member lists and settings views.
 - [ ] Cascade/archive behavior and confirmation UX for destructive operations.
@@ -205,7 +207,8 @@ speaker isolation and physical acoustic acceptance remain future work.
   Speak denial, publisher slot reuse, deleted-channel and cleanup integration tests.
 - [x] Device/access failures stop audio; transient network/ICE/signaling failures
   reconnect with bounded backoff, fresh authorization and cancellable media leases.
-- [ ] Moderator mute/deafen/move/disconnect controls with hierarchy enforcement.
+- [x] Moderator voice disconnect with hierarchy enforcement and targeted transport revocation.
+- [ ] Moderator mute/deafen/move-to-channel controls with hierarchy enforcement.
 - [ ] Remote speaking indicators and connection-quality UI.
 - [x] Automatic transport reconnection after network failure or server restart.
 - [ ] Validate real network switching/server outages across native hosts; support

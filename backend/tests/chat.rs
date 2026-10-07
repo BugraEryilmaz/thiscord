@@ -560,3 +560,69 @@ async fn session_socket_subscriptions_push_unread_switch_resync_and_revoke() {
     drop(invalid);
     server.abort();
 }
+
+#[tokio::test]
+#[ignore = "requires TEST_DATABASE_URL; CI runs with --include-ignored"]
+async fn timeout_revokes_chat_and_expiry_refreshes_composer_permissions() {
+    let _guard = TEST_LOCK.lock().await;
+    let db = database();
+    let (app, owner, guest, guest_id, mut state, channel) = setup(&db).await;
+    let guild = state["guild"]["id"].clone();
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let address = listener.local_addr().unwrap();
+    let server = tokio::spawn(axum::serve(listener, app.clone()).into_future());
+    let mut socket = session_socket(address, &guest).await;
+    event(&mut socket, "authenticated").await;
+    subscribe(&mut socket, 1, guild.clone(), channel.clone()).await;
+    change(
+        &app,
+        &owner,
+        &mut state,
+        json!({"action":"timeout_member","account_id":guest_id,"duration_seconds":60}),
+        StatusCode::OK,
+    )
+    .await;
+    event(&mut socket, "revoked").await;
+    let mut socket = session_socket(address, &guest).await;
+    event(&mut socket, "authenticated").await;
+    let ready = subscribe(&mut socket, 1, guild.clone(), channel.clone()).await;
+    assert!(
+        !ready["permissions"]
+            .as_array()
+            .unwrap()
+            .contains(&json!("send_messages"))
+    );
+    assert!(
+        ready["permissions"]
+            .as_array()
+            .unwrap()
+            .contains(&json!("read_history"))
+    );
+    diesel::sql_query("UPDATE guild_moderation SET timeout_until=now()-interval '1 second' WHERE guild_id=$1::uuid AND account_id=$2::uuid").bind::<Text,_>(guild.as_str().unwrap()).bind::<Text,_>(guest_id.to_string()).execute(&mut db.pool.get().unwrap()).unwrap();
+    // No mutation notification: the normal maintenance tick must detect expiry.
+    tokio::time::timeout(std::time::Duration::from_secs(12), async {
+        loop {
+            let incoming = socket.next().await.unwrap().unwrap();
+            if let WsMessage::Text(text) = incoming {
+                let value: Value = serde_json::from_str(&text).unwrap();
+                if value["event"]["type"] == "revoked" {
+                    break;
+                }
+            }
+        }
+    })
+    .await
+    .expect("timeout expiry did not refresh the socket");
+    let mut socket = session_socket(address, &guest).await;
+    event(&mut socket, "authenticated").await;
+    let ready = subscribe(&mut socket, 1, guild, channel).await;
+    assert!(
+        ready["permissions"]
+            .as_array()
+            .unwrap()
+            .contains(&json!("send_messages"))
+    );
+    socket.close(None).await.unwrap();
+    server.abort();
+    let _ = server.await;
+}
