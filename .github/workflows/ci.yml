@@ -28,7 +28,37 @@ env:
   THISCORD_API_URL: ${{ inputs.api_url || 'http://localhost:3000' }}
 
 jobs:
+  gate:
+    name: Avoid duplicate release checks
+    runs-on: ubuntu-24.04
+    outputs:
+      run_ci: ${{ steps.gate.outputs.run_ci }}
+    steps:
+      - uses: actions/checkout@v5
+      - name: Let tagged releases own their checks
+        id: gate
+        shell: bash
+        env:
+          RELEASE_BUILD: ${{ inputs.build_installers || false }}
+        run: |
+          run_ci=true
+          if [[ "$GITHUB_EVENT_NAME" == push && "$GITHUB_REF" == refs/heads/main && "$RELEASE_BUILD" != true ]]; then
+            # ls-remote includes peeled annotated tags. An atomic branch/tag push
+            # makes the tag visible before either workflow is scheduled.
+            git ls-remote --tags origin 'refs/tags/client-v*' > "$RUNNER_TEMP/client-tags"
+            while read -r commit ref; do
+              if [[ "$commit" == "$GITHUB_SHA" && "$ref" =~ ^refs/tags/client-v[0-9]+\.[0-9]+\.[0-9]+(\^\{\})?$ ]]; then
+                run_ci=false
+                echo "Release tag $ref points to this commit; Client release runs the full checks." >> "$GITHUB_STEP_SUMMARY"
+                break
+              fi
+            done < "$RUNNER_TEMP/client-tags"
+          fi
+          echo "run_ci=$run_ci" >> "$GITHUB_OUTPUT"
+
   runners:
+    needs: gate
+    if: needs.gate.outputs.run_ci == 'true'
     uses: ./.github/workflows/select-runners.yml
     secrets: inherit
 

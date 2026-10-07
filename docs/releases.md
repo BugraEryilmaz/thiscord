@@ -78,15 +78,20 @@ The router checks availability and labels, not installed software or GPU readine
    Run `./scripts/release-client.ps1 -Mode Validate -Tag client-vMAJOR.MINOR.PATCH`
    with the actual version to verify the complete locked dependency graph before
    tagging, including optional and platform-specific dependencies.
-2. Commit and push the changes. Tag that commit and push the tag, for example:
+2. Commit the changes, tag that commit, and push the branch and tag atomically:
 
    ```powershell
    git tag client-v0.1.0
-   git push origin client-v0.1.0
+   git push --atomic origin main client-v0.1.0
    ```
 
    Use the actual version; published tags/releases are immutable. A subsequent
    version must be higher than every previously published stable client version.
+   Standalone main-branch CI checks whether the commit already has a stable
+   `client-v` tag and skips its build jobs when the release workflow owns those
+   checks. Atomic push ensures the tag is visible during that decision. Pushing
+   main before creating/pushing the tag can still run duplicate checks. Pull
+   requests, manual CI and untagged main commits continue to run normal CI.
 3. Watch [Client release](../.github/workflows/release-client.yml). It validates
    versions/secrets, runs the existing format, Clippy, database, shared, WASM and
    desktop/audio checks, and builds three installer targets concurrently with the
