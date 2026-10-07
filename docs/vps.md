@@ -72,21 +72,36 @@ This reloads TLS without disconnecting active sessions. The source hook is
 
 ## Updating the backend
 
-Build the reviewed commit with the repository's pinned Rust toolchain. This
-4 GiB VPS uses two build jobs and disables release LTO to limit build memory:
+The installed deployment command performs the update as `ubuntu`:
 
 ```sh
-cd /home/ubuntu/thiscord
-export PATH="$HOME/.cargo/bin:$PATH"
-CARGO_BUILD_JOBS=2 CARGO_PROFILE_RELEASE_LTO=false CARGO_PROFILE_RELEASE_CODEGEN_UNITS=8 \
-  cargo build -p thiscord-backend --bin thiscord-backend --release --locked
+ssh vps thiscord-deploy
+# Or select an explicit reviewed commit/tag:
+ssh vps thiscord-deploy COMMIT_OR_TAG
+# Verify a build without changing the production service/database:
+ssh vps thiscord-deploy --build-only
 ```
 
-Take a database backup before deploying, install the binary into a new immutable
-release directory, atomically replace `/opt/thiscord/current`, and restart
-`thiscord.service` during a planned interruption. Verify liveness and readiness.
-Database migrations can make a binary-only rollback unsafe; use the reviewed
-migration rollback behavior or restore a pre-update backup to a separate database.
+Source: `infra/vps/deploy-backend.sh`, installed at `/usr/local/bin/thiscord-deploy`.
+It fetches Git, builds an isolated archive of the selected revision (default
+`origin/main`) using its pinned Rust toolchain, and reuses the VPS Cargo cache.
+It uses two build jobs with release LTO disabled for the 4 GiB machine. Local
+checkout changes and `.env` files are not included in the build archive.
+
+After a successful build it installs a new release directory, stops the backend,
+runs the database backup service, atomically switches `/opt/thiscord/current`,
+and starts the backend using the existing production environment. Startup applies
+migrations. It checks origin HTTPS/database readiness directly before checking
+public access through Cloudflare. Voice connections disconnect during the brief
+backup/restart window. A lock prevents concurrent runs of this script.
+
+A failure before activation restarts the previous backend if it was stopped.
+A failure after activation stops the attempted release for investigation; it does
+not automatically roll back because migrations may have changed the database.
+The previous release and database backups remain available. Use reviewed migration
+rollback behavior or restore a pre-update backup to a separate database. A public
+DNS/proxy check failure leaves a healthy origin running and reports the failure.
+The command does not update OS packages, coturn, secrets, or its own installed copy.
 
 ## Migration evidence
 
