@@ -98,6 +98,9 @@ pub struct StreamLevel {
 pub struct SpeakerVolumeTarget {
     pub guild_id: crate::GuildId,
     pub account_id: crate::AccountId,
+    /// Local playback preference, independent of the account's microphone.
+    #[serde(default)]
+    pub shared_audio: bool,
 }
 /// Local, numeric diagnostics only; never includes PCM or recorded speech.
 #[derive(Debug, Clone, Serialize, Deserialize)]

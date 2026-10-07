@@ -184,7 +184,7 @@ mod tests {
             jitter: Default::default(),
             decoder: opus::Decoder::new(RATE, opus::Channels::Mono).unwrap(),
         });
-        s.remotes[11] = Some(super::super::Remote {
+        s.remotes[3 + thiscord_shared::voice::ROOM_CAPACITY] = Some(super::super::Remote {
             id,
             label: "Shared audio".into(),
             jitter: Default::default(),
@@ -193,13 +193,39 @@ mod tests {
         let target = thiscord_shared::audio::SpeakerVolumeTarget {
             guild_id: guild,
             account_id: id,
+            shared_audio: false,
         };
         s.set_volume(3, Some(target), 0.37).unwrap();
-        assert_eq!(s.volumes.as_ref().unwrap().gain(id), 0.37);
+        assert_eq!(s.volumes.as_ref().unwrap().gain(id, false), 0.37);
         assert_eq!(
-            f32::from_bits(s.devices.writers[11].control.volume.load(Ordering::Relaxed)),
-            0.37
+            f32::from_bits(
+                s.devices.writers[3 + thiscord_shared::voice::ROOM_CAPACITY]
+                    .control
+                    .volume
+                    .load(Ordering::Relaxed)
+            ),
+            1.0
         );
+        let shared = thiscord_shared::audio::SpeakerVolumeTarget {
+            shared_audio: true,
+            ..target
+        };
+        assert!(s.set_volume(3, Some(shared), 0.0).is_err());
+        s.set_volume(3 + thiscord_shared::voice::ROOM_CAPACITY, Some(shared), 0.0)
+            .unwrap();
+        assert_eq!(s.volumes.as_ref().unwrap().gain(id, true), 0.0);
+        let levels = s.status().streams;
+        assert_eq!(levels.len(), 2);
+        assert_eq!(levels[0].target, Some(target));
+        assert_eq!(levels[0].volume, 0.37);
+        assert_eq!(levels[1].target, Some(shared));
+        assert_eq!(levels[1].volume, 0.0);
+        s.set_volume(3, Some(target), 0.0).unwrap();
+        s.set_volume(3 + thiscord_shared::voice::ROOM_CAPACITY, Some(shared), 1.5)
+            .unwrap();
+        assert_eq!(s.status().streams[0].volume, 0.0);
+        assert_eq!(s.status().streams[1].volume, 1.5);
+        s.set_volume(3, Some(target), 0.37).unwrap();
         assert!(s.set_volume(3, None, 0.0).is_err());
         assert!(
             s.set_volume(

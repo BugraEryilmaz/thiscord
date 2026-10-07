@@ -7,22 +7,35 @@ use thiscord_shared::{AccountId, GuildId, audio::SpeakerVolumeTarget};
 #[derive(Default, Serialize, Deserialize)]
 pub struct Store {
     guilds: BTreeMap<GuildId, BTreeMap<AccountId, f32>>,
+    #[serde(default)]
+    shared_audio: BTreeMap<GuildId, BTreeMap<AccountId, f32>>,
 }
 
 pub struct Profile {
     pub guild_id: GuildId,
     gains: BTreeMap<AccountId, f32>,
+    shared_audio: BTreeMap<AccountId, f32>,
 }
 impl Profile {
-    pub fn gain(&self, account: AccountId) -> f32 {
-        self.gains.get(&account).copied().unwrap_or(1.0)
+    pub fn gain(&self, account: AccountId, shared_audio: bool) -> f32 {
+        let gains = if shared_audio {
+            &self.shared_audio
+        } else {
+            &self.gains
+        };
+        gains.get(&account).copied().unwrap_or(1.0)
     }
     pub fn set(&mut self, target: SpeakerVolumeTarget, gain: f32) -> Result<(), String> {
         validate(gain)?;
         if self.guild_id != target.guild_id {
             return Err("Voice channel changed; adjust the current speaker instead".into());
         }
-        self.gains.insert(target.account_id, gain);
+        let gains = if target.shared_audio {
+            &mut self.shared_audio
+        } else {
+            &mut self.gains
+        };
+        gains.insert(target.account_id, gain);
         Ok(())
     }
 }
@@ -53,11 +66,23 @@ impl Store {
         Ok(store)
     }
     fn validate(&self) -> Result<(), String> {
-        if self.guilds.len() > 4096 || self.guilds.values().map(BTreeMap::len).sum::<usize>() > 4096
+        if self.guilds.len() + self.shared_audio.len() > 4096
+            || self
+                .guilds
+                .values()
+                .chain(self.shared_audio.values())
+                .map(BTreeMap::len)
+                .sum::<usize>()
+                > 4096
         {
             return Err("Too many saved speaker volumes".into());
         }
-        for gain in self.guilds.values().flat_map(BTreeMap::values) {
+        for gain in self
+            .guilds
+            .values()
+            .chain(self.shared_audio.values())
+            .flat_map(BTreeMap::values)
+        {
             validate(*gain)?;
         }
         Ok(())
@@ -66,6 +91,11 @@ impl Store {
         Profile {
             guild_id,
             gains: self.guilds.get(&guild_id).cloned().unwrap_or_default(),
+            shared_audio: self
+                .shared_audio
+                .get(&guild_id)
+                .cloned()
+                .unwrap_or_default(),
         }
     }
     pub fn save(
@@ -75,7 +105,12 @@ impl Store {
         gain: f32,
     ) -> Result<(), String> {
         validate(gain)?;
-        self.guilds
+        let guilds = if target.shared_audio {
+            &mut self.shared_audio
+        } else {
+            &mut self.guilds
+        };
+        guilds
             .entry(target.guild_id)
             .or_default()
             .insert(target.account_id, gain);
@@ -95,6 +130,7 @@ mod tests {
     use super::*;
     fn target(guild: u8, account: u8) -> SpeakerVolumeTarget {
         SpeakerVolumeTarget {
+            shared_audio: false,
             guild_id: format!("00000000-0000-0000-0000-{guild:012}")
                 .parse()
                 .unwrap(),
@@ -103,6 +139,32 @@ mod tests {
                 .unwrap(),
         }
     }
+    #[test]
+    fn legacy_voice_preferences_and_shared_audio_are_independent() {
+        let voice = target(1, 1);
+        let screen = SpeakerVolumeTarget {
+            shared_audio: true,
+            ..voice
+        };
+        let legacy = serde_json::json!({"guilds": {voice.guild_id.to_string(): {voice.account_id.to_string(): 0.4}}});
+        let mut store: Store = serde_json::from_value(legacy).unwrap();
+        let mut profile = store.profile(voice.guild_id);
+        assert_eq!(profile.gain(voice.account_id, false), 0.4);
+        assert_eq!(profile.gain(voice.account_id, true), 1.0);
+        profile.set(screen, 0.0).unwrap();
+        assert_eq!(profile.gain(voice.account_id, false), 0.4);
+        assert_eq!(profile.gain(voice.account_id, true), 0.0);
+        let path = std::env::temp_dir().join(format!(
+            "thiscord-screen-volumes-{}.json",
+            std::process::id()
+        ));
+        store.save(&path, screen, 0.0).unwrap();
+        let loaded = Store::load(&path).unwrap().profile(voice.guild_id);
+        assert_eq!(loaded.gain(voice.account_id, false), 0.4);
+        assert_eq!(loaded.gain(voice.account_id, true), 0.0);
+        std::fs::remove_file(path).unwrap();
+    }
+
     #[test]
     fn disk_roundtrip_isolates_guilds_and_accounts_and_replaces_existing_file() {
         let path =
@@ -113,10 +175,12 @@ mod tests {
         store.save(&path, a, 0.0).unwrap();
         store.save(&path, b, 1.8).unwrap();
         let loaded = Store::load(&path).unwrap();
-        assert_eq!(loaded.profile(a.guild_id).gain(a.account_id), 0.0);
-        assert_eq!(loaded.profile(b.guild_id).gain(b.account_id), 1.8);
+        assert_eq!(loaded.profile(a.guild_id).gain(a.account_id, false), 0.0);
+        assert_eq!(loaded.profile(b.guild_id).gain(b.account_id, false), 1.8);
         assert_eq!(
-            loaded.profile(a.guild_id).gain(target(1, 2).account_id),
+            loaded
+                .profile(a.guild_id)
+                .gain(target(1, 2).account_id, false),
             1.0
         );
         let mut profile = loaded.profile(a.guild_id);
@@ -127,7 +191,7 @@ mod tests {
             Store::load(&path)
                 .unwrap()
                 .profile(a.guild_id)
-                .gain(a.account_id),
+                .gain(a.account_id, false),
             0.0
         );
         std::fs::write(&path, b"broken").unwrap();
@@ -137,7 +201,7 @@ mod tests {
             Store::load(&path)
                 .unwrap()
                 .profile(a.guild_id)
-                .gain(a.account_id),
+                .gain(a.account_id, false),
             1.0
         );
     }

@@ -218,6 +218,7 @@ speaker isolation and physical acoustic acceptance remain future work.
 - [x] Selectable 720p/1080p/1440p/4K and 15/30/60 fps targets, default 1080p/30.
 - [x] Windows system-audio loopback excluding Thiscord, separate from microphone mute/PTT.
 - [x] H.264/Opus WebRTC tracks, permission-gated SFU forwarding and WebView video player.
+- [x] In-app fullscreen viewing and separate saved screen share volume/mute controls.
 - [x] Bounded media queues, loss recovery, stop/reconnect cleanup and wire/codec/SFU regression tests.
 - [ ] Two-client Windows capture/audio acceptance, mixed-DPI/protected windows and suspend/network checks.
 - [ ] macOS/Linux publishing and OS permission acceptance; portable receiving code is included.
