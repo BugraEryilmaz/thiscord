@@ -122,13 +122,22 @@ operation and heartbeat age; queue-full, missing reply and worker-exit errors ar
 reported separately. Tests inject blocked stream destruction, worker panics,
 media saturation, callback stalls and lease expiry; real-game validation is pending.
 
-**Collecting logs:** after a failure, open **Settings → Audio & voice → Open
-diagnostic logs**, then send all `audio-diagnostics*.jsonl` files with the approximate
+**Collecting logs:** first turn on **Settings → Audio & voice → Enable diagnostic
+logging**, reproduce the failure, then use **Open diagnostic logs** and send all
+`audio-diagnostics*.jsonl` files with the approximate
 failure time and whether restarting Thiscord while the game stayed open helped.
 The button does not wait for the audio worker. On Windows the folder is normally
 `%LOCALAPPDATA%\tr.com.thiscord.desktop\diagnostics`. Logs survive app restarts.
 
-Logging is automatic, asynchronous and local-only, with a bounded 512-record queue
+Logging is off by default, including for existing installs without a saved choice.
+The toggle applies immediately and persists in `diagnostics.json` in the app config
+directory. Disabling logging stops the writer and discards queued events before
+returning; existing files remain available. While off, no diagnostic writer or log
+file is opened, and panic stacks are not captured for these logs. Opening the folder
+does not enable logging. Backend `tracing` logs remain independently controlled by
+`RUST_LOG` (default `info`).
+
+Enabled logging is asynchronous and local-only, with a bounded 512-record queue
 and three files of up to 2 MiB each. Records include timestamps, app/platform details,
 device names/formats, processing options, callback/drop counts, recovery attempts,
 cleanup progress, worker watchdog state, window focus, voice lifecycle and panic

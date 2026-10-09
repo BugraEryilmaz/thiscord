@@ -3,6 +3,7 @@ use leptos::prelude::*;
 use thiscord_shared::account::*;
 mod audio;
 mod chat;
+mod diagnostics;
 mod login;
 mod moderation;
 mod permissions;
