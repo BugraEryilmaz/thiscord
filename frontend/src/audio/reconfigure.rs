@@ -179,12 +179,14 @@ mod tests {
         let other = "00000000-0000-0000-0000-000000000003".parse().unwrap();
         s.volumes = Some(super::super::volumes::Store::default().profile(guild));
         s.remotes[3] = Some(super::super::Remote {
+            activity: Default::default(),
             id,
             label: "A speaker".into(),
             jitter: Default::default(),
             decoder: opus::Decoder::new(RATE, opus::Channels::Mono).unwrap(),
         });
         s.remotes[3 + thiscord_shared::voice::ROOM_CAPACITY] = Some(super::super::Remote {
+            activity: Default::default(),
             id,
             label: "Shared audio".into(),
             jitter: Default::default(),
@@ -297,6 +299,7 @@ mod tests {
         let transport = old.outgoing.as_ref().unwrap().clone();
         let id = "00000000-0000-0000-0000-000000000001".parse().unwrap();
         old.remotes[3] = Some(Remote {
+            activity: Default::default(),
             id,
             label: "speaker".into(),
             jitter: Default::default(),

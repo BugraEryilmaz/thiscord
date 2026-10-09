@@ -1,0 +1,47 @@
+[[permission]]
+identifier = "main-commands"
+description = "Account, media and settings commands for the main window only."
+commands.allow = [
+  "load_session",
+  "save_session",
+  "clear_session",
+  "prepare_google",
+  "open_google",
+  "cancel_google",
+  "audio_devices",
+  "audio_load",
+  "audio_current",
+  "audio_save",
+  "audio_restrict",
+  "audio_test",
+  "audio_stop",
+  "audio_status",
+  "audio_debug_start",
+  "audio_debug_stop",
+  "audio_debug_folder",
+  "audio_volume",
+  "audio_pressed",
+  "audio_webrtc_probe",
+  "screen_status",
+  "screen_view_diagnostics",
+  "screen_view_keyframe",
+  "screen_view_open",
+  "screen_view_keepalive",
+  "screen_sources",
+  "screen_start",
+  "screen_stop",
+  "voice_join",
+  "voice_leave",
+  "voice_status",
+  "overlay_snapshot",
+  "overlay_enabled",
+  "overlay_enable",
+  "update_status",
+  "update_check",
+  "update_install",
+]
+
+[[permission]]
+identifier = "overlay-read"
+description = "Read presentation-only voice metadata."
+commands.allow = ["overlay_snapshot"]

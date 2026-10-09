@@ -209,7 +209,9 @@ speaker isolation and physical acoustic acceptance remain future work.
   reconnect with bounded backoff, fresh authorization and cancellable media leases.
 - [x] Moderator voice disconnect with hierarchy enforcement and targeted transport revocation.
 - [ ] Moderator mute/deafen/move-to-channel controls with hierarchy enforcement.
-- [ ] Remote speaking indicators and connection-quality UI.
+- [x] Desktop voice overlay with participant roster, speaking activity and focus visibility.
+- [ ] In-app remote speaking indicators and connection-quality UI.
+- [ ] Overlay runtime acceptance in games, mixed-DPI monitors, macOS Spaces and Linux compositors.
 - [x] Automatic transport reconnection after network failure or server restart.
 - [ ] Validate real network switching/server outages across native hosts; support
   explicit local device suspend/resume recovery without unexpected capture.
@@ -239,6 +241,7 @@ speaker isolation and physical acoustic acceptance remain future work.
 See [screen-sharing.md](docs/screen-sharing.md) for limits and remaining platform checks.
 
 ## 9. Hosting and releases
+
 
 - [x] Direct backend HTTPS/WSS using Let's Encrypt PEM files, TLS tests and SIGHUP reload.
 - [ ] Finalize public hostname/DNS, browser hosting and certificate renewal automation.

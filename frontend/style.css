@@ -10,6 +10,31 @@
   --color-brand: #5865f2;
 }
 
+/* The overlay is a separate, transparent native window. */
+html:has(.voice-overlay), body:has(.voice-overlay) {
+  background: transparent;
+  overflow: hidden;
+  margin: 0;
+}
+.voice-overlay { padding: 6px; user-select: none; pointer-events: none; }
+.overlay-person { display: flex; align-items: center; margin-bottom: 10px; height: 52px; }
+.overlay-avatar {
+  display: grid; place-items: center; flex: 0 0 48px; height: 48px;
+  border: 3px solid #747781; border-radius: 50%; background: #303344;
+  color: white; font-size: 21px; font-weight: 700;
+  box-shadow: 0 2px 5px #0008;
+}
+.overlay-label {
+  display: flex; align-items: center; gap: 8px; min-width: 0;
+  padding: 5px 10px; margin-left: 8px; border-radius: 5px;
+  background: #17191ee6; color: #d6d8df; font-size: 14px; font-weight: 650;
+  text-shadow: 0 1px 2px #000;
+}
+.overlay-status { color: #a5a9b4; }
+.overlay-speaking .overlay-avatar { border-color: #54e697; box-shadow: 0 0 8px #54e69766; }
+.overlay-speaking .overlay-label { color: white; }
+.overlay-speaking .overlay-status { color: #54e697; }
+
 @layer base {
   :root {
     color-scheme: dark;

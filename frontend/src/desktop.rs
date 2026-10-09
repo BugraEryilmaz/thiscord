@@ -2,6 +2,7 @@
 
 mod native_account;
 mod native_audio;
+mod native_overlay;
 mod native_screen;
 mod native_signaling;
 mod native_update;
@@ -35,7 +36,12 @@ fn main() {
     tauri::Builder::default()
         .plugin(tauri_plugin_updater::Builder::new().build())
         .manage(native_update::UpdateState::default())
+        .manage(native_overlay::OverlayState::default())
         .setup(|app| {
+            // An unsupported compositor must not prevent chat/voice from starting.
+            if native_overlay::start(app.handle()).is_err() {
+                eprintln!("Voice overlay unavailable on this display server");
+            }
             native_update::start(app.handle());
             Ok(())
         })
@@ -45,6 +51,9 @@ fn main() {
         .manage(native_screen::ScreenState::default())
         .on_window_event(|window, event| {
             use tauri::Manager;
+            if window.label() != "main" {
+                return;
+            }
             let engine = &window.state::<native_audio::AudioState>().engine;
             match event {
                 tauri::WindowEvent::Destroyed => {
@@ -90,6 +99,9 @@ fn main() {
             native_voice::voice_join,
             native_voice::voice_leave,
             native_voice::voice_status,
+            native_overlay::overlay_snapshot,
+            native_overlay::overlay_enabled,
+            native_overlay::overlay_enable,
             native_update::update_status,
             native_update::update_check,
             native_update::update_install

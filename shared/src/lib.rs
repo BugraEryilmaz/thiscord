@@ -7,6 +7,7 @@ pub mod account;
 pub mod chat;
 pub mod error;
 pub mod ids;
+pub mod overlay;
 pub mod pagination;
 pub mod permissions;
 pub mod screen;
