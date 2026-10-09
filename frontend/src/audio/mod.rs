@@ -1,3 +1,4 @@
+mod activity;
 pub mod connection;
 mod cues;
 mod device_users;
@@ -368,6 +369,7 @@ impl AudioEngine {
     }
 }
 struct Remote {
+    activity: activity::Activity,
     id: thiscord_shared::AccountId,
     label: String,
     jitter: jitter::Jitter,
@@ -707,6 +709,9 @@ impl Session {
                         false,
                     ) && n == FRAME
                     {
+                        if packet.is_some() {
+                            remote.activity.observe(&pcm[..n], Instant::now());
+                        }
                         writer.write(&pcm[..n]);
                     }
                 }
@@ -855,6 +860,7 @@ impl Session {
                     .enumerate()
                     .filter_map(|(i, r)| {
                         r.as_ref().map(|r| StreamLevel {
+                            speaking: r.activity.speaking(Instant::now()),
                             id: i.to_string(),
                             target: self.volumes.as_ref().map(|p| SpeakerVolumeTarget {
                                 guild_id: p.guild_id,
@@ -874,6 +880,7 @@ impl Session {
             } else {
                 (0..if self.microphone { 1 } else { 2 })
                     .map(|i| StreamLevel {
+                        speaking: false,
                         id: i.to_string(),
                         target: None,
                         label: if self.microphone {
@@ -1158,6 +1165,7 @@ fn run(
                                         s.remotes[slot] = member
                                             .map(|m| {
                                                 Ok::<_, String>(Remote {
+                                                    activity: Default::default(),
                                                     id: m.account_id,
                                                     label: if shared_audio {
                                                         format!(

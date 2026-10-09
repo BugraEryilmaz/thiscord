@@ -87,6 +87,9 @@ pub struct AudioDevice {
 }
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct StreamLevel {
+    /// Recent decoded voice activity before local playback gain.
+    #[serde(default)]
+    pub speaking: bool,
     pub id: String,
     #[serde(default)]
     pub target: Option<SpeakerVolumeTarget>,

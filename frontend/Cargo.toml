@@ -75,13 +75,13 @@ wasm-bindgen = "0.2"
 wasm-bindgen-futures = "0.4"
 serde-wasm-bindgen = "0.6"
 js-sys = "0.3"
-web-sys = { version = "0.3", features = ["Window", "HtmlDialogElement", "DomRect", "Crypto", "Document", "HtmlElement", "Navigator", "Clipboard", "HtmlVideoElement", "MediaStream", "MediaStreamTrack", "RtcPeerConnection", "RtcConfiguration", "RtcSessionDescriptionInit", "RtcSessionDescription", "RtcSdpType", "RtcTrackEvent", "RtcRtpTransceiverInit", "RtcRtpTransceiverDirection", "RtcRtpTransceiver", "RtcIceGatheringState", "RtcPeerConnectionState", "RtcStatsReport", "VideoPlaybackQuality"] }
+web-sys = { version = "0.3", features = ["Window", "Location", "HtmlDialogElement", "DomRect", "Crypto", "Document", "HtmlElement", "Navigator", "Clipboard", "HtmlVideoElement", "MediaStream", "MediaStreamTrack", "RtcPeerConnection", "RtcConfiguration", "RtcSessionDescriptionInit", "RtcSessionDescription", "RtcSdpType", "RtcTrackEvent", "RtcRtpTransceiverInit", "RtcRtpTransceiverDirection", "RtcRtpTransceiver", "RtcIceGatheringState", "RtcPeerConnectionState", "RtcStatsReport", "VideoPlaybackQuality"] }
 gloo-timers = { version = "0.3", features = ["futures"] }
 
 [target.'cfg(not(target_arch = "wasm32"))'.dependencies]
 openh264 = { version = "=0.9.8", optional = true }
 hound = { version = "3.5", optional = true }
-tauri = { version = "2", optional = true , features = [] }
+tauri = { version = "2", optional = true , features = ["macos-private-api"] }
 keyring = { version = "3.6", optional = true, features = ["apple-native", "windows-native", "sync-secret-service", "crypto-rust"] }
 open = { version = "5", optional = true }
 tokio = { version = "1", optional = true, features = ["net", "time", "io-util", "sync", "macros"] }

@@ -58,6 +58,10 @@ Exactly three Cargo packages share a root lockfile:
 | `backend/` | Axum API, Diesel pool, schema and migrations; run in WSL |
 | `shared/` | Portable Serde communication contracts used by both sides |
 
+Desktop voice includes a click-through participant overlay with green speaking
+rings while Thiscord is out of focus. Toggle it in Audio & voice; use windowed or
+borderless games. See [overlay behavior and platform limits](docs/audio.md#in-game-voice-overlay).
+
 The root defaults to `shared` so plain `cargo check` needs neither desktop system
 libraries nor PostgreSQL headers. Select other packages explicitly.
 

@@ -578,7 +578,7 @@ async fn run(
                         app.state::<crate::native_screen::ScreenState>().roster(if settings.lock().map_err(|_|"Settings unavailable")?.deafened { &[] } else { &members });
                         roster = members.iter().filter(|m|m.slot!=own_slot).cloned().collect();
                         engine.notify(Command::Roster{connection:attempt.connection.clone(),members:roster.clone()});
-                        if let Ok(mut s)=status.lock(){s.participants=members;}
+                        if let Ok(mut s)=status.lock(){s.participants=members;s.own_slot=Some(own_slot);}
                     },ServerEvent::Error{error}=>return Err(Failure::server(error)),ServerEvent::Revoked{}=>return Err("Voice access changed. Join again if you still have permission.".into()),_=>{},
                 }
             },

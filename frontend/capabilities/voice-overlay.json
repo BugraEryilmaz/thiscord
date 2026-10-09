@@ -1,0 +1,10 @@
+{
+  "identifier": "voice-overlay",
+  "description": "Read-only voice roster; no credential, media control or plugin permissions.",
+  "windows": [
+    "voice-overlay"
+  ],
+  "permissions": [
+    "overlay-read"
+  ]
+}

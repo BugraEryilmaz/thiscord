@@ -303,6 +303,7 @@ pub(super) fn AudioSettingsPanel(ui: Ui) -> impl IntoView {
         });
     };
     view! {<div class="space-y-5"><h2 class="text-xl font-semibold">"Audio & voice"</h2>
+        <Show when=desktop><crate::overlay::OverlaySettings/></Show>
         <Show when=desktop fallback=||view!{<p>"Audio devices and voice are available in the desktop app."</p>}>
             <p class="text-sm text-white/60">"Devices refresh automatically. Changes apply during a call; switching devices may briefly interrupt audio. Settings stay on this computer."</p>
             {[(true,"Microphone"),(false,"Speakers / headphones")].into_iter().map(move|(input,label)|view!{

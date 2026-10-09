@@ -15,6 +15,32 @@ Device lists refresh every three seconds. Open a voice channel and click Join
 voice. Select another voice channel and join to move yourself. The voice bar stays
 available while reading text channels. Disconnect releases the devices.
 
+### In-game voice overlay
+
+The desktop client shows a transparent, always-on-top roster when connected to
+voice and the main window is out of focus (including when minimized). It sits at
+the top left of the display containing Thiscord and passes mouse input through to
+the game. Initials stand in for profile pictures. Green rings identify speakers;
+mute/deafen marks remain visible. Audio & voice has an overlay toggle for the
+current app session, enabled by default. Returning to Thiscord, disconnecting or
+losing voice access hides the overlay.
+
+The overlay is intended for windowed/borderless games, not exclusive fullscreen.
+It uses an ordinary Tauri window, without game injection or graphics hooks.
+Compositor rules can limit stacking/positioning, especially on Wayland and macOS
+fullscreen Spaces. macOS transparency enables Tauri's `macos-private-api` feature;
+this is for the existing direct-distribution builds, not Mac App Store submission.
+Actual game/monitor behavior still needs Windows/macOS/Linux runtime acceptance.
+
+Only participant presentation metadata is exposed to the overlay's read-only IPC
+capability; credentials and audio controls stay scoped to the main window.
+Remote indicators use decoded microphone energy before playback gain, with a
+250 ms hangover; missing packets and concealment do not extend activity. Screen
+audio never lights a microphone indicator. Local activity follows the transmit
+gate (including PTT), and mute/deafen/speak restrictions override activity. This is
+an activity indicator, not speech recognition. Native visibility and UI metadata
+are polled every 100 ms; no audio samples cross IPC.
+
 Short local two-note sounds announce your own successful voice join and other
 participants joining/leaving the connected channel. Reconnecting plays a fresh
 join sound. Initial members produce one cue, not one per participant; repeated

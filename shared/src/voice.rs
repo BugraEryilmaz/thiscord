@@ -104,6 +104,8 @@ pub enum ServerEvent {
 }
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct VoiceStatus {
+    #[serde(default)]
+    pub own_slot: Option<usize>,
     pub connected: bool,
     pub channel_id: Option<ChannelId>,
     pub message: String,
