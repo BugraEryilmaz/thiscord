@@ -24,6 +24,7 @@
     "windows": [
       {
         "label": "main",
+        "backgroundThrottling": "disabled",
         "title": "Thiscord",
         "width": 1100,
         "height": 750,

@@ -81,7 +81,7 @@ gloo-timers = { version = "0.3", features = ["futures"] }
 [target.'cfg(not(target_arch = "wasm32"))'.dependencies]
 openh264 = { version = "=0.9.8", optional = true }
 hound = { version = "3.5", optional = true }
-tauri = { version = "2", optional = true , features = ["macos-private-api"] }
+tauri = { version = "2", optional = true , features = ["macos-private-api", "tray-icon"] }
 keyring = { version = "3.6", optional = true, features = ["apple-native", "windows-native", "sync-secret-service", "crypto-rust"] }
 open = { version = "5", optional = true }
 tokio = { version = "1", optional = true, features = ["net", "time", "io-util", "sync", "macros"] }
