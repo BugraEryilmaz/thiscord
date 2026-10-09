@@ -73,6 +73,8 @@ jobs:
       - run: cargo fmt --all -- --check
       - name: Runner routing regression tests
         run: python3 scripts/test-select-runners.py
+      - name: Cargo cache sharing regression tests
+        run: python3 scripts/test-cargo-cache.py
 
   backend:
     name: Backend and shared contracts
@@ -192,6 +194,7 @@ jobs:
       - uses: ./.github/actions/cargo-cache
         with:
           key: desktop-${{ matrix.os }}
+          local-group: native
       - uses: actions/download-artifact@v4
         with:
           name: frontend-assets
@@ -235,18 +238,27 @@ jobs:
       - uses: ./.github/actions/cargo-cache
         with:
           key: audio-${{ matrix.os }}
+          local-group: native
       - name: Native audio mixer, DSP, jitter and encrypted WebRTC probe
         run: cargo test -p thiscord-frontend --lib --example audio_replay --features deep-filter,neural-echo-probe --profile ci --locked
       - name: Lint audio stages, regressions and benchmarks
         run: cargo clippy -p thiscord-frontend --lib --tests --examples --features deep-filter,neural-echo-probe --profile ci --locked -- -D warnings
       - name: Build production benchmark executables together
-        run: cargo build -p thiscord-frontend --example processing_bench --example neural_echo_bench --features deep-filter,neural-echo --release --locked
+        shell: pwsh
+        run: |
+          # Tauri builds with an explicit target; match its Cargo artifact layout.
+          $hostLine = rustc -vV | Select-String '^host: '
+          if ($LASTEXITCODE -or !$hostLine) { throw 'Cannot determine Rust host target.' }
+          $target = $hostLine.ToString().Substring(6).Trim()
+          "BENCH_TARGET=$target" >> $env:GITHUB_ENV
+          cargo build -p thiscord-frontend --example processing_bench --example neural_echo_bench --features deep-filter,neural-echo --release --target $target --locked
+          if ($LASTEXITCODE) { exit $LASTEXITCODE }
       - name: Audio processing benchmark (informational)
         shell: pwsh
         run: |
-          cargo run -p thiscord-frontend --example processing_bench --features deep-filter,neural-echo --release --locked -- 300 > processing-bench.jsonl
+          cargo run -p thiscord-frontend --example processing_bench --features deep-filter,neural-echo --release --target $env:BENCH_TARGET --locked -- 300 > processing-bench.jsonl
           if ($LASTEXITCODE) { exit $LASTEXITCODE }
-          cargo run -p thiscord-frontend --example neural_echo_bench --features deep-filter,neural-echo --release --locked -- frontend/models/ree-v2.tflite > neural-echo-bench.jsonl
+          cargo run -p thiscord-frontend --example neural_echo_bench --features deep-filter,neural-echo --release --target $env:BENCH_TARGET --locked -- frontend/models/ree-v2.tflite > neural-echo-bench.jsonl
           if ($LASTEXITCODE) { exit $LASTEXITCODE }
       - uses: actions/upload-artifact@v4
         with:

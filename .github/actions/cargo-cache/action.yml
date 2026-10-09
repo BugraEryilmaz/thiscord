@@ -4,6 +4,9 @@ inputs:
   key:
     description: Distinct build job and platform identifier
     required: true
+  local-group:
+    description: Compatible self-hosted jobs may share this group on one runner
+    default: ''
 runs:
   using: composite
   steps:
@@ -11,6 +14,7 @@ runs:
       shell: pwsh
       env:
         CACHE_JOB: ${{ inputs.key }}
+        CACHE_GROUP: ${{ inputs.local-group }}
         CACHE_REPOSITORY: ${{ github.repository }}
         CACHE_RUNNER: ${{ runner.name }}
         CACHE_ENVIRONMENT: ${{ runner.environment }}
@@ -20,9 +24,10 @@ runs:
         $local = $env:CACHE_ENVIRONMENT -eq 'self-hosted' -and $env:CACHE_DISABLED -ne 'true'
         $target = Join-Path $env:GITHUB_WORKSPACE 'target'
         if ($local) {
-          # Different runner services/jobs never share a writable target directory.
-          # PR builds also stay separate from branch/tag builds.
-          $scope = "$env:CACHE_REPOSITORY/$env:CACHE_RUNNER/$env:CACHE_JOB/pr-$env:CACHE_PR"
+          # GitHub runs one job at a time per runner service. Compatible jobs
+          # share artifacts; separate runners and PRs retain distinct directories.
+          $group = if ($env:CACHE_GROUP) { $env:CACHE_GROUP } else { $env:CACHE_JOB }
+          $scope = "$env:CACHE_REPOSITORY/$env:CACHE_RUNNER/$group/pr-$env:CACHE_PR"
           $sha = [System.Security.Cryptography.SHA256]::Create()
           $hash = [BitConverter]::ToString($sha.ComputeHash([Text.Encoding]::UTF8.GetBytes($scope))).Replace('-', '').ToLowerInvariant()
           $sha.Dispose()

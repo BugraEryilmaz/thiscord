@@ -47,6 +47,7 @@ jobs:
       - uses: ./.github/actions/cargo-cache
         with:
           key: release-${{ matrix.target }}${{ runner.os == 'Linux' && '-ubuntu24-container' || '' }}
+          local-group: ${{ runner.os == 'Linux' && 'ubuntu24-container' || 'native' }}
       - uses: ./.github/actions/cargo-tool
         if: runner.os != 'Linux'
         with:

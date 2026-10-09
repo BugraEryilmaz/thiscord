@@ -38,6 +38,16 @@ that distributes the new trust configuration first.
 
 ## Runner selection
 
+On each self-hosted runner, audio checks/benchmarks, desktop checks and native
+Windows/macOS installers share the `native` Cargo target directory. Benchmarks
+use an explicit host target to match Tauri's release artifact layout. Cargo reuses
+compatible dependency artifacts; different features/profiles and final executable
+linking can still require compilation. One runner service executes jobs serially;
+separate runner names, repositories and PRs use separate directories. Hosted
+caches remain keyed by job. Ubuntu-container installers have a separate cache
+group so they never reuse Kali-built system-library artifacts. The first run of
+a new cache group starts cold; subsequent stages/releases populate and reuse it.
+
 CI and release workflows call `select-runners.yml` on GitHub-hosted Ubuntu before
 scheduling build jobs. An online runner with matching `self-hosted`, OS and
 architecture labels is preferred (Windows x64, Linux x64, macOS ARM64). Otherwise
