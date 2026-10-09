@@ -7,6 +7,7 @@ mod native_screen;
 mod native_signaling;
 mod native_update;
 mod native_voice;
+mod native_window;
 #[cfg(target_os = "windows")]
 mod system_audio;
 
@@ -39,6 +40,9 @@ fn main() {
         .manage(native_overlay::OverlayState::default())
         .setup(|app| {
             use tauri::Manager;
+            if native_window::start(app.handle()).is_err() {
+                eprintln!("System tray unavailable; close-to-tray is disabled");
+            }
             let directory = app.path().app_local_data_dir()?.join("diagnostics");
             let preference = app.path().app_config_dir()?.join("diagnostics.json");
             if let Err(error) =
@@ -67,13 +71,29 @@ fn main() {
             }
             let engine = &window.state::<native_audio::AudioState>().engine;
             match event {
+                tauri::WindowEvent::CloseRequested { api, .. }
+                    if native_window::close_to_tray(window.app_handle()) =>
+                {
+                    api.prevent_close();
+                    engine.notify(thiscord_frontend::audio::Command::Pressed(false));
+                    // Linux can create an indicator without a tray host displaying it.
+                    // Keep a taskbar recovery path on those desktops.
+                    #[cfg(target_os = "linux")]
+                    let _ = window.minimize();
+                    #[cfg(not(target_os = "linux"))]
+                    if window.hide().is_err() {
+                        let _ = window.minimize();
+                    }
+                }
                 tauri::WindowEvent::Destroyed => {
                     thiscord_frontend::audio::diagnostics::event(
                         "window_destroyed",
                         serde_json::json!({}),
                     );
                     window.state::<native_screen::ScreenState>().clear();
-                    engine.notify(thiscord_frontend::audio::Command::Stop)
+                    engine.notify(thiscord_frontend::audio::Command::Stop);
+                    // Auxiliary windows must not keep a normally closed app alive.
+                    window.app_handle().exit(0);
                 }
                 tauri::WindowEvent::Focused(false) => {
                     thiscord_frontend::audio::diagnostics::event(
@@ -93,6 +113,8 @@ fn main() {
         })
         .manage(native_account::CallbackState::default())
         .invoke_handler(tauri::generate_handler![
+            native_window::window_close_to_tray,
+            native_window::window_set_close_to_tray,
             native_account::load_session,
             native_account::save_session,
             native_account::clear_session,
@@ -137,6 +159,10 @@ fn main() {
         .build(tauri::generate_context!())
         .expect("failed to build Thiscord")
         .run(|app, event| {
+            #[cfg(target_os = "macos")]
+            if matches!(event, tauri::RunEvent::Reopen { .. }) {
+                native_window::restore(app);
+            }
             if matches!(event, tauri::RunEvent::Exit) {
                 native_audio::finish_recording_on_exit(app);
             }

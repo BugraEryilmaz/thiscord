@@ -11,6 +11,7 @@ mod screen;
 mod screen_player;
 mod servers;
 mod updates;
+mod window;
 
 #[derive(Clone, Copy)]
 struct Ui {
@@ -383,8 +384,8 @@ pub fn App() -> impl IntoView {
             <div class="grid min-h-0 flex-1 gap-6 overflow-y-auto md:grid-cols-[220px_1fr]">
                 <nav class="flex flex-col gap-2" aria-label="Account navigation">
                     {move || {
-                        let tabs = vec![("profile","Profile"),("audio","Audio & voice"),("updates","App updates"),("permissions","Guilds & roles"),("reauthenticate","Reauthenticate"),("password","Set / change password"),("devices","Devices & identities"),("delete","Delete account")];
-                        tabs.into_iter().map(move |(page,label)|view!{
+                        let tabs = vec![("profile","Profile"),("audio","Audio & voice"),("desktop","Desktop"),("updates","App updates"),("permissions","Guilds & roles"),("reauthenticate","Reauthenticate"),("password","Set / change password"),("devices","Devices & identities"),("delete","Delete account")];
+                        tabs.into_iter().filter(|(page,_)| *page != "desktop" || client::desktop()).map(move |(page,label)|view!{
                             <button class="rounded-md px-4 py-3 text-left hover:bg-white/10 disabled:opacity-50" class:bg-brand=move ||ui.page.get()==page disabled=move ||ui.busy.get()
                                 on:click=move |_| {password.set(String::new());ui.page.set(page);if page=="devices" {run(ui,AccountRequest::Sessions);}}>{label}</button>
                         }).collect_view()
@@ -395,6 +396,7 @@ pub fn App() -> impl IntoView {
                     <Show when=move ||ui.page.get()=="permissions"><permissions::PermissionEditor ui=ui/></Show>
                     <Show when=move ||ui.page.get()=="audio"><audio::AudioSettingsPanel ui=ui/></Show>
                     <Show when=move ||ui.page.get()=="updates"><updates::Panel ui=ui/></Show>
+                    <Show when=move ||ui.page.get()=="desktop" && client::desktop()><window::WindowSettings/></Show>
                     <Show when=move ||ui.page.get()=="devices">
                         <h2 class="text-xl font-semibold">"Devices & identities"</h2>
                         <ul class="space-y-3">{move ||ui.sessions.get().into_iter().map(|s| {let id=s.id; view!{
@@ -409,7 +411,7 @@ pub fn App() -> impl IntoView {
                         }).collect_view())}
                         <button class="rounded-md bg-brand px-4 py-2" disabled=move ||ui.busy.get() on:click=move |_|google(ui,GooglePurpose::Link)>"Link Google account"</button>
                     </Show>
-                    <Show when=move ||!matches!(ui.page.get(),"devices"|"permissions"|"moderation"|"audio"|"updates")>
+                    <Show when=move ||!matches!(ui.page.get(),"devices"|"permissions"|"moderation"|"audio"|"updates"|"desktop")>
                         <h2 class="text-xl font-semibold">{move ||match ui.page.get(){"register"=>"Create your account","login"=>"Welcome back","forgot"=>"Request a password reset","reset"=>"Reset your password","verify"=>"Verify your email","reauthenticate"=>"Confirm it’s you","password"=>"Set or change password","delete"=>"Permanently delete account",_=>"Your profile"}}</h2>
                         <form class="space-y-4" on:submit=submit>
                             <Show when=move ||ui.page.get()=="reauthenticate"><Field label="Current password" value=password kind="password" autocomplete="current-password"/></Show>

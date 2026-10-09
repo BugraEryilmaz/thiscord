@@ -2,6 +2,8 @@
 identifier = "main-commands"
 description = "Account, media and settings commands for the main window only."
 commands.allow = [
+  "window_close_to_tray",
+  "window_set_close_to_tray",
   "load_session",
   "save_session",
   "clear_session",

@@ -23,6 +23,13 @@ voice channel. See [audio setup, networking and remaining checks](docs/audio.md)
 Audio device failures retry selected devices three times, then system defaults
 three times; the voice bar reports recovery and any default microphone fallback.
 Windows can list possible conflicting audio-session processes after retries fail.
+Desktop clients have an opt-in **Settings > Desktop > Keep Thiscord running when
+I close the window** preference, saved on this computer. Closing hides the window
+while calls and screen sharing continue. Use the Thiscord system tray icon
+(Windows/Linux) or menu-bar icon (macOS) to **Open Thiscord** or **Quit Thiscord**.
+On macOS, clicking the Dock icon also restores the window. Linux minimizes to the
+taskbar as well, keeping a recovery path on desktops without a tray host. Tray creation failures
+disable the preference for that run. With the setting off, closing exits the app.
 Optional rotating audio diagnostics are off by default. Turn on **Settings > Audio &
 voice > Enable diagnostic logging** before reproducing a failure, then use **Open
 diagnostic logs** to share the `audio-diagnostics*.jsonl` files. The preference

@@ -8,6 +8,8 @@ media compatibility spike can happen before chat to expose platform constraints.
 
 - [x] Three-package workspace with shared Serde communication contracts.
 - [x] Leptos UI and Tauri launcher in one frontend package.
+- [x] Persistent opt-in close-to-tray setting with Open/Quit tray actions and macOS Dock restore.
+- [ ] Verify close-to-tray, active calls/screen sharing, restore, restart persistence and explicit quit interactively on Windows/macOS/Linux (including Linux without a tray host).
 - [x] Tailwind CSS styling through Trunk, with Rust source scanning and shared theme tokens.
 - [x] Axum health endpoint consumed by the UI, optional Diesel pool and migration setup.
 - [x] Setup documentation and project rules in AGENTS.md.
