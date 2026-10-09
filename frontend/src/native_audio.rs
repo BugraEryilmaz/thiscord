@@ -18,6 +18,17 @@ impl Default for AudioState {
     }
 }
 const HOTKEY: &str = "Control+Shift+Space";
+#[tauri::command]
+pub async fn audio_diagnostics_folder(state: State<'_, AudioState>) -> Result<(), String> {
+    // Does not send a worker command: usable even when that worker is hung.
+    state.engine.diagnostic_snapshot();
+    let directory = audio::diagnostics::directory()?;
+    tauri::async_runtime::spawn_blocking(move || {
+        open::that(directory).map_err(|_| "Cannot open diagnostics folder".to_string())
+    })
+    .await
+    .map_err(|_| "Cannot open diagnostics folder")?
+}
 async fn command(engine: AudioEngine, command: Command) -> Result<AudioStatus, String> {
     tauri::async_runtime::spawn_blocking(move || engine.command(command))
         .await

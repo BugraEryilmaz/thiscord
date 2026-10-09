@@ -1,16 +1,21 @@
 pub mod connection;
 mod cues;
+mod device_users;
+pub mod diagnostics;
 mod format;
 mod frames;
 mod health;
 pub mod jitter;
+mod lifecycle;
 pub mod mixer;
 pub mod processing;
 mod reconfigure;
 pub mod reconnect;
 mod recording;
+mod recovery;
 pub mod transport;
 pub mod volumes;
+mod worker_health;
 use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
 use format::config;
 use health::StreamHealth;
@@ -93,10 +98,16 @@ where
     T: cpal::SizedSample + cpal::FromSample<f32>,
 {
     let channels = config.channels as usize;
+    let activity = health.clone();
     device
         .build_output_stream(
             *config,
             move |data: &mut [T], info| {
+                if activity.disabled() {
+                    data.fill(T::from_sample(0.0));
+                    return;
+                }
+                activity.callback(false);
                 mixer.reference_time(frames::playback_time(Instant::now(), info.timestamp()));
                 mixer.render(data, channels);
             },
@@ -119,10 +130,15 @@ where
     f32: cpal::FromSample<T>,
 {
     let channels = config.channels as usize;
+    let activity = health.clone();
     device
         .build_input_stream(
             *config,
             move |data: &[T], info| {
+                if activity.disabled() {
+                    return;
+                }
+                activity.callback(true);
                 writer.begin(frames::capture_time(Instant::now(), info.timestamp()));
                 let mut peak = 0.0_f32;
                 let mut dropped = 0;
@@ -195,10 +211,28 @@ pub enum Command {
     Pressed(bool),
     Status,
     Peek,
+    Keepalive(connection::Connection),
+    #[cfg(test)]
+    CrashWorker,
+}
+impl Command {
+    fn operation(&self) -> u8 {
+        use worker_health::*;
+        match self {
+            Self::Start { .. } | Self::VoiceStart { .. } => START,
+            Self::Settings(_) => SETTINGS,
+            Self::Stop => STOP,
+            Self::Packet { .. } => MEDIA,
+            Self::Status | Self::Peek | Self::Keepalive(_) => STATUS,
+            _ => OTHER,
+        }
+    }
 }
 #[derive(Clone)]
 pub struct AudioEngine {
     sender: mpsc::SyncSender<Request>,
+    media: mpsc::SyncSender<Command>,
+    probe: Arc<worker_health::Probe>,
     stop: Arc<AtomicBool>,
     pressed: Arc<AtomicBool>,
     inhibit: Arc<AtomicBool>,
@@ -211,12 +245,24 @@ impl Default for AudioEngine {
     }
 }
 impl AudioEngine {
+    pub fn diagnostic_snapshot(&self) {
+        diagnostics::event("requested_worker_snapshot", self.probe.snapshot());
+    }
     pub fn notify(&self, command: Command) {
         self.urgent(&command);
-        let _ = self.sender.try_send((command, None));
+        if matches!(command, Command::Packet { .. }) {
+            if self.media.try_send(command).is_err() {
+                self.probe.packet_drops.fetch_add(1, Ordering::Relaxed);
+            }
+        } else if self.sender.try_send((command, None)).is_err() {
+            diagnostics::event("control_notification_dropped", self.probe.snapshot());
+        }
     }
     pub fn new() -> Self {
         let (sender, receiver) = mpsc::sync_channel(32);
+        let (media, packets) = mpsc::sync_channel(128);
+        let probe = worker_health::Probe::new();
+        let worker_probe = probe.clone();
         let stop = Arc::new(AtomicBool::new(false));
         let pressed = Arc::new(AtomicBool::new(false));
         let worker_stop = stop.clone();
@@ -230,18 +276,29 @@ impl AudioEngine {
         thread::Builder::new()
             .name("thiscord-audio-control".into())
             .spawn(move || {
-                run(
-                    receiver,
-                    worker_stop,
-                    worker_pressed,
-                    worker_inhibit,
-                    worker_debug_stop,
-                    worker_deafen,
-                )
+                diagnostics::event("worker_started", worker_probe.snapshot());
+                for restart in 0..=3 {
+                    let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| run(
+                        &receiver, &packets, worker_stop.clone(), worker_pressed.clone(),
+                        worker_inhibit.clone(), worker_debug_stop.clone(), worker_deafen.clone(), &worker_probe,
+                    )));
+                    if result.is_ok() { break; }
+                    worker_inhibit.store(true, Ordering::Release);
+                    worker_deafen.store(true, Ordering::Release);
+                    worker_pressed.store(false, Ordering::Release);
+                    worker_probe.active.store(false, Ordering::Release);
+                    worker_probe.restarts.fetch_add(1, Ordering::Relaxed);
+                    diagnostics::event("worker_panic_recovery", serde_json::json!({"restart":restart,"state":worker_probe.snapshot()}));
+                    while let Ok((_, reply)) = receiver.try_recv() { if let Some(reply) = reply { let _ = reply.send(Err("Audio worker restarted after an internal failure. Join voice again; diagnostic logs were saved.".into())); } }
+                    while packets.try_recv().is_ok() {}
+                }
+                worker_probe.exited();
             })
             .expect("audio worker");
         Self {
             sender,
+            media,
+            probe,
             stop,
             pressed,
             inhibit,
@@ -286,9 +343,23 @@ impl AudioEngine {
         let (tx, rx) = mpsc::channel();
         self.sender
             .try_send((command, Some(tx)))
-            .map_err(|_| "Audio worker busy or stopped")?;
+            .map_err(|error| {
+                let (event, message) = match error {
+                    mpsc::TrySendError::Full(_) => ("control_queue_full", "Audio control queue is full. Open diagnostic logs; the audio worker may be stalled."),
+                    mpsc::TrySendError::Disconnected(_) => ("control_worker_disconnected", "Audio worker has exited. Open diagnostic logs, then restart Thiscord."),
+                };
+                diagnostics::event(event, self.probe.snapshot());
+                message
+            })?;
         rx.recv_timeout(Duration::from_secs(10))
-            .map_err(|_| "Audio device operation timed out")?
+            .map_err(|error| {
+                let (event, message) = match error {
+                    mpsc::RecvTimeoutError::Timeout => ("control_response_timeout", "Audio worker did not respond within 10 seconds. Open diagnostic logs; the driver or processing worker may be stalled."),
+                    mpsc::RecvTimeoutError::Disconnected => ("control_reply_disconnected", "Audio operation was interrupted by a worker failure. Join again; diagnostic logs were saved."),
+                };
+                diagnostics::event(event, self.probe.snapshot());
+                message
+            })?
     }
     pub fn current_settings(&self) -> Result<Option<AudioSettings>, String> {
         let (tx, rx) = mpsc::channel();
@@ -318,6 +389,12 @@ struct CpalStreams {
     output: cpal::Stream,
     input: Option<cpal::Stream>,
 }
+struct SilentStreams;
+impl DeviceStreams for SilentStreams {
+    fn play(&self) -> Result<(), String> {
+        Ok(())
+    }
+}
 impl DeviceStreams for CpalStreams {
     fn play(&self) -> Result<(), String> {
         self.output.play().map_err(|e| e.to_string())?;
@@ -328,16 +405,45 @@ impl DeviceStreams for CpalStreams {
     }
 }
 impl Devices {
+    fn silent(settings: &AudioSettings) -> Self {
+        let control = Arc::new(Controls::default());
+        apply(&control, settings);
+        let (writers, _) = mixer(control.clone());
+        Self {
+            info: serde_json::Value::Null,
+            streams: Box::new(SilentStreams),
+            capture: frames::queue().1,
+            reference: frames::queue().1,
+            writers,
+            control,
+            health: Arc::new(StreamHealth::default()),
+        }
+    }
     fn prepare(settings: &AudioSettings, microphone: bool) -> Result<Self, String> {
         settings.validate()?;
+        let permit = lifecycle::acquire()?;
+        diagnostics::event(
+            "device_open_begin",
+            serde_json::json!({"microphone":microphone,"default_input":settings.input.is_none(),"default_output":settings.output.is_none()}),
+        );
         let control = Arc::new(Controls::default());
         let health = Arc::new(StreamHealth::default());
         apply(&control, settings);
         let (writers, mixer) = mixer(control.clone());
         let (reference_writer, reference) = frames::queue();
         let mixer = mixer.with_reference(reference_writer);
-        let output_device = device(settings.output.as_deref(), false)?;
+        let output_device =
+            device(settings.output.as_deref(), false).map_err(|e| format!("Output: {e}"))?;
+        let output_name = output_device
+            .description()
+            .ok()
+            .map(|d| d.name().to_owned())
+            .unwrap_or_else(|| "selected output".into());
         let output_config = config(&output_device, false)?;
+        diagnostics::event(
+            "output_stream_open",
+            serde_json::json!({"name":output_name,"rate":output_config.sample_rate(),"channels":output_config.channels(),"format":format!("{:?}",output_config.sample_format())}),
+        );
         let output = pcm_stream!(
             output_config.sample_format(),
             output(
@@ -346,27 +452,47 @@ impl Devices {
                 mixer,
                 health.clone()
             )
-        )?;
+        )
+        .map_err(|e| format!("Output \"{output_name}\": {e}"))?;
+        diagnostics::event("output_stream_prepared", serde_json::json!({}));
         let (producer, capture) = frames::queue();
         let mut input_info = serde_json::Value::Null;
         let input = if microphone {
-            let d = device(settings.input.as_deref(), true)?;
+            let d =
+                device(settings.input.as_deref(), true).map_err(|e| format!("Microphone: {e}"))?;
             let c = config(&d, true)?;
             input_info = serde_json::json!({"name":d.description().ok().map(|d|d.name().to_owned()),
                 "channels":c.channels(),"sample_rate":c.sample_rate(),"format":format!("{:?}",c.sample_format())});
-            Some(pcm_stream!(
-                c.sample_format(),
-                input(&d, &c.config(), producer, control.clone(), health.clone())
-            )?)
+            diagnostics::event("input_stream_open", input_info.clone());
+            let input_name = d
+                .description()
+                .ok()
+                .map(|d| d.name().to_owned())
+                .unwrap_or_else(|| "selected microphone".into());
+            Some(
+                pcm_stream!(
+                    c.sample_format(),
+                    input(&d, &c.config(), producer, control.clone(), health.clone())
+                )
+                .map_err(|e| format!("Microphone \"{input_name}\": {e}"))?,
+            )
         } else {
             None
         };
+        diagnostics::event(
+            "device_open_complete",
+            serde_json::json!({"microphone":microphone}),
+        );
         Ok(Self {
             info: serde_json::json!({"input":input_info,"output":{
                 "name":output_device.description().ok().map(|d|d.name().to_owned()),
                 "channels":output_config.channels(),"sample_rate":output_config.sample_rate(),
                 "format":format!("{:?}",output_config.sample_format())}}),
-            streams: Box::new(CpalStreams { output, input }),
+            streams: Box::new(lifecycle::Managed::new(
+                CpalStreams { output, input },
+                permit,
+                health.clone(),
+            )),
             capture,
             reference,
             writers,
@@ -379,6 +505,10 @@ impl Devices {
     }
     fn inherit(&self, old: &Self) {
         old.control.deafen.store(true, Ordering::Release);
+        self.control.cues.store(
+            old.control.cues.swap(0, Ordering::AcqRel),
+            Ordering::Release,
+        );
         for (next, previous) in self.writers.iter().zip(&old.writers) {
             next.control.volume.store(
                 previous.control.volume.load(Ordering::Relaxed),
@@ -392,6 +522,8 @@ impl Devices {
     }
 }
 struct Session {
+    device_watch: health::Watch,
+    recovery: recovery::Recovery,
     volumes: Option<volumes::Profile>,
     cues: cues::Roster,
     connection: Option<connection::Connection>,
@@ -410,7 +542,53 @@ struct Session {
     processed_level: f32,
     processing: processing::Processing,
 }
+impl Drop for Session {
+    fn drop(&mut self) {
+        self.devices.health.disable();
+        if let Some(connection) = &self.connection {
+            connection.close();
+        }
+        diagnostics::event(
+            "audio_session_ended",
+            serde_json::json!({"voice":self.connection.is_some(),"health":self.devices.health.diagnostics()}),
+        );
+    }
+}
 impl Session {
+    fn resume_devices(
+        &mut self,
+        devices: Devices,
+        stop: &AtomicBool,
+        pressed: &AtomicBool,
+        deafen: &AtomicBool,
+    ) -> Result<bool, String> {
+        if stop.load(Ordering::Acquire) || self.connection.as_ref().is_some_and(|c| !c.active()) {
+            return Ok(false);
+        }
+        devices.inherit(&self.devices);
+        apply(&devices.control, &self.settings);
+        devices.control.deafen.store(
+            self.settings.deafened || deafen.load(Ordering::Acquire),
+            Ordering::Release,
+        );
+        devices
+            .control
+            .pressed
+            .store(pressed.load(Ordering::Acquire), Ordering::Release);
+        devices.play()?;
+        self.recovery.succeeded(&devices.info);
+        self.devices = devices;
+        self.device_watch = Default::default();
+        diagnostics::event("device_active", self.devices.info.clone());
+        self.processing.reset();
+        self.hold = 0;
+        self.next = Instant::now();
+        self.playback = Instant::now();
+        for remote in self.remotes.iter_mut().flatten() {
+            remote.jitter = Default::default();
+        }
+        Ok(true)
+    }
     fn set_volume(
         &mut self,
         stream: usize,
@@ -447,9 +625,15 @@ impl Session {
 
     fn start(settings: &AudioSettings, microphone: bool) -> Result<Self, String> {
         settings.validate()?;
+        diagnostics::event(
+            "processing_init_begin",
+            serde_json::json!({"echo":settings.echo_cancellation,"neural_echo":settings.neural_echo,"suppression":settings.noise_suppression,"suppression_model":settings.noise_suppression_model}),
+        );
         let mut processing = processing::Processing::new(settings)?;
         processing.prewarm()?;
-        let devices = Devices::prepare(settings, microphone)?;
+        diagnostics::event("processing_init_complete", serde_json::json!({}));
+        let recovery = recovery::Recovery::starting();
+        let devices = Devices::silent(settings);
         let mut encoder = opus::Encoder::new(RATE, opus::Channels::Mono, opus::Application::Voip)
             .map_err(|e| e.to_string())?;
         encoder
@@ -466,8 +650,9 @@ impl Session {
                 .active
                 .store(true, Ordering::Release);
         }
-        devices.play()?;
         Ok(Self {
+            recovery,
+            device_watch: Default::default(),
             settings: settings.clone(),
             volumes: None,
             cues: Default::default(),
@@ -654,7 +839,9 @@ impl Session {
             processing_resets: self.processing.resets,
             echo: self.processing.echo_diagnostics(),
             transmitting: self.devices.control.transmitting.load(Ordering::Relaxed),
-            message: if self.outgoing.is_some() {
+            message: if let Some(message) = self.recovery.message() {
+                message
+            } else if self.outgoing.is_some() {
                 "Voice audio active"
             } else if self.microphone {
                 "Microphone test: local Opus loopback (use headphones)"
@@ -738,21 +925,35 @@ fn stopped(message: String) -> AudioStatus {
     }
 }
 type Request = (Command, Option<mpsc::Sender<Result<AudioStatus, String>>>);
+fn lease_expired(voice: bool, elapsed: Duration) -> bool {
+    elapsed > Duration::from_secs(if voice { 15 } else { 3 })
+}
+#[allow(clippy::too_many_arguments)]
 fn run(
-    receiver: mpsc::Receiver<Request>,
+    receiver: &mpsc::Receiver<Request>,
+    packets: &mpsc::Receiver<Command>,
     stop: Arc<AtomicBool>,
     pressed: Arc<AtomicBool>,
     inhibit: Arc<AtomicBool>,
     debug_stop: Arc<AtomicBool>,
     deafen: Arc<AtomicBool>,
+    probe: &worker_health::Probe,
 ) {
     let mut debug = recording::Recorder::default();
     let mut session: Option<Session> = None;
     let mut pending: Option<reconfigure::Pending> = None;
-    let mut message = String::new();
+    let mut message: String = if probe.restarts.load(Ordering::Relaxed) > 0 {
+        "Audio worker restarted after an internal failure. Join voice again; open diagnostic logs."
+            .into()
+    } else {
+        "Audio stopped".into()
+    };
     let mut lease = Instant::now();
     let mut previous = Instant::now();
+    let mut last_snapshot = Instant::now();
     loop {
+        probe.enter(worker_health::IDLE);
+        probe.active.store(session.is_some(), Ordering::Release);
         if session
             .as_ref()
             .is_some_and(|s| s.connection.as_ref().is_some_and(|c| !c.active()))
@@ -773,7 +974,20 @@ fn run(
             pressed.store(false, Ordering::Release);
             message = "Audio stopped; devices released".into();
         }
-        if previous.elapsed() > Duration::from_secs(2) || lease.elapsed() > Duration::from_secs(3) {
+        if previous.elapsed() > Duration::from_secs(2) {
+            diagnostics::event(
+                "worker_scheduling_gap",
+                serde_json::json!({"elapsed_ms":previous.elapsed().as_millis(),"voice":session.as_ref().is_some_and(|s| s.connection.is_some())}),
+            );
+        }
+        if session
+            .as_ref()
+            .is_some_and(|s| lease_expired(s.connection.is_some(), lease.elapsed()))
+        {
+            diagnostics::event(
+                "audio_lease_expired",
+                serde_json::json!({"elapsed_ms":lease.elapsed().as_millis(),"voice":session.as_ref().is_some_and(|s|s.connection.is_some())}),
+            );
             if let Some(pending) = &mut pending {
                 pending.cancel("Audio suspended; pending settings were cancelled");
             }
@@ -782,15 +996,47 @@ fn run(
             message = "Audio stopped after inactivity or suspend".into();
         }
         previous = Instant::now();
-        match receiver.recv_timeout(Duration::from_millis(5)) {
+        if last_snapshot.elapsed() >= Duration::from_secs(10) {
+            last_snapshot = Instant::now();
+            if let Some(s) = &session {
+                diagnostics::event(
+                    "audio_snapshot",
+                    serde_json::json!({"health":s.devices.health.diagnostics(),"recovering":s.recovery.active(),"muted":s.settings.muted,"deafened":s.settings.deafened,"echo":s.settings.echo_cancellation,"neural_echo":s.settings.neural_echo,"suppression":s.settings.noise_suppression,"suppression_model":s.settings.noise_suppression_model,"automatic_gain":s.settings.automatic_gain,"dropped_samples":s.devices.control.dropped.load(Ordering::Relaxed),"underrun_samples":s.devices.control.underruns.load(Ordering::Relaxed)}),
+                );
+            }
+        }
+        let request = match receiver.try_recv() {
+            Ok(request) => Ok(request),
+            Err(mpsc::TryRecvError::Disconnected) => break,
+            Err(mpsc::TryRecvError::Empty) => match packets.try_recv() {
+                Ok(packet) => Ok((packet, None)),
+                Err(_) => receiver.recv_timeout(Duration::from_millis(5)),
+            },
+        };
+        match request {
             Ok((command, mut reply)) => {
+                probe.enter(command.operation());
+                if matches!(
+                    command,
+                    Command::Start { .. }
+                        | Command::VoiceStart { .. }
+                        | Command::Settings(_)
+                        | Command::Stop
+                ) {
+                    diagnostics::event(
+                        "audio_command",
+                        serde_json::json!({"operation":command.operation()}),
+                    );
+                }
                 if !matches!(
                     &command,
                     Command::Peek
                         | Command::CurrentSettings(_)
                         | Command::Packet { .. }
                         | Command::Roster { .. }
-                ) {
+                        | Command::Keepalive(_)
+                ) && session.as_ref().is_none_or(|s| s.connection.is_none())
+                {
                     lease = Instant::now();
                 }
                 if matches!(
@@ -809,6 +1055,11 @@ fn run(
                                 .ok_or(
                                     "Join a voice channel with microphone access before recording",
                                 )?;
+                            if s.recovery.active() {
+                                return Err(
+                                    "Wait for audio device recovery before recording".into()
+                                );
+                            }
                             debug.start(parent, s.settings.clone(), s.devices.info.clone())?;
                         }
                         Command::DebugStop => debug.stop(),
@@ -819,6 +1070,7 @@ fn run(
                             debug.stop();
                             session = None;
                             session = Some(Session::start(&settings, microphone)?);
+                            lease = Instant::now();
                             message.clear();
                         }
                         Command::VoiceStart {
@@ -841,6 +1093,7 @@ fn run(
                             s.outgoing = Some(outgoing);
                             s.connection = Some(connection);
                             session = Some(s);
+                            lease = Instant::now();
                         }
                         Command::Packet {
                             connection,
@@ -945,6 +1198,12 @@ fn run(
                                 let devices = settings.input != s.settings.input
                                     || settings.output != s.settings.output;
                                 if devices || s.processing.needs_replacement(&settings) {
+                                    if s.recovery.active() {
+                                        return Err(
+                                            "Audio devices are recovering; try again shortly"
+                                                .into(),
+                                        );
+                                    }
                                     pending = Some(reconfigure::Pending::start(
                                         settings,
                                         devices,
@@ -977,7 +1236,18 @@ fn run(
                             s.set_volume(stream, target, gain)?;
                         }
                         Command::Pressed(_) => {}
+                        Command::Keepalive(connection) => {
+                            if session
+                                .as_ref()
+                                .and_then(|s| s.connection.as_ref())
+                                .is_some_and(|c| c.accepts(&connection))
+                            {
+                                lease = Instant::now();
+                            }
+                        }
                         Command::Status | Command::Peek => {}
+                        #[cfg(test)]
+                        Command::CrashWorker => panic!("injected audio worker failure"),
                     }
                     Ok(())
                 })();
@@ -998,6 +1268,46 @@ fn run(
         // Commit only between complete processing ticks. Stop takes priority
         // even if it arrived while a replacement was finishing.
         if stop.load(Ordering::Acquire)
+            || session
+                .as_ref()
+                .is_some_and(|s| s.connection.as_ref().is_some_and(|c| !c.active()))
+        {
+            continue;
+        }
+        if let Some(s) = &mut session
+            && !s.recovery.active()
+            && let Err(error) = s.devices.health.check().and_then(|_| {
+                s.device_watch
+                    .check(&s.devices.health, s.microphone, Instant::now())
+            })
+        {
+            if let Some(p) = &mut pending {
+                p.cancel("Audio device failed; settings change cancelled");
+            }
+            debug.stop();
+            diagnostics::event(
+                "device_failure",
+                serde_json::json!({"error":error,"device":s.devices.info,"health":s.devices.health.diagnostics()}),
+            );
+            s.devices
+                .control
+                .transmitting
+                .store(false, Ordering::Release);
+            s.processed_level = 0.0;
+            s.devices.control.peak.store(0, Ordering::Relaxed);
+            // Release the failed endpoints before attempting to reopen them.
+            s.devices.streams = Box::new(SilentStreams);
+            s.recovery.begin(format!(
+                "{error} Microphone: {}; output: {}.",
+                s.devices.info["input"]["name"]
+                    .as_str()
+                    .unwrap_or("not active"),
+                s.devices.info["output"]["name"]
+                    .as_str()
+                    .unwrap_or("unknown")
+            ));
+        }
+        if stop.load(Ordering::Acquire)
             && let Some(pending) = &mut pending
         {
             pending.cancel("Audio stopped; pending settings were cancelled");
@@ -1009,6 +1319,36 @@ fn run(
             pending = None;
         }
         if let Some(s) = &mut session {
+            if s.recovery.active() {
+                probe.enter(worker_health::RECOVERY);
+                // A cancelled settings worker must finish before another open.
+                if pending.is_some() {
+                    if s.recovery.wait_expired() {
+                        session = None;
+                        message = "Audio recovery timed out waiting for a previous device operation. Process information is unavailable. Join again after checking the device.".into();
+                    }
+                    continue;
+                }
+                match s.recovery.poll(&s.settings, s.microphone) {
+                    Ok(Some(devices)) => {
+                        match s.resume_devices(devices, &stop, &pressed, &deafen) {
+                            Ok(true) => {}
+                            Ok(false) => continue,
+                            Err(error) => {
+                                s.recovery
+                                    .begin(format!("Cannot restart audio devices: {error}"));
+                                continue;
+                            }
+                        }
+                    }
+                    Ok(None) => continue,
+                    Err(error) => {
+                        session = None;
+                        message = error;
+                        continue;
+                    }
+                }
+            }
             if deafen.load(Ordering::Acquire) {
                 s.devices.control.deafen.store(true, Ordering::Release);
             }
@@ -1021,11 +1361,26 @@ fn run(
             {
                 session = None;
                 message = "Test finished; devices released".into();
-            } else if let Err(error) = s.tick(&stop, &pressed, &inhibit, &mut debug) {
+            } else if let Err(error) = {
+                probe.enter(worker_health::PROCESS);
+                let started = Instant::now();
+                let result = s.tick(&stop, &pressed, &inhibit, &mut debug);
+                probe.processed(started.elapsed());
+                result
+            } {
+                // A callback may fail between the health check above and tick.
+                // Let the next iteration enter recovery instead of disconnecting.
+                if s.devices.health.check().is_err() {
+                    continue;
+                }
                 if let Some(pending) = &mut pending {
                     pending.cancel("Audio device failed; pending settings were cancelled");
                 }
                 debug.stop();
+                diagnostics::event(
+                    "audio_processing_failed",
+                    serde_json::json!({"reason":"processing_tick_failed"}),
+                );
                 session = None;
                 message = error;
             }
@@ -1036,6 +1391,42 @@ fn run(
 #[cfg(test)]
 mod lifecycle_tests {
     use super::*;
+    #[test]
+    fn worker_panic_is_recoverable_and_restart_budget_is_finite() {
+        let engine = AudioEngine::new();
+        for _ in 0..3 {
+            assert!(engine.command(Command::CrashWorker).is_err());
+            let deadline = Instant::now() + Duration::from_secs(2);
+            loop {
+                if let Ok(status) = engine.command(Command::Peek) {
+                    assert!(!status.running);
+                    break;
+                }
+                assert!(Instant::now() < deadline);
+                thread::sleep(Duration::from_millis(5));
+            }
+            assert!(engine.inhibit.load(Ordering::Acquire));
+            assert!(!engine.pressed.load(Ordering::Acquire));
+        }
+        assert!(engine.command(Command::CrashWorker).is_err());
+        let deadline = Instant::now() + Duration::from_secs(2);
+        loop {
+            if engine
+                .command(Command::Peek)
+                .is_err_and(|e| e.contains("has exited"))
+            {
+                break;
+            }
+            assert!(Instant::now() < deadline);
+            thread::sleep(Duration::from_millis(5));
+        }
+    }
+    #[test]
+    fn game_launch_delay_is_not_a_voice_suspend() {
+        assert!(!lease_expired(true, Duration::from_secs(5)));
+        assert!(lease_expired(true, Duration::from_secs(16)));
+        assert!(lease_expired(false, Duration::from_secs(4)));
+    }
     #[test]
     fn cancelled_voice_start_never_opens_devices_or_relaxes_mute() {
         let engine = AudioEngine::new();
@@ -1067,16 +1458,36 @@ mod lifecycle_tests {
     }
     #[test]
     fn saturated_media_queue_cannot_lose_stop_or_ptt_release() {
-        let (sender, _receiver) = mpsc::sync_channel(1);
+        let (sender, receiver) = mpsc::sync_channel(1);
+        let (media, _packets) = mpsc::sync_channel(1);
         let engine = AudioEngine {
             sender,
+            media,
+            probe: worker_health::Probe::new(),
             stop: Arc::new(AtomicBool::new(false)),
             pressed: Arc::new(AtomicBool::new(true)),
             inhibit: Arc::new(AtomicBool::new(false)),
             debug_stop: Arc::new(AtomicBool::new(false)),
             deafen: Arc::new(AtomicBool::new(false)),
         };
+        for _ in 0..10 {
+            engine.notify(Command::Packet {
+                connection: Default::default(),
+                slot: 0,
+                sequence: 0,
+                payload: bytes::Bytes::new(),
+            });
+        }
+        assert_eq!(engine.probe.packet_drops.load(Ordering::Relaxed), 9);
         engine.notify(Command::Peek);
+        assert!(matches!(receiver.try_recv().unwrap().0, Command::Peek));
+        engine.notify(Command::Peek);
+        assert!(
+            engine
+                .command(Command::Peek)
+                .unwrap_err()
+                .contains("queue is full")
+        );
         engine.notify(Command::Pressed(false));
         engine.notify(Command::Stop);
         engine.notify(Command::DebugStop);
@@ -1088,6 +1499,13 @@ mod lifecycle_tests {
         assert!(engine.stop.load(Ordering::Acquire));
         assert!(engine.debug_stop.load(Ordering::Acquire));
         assert!(engine.inhibit.load(Ordering::Acquire));
+        drop(receiver);
+        assert!(
+            engine
+                .command(Command::Peek)
+                .unwrap_err()
+                .contains("has exited")
+        );
         engine.restrict(&AudioSettings {
             deafened: true,
             ..Default::default()
