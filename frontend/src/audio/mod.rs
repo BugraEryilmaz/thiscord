@@ -907,9 +907,12 @@ fn run(
                                                 Ok::<_, String>(Remote {
                                                     id: m.account_id,
                                                     label: if shared_audio {
-                                                        format!("{} - shared audio", m.username)
+                                                        format!(
+                                                            "{} - shared audio",
+                                                            m.display_name().to_owned()
+                                                        )
                                                     } else {
-                                                        m.username.clone()
+                                                        m.display_name().to_owned()
                                                     },
                                                     jitter: Default::default(),
                                                     decoder: opus::Decoder::new(

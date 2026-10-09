@@ -127,7 +127,7 @@ pub(super) fn ScreenViewer(ui: Ui) -> impl IntoView {
                     "fixed inset-0 z-50 flex min-h-0 flex-col overflow-auto bg-black text-white"
                 } else { "overflow-hidden rounded-lg border border-white/15 bg-black" }>
                     <figcaption class="flex shrink-0 flex-wrap items-center justify-between gap-3 p-3 text-sm">
-                        <span>{member.username}" is sharing"{if own { " (you)" } else { "" }}</span>
+                        <span>{member.display_name().to_owned()}" is sharing"{if own { " (you)" } else { "" }}</span>
                         {(!own).then(|| view! {
                             <button class="rounded bg-white/10 px-3 py-2" aria-pressed=move || expanded.get().to_string()
                                 on:click=move |_| expanded.update(|value| *value = !*value)>

@@ -15,6 +15,8 @@ pub struct ChatMessage {
     pub channel_id: ChannelId,
     pub author_id: Option<AccountId>,
     pub username: String,
+    #[serde(default)]
+    pub display_name: String,
     pub content: String,
     pub mentions: Vec<AccountId>,
     pub created_at: Timestamp,
@@ -22,6 +24,16 @@ pub struct ChatMessage {
     pub deleted: bool,
     pub revision: i32,
     pub sequence: i64,
+}
+impl ChatMessage {
+    /// Profile label, falling back to the username for older servers.
+    pub fn display_name(&self) -> &str {
+        if self.display_name.trim().is_empty() {
+            &self.username
+        } else {
+            &self.display_name
+        }
+    }
 }
 #[derive(Clone, Serialize, Deserialize)]
 pub struct History {
@@ -39,7 +51,19 @@ pub struct Unread {
 pub struct OnlineMember {
     pub account_id: AccountId,
     pub username: String,
+    #[serde(default)]
+    pub display_name: String,
     pub typing: bool,
+}
+impl OnlineMember {
+    /// Profile label, falling back to the username for older servers.
+    pub fn display_name(&self) -> &str {
+        if self.display_name.trim().is_empty() {
+            &self.username
+        } else {
+            &self.display_name
+        }
+    }
 }
 #[derive(Clone, Serialize, Deserialize)]
 #[serde(tag = "action", rename_all = "snake_case", deny_unknown_fields)]
@@ -152,4 +176,29 @@ pub enum ServerEvent {
     Error {
         error: ApiError,
     },
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::json;
+
+    #[test]
+    fn profile_names_preserve_handles_and_accept_legacy_presence() {
+        let legacy = json!({
+            "account_id": "00000000-0000-0000-0000-000000000001",
+            "username": "user_123",
+            "typing": false
+        });
+        let mut member: OnlineMember = serde_json::from_value(legacy).unwrap();
+        assert_eq!(member.display_name(), "user_123");
+        member.display_name = "Büğra 🎮".into();
+        let wire = serde_json::to_value(&member).unwrap();
+        assert_eq!(wire["username"], "user_123");
+        assert_eq!(wire["display_name"], "Büğra 🎮");
+        let roundtrip: OnlineMember = serde_json::from_value(wire).unwrap();
+        assert_eq!(roundtrip.display_name(), "Büğra 🎮");
+        member.display_name = "   ".into();
+        assert_eq!(member.display_name(), "user_123");
+    }
 }

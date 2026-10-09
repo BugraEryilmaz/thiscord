@@ -987,12 +987,14 @@ fn combined_roles_overrides_and_admin_behavior() {
             Member {
                 account_id: owner,
                 username: "owner".into(),
+                display_name: String::new(),
                 timeout_until: None,
                 roles: vec![],
             },
             Member {
                 account_id: member,
                 username: "member".into(),
+                display_name: String::new(),
                 timeout_until: None,
                 roles: vec![a.id, b.id],
             },

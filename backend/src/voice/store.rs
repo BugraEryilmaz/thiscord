@@ -51,6 +51,7 @@ pub(super) fn authorize(
         Ok((Participant {
             account_id: session.account_id,
             username: member.username.clone(),
+            display_name: member.display_name.clone(),
             slot: 0,
             muted: false,
             deafened: false,
