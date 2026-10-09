@@ -40,7 +40,10 @@ fn main() {
         .setup(|app| {
             use tauri::Manager;
             let directory = app.path().app_local_data_dir()?.join("diagnostics");
-            if let Err(error) = thiscord_frontend::audio::diagnostics::initialize(directory) {
+            let preference = app.path().app_config_dir()?.join("diagnostics.json");
+            if let Err(error) =
+                thiscord_frontend::audio::diagnostics::initialize(directory, preference)
+            {
                 eprintln!("{error}");
             }
             app.state::<native_audio::AudioState>()
@@ -108,6 +111,8 @@ fn main() {
             native_audio::audio_debug_stop,
             native_audio::audio_debug_folder,
             native_audio::audio_diagnostics_folder,
+            native_audio::audio_diagnostics_enabled,
+            native_audio::audio_diagnostics_enable,
             native_audio::audio_volume,
             native_audio::audio_pressed,
             native_audio::audio_webrtc_probe,

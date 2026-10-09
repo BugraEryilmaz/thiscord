@@ -20,6 +20,8 @@ commands.allow = [
   "audio_debug_stop",
   "audio_debug_folder",
   "audio_diagnostics_folder",
+  "audio_diagnostics_enabled",
+  "audio_diagnostics_enable",
   "audio_volume",
   "audio_pressed",
   "audio_webrtc_probe",

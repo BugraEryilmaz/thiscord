@@ -19,11 +19,24 @@ impl Default for AudioState {
 }
 const HOTKEY: &str = "Control+Shift+Space";
 #[tauri::command]
+pub async fn audio_diagnostics_enabled() -> Result<bool, String> {
+    tauri::async_runtime::spawn_blocking(audio::diagnostics::enabled)
+        .await
+        .map_err(|_| "Diagnostics settings task failed")?
+}
+#[tauri::command]
+pub async fn audio_diagnostics_enable(enabled: bool) -> Result<(), String> {
+    tauri::async_runtime::spawn_blocking(move || audio::diagnostics::set_enabled(enabled))
+        .await
+        .map_err(|_| "Diagnostics settings task failed")?
+}
+#[tauri::command]
 pub async fn audio_diagnostics_folder(state: State<'_, AudioState>) -> Result<(), String> {
     // Does not send a worker command: usable even when that worker is hung.
     state.engine.diagnostic_snapshot();
     let directory = audio::diagnostics::directory()?;
     tauri::async_runtime::spawn_blocking(move || {
+        std::fs::create_dir_all(&directory).map_err(|_| "Cannot create diagnostics folder")?;
         open::that(directory).map_err(|_| "Cannot open diagnostics folder".to_string())
     })
     .await

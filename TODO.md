@@ -103,6 +103,7 @@ and single-process chat/media enforcement.
   use native voice heartbeats and bound worker panic restarts.
 - [x] Persist rotating audio diagnostics, callback/watchdog/cleanup state and safe
   panic metadata; expose a logs-folder button independent of the audio worker.
+- [x] Make local diagnostic logging opt-in through a persistent Audio & voice toggle.
 - [ ] Validate recovery/default microphone fallback and busy-device diagnostics on
   real Windows, macOS and Linux hardware, including exclusive-mode conflicts.
 - [x] Microphone permission/error UX, input levels and bounded playback/loopback tests.
