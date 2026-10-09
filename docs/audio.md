@@ -35,16 +35,84 @@ OS profile. Test-stream gains are temporary. Device IDs, master gain, activation
 threshold, mute/deafen,
 transmit mode and processing choices persist in the OS app config directory's
 `audio.json`. No tokens or recorded audio go there. Device and processing settings
-can be changed during a call without leaving the voice channel. A vanished device stops capture/playback and displays an error; it does
-not silently switch to a different microphone. Select devices and join again.
+can be changed during a call without leaving the voice channel.
+
+Device failures suspend capture/playback while retaining the voice connection,
+roster and volumes. Recovery makes three attempts using the selected input/output,
+then three using the system defaults, with 500 ms between attempts. Opening the
+initial devices uses the same bounded path; an immediately successful first open
+does not consume the later recovery budget. Retry counts persist for the call,
+including across briefly successful restarts, to prevent endless failure loops.
+Fallback can change the microphone: the voice bar and audio status announce the
+default devices actually opened. Saved device preferences are unchanged.
+
+Each background open has an eight-second deadline. A stuck driver operation ends
+recovery early and retains its single worker slot until it finishes; the app never
+spawns unbounded replacement workers. Leaving voice, revocation, stop or suspend
+discards late completions. Muting, deafening and PTT release remain effective during
+recovery. Device/model changes wait until recovery finishes. Recovery ends debug
+recording and clears queued remote audio before playback resumes.
+
+After exhausting retries, voice disconnects with the last error. On Windows,
+best-effort WASAPI session enumeration lists active audio-session executable names
+and PIDs on selected/default endpoints. These are possible conflicts, **not proof
+of exclusive ownership**; shared sessions can span processes, protected processes
+may expose only a PID, and the blocking process may be absent. No process is killed.
+These bounded diagnostic results are included in the local diagnostic logs. Other platforms, empty results or
+failed queries explicitly report that the blocking process could not be identified.
+Diagnostics run on the bounded background worker and also have a timeout.
 
 CPAL buffer underrun/overrun (`Xrun`) and real-time scheduling (`RealtimeDenied`)
 notifications keep the stream running. They may indicate an audible glitch or
-reduced scheduling priority, not a disconnected device. Fatal notifications stop
-audio and identify the microphone/output stream and CPAL error category. Route
-changes still require explicit restart, including when CPAL could automatically
-switch to another device. Callbacks record only an atomic failure code; error
-formatting and stream cleanup happen on the audio worker.
+reduced scheduling priority, not a disconnected device. Other notifications enter
+bounded recovery and identify the microphone/output stream and CPAL error category.
+Route changes also use recovery instead of accepting an implicit backend reroute.
+Callbacks record atomic failure/activity counters; error formatting stays off the
+callbacks. Five seconds without expected input/output callbacks also enters recovery.
+
+## Worker resilience and diagnostic logs
+
+Live voice uses a native, connection-scoped heartbeat with a 15-second expiry;
+background WebView polling no longer keeps the call alive. Local playback/microphone
+tests retain their three-second UI lease. A two-second scheduling gap is logged,
+not treated as suspension. Leave, window destruction and connection revocation
+still stop audio; a stale native heartbeat after a long stall/suspend also stops it.
+Incoming packets use a separate bounded queue so they cannot fill the control queue.
+
+CPAL stream destruction runs on one cleanup worker because Windows stream Drop
+waits for its audio thread to exit. Capture callbacks stop accepting samples and
+playback callbacks output silence before streams enter cleanup. At most four device
+sets may exist across active, opening and retired streams. A hung cleanup retains
+its quota slot; repeated hangs eventually require a full app restart. The OS handle
+and microphone indicator may remain active until then, but retired callbacks cannot
+forward audio. This avoids unsafe thread termination or unbounded replacement threads.
+Ordinary device opens and recovery are bounded separately as described above.
+
+The control worker catches unwindable panics, closes its voice connection, rejects
+queued work and restarts up to three times per app worker lifetime. Rejoining uses
+a fresh session. Abort/native crashes and indefinitely blocked driver or DSP calls
+cannot be restarted safely in-process. An independent watchdog logs the last worker
+operation and heartbeat age; queue-full, missing reply and worker-exit errors are
+reported separately. Tests inject blocked stream destruction, worker panics,
+media saturation, callback stalls and lease expiry; real-game validation is pending.
+
+**Collecting logs:** after a failure, open **Settings → Audio & voice → Open
+diagnostic logs**, then send all `audio-diagnostics*.jsonl` files with the approximate
+failure time and whether restarting Thiscord while the game stayed open helped.
+The button does not wait for the audio worker. On Windows the folder is normally
+`%LOCALAPPDATA%\tr.com.thiscord.desktop\diagnostics`. Logs survive app restarts.
+
+Logging is automatic, asynchronous and local-only, with a bounded 512-record queue
+and three files of up to 2 MiB each. Records include timestamps, app/platform details,
+device names/formats, processing options, callback/drop counts, recovery attempts,
+cleanup progress, worker watchdog state, window focus, voice lifecycle and panic
+locations/stacks. Process names/PIDs appear only in best-effort conflict diagnostics.
+Panic stacks can include source paths; arbitrary panic payloads are excluded.
+No PCM, encoded audio, private messages, account/channel IDs, credentials, tokens,
+SDP, TURN credentials or configured model-file paths are deliberately logged.
+The separate opt-in WAV debug recorder is not enabled by diagnostic logging.
+File writes flush per record but remain best effort if the process is killed or
+storage fails; queue overflow is counted when the writer can resume.
 
 Tests in settings include five seconds of two independently adjustable tones,
 a microphone/Opus loopback limited to 60 seconds, and a synthetic encrypted WebRTC

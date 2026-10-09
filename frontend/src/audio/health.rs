@@ -1,20 +1,48 @@
 //! Audio callbacks record fixed-size failure codes; formatting stays on the worker.
 use cpal::ErrorKind;
-use std::sync::atomic::{AtomicU8, Ordering};
+use std::{
+    sync::atomic::{AtomicBool, AtomicU8, AtomicU64, Ordering},
+    time::{Duration, Instant},
+};
 
 #[derive(Default)]
 pub(super) struct StreamHealth {
     failure: AtomicU8,
+    disabled: AtomicBool,
+    input: AtomicU64,
+    output: AtomicU64,
+    glitches: AtomicU64,
 }
 
 impl StreamHealth {
+    pub fn disable(&self) {
+        self.disabled.store(true, Ordering::Release);
+    }
+    pub fn disabled(&self) -> bool {
+        self.disabled.load(Ordering::Acquire)
+    }
+    pub fn callback(&self, input: bool) {
+        if input { &self.input } else { &self.output }.fetch_add(1, Ordering::Relaxed);
+    }
+    pub fn counters(&self) -> [u64; 2] {
+        [
+            self.input.load(Ordering::Relaxed),
+            self.output.load(Ordering::Relaxed),
+        ]
+    }
+    pub fn diagnostics(&self) -> serde_json::Value {
+        serde_json::json!({"callbacks":self.counters(),"failure_code":self.failure.load(Ordering::Acquire),"glitches":self.glitches.load(Ordering::Relaxed),"disabled":self.disabled()})
+    }
     pub(super) fn report(&self, input: bool, kind: ErrorKind) {
         let code = match kind {
             // CPAL reports these while the stream remains usable. Neither means
             // a device was unplugged or its stream needs rebuilding.
-            ErrorKind::Xrun | ErrorKind::RealtimeDenied => return,
-            // Preserve explicit rejoin on route changes: a microphone must not
-            // silently switch to a different device, even if CPAL reroutes it.
+            ErrorKind::Xrun | ErrorKind::RealtimeDenied => {
+                self.glitches.fetch_add(1, Ordering::Relaxed);
+                return;
+            }
+            // Reopen through bounded recovery rather than accepting an implicit
+            // backend reroute without updating the recovery status.
             ErrorKind::DeviceChanged => 1,
             ErrorKind::DeviceNotAvailable => 2,
             ErrorKind::StreamInvalidated => 3,
@@ -62,15 +90,66 @@ impl StreamHealth {
             11 => "audio operation is unsupported (UnsupportedOperation)",
             _ => "audio stream failed (Other)",
         };
-        Err(format!(
-            "{device}: {reason}. Select devices and start again."
-        ))
+        Err(format!("{device}: {reason}."))
+    }
+}
+
+pub(super) struct Watch {
+    counts: [u64; 2],
+    changed: [Instant; 2],
+}
+impl Default for Watch {
+    fn default() -> Self {
+        Self {
+            counts: [0; 2],
+            changed: [Instant::now(); 2],
+        }
+    }
+}
+impl Watch {
+    pub fn check(
+        &mut self,
+        health: &StreamHealth,
+        microphone: bool,
+        now: Instant,
+    ) -> Result<(), String> {
+        for (index, count) in health.counters().into_iter().enumerate() {
+            if self.counts[index] != count {
+                self.counts[index] = count;
+                self.changed[index] = now;
+            }
+            if (index == 1 || microphone)
+                && now.duration_since(self.changed[index]) >= Duration::from_secs(5)
+            {
+                return Err(format!(
+                    "{} callbacks stopped for five seconds; the audio driver may be stalled.",
+                    if index == 0 { "Microphone" } else { "Output" }
+                ));
+            }
+        }
+        Ok(())
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn stalled_capture_is_detected_even_while_output_is_alive() {
+        let health = StreamHealth::default();
+        let mut watch = Watch::default();
+        let now = Instant::now() + Duration::from_secs(6);
+        health.callback(false);
+        assert!(
+            watch
+                .check(&health, true, now)
+                .unwrap_err()
+                .contains("Microphone")
+        );
+        assert!(watch.check(&health, false, now).is_ok());
+        health.callback(true);
+        assert!(watch.check(&health, true, now).is_ok());
+    }
 
     #[test]
     fn buffer_glitches_and_scheduling_warnings_do_not_stop_audio() {
@@ -92,7 +171,7 @@ mod tests {
     }
 
     #[test]
-    fn device_changes_and_invalid_streams_require_explicit_restart() {
+    fn device_changes_and_invalid_streams_report_direction_for_recovery() {
         for kind in [
             ErrorKind::DeviceChanged,
             ErrorKind::StreamInvalidated,

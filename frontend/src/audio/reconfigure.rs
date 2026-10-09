@@ -55,6 +55,12 @@ impl Pending {
         })
     }
     pub fn cancel(&mut self, reason: &str) {
+        if !self.cancelled {
+            diagnostics::event(
+                "settings_preparation_cancelled",
+                serde_json::json!({"elapsed_ms":self.started.elapsed().as_millis()}),
+            );
+        }
         self.cancelled = true;
         if let Some(reply) = self.reply.take() {
             let _ = reply.send(Err(reason.into()));
@@ -100,6 +106,9 @@ impl Pending {
                 debug.stop(); // New device clocks/formats require a new recording.
                 next.inherit(&s.devices);
                 std::mem::swap(&mut s.devices, next);
+                s.device_watch = Default::default();
+                diagnostics::event("device_reconfigured", s.devices.info.clone());
+                s.recovery.reconfigured();
             } else {
                 debug.settings(&self.settings);
             }
@@ -151,6 +160,8 @@ mod tests {
     }
     fn session() -> Session {
         Session {
+            device_watch: Default::default(),
+            recovery: Default::default(),
             volumes: None,
             cues: Default::default(),
             connection: None,
@@ -263,6 +274,70 @@ mod tests {
         mpsc::Receiver<Result<AudioStatus, String>>,
         mpsc::Receiver<Replacement>,
     );
+    #[test]
+    fn recovery_retains_call_and_controls_and_clears_stale_audio() {
+        let mut s = session();
+        s.recovery.begin("device busy".into());
+        s.settings.muted = true;
+        s.settings.input = Some("saved microphone".into());
+        let transport = s.outgoing.as_ref().unwrap().clone();
+        let connection = connection::Connection::default();
+        s.connection = Some(connection.clone());
+        let id = "00000000-0000-0000-0000-000000000001".parse().unwrap();
+        s.remotes[3] = Some(Remote {
+            id,
+            label: "speaker".into(),
+            jitter: Default::default(),
+            decoder: opus::Decoder::new(RATE, opus::Channels::Mono).unwrap(),
+        });
+        s.devices.writers[3].volume(0.37).unwrap();
+        s.devices.writers[3]
+            .control
+            .active
+            .store(true, Ordering::Release);
+        assert!(s.status().running);
+        assert!(
+            s.resume_devices(
+                devices(true),
+                &AtomicBool::new(false),
+                &AtomicBool::new(false),
+                &AtomicBool::new(true)
+            )
+            .unwrap()
+        );
+        assert!(!s.recovery.active());
+        assert!(s.outgoing.as_ref().unwrap().same_channel(&transport));
+        assert!(s.connection.as_ref().unwrap().accepts(&connection));
+        assert_eq!(s.remotes[3].as_ref().unwrap().id, id);
+        assert_eq!(
+            f32::from_bits(s.devices.writers[3].control.volume.load(Ordering::Relaxed)),
+            0.37
+        );
+        assert!(s.devices.writers[3].control.active.load(Ordering::Acquire));
+        assert!(s.devices.control.deafen.load(Ordering::Acquire));
+        assert!(s.devices.control.mute.load(Ordering::Acquire));
+        assert!(!s.devices.control.pressed.load(Ordering::Acquire));
+        assert_eq!(s.hold, 0);
+        assert_eq!(s.settings.input.as_deref(), Some("saved microphone"));
+    }
+    #[test]
+    fn recovery_cannot_start_after_stop_or_revocation_and_play_failure_stays_pending() {
+        let mut s = session();
+        s.recovery.begin("busy".into());
+        let no = AtomicBool::new(false);
+        assert!(
+            !s.resume_devices(devices(false), &AtomicBool::new(true), &no, &no)
+                .unwrap()
+        );
+        let connection = connection::Connection::default();
+        connection.close();
+        s.connection = Some(connection);
+        assert!(!s.resume_devices(devices(false), &no, &no, &no).unwrap());
+        s.connection = None;
+        assert!(s.resume_devices(devices(false), &no, &no, &no).is_err());
+        assert!(s.recovery.active());
+        assert!(s.outgoing.is_some());
+    }
     fn pending() -> TestPending {
         let (send, result) = mpsc::channel();
         let (reply, response) = mpsc::channel();
@@ -311,7 +386,7 @@ mod tests {
         send.send(Ok(replacement(&pending, true))).ok().unwrap();
         assert!(pending.poll(&mut current, &mut Default::default(), true));
         let s = current.unwrap();
-        assert!(s.outgoing.unwrap().same_channel(&transport));
+        assert!(s.outgoing.as_ref().unwrap().same_channel(&transport));
         assert_eq!(s.remotes[3].as_ref().unwrap().id, id);
         assert_eq!(
             f32::from_bits(s.devices.writers[3].control.volume.load(Ordering::Relaxed)),

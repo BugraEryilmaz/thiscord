@@ -249,6 +249,10 @@ struct Runtime {
 }
 impl Runtime {
     async fn close(&mut self) {
+        thiscord_frontend::audio::diagnostics::event(
+            "voice_transport_closing",
+            serde_json::json!({}),
+        );
         self.app
             .state::<crate::native_screen::ScreenState>()
             .clear();
@@ -264,6 +268,10 @@ impl Runtime {
 }
 impl Connector for Runtime {
     async fn attempt(&mut self) -> (Failure, bool) {
+        thiscord_frontend::audio::diagnostics::event(
+            "voice_attempt_started",
+            serde_json::json!({}),
+        );
         self.attempt = Attempt::default();
         let configuration = self.settings.lock().map(|s| s.clone());
         let registration = configuration
@@ -289,6 +297,10 @@ impl Connector for Runtime {
             &mut self.attempt,
         )
         .await;
+        thiscord_frontend::audio::diagnostics::event(
+            "voice_attempt_finished",
+            serde_json::json!({"failed":result.is_err(),"retryable":result.as_ref().err().is_some_and(|e|e.retryable),"connected_ms":self.attempt.connected_at.map(|at|at.elapsed().as_millis())}),
+        );
         let stable = self
             .attempt
             .connected_at
@@ -575,13 +587,17 @@ async fn run(
                 tokio::time::timeout(Duration::from_millis(100),track.write_rtp(packet)).await.map_err(|_|Failure::temporary("Voice sender stalled"))?.map_err(|_|Failure::temporary("Voice media connection failed"))?;
             },
             _=ticker.tick()=>{
-                if failed.load(Ordering::Acquire)||heard.elapsed()>Duration::from_secs(20){return Err(Failure::temporary("Voice connection lost"));}
+                if failed.load(Ordering::Acquire)||heard.elapsed()>Duration::from_secs(20){
+                    thiscord_frontend::audio::diagnostics::event("voice_connection_lost",serde_json::json!({"peer_failed":failed.load(Ordering::Acquire),"signaling_age_ms":heard.elapsed().as_millis()}));
+                    return Err(Failure::temporary("Voice connection lost"));
+                }
                 if !audio_started{
                     if start.elapsed()>Duration::from_secs(15){return Err(Failure::temporary("Media connection timed out"));}
                     if connected.load(Ordering::Acquire){
                         let configuration=settings.lock().map_err(|_|"Settings unavailable")?.clone();let audio_app=app.clone();let tx=tx.clone();let connection=attempt.connection.clone();
                         tauri::async_runtime::spawn_blocking(move||crate::native_audio::start_voice(&audio_app,guild_id,connection,configuration,tx,can_speak)).await.map_err(|_|"Audio task failed")??;
                         audio_started=true;attempt.connected_at=Some(Instant::now());
+                        thiscord_frontend::audio::diagnostics::event("voice_media_connected",serde_json::json!({}));
                         if screen_video { app.state::<crate::native_screen::ScreenState>().bind(crate::native_screen::Binding {
                             connection: attempt.connection.clone(), video: screen_track.clone(), audio: system_track.clone(), can_publish: can_speak,
                             force_keyframe: force_keyframe.clone(), metrics: Default::default(),
@@ -594,8 +610,10 @@ async fn run(
                 let configuration=settings.lock().map_err(|_|"Settings unavailable")?.clone();
                 if audio_started {
                     let e=engine.clone();
-                    let audio=tauri::async_runtime::spawn_blocking(move||e.command(Command::Peek)).await.map_err(|_|"Audio worker failed")??;
+                    let heartbeat_connection=attempt.connection.clone();
+                    let audio=tauri::async_runtime::spawn_blocking(move||e.command(Command::Keepalive(heartbeat_connection))).await.map_err(|_|"Audio worker failed")??;
                     if !audio.running {return Err(audio.message.into());}
+                    if let Ok(mut s)=status.lock(){s.message=audio.message;}
                     if connected.load(Ordering::Acquire) { disconnected_since=None; }
                     else if disconnected_since.get_or_insert_with(Instant::now).elapsed()>Duration::from_secs(5) {return Err(Failure::temporary("Voice media connection interrupted"));}
                 }
