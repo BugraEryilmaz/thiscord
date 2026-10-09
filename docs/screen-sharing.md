@@ -120,7 +120,9 @@ the display stops capture; it never falls back to another window/display.
 - System audio is unchanged: [wasapi 0.22](https://docs.rs/wasapi/0.22.0/wasapi/)
   process loopback excludes Thiscord's process tree. Audio capture/Opus encoding
   runs separately from video and microphone work. Shared audio uses 48 kHz mono
-  Opus, 20 ms packets and 64 kbit/s. No codec/network work enters CPAL callbacks.
+  Opus, 20 ms packets and 64 kbit/s. Capture drains available WASAPI packets before
+  waiting for another event, including coalesced notifications after worker delays,
+  and zeros packets marked silent. No codec/network work enters CPAL callbacks.
 - Eight microphone, eight screen-video and eight shared-audio tracks are negotiated.
   Microphone queues are separate and prioritized. There is no adaptive video
   bitrate, simulcast or demand-based network subscription yet. Multi-share and
@@ -214,6 +216,16 @@ decode/jitter-buffer time and decoder identity/efficiency when supported. Presen
 FPS is measured separately from video presentation counters, since decoding 60 FPS
 need not mean displaying 60 FPS. Missing browser fields mean unavailable, not zero.
 No SDP, candidate addresses, credentials, frame contents or recordings are included.
+
+Publisher `audio_capture_packets`, `audio_capture_silent_packets`,
+`audio_capture_discontinuities`, `audio_capture_queue_resets`, `audio_sent_frames`
+and `audio_send_failures` cover shared-audio capture and sending. Discontinuities
+are WASAPI-reported flags (an initial flag can occur at stream start); a growing
+count during continuous playback warrants investigation. These counters do not
+measure receiver packet loss or output underruns. For crackle heard by a viewer,
+also collect that client's Audio & voice diagnostic logs; `audio_snapshot` includes
+aggregate output underruns. Silence/inactive streams can contribute to that
+aggregate, so correlate changes with audible glitches. No audio is recorded.
 
 Read diagnostics in pipeline order: raw replacements/GPU busy and encode latency
 identify publisher pressure; sender drops/age identify pacing backlog; SFU drops

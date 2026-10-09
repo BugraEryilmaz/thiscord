@@ -246,6 +246,13 @@ Each received speaker owns a separate bounded packet jitter buffer, Opus decoder
 PCM ring and gain. Jitter starts at roughly 60 ms, reorders sequence numbers,
 rejects duplicates/late packets, handles wrap, and requests bounded Opus packet
 loss concealment. A source switch resets decoding and its queued PCM.
+The worker refills decoded PCM from the output ring's actual consumption, aiming
+for 40-60 ms, instead of releasing one frame on an independent 20 ms timer. Work
+is capped at two decoded frames per stream per tick. Prefetch waits for missing
+packets while more than 10 ms of PCM remain, so filling the cushion early does
+not immediately trigger concealment of a delayed packet. A synthetic Opus/mixer
+regression checks sample continuity through irregular worker wakes and delayed
+packets; actual device scheduling and prolonged stalls still need live validation.
 
 Playback mixes on the device callback with atomic gain changes. It allocates no
 buffers, waits on no locks, and does no networking/codec/DSP work. Queues cap

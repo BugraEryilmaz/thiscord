@@ -6,6 +6,12 @@ use std::sync::{
 use std::time::{Duration, Instant};
 use thiscord_shared::screen::{Diagnostics, Timing};
 const COUNTERS: &[&str] = &[
+    "audio_capture_packets",
+    "audio_capture_discontinuities",
+    "audio_capture_queue_resets",
+    "audio_capture_silent_packets",
+    "audio_sent_frames",
+    "audio_send_failures",
     "capture_events",
     "capture_throttled",
     "raw_replaced",

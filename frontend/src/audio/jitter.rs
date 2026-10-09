@@ -45,13 +45,16 @@ impl Jitter {
             self.packets.entry(sequence).or_insert(payload);
         }
     }
-    pub fn pop(&mut self) -> Option<Option<bytes::Bytes>> {
+    pub fn pop(&mut self, conceal_missing: bool) -> Option<Option<bytes::Bytes>> {
         let expected = self.expected?;
         if !self.playing {
             if self.packets.len() < 3 && self.first.elapsed() < Duration::from_millis(60) {
                 return None;
             }
             self.playing = true;
+        }
+        if !conceal_missing && !self.packets.contains_key(&expected) {
+            return None;
         }
         let packet = self.packets.remove(&expected);
         if packet.is_some() {
@@ -79,10 +82,27 @@ mod tests {
             j.push(i, bytes::Bytes::from(i.to_string()));
         }
         for i in [65534, 65535, 0] {
-            assert_eq!(j.pop().unwrap().unwrap(), i.to_string());
+            assert_eq!(j.pop(true).unwrap().unwrap(), i.to_string());
         }
-        assert!(j.pop().unwrap().is_none());
+        assert!(j.pop(true).unwrap().is_none());
         j.push(65535, bytes::Bytes::from_static(b"late"));
-        assert!(j.pop().unwrap().is_none());
+        assert!(j.pop(true).unwrap().is_none());
+    }
+    #[test]
+    fn pcm_prefetch_does_not_conceal_a_packet_before_its_deadline() {
+        let mut j = Jitter::default();
+        for seq in [0, 2, 3] {
+            j.push(seq, bytes::Bytes::from_static(b"packet"));
+        }
+        assert!(j.pop(false).unwrap().is_some());
+        for _ in 0..5 {
+            assert!(j.pop(false).is_none());
+        }
+        j.push(1, bytes::Bytes::from_static(b"late but playable"));
+        assert_eq!(j.pop(false).unwrap().unwrap(), "late but playable");
+        assert!(j.pop(false).unwrap().is_some());
+        assert!(j.pop(false).unwrap().is_some());
+        assert!(j.pop(false).is_none());
+        assert!(j.pop(true).unwrap().is_none());
     }
 }

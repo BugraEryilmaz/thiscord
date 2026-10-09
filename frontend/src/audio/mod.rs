@@ -375,6 +375,28 @@ struct Remote {
     jitter: jitter::Jitter,
     decoder: opus::Decoder,
 }
+impl Remote {
+    fn refill(&mut self, writer: &mut StreamWriter) {
+        // At most two frames per stream per worker tick. The callback remains
+        // PCM-only; jitter buffering and Opus stay on this worker.
+        for _ in 0..writer.refill_frames() {
+            let Some(packet) = self.jitter.pop(writer.needs_concealment()) else {
+                break;
+            };
+            let mut pcm = [0.0_f32; FRAME];
+            if let Ok(n) =
+                self.decoder
+                    .decode_float(packet.as_deref().unwrap_or(&[]), &mut pcm, false)
+                && n == FRAME
+            {
+                if packet.is_some() {
+                    self.activity.observe(&pcm[..n], Instant::now());
+                }
+                writer.write(&pcm[..n]);
+            }
+        }
+    }
+}
 struct Devices {
     info: serde_json::Value,
     streams: Box<dyn DeviceStreams>,
@@ -540,7 +562,6 @@ struct Session {
     hold: usize,
     outgoing: Option<tokio::sync::mpsc::Sender<bytes::Bytes>>,
     remotes: Vec<Option<Remote>>,
-    playback: Instant,
     processed_level: f32,
     processing: processing::Processing,
 }
@@ -585,7 +606,6 @@ impl Session {
         self.processing.reset();
         self.hold = 0;
         self.next = Instant::now();
-        self.playback = Instant::now();
         for remote in self.remotes.iter_mut().flatten() {
             remote.jitter = Default::default();
         }
@@ -669,7 +689,6 @@ impl Session {
             hold: 0,
             outgoing: None,
             remotes: (0..MAX_STREAMS).map(|_| None).collect(),
-            playback: Instant::now(),
             processed_level: 0.0,
             processing,
         })
@@ -693,27 +712,10 @@ impl Session {
                     None,
                 );
             })?;
-        if self.outgoing.is_some() && Instant::now() >= self.playback {
-            self.playback += Duration::from_millis(20);
-            if self.playback.elapsed() > Duration::from_millis(100) {
-                self.playback = Instant::now();
-            }
+        if self.outgoing.is_some() {
             for (remote, writer) in self.remotes.iter_mut().zip(self.devices.writers.iter_mut()) {
-                if let Some(remote) = remote
-                    && let Some(packet) = remote.jitter.pop()
-                {
-                    let mut pcm = [0.0_f32; FRAME];
-                    if let Ok(n) = remote.decoder.decode_float(
-                        packet.as_deref().unwrap_or(&[]),
-                        &mut pcm,
-                        false,
-                    ) && n == FRAME
-                    {
-                        if packet.is_some() {
-                            remote.activity.observe(&pcm[..n], Instant::now());
-                        }
-                        writer.write(&pcm[..n]);
-                    }
+                if let Some(remote) = remote {
+                    remote.refill(writer);
                 }
             }
         }
@@ -1402,6 +1404,73 @@ fn run(
 #[cfg(test)]
 mod lifecycle_tests {
     use super::*;
+    #[test]
+    fn remote_pcm_survives_worker_jitter_and_delayed_packets_without_sample_gaps() {
+        let mut encoder =
+            opus::Encoder::new(RATE, opus::Channels::Mono, opus::Application::Audio).unwrap();
+        let mut reference = opus::Decoder::new(RATE, opus::Channels::Mono).unwrap();
+        let mut packets = Vec::new();
+        let mut expected = Vec::new();
+        for sequence in 0..60 {
+            let pcm: [f32; FRAME] = std::array::from_fn(|i| {
+                ((sequence * FRAME + i) as f32 * std::f32::consts::TAU * 440.0 / RATE as f32).sin()
+                    * 0.1
+            });
+            let mut encoded = [0u8; 4000];
+            let n = encoder.encode_float(&pcm, &mut encoded).unwrap();
+            packets.push(bytes::Bytes::copy_from_slice(&encoded[..n]));
+            let mut decoded = [0.0; FRAME];
+            assert_eq!(
+                reference
+                    .decode_float(&encoded[..n], &mut decoded, false)
+                    .unwrap(),
+                FRAME
+            );
+            expected.extend_from_slice(&decoded);
+        }
+        let mut remote = Remote {
+            activity: Default::default(),
+            id: "00000000-0000-0000-0000-000000000001".parse().unwrap(),
+            label: "synthetic shared audio".into(),
+            jitter: Default::default(),
+            decoder: opus::Decoder::new(RATE, opus::Channels::Mono).unwrap(),
+        };
+        let controls = Arc::new(Controls::default());
+        let (mut writers, mut mixer) = mixer::mixer(controls.clone());
+        let writer = &mut writers[thiscord_shared::voice::ROOM_CAPACITY];
+        writer.control.active.store(true, Ordering::Release);
+        for (i, packet) in packets.iter().take(3).enumerate() {
+            remote.jitter.push(i as u16, packet.clone());
+        }
+        remote.refill(writer);
+        let mut actual = Vec::new();
+        let mut next_worker = 5;
+        let intervals = [5, 7, 12, 4, 8, 5];
+        let mut wake = 0;
+        for ms in 0..1000 {
+            for (sequence, packet) in packets.iter().enumerate().skip(3) {
+                let arrival = (sequence - 2) * 20 + if sequence % 7 == 0 { 15 } else { 0 };
+                if ms == arrival {
+                    remote.jitter.push(sequence as u16, packet.clone());
+                }
+            }
+            if ms >= next_worker {
+                remote.refill(writer);
+                next_worker += intervals[wake % intervals.len()];
+                wake += 1;
+            }
+            let mut output = [0.0; 48]; // 1 ms of real device consumption.
+            mixer.render(&mut output, 1);
+            actual.extend_from_slice(&output);
+        }
+        assert_eq!(controls.underruns.load(Ordering::Relaxed), 0);
+        assert_eq!(
+            actual,
+            expected[..actual.len()],
+            "no premature PLC, PCM trimming or missing samples"
+        );
+    }
+
     #[test]
     fn worker_panic_is_recoverable_and_restart_budget_is_finite() {
         let engine = AudioEngine::new();

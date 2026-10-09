@@ -177,7 +177,6 @@ mod tests {
             hold: 100,
             outgoing: Some(tokio::sync::mpsc::channel(2).0),
             remotes: (0..MAX_STREAMS).map(|_| None).collect(),
-            playback: Instant::now(),
             processed_level: 0.5,
             processing: processing::Processing::new(&AudioSettings::default()).unwrap(),
         }
