@@ -65,8 +65,13 @@ the display stops capture; it never falls back to another window/display.
   a refresh of the last captured frame for a static source. Overload no longer
   stretches recovery to several seconds by counting nominal-fps frames. Hardware
   input is capped at four outstanding samples with a 500 ms stall deadline.
-  Prompt recovery requests supplement periodic IDRs; the hardware buffer target
-  is one quarter-second of the configured bitrate, where the driver supports it.
+  Prompt recovery requests supplement periodic IDRs. CBR and mean-bitrate settings
+  must be accepted by the hardware encoder. The optional H.264 HRD buffer target
+  is 100 ms of codec output, in **bytes** (`bitrate / 8 / 10`), leaving headroom
+  below the sender deadline. The previous `bitrate / 4` supplied bits to a byte
+  property, allowing two seconds rather than the intended quarter-second.
+  Diagnostics expose buffer acceptance and readback; acceptance is not a hard
+  per-frame size guarantee. Smaller buffers can trade scene-change detail for latency.
 - The network remains the Rust WebRTC client and single-process SFU; the SFU
   forwards compressed video without transcoding. The publisher byte-paces packets
   at 1.2 times target codec bitrate (transport overhead allowance), with at most
@@ -76,9 +81,15 @@ the display stops capture; it never falls back to another window/display.
   frames (six at 30 FPS, twelve at 60 FPS); frames older than 200 ms are rejected
   before sending. The in-flight frame retains a 350 ms capture-age deadline, and
   each RTP write has a 100 ms timeout, so this is not an end-to-end latency bound.
-  Admission reserves queue space for pending hardware output and skips raw
-  captures before GPU processing/encoding under backpressure. This avoids breaking
-  H.264 reference chains. Discarding dependent frames during recovery does not
+  Admission reserves queue space for pending hardware output and also pauses raw
+  input when unsent wire bytes exceed 50 ms at the pacing rate. This count includes
+  the in-flight frame and decreases after successful packet writes; failed enqueue,
+  recovery drops and cancellation release the remainder. Large frames therefore
+  suppress new encoding before filling the queue with H.264 dependencies, even
+  when a driver rejects the smaller HRD buffer. The latest raw capture is retained
+  for resumption (subject to its existing 250 ms age limit) and replaced by fresher
+  captures. These admission limits do not bound unfinished hardware output or
+  shorten an individual oversized frame. Discarding dependent frames during recovery does not
   request another keyframe for each skipped delta.
   SFU video deliveries expire after 150 ms in its egress queue, with aggregate
   queue-drop/send-timeout diagnostics and rate-limited recovery feedback.
@@ -218,7 +229,13 @@ deadline), `rtp_write` (each WebRTC write, including failed/timed-out attempts),
 and `frame_send` (packet pacing plus writes for completed frames). All report
 sample count, mean and maximum. `pacing_sleeps` counts batch wakeups;
 `encoded_peak_frame_bytes` and `sender_peak_frame_packets` expose large bursts.
-`encode_backpressure` counts raw captures skipped before encoding. Encoded losses
+`sender_peak_bytes` includes queued and in-flight unsent packet bytes, using the
+same overhead estimate as pacing. `sender_backlog_budget_ms` is the raw-input
+admission threshold, not a hard encoded-queue byte limit. `encode_backpressure`
+counts fresh raw captures deferred before encoding; newer raw captures replace
+deferred ones. `encoder_buffer_target_bytes`, `encoder_buffer_applied` and
+`encoder_buffer_readback_bytes` distinguish the requested HRD size, setter acceptance
+and driver-reported value (`unavailable` when readback is unsupported). Encoded losses
 are separated into `encode_queue_full`, `encode_stale`, `encode_dependent`,
 `sender_stale`, `sender_dependent`, `send_timeouts` and `send_errors`, while
 `encode_dropped` remains their aggregate. Large wake delays implicate scheduling;
@@ -231,6 +248,17 @@ then decodes the output to check expected SDR levels. It also reads monitor HDR
 metadata without capturing pixels. Local NVIDIA validation passed 360 frames:
 720p SDR, 1440p-to-1080p HDR normalization and 4K-to-720p HDR highlights. The attached
 HDR monitor reported 240-nit SDR white. Intel/AMD acceptance remains outstanding.
+
+Add `-- --burst` to this probe command to encode/decode 180 frames of detailed
+synthetic scenes at 2560x1070, 18 Mbit/s and a 60 FPS input target, with repeated
+keyframes. This exercises rate control without desktop capture or network traffic.
+Local NVIDIA validation accepted/read back the 225,000-byte HRD target, decoded
+all 180 frames and produced three IDRs around 170 KB (170,123-byte peak). This is
+synthetic evidence, not a before/after measurement of a user's shared content.
+The deterministic pacing regression replays 524 KB frame bursts and coarse timer
+wakeups: slot-only admission exceeds the sender age limit; byte admission avoids
+those queued-frame expirations at the same pacing rate by deferring raw input.
+Live two-client playback and scene-change quality still require acceptance.
 
 `screen_encode_probe` tests the legacy system-memory input encoder API with
 synthetic data; that API is not the production capture path. `screen_preview_probe`
@@ -249,4 +277,5 @@ network conditions and actual WebView hardware decode still require acceptance.
 
 HDR/device references: [Microsoft Advanced Color](https://learn.microsoft.com/en-us/windows/win32/direct3darticles/high-dynamic-range),
 [MF D3D device manager](https://learn.microsoft.com/en-us/windows/win32/medfound/mft-message-set-d3d-manager),
+[H.264 HRD buffer units](https://learn.microsoft.com/en-us/windows/win32/codecapi/avenccommonbuffersize-property),
 [WebRTC statistics](https://www.w3.org/TR/webrtc-stats/).

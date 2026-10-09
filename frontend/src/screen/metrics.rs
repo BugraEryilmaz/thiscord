@@ -47,6 +47,7 @@ const COUNTERS: &[&str] = &[
     "receive_peak_bytes",
     "encoder_peak_pending",
     "sender_peak_frames",
+    "sender_peak_bytes",
 ];
 const TIMINGS: &[&str] = &[
     "capture_submit",

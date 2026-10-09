@@ -57,12 +57,28 @@ pub struct HardwareEncoder {
     height: usize,
     fps: u32,
     pub name: String,
+    pub buffer_applied: bool,
     sps: Vec<u8>,
     pps: Vec<u8>,
     _manager: Option<IMFDXGIDeviceManager>,
     surfaces: Vec<(u64, Arc<ID3D11Texture2D>)>,
     _runtime: Runtime,
 }
+struct Configuration {
+    events: IMFMediaEventGenerator,
+    codec: ICodecAPI,
+    input: u32,
+    output: u32,
+    manager: Option<IMFDXGIDeviceManager>,
+    buffer_applied: bool,
+}
+/// H.264 CODECAPI_AVEncCommonBufferSize is in bytes, not bits. Target 100 ms
+/// of codec output so a supported HRD setting fits below the 200 ms send queue
+/// deadline with room for encoding, packet overhead and scheduler jitter.
+pub fn buffer_bytes(bitrate: u32) -> u32 {
+    bitrate / 8 / 10
+}
+
 pub struct Encoded {
     pub data: Vec<u8>,
     pub timestamp: u64,
@@ -158,7 +174,7 @@ impl HardwareEncoder {
             let transform: Result<IMFTransform> = unsafe { activation.ActivateObject() };
             if let Ok(transform) = transform {
                 match Self::configure(&transform, width, height, quality, device) {
-                    Ok((events, codec, input, output, manager)) => {
+                    Ok(config) => {
                         let name = unsafe {
                             let mut text = [0u16; 256];
                             activation
@@ -176,19 +192,20 @@ impl HardwareEncoder {
                         .unwrap_or_else(|| "Media Foundation H.264".into());
                         return Ok(Self {
                             transform,
-                            events,
-                            codec,
-                            input,
-                            output,
+                            events: config.events,
+                            codec: config.codec,
+                            input: config.input,
+                            output: config.output,
                             requests: 0,
                             pending: VecDeque::new(),
                             width,
                             height,
                             fps: quality.fps,
                             name,
+                            buffer_applied: config.buffer_applied,
                             sps: Vec::new(),
                             pps: Vec::new(),
-                            _manager: manager,
+                            _manager: config.manager,
                             surfaces: Vec::new(),
                             _runtime: runtime,
                         });
@@ -207,13 +224,7 @@ impl HardwareEncoder {
         height: usize,
         quality: Quality,
         device: Option<&ID3D11Device>,
-    ) -> Result<(
-        IMFMediaEventGenerator,
-        ICodecAPI,
-        u32,
-        u32,
-        Option<IMFDXGIDeviceManager>,
-    )> {
+    ) -> Result<Configuration> {
         unsafe {
             let attributes = transform.GetAttributes()?;
             attributes.SetUINT32(&MF_TRANSFORM_ASYNC_UNLOCK, 1)?;
@@ -237,18 +248,20 @@ impl HardwareEncoder {
             // Baseline + low latency prevents frame reordering on the RTP path.
             codec.SetValue(&CODECAPI_AVLowLatencyMode, &VARIANT::from(true))?;
             let _ = codec.SetValue(&CODECAPI_AVEncMPVDefaultBPictureCount, &VARIANT::from(0u32));
-            let _ = codec.SetValue(
+            codec.SetValue(
                 &CODECAPI_AVEncCommonRateControlMode,
                 &VARIANT::from(eAVEncCommonRateControlMode_CBR.0 as u32),
-            );
-            let _ = codec.SetValue(
+            )?;
+            codec.SetValue(
                 &CODECAPI_AVEncCommonMeanBitRate,
                 &VARIANT::from(quality.bitrate()),
-            );
-            let _ = codec.SetValue(
-                &CODECAPI_AVEncCommonBufferSize,
-                &VARIANT::from(quality.bitrate() / 4),
-            );
+            )?;
+            let buffer_applied = codec
+                .SetValue(
+                    &CODECAPI_AVEncCommonBufferSize,
+                    &VARIANT::from(buffer_bytes(quality.bitrate())),
+                )
+                .is_ok();
             let _ = codec.SetValue(&CODECAPI_AVEncMPVGOPSize, &VARIANT::from(quality.fps));
             let (mut input, mut output) = ([0], [0]);
             if transform.GetStreamIDs(&mut input, &mut output).is_err() {
@@ -285,8 +298,20 @@ impl HardwareEncoder {
             codec.SetValue(&CODECAPI_AVEncVideoForceKeyFrame, &VARIANT::from(1u32))?;
             transform.ProcessMessage(MFT_MESSAGE_NOTIFY_BEGIN_STREAMING, 0)?;
             transform.ProcessMessage(MFT_MESSAGE_NOTIFY_START_OF_STREAM, 0)?;
-            Ok((events, codec, input[0], output[0], manager))
+            Ok(Configuration {
+                events,
+                codec,
+                input: input[0],
+                output: output[0],
+                manager,
+                buffer_applied,
+            })
         }
+    }
+    pub fn buffer_readback_bytes(&self) -> Option<u32> {
+        unsafe { self.codec.GetValue(&CODECAPI_AVEncCommonBufferSize) }
+            .ok()
+            .and_then(|value| u32::try_from(&value).ok())
     }
     pub fn force_keyframe(&self) -> Result<()> {
         unsafe {
@@ -498,6 +523,23 @@ impl Drop for HardwareEncoder {
                 .ProcessMessage(MFT_MESSAGE_NOTIFY_END_STREAMING, 0);
             if let Ok(shutdown) = self.transform.cast::<IMFShutdown>() {
                 let _ = shutdown.Shutdown();
+            }
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    #[test]
+    fn h264_buffer_uses_bytes_and_leaves_sender_deadline_headroom() {
+        assert_eq!(super::buffer_bytes(18_000_000), 225_000);
+        for height in [720, 1080, 1440, 2160] {
+            for fps in [15, 30, 60] {
+                let bitrate = thiscord_shared::screen::Quality { height, fps }.bitrate();
+                let bytes = super::buffer_bytes(bitrate);
+                let drain_ms = u64::from(bytes) * 8 * 1000 / u64::from(bitrate);
+                assert!((99..=100).contains(&drain_ms));
+                assert!(u128::from(drain_ms) < crate::screen::SENDER_QUEUE_AGE.as_millis());
             }
         }
     }

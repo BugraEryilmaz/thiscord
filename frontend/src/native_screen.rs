@@ -480,9 +480,11 @@ pub async fn screen_start(
     let sender_stop = stop.clone();
     let sender_binding = binding.clone();
     tauri::async_runtime::spawn(async move {
-        let mut pacer = thiscord_frontend::screen::pacing::Pacer::new(quality.bitrate() * 12 / 10);
+        let mut pacer = thiscord_frontend::screen::pacing::Pacer::new(
+            thiscord_frontend::screen::pacing::transport_bitrate(quality.bitrate()),
+        );
         let mut waiting = false;
-        'frames: while let Some(frame) = rx.recv().await {
+        'frames: while let Some(mut frame) = rx.recv().await {
             let captured_at = frame.captured_at;
             sender_binding
                 .metrics
@@ -571,6 +573,7 @@ pub async fn screen_start(
                 }
                 sender_binding.metrics.add("sent_packets", 1);
                 sender_binding.metrics.add("sent_bytes", bytes as u64);
+                frame.budget.sent(bytes);
             }
             waiting = false;
             sender_binding

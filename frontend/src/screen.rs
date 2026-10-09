@@ -22,6 +22,7 @@ pub struct Outgoing {
     pub enqueued_at: std::time::Instant,
     pub packets: Vec<rtc::rtp::Packet>,
     pub keyframe: bool,
+    pub budget: pacing::PendingBytes,
 }
 
 pub fn recovery_frame(data: &[u8]) -> bool {
