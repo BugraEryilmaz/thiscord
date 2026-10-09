@@ -332,6 +332,12 @@ pub(super) fn AudioSettingsPanel(ui: Ui) -> impl IntoView {
             <Show when=move||ui.audio_saving.get()><p class="text-sm text-white/60" role="status">"Applying audio settings..."</p></Show>
             <VoiceControls ui=ui/>
             <DebugRecording ui=ui/>
+            <div class="space-y-2 text-sm text-white/70">
+                <button class="underline" on:click=move |_|leptos::task::spawn_local(async move {
+                    if let Err(error)=native::<()>("audio_diagnostics_folder",json!({})).await {message.set(error);}
+                })>"Open diagnostic logs"</button>
+                <p>"If voice fails, send the audio-diagnostics files from this folder. Logs are automatic and include device names and technical events, but no voice recordings, messages or credentials."</p>
+            </div>
             <label class="block">"Raw microphone"<meter class="ml-3 w-48" min="0" max="1" value=move||ui.audio_status.get().map(|s|s.raw_input_level).unwrap_or(0.0) /></label>
             <label class="block">"After noise / echo processing"<meter class="ml-3 w-48" min="0" max="1" value=move||ui.audio_status.get().map(|s|s.input_level).unwrap_or(0.0) /></label>
             <p class="text-sm" role="status">{move||ui.audio_status.get().map(|s|format!("{} · dropped {} · underruns {} · processing resets {}",s.message,s.dropped_samples,s.underrun_samples,s.processing_resets))}</p>

@@ -96,12 +96,21 @@ and single-process chat/media enforcement.
 - [x] Native CPAL capture/playback, per-stream SPSC ring buffers and Opus codecs.
 - [x] Windows/Linux encrypted WebRTC software probes; three-OS CI build/test matrix.
 - [x] Select Rust media libraries and document native dependencies in docs/audio.md.
-- [x] Enumerate/select devices, persist settings, refresh device lists and stop on failures.
+- [x] Enumerate/select devices, persist settings and refresh device lists.
+- [x] Bound device recovery to three selected-device and three default-device attempts;
+  retain voice during retries and show best-effort Windows audio-session processes.
+- [x] Quarantine potentially blocked stream cleanup, separate control/media queues,
+  use native voice heartbeats and bound worker panic restarts.
+- [x] Persist rotating audio diagnostics, callback/watchdog/cleanup state and safe
+  panic metadata; expose a logs-folder button independent of the audio worker.
+- [ ] Validate recovery/default microphone fallback and busy-device diagnostics on
+  real Windows, macOS and Linux hardware, including exclusive-mode conflicts.
 - [x] Microphone permission/error UX, input levels and bounded playback/loopback tests.
 - [x] Mute/deafen, independent speaker volume, voice activation and in-app push-to-talk.
 - [x] Optional Rust echo cancellation, noise suppression and automatic gain processing.
 - [x] Optional global Ctrl+Shift+Space integration with conflict/error reporting.
-- [x] Release devices on leave/logout/window destruction and UI/suspend timeout.
+- [x] Retire devices on leave/logout/window destruction and lease expiry; stop retired
+  callbacks while potentially blocked driver cleanup runs separately.
 - [ ] Physical microphone/headset, suspend and acoustic acceptance on all three OSes.
 - [ ] macOS runtime/permission spike; Wayland global shortcut portal integration.
 - [ ] Arbitrary sample-rate resampling and Bluetooth hands-free format support.
@@ -205,7 +214,8 @@ speaker isolation and physical acoustic acceptance remain future work.
 - [x] Capacity, join/speak permissions and live permission-change enforcement.
 - [x] Real-peer forwarding, channel isolation, self-mute/deafen, revocation,
   Speak denial, publisher slot reuse, deleted-channel and cleanup integration tests.
-- [x] Device/access failures stop audio; transient network/ICE/signaling failures
+- [x] Device failures use bounded local recovery; access failures stop audio;
+  transient network/ICE/signaling failures
   reconnect with bounded backoff, fresh authorization and cancellable media leases.
 - [x] Moderator voice disconnect with hierarchy enforcement and targeted transport revocation.
 - [ ] Moderator mute/deafen/move-to-channel controls with hierarchy enforcement.

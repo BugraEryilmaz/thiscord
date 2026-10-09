@@ -38,6 +38,14 @@ fn main() {
         .manage(native_update::UpdateState::default())
         .manage(native_overlay::OverlayState::default())
         .setup(|app| {
+            use tauri::Manager;
+            let directory = app.path().app_local_data_dir()?.join("diagnostics");
+            if let Err(error) = thiscord_frontend::audio::diagnostics::initialize(directory) {
+                eprintln!("{error}");
+            }
+            app.state::<native_audio::AudioState>()
+                .engine
+                .diagnostic_snapshot();
             // An unsupported compositor must not prevent chat/voice from starting.
             if native_overlay::start(app.handle()).is_err() {
                 eprintln!("Voice overlay unavailable on this display server");
@@ -57,11 +65,25 @@ fn main() {
             let engine = &window.state::<native_audio::AudioState>().engine;
             match event {
                 tauri::WindowEvent::Destroyed => {
+                    thiscord_frontend::audio::diagnostics::event(
+                        "window_destroyed",
+                        serde_json::json!({}),
+                    );
                     window.state::<native_screen::ScreenState>().clear();
                     engine.notify(thiscord_frontend::audio::Command::Stop)
                 }
                 tauri::WindowEvent::Focused(false) => {
+                    thiscord_frontend::audio::diagnostics::event(
+                        "window_focus",
+                        serde_json::json!({"focused":false}),
+                    );
                     engine.notify(thiscord_frontend::audio::Command::Pressed(false))
+                }
+                tauri::WindowEvent::Focused(true) => {
+                    thiscord_frontend::audio::diagnostics::event(
+                        "window_focus",
+                        serde_json::json!({"focused":true}),
+                    );
                 }
                 _ => {}
             }
@@ -85,6 +107,7 @@ fn main() {
             native_audio::audio_debug_start,
             native_audio::audio_debug_stop,
             native_audio::audio_debug_folder,
+            native_audio::audio_diagnostics_folder,
             native_audio::audio_volume,
             native_audio::audio_pressed,
             native_audio::audio_webrtc_probe,

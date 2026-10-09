@@ -10,7 +10,7 @@ default-run = "thiscord-desktop"
 default = []
 desktop = ["screen-share", "dep:tauri", "dep:tauri-build", "dep:keyring", "dep:open", "dep:tokio", "dep:rand", "dep:base64", "dep:url", "native-audio", "deep-filter", "neural-echo", "dep:tauri-plugin-global-shortcut", "dep:tauri-plugin-updater", "dep:tokio-tungstenite", "dep:futures-util"]
 screen-share = ["native-audio", "dep:windows-capture", "dep:windows", "dep:openh264", "dep:wasapi"]
-native-audio = ["dep:cpal", "dep:ringbuf", "dep:opus", "dep:webrtc", "dep:tokio", "dep:bytes", "dep:rtc", "dep:async-trait", "dep:sonora", "dep:hound"]
+native-audio = ["dep:cpal", "dep:ringbuf", "dep:opus", "dep:webrtc", "dep:tokio", "dep:bytes", "dep:rtc", "dep:async-trait", "dep:sonora", "dep:hound", "dep:windows"]
 deep-filter = ["native-audio", "dep:deep_filter", "dep:ndarray", "dep:tract-core", "dep:tract-hir", "dep:tract-onnx", "dep:tract-pulse"]
 release-tools = ["dep:base64", "dep:minisign-verify"]
 neural-echo = ["native-audio", "dep:tract-tflite", "dep:sha2", "dep:rustfft"]
@@ -115,7 +115,7 @@ futures-util = { version = "0.3", features = ["sink"], optional = true }
 
 [target.'cfg(target_os = "windows")'.dependencies]
 windows-capture = { version = "=2.0.1", optional = true }
-windows = { version = "0.62.2", features = ["Win32_UI_WindowsAndMessaging", "Win32_Media_MediaFoundation", "Win32_System_Com", "Win32_System_Variant", "Win32_System_Ole", "Win32_Graphics_Direct3D11", "Win32_Graphics_Direct3D_Fxc", "Win32_Graphics_Dxgi_Common", "Win32_Graphics_Dxgi", "Win32_Devices_Display", "Win32_Graphics_Gdi"], optional = true }
+windows = { version = "0.62.2", features = ["Win32_Media_Audio", "Win32_System_Threading", "Win32_System_Com_StructuredStorage", "Win32_UI_WindowsAndMessaging", "Win32_Media_MediaFoundation", "Win32_System_Com", "Win32_System_Variant", "Win32_System_Ole", "Win32_Graphics_Direct3D11", "Win32_Graphics_Direct3D_Fxc", "Win32_Graphics_Dxgi_Common", "Win32_Graphics_Dxgi", "Win32_Devices_Display", "Win32_Graphics_Gdi"], optional = true }
 wasapi = { version = "0.22", optional = true }
 
 [build-dependencies]

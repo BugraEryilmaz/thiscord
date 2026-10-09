@@ -20,6 +20,12 @@ live sockets. See [chat protocol and limits](docs/chat.md). Desktop voice channe
 use native Rust audio, independent speaker volume controls and a Rust WebRTC SFU.
 Open **Settings > Audio & voice** to select devices and test audio, then join a
 voice channel. See [audio setup, networking and remaining checks](docs/audio.md).
+Audio device failures retry selected devices three times, then system defaults
+three times; the voice bar reports recovery and any default microphone fallback.
+Windows can list possible conflicting audio-session processes after retries fail.
+Automatic rotating audio diagnostics are available through **Settings > Audio &
+voice > Open diagnostic logs**. Send the `audio-diagnostics*.jsonl` files after a
+failure; they contain technical events, not voice recordings or credentials.
 Windows desktop clients can share a screen or window with system audio from the
 voice bar, with selectable quality up to 4K/60 fps (hardware/network dependent).
 Capture uses continuous FP16 Windows Graphics Capture with GPU scaling, HDR-to-SDR
