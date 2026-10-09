@@ -96,6 +96,20 @@ pub fn mixer(controls: Arc<Controls>) -> (Vec<StreamWriter>, Mixer) {
     )
 }
 impl StreamWriter {
+    /// Refill from actual device consumption, keeping 40-60 ms of decoded PCM.
+    /// A single 20 ms frame paced by a worker timer can empty before a late wake.
+    /// Keep this below the mixer's 60 ms stale-audio trimming threshold.
+    pub fn refill_frames(&self) -> usize {
+        (FRAME * 2)
+            .saturating_sub(self.queue.occupied_len())
+            .div_ceil(FRAME)
+    }
+    pub fn needs_concealment(&self) -> bool {
+        // Prefetch real packets freely, but give a missing packet time to arrive
+        // until only 10 ms of PCM remain. Do not spend network jitter tolerance
+        // just to fill the decoded cushion early.
+        self.queue.occupied_len() <= FRAME / 2
+    }
     pub fn write(&mut self, samples: &[f32]) -> usize {
         self.queue.push_slice(samples)
     }

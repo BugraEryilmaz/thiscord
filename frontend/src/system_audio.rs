@@ -83,10 +83,22 @@ fn capture(binding: &Binding, stop: &AtomicBool) -> Result<(), String> {
             if frames > 0 {
                 if queue.len() + frames * 8 > 48_000 {
                     queue.clear();
+                    binding.metrics.add("audio_capture_queue_resets", 1);
                 }
-                capture
+                let old_len = queue.len();
+                let info = capture
                     .read_from_device_to_deque(&mut queue)
                     .map_err(|_| "Cannot read system audio")?;
+                binding.metrics.add("audio_capture_packets", 1);
+                if info.flags.data_discontinuity {
+                    binding.metrics.add("audio_capture_discontinuities", 1);
+                }
+                if info.flags.silent {
+                    // WASAPI marks silence explicitly; do not encode the
+                    // unspecified sample contents returned with this flag.
+                    queue.iter_mut().skip(old_len).for_each(|byte| *byte = 0);
+                    binding.metrics.add("audio_capture_silent_packets", 1);
+                }
             }
             while queue.len() >= 960 * 8 {
                 for sample in &mut pcm {
@@ -131,12 +143,24 @@ fn capture(binding: &Binding, stop: &AtomicBool) -> Result<(), String> {
                     }),
                     Ok(Ok(_))
                 ) {
+                    binding.metrics.add("audio_send_failures", 1);
                     return Err("Shared audio sender stalled; sharing stopped".into());
                 }
+                binding.metrics.add("audio_sent_frames", 1);
             }
             // Silence produces no loopback packets. Poll with a bounded wait so
             // Stop, disconnect and permission revocation promptly release WASAPI.
-            let _ = event.wait_for_event(20);
+            // Events can coalesce while this worker is encoding/sending. Drain
+            // every already-available WASAPI packet before waiting for another
+            // notification; one read per event strands captured audio.
+            if capture
+                .get_next_packet_size()
+                .map_err(|_| "System audio capture was interrupted")?
+                .unwrap_or(0)
+                == 0
+            {
+                let _ = event.wait_for_event(20);
+            }
         }
         Ok(())
     })();
