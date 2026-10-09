@@ -78,6 +78,12 @@ The router checks availability and labels, not installed software or GPU readine
 
 ## Publish a version
 
+Installer jobs clear generated bundle archives/signatures before packaging while
+retaining compiled dependencies. Persistent caches may otherwise contain multiple
+versioned `.deb`, `.dmg`, or `.exe` files, causing strict collection to fail. Do not
+weaken collection to choose an arbitrary file; updater signatures and versions
+must still be verified.
+
 1. Update `[workspace.package].version` in root `Cargo.toml` and `version` in
    `frontend/tauri.conf.json` to the same stable `MAJOR.MINOR.PATCH`, then refresh
    `Cargo.lock` with `cargo check -p thiscord-shared`. Let Cargo update the three

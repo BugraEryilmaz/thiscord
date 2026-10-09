@@ -72,6 +72,7 @@ jobs:
           APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
         run: |
           # Assets already passed the production WASM build in the reusable CI.
+          ../scripts/clear-installer-bundles.ps1 -TargetDirectory $env:CARGO_TARGET_DIR -Target $env:BUILD_TARGET
           '{"build":{"beforeBuildCommand":""}}' | Set-Content tauri.ci.conf.json
           if ($IsMacOS -and !$env:APPLE_SIGNING_IDENTITY) { $env:APPLE_SIGNING_IDENTITY = '-' }
           Get-ChildItem Env:APPLE_* | Where-Object { !$_.Value } | Remove-Item
