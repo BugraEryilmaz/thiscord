@@ -244,6 +244,8 @@ speaker isolation and physical acoustic acceptance remain future work.
 - [x] Native/SFU/browser diagnostics, measured FPS and copyable bounded event history.
 - [x] Bounded packet reordering, negotiated/authenticated keyframe feedback, byte
   pacing and bounded recovery queues with loss/wrap/backlog/permission tests.
+- [x] Correct H.264 HRD buffer units, report driver acceptance and gate raw encoding
+  on queued/in-flight bytes; synthetic large-frame backlog regression and NVIDIA probe.
 - [ ] Live HDR/SDR capture acceptance across Intel/AMD/NVIDIA and mixed-HDR displays.
 - [ ] Measured end-to-end 30/60 fps, high-resolution performance and real WebView
   hardware-decoder verification on Windows/macOS/Linux.

@@ -272,6 +272,9 @@ fn encode(
     let mut color_checked = Instant::now() - Duration::from_secs(2);
     let mut color = (1.0, false);
     let mut previous = Instant::now();
+    let send_budget =
+        super::pacing::SendBudget::new(super::pacing::transport_bitrate(quality.bitrate()));
+    metrics.label("sender_backlog_budget_ms", super::pacing::BACKLOG_BUDGET_MS);
     while !stop.load(Ordering::Acquire) && connection.active() {
         if previous.elapsed() > Duration::from_secs(2) {
             return Err("Screen capture paused; start sharing again.".into());
@@ -313,12 +316,13 @@ fn encode(
                 &mut sequence,
                 &mut waiting_for_keyframe,
                 metrics,
+                &send_budget,
             )? {
                 force_keyframe.store(true, Ordering::Release);
                 metrics.event("encoded frame dropped before paced sender; requesting keyframe");
             }
         }
-        let pixels = {
+        let (pixels, fresh) = {
             let guard = mailbox.0.lock().unwrap();
             let (mut guard, _) = mailbox
                 .1
@@ -335,18 +339,24 @@ fn encode(
             if guard.latest.is_some() && pending.is_some() {
                 metrics.add("raw_replaced", 1);
             }
-            guard.latest.take().or(pending)
+            let fresh = guard.latest.is_some();
+            (guard.latest.take().or(pending), fresh)
         };
         let mut captured_at = Instant::now();
         if !super::encoder_has_capacity(
             tx.capacity(),
             hardware.as_ref().map_or(0, |hw| hw.pending()),
-        ) {
+        ) || !send_budget.has_capacity()
+        {
             // Dropping raw input preserves the H.264 dependency chain. Poll
             // hardware above even when congested, but submit no new surfaces.
-            if pixels.is_some() {
+            if fresh {
                 metrics.add("encode_backpressure", 1);
             }
+            // Retain the latest raw texture so a source that becomes static
+            // during backpressure still delivers its final update. New capture
+            // replaces this texture before it becomes an H.264 dependency.
+            pending_pixels = pixels;
             continue;
         }
         if let Some(pixels) = pixels {
@@ -382,6 +392,21 @@ fn encode(
                 metrics.label("target_fps", quality.fps);
                 metrics.label("target_bitrate", quality.bitrate());
                 metrics.label("encoder", &hardware.as_ref().unwrap().name);
+                let hw = hardware.as_ref().unwrap();
+                metrics.label(
+                    "encoder_buffer_target_bytes",
+                    super::hardware::buffer_bytes(quality.bitrate()),
+                );
+                metrics.label("encoder_buffer_applied", hw.buffer_applied);
+                metrics.label(
+                    "encoder_buffer_readback_bytes",
+                    hw.buffer_readback_bytes()
+                        .map_or_else(|| "unavailable".into(), |v| v.to_string()),
+                );
+                if !hw.buffer_applied {
+                    metrics
+                        .event("encoder rejected low-latency buffer target; using byte admission");
+                }
                 metrics.label(
                     "pixel_path",
                     "FP16 GPU / tone map / BT.709 NV12 / GPU encoder",
@@ -446,6 +471,7 @@ fn encode(
             &mut sequence,
             &mut waiting_for_keyframe,
             metrics,
+            &send_budget,
         )? {
             force_keyframe.store(true, Ordering::Release);
         }
@@ -467,6 +493,7 @@ fn record_frames(frames: &[super::hardware::Encoded], started: Instant, metrics:
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 fn send_frames(
     frames: Vec<super::hardware::Encoded>,
     started: Instant,
@@ -474,6 +501,7 @@ fn send_frames(
     sequence: &mut u16,
     waiting_for_keyframe: &mut bool,
     metrics: &Metrics,
+    send_budget: &super::pacing::SendBudget,
 ) -> Result<bool, String> {
     let mut complete = true;
     for frame in frames {
@@ -498,12 +526,15 @@ fn send_frames(
         }
         let recovery = super::recovery_frame(&frame.data);
         let packets = super::packetize(frame.data, sequence, (frame.timestamp * 90 / 1000) as u32)?;
+        let budget = send_budget.track(packets.iter().map(|p| p.payload.len() + 64).sum());
+        metrics.peak("sender_peak_bytes", send_budget.bytes() as u64);
         if tx
             .try_send(super::Outgoing {
                 captured_at: at,
                 enqueued_at: Instant::now(),
                 packets,
                 keyframe: recovery,
+                budget,
             })
             .is_err()
         {
@@ -528,6 +559,7 @@ mod tests {
         let mut sequence = 0;
         let mut waiting = true;
         let metrics = Metrics::default();
+        let send_budget = super::super::pacing::SendBudget::new(21_600_000);
         let frame = |key| super::super::hardware::Encoded {
             data: if key {
                 vec![0, 0, 1, 0x67, 66, 0, 0, 1, 0x68, 1, 0, 0, 1, 0x65, 1]
@@ -543,7 +575,8 @@ mod tests {
                 &tx,
                 &mut sequence,
                 &mut waiting,
-                &metrics
+                &metrics,
+                &send_budget,
             )
             .unwrap()
         );
@@ -554,7 +587,8 @@ mod tests {
                 &tx,
                 &mut sequence,
                 &mut waiting,
-                &metrics
+                &metrics,
+                &send_budget,
             )
             .unwrap()
         );
@@ -566,7 +600,8 @@ mod tests {
                 &tx,
                 &mut sequence,
                 &mut waiting,
-                &metrics
+                &metrics,
+                &send_budget,
             )
             .unwrap()
         );
@@ -581,7 +616,8 @@ mod tests {
                 &tx,
                 &mut sequence,
                 &mut waiting,
-                &metrics
+                &metrics,
+                &send_budget,
             )
             .unwrap()
         );
@@ -590,5 +626,10 @@ mod tests {
         assert_eq!(metrics.snapshot().counters["encode_queue_full"], 1);
         assert_eq!(metrics.snapshot().counters["encode_dependent"], 1);
         assert!(rx.try_recv().is_ok());
+        assert_eq!(
+            send_budget.bytes(),
+            0,
+            "failed enqueue and frame drops release bytes"
+        );
     }
 }
