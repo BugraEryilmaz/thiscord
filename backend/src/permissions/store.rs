@@ -110,7 +110,7 @@ pub(crate) fn load(c: &mut PgConnection, id: GuildId) -> Result<GuildState, Fail
     )?;
     let members = query(
         c,
-        "SELECT jsonb_build_object('account_id',m.account_id,'username',a.username,'timeout_until',(SELECT timeout_until FROM guild_moderation x WHERE x.guild_id=m.guild_id AND x.account_id=m.account_id),'roles',COALESCE((SELECT jsonb_agg(role_id ORDER BY role_id) FROM guild_member_roles r WHERE r.guild_id=m.guild_id AND r.account_id=m.account_id),'[]'::jsonb)) AS data FROM guild_members m JOIN accounts a ON a.id=m.account_id WHERE m.guild_id=$1::uuid ORDER BY m.account_id",
+        "SELECT jsonb_build_object('account_id',m.account_id,'username',a.username,'display_name',a.display_name,'timeout_until',(SELECT timeout_until FROM guild_moderation x WHERE x.guild_id=m.guild_id AND x.account_id=m.account_id),'roles',COALESCE((SELECT jsonb_agg(role_id ORDER BY role_id) FROM guild_member_roles r WHERE r.guild_id=m.guild_id AND r.account_id=m.account_id),'[]'::jsonb)) AS data FROM guild_members m JOIN accounts a ON a.id=m.account_id WHERE m.guild_id=$1::uuid ORDER BY m.account_id",
         &[&id],
     )?;
     let channels = query(
@@ -666,6 +666,7 @@ fn moderation(
         .map(|m| ModerationMember {
             account_id: m.account_id,
             username: m.username.clone(),
+            display_name: m.display_name.clone(),
             timeout_until: m.timeout_until,
             actions: MODERATION_PERMISSIONS
                 .into_iter()
@@ -676,7 +677,7 @@ fn moderation(
     let bans = if can_unban {
         query(
             c,
-            "SELECT jsonb_build_object('account_id',m.account_id,'username',a.username) AS data FROM guild_moderation m JOIN accounts a ON a.id=m.account_id WHERE m.guild_id=$1::uuid AND m.banned ORDER BY a.username",
+            "SELECT jsonb_build_object('account_id',m.account_id,'username',a.username,'display_name',a.display_name) AS data FROM guild_moderation m JOIN accounts a ON a.id=m.account_id WHERE m.guild_id=$1::uuid AND m.banned ORDER BY a.username",
             &[&state.guild.id.to_string()],
         )?
     } else {

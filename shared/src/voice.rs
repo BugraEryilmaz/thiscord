@@ -45,6 +45,8 @@ fn is_false(value: &bool) -> bool {
 pub struct Participant {
     pub account_id: AccountId,
     pub username: String,
+    #[serde(default)]
+    pub display_name: String,
     pub slot: usize,
     pub muted: bool,
     pub deafened: bool,
@@ -55,6 +57,16 @@ pub struct Participant {
     pub sharing_audio: bool,
     #[serde(default)]
     pub screen_epoch: u32,
+}
+impl Participant {
+    /// Profile label, falling back to the username for older servers.
+    pub fn display_name(&self) -> &str {
+        if self.display_name.trim().is_empty() {
+            &self.username
+        } else {
+            &self.display_name
+        }
+    }
 }
 #[derive(Clone, Serialize, Deserialize)]
 pub struct ServerFrame {

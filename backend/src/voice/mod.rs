@@ -106,6 +106,7 @@ impl VoiceAccess {
                 return Err(Failure::Forbidden);
             }
             member.info.username = info.username;
+            member.info.display_name = info.display_name;
             self.generation.store(epoch, Ordering::Release);
             Ok(members.values().map(|m| m.info.clone()).collect())
         });
@@ -958,6 +959,7 @@ mod send_tests {
                     info: Participant {
                         account_id: uuid::Uuid::new_v4().to_string().parse().unwrap(),
                         username: "test".into(),
+                        display_name: String::new(),
                         slot,
                         muted: false,
                         deafened: false,

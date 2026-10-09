@@ -51,7 +51,7 @@ fn user(db: &Database, name: &str) -> (AccountId, String) {
     let token = URL_SAFE_NO_PAD.encode(Sha256::digest(Uuid::new_v4().as_bytes()));
     let sid = Uuid::new_v4();
     let mut c = db.pool.get().unwrap();
-    diesel::sql_query("INSERT INTO accounts(id,username,email,display_name,email_verified) VALUES($1::uuid,$2,$2||'@example.test',$2,TRUE)").bind::<Text,_>(id.to_string()).bind::<Text,_>(name).execute(&mut c).unwrap();
+    diesel::sql_query("INSERT INTO accounts(id,username,email,display_name,email_verified) VALUES($1::uuid,$2,$2||'@example.test',$2||' Profile',TRUE)").bind::<Text,_>(id.to_string()).bind::<Text,_>(name).execute(&mut c).unwrap();
     diesel::sql_query("INSERT INTO identities(account_id,provider,subject,password_hash) VALUES($1::uuid,'password',$1,'test-unused-hash')").bind::<Text,_>(id.to_string()).execute(&mut c).unwrap();
     diesel::sql_query("INSERT INTO sessions(id,account_id,device,reauthenticated_at) VALUES($1::uuid,$2::uuid,'test',now())").bind::<Text,_>(sid.to_string()).bind::<Text,_>(id.to_string()).execute(&mut c).unwrap();
     diesel::sql_query(
@@ -170,6 +170,15 @@ async fn messages_deduplicate_paginate_moderate_and_isolate() {
     );
     assert_eq!(first["message"]["id"], second["message"]["id"]);
     assert_eq!(first["message"]["mentions"], json!([guest_id]));
+    assert_eq!(first["message"]["username"], "owner");
+    assert_eq!(first["message"]["display_name"], "owner Profile");
+    assert!(
+        state["members"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .all(|m| m["display_name"].as_str().unwrap().ends_with(" Profile"))
+    );
     let id = first["message"]["id"].clone();
     let unread = chat(
         &app,
@@ -197,6 +206,10 @@ async fn messages_deduplicate_paginate_moderate_and_isolate() {
     )
     .await;
     assert_eq!(page["history"]["messages"][0]["content"], "third");
+    assert_eq!(
+        page["history"]["messages"][0]["display_name"],
+        "owner Profile"
+    );
     let older=chat(&app,&guest,json!({"action":"history","guild_id":guild,"channel_id":channel,"limit":1,"before":page["history"]["older"]}),StatusCode::OK).await;
     assert_eq!(older["history"]["messages"][0]["content"], "second");
     chat(&app,&guest,json!({"action":"read","guild_id":guild,"channel_id":channel,"through":page["history"]["messages"][0]["sequence"]}),StatusCode::OK).await;
@@ -361,6 +374,7 @@ async fn sockets_authenticate_reconnect_and_revoke() {
         .unwrap();
     let presence = event(&mut socket, "presence").await;
     assert_eq!(presence["members"][0]["account_id"], json!(guest_id));
+    assert_eq!(presence["members"][0]["display_name"], "guest Profile");
     chat(&app,&owner,json!({"action":"send","guild_id":guild,"channel_id":isolated,"client_id":Uuid::new_v4(),"content":"not for this subscription"}),StatusCode::OK).await;
     chat(&app,&owner,json!({"action":"send","guild_id":guild,"channel_id":channel,"client_id":Uuid::new_v4(),"content":"live"}),StatusCode::OK).await;
     assert_eq!(

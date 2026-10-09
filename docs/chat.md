@@ -2,7 +2,9 @@
 
 Select a text channel from a server's channel list. Messages render as plain text;
 HTML, links and Markdown are not executed. Use `@username` to mention a guild
-member. Mentioned messages are highlighted; channel badges show unread counts and
+member. Server views show profile display names; usernames remain the handles for
+mentions and member lookup. Older server responses fall back to usernames.
+Mentioned messages are highlighted; channel badges show unread counts and
 an `@` for unread mentions. Online/typing indicators describe people viewing the
 same channel, not deployment-wide availability. Voice uses its separate media transport.
 
