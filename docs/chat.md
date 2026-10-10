@@ -62,6 +62,17 @@ monotonic and clamped to the channel's latest sequence. Mentions resolve only
 against current guild usernames, at most 20 per message. Unread counts/mentions
 are filtered by the requesting account's current channel permissions.
 
+Unread queries select authorized text channels before reading messages, then use
+each channel's exclusive sequence range above its read marker (zero if absent).
+The partial `channel_unread_range` index excludes tombstones and covers author and
+mention checks. Own messages are excluded with `IS DISTINCT FROM`, so retained
+messages from deleted accounts still count. Edits use current mentions; empty
+counts are omitted. Results are ordered by channel ID to keep socket comparisons
+stable. Both HTTP and socket updates share this query and the existing guild lock.
+
+See [unread query measurements](unread-performance.md) for the reproducible
+PostgreSQL benchmark and the remaining large-backlog tradeoff.
+
 Account deletion anonymizes authors (Deleted account) but retains message content.
 Guild/channel deletion cascades messages, events, read markers and presence.
 Migration rollback permanently deletes chat data.

@@ -529,18 +529,31 @@ pub(super) fn unread(
     actor: AccountId,
     state: &GuildState,
 ) -> Result<Vec<Unread>, Failure> {
-    let channels: Vec<Unread> = query(
-        c,
-        "SELECT jsonb_build_object('channel_id',m.channel_id,'count',count(*),'mentions',count(*) FILTER (WHERE m.mentions @> jsonb_build_array($2::uuid))) AS data FROM messages m LEFT JOIN channel_reads r ON r.guild_id=m.guild_id AND r.channel_id=m.channel_id AND r.account_id=$2::uuid WHERE m.guild_id=$1::uuid AND NOT m.deleted AND m.author_id IS DISTINCT FROM $2::uuid AND m.sequence>COALESCE(r.through,0) GROUP BY m.channel_id",
-        &[&guild.to_string(), &actor.to_string()],
-    )?;
-    Ok(channels
-        .into_iter()
+    // Authorize before touching message history, using the state loaded under
+    // the guild lock by checked(). Never scan inaccessible channels.
+    let channels: Vec<_> = state
+        .channels
+        .iter()
         .filter(|ch| {
-            let p = effective(state, actor, Some(ch.channel_id));
-            p.contains(&Permission::ViewChannel) && p.contains(&Permission::ReadHistory)
+            let p = effective(state, actor, Some(ch.id));
+            ch.kind == ChannelKind::Text
+                && p.contains(&Permission::ViewChannel)
+                && p.contains(&Permission::ReadHistory)
         })
-        .collect())
+        .map(|ch| ch.id.to_string())
+        .collect();
+    if channels.is_empty() {
+        return Ok(Vec::new());
+    }
+    query(
+        c,
+        include_str!("unread.sql"),
+        &[
+            &guild.to_string(),
+            &actor.to_string(),
+            &format!("{{{}}}", channels.join(",")),
+        ],
+    )
 }
 
 pub(super) fn maintain(

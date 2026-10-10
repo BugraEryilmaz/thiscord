@@ -94,6 +94,7 @@ and single-process chat/media enforcement.
 - [x] Bounded message cache, ID lookup, batched history merges and measured keyed virtual chat rows.
 - [x] History/composer UI with pending/failed/retry states and scroll behavior.
 - [x] Unread markers, mentions, typing indicators and online presence.
+- [ ] Measure unread fan-out with large backlogs; evaluate maintained sequence-bucket aggregates (see docs/unread-performance.md).
 - [x] Safe message rendering, bounded payloads and spam controls.
 - [x] Reconnect, duplicate delivery, channel isolation and channel deletion tests.
 - [ ] Later: access-controlled attachments/quotas, search and desktop notifications.
