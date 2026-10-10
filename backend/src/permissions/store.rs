@@ -187,15 +187,21 @@ pub(super) fn dispatch(
             | PermissionRequest::SetInstanceAdmin { .. }
     )
     .then(|| crate::voice::access::global().pause());
-    let scope = match &command {
+    let scopes = match &command {
         PermissionRequest::Change { guild_id, .. }
         | PermissionRequest::JoinGuild { guild_id, .. } => {
-            Some(crate::chat::access::guild(*guild_id))
+            vec![crate::chat::access::guild(*guild_id)]
         }
-        // Instance roles never grant guild access.
-        _ => None,
+        PermissionRequest::SetInstanceAdmin { account_id, .. } => {
+            vec![crate::chat::access::instance_role(*account_id)]
+        }
+        PermissionRequest::TransferInstance { account_id } => vec![
+            crate::chat::access::instance_role(session.account_id),
+            crate::chat::access::instance_role(*account_id),
+        ],
+        _ => Vec::new(),
     };
-    let mut change = None;
+    let mut changes = Vec::new();
     let result = c.transaction(|c| {
         let result = (|| {
         auth::read_session(c,token,&session)?;
@@ -303,10 +309,10 @@ pub(super) fn dispatch(
             }
         }
         })();
-        if result.is_ok() { change = scope.map(|scope| scope.pause()); }
+        if result.is_ok() { changes.extend(scopes.into_iter().map(|scope| scope.pause())); }
         result
     });
-    if let Some(change) = change {
+    for change in changes {
         change.finish(result.is_ok());
     }
     result

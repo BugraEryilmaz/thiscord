@@ -8,9 +8,14 @@ owner bootstrap and instance controls described in [permissions.md](permissions.
 
 The static login shell is public; operational data comes from bearer-authenticated
 `GET /api/v1/admin/diagnostics`. Each request rechecks the current session and instance
-role under the account/session lock and the chat access gate. Demotion, logout and
-session revocation take effect on the next request. This explicitly permits
-inspection of instance-wide room metadata, including rooms the admin has not joined.
+role under shared account/session locks. Account and per-account instance-role
+barriers validate the snapshot again before serializing the response. Demotion,
+ownership transfer, logout and session revocation therefore also reject diagnostics
+whose telemetry collection overlaps the revocation. Instance-role barriers are
+separate from guild/chat access, and unrelated users' changes do not reject a
+snapshot. Two-request admission covers the entire operation, before database work
+and through telemetry collection; no authorization locks span telemetry waits.
+This explicitly permits inspection of instance-wide room metadata, including rooms the admin has not joined.
 It does not grant guild membership, message access or permission to join/listen to media.
 
 Browser session tokens stay in memory; reloading requires signing in again.

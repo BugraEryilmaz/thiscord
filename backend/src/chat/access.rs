@@ -16,6 +16,7 @@ use tokio::sync::watch;
 enum Key {
     Account(AccountId),
     Guild(GuildId),
+    InstanceRole(AccountId),
 }
 
 fn scope(key: Key) -> Arc<Access> {
@@ -40,6 +41,10 @@ fn scope(key: Key) -> Arc<Access> {
 }
 pub(crate) fn account(id: AccountId) -> Arc<Access> {
     scope(Key::Account(id))
+}
+// Instance privilege affects diagnostics, never guild/chat access.
+pub(crate) fn instance_role(id: AccountId) -> Arc<Access> {
+    scope(Key::InstanceRole(id))
 }
 pub(crate) fn guild(id: GuildId) -> Arc<Access> {
     scope(Key::Guild(id))
@@ -88,10 +93,10 @@ impl Drop for Mutation {
     }
 }
 
-pub(super) struct Snapshot(Vec<(Arc<Access>, u64)>);
-pub(super) fn snapshot(account: &Arc<Access>, guild: Option<&Arc<Access>>) -> Option<Snapshot> {
+pub(crate) struct Snapshot(Vec<(Arc<Access>, u64)>);
+pub(crate) fn snapshot(account: &Arc<Access>, resource: Option<&Arc<Access>>) -> Option<Snapshot> {
     let mut scopes = vec![account.clone()];
-    scopes.extend(guild.cloned());
+    scopes.extend(resource.cloned());
     scopes
         .into_iter()
         .map(|scope| {
@@ -104,7 +109,7 @@ pub(super) fn snapshot(account: &Arc<Access>, guild: Option<&Arc<Access>>) -> Op
 impl Snapshot {
     // SeqCst orders registration against mutation admission: either the writer
     // drains this send, or this send observes the active mutation/new epoch.
-    pub(super) fn deliver(self) -> Option<Vec<Delivery>> {
+    pub(crate) fn deliver(self) -> Option<Vec<Delivery>> {
         self.0
             .into_iter()
             .map(|(scope, epoch)| {
@@ -115,7 +120,7 @@ impl Snapshot {
             .collect()
     }
 }
-pub(super) struct Delivery(Arc<Access>);
+pub(crate) struct Delivery(Arc<Access>);
 impl Drop for Delivery {
     fn drop(&mut self) {
         if self.0.sends.fetch_sub(1, SeqCst) == 1 && self.0.mutations.load(SeqCst) != 0 {
