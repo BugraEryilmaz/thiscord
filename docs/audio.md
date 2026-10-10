@@ -64,10 +64,20 @@ transmit mode and processing choices persist in the OS app config directory's
 can be changed during a call without leaving the voice channel.
 
 Device failures suspend capture/playback while retaining the voice connection,
-roster and volumes. Recovery makes three attempts using the selected input/output,
-then three using the system defaults, with 500 ms between attempts. Opening the
-initial devices uses the same bounded path; an immediately successful first open
-does not consume the later recovery budget. Retry counts persist for the call,
+roster and volumes. When a saved device is absent from enumeration, opening audio
+immediately uses the system default for that direction only; a still-present
+microphone/output selection is retained. This applies on join, rejoin, live
+recovery and device changes. Both endpoints are resolved before streams are
+allocated, and listeners never resolve or open a microphone. The voice bar reports
+the missing device and the microphone/output actually opened, including on the
+first successful join. Saved preferences stay unchanged, so a reconnected headset
+is selected again on the next open. If no default is available, the error identifies
+the missing direction and recovery remains bounded.
+
+Recovery makes three attempts using the selected input/output (with the missing
+device fallback above), then three using the system defaults, with 500 ms between
+attempts. Opening the initial devices uses the same bounded path; an immediately
+successful first open does not consume the later recovery budget. Retry counts persist for the call,
 including across briefly successful restarts, to prevent endless failure loops.
 Fallback can change the microphone: the voice bar and audio status announce the
 default devices actually opened. Saved device preferences are unchanged.
@@ -510,8 +520,11 @@ Native library tests cover independent mixing/gain, deafen backlog, queue bounds
 jitter ordering/replay/wrap, finite DSP output and Opus forwarding across two
 encrypted WebRTC hops. Audio error tests cover recoverable notifications, fatal
 device/route changes, error direction and preserving the first failure. Device
-format tests cover 24/32-bit PCM, multichannel selection/routing, input conversion
-and rejection of incompatible rates/channel counts/non-PCM formats. Backend
+selection tests cover unplugged input/output independently, rejoin with stale IDs,
+replug, missing defaults, enumeration failures and first-open fallback notices.
+These deterministic tests do not replace physical USB/Bluetooth unplug acceptance.
+Device format tests cover 24/32-bit PCM, multichannel selection/routing, input
+conversion and rejection of incompatible rates/channel counts/non-PCM formats. Backend
 PostgreSQL tests use disposable test schemas and
 real peer connections to exercise forwarding, isolation, self-mute/deafen,
 Speak denial and live changes, targeted permission/session revocation, unrelated

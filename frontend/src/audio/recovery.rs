@@ -39,8 +39,8 @@ impl Recovery {
         self.next
             .is_some_and(|next| Instant::now().saturating_duration_since(next) >= DEADLINE)
     }
-    pub fn reconfigured(&mut self) {
-        self.notice = None;
+    pub fn reconfigured(&mut self, info: &serde_json::Value) {
+        self.notice = selection::fallback_notice(info);
     }
     pub fn active(&self) -> bool {
         self.active
@@ -63,6 +63,7 @@ impl Recovery {
         ));
     }
     pub fn succeeded(&mut self, info: &serde_json::Value) {
+        let fallback = selection::fallback_notice(info);
         diagnostics::event(
             "recovery_succeeded",
             serde_json::json!({"initial":self.initial,"attempts_used":self.attempts,"defaults":self.attempts>ATTEMPTS,"device":info}),
@@ -71,10 +72,10 @@ impl Recovery {
         if self.initial {
             self.initial = false;
             self.attempts = 0; // Normal first open does not spend the recovery budget.
-            self.notice = None;
+            self.notice = fallback;
             return;
         }
-        self.notice = Some(if self.attempts > ATTEMPTS {
+        self.notice = Some(fallback.unwrap_or_else(|| if self.attempts > ATTEMPTS {
             format!(
                 "Audio recovered using system defaults. Microphone: {}; output: {}. Saved device preferences unchanged.",
                 info["input"]["name"].as_str().unwrap_or("not active"),
@@ -82,7 +83,7 @@ impl Recovery {
             )
         } else {
             "Audio recovered using selected devices".into()
-        });
+        }));
     }
     fn configuration(&mut self, selected: &AudioSettings) -> Option<AudioSettings> {
         if self.attempts >= 2 * ATTEMPTS {
@@ -203,6 +204,62 @@ impl Recovery {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn first_open_announces_missing_device_fallback_without_spending_retry_budget() {
+        for (input, output, missing) in [
+            (false, true, "output is"),
+            (true, false, "microphone is"),
+            (true, true, "microphone and output are"),
+        ] {
+            let info = serde_json::json!({
+                "input": {"name": "Working microphone", "fallback": input},
+                "output": {"name": "Working speakers", "fallback": output}
+            });
+            let selected = AudioSettings {
+                input: Some("saved mic".into()),
+                output: Some("saved output".into()),
+                ..Default::default()
+            };
+            let mut recovery = Recovery::starting();
+            recovery.configuration(&selected).unwrap();
+            recovery.succeeded(&info);
+            assert!(!recovery.active());
+            assert_eq!(recovery.attempts, 0);
+            let notice = recovery.message().unwrap();
+            assert!(notice.contains(missing));
+            assert!(notice.contains("Working microphone"));
+            assert!(notice.contains("Working speakers"));
+            assert!(notice.contains("Saved device preferences unchanged"));
+
+            // Unplugging during the call uses the same resolution and notice,
+            // but still consumes the bounded recovery budget.
+            recovery.begin("device disconnected".into());
+            recovery.configuration(&selected).unwrap();
+            recovery.succeeded(&info);
+            assert!(!recovery.active());
+            assert_eq!(recovery.attempts, 1);
+            assert!(recovery.message().unwrap().contains(missing));
+        }
+    }
+
+    #[test]
+    fn listener_fallback_does_not_claim_to_open_a_microphone() {
+        let mut recovery = Recovery::starting();
+        recovery.succeeded(&serde_json::json!({
+            "input": null,
+            "output": {"name": "Speakers", "fallback": true}
+        }));
+        let notice = recovery.message().unwrap();
+        assert!(notice.contains("Microphone: not active"));
+        assert!(notice.contains("output is unavailable"));
+        recovery.reconfigured(&serde_json::json!({
+            "input": null,
+            "output": {"name": "Headset", "fallback": false}
+        }));
+        assert!(recovery.message().is_none());
+    }
+
     #[test]
     fn selected_then_default_have_equal_finite_budgets() {
         let selected = AudioSettings {

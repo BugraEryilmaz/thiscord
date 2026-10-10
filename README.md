@@ -20,8 +20,10 @@ live sockets. See [chat protocol and limits](docs/chat.md). Desktop voice channe
 use native Rust audio, independent speaker volume controls and a Rust WebRTC SFU.
 Open **Settings > Audio & voice** to select devices and test audio, then join a
 voice channel. See [audio setup, networking and remaining checks](docs/audio.md).
-Audio device failures retry selected devices three times, then system defaults
-three times; the voice bar reports recovery and any default microphone fallback.
+Missing saved audio devices immediately fall back to the system default for that
+direction on join or recovery, preserving the other selection and saved preferences.
+Other device failures retry selected devices three times, then system defaults
+three times; the voice bar reports recovery and the devices actually opened.
 Windows can list possible conflicting audio-session processes after retries fail.
 Optional rotating audio diagnostics are off by default. Turn on **Settings > Audio &
 voice > Enable diagnostic logging** before reproducing a failure, then use **Open

@@ -14,6 +14,7 @@ mod reconfigure;
 pub mod reconnect;
 mod recording;
 mod recovery;
+mod selection;
 pub mod transport;
 pub mod volumes;
 mod worker_health;
@@ -52,21 +53,6 @@ pub fn devices() -> Result<Vec<AudioDevice>, String> {
         }
     }
     Ok(result)
-}
-fn device(id: Option<&str>, input: bool) -> Result<cpal::Device, String> {
-    let host = cpal::default_host();
-    if let Some(id) = id {
-        host.devices()
-            .map_err(|e| e.to_string())?
-            .find(|d| d.id().is_ok_and(|v| v.to_string() == id))
-    } else if input {
-        host.default_input_device()
-    } else {
-        host.default_output_device()
-    }
-    .ok_or_else(|| {
-        "Selected audio device is unavailable. Refresh devices and select another.".into()
-    })
 }
 // Dispatch to the actual PCM storage type. In particular, never reinterpret
 // 24/32-bit audio as u16. Conversion is done in the existing bounded callbacks.
@@ -456,8 +442,13 @@ impl Devices {
         let (writers, mixer) = mixer(control.clone());
         let (reference_writer, reference) = frames::queue();
         let mixer = mixer.with_reference(reference_writer);
-        let output_device =
-            device(settings.output.as_deref(), false).map_err(|e| format!("Output: {e}"))?;
+        // Resolve both endpoints before allocating any streams. A stale saved ID
+        // falls back independently, leaving the other selected device intact.
+        let selected_output = selection::device(settings.output.as_deref(), false)?;
+        let selected_input = microphone
+            .then(|| selection::device(settings.input.as_deref(), true))
+            .transpose()?;
+        let output_device = selected_output.device;
         let output_name = output_device
             .description()
             .ok()
@@ -481,11 +472,10 @@ impl Devices {
         diagnostics::event("output_stream_prepared", serde_json::json!({}));
         let (producer, capture) = frames::queue();
         let mut input_info = serde_json::Value::Null;
-        let input = if microphone {
-            let d =
-                device(settings.input.as_deref(), true).map_err(|e| format!("Microphone: {e}"))?;
+        let input = if let Some(selected) = selected_input {
+            let d = selected.device;
             let c = config(&d, true)?;
-            input_info = serde_json::json!({"name":d.description().ok().map(|d|d.name().to_owned()),
+            input_info = serde_json::json!({"name":d.description().ok().map(|d|d.name().to_owned()),"fallback":selected.fallback,
                 "channels":c.channels(),"sample_rate":c.sample_rate(),"format":format!("{:?}",c.sample_format())});
             diagnostics::event("input_stream_open", input_info.clone());
             let input_name = d
@@ -509,6 +499,7 @@ impl Devices {
         );
         Ok(Self {
             info: serde_json::json!({"input":input_info,"output":{
+                "fallback":selected_output.fallback,
                 "name":output_device.description().ok().map(|d|d.name().to_owned()),
                 "channels":output_config.channels(),"sample_rate":output_config.sample_rate(),
                 "format":format!("{:?}",output_config.sample_format())}}),

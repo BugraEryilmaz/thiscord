@@ -99,6 +99,8 @@ and single-process chat/media enforcement.
 - [x] Enumerate/select devices, persist settings and refresh device lists.
 - [x] Bound device recovery to three selected-device and three default-device attempts;
   retain voice during retries and show best-effort Windows audio-session processes.
+- [x] Resolve missing saved devices to the system default independently on join/recovery;
+  preserve preferences and announce first-open fallback, with deterministic regression tests.
 - [x] Quarantine potentially blocked stream cleanup, separate control/media queues,
   use native voice heartbeats and bound worker panic restarts.
 - [x] Persist rotating audio diagnostics, callback/watchdog/cleanup state and safe
