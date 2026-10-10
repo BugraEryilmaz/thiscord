@@ -194,6 +194,8 @@ async fn messages_deduplicate_paginate_moderate_and_isolate() {
     assert_eq!(unread["channels"][0]["mentions"], 1);
     let edited=chat(&app,&owner,json!({"action":"edit","guild_id":guild,"channel_id":channel,"message_id":id,"revision":0,"content":"edited"}),StatusCode::OK).await;
     assert_eq!(edited["message"]["revision"], 1);
+    let unchanged=chat(&app,&owner,json!({"action":"edit","guild_id":guild,"channel_id":channel,"message_id":id,"revision":1,"content":"edited"}),StatusCode::OK).await;
+    assert_eq!(unchanged, edited);
     let retry = chat(&app, &owner, request.clone(), StatusCode::OK).await;
     assert_eq!(retry["message"]["content"], "edited");
     chat(&app,&guest,json!({"action":"edit","guild_id":guild,"channel_id":channel,"message_id":id,"revision":1,"content":"takeover"}),StatusCode::FORBIDDEN).await;
@@ -216,6 +218,33 @@ async fn messages_deduplicate_paginate_moderate_and_isolate() {
     let older=chat(&app,&guest,json!({"action":"history","guild_id":guild,"channel_id":channel,"limit":1,"before":page["history"]["older"]}),StatusCode::OK).await;
     assert_eq!(older["history"]["messages"][0]["content"], "second");
     chat(&app,&guest,json!({"action":"read","guild_id":guild,"channel_id":channel,"through":page["history"]["messages"][0]["sequence"]}),StatusCode::OK).await;
+    #[derive(QueryableByName)]
+    struct ReadVersion {
+        #[diesel(sql_type = Text)]
+        version: String,
+    }
+    let read_version = || {
+        diesel::sql_query("SELECT xmin::text AS version FROM channel_reads WHERE channel_id=$1::uuid AND account_id=$2::uuid")
+        .bind::<Text, _>(channel.as_str().unwrap())
+        .bind::<Text, _>(guest_id.to_string())
+        .get_result::<ReadVersion>(&mut db.pool.get().unwrap()).unwrap().version
+    };
+    let version = read_version();
+    // Equal, older and clamped positions must not even rewrite the marker row.
+    for through in [
+        page["history"]["messages"][0]["sequence"].as_i64().unwrap(),
+        0,
+        i64::MAX,
+    ] {
+        chat(
+            &app,
+            &guest,
+            json!({"action":"read","guild_id":guild,"channel_id":channel,"through":through}),
+            StatusCode::OK,
+        )
+        .await;
+        assert_eq!(read_version(), version);
+    }
     assert_eq!(
         chat(
             &app,
@@ -826,4 +855,161 @@ async fn channel_writes_serialize_without_blocking_other_channels() {
     );
     writer.batch_execute("COMMIT").unwrap();
     assert_eq!(request.await.0, StatusCode::FORBIDDEN);
+}
+
+async fn quiet(socket: &mut Socket) {
+    assert!(
+        tokio::time::timeout(std::time::Duration::from_millis(200), socket.next())
+            .await
+            .is_err(),
+        "unexpected socket update"
+    );
+}
+async fn typing(socket: &mut Socket, active: bool) {
+    socket
+        .send(WsMessage::Text(
+            json!({"version":1,"event":{"type":"typing","active":active}})
+                .to_string()
+                .into(),
+        ))
+        .await
+        .unwrap();
+}
+
+#[tokio::test]
+#[ignore = "requires TEST_DATABASE_URL; CI runs with --include-ignored"]
+async fn presence_transitions_and_read_acknowledgements_do_not_echo() {
+    let _guard = TEST_LOCK.lock().await;
+    let db = database();
+    let (app, owner, guest, guest_id, state, channel) = setup(&db).await;
+    let guild = state["guild"]["id"].clone();
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let address = listener.local_addr().unwrap();
+    let server = tokio::spawn(axum::serve(listener, app.clone()).into_future());
+    let mut viewer = session_socket(address, &owner).await;
+    event(&mut viewer, "authenticated").await;
+    subscribe(&mut viewer, 1, guild.clone(), channel.clone()).await;
+    pushed(&mut viewer, 1, "presence").await;
+    let mut first = session_socket(address, &guest).await;
+    event(&mut first, "authenticated").await;
+    subscribe(&mut first, 1, guild.clone(), channel.clone()).await;
+    pushed(&mut first, 1, "presence").await;
+    assert_eq!(
+        pushed(&mut viewer, 1, "presence").await["members"]
+            .as_array()
+            .unwrap()
+            .len(),
+        2
+    );
+    // A second device doesn't change the account's visible presence.
+    let mut second = session_socket(address, &guest).await;
+    event(&mut second, "authenticated").await;
+    subscribe(&mut second, 1, guild.clone(), channel.clone()).await;
+    pushed(&mut second, 1, "presence").await;
+    quiet(&mut viewer).await;
+    // Fail the socket if a presence-only wake queries either history or unread.
+    // Only this test's temporary schema is affected.
+    db.pool.get().unwrap().batch_execute("ALTER TABLE messages RENAME TO parked_messages; ALTER TABLE message_events RENAME TO parked_events").unwrap();
+    typing(&mut first, true).await;
+    let online = pushed(&mut viewer, 1, "presence").await;
+    assert!(
+        online["members"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|m| m["account_id"] == json!(guest_id) && m["typing"] == true)
+    );
+    pushed(&mut first, 1, "presence").await;
+    pushed(&mut second, 1, "presence").await;
+    typing(&mut first, true).await;
+    quiet(&mut viewer).await;
+    typing(&mut first, false).await;
+    let online = pushed(&mut viewer, 1, "presence").await;
+    assert!(
+        online["members"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .all(|m| m["typing"] == false)
+    );
+    pushed(&mut first, 1, "presence").await;
+    pushed(&mut second, 1, "presence").await;
+    typing(&mut first, false).await;
+    quiet(&mut viewer).await;
+    // Expiry also produces exactly one state transition, without another write.
+    typing(&mut first, true).await;
+    pushed(&mut viewer, 1, "presence").await;
+    pushed(&mut first, 1, "presence").await;
+    pushed(&mut second, 1, "presence").await;
+    let expired = tokio::time::timeout(std::time::Duration::from_secs(6), async {
+        loop {
+            let incoming = viewer.next().await.unwrap().unwrap();
+            if let WsMessage::Text(text) = incoming {
+                let value: Value = serde_json::from_str(&text).unwrap();
+                if value["event"]["event"]["type"] == "presence" {
+                    break value["event"]["event"].clone();
+                }
+            }
+        }
+    })
+    .await
+    .unwrap();
+    assert!(
+        expired["members"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .all(|m| m["typing"] == false)
+    );
+    pushed(&mut first, 1, "presence").await;
+    pushed(&mut second, 1, "presence").await;
+    quiet(&mut viewer).await;
+    db.pool.get().unwrap().batch_execute("ALTER TABLE parked_messages RENAME TO messages; ALTER TABLE parked_events RENAME TO message_events").unwrap();
+    let request = json!({"action":"send","guild_id":guild,"channel_id":channel,"client_id":Uuid::new_v4(),"content":"read on both devices"});
+    let sent = chat(&app, &owner, request.clone(), StatusCode::OK).await;
+    pushed(&mut viewer, 1, "message").await;
+    pushed(&mut first, 1, "message").await;
+    pushed(&mut second, 1, "message").await;
+    pushed(&mut first, 1, "unread").await;
+    pushed(&mut second, 1, "unread").await;
+    // Neither an exact send retry nor read acknowledgements may poll history.
+    db.pool
+        .get()
+        .unwrap()
+        .batch_execute("ALTER TABLE message_events RENAME TO parked_events")
+        .unwrap();
+    chat(&app, &owner, request, StatusCode::OK).await;
+    let unchanged = chat(&app, &owner, json!({"action":"edit","guild_id":guild,"channel_id":channel,"message_id":sent["message"]["id"],"revision":sent["message"]["revision"],"content":"read on both devices"}), StatusCode::OK).await;
+    assert_eq!(unchanged, sent);
+    quiet(&mut viewer).await;
+    let read = json!({"action":"read","guild_id":guild,"channel_id":channel,"through":sent["message"]["sequence"]});
+    for _ in 0..4 {
+        chat(&app, &guest, read.clone(), StatusCode::OK).await;
+    }
+    assert_eq!(pushed(&mut first, 1, "unread").await["channels"], json!([]));
+    assert_eq!(
+        pushed(&mut second, 1, "unread").await["channels"],
+        json!([])
+    );
+    quiet(&mut viewer).await;
+    quiet(&mut first).await;
+    quiet(&mut second).await;
+    db.pool
+        .get()
+        .unwrap()
+        .batch_execute("ALTER TABLE parked_events RENAME TO message_events")
+        .unwrap();
+    first.close(None).await.unwrap();
+    quiet(&mut viewer).await;
+    second.close(None).await.unwrap();
+    assert_eq!(
+        pushed(&mut viewer, 1, "presence").await["members"]
+            .as_array()
+            .unwrap()
+            .len(),
+        1
+    );
+    viewer.close(None).await.unwrap();
+    server.abort();
+    let _ = server.await;
 }
