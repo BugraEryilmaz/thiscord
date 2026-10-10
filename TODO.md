@@ -244,6 +244,8 @@ speaker isolation and physical acoustic acceptance remain future work.
 - [x] H.264/Opus WebRTC tracks, permission-gated SFU forwarding and WebView video player.
 - [x] In-app fullscreen viewing and separate saved screen share volume/mute controls.
 - [x] Bounded media queues, loss recovery, stop/reconnect cleanup and wire/codec/SFU regression tests.
+- [x] Isolate SFU screen backpressure from microphone writes, bound egress bytes/age
+  including in-flight packets, and recover video without disconnecting voice.
 - [ ] Two-client Windows capture/audio acceptance, mixed-DPI/protected windows and suspend/network checks.
 - [ ] macOS/Linux publishing and OS permission acceptance; portable receiving code is included.
 - [ ] Stereo system audio, adaptive bitrate, demand-based subscriptions and measured multi-share capacity.

@@ -91,8 +91,20 @@ the display stops capture; it never falls back to another window/display.
   captures. These admission limits do not bound unfinished hardware output or
   shorten an individual oversized frame. Discarding dependent frames during recovery does not
   request another keyframe for each skipped delta.
-  SFU video deliveries expire after 150 ms in its egress queue, with aggregate
-  queue-drop/send-timeout diagnostics and rate-limited recovery feedback.
+  SFU egress uses independent microphone, video and shared-audio writers. Per
+  receiver, video is bounded to 512 queued packets and 512 KiB; each audio queue
+  has 32 packet slots and 32 KiB. Byte reservations include the in-flight packet,
+  serialized RTP and 64 bytes of transport overhead, and release on cancellation.
+  Video expires at 150 ms and audio at 100 ms from egress enqueue, including time
+  waiting to write. These limits do not bound the WebRTC driver's internal queue
+  or network latency. Screen writes poll driver admission once and cancel if it
+  would wait, so microphone delivery never waits for a pending video write to
+  complete or time out. Backpressure/errors discard that source's backlog and
+  back off screen writes for 20 ms; video queue loss, expiry and write failure
+  request a rate-limited fresh keyframe through the existing recovery protocol.
+  Only microphone write failure or connection-level failure ends the call;
+  screen transport errors leave voice connected. Recovery uses the existing
+  viewer dependency-loss handling and publisher IDRs, without renegotiation.
 - Receivers reorder up to 256 packets for 40 ms, handle sequence wraparound and
   reject duplicates/late packets. A 10 ms timer resolves gaps even if no more
   packets arrive. Complete-frame queues allow eight frames, at most 8 MiB and
@@ -124,8 +136,8 @@ the display stops capture; it never falls back to another window/display.
   waiting for another event, including coalesced notifications after worker delays,
   and zeros packets marked silent. No codec/network work enters CPAL callbacks.
 - Eight microphone, eight screen-video and eight shared-audio tracks are negotiated.
-  Microphone queues are separate and prioritized. There is no adaptive video
-  bitrate, simulcast or demand-based network subscription yet. Multi-share and
+  Microphone queues and writers are separate from screen traffic. There is no
+  adaptive video bitrate, simulcast or demand-based network subscription yet. Multi-share and
   constrained-network capacity remain unmeasured.
 
 Existing voice STUN/TURN, UDP addressing, certificates and per-hop DTLS-SRTP
@@ -209,7 +221,8 @@ time measures CPU command submission, not a GPU timestamp query. A bounded
 
 Native WebRTC reports add network jitter/loss and nominated-pair RTT/bandwidth
 estimates. These are library-reported values: unsupported estimates may be zero.
-SFU counters distinguish ingress and egress queue drops from transport timeouts;
+SFU counters distinguish ingress drops and egress losses (including queue budgets,
+screen backpressure and write errors) from write-deadline timeouts;
 they update every five seconds. They are cumulative, not per-sample rates.
 Browser statistics show decoded FPS, decoder drops, freezes, local-hop loss/jitter,
 decode/jitter-buffer time and decoder identity/efficiency when supported. Presented
