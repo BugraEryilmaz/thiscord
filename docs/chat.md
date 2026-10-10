@@ -26,7 +26,7 @@ Message content, tokens and socket frames are never logged or derived as Debug.
 
 The migration adds messages, a durable event log, read markers and short-lived
 presence. Server UUIDs identify messages; server sequences order them. Channel
-timestamps are monotonic under the guild lock, with UUID as a stable tie-breaker.
+timestamps are monotonic under the channel write lock, with UUID as a stable tie-breaker.
 Client UUIDs are unique per author across channels. An original-content hash detects
 reuse with a different payload; an exact retry returns the current message,
 including edits/deletion. Edits/deletes require the current revision; stale writes
@@ -37,6 +37,13 @@ History returns the latest 50 messages by default (maximum 100), ascending withi
 each page. Pass the shared `older` PageCursor as `before` for the preceding page.
 The query uses a strict `(created_at,id) < cursor` boundary, fetches one extra row,
 and reverses the descending query result. It never uses offsets.
+
+Routine operations hold shared account/session and guild locks; guild permission
+mutations retain exclusive guild locking and revision checks. Sends/edits/deletes
+serialize on the requested channel, while the author/client unique key also guards
+cross-channel retries. History snapshots take a shared channel lock; other channels
+remain available. The existing in-process access gate still excludes delivery
+while HTTP handlers can change access or revoke a replayed session.
 
 Every operation checks membership, text-channel type, ViewChannel and its action
 permission in the same locked transaction. History, unread counts and subscriptions
@@ -72,7 +79,7 @@ Subscribers recheck session/access under the access gate before reading and send
 current unread counts and durable message events. Event batches are capped at 100
 and drained without waiting for a polling interval. Join/leave/typing transitions
 also wake presence delivery; unchanged snapshots are not resent. Initial history
-and its event cursor are read under the same guild lock. Reconnect subscribes again
+and its event cursor are read under a shared channel lock that excludes channel writes. Reconnect subscribes again
 and reloads a fresh snapshot, recovering missed sends, edits and deletions.
 
 Heartbeats use the socket every ten seconds; clients abandon silent connections
@@ -109,8 +116,13 @@ an existing session. Multiple replicas need shared invalidation and are not supp
 - Frontend HTTP requests time out after 15 seconds; failed sends retain retry IDs.
 
 This targets a personal deployment, not measured large-installation capacity.
-Full guild evaluation reuses the current permission policy; commit notifications
-currently wake all session sockets, which filter their subscribed state.
+Authorization loads only the actor, Everyone/assigned roles and applicable channel
+overrides, reusing the authoritative evaluator. Unread counts load the actor's
+channel grants across the guild; presence checks batch only members with active
+leases in the requested channel. Mentions query matching guild usernames directly.
+Each socket refresh shares one session/guild authorization transaction between
+unread counts and channel events. Commit notifications currently wake all session
+sockets, which filter their subscribed state.
 Event-log compaction, cross-process fanout, full-guild presence and load tests are
 future work. Attachments, search and desktop notifications remain pending.
 Native voice uses a separate signaling socket and the same access gate; see [audio.md](audio.md).

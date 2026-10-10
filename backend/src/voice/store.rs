@@ -4,7 +4,7 @@ use crate::{
         store::{self as auth, connection, execute, query},
     },
     db::DbPool,
-    permissions::{evaluator::effective, store::load},
+    permissions::{authorization::load, evaluator::effective},
 };
 use diesel::Connection;
 use thiscord_shared::{
@@ -21,14 +21,14 @@ pub(super) fn authorize(
     let mut c = connection(pool)?;
     let session = auth::authenticate(&mut c, token)?;
     c.transaction(|c| {
-        auth::lock_session(c, token, &session)?;
+        auth::read_session(c, token, &session)?;
         execute(
             c,
             // Stable permission snapshot against guild writes, without serializing readers.
             "SELECT id FROM guilds WHERE id=$1::uuid FOR SHARE",
             &[&guild.to_string()],
         )?;
-        let state = load(c, guild)?;
+        let state = load(c, guild, &[session.account_id], Some(channel))?;
         let member = state
             .members
             .iter()

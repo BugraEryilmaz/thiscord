@@ -110,6 +110,14 @@ pub(crate) fn authenticate(c: &mut PgConnection, token: &str) -> Result<Session,
         return Err(Failure::Unauthorized);
     }
     let hash = digest(token);
+    // Ordinary checks neither lock exclusively nor write activity. Actions recheck
+    // under read_session/lock_session; replay and activity refresh take the slow path.
+    if let Some(session) = query(c,
+        "SELECT to_jsonb(s) AS data FROM sessions s JOIN session_tokens t ON t.session_id=s.id WHERE t.token_hash=$1 AND t.active AND NOT s.revoked AND s.expires_at>now() AND s.last_seen_at>now()-interval '5 minutes'",
+        &[&hash],
+    )?.pop() {
+        return Ok(session);
+    }
     // Commit replay revocation even though authentication itself fails.
     let mut replay_revoked = false;
     let mut _voice_revocation = None;
@@ -123,6 +131,7 @@ pub(crate) fn authenticate(c: &mut PgConnection, token: &str) -> Result<Session,
             replay_revoked=true;
             return Ok(None);
         }
+        execute(c, "UPDATE sessions SET last_seen_at=now() WHERE id=$1::uuid AND last_seen_at<=now()-interval '5 minutes'", &[&session.id.to_string()])?;
         Ok(Some(session))
     })?;
     if replay_revoked {
@@ -149,11 +158,36 @@ pub(crate) fn lock_session(
     if valid.is_empty() {
         return Err(Failure::Unauthorized);
     }
+    Ok(())
+}
+/// Compatible readers, ordered account -> session like account mutations. Must
+/// remain inside the action transaction; never upgrade these locks to write locks.
+pub(crate) fn read_session(
+    c: &mut PgConnection,
+    token: &str,
+    session: &Session,
+) -> Result<(), Failure> {
     execute(
         c,
-        "UPDATE sessions SET last_seen_at=now() WHERE id=$1::uuid",
-        &[&session.id.to_string()],
+        "SELECT id FROM accounts WHERE id=$1::uuid FOR SHARE",
+        &[&session.account_id.to_string()],
     )?;
+    // Lock the session first, then read the token with a fresh READ COMMITTED
+    // snapshot so a rotation that we waited for cannot leave an old active token.
+    let valid: Vec<bool> = query(
+        c,
+        "SELECT to_jsonb(TRUE) AS data FROM sessions WHERE id=$1::uuid AND account_id=$2::uuid AND NOT revoked AND expires_at>now() AND last_seen_at>now()-interval '7 days' FOR SHARE",
+        &[&session.id.to_string(), &session.account_id.to_string()],
+    )?;
+    if valid.is_empty()
+        || query::<bool>(
+            c,
+            "SELECT to_jsonb(active) AS data FROM session_tokens WHERE session_id=$1::uuid AND token_hash=$2",
+            &[&session.id.to_string(), &digest(token)],
+        )? != [true]
+    {
+        return Err(Failure::Unauthorized);
+    }
     Ok(())
 }
 pub(crate) fn recent(session: &Session) -> Result<(), Failure> {
@@ -388,7 +422,11 @@ pub(super) fn dispatch(
         command => {
             let session = authenticate(&mut c, token)?;
             c.transaction(|c| {
-                lock_session(c,token,&session)?;
+                if matches!(command, AccountRequest::Current | AccountRequest::Sessions) {
+                    read_session(c,token,&session)?;
+                } else {
+                    lock_session(c,token,&session)?;
+                }
                 let id = session.account_id;
                 match command {
                     AccountRequest::Current => Ok(AccountResponse::Account { account: account(c,id)? }),
