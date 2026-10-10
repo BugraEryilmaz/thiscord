@@ -48,14 +48,17 @@ caches remain keyed by job. Ubuntu-container installers have a separate cache
 group so they never reuse Kali-built system-library artifacts. The first run of
 a new cache group starts cold; subsequent stages/releases populate and reuse it.
 
-CI and release workflows call `select-runners.yml` on GitHub-hosted Ubuntu before
-scheduling build jobs. An online runner with matching `self-hosted`, OS and
-architecture labels is preferred (Windows x64, Linux x64, macOS ARM64). Otherwise
-that platform uses `windows-latest`, `ubuntu-24.04` or `macos-latest`. Selection is
-reported in the routing job summary. Busy online runners remain eligible; jobs
-queue behind their existing work instead of falling back to hosted machines.
-Installer jobs reuse CI's initial selection.
-Linux installers also prefer the online Linux x64 self-hosted runner, including
+Every job uses fixed self-hosted labels: Windows x64, macOS ARM64 or Linux x64.
+There is no availability query or GitHub-hosted fallback. Offline/busy runners
+leave jobs queued until an eligible runner is available. `RUNNER_STATUS_TOKEN`
+is no longer used and may be removed from repository secrets.
+
+CI starts only for pull requests, also on self-hosted runners. Main pushes do not
+start checks. All changes, including version bumps, go through PRs before release.
+Publishing builds web assets and installers and verifies their signatures; it
+does not repeat formatting, Clippy, regression tests, benchmarks or backend checks.
+
+Linux installers run on the self-hosted Linux x64 runner, including
 Kali. They always build inside an Ubuntu 24.04 Docker image so released binaries
 preserve the Ubuntu system-library baseline. No distribution-specific runner label
 is required. The runner account needs a working Linux Docker daemon without sudo.
@@ -68,15 +71,6 @@ Compilation defaults to two jobs to fit memory-limited Docker/WSL instances;
 set `CARGO_BUILD_JOBS` in the installer job if the daemon has more RAM available.
 The image is defined in `infra/ci/linux-installer.Dockerfile`; packaging and
 signature verification run through `scripts/build-linux-installer.sh`.
-This is a snapshot, not a reservation: jobs can queue behind each other, and a
-runner going offline after selection does not trigger another fallback check.
-
-Add repository Actions secret `RUNNER_STATUS_TOKEN`: a fine-grained PAT scoped
-only to this repository with **Administration: read-only**. GitHub requires this
-permission for the runner-list API; the normal `GITHUB_TOKEN` is insufficient.
-Missing/expired tokens and API failures emit a warning and select hosted runners.
-Do not copy a broadly scoped personal CLI credential into this secret. Pull request
-jobs always use hosted runners, and their router never receives the PAT.
 
 Self-hosted machines must already have Rust/rustup, PowerShell 7, Git and the
 platform build prerequisites available to the runner account. Linux also needs
@@ -84,7 +78,6 @@ GitHub CLI (`gh`) for release publication, Python 3, passwordless package
 installation and a running Docker daemon accessible
 to that account for the PostgreSQL service container. CI uses a dynamically
 assigned database port to avoid the locally hosted development PostgreSQL port.
-The router checks availability and labels, not installed software or GPU readiness.
 
 ## Publish a version
 
@@ -102,25 +95,23 @@ must still be verified.
    Run `./scripts/release-client.ps1 -Mode Validate -Tag client-vMAJOR.MINOR.PATCH`
    with the actual version to verify the complete locked dependency graph before
    tagging, including optional and platform-specific dependencies.
-2. Commit the changes, tag that commit, and push the branch and tag atomically:
+2. Commit the changes on a branch, open a PR, and merge it after CI passes.
+   Tag the merged main commit and push the tag:
 
    ```powershell
-   git tag client-v0.1.0
-   git push --atomic origin main client-v0.1.0
+   git switch main
+   git pull --ff-only
+   git tag client-vMAJOR.MINOR.PATCH
+   git push origin client-vMAJOR.MINOR.PATCH
    ```
 
    Use the actual version; published tags/releases are immutable. A subsequent
    version must be higher than every previously published stable client version.
-   Standalone main-branch CI checks whether the commit already has a stable
-   `client-v` tag and skips its build jobs when the release workflow owns those
-   checks. Atomic push ensures the tag is visible during that decision. Pushing
-   main before creating/pushing the tag can still run duplicate checks. Pull
-   requests, manual CI and untagged main commits continue to run normal CI.
+   Main pushes do not trigger CI; regression checks belong to the PR.
 3. Watch [Client release](../.github/workflows/release-client.yml). It validates
-   versions/secrets, runs the existing format, Clippy, database, shared, WASM and
-   desktop/audio checks, and builds three installer targets concurrently with the
-   remaining checks once the WASM assets are ready. Publication waits for all
-   checks and all installers to succeed. Production WASM assets
+   versions/secrets and builds three installer targets concurrently once the WASM
+   assets are ready. Publication waits for all installers to succeed. The release
+   workflow does not call PR CI or repeat regression checks. Production WASM assets
    compile with `THISCORD_API_URL=https://thiscord.com.tr`.
 4. The final job downloads every platform artifact and independently verifies
    each updater signature against the embedded public key and signed version.

@@ -18,23 +18,12 @@ env:
   THISCORD_API_URL: https://thiscord.com.tr
 
 jobs:
-  runners:
-    uses: ./.github/workflows/select-runners.yml
-    secrets: inherit
-
-  validate:
-    needs: runners
-    runs-on: ${{ fromJSON(needs.runners.outputs.routes)['ubuntu-24.04'] }}
+  assets:
+    name: Validate release and build web assets
+    runs-on: [self-hosted, Linux, X64]
     steps:
       - uses: actions/checkout@v5
       - run: rustup show
-      - name: Ensure GitHub CLI is available
-        run: |
-          if ! command -v gh >/dev/null 2>&1; then
-            sudo apt-get update
-            sudo apt-get install -y gh
-          fi
-          gh --version
       - name: Validate stable tag and package versions
         shell: pwsh
         env:
@@ -47,17 +36,30 @@ jobs:
           }
           ./scripts/release-client.ps1 -Mode Validate -Tag $env:RELEASE_TAG
 
-  checks:
-    needs: validate
-    uses: ./.github/workflows/ci.yml
-    with:
-      api_url: https://thiscord.com.tr
-      build_installers: true
+      - uses: ./.github/actions/cargo-cache
+        with:
+          key: wasm
+      - uses: ./.github/actions/cargo-tool
+        with:
+          crate: trunk
+          version: 0.21.14
+      - name: Build production web assets
+        working-directory: frontend
+        run: trunk build --release --locked
+      - uses: actions/upload-artifact@v4
+        with:
+          name: frontend-assets
+          path: frontend/dist/
+          if-no-files-found: error
+
+  installers:
+    needs: assets
+    uses: ./.github/workflows/build-installers.yml
     secrets: inherit
 
   publish:
-    needs: [checks, runners]
-    runs-on: ${{ fromJSON(needs.runners.outputs.routes)['ubuntu-24.04'] }}
+    needs: installers
+    runs-on: [self-hosted, Linux, X64]
     permissions:
       contents: write
     steps:

@@ -1,19 +1,7 @@
 name: CI
 
 on:
-  push:
-    # Feature branches are checked through pull requests; main is checked after merge.
-    branches: [main]
   pull_request:
-  workflow_dispatch:
-  workflow_call:
-    inputs:
-      api_url:
-        type: string
-        default: http://localhost:3000
-      build_installers:
-        type: boolean
-        default: false
 
 permissions:
   contents: read
@@ -25,61 +13,23 @@ concurrency:
 env:
   CARGO_TERM_COLOR: always
   THISCORD_DISABLE_LOCAL_CACHE: ${{ vars.THISCORD_DISABLE_LOCAL_CACHE }}
-  THISCORD_API_URL: ${{ inputs.api_url || 'http://localhost:3000' }}
+  THISCORD_API_URL: http://localhost:3000
 
 jobs:
-  gate:
-    name: Avoid duplicate release checks
-    runs-on: ubuntu-24.04
-    outputs:
-      run_ci: ${{ steps.gate.outputs.run_ci }}
-    steps:
-      - uses: actions/checkout@v5
-      - name: Let tagged releases own their checks
-        id: gate
-        shell: bash
-        env:
-          RELEASE_BUILD: ${{ inputs.build_installers || false }}
-        run: |
-          run_ci=true
-          if [[ "$GITHUB_EVENT_NAME" == push && "$GITHUB_REF" == refs/heads/main && "$RELEASE_BUILD" != true ]]; then
-            # ls-remote includes peeled annotated tags. An atomic branch/tag push
-            # makes the tag visible before either workflow is scheduled.
-            git ls-remote --tags origin 'refs/tags/client-v*' > "$RUNNER_TEMP/client-tags"
-            while read -r commit ref; do
-              if [[ "$commit" == "$GITHUB_SHA" && "$ref" =~ ^refs/tags/client-v[0-9]+\.[0-9]+\.[0-9]+(\^\{\})?$ ]]; then
-                run_ci=false
-                echo "Release tag $ref points to this commit; Client release runs the full checks." >> "$GITHUB_STEP_SUMMARY"
-                break
-              fi
-            done < "$RUNNER_TEMP/client-tags"
-          fi
-          echo "run_ci=$run_ci" >> "$GITHUB_OUTPUT"
-
-  runners:
-    needs: gate
-    if: needs.gate.outputs.run_ci == 'true'
-    uses: ./.github/workflows/select-runners.yml
-    secrets: inherit
-
   format:
     name: Rust formatting
-    needs: runners
-    runs-on: ${{ fromJSON(needs.runners.outputs.routes)['ubuntu-24.04'] }}
+    runs-on: [self-hosted, Linux, X64]
     steps:
       - uses: actions/checkout@v5
       - name: Install pinned toolchain
         run: rustup show
       - run: cargo fmt --all -- --check
-      - name: Runner routing regression tests
-        run: python3 scripts/test-select-runners.py
       - name: Cargo cache sharing regression tests
         run: python3 scripts/test-cargo-cache.py
 
   backend:
     name: Backend and shared contracts
-    needs: runners
-    runs-on: ${{ fromJSON(needs.runners.outputs.routes)['ubuntu-24.04'] }}
+    runs-on: [self-hosted, Linux, X64]
     services:
       postgres:
         image: postgres:17
@@ -133,8 +83,7 @@ jobs:
 
   voice-load-macos:
     name: macOS voice load generator
-    needs: runners
-    runs-on: ${{ fromJSON(needs.runners.outputs.routes)['macos-latest'] }}
+    runs-on: [self-hosted, macOS, ARM64]
     steps:
       - uses: actions/checkout@v5
       - name: Native build dependencies
@@ -151,8 +100,7 @@ jobs:
 
   wasm:
     name: Leptos and Tailwind build
-    needs: runners
-    runs-on: ${{ fromJSON(needs.runners.outputs.routes)['ubuntu-24.04'] }}
+    runs-on: [self-hosted, Linux, X64]
     steps:
       - uses: actions/checkout@v5
       - name: Install pinned toolchain
@@ -186,12 +134,18 @@ jobs:
 
   desktop:
     name: Desktop (${{ matrix.os }})
-    needs: [wasm, runners]
+    needs: wasm
     strategy:
       fail-fast: false
       matrix:
-        os: [windows-latest, macos-latest, ubuntu-24.04]
-    runs-on: ${{ fromJSON(needs.runners.outputs.routes)[matrix.os] }}
+        include:
+          - os: windows-latest
+            runner: [self-hosted, Windows, X64]
+          - os: macos-latest
+            runner: [self-hosted, macOS, ARM64]
+          - os: ubuntu-24.04
+            runner: [self-hosted, Linux, X64]
+    runs-on: ${{ matrix.runner }}
     steps:
       - uses: actions/checkout@v5
       - name: Linux desktop dependencies
@@ -229,13 +183,18 @@ jobs:
           if-no-files-found: error
 
   audio:
-    needs: runners
     name: Audio (${{ matrix.os }})
     strategy:
       fail-fast: false
       matrix:
-        os: [windows-latest, macos-latest, ubuntu-24.04]
-    runs-on: ${{ fromJSON(needs.runners.outputs.routes)[matrix.os] }}
+        include:
+          - os: windows-latest
+            runner: [self-hosted, Windows, X64]
+          - os: macos-latest
+            runner: [self-hosted, macOS, ARM64]
+          - os: ubuntu-24.04
+            runner: [self-hosted, Linux, X64]
+    runs-on: ${{ matrix.runner }}
     steps:
       - uses: actions/checkout@v5
       - name: Linux audio dependencies
@@ -277,11 +236,3 @@ jobs:
             processing-bench.jsonl
             neural-echo-bench.jsonl
           if-no-files-found: error
-
-  installers:
-    if: inputs.build_installers && startsWith(github.ref, 'refs/tags/client-v')
-    needs: [wasm, runners]
-    uses: ./.github/workflows/build-installers.yml
-    with:
-      runner_routes: ${{ needs.runners.outputs.routes }}
-    secrets: inherit
