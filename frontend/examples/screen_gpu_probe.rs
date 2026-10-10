@@ -40,6 +40,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         if std::env::args().any(|arg| arg == "--burst") {
             return burst_probe(&device, &context);
         }
+        if std::env::args().any(|arg| arg == "--adaptive") {
+            return adaptive_probe(&device, &context);
+        }
         for (w, h, source_w, source_h, white, hdr, value, low, high) in [
             (1280, 720, 1280, 720, 1.0, false, 0x3800u16, 170.0, 195.0),
             (1920, 1080, 2560, 1440, 2.0, true, 0x3c00u16, 170.0, 195.0),
@@ -102,6 +105,99 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             }
             println!("{decoded} GPU frames verified in {:?}", start.elapsed());
         }
+    }
+    Ok(())
+}
+
+/// Exercise encoder replacement and the low-rate admission limit on synthetic
+/// surfaces. One decoder must recover across every resolution/FPS transition.
+#[cfg(windows)]
+fn adaptive_probe(
+    device: &windows::Win32::Graphics::Direct3D11::ID3D11Device,
+    context: &windows::Win32::Graphics::Direct3D11::ID3D11DeviceContext,
+) -> Result<(), Box<dyn std::error::Error>> {
+    use openh264::formats::YUVSource;
+    use std::time::{Duration, Instant};
+    use thiscord_frontend::screen::{
+        gpu, hardware::HardwareEncoder, recovery_frame, sender_queue_frames,
+    };
+    use thiscord_shared::screen::Quality;
+    use windows::Win32::Graphics::{Direct3D11::*, Dxgi::Common::*};
+    let texture = gpu::texture(
+        device,
+        1920,
+        1080,
+        DXGI_FORMAT_R16G16B16A16_FLOAT,
+        D3D11_BIND_SHADER_RESOURCE.0 as u32,
+    )?;
+    let pixels = vec![0x3800_u16; 1920 * 1080 * 4];
+    unsafe {
+        context.UpdateSubresource(&texture, 0, None, pixels.as_ptr().cast(), 1920 * 8, 0);
+    }
+    let mut decoder = openh264::decoder::Decoder::new()?;
+    let started = Instant::now();
+    for quality in [
+        Quality {
+            height: 1080,
+            fps: 30,
+        },
+        Quality {
+            height: 720,
+            fps: 15,
+        },
+        Quality {
+            height: 360,
+            fps: 5,
+        },
+        Quality {
+            height: 1080,
+            fps: 30,
+        },
+    ] {
+        let (w, h) = (quality.width(), quality.height);
+        let processor = gpu::Processor::new(device, w, h)?;
+        let mut encoder = HardwareEncoder::new_gpu(w as usize, h as usize, quality, device)?;
+        let (mut submitted, mut decoded) = (0, 0);
+        let step = Instant::now();
+        let mut next = step;
+        while step.elapsed() < Duration::from_secs(8) && decoded < 10 {
+            let mut frames = encoder.poll()?;
+            if submitted < 10
+                && Instant::now() >= next
+                && encoder.ready()
+                && encoder.pending() < sender_queue_frames(quality.fps)
+                && let Some(surface) = processor.process(&texture, 1.0, false)?
+            {
+                frames
+                    .extend(encoder.encode_texture(surface, started.elapsed().as_micros() as u64)?);
+                submitted += 1;
+                next = Instant::now() + Duration::from_secs_f64(1.0 / f64::from(quality.fps));
+            }
+            for frame in frames {
+                if decoded == 0 {
+                    assert!(
+                        recovery_frame(&frame.data),
+                        "reconfiguration must start with SPS/PPS and IDR"
+                    );
+                }
+                let picture = decoder
+                    .decode(&frame.data)?
+                    .ok_or("Missing adaptive frame")?;
+                assert_eq!(picture.dimensions(), (w as usize, h as usize));
+                decoded += 1;
+            }
+            std::thread::sleep(Duration::from_millis(2));
+        }
+        assert_eq!(
+            decoded, 10,
+            "adaptive encoder stalled at {h}p/{}",
+            quality.fps
+        );
+        println!(
+            "Adaptive GPU: {w}x{h}/{} fps, {} bit/s, {decoded} decoded",
+            quality.fps,
+            quality.bitrate()
+        );
     }
     Ok(())
 }

@@ -3,6 +3,7 @@ pub(crate) mod access;
 mod diagnostics;
 mod ice;
 mod store;
+mod viewing;
 use crate::{auth::Failure, db::DbPool};
 use axum::{
     Extension, Router,
@@ -44,11 +45,14 @@ struct Member {
     network: Arc<RwLock<thiscord_shared::admin::NetworkMetrics>>,
     info: Participant,
     source_id: uuid::Uuid,
+    screen_started: Instant,
     tx: mpsc::Sender<Delivery>,
     media_tx: mpsc::Sender<Delivery>,
     keyframes: mpsc::Sender<u32>,
     last_keyframe: Option<Instant>,
     feedback_enabled: bool,
+    subscriptions_enabled: bool,
+    views: [Option<viewing::View>; ROOM_CAPACITY],
     generation: Arc<AtomicU64>,
     metrics: Arc<[AtomicU64; 5]>,
     active: Arc<AtomicBool>,
@@ -215,11 +219,17 @@ async fn access_failed(socket: &mut WebSocket, id: RequestId, failure: Failure) 
         }
     }
 }
+struct Ingress {
+    epoch: u64,
+    kind: MediaKind,
+    packet: rtp::Packet,
+    arrived: Instant,
+}
 struct Handler {
     metrics: Arc<[AtomicU64; 5]>,
     gathered: Arc<Notify>,
-    packets: mpsc::Sender<(u64, MediaKind, rtp::Packet)>,
-    media_packets: mpsc::Sender<(u64, MediaKind, rtp::Packet)>,
+    packets: mpsc::Sender<Ingress>,
+    media_packets: mpsc::Sender<Ingress>,
     active: Arc<AtomicBool>,
     generation: Arc<AtomicU64>,
     track_seen: [AtomicBool; 3],
@@ -308,7 +318,12 @@ impl PeerConnectionEventHandler for Handler {
                         metrics[0].fetch_add(1, Ordering::Relaxed);
                     }
                     if tx
-                        .try_send((generation.load(Ordering::Acquire), kind, packet))
+                        .try_send(Ingress {
+                            epoch: generation.load(Ordering::Acquire),
+                            kind,
+                            packet,
+                            arrived: Instant::now(),
+                        })
                         .is_err()
                         && kind == MediaKind::ScreenVideo
                     {
@@ -376,10 +391,17 @@ fn may_publish(info: &Participant, kind: MediaKind) -> bool {
             MediaKind::SystemAudio => info.sharing_screen && info.sharing_audio,
         }
 }
+fn may_relay(member: &Member, kind: MediaKind, arrived: Instant) -> bool {
+    may_publish(&member.info, kind)
+        && (kind == MediaKind::Microphone || arrived >= member.screen_started)
+}
 async fn update_voice_state(room: &Room, slot: usize, muted: bool, deafened: bool) {
     if let Some(member) = room.members.write().await.get_mut(&slot) {
         member.info.muted = muted;
         member.info.deafened = deafened;
+        if deafened {
+            member.views = [None; ROOM_CAPACITY];
+        }
     }
 }
 async fn update_screen_state(
@@ -390,8 +412,15 @@ async fn update_screen_state(
 ) -> Result<(), ()> {
     let mut members = room.members.write().await;
     let member = members.get_mut(&slot).ok_or(())?;
-    if active && (!member.info.can_speak || member.info.deafened) {
+    if active && (!member.info.can_speak || member.info.deafened || !member.subscriptions_enabled) {
         return Err(());
+    }
+    if active && !member.info.sharing_screen {
+        member.screen_started = Instant::now();
+        member.info.screen_epoch = room
+            .screen_epoch
+            .fetch_add(1, Ordering::Relaxed)
+            .wrapping_add(1);
     }
     member.info.sharing_screen = active;
     member.info.sharing_audio = active && audio;
@@ -412,6 +441,7 @@ async fn handle_signal(
         Some(ClientEvent::Screen { active, audio }) => {
             update_screen_state(room, slot, active, audio).await.is_ok()
         }
+        Some(ClientEvent::ScreenViews { views }) => viewing::update(room, slot, views).await,
         Some(ClientEvent::ScreenKeyframe {
             slot: publisher,
             epoch,
@@ -439,6 +469,13 @@ async fn request_keyframe(room: &Room, viewer: usize, publisher: usize, epoch: u
             .get(&viewer)
             .is_some_and(|m| m.active.load(Ordering::Acquire) && !m.info.deafened)
     {
+        return;
+    }
+    if !members.get(&publisher).is_some_and(|source| {
+        members.get(&viewer).is_some_and(|receiver| {
+            viewing::receives(receiver, source, MediaKind::ScreenVideo, Instant::now())
+        })
+    }) {
         return;
     }
     let Some(source) = members.get_mut(&publisher) else {
@@ -591,11 +628,14 @@ async fn serve(mut socket: WebSocket, pool: DbPool, id: RequestId) {
                 network: network.clone(),
                 info: info.clone(),
                 source_id,
+                screen_started: Instant::now(),
                 tx: out_tx,
                 media_tx: media_out_tx,
                 keyframes: keyframe_tx,
                 last_keyframe: None,
                 feedback_enabled: false,
+                subscriptions_enabled: false,
+                views: [None; ROOM_CAPACITY],
                 generation: generation.clone(),
                 metrics: metrics.clone(),
                 active: active.clone(),
@@ -604,8 +644,8 @@ async fn serve(mut socket: WebSocket, pool: DbPool, id: RequestId) {
         slot
     };
     let gathered = Arc::new(Notify::new());
-    let (in_tx, mut in_rx) = mpsc::channel::<(u64, MediaKind, rtp::Packet)>(8);
-    let (media_in_tx, mut media_in_rx) = mpsc::channel::<(u64, MediaKind, rtp::Packet)>(4096);
+    let (in_tx, mut in_rx) = mpsc::channel::<Ingress>(8);
+    let (media_in_tx, mut media_in_rx) = mpsc::channel::<Ingress>(4096);
     let mut engine = MediaEngine::default();
     engine
         .register_codec(
@@ -684,6 +724,7 @@ async fn serve(mut socket: WebSocket, pool: DbPool, id: RequestId) {
                 can_speak: info.can_speak,
                 screen_video: true,
                 screen_feedback: true,
+                screen_subscriptions: true,
                 ice_servers,
             },
         )
@@ -694,6 +735,7 @@ async fn serve(mut socket: WebSocket, pool: DbPool, id: RequestId) {
         let Some(ClientEvent::Answer {
             sdp,
             screen_feedback: enabled,
+            screen_subscriptions,
         }) = parse(answer)
         else {
             return Err(());
@@ -701,6 +743,7 @@ async fn serve(mut socket: WebSocket, pool: DbPool, id: RequestId) {
         screen_feedback = enabled;
         if let Some(member) = room.members.write().await.get_mut(&slot) {
             member.feedback_enabled = enabled;
+            member.subscriptions_enabled = screen_subscriptions;
         }
         let answer: RTCSessionDescription = serde_json::from_str(&sdp).map_err(|_| ())?;
         if answer.sdp_type != RTCSdpType::Answer {
@@ -715,7 +758,12 @@ async fn serve(mut socket: WebSocket, pool: DbPool, id: RequestId) {
         let relay_active = active.clone();
         let relay_generation = generation.clone();
         let relay = tokio::spawn(async move {
-            while let Some((epoch, kind, mut packet)) = tokio::select! { biased; packet = in_rx.recv() => packet, packet = media_in_rx.recv() => packet }
+            while let Some(Ingress {
+                epoch,
+                kind,
+                mut packet,
+                arrived,
+            }) = tokio::select! { biased; packet = in_rx.recv() => packet, packet = media_in_rx.recv() => packet }
             {
                 if !relay_active.load(Ordering::Acquire) {
                     break;
@@ -729,7 +777,7 @@ async fn serve(mut socket: WebSocket, pool: DbPool, id: RequestId) {
                 let Some(source) = members.get(&slot) else {
                     break;
                 };
-                if !may_publish(&source.info, kind) {
+                if !may_relay(source, kind, arrived) {
                     continue;
                 }
                 packet.header = rtp::header::Header {
@@ -747,7 +795,7 @@ async fn serve(mut socket: WebSocket, pool: DbPool, id: RequestId) {
                     ..Default::default()
                 };
                 for (&other, m) in members.iter() {
-                    if other != slot && !m.info.deafened && m.active.load(Ordering::Acquire) {
+                    if other != slot && viewing::receives(m, source, kind, Instant::now()) {
                         let tx = if kind == MediaKind::Microphone {
                             &m.tx
                         } else {
@@ -831,6 +879,7 @@ async fn serve(mut socket: WebSocket, pool: DbPool, id: RequestId) {
                 if packet.header.sequence_number.wrapping_sub(last[slot].0) as i16 > 0 {
                     last[slot] = (packet.header.sequence_number, packet.header.timestamp);
                 }
+                let packet_epoch = packet.header.csrc.first().copied();
                 let delivered = tokio::time::timeout(
                     Duration::from_millis(100),
                     authorized_write(
@@ -846,9 +895,11 @@ async fn serve(mut socket: WebSocket, pool: DbPool, id: RequestId) {
                                     m.active.load(Ordering::Acquire)
                                         && m.source_id == source
                                         && may_publish(&m.info, kind)
-                                })
-                                && members.get(&receiver_slot).is_some_and(|m| {
-                                    !m.info.deafened && m.active.load(Ordering::Acquire)
+                                        && (kind == MediaKind::Microphone
+                                            || packet_epoch == Some(m.info.screen_epoch))
+                                        && members.get(&receiver_slot).is_some_and(|receiver| {
+                                            viewing::receives(receiver, m, kind, queued_at)
+                                        })
                                 })
                         },
                         tracks[slot].write_rtp(packet),
@@ -915,6 +966,8 @@ async fn serve(mut socket: WebSocket, pool: DbPool, id: RequestId) {
                         Ok(members)=>members,
                         Err(error)=>{access_failed(&mut socket,id,error).await;break;}
                     };
+                    if let Some((epoch, bitrate)) = viewing::target(&room, slot).await
+                        && send(&mut socket, ServerEvent::ScreenTarget { epoch, bitrate }).await.is_err() { break; }
                     if !route_logged { route_logged=log_selected_route(pc.as_ref(),id).await; }
                 if send(&mut socket,ServerEvent::Participants{members}).await.is_err(){break;}
                 }
@@ -996,17 +1049,34 @@ mod send_tests {
                         screen_epoch: 7,
                     },
                     source_id: uuid::Uuid::new_v4(),
+                    screen_started: Instant::now(),
                     tx: tx.clone(),
                     media_tx: tx,
                     keyframes,
                     last_keyframe: None,
                     feedback_enabled: true,
+                    subscriptions_enabled: true,
+                    views: [None; ROOM_CAPACITY],
                     generation: Arc::new(AtomicU64::new(epoch)),
                     active: Arc::new(AtomicBool::new(true)),
                     metrics: Arc::new(std::array::from_fn(|_| AtomicU64::new(0))),
                 },
             );
         }
+        let owner = room.members.read().await[&1].info.account_id;
+        assert!(
+            viewing::update(
+                &room,
+                0,
+                vec![thiscord_shared::screen::Subscription {
+                    slot: 1,
+                    owner,
+                    epoch: 7,
+                    bitrate: 2_500_000,
+                }]
+            )
+            .await
+        );
         for (viewer, publisher, stream_epoch) in [(7, 1, 7), (0, 7, 7), (1, 1, 7), (0, 1, 6)] {
             request_keyframe(&room, viewer, publisher, stream_epoch).await;
             assert!(receivers[1].try_recv().is_err());

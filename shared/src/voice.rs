@@ -22,6 +22,8 @@ pub enum ClientEvent {
         sdp: String,
         #[serde(default, skip_serializing_if = "is_false")]
         screen_feedback: bool,
+        #[serde(default, skip_serializing_if = "is_false")]
+        screen_subscriptions: bool,
     },
     State {
         muted: bool,
@@ -34,6 +36,9 @@ pub enum ClientEvent {
     ScreenKeyframe {
         slot: usize,
         epoch: u32,
+    },
+    ScreenViews {
+        views: Vec<crate::screen::Subscription>,
     },
     Ping {},
     Leave {},
@@ -78,6 +83,11 @@ pub struct ServerFrame {
 #[derive(Clone, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum ServerEvent {
+    ScreenTarget {
+        epoch: u32,
+        /// Zero pauses video. Otherwise the lowest active receiver budget.
+        bitrate: u32,
+    },
     ScreenKeyframe {
         epoch: u32,
     },
@@ -92,6 +102,8 @@ pub enum ServerEvent {
         screen_video: bool,
         #[serde(default)]
         screen_feedback: bool,
+        #[serde(default)]
+        screen_subscriptions: bool,
         #[serde(default)]
         ice_servers: Vec<IceServer>,
     },

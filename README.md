@@ -49,7 +49,8 @@ Capture uses continuous FP16 Windows Graphics Capture with GPU scaling, HDR-to-S
 tone mapping, NV12 conversion and H.264 surface encoding. Windows publishing
 requires a compatible D3D11 hardware encoder. Received video uses the WebView's
 WebRTC video player with in-app fullscreen and separate screen share volume/mute
-controls. Sender/playback diagnostics report measured rates and drops.
+controls. Choose **Watch stream** to subscribe; video adapts to active viewers and
+pauses when nobody watches. Sender/playback diagnostics report measured rates and drops.
 See [screen sharing, requirements and acceptance checks](docs/screen-sharing.md).
 For echo troubleshooting, Audio & voice can save a 60-second local debug recording
 of playback, raw microphone and outgoing audio, with metadata for offline DSP replay.

@@ -21,6 +21,7 @@ use windows_capture::{
     window::Window,
 };
 
+#[derive(Clone)]
 struct Pixels {
     texture: Arc<ID3D11Texture2D>,
     device: ID3D11Device,
@@ -39,6 +40,8 @@ struct Flags {
     stop: Arc<AtomicBool>,
     connection: Connection,
     period: Duration,
+    quality: Quality,
+    demand: Arc<super::adaptation::Demand>,
     metrics: Metrics,
 }
 struct Capture {
@@ -66,6 +69,17 @@ impl GraphicsCaptureApiHandler for Capture {
         if self.flags.stop.load(Ordering::Acquire) || !self.flags.connection.active() {
             control.stop();
             return Ok(());
+        }
+        let bitrate = self.flags.demand.bitrate();
+        let fps = if bitrate == 0 {
+            1
+        } else {
+            self.flags.quality.constrained(bitrate).fps
+        };
+        let period = Duration::from_secs_f64(1.0 / f64::from(fps));
+        if period != self.flags.period {
+            self.flags.period = period;
+            self.cadence = super::cadence::Cadence::new(period);
         }
         let now = Instant::now();
         self.flags.metrics.add("capture_events", 1);
@@ -194,6 +208,7 @@ pub fn run(
     tx: tokio::sync::mpsc::Sender<super::Outgoing>,
     metrics: Metrics,
     force_keyframe: Arc<AtomicBool>,
+    demand: Arc<super::adaptation::Demand>,
     mut report: impl FnMut(String),
 ) -> Result<(), String> {
     let mailbox = Arc::new((Mutex::new(Mailbox::default()), Condvar::new()));
@@ -202,6 +217,8 @@ pub fn run(
         stop: stop.clone(),
         connection: connection.clone(),
         period: Duration::from_secs_f64(1.0 / quality.fps as f64),
+        quality,
+        demand: demand.clone(),
         metrics: metrics.clone(),
     };
     let mut window = None;
@@ -238,6 +255,7 @@ pub fn run(
         source,
         &metrics,
         &force_keyframe,
+        &demand,
     );
     // Stop also wakes/joins capture when the source is static (no callbacks).
     let stopped = capture
@@ -260,7 +278,15 @@ fn encode(
     source: &SourceId,
     metrics: &Metrics,
     force_keyframe: &AtomicBool,
+    demand: &super::adaptation::Demand,
 ) -> Result<(), String> {
+    let requested = quality;
+    let mut quality = requested.constrained(demand.bitrate());
+    let mut paused = true;
+    let mut reconfigure = true;
+    let mut last_raw: Option<Pixels> = None;
+    let mut encode_cadence =
+        super::cadence::Cadence::new(Duration::from_secs_f64(1.0 / f64::from(quality.fps)));
     let mut hardware: Option<super::hardware::HardwareEncoder> = None;
     let mut processor: Option<gpu::Processor> = None;
     let mut configured = None;
@@ -272,9 +298,10 @@ fn encode(
     let mut color_checked = Instant::now() - Duration::from_secs(2);
     let mut color = (1.0, false);
     let mut previous = Instant::now();
-    let send_budget =
+    let mut send_budget =
         super::pacing::SendBudget::new(super::pacing::transport_bitrate(quality.bitrate()));
     metrics.label("sender_backlog_budget_ms", super::pacing::BACKLOG_BUDGET_MS);
+    metrics.label("video_paused", true);
     while !stop.load(Ordering::Acquire) && connection.active() {
         if previous.elapsed() > Duration::from_secs(2) {
             return Err("Screen capture paused; start sharing again.".into());
@@ -282,6 +309,36 @@ fn encode(
         previous = Instant::now();
         if window.is_some_and(|w| !w.is_valid() || minimized(w)) || capture.is_finished() {
             return Err("The shared source closed or became unavailable; sharing stopped.".into());
+        }
+        let bitrate = demand.bitrate();
+        if bitrate == 0 {
+            if !paused {
+                hardware = None;
+                processor = None;
+                configured = None;
+                last_texture = None;
+                waiting_for_keyframe = true;
+                metrics.label("video_paused", true);
+            }
+            paused = true;
+            std::thread::sleep(Duration::from_millis(20));
+            continue;
+        }
+        let next = requested.constrained(bitrate);
+        if paused || next != quality {
+            quality = next;
+            encode_cadence =
+                super::cadence::Cadence::new(Duration::from_secs_f64(1.0 / f64::from(quality.fps)));
+            hardware = None;
+            processor = None;
+            configured = None;
+            last_texture = None;
+            waiting_for_keyframe = true;
+            reconfigure = true;
+            paused = false;
+            send_budget.set_bitrate(super::pacing::transport_bitrate(quality.bitrate()));
+            force_keyframe.store(true, Ordering::Release);
+            metrics.label("video_paused", false);
         }
         if color_checked.elapsed() >= Duration::from_secs(1) {
             let monitor = match source {
@@ -342,9 +399,31 @@ fn encode(
             let fresh = guard.latest.is_some();
             (guard.latest.take().or(pending), fresh)
         };
+        let pixels = pixels
+            .map(|mut p| {
+                if reconfigure {
+                    p.arrived = Instant::now();
+                }
+                p
+            })
+            .or_else(|| {
+                if reconfigure {
+                    last_raw.clone().map(|mut p| {
+                        p.arrived = Instant::now();
+                        p
+                    })
+                } else {
+                    None
+                }
+            });
+        if !encode_cadence.accept(Instant::now()) {
+            pending_pixels = pixels;
+            continue;
+        }
         let mut captured_at = Instant::now();
+        let queued = tx.max_capacity() - tx.capacity();
         if !super::encoder_has_capacity(
-            tx.capacity(),
+            super::sender_queue_frames(quality.fps).saturating_sub(queued),
             hardware.as_ref().map_or(0, |hw| hw.pending()),
         ) || !send_budget.has_capacity()
         {
@@ -365,6 +444,8 @@ fn encode(
                 continue;
             }
             captured_at = pixels.arrived;
+            last_raw = Some(pixels.clone());
+            reconfigure = false;
             metrics.label(
                 "source_resolution",
                 format!("{}x{}", pixels.width, pixels.height),

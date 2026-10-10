@@ -199,7 +199,7 @@ speaker isolation and physical acoustic acceptance remain future work.
 - [ ] In-place ICE restart and proactive long-call relay credential refresh.
 - [x] Docker coturn deployment, shared-secret configuration and local relay tests.
 - [ ] Restrictive NAT, forced WebRTC relay fallback and off-site public UDP acceptance.
-- [ ] Packet-loss/jitter network trials, connection quality metrics and adaptive bitrate.
+- [ ] Packet-loss/jitter network trials, connection quality metrics and adaptive microphone bitrate.
 
 ## 7. Backend Rust SFU
 
@@ -246,7 +246,8 @@ speaker isolation and physical acoustic acceptance remain future work.
 - [x] Bounded media queues, loss recovery, stop/reconnect cleanup and wire/codec/SFU regression tests.
 - [ ] Two-client Windows capture/audio acceptance, mixed-DPI/protected windows and suspend/network checks.
 - [ ] macOS/Linux publishing and OS permission acceptance; portable receiving code is included.
-- [ ] Stereo system audio, adaptive bitrate, demand-based subscriptions and measured multi-share capacity.
+- [x] Explicit viewer subscriptions with lease expiry and receiver-driven bitrate/resolution/FPS adaptation; pause video with no viewers.
+- [ ] Stereo system audio, measured multi-share capacity and constrained-network/hardware acceptance for adaptive video.
 - [x] Continuous Windows Graphics Capture and WebRTC video-element presentation without JPEGs.
 - [x] GPU FP16 capture/copy, scaling, HDR-to-SDR tone mapping, NV12 conversion and
   same-adapter Media Foundation surface encoding; synthetic NVIDIA GPU validation.

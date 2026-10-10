@@ -3,7 +3,8 @@
 Join a voice channel in the Windows desktop app, then choose **Share screen**
 in the persistent voice bar. Select a screen or a visible window and choose
 whether to include system audio. **Start sharing** is the only capture trigger.
-The other participants see the share in that voice channel. **Stop sharing**
+Other participants choose **Watch stream** in that voice channel. **Stop watching**
+closes their viewer and unsubscribes video and shared audio. **Stop sharing**
 remains available while reading text channels or settings.
 
 System audio captures all other applications, even for a single-window share.
@@ -59,7 +60,9 @@ the display stops capture; it never falls back to another window/display.
   fallback. AMD/Intel and mixed-display visual acceptance remain required.
 - Video offers 720p, 1080p, 1440p and 2160p (4K), each at 15/30/60 fps; default
   1080p/30. Aspect ratio is preserved without upscaling. These are targets, not
-  measured throughput guarantees. Bitrate targets range from 1.25 to 32 Mbit/s.
+  measured throughput guarantees. The selected preset is a maximum; adaptive modes
+  also allow 360p and 5 fps, down to roughly 167 kbit/s. Preset maxima range from
+  1.25 to 32 Mbit/s.
   Access units are bounded to 4 MiB. H.264 Baseline level 5.2 is advertised with a
   90 kHz RTP clock. Keyframes are requested by elapsed time (one second), including
   a refresh of the last captured frame for a static source. Overload no longer
@@ -87,8 +90,10 @@ the display stops capture; it never falls back to another window/display.
   recovery drops and cancellation release the remainder. Large frames therefore
   suppress new encoding before filling the queue with H.264 dependencies, even
   when a driver rejects the smaller HRD buffer. The latest raw capture is retained
-  for resumption (subject to its existing 250 ms age limit) and replaced by fresher
-  captures. These admission limits do not bound unfinished hardware output or
+  during backpressure (subject to its existing 250 ms age limit) and replaced by fresher
+  captures. Demand resumption or quality reconfiguration can re-encode the last raw
+  image with a fresh timestamp, allowing static sources to resume without a new
+  compositor event. These admission limits do not bound unfinished hardware output or
   shorten an individual oversized frame. Discarding dependent frames during recovery does not
   request another keyframe for each skipped delta.
   SFU video deliveries expire after 150 ms in its egress queue, with aggregate
@@ -124,13 +129,50 @@ the display stops capture; it never falls back to another window/display.
   waiting for another event, including coalesced notifications after worker delays,
   and zeros packets marked silent. No codec/network work enters CPAL callbacks.
 - Eight microphone, eight screen-video and eight shared-audio tracks are negotiated.
-  Microphone queues are separate and prioritized. There is no adaptive video
-  bitrate, simulcast or demand-based network subscription yet. Multi-share and
+  Microphone queues are separate and prioritized. Video and shared audio require
+  explicit viewer subscriptions. There is no simulcast; multi-share and
   constrained-network capacity remain unmeasured.
 
 Existing voice STUN/TURN, UDP addressing, certificates and per-hop DTLS-SRTP
 apply. The SFU forwards encoded video/audio without transcoding. This is transport
 encryption, not end-to-end encryption against the server. See [audio.md](audio.md).
+
+## Viewing demand and adaptive quality
+
+`screen_subscriptions` is negotiated in the voice offer/answer. Clients send a
+bounded, full replacement `screen_views` list every 500 ms while connected.
+Each entry binds a room slot, account ID and share epoch to a receiver bitrate
+budget. The server ignores stale identities/epochs and self-subscriptions;
+invalid bounds or duplicate slots reject signaling. Views expire after three
+seconds without renewal. Deafen clears subscriptions. Every new share has a new
+epoch, including stop/start without leaving voice. Legacy clients can still use
+microphone voice; publishing and viewing screens require updated clients. New clients
+require a subscription-capable server to publish.
+
+The SFU sends `screen_target` once per second to opted-in publishers. Zero means
+no viewers: native encoding and video sending pause, with capture reduced to one
+raw refresh per second so a static source can resume. Publisher demand also expires
+after three seconds if control feedback stops. The SFU immediately excludes
+unsubscribed receivers from video and shared-audio fanout, including already queued
+packets. Local close/hide reaches the SFU on the next 500 ms renewal; a stalled UI
+first loses its three-second local viewer lease. Publisher shared-audio capture
+continues until Stop sharing; it is not forwarded to non-viewers.
+
+Receivers sample native packet-loss/frame-queue counters and WebView dropped-frame,
+presentation-stall or decoder PLI feedback once per second. Budgets start at 2.5 Mbit/s, decrease by
+35% on congestion, and increase by 25% after ten healthy samples, bounded to
+200 kbit/s–32 Mbit/s. Three initial samples allow setup; three consecutive empty
+samples detect stalls without treating a static source's one-second IDR cadence
+as immediate loss. The server takes the lowest live viewer budget. The publisher
+selects a resolution/FPS/bitrate combination within that budget and its selected
+maximum, recreates the GPU encoder with an IDR when quality changes, and updates
+capture cadence, byte admission and RTP pacing together. Diagnostics expose actual
+`target_bitrate`, `target_fps`, `resolution` and `video_paused`.
+
+This is an application feedback controller, not a bandwidth guarantee or per-viewer
+simulcast. One constrained viewer lowers the common stream; independent multi-share
+controllers do not allocate a shared link budget. Packet-loss, bandwidth-step and
+hardware reconfiguration trials with two desktop clients remain required.
 
 ## Authorization and lifecycle
 
@@ -139,7 +181,7 @@ Speak also grants screen/system-audio publishing in this first version. There
 is no separate screen-sharing permission/editor yet. Explicit `screen` signaling
 state gates both publisher ingress and receiver egress. Queued packets are
 checked against the current publisher identity, share state, receiver deafen
-state and access epoch, including slot reuse. Voice uses mutation-only packet
+state, viewer subscription/lease and access epoch, including slot reuse. Voice uses mutation-only packet
 admission/draining: ordinary database authorization checks do not hold the chat
 gate or stall media. Access-changing commits invalidate queued media and require
 fresh authorization, with conservative voice revocation. Transport writes hold
@@ -180,8 +222,15 @@ capture library is selected in place of the native transport.
 
 Automated checks cover codec/RTP round trips and loss, bounded malformed input,
 wire compatibility, capture cancellation state, and real-peer SFU video/audio
-forwarding, isolation, stop/restart, mute/deafen and permission revocation.
+forwarding, isolation, viewer subscription/unsubscribe, lease expiry, adaptive
+budget bounds, stop/restart, mute/deafen and permission revocation.
 CI runs portable codec tests and native compilation on all three hosts.
+
+The Windows synthetic GPU check `cargo run -p thiscord-frontend --example
+screen_gpu_probe --features screen-share --locked -- --adaptive` exercises
+1080p/30 -> 720p/15 -> 360p/5 -> 1080p/30 encoder replacements with one decoder,
+checking an initial SPS/PPS/IDR and ten decoded frames at each step. This passed
+locally; it does not establish behavior on every GPU or under network congestion.
 
 Manual Windows acceptance still needs two desktop clients: share a monitor and
 a window, play another app's audio, verify Thiscord playback is excluded, mute

@@ -81,7 +81,7 @@ pub(super) fn ScreenControls(ui: Ui) -> impl IntoView {
                             <option value="15">"15 fps"</option><option value="30">"30 fps"</option><option value="60">"60 fps"</option>
                         </select></label>
                     </div>
-                    <p class="text-xs text-white/60">"Target quality. Higher settings use more bandwidth and CPU; actual frame rate depends on your computer and connection. Smaller sources retain their original size."</p>
+                    <p class="text-xs text-white/60">"Maximum quality. Video adapts to viewer connections and pauses when nobody is watching. Smaller sources retain their original size."</p>
                     <label class="flex items-center gap-2 text-sm"><input type="checkbox" prop:checked=move || audio.get() on:change=move |event| audio.set(event_target_checked(&event))/>
                         "Share system audio (all other apps, even when sharing one window)"</label>
                     <p class="text-xs text-white/60">"Thiscord playback is excluded. Microphone mute does not mute shared audio. Stop sharing to stop both video and system audio."</p>
@@ -119,6 +119,7 @@ pub(super) fn ScreenViewer(ui: Ui) -> impl IntoView {
                 let own = ui.account.get_untracked().is_some_and(|a| a.id == member.account_id);
                 let watch = thiscord_shared::screen::Watch { slot: member.slot, owner: member.account_id, epoch: member.screen_epoch, viewer: NEXT_VIEWER.fetch_add(1, std::sync::atomic::Ordering::Relaxed) };
                 let expanded = RwSignal::new(false);
+                let watching = RwSignal::new(false);
                 let escape = window_event_listener(leptos::ev::keydown, move |event| {
                     if event.key() == "Escape" { expanded.set(false); }
                 });
@@ -129,18 +130,24 @@ pub(super) fn ScreenViewer(ui: Ui) -> impl IntoView {
                     <figcaption class="flex shrink-0 flex-wrap items-center justify-between gap-3 p-3 text-sm">
                         <span>{member.display_name().to_owned()}" is sharing"{if own { " (you)" } else { "" }}</span>
                         {(!own).then(|| view! {
-                            <button class="rounded bg-white/10 px-3 py-2" aria-pressed=move || expanded.get().to_string()
+                            <button class="rounded bg-brand px-3 py-2" on:click=move |_| {
+                                watching.update(|value| *value = !*value);
+                                if !watching.get_untracked() { expanded.set(false); }
+                            }>{move || if watching.get() { "Stop watching" } else { "Watch stream" }}</button>
+                            <button disabled=move || !watching.get() class="rounded bg-white/10 px-3 py-2 disabled:opacity-50" aria-pressed=move || expanded.get().to_string()
                                 on:click=move |_| expanded.update(|value| *value = !*value)>
                                 {move || if expanded.get() { "Exit full screen" } else { "Full screen" }}
                             </button>
                         })}
                     </figcaption>
                     {(!own).then(|| view! {
+                        <Show when=move || watching.get()>
                         <div class="shrink-0 px-3 pb-3">
                             <For each=move || { ui.audio_status.get().map(|s| s.streams).unwrap_or_default().into_iter().filter(|s| s.target.is_some_and(|t| t.account_id == watch.owner && t.shared_audio)).collect::<Vec<_>>() } key=|s| (s.id.clone(), s.target)
                                 children=move |stream| view! { <super::audio::StreamVolume ui=ui stream=stream/> }/>
                         </div>
                         <ScreenVideo watch=watch expanded=expanded/>
+                        </Show>
                     })}
                 </figure> }
             }/>
@@ -149,6 +156,10 @@ pub(super) fn ScreenViewer(ui: Ui) -> impl IntoView {
 
 #[component]
 fn ScreenVideo(watch: thiscord_shared::screen::Watch, expanded: RwSignal<bool>) -> impl IntoView {
+    let watch = thiscord_shared::screen::Watch {
+        viewer: NEXT_VIEWER.fetch_add(1, std::sync::atomic::Ordering::Relaxed),
+        ..watch
+    };
     let video = NodeRef::<leptos::html::Video>::new();
     let message = RwSignal::new("Connecting screen video...".to_owned());
     let diagnostics = RwSignal::new(String::new());

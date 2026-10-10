@@ -406,7 +406,15 @@ async fn run(
     if first.version != VOICE_VERSION {
         return Err("Unsupported voice version".into());
     }
-    let (sdp, own_slot, can_speak, ice_servers, screen_video, screen_feedback) = match first.event {
+    let (
+        sdp,
+        own_slot,
+        can_speak,
+        ice_servers,
+        screen_video,
+        screen_feedback,
+        screen_subscriptions,
+    ) = match first.event {
         ServerEvent::Offer {
             sdp,
             slot,
@@ -414,6 +422,7 @@ async fn run(
             ice_servers,
             screen_video,
             screen_feedback,
+            screen_subscriptions,
         } if first.version == VOICE_VERSION && slot < ROOM_CAPACITY => (
             sdp,
             slot,
@@ -421,6 +430,7 @@ async fn run(
             ice_servers,
             screen_video,
             screen_feedback,
+            screen_subscriptions,
         ),
         ServerEvent::Error { error } => return Err(Failure::server(error)),
         _ => return Err("Invalid voice offer".into()),
@@ -542,6 +552,7 @@ async fn run(
         ClientEvent::Answer {
             sdp,
             screen_feedback,
+            screen_subscriptions,
         },
     )
     .await?;
@@ -569,6 +580,11 @@ async fn run(
                 let message:ServerFrame=serde_json::from_str(message.to_text().map_err(|_|"Invalid voice event")?).map_err(|_|"Invalid voice event")?;
                 if message.version!=VOICE_VERSION{return Err("Unsupported voice version".into());}heard=Instant::now();
                 match message.event{
+                    ServerEvent::ScreenTarget { epoch, bitrate } => {
+                        if status.lock().ok().is_some_and(|s| s.participants.iter().any(|m| m.slot == own_slot && m.screen_epoch == epoch && m.sharing_screen)) {
+                            app.state::<crate::native_screen::ScreenState>().target(bitrate);
+                        }
+                    },
                     ServerEvent::MediaDiagnostics{counters}=>{ app.state::<crate::native_screen::ScreenState>().server_diagnostics(counters); },
                     ServerEvent::ScreenKeyframe{epoch}=>{
                         if status.lock().ok().is_some_and(|s| s.participants.iter().any(|m| m.slot == own_slot && m.screen_epoch == epoch && m.sharing_screen)) { force_keyframe.store(true, Ordering::Release); }
@@ -600,6 +616,8 @@ async fn run(
                         thiscord_frontend::audio::diagnostics::event("voice_media_connected",serde_json::json!({}));
                         if screen_video { app.state::<crate::native_screen::ScreenState>().bind(crate::native_screen::Binding {
                             connection: attempt.connection.clone(), video: screen_track.clone(), audio: system_track.clone(), can_publish: can_speak,
+                            subscriptions: screen_subscriptions,
+                            demand: Default::default(),
                             force_keyframe: force_keyframe.clone(), metrics: Default::default(),
                             video_sequence: Default::default(), audio_sequence: Default::default(), audio_timestamp: Default::default(), started: Instant::now(),
                         }); }
@@ -624,6 +642,10 @@ async fn run(
                     screen_state = current_screen;
                 }
                 send_event(&mut send, ClientEvent::State{muted:configuration.muted,deafened:configuration.deafened}).await?;
+                if screen_subscriptions {
+                    let views = if configuration.deafened { vec![] } else { app.state::<crate::native_screen::ScreenState>().subscriptions() };
+                    send_event(&mut send, ClientEvent::ScreenViews { views }).await?;
+                }
             }
         }
     }

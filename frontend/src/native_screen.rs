@@ -35,11 +35,13 @@ pub struct Binding {
     pub video: Arc<TrackLocalStaticRTP>,
     pub audio: Arc<TrackLocalStaticRTP>,
     pub can_publish: bool,
+    pub subscriptions: bool,
     pub video_sequence: Arc<AtomicU32>,
     pub audio_sequence: Arc<AtomicU32>,
     pub audio_timestamp: Arc<AtomicU32>,
     pub started: Instant,
     pub force_keyframe: Arc<AtomicBool>,
+    pub demand: Arc<thiscord_frontend::screen::adaptation::Demand>,
     pub metrics: thiscord_frontend::screen::metrics::Metrics,
 }
 #[derive(Default)]
@@ -56,7 +58,15 @@ struct Inner {
     inboxes: [Option<Inbox>; ROOM_CAPACITY],
     receivers: [Option<thiscord_frontend::screen::metrics::Metrics>; ROOM_CAPACITY],
 }
+#[derive(Default)]
+struct Feedback {
+    receiver: thiscord_frontend::screen::adaptation::Receiver,
+    previous: Diagnostics,
+    sampled: Option<Instant>,
+    decoder_pressure: bool,
+}
 struct Viewer {
+    feedback: Feedback,
     watch: Watch,
     touched: Instant,
     connection: Connection,
@@ -70,6 +80,75 @@ impl Drop for Viewer {
 #[derive(Clone, Default)]
 pub struct ScreenState(Arc<Mutex<Inner>>);
 impl ScreenState {
+    pub fn target(&self, bitrate: u32) {
+        if let Ok(inner) = self.0.lock()
+            && let Some(binding) = &inner.binding
+        {
+            binding.demand.update(bitrate);
+        }
+    }
+    pub fn subscriptions(&self) -> Vec<Subscription> {
+        let Ok(mut inner) = self.0.lock() else {
+            return vec![];
+        };
+        if inner
+            .binding
+            .as_ref()
+            .is_none_or(|b| !b.connection.active())
+        {
+            return vec![];
+        }
+        let mut views = Vec::new();
+        for slot in 0..ROOM_CAPACITY {
+            let metrics = inner.receivers[slot].clone();
+            let owner = inner.owners[slot];
+            let Some(viewer) = inner.viewers[slot].as_mut() else {
+                continue;
+            };
+            if !viewer.connection.active()
+                || viewer.touched.elapsed() >= VIEWER_LEASE
+                || viewer.preview.is_none()
+                || owner != Some((viewer.watch.owner, viewer.watch.epoch))
+            {
+                continue;
+            }
+            let feedback = &mut viewer.feedback;
+            if feedback
+                .sampled
+                .is_none_or(|at| at.elapsed() >= Duration::from_secs(1))
+            {
+                let stats = metrics.map(|m| m.snapshot()).unwrap_or_default();
+                let delta = |name: &str| {
+                    stats
+                        .counters
+                        .get(name)
+                        .copied()
+                        .unwrap_or(0)
+                        .saturating_sub(feedback.previous.counters.get(name).copied().unwrap_or(0))
+                };
+                let lost = delta("lost_packets");
+                let congested = lost > 2 && lost * 100 > delta("received_packets").max(1)
+                    || delta("queue_resets") > 0
+                    || delta("expired_frames") > 0
+                    || delta("preview_errors") > 0
+                    || feedback.decoder_pressure;
+                feedback
+                    .receiver
+                    .sample(congested, delta("received_frames") > 0);
+                feedback.decoder_pressure = false;
+                feedback.previous = stats;
+                feedback.sampled = Some(Instant::now());
+            }
+            views.push(Subscription {
+                slot,
+                owner: viewer.watch.owner,
+                epoch: viewer.watch.epoch,
+                bitrate: feedback.receiver.bitrate(),
+            });
+        }
+        views
+    }
+
     pub fn network_diagnostics(
         &self,
         connection: &Connection,
@@ -105,10 +184,14 @@ impl ScreenState {
     pub fn bind(&self, binding: Binding) {
         self.clear();
         if let Ok(mut inner) = self.0.lock() {
-            inner.status.available = binding.can_publish && cfg!(target_os = "windows");
+            inner.status.available =
+                binding.can_publish && binding.subscriptions && cfg!(target_os = "windows");
             if !cfg!(target_os = "windows") {
                 inner.status.message =
                     "Screen publishing is currently available on Windows.".into();
+            } else if !binding.subscriptions {
+                inner.status.message =
+                    "Update the server to enable screen viewing subscriptions.".into();
             } else if !binding.can_publish {
                 inner.status.message = "Speak permission is needed to share your screen.".into();
             }
@@ -281,7 +364,19 @@ impl ScreenState {
 }
 
 #[tauri::command]
-pub fn screen_view_keepalive(state: State<'_, ScreenState>, watch: Watch, visible: bool) -> bool {
+pub fn screen_view_keepalive(
+    state: State<'_, ScreenState>,
+    watch: Watch,
+    visible: bool,
+    decoder_pressure: Option<bool>,
+) -> bool {
+    if decoder_pressure == Some(true)
+        && let Ok(mut inner) = state.0.lock()
+        && let Some(viewer) = inner.viewers.get_mut(watch.slot).and_then(Option::as_mut)
+        && viewer.watch == watch
+    {
+        viewer.feedback.decoder_pressure = true;
+    }
     state.watch(watch, visible)
 }
 #[tauri::command]
@@ -310,6 +405,7 @@ pub async fn screen_view_open(
             metrics.event("viewer connection opened");
         }
         inner.viewers[watch.slot] = Some(Viewer {
+            feedback: Feedback::default(),
             watch,
             touched: Instant::now(),
             connection: lease.clone(),
@@ -462,9 +558,10 @@ pub async fn screen_start(
     let mut binding = inner
         .binding
         .clone()
-        .filter(|b| b.connection.active() && b.can_publish)
+        .filter(|b| b.connection.active() && b.can_publish && b.subscriptions)
         .ok_or("Join voice with Speak permission before sharing.")?;
     binding.metrics = Default::default();
+    binding.demand = Default::default();
     binding.force_keyframe.store(true, Ordering::Release);
     inner.binding = Some(binding.clone());
     let stop = Arc::new(AtomicBool::new(false));
@@ -484,7 +581,20 @@ pub async fn screen_start(
             thiscord_frontend::screen::pacing::transport_bitrate(quality.bitrate()),
         );
         let mut waiting = false;
+        let mut paced_quality = quality;
         'frames: while let Some(mut frame) = rx.recv().await {
+            let budget = sender_binding.demand.bitrate();
+            if budget == 0 {
+                waiting = true;
+                continue;
+            }
+            let current = quality.constrained(budget);
+            if current != paced_quality {
+                pacer = thiscord_frontend::screen::pacing::Pacer::new(
+                    thiscord_frontend::screen::pacing::transport_bitrate(current.bitrate()),
+                );
+                paced_quality = current;
+            }
             let captured_at = frame.captured_at;
             sender_binding
                 .metrics
@@ -530,6 +640,11 @@ pub async fn screen_start(
                 }
                 if sender_stop.load(Ordering::Acquire) || !sender_binding.connection.active() {
                     return;
+                }
+                if sender_binding.demand.bitrate() == 0 {
+                    waiting = true;
+                    sender_binding.force_keyframe.store(true, Ordering::Release);
+                    continue 'frames;
                 }
                 if captured_at.elapsed() > Duration::from_millis(350) {
                     waiting = true;
@@ -636,6 +751,7 @@ fn capture(
         tx,
         binding.metrics.clone(),
         binding.force_keyframe.clone(),
+        binding.demand.clone(),
         |encoder| {
             if let Ok(mut inner) = state.0.lock()
                 && inner.stop.as_ref().is_some_and(|s| Arc::ptr_eq(s, stop))
@@ -681,6 +797,7 @@ mod tests {
             let mut inner = state.0.lock().unwrap();
             inner.owners[0] = Some((owner, 1));
             inner.viewers[0] = Some(Viewer {
+                feedback: Feedback::default(),
                 watch,
                 touched: Instant::now(),
                 connection: old.clone(),
@@ -701,6 +818,7 @@ mod tests {
         assert!(!state.watch(Watch { epoch: 2, ..watch }, true));
         let replacement = Connection::default();
         state.0.lock().unwrap().viewers[0] = Some(Viewer {
+            feedback: Feedback::default(),
             watch: Watch { viewer: 8, ..watch },
             touched: Instant::now(),
             connection: replacement.clone(),
