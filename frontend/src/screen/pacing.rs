@@ -26,6 +26,9 @@ impl SendBudget {
             limit: (u64::from(bitrate) * u64::from(BACKLOG_BUDGET_MS) / 8 / 1000).max(1) as usize,
         }
     }
+    pub fn set_bitrate(&mut self, bitrate: u32) {
+        self.limit = (u64::from(bitrate) * u64::from(BACKLOG_BUDGET_MS) / 8 / 1000).max(1) as usize;
+    }
     pub fn bytes(&self) -> usize {
         self.outstanding.load(Ordering::Acquire)
     }
@@ -93,6 +96,18 @@ impl Pacer {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn reduced_rate_preserves_in_flight_byte_debt() {
+        let mut budget = SendBudget::new(32_000_000);
+        let mut pending = budget.track(20_000);
+        assert!(budget.has_capacity());
+        budget.set_bitrate(200_000);
+        assert!(!budget.has_capacity());
+        pending.sent(19_000);
+        assert!(budget.has_capacity());
+        drop(pending);
+        assert_eq!(budget.bytes(), 0);
+    }
     #[test]
     fn in_flight_bytes_block_encoding_and_release_on_send_or_cancel() {
         let budget = SendBudget::new(transport_bitrate(18_000_000));

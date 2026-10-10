@@ -174,7 +174,9 @@ async fn still_connected(socket: &mut Socket) {
     loop {
         match event(socket).await {
             ServerEvent::Pong {} => break,
-            ServerEvent::Participants { .. } | ServerEvent::MediaDiagnostics { .. } => {}
+            ServerEvent::Participants { .. }
+            | ServerEvent::MediaDiagnostics { .. }
+            | ServerEvent::ScreenTarget { .. } => {}
             ServerEvent::Revoked {} => panic!("Authorized voice connection was revoked"),
             _ => panic!("Unexpected event on an authorized voice connection"),
         }
@@ -207,6 +209,7 @@ struct Peer {
     sequence: u16,
     screen_tracks: [Arc<TrackLocalStaticRTP>; 2],
     screen_sequences: [u16; 2],
+    views: Vec<thiscord_shared::screen::Subscription>,
 }
 impl Peer {
     async fn new(mut socket: Socket) -> Self {
@@ -301,6 +304,7 @@ impl Peer {
             &mut socket,
             ClientEvent::Answer {
                 screen_feedback: true,
+                screen_subscriptions: true,
                 sdp: serde_json::to_string(&pc.local_description().await.unwrap()).unwrap(),
             },
         )
@@ -314,6 +318,7 @@ impl Peer {
             sequence: 0,
             screen_tracks,
             screen_sequences: [0; 2],
+            views: vec![],
         }
     }
     async fn publish(&mut self) {
@@ -377,7 +382,41 @@ async fn forwarded(source: &mut Peer, receiver: &mut Peer) -> rtp::Packet {
     .await
     .expect("Authorized participants must still exchange media")
 }
+async fn watch_screen(source: &mut Peer, receiver: &mut Peer) {
+    // Drain old rosters, then read the publisher's current share incarnation.
+    still_connected(&mut source.socket).await;
+    let member = loop {
+        if let ServerEvent::Participants { members } = event(&mut source.socket).await
+            && let Some(member) = members
+                .into_iter()
+                .find(|m| m.slot == source.slot && m.sharing_screen)
+        {
+            break member;
+        }
+    };
+    receiver.views = vec![thiscord_shared::screen::Subscription {
+        slot: member.slot,
+        owner: member.account_id,
+        epoch: member.screen_epoch,
+        bitrate: 2_500_000,
+    }];
+    send(
+        &mut receiver.socket,
+        ClientEvent::ScreenViews {
+            views: receiver.views.clone(),
+        },
+    )
+    .await;
+    still_connected(&mut receiver.socket).await;
+}
 async fn screen_forwarded(source: &mut Peer, receiver: &mut Peer, kind: usize) -> rtp::Packet {
+    send(
+        &mut receiver.socket,
+        ClientEvent::ScreenViews {
+            views: receiver.views.clone(),
+        },
+    )
+    .await;
     while receiver.packets.try_recv().is_ok() {}
     let base = if kind == 0 {
         thiscord_shared::screen::SSRC_BASE
@@ -599,6 +638,8 @@ async fn sfu_forwarding_permissions_isolation_and_cleanup() {
     )
     .await;
     still_connected(&mut a.socket).await;
+    screen_blocked(&mut a, &mut b).await; // Room membership alone is not a viewer.
+    watch_screen(&mut a, &mut b).await;
     let video = screen_forwarded(&mut a, &mut b, 0).await;
     assert_eq!(video.payload.as_ref(), [0x65, 1, 2, 3]);
     assert!(video.header.marker);
@@ -619,7 +660,9 @@ async fn sfu_forwarding_permissions_isolation_and_cleanup() {
                     assert_eq!(epoch, video.header.csrc[0]);
                     break;
                 }
-                ServerEvent::Participants { .. } | ServerEvent::MediaDiagnostics { .. } => {}
+                ServerEvent::Participants { .. }
+                | ServerEvent::MediaDiagnostics { .. }
+                | ServerEvent::ScreenTarget { .. } => {}
                 _ => panic!("Unexpected feedback event"),
             }
         }
@@ -632,6 +675,11 @@ async fn sfu_forwarding_permissions_isolation_and_cleanup() {
         [0xf8, 0xff, 0xfe]
     );
     assert!(isolated.packets.try_recv().is_err());
+    send(&mut b.socket, ClientEvent::ScreenViews { views: vec![] }).await;
+    still_connected(&mut b.socket).await;
+    screen_blocked(&mut a, &mut b).await;
+    forwarded(&mut a, &mut b).await; // Microphone remains independent.
+    watch_screen(&mut a, &mut b).await;
     send(
         &mut a.socket,
         ClientEvent::State {
@@ -679,6 +727,7 @@ async fn sfu_forwarding_permissions_isolation_and_cleanup() {
         },
     )
     .await;
+    watch_screen(&mut a, &mut b).await;
     assert!(
         screen_forwarded(&mut a, &mut b, 0)
             .await
@@ -714,6 +763,7 @@ async fn sfu_forwarding_permissions_isolation_and_cleanup() {
     )
     .await;
     still_connected(&mut a.socket).await;
+    watch_screen(&mut a, &mut b).await;
     // Hold the guild row without changing access. Wait until a periodic voice
     // check actually blocks in PostgreSQL, then require media while it is held.
     // Previously that check held the global write gate and stalled every stream.
@@ -818,6 +868,7 @@ async fn sfu_forwarding_permissions_isolation_and_cleanup() {
         },
     )
     .await;
+    watch_screen(&mut b, &mut a).await;
     screen_forwarded(&mut b, &mut a, 0).await;
     screen_forwarded(&mut b, &mut a, 1).await;
     send(
@@ -828,6 +879,7 @@ async fn sfu_forwarding_permissions_isolation_and_cleanup() {
         },
     )
     .await;
+    watch_screen(&mut a, &mut b).await;
     let reused_video = screen_forwarded(&mut a, &mut b, 0).await;
     assert_ne!(
         video.header.csrc, reused_video.header.csrc,

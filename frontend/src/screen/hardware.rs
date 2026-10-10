@@ -104,7 +104,7 @@ impl HardwareEncoder {
         quality: Quality,
         device: Option<&ID3D11Device>,
     ) -> Result<Self> {
-        if !quality.valid()
+        if !quality.encoding_valid()
             || width < 2
             || height < 2
             || !width.is_multiple_of(2)

@@ -95,7 +95,10 @@ pub async fn run(
                 let mut previous = thiscord_shared::screen::Diagnostics::default();
                 let mut last_stats = 0.0;
                 let mut last_presented = 0;
+                let mut last_presentation = js_sys::Date::now();
                 let mut last_pli = 0;
+                let mut last_dropped = 0;
+                let mut decoder_pressure = false;
                 while visible() {
                     let state = player.pc.connection_state();
                     if matches!(
@@ -115,13 +118,14 @@ pub async fn run(
                     }
                     if !native::<bool>(
                         "screen_view_keepalive",
-                        json!({"watch":watch,"visible":true}),
+                        json!({"watch":watch,"visible":true,"decoderPressure":decoder_pressure}),
                     )
                     .await
                     .unwrap_or(false)
                     {
                         break;
                     }
+                    decoder_pressure = false;
                     let now = js_sys::Date::now();
                     if now - last_stats > 200.0 {
                         let seconds = (now - last_stats) / 1000.0;
@@ -138,12 +142,21 @@ pub async fn run(
                                     native::<bool>("screen_view_keyframe", json!({"watch":watch}))
                                         .await;
                             }
+                            decoder_pressure = pli > last_pli;
                             last_pli = pli;
                             let playback = {
                                 let q = player.video.get_video_playback_quality();
+                                decoder_pressure |=
+                                    q.dropped_video_frames().saturating_sub(last_dropped) > 0;
+                                last_dropped = q.dropped_video_frames();
                                 let presented = q
                                     .total_video_frames()
                                     .saturating_sub(q.dropped_video_frames());
+                                if presented > last_presented {
+                                    last_presentation = now;
+                                } else {
+                                    decoder_pressure |= now - last_presentation > 3000.0;
+                                }
                                 let fps = presented.saturating_sub(last_presented) as f64
                                     / seconds.max(0.001);
                                 last_presented = presented;
