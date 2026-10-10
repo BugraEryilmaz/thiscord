@@ -187,7 +187,17 @@ pub(super) fn dispatch(
             | PermissionRequest::SetInstanceAdmin { .. }
     )
     .then(|| crate::voice::access::global().pause());
-    c.transaction(|c| {
+    let scope = match &command {
+        PermissionRequest::Change { guild_id, .. }
+        | PermissionRequest::JoinGuild { guild_id, .. } => {
+            Some(crate::chat::access::guild(*guild_id))
+        }
+        // Instance roles never grant guild access.
+        _ => None,
+    };
+    let mut change = None;
+    let result = c.transaction(|c| {
+        let result = (|| {
         auth::read_session(c,token,&session)?;
         let actor = session.account_id;
         match command {
@@ -292,7 +302,14 @@ pub(super) fn dispatch(
                 }
             }
         }
-    })
+        })();
+        if result.is_ok() { change = scope.map(|scope| scope.pause()); }
+        result
+    });
+    if let Some(change) = change {
+        change.finish(result.is_ok());
+    }
+    result
 }
 
 fn change_guild(

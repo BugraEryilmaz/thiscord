@@ -419,7 +419,7 @@ or guild changes leave authorized calls connected. Lost session/channel access o
 a changed Speak grant closes only affected connections (Speak determines native
 microphone setup in the offer). Both publisher routing and receiver writes check
 the participant's validated generation using atomic media permits. Periodic DB
-checks run concurrently without taking the global chat/auth gate; guild snapshots
+checks run concurrently without taking chat delivery barriers; guild snapshots
 use compatible shared row locks. Checks overlapping an access change retry instead
 of publishing a stale grant. Only access-changing DB workers close media admission
 and drain in-flight application writes, retaining that guard through commit or

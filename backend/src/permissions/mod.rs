@@ -26,16 +26,6 @@ async fn handle(
     headers: HeaderMap,
     body: Result<Json<PermissionRequest>, JsonRejection>,
 ) -> Response {
-    let _access = crate::chat::gate().write().await;
-    let mutation = matches!(
-        &body,
-        Ok(Json(
-            PermissionRequest::Change { .. }
-                | PermissionRequest::JoinGuild { .. }
-                | PermissionRequest::TransferInstance { .. }
-                | PermissionRequest::SetInstanceAdmin { .. }
-        ))
-    );
     let result = async {
         let Json(command) = body.map_err(|_| Failure::Invalid("Invalid permission request"))?;
         let pool = pool.ok_or(Failure::Unavailable)?;
@@ -55,9 +45,6 @@ async fn handle(
         .map_err(|_| Failure::Unavailable)?
     }
     .await;
-    if mutation && result.is_ok() {
-        crate::chat::invalidate();
-    }
     let mut response = match result {
         Ok(body) => Json(body).into_response(),
         Err(error) => error.response(id),

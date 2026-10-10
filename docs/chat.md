@@ -96,9 +96,10 @@ There is no five-second HTTP unread poll or per-channel permissions-preview fetc
 User commands (send/edit/delete/read and loading older history) still use HTTP.
 
 Committed chat mutations wake a bounded/coalesced in-process watch channel.
-Subscribers recheck session/access under the access gate before reading and sending
-current unread counts and durable message events. Event batches are capped at 100
-and drained without waiting for a polling interval. Join/leave/typing transitions
+Subscribers capture account/guild access epochs before querying current sessions,
+permissions, unread counts and durable message events. Delivery admits only snapshots
+whose epochs remain current. No delivery permit is held during database work.
+Event batches are capped at 100 and drained without waiting for a polling interval. Join/leave/typing transitions
 also wake presence delivery; unchanged snapshots are not resent. Initial history
 and its event cursor are read under a shared channel lock that excludes channel writes. Reconnect subscribes again
 and reloads a fresh snapshot, recovering missed sends, edits and deletions.
@@ -117,19 +118,34 @@ Compatibility: existing installed clients can still begin with `authenticate`
 backend polling until those clients are upgraded. Deploy the updated backend before
 the new frontend. This change does not alter the HTTP message contracts.
 
-Successful permission/membership changes, channel deletion, session revocation,
-account deletion and rotation invalidate sockets immediately after commit. An
-access read/write gate prevents delivery racing these mutations. For this initial
-**single-backend-process** deployment, invalidation conservatively closes all
-sockets, including unaffected channels; eligible clients reconnect automatically.
-Rejected requests do not trigger invalidation, except a real token replay revoking
-an existing session. Multiple replicas need shared invalidation and are not supported.
+Successful permission/membership changes and channel deletion invalidate sockets
+subscribed to that guild. Session revocation, account deletion, rotation and login
+session eviction invalidate that account's sockets, including connections without
+a guild subscription. Account deletion also invalidates its former guilds because
+membership cascades change their state. Instance roles grant no guild access and do not revoke chat.
+Account/guild barriers drain already admitted socket sends before an access mutation
+can commit, and reject snapshots read across that mutation. Unrelated scopes keep
+serving HTTP and delivering chat. Socket sends remain bounded by deadlines.
+
+HTTP reads and chat writes do not acquire a process-wide access lock. Database
+transactions retain their account/guild locks and authoritative permission/revision
+checks. Access mutation guards and commit notifications live in blocking workers,
+so cancelling an HTTP request cannot release protection or skip invalidation.
+Rejected requests do not publish revocations, except real token replay revoking
+an existing session. Barriers pause only after successful authorization/writes,
+immediately before commit. A socket overlapping that commit may reconnect
+conservatively even if the database ultimately fails to commit. Eligible clients
+reconnect automatically. This remains a **single-backend-process** design; multiple replicas
+need shared invalidation and are not supported.
 
 ## Bounds
 
 - 4000 Unicode characters, excluding control codes other than newline/tab. Leptos
   inserts text nodes, never inner HTML.
 - HTTP bodies: 32 KiB. Socket frames/messages: 16 KiB.
+- Admission precedes database work and lock waits: 8 chat, 8 permission and 4
+  local account operations per process. Google discovery has a separate 4-request
+  budget and holds no access barrier during provider I/O. Excess requests return 429.
 - Per-account chat HTTP budget: 180 requests/minute, at most 30 writes.
 - 30 socket events per ten seconds; 128 live/pending sockets per process.
 - Database checkout/queries and socket writes have deadlines. Blocking Diesel
@@ -148,14 +164,17 @@ unread counts and channel events. Commit notifications currently wake all sessio
 sockets, which filter their subscribed state.
 Event-log compaction, cross-process fanout, full-guild presence and load tests are
 future work. Attachments, search and desktop notifications remain pending.
-Native voice uses a separate signaling socket and the same access gate; see [audio.md](audio.md).
+Native voice uses a separate signaling socket and media admission/drain mechanism;
+see [audio.md](audio.md).
 
 ## Checks
 
 Backend tests use random schemas in TEST_DATABASE_URL and cover concurrent send
 deduplication, revisions, pagination, mentions/read markers, isolation, content
 transport, socket authentication, origins, rate limits, heartbeats, live updates,
-reconnect snapshots, membership/channel revocation and logout. Run with
+reconnect snapshots, membership/channel revocation and logout. Concurrency tests
+hold account/guild rows to verify unrelated HTTP/socket progress, early overload
+rejection and revocation after HTTP cancellation. Run with
 `--include-ignored`. Shared tests cover wire versions and bounds. Browser smoke
 tests use isolated fixtures; native compilation does not establish cross-platform
 WebView runtime acceptance.

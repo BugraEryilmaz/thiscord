@@ -11,8 +11,7 @@ use thiscord_backend::{api, db, permissions};
 use thiscord_shared::{AccountId, permissions::*};
 use tower::ServiceExt;
 use uuid::Uuid;
-// The running backend deliberately invalidates all sockets on permission changes.
-// Keep independent database fixtures from invalidating each other's sockets.
+// Keep tests that intentionally fill process-wide admission budgets isolated.
 static TEST_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
 
 #[path = "chat/unread.rs"]
@@ -25,6 +24,9 @@ struct Database {
 }
 impl Drop for Database {
     fn drop(&mut self) {
+        if std::thread::panicking() {
+            self.connection.batch_execute("ROLLBACK").ok();
+        }
         self.connection
             .batch_execute(&format!("DROP SCHEMA {} CASCADE", self.schema))
             .unwrap();
@@ -826,4 +828,183 @@ async fn channel_writes_serialize_without_blocking_other_channels() {
     );
     writer.batch_execute("COMMIT").unwrap();
     assert_eq!(request.await.0, StatusCode::FORBIDDEN);
+}
+
+// Hold a real row lock and observe PostgreSQL's waiter list instead of relying
+// on a sleep to guess whether a request reached its critical section.
+async fn wait_for_blocked(c: &mut PgConnection, expected: i32) {
+    #[derive(QueryableByName)]
+    struct Count {
+        #[diesel(sql_type = diesel::sql_types::Integer)]
+        count: i32,
+    }
+    tokio::time::timeout(std::time::Duration::from_secs(3), async {
+        loop {
+            let row: Count = diesel::sql_query("WITH RECURSIVE blocked(pid) AS (SELECT pg_backend_pid() UNION SELECT a.pid FROM pg_stat_activity a JOIN blocked b ON b.pid = ANY(pg_blocking_pids(a.pid))) SELECT (count(*)-1)::integer AS count FROM blocked").get_result(c).unwrap();
+            if row.count >= expected { break; }
+            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        }
+    }).await.expect("requests did not reach the held row lock");
+}
+fn prepare_blocking_test(db: &mut Database) {
+    let mut connections: Vec<_> = (0..5).map(|_| db.pool.get().unwrap()).collect();
+    for c in &mut connections {
+        c.batch_execute("SET lock_timeout = '10s'; SET statement_timeout = '15s'")
+            .unwrap();
+    }
+    db.connection
+        .batch_execute(&format!("SET search_path = {}", db.schema))
+        .unwrap();
+}
+
+#[tokio::test]
+#[ignore = "requires TEST_DATABASE_URL; CI runs with --include-ignored"]
+async fn blocked_account_work_is_bounded_and_cancelled_logout_still_revokes() {
+    use std::time::Duration;
+    use thiscord_shared::account::ACCOUNT_PATH;
+    let _guard = TEST_LOCK.lock().await;
+    let mut db = database();
+    let (app, owner, guest, _, state, channel) = setup(&db).await;
+    prepare_blocking_test(&mut db);
+    let guild = state["guild"]["id"].clone();
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let address = listener.local_addr().unwrap();
+    let server = tokio::spawn(axum::serve(listener, app.clone()).into_future());
+    let mut owner_socket = session_socket(address, &owner).await;
+    event(&mut owner_socket, "authenticated").await;
+    let mut guest_socket = session_socket(address, &guest).await;
+    event(&mut guest_socket, "authenticated").await;
+    subscribe(&mut guest_socket, 1, guild.clone(), channel.clone()).await;
+    db.connection
+        .batch_execute("BEGIN; SELECT id FROM accounts WHERE username='owner' FOR UPDATE")
+        .unwrap();
+    let app_copy = app.clone();
+    let token = owner.clone();
+    let logout = tokio::spawn(async move {
+        call(&app_copy, ACCOUNT_PATH, &token, json!({"action":"logout"})).await
+    });
+    wait_for_blocked(&mut db.connection, 1).await;
+    tokio::time::timeout(Duration::from_secs(2), async {
+        assert_eq!(call(&app, ACCOUNT_PATH, &guest, json!({"action":"current"})).await.0, StatusCode::OK);
+        command(&app, &guest, json!({"action":"view_guild","guild_id":guild}), StatusCode::OK).await;
+        chat(&app, &guest, json!({"action":"send","guild_id":guild,"channel_id":channel,"client_id":Uuid::new_v4(),"content":"unrelated account remains live"}), StatusCode::OK).await;
+        assert_eq!(pushed(&mut guest_socket, 1, "message").await["message"]["content"], "unrelated account remains live");
+    }).await.expect("an account mutation blocked unrelated HTTP or socket delivery");
+    // All four local account workers wait on the same account; excess requests
+    // must fail admission immediately rather than joining an unbounded queue.
+    let mut waiting = Vec::new();
+    for _ in 0..3 {
+        let app = app.clone();
+        let token = owner.clone();
+        waiting.push(tokio::spawn(async move {
+            call(&app, ACCOUNT_PATH, &token, json!({"action":"current"})).await
+        }));
+    }
+    wait_for_blocked(&mut db.connection, 4).await;
+    let limited = tokio::time::timeout(
+        Duration::from_millis(500),
+        call(&app, ACCOUNT_PATH, &guest, json!({"action":"current"})),
+    )
+    .await
+    .expect("admission waited behind row locks");
+    assert_eq!(limited.0, StatusCode::TOO_MANY_REQUESTS);
+    logout.abort();
+    let _ = logout.await;
+    db.connection.batch_execute("COMMIT").unwrap();
+    event(&mut owner_socket, "revoked").await;
+    for task in waiting {
+        let _ = task.await.unwrap();
+    }
+    chat(&app, &guest, json!({"action":"send","guild_id":guild,"channel_id":channel,"client_id":Uuid::new_v4(),"content":"unrelated socket survives commit"}), StatusCode::OK).await;
+    assert_eq!(
+        pushed(&mut guest_socket, 1, "message").await["message"]["content"],
+        "unrelated socket survives commit"
+    );
+    owner_socket.close(None).await.ok();
+    guest_socket.close(None).await.ok();
+    server.abort();
+    let _ = server.await;
+}
+
+#[tokio::test]
+#[ignore = "requires TEST_DATABASE_URL; CI runs with --include-ignored"]
+async fn blocked_guild_change_preserves_other_guild_delivery_before_and_after_commit() {
+    use std::time::Duration;
+    let _guard = TEST_LOCK.lock().await;
+    let mut db = database();
+    let (app, owner, guest, _, state, channel) = setup(&db).await;
+    prepare_blocking_test(&mut db);
+    let other = command(
+        &app,
+        &owner,
+        json!({"action":"create_guild","name":"other"}),
+        StatusCode::OK,
+    )
+    .await["state"]
+        .clone();
+    let guild = state["guild"]["id"].clone();
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let address = listener.local_addr().unwrap();
+    let server = tokio::spawn(axum::serve(listener, app.clone()).into_future());
+    let mut socket = session_socket(address, &guest).await;
+    event(&mut socket, "authenticated").await;
+    subscribe(&mut socket, 1, guild.clone(), channel.clone()).await;
+    let mut affected = session_socket(address, &owner).await;
+    event(&mut affected, "authenticated").await;
+    subscribe(&mut affected, 1, other["guild"]["id"].clone(), Value::Null).await;
+    db.connection.batch_execute("BEGIN").unwrap();
+    diesel::sql_query("SELECT id FROM guilds WHERE id=$1::uuid FOR UPDATE")
+        .bind::<Text, _>(other["guild"]["id"].as_str().unwrap())
+        .execute(&mut db.connection)
+        .unwrap();
+    let app_copy = app.clone();
+    let token = owner.clone();
+    let mutation = tokio::spawn(async move {
+        command(&app_copy, &token, json!({"action":"change","guild_id":other["guild"]["id"],"revision":other["guild"]["revision"],"change":{"action":"rename","name":"changed"}}), StatusCode::OK).await
+    });
+    wait_for_blocked(&mut db.connection, 1).await;
+    tokio::time::timeout(Duration::from_secs(2), async {
+        command(&app, &guest, json!({"action":"view_guild","guild_id":guild}), StatusCode::OK).await;
+        chat(&app, &guest, json!({"action":"send","guild_id":guild,"channel_id":channel,"client_id":Uuid::new_v4(),"content":"other guild is live"}), StatusCode::OK).await;
+        pushed(&mut socket, 1, "message").await;
+    }).await.expect("guild mutation blocked an unrelated guild");
+    db.connection.batch_execute("COMMIT").unwrap();
+    mutation.await.unwrap();
+    event(&mut affected, "revoked").await;
+    chat(&app, &guest, json!({"action":"send","guild_id":guild,"channel_id":channel,"client_id":Uuid::new_v4(),"content":"still subscribed"}), StatusCode::OK).await;
+    assert_eq!(
+        pushed(&mut socket, 1, "message").await["message"]["content"],
+        "still subscribed"
+    );
+    socket.close(None).await.ok();
+    affected.close(None).await.ok();
+    server.abort();
+    let _ = server.await;
+}
+
+#[tokio::test]
+#[ignore = "requires TEST_DATABASE_URL; CI runs with --include-ignored"]
+async fn moderation_foreign_keys_do_not_deadlock_with_pending_history() {
+    let _guard = TEST_LOCK.lock().await;
+    let mut db = database();
+    let (app, _, guest, guest_id, state, channel) = setup(&db).await;
+    prepare_blocking_test(&mut db);
+    let guild = state["guild"]["id"].as_str().unwrap().to_owned();
+    db.connection
+        .batch_execute("BEGIN; SET LOCAL statement_timeout = '2s'")
+        .unwrap();
+    diesel::sql_query("SELECT id FROM guilds WHERE id=$1::uuid FOR UPDATE")
+        .bind::<Text, _>(&guild)
+        .execute(&mut db.connection)
+        .unwrap();
+    let request = json!({"action":"history","guild_id":guild,"channel_id":channel});
+    let history = tokio::spawn(async move { chat(&app, &guest, request, StatusCode::OK).await });
+    wait_for_blocked(&mut db.connection, 1).await;
+    // History holds its account lock while waiting for the guild. A moderator
+    // holding that guild must still be able to reference the target account.
+    diesel::sql_query("INSERT INTO guild_moderation(guild_id,account_id,voice_revision) VALUES($1::uuid,$2::uuid,1)")
+        .bind::<Text,_>(&guild).bind::<Text,_>(guest_id.to_string()).execute(&mut db.connection)
+        .expect("moderation foreign key blocked behind the waiting reader's account lock");
+    db.connection.batch_execute("COMMIT").unwrap();
+    history.await.unwrap();
 }

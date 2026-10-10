@@ -105,6 +105,15 @@ pub(crate) struct Session {
     pub reauthenticated_at: Option<DateTime<Utc>>,
 }
 
+/// Resolve a barrier key only; callers must still authenticate after capturing its epoch.
+pub(crate) fn token_account(c: &mut PgConnection, token: &str) -> Result<AccountId, Failure> {
+    if token.len() != 43 {
+        return Err(Failure::Unauthorized);
+    }
+    query(c, "SELECT to_jsonb(s.account_id) AS data FROM sessions s JOIN session_tokens t ON t.session_id=s.id WHERE t.token_hash=$1", &[&digest(token)])?
+        .pop().ok_or(Failure::Unauthorized)
+}
+
 pub(crate) fn authenticate(c: &mut PgConnection, token: &str) -> Result<Session, Failure> {
     if token.len() != 43 {
         return Err(Failure::Unauthorized);
@@ -119,7 +128,7 @@ pub(crate) fn authenticate(c: &mut PgConnection, token: &str) -> Result<Session,
         return Ok(session);
     }
     // Commit replay revocation even though authentication itself fails.
-    let mut replay_revoked = false;
+    let mut chat_change = None;
     let mut _voice_revocation = None;
     let session=c.transaction::<_, Failure, _>(|c| {
         let sessions: Vec<Session> = query(c, "SELECT to_jsonb(s) AS data FROM sessions s JOIN session_tokens t ON t.session_id=s.id WHERE t.token_hash=$1 AND NOT s.revoked AND s.expires_at>now() AND s.last_seen_at>now()-interval '7 days' FOR UPDATE OF s", &[&hash])?;
@@ -128,14 +137,14 @@ pub(crate) fn authenticate(c: &mut PgConnection, token: &str) -> Result<Session,
         if active != [true] {
             _voice_revocation = Some(crate::voice::access::global().pause());
             execute(c, "UPDATE sessions SET revoked=TRUE WHERE id=$1::uuid", &[&session.id.to_string()])?;
-            replay_revoked=true;
+            chat_change = Some(crate::chat::access::account(session.account_id).pause());
             return Ok(None);
         }
         execute(c, "UPDATE sessions SET last_seen_at=now() WHERE id=$1::uuid AND last_seen_at<=now()-interval '5 minutes'", &[&session.id.to_string()])?;
         Ok(Some(session))
     })?;
-    if replay_revoked {
-        crate::chat::invalidate();
+    if let Some(change) = chat_change {
+        change.finish(true);
     }
     session.ok_or(Failure::Unauthorized)
 }
@@ -144,10 +153,13 @@ pub(crate) fn lock_session(
     token: &str,
     session: &Session,
 ) -> Result<(), Failure> {
-    // Serialize all account mutations, including linking, deletion and password reset.
+    // Serialize account operations, while allowing foreign-key KEY SHARE locks.
+    // A guild moderator may reference another account while that account waits
+    // for this guild. FOR UPDATE here would invert their lock order and deadlock.
+    // Deletion takes its stronger row lock only after locking affected guilds.
     execute(
         c,
-        "SELECT id FROM accounts WHERE id=$1::uuid FOR UPDATE",
+        "SELECT id FROM accounts WHERE id=$1::uuid FOR NO KEY UPDATE",
         &[&session.account_id.to_string()],
     )?;
     let valid: Vec<bool> = query(
@@ -385,12 +397,19 @@ pub(super) fn dispatch(
             }
             // A successful login can evict the oldest device session.
             let _voice_change = crate::voice::access::global().pause();
-            c.transaction(|c| {
+            let mut change = None;
+            let result = c.transaction(|c| {
                 execute(c,"SELECT id FROM accounts WHERE id=$1::uuid FOR UPDATE", &[&credential.account_id.to_string()])?;
                 let unchanged: Vec<bool> = query(c,"SELECT to_jsonb(TRUE) AS data FROM identities WHERE account_id=$1::uuid AND provider='password' AND password_hash=$2", &[&credential.account_id.to_string(), &credential.password_hash])?;
                 if unchanged.is_empty() { return Err(Failure::Unauthorized); }
-                grant(c,credential.account_id,&name)
-            })
+                let response = grant(c,credential.account_id,&name)?;
+                change = Some(crate::chat::access::account(credential.account_id).pause());
+                Ok(response)
+            });
+            if let Some(change) = change {
+                change.finish(result.is_ok());
+            }
+            result
         }
         AccountRequest::ForgotPassword { email: address } => {
             let address = email(&address)?;
@@ -421,7 +440,21 @@ pub(super) fn dispatch(
         }
         command => {
             let session = authenticate(&mut c, token)?;
-            c.transaction(|c| {
+            let scope = matches!(
+                &command,
+                AccountRequest::Logout
+                    | AccountRequest::LogoutAll
+                    | AccountRequest::RevokeSession { .. }
+                    | AccountRequest::DeleteAccount { .. }
+                    | AccountRequest::ChangePassword { .. }
+                    | AccountRequest::UnlinkIdentity { .. }
+                    | AccountRequest::Rotate
+            )
+            .then(|| crate::chat::access::account(session.account_id));
+            let mut changes = Vec::new();
+            let result = c.transaction(|c| {
+                let mut guild_scopes = Vec::new();
+                let result = (|| {
                 if matches!(command, AccountRequest::Current | AccountRequest::Sessions) {
                     read_session(c,token,&session)?;
                 } else {
@@ -476,13 +509,24 @@ pub(super) fn dispatch(
                         if owns == [true] { return Err(Failure::Invalid("Transfer instance ownership and transfer or delete owned guilds before deleting your account")); }
                         // Membership cascades also invalidate editor revisions. Lock in UUID order.
                         execute(c,"SELECT id FROM guilds WHERE id IN (SELECT guild_id FROM guild_members WHERE account_id=$1::uuid) ORDER BY id FOR UPDATE", &[&id.to_string()])?;
+                        let guilds: Vec<thiscord_shared::GuildId> = query(c,"SELECT to_jsonb(guild_id) AS data FROM guild_members WHERE account_id=$1::uuid ORDER BY guild_id", &[&id.to_string()])?;
+                        guild_scopes.extend(guilds.into_iter().map(crate::chat::access::guild));
                         execute(c,"UPDATE guilds SET revision=revision+1 WHERE id IN (SELECT guild_id FROM guild_members WHERE account_id=$1::uuid)", &[&id.to_string()])?;
                         execute(c,"DELETE FROM accounts WHERE id=$1::uuid", &[&id.to_string()])?;
                         Ok(done("Account and credentials permanently deleted"))
                     }
                     _ => Err(Failure::Invalid("Unsupported operation")),
                 }
-            })
+                })();
+                if result.is_ok() {
+                    changes.extend(scope.into_iter().chain(guild_scopes).map(|scope| scope.pause()));
+                }
+                result
+            });
+            for change in changes {
+                change.finish(result.is_ok());
+            }
+            result
         }
     }
 }
@@ -517,17 +561,23 @@ fn consume_code(
     code: &str,
     hash: Option<String>,
 ) -> Result<AccountResponse, Failure> {
-    c.transaction(|c| {
+    let mut change = None;
+    let result = c.transaction(|c| {
         let purpose = if hash.is_some() {"reset"} else {"verify"};
         let ids: Vec<AccountId> = query(c,"SELECT to_jsonb(a.id) AS data FROM accounts a JOIN account_codes t ON t.account_id=a.id WHERE t.token_hash=$1 AND t.purpose=$2 AND t.expires_at>now() FOR UPDATE OF a", &[&digest(code),purpose])?;
         let id = *ids.first().ok_or(Failure::Unauthorized)?;
         if execute(c,"DELETE FROM account_codes WHERE token_hash=$1 AND expires_at>now()", &[&digest(code)])?!=1 { return Err(Failure::Unauthorized); }
         if let Some(hash) = hash {
             set_password(c,id,&hash)?; revoke_all(c,id)?;
+            change = Some(crate::chat::access::account(id).pause());
             Ok(done("Password reset. Sign in again"))
         } else {
             execute(c,"UPDATE accounts SET email_verified=TRUE WHERE id=$1::uuid", &[&id.to_string()])?;
             Ok(done("Email verified"))
         }
-    })
+    });
+    if let Some(change) = change {
+        change.finish(result.is_ok());
+    }
+    result
 }
