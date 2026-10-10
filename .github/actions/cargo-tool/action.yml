@@ -19,11 +19,25 @@ runs:
       env:
         TOOL_CRATE: ${{ inputs.crate }}
         TOOL_VERSION: ${{ inputs.version }}
+        TOOL_ARGS: ${{ inputs.args }}
+        TOOL_PLATFORM: ${{ runner.os }}-${{ runner.arch }}
+        TOOL_CHAIN: ${{ hashFiles('rust-toolchain.toml') }}
       run: |
+        $ErrorActionPreference = 'Stop'
         $root = Join-Path $env:RUNNER_TEMP "thiscord-tools/$env:TOOL_CRATE-$env:TOOL_VERSION"
+        $local = $env:THISCORD_LOCAL_CACHE -eq 'true'
+        if ($local) {
+          $scope = "$env:TOOL_PLATFORM/$env:TOOL_CRATE/$env:TOOL_VERSION/$env:TOOL_CHAIN/$env:TOOL_ARGS"
+          $sha = [System.Security.Cryptography.SHA256]::Create()
+          $hash = [BitConverter]::ToString($sha.ComputeHash([Text.Encoding]::UTF8.GetBytes($scope))).Replace('-', '').ToLowerInvariant()
+          $sha.Dispose()
+          $root = Join-Path (Split-Path $env:RUNNER_TEMP -Parent) "thiscord-tools/$hash"
+        }
         "root=$root" >> $env:GITHUB_OUTPUT
+        "local=$($local.ToString().ToLowerInvariant())" >> $env:GITHUB_OUTPUT
         (Join-Path $root 'bin') >> $env:GITHUB_PATH
     - uses: actions/cache@v4
+      if: steps.directory.outputs.local != 'true'
       with:
         path: ${{ steps.directory.outputs.root }}
         key: cargo-tool-${{ runner.os }}-${{ runner.arch }}-${{ inputs.crate }}-${{ inputs.version }}-${{ hashFiles('rust-toolchain.toml') }}-${{ inputs.args }}

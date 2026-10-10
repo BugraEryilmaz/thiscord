@@ -1,3 +1,9 @@
+[build]
+# Cargo 1.98 keeps final binaries in each checkout's target directory, while
+# dependencies, build-script output and incremental state are shared per user/OS.
+# CI overrides this with its own runner slot; see docs/ci.md.
+build-dir = "{cargo-cache-home}/thiscord"
+
 [env]
 # Leptos macro-heavy debug builds can exceed rustc's default Windows stack.
 RUST_MIN_STACK = "16777216"

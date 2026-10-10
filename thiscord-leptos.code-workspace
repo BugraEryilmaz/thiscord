@@ -7,19 +7,17 @@
     "rust-analyzer.cargo.target": "wasm32-unknown-unknown",
     "rust-analyzer.cargo.features": [],
     "rust-analyzer.cargo.noDefaultFeatures": true,
-    "rust-analyzer.cargo.targetDir": "target/rust-analyzer-leptos",
+    "rust-analyzer.cargo.targetDir": false,
     "rust-analyzer.cargo.buildScripts.overrideCommand": [
       "cargo", "check", "--locked",
       "--package", "thiscord-frontend", "--bin", "thiscord-ui",
       "--target", "wasm32-unknown-unknown", "--no-default-features",
-      "--target-dir", "target/rust-analyzer-leptos",
       "--message-format=json"
     ],
     "rust-analyzer.check.overrideCommand": [
       "cargo", "check", "--locked",
       "--package", "thiscord-frontend", "--bin", "thiscord-ui",
       "--target", "wasm32-unknown-unknown", "--no-default-features",
-      "--target-dir", "target/rust-analyzer-leptos",
       "--message-format=json"
     ]
   },

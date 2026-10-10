@@ -13,6 +13,7 @@ docker run --rm --init --user "$(id -u):$(id -g)" \
     --mount "type=bind,source=$root,target=/workspace" \
     --mount "type=bind,source=$CARGO_TARGET_DIR,target=/cache" \
     -e HOME=/tmp -e CARGO_HOME=/cache/cargo-home -e CARGO_TARGET_DIR=/cache/target \
+    -e CARGO_BUILD_BUILD_DIR=/cache/target \
     -e "CARGO_BUILD_JOBS=${CARGO_BUILD_JOBS:-2}" \
     -e THISCORD_API_URL -e RELEASE_TAG -e GITHUB_REPOSITORY \
     -e TAURI_SIGNING_PRIVATE_KEY -e TAURI_SIGNING_PRIVATE_KEY_PASSWORD \

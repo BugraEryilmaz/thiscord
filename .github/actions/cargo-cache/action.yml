@@ -5,8 +5,8 @@ inputs:
     description: Distinct build job and platform identifier
     required: true
   local-group:
-    description: Compatible self-hosted jobs may share this group on one runner
-    default: ''
+    description: Build environment (native or ubuntu24-container), not a job or PR identifier
+    default: native
 runs:
   using: composite
   steps:
@@ -17,17 +17,20 @@ runs:
         CACHE_GROUP: ${{ inputs.local-group }}
         CACHE_REPOSITORY: ${{ github.repository }}
         CACHE_RUNNER: ${{ runner.name }}
+        CACHE_OS: ${{ runner.os }}
+        CACHE_ARCH: ${{ runner.arch }}
         CACHE_ENVIRONMENT: ${{ runner.environment }}
-        CACHE_PR: ${{ github.event.pull_request.number }}
         CACHE_DISABLED: ${{ env.THISCORD_DISABLE_LOCAL_CACHE }}
       run: |
+        $ErrorActionPreference = 'Stop'
         $local = $env:CACHE_ENVIRONMENT -eq 'self-hosted' -and $env:CACHE_DISABLED -ne 'true'
         $target = Join-Path $env:GITHUB_WORKSPACE 'target'
         if ($local) {
-          # GitHub runs one job at a time per runner service. Compatible jobs
-          # share artifacts; separate runners and PRs retain distinct directories.
-          $group = if ($env:CACHE_GROUP) { $env:CACHE_GROUP } else { $env:CACHE_JOB }
-          $scope = "$env:CACHE_REPOSITORY/$env:CACHE_RUNNER/$group/pr-$env:CACHE_PR"
+          # One job at a time per runner service: reuse the same slot across PRs
+          # and compatible jobs. Keep container/native ABIs and runners separate.
+          $group = if ($env:CACHE_GROUP) { $env:CACHE_GROUP } else { 'native' }
+          if ($group -notin @('native', 'ubuntu24-container')) { throw "Unknown build environment: $group" }
+          $scope = "$env:CACHE_REPOSITORY/$env:CACHE_RUNNER/$env:CACHE_OS/$env:CACHE_ARCH/$group/v2"
           $sha = [System.Security.Cryptography.SHA256]::Create()
           $hash = [BitConverter]::ToString($sha.ComputeHash([Text.Encoding]::UTF8.GetBytes($scope))).Replace('-', '').ToLowerInvariant()
           $sha.Dispose()
@@ -37,7 +40,15 @@ runs:
           $target = Join-Path (Split-Path $env:RUNNER_TEMP -Parent) $relative
         }
         New-Item -ItemType Directory -Force -Path $target | Out-Null
+        if ($local) {
+          # The cleanup tool preserves all current slots, including idle ones.
+          @{ version = 2; scope = $scope } | ConvertTo-Json |
+            Set-Content -LiteralPath (Join-Path $target 'thiscord-cache.json')
+        }
         "CARGO_TARGET_DIR=$target" >> $env:GITHUB_ENV
+        # Override the repository's development cache. Hosted cache restore/save
+        # must include intermediates too; target-dir alone no longer controls them.
+        "CARGO_BUILD_BUILD_DIR=$target" >> $env:GITHUB_ENV
         "THISCORD_LOCAL_CACHE=$($local.ToString().ToLowerInvariant())" >> $env:GITHUB_ENV
         Write-Output "Cargo target directory: $target (persistent: $local)"
     - uses: Swatinem/rust-cache@v2

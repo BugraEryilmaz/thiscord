@@ -95,6 +95,10 @@
 ## Development
 
 - Use pinned Rust and commit the root Cargo.lock. Separate Windows/WSL target dirs.
+- Reuse the `.cargo/config.toml` shared intermediate build directory; do not create
+  per-task/per-PR compiler caches. CI must set both `CARGO_TARGET_DIR` and
+  `CARGO_BUILD_BUILD_DIR` to its stable runner slot. See `docs/ci.md` for parallel
+  development slots and idle-only cleanup. Keep each checkout's final outputs separate.
 - Keep the Leptos and native VS Code workspaces separate: WASM analysis/checks
   must select only `thiscord-ui`; native analysis enables the Tauri `desktop`
   feature. Match build-script and on-save check commands when changing either.

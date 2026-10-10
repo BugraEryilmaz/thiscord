@@ -282,16 +282,21 @@ code --new-window thiscord-native.code-workspace
 
 Both show the repository root so workspace manifests and documentation remain
 accessible. Their analysis targets are intentionally different; edit the UI in
-the Leptos window. Build output is separated under `target/rust-analyzer-leptos`
-and `target/rust-analyzer-native`. These editor settings do not change Trunk,
-Tauri or normal terminal Cargo commands.
+the Leptos window. Both editors, Trunk, Tauri and terminal Cargo builds share the
+intermediate cache configured in `.cargo/config.toml`: `${CARGO_HOME}/thiscord`
+(normally `~/.cargo/thiscord`). Final executables stay in each checkout's `target`
+directory. This prevents a full compiler cache per T3 worktree or editor window.
+Cargo serializes builds using that cache. See [build cache configuration](docs/ci.md)
+for fixed parallel slots, CI isolation and preview-only legacy cleanup.
 
 Native checks require Tauri platform dependencies and PostgreSQL client development
 libraries on the host running rust-analyzer. The backend still runs in WSL as
 documented above. When opening the native workspace in WSL, install Linux Tauri
 dependencies as well, since that workspace checks the launcher too. If using
-both Windows and WSL, use separate checkouts or set WSL's `CARGO_TARGET_DIR` and
-adjust the native workspace's target-directory settings to a Linux-only path.
+both Windows and WSL, use separate Cargo homes and set WSL's `CARGO_TARGET_DIR`
+to a Linux-only path for final outputs, as shown above. The intermediate cache
+automatically follows the host's Cargo home; no editor target-directory override
+is needed.
 
 After switching workspaces, run **rust-analyzer: Restart server** if diagnostics
 from the previous target remain. The original `thiscord.code-workspace` is
