@@ -57,13 +57,23 @@ impl Sender {
     ) -> Result<(), ()> {
         if delivery.source != source.source_id
             || !delivery.source_active.load(Ordering::Acquire)
-            || delivery.epoch != receiver.generation.load(Ordering::Acquire)
+            || delivery.epoch != source.generation.load(Ordering::Acquire)
+            || delivery.receiver_epoch != receiver.generation.load(Ordering::Acquire)
             || (self.kind != MediaKind::Microphone
                 && delivery.packet.header.csrc.first().copied() != Some(source.info.screen_epoch))
             || !viewing::receives(receiver, source, self.kind, delivery.queued_at)
         {
             return Ok(());
         }
+        let Some(_permits) = delivery_permits(
+            &source.access,
+            delivery.epoch,
+            &receiver.access,
+            delivery.receiver_epoch,
+            receiver.generation.load(Ordering::Acquire),
+        ) else {
+            return Ok(());
+        };
         self.try_send(delivery)
     }
 
@@ -110,6 +120,7 @@ where
 }
 
 pub(super) struct Writer {
+    pub access: Arc<access::Access>,
     pub room: Arc<Room>,
     pub receiver_slot: usize,
     pub active: Arc<AtomicBool>,
@@ -130,6 +141,8 @@ impl Writer {
         while let Some(Queued { delivery, _bytes }) = rx.recv().await {
             let Delivery {
                 epoch,
+                receiver_epoch,
+                source_access,
                 slot,
                 source,
                 source_active,
@@ -187,7 +200,15 @@ impl Writer {
                 deadline.into(),
                 authorized_write(
                     &self.room,
-                    || access::global().packet(epoch, self.generation.load(Ordering::Acquire)),
+                    || {
+                        delivery_permits(
+                            &source_access,
+                            epoch,
+                            &self.access,
+                            receiver_epoch,
+                            self.generation.load(Ordering::Acquire),
+                        )
+                    },
                     |members| {
                         Instant::now() < deadline
                             && self.active.load(Ordering::Acquire)
@@ -303,13 +324,13 @@ mod tests {
                 let (writer, source, _) = fixture().await;
                 let (tx, mut rx) = channel(kind);
                 let budget = tx.bytes.available_permits();
-                forward(&writer.room, &tx, delivery(kind, source, 100)).await;
+                forward(&writer.room, &tx, delivery(kind, &source, 100)).await;
                 drop(rx.try_recv().expect("active viewer must be admitted"));
                 assert_eq!(tx.bytes.available_permits(), budget);
                 change_viewer(&writer.room, change).await;
                 // Timestamp after the mutation: restart must check the wire epoch,
                 // not just whether there is now a viewer for this slot.
-                forward(&writer.room, &tx, delivery(kind, source, 100)).await;
+                forward(&writer.room, &tx, delivery(kind, &source, 100)).await;
                 if kind == MediaKind::Microphone {
                     drop(rx.try_recv().expect("microphone must remain independent"));
                 } else {
@@ -321,7 +342,7 @@ mod tests {
                     "filtered packets reserved bytes"
                 );
                 subscribe(&writer.room).await;
-                let mut fresh = delivery(kind, source, 100);
+                let mut fresh = delivery(kind, &source, 100);
                 fresh.packet.header.csrc =
                     vec![writer.room.members.read().await[&1].info.screen_epoch];
                 forward(&writer.room, &tx, fresh).await;
@@ -347,7 +368,7 @@ mod tests {
                 let active = writer.active.clone();
                 let (tx, rx) = channel(kind);
                 let budget = tx.bytes.available_permits();
-                forward(&room, &tx, delivery(kind, source, 100)).await;
+                forward(&room, &tx, delivery(kind, &source, 100)).await;
                 let (sent, mut received) = mpsc::unbounded_channel();
                 let mut run = std::pin::pin!(tokio::task::unconstrained(writer.run(
                     kind,
@@ -412,7 +433,7 @@ mod tests {
                 if matches!(change, ViewerChange::Restart) && kind != MediaKind::Microphone {
                     // Bypass admission to exercise the final transport epoch check
                     // with a new queue timestamp and a valid replacement viewer.
-                    tx.try_send(delivery(kind, source, 100)).unwrap();
+                    tx.try_send(delivery(kind, &source, 100)).unwrap();
                     assert!(futures_util::poll!(run.as_mut()).is_pending());
                     assert!(
                         received.try_recv().is_err(),
@@ -421,7 +442,7 @@ mod tests {
                     assert_eq!(tx.bytes.available_permits(), budget);
                 }
                 subscribe(&room).await;
-                let mut fresh = delivery(kind, source, 100);
+                let mut fresh = delivery(kind, &source, 100);
                 let epoch = room.members.read().await[&1].info.screen_epoch;
                 fresh.packet.header.csrc = vec![epoch];
                 forward(&room, &tx, fresh).await;
@@ -434,11 +455,32 @@ mod tests {
         }
     }
 
-    fn delivery(kind: MediaKind, source: uuid::Uuid, size: usize) -> Delivery {
+    struct Source {
+        id: uuid::Uuid,
+        identity: access::Identity,
+        access: Arc<access::Access>,
+        generation: Arc<AtomicU64>,
+    }
+    fn source() -> Source {
+        let identity = access::Identity {
+            account: thiscord_shared::AccountId::from_uuid(uuid::Uuid::new_v4()),
+            session: thiscord_shared::SessionId::from_uuid(uuid::Uuid::new_v4()),
+            guild: None,
+        };
+        Source {
+            id: uuid::Uuid::new_v4(),
+            identity,
+            access: access::register(identity),
+            generation: Arc::new(AtomicU64::new(0)),
+        }
+    }
+    fn delivery(kind: MediaKind, source: &Source, size: usize) -> Delivery {
         Delivery {
-            epoch: access::global().snapshot().unwrap(),
+            epoch: source.generation.load(Ordering::Acquire),
+            receiver_epoch: 0,
+            source_access: source.access.clone(),
             slot: kind.track_index(1),
-            source,
+            source: source.id,
             source_active: Arc::new(AtomicBool::new(true)),
             packet: rtp::Packet {
                 header: rtp::header::Header {
@@ -454,21 +496,22 @@ mod tests {
         }
     }
 
-    async fn fixture() -> (Writer, uuid::Uuid, mpsc::Receiver<u32>) {
+    async fn fixture() -> (Writer, Source, mpsc::Receiver<u32>) {
         let room = Arc::new(Room::default());
-        let source = uuid::Uuid::new_v4();
-        let epoch = access::global().snapshot().unwrap();
+        let source = source();
+        let receiver = self::source();
         let active = Arc::new(AtomicBool::new(true));
-        let generation = Arc::new(AtomicU64::new(epoch));
+        let generation = receiver.generation.clone();
         let metrics = Arc::new(std::array::from_fn(|_| AtomicU64::new(0)));
         let (keyframes, rx) = mpsc::channel(1);
         for slot in 0..2 {
+            let endpoint = if slot == 0 { &receiver } else { &source };
             room.members.write().await.insert(
                 slot,
                 Member {
                     network: Arc::new(RwLock::new(Default::default())),
                     info: Participant {
-                        account_id: uuid::Uuid::new_v4().to_string().parse().unwrap(),
+                        account_id: endpoint.identity.account,
                         username: "test".into(),
                         display_name: String::new(),
                         avatar_id: None,
@@ -480,7 +523,7 @@ mod tests {
                         sharing_audio: true,
                         screen_epoch: 7,
                     },
-                    source_id: source,
+                    source_id: endpoint.id,
                     screen_started: Instant::now(),
                     outgoing: MediaKind::ALL.map(|kind| channel(kind).0),
                     keyframes: keyframes.clone(),
@@ -488,7 +531,8 @@ mod tests {
                     feedback_enabled: true,
                     subscriptions_enabled: true,
                     views: [None; ROOM_CAPACITY],
-                    generation: generation.clone(),
+                    generation: endpoint.generation.clone(),
+                    access: endpoint.access.clone(),
                     active: active.clone(),
                     metrics: metrics.clone(),
                 },
@@ -510,6 +554,7 @@ mod tests {
         );
         (
             Writer {
+                access: receiver.access,
                 room,
                 receiver_slot: 0,
                 active,
@@ -523,6 +568,7 @@ mod tests {
 
     fn clone_writer(writer: &Writer) -> Writer {
         Writer {
+            access: writer.access.clone(),
             room: writer.room.clone(),
             receiver_slot: writer.receiver_slot,
             active: writer.active.clone(),
@@ -548,7 +594,7 @@ mod tests {
             async move { driver.send(2).await.map_err(|_| ()) }
         }));
         video_tx
-            .try_send(delivery(MediaKind::ScreenVideo, source, 1000))
+            .try_send(delivery(MediaKind::ScreenVideo, &source, 1000))
             .unwrap();
         tokio::time::timeout(Duration::from_secs(1), feedback.recv())
             .await
@@ -572,7 +618,7 @@ mod tests {
             }
         }));
         mic_tx
-            .try_send(delivery(MediaKind::Microphone, source, 100))
+            .try_send(delivery(MediaKind::Microphone, &source, 100))
             .unwrap();
         waiting.recv().await.unwrap();
         assert_eq!(received.recv().await, Some(0));
@@ -585,7 +631,7 @@ mod tests {
 
         tokio::time::sleep(SCREEN_BACKOFF + Duration::from_millis(5)).await;
         video_tx
-            .try_send(delivery(MediaKind::ScreenVideo, source, 1000))
+            .try_send(delivery(MediaKind::ScreenVideo, &source, 1000))
             .unwrap();
         assert_eq!(
             tokio::time::timeout(Duration::from_secs(1), received.recv())
@@ -620,7 +666,7 @@ mod tests {
             let (writer, source, mut feedback) = fixture().await;
             let active = writer.active.clone();
             let (tx, rx) = channel(kind);
-            tx.try_send(delivery(kind, source, 100)).unwrap();
+            tx.try_send(delivery(kind, &source, 100)).unwrap();
             drop(tx);
             writer.run(kind, rx, |_, _| async { Err(()) }).await;
             assert_eq!(
@@ -636,15 +682,15 @@ mod tests {
     #[tokio::test]
     async fn byte_packet_and_age_budgets_release_on_drop_close_and_cancel() {
         for kind in MediaKind::ALL {
-            let source = uuid::Uuid::new_v4();
+            let source = source();
             let (tx, mut rx) = channel(kind);
             let budget = tx.bytes.available_permits();
-            let mut stale = delivery(kind, source, 1);
+            let mut stale = delivery(kind, &source, 1);
             stale.queued_at -= max_age(kind);
             assert!(tx.try_send(stale).is_err());
-            assert!(tx.try_send(delivery(kind, source, budget)).is_err());
+            assert!(tx.try_send(delivery(kind, &source, budget)).is_err());
             let mut accepted = 0;
-            while tx.try_send(delivery(kind, source, 1500)).is_ok() {
+            while tx.try_send(delivery(kind, &source, 1500)).is_ok() {
                 accepted += 1;
             }
             assert!(accepted > 0);
@@ -654,7 +700,7 @@ mod tests {
             );
             let in_flight = rx.recv().await.unwrap();
             assert!(
-                tx.try_send(delivery(kind, source, 1500)).is_err(),
+                tx.try_send(delivery(kind, &source, 1500)).is_err(),
                 "in-flight bytes unaccounted"
             );
             let task = tokio::spawn(async move {
@@ -663,17 +709,17 @@ mod tests {
             });
             task.abort();
             let _ = task.await;
-            tx.try_send(delivery(kind, source, 1500)).unwrap();
+            tx.try_send(delivery(kind, &source, 1500)).unwrap();
             drop(rx);
             assert_eq!(tx.bytes.available_permits(), budget);
-            assert!(tx.try_send(delivery(kind, source, 1)).is_err());
+            assert!(tx.try_send(delivery(kind, &source, 1)).is_err());
             assert_eq!(tx.bytes.available_permits(), budget);
 
             let (tx, rx) = channel(kind);
             for _ in 0..tx.tx.max_capacity() {
-                tx.try_send(delivery(kind, source, 1)).unwrap();
+                tx.try_send(delivery(kind, &source, 1)).unwrap();
             }
-            assert!(tx.try_send(delivery(kind, source, 1)).is_err());
+            assert!(tx.try_send(delivery(kind, &source, 1)).is_err());
             drop(rx);
             assert_eq!(tx.bytes.available_permits(), budget);
         }
@@ -684,7 +730,7 @@ mod tests {
         let (writer, source, mut feedback) = fixture().await;
         let active = writer.active.clone();
         let (tx, mut rx) = channel(MediaKind::ScreenVideo);
-        tx.try_send(delivery(MediaKind::ScreenVideo, source, 1000))
+        tx.try_send(delivery(MediaKind::ScreenVideo, &source, 1000))
             .unwrap();
         let mut queued = rx.recv().await.unwrap();
         queued.delivery.queued_at -= VIDEO_AGE;
@@ -705,7 +751,7 @@ mod tests {
         let room = writer.room.clone();
         let members = room.members.write().await;
         let (tx, rx) = channel(MediaKind::ScreenVideo);
-        tx.try_send(delivery(MediaKind::ScreenVideo, source, 1000))
+        tx.try_send(delivery(MediaKind::ScreenVideo, &source, 1000))
             .unwrap();
         drop(tx);
         let task = tokio::spawn(writer.run(MediaKind::ScreenVideo, rx, |_, _| async {
@@ -718,12 +764,127 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn every_writer_rejects_either_endpoints_revoked_or_stale_queue() {
+        for kind in MediaKind::ALL {
+            for revoke_source in [true, false] {
+                for reauthorize in [false, true] {
+                    let (writer, source, _) = fixture().await;
+                    let active = writer.active.clone();
+                    let (tx, rx) = channel(kind);
+                    // Queue under the old grants, before the DB mutation drains.
+                    forward(&writer.room, &tx, delivery(kind, &source, 100)).await;
+                    let receiver = writer.room.members.read().await[&0].info.account_id;
+                    let scope = if revoke_source {
+                        access::Scope::Session(source.identity.session)
+                    } else {
+                        access::Scope::Account(receiver)
+                    };
+                    let mut mutation = Some(access::pause(scope));
+                    // Filter new arrivals while either endpoint is paused, without
+                    // consuming queue budget or requesting congestion recovery.
+                    let budget = tx.bytes.available_permits();
+                    forward(&writer.room, &tx, delivery(kind, &source, 100)).await;
+                    assert_eq!(tx.bytes.available_permits(), budget);
+                    if reauthorize {
+                        mutation.take().unwrap().commit();
+                        source
+                            .generation
+                            .store(source.access.snapshot().unwrap(), Ordering::Release);
+                        writer
+                            .generation
+                            .store(writer.access.snapshot().unwrap(), Ordering::Release);
+                        // Only a newly admitted packet can use the new grants.
+                        let mut fresh = delivery(kind, &source, 100);
+                        fresh.receiver_epoch = writer.generation.load(Ordering::Acquire);
+                        fresh.packet.header.sequence_number += 1;
+                        assert_ne!(fresh.epoch, fresh.receiver_epoch);
+                        forward(&writer.room, &tx, fresh).await;
+                    }
+                    drop(tx);
+                    let writes = AtomicU64::new(0);
+                    writer
+                        .run(kind, rx, |_, _| async {
+                            writes.fetch_add(1, Ordering::Relaxed);
+                            Ok(())
+                        })
+                        .await;
+                    assert_eq!(
+                        writes.load(Ordering::Relaxed),
+                        u64::from(reauthorize),
+                        "revoked/stale packet reached transport: {kind:?}, source={revoke_source}"
+                    );
+                    assert!(
+                        active.load(Ordering::Acquire),
+                        "dropping revoked media must not fail the transport"
+                    );
+                    drop(mutation);
+                }
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn pending_microphone_write_rechecks_both_endpoints_after_revocation() {
+        for revoke_source in [true, false] {
+            let (writer, source, _) = fixture().await;
+            let active = writer.active.clone();
+            let receiver = writer.room.members.read().await[&0].info.account_id;
+            let (tx, rx) = channel(MediaKind::Microphone);
+            tx.try_send(delivery(MediaKind::Microphone, &source, 100))
+                .unwrap();
+            drop(tx);
+            let (entered, mut waiting) = mpsc::channel(1);
+            let resume = Arc::new(Notify::new());
+            let ready = resume.clone();
+            let writes = Arc::new(AtomicU64::new(0));
+            let sent = writes.clone();
+            let task = tokio::spawn(writer.run(MediaKind::Microphone, rx, move |_, _| {
+                let entered = entered.clone();
+                let ready = ready.clone();
+                let sent = sent.clone();
+                async move {
+                    entered.try_send(()).unwrap();
+                    ready.notified().await;
+                    sent.fetch_add(1, Ordering::Relaxed);
+                    Ok(())
+                }
+            }));
+            waiting.recv().await.unwrap();
+            let scope = if revoke_source {
+                access::Scope::Session(source.identity.session)
+            } else {
+                access::Scope::Account(receiver)
+            };
+            tokio::time::timeout(
+                Duration::from_secs(1),
+                tokio::task::spawn_blocking(move || {
+                    access::pause(scope).commit();
+                }),
+            )
+            .await
+            .expect("pending send retained a drain permit")
+            .unwrap();
+            resume.notify_one();
+            task.await.unwrap();
+            assert!(
+                active.load(Ordering::Acquire),
+                "write timed out instead of rejecting revocation"
+            );
+            assert_eq!(
+                writes.load(Ordering::Relaxed),
+                0,
+                "pending revoked media reached transport"
+            );
+        }
+    }
+
+    #[tokio::test]
     async fn independent_writers_reject_revoked_deafened_stopped_and_replaced_sources() {
         for kind in MediaKind::ALL {
             for reason in 0..5 {
                 let (writer, source, _) = fixture().await;
                 let (tx, rx) = channel(kind);
-                let mut packet = delivery(kind, source, 100);
+                let mut packet = delivery(kind, &source, 100);
                 {
                     let mut members = writer.room.members.write().await;
                     match reason {

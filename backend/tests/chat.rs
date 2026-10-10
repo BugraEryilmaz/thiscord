@@ -1268,3 +1268,163 @@ async fn cancelled_http_handler_still_publishes_committed_message() {
     server.abort();
     let _ = server.await;
 }
+
+fn extra_session(db: &Database, account: AccountId) -> String {
+    let token = URL_SAFE_NO_PAD.encode(Sha256::digest(Uuid::new_v4().as_bytes()));
+    let session = Uuid::new_v4();
+    let mut c = db.pool.get().unwrap();
+    diesel::sql_query("INSERT INTO sessions(id,account_id,device,reauthenticated_at) VALUES($1::uuid,$2::uuid,'second',now())")
+        .bind::<Text,_>(session.to_string()).bind::<Text,_>(account.to_string()).execute(&mut c).unwrap();
+    diesel::sql_query(
+        "INSERT INTO session_tokens(token_hash,session_id,active) VALUES($1,$2::uuid,TRUE)",
+    )
+    .bind::<Text, _>(URL_SAFE_NO_PAD.encode(Sha256::digest(token.as_bytes())))
+    .bind::<Text, _>(session.to_string())
+    .execute(&mut c)
+    .unwrap();
+    token
+}
+async fn connected(socket: &mut Socket) {
+    socket
+        .send(WsMessage::Text(
+            json!({"version":1,"event":{"type":"ping"}})
+                .to_string()
+                .into(),
+        ))
+        .await
+        .unwrap();
+    event(socket, "pong").await;
+}
+#[tokio::test]
+#[ignore = "requires TEST_DATABASE_URL; CI runs with --include-ignored"]
+async fn invalidation_targets_sessions_accounts_and_current_guild_subscriptions() {
+    let _guard = TEST_LOCK.lock().await;
+    use thiscord_shared::account::ACCOUNT_PATH;
+    let db = database();
+    let (app, owner, guest, guest_id, mut state, channel) = setup(&db).await;
+    let guild = state["guild"]["id"].clone();
+    let second_guest = extra_session(&db, guest_id);
+    let (_, unrelated) = user(&db, "unrelated");
+    let mut other = command(
+        &app,
+        &owner,
+        json!({"action":"create_guild","name":"other"}),
+        StatusCode::OK,
+    )
+    .await["state"]
+        .clone();
+    change(
+        &app,
+        &owner,
+        &mut other,
+        json!({"action":"add_member","username":"guest"}),
+        StatusCode::OK,
+    )
+    .await;
+    let other_guild = other["guild"]["id"].clone();
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let address = listener.local_addr().unwrap();
+    let router = app.clone();
+    let server = tokio::spawn(async move {
+        axum::serve(listener, router).await.unwrap();
+    });
+    let mut legacy = open_socket(address, &owner, &guild, &channel).await;
+    event(&mut legacy, "ready").await;
+    let mut selected = session_socket(address, &guest).await;
+    event(&mut selected, "authenticated").await;
+    subscribe(&mut selected, 1, guild.clone(), channel.clone()).await;
+    let mut idle = session_socket(address, &guest).await;
+    event(&mut idle, "authenticated").await;
+    let mut second = session_socket(address, &second_guest).await;
+    event(&mut second, "authenticated").await;
+    subscribe(&mut second, 1, other_guild.clone(), Value::Null).await;
+
+    assert_eq!(
+        call(&app, ACCOUNT_PATH, &unrelated, json!({"action":"rotate"}))
+            .await
+            .0,
+        StatusCode::OK
+    );
+    for socket in [&mut legacy, &mut selected, &mut idle, &mut second] {
+        connected(socket).await;
+    }
+    // A member mutation is confined to this account in this guild.
+    change(
+        &app,
+        &owner,
+        &mut state,
+        json!({"action":"timeout_member","account_id":guest_id,"duration_seconds":60}),
+        StatusCode::OK,
+    )
+    .await;
+    event(&mut selected, "revoked").await;
+    for socket in [&mut legacy, &mut idle, &mut second] {
+        connected(socket).await;
+    }
+
+    // Switching subscriptions removes the old guild from the connection scope.
+    subscribe(&mut second, 2, guild.clone(), Value::Null).await;
+    change(
+        &app,
+        &owner,
+        &mut other,
+        json!({"action":"rename","name":"renamed"}),
+        StatusCode::OK,
+    )
+    .await;
+    for socket in [&mut legacy, &mut idle, &mut second] {
+        connected(socket).await;
+    }
+    subscribe(&mut second, 3, other_guild.clone(), Value::Null).await;
+    change(
+        &app,
+        &owner,
+        &mut other,
+        json!({"action":"rename","name":"renamed again"}),
+        StatusCode::OK,
+    )
+    .await;
+    event(&mut second, "revoked").await;
+    connected(&mut legacy).await;
+    connected(&mut idle).await;
+    let mut second = session_socket(address, &second_guest).await;
+    event(&mut second, "authenticated").await;
+
+    // Rotation and replay revoke only the selected session, even across devices
+    // belonging to the same account; idle authenticated sockets are included.
+    let (status, rotated) = call(&app, ACCOUNT_PATH, &guest, json!({"action":"rotate"})).await;
+    assert_eq!(status, StatusCode::OK);
+    event(&mut idle, "revoked").await;
+    connected(&mut second).await;
+    connected(&mut legacy).await;
+    let mut rotated_socket =
+        session_socket(address, rotated["session"]["token"].as_str().unwrap()).await;
+    event(&mut rotated_socket, "authenticated").await;
+    assert_eq!(
+        call(&app, ACCOUNT_PATH, &guest, json!({"action":"current"}))
+            .await
+            .0,
+        StatusCode::UNAUTHORIZED
+    );
+    event(&mut rotated_socket, "revoked").await;
+    connected(&mut second).await;
+    connected(&mut legacy).await;
+
+    assert_eq!(
+        call(
+            &app,
+            ACCOUNT_PATH,
+            &second_guest,
+            json!({"action":"logout_all"})
+        )
+        .await
+        .0,
+        StatusCode::OK
+    );
+    event(&mut second, "revoked").await;
+    connected(&mut legacy).await;
+    legacy.close(None).await.unwrap();
+    drop((legacy, selected, idle, second, rotated_socket));
+    server.abort();
+    let _ = server.await;
+}

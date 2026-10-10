@@ -128,14 +128,17 @@ Compatibility: existing installed clients can still begin with `authenticate`
 backend polling until those clients are upgraded. Deploy the updated backend before
 the new frontend. This change does not alter the HTTP message contracts.
 
-Successful permission/membership changes and channel deletion invalidate sockets
-subscribed to that guild. Session revocation, account deletion, rotation and login
-session eviction invalidate that account's sockets, including connections without
-a guild subscription. Account deletion also invalidates its former guilds because
-membership cascades change their state. Instance roles grant no guild access and do not revoke chat.
-Account/guild barriers drain already admitted socket sends before an access mutation
-can commit, and reject snapshots read across that mutation. Unrelated scopes keep
-serving HTTP and delivering chat. Socket sends remain bounded by deadlines.
+Guild-wide permission changes and channel deletion invalidate sockets subscribed to
+that guild. Member changes invalidate only that account's subscriptions in that
+guild. Rotation, replay, logout and session eviction invalidate only the affected
+session; account-wide revocation and deletion invalidate all of its sessions,
+including connections without a guild subscription. Instance roles grant no guild
+access and invalidate only that account's diagnostics authorization.
+Account/session/guild/member barriers drain already admitted socket sends before
+an access mutation can commit, and reject snapshots read across that mutation.
+Unrelated scopes keep serving HTTP and delivering chat. Socket sends remain bounded
+by deadlines. Diagnostics captures account, session and instance-role epochs before
+its authoritative database check and validates them again after async collection.
 
 HTTP reads and chat writes do not acquire a process-wide access lock. Database
 transactions retain their account/guild locks and authoritative permission/revision
@@ -189,7 +192,8 @@ expiry and disconnect without notification echoes. A cancellation regression pau
 a transaction at commit, cancels its HTTP handler and verifies durable message and
 unread delivery after the detached worker commits. Concurrency tests hold account/
 guild rows to verify unrelated HTTP/socket progress, early overload rejection and
-revocation after HTTP cancellation. Run with
+revocation after HTTP cancellation, same-account session isolation, member isolation
+and subscription scope changes. Run with
 `--include-ignored`. Shared tests cover wire versions and bounds. Browser smoke
 tests use isolated fixtures; native compilation does not establish cross-platform
 WebView runtime acceptance.

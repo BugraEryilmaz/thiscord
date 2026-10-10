@@ -31,11 +31,12 @@ pub(super) async fn update(room: &Room, slot: usize, views: Vec<Subscription>) -
         return false;
     }
     let generation = receiver.generation.load(Ordering::Acquire);
-    let Some(_permit) = access::global().packet(generation, generation) else {
+    let Some(_permit) = receiver.access.packet(generation, generation) else {
         return true;
     };
     let now = Instant::now();
     let mut next = [None; ROOM_CAPACITY];
+    let mut source_permits = Vec::new();
     if receiver.active.load(Ordering::Acquire) && !receiver.info.deafened {
         for subscription in views {
             let Some(source) = members.get(&subscription.slot) else {
@@ -45,11 +46,15 @@ pub(super) async fn update(room: &Room, slot: usize, views: Vec<Subscription>) -
                 || source.info.account_id != subscription.owner
                 || source.info.screen_epoch != subscription.epoch
                 || !source.active.load(Ordering::Acquire)
-                || source.generation.load(Ordering::Acquire) != generation
                 || !may_publish(&source.info, MediaKind::ScreenVideo)
             {
                 continue;
             }
+            let epoch = source.generation.load(Ordering::Acquire);
+            let Some(permit) = source.access.packet(epoch, epoch) else {
+                continue;
+            };
+            source_permits.push(permit);
             let since = receiver.views[subscription.slot]
                 .filter(|old| {
                     old.live()
@@ -80,7 +85,12 @@ pub(super) fn receives(
         || receiver.info.slot == source.info.slot
         || receiver.info.deafened
         || !receiver.active.load(Ordering::Acquire)
-        || receiver.generation.load(Ordering::Acquire) != source.generation.load(Ordering::Acquire)
+        || !receiver
+            .access
+            .current(receiver.generation.load(Ordering::Acquire))
+        || !source
+            .access
+            .current(source.generation.load(Ordering::Acquire))
     {
         return false;
     }
@@ -105,11 +115,16 @@ pub(super) async fn target(room: &Room, slot: usize) -> Option<(u32, u32)> {
         return None;
     }
     let generation = source.generation.load(Ordering::Acquire);
-    let _permit = access::global().packet(generation, generation)?;
+    let _permit = source.access.packet(generation, generation)?;
+    let mut receiver_permits = Vec::new();
     let bitrate = members
         .values()
         .filter(|receiver| receives(receiver, source, MediaKind::ScreenVideo, Instant::now()))
-        .filter_map(|receiver| receiver.views[slot].map(|v| v.subscription.bitrate))
+        .filter_map(|receiver| {
+            let epoch = receiver.generation.load(Ordering::Acquire);
+            receiver_permits.push(receiver.access.packet(epoch, epoch)?);
+            receiver.views[slot].map(|v| v.subscription.bitrate)
+        })
         .min()
         .unwrap_or(0);
     Some((source.info.screen_epoch, bitrate))
@@ -122,12 +137,18 @@ mod tests {
         let room = Room::default();
         for slot in 0..3 {
             let (keyframes, _) = mpsc::channel(1);
+            let account = thiscord_shared::AccountId::from_uuid(uuid::Uuid::new_v4());
+            let access = access::register(access::Identity {
+                account,
+                session: thiscord_shared::SessionId::from_uuid(uuid::Uuid::new_v4()),
+                guild: None,
+            });
             room.members.write().await.insert(
                 slot,
                 Member {
                     network: Arc::new(RwLock::new(Default::default())),
                     info: Participant {
-                        account_id: thiscord_shared::AccountId::from_uuid(uuid::Uuid::new_v4()),
+                        account_id: account,
                         username: "viewer".into(),
                         display_name: String::new(),
                         avatar_id: None,
@@ -147,7 +168,8 @@ mod tests {
                     feedback_enabled: true,
                     subscriptions_enabled: true,
                     views: [None; ROOM_CAPACITY],
-                    generation: Arc::new(AtomicU64::new(access::global().snapshot().unwrap())),
+                    generation: Arc::new(AtomicU64::new(0)),
+                    access,
                     metrics: Arc::new(std::array::from_fn(|_| AtomicU64::new(0))),
                     active: Arc::new(AtomicBool::new(true)),
                 },
@@ -167,6 +189,51 @@ mod tests {
         let members = room.members.read().await;
         receives(&members[&receiver], &members[&0], kind, queued)
     }
+    #[tokio::test]
+    async fn viewer_admission_and_bitrate_validate_each_endpoint_epoch() {
+        for changed_slot in [0, 1] {
+            let room = room().await;
+            let view = subscription(&room).await;
+            assert!(update(&room, 1, vec![view]).await);
+            let account = room.members.read().await[&changed_slot].info.account_id;
+            let mutation = access::pause(access::Scope::Account(account));
+            for kind in MediaKind::ALL {
+                assert!(!allowed(&room, 1, kind, Instant::now()).await);
+            }
+            assert_eq!(
+                target(&room, 0).await,
+                if changed_slot == 0 {
+                    None
+                } else {
+                    Some((9, 0))
+                }
+            );
+            mutation.finish(true);
+            // A completed mutation still needs a fresh authoritative grant.
+            assert!(update(&room, 1, vec![view]).await);
+            assert!(!allowed(&room, 1, MediaKind::ScreenVideo, Instant::now()).await);
+            {
+                let members = room.members.read().await;
+                let endpoint = &members[&changed_slot];
+                endpoint
+                    .generation
+                    .store(endpoint.access.snapshot().unwrap(), Ordering::Release);
+                assert_ne!(
+                    members[&0].generation.load(Ordering::Acquire),
+                    members[&1].generation.load(Ordering::Acquire)
+                );
+            }
+            assert!(update(&room, 1, vec![view]).await);
+            for kind in MediaKind::ALL {
+                assert!(
+                    allowed(&room, 1, kind, Instant::now()).await,
+                    "valid unequal epochs rejected: {kind:?}"
+                );
+            }
+            assert_eq!(target(&room, 0).await, Some((9, 5_000_000)));
+        }
+    }
+
     #[tokio::test]
     async fn viewers_control_fanout_shared_audio_and_lowest_budget() {
         let room = room().await;

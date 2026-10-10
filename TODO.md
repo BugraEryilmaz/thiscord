@@ -210,7 +210,7 @@ speaker isolation and physical acoustic acceptance remain future work.
 - [x] Forward encoded audio without transcoding; per-hop RTCP interceptors.
 - [x] Bounded ingress/egress, slow-receiver deadlines and eight-person room limits.
 - [x] Permission-controlled admission and eviction tied to channel/session changes.
-- [x] Abandoned connection cleanup and conservative access-change invalidation.
+- [x] Abandoned connection cleanup and account/session/guild-scoped access invalidation.
 - [x] Document bandwidth estimate and transport encryption versus E2EE.
 - [ ] Sustained multi-party load tests and measured capacity/congestion budgets.
 - [x] Opt-in Rust voice load generator and disposable benchmark server; per-stream

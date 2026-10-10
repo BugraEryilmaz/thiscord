@@ -134,15 +134,19 @@ fn frame(message: Message) -> Option<ClientEvent> {
     let frame: ClientFrame = serde_json::from_str(&text).ok()?;
     (frame.version == SOCKET_VERSION).then_some(frame.event)
 }
-async fn socket_access(pool: &DbPool, token: &str) -> Result<Arc<access::Access>, Failure> {
+async fn socket_access(pool: &DbPool, token: &str) -> Result<access::SocketAccess, Failure> {
     let p = pool.clone();
     let t = token.to_owned();
-    let account = tokio::task::spawn_blocking(move || {
-        auth::store::token_account(&mut *auth::store::connection(&p)?, &t)
+    let session = tokio::task::spawn_blocking(move || {
+        auth::store::token_session(&mut *auth::store::connection(&p)?, &t)
     })
     .await
     .map_err(|_| Failure::Unavailable)??;
-    Ok(access::account(account))
+    Ok(access::SocketAccess {
+        account_id: session.account_id,
+        account: access::account(session.account_id),
+        session: access::session(session.id),
+    })
 }
 
 async fn serve(mut socket: WebSocket, pool: DbPool, id: RequestId) {
@@ -181,12 +185,16 @@ async fn serve(mut socket: WebSocket, pool: DbPool, id: RequestId) {
         return;
     };
     let guild_access = access::guild(guild_id);
-    let mut changed = account_access.subscribe();
+    let mut changed = account_access.account.subscribe();
+    let mut session_changed = account_access.session.subscribe();
+    let member_access = access::member(guild_id, account_access.account_id);
+    let mut member_changed = member_access.subscribe();
     let mut guild_changed = guild_access.subscribe();
     let connection_id = Uuid::new_v4();
     let mut cursor;
     {
-        let Some(snapshot) = access::snapshot(&account_access, Some(&guild_access)) else {
+        let Some(snapshot) = account_access.snapshot(Some(&guild_access), Some(&member_access))
+        else {
             return;
         };
         if changed.has_changed().unwrap_or(true) {
@@ -239,6 +247,8 @@ async fn serve(mut socket: WebSocket, pool: DbPool, id: RequestId) {
     let mut last_members = Vec::new();
     loop {
         tokio::select! {biased;
+            _=session_changed.changed()=>{let _=send(&mut socket,ServerEvent::Revoked{}).await;break;}
+            _=member_changed.changed()=>{let _=send(&mut socket,ServerEvent::Revoked{}).await;break;}
             _=guild_changed.changed()=>{let _=send(&mut socket,ServerEvent::Revoked{}).await;break;}
             _=changed.changed()=>{let _=send(&mut socket,ServerEvent::Revoked{}).await;break;}
             message=socket.recv()=>{
@@ -255,7 +265,7 @@ async fn serve(mut socket: WebSocket, pool: DbPool, id: RequestId) {
             }
             _=tick.tick()=>{
                 if last_seen.elapsed()>Duration::from_secs(35){break;}
-                let Some(snapshot) = access::snapshot(&account_access, Some(&guild_access)) else { let _=send(&mut socket,ServerEvent::Revoked{}).await;break; };
+                let Some(snapshot) = account_access.snapshot(Some(&guild_access), Some(&member_access)) else { let _=send(&mut socket,ServerEvent::Revoked{}).await;break; };
                 if changed.has_changed().unwrap_or(true){let _=send(&mut socket,ServerEvent::Revoked{}).await;break;}
                 let p=pool.clone();let t=token.clone();let active=typing.take();
                 let result=tokio::task::spawn_blocking(move||store::poll(&p,&t,guild_id,channel_id,cursor,connection_id,active)).await;

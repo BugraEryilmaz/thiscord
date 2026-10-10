@@ -9,13 +9,15 @@ use std::{
         atomic::{AtomicU64, AtomicUsize, Ordering::SeqCst},
     },
 };
-use thiscord_shared::{AccountId, GuildId};
+use thiscord_shared::{AccountId, GuildId, SessionId};
 use tokio::sync::watch;
 
 #[derive(Clone, Copy, PartialEq, Eq, Hash)]
 enum Key {
     Account(AccountId),
     Guild(GuildId),
+    Session(SessionId),
+    Member(GuildId, AccountId),
     InstanceRole(AccountId),
 }
 
@@ -48,6 +50,31 @@ pub(crate) fn instance_role(id: AccountId) -> Arc<Access> {
 }
 pub(crate) fn guild(id: GuildId) -> Arc<Access> {
     scope(Key::Guild(id))
+}
+
+pub(crate) fn session(id: SessionId) -> Arc<Access> {
+    scope(Key::Session(id))
+}
+pub(crate) fn member(guild: GuildId, account: AccountId) -> Arc<Access> {
+    scope(Key::Member(guild, account))
+}
+
+/// A socket retains account/session scopes across guild selection changes.
+pub(super) struct SocketAccess {
+    pub account_id: AccountId,
+    pub account: Arc<Access>,
+    pub session: Arc<Access>,
+}
+impl SocketAccess {
+    pub fn snapshot(
+        &self,
+        guild: Option<&Arc<Access>>,
+        member: Option<&Arc<Access>>,
+    ) -> Option<Snapshot> {
+        snapshot(&self.account, guild)?
+            .including(&self.session)?
+            .including_optional(member)
+    }
 }
 
 pub(crate) struct Access {
@@ -107,6 +134,21 @@ pub(crate) fn snapshot(account: &Arc<Access>, resource: Option<&Arc<Access>>) ->
         .map(Snapshot)
 }
 impl Snapshot {
+    pub(crate) fn including(mut self, scope: &Arc<Access>) -> Option<Self> {
+        let epoch = scope.epoch.load(SeqCst);
+        if !scope.current(epoch) {
+            return None;
+        }
+        self.0.push((scope.clone(), epoch));
+        Some(self)
+    }
+    fn including_optional(self, scope: Option<&Arc<Access>>) -> Option<Self> {
+        match scope {
+            Some(scope) => self.including(scope),
+            None => Some(self),
+        }
+    }
+
     // SeqCst orders registration against mutation admission: either the writer
     // drains this send, or this send observes the active mutation/new epoch.
     pub(crate) fn deliver(self) -> Option<Vec<Delivery>> {
@@ -166,6 +208,68 @@ mod tests {
         let old = snapshot(&b, Some(&g)).unwrap();
         g.pause().finish(true);
         assert!(old.deliver().is_none());
+    }
+
+    #[test]
+    fn shared_mutations_preserve_session_and_member_isolation() {
+        let a = AccountId::from_uuid(Uuid::new_v4());
+        let b = AccountId::from_uuid(Uuid::new_v4());
+        let s1 = SessionId::from_uuid(Uuid::new_v4());
+        let s2 = SessionId::from_uuid(Uuid::new_v4());
+        let g1 = GuildId::from_uuid(Uuid::new_v4());
+        let g2 = GuildId::from_uuid(Uuid::new_v4());
+        let connections = [
+            (a, s1, Some(g1)),
+            (a, s2, Some(g1)),
+            (a, s1, Some(g2)),
+            (b, s2, Some(g1)),
+            (a, s1, None),
+        ];
+        for (scope, affected) in [
+            (
+                crate::access::Scope::Session(s1),
+                [true, false, true, false, true],
+            ),
+            (
+                crate::access::Scope::Account(a),
+                [true, true, true, false, true],
+            ),
+            (
+                crate::access::Scope::Guild(g1),
+                [true, true, false, true, false],
+            ),
+            (
+                crate::access::Scope::Member(g1, a),
+                [true, true, false, false, false],
+            ),
+        ] {
+            let scopes: Vec<_> = connections
+                .iter()
+                .map(|&(a, s, g)| {
+                    (
+                        SocketAccess {
+                            account_id: a,
+                            account: account(a),
+                            session: session(s),
+                        },
+                        g.map(guild),
+                        g.map(|g| member(g, a)),
+                    )
+                })
+                .collect();
+            let before: Vec<_> = scopes
+                .iter()
+                .map(|(s, g, m)| s.snapshot(g.as_ref(), m.as_ref()).unwrap())
+                .collect();
+            let mutation = crate::access::pause(scope);
+            for ((s, g, m), affected) in scopes.iter().zip(affected) {
+                assert_eq!(s.snapshot(g.as_ref(), m.as_ref()).is_none(), affected);
+            }
+            mutation.finish(true);
+            for (snapshot, affected) in before.into_iter().zip(affected) {
+                assert_eq!(snapshot.deliver().is_none(), affected);
+            }
+        }
     }
 
     #[test]

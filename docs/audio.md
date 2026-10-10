@@ -413,22 +413,29 @@ deadlines. Screen writes never wait for transport admission or deactivate voice
 on failure; video losses request keyframe recovery. See [screen-sharing.md](screen-sharing.md)
 for video budgets and the limits of the shared WebRTC transport.
 
-Current sessions are rechecked every second and immediately after access-changing
-commits. Each participant is reauthorized against the database; unrelated account
-or guild changes leave authorized calls connected. Lost session/channel access or
-a changed Speak grant closes only affected connections (Speak determines native
-microphone setup in the offer). Both publisher routing and receiver writes check
-the participant's validated generation using atomic media permits. Periodic DB
-checks run concurrently without taking chat delivery barriers; guild snapshots
-use compatible shared row locks. Checks overlapping an access change retry instead
-of publishing a stale grant. Only access-changing DB workers close media admission
-and drain in-flight application writes, retaining that guard through commit or
-rollback even if the HTTP task is canceled. These changes invalidate the generation
-and pause forwarding until reauthorization; packets queued under an older generation
-are discarded. Receiver queues also reject publishers whose session has closed.
-Thus cached grants cannot continue forwarding after revocation. Each receiver gets
-only its channel's streams; own audio is not looped back. Self mute/deafen is also
-enforced by the SFU. This assumes a single backend process.
+Current sessions are rechecked every second and immediately after matching access
+changes. Each participant registers its account, session and guild before an
+authoritative database check. Account-wide changes affect that account; rotation,
+replay and logout affect one session; member changes affect that account in one
+guild; role/channel changes affect that guild. Other connections retain their
+authorization epochs and keep forwarding without reauthorization.
+
+Mutation guards live on the blocking database worker through commit or rollback,
+even after HTTP cancellation. They close matching media admission and drain
+in-flight application writes before commit. Database checks overlapping a matching
+mutation retry; newly registered connections inherit active mutations. Session and
+guild checks use authoritative database state and compatible shared row locks.
+Lost session/channel access or a changed Speak grant closes affected connections.
+
+Sender and receiver epochs are independent. Viewer admission, bitrate votes,
+keyframe feedback, queue admission and each transport poll validate both endpoints
+against their own grants. Media remains valid with unequal epochs. Queued packets
+retain both original epochs and are discarded after either endpoint changes, even
+if that endpoint subsequently reauthorizes. Screen identity, share epoch, viewer
+lease and ingress timestamp checks also reject stale subscriptions and packets.
+No media permit survives a pending transport poll. Each receiver gets only its
+channel's streams; own audio is not looped back. Self mute/deafen is enforced by
+the SFU. This assumes a single backend process.
 
 Temporary signaling/ICE/heartbeat/media-write failures now reconnect automatically.
 The selected room stays in the voice bar with a reconnect message and an available

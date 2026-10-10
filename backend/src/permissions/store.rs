@@ -179,19 +179,27 @@ pub(super) fn dispatch(
         ),
     )?;
     let mut c = connection(pool)?;
-    let _voice_change = matches!(
-        &command,
-        PermissionRequest::Change { .. }
-            | PermissionRequest::JoinGuild { .. }
-            | PermissionRequest::TransferInstance { .. }
-            | PermissionRequest::SetInstanceAdmin { .. }
-    )
-    .then(|| crate::voice::access::global().pause());
-    let scopes = match &command {
-        PermissionRequest::Change { guild_id, .. }
-        | PermissionRequest::JoinGuild { guild_id, .. } => {
-            vec![crate::chat::access::guild(*guild_id)]
+    let scope = match &command {
+        PermissionRequest::Change {
+            guild_id, change, ..
+        } => Some(match change {
+            GuildChange::RemoveMember { account_id }
+            | GuildChange::BanMember { account_id, .. }
+            | GuildChange::UnbanMember { account_id }
+            | GuildChange::TimeoutMember { account_id, .. }
+            | GuildChange::DisconnectVoice { account_id }
+            | GuildChange::AssignRole { account_id, .. } => {
+                crate::access::Scope::Member(*guild_id, *account_id)
+            }
+            _ => crate::access::Scope::Guild(*guild_id),
+        }),
+        PermissionRequest::JoinGuild { guild_id, .. } => {
+            Some(crate::access::Scope::Member(*guild_id, session.account_id))
         }
+        _ => None,
+    };
+    let mut mutations = Vec::new();
+    let scopes = match &command {
         PermissionRequest::SetInstanceAdmin { account_id, .. } => {
             vec![crate::chat::access::instance_role(*account_id)]
         }
@@ -309,13 +317,16 @@ pub(super) fn dispatch(
             }
         }
         })();
-        if result.is_ok() { changes.extend(scopes.into_iter().map(|scope| scope.pause())); }
+        if result.is_ok() {
+            changes.extend(scopes.into_iter().map(|scope| scope.pause()));
+            mutations.extend(scope.into_iter().map(crate::access::pause));
+        }
         result
     });
     for change in changes {
         change.finish(result.is_ok());
     }
-    result
+    crate::access::complete(result, &mut mutations)
 }
 
 fn change_guild(
