@@ -10,6 +10,25 @@ use uuid::Uuid;
 const ID: &str = "f8f72890-fbae-4e56-9e7b-8038b5c3a094";
 
 #[test]
+fn diagnostics_distinguish_missing_measurements_from_zero() {
+    use thiscord_shared::admin::NetworkMetrics;
+    let missing = to_value(NetworkMetrics::default()).unwrap();
+    assert!(missing["round_trip_ms"].is_null());
+    assert!(missing["microphone_jitter_ms"].is_null());
+    let reported = NetworkMetrics {
+        round_trip_ms: Some(0.0),
+        microphone_jitter_ms: Some(1.25),
+        microphone_packets_lost: Some(-1),
+        ..Default::default()
+    };
+    let wire = to_value(reported).unwrap();
+    assert_eq!(wire["round_trip_ms"], 0.0);
+    let decoded: NetworkMetrics = from_value(wire).unwrap();
+    assert_eq!(decoded.microphone_jitter_ms, Some(1.25));
+    assert_eq!(decoded.microphone_packets_lost, Some(-1));
+}
+
+#[test]
 fn speaker_volume_targets_default_to_voice_and_distinguish_shared_audio() {
     use thiscord_shared::audio::SpeakerVolumeTarget;
     let voice: SpeakerVolumeTarget = from_value(json!({"guild_id": ID, "account_id": ID})).unwrap();

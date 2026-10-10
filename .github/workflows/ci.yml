@@ -173,6 +173,14 @@ jobs:
           name: frontend-assets
           path: frontend/dist/
           if-no-files-found: error
+      - name: Build browser admin bundle
+        working-directory: frontend
+        run: trunk build --release --locked --public-url /admin/ --dist dist-admin
+      - uses: actions/upload-artifact@v4
+        with:
+          name: admin-assets
+          path: frontend/dist-admin/
+          if-no-files-found: error
 
   desktop:
     name: Desktop (${{ matrix.os }})

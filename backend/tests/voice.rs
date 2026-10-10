@@ -523,6 +523,71 @@ async fn sfu_forwarding_permissions_isolation_and_cleanup() {
     assert_eq!(packet.payload.as_ref(), [0xf8, 0xff, 0xfe]);
     assert!(a.packets.try_recv().is_err());
     assert!(isolated.packets.try_recv().is_err());
+    // Admin diagnostics read the actual live registry, including multiple rooms.
+    let diagnostic_snapshot = tokio::time::timeout(Duration::from_secs(12), async {
+        loop {
+            a.publish().await;
+            let response = app
+                .clone()
+                .oneshot(
+                    Request::builder()
+                        .uri(thiscord_shared::admin::DIAGNOSTICS_PATH)
+                        .header("authorization", format!("Bearer {ot}"))
+                        .body(Body::empty())
+                        .unwrap(),
+                )
+                .await
+                .unwrap();
+            assert_eq!(response.status(), StatusCode::OK);
+            let snapshot: thiscord_shared::admin::Diagnostics =
+                serde_json::from_slice(&to_bytes(response.into_body(), 2_000_000).await.unwrap())
+                    .unwrap();
+            assert_eq!(snapshot.rooms.len(), 2);
+            assert_eq!(
+                snapshot
+                    .rooms
+                    .iter()
+                    .map(|r| r.participants.len())
+                    .sum::<usize>(),
+                3
+            );
+            let room = snapshot
+                .rooms
+                .iter()
+                .find(|r| json!(r.channel_id) == channel)
+                .unwrap();
+            let publisher = room
+                .participants
+                .iter()
+                .find(|p| p.participant.account_id == owner)
+                .unwrap();
+            if publisher
+                .network
+                .microphone_packets_received
+                .is_some_and(|n| n > 0)
+            {
+                assert!(
+                    publisher
+                        .network
+                        .round_trip_ms
+                        .is_some_and(|n| n.is_finite() && n >= 0.0)
+                );
+                assert!(
+                    publisher
+                        .network
+                        .microphone_jitter_ms
+                        .is_some_and(|n| n.is_finite() && n >= 0.0)
+                );
+                break snapshot;
+            }
+            tokio::time::sleep(Duration::from_millis(100)).await;
+        }
+    })
+    .await
+    .unwrap();
+    if cfg!(target_os = "linux") {
+        assert!(diagnostic_snapshot.host.memory_total_bytes.is_some());
+    }
     // Screen publishing requires explicit state, even for an authorized speaker.
     screen_blocked(&mut a, &mut b).await;
     send(
@@ -1005,6 +1070,30 @@ async fn sfu_forwarding_permissions_isolation_and_cleanup() {
     ));
     c.close().await;
     listener_only.close().await;
+    tokio::time::timeout(Duration::from_secs(5), async {
+        loop {
+            let response = app
+                .clone()
+                .oneshot(
+                    Request::builder()
+                        .uri(thiscord_shared::admin::DIAGNOSTICS_PATH)
+                        .header("authorization", format!("Bearer {ot}"))
+                        .body(Body::empty())
+                        .unwrap(),
+                )
+                .await
+                .unwrap();
+            let snapshot: thiscord_shared::admin::Diagnostics =
+                serde_json::from_slice(&to_bytes(response.into_body(), 2_000_000).await.unwrap())
+                    .unwrap();
+            if snapshot.rooms.is_empty() {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(100)).await;
+        }
+    })
+    .await
+    .unwrap();
     assert_eq!(state["guild"]["owner"], json!(owner));
     serving.abort();
 }

@@ -2,6 +2,22 @@ use gloo_net::http::Request;
 use thiscord_shared::{ApiError, account::*};
 use wasm_bindgen::prelude::*;
 
+pub fn admin_page() -> bool {
+    !desktop()
+        && web_sys::window()
+            .and_then(|w| w.location().pathname().ok())
+            .is_some_and(|p| p == "/admin" || p.starts_with("/admin/"))
+}
+pub fn api_base() -> &'static str {
+    if admin_page() {
+        ""
+    } else {
+        option_env!("THISCORD_API_URL")
+            .unwrap_or("http://localhost:3000")
+            .trim_end_matches('/')
+    }
+}
+
 #[wasm_bindgen]
 extern "C" {
     #[wasm_bindgen(catch, js_namespace = ["__TAURI__", "core"], js_name = invoke)]
@@ -36,7 +52,7 @@ pub async fn api_request<T: serde::Serialize, R: serde::de::DeserializeOwned>(
     command: &T,
     token: Option<&str>,
 ) -> Result<R, String> {
-    let base = option_env!("THISCORD_API_URL").unwrap_or("http://localhost:3000");
+    let base = api_base();
     let mut request = Request::post(&format!("{}{path}", base.trim_end_matches('/')));
     if let Some(token) = token {
         request = request.header("Authorization", &format!("Bearer {token}"));

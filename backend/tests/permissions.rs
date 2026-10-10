@@ -110,6 +110,81 @@ async fn change(
 
 #[tokio::test]
 #[ignore = "requires TEST_DATABASE_URL; CI runs with --include-ignored"]
+async fn diagnostics_requires_current_instance_privilege() {
+    use thiscord_shared::admin::{DIAGNOSTICS_PATH, Diagnostics};
+    let db = database();
+    let (owner, ot) = user(&db, "diagnostic_owner");
+    let (admin, at) = user(&db, "diagnostic_admin");
+    let (_, regular) = user(&db, "diagnostic_user");
+    permissions::bootstrap_owner(&db.pool, "diagnostic_owner").unwrap();
+    let app = api::router(Some(db.pool.clone()), vec![]);
+    async fn get(app: &Router, token: &str, status: StatusCode) -> Value {
+        let response = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .uri(DIAGNOSTICS_PATH)
+                    .header("authorization", format!("Bearer {token}"))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), status);
+        assert_eq!(response.headers()["cache-control"], "no-store");
+        let id = response.headers()["x-request-id"]
+            .to_str()
+            .unwrap()
+            .to_owned();
+        let body: Value =
+            serde_json::from_slice(&to_bytes(response.into_body(), 2_000_000).await.unwrap())
+                .unwrap();
+        if !status.is_success() {
+            assert_eq!(body["request_id"], id);
+            assert!(body.get("rooms").is_none());
+        }
+        body
+    }
+    get(&app, "", StatusCode::UNAUTHORIZED).await;
+    get(&app, "invalid", StatusCode::UNAUTHORIZED).await;
+    get(&app, &regular, StatusCode::FORBIDDEN).await;
+    get(&app, &at, StatusCode::FORBIDDEN).await;
+    let snapshot: Diagnostics =
+        serde_json::from_value(get(&app, &ot, StatusCode::OK).await).unwrap();
+    assert_eq!(snapshot.role, InstanceRole::Owner);
+    command(
+        &app,
+        &ot,
+        json!({"action":"set_instance_admin","account_id":admin,"admin":true}),
+        StatusCode::OK,
+    )
+    .await;
+    assert_eq!(get(&app, &at, StatusCode::OK).await["role"], "admin");
+    // A guild owner has no instance diagnostic access after instance demotion.
+    command(
+        &app,
+        &at,
+        json!({"action":"create_guild","name":"Private diagnostic test"}),
+        StatusCode::OK,
+    )
+    .await;
+    command(
+        &app,
+        &ot,
+        json!({"action":"set_instance_admin","account_id":admin,"admin":false}),
+        StatusCode::OK,
+    )
+    .await;
+    get(&app, &at, StatusCode::FORBIDDEN).await;
+    diesel::sql_query("UPDATE sessions SET revoked=TRUE WHERE account_id=$1::uuid")
+        .bind::<Text, _>(owner.to_string())
+        .execute(&mut db.pool.get().unwrap())
+        .unwrap();
+    get(&app, &ot, StatusCode::UNAUTHORIZED).await;
+}
+
+#[tokio::test]
+#[ignore = "requires TEST_DATABASE_URL; CI runs with --include-ignored"]
 async fn moderation_hierarchy_timeouts_bans_and_rejoining() {
     let db = database();
     let (owner, ot) = user(&db, "mod_owner");

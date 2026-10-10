@@ -17,6 +17,8 @@ only on loopback.
 
 - `/home/ubuntu/thiscord`: source checkout; build as `ubuntu`, not root.
 - `/opt/thiscord/releases/<commit>/thiscord-backend`: deployed native binary.
+- `/opt/thiscord/releases/<commit>/admin`: browser bundle installed by new deployments;
+  see [admin build and access](admin.md). The build host requires Trunk 0.21.14.
 - `/opt/thiscord/current`: symlink to the selected release directory.
 - `/etc/thiscord/backend.env`: root-owned, service-readable production settings.
   It preserves provider credentials and uses a separate VPS database password.

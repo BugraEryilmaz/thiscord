@@ -46,6 +46,7 @@ fn routes(
         .merge(voice)
         .merge(crate::auth::router())
         .merge(crate::permissions::router())
+        .merge(crate::admin::router())
         .fallback(not_found)
         .method_not_allowed_fallback(method_not_allowed)
         .layer(

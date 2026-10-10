@@ -48,7 +48,10 @@ fn verified(c: &mut PgConnection, account: AccountId) -> Result<(), Failure> {
         )? == [true],
     )
 }
-fn instance(c: &mut PgConnection, account: AccountId) -> Result<InstanceAccess, Failure> {
+pub(crate) fn instance(
+    c: &mut PgConnection,
+    account: AccountId,
+) -> Result<InstanceAccess, Failure> {
     let owner: Option<AccountId> = query(
         c,
         "SELECT COALESCE(to_jsonb(owner_account_id),'null'::jsonb) AS data FROM instance",

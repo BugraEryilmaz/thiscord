@@ -37,8 +37,8 @@ This code loads certificates; certificate issuance and renewal remain Certbot's 
 Forward public TCP port 443 through the router and Windows firewall/networking
 to WSL port 443. Windows TCP portproxy entries, if used, must target the current
 WSL IP, which can change after restarting WSL. Test from a different network as
-well as locally. The TLS listener serves the backend API; it does not serve the
-frontend website or redirect HTTP port 80. Stop any older plaintext backend before
+well as locally. The TLS listener serves the backend API and optional `/admin`
+bundle (see [admin setup](admin.md)); it does not redirect HTTP port 80. Stop any older plaintext backend before
 using production accounts. Keep PostgreSQL private.
 
 Build clients with the HTTPS origin in **both** WASM and native builds:

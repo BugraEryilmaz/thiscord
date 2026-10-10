@@ -1,5 +1,9 @@
 # Thiscord
 
+A browser dashboard at `/admin` provides instance-owner/admin-only CPU/RAM,
+backend health, active voice rooms and per-participant network diagnostics.
+See [admin build, access and deployment](docs/admin.md).
+
 A personal Discord-style application built with Rust: Leptos/WASM inside Tauri,
 an Axum backend running in WSL, and locally hosted PostgreSQL managed by Diesel.
 HTML/CSS, configuration, SQL migrations and generated WASM JavaScript glue are
