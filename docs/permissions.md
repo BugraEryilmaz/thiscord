@@ -111,10 +111,13 @@ guild administration. The evaluator is authoritative in
 error envelope. Inputs are limited to 16 KiB, requests are rate-limited per account
 and blocking workers are bounded. Responses are `no-store`.
 
-Each operation authenticates the session, rechecks it under its account/session
-lock, locks the guild and loads current permissions in the same transaction as
-the action. Replay revocation commits separately. Every guild mutation increments
-its revision. Editors submit the revision they viewed; a concurrent/stale write
+Each operation authenticates the session, rechecks it under shared account/session
+locks, locks the guild and loads current permissions in the same transaction as
+the action. Routine authorization uses shared guild locks and focused actor/channel
+inputs; full member/role lists are loaded only when management needs them. Guild
+writes keep exclusive guild locks. The existing in-process access gate and
+post-commit invalidation remain in place. Replay revocation commits separately.
+Every guild mutation increments its revision. Editors submit the revision they viewed; a concurrent/stale write
 returns 409 and must be refreshed. No client-provided role or permission claim is
 trusted. Revoked roles/memberships/sessions take effect on the next HTTP operation.
 

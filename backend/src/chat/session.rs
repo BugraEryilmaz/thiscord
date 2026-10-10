@@ -13,23 +13,18 @@ struct Snapshot {
     unread: Vec<Unread>,
 }
 fn snapshot(pool: &DbPool, token: &str, sub: Subscription) -> Result<Snapshot, Failure> {
-    store::checked(
-        pool,
-        token,
-        sub.guild,
-        sub.channel,
-        Some(Permission::ReadHistory),
-        |c, actor, state| {
-            Ok(Snapshot {
-                history: sub
-                    .channel
-                    .map(|channel| store::history(c, sub.guild, channel, None, Default::default()))
-                    .transpose()?,
-                permissions: crate::permissions::evaluator::effective(state, actor, sub.channel),
-                unread: store::unread(c, sub.guild, actor, state)?,
-            })
-        },
-    )
+    store::checked(pool, token, sub.guild, None, None, |c, actor, state| {
+        let permissions =
+            store::check_channel(state, actor, sub.channel, Some(Permission::ReadHistory))?;
+        Ok(Snapshot {
+            history: sub
+                .channel
+                .map(|channel| store::history(c, sub.guild, channel, None, Default::default()))
+                .transpose()?,
+            permissions,
+            unread: store::unread(c, sub.guild, actor, state)?,
+        })
+    })
 }
 async fn update(socket: &mut WebSocket, sub: Subscription, event: ServerEvent) -> Result<(), ()> {
     send(
@@ -140,9 +135,7 @@ pub(super) async fn serve(
                 if revoked.has_changed().unwrap_or(true) { let _ = send(&mut socket, ServerEvent::Revoked {}).await; break; }
                 let p = pool.clone(); let t = token.clone(); let active = typing; typing = false;
                 let result = tokio::task::spawn_blocking(move || {
-                    let unread = store::checked(&p, &t, sub.guild, None, None, |c, actor, state| store::unread(c, sub.guild, actor, state))?;
-                    let poll = sub.channel.map(|ch| store::poll(&p, &t, sub.guild, ch, cursor, connection, active)).transpose()?;
-                    Ok::<_, Failure>((unread, poll))
+                    store::refresh(&p, &t, sub.guild, sub.channel, cursor, connection, active)
                 }).await;
                 let Ok(Ok((unread, poll))) = result else { let _ = send(&mut socket, ServerEvent::Revoked {}).await; break; };
                 let delivery = async {
@@ -174,8 +167,6 @@ pub(super) async fn serve(
                 if last_seen.elapsed() > Duration::from_secs(35) { break; }
                 // Expiry/authentication and presence lease maintenance only;
                 // committed changes independently wake delivery immediately.
-                let p = pool.clone(); let t = token.clone();
-                if !matches!(tokio::task::spawn_blocking(move || auth::store::authenticate(&mut *auth::store::connection(&p)?, &t)).await, Ok(Ok(_))) { break; }
                 if let Some(sub) = subscription {
                     let _guard = gate().read().await;
                     let p = pool.clone(); let t = token.clone();
@@ -191,6 +182,9 @@ pub(super) async fn serve(
                         },
                         _ => { let _ = send(&mut socket, ServerEvent::Revoked {}).await; break; }
                     }
+                } else {
+                    let p = pool.clone(); let t = token.clone();
+                    if !matches!(tokio::task::spawn_blocking(move || auth::store::authenticate(&mut *auth::store::connection(&p)?, &t)).await, Ok(Ok(_))) { break; }
                 }
             }
         }
