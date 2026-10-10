@@ -1,4 +1,5 @@
 pub(crate) mod access;
+mod notifications;
 mod session;
 mod store;
 use crate::{
@@ -16,22 +17,15 @@ use axum::{
     response::{IntoResponse, Response},
     routing::{get, post},
 };
+use notifications::notifications;
 use std::{
     sync::{Arc, OnceLock},
     time::{Duration, Instant},
 };
 use thiscord_shared::{ApiError, ErrorCode, RequestId, chat::*, permissions::Permission};
-use tokio::sync::{Semaphore, watch};
+use tokio::sync::Semaphore;
 use uuid::Uuid;
 
-// Coalesced commit notifications; subscribers re-read authorized durable state.
-pub(super) fn updates() -> &'static watch::Sender<u64> {
-    static UPDATES: OnceLock<watch::Sender<u64>> = OnceLock::new();
-    UPDATES.get_or_init(|| watch::channel(0).0)
-}
-pub(super) fn notify() {
-    updates().send_modify(|v| *v = v.wrapping_add(1));
-}
 pub fn router(origins: Vec<HeaderValue>) -> Router<Option<DbPool>> {
     Router::new()
         .route(CHAT_PATH, post(handle))
@@ -47,10 +41,6 @@ async fn handle(
 ) -> Response {
     let result = async {
         let Json(command) = body.map_err(|_| Failure::Invalid("Invalid chat request"))?;
-        let mutation = !matches!(
-            command,
-            ChatRequest::History { .. } | ChatRequest::Unread { .. }
-        );
         let pool = pool.ok_or(Failure::Unavailable)?;
         let token = auth::bearer(&headers);
         static WORKERS: OnceLock<Arc<Semaphore>> = OnceLock::new();
@@ -61,11 +51,13 @@ async fn handle(
             .map_err(|_| Failure::Limited)?;
         tokio::task::spawn_blocking(move || {
             let _permit = permit;
-            let result = store::dispatch(&pool, &token, command);
-            if mutation && result.is_ok() {
-                notify();
+            let (response, change) = store::dispatch(&pool, &token, command)?;
+            // A started blocking worker survives cancellation of the HTTP future.
+            // Publish after commit here so its durable write still reaches sockets.
+            if let Some(change) = change {
+                notifications().publish(change);
             }
-            result
+            Ok::<_, Failure>(response)
         })
         .await
         .map_err(|_| Failure::Unavailable)?
@@ -243,7 +235,7 @@ async fn serve(mut socket: WebSocket, pool: DbPool, id: RequestId) {
     let mut last_seen = Instant::now();
     let mut window = Instant::now();
     let mut count = 0u32;
-    let mut typing = false;
+    let mut typing = None;
     let mut last_members = Vec::new();
     loop {
         tokio::select! {biased;
@@ -257,7 +249,7 @@ async fn serve(mut socket: WebSocket, pool: DbPool, id: RequestId) {
                 last_seen=Instant::now();
                 match frame(message){
                     Some(ClientEvent::Ping{})=>{if send(&mut socket,ServerEvent::Pong{}).await.is_err(){break;}}
-                    Some(ClientEvent::Typing{active})=>typing=active,
+                    Some(ClientEvent::Typing{active})=>typing=Some(active),
                     _=>{let _=send(&mut socket,error(id,ErrorCode::BadRequest,"Invalid socket event")).await;break;}
                 }
             }
@@ -265,13 +257,13 @@ async fn serve(mut socket: WebSocket, pool: DbPool, id: RequestId) {
                 if last_seen.elapsed()>Duration::from_secs(35){break;}
                 let Some(snapshot) = access::snapshot(&account_access, Some(&guild_access)) else { let _=send(&mut socket,ServerEvent::Revoked{}).await;break; };
                 if changed.has_changed().unwrap_or(true){let _=send(&mut socket,ServerEvent::Revoked{}).await;break;}
-                let p=pool.clone();let t=token.clone();let active=typing;typing=false;
+                let p=pool.clone();let t=token.clone();let active=typing.take();
                 let result=tokio::task::spawn_blocking(move||store::poll(&p,&t,guild_id,channel_id,cursor,connection_id,active)).await;
                 let Ok(Ok(poll))=result else{let _=send(&mut socket,ServerEvent::Revoked{}).await;break;};
                 let Some(_delivery) = snapshot.deliver() else { let _=send(&mut socket,ServerEvent::Revoked{}).await;break; };
                 let delivery=async {
                     for (seq,message) in poll.events{send(&mut socket,ServerEvent::Message{message,cursor:seq}).await?;cursor=seq;}
-                    if poll.members!=last_members{notify();last_members=poll.members.clone();send(&mut socket,ServerEvent::Presence{members:poll.members}).await?;}
+                    if poll.members!=last_members{last_members=poll.members.clone();send(&mut socket,ServerEvent::Presence{members:poll.members}).await?;}
                     Ok::<(),()>(())
                 };
                 if !matches!(tokio::time::timeout(Duration::from_secs(2),delivery).await,Ok(Ok(()))){break;}
@@ -280,5 +272,4 @@ async fn serve(mut socket: WebSocket, pool: DbPool, id: RequestId) {
     }
     let _ = tokio::time::timeout(Duration::from_secs(1), socket.send(Message::Close(None))).await;
     let _ = tokio::task::spawn_blocking(move || store::cleanup(&pool, connection_id)).await;
-    notify();
 }

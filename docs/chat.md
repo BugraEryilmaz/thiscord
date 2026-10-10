@@ -95,11 +95,21 @@ when no text channel is open. Read acknowledgements update other devices' badges
 There is no five-second HTTP unread poll or per-channel permissions-preview fetch.
 User commands (send/edit/delete/read and loading older history) still use HTTP.
 
-Committed chat mutations wake a bounded/coalesced in-process watch channel.
-Subscribers capture account/guild access epochs before querying current sessions,
-permissions, unread counts and durable message events. Delivery admits only snapshots
-whose epochs remain current. No delivery permit is held during database work.
-Event batches are capped at 100 and drained without waiting for a polling interval. Join/leave/typing transitions
+Committed chat changes use bounded in-process watches registered per subscription.
+The blocking database worker publishes after commit, even if the HTTP handler was
+cancelled while the transaction was running. Failed transactions publish nothing.
+Message changes wake message delivery only in that channel and unread delivery in
+that guild. Presence/typing changes wake only that channel's presence readers.
+Read acknowledgements wake only that account's subscriptions in the affected guild.
+Unread work is coalesced over a fixed 75 ms window; message/presence delivery does
+not wait for that window and never performs an unread query. Unchanged read markers,
+exact send retries and unchanged edits do not publish notifications. Presence writers
+compare combined account state, suppressing unchanged heartbeats/typing refreshes;
+snapshot readers never publish notifications. Subscriptions unregister on switch or
+close. Subscribers capture account/guild access epochs before querying authorized
+state and validate those epochs when admitting delivery. No delivery permit is held
+during database work. Event batches are capped at 100 and drained without waiting
+for a polling interval. Join/leave/typing transitions
 also wake presence delivery; unchanged snapshots are not resent. Initial history
 and its event cursor are read under a shared channel lock that excludes channel writes. Reconnect subscribes again
 and reloads a fresh snapshot, recovering missed sends, edits and deletions.
@@ -160,8 +170,8 @@ overrides, reusing the authoritative evaluator. Unread counts load the actor's
 channel grants across the guild; presence checks batch only members with active
 leases in the requested channel. Mentions query matching guild usernames directly.
 Each socket refresh shares one session/guild authorization transaction between
-unread counts and channel events. Commit notifications currently wake all session
-sockets, which filter their subscribed state.
+unread counts and channel events. Commit notifications are scoped to the subscribed
+guild, channel and account.
 Event-log compaction, cross-process fanout, full-guild presence and load tests are
 future work. Attachments, search and desktop notifications remain pending.
 Native voice uses a separate signaling socket and media admission/drain mechanism;
@@ -172,9 +182,14 @@ see [audio.md](audio.md).
 Backend tests use random schemas in TEST_DATABASE_URL and cover concurrent send
 deduplication, revisions, pagination, mentions/read markers, isolation, content
 transport, socket authentication, origins, rate limits, heartbeats, live updates,
-reconnect snapshots, membership/channel revocation and logout. Concurrency tests
-hold account/guild rows to verify unrelated HTTP/socket progress, early overload
-rejection and revocation after HTTP cancellation. Run with
+reconnect snapshots, membership/channel revocation and logout. Regression checks
+also cover scoped notification routing, unchanged read-marker rows, duplicate send/
+edit suppression, multiple-device read delivery, and presence/typing start, stop,
+expiry and disconnect without notification echoes. A cancellation regression pauses
+a transaction at commit, cancels its HTTP handler and verifies durable message and
+unread delivery after the detached worker commits. Concurrency tests hold account/
+guild rows to verify unrelated HTTP/socket progress, early overload rejection and
+revocation after HTTP cancellation. Run with
 `--include-ignored`. Shared tests cover wire versions and bounds. Browser smoke
 tests use isolated fixtures; native compilation does not establish cross-platform
 WebView runtime acceptance.

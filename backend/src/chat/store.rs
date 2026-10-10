@@ -166,7 +166,7 @@ pub(super) fn dispatch(
     pool: &DbPool,
     token: &str,
     command: ChatRequest,
-) -> Result<ChatResponse, Failure> {
+) -> Result<(ChatResponse, Option<super::notifications::Change>), Failure> {
     let mut c = connection(pool)?;
     let session = auth::authenticate(&mut c, token)?;
     drop(c);
@@ -208,7 +208,8 @@ pub(super) fn dispatch(
         } => (*guild_id, Some(*channel_id), None),
     };
     let mut c = connection(pool)?;
-    checked_session(
+    let mut change = None;
+    let response = checked_session(
         &mut c,
         token,
         &session,
@@ -287,6 +288,7 @@ pub(super) fn dispatch(
                         return Err(Failure::Conflict);
                     }
                     event(c, guild, channel_id, id)?;
+                    change = Some(super::notifications::Change::Message(guild, channel_id));
                     Ok(ChatResponse::Message {
                         message: message(c, id)?,
                     })
@@ -307,6 +309,9 @@ pub(super) fn dispatch(
                         return Err(Failure::Forbidden);
                     }
                     text(&content)?;
+                    if old.content == content {
+                        return Ok(ChatResponse::Message { message: old });
+                    }
                     let mentions = mentions(c, guild, &content)?;
                     execute(
                         c,
@@ -314,6 +319,7 @@ pub(super) fn dispatch(
                         &[&message_id.to_string(), &content, &mentions],
                     )?;
                     event(c, guild, channel_id, message_id)?;
+                    change = Some(super::notifications::Change::Message(guild, channel_id));
                     Ok(ChatResponse::Message {
                         message: message(c, message_id)?,
                     })
@@ -339,6 +345,7 @@ pub(super) fn dispatch(
                         &[&message_id.to_string()],
                     )?;
                     event(c, guild, channel_id, message_id)?;
+                    change = Some(super::notifications::Change::Message(guild, channel_id));
                     Ok(ChatResponse::Message {
                         message: message(c, message_id)?,
                     })
@@ -351,9 +358,9 @@ pub(super) fn dispatch(
                     if through < 0 {
                         return Err(Failure::Invalid("Invalid read position"));
                     }
-                    execute(
+                    let advanced = execute(
                         c,
-                        "INSERT INTO channel_reads(guild_id,channel_id,account_id,through) VALUES($1::uuid,$2::uuid,$3::uuid,LEAST($4::bigint,COALESCE((SELECT max(sequence) FROM messages WHERE guild_id=$1::uuid AND channel_id=$2::uuid),0))) ON CONFLICT(guild_id,channel_id,account_id) DO UPDATE SET through=GREATEST(channel_reads.through,EXCLUDED.through)",
+                        "INSERT INTO channel_reads(guild_id,channel_id,account_id,through) SELECT $1::uuid,$2::uuid,$3::uuid,position FROM (SELECT LEAST($4::bigint,COALESCE((SELECT max(sequence) FROM messages WHERE guild_id=$1::uuid AND channel_id=$2::uuid),0)) AS position) p WHERE position>0 ON CONFLICT(guild_id,channel_id,account_id) DO UPDATE SET through=EXCLUDED.through WHERE channel_reads.through<EXCLUDED.through",
                         &[
                             &guild.to_string(),
                             &channel_id.to_string(),
@@ -361,6 +368,9 @@ pub(super) fn dispatch(
                             &through.to_string(),
                         ],
                     )?;
+                    if advanced > 0 {
+                        change = Some(super::notifications::Change::Read(guild, actor));
+                    }
                     Ok(ChatResponse::Done)
                 }
                 ChatRequest::Unread { .. } => Ok(ChatResponse::Unread {
@@ -368,8 +378,10 @@ pub(super) fn dispatch(
                 }),
             }
         },
-    )
+    )?;
+    Ok((response, change))
 }
+
 fn scope(
     message: &ChatMessage,
     guild: GuildId,
@@ -402,14 +414,21 @@ pub(super) struct Poll {
     pub events: Vec<(i64, ChatMessage)>,
     pub members: Vec<OnlineMember>,
 }
-pub(super) fn poll(
+#[derive(Clone, Copy)]
+pub(super) struct Refresh {
+    pub messages: bool,
+    pub presence: bool,
+    pub unread: bool,
+}
+
+pub(super) fn poll_updates(
     pool: &DbPool,
     token: &str,
     guild: GuildId,
     channel: ChannelId,
     cursor: i64,
-    connection_id: Uuid,
-    typing: bool,
+    messages: bool,
+    presence: bool,
 ) -> Result<Poll, Failure> {
     checked(
         pool,
@@ -417,7 +436,7 @@ pub(super) fn poll(
         guild,
         Some(channel),
         Some(Permission::ReadHistory),
-        |c, actor, state| poll_checked(c, actor, state, channel, cursor, connection_id, typing),
+        |c, actor, state| poll_checked(c, actor, state, channel, cursor, messages, presence),
     )
 }
 fn poll_checked(
@@ -426,47 +445,29 @@ fn poll_checked(
     state: &GuildState,
     channel: ChannelId,
     cursor: i64,
-    connection_id: Uuid,
-    typing: bool,
+    messages: bool,
+    presence: bool,
 ) -> Result<Poll, Failure> {
     let guild = state.guild.id;
     check_channel(state, actor, Some(channel), Some(Permission::ReadHistory))?;
-
-    if typing && !effective(state, actor, Some(channel)).contains(&Permission::SendMessages) {
-        return Err(Failure::Forbidden);
-    }
-    execute(c, "DELETE FROM chat_presence WHERE expires_at<now()", &[])?;
-    execute(
-        c,
-        "INSERT INTO chat_presence(id,guild_id,channel_id,account_id) VALUES($1::uuid,$2::uuid,$3::uuid,$4::uuid) ON CONFLICT(id) DO UPDATE SET expires_at=now()+interval '35 seconds'",
-        &[
-            &connection_id.to_string(),
-            &guild.to_string(),
-            &channel.to_string(),
-            &actor.to_string(),
-        ],
-    )?;
-    if typing {
-        execute(
+    let events: Vec<(i64, ChatMessage)> = if messages {
+        query(
             c,
-            "UPDATE chat_presence SET typing_until=now()+interval '4 seconds' WHERE id=$1::uuid",
-            &[&connection_id.to_string()],
-        )?;
-    }
-    let events: Vec<(i64, ChatMessage)> = query(
-        c,
-        "SELECT jsonb_build_array(e.sequence,to_jsonb(m)||jsonb_build_object('username',COALESCE(a.username,'Deleted account'),'display_name',COALESCE(NULLIF(a.display_name,''),a.username,'Deleted account'))) AS data FROM message_events e JOIN messages m ON m.id=e.message_id LEFT JOIN accounts a ON a.id=m.author_id WHERE e.guild_id=$1::uuid AND e.channel_id=$2::uuid AND e.sequence>$3::bigint ORDER BY e.sequence LIMIT 100",
-        &[
-            &guild.to_string(),
-            &channel.to_string(),
-            &cursor.to_string(),
-        ],
-    )?;
-    let members: Vec<OnlineMember> = query(
-        c,
-        "SELECT jsonb_build_object('account_id',p.account_id,'username',a.username,'display_name',a.display_name,'typing',bool_or(p.typing_until>now())) AS data FROM chat_presence p JOIN accounts a ON a.id=p.account_id WHERE p.guild_id=$1::uuid AND p.channel_id=$2::uuid AND p.expires_at>now() GROUP BY p.account_id,a.username,a.display_name ORDER BY a.username",
-        &[&guild.to_string(), &channel.to_string()],
-    )?;
+            "SELECT jsonb_build_array(e.sequence,to_jsonb(m)||jsonb_build_object('username',COALESCE(a.username,'Deleted account'),'display_name',COALESCE(NULLIF(a.display_name,''),a.username,'Deleted account'))) AS data FROM message_events e JOIN messages m ON m.id=e.message_id LEFT JOIN accounts a ON a.id=m.author_id WHERE e.guild_id=$1::uuid AND e.channel_id=$2::uuid AND e.sequence>$3::bigint ORDER BY e.sequence LIMIT 100",
+            &[
+                &guild.to_string(),
+                &channel.to_string(),
+                &cursor.to_string(),
+            ],
+        )?
+    } else {
+        Vec::new()
+    };
+    let members = if presence {
+        members(c, guild, channel)?
+    } else {
+        Vec::new()
+    };
     // Presence has its own bounded set of actors. Evaluate only those
     // members and the selected channel, retaining per-recipient privacy.
     let accounts: Vec<_> = members
@@ -501,25 +502,154 @@ pub(super) fn refresh(
     guild: GuildId,
     channel: Option<ChannelId>,
     cursor: i64,
+    work: Refresh,
+) -> Result<(Option<Vec<Unread>>, Option<Poll>), Failure> {
+    // Guild-wide grants are needed only for unread counts.
+    let scope = if work.unread { None } else { channel };
+    checked(
+        pool,
+        token,
+        guild,
+        scope,
+        Some(Permission::ReadHistory),
+        |c, actor, state| {
+            let unread = work
+                .unread
+                .then(|| unread(c, guild, actor, state))
+                .transpose()?;
+            let poll = channel
+                .filter(|_| work.messages || work.presence)
+                .map(|ch| poll_checked(c, actor, state, ch, cursor, work.messages, work.presence))
+                .transpose()?;
+            Ok((unread, poll))
+        },
+    )
+}
+fn members(
+    c: &mut PgConnection,
+    guild: GuildId,
+    channel: ChannelId,
+) -> Result<Vec<OnlineMember>, Failure> {
+    presence_state(c, guild, channel, true)
+}
+
+// Inactive typing uses -infinity. The stored snapshot includes unprocessed expiries,
+// allowing the lease/typing reaper to publish each visible transition just once.
+fn presence_state(
+    c: &mut PgConnection,
+    guild: GuildId,
+    channel: ChannelId,
+    live: bool,
+) -> Result<Vec<OnlineMember>, Failure> {
+    query(
+        c,
+        "SELECT jsonb_build_object('account_id',p.account_id,'username',a.username,'display_name',a.display_name,'typing',bool_or(p.typing_until>CASE WHEN $3::boolean THEN now() ELSE '-infinity'::timestamptz END)) AS data FROM chat_presence p JOIN accounts a ON a.id=p.account_id WHERE p.guild_id=$1::uuid AND p.channel_id=$2::uuid AND (NOT $3::boolean OR p.expires_at>now()) GROUP BY p.account_id,a.username,a.display_name ORDER BY a.username",
+        &[&guild.to_string(), &channel.to_string(), &live.to_string()],
+    )
+}
+
+fn reap_presence(c: &mut PgConnection, guild: GuildId, channel: ChannelId) -> Result<(), Failure> {
+    execute(
+        c,
+        "DELETE FROM chat_presence WHERE guild_id=$1::uuid AND channel_id=$2::uuid AND expires_at<=now()",
+        &[&guild.to_string(), &channel.to_string()],
+    )?;
+    execute(
+        c,
+        "UPDATE chat_presence SET typing_until='-infinity' WHERE guild_id=$1::uuid AND channel_id=$2::uuid AND typing_until<>'-infinity' AND typing_until<=now()",
+        &[&guild.to_string(), &channel.to_string()],
+    )?;
+    Ok(())
+}
+
+// Only writers publish presence hints. Reading/delivering a snapshot never does.
+pub(super) fn presence(
+    pool: &DbPool,
+    token: &str,
+    guild: GuildId,
+    channel: ChannelId,
     connection_id: Uuid,
-    typing: bool,
-) -> Result<(Vec<Unread>, Option<Poll>), Failure> {
-    checked(pool, token, guild, None, None, |c, actor, state| {
-        let unread = unread(c, guild, actor, state)?;
-        let poll = channel
-            .map(|ch| poll_checked(c, actor, state, ch, cursor, connection_id, typing))
-            .transpose()?;
-        Ok((unread, poll))
-    })
+    typing: Option<bool>,
+) -> Result<Permissions, Failure> {
+    let (changed, permissions) = checked(
+        pool,
+        token,
+        guild,
+        Some(channel),
+        Some(Permission::ReadHistory),
+        |c, actor, state| {
+            if typing == Some(true)
+                && !effective(state, actor, Some(channel)).contains(&Permission::SendMessages)
+            {
+                return Err(Failure::Forbidden);
+            }
+            execute(
+                c,
+                "SELECT id FROM channels WHERE guild_id=$1::uuid AND id=$2::uuid FOR UPDATE",
+                &[&guild.to_string(), &channel.to_string()],
+            )?;
+            let before = presence_state(c, guild, channel, false)?;
+            reap_presence(c, guild, channel)?;
+            execute(
+                c,
+                "INSERT INTO chat_presence(id,guild_id,channel_id,account_id,typing_until) VALUES($1::uuid,$2::uuid,$3::uuid,$4::uuid,'-infinity') ON CONFLICT(id) DO UPDATE SET expires_at=now()+interval '35 seconds'",
+                &[
+                    &connection_id.to_string(),
+                    &guild.to_string(),
+                    &channel.to_string(),
+                    &actor.to_string(),
+                ],
+            )?;
+            if let Some(active) = typing {
+                execute(
+                    c,
+                    "UPDATE chat_presence SET typing_until=CASE WHEN $2::boolean THEN now()+interval '4 seconds' ELSE '-infinity'::timestamptz END WHERE id=$1::uuid",
+                    &[&connection_id.to_string(), &active.to_string()],
+                )?;
+            }
+            Ok((
+                before != members(c, guild, channel)?,
+                effective(state, actor, Some(channel)),
+            ))
+        },
+    )?;
+    if changed {
+        super::notifications::notifications()
+            .publish(super::notifications::Change::Presence(guild, channel));
+    }
+    Ok(permissions)
+}
+
+pub(super) fn poll(
+    pool: &DbPool,
+    token: &str,
+    guild: GuildId,
+    channel: ChannelId,
+    cursor: i64,
+    connection_id: Uuid,
+    typing: Option<bool>,
+) -> Result<Poll, Failure> {
+    presence(pool, token, guild, channel, connection_id, typing)?;
+    poll_updates(pool, token, guild, channel, cursor, true, true)
 }
 
 pub(super) fn cleanup(pool: &DbPool, id: Uuid) {
-    if let Ok(mut c) = connection(pool) {
-        let _ = execute(
-            &mut c,
-            "DELETE FROM chat_presence WHERE id=$1::uuid",
-            &[&id.to_string()],
-        );
+    let result = (|| -> Result<Option<(GuildId, ChannelId)>, Failure> {
+        let mut c = connection(pool)?;
+        c.transaction(|c| {
+            let location: Option<(GuildId, ChannelId)> = query(c, "SELECT jsonb_build_array(guild_id,channel_id) AS data FROM chat_presence WHERE id=$1::uuid", &[&id.to_string()])?.pop();
+            let Some((guild, channel)) = location else { return Ok(None); };
+            execute(c, "SELECT id FROM guilds WHERE id=$1::uuid FOR SHARE", &[&guild.to_string()])?;
+            execute(c, "SELECT id FROM channels WHERE guild_id=$1::uuid AND id=$2::uuid FOR UPDATE", &[&guild.to_string(), &channel.to_string()])?;
+            let before = presence_state(c, guild, channel, false)?;
+            reap_presence(c, guild, channel)?;
+            execute(c, "DELETE FROM chat_presence WHERE id=$1::uuid", &[&id.to_string()])?;
+            Ok((before != members(c, guild, channel)?).then_some((guild, channel)))
+        })
+    })();
+    if let Ok(Some((guild, channel))) = result {
+        super::notifications::notifications()
+            .publish(super::notifications::Change::Presence(guild, channel));
     }
 }
 
@@ -562,21 +692,16 @@ pub(super) fn maintain(
     guild: GuildId,
     channel: Option<ChannelId>,
     connection_id: Uuid,
-) -> Result<(bool, thiscord_shared::permissions::Permissions), Failure> {
+) -> Result<thiscord_shared::permissions::Permissions, Failure> {
+    if let Some(channel) = channel {
+        return presence(pool, token, guild, channel, connection_id, None);
+    }
     checked(
         pool,
         token,
         guild,
         channel,
         Some(Permission::ReadHistory),
-        |c, actor, state| {
-            let removed = execute(c, "DELETE FROM chat_presence WHERE expires_at<now()", &[])?;
-            execute(
-                c,
-                "UPDATE chat_presence SET expires_at=now()+interval '35 seconds' WHERE id=$1::uuid",
-                &[&connection_id.to_string()],
-            )?;
-            Ok((removed > 0, effective(state, actor, channel)))
-        },
+        |_c, actor, state| Ok(effective(state, actor, channel)),
     )
 }
