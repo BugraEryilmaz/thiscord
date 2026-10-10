@@ -52,6 +52,8 @@ cd "$source_dir"
 export CARGO_TARGET_DIR="$repo/target"
 export CARGO_BUILD_JOBS=2 CARGO_PROFILE_RELEASE_LTO=false CARGO_PROFILE_RELEASE_CODEGEN_UNITS=8
 cargo build -p thiscord-backend --bin thiscord-backend --release --locked
+[[ $(trunk --version) == 'trunk 0.21.14' ]] || { echo 'Install trunk 0.21.14 with cargo install trunk --version 0.21.14 --locked.' >&2; exit 1; }
+(cd frontend && trunk build --release --locked --public-url /admin/ --dist dist-admin)
 if [[ $build_only == true ]]; then
     echo "Build verified: $commit. No production service or database changes."
     exit 0
@@ -62,6 +64,11 @@ previous=$(sudo -n readlink -f /opt/thiscord/current)
 release=$(sudo -n mktemp -d "/opt/thiscord/releases/${commit:0:12}-$(date -u +%Y%m%dT%H%M%SZ).XXXXXXXX")
 sudo -n chmod 0755 "$release"
 sudo -n install -o root -g root -m 0755 "$CARGO_TARGET_DIR/release/thiscord-backend" "$release/thiscord-backend"
+sudo -n install -d -o root -g root -m 0755 "$release/admin"
+sudo -n cp -R frontend/dist-admin/. "$release/admin/"
+sudo -n chown -R root:root "$release/admin"
+sudo -n find "$release/admin" -type d -exec chmod 0755 {} +
+sudo -n find "$release/admin" -type f -exec chmod 0644 {} +
 echo "Stopping backend and backing up PostgreSQL before activation: $release"
 stopped=true
 sudo -n systemctl stop thiscord

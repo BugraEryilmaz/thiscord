@@ -6,6 +6,9 @@ media compatibility spike can happen before chat to expose platform constraints.
 
 ## 0. Foundation
 
+- [x] Browser `/admin` dashboard with current instance-owner/admin authorization, host metrics and live voice diagnostics.
+- [ ] Deploy the admin bundle to the VPS and verify production password/Google login and real-client telemetry.
+
 - [x] Three-package workspace with shared Serde communication contracts.
 - [x] Leptos UI and Tauri launcher in one frontend package.
 - [x] Persistent opt-in close-to-tray setting with Open/Quit tray actions and macOS Dock restore.

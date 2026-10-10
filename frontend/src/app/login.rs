@@ -3,7 +3,7 @@ use leptos::prelude::*;
 use thiscord_shared::account::{AccountRequest, GooglePurpose};
 
 #[component]
-pub(super) fn Login(ui: Ui) -> impl IntoView {
+pub(super) fn Login(ui: Ui, #[prop(default = false)] admin: bool) -> impl IntoView {
     let login = RwSignal::new(String::new());
     let password = RwSignal::new(String::new());
     let username = RwSignal::new(String::new());
@@ -56,7 +56,7 @@ pub(super) fn Login(ui: Ui) -> impl IntoView {
         <main class="flex min-h-screen items-center justify-center px-5 py-10">
             <section class="w-full max-w-md space-y-6 rounded-2xl border border-white/10 bg-surface p-8 shadow-2xl" aria-labelledby="login-title">
                 <header class="space-y-2 text-center"><p class="text-sm font-semibold uppercase tracking-widest text-brand">"Thiscord"</p>
-                    <h1 id="login-title" class="text-3xl font-bold">"Welcome back"</h1><p class="text-white/60">"Sign in to your account."</p>
+                    <h1 id="login-title" class="text-3xl font-bold">{if admin { "Instance dashboard" } else { "Welcome back" }}</h1><p class="text-white/60">{if admin { "Sign in with an instance owner or admin account." } else { "Sign in to your account." }}</p>
                 </header>
                 <form class="space-y-5" on:submit=sign_in>
                     <Field label="Username or email" value=login autocomplete="username"/>

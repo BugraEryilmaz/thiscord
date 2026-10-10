@@ -50,6 +50,7 @@ pub enum ReadinessStatus {
     Ready,
 }
 
+pub mod admin;
 pub mod audio;
 pub mod update;
 pub mod voice;

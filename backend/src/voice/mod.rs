@@ -1,5 +1,6 @@
 //! Bounded, single-process audio SFU. One WebRTC transport per participant.
 pub(crate) mod access;
+mod diagnostics;
 mod ice;
 mod store;
 use crate::{auth::Failure, db::DbPool};
@@ -40,6 +41,7 @@ use webrtc::{
 
 #[derive(Clone)]
 struct Member {
+    network: Arc<RwLock<thiscord_shared::admin::NetworkMetrics>>,
     info: Participant,
     source_id: uuid::Uuid,
     tx: mpsc::Sender<Delivery>,
@@ -116,8 +118,8 @@ impl VoiceAccess {
         result
     }
 }
+static ROOMS: OnceLock<Mutex<HashMap<ChannelId, Weak<Room>>>> = OnceLock::new();
 async fn room(id: ChannelId) -> Arc<Room> {
-    static ROOMS: OnceLock<Mutex<HashMap<ChannelId, Weak<Room>>>> = OnceLock::new();
     let mut rooms = ROOMS.get_or_init(Default::default).lock().await;
     rooms.retain(|_, r| r.strong_count() > 0);
     if let Some(room) = rooms.get(&id).and_then(Weak::upgrade) {
@@ -129,6 +131,10 @@ async fn room(id: ChannelId) -> Arc<Room> {
 }
 pub fn router(origins: Vec<HeaderValue>) -> Router<Option<DbPool>> {
     router_with_limit(origins, 64)
+}
+pub(crate) async fn diagnostics()
+-> HashMap<ChannelId, Vec<thiscord_shared::admin::ParticipantDiagnostics>> {
+    diagnostics::snapshot().await
 }
 pub(crate) fn router_with_limit(
     origins: Vec<HeaderValue>,
@@ -545,6 +551,7 @@ async fn serve(mut socket: WebSocket, pool: DbPool, id: RequestId) {
     let metrics: Arc<[AtomicU64; 5]> = Arc::new(std::array::from_fn(|_| AtomicU64::new(0)));
     let (keyframe_tx, mut keyframe_rx) = mpsc::channel(1);
     let source_id = uuid::Uuid::new_v4();
+    let network = Arc::new(RwLock::new(Default::default()));
     info.screen_epoch = room
         .screen_epoch
         .fetch_add(1, Ordering::Relaxed)
@@ -580,6 +587,7 @@ async fn serve(mut socket: WebSocket, pool: DbPool, id: RequestId) {
         members.insert(
             slot,
             Member {
+                network: network.clone(),
                 info: info.clone(),
                 source_id,
                 tx: out_tx,
@@ -638,6 +646,20 @@ async fn serve(mut socket: WebSocket, pool: DbPool, id: RequestId) {
         return;
     };
     let pc: Arc<dyn PeerConnection> = Arc::new(pc);
+    let stats_peer = pc.clone();
+    let mut stats_task = diagnostics::Sampler(tokio::spawn(async move {
+        loop {
+            if let Ok(report) = tokio::time::timeout(
+                Duration::from_millis(100),
+                stats_peer.get_stats(Instant::now(), rtc::statistics::StatsSelector::None),
+            )
+            .await
+            {
+                *network.write().await = diagnostics::network(&report);
+            }
+            tokio::time::sleep(Duration::from_secs(5)).await;
+        }
+    }));
     let mut tracks = Vec::new();
     let mut screen_feedback = false;
     let negotiated = tokio::time::timeout(Duration::from_secs(15), async {
@@ -905,6 +927,8 @@ async fn serve(mut socket: WebSocket, pool: DbPool, id: RequestId) {
     }
     active.store(false, Ordering::Release);
     room.members.write().await.remove(&slot);
+    stats_task.0.abort();
+    let _ = (&mut stats_task.0).await;
     let _ = tokio::time::timeout(Duration::from_secs(2), pc.close()).await;
     let _ = tokio::time::timeout(Duration::from_secs(1), socket.send(Message::Close(None))).await;
 }
@@ -956,6 +980,7 @@ mod send_tests {
             room.members.write().await.insert(
                 slot,
                 Member {
+                    network: Arc::new(RwLock::new(Default::default())),
                     info: Participant {
                         account_id: uuid::Uuid::new_v4().to_string().parse().unwrap(),
                         username: "test".into(),

@@ -70,7 +70,18 @@ async fn main() -> Result<(), BoxError> {
     if let Some(pool) = pool.as_ref() {
         thiscord_backend::auth::mail::start(pool.clone());
     }
-    let app = api::router(pool, origins);
+    let mut app = api::router(pool, origins);
+    // Production bundles live beside the executable. An explicit path must exist.
+    let configured = env::var_os("ADMIN_DIST_DIR");
+    let directory = configured.clone().map(std::path::PathBuf::from).unwrap_or(
+        env::current_exe()?
+            .parent()
+            .ok_or("Missing executable directory")?
+            .join("admin"),
+    );
+    if configured.is_some() || directory.is_dir() {
+        app = app.merge(thiscord_backend::admin::web::router(&directory)?);
+    }
     let listener = tokio::net::TcpListener::bind(bind).await?;
     let address = listener.local_addr()?;
     if let Some(tls) = tls {

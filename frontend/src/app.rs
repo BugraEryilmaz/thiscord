@@ -1,6 +1,7 @@
 use crate::account_client as client;
 use leptos::prelude::*;
 use thiscord_shared::account::*;
+mod admin;
 mod audio;
 mod chat;
 mod diagnostics;
@@ -129,6 +130,8 @@ fn run(ui: Ui, command: AccountRequest) {
 fn device_name() -> &'static str {
     if client::desktop() {
         "Thiscord desktop"
+    } else if client::admin_page() {
+        "Thiscord admin browser"
     } else {
         "Browser preview"
     }
@@ -304,6 +307,13 @@ pub fn App() -> impl IntoView {
         ticket: RwSignal::new(None),
         authorization_url: RwSignal::new(None),
     };
+    if crate::account_client::admin_page() {
+        return view! {
+            <Show when=move ||ui.account.get().is_some() fallback=move ||view!{<login::Login ui=ui admin=true/>}>
+                <admin::Dashboard ui=ui/>
+            </Show>
+        }.into_any();
+    }
     let password = RwSignal::new(String::new());
     let display_name = RwSignal::new(String::new());
     let bio = RwSignal::new(String::new());
@@ -439,5 +449,5 @@ pub fn App() -> impl IntoView {
             <audio::VoiceBar ui=ui/>
         </main>
         </Show>
-    }
+    }.into_any()
 }
