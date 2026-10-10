@@ -187,7 +187,23 @@ pub(super) fn dispatch(
             | PermissionRequest::SetInstanceAdmin { .. }
     )
     .then(|| crate::voice::access::global().pause());
-    c.transaction(|c| {
+    let scopes = match &command {
+        PermissionRequest::Change { guild_id, .. }
+        | PermissionRequest::JoinGuild { guild_id, .. } => {
+            vec![crate::chat::access::guild(*guild_id)]
+        }
+        PermissionRequest::SetInstanceAdmin { account_id, .. } => {
+            vec![crate::chat::access::instance_role(*account_id)]
+        }
+        PermissionRequest::TransferInstance { account_id } => vec![
+            crate::chat::access::instance_role(session.account_id),
+            crate::chat::access::instance_role(*account_id),
+        ],
+        _ => Vec::new(),
+    };
+    let mut changes = Vec::new();
+    let result = c.transaction(|c| {
+        let result = (|| {
         auth::read_session(c,token,&session)?;
         let actor = session.account_id;
         match command {
@@ -292,7 +308,14 @@ pub(super) fn dispatch(
                 }
             }
         }
-    })
+        })();
+        if result.is_ok() { changes.extend(scopes.into_iter().map(|scope| scope.pause())); }
+        result
+    });
+    for change in changes {
+        change.finish(result.is_ok());
+    }
+    result
 }
 
 fn change_guild(

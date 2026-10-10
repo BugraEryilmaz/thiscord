@@ -143,13 +143,14 @@ disabled with an explanatory hover tooltip. Other members can confirm Leave serv
 The server list refreshes after a successful leave or deletion.
 
 Chat HTTP operations and socket deliveries now use current database permissions.
-Membership/role/session changes invalidate active sockets; the single-process access
-gate closes all subscriptions conservatively and eligible clients reconnect.
+Membership/role changes invalidate sockets subscribed to the affected guild; session
+changes invalidate that account's sockets. Scoped delivery barriers preserve commit
+ordering without blocking unrelated accounts/guilds; eligible clients reconnect.
 See [chat.md](chat.md). Do not treat client snapshots as reusable authorization tickets.
 Voice signaling checks current sessions, membership, ViewChannel and JoinVoice.
 SFU routing also enforces Speak and self mute/deafen. Publisher/receiver writes
-hold the same access gate and check its generation; successful access-changing
-commits pause media until sessions revalidate; revoked sessions are evicted. See [audio.md](audio.md). Moderator voice
+use separate atomic media permits and check their generation; access-changing
+workers drain admitted media writes and commits pause media until sessions revalidate; revoked sessions are evicted. See [audio.md](audio.md). Moderator voice
 disconnects now enforce the target hierarchy; mute/deafen/move remain pending.
 
 EditOwnMessages/DeleteOwnMessages additionally require message authorship;

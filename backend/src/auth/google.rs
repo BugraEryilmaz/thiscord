@@ -78,6 +78,7 @@ pub(super) async fn start(
     purpose: GooglePurpose,
     callback: Option<String>,
     name: String,
+    permit: std::sync::Arc<tokio::sync::OwnedSemaphorePermit>,
 ) -> Result<AccountResponse, Failure> {
     device(&name)?;
     if callback.as_ref().is_some_and(|c| !valid_callback(c)) {
@@ -113,6 +114,7 @@ pub(super) async fn start(
     let state_hash = digest(state.secret());
     let ticket_hash = digest(&ticket);
     tokio::task::spawn_blocking(move || {
+        let _permit = permit;
         let mut c = connection(&pool)?;
         let session = if purpose!=GooglePurpose::Login { Some(authenticate(&mut c,&token)?) } else { None };
         c.transaction::<_,Failure,_>(|c| {
@@ -314,7 +316,8 @@ pub(super) fn complete(c: &mut PgConnection, ticket: &str) -> Result<AccountResp
     // Pending ticket polls do not affect voice. A completed login can evict a
     // device; keep its drain guard outside the closure so it survives commit.
     let mut _voice_change = None;
-    c.transaction(|c| {
+    let mut chat_change = None;
+    let result = c.transaction(|c| {
         let initial = query_attempt(c,"SELECT to_jsonb(o) AS data FROM oauth_attempts o WHERE ticket_hash=$1 AND expires_at>now()", &digest(ticket))?;
         if initial.status=="pending" || initial.status=="processing" { return Ok(AccountResponse::Pending); }
         if let Some(id) = initial.account_id { execute(c,"SELECT id FROM accounts WHERE id=$1::uuid FOR UPDATE", &[&id.to_string()])?; }
@@ -324,10 +327,17 @@ pub(super) fn complete(c: &mut PgConnection, ticket: &str) -> Result<AccountResp
         execute(c,"DELETE FROM oauth_attempts WHERE ticket_hash=$1", &[&digest(ticket)])?;
         if a.purpose=="login" {
             _voice_change = Some(crate::voice::access::global().pause());
-            grant(c,a.account_id.ok_or(Failure::Unauthorized)?,&a.device)
+            let id = a.account_id.ok_or(Failure::Unauthorized)?;
+            let response = grant(c,id,&a.device)?;
+            chat_change = Some(crate::chat::access::account(id).pause());
+            Ok(response)
         }
         else { Ok(AccountResponse::Done {message:"Google identity operation completed".into()}) }
-    })
+    });
+    if let Some(change) = chat_change {
+        change.finish(result.is_ok());
+    }
+    result
 }
 
 #[cfg(test)]

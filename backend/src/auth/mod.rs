@@ -147,6 +147,25 @@ pub(crate) fn bearer(headers: &HeaderMap) -> String {
         .to_owned()
 }
 
+// Keep admission ahead of all database work, including rate-limit queries.
+fn admit(command: &AccountRequest) -> Result<Arc<tokio::sync::OwnedSemaphorePermit>, Failure> {
+    // Provider discovery has its own budget so it cannot exhaust local workers.
+    static WORKERS: OnceLock<Arc<tokio::sync::Semaphore>> = OnceLock::new();
+    static PROVIDERS: OnceLock<Arc<tokio::sync::Semaphore>> = OnceLock::new();
+    let workers = if matches!(command, AccountRequest::GoogleStart { .. }) {
+        &PROVIDERS
+    } else {
+        &WORKERS
+    };
+    Ok(Arc::new(
+        workers
+            .get_or_init(|| Arc::new(tokio::sync::Semaphore::new(4)))
+            .clone()
+            .try_acquire_owned()
+            .map_err(|_| Failure::Limited)?,
+    ))
+}
+
 async fn handle(
     State(pool): State<Option<DbPool>>,
     Extension(id): Extension<RequestId>,
@@ -154,25 +173,12 @@ async fn handle(
     headers: HeaderMap,
     body: Result<Json<AccountRequest>, JsonRejection>,
 ) -> Response {
-    let _access = crate::chat::gate().write().await;
-    let mutation = matches!(
-        &body,
-        Ok(Json(
-            AccountRequest::Logout
-                | AccountRequest::LogoutAll
-                | AccountRequest::RevokeSession { .. }
-                | AccountRequest::DeleteAccount { .. }
-                | AccountRequest::ChangePassword { .. }
-                | AccountRequest::ResetPassword { .. }
-                | AccountRequest::UnlinkIdentity { .. }
-                | AccountRequest::Rotate
-                | AccountRequest::GoogleComplete { .. }
-        ))
-    );
     let result = async {
         let Json(command) = body.map_err(|_| Failure::Invalid("Invalid account request"))?;
         let pool = pool.ok_or(Failure::Unavailable)?;
         let token = bearer(&headers);
+        let permit = admit(&command)?;
+        let limit_permit = permit.clone();
         // Proxy headers are deliberately ignored. Configure a trusted proxy before deployment.
         let ip = peer
             .map(|p| p.0.0.ip().to_string())
@@ -191,6 +197,7 @@ async fn handle(
                 | AccountRequest::GoogleComplete { .. }
         );
         tokio::task::spawn_blocking(move || {
+            let _permit = limit_permit;
             store::rate_limit(&limit_pool, &ip, identifier.as_deref(), sensitive)
         })
         .await
@@ -200,29 +207,16 @@ async fn handle(
                 purpose,
                 callback,
                 device,
-            } => google::start(pool, token, purpose, callback, device).await,
-            command => {
-                static WORKERS: OnceLock<Arc<tokio::sync::Semaphore>> = OnceLock::new();
-                let permit = WORKERS
-                    .get_or_init(|| Arc::new(tokio::sync::Semaphore::new(4)))
-                    .clone()
-                    .try_acquire_owned()
-                    .map_err(|_| Failure::Limited)?;
-                tokio::task::spawn_blocking(move || {
-                    let _permit = permit;
-                    store::dispatch(&pool, &token, command)
-                })
-                .await
-                .map_err(|_| Failure::Unavailable)?
-            }
+            } => google::start(pool, token, purpose, callback, device, permit).await,
+            command => tokio::task::spawn_blocking(move || {
+                let _permit = permit;
+                store::dispatch(&pool, &token, command)
+            })
+            .await
+            .map_err(|_| Failure::Unavailable)?,
         }
     }
     .await;
-    if (mutation && result.is_ok() && !matches!(&result, Ok(AccountResponse::Pending)))
-        || matches!(&result, Ok(AccountResponse::Session { .. }))
-    {
-        crate::chat::invalidate();
-    }
     let mut response = match result {
         Ok(body) => Json(body).into_response(),
         Err(e) => e.response(id),
@@ -231,4 +225,24 @@ async fn handle(
         .headers_mut()
         .insert("cache-control", "no-store".parse().unwrap());
     response
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn stalled_provider_budget_does_not_exhaust_local_account_admission() {
+        let discovery = AccountRequest::GoogleStart {
+            purpose: GooglePurpose::Login,
+            callback: None,
+            device: "test".into(),
+        };
+        let providers: Vec<_> = (0..4).map(|_| admit(&discovery).unwrap()).collect();
+        assert!(matches!(admit(&discovery), Err(Failure::Limited)));
+        let local = admit(&AccountRequest::Current).unwrap();
+        drop(providers);
+        assert!(admit(&discovery).is_ok());
+        drop(local);
+    }
 }

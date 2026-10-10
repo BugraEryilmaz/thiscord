@@ -16,6 +16,10 @@ use thiscord_shared::{ApiError, account::*};
 use tower::ServiceExt;
 use uuid::Uuid;
 
+// Independent fixtures share the process-wide four-worker account limit. Each
+// fixture sends requests sequentially; overload behavior is tested in chat.rs.
+static FIXTURES: tokio::sync::Semaphore = tokio::sync::Semaphore::const_new(4);
+
 struct Database {
     connection: PgConnection,
     schema: String,
@@ -118,6 +122,7 @@ fn code(db: &Database, purpose: &str) -> String {
 #[tokio::test]
 #[ignore = "requires TEST_DATABASE_URL; CI runs with --include-ignored"]
 async fn profile_pictures_are_owned_persistent_replaceable_and_deleted_with_account() {
+    let _fixture = FIXTURES.acquire().await.unwrap();
     use base64::{Engine, engine::general_purpose::STANDARD};
     let db = database();
     let app = api::router(Some(db.pool.clone()), vec![]);
@@ -264,6 +269,7 @@ async fn profile_pictures_are_owned_persistent_replaceable_and_deleted_with_acco
 #[tokio::test]
 #[ignore = "requires TEST_DATABASE_URL; CI runs with --include-ignored"]
 async fn verification_links_are_single_use_and_expire() {
+    let _fixture = FIXTURES.acquire().await.unwrap();
     let db = database();
     let app = api::router(Some(db.pool.clone()), vec![]);
     let session=token(&call(&app,json!({"action":"register","username":"link_user","email":"link@example.com","password":"a long test password","device":"test"}),None,StatusCode::OK).await);
@@ -347,6 +353,7 @@ fn login(password: &str) -> Value {
 #[tokio::test]
 #[ignore = "requires TEST_DATABASE_URL; CI runs with --include-ignored"]
 async fn accounts_sessions_recovery_and_deletion() {
+    let _fixture = FIXTURES.acquire().await.unwrap();
     let db = database();
     let app = api::router(Some(db.pool.clone()), vec![]);
     let register = json!({"action":"register","username":"Alice","email":"Alice@example.com","password":"correct horse battery","device":"laptop"});
@@ -619,6 +626,7 @@ async fn accounts_sessions_recovery_and_deletion() {
 #[tokio::test]
 #[ignore = "requires TEST_DATABASE_URL; CI runs with --include-ignored"]
 async fn validation_throttling_and_oauth_rejection() {
+    let _fixture = FIXTURES.acquire().await.unwrap();
     let db = database();
     let app = api::router(Some(db.pool.clone()), vec![]);
     call(&app,json!({"action":"register","username":"x","email":"a@example.com","password":"short","device":"test"}),None,StatusCode::BAD_REQUEST).await;
@@ -670,6 +678,7 @@ async fn validation_throttling_and_oauth_rejection() {
 #[tokio::test]
 #[ignore = "requires TEST_DATABASE_URL; CI runs with --include-ignored"]
 async fn oauth_cancellation_expiry_and_callback_replay() {
+    let _fixture = FIXTURES.acquire().await.unwrap();
     use base64::{Engine, engine::general_purpose::URL_SAFE_NO_PAD};
     use sha2::{Digest, Sha256};
     let db = database();

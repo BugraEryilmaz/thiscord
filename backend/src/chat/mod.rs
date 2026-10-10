@@ -1,3 +1,4 @@
+pub(crate) mod access;
 mod notifications;
 mod session;
 mod store;
@@ -22,20 +23,9 @@ use std::{
     time::{Duration, Instant},
 };
 use thiscord_shared::{ApiError, ErrorCode, RequestId, chat::*, permissions::Permission};
-use tokio::sync::{RwLock, Semaphore, watch};
+use tokio::sync::Semaphore;
 use uuid::Uuid;
 
-pub(crate) fn gate() -> &'static RwLock<()> {
-    static GATE: OnceLock<RwLock<()>> = OnceLock::new();
-    GATE.get_or_init(|| RwLock::new(()))
-}
-pub(crate) fn changes() -> &'static watch::Sender<u64> {
-    static CHANGES: OnceLock<watch::Sender<u64>> = OnceLock::new();
-    CHANGES.get_or_init(|| watch::channel(0).0)
-}
-pub(crate) fn invalidate() {
-    changes().send_modify(|v| *v = v.wrapping_add(1));
-}
 pub fn router(origins: Vec<HeaderValue>) -> Router<Option<DbPool>> {
     Router::new()
         .route(CHAT_PATH, post(handle))
@@ -49,7 +39,6 @@ async fn handle(
     headers: HeaderMap,
     body: Result<Json<ChatRequest>, JsonRejection>,
 ) -> Response {
-    let _guard = gate().write().await;
     let result = async {
         let Json(command) = body.map_err(|_| Failure::Invalid("Invalid chat request"))?;
         let pool = pool.ok_or(Failure::Unavailable)?;
@@ -145,15 +134,25 @@ fn frame(message: Message) -> Option<ClientEvent> {
     let frame: ClientFrame = serde_json::from_str(&text).ok()?;
     (frame.version == SOCKET_VERSION).then_some(frame.event)
 }
+async fn socket_access(pool: &DbPool, token: &str) -> Result<Arc<access::Access>, Failure> {
+    let p = pool.clone();
+    let t = token.to_owned();
+    let account = tokio::task::spawn_blocking(move || {
+        auth::store::token_account(&mut *auth::store::connection(&p)?, &t)
+    })
+    .await
+    .map_err(|_| Failure::Unavailable)??;
+    Ok(access::account(account))
+}
+
 async fn serve(mut socket: WebSocket, pool: DbPool, id: RequestId) {
-    let mut changed = changes().subscribe();
     let first = tokio::time::timeout(Duration::from_secs(5), socket.recv()).await;
     let Ok(Some(Ok(message))) = first else {
         return;
     };
     let event = frame(message);
     if let Some(ClientEvent::Connect { token }) = event {
-        session::serve(socket, pool, id, token, changed).await;
+        session::serve(socket, pool, id, token).await;
         return;
     }
     let Some(ClientEvent::Authenticate {
@@ -173,10 +172,23 @@ async fn serve(mut socket: WebSocket, pool: DbPool, id: RequestId) {
         .await;
         return;
     };
+    let Ok(account_access) = socket_access(&pool, &token).await else {
+        let _ = send(
+            &mut socket,
+            error(id, ErrorCode::Unauthorized, "Sign in again"),
+        )
+        .await;
+        return;
+    };
+    let guild_access = access::guild(guild_id);
+    let mut changed = account_access.subscribe();
+    let mut guild_changed = guild_access.subscribe();
     let connection_id = Uuid::new_v4();
     let mut cursor;
     {
-        let _guard = gate().write().await;
+        let Some(snapshot) = access::snapshot(&account_access, Some(&guild_access)) else {
+            return;
+        };
         if changed.has_changed().unwrap_or(true) {
             return;
         }
@@ -207,6 +219,9 @@ async fn serve(mut socket: WebSocket, pool: DbPool, id: RequestId) {
             .await;
             return;
         };
+        let Some(_delivery) = snapshot.deliver() else {
+            return;
+        };
         cursor = history.event_cursor;
         if send(&mut socket, ServerEvent::Ready { history })
             .await
@@ -224,6 +239,7 @@ async fn serve(mut socket: WebSocket, pool: DbPool, id: RequestId) {
     let mut last_members = Vec::new();
     loop {
         tokio::select! {biased;
+            _=guild_changed.changed()=>{let _=send(&mut socket,ServerEvent::Revoked{}).await;break;}
             _=changed.changed()=>{let _=send(&mut socket,ServerEvent::Revoked{}).await;break;}
             message=socket.recv()=>{
                 let Some(Ok(message))=message else{break;};
@@ -239,11 +255,12 @@ async fn serve(mut socket: WebSocket, pool: DbPool, id: RequestId) {
             }
             _=tick.tick()=>{
                 if last_seen.elapsed()>Duration::from_secs(35){break;}
-                let _guard=gate().read().await;
+                let Some(snapshot) = access::snapshot(&account_access, Some(&guild_access)) else { let _=send(&mut socket,ServerEvent::Revoked{}).await;break; };
                 if changed.has_changed().unwrap_or(true){let _=send(&mut socket,ServerEvent::Revoked{}).await;break;}
                 let p=pool.clone();let t=token.clone();let active=typing.take();
                 let result=tokio::task::spawn_blocking(move||store::poll(&p,&t,guild_id,channel_id,cursor,connection_id,active)).await;
                 let Ok(Ok(poll))=result else{let _=send(&mut socket,ServerEvent::Revoked{}).await;break;};
+                let Some(_delivery) = snapshot.deliver() else { let _=send(&mut socket,ServerEvent::Revoked{}).await;break; };
                 let delivery=async {
                     for (seq,message) in poll.events{send(&mut socket,ServerEvent::Message{message,cursor:seq}).await?;cursor=seq;}
                     if poll.members!=last_members{last_members=poll.members.clone();send(&mut socket,ServerEvent::Presence{members:poll.members}).await?;}
