@@ -107,6 +107,7 @@ impl VoiceAccess {
             }
             member.info.username = info.username;
             member.info.display_name = info.display_name;
+            member.info.avatar_id = info.avatar_id;
             self.generation.store(epoch, Ordering::Release);
             Ok(members.values().map(|m| m.info.clone()).collect())
         });
@@ -960,6 +961,7 @@ mod send_tests {
                         account_id: uuid::Uuid::new_v4().to_string().parse().unwrap(),
                         username: "test".into(),
                         display_name: String::new(),
+                        avatar_id: None,
                         slot,
                         muted: false,
                         deafened: false,

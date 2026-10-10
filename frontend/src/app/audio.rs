@@ -245,7 +245,17 @@ pub(super) fn VoiceChannel(
                 }>"Join voice"</button>
             </Show>
             <Show when=move||ui.voice.get().channel_id==Some(channel)>
-                <ul class="space-y-2">{move||ui.voice.get().participants.into_iter().map(move |m|view!{<li class="flex flex-wrap items-center gap-3"><span>{m.display_name().to_owned()}{if m.deafened{" · deafened"}else if m.muted||!m.can_speak{" · muted"}else{""}}</span><Show when=move ||ui.server.get().is_some_and(|s|s.guild.id==guild && s.can_moderate) && ui.account.get().is_some_and(|a|a.id!=m.account_id)><button class="text-sm text-brand underline" on:click=move |_|{ui.moderation_target.set(Some(m.account_id));ui.page.set("moderation");}>"Moderate"</button></Show></li>}).collect_view()}</ul>
+                <ul class="space-y-2"><For each=move || ui.voice.get().participants key=|m| m.account_id children=move |m| {
+                    let id = m.account_id;
+                    let member = Signal::derive(move || ui.voice.with(|v| v.participants.iter().find(|m| m.account_id == id).cloned()).unwrap_or_else(|| m.clone()));
+                    view! { <li class="flex flex-wrap items-center gap-3">
+                        <crate::avatar::Avatar name=Signal::derive(move || member.get().display_name().to_owned()) avatar_id=Signal::derive(move || member.get().avatar_id)/>
+                        <span>{move || member.get().display_name().to_owned()}{move || {let m=member.get(); if m.deafened {" · deafened"} else if m.muted || !m.can_speak {" · muted"} else {""}}}</span>
+                        <Show when=move || ui.server.get().is_some_and(|s| s.guild.id == guild && s.can_moderate) && ui.account.get().is_some_and(|a| a.id != id)>
+                            <button class="text-sm text-brand underline" on:click=move |_| {ui.moderation_target.set(Some(id)); ui.page.set("moderation");}>"Moderate"</button>
+                        </Show>
+                    </li> }
+                }/></ul>
                 <super::screen::ScreenViewer ui=ui/>
                 <h3 class="font-semibold">"Speaker volumes"</h3><StreamVolumes ui=ui/>
             </Show>

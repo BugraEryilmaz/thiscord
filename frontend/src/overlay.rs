@@ -28,20 +28,26 @@ pub fn VoiceOverlay() -> impl IntoView {
     }
     view! {
         <main class="voice-overlay" aria-label="Active voice chat">
-            {move || snapshot.get().participants.into_iter().map(|p| {
-                let initial = p.name.chars().next().unwrap_or('?').to_uppercase().to_string();
-                let state = if p.deafened { "Deafened" } else if p.muted { "Muted" }
-                    else if p.speaking { "Speaking" } else { "Listening" };
-                let accessible_name = format!("{}: {state}", p.name);
+            <For each=move || snapshot.get().participants
+                key=|p| p.account_id
+                children=move |p| {
+                let id = p.account_id;
+                let person = Signal::derive(move || snapshot.with(|s| s.participants.iter().find(|p| p.account_id == id).cloned()).unwrap_or_else(|| p.clone()));
+                let accessible_name = move || {
+                    let p = person.get();
+                    let state = if p.deafened { "Deafened" } else if p.muted { "Muted" }
+                        else if p.speaking { "Speaking" } else { "Listening" };
+                    format!("{}: {state}", p.name)
+                };
                 view! {
-                    <div class="overlay-person" class:overlay-speaking=p.speaking aria-label=accessible_name>
-                        <span class="overlay-avatar" aria-hidden="true">{initial}</span>
-                        <span class="overlay-label"><span class="truncate">{p.name}</span>
-                            <span class="overlay-status" aria-hidden="true">{if p.deafened { "⊘" } else if p.muted { "×" } else if p.speaking { "•" } else { "" }}</span>
+                    <div class="overlay-person" class:overlay-speaking=move || person.get().speaking aria-label=accessible_name>
+                        <crate::avatar::Avatar class="overlay-avatar" name=Signal::derive(move || person.get().name) avatar_id=Signal::derive(move || person.get().avatar_id)/>
+                        <span class="overlay-label"><span class="truncate">{move || person.get().name}</span>
+                            <span class="overlay-status" aria-hidden="true">{move || { let p=person.get(); if p.deafened { "⊘" } else if p.muted { "×" } else if p.speaking { "•" } else { "" } }}</span>
                         </span>
                     </div>
                 }
-            }).collect_view()}
+            }/>
         </main>
     }
 }

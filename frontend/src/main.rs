@@ -3,6 +3,8 @@ mod account_client;
 #[cfg(target_arch = "wasm32")]
 mod app;
 #[cfg(target_arch = "wasm32")]
+mod avatar;
+#[cfg(target_arch = "wasm32")]
 mod overlay;
 
 #[cfg(target_arch = "wasm32")]

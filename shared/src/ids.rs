@@ -41,6 +41,7 @@ macro_rules! uuid_id {
 uuid_id!(InstanceId);
 uuid_id!(RequestId);
 uuid_id!(AccountId);
+uuid_id!(AvatarId);
 uuid_id!(SessionId);
 uuid_id!(GuildId);
 uuid_id!(RoleId);

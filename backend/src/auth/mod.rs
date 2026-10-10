@@ -1,4 +1,5 @@
 //! Account entry points. Database and Argon2 work run on bounded blocking workers.
+mod avatar;
 mod google;
 pub mod mail;
 pub(crate) mod store;
@@ -21,6 +22,7 @@ use thiscord_shared::{ApiError, ErrorCode, RequestId, account::*};
 #[derive(Debug)]
 pub(super) enum Failure {
     Unauthorized,
+    NotFound,
     Invalid(&'static str),
     Conflict,
     Forbidden,
@@ -53,6 +55,11 @@ impl From<diesel::result::Error> for Failure {
 impl Failure {
     pub(crate) fn response(self, request_id: RequestId) -> Response {
         let (status, code, message) = match self {
+            Self::NotFound => (
+                StatusCode::NOT_FOUND,
+                ErrorCode::NotFound,
+                "Profile picture not found",
+            ),
             Self::Unauthorized => (
                 StatusCode::UNAUTHORIZED,
                 ErrorCode::Unauthorized,
@@ -120,13 +127,14 @@ impl Failure {
 pub fn router() -> Router<Option<DbPool>> {
     Router::new()
         .route(ACCOUNT_PATH, post(handle))
+        .route(&format!("{AVATAR_PATH}/{{avatar_id}}"), get(avatar::get))
         .route(GOOGLE_CALLBACK_PATH, get(google::callback))
         .route(
             EMAIL_VERIFICATION_PATH,
             get(verification::verify)
                 .head(|| async { (StatusCode::NO_CONTENT, [("cache-control", "no-store")]) }),
         )
-        .layer(DefaultBodyLimit::max(16 * 1024))
+        .layer(DefaultBodyLimit::max(MAX_AVATAR_BASE64 + 1024))
 }
 
 pub(crate) fn bearer(headers: &HeaderMap) -> String {

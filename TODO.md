@@ -33,6 +33,7 @@ media compatibility spike can happen before chat to expose platform constraints.
 - [x] Link/unlink login identities after reauthentication; prevent takeover through
   unverified email matching and removal of the last usable login method.
 - [x] Profile/settings and account deletion behavior (display name/bio; identifiers immutable).
+- [x] Upload, replace and remove profile pictures in Settings; persist normalized images and display them in live voice rosters and the overlay.
 - [x] Test invalid credentials, expired/replayed sessions, throttling and OAuth failures.
 - [ ] Configure Google web-client credentials and Resend; complete live provider acceptance.
 - [ ] Verify browser handoff and OS-store prompts interactively on Windows/macOS/Linux.

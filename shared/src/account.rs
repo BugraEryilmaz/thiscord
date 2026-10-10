@@ -1,8 +1,12 @@
 //! Account transport only. Secrets deliberately do not implement Debug.
-use crate::{AccountId, SessionId, Timestamp};
+use crate::{AccountId, AvatarId, SessionId, Timestamp};
 use serde::{Deserialize, Serialize};
 
 pub const ACCOUNT_PATH: &str = "/api/v1/account";
+pub const AVATAR_PATH: &str = "/api/v1/avatars";
+pub const MAX_AVATAR_BYTES: usize = 2 * 1024 * 1024;
+pub const MAX_AVATAR_BASE64: usize = MAX_AVATAR_BYTES.div_ceil(3) * 4;
+pub const AVATAR_SIZE: u32 = 256;
 pub const GOOGLE_CALLBACK_PATH: &str = "/api/v1/account/google/callback";
 pub const EMAIL_VERIFICATION_PATH: &str = "/api/v1/account/verify-email";
 
@@ -54,6 +58,10 @@ pub enum AccountRequest {
         display_name: String,
         bio: String,
     },
+    /// Standard padded base64 PNG/JPEG/WebP, or null to remove the picture.
+    SetAvatar {
+        image_base64: Option<String>,
+    },
     UnlinkIdentity {
         provider: IdentityProvider,
     },
@@ -96,6 +104,8 @@ pub struct Account {
     pub email_verified: bool,
     pub display_name: String,
     pub bio: String,
+    #[serde(default)]
+    pub avatar_id: Option<AvatarId>,
     pub created_at: Timestamp,
     pub identities: Vec<IdentityProvider>,
 }
@@ -137,4 +147,32 @@ pub enum AccountResponse {
         ticket: String,
     },
     Pending,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn avatar_commands_and_older_profiles_are_wire_compatible() {
+        let remove =
+            serde_json::to_value(AccountRequest::SetAvatar { image_base64: None }).unwrap();
+        assert_eq!(
+            remove,
+            serde_json::json!({"action":"set_avatar","image_base64":null})
+        );
+        let account: Account = serde_json::from_value(serde_json::json!({
+            "id":"00000000-0000-0000-0000-000000000001", "username":"user",
+            "email":"user@example.test", "email_verified":false, "display_name":"User",
+            "bio":"", "created_at":"2026-10-10T00:00:00Z", "identities":["password"]
+        }))
+        .unwrap();
+        assert!(account.avatar_id.is_none());
+        assert!(
+            serde_json::from_value::<AccountRequest>(serde_json::json!({
+                "action":"set_avatar", "image_base64":null, "account_id":account.id
+            }))
+            .is_err()
+        );
+    }
 }
