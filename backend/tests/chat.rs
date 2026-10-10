@@ -15,6 +15,9 @@ use uuid::Uuid;
 // Keep independent database fixtures from invalidating each other's sockets.
 static TEST_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
 
+#[path = "chat/unread.rs"]
+mod unread;
+
 struct Database {
     connection: PgConnection,
     schema: String,
