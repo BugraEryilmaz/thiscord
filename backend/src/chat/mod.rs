@@ -60,17 +60,18 @@ async fn handle(
             .clone()
             .try_acquire_owned()
             .map_err(|_| Failure::Limited)?;
-        let result = tokio::task::spawn_blocking(move || {
+        tokio::task::spawn_blocking(move || {
             let _permit = permit;
-            store::dispatch(&pool, &token, command)
+            let (response, change) = store::dispatch(&pool, &token, command)?;
+            // A started blocking worker survives cancellation of the HTTP future.
+            // Publish after commit here so its durable write still reaches sockets.
+            if let Some(change) = change {
+                notifications().publish(change);
+            }
+            Ok::<_, Failure>(response)
         })
         .await
-        .map_err(|_| Failure::Unavailable)?;
-        let (response, change) = result?;
-        if let Some(change) = change {
-            notifications().publish(change);
-        }
-        Ok::<_, Failure>(response)
+        .map_err(|_| Failure::Unavailable)?
     }
     .await;
     let mut response = match result {

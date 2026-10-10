@@ -96,6 +96,8 @@ There is no five-second HTTP unread poll or per-channel permissions-preview fetc
 User commands (send/edit/delete/read and loading older history) still use HTTP.
 
 Committed chat changes use bounded in-process watches registered per subscription.
+The blocking database worker publishes after commit, even if the HTTP handler was
+cancelled while the transaction was running. Failed transactions publish nothing.
 Message changes wake message delivery only in that channel and unread delivery in
 that guild. Presence/typing changes wake only that channel's presence readers.
 Read acknowledgements wake only that account's subscriptions in the affected guild.
@@ -152,7 +154,8 @@ overrides, reusing the authoritative evaluator. Unread counts load the actor's
 channel grants across the guild; presence checks batch only members with active
 leases in the requested channel. Mentions query matching guild usernames directly.
 Each socket refresh shares one session/guild authorization transaction between
-unread counts and channel events. Commit notifications are scoped to the subscribed guild, channel and account.
+unread counts and channel events. Commit notifications are scoped to the subscribed
+guild, channel and account.
 Event-log compaction, cross-process fanout, full-guild presence and load tests are
 future work. Attachments, search and desktop notifications remain pending.
 Native voice uses a separate signaling socket and the same access gate; see [audio.md](audio.md).
@@ -165,7 +168,9 @@ transport, socket authentication, origins, rate limits, heartbeats, live updates
 reconnect snapshots, membership/channel revocation and logout. Regression checks
 also cover scoped notification routing, unchanged read-marker rows, duplicate send/
 edit suppression, multiple-device read delivery, and presence/typing start, stop,
-expiry and disconnect without notification echoes. Run with
+expiry and disconnect without notification echoes. A cancellation regression pauses
+a transaction at commit, cancels its HTTP handler and verifies durable message and
+unread delivery after the detached worker commits. Run with
 `--include-ignored`. Shared tests cover wire versions and bounds. Browser smoke
 tests use isolated fixtures; native compilation does not establish cross-platform
 WebView runtime acceptance.

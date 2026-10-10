@@ -1013,3 +1013,77 @@ async fn presence_transitions_and_read_acknowledgements_do_not_echo() {
     server.abort();
     let _ = server.await;
 }
+
+#[tokio::test]
+#[ignore = "requires TEST_DATABASE_URL; CI runs with --include-ignored"]
+async fn cancelled_http_handler_still_publishes_committed_message() {
+    let _guard = TEST_LOCK.lock().await;
+    let db = database();
+    let (app, owner, guest, _, state, channel) = setup(&db).await;
+    let guild = state["guild"]["id"].clone();
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let address = listener.local_addr().unwrap();
+    let server = tokio::spawn(axum::serve(listener, app.clone()).into_future());
+    let mut socket = session_socket(address, &guest).await;
+    event(&mut socket, "authenticated").await;
+    subscribe(&mut socket, 1, guild.clone(), channel.clone()).await;
+    pushed(&mut socket, 1, "presence").await;
+
+    // Pause the worker at COMMIT, after the message and event were written.
+    // This deferred trigger exists only in this test's isolated schema.
+    let key = (Uuid::new_v4().as_u128() & i64::MAX as u128) as i64;
+    let mut blocker = db.pool.get().unwrap();
+    blocker.batch_execute(&format!("CREATE FUNCTION pause_chat_commit() RETURNS trigger LANGUAGE plpgsql AS $$ BEGIN PERFORM pg_advisory_xact_lock({key}); RETURN NEW; END $$; CREATE CONSTRAINT TRIGGER pause_chat_commit AFTER INSERT ON messages DEFERRABLE INITIALLY DEFERRED FOR EACH ROW EXECUTE FUNCTION pause_chat_commit(); BEGIN; SELECT pg_advisory_xact_lock({key});")).unwrap();
+    #[derive(QueryableByName)]
+    struct Pid {
+        #[diesel(sql_type = diesel::sql_types::Integer)]
+        pid: i32,
+    }
+    #[derive(QueryableByName)]
+    struct Observed {
+        #[diesel(sql_type = diesel::sql_types::Bool)]
+        value: bool,
+    }
+    let pid = diesel::sql_query("SELECT pg_backend_pid() AS pid")
+        .get_result::<Pid>(&mut blocker)
+        .unwrap()
+        .pid;
+    let client = Uuid::new_v4();
+    let request = json!({"action":"send","guild_id":guild,"channel_id":channel,"client_id":client,"content":"committed after cancellation"});
+    let router = app.clone();
+    let handler = tokio::spawn(async move { call(&router, CHAT_PATH, &owner, request).await });
+    let mut observer = db.pool.get().unwrap();
+    let waiting = tokio::time::timeout(std::time::Duration::from_millis(750), async {
+        loop {
+            let waiting = diesel::sql_query("SELECT EXISTS(SELECT 1 FROM pg_stat_activity WHERE $1 = ANY(pg_blocking_pids(pid))) AS value")
+                .bind::<diesel::sql_types::Integer, _>(pid).get_result::<Observed>(&mut observer).unwrap().value;
+            if waiting { break; }
+            tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+        }
+    }).await;
+    handler.abort();
+    let cancelled = handler.await;
+    blocker.batch_execute("ROLLBACK").unwrap();
+    assert!(waiting.is_ok(), "worker never reached the commit barrier");
+    assert!(cancelled.unwrap_err().is_cancelled());
+
+    // Establish that the detached worker committed even if delivery is broken.
+    tokio::time::timeout(std::time::Duration::from_secs(2), async {
+        loop {
+            let committed = diesel::sql_query("SELECT EXISTS(SELECT 1 FROM messages m JOIN message_events e ON e.message_id=m.id WHERE m.client_id=$1::uuid) AS value")
+                .bind::<Text, _>(client.to_string()).get_result::<Observed>(&mut observer).unwrap().value;
+            if committed { break; }
+            tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+        }
+    }).await.expect("cancelled request did not commit its message and event");
+    let update = pushed(&mut socket, 1, "message").await;
+    assert_eq!(update["message"]["client_id"], json!(client));
+    assert_eq!(update["message"]["content"], "committed after cancellation");
+    assert_eq!(
+        pushed(&mut socket, 1, "unread").await["channels"][0]["count"],
+        1
+    );
+    socket.close(None).await.unwrap();
+    server.abort();
+    let _ = server.await;
+}
