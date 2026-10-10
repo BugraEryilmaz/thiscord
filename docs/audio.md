@@ -406,7 +406,12 @@ Room membership is in memory. There are eight users per room, 64 active/pending
 voice sockets per process, six joins per account/minute, a five-second initial
 authentication deadline and bounded negotiation. Signaling is capped at 128 KiB
 and 30 incoming frames/second. Publisher ingress is capped at 100 packets/second
-and 1500 bytes/packet. Media queues and write deadlines isolate slow receivers.
+and 1500 bytes/packet. Independent outgoing microphone, video and shared-audio
+writers isolate application backpressure. Audio queues have 32 packet slots,
+32 KiB byte budgets (including in-flight writes) and 100 ms enqueue-to-write
+deadlines. Screen writes never wait for transport admission or deactivate voice
+on failure; video losses request keyframe recovery. See [screen-sharing.md](screen-sharing.md)
+for video budgets and the limits of the shared WebRTC transport.
 
 Current sessions are rechecked every second and immediately after access-changing
 commits. Each participant is reauthorized against the database; unrelated account
