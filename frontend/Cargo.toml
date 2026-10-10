@@ -76,7 +76,7 @@ wasm-bindgen = "0.2"
 wasm-bindgen-futures = "0.4"
 serde-wasm-bindgen = "0.6"
 js-sys = "0.3"
-web-sys = { version = "0.3", features = ["File", "FileList", "Blob", "HtmlInputElement", "Window", "Location", "HtmlDialogElement", "DomRect", "Crypto", "Document", "HtmlElement", "Navigator", "Clipboard", "HtmlVideoElement", "MediaStream", "MediaStreamTrack", "RtcPeerConnection", "RtcConfiguration", "RtcSessionDescriptionInit", "RtcSessionDescription", "RtcSdpType", "RtcTrackEvent", "RtcRtpTransceiverInit", "RtcRtpTransceiverDirection", "RtcRtpTransceiver", "RtcIceGatheringState", "RtcPeerConnectionState", "RtcStatsReport", "VideoPlaybackQuality"] }
+web-sys = { version = "0.3", features = ["ResizeObserver", "ResizeObserverEntry", "File", "FileList", "Blob", "HtmlInputElement", "Window", "Location", "HtmlDialogElement", "DomRect", "Crypto", "Document", "HtmlElement", "Navigator", "Clipboard", "HtmlVideoElement", "MediaStream", "MediaStreamTrack", "RtcPeerConnection", "RtcConfiguration", "RtcSessionDescriptionInit", "RtcSessionDescription", "RtcSdpType", "RtcTrackEvent", "RtcRtpTransceiverInit", "RtcRtpTransceiverDirection", "RtcRtpTransceiver", "RtcIceGatheringState", "RtcPeerConnectionState", "RtcStatsReport", "VideoPlaybackQuality"] }
 gloo-timers = { version = "0.3", features = ["futures"] }
 
 [target.'cfg(not(target_arch = "wasm32"))'.dependencies]
