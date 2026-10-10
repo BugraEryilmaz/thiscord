@@ -46,10 +46,13 @@ pub(super) async fn serve(mut socket: WebSocket, pool: DbPool, id: RequestId, to
         .await;
         return;
     };
-    let mut revoked = account_access.subscribe();
+    let mut revoked = account_access.account.subscribe();
+    let mut session_revoked = account_access.session.subscribe();
+    let mut member_access = None;
+    let mut member_revoked = None;
     let mut guild_access = None;
     let mut guild_revoked = None;
-    let Some(initial) = access::snapshot(&account_access, None) else {
+    let Some(initial) = account_access.snapshot(None, None) else {
         return;
     };
     let mut listener = None::<notifications::Listener<'static>>;
@@ -98,6 +101,8 @@ pub(super) async fn serve(mut socket: WebSocket, pool: DbPool, id: RequestId, to
     maintenance.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
     loop {
         tokio::select! { biased;
+            _ = session_revoked.changed() => { let _ = send(&mut socket, ServerEvent::Revoked {}).await; break; }
+            _ = access::changed(&mut member_revoked) => { let _ = send(&mut socket, ServerEvent::Revoked {}).await; break; }
             _ = access::changed(&mut guild_revoked) => { let _ = send(&mut socket, ServerEvent::Revoked {}).await; break; }
             _ = revoked.changed() => { let _ = send(&mut socket, ServerEvent::Revoked {}).await; break; }
             incoming = socket.recv() => {
@@ -109,7 +114,7 @@ pub(super) async fn serve(mut socket: WebSocket, pool: DbPool, id: RequestId, to
                 last_seen = Instant::now();
                 match frame(incoming) {
                     Some(ClientEvent::Subscribe { subscription: serial, guild_id, channel_id }) => {
-                        if revoked.has_changed().unwrap_or(true) { let _ = send(&mut socket, ServerEvent::Revoked {}).await; break; }
+                        if revoked.has_changed().unwrap_or(true) || session_revoked.has_changed().unwrap_or(true) { let _ = send(&mut socket, ServerEvent::Revoked {}).await; break; }
                         let p = pool.clone();
                         let _ = tokio::task::spawn_blocking(move || store::cleanup(&p, connection)).await;
                         listener = None;
@@ -120,9 +125,11 @@ pub(super) async fn serve(mut socket: WebSocket, pool: DbPool, id: RequestId, to
                         if channel_id.is_some() && guild_id.is_none() {
                             let _ = send(&mut socket, error(id, ErrorCode::BadRequest, "A channel requires a guild")).await; break;
                         }
+                        member_access = guild_id.map(|guild| access::member(guild, account));
+                        member_revoked = member_access.as_ref().map(|scope| scope.subscribe());
                         guild_access = guild_id.map(access::guild);
                         guild_revoked = guild_access.as_ref().map(|scope| scope.subscribe());
-                        let Some(authorized) = access::snapshot(&account_access, guild_access.as_ref()) else { let _ = send(&mut socket, ServerEvent::Revoked {}).await; break; };
+                        let Some(authorized) = account_access.snapshot(guild_access.as_ref(), member_access.as_ref()) else { let _ = send(&mut socket, ServerEvent::Revoked {}).await; break; };
                         if let Some(guild) = guild_id {
                             let sub = Subscription { id: serial, guild, channel: channel_id };
                             let p = pool.clone(); let t = token.clone();
@@ -151,7 +158,7 @@ pub(super) async fn serve(mut socket: WebSocket, pool: DbPool, id: RequestId, to
                     Some(ClientEvent::Ping {}) => { if send(&mut socket, ServerEvent::Pong {}).await.is_err() { break; } }
                     Some(ClientEvent::Typing { active }) if subscription.is_some_and(|s| s.channel.is_some()) => {
                         let sub = subscription.unwrap();
-                        if revoked.has_changed().unwrap_or(true) { let _ = send(&mut socket, ServerEvent::Revoked {}).await; break; }
+                        if revoked.has_changed().unwrap_or(true) || session_revoked.has_changed().unwrap_or(true) { let _ = send(&mut socket, ServerEvent::Revoked {}).await; break; }
                         let p = pool.clone(); let t = token.clone();
                         if !matches!(tokio::task::spawn_blocking(move || store::presence(&p, &t, sub.guild, sub.channel.unwrap(), connection, Some(active))).await, Ok(Ok(_))) {
                             let _ = send(&mut socket, ServerEvent::Revoked {}).await; break;
@@ -173,8 +180,8 @@ pub(super) async fn serve(mut socket: WebSocket, pool: DbPool, id: RequestId, to
             }
             _ = async {}, if messages_dirty || presence_dirty || unread_dirty => {
                 let Some(sub) = subscription else { continue; };
-                let Some(authorized) = access::snapshot(&account_access, guild_access.as_ref()) else { let _ = send(&mut socket, ServerEvent::Revoked {}).await; break; };
-                if revoked.has_changed().unwrap_or(true) { let _ = send(&mut socket, ServerEvent::Revoked {}).await; break; }
+                let Some(authorized) = account_access.snapshot(guild_access.as_ref(), member_access.as_ref()) else { let _ = send(&mut socket, ServerEvent::Revoked {}).await; break; };
+                if revoked.has_changed().unwrap_or(true) || session_revoked.has_changed().unwrap_or(true) { let _ = send(&mut socket, ServerEvent::Revoked {}).await; break; }
                 let p = pool.clone(); let t = token.clone();
                 let read_messages = std::mem::take(&mut messages_dirty);
                 let read_presence = std::mem::take(&mut presence_dirty);
@@ -207,7 +214,7 @@ pub(super) async fn serve(mut socket: WebSocket, pool: DbPool, id: RequestId, to
             _ = async { if let Some(at) = typing_expiry { tokio::time::sleep_until(at.into()).await; } else { std::future::pending::<()>().await; } } => {
                 typing_expiry = None;
                 if let Some(sub) = subscription && let Some(channel) = sub.channel {
-                    if revoked.has_changed().unwrap_or(true) { let _ = send(&mut socket, ServerEvent::Revoked {}).await; break; }
+                    if revoked.has_changed().unwrap_or(true) || session_revoked.has_changed().unwrap_or(true) { let _ = send(&mut socket, ServerEvent::Revoked {}).await; break; }
                     let p = pool.clone(); let t = token.clone();
                     if !matches!(tokio::task::spawn_blocking(move || store::presence(&p, &t, sub.guild, channel, connection, None)).await, Ok(Ok(_))) {
                         let _ = send(&mut socket, ServerEvent::Revoked {}).await; break;

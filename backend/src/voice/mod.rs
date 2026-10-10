@@ -1,5 +1,5 @@
 //! Bounded, single-process audio SFU. One WebRTC transport per participant.
-pub(crate) mod access;
+use crate::access;
 mod diagnostics;
 mod egress;
 mod ice;
@@ -54,11 +54,14 @@ struct Member {
     subscriptions_enabled: bool,
     views: [Option<viewing::View>; ROOM_CAPACITY],
     generation: Arc<AtomicU64>,
+    access: Arc<access::Access>,
     metrics: Arc<[AtomicU64; 5]>,
     active: Arc<AtomicBool>,
 }
 struct Delivery {
     epoch: u64,
+    receiver_epoch: u64,
+    source_access: Arc<access::Access>,
     slot: usize,
     source: uuid::Uuid,
     source_active: Arc<AtomicBool>,
@@ -71,6 +74,7 @@ struct Room {
     members: RwLock<HashMap<usize, Member>>,
 }
 struct VoiceAccess {
+    access: Arc<access::Access>,
     pool: DbPool,
     token: String,
     guild: GuildId,
@@ -86,7 +90,8 @@ impl VoiceAccess {
         slot: usize,
         changed: &mut watch::Receiver<u64>,
     ) -> Result<Vec<Participant>, Failure> {
-        let result = access::global()
+        let result = self
+            .access
             .authorize(changed, || {
                 let pool = self.pool.clone();
                 let token = self.token.clone();
@@ -461,7 +466,7 @@ async fn request_keyframe(room: &Room, viewer: usize, publisher: usize, epoch: u
     else {
         return;
     };
-    let Some(_permit) = access::global().packet(viewer_epoch, viewer_epoch) else {
+    let Some(_permit) = members[&viewer].access.packet(viewer_epoch, viewer_epoch) else {
         return;
     };
     if viewer == publisher
@@ -481,8 +486,11 @@ async fn request_keyframe(room: &Room, viewer: usize, publisher: usize, epoch: u
     let Some(source) = members.get_mut(&publisher) else {
         return;
     };
+    let source_epoch = source.generation.load(Ordering::Acquire);
+    let Some(_source_permit) = source.access.packet(source_epoch, source_epoch) else {
+        return;
+    };
     if !source.feedback_enabled
-        || source.generation.load(Ordering::Acquire) != viewer_epoch
         || !source.active.load(Ordering::Acquire)
         || !may_publish(&source.info, MediaKind::ScreenVideo)
         || source.info.screen_epoch != epoch
@@ -517,7 +525,6 @@ async fn log_selected_route(pc: &dyn PeerConnection, id: RequestId) -> bool {
     false
 }
 async fn serve(mut socket: WebSocket, pool: DbPool, id: RequestId) {
-    let mut changed = access::global().subscribe();
     let Ok(Some(Ok(first))) = tokio::time::timeout(Duration::from_secs(5), socket.recv()).await
     else {
         return;
@@ -536,7 +543,15 @@ async fn serve(mut socket: WebSocket, pool: DbPool, id: RequestId) {
         .await;
         return;
     };
-    let authorized = access::global()
+    let connection_access = match access::identify(&pool, &token, Some(guild_id)).await {
+        Ok((_, access)) => access,
+        Err(error) => {
+            fail(&mut socket, id, error).await;
+            return;
+        }
+    };
+    let mut changed = connection_access.subscribe();
+    let authorized = connection_access
         .authorize(&mut changed, || {
             let p = pool.clone();
             let t = token.clone();
@@ -617,7 +632,7 @@ async fn serve(mut socket: WebSocket, pool: DbPool, id: RequestId) {
         };
         // Commit membership only while the original DB grant is current.
         // A mutation may have overlapped the rate-limit or room-lock await.
-        let Some(_admission) = access::global().packet(epoch, epoch) else {
+        let Some(_admission) = connection_access.packet(epoch, epoch) else {
             drop(members);
             fail(&mut socket, id, Failure::Unavailable).await;
             return;
@@ -637,6 +652,7 @@ async fn serve(mut socket: WebSocket, pool: DbPool, id: RequestId) {
                 subscriptions_enabled: false,
                 views: [None; ROOM_CAPACITY],
                 generation: generation.clone(),
+                access: connection_access.clone(),
                 metrics: metrics.clone(),
                 active: active.clone(),
             },
@@ -757,6 +773,7 @@ async fn serve(mut socket: WebSocket, pool: DbPool, id: RequestId) {
         let relay_room = room.clone();
         let relay_active = active.clone();
         let relay_generation = generation.clone();
+        let relay_access = connection_access.clone();
         let relay = tokio::spawn(async move {
             while let Some(Ingress {
                 epoch,
@@ -769,7 +786,7 @@ async fn serve(mut socket: WebSocket, pool: DbPool, id: RequestId) {
                     break;
                 }
                 let Some(_permit) =
-                    access::global().packet(epoch, relay_generation.load(Ordering::Acquire))
+                    relay_access.packet(epoch, relay_generation.load(Ordering::Acquire))
                 else {
                     continue;
                 };
@@ -804,11 +821,13 @@ async fn serve(mut socket: WebSocket, pool: DbPool, id: RequestId) {
                                 m,
                                 Delivery {
                                     epoch,
+                                    receiver_epoch: m.generation.load(Ordering::Acquire),
+                                    source_access: relay_access.clone(),
                                     slot: kind.track_index(slot),
                                     source: source_id,
                                     source_active: relay_active.clone(),
                                     packet: packet.clone(),
-                                    queued_at: Instant::now(),
+                                    queued_at: arrived,
                                 },
                             )
                             .is_err()
@@ -834,6 +853,7 @@ async fn serve(mut socket: WebSocket, pool: DbPool, id: RequestId) {
             (MediaKind::SystemAudio, audio_rx),
         ] {
             let writer = egress::Writer {
+                access: connection_access.clone(),
                 room: room.clone(),
                 receiver_slot: slot,
                 active: active.clone(),
@@ -849,6 +869,7 @@ async fn serve(mut socket: WebSocket, pool: DbPool, id: RequestId) {
         let mut tick = tokio::time::interval(Duration::from_secs(1));
         tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
         let access = VoiceAccess {
+            access: connection_access.clone(),
             pool,
             token,
             guild: guild_id,
@@ -872,7 +893,7 @@ async fn serve(mut socket: WebSocket, pool: DbPool, id: RequestId) {
                 },
                 Some(epoch)=keyframe_rx.recv()=>{
                     // Revalidate the publisher and generation after queued feedback.
-                    let allowed = access::global().packet(access.generation.load(Ordering::Acquire), access.generation.load(Ordering::Acquire)).is_some()
+                    let allowed = connection_access.packet(access.generation.load(Ordering::Acquire), access.generation.load(Ordering::Acquire)).is_some()
                         && room.members.read().await.get(&slot).is_some_and(|m| m.feedback_enabled && m.active.load(Ordering::Acquire) && m.info.sharing_screen && m.info.screen_epoch == epoch);
                     if allowed && send(&mut socket, ServerEvent::ScreenKeyframe { epoch }).await.is_err() { break; }
                 },
@@ -912,12 +933,26 @@ async fn serve(mut socket: WebSocket, pool: DbPool, id: RequestId) {
     let _ = tokio::time::timeout(Duration::from_secs(1), socket.send(Message::Close(None))).await;
 }
 
+/// Both endpoints participate in the drain. Epochs belong to each connection,
+/// so an unrelated change to one endpoint must not require the other to refresh.
+fn delivery_permits(
+    source: &Arc<access::Access>,
+    source_epoch: u64,
+    receiver: &Arc<access::Access>,
+    receiver_epoch: u64,
+    receiver_authorized: u64,
+) -> Option<(access::Packet, access::Packet)> {
+    let source = source.packet(source_epoch, source_epoch)?;
+    let receiver = receiver.packet(receiver_epoch, receiver_authorized)?;
+    Some((source, receiver))
+}
+
 /// Poll the bounded transport send only while authorization is current. No lock
 /// or mutation permit survives Pending; queue capacity wakes us to revalidate.
 /// write_rtp enqueues atomically on its final poll (pinned webrtc 0.21).
-async fn authorized_write<F, T>(
+async fn authorized_write<F, T, P>(
     room: &Room,
-    permit: impl Fn() -> Option<access::Packet>,
+    permit: impl Fn() -> Option<P>,
     allowed: impl Fn(&HashMap<usize, Member>) -> bool,
     send: F,
 ) -> Result<T, ()>
@@ -947,10 +982,61 @@ where
 #[cfg(test)]
 mod send_tests {
     use super::*;
+
+    #[test]
+    fn queued_media_requires_current_epochs_for_both_endpoints() {
+        let identity = || access::Identity {
+            account: thiscord_shared::AccountId::from_uuid(uuid::Uuid::new_v4()),
+            session: thiscord_shared::SessionId::from_uuid(uuid::Uuid::new_v4()),
+            guild: None,
+        };
+        let publisher = identity();
+        let listener = identity();
+        let source = access::register(publisher);
+        let receiver = access::register(listener);
+        assert!(delivery_permits(&source, 0, &receiver, 0, 0).is_some());
+        let mutation = access::pause(access::Scope::Session(publisher.session));
+        assert!(delivery_permits(&source, 0, &receiver, 0, 0).is_none());
+        drop(mutation);
+        let source_epoch = source.snapshot().unwrap();
+        assert_ne!(source_epoch, 0);
+        assert!(
+            delivery_permits(&source, 0, &receiver, 0, 0).is_none(),
+            "old publisher queue survived"
+        );
+        assert!(
+            delivery_permits(&source, source_epoch, &receiver, 0, 0).is_some(),
+            "independent epochs prevented forwarding"
+        );
+        let mutation = access::pause(access::Scope::Session(listener.session));
+        assert!(delivery_permits(&source, source_epoch, &receiver, 0, 0).is_none());
+        drop(mutation);
+        let receiver_epoch = receiver.snapshot().unwrap();
+        assert!(
+            delivery_permits(&source, source_epoch, &receiver, 0, receiver_epoch).is_none(),
+            "old receiver queue survived reauthorization"
+        );
+        assert!(
+            delivery_permits(&source, source_epoch, &receiver, receiver_epoch, 0).is_none(),
+            "stale receiver authorization admitted new packet"
+        );
+        assert!(
+            delivery_permits(
+                &source,
+                source_epoch,
+                &receiver,
+                receiver_epoch,
+                receiver_epoch
+            )
+            .is_some()
+        );
+    }
+
     #[tokio::test]
     async fn keyframe_feedback_checks_membership_epoch_deafen_speak_and_coalescing() {
         let room = Room::default();
-        let epoch = access::global().snapshot().unwrap();
+        let connection_access = access::Access::new();
+        let epoch = connection_access.snapshot().unwrap();
         let mut receivers = Vec::new();
         for slot in 0..2 {
             let (keyframes, rx) = mpsc::channel(1);
@@ -985,6 +1071,7 @@ mod send_tests {
                     subscriptions_enabled: true,
                     views: [None; ROOM_CAPACITY],
                     generation: Arc::new(AtomicU64::new(epoch)),
+                    access: connection_access.clone(),
                     active: Arc::new(AtomicBool::new(true)),
                     metrics: Arc::new(std::array::from_fn(|_| AtomicU64::new(0))),
                 },
@@ -1044,13 +1131,14 @@ mod send_tests {
         let (tx, mut rx) = mpsc::channel(1);
         tx.send(1).await.unwrap();
         let (entered, waiting) = tokio::sync::oneshot::channel();
-        let epoch = access::global().snapshot().unwrap();
+        let connection_access = access::Access::new();
+        let epoch = connection_access.snapshot().unwrap();
         let task_room = room.clone();
         let task_allowed = allowed.clone();
         let writer = tokio::spawn(async move {
             authorized_write(
                 &task_room,
-                || access::global().packet(epoch, epoch),
+                || connection_access.packet(epoch, epoch),
                 |_| task_allowed.load(Ordering::Acquire),
                 async {
                     entered.send(()).unwrap();

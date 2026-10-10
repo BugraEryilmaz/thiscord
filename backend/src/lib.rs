@@ -1,3 +1,4 @@
+pub(crate) mod access;
 pub mod api;
 pub mod auth;
 pub mod chat;

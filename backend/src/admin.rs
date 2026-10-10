@@ -58,8 +58,10 @@ async fn respond(
         let (role, names, host, authorized) = tokio::task::spawn_blocking(move || {
             let _permit = worker_permit;
             let mut c = store::connection(&p)?;
-            let account = store::token_account(&mut c, &token)?;
+            let identity = store::token_session(&mut c, &token)?;
+            let account = identity.account_id;
             let authorized = access::snapshot(&access::account(account), Some(&access::instance_role(account)))
+                .and_then(|snapshot| snapshot.including(&access::session(identity.id)))
                 .ok_or(Failure::Forbidden)?;
             let session = store::authenticate(&mut c, &token)?;
             let result = c.transaction::<_, Failure, _>(|c| {

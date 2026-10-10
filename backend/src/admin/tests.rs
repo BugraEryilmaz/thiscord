@@ -135,19 +135,6 @@ async fn finish(
 #[tokio::test]
 #[ignore = "requires TEST_DATABASE_URL; CI runs with --include-ignored"]
 async fn diagnostics_rejects_revocations_during_collection_without_blocking_mutations() {
-    // HTTP mutations also advance the process-wide media epoch. Run this fixture
-    // in its own process so parallel media unit tests keep their synthetic grants.
-    const ISOLATED: &str = "THISCORD_ADMIN_TEST_ISOLATED";
-    if std::env::var_os(ISOLATED).is_none() {
-        let status = tokio::task::spawn_blocking(|| {
-            std::process::Command::new(std::env::current_exe().unwrap())
-                .args(["--exact", "admin::tests::diagnostics_rejects_revocations_during_collection_without_blocking_mutations", "--include-ignored"])
-                .env(ISOLATED, "1")
-                .status().unwrap()
-        }).await.unwrap();
-        assert!(status.success(), "isolated diagnostics regression failed");
-        return;
-    }
     let db = database();
     let (_, owner) = user(&db, "owner");
     let (admin_id, admin) = user(&db, "admin");
@@ -215,6 +202,26 @@ async fn diagnostics_rejects_revocations_during_collection_without_blocking_muta
     get(&app, &owner, StatusCode::FORBIDDEN).await;
     assert_eq!(get(&app, &other, StatusCode::OK).await["role"], "owner");
 
+    // Logout revokes this session while another device of the same account
+    // retains its already-authorized diagnostics response.
+    let second_token = store::digest(&Uuid::new_v4().to_string());
+    {
+        let mut c = db.pool.get().unwrap();
+        let sid = Uuid::new_v4().to_string();
+        store::execute(
+            &mut c,
+            "INSERT INTO sessions(id,account_id,device) VALUES($1::uuid,$2::uuid,'second')",
+            &[&sid, &other_id.to_string()],
+        )
+        .unwrap();
+        store::execute(
+            &mut c,
+            "INSERT INTO session_tokens(token_hash,session_id) VALUES($1,$2::uuid)",
+            &[&store::digest(&second_token), &sid],
+        )
+        .unwrap();
+    }
+    let second = collecting(&db, &second_token).await;
     let pending = collecting(&db, &other).await;
     command(
         &app,
@@ -225,5 +232,6 @@ async fn diagnostics_rejects_revocations_during_collection_without_blocking_muta
     )
     .await;
     finish(pending, StatusCode::FORBIDDEN).await;
+    finish(second, StatusCode::OK).await;
     get(&app, &other, StatusCode::UNAUTHORIZED).await;
 }

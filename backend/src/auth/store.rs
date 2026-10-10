@@ -1,4 +1,5 @@
 use super::Failure;
+use crate::access::{self, Scope};
 use crate::db::DbPool;
 use argon2::{Argon2, PasswordHash, PasswordHasher, PasswordVerifier, password_hash::SaltString};
 use base64::{Engine, engine::general_purpose::URL_SAFE_NO_PAD};
@@ -106,11 +107,11 @@ pub(crate) struct Session {
 }
 
 /// Resolve a barrier key only; callers must still authenticate after capturing its epoch.
-pub(crate) fn token_account(c: &mut PgConnection, token: &str) -> Result<AccountId, Failure> {
+pub(crate) fn token_session(c: &mut PgConnection, token: &str) -> Result<Session, Failure> {
     if token.len() != 43 {
         return Err(Failure::Unauthorized);
     }
-    query(c, "SELECT to_jsonb(s.account_id) AS data FROM sessions s JOIN session_tokens t ON t.session_id=s.id WHERE t.token_hash=$1", &[&digest(token)])?
+    query(c, "SELECT to_jsonb(s) AS data FROM sessions s JOIN session_tokens t ON t.session_id=s.id WHERE t.token_hash=$1", &[&digest(token)])?
         .pop().ok_or(Failure::Unauthorized)
 }
 
@@ -128,22 +129,20 @@ pub(crate) fn authenticate(c: &mut PgConnection, token: &str) -> Result<Session,
         return Ok(session);
     }
     // Commit replay revocation even though authentication itself fails.
-    let mut chat_change = None;
-    let mut _voice_revocation = None;
+    let mut revocation = None;
     let session=c.transaction::<_, Failure, _>(|c| {
         let sessions: Vec<Session> = query(c, "SELECT to_jsonb(s) AS data FROM sessions s JOIN session_tokens t ON t.session_id=s.id WHERE t.token_hash=$1 AND NOT s.revoked AND s.expires_at>now() AND s.last_seen_at>now()-interval '7 days' FOR UPDATE OF s", &[&hash])?;
         let Some(session) = sessions.into_iter().next() else { return Ok(None); };
         let active: Vec<bool> = query(c, "SELECT to_jsonb(active) AS data FROM session_tokens WHERE token_hash=$1", &[&hash])?;
         if active != [true] {
-            _voice_revocation = Some(crate::voice::access::global().pause());
             execute(c, "UPDATE sessions SET revoked=TRUE WHERE id=$1::uuid", &[&session.id.to_string()])?;
-            chat_change = Some(crate::chat::access::account(session.account_id).pause());
+            revocation = Some(access::pause(Scope::Session(session.id)));
             return Ok(None);
         }
         execute(c, "UPDATE sessions SET last_seen_at=now() WHERE id=$1::uuid AND last_seen_at<=now()-interval '5 minutes'", &[&session.id.to_string()])?;
         Ok(Some(session))
     })?;
-    if let Some(change) = chat_change {
+    if let Some(change) = revocation {
         change.finish(true);
     }
     session.ok_or(Failure::Unauthorized)
@@ -216,21 +215,37 @@ pub(super) fn grant(
     c: &mut PgConnection,
     id: AccountId,
     device_name: &str,
+    mutations: &mut Vec<access::Mutation>,
 ) -> Result<AccountResponse, Failure> {
     let device_name = device(device_name)?;
-    // A bounded number of devices per account; oldest active session is evicted.
-    execute(
+    // The account lock serializes eviction selection with session grants.
+    let evicted: Vec<SessionId> = query(
         c,
-        "UPDATE sessions SET revoked=TRUE WHERE id IN (SELECT id FROM sessions WHERE account_id=$1::uuid AND NOT revoked ORDER BY created_at DESC OFFSET 19)",
+        "SELECT to_jsonb(id) AS data FROM sessions WHERE account_id=$1::uuid AND NOT revoked ORDER BY created_at DESC OFFSET 19",
         &[&id.to_string()],
     )?;
+    // Revoke exactly the selected rows (including ties in created_at), each
+    // under its own drain before commit. Re-running OFFSET could choose other rows.
+    for session in &evicted {
+        execute(
+            c,
+            "UPDATE sessions SET revoked=TRUE WHERE id=$1::uuid",
+            &[&session.to_string()],
+        )?;
+    }
     let sid = SessionId::from_uuid(Uuid::new_v4());
     execute(
         c,
         "INSERT INTO sessions(id,account_id,device) VALUES($1::uuid,$2::uuid,$3)",
         &[&sid.to_string(), &id.to_string(), device_name],
     )?;
-    session_grant(c, sid, id)
+    let response = session_grant(c, sid, id)?;
+    mutations.extend(
+        evicted
+            .into_iter()
+            .map(|id| access::pause(Scope::Session(id))),
+    );
+    Ok(response)
 }
 fn session_grant(
     c: &mut PgConnection,
@@ -332,19 +347,6 @@ pub(super) fn dispatch(
     command: AccountRequest,
 ) -> Result<AccountResponse, Failure> {
     let mut c = connection(pool)?;
-    // Owned by the blocking worker through commit, even if the HTTP task exits.
-    let _voice_change = matches!(
-        &command,
-        AccountRequest::Logout
-            | AccountRequest::LogoutAll
-            | AccountRequest::RevokeSession { .. }
-            | AccountRequest::DeleteAccount { .. }
-            | AccountRequest::ChangePassword { .. }
-            | AccountRequest::ResetPassword { .. }
-            | AccountRequest::UnlinkIdentity { .. }
-            | AccountRequest::Rotate
-    )
-    .then(|| crate::voice::access::global().pause());
     match command {
         AccountRequest::Register {
             username,
@@ -365,14 +367,16 @@ pub(super) fn dispatch(
             let address = email(&address)?;
             device(&name)?;
             let hash = password_hash(&password)?;
-            c.transaction(|c| {
+            let mut mutations = Vec::new();
+            let result = c.transaction(|c| {
                 let id = AccountId::from_uuid(Uuid::new_v4());
                 execute(c,"INSERT INTO accounts(id,username,email,display_name) VALUES($1::uuid,$2,$3,$2)", &[&id.to_string(), &username, &address])?;
                 execute(c,"INSERT INTO identities(account_id,provider,subject,password_hash) VALUES($1::uuid,'password',$1,$2)", &[&id.to_string(), &hash])?;
                 let a = account(c,id)?;
                 enqueue_code(c, &a, "verify")?;
-                grant(c,id,&name)
-            })
+                grant(c,id,&name,&mut mutations)
+            });
+            access::complete(result, &mut mutations)
         }
         AccountRequest::Login {
             login,
@@ -396,20 +400,14 @@ pub(super) fn dispatch(
                 return Err(Failure::Unauthorized);
             }
             // A successful login can evict the oldest device session.
-            let _voice_change = crate::voice::access::global().pause();
-            let mut change = None;
+            let mut mutations = Vec::new();
             let result = c.transaction(|c| {
                 execute(c,"SELECT id FROM accounts WHERE id=$1::uuid FOR UPDATE", &[&credential.account_id.to_string()])?;
                 let unchanged: Vec<bool> = query(c,"SELECT to_jsonb(TRUE) AS data FROM identities WHERE account_id=$1::uuid AND provider='password' AND password_hash=$2", &[&credential.account_id.to_string(), &credential.password_hash])?;
                 if unchanged.is_empty() { return Err(Failure::Unauthorized); }
-                let response = grant(c,credential.account_id,&name)?;
-                change = Some(crate::chat::access::account(credential.account_id).pause());
-                Ok(response)
+                grant(c,credential.account_id,&name,&mut mutations)
             });
-            if let Some(change) = change {
-                change.finish(result.is_ok());
-            }
-            result
+            access::complete(result, &mut mutations)
         }
         AccountRequest::ForgotPassword { email: address } => {
             let address = email(&address)?;
@@ -440,20 +438,17 @@ pub(super) fn dispatch(
         }
         command => {
             let session = authenticate(&mut c, token)?;
-            let scope = matches!(
-                &command,
-                AccountRequest::Logout
-                    | AccountRequest::LogoutAll
-                    | AccountRequest::RevokeSession { .. }
-                    | AccountRequest::DeleteAccount { .. }
-                    | AccountRequest::ChangePassword { .. }
-                    | AccountRequest::UnlinkIdentity { .. }
-                    | AccountRequest::Rotate
-            )
-            .then(|| crate::chat::access::account(session.account_id));
+            let mut scope = match &command {
+                AccountRequest::Logout | AccountRequest::Rotate => Some(Scope::Session(session.id)),
+                AccountRequest::RevokeSession { session_id } => Some(Scope::Session(*session_id)),
+                AccountRequest::LogoutAll
+                | AccountRequest::DeleteAccount { .. }
+                | AccountRequest::ChangePassword { .. }
+                | AccountRequest::UnlinkIdentity { .. } => Some(Scope::Account(session.account_id)),
+                _ => None,
+            };
             let mut changes = Vec::new();
             let result = c.transaction(|c| {
-                let mut guild_scopes = Vec::new();
                 let result = (|| {
                 if matches!(command, AccountRequest::Current | AccountRequest::Sessions) {
                     read_session(c,token,&session)?;
@@ -470,7 +465,7 @@ pub(super) fn dispatch(
                         session_grant(c,session.id,id)
                     }
                     AccountRequest::Sessions => Ok(AccountResponse::Sessions { sessions: query(c,"SELECT to_jsonb(s) || jsonb_build_object('current',id=$2::uuid) AS data FROM sessions s WHERE account_id=$1::uuid AND NOT revoked AND expires_at>now() AND last_seen_at>now()-interval '7 days' ORDER BY created_at DESC", &[&id.to_string(), &session.id.to_string()])? }),
-                    AccountRequest::RevokeSession { session_id } => { execute(c,"UPDATE sessions SET revoked=TRUE WHERE id=$1::uuid AND account_id=$2::uuid", &[&session_id.to_string(), &id.to_string()])?; Ok(done("Session revoked")) },
+                    AccountRequest::RevokeSession { session_id } => { if execute(c,"UPDATE sessions SET revoked=TRUE WHERE id=$1::uuid AND account_id=$2::uuid", &[&session_id.to_string(), &id.to_string()])? == 0 { scope = None; } Ok(done("Session revoked")) },
                     AccountRequest::SendVerification => { let a = account(c,id)?; if !a.email_verified { enqueue_code(c,&a,"verify")?; } Ok(done("Verification email queued")) },
                     AccountRequest::Reauthenticate { password } => {
                         let hashes: Vec<String> = query(c,"SELECT to_jsonb(password_hash) AS data FROM identities WHERE account_id=$1::uuid AND provider='password'", &[&id.to_string()])?;
@@ -509,8 +504,6 @@ pub(super) fn dispatch(
                         if owns == [true] { return Err(Failure::Invalid("Transfer instance ownership and transfer or delete owned guilds before deleting your account")); }
                         // Membership cascades also invalidate editor revisions. Lock in UUID order.
                         execute(c,"SELECT id FROM guilds WHERE id IN (SELECT guild_id FROM guild_members WHERE account_id=$1::uuid) ORDER BY id FOR UPDATE", &[&id.to_string()])?;
-                        let guilds: Vec<thiscord_shared::GuildId> = query(c,"SELECT to_jsonb(guild_id) AS data FROM guild_members WHERE account_id=$1::uuid ORDER BY guild_id", &[&id.to_string()])?;
-                        guild_scopes.extend(guilds.into_iter().map(crate::chat::access::guild));
                         execute(c,"UPDATE guilds SET revision=revision+1 WHERE id IN (SELECT guild_id FROM guild_members WHERE account_id=$1::uuid)", &[&id.to_string()])?;
                         execute(c,"DELETE FROM accounts WHERE id=$1::uuid", &[&id.to_string()])?;
                         Ok(done("Account and credentials permanently deleted"))
@@ -519,7 +512,7 @@ pub(super) fn dispatch(
                 }
                 })();
                 if result.is_ok() {
-                    changes.extend(scope.into_iter().chain(guild_scopes).map(|scope| scope.pause()));
+                    changes.extend(scope.into_iter().map(access::pause));
                 }
                 result
             });
@@ -569,7 +562,7 @@ fn consume_code(
         if execute(c,"DELETE FROM account_codes WHERE token_hash=$1 AND expires_at>now()", &[&digest(code)])?!=1 { return Err(Failure::Unauthorized); }
         if let Some(hash) = hash {
             set_password(c,id,&hash)?; revoke_all(c,id)?;
-            change = Some(crate::chat::access::account(id).pause());
+            change = Some(access::pause(Scope::Account(id)));
             Ok(done("Password reset. Sign in again"))
         } else {
             execute(c,"UPDATE accounts SET email_verified=TRUE WHERE id=$1::uuid", &[&id.to_string()])?;
