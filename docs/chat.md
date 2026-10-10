@@ -14,6 +14,16 @@ are held in memory for the open channel, not across channel changes/app restarts
 Edit/delete controls reflect current permissions; the backend checks them again.
 Deletion requires confirmation and leaves a content-free tombstone. Loading older
 history preserves scroll position; incoming messages follow only near the bottom.
+The open channel retains at most 500 server messages in an ID-indexed, ordered
+cache. The list renders keyed reactive rows for the viewport plus 400 pixels of
+overscan on each side. Row heights are measured for wrapping, edits and resizing;
+spacers represent unmounted rows, and history prepends preserve a message anchor.
+Pages merge once and share deferred scroll work. Edits update existing row state.
+Following live chat evicts the oldest rows and preserves a cursor to reload them.
+Paging back evicts the newest rows; when a full window is being read, newer live
+messages also wait outside that window. Jump to latest obtains a fresh socket
+snapshot before acknowledging reads. Reconnect snapshots cancel stale history
+requests. Only the selected channel has a resident cache.
 Read acknowledgements require focus and the bottom of the view. Jump to latest
 marks the channel read.
 
@@ -107,6 +117,8 @@ an existing session. Multiple replicas need shared invalidation and are not supp
 - Database checkout/queries and socket writes have deadlines. Blocking Diesel
   runs off async workers. Slow sockets close rather than buffer without a bound.
 - Frontend HTTP requests time out after 15 seconds; failed sends retain retry IDs.
+- Frontend history: 500 resident messages; pending sends: 20. Failed sends can be
+  retried or discarded; hitting the pending limit leaves the draft intact.
 
 This targets a personal deployment, not measured large-installation capacity.
 Full guild evaluation reuses the current permission policy; commit notifications
@@ -124,3 +136,6 @@ reconnect snapshots, membership/channel revocation and logout. Run with
 `--include-ignored`. Shared tests cover wire versions and bounds. Browser smoke
 tests use isolated fixtures; native compilation does not establish cross-platform
 WebView runtime acceptance.
+`cargo test -p thiscord-frontend --lib --locked` also checks bounded history over
+long sessions, revision/deduplication rules, eviction cleanup, old-history/live
+isolation and variable-height viewport/anchor calculations without a browser.

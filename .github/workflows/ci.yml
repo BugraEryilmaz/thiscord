@@ -161,6 +161,8 @@ jobs:
         with:
           key: wasm
       - run: cargo clippy -p thiscord-frontend --bin thiscord-ui --target wasm32-unknown-unknown --locked -- -D warnings
+      - name: Chat history and frontend state regression tests
+        run: cargo test -p thiscord-frontend --lib --locked
       - uses: ./.github/actions/cargo-tool
         with:
           crate: trunk
