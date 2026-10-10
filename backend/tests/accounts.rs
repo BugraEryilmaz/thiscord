@@ -117,6 +117,152 @@ fn code(db: &Database, purpose: &str) -> String {
 
 #[tokio::test]
 #[ignore = "requires TEST_DATABASE_URL; CI runs with --include-ignored"]
+async fn profile_pictures_are_owned_persistent_replaceable_and_deleted_with_account() {
+    use base64::{Engine, engine::general_purpose::STANDARD};
+    let db = database();
+    let app = api::router(Some(db.pool.clone()), vec![]);
+    let owner = token(&call(&app, json!({"action":"register","username":"picture_owner","email":"picture@example.test","password":"a long test password","device":"test"}), None, StatusCode::OK).await);
+    let other = token(&call(&app, json!({"action":"register","username":"picture_other","email":"other@example.test","password":"a long test password","device":"test"}), None, StatusCode::OK).await);
+    let mut input = std::io::Cursor::new(Vec::new());
+    image::DynamicImage::new_rgb8(40, 80)
+        .write_to(&mut input, image::ImageFormat::Jpeg)
+        .unwrap();
+    let upload = json!({"action":"set_avatar","image_base64":STANDARD.encode(input.into_inner())});
+    call(&app, upload.clone(), None, StatusCode::UNAUTHORIZED).await;
+    let saved = call(&app, upload.clone(), Some(&owner), StatusCode::OK).await;
+    let first = saved["account"]["avatar_id"].as_str().unwrap().to_owned();
+    let picture = |id: &str| {
+        Request::builder()
+            .uri(format!("{AVATAR_PATH}/{id}"))
+            .body(Body::empty())
+            .unwrap()
+    };
+    let response = app.clone().oneshot(picture(&first)).await.unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    assert_eq!(response.headers()["content-type"], "image/png");
+    assert_eq!(response.headers()["x-content-type-options"], "nosniff");
+    let png = to_bytes(response.into_body(), 300_000).await.unwrap();
+    let decoded = image::load_from_memory(&png).unwrap();
+    assert_eq!(
+        (decoded.width(), decoded.height()),
+        (AVATAR_SIZE, AVATAR_SIZE)
+    );
+    // No in-memory service state is required to retrieve the saved picture.
+    let restarted = api::router(Some(db.pool.clone()), vec![]);
+    assert_eq!(
+        restarted.oneshot(picture(&first)).await.unwrap().status(),
+        StatusCode::OK
+    );
+    for invalid in [
+        json!({"action":"set_avatar","image_base64":"bad image"}),
+        json!({"action":"set_avatar","image_base64":"x".repeat(MAX_AVATAR_BASE64+1)}),
+    ] {
+        call(&app, invalid, Some(&owner), StatusCode::BAD_REQUEST).await;
+    }
+    let current = call(
+        &app,
+        json!({"action":"current"}),
+        Some(&owner),
+        StatusCode::OK,
+    )
+    .await;
+    assert_eq!(current["account"]["avatar_id"], first);
+    assert!(
+        call(
+            &app,
+            json!({"action":"current"}),
+            Some(&other),
+            StatusCode::OK
+        )
+        .await["account"]["avatar_id"]
+            .is_null()
+    );
+    call(
+        &app,
+        json!({"action":"set_avatar","image_base64":null,"account_id":saved["account"]["id"]}),
+        Some(&other),
+        StatusCode::BAD_REQUEST,
+    )
+    .await;
+    call(
+        &app,
+        json!({"action":"set_avatar","image_base64":null}),
+        Some(&other),
+        StatusCode::OK,
+    )
+    .await;
+    assert_eq!(
+        app.clone().oneshot(picture(&first)).await.unwrap().status(),
+        StatusCode::OK
+    );
+    let replacement = call(&app, upload.clone(), Some(&owner), StatusCode::OK).await;
+    let second = replacement["account"]["avatar_id"].as_str().unwrap();
+    assert_ne!(first, second);
+    let missing = app.clone().oneshot(picture(&first)).await.unwrap();
+    assert_eq!(missing.status(), StatusCode::NOT_FOUND);
+    let request_id = missing.headers()["x-request-id"]
+        .to_str()
+        .unwrap()
+        .to_owned();
+    let error: ApiError =
+        serde_json::from_slice(&to_bytes(missing.into_body(), 4096).await.unwrap()).unwrap();
+    assert_eq!(error.request_id.to_string(), request_id);
+    let removed = call(
+        &app,
+        json!({"action":"set_avatar","image_base64":null}),
+        Some(&owner),
+        StatusCode::OK,
+    )
+    .await;
+    assert!(removed["account"]["avatar_id"].is_null());
+    assert_eq!(
+        app.clone().oneshot(picture(second)).await.unwrap().status(),
+        StatusCode::NOT_FOUND
+    );
+    assert_eq!(
+        app.clone()
+            .oneshot(picture("invalid"))
+            .await
+            .unwrap()
+            .status(),
+        StatusCode::BAD_REQUEST
+    );
+    // Extractor body limits must keep the shared wire error format.
+    call(
+        &app,
+        json!({"action":"set_avatar","image_base64":"x".repeat(MAX_AVATAR_BASE64+2048)}),
+        Some(&owner),
+        StatusCode::BAD_REQUEST,
+    )
+    .await;
+    let last = call(&app, upload.clone(), Some(&owner), StatusCode::OK).await;
+    call(
+        &app,
+        json!({"action":"reauthenticate","password":"a long test password"}),
+        Some(&owner),
+        StatusCode::OK,
+    )
+    .await;
+    call(
+        &app,
+        json!({"action":"delete_account","confirmation":"picture_owner"}),
+        Some(&owner),
+        StatusCode::OK,
+    )
+    .await;
+    assert_eq!(
+        app.clone()
+            .oneshot(picture(last["account"]["avatar_id"].as_str().unwrap()))
+            .await
+            .unwrap()
+            .status(),
+        StatusCode::NOT_FOUND
+    );
+    call(&app, upload, Some(&owner), StatusCode::UNAUTHORIZED).await;
+}
+
+#[tokio::test]
+#[ignore = "requires TEST_DATABASE_URL; CI runs with --include-ignored"]
 async fn verification_links_are_single_use_and_expire() {
     let db = database();
     let app = api::router(Some(db.pool.clone()), vec![]);

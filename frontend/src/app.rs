@@ -7,6 +7,7 @@ mod diagnostics;
 mod login;
 mod moderation;
 mod permissions;
+mod profile;
 mod screen;
 mod screen_player;
 mod servers;
@@ -308,10 +309,11 @@ pub fn App() -> impl IntoView {
     let display_name = RwSignal::new(String::new());
     let bio = RwSignal::new(String::new());
     let confirmation = RwSignal::new(String::new());
+    let profile_text = Memo::new(move |_| ui.account.get().map(|a| (a.id, a.display_name, a.bio)));
     Effect::new(move |_| {
-        if let Some(a) = ui.account.get() {
-            display_name.set(a.display_name);
-            bio.set(a.bio);
+        if let Some((_, name, text)) = profile_text.get() {
+            display_name.set(name);
+            bio.set(text);
         }
     });
     if client::desktop() {
@@ -418,6 +420,7 @@ pub fn App() -> impl IntoView {
                             <Show when=move ||ui.page.get()=="password"><Field label="New password (at least 12 characters)" value=password kind="password" autocomplete="new-password"/></Show>
                             <Show when=move ||ui.page.get()=="profile">
                                 <p class="text-sm text-white/60">{move ||ui.account.get().map(|a|format!("@{} · {} · {}",a.username,a.email,if a.email_verified {"Email verified"} else {"Email not verified"}))}</p>
+                                <profile::ProfilePicture ui=ui/>
                                 <Field label="Display name" value=display_name/><Field label="Bio (up to 500 characters)" value=bio/>
                                 <button type="button" class="underline" disabled=move ||ui.busy.get() on:click=move |_|run(ui,AccountRequest::Current)>"Refresh account"</button>
                                 <Show when=move ||ui.account.get().is_some_and(|a|!a.email_verified)>

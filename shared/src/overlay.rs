@@ -10,6 +10,8 @@ pub struct OverlaySnapshot {
 pub struct OverlayParticipant {
     pub account_id: crate::AccountId,
     pub name: String,
+    #[serde(default)]
+    pub avatar_id: Option<crate::AvatarId>,
     pub speaking: bool,
     pub muted: bool,
     pub deafened: bool,

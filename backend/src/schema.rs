@@ -1,6 +1,14 @@
 // @generated automatically by Diesel CLI.
 
 diesel::table! {
+    account_avatars (account_id) {
+        account_id -> Uuid,
+        id -> Uuid,
+        png -> Bytea,
+    }
+}
+
+diesel::table! {
     account_codes (token_hash) {
         token_hash -> Text,
         account_id -> Uuid,
@@ -216,6 +224,7 @@ diesel::table! {
     }
 }
 
+diesel::joinable!(account_avatars -> accounts (account_id));
 diesel::joinable!(account_codes -> accounts (account_id));
 diesel::joinable!(channels -> guilds (guild_id));
 diesel::joinable!(guild_members -> accounts (account_id));
@@ -235,6 +244,7 @@ diesel::joinable!(session_tokens -> sessions (session_id));
 diesel::joinable!(sessions -> accounts (account_id));
 
 diesel::allow_tables_to_appear_in_same_query!(
+    account_avatars,
     account_codes,
     accounts,
     auth_limits,

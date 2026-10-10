@@ -9,6 +9,8 @@ The app includes account registration/login, recovery and verification, profile 
 device management, OS-backed desktop sessions, and Google OIDC integration. Local
 emails default to ignored `backend/.mail/`; Resend, SMTP and Google use provider
 credentials configured in `backend/.env` (see `docs/accounts.md`).
+Everyone can upload or remove a profile picture in **Settings > Profile**. Pictures
+appear in voice chat and the desktop overlay, with initials when no picture is set.
 
 Guild memberships, role hierarchy, channel overrides and the role editor are
 implemented. Each server has a **Moderation** panel for voice disconnects,

@@ -52,6 +52,7 @@ pub(super) fn authorize(
             account_id: session.account_id,
             username: member.username.clone(),
             display_name: member.display_name.clone(),
+            avatar_id: query(c, "SELECT to_jsonb(id) AS data FROM account_avatars WHERE account_id=$1::uuid", &[&session.account_id.to_string()])?.pop(),
             slot: 0,
             muted: false,
             deafened: false,

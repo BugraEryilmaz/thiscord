@@ -476,6 +476,37 @@ async fn sfu_forwarding_permissions_isolation_and_cleanup() {
     let mut a = Peer::new(join(addr, &ot, guild.clone(), channel.clone()).await).await;
     let mut b = Peer::new(join(addr, &mt, guild.clone(), channel.clone()).await).await;
     let mut isolated = Peer::new(join(addr, &ot, guild.clone(), other).await).await;
+    // Existing peers receive profile picture changes/removal without renegotiation.
+    let mut picture = std::io::Cursor::new(Vec::new());
+    image::DynamicImage::new_rgb8(8, 8)
+        .write_to(&mut picture, image::ImageFormat::Png)
+        .unwrap();
+    let picture = base64::engine::general_purpose::STANDARD.encode(picture.into_inner());
+    for picture in [Some(picture.clone()), Some(picture), None] {
+        let (status, response) = call(
+            &app,
+            ACCOUNT_PATH,
+            &ot,
+            json!({"action":"set_avatar","image_base64":picture}),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        let expected: Option<thiscord_shared::AvatarId> =
+            serde_json::from_value(response["account"]["avatar_id"].clone()).unwrap();
+        tokio::time::timeout(Duration::from_secs(8), async {
+            loop {
+                if let ServerEvent::Participants { members } = event(&mut b.socket).await
+                    && members
+                        .iter()
+                        .any(|m| m.account_id == owner && m.avatar_id == expected)
+                {
+                    break;
+                }
+            }
+        })
+        .await
+        .expect("A connected peer must see current profile pictures");
+    }
     let packet = tokio::time::timeout(Duration::from_secs(10), async {
         loop {
             a.publish().await;

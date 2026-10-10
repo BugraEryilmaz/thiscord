@@ -36,7 +36,33 @@ in shared models, logs or checked-in configuration.
    remove the last login method. A Google-only account can add a password after
    Google reauthentication, or through verified-email recovery.
 
-Profiles currently support display name and bio. Username and email are immutable
+Profiles support display name, bio and a profile picture. Open **Settings > Profile**
+to choose a PNG, JPEG or WebP up to 2 MiB and 4096 × 4096 pixels, or remove the current
+picture. Choosing a file saves immediately. The backend applies image orientation,
+center-crops/resizes to 256 × 256 and re-encodes a static PNG without the original
+metadata. Active voice participants and the desktop overlay update within the next
+roster refresh (normally two seconds), without leaving the call. Initials remain
+visible when no picture is set or loading fails.
+
+`set_avatar` on `POST /api/v1/account` takes `image_base64` (standard padded base64,
+or `null` to remove). Every signed-in account may change only its own picture;
+neither a verified email nor a guild/instance role is required. The existing account
+lock, session validation, rate limits and four bounded blocking workers apply.
+Uploads are limited to 2 MiB decoded, with decoder dimensions and memory bounded.
+Account request bodies allow up to 2,797,228 bytes for encoded images and JSON.
+`avatar_id` is optional in account, voice participant and overlay metadata, so older
+responses still decode. Only the ID travels in roster/IPC updates, not image bytes.
+
+`GET /api/v1/avatars/{avatar_id}` serves presentation media without a bearer token
+so the overlay does not need session access. IDs are random UUIDs, exposed with the
+profile/authorized voice roster; there is no image listing or account-ID lookup.
+Anyone given the image URL can view it. Every replacement gets a new ID, and the
+old URL returns 404. Images use `image/png`, `nosniff`, no referrer in clients, and
+a private five-minute browser cache. Removal/account deletion deletes the stored
+image; previously downloaded/cached copies cannot be recalled. The migration stores
+one bounded image per account in PostgreSQL; rollback drops only these pictures.
+
+Username and email are immutable
 in this version; changing verified identifiers needs a separate confirmation flow.
 Permanent deletion requires recent reauthentication and typing the username. It
 deletes the profile, identities, sessions, codes, pending OAuth attempts and queued

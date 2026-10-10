@@ -25,6 +25,7 @@ pub fn snapshot(voice: &VoiceStatus, audio: &AudioStatus) -> OverlaySnapshot {
                 OverlayParticipant {
                     account_id: p.account_id,
                     name: p.display_name().to_owned(),
+                    avatar_id: p.avatar_id,
                     speaking: audio.running && activity && p.can_speak && !p.muted && !p.deafened,
                     muted: p.muted || !p.can_speak,
                     deafened: p.deafened,
@@ -100,5 +101,17 @@ mod tests {
         );
         voice.connected = false;
         assert!(snapshot(&voice, &audio).participants.is_empty());
+    }
+
+    #[test]
+    fn profile_picture_changes_and_removal_reach_the_overlay() {
+        let (mut voice, audio) = fixture();
+        assert!(snapshot(&voice, &audio).participants[0].avatar_id.is_none());
+        let id = "00000000-0000-0000-0000-000000000005".parse().unwrap();
+        voice.participants[0].avatar_id = Some(id);
+        assert_eq!(snapshot(&voice, &audio).participants[0].avatar_id, Some(id));
+        assert!(snapshot(&voice, &audio).participants[1].avatar_id.is_none());
+        voice.participants[0].avatar_id = None;
+        assert!(snapshot(&voice, &audio).participants[0].avatar_id.is_none());
     }
 }

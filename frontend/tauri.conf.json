@@ -33,8 +33,8 @@
       }
     ],
     "security": {
-      "csp": "default-src 'self'; script-src 'self' 'wasm-unsafe-eval'; style-src 'self'; img-src 'self' asset: http://asset.localhost; media-src 'self' blob:; connect-src 'self' ipc: http://ipc.localhost http://localhost:3000 http://127.0.0.1:3000 ws://localhost:3000 ws://127.0.0.1:3000 https://thiscord.com.tr wss://thiscord.com.tr https://api.thiscord.com.tr wss://api.thiscord.com.tr",
-      "devCsp": "img-src 'self'; media-src 'self' blob:; default-src 'self'; script-src 'self' 'wasm-unsafe-eval'; style-src 'self'; connect-src 'self' ipc: http://ipc.localhost http://localhost:3000 http://127.0.0.1:3000 ws://localhost:3000 ws://127.0.0.1:3000 ws://127.0.0.1:1420 ws://localhost:1420 https://thiscord.com.tr wss://thiscord.com.tr https://api.thiscord.com.tr wss://api.thiscord.com.tr"
+      "csp": "default-src 'self'; script-src 'self' 'wasm-unsafe-eval'; style-src 'self'; img-src 'self' asset: http://asset.localhost http://localhost:3000 http://127.0.0.1:3000 https://thiscord.com.tr https://api.thiscord.com.tr; media-src 'self' blob:; connect-src 'self' ipc: http://ipc.localhost http://localhost:3000 http://127.0.0.1:3000 ws://localhost:3000 ws://127.0.0.1:3000 https://thiscord.com.tr wss://thiscord.com.tr https://api.thiscord.com.tr wss://api.thiscord.com.tr",
+      "devCsp": "img-src 'self' http://localhost:3000 http://127.0.0.1:3000 https://thiscord.com.tr https://api.thiscord.com.tr; media-src 'self' blob:; default-src 'self'; script-src 'self' 'wasm-unsafe-eval'; style-src 'self'; connect-src 'self' ipc: http://ipc.localhost http://localhost:3000 http://127.0.0.1:3000 ws://localhost:3000 ws://127.0.0.1:3000 ws://127.0.0.1:1420 ws://localhost:1420 https://thiscord.com.tr wss://thiscord.com.tr https://api.thiscord.com.tr wss://api.thiscord.com.tr"
     }
   },
   "bundle": {

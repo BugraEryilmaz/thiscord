@@ -96,7 +96,7 @@ pub(super) fn device(value: &str) -> Result<&str, Failure> {
     Ok(value.trim())
 }
 pub(super) fn account(c: &mut PgConnection, id: AccountId) -> Result<Account, Failure> {
-    query(c, "SELECT to_jsonb(a) || jsonb_build_object('identities', (SELECT jsonb_agg(provider ORDER BY provider) FROM identities WHERE account_id=a.id)) AS data FROM accounts a WHERE id=$1::uuid", &[&id.to_string()])?.pop().ok_or(Failure::Unauthorized)
+    query(c, "SELECT to_jsonb(a) || jsonb_build_object('avatar_id', (SELECT id FROM account_avatars WHERE account_id=a.id), 'identities', (SELECT jsonb_agg(provider ORDER BY provider) FROM identities WHERE account_id=a.id)) AS data FROM accounts a WHERE id=$1::uuid", &[&id.to_string()])?.pop().ok_or(Failure::Unauthorized)
 }
 #[derive(Deserialize, Clone)]
 pub(crate) struct Session {
@@ -417,6 +417,10 @@ pub(super) fn dispatch(
                     AccountRequest::UpdateProfile { display_name, bio } => {
                         if display_name.trim().is_empty() || display_name.chars().count()>64 || bio.chars().count()>500 || display_name.chars().any(char::is_control) { return Err(Failure::Invalid("Display name must be 1 to 64 characters; bio at most 500")); }
                         execute(c,"UPDATE accounts SET display_name=$2,bio=$3 WHERE id=$1::uuid", &[&id.to_string(),display_name.trim(),&bio])?;
+                        Ok(AccountResponse::Account { account: account(c,id)? })
+                    }
+                    AccountRequest::SetAvatar { image_base64 } => {
+                        super::avatar::set(c, id, image_base64.as_deref())?;
                         Ok(AccountResponse::Account { account: account(c,id)? })
                     }
                     AccountRequest::UnlinkIdentity { provider } => {

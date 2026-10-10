@@ -47,6 +47,8 @@ pub struct Participant {
     pub username: String,
     #[serde(default)]
     pub display_name: String,
+    #[serde(default)]
+    pub avatar_id: Option<crate::AvatarId>,
     pub slot: usize,
     pub muted: bool,
     pub deafened: bool,
