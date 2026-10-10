@@ -46,7 +46,7 @@ async fn handle(
             let mut c = store::connection(&p)?;
             let session = store::authenticate(&mut c, &token)?;
             let result = c.transaction::<_, Failure, _>(|c| {
-                store::lock_session(c, &token, &session)?;
+                store::read_session(c, &token, &session)?;
                 let role = crate::permissions::store::instance(c, session.account_id)?.role;
                 if !matches!(role, InstanceRole::Owner | InstanceRole::Admin) { return Err(Failure::Forbidden); }
                 let names: Vec<RoomDiagnostics> = store::query(c,

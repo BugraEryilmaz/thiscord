@@ -14,6 +14,16 @@ are held in memory for the open channel, not across channel changes/app restarts
 Edit/delete controls reflect current permissions; the backend checks them again.
 Deletion requires confirmation and leaves a content-free tombstone. Loading older
 history preserves scroll position; incoming messages follow only near the bottom.
+The open channel retains at most 500 server messages in an ID-indexed, ordered
+cache. The list renders keyed reactive rows for the viewport plus 400 pixels of
+overscan on each side. Row heights are measured for wrapping, edits and resizing;
+spacers represent unmounted rows, and history prepends preserve a message anchor.
+Pages merge once and share deferred scroll work. Edits update existing row state.
+Following live chat evicts the oldest rows and preserves a cursor to reload them.
+Paging back evicts the newest rows; when a full window is being read, newer live
+messages also wait outside that window. Jump to latest obtains a fresh socket
+snapshot before acknowledging reads. Reconnect snapshots cancel stale history
+requests. Only the selected channel has a resident cache.
 Read acknowledgements require focus and the bottom of the view. Jump to latest
 marks the channel read.
 
@@ -26,7 +36,7 @@ Message content, tokens and socket frames are never logged or derived as Debug.
 
 The migration adds messages, a durable event log, read markers and short-lived
 presence. Server UUIDs identify messages; server sequences order them. Channel
-timestamps are monotonic under the guild lock, with UUID as a stable tie-breaker.
+timestamps are monotonic under the channel write lock, with UUID as a stable tie-breaker.
 Client UUIDs are unique per author across channels. An original-content hash detects
 reuse with a different payload; an exact retry returns the current message,
 including edits/deletion. Edits/deletes require the current revision; stale writes
@@ -38,12 +48,30 @@ each page. Pass the shared `older` PageCursor as `before` for the preceding page
 The query uses a strict `(created_at,id) < cursor` boundary, fetches one extra row,
 and reverses the descending query result. It never uses offsets.
 
+Routine operations hold shared account/session and guild locks; guild permission
+mutations retain exclusive guild locking and revision checks. Sends/edits/deletes
+serialize on the requested channel, while the author/client unique key also guards
+cross-channel retries. History snapshots take a shared channel lock; other channels
+remain available. The existing in-process access gate still excludes delivery
+while HTTP handlers can change access or revoke a replayed session.
+
 Every operation checks membership, text-channel type, ViewChannel and its action
 permission in the same locked transaction. History, unread counts and subscriptions
 also require ReadHistory. Cross-channel/guild IDs are rejected. Read positions are
 monotonic and clamped to the channel's latest sequence. Mentions resolve only
 against current guild usernames, at most 20 per message. Unread counts/mentions
 are filtered by the requesting account's current channel permissions.
+
+Unread queries select authorized text channels before reading messages, then use
+each channel's exclusive sequence range above its read marker (zero if absent).
+The partial `channel_unread_range` index excludes tombstones and covers author and
+mention checks. Own messages are excluded with `IS DISTINCT FROM`, so retained
+messages from deleted accounts still count. Edits use current mentions; empty
+counts are omitted. Results are ordered by channel ID to keep socket comparisons
+stable. Both HTTP and socket updates share this query and the existing guild lock.
+
+See [unread query measurements](unread-performance.md) for the reproducible
+PostgreSQL benchmark and the remaining large-backlog tradeoff.
 
 Account deletion anonymizes authors (Deleted account) but retains message content.
 Guild/channel deletion cascades messages, events, read markers and presence.
@@ -72,7 +100,7 @@ Subscribers recheck session/access under the access gate before reading and send
 current unread counts and durable message events. Event batches are capped at 100
 and drained without waiting for a polling interval. Join/leave/typing transitions
 also wake presence delivery; unchanged snapshots are not resent. Initial history
-and its event cursor are read under the same guild lock. Reconnect subscribes again
+and its event cursor are read under a shared channel lock that excludes channel writes. Reconnect subscribes again
 and reloads a fresh snapshot, recovering missed sends, edits and deletions.
 
 Heartbeats use the socket every ten seconds; clients abandon silent connections
@@ -107,10 +135,17 @@ an existing session. Multiple replicas need shared invalidation and are not supp
 - Database checkout/queries and socket writes have deadlines. Blocking Diesel
   runs off async workers. Slow sockets close rather than buffer without a bound.
 - Frontend HTTP requests time out after 15 seconds; failed sends retain retry IDs.
+- Frontend history: 500 resident messages; pending sends: 20. Failed sends can be
+  retried or discarded; hitting the pending limit leaves the draft intact.
 
 This targets a personal deployment, not measured large-installation capacity.
-Full guild evaluation reuses the current permission policy; commit notifications
-currently wake all session sockets, which filter their subscribed state.
+Authorization loads only the actor, Everyone/assigned roles and applicable channel
+overrides, reusing the authoritative evaluator. Unread counts load the actor's
+channel grants across the guild; presence checks batch only members with active
+leases in the requested channel. Mentions query matching guild usernames directly.
+Each socket refresh shares one session/guild authorization transaction between
+unread counts and channel events. Commit notifications currently wake all session
+sockets, which filter their subscribed state.
 Event-log compaction, cross-process fanout, full-guild presence and load tests are
 future work. Attachments, search and desktop notifications remain pending.
 Native voice uses a separate signaling socket and the same access gate; see [audio.md](audio.md).
@@ -124,3 +159,6 @@ reconnect snapshots, membership/channel revocation and logout. Run with
 `--include-ignored`. Shared tests cover wire versions and bounds. Browser smoke
 tests use isolated fixtures; native compilation does not establish cross-platform
 WebView runtime acceptance.
+`cargo test -p thiscord-frontend --lib --locked` also checks bounded history over
+long sessions, revision/deduplication rules, eviction cleanup, old-history/live
+isolation and variable-height viewport/anchor calculations without a browser.

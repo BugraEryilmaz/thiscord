@@ -225,3 +225,19 @@ failures are tested against a local mock, without sending real emails. Google co
 live Resend/SMTP delivery and
 desktop browser/credential prompts on each OS still need live acceptance checks
 with the configured providers. Compilation does not establish macOS runtime behavior.
+
+## Session checks and activity
+
+Routine authorization rechecks the account and session under compatible `FOR SHARE`
+locks for the action transaction, in account-then-session order. Credential/identity
+changes, rotation, deletion and revocation retain exclusive account/session locking.
+Token activity is read after the session lock is acquired so a concurrent rotation
+cannot authorize a previously active token. Replay revocation still commits in its
+own transaction even when the requesting action fails.
+
+Successful authentication refreshes `last_seen_at` at most once per five minutes,
+using an exclusive session lock only on that slow path (or for replay revocation).
+Recent checks do not write activity timestamps. The seven-day idle cutoff therefore
+uses coalesced activity and can expire a session up to five minutes earlier than
+its last request; the absolute expiry is unchanged. Expired/revoked sessions are
+never revived by an activity refresh.

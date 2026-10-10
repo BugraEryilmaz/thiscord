@@ -121,7 +121,6 @@ mod tests {
     async fn room() -> Room {
         let room = Room::default();
         for slot in 0..3 {
-            let (tx, _) = mpsc::channel(1);
             let (keyframes, _) = mpsc::channel(1);
             room.members.write().await.insert(
                 slot,
@@ -142,8 +141,7 @@ mod tests {
                     },
                     source_id: uuid::Uuid::new_v4(),
                     screen_started: Instant::now(),
-                    tx: tx.clone(),
-                    media_tx: tx,
+                    outgoing: MediaKind::ALL.map(|kind| egress::channel(kind).0),
                     keyframes,
                     last_keyframe: None,
                     feedback_enabled: true,

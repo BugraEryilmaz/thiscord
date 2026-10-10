@@ -1,3 +1,4 @@
+pub(crate) mod authorization;
 pub mod evaluator;
 pub(crate) mod store;
 

@@ -15,6 +15,9 @@ use uuid::Uuid;
 // Keep independent database fixtures from invalidating each other's sockets.
 static TEST_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
 
+#[path = "chat/unread.rs"]
+mod unread;
+
 struct Database {
     connection: PgConnection,
     schema: String,
@@ -639,4 +642,188 @@ async fn timeout_revokes_chat_and_expiry_refreshes_composer_permissions() {
     socket.close(None).await.unwrap();
     server.abort();
     let _ = server.await;
+}
+
+#[tokio::test]
+#[ignore = "requires TEST_DATABASE_URL; CI runs with --include-ignored"]
+async fn authorization_readers_share_locks_and_activity_is_coalesced() {
+    let _guard = TEST_LOCK.lock().await;
+    let db = database();
+    let (app, _, guest, guest_id, state, channel) = setup(&db).await;
+    let guild = state["guild"]["id"].clone();
+    let history = json!({"action":"history","guild_id":guild,"channel_id":channel});
+    let mut reader = db.pool.get().unwrap();
+    reader.batch_execute("BEGIN").unwrap();
+    diesel::sql_query("SELECT id FROM accounts WHERE id=$1::uuid FOR SHARE")
+        .bind::<Text, _>(guest_id.to_string())
+        .execute(&mut reader)
+        .unwrap();
+    diesel::sql_query("SELECT id FROM sessions WHERE account_id=$1::uuid FOR SHARE")
+        .bind::<Text, _>(guest_id.to_string())
+        .execute(&mut reader)
+        .unwrap();
+    diesel::sql_query("SELECT id FROM guilds WHERE id=$1::uuid FOR SHARE")
+        .bind::<Text, _>(guild.as_str().unwrap())
+        .execute(&mut reader)
+        .unwrap();
+    diesel::sql_query("SELECT id FROM channels WHERE id=$1::uuid FOR SHARE")
+        .bind::<Text, _>(channel.as_str().unwrap())
+        .execute(&mut reader)
+        .unwrap();
+    // These requests fail with lock_timeout if any routine check still takes
+    // FOR UPDATE or writes last_seen_at. Same-session readers must coexist.
+    let (a, b) = tokio::join!(
+        chat(&app, &guest, history.clone(), StatusCode::OK),
+        chat(&app, &guest, history.clone(), StatusCode::OK),
+    );
+    assert_eq!(a, b);
+    command(
+        &app,
+        &guest,
+        json!({"action":"view_guild","guild_id":guild}),
+        StatusCode::OK,
+    )
+    .await;
+    reader.batch_execute("ROLLBACK").unwrap();
+
+    #[derive(QueryableByName)]
+    struct Activity {
+        #[diesel(sql_type = diesel::sql_types::Bool)]
+        fresh: bool,
+        #[diesel(sql_type = Text)]
+        seen: String,
+    }
+    diesel::sql_query(
+        "UPDATE sessions SET last_seen_at=now()-interval '6 minutes' WHERE account_id=$1::uuid",
+    )
+    .bind::<Text, _>(guest_id.to_string())
+    .execute(&mut reader)
+    .unwrap();
+    chat(&app, &guest, history.clone(), StatusCode::OK).await;
+    let activity = |c: &mut PgConnection| {
+        diesel::sql_query("SELECT last_seen_at>now()-interval '1 minute' AS fresh,last_seen_at::text AS seen FROM sessions WHERE account_id=$1::uuid").bind::<Text,_>(guest_id.to_string()).get_result::<Activity>(c).unwrap()
+    };
+    let first = activity(&mut reader);
+    assert!(first.fresh);
+    chat(&app, &guest, history.clone(), StatusCode::OK).await;
+    assert_eq!(first.seen, activity(&mut reader).seen);
+    diesel::sql_query(
+        "UPDATE sessions SET last_seen_at=now()-interval '8 days' WHERE account_id=$1::uuid",
+    )
+    .bind::<Text, _>(guest_id.to_string())
+    .execute(&mut reader)
+    .unwrap();
+    chat(&app, &guest, history.clone(), StatusCode::UNAUTHORIZED).await;
+
+    diesel::sql_query("UPDATE sessions SET last_seen_at=now() WHERE account_id=$1::uuid")
+        .bind::<Text, _>(guest_id.to_string())
+        .execute(&mut reader)
+        .unwrap();
+    reader.batch_execute("BEGIN").unwrap();
+    diesel::sql_query("UPDATE sessions SET revoked=TRUE WHERE account_id=$1::uuid")
+        .bind::<Text, _>(guest_id.to_string())
+        .execute(&mut reader)
+        .unwrap();
+    // The optimistic authentication lookup can still see the old committed row;
+    // the action's shared session lock must wait and reject the committed revoke.
+    let request = call(&app, CHAT_PATH, &guest, history);
+    tokio::pin!(request);
+    assert!(
+        tokio::time::timeout(std::time::Duration::from_millis(100), &mut request)
+            .await
+            .is_err()
+    );
+    reader.batch_execute("COMMIT").unwrap();
+    assert_eq!(request.await.0, StatusCode::UNAUTHORIZED);
+}
+
+#[tokio::test]
+#[ignore = "requires TEST_DATABASE_URL; CI runs with --include-ignored"]
+async fn channel_writes_serialize_without_blocking_other_channels() {
+    let _guard = TEST_LOCK.lock().await;
+    let db = database();
+    let (app, owner, guest, _, mut state, first) = setup(&db).await;
+    change(
+        &app,
+        &owner,
+        &mut state,
+        json!({"action":"create_channel","name":"two","kind":"text"}),
+        StatusCode::OK,
+    )
+    .await;
+    let second = state["channels"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|ch| ch["id"] != first)
+        .unwrap()["id"]
+        .clone();
+    let guild = state["guild"]["id"].clone();
+    let mut writer = db.pool.get().unwrap();
+    writer.batch_execute("BEGIN").unwrap();
+    diesel::sql_query("SELECT id FROM guilds WHERE id=$1::uuid FOR SHARE")
+        .bind::<Text, _>(guild.as_str().unwrap())
+        .execute(&mut writer)
+        .unwrap();
+    diesel::sql_query("SELECT id FROM channels WHERE id=$1::uuid FOR UPDATE")
+        .bind::<Text, _>(first.as_str().unwrap())
+        .execute(&mut writer)
+        .unwrap();
+    let sent = chat(&app, &guest, json!({"action":"send","guild_id":guild,"channel_id":second,"client_id":Uuid::new_v4(),"content":"independent channel"}), StatusCode::OK).await;
+    chat(
+        &app,
+        &guest,
+        json!({"action":"history","guild_id":guild,"channel_id":second}),
+        StatusCode::OK,
+    )
+    .await;
+    writer.batch_execute("ROLLBACK").unwrap();
+    let id = sent["message"]["id"].clone();
+    let edit = json!({"action":"edit","guild_id":guild,"channel_id":second,"message_id":id,"revision":sent["message"]["revision"],"content":"concurrent edit"});
+    let (a, b) = tokio::join!(
+        call(&app, CHAT_PATH, &guest, edit.clone()),
+        call(&app, CHAT_PATH, &guest, edit)
+    );
+    assert!(
+        (a.0 == StatusCode::OK && b.0 == StatusCode::CONFLICT)
+            || (b.0 == StatusCode::OK && a.0 == StatusCode::CONFLICT)
+    );
+    let client = Uuid::new_v4();
+    let send = |channel: &Value| json!({"action":"send","guild_id":guild,"channel_id":channel,"client_id":client,"content":"same key in different channels"});
+    let (a, b) = tokio::join!(
+        call(&app, CHAT_PATH, &guest, send(&first)),
+        call(&app, CHAT_PATH, &guest, send(&second))
+    );
+    assert!(
+        (a.0 == StatusCode::OK && b.0 == StatusCode::CONFLICT)
+            || (b.0 == StatusCode::OK && a.0 == StatusCode::CONFLICT)
+    );
+
+    // A permission writer excludes readers until commit, after which the waiting
+    // reader must evaluate the new grants, not a snapshot taken before the lock.
+    writer.batch_execute("BEGIN").unwrap();
+    diesel::sql_query("SELECT id FROM guilds WHERE id=$1::uuid FOR UPDATE")
+        .bind::<Text, _>(guild.as_str().unwrap())
+        .execute(&mut writer)
+        .unwrap();
+    diesel::sql_query(
+        "UPDATE guild_roles SET permissions='[]' WHERE guild_id=$1::uuid AND everyone",
+    )
+    .bind::<Text, _>(guild.as_str().unwrap())
+    .execute(&mut writer)
+    .unwrap();
+    let request = call(
+        &app,
+        CHAT_PATH,
+        &guest,
+        json!({"action":"history","guild_id":guild,"channel_id":second}),
+    );
+    tokio::pin!(request);
+    assert!(
+        tokio::time::timeout(std::time::Duration::from_millis(100), &mut request)
+            .await
+            .is_err()
+    );
+    writer.batch_execute("COMMIT").unwrap();
+    assert_eq!(request.await.0, StatusCode::FORBIDDEN);
 }

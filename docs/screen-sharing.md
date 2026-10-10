@@ -96,8 +96,20 @@ the display stops capture; it never falls back to another window/display.
   compositor event. These admission limits do not bound unfinished hardware output or
   shorten an individual oversized frame. Discarding dependent frames during recovery does not
   request another keyframe for each skipped delta.
-  SFU video deliveries expire after 150 ms in its egress queue, with aggregate
-  queue-drop/send-timeout diagnostics and rate-limited recovery feedback.
+  SFU egress uses independent microphone, video and shared-audio writers. Per
+  receiver, video is bounded to 512 queued packets and 512 KiB; each audio queue
+  has 32 packet slots and 32 KiB. Byte reservations include the in-flight packet,
+  serialized RTP and 64 bytes of transport overhead, and release on cancellation.
+  Video expires at 150 ms and audio at 100 ms from egress enqueue, including time
+  waiting to write. These limits do not bound the WebRTC driver's internal queue
+  or network latency. Screen writes poll driver admission once and cancel if it
+  would wait, so microphone delivery never waits for a pending video write to
+  complete or time out. Backpressure/errors discard that source's backlog and
+  back off screen writes for 20 ms; video queue loss, expiry and write failure
+  request a rate-limited fresh keyframe through the existing recovery protocol.
+  Only microphone write failure or connection-level failure ends the call;
+  screen transport errors leave voice connected. Recovery uses the existing
+  viewer dependency-loss handling and publisher IDRs, without renegotiation.
 - Receivers reorder up to 256 packets for 40 ms, handle sequence wraparound and
   reject duplicates/late packets. A 10 ms timer resolves gaps even if no more
   packets arrive. Complete-frame queues allow eight frames, at most 8 MiB and
@@ -129,8 +141,8 @@ the display stops capture; it never falls back to another window/display.
   waiting for another event, including coalesced notifications after worker delays,
   and zeros packets marked silent. No codec/network work enters CPAL callbacks.
 - Eight microphone, eight screen-video and eight shared-audio tracks are negotiated.
-  Microphone queues are separate and prioritized. Video and shared audio require
-  explicit viewer subscriptions. There is no simulcast; multi-share and
+  Microphone queues and writers are separate from screen traffic. Video and shared
+  audio require explicit viewer subscriptions. There is no simulcast; multi-share and
   constrained-network capacity remain unmeasured.
 
 Existing voice STUN/TURN, UDP addressing, certificates and per-hop DTLS-SRTP
@@ -190,6 +202,15 @@ write releases both and revalidates before resuming; a slow receiver cannot hold
 up room updates or subsequent media readers. This relies on the pinned WebRTC
 `write_rtp` implementation enqueuing atomically on its final poll.
 
+Each microphone, video and shared-audio writer keeps its independent bounded
+queue. Queue admission checks the current viewer lease and share epoch before
+reserving bytes; intentional filtering does not count as congestion or request
+recovery. The same viewer and epoch checks run under the room lock on every
+transport poll, including after waiting for room access. Unsubscribe, lease
+expiry and share restart therefore invalidate packets already dequeued by a
+writer as well as queued packets. These viewer changes do not stop microphone
+delivery, and fresh subscriptions can resume screen delivery.
+
 `shared::voice::MediaKind` owns publisher SSRCs, relay ranges, payload types and
 track/mixer slot mappings. Internal SFU queues carry the kind explicitly.
 
@@ -200,15 +221,15 @@ voice never restarts a share automatically. A stalled OS capture call retains
 the single worker slot until it returns; users cannot accumulate capture threads
 by repeatedly pressing Start. Captured frames awaiting send are age-limited.
 
-The version-1 voice offer adds `screen_video` and `screen_feedback`; older offers
-default both to false. A new client opts into feedback/diagnostic events in its
-answer only when the server advertises support. Older clients never receive new
-event variants; newer clients use periodic recovery with older backends. Deploy
-the updated backend to enable prompt feedback and SFU counters. Feedback checks
+The version-1 voice offer adds `screen_video`, `screen_feedback` and
+`screen_subscriptions`; older offers default these to false. A new client opts
+into feedback/diagnostic and subscription events in its answer only when the
+server advertises support. Older clients never receive new event variants.
+Screen publishing requires subscription support. Feedback checks
 current membership/access generation, deafen, publisher Speak/sharing state and
 stream epoch, and coalesces requests across viewers.
 Participant snapshots add `sharing_screen` and `sharing_audio`, both defaulting
-to false, and a `screen_epoch` identifying the publisher connection. The SFU
+to false, and a `screen_epoch` identifying each share incarnation. The SFU
 stamps that epoch in video CSRC metadata; receivers discard packets from reused
 slots whose epoch no longer matches their roster. Clients only send the new screen command to supporting servers.
 
@@ -258,7 +279,8 @@ time measures CPU command submission, not a GPU timestamp query. A bounded
 
 Native WebRTC reports add network jitter/loss and nominated-pair RTT/bandwidth
 estimates. These are library-reported values: unsupported estimates may be zero.
-SFU counters distinguish ingress and egress queue drops from transport timeouts;
+SFU counters distinguish ingress drops and egress losses (including queue budgets,
+screen backpressure and write errors) from write-deadline timeouts;
 they update every five seconds. They are cumulative, not per-sample rates.
 Browser statistics show decoded FPS, decoder drops, freezes, local-hop loss/jitter,
 decode/jitter-buffer time and decoder identity/efficiency when supported. Presented

@@ -91,8 +91,10 @@ and single-process chat/media enforcement.
 - [x] Heartbeats, disconnect cleanup, reconnect/backoff and resynchronization.
 - [x] Persist/send messages, server IDs/ordering and client deduplication.
 - [x] Cursor-paginated history, permission-checked edit/delete and live updates.
+- [x] Bounded message cache, ID lookup, batched history merges and measured keyed virtual chat rows.
 - [x] History/composer UI with pending/failed/retry states and scroll behavior.
 - [x] Unread markers, mentions, typing indicators and online presence.
+- [ ] Measure unread fan-out with large backlogs; evaluate maintained sequence-bucket aggregates (see docs/unread-performance.md).
 - [x] Safe message rendering, bounded payloads and spam controls.
 - [x] Reconnect, duplicate delivery, channel isolation and channel deletion tests.
 - [ ] Later: access-controlled attachments/quotas, search and desktop notifications.
@@ -244,6 +246,8 @@ speaker isolation and physical acoustic acceptance remain future work.
 - [x] H.264/Opus WebRTC tracks, permission-gated SFU forwarding and WebView video player.
 - [x] In-app fullscreen viewing and separate saved screen share volume/mute controls.
 - [x] Bounded media queues, loss recovery, stop/reconnect cleanup and wire/codec/SFU regression tests.
+- [x] Isolate SFU screen backpressure from microphone writes, bound egress bytes/age
+  including in-flight packets, and recover video without disconnecting voice.
 - [ ] Two-client Windows capture/audio acceptance, mixed-DPI/protected windows and suspend/network checks.
 - [ ] macOS/Linux publishing and OS permission acceptance; portable receiving code is included.
 - [x] Explicit viewer subscriptions with lease expiry and receiver-driven bitrate/resolution/FPS adaptation; pause video with no viewers.

@@ -188,7 +188,7 @@ pub(super) fn dispatch(
     )
     .then(|| crate::voice::access::global().pause());
     c.transaction(|c| {
-        auth::lock_session(c,token,&session)?;
+        auth::read_session(c,token,&session)?;
         let actor = session.account_id;
         match command {
             PermissionRequest::Instance {} => Ok(PermissionResponse::Instance { access: instance(c,actor)? }),
@@ -245,9 +245,19 @@ pub(super) fn dispatch(
             }
             command => {
                 let guild_id=match &command { PermissionRequest::ViewGuild{guild_id} | PermissionRequest::InspectModeration{guild_id} | PermissionRequest::Inspect{guild_id} | PermissionRequest::Change{guild_id,..} | PermissionRequest::Preview{guild_id,..} => *guild_id, _=>unreachable!() };
-                // One lock order for every operation. All decisions and writes share this lock.
-                execute(c,"SELECT id FROM guilds WHERE id=$1::uuid FOR UPDATE", &[&guild_id.to_string()])?;
-                let state=load(c,guild_id)?;
+                // Writes retain exclusive serialization and revision checks. Readers
+                // protect their permission snapshot with compatible shared locks.
+                let lock = if matches!(command, PermissionRequest::Change { .. }) {
+                    "SELECT id FROM guilds WHERE id=$1::uuid FOR UPDATE"
+                } else {
+                    "SELECT id FROM guilds WHERE id=$1::uuid FOR SHARE"
+                };
+                execute(c,lock, &[&guild_id.to_string()])?;
+                let state=match &command {
+                    PermissionRequest::ViewGuild { .. } => super::authorization::load(c,guild_id,&[actor],None)?,
+                    PermissionRequest::Preview { account_id, channel_id, .. } => super::authorization::load(c,guild_id,&[actor,*account_id],*channel_id)?,
+                    _ => load(c,guild_id)?,
+                };
                 member(&state,actor)?;
                 match command {
                     PermissionRequest::ViewGuild {..} => {

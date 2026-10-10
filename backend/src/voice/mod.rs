@@ -1,6 +1,7 @@
 //! Bounded, single-process audio SFU. One WebRTC transport per participant.
 pub(crate) mod access;
 mod diagnostics;
+mod egress;
 mod ice;
 mod store;
 mod viewing;
@@ -46,8 +47,7 @@ struct Member {
     info: Participant,
     source_id: uuid::Uuid,
     screen_started: Instant,
-    tx: mpsc::Sender<Delivery>,
-    media_tx: mpsc::Sender<Delivery>,
+    outgoing: [egress::Sender; 3],
     keyframes: mpsc::Sender<u32>,
     last_keyframe: Option<Instant>,
     feedback_enabled: bool,
@@ -584,8 +584,9 @@ async fn serve(mut socket: WebSocket, pool: DbPool, id: RequestId) {
     };
     let room = room(channel_id).await;
     let active = Arc::new(AtomicBool::new(true));
-    let (out_tx, mut out_rx) = mpsc::channel::<Delivery>(32);
-    let (media_out_tx, mut media_out_rx) = mpsc::channel::<Delivery>(4096);
+    let (out_tx, out_rx) = egress::channel(MediaKind::Microphone);
+    let (video_tx, video_rx) = egress::channel(MediaKind::ScreenVideo);
+    let (audio_tx, audio_rx) = egress::channel(MediaKind::SystemAudio);
     let metrics: Arc<[AtomicU64; 5]> = Arc::new(std::array::from_fn(|_| AtomicU64::new(0)));
     let (keyframe_tx, mut keyframe_rx) = mpsc::channel(1);
     let source_id = uuid::Uuid::new_v4();
@@ -629,8 +630,7 @@ async fn serve(mut socket: WebSocket, pool: DbPool, id: RequestId) {
                 info: info.clone(),
                 source_id,
                 screen_started: Instant::now(),
-                tx: out_tx,
-                media_tx: media_out_tx,
+                outgoing: [out_tx, video_tx, audio_tx],
                 keyframes: keyframe_tx,
                 last_keyframe: None,
                 feedback_enabled: false,
@@ -794,133 +794,58 @@ async fn serve(mut socket: WebSocket, pool: DbPool, id: RequestId) {
                     timestamp: packet.header.timestamp,
                     ..Default::default()
                 };
+                let mut recovery = Vec::new();
                 for (&other, m) in members.iter() {
-                    if other != slot && viewing::receives(m, source, kind, Instant::now()) {
-                        let tx = if kind == MediaKind::Microphone {
-                            &m.tx
-                        } else {
-                            &m.media_tx
-                        };
+                    if other != slot {
+                        let tx = &m.outgoing[kind as usize];
                         if tx
-                            .try_send(Delivery {
-                                epoch,
-                                slot: kind.track_index(slot),
-                                source: source_id,
-                                source_active: relay_active.clone(),
-                                packet: packet.clone(),
-                                queued_at: Instant::now(),
-                            })
+                            .forward(
+                                source,
+                                m,
+                                Delivery {
+                                    epoch,
+                                    slot: kind.track_index(slot),
+                                    source: source_id,
+                                    source_active: relay_active.clone(),
+                                    packet: packet.clone(),
+                                    queued_at: Instant::now(),
+                                },
+                            )
                             .is_err()
                             && kind == MediaKind::ScreenVideo
                         {
                             m.metrics[2].fetch_add(1, Ordering::Relaxed);
+                            recovery.push((other, source.info.screen_epoch));
                         }
                     }
                 }
-            }
-        });
-        let writer_active = active.clone();
-        let writer_generation = generation.clone();
-        let writer_room = room.clone();
-        let receiver_slot = slot;
-        let writer_metrics = metrics.clone();
-        let writer = tokio::spawn(async move {
-            let mut sources = [None; MediaKind::TRACK_COUNT];
-            let mut offsets = [(0_u16, 0_u32); MediaKind::TRACK_COUNT];
-            let mut last = [(0_u16, 0_u32); MediaKind::TRACK_COUNT];
-            while let Some(Delivery {
-                epoch,
-                slot,
-                source,
-                source_active,
-                mut packet,
-                queued_at,
-            }) = tokio::select! { biased; packet = out_rx.recv() => packet, packet = media_out_rx.recv() => packet }
-            {
-                if !writer_active.load(Ordering::Acquire) {
-                    break;
-                }
-                let (kind, source_slot) = MediaKind::from_track(slot).expect("delivery track");
-                if kind == MediaKind::ScreenVideo
-                    && queued_at.elapsed() > Duration::from_millis(150)
-                {
-                    writer_metrics[2].fetch_add(1, Ordering::Relaxed);
-                    request_keyframe(
-                        &writer_room,
-                        receiver_slot,
-                        source_slot,
-                        packet.header.csrc.first().copied().unwrap_or(0),
-                    )
-                    .await;
-                    continue;
-                }
-                // A slot may be reused, but its SRTP sequence must not rewind.
-                // Preserve sequence gaps/reordering within the publisher stream.
-                if sources[slot] != Some(source) {
-                    sources[slot] = Some(source);
-                    offsets[slot] = (
-                        last[slot]
-                            .0
-                            .wrapping_add(1)
-                            .wrapping_sub(packet.header.sequence_number),
-                        last[slot]
-                            .1
-                            .wrapping_add(if kind == MediaKind::ScreenVideo {
-                                9000
-                            } else {
-                                960
-                            })
-                            .wrapping_sub(packet.header.timestamp),
-                    );
-                }
-                packet.header.sequence_number =
-                    packet.header.sequence_number.wrapping_add(offsets[slot].0);
-                packet.header.timestamp = packet.header.timestamp.wrapping_add(offsets[slot].1);
-                if packet.header.sequence_number.wrapping_sub(last[slot].0) as i16 > 0 {
-                    last[slot] = (packet.header.sequence_number, packet.header.timestamp);
-                }
-                let packet_epoch = packet.header.csrc.first().copied();
-                let delivered = tokio::time::timeout(
-                    Duration::from_millis(100),
-                    authorized_write(
-                        &writer_room,
-                        || {
-                            access::global()
-                                .packet(epoch, writer_generation.load(Ordering::Acquire))
-                        },
-                        |members| {
-                            writer_active.load(Ordering::Acquire)
-                                && source_active.load(Ordering::Acquire)
-                                && members.get(&source_slot).is_some_and(|m| {
-                                    m.active.load(Ordering::Acquire)
-                                        && m.source_id == source
-                                        && may_publish(&m.info, kind)
-                                        && (kind == MediaKind::Microphone
-                                            || packet_epoch == Some(m.info.screen_epoch))
-                                        && members.get(&receiver_slot).is_some_and(|receiver| {
-                                            viewing::receives(receiver, m, kind, queued_at)
-                                        })
-                                })
-                        },
-                        tracks[slot].write_rtp(packet),
-                    ),
-                )
-                .await;
-                if matches!(delivered, Ok(Err(()))) {
-                    continue;
-                }
-                if !matches!(delivered, Ok(Ok(Ok(_)))) {
-                    writer_active.store(false, Ordering::Release);
-                    if kind == MediaKind::ScreenVideo {
-                        writer_metrics[4].fetch_add(1, Ordering::Relaxed);
-                    }
-                    break;
-                }
-                if kind == MediaKind::ScreenVideo {
-                    writer_metrics[3].fetch_add(1, Ordering::Relaxed);
+                drop(members);
+                drop(_permit);
+                for (viewer, epoch) in recovery {
+                    request_keyframe(&relay_room, viewer, slot, epoch).await;
                 }
             }
         });
+        let tracks = Arc::new(tracks);
+        let mut writers = tokio::task::JoinSet::new();
+        for (kind, rx) in [
+            (MediaKind::Microphone, out_rx),
+            (MediaKind::ScreenVideo, video_rx),
+            (MediaKind::SystemAudio, audio_rx),
+        ] {
+            let writer = egress::Writer {
+                room: room.clone(),
+                receiver_slot: slot,
+                active: active.clone(),
+                generation: generation.clone(),
+                metrics: metrics.clone(),
+            };
+            let tracks = tracks.clone();
+            writers.spawn(writer.run(kind, rx, move |slot, packet| {
+                let track = tracks[slot].clone();
+                async move { track.write_rtp(packet).await.map_err(|_| ()) }
+            }));
+        }
         let mut tick = tokio::time::interval(Duration::from_secs(1));
         tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
         let access = VoiceAccess {
@@ -975,9 +900,9 @@ async fn serve(mut socket: WebSocket, pool: DbPool, id: RequestId) {
         }
         active.store(false, Ordering::Release);
         relay.abort();
-        writer.abort();
+        writers.abort_all();
         let _ = relay.await;
-        let _ = writer.await;
+        while writers.join_next().await.is_some() {}
     }
     active.store(false, Ordering::Release);
     room.members.write().await.remove(&slot);
@@ -1028,7 +953,6 @@ mod send_tests {
         let epoch = access::global().snapshot().unwrap();
         let mut receivers = Vec::new();
         for slot in 0..2 {
-            let (tx, _) = mpsc::channel(1);
             let (keyframes, rx) = mpsc::channel(1);
             receivers.push(rx);
             room.members.write().await.insert(
@@ -1050,8 +974,11 @@ mod send_tests {
                     },
                     source_id: uuid::Uuid::new_v4(),
                     screen_started: Instant::now(),
-                    tx: tx.clone(),
-                    media_tx: tx,
+                    outgoing: [
+                        egress::channel(MediaKind::Microphone).0,
+                        egress::channel(MediaKind::ScreenVideo).0,
+                        egress::channel(MediaKind::SystemAudio).0,
+                    ],
                     keyframes,
                     last_keyframe: None,
                     feedback_enabled: true,
