@@ -108,7 +108,7 @@ impl Pending {
                 std::mem::swap(&mut s.devices, next);
                 s.device_watch = Default::default();
                 diagnostics::event("device_reconfigured", s.devices.info.clone());
-                s.recovery.reconfigured();
+                s.recovery.reconfigured(&s.devices.info);
             } else {
                 debug.settings(&self.settings);
             }
@@ -281,6 +281,7 @@ mod tests {
         s.recovery.begin("device busy".into());
         s.settings.muted = true;
         s.settings.input = Some("saved microphone".into());
+        s.settings.output = Some("unplugged headset".into());
         let transport = s.outgoing.as_ref().unwrap().clone();
         let connection = connection::Connection::default();
         s.connection = Some(connection.clone());
@@ -298,9 +299,14 @@ mod tests {
             .active
             .store(true, Ordering::Release);
         assert!(s.status().running);
+        let mut replacement = devices(true);
+        replacement.info = serde_json::json!({
+            "input": {"name": "saved microphone", "fallback": false},
+            "output": {"name": "System speakers", "fallback": true}
+        });
         assert!(
             s.resume_devices(
-                devices(true),
+                replacement,
                 &AtomicBool::new(false),
                 &AtomicBool::new(false),
                 &AtomicBool::new(true)
@@ -321,6 +327,9 @@ mod tests {
         assert!(!s.devices.control.pressed.load(Ordering::Acquire));
         assert_eq!(s.hold, 0);
         assert_eq!(s.settings.input.as_deref(), Some("saved microphone"));
+        assert_eq!(s.settings.output.as_deref(), Some("unplugged headset"));
+        assert!(s.status().message.contains("output is unavailable"));
+        assert!(s.status().message.contains("System speakers"));
     }
     #[test]
     fn recovery_cannot_start_after_stop_or_revocation_and_play_failure_stays_pending() {
