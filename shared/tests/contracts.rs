@@ -338,6 +338,7 @@ fn screen_feedback_capabilities_are_opt_in_and_legacy_answers_stay_compatible() 
         old,
         ClientEvent::Answer {
             screen_feedback: false,
+            screen_subscriptions: false,
             ..
         }
     ));
@@ -351,6 +352,7 @@ fn screen_feedback_capabilities_are_opt_in_and_legacy_answers_stay_compatible() 
         offer,
         ServerEvent::Offer {
             screen_feedback: false,
+            screen_subscriptions: false,
             ..
         }
     ));
@@ -359,4 +361,42 @@ fn screen_feedback_capabilities_are_opt_in_and_legacy_answers_stay_compatible() 
         serde_json::to_value(event).unwrap(),
         serde_json::json!({"type":"screen_keyframe","slot":2,"epoch":3})
     );
+}
+
+#[test]
+fn screen_view_subscriptions_and_pause_targets_keep_stable_wire_shapes() {
+    use thiscord_shared::{screen::Subscription, voice::*};
+    let view = Subscription {
+        slot: 2,
+        owner: ID.parse().unwrap(),
+        epoch: 3,
+        bitrate: 2_500_000,
+    };
+    let value = json!({"type":"screen_views","views":[{"slot":2,"owner":ID,"epoch":3,"bitrate":2_500_000}]});
+    assert_eq!(
+        to_value(ClientEvent::ScreenViews { views: vec![view] }).unwrap(),
+        value
+    );
+    assert!(
+        matches!(from_value::<ClientEvent>(value).unwrap(), ClientEvent::ScreenViews { views } if views == vec![view])
+    );
+    let pause = json!({"type":"screen_target","epoch":3,"bitrate":0});
+    assert_eq!(
+        to_value(ServerEvent::ScreenTarget {
+            epoch: 3,
+            bitrate: 0
+        })
+        .unwrap(),
+        pause
+    );
+    assert!(
+        from_value::<ClientEvent>(
+            json!({"type":"screen_views","views":[{"slot":2,"owner":ID,"epoch":3}]})
+        )
+        .is_err()
+    );
+    assert!(view.valid());
+    for bitrate in [0, 199_999, 32_000_001, u32::MAX] {
+        assert!(!Subscription { bitrate, ..view }.valid());
+    }
 }

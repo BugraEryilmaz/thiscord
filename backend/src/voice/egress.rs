@@ -47,7 +47,27 @@ pub(super) fn channel(kind: MediaKind) -> (Sender, mpsc::Receiver<Queued>) {
 }
 
 impl Sender {
-    pub(super) fn try_send(&self, delivery: Delivery) -> Result<(), ()> {
+    /// Called under the room lock and access permit. Intentional filtering is
+    /// not congestion and must not request a keyframe or consume queue budget.
+    pub(super) fn forward(
+        &self,
+        source: &Member,
+        receiver: &Member,
+        delivery: Delivery,
+    ) -> Result<(), ()> {
+        if delivery.source != source.source_id
+            || !delivery.source_active.load(Ordering::Acquire)
+            || delivery.epoch != receiver.generation.load(Ordering::Acquire)
+            || (self.kind != MediaKind::Microphone
+                && delivery.packet.header.csrc.first().copied() != Some(source.info.screen_epoch))
+            || !viewing::receives(receiver, source, self.kind, delivery.queued_at)
+        {
+            return Ok(());
+        }
+        self.try_send(delivery)
+    }
+
+    fn try_send(&self, delivery: Delivery) -> Result<(), ()> {
         if delivery.queued_at.elapsed() >= max_age(self.kind) {
             return Err(());
         }
@@ -121,7 +141,8 @@ impl Writer {
             }
             let (packet_kind, source_slot) = MediaKind::from_track(slot).expect("delivery track");
             debug_assert_eq!(kind, packet_kind);
-            let screen_epoch = packet.header.csrc.first().copied().unwrap_or(0);
+            let packet_epoch = packet.header.csrc.first().copied();
+            let screen_epoch = packet_epoch.unwrap_or(0);
             if sources[source_slot] != Some(source) {
                 sources[source_slot] = Some(source);
                 retry_after[source_slot] = None;
@@ -172,12 +193,12 @@ impl Writer {
                             && self.active.load(Ordering::Acquire)
                             && source_active.load(Ordering::Acquire)
                             && members.get(&source_slot).is_some_and(|m| {
-                                m.active.load(Ordering::Acquire)
-                                    && m.source_id == source
-                                    && may_publish(&m.info, kind)
-                            })
-                            && members.get(&self.receiver_slot).is_some_and(|m| {
-                                !m.info.deafened && m.active.load(Ordering::Acquire)
+                                m.source_id == source
+                                    && (kind == MediaKind::Microphone
+                                        || packet_epoch == Some(m.info.screen_epoch))
+                                    && members.get(&self.receiver_slot).is_some_and(|receiver| {
+                                        viewing::receives(receiver, m, kind, queued_at)
+                                    })
                             })
                     },
                     write_media(kind, send(slot, packet)),
@@ -221,6 +242,197 @@ impl Writer {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[derive(Clone, Copy, Debug)]
+    enum ViewerChange {
+        Unsubscribe,
+        Expire,
+        Restart,
+    }
+
+    async fn subscribe(room: &Room) {
+        let publisher = room.members.read().await[&1].info.clone();
+        assert!(
+            viewing::update(
+                room,
+                0,
+                vec![thiscord_shared::screen::Subscription {
+                    slot: 1,
+                    owner: publisher.account_id,
+                    epoch: publisher.screen_epoch,
+                    bitrate: 2_500_000,
+                }]
+            )
+            .await
+        );
+    }
+
+    async fn change_viewer(room: &Room, change: ViewerChange) {
+        match change {
+            ViewerChange::Unsubscribe => {
+                assert!(viewing::update(room, 0, vec![]).await);
+            }
+            ViewerChange::Expire => {
+                room.members.write().await.get_mut(&0).unwrap().views[1]
+                    .as_mut()
+                    .unwrap()
+                    .renewed -= Duration::from_secs(thiscord_shared::screen::VIEW_LEASE_SECS);
+            }
+            ViewerChange::Restart => {
+                update_screen_state(room, 1, false, false).await.unwrap();
+                update_screen_state(room, 1, true, true).await.unwrap();
+                // A new viewer of the new share must never receive the old share's packets.
+                subscribe(room).await;
+            }
+        }
+    }
+
+    async fn forward(room: &Room, tx: &Sender, packet: Delivery) {
+        let members = room.members.read().await;
+        tx.forward(&members[&1], &members[&0], packet).unwrap();
+    }
+
+    #[tokio::test]
+    async fn queue_admission_filters_unsubscribed_expired_and_restarted_views() {
+        for kind in MediaKind::ALL {
+            for change in [
+                ViewerChange::Unsubscribe,
+                ViewerChange::Expire,
+                ViewerChange::Restart,
+            ] {
+                let (writer, source, _) = fixture().await;
+                let (tx, mut rx) = channel(kind);
+                let budget = tx.bytes.available_permits();
+                forward(&writer.room, &tx, delivery(kind, source, 100)).await;
+                drop(rx.try_recv().expect("active viewer must be admitted"));
+                assert_eq!(tx.bytes.available_permits(), budget);
+                change_viewer(&writer.room, change).await;
+                // Timestamp after the mutation: restart must check the wire epoch,
+                // not just whether there is now a viewer for this slot.
+                forward(&writer.room, &tx, delivery(kind, source, 100)).await;
+                if kind == MediaKind::Microphone {
+                    drop(rx.try_recv().expect("microphone must remain independent"));
+                } else {
+                    assert!(rx.try_recv().is_err(), "admitted {kind:?} after {change:?}");
+                }
+                assert_eq!(
+                    tx.bytes.available_permits(),
+                    budget,
+                    "filtered packets reserved bytes"
+                );
+                subscribe(&writer.room).await;
+                let mut fresh = delivery(kind, source, 100);
+                fresh.packet.header.csrc =
+                    vec![writer.room.members.read().await[&1].info.screen_epoch];
+                forward(&writer.room, &tx, fresh).await;
+                drop(
+                    rx.try_recv()
+                        .expect("fresh subscription must resume admission"),
+                );
+                assert_eq!(tx.bytes.available_permits(), budget);
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn each_writer_rechecks_viewer_and_share_after_waiting_for_room_access() {
+        for kind in MediaKind::ALL {
+            for change in [
+                ViewerChange::Unsubscribe,
+                ViewerChange::Expire,
+                ViewerChange::Restart,
+            ] {
+                let (writer, source, mut feedback) = fixture().await;
+                let room = writer.room.clone();
+                let active = writer.active.clone();
+                let (tx, rx) = channel(kind);
+                let budget = tx.bytes.available_permits();
+                forward(&room, &tx, delivery(kind, source, 100)).await;
+                let (sent, mut received) = mpsc::unbounded_channel();
+                let mut run = std::pin::pin!(tokio::task::unconstrained(writer.run(
+                    kind,
+                    rx,
+                    move |_, packet| {
+                        let sent = sent.clone();
+                        async move { sent.send(packet).map_err(|_| ()) }
+                    }
+                )));
+                // Deterministically stop between dequeue and the transport poll;
+                // real elapsed time remains below the media's 100/150 ms deadline.
+                let mut lock = room.members.write().await;
+                assert!(futures_util::poll!(run.as_mut()).is_pending());
+                assert_eq!(
+                    tx.tx.capacity(),
+                    tx.tx.max_capacity(),
+                    "packet was not dequeued"
+                );
+                assert!(
+                    tx.bytes.available_permits() < budget,
+                    "in-flight reservation missing"
+                );
+                // Commit while owning the write lock: a queued read has priority
+                // over a later writer, so it must observe this intervening change.
+                match change {
+                    ViewerChange::Unsubscribe => {
+                        lock.get_mut(&0).unwrap().views = [None; ROOM_CAPACITY]
+                    }
+                    ViewerChange::Expire => {
+                        lock.get_mut(&0).unwrap().views[1].as_mut().unwrap().renewed -=
+                            Duration::from_secs(thiscord_shared::screen::VIEW_LEASE_SECS);
+                    }
+                    ViewerChange::Restart => {
+                        let publisher = lock.get_mut(&1).unwrap();
+                        publisher.info.screen_epoch += 1;
+                        publisher.screen_started = Instant::now();
+                        let epoch = publisher.info.screen_epoch;
+                        let replacement = lock.get_mut(&0).unwrap().views[1].as_mut().unwrap();
+                        replacement.subscription.epoch = epoch;
+                        replacement.since = Instant::now();
+                        replacement.renewed = replacement.since;
+                    }
+                }
+                drop(lock);
+                assert!(futures_util::poll!(run.as_mut()).is_pending());
+                if kind == MediaKind::Microphone {
+                    received
+                        .try_recv()
+                        .expect("viewer changes must not stop microphone");
+                } else {
+                    assert!(
+                        received.try_recv().is_err(),
+                        "sent {kind:?} after {change:?}"
+                    );
+                }
+                assert_eq!(tx.bytes.available_permits(), budget);
+                assert!(
+                    feedback.try_recv().is_err(),
+                    "invalid viewer requested recovery"
+                );
+
+                if matches!(change, ViewerChange::Restart) && kind != MediaKind::Microphone {
+                    // Bypass admission to exercise the final transport epoch check
+                    // with a new queue timestamp and a valid replacement viewer.
+                    tx.try_send(delivery(kind, source, 100)).unwrap();
+                    assert!(futures_util::poll!(run.as_mut()).is_pending());
+                    assert!(
+                        received.try_recv().is_err(),
+                        "old share epoch reached transport"
+                    );
+                    assert_eq!(tx.bytes.available_permits(), budget);
+                }
+                subscribe(&room).await;
+                let mut fresh = delivery(kind, source, 100);
+                let epoch = room.members.read().await[&1].info.screen_epoch;
+                fresh.packet.header.csrc = vec![epoch];
+                forward(&room, &tx, fresh).await;
+                drop(tx);
+                run.await;
+                assert_eq!(received.try_recv().unwrap().header.csrc, vec![epoch]);
+                assert!(received.try_recv().is_err());
+                assert!(active.load(Ordering::Acquire));
+            }
+        }
+    }
 
     fn delivery(kind: MediaKind, source: uuid::Uuid, size: usize) -> Delivery {
         Delivery {
@@ -269,16 +481,33 @@ mod tests {
                         screen_epoch: 7,
                     },
                     source_id: source,
+                    screen_started: Instant::now(),
                     outgoing: MediaKind::ALL.map(|kind| channel(kind).0),
                     keyframes: keyframes.clone(),
                     last_keyframe: None,
                     feedback_enabled: true,
+                    subscriptions_enabled: true,
+                    views: [None; ROOM_CAPACITY],
                     generation: generation.clone(),
                     active: active.clone(),
                     metrics: metrics.clone(),
                 },
             );
         }
+        let owner = room.members.read().await[&1].info.account_id;
+        assert!(
+            viewing::update(
+                &room,
+                0,
+                vec![thiscord_shared::screen::Subscription {
+                    slot: 1,
+                    owner,
+                    epoch: 7,
+                    bitrate: 2_500_000,
+                }]
+            )
+            .await
+        );
         (
             Writer {
                 room,

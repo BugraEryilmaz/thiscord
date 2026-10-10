@@ -52,7 +52,7 @@ pub struct Timing {
 }
 
 /// Requested capture targets; actual throughput depends on the source and host.
-#[derive(Debug, Clone, Copy, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Quality {
     pub height: u32,
     pub fps: u32,
@@ -72,14 +72,63 @@ impl Quality {
     pub fn width(self) -> u32 {
         self.height * 16 / 9
     }
+    /// Internal low-bandwidth modes are not selectable publishing presets.
+    pub fn encoding_valid(self) -> bool {
+        matches!(self.height, 360 | 720 | 1080 | 1440 | 2160)
+            && matches!(self.fps, 5 | 15 | 30 | 60)
+    }
+    pub fn constrained(self, bitrate: u32) -> Self {
+        let mut best = Self {
+            height: 360,
+            fps: 5,
+        };
+        for height in [360, 720, 1080, 1440, 2160] {
+            for fps in [5, 15, 30, 60] {
+                let candidate = Self { height, fps };
+                // Prefer delivered pixels per second; avoid selecting 4K/5
+                // when the same budget supports a more useful moving picture.
+                let score = |q: Self| u64::from(q.height).pow(2) * u64::from(q.fps);
+                if height <= self.height
+                    && fps <= self.fps
+                    && candidate.bitrate() <= bitrate
+                    && score(candidate) >= score(best)
+                {
+                    best = candidate;
+                }
+            }
+        }
+        best
+    }
     pub fn bitrate(self) -> u32 {
         let base = match self.height {
+            360 => 1_000_000,
             720 => 2_500_000,
             1080 => 5_000_000,
             1440 => 9_000_000,
             _ => 16_000_000,
         };
         base * self.fps / 30
+    }
+}
+
+pub const MIN_VIEW_BITRATE: u32 = 200_000;
+pub const MAX_VIEW_BITRATE: u32 = 32_000_000;
+pub const INITIAL_VIEW_BITRATE: u32 = 2_500_000;
+pub const VIEW_LEASE_SECS: u64 = 3;
+
+/// Full replacement of a receiver's active viewers, renewed over authenticated signaling.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct Subscription {
+    pub slot: usize,
+    pub owner: crate::AccountId,
+    pub epoch: u32,
+    pub bitrate: u32,
+}
+impl Subscription {
+    pub fn valid(self) -> bool {
+        self.slot < crate::voice::ROOM_CAPACITY
+            && (MIN_VIEW_BITRATE..=MAX_VIEW_BITRATE).contains(&self.bitrate)
     }
 }
 #[cfg(test)]
@@ -123,6 +172,40 @@ mod tests {
             assert!(!q.valid());
         }
         assert!(Quality::default().valid());
+    }
+    #[test]
+    fn adaptation_never_exceeds_receiver_budget_or_selected_quality() {
+        for height in [720, 1080, 1440, 2160] {
+            for fps in [15, 30, 60] {
+                let maximum = Quality { height, fps };
+                for budget in [
+                    MIN_VIEW_BITRATE,
+                    500_000,
+                    1_250_000,
+                    INITIAL_VIEW_BITRATE,
+                    8_000_000,
+                    MAX_VIEW_BITRATE,
+                ] {
+                    let actual = maximum.constrained(budget);
+                    assert!(actual.encoding_valid());
+                    assert!(actual.height <= height && actual.fps <= fps);
+                    assert!(actual.bitrate() <= budget);
+                }
+                assert_eq!(maximum.constrained(MAX_VIEW_BITRATE), maximum);
+            }
+        }
+        let reduced = Quality::default().constrained(MIN_VIEW_BITRATE);
+        assert_eq!(
+            reduced,
+            Quality {
+                height: 360,
+                fps: 5
+            }
+        );
+        assert!(
+            !reduced.valid(),
+            "internal adaptive modes are not user presets"
+        );
     }
 }
 
