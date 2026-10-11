@@ -226,6 +226,13 @@ impl Writer {
                 ),
             )
             .await;
+            // The deadline includes queue age and room/driver contention. An
+            // expired microphone packet says nothing about transport health;
+            // discard it and allow the next fresh packet to make progress.
+            // Explicit transport errors below still end the voice connection.
+            if kind == MediaKind::Microphone && delivered.is_err() {
+                continue;
+            }
             if matches!(delivered, Ok(Err(()))) {
                 if Instant::now() >= deadline {
                     self.dropped(kind, source_slot, screen_epoch).await;
@@ -761,6 +768,57 @@ mod tests {
         drop(members);
         task.await.unwrap();
         assert_eq!(feedback.try_recv().unwrap(), 7);
+    }
+
+    #[tokio::test]
+    async fn microphone_packet_expiry_keeps_membership_and_delivers_fresh_audio() {
+        for wait_for_room in [true, false] {
+            let (writer, source, _) = fixture().await;
+            let active = writer.active.clone();
+            let room = writer.room.clone();
+            let members = if wait_for_room {
+                Some(room.members.write().await)
+            } else {
+                None
+            };
+            let (tx, rx) = channel(MediaKind::Microphone);
+            let mut packet = delivery(MediaKind::Microphone, &source, 100);
+            packet.queued_at -= AUDIO_AGE / 2;
+            tx.try_send(packet).unwrap();
+            let writes = AtomicU64::new(0);
+            let mut run = std::pin::pin!(writer.run(MediaKind::Microphone, rx, |_, packet| {
+                let writes = &writes;
+                async move {
+                    if packet.header.sequence_number == 1 {
+                        std::future::pending::<()>().await;
+                    }
+                    writes.fetch_add(1, Ordering::Relaxed);
+                    Ok(())
+                }
+            }));
+            // Start the write before expiry; merely dequeuing an expired packet
+            // exercises a different, already nonfatal branch.
+            assert!(
+                std::future::poll_fn(|cx| Poll::Ready(run.as_mut().poll(cx)))
+                    .await
+                    .is_pending()
+            );
+            tokio::time::sleep(AUDIO_AGE).await;
+            let expired = std::future::poll_fn(|cx| Poll::Ready(run.as_mut().poll(cx))).await;
+            assert!(
+                active.load(Ordering::Acquire),
+                "packet expiry disconnected voice (room wait: {wait_for_room})"
+            );
+            assert!(expired.is_pending());
+            drop(members);
+            let mut fresh = delivery(MediaKind::Microphone, &source, 100);
+            fresh.packet.header.sequence_number += 1;
+            tx.try_send(fresh).unwrap();
+            drop(tx);
+            tokio::time::timeout(AUDIO_AGE, run).await.unwrap();
+            assert_eq!(writes.load(Ordering::Relaxed), 1);
+            assert!(active.load(Ordering::Acquire));
+        }
     }
 
     #[tokio::test]

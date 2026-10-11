@@ -409,8 +409,11 @@ and 30 incoming frames/second. Publisher ingress is capped at 100 packets/second
 and 1500 bytes/packet. Independent outgoing microphone, video and shared-audio
 writers isolate application backpressure. Audio queues have 32 packet slots,
 32 KiB byte budgets (including in-flight writes) and 100 ms enqueue-to-write
-deadlines. Screen writes never wait for transport admission or deactivate voice
-on failure; video losses request keyframe recovery. See [screen-sharing.md](screen-sharing.md)
+deadlines. Expired microphone packets are dropped, including expiry while waiting
+for room access or transport admission; expiry alone does not end membership.
+Explicit microphone transport errors still disconnect. Screen writes never wait
+for transport admission or deactivate voice on failure; video losses request
+keyframe recovery. See [screen-sharing.md](screen-sharing.md)
 for video budgets and the limits of the shared WebRTC transport.
 
 Current sessions are rechecked every second and immediately after matching access
@@ -446,6 +449,15 @@ closed first. This is full reconnection, not in-place ICE restart. Participant
 snapshots are rebuilt, and saved per-speaker volumes are restored for the new
 connection; master volume, mute/deafen and processing settings persist.
 
+Each attempt retains its signaling sender through failures and cancellation.
+Cleanup sends an explicit Leave followed by a WebSocket close, with a 500 ms
+deadline, before retrying. Dropping only the TCP socket through a proxy can leave
+the origin's old membership alive for its 20-second heartbeat timeout; repeated
+duplicate-join rejections can then extend the interruption through retry backoff.
+If signaling is unreachable, cleanup is best effort and that server timeout still
+applies. Diagnostic logs record fixed failure categories, peer-state transitions,
+retry delays and whether signaling cleanup was sent, without logging error bodies.
+
 Retries use 1/2/4/8/16/30-second backoff plus up to 500 ms jitter, capped thereafter;
 30 seconds of connected audio resets the backoff. They continue until successful or
 cancelled. DNS/TCP failures, timeouts, HTTP 429/5xx, transient server errors and a
@@ -455,10 +467,11 @@ passes the backend's join rate limits and current authorization checks.
 
 Explicit Disconnect/logout, revoked/expired sessions, denied access, deleted
 channels, incompatible protocol, certificate verification failures and local
-device/DSP failures end retrying. Missing UI heartbeats or suspend gaps stop the
-audio worker within three seconds; automatic recovery from local device suspension
-remains pending. Update installation remains blocked while a reconnecting channel
-is selected. Cancellation covers negotiation, active calls and backoff. Connection
+device/DSP failures end retrying. Live voice uses the native 15-second heartbeat
+lease described above; local audio tests use a three-second UI lease. Automatic
+recovery from local device suspension remains pending. Update installation remains
+blocked while a reconnecting channel is selected. Cancellation covers negotiation,
+active calls and backoff. Connection
 leases invalidate queued starts, rosters and packets from previous attempts, and
 track readers receive an explicit shutdown signal. Regression tests cover retry
 policy, cancellation, stale leases and transient versus terminal upgrade errors.
