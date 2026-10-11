@@ -84,7 +84,7 @@ class CacheTests(unittest.TestCase):
                     '[dependencies]\ncache-fixture-dep={path="../dependency"}\n')
                 (checkout / 'src/main.rs').write_text(
                     f'fn main() {{ println!("{name} {{}}", cache_fixture_dep::value()); }}')
-                result = subprocess.run(['cargo', 'build', '--offline', '-v'],
+                result = subprocess.run(['cargo', 'build', '--offline', '--color', 'never', '-v'],
                                         cwd=checkout, env=env, text=True, capture_output=True)
                 self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
                 if name == 'second':
