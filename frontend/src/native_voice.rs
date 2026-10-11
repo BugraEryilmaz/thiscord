@@ -48,6 +48,10 @@ impl PeerConnectionEventHandler for Handler {
         }
     }
     async fn on_connection_state_change(&self, state: RTCPeerConnectionState) {
+        thiscord_frontend::audio::diagnostics::event(
+            "voice_peer_state",
+            serde_json::json!({"state":format!("{state:?}")}),
+        );
         self.connected.store(
             state == RTCPeerConnectionState::Connected,
             Ordering::Release,
@@ -216,6 +220,7 @@ pub async fn voice_join(
     Ok(())
 }
 struct Attempt {
+    signaling: Option<crate::native_signaling::Sender>,
     peer: Option<Arc<dyn PeerConnection>>,
     connection: Connection,
     closed: watch::Sender<bool>,
@@ -224,10 +229,32 @@ struct Attempt {
 impl Default for Attempt {
     fn default() -> Self {
         Self {
+            signaling: None,
             peer: None,
             connection: Connection::default(),
             closed: watch::channel(false).0,
             connected_at: None,
+        }
+    }
+}
+impl Attempt {
+    async fn close_signaling(&mut self) {
+        if let Some(mut send) = self.signaling.take() {
+            // A raw TCP drop through a proxy can leave the origin's membership
+            // alive until its heartbeat expires, rejecting every new join.
+            // Retain the sink across run()/supervise() cancellation so all exits
+            // explicitly release that membership before retrying.
+            let outcome = tokio::time::timeout(Duration::from_millis(500), async {
+                send.send(frame(ClientEvent::Leave {}).map_err(|_| ())?)
+                    .await
+                    .map_err(|_| ())?;
+                send.close().await.map_err(|_| ())
+            })
+            .await;
+            thiscord_frontend::audio::diagnostics::event(
+                "voice_signaling_closed",
+                serde_json::json!({"sent":matches!(outcome, Ok(Ok(())))}),
+            );
         }
     }
 }
@@ -260,6 +287,7 @@ impl Runtime {
         self.attempt.closed.send_replace(true);
         self.engine.notify(Command::Stop);
         self.engine.notify(Command::Pressed(false));
+        self.attempt.close_signaling().await;
         if let Some(peer) = &self.attempt.peer {
             let _ = tokio::time::timeout(Duration::from_secs(2), peer.close()).await;
         }
@@ -299,7 +327,7 @@ impl Connector for Runtime {
         .await;
         thiscord_frontend::audio::diagnostics::event(
             "voice_attempt_finished",
-            serde_json::json!({"failed":result.is_err(),"retryable":result.as_ref().err().is_some_and(|e|e.retryable),"connected_ms":self.attempt.connected_at.map(|at|at.elapsed().as_millis())}),
+            serde_json::json!({"failed":result.is_err(),"reason":result.as_ref().err().map(Failure::diagnostic_reason),"retryable":result.as_ref().err().is_some_and(|e|e.retryable),"connected_ms":self.attempt.connected_at.map(|at|at.elapsed().as_millis())}),
         );
         let stable = self
             .attempt
@@ -318,6 +346,10 @@ impl Connector for Runtime {
         )
     }
     fn waiting(&mut self, error: &Failure, delay: Duration) {
+        thiscord_frontend::audio::diagnostics::event(
+            "voice_retry_wait",
+            serde_json::json!({"reason":error.diagnostic_reason(),"delay_ms":delay.as_millis()}),
+        );
         if let Ok(mut status) = self.status.lock() {
             *status = VoiceStatus {
                 channel_id: Some(self.channel_id),
@@ -337,8 +369,11 @@ async fn send_event<S: futures_util::Sink<Message> + Unpin>(
 ) -> Result<(), Failure> {
     tokio::time::timeout(Duration::from_secs(3), send.send(frame(event)?))
         .await
-        .map_err(|_| Failure::temporary("Voice signaling sender stalled"))?
-        .map_err(|_| Failure::temporary("Voice socket closed"))
+        .map_err(|_| {
+            Failure::temporary("Voice signaling sender stalled")
+                .with_reason("signaling_send_timeout")
+        })?
+        .map_err(|_| Failure::temporary("Voice socket closed").with_reason("signaling_send_failed"))
 }
 fn frame(event: ClientEvent) -> Result<Message, String> {
     Ok(Message::Text(
@@ -355,10 +390,11 @@ fn closed(message: &Message) -> Failure {
         let code = u16::from(frame.code);
         if !matches!(code, 1000 | 1001 | 1006 | 1011..=1014) {
             // Policy/protocol closes are final; never display arbitrary close bodies.
-            return Failure::from("Voice connection rejected or protocol unsupported");
+            return Failure::from("Voice connection rejected or protocol unsupported")
+                .with_reason("signaling_policy_close");
         }
     }
-    Failure::temporary("Voice connection closed")
+    Failure::temporary("Voice connection closed").with_reason("signaling_close")
 }
 fn bind() -> Result<String, String> {
     let s = std::net::UdpSocket::bind("0.0.0.0:0").map_err(|e| e.to_string())?;
@@ -383,9 +419,11 @@ async fn run(
         .clone();
     let base = option_env!("THISCORD_API_URL").unwrap_or("http://localhost:3000");
     let ws = crate::native_signaling::connect(base).await?;
-    let (mut send, mut receive) = ws.split();
+    let (send, mut receive) = ws.split();
+    attempt.signaling = Some(send);
+    let send = attempt.signaling.as_mut().unwrap();
     send_event(
-        &mut send,
+        send,
         ClientEvent::Join {
             token: token.into(),
             guild_id,
@@ -395,9 +433,11 @@ async fn run(
     .await?;
     let first = tokio::time::timeout(Duration::from_secs(20), receive.next())
         .await
-        .map_err(|_| Failure::temporary("Voice offer timed out"))?
-        .ok_or_else(|| Failure::temporary("Voice socket closed"))?
-        .map_err(|_| Failure::temporary("Voice socket failed"))?;
+        .map_err(|_| Failure::temporary("Voice offer timed out").with_reason("offer_timeout"))?
+        .ok_or_else(|| Failure::temporary("Voice socket closed").with_reason("signaling_eof"))?
+        .map_err(|_| {
+            Failure::temporary("Voice socket failed").with_reason("signaling_receive_failed")
+        })?;
     if first.is_close() {
         return Err(closed(&first));
     }
@@ -548,7 +588,7 @@ async fn run(
     let sdp = serde_json::to_string(&pc.local_description().await.ok_or("Missing answer")?)
         .map_err(|_| "Invalid answer")?;
     send_event(
-        &mut send,
+        send,
         ClientEvent::Answer {
             sdp,
             screen_feedback,
@@ -570,11 +610,11 @@ async fn run(
         tokio::select! {
             Some((slot, epoch))=keyframe_rx.recv()=>{
                 if screen_feedback && app.state::<crate::native_screen::ScreenState>().watching(slot, epoch) && roster.iter().any(|m| m.slot == slot && m.screen_epoch == epoch && m.sharing_screen) {
-                    send_event(&mut send, ClientEvent::ScreenKeyframe { slot, epoch }).await?;
+                    send_event(send, ClientEvent::ScreenKeyframe { slot, epoch }).await?;
                 }
             },
             message=receive.next()=>{
-                let message=message.ok_or_else(||Failure::temporary("Voice connection closed"))?.map_err(|_|Failure::temporary("Voice socket failed"))?;
+                let message=message.ok_or_else(||Failure::temporary("Voice connection closed").with_reason("signaling_eof"))?.map_err(|_|Failure::temporary("Voice socket failed").with_reason("signaling_receive_failed"))?;
                 if message.is_close(){return Err(closed(&message));}
                 if !message.is_text(){continue;}
                 let message:ServerFrame=serde_json::from_str(message.to_text().map_err(|_|"Invalid voice event")?).map_err(|_|"Invalid voice event")?;
@@ -600,15 +640,15 @@ async fn run(
             },
             Some(payload)=outgoing.recv()=>{
                 sequence=sequence.wrapping_add(1);timestamp=timestamp.wrapping_add(960);let packet=rtc::rtp::Packet{header:rtc::rtp::header::Header{version:2,payload_type:MediaKind::Microphone.payload_type(),ssrc:MediaKind::Microphone.publisher_ssrc(),sequence_number:sequence,timestamp,..Default::default()},payload};
-                tokio::time::timeout(Duration::from_millis(100),track.write_rtp(packet)).await.map_err(|_|Failure::temporary("Voice sender stalled"))?.map_err(|_|Failure::temporary("Voice media connection failed"))?;
+                tokio::time::timeout(Duration::from_millis(100),track.write_rtp(packet)).await.map_err(|_|Failure::temporary("Voice sender stalled").with_reason("media_send_timeout"))?.map_err(|_|Failure::temporary("Voice media connection failed").with_reason("media_send_failed"))?;
             },
             _=ticker.tick()=>{
                 if failed.load(Ordering::Acquire)||heard.elapsed()>Duration::from_secs(20){
                     thiscord_frontend::audio::diagnostics::event("voice_connection_lost",serde_json::json!({"peer_failed":failed.load(Ordering::Acquire),"signaling_age_ms":heard.elapsed().as_millis()}));
-                    return Err(Failure::temporary("Voice connection lost"));
+                    return Err(Failure::temporary("Voice connection lost").with_reason(if failed.load(Ordering::Acquire) { "peer_failed" } else { "signaling_heartbeat_timeout" }));
                 }
                 if !audio_started{
-                    if start.elapsed()>Duration::from_secs(15){return Err(Failure::temporary("Media connection timed out"));}
+                    if start.elapsed()>Duration::from_secs(15){return Err(Failure::temporary("Media connection timed out").with_reason("media_connect_timeout"));}
                     if connected.load(Ordering::Acquire){
                         let configuration=settings.lock().map_err(|_|"Settings unavailable")?.clone();let audio_app=app.clone();let tx=tx.clone();let connection=attempt.connection.clone();
                         tauri::async_runtime::spawn_blocking(move||crate::native_audio::start_voice(&audio_app,guild_id,connection,configuration,tx,can_speak)).await.map_err(|_|"Audio task failed")??;
@@ -630,21 +670,21 @@ async fn run(
                     let e=engine.clone();
                     let heartbeat_connection=attempt.connection.clone();
                     let audio=tauri::async_runtime::spawn_blocking(move||e.command(Command::Keepalive(heartbeat_connection))).await.map_err(|_|"Audio worker failed")??;
-                    if !audio.running {return Err(audio.message.into());}
+                    if !audio.running {return Err(Failure::from(audio.message).with_reason("audio_stopped"));}
                     if let Ok(mut s)=status.lock(){s.message=audio.message;}
                     if connected.load(Ordering::Acquire) { disconnected_since=None; }
-                    else if disconnected_since.get_or_insert_with(Instant::now).elapsed()>Duration::from_secs(5) {return Err(Failure::temporary("Voice media connection interrupted"));}
+                    else if disconnected_since.get_or_insert_with(Instant::now).elapsed()>Duration::from_secs(5) {return Err(Failure::temporary("Voice media connection interrupted").with_reason("media_disconnected"));}
                 }
                 if configuration.deafened { crate::native_screen::screen_stop(app.state::<crate::native_screen::ScreenState>()); }
                 let current_screen = app.state::<crate::native_screen::ScreenState>().sharing();
                 if current_screen != screen_state {
-                    send_event(&mut send, ClientEvent::Screen { active: current_screen.0, audio: current_screen.1 }).await?;
+                    send_event(send, ClientEvent::Screen { active: current_screen.0, audio: current_screen.1 }).await?;
                     screen_state = current_screen;
                 }
-                send_event(&mut send, ClientEvent::State{muted:configuration.muted,deafened:configuration.deafened}).await?;
+                send_event(send, ClientEvent::State{muted:configuration.muted,deafened:configuration.deafened}).await?;
                 if screen_subscriptions {
                     let views = if configuration.deafened { vec![] } else { app.state::<crate::native_screen::ScreenState>().subscriptions() };
-                    send_event(&mut send, ClientEvent::ScreenViews { views }).await?;
+                    send_event(send, ClientEvent::ScreenViews { views }).await?;
                 }
             }
         }
@@ -654,6 +694,85 @@ async fn run(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    async fn signaling_endpoint() -> (String, tokio::task::JoinHandle<()>) {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let base = format!("http://{}", listener.local_addr().unwrap());
+        let server = tokio::spawn(async move {
+            let (stream, _) = listener.accept().await.unwrap();
+            let mut socket = tokio_tungstenite::accept_async(stream).await.unwrap();
+            let message = socket.next().await.unwrap().unwrap();
+            let frame: ClientFrame = serde_json::from_str(message.to_text().unwrap()).unwrap();
+            assert_eq!(frame.version, VOICE_VERSION);
+            assert!(matches!(frame.event, ClientEvent::Leave {}));
+            assert!(socket.next().await.unwrap().unwrap().is_close());
+        });
+        (base, server)
+    }
+
+    #[tokio::test]
+    async fn finished_attempt_sends_leave_and_close_after_receive_half_is_dropped() {
+        let (base, server) = signaling_endpoint().await;
+        let mut attempt = Attempt::default();
+        let (send, receive) = crate::native_signaling::connect(&base)
+            .await
+            .unwrap()
+            .split();
+        attempt.signaling = Some(send);
+        // run() has returned a failure, so its local receive half is gone.
+        drop(receive);
+        attempt.close_signaling().await;
+        assert!(attempt.signaling.is_none());
+        tokio::time::timeout(Duration::from_secs(2), server)
+            .await
+            .unwrap()
+            .unwrap();
+    }
+
+    #[tokio::test]
+    async fn cancellation_preserves_signaling_for_explicit_cleanup() {
+        struct Pending {
+            attempt: Attempt,
+            base: String,
+            cancel: Option<oneshot::Sender<()>>,
+        }
+        impl Connector for Pending {
+            async fn attempt(&mut self) -> (Failure, bool) {
+                let (send, _receive) = crate::native_signaling::connect(&self.base)
+                    .await
+                    .unwrap()
+                    .split();
+                self.attempt.signaling = Some(send);
+                self.cancel.take().unwrap().send(()).unwrap();
+                std::future::pending().await
+            }
+            fn waiting(&mut self, _: &Failure, _: Duration) {
+                panic!("cancelled connections must not retry");
+            }
+        }
+        let (base, server) = signaling_endpoint().await;
+        let (cancel, stopped) = oneshot::channel();
+        let mut runtime = Pending {
+            attempt: Attempt::default(),
+            base,
+            cancel: Some(cancel),
+        };
+        assert!(
+            tokio::time::timeout(
+                Duration::from_secs(2),
+                reconnect::supervise(&mut runtime, stopped, || 0),
+            )
+            .await
+            .unwrap()
+            .is_none()
+        );
+        runtime.attempt.close_signaling().await;
+        tokio::time::timeout(Duration::from_secs(2), server)
+            .await
+            .unwrap()
+            .unwrap();
+    }
+
     #[test]
     fn policy_closes_are_final_but_server_restart_closes_retry() {
         use tokio_tungstenite::tungstenite::protocol::{CloseFrame, frame::coding::CloseCode};

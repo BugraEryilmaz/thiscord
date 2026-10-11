@@ -13,6 +13,7 @@ const DNS_TIMEOUT: Duration = Duration::from_secs(5);
 const TCP_TIMEOUT: Duration = Duration::from_secs(10);
 const HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(10);
 type Socket = WebSocketStream<MaybeTlsStream<TcpStream>>;
+pub type Sender = futures_util::stream::SplitSink<Socket, tokio_tungstenite::tungstenite::Message>;
 
 fn endpoint(base: &str) -> Result<url::Url, String> {
     let mut url = url::Url::parse(base).map_err(|_| "Invalid voice server URL")?;

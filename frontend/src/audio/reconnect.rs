@@ -6,13 +6,23 @@ use thiscord_shared::{ApiError, ErrorCode};
 pub struct Failure {
     pub message: String,
     pub retryable: bool,
+    reason: &'static str,
 }
 impl Failure {
     pub fn temporary(message: impl Into<String>) -> Self {
         Self {
             message: message.into(),
             retryable: true,
+            reason: "transport",
         }
+    }
+    /// Log a fixed category, never a server body, device error or network URL.
+    pub fn with_reason(mut self, reason: &'static str) -> Self {
+        self.reason = reason;
+        self
+    }
+    pub fn diagnostic_reason(&self) -> &'static str {
+        self.reason
     }
     pub fn server(error: ApiError) -> Self {
         // The current server reports a still-live connection as validation failure.
@@ -28,6 +38,11 @@ impl Failure {
                         | ErrorCode::InternalError
                 ),
             message: error.message,
+            reason: if legacy_closing {
+                "duplicate_join"
+            } else {
+                "server"
+            },
         }
     }
 }
@@ -36,6 +51,7 @@ impl From<String> for Failure {
         Self {
             message,
             retryable: false,
+            reason: "local_or_protocol",
         }
     }
 }
@@ -223,8 +239,35 @@ mod tests {
             request_id: "00000000-0000-0000-0000-000000000001".parse().unwrap(),
             fields: vec![],
         };
-        assert!(Failure::server(error.clone()).retryable);
+        let duplicate = Failure::server(error.clone());
+        assert!(duplicate.retryable);
+        assert_eq!(duplicate.diagnostic_reason(), "duplicate_join");
         error.message = "Invalid voice request".into();
         assert!(!Failure::server(error).retryable);
+    }
+
+    #[test]
+    fn diagnostic_categories_do_not_include_dynamic_error_text() {
+        let private = "private device path, token or server body";
+        let errors = [
+            Failure::from(private),
+            Failure::temporary(private),
+            Failure::temporary(private).with_reason("media_send_timeout"),
+            Failure::server(ApiError {
+                code: ErrorCode::InternalError,
+                message: private.into(),
+                request_id: "00000000-0000-0000-0000-000000000001".parse().unwrap(),
+                fields: vec![],
+            }),
+        ];
+        for (error, expected) in errors.into_iter().zip([
+            "local_or_protocol",
+            "transport",
+            "media_send_timeout",
+            "server",
+        ]) {
+            assert_eq!(error.diagnostic_reason(), expected);
+            assert!(!error.diagnostic_reason().contains(private));
+        }
     }
 }
