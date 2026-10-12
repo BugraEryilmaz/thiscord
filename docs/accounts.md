@@ -80,7 +80,7 @@ Set these values in ignored `backend/.env`, then restart the backend:
 ```dotenv
 MAIL_MODE=resend
 RESEND_API_KEY=re_xxxxxxxxx
-RESEND_FROM=onboarding@resend.dev
+RESEND_FROM=onboarding@thiscord.com.tr
 ```
 
 Replace `re_xxxxxxxxx` with your real Resend API key locally. The backend uses the
@@ -94,6 +94,11 @@ with your Resend account. To send to other users, verify your domain in Resend a
 set `RESEND_FROM="Thiscord <noreply@thiscord.com.tr>"` (or a sender on the domain you
 verified). See [Resend's testing-domain restrictions](https://resend.com/docs/knowledge-base/403-error-resend-dev-domain).
 Domain ownership alone does not configure the required DNS records.
+
+On the VPS, edit `/etc/thiscord/backend.env`, not the checkout's `backend/.env`.
+Keep exactly one `RESEND_FROM` entry: a later duplicate overrides the earlier
+sender. Run `sudo systemctl restart thiscord` to load environment changes
+(active voice connections disconnect). See [vps.md](vps.md).
 
 The worker retries queued mail every five seconds until its 30-minute expiry.
 Each outbox message uses a stable Resend idempotency key, including after a restart.

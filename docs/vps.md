@@ -50,6 +50,26 @@ UFW allows SSH TCP 22, ACME HTTP TCP 80, backend HTTPS TCP 443, STUN/TURN UDP/TC
 ports and coturn's 49160–49259 relay range. Do not expose PostgreSQL 5432.
 If the kernel ephemeral port range changes, review the media firewall rules.
 
+## Account email settings
+
+Production account email uses these settings in `/etc/thiscord/backend.env`:
+
+```dotenv
+MAIL_MODE=resend
+RESEND_API_KEY=YOUR_EXISTING_RESEND_API_KEY
+RESEND_FROM=onboarding@thiscord.com.tr
+PUBLIC_BACKEND_URL=https://thiscord.com.tr
+```
+
+Preserve the existing API key and verify the sender domain in Resend. Keep each
+setting only once: a later `RESEND_FROM=onboarding@resend.dev` overrides the
+production sender. The source checkout's `backend/.env` is not used by systemd,
+and `thiscord-deploy` preserves the production environment file.
+
+After editing, run `sudo systemctl restart thiscord` and check
+`https://thiscord.com.tr/api/v1/ready`. Restarting disconnects active voice calls;
+SIGHUP reloads certificates only and does not reload mail settings.
+
 ## Backups and certificate renewal
 
 `thiscord-backup.timer` creates a protected custom-format database dump daily at
