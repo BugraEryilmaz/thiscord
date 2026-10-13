@@ -4,21 +4,27 @@ use std::sync::{
     atomic::{AtomicBool, Ordering},
 };
 #[derive(Clone)]
-pub struct Connection(Arc<AtomicBool>);
+pub struct Connection {
+    alive: Arc<AtomicBool>,
+    pub metrics: Arc<super::quality::Metrics>,
+}
 impl Default for Connection {
     fn default() -> Self {
-        Self(Arc::new(AtomicBool::new(true)))
+        Self {
+            alive: Arc::new(AtomicBool::new(true)),
+            metrics: Arc::default(),
+        }
     }
 }
 impl Connection {
     pub fn close(&self) {
-        self.0.store(false, Ordering::Release);
+        self.alive.store(false, Ordering::Release);
     }
     pub fn active(&self) -> bool {
-        self.0.load(Ordering::Acquire)
+        self.alive.load(Ordering::Acquire)
     }
     pub fn accepts(&self, other: &Self) -> bool {
-        self.active() && other.active() && Arc::ptr_eq(&self.0, &other.0)
+        self.active() && other.active() && Arc::ptr_eq(&self.alive, &other.alive)
     }
 }
 #[cfg(test)]

@@ -274,6 +274,30 @@ three OSes. macOS runtime, microphone consent, headset changes and acoustic
 acceptance remain open. Compilation alone does not establish those results.
 WebView capture was not substituted for the requested native path.
 
+## Local voice quality
+
+The voice bar summarizes recent local processing/buffering pressure, transport
+queue drops, clipping and late/missing packets. Settings > Audio & voice >
+Advanced voice quality diagnostics shows recent and lifetime counters, independent
+stream slots, bounded timing percentiles and instantaneous buffer occupancy.
+See [metric definitions, scopes, denominators and limitations](audio-quality.md).
+Empty active PCM queues alone no longer count as playback starvation. Deafen,
+inactive slots and zero gains are intentional silence; inactivity/DTX without
+buffered-media evidence is unclassified. These are not device xrun counters.
+
+Metrics stay in memory when logging is off. Opt-in logs add numeric session and
+per-stream snapshots every ten seconds and at session end, split to stay within existing record
+bounds. No account/transport identifiers, audio or model paths enter these records.
+WebRTC RTT and receiver loss reports are explicitly SFU-hop observations; they
+cannot establish speaker-to-listener loss or delay. FEC recovery and limiter
+activity are unavailable; current Opus playback uses PLC, and output hard-clips.
+
+Outgoing native packets now carry enqueue time and connection/control revision.
+The five-packet queue rejects full sends, discards packets older than 100 ms, and
+invalidates queued packets across stop/mute/deafen/PTT restrictions or connection
+replacement. Counts distinguish these outcomes from successful WebRTC submission.
+AEC3 processing, configuration and reference timestamps are unchanged.
+
 ## Audio timing and performance
 
 Capture is averaged to mono, processed at 48 kHz and encoded as 20 ms Opus frames

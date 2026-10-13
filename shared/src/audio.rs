@@ -156,6 +156,8 @@ pub struct EchoDiagnostics {
 }
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct AudioStatus {
+    #[serde(default)]
+    pub quality: Option<AudioQuality>,
     /// Local diagnostic recording state only; audio bytes never cross IPC.
     #[serde(default)]
     pub recording: Option<AudioRecordingStatus>,
@@ -172,7 +174,9 @@ pub struct AudioStatus {
     pub transmitting: bool,
     pub message: String,
     pub streams: Vec<StreamLevel>,
+    /// Legacy sum of capture/reference queue sample drops. Prefer quality metrics.
     pub dropped_samples: u64,
+    /// Legacy name: per-stream playback starvation samples, never device xruns.
     pub underrun_samples: u64,
 }
 
@@ -189,6 +193,34 @@ pub struct AudioRecordingStatus {
 #[cfg(test)]
 mod control_tests {
     use super::*;
+
+    #[test]
+    fn quality_is_backward_compatible_optional_and_contains_only_numeric_metadata() {
+        let legacy = serde_json::json!({"running":false,"input_level":0.0,"transmitting":false,"message":"","streams":[],"dropped_samples":0,"underrun_samples":0});
+        let mut status: AudioStatus = serde_json::from_value(legacy).unwrap();
+        assert!(status.quality.is_none());
+        status.quality = Some(AudioQuality::default());
+        let value = serde_json::to_value(&status).unwrap();
+        assert!(value["quality"]["end_to_end_loss_percent"].is_null());
+        let again: AudioStatus = serde_json::from_value(value).unwrap();
+        assert!(again.quality.unwrap().sfu_hop_rtt_ms.is_none());
+        let partial: AudioQuality = serde_json::from_str(
+            r#"{"metrics":{"recent":{"received_packets":3}},"future_field":42}"#,
+        )
+        .unwrap();
+        assert_eq!(partial.metrics.recent.received_packets, 3);
+        let text = format!("{:?}", AudioQuality::default());
+        for forbidden in [
+            "account_id",
+            "payload",
+            "credential",
+            "token",
+            "sdp",
+            "model_path",
+        ] {
+            assert!(!text.contains(forbidden));
+        }
+    }
 
     #[test]
     fn deafen_round_trip_preserves_manual_mute() {
@@ -218,4 +250,86 @@ mod control_tests {
             "\"deafen\""
         );
     }
+}
+
+/// Numeric local status only. See docs/audio-quality.md for units and scope.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct QualityCounts {
+    pub capture_overflow_samples: u64,
+    pub reference_overflow_samples: u64,
+    pub input_samples: u64,
+    pub input_clipped_samples: u64,
+    pub output_samples: u64,
+    pub output_clipped_samples: u64,
+    pub outgoing_offered_packets: u64,
+    pub outgoing_full_packets: u64,
+    pub outgoing_expired_packets: u64,
+    pub outgoing_invalidated_packets: u64,
+    pub outgoing_sent_packets: u64,
+    pub outgoing_failed_packets: u64,
+    pub incoming_queue_dropped_packets: u64,
+    pub received_packets: u64,
+    pub duplicate_packets: u64,
+    pub reordered_packets: u64,
+    pub late_packets: u64,
+    pub jitter_overflow_packets: u64,
+    pub resync_discarded_packets: u64,
+    pub invalid_packets: u64,
+    pub sequence_gap_packets: u64,
+    pub fec_attempts: u64,
+    pub plc_samples: u64,
+    pub decoded_samples: u64,
+    pub decode_errors: u64,
+    pub pcm_overflow_samples: u64,
+    pub starvation_samples: u64,
+    pub empty_unknown_samples: u64,
+    pub intentional_silence_samples: u64,
+    pub pcm_discarded_samples: u64,
+}
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(default)]
+pub struct QualityTiming {
+    pub calls: u64,
+    pub deadline_misses: u64,
+    pub p50_us: Option<u64>,
+    pub p95_us: Option<u64>,
+    pub p99_us: Option<u64>,
+    pub max_us: Option<u64>,
+}
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(default)]
+pub struct QualityMetrics {
+    pub total: QualityCounts,
+    pub recent: QualityCounts,
+    pub window_ms: u64,
+    pub capture: QualityTiming,
+    pub render: QualityTiming,
+    pub encode: QualityTiming,
+    pub decode: QualityTiming,
+}
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(default)]
+pub struct StreamQuality {
+    /// Local reusable slot, not an account or transport identifier.
+    pub slot: usize,
+    pub metrics: QualityMetrics,
+    pub jitter_packets: usize,
+    pub pcm_samples: usize,
+    pub buffered_playout_ms: f64,
+    pub verified_fec_packets: Option<u64>,
+}
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(default)]
+pub struct AudioQuality {
+    pub metrics: QualityMetrics,
+    pub streams: Vec<StreamQuality>,
+    pub capture_blocks: usize,
+    pub reference_blocks: usize,
+    pub sfu_hop_rtt_ms: Option<f64>,
+    pub sfu_hop_received_packets: Option<u64>,
+    pub sfu_hop_lost_packets: Option<i64>,
+    pub end_to_end_loss_percent: Option<f64>,
+    pub end_to_end_latency_ms: Option<f64>,
+    pub limiter_reduction_db: Option<f32>,
 }

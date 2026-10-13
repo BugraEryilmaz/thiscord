@@ -548,6 +548,9 @@ async fn run(
             )
             .await
             {
+                diagnostics_connection
+                    .metrics
+                    .set_network(thiscord_frontend::audio::quality::network(&report));
                 diagnostics_screen.network_diagnostics(
                     &diagnostics_connection,
                     thiscord_frontend::screen::metrics::network(&report),
@@ -638,9 +641,12 @@ async fn run(
                     },ServerEvent::Error{error}=>return Err(Failure::server(error)),ServerEvent::Revoked{}=>return Err("Voice access changed. Join again if you still have permission.".into()),_=>{},
                 }
             },
-            Some(payload)=outgoing.recv()=>{
+            Some(queued)=outgoing.recv()=>{
+                let Some(payload) = engine.take_outgoing(queued, &attempt.connection) else { continue; };
                 sequence=sequence.wrapping_add(1);timestamp=timestamp.wrapping_add(960);let packet=rtc::rtp::Packet{header:rtc::rtp::header::Header{version:2,payload_type:MediaKind::Microphone.payload_type(),ssrc:MediaKind::Microphone.publisher_ssrc(),sequence_number:sequence,timestamp,..Default::default()},payload};
-                tokio::time::timeout(Duration::from_millis(100),track.write_rtp(packet)).await.map_err(|_|Failure::temporary("Voice sender stalled").with_reason("media_send_timeout"))?.map_err(|_|Failure::temporary("Voice media connection failed").with_reason("media_send_failed"))?;
+                let result = tokio::time::timeout(Duration::from_millis(100),track.write_rtp(packet)).await;
+                attempt.connection.metrics.add(if matches!(&result,Ok(Ok(_))) { thiscord_frontend::audio::quality::Count::OutgoingSentPackets } else { thiscord_frontend::audio::quality::Count::OutgoingFailedPackets },1);
+                result.map_err(|_|Failure::temporary("Voice sender stalled").with_reason("media_send_timeout"))?.map_err(|_|Failure::temporary("Voice media connection failed").with_reason("media_send_failed"))?;
             },
             _=ticker.tick()=>{
                 if failed.load(Ordering::Acquire)||heard.elapsed()>Duration::from_secs(20){

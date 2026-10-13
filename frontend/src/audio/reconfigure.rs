@@ -105,6 +105,7 @@ impl Pending {
                 }
                 debug.stop(); // New device clocks/formats require a new recording.
                 next.inherit(&s.devices);
+                s.collect_metrics();
                 std::mem::swap(&mut s.devices, next);
                 s.device_watch = Default::default();
                 diagnostics::event("device_reconfigured", s.devices.info.clone());
@@ -179,6 +180,36 @@ mod tests {
             remotes: (0..MAX_STREAMS).map(|_| None).collect(),
             processed_level: 0.5,
             processing: processing::Processing::new(&AudioSettings::default()).unwrap(),
+        }
+    }
+    #[test]
+    fn device_recovery_preserves_numeric_totals_but_snapshot_omits_identity() {
+        let mut s = session();
+        s.devices.control.counts.capture_overflow.add(480);
+        s.devices.control.counts.input_samples.add(960);
+        s.devices.control.counts.input_clipped.add(3);
+        let stop = AtomicBool::new(false);
+        let pressed = AtomicBool::new(false);
+        let deafen = AtomicBool::new(false);
+        assert!(
+            s.resume_devices(devices(true), &stop, &pressed, &deafen)
+                .unwrap()
+        );
+        let q = s.quality();
+        assert_eq!(q.metrics.total.capture_overflow_samples, 480);
+        assert_eq!(q.metrics.total.input_samples, 960);
+        assert_eq!(q.metrics.total.input_clipped_samples, 3);
+        let text = serde_json::to_string(&q).unwrap();
+        for forbidden in [
+            "account_id",
+            "guild_id",
+            "label",
+            "payload",
+            "token",
+            "sdp",
+            "model_path",
+        ] {
+            assert!(!text.contains(forbidden));
         }
     }
     #[test]

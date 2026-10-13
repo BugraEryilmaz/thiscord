@@ -24,6 +24,7 @@ mod neural_echo_tests;
 mod neural_tests;
 pub mod stages;
 pub struct Processing {
+    pub metrics: std::sync::Arc<super::quality::Metrics>,
     apm: AudioProcessing,
     config: Config,
     render_at: Option<Instant>,
@@ -166,6 +167,7 @@ impl Processing {
                 .render_config(StreamConfig::new(48_000, 1))
                 .build(),
             config,
+            metrics: Default::default(),
             render_at: None,
             resets: 0,
             reference_level: 0.0,
@@ -297,6 +299,8 @@ impl Processing {
         self.chain.delay_samples()
     }
     pub fn render(&mut self, frame: &[f32; 480]) -> Result<(), String> {
+        let metrics = self.metrics.clone();
+        let _timer = metrics.timed(super::quality::Stage::Render);
         let _float_mode = denormals::Guard::new();
         let peak = frame.iter().fold(0.0_f32, |peak, v| peak.max(v.abs()));
         // Hold short peaks for the UI poll; silence makes old metrics unavailable.
@@ -380,6 +384,8 @@ impl Processing {
         }))
     }
     pub fn capture_frame(&mut self, frame: &mut [f32; 480], delay_ms: i32) -> Result<(), String> {
+        let metrics = self.metrics.clone();
+        let _timer = metrics.timed(super::quality::Stage::Capture);
         let _float_mode = denormals::Guard::new();
         if frame.iter().any(|x| !x.is_finite()) {
             frame.fill(0.0);

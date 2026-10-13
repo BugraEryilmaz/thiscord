@@ -9,7 +9,10 @@ mod health;
 pub mod jitter;
 mod lifecycle;
 pub mod mixer;
+pub mod outgoing;
 pub mod processing;
+pub mod quality;
+use quality::{Count, Stage};
 mod reconfigure;
 pub mod reconnect;
 mod recording;
@@ -25,7 +28,7 @@ use mixer::*;
 use std::{
     sync::{
         Arc,
-        atomic::{AtomicBool, Ordering},
+        atomic::{AtomicBool, AtomicU64, Ordering},
         mpsc,
     },
     thread,
@@ -129,12 +132,20 @@ where
                 writer.begin(frames::capture_time(Instant::now(), info.timestamp()));
                 let mut peak = 0.0_f32;
                 let mut dropped = 0;
+                let mut clipped = 0;
                 for frame in data.chunks_exact(channels) {
                     let mono = capture_mono(frame);
                     peak = peak.max(mono.abs());
+                    clipped += u64::from(mono.abs() >= 0.999);
                     dropped += writer.push(mono);
                 }
+                control
+                    .counts
+                    .input_samples
+                    .add((data.len() / channels) as u64);
+                control.counts.input_clipped.add(clipped);
                 control.peak.store(peak.to_bits(), Ordering::Relaxed);
+                control.counts.capture_overflow.add(dropped);
                 control.dropped.fetch_add(dropped, Ordering::Relaxed);
             },
             move |error| {
@@ -170,7 +181,7 @@ pub enum Command {
         volumes: volumes::Profile,
         connection: connection::Connection,
         settings: AudioSettings,
-        outgoing: tokio::sync::mpsc::Sender<bytes::Bytes>,
+        outgoing: tokio::sync::mpsc::Sender<outgoing::Packet>,
         microphone: bool,
     },
     Packet {
@@ -225,6 +236,7 @@ pub struct AudioEngine {
     inhibit: Arc<AtomicBool>,
     debug_stop: Arc<AtomicBool>,
     deafen: Arc<AtomicBool>,
+    restrictions: Arc<AtomicU64>,
 }
 impl Default for AudioEngine {
     fn default() -> Self {
@@ -238,7 +250,15 @@ impl AudioEngine {
     pub fn notify(&self, command: Command) {
         self.urgent(&command);
         if matches!(command, Command::Packet { .. }) {
-            if self.media.try_send(command).is_err() {
+            if let Err(error) = self.media.try_send(command) {
+                let (mpsc::TrySendError::Full(Command::Packet { connection, .. })
+                | mpsc::TrySendError::Disconnected(Command::Packet { connection, .. })) = error
+                else {
+                    return;
+                };
+                connection
+                    .metrics
+                    .add(Count::IncomingQueueDroppedPackets, 1);
                 self.probe.packet_drops.fetch_add(1, Ordering::Relaxed);
             }
         } else if self.sender.try_send((command, None)).is_err() {
@@ -260,6 +280,8 @@ impl AudioEngine {
         let worker_debug_stop = debug_stop.clone();
         let deafen = Arc::new(AtomicBool::new(false));
         let worker_deafen = deafen.clone();
+        let restrictions = Arc::new(AtomicU64::new(0));
+        let worker_restrictions = restrictions.clone();
         thread::Builder::new()
             .name("thiscord-audio-control".into())
             .spawn(move || {
@@ -267,7 +289,7 @@ impl AudioEngine {
                 for restart in 0..=3 {
                     let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| run(
                         &receiver, &packets, worker_stop.clone(), worker_pressed.clone(),
-                        worker_inhibit.clone(), worker_debug_stop.clone(), worker_deafen.clone(), &worker_probe,
+                        worker_inhibit.clone(), worker_debug_stop.clone(), worker_deafen.clone(), &worker_probe, &worker_restrictions,
                     )));
                     if result.is_ok() { break; }
                     worker_inhibit.store(true, Ordering::Release);
@@ -291,9 +313,30 @@ impl AudioEngine {
             inhibit,
             debug_stop,
             deafen,
+            restrictions,
         }
     }
+    pub fn take_outgoing(
+        &self,
+        packet: outgoing::Packet,
+        connection: &connection::Connection,
+    ) -> Option<bytes::Bytes> {
+        if self.stop.load(Ordering::Acquire) {
+            return None;
+        }
+        packet.take(
+            Instant::now(),
+            self.restrictions.load(Ordering::Acquire),
+            !self.stop.load(Ordering::Acquire) && !self.inhibit.load(Ordering::Acquire),
+            connection,
+        )
+    }
     fn urgent(&self, command: &Command) {
+        if matches!(command, Command::Stop | Command::Pressed(false))
+            || matches!(command, Command::Settings(s) if s.muted || s.deafened)
+        {
+            self.restrictions.fetch_add(1, Ordering::AcqRel);
+        }
         match command {
             Command::VoiceStart { connection, .. } if !connection.active() => {}
             Command::DebugStop => {
@@ -319,6 +362,7 @@ impl AudioEngine {
     /// is in flight. Only an ordered settings command can relax them again.
     pub fn restrict(&self, settings: &AudioSettings) {
         if settings.muted || settings.deafened {
+            self.restrictions.fetch_add(1, Ordering::AcqRel);
             self.inhibit.store(true, Ordering::Release);
         }
         if settings.deafened {
@@ -365,22 +409,39 @@ impl Remote {
     fn refill(&mut self, writer: &mut StreamWriter) {
         // At most two frames per stream per worker tick. The callback remains
         // PCM-only; jitter buffering and Opus stay on this worker.
+        writer.control.counts.drain(&self.jitter.metrics);
         for _ in 0..writer.refill_frames() {
             let Some(packet) = self.jitter.pop(writer.needs_concealment()) else {
                 break;
             };
             let mut pcm = [0.0_f32; FRAME];
-            if let Ok(n) =
+            let decoded = {
+                let _timer = self.jitter.metrics.timed(Stage::Decode);
                 self.decoder
                     .decode_float(packet.as_deref().unwrap_or(&[]), &mut pcm, false)
+            };
+            if let Ok(n) = decoded
                 && n == FRAME
             {
                 if packet.is_some() {
                     self.activity.observe(&pcm[..n], Instant::now());
                 }
-                writer.write(&pcm[..n]);
+                self.jitter.metrics.add(Count::DecodedSamples, n as u64);
+                if packet.is_none() {
+                    self.jitter.metrics.add(Count::PlcSamples, n as u64);
+                }
+                let written = writer.write(&pcm[..n]);
+                self.jitter
+                    .metrics
+                    .add(Count::PcmOverflowSamples, (n - written) as u64);
+            } else {
+                self.jitter.metrics.add(Count::DecodeErrors, 1);
             }
         }
+        writer.control.pending_media.store(
+            self.jitter.playing() && !self.jitter.is_empty(),
+            Ordering::Relaxed,
+        );
     }
 }
 struct Devices {
@@ -551,7 +612,7 @@ struct Session {
     next: Instant,
     started: Instant,
     hold: usize,
-    outgoing: Option<tokio::sync::mpsc::Sender<bytes::Bytes>>,
+    outgoing: Option<tokio::sync::mpsc::Sender<outgoing::Packet>>,
     remotes: Vec<Option<Remote>>,
     processed_level: f32,
     processing: processing::Processing,
@@ -559,6 +620,7 @@ struct Session {
 impl Drop for Session {
     fn drop(&mut self) {
         self.devices.health.disable();
+        diagnostics::quality(|| self.quality());
         if let Some(connection) = &self.connection {
             connection.close();
         }
@@ -591,6 +653,7 @@ impl Session {
             .store(pressed.load(Ordering::Acquire), Ordering::Release);
         devices.play()?;
         self.recovery.succeeded(&devices.info);
+        self.collect_metrics();
         self.devices = devices;
         self.device_watch = Default::default();
         diagnostics::event("device_active", self.devices.info.clone());
@@ -598,7 +661,7 @@ impl Session {
         self.hold = 0;
         self.next = Instant::now();
         for remote in self.remotes.iter_mut().flatten() {
-            remote.jitter = Default::default();
+            remote.jitter.clear();
         }
         Ok(true)
     }
@@ -690,7 +753,9 @@ impl Session {
         pressed: &AtomicBool,
         inhibit: &AtomicBool,
         debug: &mut recording::Recorder,
+        restrictions: &AtomicU64,
     ) -> Result<(), String> {
+        self.devices.control.counts.drain(&self.processing.metrics);
         self.devices.health.check()?;
         self.processing
             .render_tapped(&mut self.devices.reference, &mut |frame, gap| {
@@ -736,6 +801,7 @@ impl Session {
             if stop.load(Ordering::Acquire) {
                 break;
             }
+            let revision = restrictions.load(Ordering::Acquire);
             let Some(packet) = self.processing.capture_tapped(
                 &mut self.devices.capture,
                 &mut |frame, gap, reset, delay| {
@@ -759,7 +825,7 @@ impl Session {
                 .control
                 .pressed
                 .store(pressed.load(Ordering::Acquire), Ordering::Relaxed);
-            self.capture_packet(packet, inhibit, debug)?;
+            self.capture_packet(packet, inhibit, debug, revision)?;
         }
         Ok(())
     }
@@ -768,6 +834,7 @@ impl Session {
         captured: processing::Captured,
         inhibit: &AtomicBool,
         debug: &mut recording::Recorder,
+        revision: u64,
     ) -> Result<(), String> {
         let mut pcm = captured.pcm;
         let peak = pcm.iter().fold(0.0_f32, |p, v| p.max(v.abs()));
@@ -793,14 +860,25 @@ impl Session {
             pcm.fill(0.0);
         }
         let mut packet = [0_u8; 4000];
+        let timer = self.processing.metrics.timed(Stage::Encode);
         let n = self
             .encoder
             .encode_float(&pcm, &mut packet)
             .map_err(|e| e.to_string())?;
+        drop(timer);
         if let Some(outgoing) = &self.outgoing {
-            let accepted = outgoing
-                .try_send(bytes::Bytes::copy_from_slice(&packet[..n]))
-                .is_ok();
+            let accepted = outgoing::enqueue(
+                outgoing,
+                outgoing::Packet::new(
+                    bytes::Bytes::copy_from_slice(&packet[..n]),
+                    self.connection
+                        .as_ref()
+                        .expect("voice transport connection")
+                        .clone(),
+                    revision,
+                    active,
+                ),
+            );
             for (index, frame) in pcm.as_chunks::<480>().0.iter().enumerate() {
                 debug.block(
                     recording::Track::Transmit,
@@ -817,19 +895,65 @@ impl Session {
             return Ok(());
         }
         let mut decoded = [0.0; FRAME];
+        let timer = self.processing.metrics.timed(Stage::Decode);
         let n = self
             .decoder
             .decode_float(&packet[..n], &mut decoded, false)
             .map_err(|e| e.to_string())?;
+        drop(timer);
         let written = self.devices.writers[0].write(&decoded[..n]);
-        self.devices
-            .control
-            .dropped
-            .fetch_add((n - written) as u64, Ordering::Relaxed);
+        self.processing
+            .metrics
+            .add(Count::PcmOverflowSamples, (n - written) as u64);
         Ok(())
+    }
+    fn collect_metrics(&self) {
+        self.devices.control.counts.drain(&self.processing.metrics);
+        for (remote, writer) in self.remotes.iter().zip(&self.devices.writers) {
+            if let Some(remote) = remote {
+                writer.control.counts.drain(&remote.jitter.metrics);
+            }
+        }
+    }
+    fn quality(&self) -> AudioQuality {
+        self.collect_metrics();
+        let metrics = &self.processing.metrics;
+        let network = metrics.network();
+        // These legacy cumulative counters are maintained separately; new
+        // callback counters are drained exactly once on the worker.
+        AudioQuality {
+            metrics: metrics.snapshot(),
+            streams: self
+                .remotes
+                .iter()
+                .enumerate()
+                .filter_map(|(slot, r)| {
+                    r.as_ref().map(|r| {
+                        let writer = &self.devices.writers[slot];
+                        let pcm_samples = writer.occupied_samples();
+                        StreamQuality {
+                            slot,
+                            metrics: r.jitter.metrics.snapshot(),
+                            jitter_packets: r.jitter.len(),
+                            pcm_samples,
+                            buffered_playout_ms: r.jitter.len() as f64 * 20.0
+                                + pcm_samples as f64 / 48.0,
+                            verified_fec_packets: None,
+                        }
+                    })
+                })
+                .collect(),
+            capture_blocks: self.devices.capture.len(),
+            reference_blocks: self.devices.reference.len(),
+            sfu_hop_rtt_ms: network.rtt_ms,
+            sfu_hop_received_packets: network.received,
+            sfu_hop_lost_packets: network.lost,
+            ..Default::default()
+        }
     }
     fn status(&self) -> AudioStatus {
         AudioStatus {
+            quality: Some(self.quality()),
             recording: None,
             running: true,
             input_level: self.processed_level,
@@ -911,6 +1035,7 @@ fn apply(c: &Controls, s: &AudioSettings) {
 }
 fn stopped(message: String) -> AudioStatus {
     AudioStatus {
+        quality: None,
         recording: None,
         running: false,
         input_level: 0.0,
@@ -938,6 +1063,7 @@ fn run(
     debug_stop: Arc<AtomicBool>,
     deafen: Arc<AtomicBool>,
     probe: &worker_health::Probe,
+    restrictions: &AtomicU64,
 ) {
     let mut debug = recording::Recorder::default();
     let mut session: Option<Session> = None;
@@ -999,9 +1125,10 @@ fn run(
         if last_snapshot.elapsed() >= Duration::from_secs(10) {
             last_snapshot = Instant::now();
             if let Some(s) = &session {
+                diagnostics::quality(|| s.quality());
                 diagnostics::event(
                     "audio_snapshot",
-                    serde_json::json!({"health":s.devices.health.diagnostics(),"recovering":s.recovery.active(),"muted":s.settings.muted,"deafened":s.settings.deafened,"echo":s.settings.echo_cancellation,"neural_echo":s.settings.neural_echo,"suppression":s.settings.noise_suppression,"suppression_model":s.settings.noise_suppression_model,"automatic_gain":s.settings.automatic_gain,"dropped_samples":s.devices.control.dropped.load(Ordering::Relaxed),"underrun_samples":s.devices.control.underruns.load(Ordering::Relaxed)}),
+                    serde_json::json!({"health":s.devices.health.diagnostics(),"recovering":s.recovery.active(),"muted":s.settings.muted,"deafened":s.settings.deafened,"echo":s.settings.echo_cancellation,"neural_echo":s.settings.neural_echo,"suppression":s.settings.noise_suppression,"suppression_model":s.settings.noise_suppression_model,"automatic_gain":s.settings.automatic_gain,"capture_overflow_samples":s.devices.control.dropped.load(Ordering::Relaxed),"playback_starvation_samples":s.devices.control.underruns.load(Ordering::Relaxed)}),
                 );
             }
         }
@@ -1091,6 +1218,7 @@ fn run(
                             }
                             s.volumes = Some(volumes);
                             s.outgoing = Some(outgoing);
+                            s.processing.metrics = connection.metrics.clone();
                             s.connection = Some(connection);
                             session = Some(s);
                             lease = Instant::now();
@@ -1108,6 +1236,10 @@ fn run(
                                 && let Some(Some(r)) = s.remotes.get_mut(slot)
                             {
                                 r.jitter.push(sequence, payload);
+                                s.devices.writers[slot].control.pending_media.store(
+                                    r.jitter.playing() && !r.jitter.is_empty(),
+                                    Ordering::Relaxed,
+                                );
                             }
                         }
                         Command::Roster {
@@ -1155,6 +1287,11 @@ fn run(
                                                 })
                                                 .unwrap_or(1.0),
                                         )?;
+                                        s.devices.writers[slot]
+                                            .control
+                                            .pending_media
+                                            .store(false, Ordering::Relaxed);
+                                        s.devices.writers[slot].control.counts.clear();
                                         s.remotes[slot] = member
                                             .map(|m| {
                                                 Ok::<_, String>(Remote {
@@ -1222,7 +1359,7 @@ fn run(
                                 debug.settings(&settings);
                                 if settings.deafened {
                                     for remote in s.remotes.iter_mut().flatten() {
-                                        remote.jitter = Default::default();
+                                        remote.jitter.clear();
                                     }
                                 }
                                 apply(&s.devices.control, &settings);
@@ -1368,7 +1505,7 @@ fn run(
             } else if let Err(error) = {
                 probe.enter(worker_health::PROCESS);
                 let started = Instant::now();
-                let result = s.tick(&stop, &pressed, &inhibit, &mut debug);
+                let result = s.tick(&stop, &pressed, &inhibit, &mut debug, restrictions);
                 probe.processed(started.elapsed());
                 result
             } {
@@ -1395,6 +1532,56 @@ fn run(
 #[cfg(test)]
 mod lifecycle_tests {
     use super::*;
+    #[test]
+    fn decoder_counts_actual_plc_samples_and_times_failed_packets() {
+        let mut encoder =
+            opus::Encoder::new(RATE, opus::Channels::Mono, opus::Application::Voip).unwrap();
+        let mut encoded = [0u8; 4000];
+        let n = encoder.encode_float(&[0.0; FRAME], &mut encoded).unwrap();
+        let mut remote = Remote {
+            activity: Default::default(),
+            id: "00000000-0000-0000-0000-000000000001".parse().unwrap(),
+            label: "private speaker".into(),
+            jitter: Default::default(),
+            decoder: opus::Decoder::new(RATE, opus::Channels::Mono).unwrap(),
+        };
+        let controls = Arc::new(Controls::default());
+        let (mut writers, mut mixer) = mixer::mixer(controls.clone());
+        let writer = &mut writers[0];
+        writer.control.active.store(true, Ordering::Release);
+        for seq in [0, 2, 3] {
+            remote
+                .jitter
+                .push(seq, bytes::Bytes::copy_from_slice(&encoded[..n]));
+        }
+        remote.refill(writer); // seq 0 only: don't conceal while PCM >10ms.
+        let mut out = [0.0f32; FRAME];
+        mixer.render(&mut out, 1);
+        remote.refill(writer); // one 20ms PLC plus seq 2.
+        let stats = remote.jitter.metrics.snapshot();
+        assert_eq!(stats.total.decoded_samples, 3 * FRAME as u64);
+        assert_eq!(stats.total.plc_samples, FRAME as u64);
+        assert_eq!(stats.total.sequence_gap_packets, 1);
+        assert_eq!(stats.total.fec_attempts, 0);
+        assert_eq!(stats.decode.calls, 3);
+        assert_eq!(controls.underruns.load(Ordering::Relaxed), 0);
+        // Invalid Opus is a decoder/application failure, never a network gap.
+        remote.jitter.clear();
+        for seq in 10..13 {
+            remote.jitter.push(seq, bytes::Bytes::from_static(&[0xff]));
+        }
+        mixer.render(&mut out, 1);
+        mixer.render(&mut out, 1);
+        remote.refill(writer);
+        let stats = remote.jitter.metrics.snapshot();
+        assert_eq!(stats.total.decode_errors, 2);
+        assert_eq!(stats.decode.calls, 5);
+        assert_eq!(stats.total.sequence_gap_packets, 1);
+        let text = format!("{stats:?}");
+        assert!(!text.contains("private speaker"));
+        assert!(!text.contains("00000000"));
+        assert!(!text.contains("payload"));
+    }
     #[test]
     fn remote_pcm_survives_worker_jitter_and_delayed_packets_without_sample_gaps() {
         let mut encoder =
@@ -1540,6 +1727,7 @@ mod lifecycle_tests {
             inhibit: Arc::new(AtomicBool::new(false)),
             debug_stop: Arc::new(AtomicBool::new(false)),
             deafen: Arc::new(AtomicBool::new(false)),
+            restrictions: Arc::new(AtomicU64::new(0)),
         };
         for _ in 0..10 {
             engine.notify(Command::Packet {

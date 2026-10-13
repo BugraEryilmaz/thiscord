@@ -1,5 +1,8 @@
 //! Fixed-capacity SPSC queues. The device callback never allocates, locks or waits.
-use super::{cues, frames};
+use super::{
+    cues, frames,
+    quality::{Count, Metrics},
+};
 use ringbuf::{HeapCons, HeapProd, HeapRb, traits::*};
 use std::sync::{
     Arc,
@@ -12,7 +15,88 @@ pub const FRAME: usize = 960;
 pub const MAX_STREAMS: usize = 32;
 pub const CAPACITY: usize = FRAME * 6;
 
+/// Bounded callback updates without a CAS retry loop. A wrap latches saturation
+/// for the worker drain, so even artificially injected u64 overflow is visible.
+#[derive(Default)]
+pub struct SampleCounter {
+    value: AtomicU64,
+    overflow: AtomicBool,
+}
+impl SampleCounter {
+    pub fn add(&self, n: u64) {
+        if self
+            .value
+            .fetch_add(n, Ordering::Relaxed)
+            .checked_add(n)
+            .is_none()
+        {
+            self.overflow.store(true, Ordering::Release);
+        }
+    }
+    fn drain(&self) -> u64 {
+        let value = self.value.swap(0, Ordering::Relaxed);
+        if self.overflow.swap(false, Ordering::AcqRel) {
+            u64::MAX
+        } else {
+            value
+        }
+    }
+}
+
+#[derive(Default)]
+pub struct CallbackCounts {
+    pub capture_overflow: SampleCounter,
+    pub reference_overflow: SampleCounter,
+    pub input_samples: SampleCounter,
+    pub input_clipped: SampleCounter,
+    pub output_samples: SampleCounter,
+    pub output_clipped: SampleCounter,
+}
+impl CallbackCounts {
+    pub fn drain(&self, metrics: &Metrics) {
+        for (counter, event) in [
+            (&self.capture_overflow, Count::CaptureOverflowSamples),
+            (&self.reference_overflow, Count::ReferenceOverflowSamples),
+            (&self.input_samples, Count::InputSamples),
+            (&self.input_clipped, Count::InputClippedSamples),
+            (&self.output_samples, Count::OutputSamples),
+            (&self.output_clipped, Count::OutputClippedSamples),
+        ] {
+            metrics.add(event, counter.drain());
+        }
+    }
+}
+#[derive(Default)]
+pub struct PlaybackCounts {
+    starvation: SampleCounter,
+    unknown: SampleCounter,
+    silence: SampleCounter,
+    discarded: SampleCounter,
+}
+impl PlaybackCounts {
+    pub fn clear(&self) {
+        for counter in [
+            &self.starvation,
+            &self.unknown,
+            &self.silence,
+            &self.discarded,
+        ] {
+            counter.drain();
+        }
+    }
+    pub fn drain(&self, metrics: &Metrics) {
+        for (counter, event) in [
+            (&self.starvation, Count::StarvationSamples),
+            (&self.unknown, Count::EmptyUnknownSamples),
+            (&self.silence, Count::IntentionalSilenceSamples),
+            (&self.discarded, Count::PcmDiscardedSamples),
+        ] {
+            metrics.add(event, counter.drain());
+        }
+    }
+}
 pub struct Controls {
+    pub counts: CallbackCounts,
     pub(super) cues: AtomicU8,
     pub mute: AtomicBool,
     pub deafen: AtomicBool,
@@ -29,6 +113,7 @@ pub struct Controls {
 impl Default for Controls {
     fn default() -> Self {
         Self {
+            counts: Default::default(),
             cues: 0.into(),
             mute: false.into(),
             deafen: false.into(),
@@ -45,6 +130,8 @@ impl Default for Controls {
     }
 }
 pub struct StreamControl {
+    pub counts: PlaybackCounts,
+    pub pending_media: AtomicBool,
     pub volume: AtomicU32,
     pub active: AtomicBool,
     pub generation: AtomicU64,
@@ -71,6 +158,8 @@ pub fn mixer(controls: Arc<Controls>) -> (Vec<StreamWriter>, Mixer) {
     for _ in 0..MAX_STREAMS {
         let (queue, reader) = HeapRb::<f32>::new(CAPACITY).split();
         let control = Arc::new(StreamControl {
+            counts: Default::default(),
+            pending_media: false.into(),
             volume: AtomicU32::new(1.0_f32.to_bits()),
             active: false.into(),
             generation: 0.into(),
@@ -99,6 +188,9 @@ impl StreamWriter {
     /// Refill from actual device consumption, keeping 40-60 ms of decoded PCM.
     /// A single 20 ms frame paced by a worker timer can empty before a late wake.
     /// Keep this below the mixer's 60 ms stale-audio trimming threshold.
+    pub fn occupied_samples(&self) -> usize {
+        self.queue.occupied_len()
+    }
     pub fn refill_frames(&self) -> usize {
         (FRAME * 2)
             .saturating_sub(self.queue.occupied_len())
@@ -150,17 +242,28 @@ impl Mixer {
             } else {
                 stream.queue.occupied_len().saturating_sub(FRAME * 3)
             };
+            stream.control.counts.discarded.add(discard as u64);
             for _ in 0..discard {
                 let _ = stream.queue.try_pop();
             }
         }
         let mut underruns = 0;
         let mut reference_dropped = 0;
+        let mut clipped = 0;
+        let mut starvation = [0u64; MAX_STREAMS];
+        let mut unknown = [0u64; MAX_STREAMS];
+        let mut silence = [0u64; MAX_STREAMS];
         for frame in output.chunks_mut(channels) {
             let mut mix = self.cues.next();
-            for stream in &mut self.streams {
-                if !stream.control.active.load(Ordering::Relaxed) {
+            for (index, stream) in self.streams.iter_mut().enumerate() {
+                if deafened || !stream.control.active.load(Ordering::Relaxed) {
+                    silence[index] += 1;
                     continue;
+                }
+                let audible = master > 0.0
+                    && f32::from_bits(stream.control.volume.load(Ordering::Relaxed)) > 0.0;
+                if !audible {
+                    silence[index] += 1;
                 }
                 match stream.queue.try_pop() {
                     Some(sample) if sample.is_finite() => {
@@ -168,8 +271,16 @@ impl Mixer {
                             sample * f32::from_bits(stream.control.volume.load(Ordering::Relaxed))
                     }
                     Some(_) => {}
-                    None => underruns += 1,
+                    None if audible && stream.control.pending_media.load(Ordering::Relaxed) => {
+                        starvation[index] += 1;
+                        underruns += 1;
+                    }
+                    None if audible => unknown[index] += 1,
+                    None => {}
                 }
+            }
+            if !deafened && (mix * master).abs() > 1.0 {
+                clipped += 1;
             }
             let sample = if deafened {
                 0.0
@@ -188,8 +299,22 @@ impl Mixer {
             }
         }
         self.controls
+            .counts
+            .output_samples
+            .add(output.len().div_ceil(channels) as u64);
+        self.controls.counts.output_clipped.add(clipped);
+        for (i, stream) in self.streams.iter().enumerate() {
+            stream.control.counts.starvation.add(starvation[i]);
+            stream.control.counts.unknown.add(unknown[i]);
+            stream.control.counts.silence.add(silence[i]);
+        }
+        self.controls
             .underruns
             .fetch_add(underruns, Ordering::Relaxed);
+        self.controls
+            .counts
+            .reference_overflow
+            .add(reference_dropped);
         self.controls
             .reference_dropped
             .fetch_add(reference_dropped, Ordering::Relaxed);
@@ -199,6 +324,88 @@ impl Mixer {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn callback_counter_wrap_latches_saturation_without_retrying() {
+        let counter = SampleCounter::default();
+        counter.add(u64::MAX);
+        counter.add(2);
+        assert_eq!(counter.drain(), u64::MAX);
+        assert_eq!(counter.drain(), 0);
+        counter.add(480);
+        assert_eq!(counter.drain(), 480);
+    }
+    #[test]
+    fn intentional_silence_and_unknown_inactivity_are_not_playback_starvation() {
+        let controls = Arc::new(Controls::default());
+        let (mut writers, mut mix) = mixer(controls.clone());
+        let metrics = Metrics::default();
+        let mut out = [0f32; 480];
+        mix.render(&mut out, 1); // inactive
+        writers[0].control.active.store(true, Ordering::Release);
+        mix.render(&mut out, 1); // empty, no evidence of pending media (DTX/inactivity)
+        writers[0].write(&[0.0; 480]);
+        mix.render(&mut out, 1); // normal decoded silence
+        controls.mute.store(true, Ordering::Relaxed);
+        mix.render(&mut out, 1); // local mute does not imply missing received speech
+        writers[0]
+            .control
+            .pending_media
+            .store(true, Ordering::Relaxed);
+        controls.deafen.store(true, Ordering::Relaxed);
+        mix.render(&mut out, 1);
+        controls.deafen.store(false, Ordering::Relaxed);
+        writers[0].volume(0.0).unwrap();
+        mix.render(&mut out, 1);
+        writers[0].volume(1.0).unwrap();
+        controls.master.store(0f32.to_bits(), Ordering::Relaxed);
+        mix.render(&mut out, 1);
+        writers[0].control.counts.drain(&metrics);
+        let t = metrics.snapshot().total;
+        assert_eq!(t.starvation_samples, 0);
+        assert_eq!(t.empty_unknown_samples, 960);
+        assert_eq!(t.intentional_silence_samples, 1920);
+        assert_eq!(controls.underruns.load(Ordering::Relaxed), 0);
+        controls.master.store(1f32.to_bits(), Ordering::Relaxed);
+        mix.render(&mut out, 1); // known buffered media, worker has not decoded it
+        writers[0].control.counts.drain(&metrics);
+        assert_eq!(metrics.snapshot().total.starvation_samples, 480);
+        assert_eq!(controls.underruns.load(Ordering::Relaxed), 480);
+    }
+    #[test]
+    fn clipping_reference_overflow_and_stream_counts_are_exact_and_distinct() {
+        let controls = Arc::new(Controls::default());
+        let (mut writers, mix) = mixer(controls.clone());
+        let (reference, _reader) = frames::queue();
+        let mut mix = mix.with_reference(reference);
+        let a = Metrics::default();
+        let b = Metrics::default();
+        let device = Metrics::default();
+        for w in writers.iter_mut().take(2) {
+            w.control.active.store(true, Ordering::Release);
+        }
+        writers[0].volume(2.0).unwrap();
+        writers[0].write(&[0.8; 480]);
+        writers[1]
+            .control
+            .pending_media
+            .store(true, Ordering::Relaxed);
+        let mut out = [0f32; 960];
+        mix.render(&mut out, 2);
+        for _ in 0..12 {
+            mix.render(&mut out, 2);
+        }
+        controls.counts.drain(&device);
+        writers[0].control.counts.drain(&a);
+        writers[1].control.counts.drain(&b);
+        assert_eq!(device.snapshot().total.output_clipped_samples, 480);
+        assert_eq!(device.snapshot().total.output_samples, 13 * 480);
+        assert_eq!(device.snapshot().total.reference_overflow_samples, 480);
+        assert_eq!(device.snapshot().total.capture_overflow_samples, 0);
+        assert_eq!(a.snapshot().total.starvation_samples, 0);
+        assert_eq!(b.snapshot().total.starvation_samples, 13 * 480);
+        controls.counts.drain(&device); // no double accounting
+        assert_eq!(device.snapshot().total.output_samples, 13 * 480);
+    }
     #[test]
     fn membership_cues_follow_master_and_reach_echo_reference() {
         let controls = Arc::new(Controls::default());
