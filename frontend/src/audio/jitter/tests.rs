@@ -11,6 +11,44 @@ fn packet(sequence: u16, timestamp: u32, arrived: Instant) -> Packet {
     }
 }
 
+#[test]
+fn idle_epoch_expiry_requires_fresh_valid_media_and_keeps_a_receive_time_fence() {
+    let at = Instant::now();
+    let mut j = Jitter::default();
+    for seq in 0..3 {
+        push(&mut j, seq, u32::from(seq) * 960, at);
+    }
+    for _ in 0..3 {
+        assert!(j.pop(false, at).is_some());
+    }
+    j.discard();
+    let floor = j.floor;
+    let payload = bytes::Bytes::from_static(b"packet");
+    let before_expiry = at + EPOCH_IDLE - Duration::from_secs(1);
+    assert!(!j.push(0, 0, payload.clone(), before_expiry, before_expiry));
+    assert_eq!(j.floor, floor);
+    let later = at + Duration::from_secs(13 * 3600);
+    assert!(!j.push(0, 0, bytes::Bytes::new(), later, later));
+    assert!(!j.push(0, 0, payload.clone(), at, later));
+    assert_eq!(
+        j.floor, floor,
+        "invalid/stale packets cannot reset replay protection"
+    );
+    let timestamp = (13u64 * 3600 * 48000) as u32;
+    assert!(j.push(500, timestamp, payload.clone(), later, later));
+    assert!(!j.push(
+        501,
+        timestamp.wrapping_add(960),
+        payload.clone(),
+        later - Duration::from_millis(1),
+        later
+    ));
+    assert!(j.prepare(later));
+    assert!(j.poll(later + Duration::from_millis(40), 0).is_some());
+    assert!(!j.push(500, timestamp, payload, later, later));
+    assert_eq!(j.metrics().rebufferings, 1);
+}
+
 fn push(j: &mut Jitter, sequence: u16, timestamp: u32, at: Instant) {
     j.push_packet(packet(sequence, timestamp, at), at);
 }

@@ -431,6 +431,10 @@ its existing atomic mixer generation. The callback acknowledges after discarding
 old PCM; the worker waits for that acknowledgement before writing fresh decoded
 audio. Other sources and gains are preserved. Deafen transitions and device changes
 also clear pending receive audio, retaining consumed sequence/media watermarks.
+After six hours without accepted media, a fresh packet starts a new local RTP
+epoch with an acknowledged PCM flush. This avoids the signed timestamp comparison's
+12.4-hour ambiguity after an overnight deafen; receive-time fences still reject
+older queued audio. Short interruptions preserve their existing replay protection.
 A replacement source owns fresh decoder/jitter state and rejects media that was
 already in the local dispatch queue before its roster entry. Existing connection
 identity checks still reject old connection handlers. This does not add a new wire
@@ -444,10 +448,13 @@ source identifiers are logged. See [adaptive playout](audio-playout.md) for the
 estimator, hysteresis, bounds, measurements and remaining listening acceptance.
 AEC algorithms, the final post-mix reference and its timing remain unchanged.
 
-The worker refills decoded PCM when at most 15 ms remain, with at most two decode
-decisions per stream per tick and at most 35.125 ms of decoded PCM. Missing packets
-wait until at most 5 ms remain; prefetch cannot conceal them early. A bounded
-streaming sinc converter corrects sender/output drift before mixing, preserving
+The worker sizes decoded PCM refills from the largest observed device callback,
+with a 15 ms minimum and a 12 ms worker allowance above one callback. The existing
+120 ms PCM ring remains fixed; refill work is bounded to two through six decode
+decisions per stream per tick. Missing packets wait until at most 5 ms remain,
+or until a callback is imminent and cannot be filled. The minimum receive target
+and callback safety trim accommodate this cushion; see [the exact bounds](audio-playout.md).
+A bounded streaming sinc converter corrects sender/output drift before mixing, preserving
 phase across full packets and fractional media gaps. Tests cover irregular worker
 wakes, packet and sample continuity, FEC/PLC, long virtual calls, final AEC samples,
 queue pressure, stalls, flush acknowledgement, deafen and source replacement.
@@ -477,8 +484,8 @@ and default disabled FEC/zero loss hint; the microphone speech policy is not
 applied to music. All native receivers can opportunistically decode redundancy.
 
 The jitter decision is normal packet, FEC from the immediate media successor,
-concealment (PLC or fractional silence), or wait. While more than 5 ms of PCM
-remain, a missing original can still arrive.
+concealment (PLC or fractional silence), or wait. Until the callback-aware decode
+deadline described above, a missing original can still arrive.
 At that playout deadline, an available successor is cloned by reference
 and decoded with `fec=true` into exactly 960 samples. It remains buffered for
 normal decoding exactly once, after the missing interval. The media cursor advances
@@ -492,7 +499,7 @@ Fractional holes use exact silence and cannot borrow a full FEC frame. No extra
 wait is introduced for FEC. With burst loss, earlier gaps use PLC; only the gap
 immediately preceding an available packet can use that packet's redundancy.
 The adaptive startup buffer, 12-packet cap, 60 ms consecutive-concealment limit and maximum
-two output frames per stream per worker tick remain bounded.
+six decode decisions per stream per worker tick remain bounded.
 
 The [Opus decoder API](https://opus-codec.org/docs/opus_api-1.5/group__opus__decoder.html)
 requires the exact missing duration and serial decode order. It may return PLC

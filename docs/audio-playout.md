@@ -23,18 +23,25 @@ receiver, worker and output clocks without sleeping or opening a device.
   history, one Opus decoder and fixed resampling state. Packet ordering, startup
   waits and decode decisions are separate operations. There are still 32 bounded
   SPSC PCM rings; no additional application package or DSP dependency is added.
-- Startup targets 40 ms. An EWMA (1/16 update) of arrival/media interval variation
-  raises the target to `40 + 4 * variation` ms, bounded to 40-120 ms, with 5 ms
+- Startup targets at least 40 ms, or the device-sized refill limit plus 10 ms,
+  whichever is larger. An EWMA (1/16 update) of arrival/media interval variation
+  raises the target to `minimum + 4 * variation` ms, capped at 120 ms, with 5 ms
   hysteresis. Late packets still supply variation evidence; duplicates do not.
   After five seconds without an increase, the target falls at at most 1 ms/s,
   stopping within the hysteresis band. Isolated timing noise does not force a reset.
-- The target covers packet waiting **and** decoded PCM. PCM refills below 15 ms
-  and stays at or below 1,686 samples (35.125 ms), rather than adding the old
-  40-60 ms cushion to a new network buffer. The 15 ms threshold preserves the
-  existing irregular-worker regression, which includes 12 ms wakes.
-- A missing packet is resolved only with at most 240 samples/5 ms left in the
-  output ring: this is the worker's decode lead before the ring deadline. If the
-  following packet is present at the adjacent media timestamp and has a sequence
+- The target covers packet waiting **and** decoded PCM. Each device callback
+  publishes its size and estimated next deadline through bounded atomic stores.
+  The largest observed mono-frame count is retained for that device lifetime.
+  PCM refills at `max(720, callback_samples + 576)` samples: a 15 ms minimum or
+  one callback plus a 12 ms worker allowance. The limit is capped at 4,794 samples,
+  leaving room for a maximally stretched packet in the existing 5,760-sample ring.
+  Small callbacks retain the 1,686-sample maximum; larger callbacks get a larger
+  cushion, rather than repeatedly emptying a single 20 ms frame.
+- A missing packet normally waits until at most 240 samples/5 ms remain. Within
+  12 ms of the estimated next callback (or when that callback is overdue), it can
+  also be resolved if the ring cannot cover a complete callback. This avoids both
+  callback starvation and premature PLC while a large callback is still far away.
+  If the following packet is present at the adjacent media timestamp and has a sequence
   hole after the last normal packet, Opus FEC is tried
   without consuming that carrier. Otherwise PLC runs. An FEC attempt can internally
   produce PLC when the sender supplied no redundancy; metrics do not claim recovery.
@@ -43,8 +50,14 @@ receiver, worker and output clocks without sleeping or opening a device.
   exact sample counts: whole slots use PLC, fractional holes use exact-length
   silence through the continuous rate filter. Consecutive sequences with timestamp
   gaps do not borrow FEC; those gaps can be sender capture drops. Longer timestamp
-  jumps rebuffer. Consumed sequence/media watermarks survive inactivity and deafen,
-  preventing late audio from rewinding the cursor. The microphone now uses
+  jumps rebuffer. Consumed sequence/media watermarks survive short inactivity and
+  deafen, preventing late audio from rewinding the cursor. After six hours without
+  an accepted packet, the next fresh valid packet starts a new local RTP epoch:
+  signed 32-bit timestamp ordering is ambiguous after about 12.4 hours at 48 kHz.
+  The reset retains counters, rejects older receive times and requires the normal
+  decoder/PCM flush acknowledgement. Worker-age and control-time checks still run
+  before admission; this does not authenticate the age of packets delayed upstream.
+  The microphone now uses
   [Opus DTX](audio.md#microphone-dtx-and-media-timing), retaining CN updates and a
   repeated no-data cue. Known silence suspends PLC and drift integration, preserves
   timestamps, and resumes at the current target without counting a recovery.
@@ -63,12 +76,16 @@ receiver, worker and output clocks without sleeping or opening a device.
   after 200 ms without arrivals, including when no encoded packets remain.
   These are explicit discontinuity boundaries, not the normal drift strategy.
   An arbitrarily stalled OS callback cannot offer a wall-clock latency guarantee.
-- The worker makes at most two decode decisions per source per tick. The rate
+- The worker makes two to six decode decisions per source per tick, depending
+  on callback size; the refill limit stops work once enough PCM is queued. The rate
   converter emits at most 966 samples per packet, using 32 multiply-accumulate taps
   per output. Callbacks do no additional DSP, allocations, locks or networking.
-  Adaptive remote queues never reach the callback's existing 60 ms safety trim,
-  retained for local device tests. Lifecycle generation changes, deafen and
-  inactive streams still discard their queues.
+  The callback's safety trim is at least 60 ms and expands to accommodate the
+  device-sized cushion, never exceeding the existing ring capacity. Lifecycle
+  generation changes, deafen and inactive streams still discard their queues.
+  The callback estimate cannot anticipate an unseen larger block or a driver
+  delivering callbacks early. Blocks beyond the ring's capacity and arbitrarily
+  stalled workers remain outside these buffering guarantees.
 
 ## Clock correction and device conversion ownership
 
@@ -109,7 +126,8 @@ required; explicit DTX, inactive slots and deafen excluded). These are not devic
 xrun counts; see [quality definitions](audio-quality.md). `current_ms` excludes OS/device
 buffering and the fixed 0.333 ms filter delay; it is not an end-to-end latency
 measurement. Counters restart on source replacement; device/deafen boundaries
-clear queued audio and rate state while retaining media watermarks and counters.
+clear queued audio and rate state while retaining counters and unexpired media
+watermarks.
 
 Run with the pinned toolchain and existing shared build directory:
 
@@ -129,6 +147,14 @@ Additional tests cover wrap, duplicates, reordering, isolated/burst loss, source
 jumps, inactivity/resumption, worker queue delay, independent speakers, malformed
 durations, deafen and source generations. Tone tests measure resampling waveform
 error against analytic fractional-time signals, including packet boundaries.
+
+Callback regressions run 120-second production Opus/filter/mixer traces with
+48, 480, 960, 1,024, 2,048 and 4,096-frame stereo callbacks, varying callback sizes,
+irregular 4-12 ms worker wakes and an isolated lost packet. After startup they
+require enough PCM for every callback, zero overflows/late discards/rebuffers,
+and exactly the expected concealment count. Overnight-deafen tests advance
+13, 26 and 49 hours without sleeping, require resumed audio after the flush
+acknowledgement, and reject queued old media and repeated consumed packets.
 
 The initial audit was reproduced: all 81 selected native audio tests passed on
 Windows before changes. Windows x64, Rust 1.98.1, `ci` profile results:
