@@ -7,13 +7,13 @@ use thiscord_shared::audio::*;
 
 pub struct AudioState {
     pub engine: AudioEngine,
-    file_lock: Mutex<()>,
+    file_lock: Mutex<Option<AudioSettings>>,
 }
 impl Default for AudioState {
     fn default() -> Self {
         Self {
             engine: AudioEngine::new(),
-            file_lock: Mutex::new(()),
+            file_lock: Mutex::new(None),
         }
     }
 }
@@ -53,17 +53,19 @@ pub async fn audio_devices() -> Result<Vec<AudioDevice>, String> {
         .await
         .map_err(|_| "Device scan failed")?
 }
-#[tauri::command]
-pub async fn audio_load(app: tauri::AppHandle) -> Result<AudioSettings, String> {
-    tauri::async_runtime::spawn_blocking(move || {
-        let path = app
-            .path()
-            .app_config_dir()
-            .map_err(|_| "Settings directory unavailable")?
-            .join("audio.json");
-        if !path.exists() {
-            return Ok(AudioSettings::default());
-        }
+fn load_settings(
+    app: &tauri::AppHandle,
+    cached: &mut Option<AudioSettings>,
+) -> Result<AudioSettings, String> {
+    if let Some(settings) = cached {
+        return Ok(settings.clone());
+    }
+    let path = app
+        .path()
+        .app_config_dir()
+        .map_err(|_| "Settings directory unavailable")?
+        .join("audio.json");
+    let settings = if path.exists() {
         if std::fs::metadata(&path)
             .map_err(|_| "Cannot read audio settings")?
             .len()
@@ -71,25 +73,47 @@ pub async fn audio_load(app: tauri::AppHandle) -> Result<AudioSettings, String> 
         {
             return Err("Audio settings file is too large".into());
         }
-        let settings: AudioSettings =
-            serde_json::from_slice(&std::fs::read(path).map_err(|_| "Cannot read audio settings")?)
-                .map_err(|_| "Invalid audio settings file")?;
-        settings.validate()?;
-        Ok(settings)
+        serde_json::from_slice::<AudioSettings>(
+            &std::fs::read(path).map_err(|_| "Cannot read audio settings")?,
+        )
+        .map_err(|_| "Invalid audio settings file")?
+    } else {
+        AudioSettings::default()
+    };
+    settings.validate()?;
+    *cached = Some(settings.clone());
+    Ok(settings)
+}
+#[tauri::command]
+pub async fn audio_load(app: tauri::AppHandle) -> Result<AudioSettings, String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        let state = app.state::<AudioState>();
+        let mut cached = state.file_lock.lock().map_err(|_| "Settings unavailable")?;
+        load_settings(&app, &mut cached)
     })
     .await
     .map_err(|_| "Settings task failed")?
 }
 #[tauri::command]
 pub async fn audio_current(app: tauri::AppHandle) -> Result<AudioSettings, String> {
-    let engine = app.state::<AudioState>().engine.clone();
-    if let Some(settings) = tauri::async_runtime::spawn_blocking(move || engine.current_settings())
-        .await
-        .map_err(|_| "Audio worker stopped")??
-    {
-        return Ok(settings);
-    }
     audio_load(app).await
+}
+
+/// All entry points toggle the latest native state, never a WebView snapshot.
+#[tauri::command]
+pub async fn audio_toggle(app: tauri::AppHandle, action: AudioToggle) -> Result<(), String> {
+    // Tighten gates immediately even while a device/model save holds file_lock.
+    // Only the serialized change below can relax them or persist preferences.
+    if let Ok(mut settings) = app
+        .state::<crate::native_voice::VoiceState>()
+        .settings
+        .lock()
+        .map(|s| s.clone())
+    {
+        action.apply(&mut settings);
+        audio_restrict(app.clone(), app.state(), settings)?;
+    }
+    change_settings(app, None, Some(action)).await
 }
 #[tauri::command]
 pub fn audio_restrict(
@@ -108,16 +132,24 @@ pub fn audio_restrict(
 #[tauri::command]
 pub async fn audio_save(app: tauri::AppHandle, settings: AudioSettings) -> Result<(), String> {
     settings.validate()?;
+    change_settings(app, Some(settings), None).await
+}
+async fn change_settings(
+    app: tauri::AppHandle,
+    requested: Option<AudioSettings>,
+    action: Option<AudioToggle>,
+) -> Result<(), String> {
     tauri::async_runtime::spawn_blocking(move || {
         let state = app.state::<AudioState>();
+        let mut cached = state.file_lock.lock().map_err(|_| "Settings unavailable")?;
+        let previous = load_settings(&app, &mut cached)?;
+        let settings = merge_settings(&previous, requested, action);
         state.engine.restrict(&settings);
-        let _guard = state.file_lock.lock().map_err(|_| "Settings unavailable")?;
+        if settings.deafened {
+            crate::native_screen::screen_stop(app.state::<crate::native_screen::ScreenState>());
+            app.state::<crate::native_screen::ScreenState>().roster(&[]);
+        }
         let voice = app.state::<crate::native_voice::VoiceState>();
-        let previous = voice
-            .settings
-            .lock()
-            .map_err(|_| "Voice settings unavailable")?
-            .clone();
         let shortcut_changed = (previous.mode != settings.mode
             || previous.global_push_to_talk != settings.global_push_to_talk)
             && state.engine.command(Command::Peek)?.running;
@@ -127,6 +159,17 @@ pub async fn audio_save(app: tauri::AppHandle, settings: AudioSettings) -> Resul
         }
         // Apply controls before disk I/O: a failed save must not leave a mic unmuted.
         if let Err(error) = state.engine.command(Command::Settings(settings.clone())) {
+            // A failed command must never relax a previously active restriction.
+            // Keep any newly applied safety gate visible to subsequent saves.
+            let mut safe = previous.clone();
+            safe.muted |= settings.muted;
+            safe.deafened |= settings.deafened;
+            state.engine.restrict(&safe);
+            if let Ok(mut configuration) = voice.settings.lock() {
+                configuration.muted = safe.muted;
+                configuration.deafened = safe.deafened;
+            }
+            *cached = Some(safe);
             if shortcut_changed {
                 if state.engine.command(Command::Peek).is_ok_and(|s| s.running) {
                     // Do not replace a newer session's shortcut after cancellation.
@@ -145,6 +188,7 @@ pub async fn audio_save(app: tauri::AppHandle, settings: AudioSettings) -> Resul
         if let Ok(mut configuration) = voice.settings.lock() {
             *configuration = settings.clone();
         }
+        *cached = Some(settings.clone());
         let directory = app
             .path()
             .app_config_dir()
@@ -163,10 +207,43 @@ pub async fn audio_save(app: tauri::AppHandle, settings: AudioSettings) -> Resul
     .await
     .map_err(|_| "Settings task failed")?
 }
+
+fn merge_settings(
+    previous: &AudioSettings,
+    requested: Option<AudioSettings>,
+    action: Option<AudioToggle>,
+) -> AudioSettings {
+    let mut settings = requested.unwrap_or_else(|| previous.clone());
+    // Device/processing saves cannot undo controls from the overlay or hotkeys.
+    settings.muted = previous.muted;
+    settings.deafened = previous.deafened;
+    if let Some(action) = action {
+        action.apply(&mut settings);
+    }
+    settings
+}
+
+#[cfg(test)]
+mod control_tests {
+    use super::*;
+    #[test]
+    fn stale_device_saves_cannot_undo_toggles_and_toggles_preserve_devices() {
+        let before = AudioSettings::default();
+        let muted = merge_settings(&before, None, Some(AudioToggle::Mute));
+        let deafened = merge_settings(&muted, None, Some(AudioToggle::Deafen));
+        let mut stale = before;
+        stale.input = Some("new microphone".into());
+        let saved = merge_settings(&deafened, Some(stale), None);
+        assert!(saved.muted && saved.deafened);
+        assert_eq!(saved.input.as_deref(), Some("new microphone"));
+        let restored = merge_settings(&saved, None, Some(AudioToggle::Deafen));
+        assert!(restored.muted && !restored.deafened);
+        assert_eq!(restored.input, saved.input);
+    }
+}
 #[tauri::command]
 pub async fn audio_test(
     app: tauri::AppHandle,
-    state: State<'_, AudioState>,
     settings: AudioSettings,
     microphone: bool,
 ) -> Result<AudioStatus, String> {
@@ -179,14 +256,21 @@ pub async fn audio_test(
     if microphone {
         register_ptt(&app, &settings)?;
     }
-    let result = command(
-        state.engine.clone(),
-        Command::Start {
+    let start_app = app.clone();
+    let result = tauri::async_runtime::spawn_blocking(move || {
+        let state = start_app.state::<AudioState>();
+        let mut cached = state.file_lock.lock().map_err(|_| "Settings unavailable")?;
+        let current = load_settings(&start_app, &mut cached)?;
+        let mut settings = settings;
+        settings.muted = current.muted;
+        settings.deafened = current.deafened;
+        state.engine.command(Command::Start {
             settings,
             microphone,
-        },
-    )
-    .await;
+        })
+    })
+    .await
+    .map_err(|_| "Audio worker stopped")?;
     if result.is_err() {
         let _ = app.global_shortcut().unregister(HOTKEY);
     }
@@ -267,7 +351,15 @@ pub fn start_voice(
     microphone: bool,
 ) -> Result<AudioStatus, String> {
     let state = app.state::<AudioState>();
-    let _guard = state.file_lock.lock().map_err(|_| "Settings unavailable")?;
+    let mut cached = state.file_lock.lock().map_err(|_| "Settings unavailable")?;
+    let current = load_settings(app, &mut cached)?;
+    let mut settings = settings;
+    settings.muted = current.muted;
+    settings.deafened = current.deafened;
+    *app.state::<crate::native_voice::VoiceState>()
+        .settings
+        .lock()
+        .map_err(|_| "Voice settings unavailable")? = settings.clone();
     let path = app
         .path()
         .app_config_dir()

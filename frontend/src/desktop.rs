@@ -4,6 +4,7 @@ mod native_account;
 mod native_audio;
 mod native_overlay;
 mod native_screen;
+mod native_shortcuts;
 mod native_signaling;
 mod native_update;
 mod native_voice;
@@ -38,6 +39,7 @@ fn main() {
         .plugin(tauri_plugin_updater::Builder::new().build())
         .manage(native_update::UpdateState::default())
         .manage(native_overlay::OverlayState::default())
+        .manage(native_shortcuts::ShortcutStateStore::default())
         .setup(|app| {
             use tauri::Manager;
             if native_window::start(app.handle()).is_err() {
@@ -58,6 +60,7 @@ fn main() {
                 eprintln!("Voice overlay unavailable on this display server");
             }
             native_update::start(app.handle());
+            native_shortcuts::start(app.handle());
             Ok(())
         })
         .plugin(tauri_plugin_global_shortcut::Builder::new().build())
@@ -149,6 +152,10 @@ fn main() {
             native_voice::voice_join,
             native_voice::voice_leave,
             native_voice::voice_status,
+            native_audio::audio_toggle,
+            native_shortcuts::audio_shortcuts,
+            native_shortcuts::audio_shortcuts_save,
+            native_overlay::overlay_toggle_audio,
             native_overlay::overlay_snapshot,
             native_overlay::overlay_enabled,
             native_overlay::overlay_enable,

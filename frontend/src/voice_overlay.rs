@@ -8,7 +8,7 @@ pub fn snapshot(voice: &VoiceStatus, audio: &AudioStatus) -> OverlaySnapshot {
     if !voice.connected || voice.channel_id.is_none() {
         return OverlaySnapshot::default();
     }
-    OverlaySnapshot {
+    let mut snapshot = OverlaySnapshot {
         participants: voice
             .participants
             .iter()
@@ -23,6 +23,7 @@ pub fn snapshot(voice: &VoiceStatus, audio: &AudioStatus) -> OverlaySnapshot {
                     })
                 };
                 OverlayParticipant {
+                    is_self: voice.own_slot == Some(p.slot),
                     account_id: p.account_id,
                     name: p.display_name().to_owned(),
                     avatar_id: p.avatar_id,
@@ -32,7 +33,14 @@ pub fn snapshot(voice: &VoiceStatus, audio: &AudioStatus) -> OverlaySnapshot {
                 }
             })
             .collect(),
-    }
+    };
+    snapshot.participants.sort_by_key(|p| !p.is_self);
+    snapshot
+}
+
+/// Matches the fixed local row in style.css; all other pixels pass through.
+pub fn over_self_controls(x: f64, y: f64) -> bool {
+    (6.0..274.0).contains(&x) && (6.0..58.0).contains(&y)
 }
 
 #[cfg(test)]
@@ -60,6 +68,34 @@ mod tests {
         }))
         .unwrap();
         (voice, audio)
+    }
+
+    #[test]
+    fn only_own_row_is_interactive_even_after_roster_reordering() {
+        let (mut voice, audio) = fixture();
+        voice.participants.reverse();
+        let view = snapshot(&voice, &audio);
+        assert!(view.participants[0].is_self);
+        assert!(!view.participants[1].is_self);
+        assert_eq!(view.participants[0].name, "self");
+        assert!(over_self_controls(6.0, 6.0));
+        assert!(over_self_controls(273.9, 57.9));
+        for (x, y) in [
+            (5.9, 6.0),
+            (274.0, 6.0),
+            (6.0, 58.0),
+            (6.0, 68.0),
+            (f64::NAN, 6.0),
+        ] {
+            assert!(!over_self_controls(x, y));
+        }
+        voice.own_slot = None;
+        assert!(
+            snapshot(&voice, &audio)
+                .participants
+                .iter()
+                .all(|p| !p.is_self)
+        );
     }
 
     #[test]

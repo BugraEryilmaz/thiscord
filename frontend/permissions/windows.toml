@@ -14,6 +14,9 @@ commands.allow = [
   "audio_load",
   "audio_current",
   "audio_save",
+  "audio_toggle",
+  "audio_shortcuts",
+  "audio_shortcuts_save",
   "audio_restrict",
   "audio_test",
   "audio_stop",
@@ -50,3 +53,8 @@ commands.allow = [
 identifier = "overlay-read"
 description = "Read presentation-only voice metadata."
 commands.allow = ["overlay_snapshot"]
+
+[[permission]]
+identifier = "overlay-self-controls"
+description = "Toggle only the local microphone mute and deafen while connected to voice."
+commands.allow = ["overlay_toggle_audio"]

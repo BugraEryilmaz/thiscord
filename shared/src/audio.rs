@@ -1,6 +1,44 @@
 //! Native audio control contracts; PCM never crosses the WebView bridge.
 use serde::{Deserialize, Serialize};
 
+/// Local self controls; deafen suppresses transmission without changing manual mute.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum AudioToggle {
+    Mute,
+    Deafen,
+}
+impl AudioToggle {
+    pub fn apply(self, settings: &mut AudioSettings) {
+        match self {
+            Self::Mute => settings.muted = !settings.muted,
+            Self::Deafen => settings.deafened = !settings.deafened,
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct AudioShortcuts {
+    /// Empty strings disable individual shortcuts. Native registration validates keys.
+    pub mute: String,
+    pub deafen: String,
+}
+impl Default for AudioShortcuts {
+    fn default() -> Self {
+        Self {
+            mute: "Control+Shift+M".into(),
+            deafen: "Control+Shift+D".into(),
+        }
+    }
+}
+
+#[derive(Clone, Serialize, Deserialize)]
+pub struct AudioShortcutStatus {
+    pub shortcuts: AudioShortcuts,
+    pub error: Option<String>,
+}
+
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum TransmitMode {
@@ -146,4 +184,38 @@ pub struct AudioRecordingStatus {
     pub directory: String,
     pub dropped_blocks: u64,
     pub error: Option<String>,
+}
+
+#[cfg(test)]
+mod control_tests {
+    use super::*;
+
+    #[test]
+    fn deafen_round_trip_preserves_manual_mute() {
+        let mut settings = AudioSettings::default();
+        AudioToggle::Mute.apply(&mut settings);
+        AudioToggle::Deafen.apply(&mut settings);
+        assert!(settings.muted && settings.deafened);
+        AudioToggle::Deafen.apply(&mut settings);
+        assert!(settings.muted && !settings.deafened);
+        AudioToggle::Mute.apply(&mut settings);
+        AudioToggle::Deafen.apply(&mut settings);
+        assert!(!settings.muted && settings.deafened);
+    }
+
+    #[test]
+    fn shortcut_defaults_and_toggle_wire_values_are_stable() {
+        let old: AudioSettings = serde_json::from_str("{}").unwrap();
+        assert!(!old.muted && !old.deafened);
+        let defaults: AudioShortcuts = serde_json::from_str("{}").unwrap();
+        assert_eq!(defaults, AudioShortcuts::default());
+        assert_eq!(
+            serde_json::to_string(&AudioToggle::Mute).unwrap(),
+            "\"mute\""
+        );
+        assert_eq!(
+            serde_json::to_string(&AudioToggle::Deafen).unwrap(),
+            "\"deafen\""
+        );
+    }
 }

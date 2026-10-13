@@ -64,7 +64,24 @@ pub fn start(app: &tauri::AppHandle) -> tauri::Result<()> {
                     let _ = window.hide();
                 }
             }
-            tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+            // The local row is first (6px padding, 268 x 52px). Query the OS cursor
+            // because a click-through WebView cannot receive pointer-enter events.
+            let interactive = show
+                && crate::native_voice::voice_status(app.state())
+                    .is_ok_and(|s| s.participants.iter().any(|p| Some(p.slot) == s.own_slot))
+                && window
+                    .cursor_position()
+                    .ok()
+                    .zip(window.inner_position().ok())
+                    .zip(window.scale_factor().ok())
+                    .is_some_and(|((cursor, origin), scale)| {
+                        thiscord_frontend::voice_overlay::over_self_controls(
+                            (cursor.x - f64::from(origin.x)) / scale,
+                            (cursor.y - f64::from(origin.y)) / scale,
+                        )
+                    });
+            let _ = window.set_ignore_cursor_events(!interactive);
+            tokio::time::sleep(std::time::Duration::from_millis(50)).await;
         }
     });
     Ok(())
@@ -101,9 +118,31 @@ pub async fn overlay_snapshot(app: tauri::AppHandle) -> Result<OverlaySnapshot, 
     })
     .await
     .map_err(|_| "Audio worker unavailable")??;
+    let settings = crate::native_audio::audio_current(app.clone()).await?;
     let voice = crate::native_voice::voice_status(app.state())?;
     if !voice.connected || voice.channel_id != before.channel_id {
         return Ok(OverlaySnapshot::default());
     }
-    Ok(thiscord_frontend::voice_overlay::snapshot(&voice, &audio))
+    let mut snapshot = thiscord_frontend::voice_overlay::snapshot(&voice, &audio);
+    for person in snapshot.participants.iter_mut().filter(|p| p.is_self) {
+        person.muted = settings.muted;
+        person.deafened = settings.deafened;
+        person.speaking &= !settings.muted && !settings.deafened;
+    }
+    Ok(snapshot)
+}
+
+#[tauri::command]
+pub async fn overlay_toggle_audio(
+    app: tauri::AppHandle,
+    action: thiscord_shared::audio::AudioToggle,
+) -> Result<(), String> {
+    let voice = crate::native_voice::voice_status(app.state())?;
+    if !voice.connected
+        || voice.own_slot.is_none()
+        || !app.state::<OverlayState>().enabled.load(Ordering::Relaxed)
+    {
+        return Err("Join voice to use overlay controls".into());
+    }
+    crate::native_audio::audio_toggle(app, action).await
 }

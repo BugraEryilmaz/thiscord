@@ -17,7 +17,7 @@ html:has(.voice-overlay), body:has(.voice-overlay) {
   margin: 0;
 }
 .voice-overlay { padding: 6px; user-select: none; pointer-events: none; }
-.overlay-person { display: flex; align-items: center; margin-bottom: 10px; height: 52px; }
+.overlay-person { position: relative; display: flex; align-items: center; margin-bottom: 10px; height: 52px; }
 .overlay-avatar {
   display: grid; place-items: center; flex: 0 0 48px; height: 48px;
   border: 3px solid #747781; border-radius: 50%; background: #303344;
@@ -30,6 +30,14 @@ html:has(.voice-overlay), body:has(.voice-overlay) {
   background: #17191ee6; color: #d6d8df; font-size: 14px; font-weight: 650;
   text-shadow: 0 1px 2px #000;
 }
+.overlay-self { width: 268px; pointer-events: auto; }
+.overlay-actions { display: flex; gap: 4px; position: absolute; left: 56px; right: 0; height: 100%; align-items: center; opacity: 0; pointer-events: none; }
+.overlay-self:hover .overlay-actions, .overlay-self:focus-within .overlay-actions { opacity: 1; pointer-events: auto; }
+.overlay-self:hover .overlay-label, .overlay-self:focus-within .overlay-label { opacity: 0; }
+.overlay-actions button { background: #17191ef5; color: white; border: 1px solid #747781; border-radius: 5px; padding: 7px 9px; font-size: 13px; cursor: pointer; }
+.overlay-actions button[aria-pressed="true"] { background: #7f1d1d; border-color: #fca5a5; }
+.overlay-actions button:disabled { opacity: .6; cursor: wait; }
+.overlay-actions button:focus-visible { outline: 2px solid white; }
 .overlay-status { color: #a5a9b4; }
 .overlay-speaking .overlay-avatar { border-color: #54e697; box-shadow: 0 0 8px #54e69766; }
 .overlay-speaking .overlay-label { color: white; }

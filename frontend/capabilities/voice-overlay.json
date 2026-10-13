@@ -1,10 +1,11 @@
 {
   "identifier": "voice-overlay",
-  "description": "Read-only voice roster; no credential, media control or plugin permissions.",
+  "description": "Voice roster and local mute/deafen toggles; no credential or general media permissions.",
   "windows": [
     "voice-overlay"
   ],
   "permissions": [
-    "overlay-read"
+    "overlay-read",
+    "overlay-self-controls"
   ]
 }
