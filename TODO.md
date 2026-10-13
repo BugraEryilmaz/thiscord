@@ -127,6 +127,10 @@ and single-process chat/media enforcement.
 - [ ] Physical microphone/headset, suspend and acoustic acceptance on all three OSes.
 - [ ] macOS runtime/permission spike; Wayland global shortcut portal integration.
 - [ ] Arbitrary sample-rate resampling and Bluetooth hands-free format support.
+- [x] Timestamp-aware adaptive receive playout, combined packet/PCM budgeting,
+  bounded fractional clock correction, deadline FEC/PLC and deterministic traces.
+- [ ] Adaptive playout listening/long-call acceptance with physical devices on
+  Windows/macOS/Linux, loaded workers and real jitter/loss; see docs/audio-playout.md.
 
 ## 5a. Voice isolation and speech quality
 

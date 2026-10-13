@@ -1,7 +1,5 @@
 #[cfg(all(test, any(feature = "neural-echo", feature = "deep-filter")))]
-#[path = "../../tests/support/audio_fixture.rs"]
-#[allow(dead_code)]
-mod fixture;
+use super::fixture;
 use super::frames;
 use sonora::{
     AudioProcessing, Config, StreamConfig,

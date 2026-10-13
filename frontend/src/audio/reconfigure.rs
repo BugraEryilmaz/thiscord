@@ -106,6 +106,10 @@ impl Pending {
                 debug.stop(); // New device clocks/formats require a new recording.
                 next.inherit(&s.devices);
                 std::mem::swap(&mut s.devices, next);
+                for remote in s.remotes.iter_mut().flatten() {
+                    remote.jitter = Default::default();
+                    remote.rate.reset();
+                }
                 s.device_watch = Default::default();
                 diagnostics::event("device_reconfigured", s.devices.info.clone());
                 s.recovery.reconfigured(&s.devices.info);
@@ -193,6 +197,7 @@ mod tests {
             id,
             label: "A speaker".into(),
             jitter: Default::default(),
+            rate: Default::default(),
             decoder: opus::Decoder::new(RATE, opus::Channels::Mono).unwrap(),
         });
         s.remotes[3 + thiscord_shared::voice::ROOM_CAPACITY] = Some(super::super::Remote {
@@ -200,6 +205,7 @@ mod tests {
             id,
             label: "Shared audio".into(),
             jitter: Default::default(),
+            rate: Default::default(),
             decoder: opus::Decoder::new(RATE, opus::Channels::Mono).unwrap(),
         });
         let target = thiscord_shared::audio::SpeakerVolumeTarget {
@@ -291,6 +297,7 @@ mod tests {
             id,
             label: "speaker".into(),
             jitter: Default::default(),
+            rate: Default::default(),
             decoder: opus::Decoder::new(RATE, opus::Channels::Mono).unwrap(),
         });
         s.devices.writers[3].volume(0.37).unwrap();
@@ -387,6 +394,7 @@ mod tests {
             id,
             label: "speaker".into(),
             jitter: Default::default(),
+            rate: Default::default(),
             decoder: opus::Decoder::new(RATE, opus::Channels::Mono).unwrap(),
         });
         old.devices.writers[3].volume(0.37).unwrap();

@@ -96,20 +96,6 @@ pub fn mixer(controls: Arc<Controls>) -> (Vec<StreamWriter>, Mixer) {
     )
 }
 impl StreamWriter {
-    /// Refill from actual device consumption, keeping 40-60 ms of decoded PCM.
-    /// A single 20 ms frame paced by a worker timer can empty before a late wake.
-    /// Keep this below the mixer's 60 ms stale-audio trimming threshold.
-    pub fn refill_frames(&self) -> usize {
-        (FRAME * 2)
-            .saturating_sub(self.queue.occupied_len())
-            .div_ceil(FRAME)
-    }
-    pub fn needs_concealment(&self) -> bool {
-        // Prefetch real packets freely, but give a missing packet time to arrive
-        // until only 10 ms of PCM remain. Do not spend network jitter tolerance
-        // just to fill the decoded cushion early.
-        self.queue.occupied_len() <= FRAME / 2
-    }
     pub fn write(&mut self, samples: &[f32]) -> usize {
         self.queue.push_slice(samples)
     }
@@ -140,7 +126,8 @@ impl Mixer {
         self.cues
             .request(self.controls.cues.swap(0, Ordering::Relaxed), deafened);
         let master = f32::from_bits(self.controls.master.load(Ordering::Relaxed));
-        // Catch up after a stall; never play a growing backlog of old speech.
+        // Adaptive remote queues top out below 36 ms: this legacy 60 ms safety
+        // trim applies to the local device tests, not to normal drift control.
         for stream in &mut self.streams {
             let generation = stream.control.generation.load(Ordering::Acquire);
             let changed = generation != stream.generation;

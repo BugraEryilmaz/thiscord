@@ -286,16 +286,16 @@ draining. Lost blocks carry a sequence gap that restarts DSP adaptation; playbac
 reference overflows are counted too. No per-sample allocation or DSP runs on the
 device callback. The processor is constructed before starting either device.
 Each received speaker owns a separate bounded packet jitter buffer, Opus decoder,
-PCM ring and gain. Jitter starts at roughly 60 ms, reorders sequence numbers,
-rejects duplicates/late packets, handles wrap, and requests bounded Opus packet
-loss concealment. A source switch resets decoding and its queued PCM.
-The worker refills decoded PCM from the output ring's actual consumption, aiming
-for 40-60 ms, instead of releasing one frame on an independent 20 ms timer. Work
-is capped at two decoded frames per stream per tick. Prefetch waits for missing
-packets while more than 10 ms of PCM remain, so filling the cushion early does
-not immediately trigger concealment of a delayed packet. A synthetic Opus/mixer
-regression checks sample continuity through irregular worker wakes and delayed
-packets; actual device scheduling and prolonged stalls still need live validation.
+PCM ring and gain. Receive preserves RTP media timestamps and local arrival times
+before worker queuing. Adaptive playout targets 40-120 ms for packets and decoded
+PCM together; decoded PCM refills at 15 ms, topping out near 35 ms. Real packets
+can be prefetched, but FEC/PLC waits until at most 5 ms of PCM remain. Each tick
+decodes at most two frames per source. A worker-side fractional resampler controls
+sender/output clock drift without periodic frame deletion. Source replacement,
+timestamp gaps and inactivity reset/rebuffer explicitly. The callback still feeds
+the final rendered signal to AEC, including rate correction, gains and clipping.
+See [adaptive playout](audio-playout.md) for limits, diagnostics, trace comparisons,
+resampling ownership and remaining acoustic/cross-platform acceptance.
 
 Playback mixes on the device callback with atomic gain changes. It allocates no
 buffers, waits on no locks, and does no networking/codec/DSP work. Queues cap
