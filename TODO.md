@@ -104,6 +104,10 @@ and single-process chat/media enforcement.
 ## 5. Frontend audio and media feasibility
 
 - [x] Native CPAL capture/playback, per-stream SPSC ring buffers and Opus codecs.
+- [x] Explicit microphone Opus in-band FEC (fixed 5% loss hint), deadline-bounded
+  successor recovery/PLC, honest attempt counters and deterministic loss regressions.
+- [ ] Validate FEC speech/bitrate tradeoffs with listening and physical clients
+  on Windows/macOS/Linux under real packet loss and jitter.
 - [x] Windows/Linux encrypted WebRTC software probes; three-OS CI build/test matrix.
 - [x] Select Rust media libraries and document native dependencies in docs/audio.md.
 - [x] Enumerate/select devices, persist settings and refresh device lists.

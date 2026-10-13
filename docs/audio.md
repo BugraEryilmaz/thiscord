@@ -287,8 +287,9 @@ reference overflows are counted too. No per-sample allocation or DSP runs on the
 device callback. The processor is constructed before starting either device.
 Each received speaker owns a separate bounded packet jitter buffer, Opus decoder,
 PCM ring and gain. Jitter starts at roughly 60 ms, reorders sequence numbers,
-rejects duplicates/late packets, handles wrap, and requests bounded Opus packet
-loss concealment. A source switch resets decoding and its queued PCM.
+rejects duplicates/late packets, handles wrap, and attempts Opus in-band FEC at
+the missing frame's deadline, with bounded packet-loss concealment as fallback.
+A source switch resets decoding and its queued PCM.
 The worker refills decoded PCM from the output ring's actual consumption, aiming
 for 40-60 ms, instead of releasing one frame on an independent 20 ms timer. Work
 is capped at two decoded frames per stream per tick. Prefetch waits for missing
@@ -296,6 +297,70 @@ packets while more than 10 ms of PCM remain, so filling the cushion early does
 not immediately trigger concealment of a delayed packet. A synthetic Opus/mixer
 regression checks sample continuity through irregular worker wakes and delayed
 packets; actual device scheduling and prolonged stalls still need live validation.
+
+### Opus microphone FEC policy
+
+Microphone encoding retains 48 kHz mono, 20 ms frames, `Application::Voip` and
+32 kbit/s. It explicitly sets `set_inband_fec(true)` and
+`set_packet_loss_perc(5)`. This is a conservative **fixed 5% expected-loss hint**,
+not a measured loss rate or dynamic adaptation; no RTCP feedback drives it.
+Redundancy spends part of the existing bitrate budget on the preceding speech
+frame, reducing bits available for the current frame and potentially changing
+bandwidth/mode selection. VBR packet sizes still vary. FEC is conditional on the
+codec's mode, available bits and signal; it is not present in every packet.
+
+The reviewed lockfile pins `opus 0.4.0` / `opusic-sys 0.7.5`, whose bundled
+`opus/package_version` identifies libopus **1.6.1**. In the wrapper's `src/lib.rs`,
+the boolean FEC setter sends `OPUS_SET_INBAND_FEC(1)`, and the loss setter sends
+`OPUS_SET_PACKET_LOSS_PERC`. The bundled `src/opus_encoder.c` accepts FEC values
+0..2 and loss percentages 0..100. The wrapper exposes only modes 0/1; mode 2's
+music-preserving preference is not requested. See the official
+[encoder controls](https://opus-codec.org/docs/opus_api-1.5/group__opus__encoderctls.html).
+Shared system audio retains its separate `Application::Audio`, 64 kbit/s encoder
+and default disabled FEC/zero loss hint; the microphone speech policy is not
+applied to music. All native receivers can opportunistically decode redundancy.
+
+The jitter decision is normal packet, FEC from the immediate successor, PLC, or
+wait. While more than 10 ms of PCM remain, a missing original can still arrive.
+At that existing refill deadline, an available successor is cloned by reference
+and decoded with `fec=true` into exactly 960 samples. It remains buffered for
+normal decoding exactly once, after the missing interval. The expected sequence
+advances once, so a late original cannot replay the recovered interval. No extra
+wait is introduced for FEC. With burst loss, earlier gaps use PLC; only the gap
+immediately preceding an available packet can use that packet's redundancy.
+The startup buffer, eight-packet cap, ten-consecutive-missing limit and maximum
+two output frames per stream per worker tick remain bounded.
+
+The [Opus decoder API](https://opus-codec.org/docs/opus_api-1.5/group__opus__decoder.html)
+requires the exact missing duration and serial decode order. It may return PLC
+successfully when FEC is absent (also confirmed in bundled `src/opus_decoder.c`).
+Empty, malformed or non-20-ms packets use explicit PLC. A decode failure resets
+potentially modified decoder state before one bounded PLC fallback; a failed PLC
+produces one silent interval. No codec work runs in device callbacks. Recovered
+audio uses the existing per-source PCM queues, generation invalidation, volume,
+deafen and post-mix AEC reference. Only successfully decoded **normal** packets
+refresh remote activity; FEC attempts cannot extend an indicator using PLC.
+
+Opt-in local `audio_snapshot` logs include per-live-decoder `opus_decode` counters:
+normal frames, FEC attempts, successful FEC-call output frames, explicit PLC
+frames, decode/validation errors and silent fallback frames. Counters reset with
+source replacement. `fec_output_frames` includes implicit PLC and is **not a
+verified recovery count**; `verified_fec_frames` is explicitly null because the
+API used here cannot establish that count. No payloads or speaker identities are
+included. Existing `useinbandfec=1` SDP remains appropriate: it advertises receiver
+capability/preference, not guaranteed encoder redundancy, including for shared
+audio ([RFC 7587](https://www.rfc-editor.org/rfc/rfc7587.html#section-6.1)).
+
+`audio::codec::tests` encodes the committed synthetic speech WAV with the production
+policy, compares aligned dropped intervals with a PLC-only decoder, and requires
+FEC output distinct from PLC. The deterministic transport/playout simulation covers
+isolated and burst loss, duplicates, reordering, sequence wrap and irregular worker
+wakes through the actual remote decoder/mixer. Additional jitter and codec tests
+cover deadline waiting, absent redundancy/successors, late packets, invalid packets,
+source reset, deafen and generation invalidation. These are software regressions,
+not evidence of acoustic quality or real-network latency. Listening, microphone
+quality/bitrate tradeoffs, real loss/jitter trials and Windows/macOS/Linux hardware
+acceptance remain pending.
 
 Playback mixes on the device callback with atomic gain changes. It allocates no
 buffers, waits on no locks, and does no networking/codec/DSP work. Queues cap
