@@ -220,7 +220,7 @@ pub fn detail(value: Option<&AudioQuality>) -> String {
     for s in &q.streams {
         let _ = writeln!(
             out,
-            "\nStream slot {} · jitter {}/8 packets · PCM {}/5760 samples · buffered playout {:.1} ms (excludes device/network/DSP delay)",
+            "\nStream slot {} · jitter {}/12 packets · PCM {}/5760 samples · buffered playout {:.1} ms (excludes device/network/DSP delay)",
             s.slot, s.jitter_packets, s.pcm_samples, s.buffered_playout_ms
         );
         counts(&mut out, &s.metrics, true);
@@ -229,7 +229,9 @@ pub fn detail(value: Option<&AudioQuality>) -> String {
             "Verified FEC recoveries: {}",
             s.verified_fec_packets
                 .map(|v| v.to_string())
-                .unwrap_or_else(|| "unavailable (decoder currently uses PLC only)".into())
+                .unwrap_or_else(
+                    || "unavailable (Opus does not identify actual FEC recovery)".into()
+                )
         );
     }
     out.push_str("\nEmpty queues and PLC do not prove audible failure or network loss. Stream starvation is not a device xrun. Totals reset on reconnect; source totals reset on slot reassignment. Disk logging remains separately opt-in.\nFor clipping, check microphone/output gain. For processing misses, compare optional DSP settings under the same CPU load. For late packets, compare local queue drops before attributing the issue to the network.");

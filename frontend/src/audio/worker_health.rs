@@ -27,6 +27,7 @@ fn name(code: u64) -> &'static str {
     .unwrap_or("unknown")
 }
 pub(super) struct Probe {
+    pub outgoing: Arc<outgoing::Control>,
     start: Instant,
     heartbeat: AtomicU64,
     operation: AtomicU64,
@@ -39,6 +40,7 @@ pub(super) struct Probe {
 impl Probe {
     pub fn new() -> Arc<Self> {
         let probe = Arc::new(Self {
+            outgoing: Default::default(),
             start: Instant::now(),
             heartbeat: AtomicU64::new(0),
             operation: AtomicU64::new(0),
@@ -93,7 +95,7 @@ impl Probe {
             .saturating_sub(self.heartbeat.load(Ordering::Acquire))
     }
     pub fn snapshot(&self) -> serde_json::Value {
-        serde_json::json!({"heartbeat_age_ms":self.age(),"operation":name(self.operation.load(Ordering::Relaxed)),"alive":self.alive.load(Ordering::Acquire),"active":self.active.load(Ordering::Acquire),"packet_drops":self.packet_drops.load(Ordering::Relaxed),"live_device_sets":lifecycle::live(),"worker_failures":self.restarts.load(Ordering::Relaxed),"max_processing_us":self.max_processing_us.load(Ordering::Relaxed)})
+        serde_json::json!({"outgoing":self.outgoing.snapshot(),"heartbeat_age_ms":self.age(),"operation":name(self.operation.load(Ordering::Relaxed)),"alive":self.alive.load(Ordering::Acquire),"active":self.active.load(Ordering::Acquire),"packet_drops":self.packet_drops.load(Ordering::Relaxed),"live_device_sets":lifecycle::live(),"worker_failures":self.restarts.load(Ordering::Relaxed),"max_processing_us":self.max_processing_us.load(Ordering::Relaxed)})
     }
     pub fn exited(&self) {
         self.alive.store(false, Ordering::Release);

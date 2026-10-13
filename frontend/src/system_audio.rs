@@ -53,6 +53,8 @@ fn capture(binding: &Binding, stop: &AtomicBool) -> Result<(), String> {
         .map_err(|_| "Cannot access system audio")?;
     let mut encoder = opus::Encoder::new(48_000, opus::Channels::Mono, opus::Application::Audio)
         .map_err(|_| "Cannot initialize shared audio encoder")?;
+    // Shared music/system audio keeps continuous transmission.
+    encoder.set_dtx(false).map_err(|e| e.to_string())?;
     encoder
         .set_bitrate(opus::Bitrate::Bits(64_000))
         .map_err(|_| "Cannot configure shared audio encoder")?;

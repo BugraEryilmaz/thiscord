@@ -72,7 +72,7 @@ fn replay(args: &[String]) -> Result<(), Box<dyn std::error::Error>> {
     let mut lines = BufReader::new(file).lines();
     let header: Value = serde_json::from_str(&lines.next().ok_or("Missing timeline header")??)?;
     if header["type"] != "header"
-        || header["schema"] != 1
+        || !matches!(header["schema"].as_u64(), Some(1 | 2))
         || header["rate"] != 48_000
         || header["channels"] != 1
     {
@@ -84,9 +84,18 @@ fn replay(args: &[String]) -> Result<(), Box<dyn std::error::Error>> {
     let mut processed = vec![0.0; microphone.len()];
     let mut complete = false;
     let mut capture_blocks = 0;
+    let mut capture_after = None;
     for line in lines {
         let event: Value = serde_json::from_str(&line?)?;
         match event["type"].as_str() {
+            Some("capture_boundary") if header["schema"] == 2 => {
+                capture_after = Some(
+                    event["after_sample"]
+                        .as_i64()
+                        .ok_or("Missing capture boundary")?,
+                );
+                processing.clear_enhancement_history();
+            }
             Some("settings") => processing.settings(&configure(serde_json::from_value(
                 event["settings"].clone(),
             )?)?)?,
@@ -137,13 +146,35 @@ fn replay(args: &[String]) -> Result<(), Box<dyn std::error::Error>> {
                             .as_i64()
                             .filter(|d| (0..=500).contains(d))
                             .ok_or("Invalid capture delay")?;
-                        processing.capture_frame(&mut frame, delay as i32)?;
+                        let at = event["observed_sample"]
+                            .as_i64()
+                            .unwrap_or(offset as i64 - prefix as i64);
+                        processing.capture_frame_retained(
+                            &mut frame,
+                            delay as i32,
+                            capture_after.is_none_or(|after| at >= after),
+                        )?;
                         processed[range].copy_from_slice(&frame[prefix..prefix + count]);
                         capture_blocks += 1;
                     }
                     Some("transmit") => {
                         if event["gate_open"] == true {
-                            output[range.clone()].copy_from_slice(&processed[range]);
+                            let delay = if header["schema"] == 1 {
+                                0
+                            } else {
+                                event["source_delay_samples"]
+                                    .as_u64()
+                                    .filter(|d| matches!(d, 0 | 2880))
+                                    .ok_or("Invalid gate delay")?
+                                    as usize
+                            };
+                            // At recording start, retained PCM may predate the
+                            // fixture. It cannot be reconstructed; leave zero.
+                            for destination in range {
+                                if let Some(source) = destination.checked_sub(delay) {
+                                    output[destination] = processed[source];
+                                }
+                            }
                         }
                     }
                     _ => return Err("Unknown recorded track".into()),
@@ -184,6 +215,90 @@ fn replay(args: &[String]) -> Result<(), Box<dyn std::error::Error>> {
 mod tests {
     use super::*;
     use serde_json::json;
+    #[test]
+    fn replay_maps_preroll_to_source_samples_and_supports_ptt_without_delay() {
+        let folder = std::env::temp_dir().join(format!(
+            "thiscord-gate-replay-{}",
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::create_dir(&folder).unwrap();
+        for name in [
+            "speaker-output.wav",
+            "microphone-input.wav",
+            "transmit-input.wav",
+        ] {
+            let mut writer = hound::WavWriter::create(
+                folder.join(name),
+                hound::WavSpec {
+                    channels: 1,
+                    sample_rate: 48000,
+                    bits_per_sample: 32,
+                    sample_format: hound::SampleFormat::Float,
+                },
+            )
+            .unwrap();
+            for sample in 0..4800 {
+                writer
+                    .write_sample(if name == "microphone-input.wav" {
+                        (sample + 1) as f32 / 10000.0
+                    } else {
+                        0.0
+                    })
+                    .unwrap();
+            }
+            writer.finalize().unwrap();
+        }
+        let mut timeline = format!(
+            "{}\n",
+            json!({"type":"header","schema":2,"rate":48000,"channels":1,"settings":AudioSettings::default()})
+        );
+        timeline.push_str(&format!(
+            "{}\n",
+            json!({"type":"capture_boundary","after_sample":480})
+        ));
+        for offset in (0..4800).step_by(480) {
+            for track in ["microphone", "transmit"] {
+                timeline.push_str(&format!("{}\n", json!({"type":"block","track":track,"offset":offset,"count":480,"prefix":0,"gap":false,"delay_ms":0,"gate_open":true,"source_delay_samples":if offset < 3840 {2880} else {0}})));
+            }
+        }
+        timeline.push_str(&format!(
+            "{}\n",
+            json!({"type":"end","complete":true,"samples":4800})
+        ));
+        std::fs::write(folder.join("timeline.jsonl"), &timeline).unwrap();
+        let output = folder.join("replay.wav");
+        replay(&[
+            folder.to_string_lossy().into_owned(),
+            output.to_string_lossy().into_owned(),
+        ])
+        .unwrap();
+        let samples = wav(&output).unwrap();
+        for (index, sample) in samples.iter().enumerate() {
+            let expected = match index {
+                0..3360 => 0.0,
+                3360..3840 => (index - 2880 + 1) as f32 / 10000.0,
+                _ => (index + 1) as f32 / 10000.0,
+            };
+            assert_eq!(*sample, expected);
+        }
+        std::fs::write(
+            folder.join("timeline.jsonl"),
+            timeline.replace("2880", "2881"),
+        )
+        .unwrap();
+        assert!(
+            replay(&[
+                folder.to_string_lossy().into_owned(),
+                folder.join("invalid.wav").to_string_lossy().into_owned()
+            ])
+            .is_err()
+        );
+        assert!(!folder.join("invalid.wav").exists());
+        std::fs::remove_dir_all(folder).unwrap();
+    }
     #[test]
     fn replay_preserves_alignment_and_recorded_gate_and_rejects_incomplete_input() {
         let folder = std::env::temp_dir().join(format!(

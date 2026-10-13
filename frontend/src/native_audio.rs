@@ -347,7 +347,7 @@ pub fn start_voice(
     guild: thiscord_shared::GuildId,
     connection: audio::connection::Connection,
     settings: AudioSettings,
-    outgoing: tokio::sync::mpsc::Sender<audio::outgoing::Packet>,
+    outgoing: tokio::sync::mpsc::Sender<thiscord_frontend::audio::outgoing::EncodedFrame>,
     microphone: bool,
 ) -> Result<AudioStatus, String> {
     let state = app.state::<AudioState>();

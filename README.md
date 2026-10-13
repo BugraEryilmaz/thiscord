@@ -58,6 +58,9 @@ pauses when nobody watches. Sender/playback diagnostics report measured rates an
 See [screen sharing, requirements and acceptance checks](docs/screen-sharing.md).
 For echo troubleshooting, Audio & voice can save a 60-second local debug recording
 of playback, raw microphone and outgoing audio, with metadata for offline DSP replay.
+Voice activation uses sustained energy before automatic gain, hysteresis and a
+60 ms pre-roll delay to retain short quiet onsets. Push-to-talk bypasses the
+automatic gate and its delay. See [activation behavior and limits](docs/voice-activation.md).
 Experimental DeepFilterNet3 noise suppression is available in Audio & voice;
 see [model selection, regression tests and benchmarks](docs/deep-filter.md).
 Experimental neural residual echo estimation is also available, independently

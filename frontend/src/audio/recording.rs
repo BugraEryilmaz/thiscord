@@ -42,7 +42,7 @@ struct Block {
     gap: bool,
     reset: bool,
     delay_ms: i32,
-    delivery: Option<(bool, bool)>,
+    delivery: Option<(bool, bool, usize)>,
 }
 #[derive(Clone, Copy)]
 pub(super) struct Continuity {
@@ -61,6 +61,7 @@ impl From<bool> for Continuity {
 enum Event {
     Block(Block),
     Settings(AudioSettings),
+    CaptureBoundary(Instant),
 }
 struct State {
     // 0 = recording, 1 = draining/finalizing, 2 = finished (possibly failed).
@@ -121,7 +122,7 @@ impl Recorder {
         });
         let (tx, rx) = mpsc::sync_channel(QUEUE_BLOCKS);
         let writer_state = state.clone();
-        let header = json!({"type":"header", "schema":1, "version":env!("CARGO_PKG_VERSION"),
+        let header = json!({"type":"header", "schema":2, "version":env!("CARGO_PKG_VERSION"),
             "os":std::env::consts::OS, "arch":std::env::consts::ARCH,
             "rate":RATE,"channels":1,"max_seconds":MAX_SECONDS,
             "settings":sanitized(settings),"devices":devices});
@@ -179,7 +180,7 @@ impl Recorder {
         pcm: &[f32; 480],
         continuity: Continuity,
         delay_ms: i32,
-        delivery: Option<(bool, bool)>,
+        delivery: Option<(bool, bool, usize)>,
     ) {
         if self.active.is_some() {
             self.send(Event::Block(Block {
@@ -196,6 +197,11 @@ impl Recorder {
     pub fn settings(&mut self, settings: &AudioSettings) {
         if self.active.is_some() {
             self.send(Event::Settings(sanitized(settings.clone())));
+        }
+    }
+    pub fn capture_boundary(&mut self, at: Instant) {
+        if self.active.is_some() {
+            self.send(Event::CaptureBoundary(at));
         }
     }
     pub fn status(&self) -> Option<AudioRecordingStatus> {
@@ -286,7 +292,8 @@ impl Wave {
         Ok(
             json!({"type":"block","track":block.track.name(),"offset":offset,"count":count,
             "prefix":prefix,"observed_sample":observed_sample,"gap":block.gap,"reset":block.reset,"delay_ms":block.delay_ms,
-            "accepted":block.delivery.map(|d|d.0),"gate_open":block.delivery.map(|d|d.1)}),
+            "accepted":block.delivery.map(|d|d.0),"gate_open":block.delivery.map(|d|d.1),
+            "source_delay_samples":block.delivery.map(|d|d.2)}),
         )
     }
 }
@@ -323,6 +330,18 @@ fn write_session(
                 "{}",
                 json!({"type":"settings","settings":settings})
             )?,
+            Event::CaptureBoundary(at) => {
+                let seconds = if at >= state.origin {
+                    at.duration_since(state.origin).as_secs_f64()
+                } else {
+                    -state.origin.duration_since(at).as_secs_f64()
+                };
+                writeln!(
+                    metadata,
+                    "{}",
+                    json!({"type":"capture_boundary","after_sample":(seconds * RATE as f64).round() as i64})
+                )?;
+            }
         }
         if last_flush.elapsed() >= Duration::from_secs(1) {
             for wave in &mut waves {
@@ -366,6 +385,8 @@ It does not include codec/network loss. accepted in timeline records admission\n
 to the voice transport queue, not confirmation of server or listener delivery.\n\n\
 Timeline preserves worker processing order, capture/playback timestamps, queue\n\
 gaps and settings. Continuous samples are not trimmed for timestamp jitter.\n\
+Schema 2 records source_delay_samples (60 ms voice activation, zero PTT) and\n\
+capture_boundary enhancement resets. Use a current audio_replay executable.\n\
 Input and output clocks may drift; inspect observed_sample for precise analysis.\n\
 A missing end record or complete=false means the recording is incomplete.\n\
 DSP was already adapting when capture began; replay starts fresh. Use the first\n\
@@ -423,7 +444,7 @@ mod tests {
             &[0.0; 480],
             false.into(),
             0,
-            Some((true, false)),
+            Some((true, false, 2880)),
         );
         let second = at + Duration::from_millis(10);
         recorder.block(
@@ -440,12 +461,13 @@ mod tests {
             &[0.1; 480],
             false.into(),
             0,
-            Some((false, true)),
+            Some((false, true, 2880)),
         );
         recorder.settings(&AudioSettings {
             muted: true,
             ..Default::default()
         });
+        recorder.capture_boundary(at + Duration::from_millis(20));
         recorder.stop();
         done(&state);
         let status = recorder.status().unwrap();
@@ -468,7 +490,10 @@ mod tests {
             .map(|s| serde_json::from_str(s).unwrap())
             .collect();
         assert_eq!(events[3]["gate_open"], false);
+        assert_eq!(events[3]["source_delay_samples"], 2880);
         assert_eq!(events[5]["accepted"], false);
+        assert_eq!(events[7]["type"], "capture_boundary");
+        assert_eq!(events[7]["after_sample"], 960);
         assert_eq!(events.last().unwrap()["complete"], true);
         #[cfg(unix)]
         {

@@ -20,19 +20,19 @@ means unavailable, never 0% loss. Snapshots are approximate across threads.
 | Capture / reference overflow | mono samples / device session | Samples rejected by the respective 120 ms queue; divide by input / output samples respectively. |
 | Input / output clipped | mono samples / device session | Input magnitude >=0.999 after downmix (a near-full-scale indicator); output exceeding full scale before hard clipping, after gains, excluding deafen. Divide by input / output samples. Not a measurement of physical device clipping. |
 | Output samples | mono sample frames / device session | Frames rendered, independent of device channel count. |
-| Outgoing offered, full, expired, invalidated, sent, send failed | packets / connection | One offered packet per encoder result; each rejection has one reason. Expiry is >100 ms since enqueue. Invalidated means closed connection or tightened stop/mute/deafen/PTT controls. Sent means accepted by WebRTC, not delivered. Denominator: offered packets. |
+| Outgoing offered, full, expired, invalidated, sent, send failed | packets / connection | One offered packet per non-omitted encoder result; DTX omission is not a drop. Each rejection has one reason, including abandoned queued packets. Expiry is capture age >=100 ms plus the fixed, capped activation allowance (60 ms automatic, zero PTT); DSP delay is included. Invalidated means closed connection, cancelled delivery, or a changed control generation (including relaxation). Sent means accepted by WebRTC, not delivered. Denominator: offered packets. |
 | Incoming application queue drops | packets / connection | Local media queue rejected packets; separate from network statistics. |
-| Received / duplicate / reordered / late | packets / source | Jitter input; duplicate means seen in the bounded 64-sequence history; reordered means unseen and behind the highest arrival; late means older than playout cursor. Duplicate and late are disjoint; reordered may also be late. Denominator: received packets. |
-| Jitter overflow / resync discard / invalid payload | packets / source | Local buffer policy drops, never network loss. Denominator: received packets. |
-| Sequence gaps | packets / source | Missing sequence at playout with a later packet already buffered; not empty-tail PLC, silence or DTX timestamp gaps. Attribution across sender/SFU/network/application is incomplete. Not an end-to-end network loss estimate. |
-| FEC attempts / verified recoveries | packets / source | Current decoder never requests FEC: attempts zero, verified recovery unavailable. Future FEC callers must report attempts independently from observable recovery. Successful decode alone does not prove FEC. |
-| PLC | mono samples / source | Samples actually returned by empty-input Opus decoding, including tail concealment. Display ms = samples / 48. Denominator: decoded samples. PLC is not proof of packet loss or audible failure. |
+| Received / duplicate / reordered / late | packets / source | Packets presented to a source; duplicate means seen in the bounded 32-entry sequence/timestamp history; reordered means unseen media behind the highest observed timestamp; late means rejected behind the media watermark. A repeated late packet can count as both duplicate and late; reordered may also be late. Locally expired packets skip arrival estimation. Denominator: received packets. |
+| Jitter overflow / resync discard / invalid payload | packets / source | Local capacity, stale worker/jitter queue or live-edge resync drops, and invalid Opus payloads; never network loss. Denominator: received packets. |
+| Sequence gaps | packets / source | Sequence holes observed between consumed packets; not empty-tail PLC or DTX timestamp gaps. Lost DTX updates can still produce sequence holes. Attribution across sender/SFU/network/application is incomplete. Not an end-to-end network loss estimate. |
+| FEC attempts / verified recoveries | packets / source | FEC decode requests, including errors; verified recovery remains unavailable because libopus may return PLC from a successful FEC call. The adjacent-packet policy is documented in audio.md. |
+| PLC | mono samples / source | Samples actually returned by explicit empty-input Opus decoding, including tail concealment and fallback after decode errors. Fractional gap silence and unobservable PLC within a FEC call are excluded. Display ms = samples / 48. Denominator: decoded samples. PLC is not proof of packet loss or audible failure. |
 | Decode errors / PCM overflow | packets / samples / source | Codec failures and decoded samples rejected by the local PCM ring. |
-| Playback starvation | missing mono samples / source | Empty PCM while playout has started and packets remain buffered for decoding. Excludes deafen, inactive slots and zero gains. Local buffering/scheduling evidence, not a device xrun or proof of an audible glitch. |
+| Playback starvation | missing mono samples / source | Empty PCM while playout has started and packets remain buffered for decoding. Excludes explicit DTX, deafen, inactive slots and zero gains. Local buffering/scheduling evidence, not a device xrun or proof of an audible glitch. |
 | Unclassified empty playback | mono samples / source | Empty active queue without buffered-media evidence; may be remote inactivity, DTX, network interruption or scheduling. Never added to loss/starvation. |
-| Intentional silence | mono samples / source | Inactive/deafened/zero-gain output slots; no loss/starvation. Muted microphone affects sending, not listening. |
+| Intentional silence | mono samples / source | Inactive/deafened/zero-gain output slots and empty queues during explicit DTX/inactivity; no loss/starvation. Muted microphone affects sending, not listening. |
 | PCM policy discard | mono samples / source | Backlog trimmed or invalidated by source/gain/deafen controls; separate from empty queues. |
-| Queue occupancy | packets, blocks, mono samples | Instantaneous jitter, capture/reference and PCM depths. Playout buffer ms = jitter packets * 20 + PCM samples / 48; excludes devices, network, codec/DSP delay, not end-to-end latency. |
+| Queue occupancy | packets, blocks, mono samples | Instantaneous jitter (maximum 12 packets), capture/reference and PCM depths. Playout buffer ms = jitter packets * 20 + PCM samples / 48; excludes devices, network, codec/DSP delay, not end-to-end latency. |
 | DSP capture / render, encode / decode duration | microseconds / invocation | Worker wall duration, including preemption; 10 ms DSP and 20 ms codec budgets. Miss is strictly greater than budget. Denominator: timed calls. Errors are timed too. |
 | Timing percentiles | microseconds / recent calls | Fixed upper-bound histogram bins; p50/p95/p99 unavailable with no observations. Last bin reports the observed max. No event history. |
 | SFU receiver loss report | signed packets / connection | WebRTC audio receive and loss estimates summed over inbound audio tracks, cumulative since peer creation. Duplicates can make loss negative. The forwarded sequence space may retain upstream gaps: this is not isolated link loss. Expires after three seconds. Denominator for an estimated fraction would be received + max(lost, 0), not decoded/PLC frames; no percentage is presented as end-to-end loss. |
@@ -51,10 +51,10 @@ event history, background recording or new persistent preference is introduced.
 Physical multi-user listening, real network impairment, long calls under CPU
 contention, and native macOS/Linux device validation remain acceptance work.
 
-## Verification on Windows (2026-10-13)
+## Initial verification on Windows (2026-10-13)
 
-The audited 81-test baseline passed before editing. Targeted native tests, the
-individual `deep-filter` and `neural-echo` feature builds, and the combined
+Before the main-branch integration, the audited 81-test baseline passed before
+editing. Targeted native tests, the individual `deep-filter` and `neural-echo` feature builds, and the combined
 `deep-filter,neural-echo-probe` suite passed; the final combined run selected 110
 tests. Shared contract tests, native desktop and WASM UI checks, targeted Clippy
 (including audio tests/examples), formatting and whitespace checks passed.
@@ -76,3 +76,30 @@ cargo clippy -p thiscord-frontend --lib --tests --examples --features deep-filte
 cargo run -p thiscord-frontend --example audio_bench --features native-audio --profile ci --locked
 cargo fmt --all -- --check
 ```
+
+## Main-branch integration verification (2026-10-13)
+
+The merge retains capture-age admission, control fences, gate pre-roll, Opus
+FEC/DTX, adaptive playout and AEC reference timing from main. Diagnostics now
+observe those paths: DTX omissions are not transport drops; FEC requests remain
+separate from explicit PLC; fractional gap silence is not PLC; cancelled queued
+frames have one invalidated outcome. Definitions and local presentation above
+reflect the 12-packet jitter capacity and capture-age deadline.
+
+On Windows with Rust 1.98.1, the committed lockfile and configured build directory:
+
+- Native audio/presentation tests: 176 passed.
+- Combined `deep-filter,neural-echo-probe` audio/presentation suite: 187 passed;
+  the subsequently added DTX offered/drop regression also passed with both the
+  native and combined feature selections.
+- Shared contracts: 27 passed.
+- Optimized `ci` builds: native `thiscord-desktop` with `desktop`, and only
+  `thiscord-ui` for `wasm32-unknown-unknown`.
+- Clippy with warnings denied: combined audio library/tests/examples, desktop
+  binary, and WASM UI. Formatting and whitespace checks passed.
+
+The WASM commands report an upstream future-compatibility warning for
+`proc-macro-error2` 2.0.1; they succeed with the pinned compiler. Backend behavior
+is unchanged, so backend/WSL checks were not rerun. These results do not establish
+physical audio quality or macOS/Linux runtime compatibility; the acceptance items
+in TODO.md remain open.
