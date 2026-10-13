@@ -9,6 +9,7 @@ mod health;
 pub mod jitter;
 mod lifecycle;
 pub mod mixer;
+pub mod outgoing;
 pub mod processing;
 mod reconfigure;
 pub mod reconnect;
@@ -126,7 +127,7 @@ where
                     return;
                 }
                 activity.callback(true);
-                writer.begin(frames::capture_time(Instant::now(), info.timestamp()));
+                writer.begin_capture(frames::capture_time(Instant::now(), info.timestamp()));
                 let mut peak = 0.0_f32;
                 let mut dropped = 0;
                 for frame in data.chunks_exact(channels) {
@@ -170,7 +171,7 @@ pub enum Command {
         volumes: volumes::Profile,
         connection: connection::Connection,
         settings: AudioSettings,
-        outgoing: tokio::sync::mpsc::Sender<bytes::Bytes>,
+        outgoing: tokio::sync::mpsc::Sender<outgoing::EncodedFrame>,
         microphone: bool,
     },
     Packet {
@@ -232,6 +233,9 @@ impl Default for AudioEngine {
     }
 }
 impl AudioEngine {
+    pub fn outgoing_control(&self) -> Arc<outgoing::Control> {
+        self.probe.outgoing.clone()
+    }
     pub fn diagnostic_snapshot(&self) {
         diagnostics::event("requested_worker_snapshot", self.probe.snapshot());
     }
@@ -271,6 +275,7 @@ impl AudioEngine {
                     )));
                     if result.is_ok() { break; }
                     worker_inhibit.store(true, Ordering::Release);
+                    worker_probe.outgoing.invalidate();
                     worker_deafen.store(true, Ordering::Release);
                     worker_pressed.store(false, Ordering::Release);
                     worker_probe.active.store(false, Ordering::Release);
@@ -300,14 +305,19 @@ impl AudioEngine {
                 self.debug_stop.store(true, Ordering::Release);
             }
             Command::Stop => {
+                self.probe.outgoing.invalidate();
                 self.stop.store(true, Ordering::Release);
             }
             Command::Pressed(value) => {
+                if !value || !self.pressed.load(Ordering::Acquire) {
+                    self.probe.outgoing.invalidate();
+                }
                 self.pressed.store(*value, Ordering::Release);
             }
             Command::Settings(settings)
             | Command::Start { settings, .. }
             | Command::VoiceStart { settings, .. } => {
+                self.probe.outgoing.invalidate();
                 self.inhibit
                     .store(settings.muted || settings.deafened, Ordering::Release);
                 self.deafen.store(settings.deafened, Ordering::Release);
@@ -319,6 +329,7 @@ impl AudioEngine {
     /// is in flight. Only an ordered settings command can relax them again.
     pub fn restrict(&self, settings: &AudioSettings) {
         if settings.muted || settings.deafened {
+            self.probe.outgoing.invalidate();
             self.inhibit.store(true, Ordering::Release);
         }
         if settings.deafened {
@@ -551,7 +562,11 @@ struct Session {
     next: Instant,
     started: Instant,
     hold: usize,
-    outgoing: Option<tokio::sync::mpsc::Sender<bytes::Bytes>>,
+    outgoing: Option<tokio::sync::mpsc::Sender<outgoing::EncodedFrame>>,
+    media_clock: outgoing::MediaClock,
+    transmit_control: Arc<outgoing::Control>,
+    encoder_generation: u64,
+    encoder_active: bool,
     remotes: Vec<Option<Remote>>,
     processed_level: f32,
     processing: processing::Processing,
@@ -591,7 +606,9 @@ impl Session {
             .store(pressed.load(Ordering::Acquire), Ordering::Release);
         devices.play()?;
         self.recovery.succeeded(&devices.info);
+        self.transmit_control.invalidate();
         self.devices = devices;
+        self.media_clock.restart_device();
         self.device_watch = Default::default();
         diagnostics::event("device_active", self.devices.info.clone());
         self.processing.reset();
@@ -679,6 +696,10 @@ impl Session {
             started: Instant::now(),
             hold: 0,
             outgoing: None,
+            media_clock: Default::default(),
+            transmit_control: Default::default(),
+            encoder_generation: 0,
+            encoder_active: false,
             remotes: (0..MAX_STREAMS).map(|_| None).collect(),
             processed_level: 0.0,
             processing,
@@ -736,6 +757,7 @@ impl Session {
             if stop.load(Ordering::Acquire) {
                 break;
             }
+            let generation = self.transmit_control.generation();
             let Some(packet) = self.processing.capture_tapped(
                 &mut self.devices.capture,
                 &mut |frame, gap, reset, delay| {
@@ -759,16 +781,20 @@ impl Session {
                 .control
                 .pressed
                 .store(pressed.load(Ordering::Acquire), Ordering::Relaxed);
-            self.capture_packet(packet, inhibit, debug)?;
+            self.capture_packet(packet, generation, inhibit, debug)?;
         }
         Ok(())
     }
     fn capture_packet(
         &mut self,
         captured: processing::Captured,
+        generation: u64,
         inhibit: &AtomicBool,
         debug: &mut recording::Recorder,
     ) -> Result<(), String> {
+        let media_position = self.media_clock.position(captured.at[0], captured.position);
+        let oldest_capture =
+            outgoing::oldest_capture(captured.at[0], self.processing.enhancement_delay_samples());
         let mut pcm = captured.pcm;
         let peak = pcm.iter().fold(0.0_f32, |p, v| p.max(v.abs()));
         self.processed_level = peak;
@@ -777,7 +803,10 @@ impl Session {
         } else {
             self.hold = self.hold.saturating_sub(1);
         }
-        let active = !inhibit.load(Ordering::Acquire)
+        let active = self
+            .transmit_control
+            .fresh_capture(generation, oldest_capture)
+            && !inhibit.load(Ordering::Acquire)
             && !self.devices.control.mute.load(Ordering::Relaxed)
             && !self.devices.control.deafen.load(Ordering::Relaxed)
             && if self.devices.control.push_to_talk.load(Ordering::Relaxed) {
@@ -792,15 +821,48 @@ impl Session {
         if !active {
             pcm.fill(0.0);
         }
+        if generation != self.encoder_generation || (!active && self.encoder_active) {
+            // A zero-input Opus frame can otherwise retain earlier speech history.
+            self.encoder.reset_state().map_err(|e| e.to_string())?;
+        }
+        self.encoder_generation = generation;
+        self.encoder_active = active;
         let mut packet = [0_u8; 4000];
         let n = self
             .encoder
             .encode_float(&pcm, &mut packet)
             .map_err(|e| e.to_string())?;
         if let Some(outgoing) = &self.outgoing {
-            let accepted = outgoing
-                .try_send(bytes::Bytes::copy_from_slice(&packet[..n]))
-                .is_ok();
+            let connection = self.connection.as_ref().ok_or("Missing voice connection")?;
+            let frame = outgoing::EncodedFrame {
+                payload: bytes::Bytes::copy_from_slice(&packet[..n]),
+                media_position,
+                oldest_capture,
+                generation,
+                connection: connection.clone(),
+            };
+            let accepted = match self
+                .transmit_control
+                .check(&frame, connection, Instant::now())
+            {
+                Err(reason) => {
+                    self.transmit_control.dropped(reason);
+                    false
+                }
+                Ok(()) => match outgoing.try_send(frame) {
+                    Ok(()) => true,
+                    Err(tokio::sync::mpsc::error::TrySendError::Full(_)) => {
+                        self.transmit_control
+                            .dropped(outgoing::DropReason::QueueFull);
+                        false
+                    }
+                    Err(tokio::sync::mpsc::error::TrySendError::Closed(_)) => {
+                        self.transmit_control
+                            .dropped(outgoing::DropReason::ControlInvalidated);
+                        false
+                    }
+                },
+            };
             for (index, frame) in pcm.as_chunks::<480>().0.iter().enumerate() {
                 debug.block(
                     recording::Track::Transmit,
@@ -1070,6 +1132,7 @@ fn run(
                             debug.stop();
                             session = None;
                             session = Some(Session::start(&settings, microphone)?);
+                            session.as_mut().unwrap().transmit_control = probe.outgoing.clone();
                             lease = Instant::now();
                             message.clear();
                         }
@@ -1091,6 +1154,7 @@ fn run(
                             }
                             s.volumes = Some(volumes);
                             s.outgoing = Some(outgoing);
+                            s.transmit_control = probe.outgoing.clone();
                             s.connection = Some(connection);
                             session = Some(s);
                             lease = Instant::now();
@@ -1293,6 +1357,7 @@ fn run(
                 "device_failure",
                 serde_json::json!({"error":error,"device":s.devices.info,"health":s.devices.health.diagnostics()}),
             );
+            s.transmit_control.invalidate();
             s.devices
                 .control
                 .transmitting
@@ -1541,6 +1606,14 @@ mod lifecycle_tests {
             debug_stop: Arc::new(AtomicBool::new(false)),
             deafen: Arc::new(AtomicBool::new(false)),
         };
+        let connection = connection::Connection::default();
+        let queued = outgoing::EncodedFrame {
+            payload: bytes::Bytes::from_static(b"synthetic"),
+            media_position: 0,
+            oldest_capture: Instant::now(),
+            generation: engine.probe.outgoing.generation(),
+            connection: connection.clone(),
+        };
         for _ in 0..10 {
             engine.notify(Command::Packet {
                 connection: Default::default(),
@@ -1560,6 +1633,15 @@ mod lifecycle_tests {
                 .contains("queue is full")
         );
         engine.notify(Command::Pressed(false));
+        engine.notify(Command::Pressed(true));
+        assert_eq!(
+            engine
+                .probe
+                .outgoing
+                .check(&queued, &connection, Instant::now()),
+            Err(outgoing::DropReason::ControlInvalidated)
+        );
+        engine.notify(Command::Pressed(false));
         engine.notify(Command::Stop);
         engine.notify(Command::DebugStop);
         engine.notify(Command::Settings(AudioSettings {
@@ -1570,6 +1652,13 @@ mod lifecycle_tests {
         assert!(engine.stop.load(Ordering::Acquire));
         assert!(engine.debug_stop.load(Ordering::Acquire));
         assert!(engine.inhibit.load(Ordering::Acquire));
+        assert_eq!(
+            engine
+                .probe
+                .outgoing
+                .check(&queued, &connection, Instant::now()),
+            Err(outgoing::DropReason::ControlInvalidated)
+        );
         drop(receiver);
         assert!(
             engine
@@ -1584,5 +1673,54 @@ mod lifecycle_tests {
         engine.restrict(&AudioSettings::default()); // Restrictions cannot unmute/deafen.
         assert!(engine.deafen.load(Ordering::Acquire));
         assert!(engine.inhibit.load(Ordering::Acquire));
+    }
+
+    #[test]
+    fn urgent_mute_deafen_stop_and_replacement_invalidate_before_queue_drain() {
+        let (sender, _receiver) = mpsc::sync_channel(1);
+        let (media, _packets) = mpsc::sync_channel(1);
+        let engine = AudioEngine {
+            sender,
+            media,
+            probe: worker_health::Probe::new(),
+            stop: Default::default(),
+            pressed: Default::default(),
+            inhibit: Default::default(),
+            debug_stop: Default::default(),
+            deafen: Default::default(),
+        };
+        for command in [
+            Command::Settings(AudioSettings {
+                muted: true,
+                ..Default::default()
+            }),
+            Command::Settings(AudioSettings {
+                deafened: true,
+                ..Default::default()
+            }),
+            Command::Pressed(false),
+            Command::Stop,
+        ] {
+            let connection = connection::Connection::default();
+            let frame = outgoing::EncodedFrame {
+                payload: bytes::Bytes::from_static(b"synthetic"),
+                media_position: 0,
+                oldest_capture: Instant::now(),
+                generation: engine.probe.outgoing.generation(),
+                connection: connection.clone(),
+            };
+            engine.notify(command);
+            // Relax before draining; old encoded speech remains invalid.
+            engine.notify(Command::Settings(AudioSettings::default()));
+            engine.notify(Command::Pressed(true));
+            assert_eq!(
+                engine
+                    .probe
+                    .outgoing
+                    .check(&frame, &connection, Instant::now()),
+                Err(outgoing::DropReason::ControlInvalidated)
+            );
+        }
+        engine.probe.exited();
     }
 }

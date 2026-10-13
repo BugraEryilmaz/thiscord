@@ -104,6 +104,10 @@ and single-process chat/media enforcement.
 ## 5. Frontend audio and media feasibility
 
 - [x] Native CPAL capture/playback, per-stream SPSC ring buffers and Opus codecs.
+- [x] Preserve microphone media time across capture/queue drops and device recovery;
+  bound outgoing age to 100 ms with control invalidation and distinct drop counters.
+- [ ] Consume RTP timestamps in native microphone playout; validate end-to-end stall
+  recovery, urgent controls and device-clock drift on physical three-platform clients.
 - [x] Windows/Linux encrypted WebRTC software probes; three-OS CI build/test matrix.
 - [x] Select Rust media libraries and document native dependencies in docs/audio.md.
 - [x] Enumerate/select devices, persist settings and refresh device lists.

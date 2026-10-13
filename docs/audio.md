@@ -261,6 +261,78 @@ than 60 ms. Work per tick stays bounded, and stop/PTT release are checked while
 draining. Lost blocks carry a sequence gap that restarts DSP adaptation; playback
 reference overflows are counted too. No per-sample allocation or DSP runs on the
 device callback. The processor is constructed before starting either device.
+
+### Microphone sender timeline and expiry
+
+`frames::Frame.at` is the first sample's CPAL capture time mapped to monotonic
+`Instant`; subsequent samples in that callback use exact 48 kHz offsets. Capture
+blocks also carry a device-stream sample position, advanced even when the 120 ms
+ring is full. A forward callback-time hole greater than 2 ms adds the rounded
+missing sample count. Smaller differences are treated as timestamp mapping jitter,
+and backward timing never rewinds sample positions. A partial 10 ms block crossing
+a hole is discarded. This is capture-only handling: post-mix AEC reference assembly,
+timestamps, delay calculation and echo configuration remain unchanged.
+
+DSP preserves block timestamps and sample positions. It never combines two halves
+across a gap into one 20 ms Opus packet: the earlier half is discarded and the later
+half retained until a contiguous partner arrives. The existing gap reset then
+clears DSP history. There is at most one retained 480-sample block beyond the ring.
+Normal packets advance by exactly 960 samples. The session maps these positions
+to one 48 kHz media clock before queue admission, so discarded packets still occupy
+time. Device recovery/reconfiguration bridges new device positions using elapsed
+monotonic capture time from the session origin, clamped beyond the previous packet.
+A replacement connection starts a fresh clock; neither wall-clock nor dequeue time
+sets RTP timestamps.
+
+`audio::outgoing::EncodedFrame` is native-only: encoded payload, 64-bit media
+position, oldest capture time, control generation and connection identity. RTP
+uses the low 32 bits of media position, preserving wrapping. Sequence numbers wrap
+independently at 16 bits and advance only for transport attempts. A frame discarded
+before admission consumes media time but no sequence number. Cancellation after a
+write has begun can consume a sequence number even if WebRTC did not admit it.
+
+RTP positions describe output slots on the capture clock. Explicit enhancement
+buffering delays the signal within those slots rather than retiming the clock on
+model changes. For age/control checks, the oldest capture time subtracts the active
+enhancer's declared buffering (DFN3: 1,440 samples / 30 ms). Frequency-dependent
+filter-bank/AEC phase delay and Opus lookahead are not exact capture-age estimates;
+these remain part of acoustic latency validation. No echo algorithm was replaced
+or retuned.
+
+The outgoing queue holds five packets plus at most one pending transport write.
+Packets aged **100 ms or more** from oldest capture are discarded before enqueue,
+at dequeue, and before every poll of a pending WebRTC write. The same deadline
+cancels blocked admission. Thus a stalled sender drains expired entries without
+replaying an arbitrarily old backlog; expiry alone does not disconnect the call.
+Transport errors retain the existing disconnect behavior. Work and memory stay
+bounded by capture/packet capacities; this does not guarantee downstream WebRTC,
+network or receiver latency after admission.
+
+Urgent stop, PTT release, mute/deafen and settings/session changes invalidate the
+generation independently of the command queue. Relaxing a restriction cannot
+revalidate old frames. A monotonic capture cutoff also prevents queued PCM and
+explicit enhancer delay from being relabeled as fresh speech after unmuting.
+Opus history resets on generation changes and on the transition to silence.
+Fresh muted/PTT-gated frames continue to encode silence; DTX is not enabled.
+Connection identity and active-state checks reject closed/replaced peers before
+each transport poll. A control notification wakes blocked writes; packets already
+admitted to WebRTC cannot be recalled. Backend permissions remain authoritative.
+
+Worker diagnostic snapshots include `outgoing.queue_full`, `outgoing.expired` and
+`outgoing.control_invalidated`, cumulative per audio-engine lifetime. Each rejected
+encoded packet increments one reason (invalidation takes precedence over expiry).
+They contain no audio or connection identifiers. Recording's `accepted` flag still
+means outgoing queue admission, not final network delivery.
+
+**Temporary receive limitation:** native incoming microphone handling/jitter uses
+sequence numbers and does not yet consume RTP timestamps. A sender-side unsent
+frame therefore has a timestamp hole but no receiver sequence loss to conceal.
+Timestamp-aware receiver playout/recovery remains required; sender timing alone
+does not establish end-to-end recovery. Physical stalls, device drift and listening
+acceptance on Windows/macOS/Linux remain unverified by deterministic tests.
+
+### Playback timing
+
 Each received speaker owns a separate bounded packet jitter buffer, Opus decoder,
 PCM ring and gain. Jitter starts at roughly 60 ms, reorders sequence numbers,
 rejects duplicates/late packets, handles wrap, and requests bounded Opus packet
