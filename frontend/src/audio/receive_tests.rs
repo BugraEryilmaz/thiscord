@@ -39,6 +39,113 @@ fn decoded(decoder: &mut opus::Decoder, payload: &[u8]) -> [f32; FRAME] {
 }
 
 #[test]
+fn repeated_capture_timestamps_preserve_activation_and_receiver_playout() {
+    let at = Instant::now();
+    let (mut capture, mut reader) = frames::queue();
+    let settings = AudioSettings {
+        echo_cancellation: false,
+        neural_echo: false,
+        noise_suppression: false,
+        automatic_gain: false,
+        ..Default::default()
+    };
+    let mut processing = processing::Processing::new(&settings).unwrap();
+    let mut gate = gate::Gate::default();
+    let mut media = outgoing::MediaClock::default();
+    let mut encoder =
+        opus::Encoder::new(RATE, opus::Channels::Mono, opus::Application::Voip).unwrap();
+    let (mut writers, mut mixer) = mixer(Arc::new(Controls::default()));
+    writers[0].control.active.store(true, Ordering::Release);
+    let mut remote = remote(at);
+    let (mut next_packet, mut next_worker, mut next_callback) = (0, 0, 0);
+    let mut active_packets = 0;
+    let mut rendered_energy = 0.0;
+    let mut output = [0.0_f32; 1024];
+    loop {
+        let sample = next_packet.min(next_worker).min(next_callback);
+        if sample >= 16 * RATE as usize {
+            break;
+        }
+        // 20 ms acquisition plus 25 ms transport; callbacks on the receiving
+        // device have a different size/phase from the sender's 480-sample blocks.
+        let now = at + frames::sample_duration(sample) + Duration::from_millis(45);
+        if sample == next_packet {
+            for half in 0..2 {
+                let observed = at + frames::sample_duration(sample);
+                capture.begin_capture(if half == 0 {
+                    observed
+                } else {
+                    observed - Duration::from_micros(167)
+                });
+                for i in 0..480 {
+                    let phase = (sample + half * 480 + i) as f32;
+                    let tone = (phase * std::f32::consts::TAU * 440.0 / RATE as f32).sin();
+                    assert_eq!(capture.push(tone * 0.2), 0);
+                }
+            }
+            let captured = processing
+                .capture_tapped(&mut reader, &mut |_, _, _, _| {})
+                .unwrap()
+                .unwrap();
+            let position = media.position(captured.at[0], captured.position);
+            let outgoing = gate.process(
+                captured.pcm,
+                captured.evidence,
+                captured.at[0],
+                captured.gap.iter().any(|gap| *gap),
+                settings.mode,
+                settings.activation_threshold,
+                true,
+                false,
+            );
+            active_packets += usize::from(outgoing.active);
+            let mut payload = [0; 1500];
+            let len = encoder.encode_float(&outgoing.pcm, &mut payload).unwrap();
+            assert!(remote.push(
+                (sample / FRAME) as u16,
+                position as u32,
+                bytes::Bytes::copy_from_slice(&payload[..len]),
+                now,
+                now,
+            ));
+            next_packet += FRAME;
+        }
+        if sample == next_worker {
+            remote.refill(&mut writers[0], now);
+            next_worker += 240;
+        }
+        if sample == next_callback {
+            mixer.render_at(&mut output, 1, now);
+            rendered_energy += output.iter().map(|v| f64::from(v * v)).sum::<f64>();
+            next_callback += output.len();
+        }
+    }
+    assert_eq!(processing.resets, 0);
+    assert!(
+        active_packets > 750,
+        "voice activation never sustained speech"
+    );
+    assert!(
+        rendered_energy > 100.0,
+        "receiver rendered no sustained audio"
+    );
+    let metrics = remote.jitter.metrics();
+    assert_eq!(metrics.discontinuities, 0);
+    assert_eq!(metrics.rebufferings, 0);
+    assert_eq!(metrics.concealments, 0);
+    assert_eq!(metrics.capacity_discards, 0);
+    assert_eq!(
+        remote
+            .jitter
+            .quality
+            .snapshot()
+            .total
+            .resync_discarded_packets,
+        0
+    );
+}
+
+#[test]
 fn device_callback_batches_do_not_starve_lossless_or_isolated_loss_playout() {
     let packets = packets();
     for sizes in [
