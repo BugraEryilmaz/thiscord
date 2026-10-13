@@ -324,26 +324,68 @@ encoded packet increments one reason (invalidation takes precedence over expiry)
 They contain no audio or connection identifiers. Recording's `accepted` flag still
 means outgoing queue admission, not final network delivery.
 
-**Temporary receive limitation:** native incoming microphone handling/jitter uses
-sequence numbers and does not yet consume RTP timestamps. A sender-side unsent
-frame therefore has a timestamp hole but no receiver sequence loss to conceal.
-Timestamp-aware receiver playout/recovery remains required; sender timing alone
-does not establish end-to-end recovery. Physical stalls, device drift and listening
-acceptance on Windows/macOS/Linux remain unverified by deterministic tests.
+Native receive playout now consumes these timestamp holes, including sender-side
+drops with consecutive sequence numbers. The same receive path serves mono shared
+audio. Physical stalls, device drift and listening acceptance on Windows/macOS/Linux
+remain unverified by deterministic sender/receiver tests.
 
 ### Playback timing
 
 Each received speaker owns a separate bounded packet jitter buffer, Opus decoder,
-PCM ring and gain. Jitter starts at roughly 60 ms, reorders sequence numbers,
-rejects duplicates/late packets, handles wrap, and requests bounded Opus packet
-loss concealment. A source switch resets decoding and its queued PCM.
+PCM ring and gain. Jitter starts after three packets or 60 ms. The native media
+command preserves RTP timestamp and monotonic arrival time from the transport,
+before the bounded audio-worker queue. Only 20 ms Opus packets are supported;
+invalid packet headers and unsupported durations are rejected before clock admission. RTP
+timestamps advance a 48 kHz sample cursor, independently of sequence numbers.
+Reordering/deduplication handles both timestamp and sequence wrap; late, overlapping
+or contradictory packets cannot rewind consumed audio. A long media jump can
+re-establish sequence ordering after the 16-bit half-range (for example a long
+deafen); the timestamp floor still rejects old audio.
+
+Short timestamp holes produce at most 60 ms of consecutive concealment. Whole
+20 ms slots use the source's Opus PLC state; fractional holes use exact-length
+silence, since Opus PLC cannot represent arbitrary sample counts. Missing sequence
+numbers alone do not add silence if timestamps are contiguous. Missing media and
+PLC never refresh speaking indicators. Decode errors fill the declared slot with
+silence and clear decoder history.
+
+Each source retains at most eight packets of 1,500 bytes. Queue age of **120 ms**,
+a cursor lag of **120 ms** against its monotonic playout anchor, more than **60 ms**
+of missing media, a buffered timestamp span beyond **160 ms**, or queue pressure
+triggers recovery. The receiver discards stale entries and reanchors at the newest
+40 ms of buffered media (at most three packets), rather than replaying an entire
+interruption or synthesizing seconds of concealment. Arrival age is measured from
+transport delivery, not worker dequeue. It cannot measure time already spent in
+the remote transport/network or establish an absolute sender-to-listener age bound.
+
+Recovery resets that source's decoder/activity and requests a PCM flush through
+its existing atomic mixer generation. The callback acknowledges after discarding
+old PCM; the worker waits for that acknowledgement before writing fresh decoded
+audio. Other sources and gains are preserved. Deafen transitions and device changes
+also clear pending receive audio, retaining consumed sequence/media watermarks.
+A replacement source owns fresh decoder/jitter state and rejects media that was
+already in the local dispatch queue before its roster entry. Existing connection
+identity checks still reject old connection handlers. This does not add a new wire
+source epoch: packets from a replaced publisher delayed upstream of transport
+delivery still depend on the SFU's existing routing and RTP continuity guarantees.
+
+Audio diagnostic snapshots include per-source `receive` counters for rejected
+packets, expired packets, overflow, automatic rebuffers and concealed samples;
+no payloads or source identifiers are logged. The fixed playout cushion remains
+an initial policy, not adaptive network jitter estimation or sample-rate drift
+compensation. AEC algorithms, the final post-mix reference and its timing remain
+unchanged.
+
 The worker refills decoded PCM from the output ring's actual consumption, aiming
 for 40-60 ms, instead of releasing one frame on an independent 20 ms timer. Work
 is capped at two decoded frames per stream per tick. Prefetch waits for missing
 packets while more than 10 ms of PCM remain, so filling the cushion early does
 not immediately trigger concealment of a delayed packet. A synthetic Opus/mixer
 regression checks sample continuity through irregular worker wakes and delayed
-packets; actual device scheduling and prolonged stalls still need live validation.
+packets. Deterministic RTP/Opus/mixer tests also cover sender drops, fractional
+capture gaps, wrap/reordering, bounded queue pressure, long stalls, decoder/ring
+reset, deafen and source replacement. Actual device scheduling, acoustic quality
+and prolonged stalls still need three-platform live validation.
 
 Playback mixes on the device callback with atomic gain changes. It allocates no
 buffers, waits on no locks, and does no networking/codec/DSP work. Queues cap

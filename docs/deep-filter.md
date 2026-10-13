@@ -38,7 +38,7 @@ The model adds **1,440 samples / 30 ms of output alignment delay**, plus the
 AEC/filter-bank delay, device buffering, Opus framing and network/jitter buffers.
 Native sender age/control fences include that 30 ms buffering; the RTP clock
 continues on capture sample positions. See [sender timing](audio.md#microphone-sender-timeline-and-expiry)
-for the 100 ms age limit and the pending timestamp-aware receiver work.
+for the 100 ms sender age limit and timestamp-aware receiver recovery.
 The offline quality benchmark independently aligns all pipelines, including
 Sonora's filter-bank delay, before comparing SNR.
 

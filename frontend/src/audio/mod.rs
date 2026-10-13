@@ -11,6 +11,8 @@ mod lifecycle;
 pub mod mixer;
 pub mod outgoing;
 pub mod processing;
+#[cfg(test)]
+mod receive_tests;
 mod reconfigure;
 pub mod reconnect;
 mod recording;
@@ -178,6 +180,8 @@ pub enum Command {
         connection: connection::Connection,
         slot: usize,
         sequence: u16,
+        timestamp: u32,
+        received_at: Instant,
         payload: bytes::Bytes,
     },
     Roster {
@@ -366,6 +370,8 @@ impl AudioEngine {
     }
 }
 struct Remote {
+    since: Instant,
+    deafened: bool,
     activity: activity::Activity,
     id: thiscord_shared::AccountId,
     label: String,
@@ -373,24 +379,79 @@ struct Remote {
     decoder: opus::Decoder,
 }
 impl Remote {
-    fn refill(&mut self, writer: &mut StreamWriter) {
+    fn push(
+        &mut self,
+        sequence: u16,
+        timestamp: u32,
+        payload: bytes::Bytes,
+        received_at: Instant,
+        now: Instant,
+    ) {
+        if !self.deafened
+            && received_at >= self.since
+            && opus::packet::get_nb_samples(&payload, RATE).is_ok_and(|n| n == FRAME)
+        {
+            self.jitter
+                .push(sequence, timestamp, payload, received_at, now);
+        } else {
+            self.jitter.reject();
+        }
+    }
+    fn clear(&mut self, writer: &StreamWriter, now: Instant) {
+        self.since = now;
+        self.jitter.discard();
+        self.reset_decoder(writer);
+    }
+    fn set_deafened(&mut self, writer: &StreamWriter, deafened: bool, now: Instant) {
+        if deafened != self.deafened {
+            self.deafened = deafened;
+            self.clear(writer, now);
+        }
+    }
+    fn reset_decoder(&mut self, writer: &StreamWriter) {
+        let _ = self.decoder.reset_state();
+        self.activity = Default::default();
+        writer.discard();
+    }
+    fn refill(&mut self, writer: &mut StreamWriter, now: Instant) {
+        if self.deafened {
+            return;
+        }
+        if self.jitter.maintain(now) {
+            self.reset_decoder(writer);
+        }
+        if !writer.ready() {
+            return;
+        }
         // At most two frames per stream per worker tick. The callback remains
         // PCM-only; jitter buffering and Opus stay on this worker.
         for _ in 0..writer.refill_frames() {
-            let Some(packet) = self.jitter.pop(writer.needs_concealment()) else {
+            let Some(packet) = self.jitter.pop(writer.needs_concealment(), now) else {
                 break;
             };
             let mut pcm = [0.0_f32; FRAME];
-            if let Ok(n) =
-                self.decoder
-                    .decode_float(packet.as_deref().unwrap_or(&[]), &mut pcm, false)
-                && n == FRAME
-            {
-                if packet.is_some() {
-                    self.activity.observe(&pcm[..n], Instant::now());
+            let (payload, samples) = match &packet {
+                jitter::Playout::Packet(payload) => (Some(payload.as_ref()), FRAME),
+                jitter::Playout::Conceal(samples) => (None, *samples),
+            };
+            if samples == FRAME {
+                match self
+                    .decoder
+                    .decode_float(payload.unwrap_or(&[]), &mut pcm, false)
+                {
+                    Ok(FRAME) => {
+                        if payload.is_some() {
+                            self.activity.observe(&pcm, now);
+                        }
+                    }
+                    _ => {
+                        // Malformed media still occupies its declared slot.
+                        pcm.fill(0.0);
+                        let _ = self.decoder.reset_state();
+                    }
                 }
-                writer.write(&pcm[..n]);
             }
+            writer.write(&pcm[..samples]);
         }
     }
 }
@@ -614,8 +675,10 @@ impl Session {
         self.processing.reset();
         self.hold = 0;
         self.next = Instant::now();
-        for remote in self.remotes.iter_mut().flatten() {
-            remote.jitter = Default::default();
+        for (remote, writer) in self.remotes.iter_mut().zip(&self.devices.writers) {
+            if let Some(remote) = remote {
+                remote.clear(writer, Instant::now());
+            }
         }
         Ok(true)
     }
@@ -727,7 +790,12 @@ impl Session {
         if self.outgoing.is_some() {
             for (remote, writer) in self.remotes.iter_mut().zip(self.devices.writers.iter_mut()) {
                 if let Some(remote) = remote {
-                    remote.refill(writer);
+                    remote.set_deafened(
+                        writer,
+                        self.devices.control.deafen.load(Ordering::Acquire),
+                        Instant::now(),
+                    );
+                    remote.refill(writer, Instant::now());
                 }
             }
         }
@@ -1063,7 +1131,7 @@ fn run(
             if let Some(s) = &session {
                 diagnostics::event(
                     "audio_snapshot",
-                    serde_json::json!({"health":s.devices.health.diagnostics(),"recovering":s.recovery.active(),"muted":s.settings.muted,"deafened":s.settings.deafened,"echo":s.settings.echo_cancellation,"neural_echo":s.settings.neural_echo,"suppression":s.settings.noise_suppression,"suppression_model":s.settings.noise_suppression_model,"automatic_gain":s.settings.automatic_gain,"dropped_samples":s.devices.control.dropped.load(Ordering::Relaxed),"underrun_samples":s.devices.control.underruns.load(Ordering::Relaxed)}),
+                    serde_json::json!({"receive":s.remotes.iter().flatten().map(|r|r.jitter.diagnostics()).collect::<Vec<_>>(),"health":s.devices.health.diagnostics(),"recovering":s.recovery.active(),"muted":s.settings.muted,"deafened":s.settings.deafened,"echo":s.settings.echo_cancellation,"neural_echo":s.settings.neural_echo,"suppression":s.settings.noise_suppression,"suppression_model":s.settings.noise_suppression_model,"automatic_gain":s.settings.automatic_gain,"dropped_samples":s.devices.control.dropped.load(Ordering::Relaxed),"underrun_samples":s.devices.control.underruns.load(Ordering::Relaxed)}),
                 );
             }
         }
@@ -1163,6 +1231,8 @@ fn run(
                             connection,
                             slot,
                             sequence,
+                            timestamp,
+                            received_at,
                             payload,
                         } => {
                             if let Some(s) = &mut session
@@ -1170,8 +1240,10 @@ fn run(
                                     .as_ref()
                                     .is_some_and(|c| c.accepts(&connection))
                                 && let Some(Some(r)) = s.remotes.get_mut(slot)
+                                && !deafen.load(Ordering::Acquire)
+                                && !s.settings.deafened
                             {
-                                r.jitter.push(sequence, payload);
+                                r.push(sequence, timestamp, payload, received_at, Instant::now());
                             }
                         }
                         Command::Roster {
@@ -1222,6 +1294,8 @@ fn run(
                                         s.remotes[slot] = member
                                             .map(|m| {
                                                 Ok::<_, String>(Remote {
+                                                    since: Instant::now(),
+                                                    deafened: false,
                                                     activity: Default::default(),
                                                     id: m.account_id,
                                                     label: if shared_audio {
@@ -1284,9 +1358,14 @@ fn run(
                                 s.processing.settings(&settings)?;
                                 s.settings = settings.clone();
                                 debug.settings(&settings);
-                                if settings.deafened {
-                                    for remote in s.remotes.iter_mut().flatten() {
-                                        remote.jitter = Default::default();
+                                for (remote, writer) in s.remotes.iter_mut().zip(&s.devices.writers)
+                                {
+                                    if let Some(remote) = remote {
+                                        remote.set_deafened(
+                                            writer,
+                                            settings.deafened,
+                                            Instant::now(),
+                                        );
                                     }
                                 }
                                 apply(&s.devices.control, &settings);
@@ -1484,7 +1563,10 @@ mod lifecycle_tests {
             );
             expected.extend_from_slice(&decoded);
         }
+        let at = Instant::now();
         let mut remote = Remote {
+            since: at,
+            deafened: false,
             activity: Default::default(),
             id: "00000000-0000-0000-0000-000000000001".parse().unwrap(),
             label: "synthetic shared audio".into(),
@@ -1496,9 +1578,9 @@ mod lifecycle_tests {
         let writer = &mut writers[thiscord_shared::voice::ROOM_CAPACITY];
         writer.control.active.store(true, Ordering::Release);
         for (i, packet) in packets.iter().take(3).enumerate() {
-            remote.jitter.push(i as u16, packet.clone());
+            remote.push(i as u16, i as u32 * FRAME as u32, packet.clone(), at, at);
         }
-        remote.refill(writer);
+        remote.refill(writer, at);
         let mut actual = Vec::new();
         let mut next_worker = 5;
         let intervals = [5, 7, 12, 4, 8, 5];
@@ -1507,11 +1589,18 @@ mod lifecycle_tests {
             for (sequence, packet) in packets.iter().enumerate().skip(3) {
                 let arrival = (sequence - 2) * 20 + if sequence % 7 == 0 { 15 } else { 0 };
                 if ms == arrival {
-                    remote.jitter.push(sequence as u16, packet.clone());
+                    let now = at + Duration::from_millis(ms as u64);
+                    remote.push(
+                        sequence as u16,
+                        sequence as u32 * FRAME as u32,
+                        packet.clone(),
+                        now,
+                        now,
+                    );
                 }
             }
             if ms >= next_worker {
-                remote.refill(writer);
+                remote.refill(writer, at + Duration::from_millis(ms as u64));
                 next_worker += intervals[wake % intervals.len()];
                 wake += 1;
             }
@@ -1619,6 +1708,8 @@ mod lifecycle_tests {
                 connection: Default::default(),
                 slot: 0,
                 sequence: 0,
+                timestamp: 0,
+                received_at: Instant::now(),
                 payload: bytes::Bytes::new(),
             });
         }

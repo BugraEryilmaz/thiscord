@@ -101,6 +101,8 @@ impl PeerConnectionEventHandler for Handler {
                             connection: connection.clone(),
                             slot,
                             sequence: packet.header.sequence_number,
+                            timestamp: packet.header.timestamp,
+                            received_at: Instant::now(),
                             payload: packet.payload,
                         });
                     }

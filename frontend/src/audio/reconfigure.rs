@@ -108,6 +108,11 @@ impl Pending {
                 std::mem::swap(&mut s.devices, next);
                 s.media_clock.restart_device();
                 s.transmit_control.invalidate();
+                for (remote, writer) in s.remotes.iter_mut().zip(&s.devices.writers) {
+                    if let Some(remote) = remote {
+                        remote.clear(writer, Instant::now());
+                    }
+                }
                 s.device_watch = Default::default();
                 diagnostics::event("device_reconfigured", s.devices.info.clone());
                 s.recovery.reconfigured(&s.devices.info);
@@ -263,6 +268,8 @@ mod tests {
         let other = "00000000-0000-0000-0000-000000000003".parse().unwrap();
         s.volumes = Some(super::super::volumes::Store::default().profile(guild));
         s.remotes[3] = Some(super::super::Remote {
+            since: Instant::now(),
+            deafened: false,
             activity: Default::default(),
             id,
             label: "A speaker".into(),
@@ -270,6 +277,8 @@ mod tests {
             decoder: opus::Decoder::new(RATE, opus::Channels::Mono).unwrap(),
         });
         s.remotes[3 + thiscord_shared::voice::ROOM_CAPACITY] = Some(super::super::Remote {
+            since: Instant::now(),
+            deafened: false,
             activity: Default::default(),
             id,
             label: "Shared audio".into(),
@@ -363,6 +372,8 @@ mod tests {
         s.connection = Some(connection.clone());
         let id = "00000000-0000-0000-0000-000000000001".parse().unwrap();
         s.remotes[3] = Some(Remote {
+            since: Instant::now(),
+            deafened: false,
             activity: Default::default(),
             id,
             label: "speaker".into(),
@@ -463,6 +474,8 @@ mod tests {
         let transport = old.outgoing.as_ref().unwrap().clone();
         let id = "00000000-0000-0000-0000-000000000001".parse().unwrap();
         old.remotes[3] = Some(Remote {
+            since: Instant::now(),
+            deafened: false,
             activity: Default::default(),
             id,
             label: "speaker".into(),
