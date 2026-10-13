@@ -101,6 +101,8 @@ impl PeerConnectionEventHandler for Handler {
                             connection: connection.clone(),
                             slot,
                             sequence: packet.header.sequence_number,
+                            timestamp: packet.header.timestamp,
+                            marker: packet.header.marker,
                             payload: packet.payload,
                         });
                     }
@@ -605,7 +607,10 @@ async fn run(
     let mut heard = Instant::now();
     let mut screen_state = (false, false);
     let mut sequence = 0_u16;
-    let mut timestamp = 0_u32;
+    let mut sent_packets = 0_u64;
+    let mut sent_bytes = 0_u64;
+    let mut rejected_packets = 0_u64;
+    let mut next_report = Instant::now() + Duration::from_secs(5);
     loop {
         tokio::select! {
             Some((slot, epoch))=keyframe_rx.recv()=>{
@@ -638,11 +643,24 @@ async fn run(
                     },ServerEvent::Error{error}=>return Err(Failure::server(error)),ServerEvent::Revoked{}=>return Err("Voice access changed. Join again if you still have permission.".into()),_=>{},
                 }
             },
-            Some(payload)=outgoing.recv()=>{
-                sequence=sequence.wrapping_add(1);timestamp=timestamp.wrapping_add(960);let packet=rtc::rtp::Packet{header:rtc::rtp::header::Header{version:2,payload_type:MediaKind::Microphone.payload_type(),ssrc:MediaKind::Microphone.publisher_ssrc(),sequence_number:sequence,timestamp,..Default::default()},payload};
-                tokio::time::timeout(Duration::from_millis(100),track.write_rtp(packet)).await.map_err(|_|Failure::temporary("Voice sender stalled").with_reason("media_send_timeout"))?.map_err(|_|Failure::temporary("Voice media connection failed").with_reason("media_send_failed"))?;
+            Some(encoded)=outgoing.recv()=>{
+                if !attempt.connection.active() || !engine.permits_packet(&encoded) { rejected_packets += 1; continue; }
+                let next_sequence=sequence.wrapping_add(1);
+                let packet=rtc::rtp::Packet{header:rtc::rtp::header::Header{version:2,payload_type:MediaKind::Microphone.payload_type(),ssrc:MediaKind::Microphone.publisher_ssrc(),sequence_number:next_sequence,timestamp:encoded.timestamp,marker:encoded.marker,..Default::default()},payload:encoded.payload.clone()};
+                let admitted = thiscord_frontend::audio::transmit::while_permitted(
+                    track.write_rtp(packet),
+                    || attempt.connection.active() && engine.permits_packet(&encoded),
+                );
+                let delivered = tokio::time::timeout(Duration::from_millis(100),admitted).await.map_err(|_|Failure::temporary("Voice sender stalled").with_reason("media_send_timeout"))?.map_err(|_|Failure::temporary("Voice media connection failed").with_reason("media_send_failed"))?;
+                if delivered { sequence=next_sequence; sent_packets+=1; sent_bytes+=encoded.payload.len() as u64; }
+                else { rejected_packets+=1; }
             },
             _=ticker.tick()=>{
+                if Instant::now() >= next_report {
+                    thiscord_frontend::audio::diagnostics::event("microphone_transport",serde_json::json!({"accepted_packets":sent_packets,"payload_bytes":sent_bytes,"minimum_rtp_header_bytes":sent_packets*12,"rejected_packets":rejected_packets}));
+                    sent_packets=0;sent_bytes=0;rejected_packets=0;
+                    next_report=Instant::now()+Duration::from_secs(5);
+                }
                 if failed.load(Ordering::Acquire)||heard.elapsed()>Duration::from_secs(20){
                     thiscord_frontend::audio::diagnostics::event("voice_connection_lost",serde_json::json!({"peer_failed":failed.load(Ordering::Acquire),"signaling_age_ms":heard.elapsed().as_millis()}));
                     return Err(Failure::temporary("Voice connection lost").with_reason(if failed.load(Ordering::Acquire) { "peer_failed" } else { "signaling_heartbeat_timeout" }));

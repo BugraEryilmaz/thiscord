@@ -15,6 +15,7 @@ pub mod reconnect;
 mod recording;
 mod recovery;
 mod selection;
+pub mod transmit;
 pub mod transport;
 pub mod volumes;
 mod worker_health;
@@ -170,13 +171,15 @@ pub enum Command {
         volumes: volumes::Profile,
         connection: connection::Connection,
         settings: AudioSettings,
-        outgoing: tokio::sync::mpsc::Sender<bytes::Bytes>,
+        outgoing: tokio::sync::mpsc::Sender<transmit::Packet>,
         microphone: bool,
     },
     Packet {
         connection: connection::Connection,
         slot: usize,
         sequence: u16,
+        timestamp: u32,
+        marker: bool,
         payload: bytes::Bytes,
     },
     Roster {
@@ -225,6 +228,8 @@ pub struct AudioEngine {
     inhibit: Arc<AtomicBool>,
     debug_stop: Arc<AtomicBool>,
     deafen: Arc<AtomicBool>,
+    restrictions: Arc<transmit::Restrictions>,
+    ptt_mode: Arc<AtomicBool>,
 }
 impl Default for AudioEngine {
     fn default() -> Self {
@@ -260,6 +265,8 @@ impl AudioEngine {
         let worker_debug_stop = debug_stop.clone();
         let deafen = Arc::new(AtomicBool::new(false));
         let worker_deafen = deafen.clone();
+        let restrictions = Arc::new(transmit::Restrictions::default());
+        let worker_restrictions = restrictions.clone();
         thread::Builder::new()
             .name("thiscord-audio-control".into())
             .spawn(move || {
@@ -267,7 +274,7 @@ impl AudioEngine {
                 for restart in 0..=3 {
                     let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| run(
                         &receiver, &packets, worker_stop.clone(), worker_pressed.clone(),
-                        worker_inhibit.clone(), worker_debug_stop.clone(), worker_deafen.clone(), &worker_probe,
+                        worker_inhibit.clone(), worker_debug_stop.clone(), worker_deafen.clone(), &worker_restrictions, &worker_probe,
                     )));
                     if result.is_ok() { break; }
                     worker_inhibit.store(true, Ordering::Release);
@@ -291,6 +298,8 @@ impl AudioEngine {
             inhibit,
             debug_stop,
             deafen,
+            restrictions,
+            ptt_mode: Default::default(),
         }
     }
     fn urgent(&self, command: &Command) {
@@ -301,15 +310,26 @@ impl AudioEngine {
             }
             Command::Stop => {
                 self.stop.store(true, Ordering::Release);
+                self.restrictions.invalidate();
             }
             Command::Pressed(value) => {
+                if self.pressed.load(Ordering::Acquire) != *value {
+                    self.restrictions.invalidate();
+                }
                 self.pressed.store(*value, Ordering::Release);
             }
             Command::Settings(settings)
             | Command::Start { settings, .. }
             | Command::VoiceStart { settings, .. } => {
-                self.inhibit
-                    .store(settings.muted || settings.deafened, Ordering::Release);
+                let inhibited = settings.muted || settings.deafened;
+                let ptt = settings.mode == TransmitMode::PushToTalk;
+                if self.inhibit.load(Ordering::Acquire) != inhibited
+                    || self.ptt_mode.load(Ordering::Acquire) != ptt
+                {
+                    self.restrictions.invalidate();
+                }
+                self.inhibit.store(inhibited, Ordering::Release);
+                self.ptt_mode.store(ptt, Ordering::Release);
                 self.deafen.store(settings.deafened, Ordering::Release);
             }
             _ => {}
@@ -318,8 +338,8 @@ impl AudioEngine {
     /// Safety controls can tighten immediately while a settings save/preparation
     /// is in flight. Only an ordered settings command can relax them again.
     pub fn restrict(&self, settings: &AudioSettings) {
-        if settings.muted || settings.deafened {
-            self.inhibit.store(true, Ordering::Release);
+        if (settings.muted || settings.deafened) && !self.inhibit.swap(true, Ordering::AcqRel) {
+            self.restrictions.invalidate();
         }
         if settings.deafened {
             self.deafen.store(true, Ordering::Release);
@@ -348,6 +368,13 @@ impl AudioEngine {
                 message
             })?
     }
+    /// Rechecked on every poll of a pending transport write, not just enqueue.
+    pub fn permits_packet(&self, packet: &transmit::Packet) -> bool {
+        !self.stop.load(Ordering::Acquire)
+            && !self.inhibit.load(Ordering::Acquire)
+            && (!self.ptt_mode.load(Ordering::Acquire) || self.pressed.load(Ordering::Acquire))
+            && self.restrictions.accepts(packet, Instant::now())
+    }
     pub fn current_settings(&self) -> Result<Option<AudioSettings>, String> {
         let (tx, rx) = mpsc::channel();
         self.command(Command::CurrentSettings(tx))?;
@@ -363,24 +390,33 @@ struct Remote {
 }
 impl Remote {
     fn refill(&mut self, writer: &mut StreamWriter) {
+        self.refill_at(writer, Instant::now());
+    }
+    fn refill_at(&mut self, writer: &mut StreamWriter, now: Instant) {
         // At most two frames per stream per worker tick. The callback remains
         // PCM-only; jitter buffering and Opus stay on this worker.
         for _ in 0..writer.refill_frames() {
-            let Some(packet) = self.jitter.pop(writer.needs_concealment()) else {
+            let Some(packet) = self.jitter.pop(writer.needs_concealment(), now) else {
                 break;
             };
             let mut pcm = [0.0_f32; FRAME];
-            if let Ok(n) =
-                self.decoder
-                    .decode_float(packet.as_deref().unwrap_or(&[]), &mut pcm, false)
-                && n == FRAME
-            {
-                if packet.is_some() {
-                    self.activity.observe(&pcm[..n], Instant::now());
+            match packet {
+                jitter::Playout::Packet(payload) => {
+                    if self.decoder.decode_float(&payload, &mut pcm, false).ok() == Some(FRAME) {
+                        self.activity.observe(&pcm, Instant::now());
+                    }
                 }
-                writer.write(&pcm[..n]);
+                jitter::Playout::Conceal => {
+                    let _ = self.decoder.decode_float(&[], &mut pcm, false);
+                }
+                jitter::Playout::Silence | jitter::Playout::Inactive => {}
             }
+            writer.write(&pcm);
         }
+        writer
+            .control
+            .quiet
+            .store(self.jitter.quiet(), Ordering::Relaxed);
     }
 }
 struct Devices {
@@ -544,14 +580,17 @@ struct Session {
     connection: Option<connection::Connection>,
     settings: AudioSettings,
     devices: Devices,
-    encoder: opus::Encoder,
+    encoder: transmit::Encoder,
+    media_clock: transmit::Clock,
+    gate: transmit::Gate,
+    transmit_generation: u64,
     decoder: opus::Decoder,
     microphone: bool,
     phase: f32,
     next: Instant,
     started: Instant,
     hold: usize,
-    outgoing: Option<tokio::sync::mpsc::Sender<bytes::Bytes>>,
+    outgoing: Option<tokio::sync::mpsc::Sender<transmit::Packet>>,
     remotes: Vec<Option<Remote>>,
     processed_level: f32,
     processing: processing::Processing,
@@ -564,7 +603,11 @@ impl Drop for Session {
         }
         diagnostics::event(
             "audio_session_ended",
-            serde_json::json!({"voice":self.connection.is_some(),"health":self.devices.health.diagnostics()}),
+            serde_json::json!({"voice":self.connection.is_some(),"health":self.devices.health.diagnostics(),"microphone_encoding":self.encoder.stats,
+                "receive_sequence_loss":self.remotes.iter().flatten().map(|r| r.jitter.lost_packets).sum::<u64>(),
+                "receive_late_packets":self.remotes.iter().flatten().map(|r| r.jitter.late_packets).sum::<u64>(),
+                "receive_omitted_frames_lower_bound":self.remotes.iter().flatten().map(|r| r.jitter.omitted_frames).sum::<u64>(),
+                "receive_resyncs":self.remotes.iter().flatten().map(|r| r.jitter.resyncs).sum::<u64>()}),
         );
     }
 }
@@ -595,6 +638,8 @@ impl Session {
         self.device_watch = Default::default();
         diagnostics::event("device_active", self.devices.info.clone());
         self.processing.reset();
+        self.gate.clear();
+        self.encoder.reset().map_err(|e| e.to_string())?;
         self.hold = 0;
         self.next = Instant::now();
         for remote in self.remotes.iter_mut().flatten() {
@@ -647,11 +692,7 @@ impl Session {
         diagnostics::event("processing_init_complete", serde_json::json!({}));
         let recovery = recovery::Recovery::starting();
         let devices = Devices::silent(settings);
-        let mut encoder = opus::Encoder::new(RATE, opus::Channels::Mono, opus::Application::Voip)
-            .map_err(|e| e.to_string())?;
-        encoder
-            .set_bitrate(opus::Bitrate::Bits(32_000))
-            .map_err(|e| e.to_string())?;
+        let encoder = transmit::Encoder::new(true).map_err(|e| e.to_string())?;
         let decoder = opus::Decoder::new(RATE, opus::Channels::Mono).map_err(|e| e.to_string())?;
         devices.writers[0]
             .control
@@ -672,6 +713,9 @@ impl Session {
             connection: None,
             devices,
             encoder,
+            media_clock: Default::default(),
+            gate: Default::default(),
+            transmit_generation: 0,
             decoder,
             microphone,
             phase: 0.0,
@@ -689,6 +733,7 @@ impl Session {
         stop: &AtomicBool,
         pressed: &AtomicBool,
         inhibit: &AtomicBool,
+        restrictions: &transmit::Restrictions,
         debug: &mut recording::Recorder,
     ) -> Result<(), String> {
         self.devices.health.check()?;
@@ -759,7 +804,7 @@ impl Session {
                 .control
                 .pressed
                 .store(pressed.load(Ordering::Acquire), Ordering::Relaxed);
-            self.capture_packet(packet, inhibit, debug)?;
+            self.capture_packet(packet, inhibit, restrictions, debug)?;
         }
         Ok(())
     }
@@ -767,9 +812,18 @@ impl Session {
         &mut self,
         captured: processing::Captured,
         inhibit: &AtomicBool,
+        restrictions: &transmit::Restrictions,
         debug: &mut recording::Recorder,
     ) -> Result<(), String> {
-        let mut pcm = captured.pcm;
+        let timestamp = self.media_clock.advance(captured.position, captured.at[0]);
+        let (generation, cutoff) = restrictions.snapshot();
+        if generation != self.transmit_generation || captured.gap.iter().any(|gap| *gap) {
+            self.encoder.reset().map_err(|e| e.to_string())?;
+            self.gate.clear();
+            self.hold = 0;
+            self.transmit_generation = generation;
+        }
+        let pcm = captured.pcm;
         let peak = pcm.iter().fold(0.0_f32, |p, v| p.max(v.abs()));
         self.processed_level = peak;
         if peak >= f32::from_bits(self.devices.control.threshold.load(Ordering::Relaxed)) {
@@ -777,30 +831,53 @@ impl Session {
         } else {
             self.hold = self.hold.saturating_sub(1);
         }
-        let active = !inhibit.load(Ordering::Acquire)
+        // Exclude queued capture and explicitly buffered denoiser output from
+        // before a restriction. AEC continues adapting; it is never reset here.
+        let fresh = captured.at[0]
+            .checked_sub(frames::sample_duration(
+                self.processing.enhancement_delay_samples(),
+            ))
+            .is_some_and(|at| at >= cutoff);
+        let allowed = fresh
+            && !captured.gap[1]
+            && !inhibit.load(Ordering::Acquire)
             && !self.devices.control.mute.load(Ordering::Relaxed)
             && !self.devices.control.deafen.load(Ordering::Relaxed)
             && if self.devices.control.push_to_talk.load(Ordering::Relaxed) {
                 self.devices.control.pressed.load(Ordering::Relaxed)
             } else {
-                self.hold > 0
+                true
             };
+        let active =
+            allowed && (self.devices.control.push_to_talk.load(Ordering::Relaxed) || self.hold > 0);
         self.devices
             .control
             .transmitting
             .store(active, Ordering::Relaxed);
-        if !active {
-            pcm.fill(0.0);
-        }
+        let (pcm, protect_speech) = self.gate.process(pcm, active, allowed);
         let mut packet = [0_u8; 4000];
-        let n = self
+        let (n, omit, marker) = self
             .encoder
-            .encode_float(&pcm, &mut packet)
+            .encode(&pcm, protect_speech, &mut packet)
             .map_err(|e| e.to_string())?;
         if let Some(outgoing) = &self.outgoing {
-            let accepted = outgoing
-                .try_send(bytes::Bytes::copy_from_slice(&packet[..n]))
-                .is_ok();
+            let accepted = !omit
+                && allowed
+                && outgoing
+                    .try_send(transmit::Packet {
+                        payload: bytes::Bytes::copy_from_slice(&packet[..n]),
+                        timestamp,
+                        marker,
+                        captured: captured.at[0],
+                        generation,
+                    })
+                    .is_ok();
+            if accepted {
+                self.encoder.stats.queued_packets += 1;
+                self.encoder.stats.queued_bytes += n as u64;
+            } else if !omit && allowed {
+                self.encoder.stats.queue_drops += 1;
+            }
             for (index, frame) in pcm.as_chunks::<480>().0.iter().enumerate() {
                 debug.block(
                     recording::Track::Transmit,
@@ -937,6 +1014,7 @@ fn run(
     inhibit: Arc<AtomicBool>,
     debug_stop: Arc<AtomicBool>,
     deafen: Arc<AtomicBool>,
+    restrictions: &transmit::Restrictions,
     probe: &worker_health::Probe,
 ) {
     let mut debug = recording::Recorder::default();
@@ -1099,6 +1177,8 @@ fn run(
                             connection,
                             slot,
                             sequence,
+                            timestamp,
+                            marker,
                             payload,
                         } => {
                             if let Some(s) = &mut session
@@ -1106,8 +1186,10 @@ fn run(
                                     .as_ref()
                                     .is_some_and(|c| c.accepts(&connection))
                                 && let Some(Some(r)) = s.remotes.get_mut(slot)
+                                && opus::packet::get_nb_samples(&payload, RATE).ok() == Some(FRAME)
                             {
-                                r.jitter.push(sequence, payload);
+                                r.jitter
+                                    .push(sequence, timestamp, marker, payload, Instant::now());
                             }
                         }
                         Command::Roster {
@@ -1138,6 +1220,10 @@ fn run(
                                     if s.remotes[slot].as_ref().map(|r| r.id)
                                         != member.map(|m| m.account_id)
                                     {
+                                        s.devices.writers[slot]
+                                            .control
+                                            .quiet
+                                            .store(true, Ordering::Release);
                                         s.devices.writers[slot]
                                             .control
                                             .active
@@ -1368,7 +1454,7 @@ fn run(
             } else if let Err(error) = {
                 probe.enter(worker_health::PROCESS);
                 let started = Instant::now();
-                let result = s.tick(&stop, &pressed, &inhibit, &mut debug);
+                let result = s.tick(&stop, &pressed, &inhibit, restrictions, &mut debug);
                 probe.processed(started.elapsed());
                 result
             } {
@@ -1395,6 +1481,70 @@ fn run(
 #[cfg(test)]
 mod lifecycle_tests {
     use super::*;
+    #[test]
+    fn minute_of_dtx_with_lost_updates_and_onset_resumes_without_false_underruns() {
+        let mut encoder = transmit::Encoder::new(true).unwrap();
+        let mut remote = Remote {
+            activity: Default::default(),
+            id: "00000000-0000-0000-0000-000000000001".parse().unwrap(),
+            label: "test".into(),
+            jitter: Default::default(),
+            decoder: opus::Decoder::new(RATE, opus::Channels::Mono).unwrap(),
+        };
+        let controls = Arc::new(Controls::default());
+        let (mut writers, mut mixer) = mixer::mixer(controls.clone());
+        let writer = &mut writers[0];
+        writer.control.active.store(true, Ordering::Release);
+        let now = Instant::now();
+        let mut sequence = 65500u16;
+        let mut lost = 0;
+        let mut first_speech = None;
+        let mut packets = 0;
+        for frame in 0..3300u32 {
+            let speech = frame >= 3000 && frame % 30 < 15;
+            let pcm = std::array::from_fn(|i| {
+                if speech {
+                    (i as f32 * 0.04).sin() * if frame < 3010 { 0.005 } else { 0.2 }
+                } else {
+                    0.0
+                }
+            });
+            let mut output = [0; 4000];
+            let (n, omitted, marker) = encoder.encode(&pcm, speech, &mut output).unwrap();
+            let at = now + Duration::from_millis(frame as u64 * 20);
+            if !omitted {
+                sequence = sequence.wrapping_add(1);
+                packets += 1;
+                if (frame > 100 && frame < 2900 && sequence.is_multiple_of(17)) || frame == 3000 {
+                    lost += 1;
+                } else {
+                    remote.jitter.push(
+                        sequence,
+                        (u32::MAX - 95_999).wrapping_add(frame * 960),
+                        marker,
+                        bytes::Bytes::copy_from_slice(&output[..n]),
+                        at,
+                    );
+                }
+            }
+            remote.refill_at(writer, at);
+            let mut rendered = [0.0_f32; FRAME];
+            mixer.render(&mut rendered, 1);
+            if frame >= 3000 && rendered.iter().any(|v| v.abs() > 0.0001) {
+                first_speech.get_or_insert(frame);
+            }
+        }
+        assert!(packets < 500);
+        assert_eq!(remote.jitter.lost_packets, lost);
+        assert_eq!(remote.jitter.resyncs, 0);
+        assert_eq!(remote.jitter.late_packets, 0);
+        assert_eq!(controls.underruns.load(Ordering::Relaxed), 0);
+        assert!(
+            first_speech.unwrap() <= 3005,
+            "including deliberately lost onset"
+        );
+    }
+
     #[test]
     fn remote_pcm_survives_worker_jitter_and_delayed_packets_without_sample_gaps() {
         let mut encoder =
@@ -1431,7 +1581,13 @@ mod lifecycle_tests {
         let writer = &mut writers[thiscord_shared::voice::ROOM_CAPACITY];
         writer.control.active.store(true, Ordering::Release);
         for (i, packet) in packets.iter().take(3).enumerate() {
-            remote.jitter.push(i as u16, packet.clone());
+            remote.jitter.push(
+                i as u16,
+                i as u32 * 960,
+                false,
+                packet.clone(),
+                Instant::now(),
+            );
         }
         remote.refill(writer);
         let mut actual = Vec::new();
@@ -1442,7 +1598,13 @@ mod lifecycle_tests {
             for (sequence, packet) in packets.iter().enumerate().skip(3) {
                 let arrival = (sequence - 2) * 20 + if sequence % 7 == 0 { 15 } else { 0 };
                 if ms == arrival {
-                    remote.jitter.push(sequence as u16, packet.clone());
+                    remote.jitter.push(
+                        sequence as u16,
+                        sequence as u32 * 960,
+                        false,
+                        packet.clone(),
+                        Instant::now(),
+                    );
                 }
             }
             if ms >= next_worker {
@@ -1540,12 +1702,43 @@ mod lifecycle_tests {
             inhibit: Arc::new(AtomicBool::new(false)),
             debug_stop: Arc::new(AtomicBool::new(false)),
             deafen: Arc::new(AtomicBool::new(false)),
+            restrictions: Default::default(),
+            ptt_mode: Default::default(),
         };
+        engine.ptt_mode.store(true, Ordering::Release);
+        let mut queued = transmit::Packet {
+            payload: bytes::Bytes::new(),
+            timestamp: 0,
+            marker: false,
+            captured: Instant::now(),
+            generation: engine.restrictions.snapshot().0,
+        };
+        assert!(engine.permits_packet(&queued));
+        engine.urgent(&Command::Pressed(false));
+        engine.urgent(&Command::Pressed(true));
+        assert!(!engine.permits_packet(&queued));
+        for deafened in [false, true] {
+            queued.generation = engine.restrictions.snapshot().0;
+            queued.captured = Instant::now();
+            engine.urgent(&Command::Settings(AudioSettings {
+                muted: !deafened,
+                deafened,
+                mode: TransmitMode::PushToTalk,
+                ..Default::default()
+            }));
+            engine.urgent(&Command::Settings(AudioSettings {
+                mode: TransmitMode::PushToTalk,
+                ..Default::default()
+            }));
+            assert!(!engine.permits_packet(&queued));
+        }
         for _ in 0..10 {
             engine.notify(Command::Packet {
                 connection: Default::default(),
                 slot: 0,
                 sequence: 0,
+                timestamp: 0,
+                marker: false,
                 payload: bytes::Bytes::new(),
             });
         }

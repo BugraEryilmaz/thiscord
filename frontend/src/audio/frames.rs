@@ -13,6 +13,11 @@ pub struct Frame {
     pub at: Instant,
     sequence: u64,
 }
+impl Frame {
+    pub fn sample_position(&self) -> u64 {
+        self.sequence.wrapping_mul(SAMPLES as u64)
+    }
+}
 
 pub struct Writer {
     queue: HeapProd<Frame>,

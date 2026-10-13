@@ -35,6 +35,10 @@ name = "processing_bench"
 required-features = ["deep-filter"]
 
 [[example]]
+name = "dtx_bench"
+required-features = ["native-audio"]
+
+[[example]]
 name = "neural_echo_probe"
 required-features = ["neural-echo-probe"]
 

@@ -146,6 +146,11 @@ without LTO, with 16 codegen units. They use the same audio/probe feature graph.
 This preserves optimized neural inference without paying production linking cost
 for functional checks. Audio benchmark executables are built together with the
 normal `release` profile; benchmark artifacts remain available on all platforms.
+The DTX benchmark artifact compares continuous and suppressed microphone packet
+counts, payload/header bytes and codec-loop cost for synthetic silence/talkspurts.
+It excludes DSP, devices and encrypted/network overhead. Audio tests also retain
+a real 31-second silent interval across two encrypted hops to exercise transport
+keepalives; physical NAT/TURN and acoustic acceptance remain separate.
 Production WASM and signed installers also retain thin LTO and one codegen unit.
 
 Compare a second successful run on the same runners with the first cold run.

@@ -48,6 +48,8 @@ pub struct StreamControl {
     pub volume: AtomicU32,
     pub active: AtomicBool,
     pub generation: AtomicU64,
+    /// The worker expects silence/startup/inactivity, not device starvation.
+    pub quiet: AtomicBool,
 }
 pub struct StreamWriter {
     pub queue: HeapProd<f32>,
@@ -74,6 +76,7 @@ pub fn mixer(controls: Arc<Controls>) -> (Vec<StreamWriter>, Mixer) {
             volume: AtomicU32::new(1.0_f32.to_bits()),
             active: false.into(),
             generation: 0.into(),
+            quiet: false.into(),
         });
         writers.push(StreamWriter {
             queue,
@@ -168,7 +171,8 @@ impl Mixer {
                             sample * f32::from_bits(stream.control.volume.load(Ordering::Relaxed))
                     }
                     Some(_) => {}
-                    None => underruns += 1,
+                    None if !stream.control.quiet.load(Ordering::Relaxed) => underruns += 1,
+                    None => {}
                 }
             }
             let sample = if deafened {

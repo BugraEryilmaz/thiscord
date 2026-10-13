@@ -113,6 +113,7 @@ impl Pending {
                 debug.settings(&self.settings);
             }
             prepared.processing = s.processing.install(prepared.processing)?;
+            s.gate.clear();
             s.hold = 0;
             s.processed_level = 0.0;
             s.settings = self.settings.clone();
@@ -167,8 +168,10 @@ mod tests {
             connection: None,
             settings: AudioSettings::default(),
             devices: devices(true),
-            encoder: opus::Encoder::new(RATE, opus::Channels::Mono, opus::Application::Voip)
-                .unwrap(),
+            encoder: super::transmit::Encoder::new(true).unwrap(),
+            media_clock: Default::default(),
+            gate: Default::default(),
+            transmit_generation: 0,
             decoder: opus::Decoder::new(RATE, opus::Channels::Mono).unwrap(),
             microphone: true,
             phase: 0.0,
@@ -180,6 +183,54 @@ mod tests {
             processed_level: 0.5,
             processing: processing::Processing::new(&AudioSettings::default()).unwrap(),
         }
+    }
+    #[test]
+    fn mute_and_ptt_epochs_clear_queued_capture_preroll_and_codec_without_resetting_aec() {
+        let mut s = session();
+        let (sender, mut packets) = tokio::sync::mpsc::channel(5);
+        s.outgoing = Some(sender);
+        let restrictions = transmit::Restrictions::default();
+        let inhibit = AtomicBool::new(false);
+        let mut debug = recording::Recorder::default();
+        let capture = |at, level| processing::Captured {
+            position: 0,
+            pcm: [level; FRAME],
+            at: [at, at + Duration::from_millis(10)],
+            gap: [false; 2],
+        };
+        let at = Instant::now();
+        s.capture_packet(capture(at, 0.3), &inhibit, &restrictions, &mut debug)
+            .unwrap();
+        s.capture_packet(
+            capture(at + Duration::from_millis(20), 0.3),
+            &inhibit,
+            &restrictions,
+            &mut debug,
+        )
+        .unwrap();
+        let queued = packets.try_recv().unwrap();
+        restrictions.invalidate(); // mute/PTT release
+        restrictions.invalidate(); // unmute/repress before next worker tick
+        assert!(!restrictions.accepts(&queued, Instant::now()));
+        while packets.try_recv().is_ok() {}
+        let old = restrictions.snapshot().1 - Duration::from_millis(20);
+        s.capture_packet(capture(old, 0.9), &inhibit, &restrictions, &mut debug)
+            .unwrap();
+        assert!(packets.try_recv().is_err());
+        let fresh = restrictions.snapshot().1 + Duration::from_millis(20);
+        s.capture_packet(capture(fresh, 0.2), &inhibit, &restrictions, &mut debug)
+            .unwrap();
+        let packet = packets.try_recv().unwrap();
+        let mut decoded = [0.0; FRAME];
+        let mut decoder = opus::Decoder::new(RATE, opus::Channels::Mono).unwrap();
+        decoder
+            .decode_float(&packet.payload, &mut decoded, false)
+            .unwrap();
+        assert!(
+            decoded.iter().all(|sample| sample.abs() < 0.0001),
+            "no retained pre-roll or codec speech"
+        );
+        assert_eq!(s.processing.resets, 0, "restrictions must not restart AEC");
     }
     #[test]
     fn saved_speaker_volume_rejects_stale_slots_and_other_guilds() {

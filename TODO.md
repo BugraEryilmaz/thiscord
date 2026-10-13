@@ -196,6 +196,11 @@ speaker isolation and physical acoustic acceptance remain future work.
 - [x] Shared versioned authenticated join/leave/offer/answer/state/error contracts.
 - [x] Bounded peer negotiation, gathered SDP ICE candidates and disconnect cleanup.
 - [x] Opus negotiation and per-hop DTLS-SRTP; encrypted two-hop probe.
+- [x] Microphone Opus DTX with retained comfort-noise updates, sample-clock RTP
+  timestamps, timestamp-aware bounded playout, protected pre-roll and stale-send
+  rejection; synthetic traffic benchmark and long-silence encrypted transport tests.
+- [ ] Validate DTX onset/listening quality, mixed-client rollout, clock drift,
+  public NAT/TURN stability and full wire/CPU savings on Windows/macOS/Linux.
 - [x] Configurable STUN/TURN and backend-generated short-lived TURN credentials.
 - [x] Validate current sessions/voice permissions; reject duplicate negotiation.
 - [x] Document WSL/Windows UDP addressing and firewall requirements.

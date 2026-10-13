@@ -374,6 +374,7 @@ impl Processing {
             self.capture_frame(frame, frames::delay_ms(self.render_at, at))?;
         }
         Ok(Some(Captured {
+            position: first.sample_position(),
             pcm,
             at: [first.at, second.at],
             gap: [first_gap, second_gap],
@@ -452,6 +453,7 @@ impl Processing {
     }
 }
 pub(super) struct Captured {
+    pub position: u64,
     pub pcm: [f32; 960],
     pub at: [Instant; 2],
     pub gap: [bool; 2],
