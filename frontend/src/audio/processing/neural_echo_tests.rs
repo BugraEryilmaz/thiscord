@@ -62,7 +62,9 @@ fn model_failure_silences_capture_and_stays_latched_across_gap_reset() {
     p.neural_failed.store(true, Ordering::Relaxed);
     for _ in 0..2 {
         let mut input = [0.2; 480];
-        assert!(p.capture_frame(&mut input, 0).is_err());
+        let error = p.capture_frame(&mut input, 0).unwrap_err();
+        assert_eq!(error.details()["stage"], "neural_echo");
+        assert_eq!(error.details()["code"], "estimator_failed");
         assert_eq!(input, [0.0; 480]);
         p.reset();
     }

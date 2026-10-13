@@ -3,6 +3,8 @@ use crate::access;
 mod diagnostics;
 mod egress;
 mod ice;
+mod logging;
+mod membership;
 mod store;
 mod viewing;
 use crate::{auth::Failure, db::DbPool};
@@ -43,6 +45,9 @@ use webrtc::{
 
 #[derive(Clone)]
 struct Member {
+    request_id: RequestId,
+    call_id: Option<RequestId>,
+    replaced: watch::Sender<bool>,
     network: Arc<RwLock<thiscord_shared::admin::NetworkMetrics>>,
     info: Participant,
     source_id: uuid::Uuid,
@@ -107,6 +112,9 @@ impl VoiceAccess {
             .await;
         let mut members = room.members.write().await;
         let result = result.and_then(|((info, voice_revision), epoch)| {
+            if !self.active.load(Ordering::Acquire) {
+                return Err(Failure::Forbidden);
+            }
             let member = members.get_mut(&slot).ok_or(Failure::Forbidden)?;
             // Speak controls native microphone setup in the negotiated offer.
             // A changed grant requires a fresh join; unrelated grants do not.
@@ -183,18 +191,23 @@ async fn upgrade(
         })
         .into_response()
 }
-async fn send(socket: &mut WebSocket, event: ServerEvent) -> Result<(), ()> {
+async fn send(socket: &mut logging::Socket, event: ServerEvent) -> Result<(), ()> {
     let text = serde_json::to_string(&ServerFrame {
         version: VOICE_VERSION,
         event,
     })
-    .map_err(|_| ())?;
+    .map_err(|_| {
+        socket.end("signaling_serialize_failed");
+    })?;
     tokio::time::timeout(
         Duration::from_secs(2),
         socket.send(Message::Text(text.into())),
     )
     .await
-    .map_err(|_| ())?
+    .map_err(|_| {
+        socket.end("signaling_send_timeout");
+        tracing::warn!(request_id = %socket.id, stage = socket.stage, "voice signaling send timed out");
+    })?
     .map_err(|_| ())
 }
 fn parse(message: Message) -> Option<ClientEvent> {
@@ -204,7 +217,19 @@ fn parse(message: Message) -> Option<ClientEvent> {
     let frame: ClientFrame = serde_json::from_str(&text).ok()?;
     (frame.version == VOICE_VERSION).then_some(frame.event)
 }
-async fn fail(socket: &mut WebSocket, id: RequestId, failure: Failure) {
+async fn fail(socket: &mut logging::Socket, id: RequestId, failure: Failure) {
+    let reason = match &failure {
+        Failure::Unauthorized => "unauthorized",
+        Failure::Forbidden => "forbidden",
+        Failure::NotFound => "not_found",
+        Failure::Invalid(_) => "invalid_request",
+        Failure::Conflict => "conflict",
+        Failure::Limited => "rate_limited",
+        Failure::Unavailable => "unavailable",
+        Failure::Configuration(_) => "configuration",
+        Failure::Database(_) => "database",
+    };
+    socket.end(reason);
     let response = failure.response(id);
     if let Ok(body) = axum::body::to_bytes(response.into_body(), 8192).await
         && let Ok(error) = serde_json::from_slice(&body)
@@ -212,9 +237,10 @@ async fn fail(socket: &mut WebSocket, id: RequestId, failure: Failure) {
         let _ = send(socket, ServerEvent::Error { error }).await;
     }
 }
-async fn access_failed(socket: &mut WebSocket, id: RequestId, failure: Failure) {
+async fn access_failed(socket: &mut logging::Socket, id: RequestId, failure: Failure) {
     match failure {
         Failure::Unauthorized | Failure::Forbidden => {
+            socket.end("access_revoked");
             tracing::info!(request_id = %id, "voice session or channel access revoked");
             let _ = send(socket, ServerEvent::Revoked {}).await;
         }
@@ -231,6 +257,7 @@ struct Ingress {
     arrived: Instant,
 }
 struct Handler {
+    request_id: RequestId,
     metrics: Arc<[AtomicU64; 5]>,
     gathered: Arc<Notify>,
     packets: mpsc::Sender<Ingress>,
@@ -247,6 +274,7 @@ impl PeerConnectionEventHandler for Handler {
         }
     }
     async fn on_connection_state_change(&self, s: RTCPeerConnectionState) {
+        tracing::info!(request_id = %self.request_id, state = ?s, "voice peer state changed");
         if matches!(
             s,
             RTCPeerConnectionState::Failed | RTCPeerConnectionState::Closed
@@ -400,8 +428,20 @@ fn may_relay(member: &Member, kind: MediaKind, arrived: Instant) -> bool {
     may_publish(&member.info, kind)
         && (kind == MediaKind::Microphone || arrived >= member.screen_started)
 }
-async fn update_voice_state(room: &Room, slot: usize, muted: bool, deafened: bool) {
-    if let Some(member) = room.members.write().await.get_mut(&slot) {
+async fn update_voice_state(
+    room: &Room,
+    slot: usize,
+    muted: bool,
+    deafened: bool,
+    owner: &AtomicBool,
+) {
+    if let Some(member) = room
+        .members
+        .write()
+        .await
+        .get_mut(&slot)
+        .filter(|_| owner.load(Ordering::Acquire))
+    {
         member.info.muted = muted;
         member.info.deafened = deafened;
         if deafened {
@@ -414,8 +454,12 @@ async fn update_screen_state(
     slot: usize,
     active: bool,
     audio: bool,
+    owner: &AtomicBool,
 ) -> Result<(), ()> {
     let mut members = room.members.write().await;
+    if !owner.load(Ordering::Acquire) {
+        return Err(());
+    }
     let member = members.get_mut(&slot).ok_or(())?;
     if active && (!member.info.can_speak || member.info.deafened || !member.subscriptions_enabled) {
         return Err(());
@@ -432,34 +476,55 @@ async fn update_screen_state(
     Ok(())
 }
 async fn handle_signal(
-    socket: &mut WebSocket,
+    socket: &mut logging::Socket,
     room: &Room,
     slot: usize,
     event: Option<ClientEvent>,
-) -> bool {
+    owner: &AtomicBool,
+) -> Result<(), &'static str> {
     match event {
-        Some(ClientEvent::Ping {}) => send(socket, ServerEvent::Pong {}).await.is_ok(),
+        Some(ClientEvent::Ping {}) => send(socket, ServerEvent::Pong {})
+            .await
+            .map_err(|_| "pong_send_failed"),
         Some(ClientEvent::State { muted, deafened }) => {
-            update_voice_state(room, slot, muted, deafened).await;
-            true
+            update_voice_state(room, slot, muted, deafened, owner).await;
+            Ok(())
         }
         Some(ClientEvent::Screen { active, audio }) => {
-            update_screen_state(room, slot, active, audio).await.is_ok()
+            update_screen_state(room, slot, active, audio, owner)
+                .await
+                .map_err(|_| "screen_state_rejected")
         }
-        Some(ClientEvent::ScreenViews { views }) => viewing::update(room, slot, views).await,
+        Some(ClientEvent::ScreenViews { views }) => {
+            if viewing::update(room, slot, views, owner).await {
+                Ok(())
+            } else {
+                Err("screen_views_rejected")
+            }
+        }
         Some(ClientEvent::ScreenKeyframe {
             slot: publisher,
             epoch,
         }) => {
-            request_keyframe(room, slot, publisher, epoch).await;
-            true
+            request_keyframe(room, slot, publisher, epoch, owner).await;
+            Ok(())
         }
-        Some(ClientEvent::Leave {}) | None => false,
-        _ => false,
+        Some(ClientEvent::Leave {}) => Err("client_leave"),
+        None => Err("invalid_frame"),
+        _ => Err("unexpected_event"),
     }
 }
-async fn request_keyframe(room: &Room, viewer: usize, publisher: usize, epoch: u32) {
+async fn request_keyframe(
+    room: &Room,
+    viewer: usize,
+    publisher: usize,
+    epoch: u32,
+    owner: &AtomicBool,
+) {
     let mut members = room.members.write().await;
+    if !owner.load(Ordering::Acquire) {
+        return;
+    }
     let Some(viewer_epoch) = members
         .get(&viewer)
         .map(|m| m.generation.load(Ordering::Acquire))
@@ -524,15 +589,18 @@ async fn log_selected_route(pc: &dyn PeerConnection, id: RequestId) -> bool {
     }
     false
 }
-async fn serve(mut socket: WebSocket, pool: DbPool, id: RequestId) {
+async fn serve(socket: WebSocket, pool: DbPool, id: RequestId) {
+    let mut socket = logging::Socket::new(socket, id);
     let Ok(Some(Ok(first))) = tokio::time::timeout(Duration::from_secs(5), socket.recv()).await
     else {
+        socket.end("join_timeout");
         return;
     };
     let Some(ClientEvent::Join {
         token,
         guild_id,
         channel_id,
+        attempt,
     }) = parse(first)
     else {
         fail(
@@ -543,6 +611,7 @@ async fn serve(mut socket: WebSocket, pool: DbPool, id: RequestId) {
         .await;
         return;
     };
+    socket.stage = "authorize";
     let connection_access = match access::identify(&pool, &token, Some(guild_id)).await {
         Ok((_, access)) => access,
         Err(error) => {
@@ -610,54 +679,45 @@ async fn serve(mut socket: WebSocket, pool: DbPool, id: RequestId) {
         .screen_epoch
         .fetch_add(1, Ordering::Relaxed)
         .wrapping_add(1);
-    let slot = {
-        let mut members = room.members.write().await;
-        if members
-            .values()
-            .any(|m| m.info.account_id == info.account_id)
-        {
-            drop(members);
-            fail(
-                &mut socket,
-                id,
-                Failure::Invalid("Already connected to this voice channel"),
-            )
-            .await;
+    let (replaced_tx, mut replaced) = watch::channel(false);
+    let slot = match membership::admit(
+        &room,
+        Member {
+            request_id: id,
+            call_id: attempt.map(|a| a.call_id),
+            replaced: replaced_tx,
+            network: network.clone(),
+            info: info.clone(),
+            source_id,
+            screen_started: Instant::now(),
+            outgoing: [out_tx, video_tx, audio_tx],
+            keyframes: keyframe_tx,
+            last_keyframe: None,
+            feedback_enabled: false,
+            subscriptions_enabled: false,
+            views: [None; ROOM_CAPACITY],
+            generation: generation.clone(),
+            access: connection_access.clone(),
+            metrics: metrics.clone(),
+            active: active.clone(),
+        },
+        attempt.is_some_and(|a| a.reconnect),
+    )
+    .await
+    {
+        Ok(slot) => slot,
+        Err(membership::Rejected::Replaced) => {
+            replaced_close(&mut socket).await;
             return;
         }
-        let Some(slot) = (0..ROOM_CAPACITY).find(|s| !members.contains_key(s)) else {
-            drop(members);
+        Err(membership::Rejected::Full) => {
             fail(&mut socket, id, Failure::Limited).await;
             return;
-        };
-        // Commit membership only while the original DB grant is current.
-        // A mutation may have overlapped the rate-limit or room-lock await.
-        let Some(_admission) = connection_access.packet(epoch, epoch) else {
-            drop(members);
+        }
+        Err(membership::Rejected::StaleGrant) => {
             fail(&mut socket, id, Failure::Unavailable).await;
             return;
-        };
-        info.slot = slot;
-        members.insert(
-            slot,
-            Member {
-                network: network.clone(),
-                info: info.clone(),
-                source_id,
-                screen_started: Instant::now(),
-                outgoing: [out_tx, video_tx, audio_tx],
-                keyframes: keyframe_tx,
-                last_keyframe: None,
-                feedback_enabled: false,
-                subscriptions_enabled: false,
-                views: [None; ROOM_CAPACITY],
-                generation: generation.clone(),
-                access: connection_access.clone(),
-                metrics: metrics.clone(),
-                active: active.clone(),
-            },
-        );
-        slot
+        }
     };
     let gathered = Arc::new(Notify::new());
     let (in_tx, mut in_rx) = mpsc::channel::<Ingress>(8);
@@ -680,11 +740,13 @@ async fn serve(mut socket: WebSocket, pool: DbPool, id: RequestId) {
     let _ = engine.register_default_codecs();
     let registry = register_default_interceptors(Registry::new(), &mut engine)
         .expect("default RTP interceptors");
+    socket.stage = "peer_build";
     let built = PeerConnectionBuilder::new()
         .with_configuration(ice::configuration(&ice_servers))
         .with_interceptor_registry(registry)
         .with_media_engine(engine)
         .with_handler(Arc::new(Handler {
+            request_id: id,
             metrics: metrics.clone(),
             gathered: gathered.clone(),
             packets: in_tx,
@@ -698,8 +760,12 @@ async fn serve(mut socket: WebSocket, pool: DbPool, id: RequestId) {
         .await;
     let Ok(pc) = built else {
         active.store(false, Ordering::Release);
-        room.members.write().await.remove(&slot);
-        fail(&mut socket, id, Failure::Unavailable).await;
+        release_member(&room, slot, source_id).await;
+        if *replaced.borrow() {
+            replaced_close(&mut socket).await;
+        } else {
+            fail(&mut socket, id, Failure::Unavailable).await;
+        }
         return;
     };
     let pc: Arc<dyn PeerConnection> = Arc::new(pc);
@@ -717,59 +783,81 @@ async fn serve(mut socket: WebSocket, pool: DbPool, id: RequestId) {
             tokio::time::sleep(Duration::from_secs(5)).await;
         }
     }));
+    socket.stage = "negotiate";
     let mut tracks = Vec::new();
     let mut screen_feedback = false;
-    let negotiated = tokio::time::timeout(Duration::from_secs(15), async {
-        for slot in 0..MediaKind::TRACK_COUNT {
-            let track = local_track(slot);
-            pc.add_track(track.clone() as Arc<dyn TrackLocal>)
-                .await
-                .map_err(|_| ())?;
-            tracks.push(track);
-        }
-        let offer = pc.create_offer(None).await.map_err(|_| ())?;
-        pc.set_local_description(offer).await.map_err(|_| ())?;
-        gathered.notified().await;
-        let sdp =
-            serde_json::to_string(&pc.local_description().await.ok_or(())?).map_err(|_| ())?;
-        send(
-            &mut socket,
-            ServerEvent::Offer {
+    let negotiated = async {
+        tokio::time::timeout(Duration::from_secs(15), async {
+            socket.stage = "add_tracks";
+            for slot in 0..MediaKind::TRACK_COUNT {
+                let track = local_track(slot);
+                pc.add_track(track.clone() as Arc<dyn TrackLocal>)
+                    .await
+                    .map_err(|_| ())?;
+                tracks.push(track);
+            }
+            socket.stage = "create_offer";
+            let offer = pc.create_offer(None).await.map_err(|_| ())?;
+            socket.stage = "local_description";
+            pc.set_local_description(offer).await.map_err(|_| ())?;
+            socket.stage = "ice_gathering";
+            gathered.notified().await;
+            let sdp =
+                serde_json::to_string(&pc.local_description().await.ok_or(())?).map_err(|_| ())?;
+            socket.stage = "offer_send";
+            send(
+                &mut socket,
+                ServerEvent::Offer {
+                    sdp,
+                    slot,
+                    can_speak: info.can_speak,
+                    screen_video: true,
+                    screen_feedback: true,
+                    screen_subscriptions: true,
+                    ice_servers,
+                },
+            )
+            .await?;
+            socket.stage = "answer";
+            let Some(Ok(answer)) = socket.recv().await else {
+                return Err(());
+            };
+            let Some(ClientEvent::Answer {
                 sdp,
-                slot,
-                can_speak: info.can_speak,
-                screen_video: true,
-                screen_feedback: true,
-                screen_subscriptions: true,
-                ice_servers,
-            },
-        )
-        .await?;
-        let Some(Ok(answer)) = socket.recv().await else {
-            return Err(());
-        };
-        let Some(ClientEvent::Answer {
-            sdp,
-            screen_feedback: enabled,
-            screen_subscriptions,
-        }) = parse(answer)
-        else {
-            return Err(());
-        };
-        screen_feedback = enabled;
-        if let Some(member) = room.members.write().await.get_mut(&slot) {
-            member.feedback_enabled = enabled;
-            member.subscriptions_enabled = screen_subscriptions;
-        }
-        let answer: RTCSessionDescription = serde_json::from_str(&sdp).map_err(|_| ())?;
-        if answer.sdp_type != RTCSdpType::Answer {
-            return Err(());
-        }
-        pc.set_remote_description(answer).await.map_err(|_| ())?;
-        Ok(())
-    })
-    .await;
-    if matches!(negotiated, Ok(Ok(()))) {
+                screen_feedback: enabled,
+                screen_subscriptions,
+            }) = parse(answer)
+            else {
+                return Err(());
+            };
+            screen_feedback = enabled;
+            if let Some(member) = room
+                .members
+                .write()
+                .await
+                .get_mut(&slot)
+                .filter(|m| m.source_id == source_id)
+            {
+                member.feedback_enabled = enabled;
+                member.subscriptions_enabled = screen_subscriptions;
+            }
+            let answer: RTCSessionDescription = serde_json::from_str(&sdp).map_err(|_| ())?;
+            if answer.sdp_type != RTCSdpType::Answer {
+                return Err(());
+            }
+            socket.stage = "remote_description";
+            pc.set_remote_description(answer).await.map_err(|_| ())?;
+            Ok(())
+        })
+        .await
+    };
+    let negotiated = tokio::select! { biased;
+        _ = async { let _ = replaced.wait_for(|value| *value).await; } => None,
+        result = negotiated => Some(result),
+    };
+    if matches!(negotiated, Some(Ok(Ok(())))) {
+        socket.stage = "active";
+        tracing::info!(request_id = %id, "voice signaling negotiated");
         let relay_room = room.clone();
         let relay_active = active.clone();
         let relay_generation = generation.clone();
@@ -794,6 +882,9 @@ async fn serve(mut socket: WebSocket, pool: DbPool, id: RequestId) {
                 let Some(source) = members.get(&slot) else {
                     break;
                 };
+                if source.source_id != source_id || !relay_active.load(Ordering::Acquire) {
+                    break;
+                }
                 if !may_relay(source, kind, arrived) {
                     continue;
                 }
@@ -834,14 +925,14 @@ async fn serve(mut socket: WebSocket, pool: DbPool, id: RequestId) {
                             && kind == MediaKind::ScreenVideo
                         {
                             m.metrics[2].fetch_add(1, Ordering::Relaxed);
-                            recovery.push((other, source.info.screen_epoch));
+                            recovery.push((other, source.info.screen_epoch, m.active.clone()));
                         }
                     }
                 }
                 drop(members);
                 drop(_permit);
-                for (viewer, epoch) in recovery {
-                    request_keyframe(&relay_room, viewer, slot, epoch).await;
+                for (viewer, epoch, viewer_active) in recovery {
+                    request_keyframe(&relay_room, viewer, slot, epoch, &viewer_active).await;
                 }
             }
         });
@@ -884,8 +975,9 @@ async fn serve(mut socket: WebSocket, pool: DbPool, id: RequestId) {
         let mut diagnostic_tick = 0;
         loop {
             tokio::select! {biased;
+                _ = async { let _ = replaced.wait_for(|value| *value).await; } => break,
                 result=changed.changed()=>{
-                    if result.is_err(){break;}
+                    if result.is_err(){socket.end("access_watcher_closed");break;}
                     if let Err(error)=access.refresh(&room,slot,&mut changed).await {
                         access_failed(&mut socket,id,error).await;
                         break;
@@ -894,12 +986,12 @@ async fn serve(mut socket: WebSocket, pool: DbPool, id: RequestId) {
                 Some(epoch)=keyframe_rx.recv()=>{
                     // Revalidate the publisher and generation after queued feedback.
                     let allowed = connection_access.packet(access.generation.load(Ordering::Acquire), access.generation.load(Ordering::Acquire)).is_some()
-                        && room.members.read().await.get(&slot).is_some_and(|m| m.feedback_enabled && m.active.load(Ordering::Acquire) && m.info.sharing_screen && m.info.screen_epoch == epoch);
+                        && room.members.read().await.get(&slot).is_some_and(|m| m.source_id == source_id && m.feedback_enabled && m.active.load(Ordering::Acquire) && m.info.sharing_screen && m.info.screen_epoch == epoch);
                     if allowed && send(&mut socket, ServerEvent::ScreenKeyframe { epoch }).await.is_err() { break; }
                 },
                 message=socket.recv()=>{
-                    let Some(Ok(message))=message else{break;};budget+=1;if budget>30{break;}last=Instant::now();
-                    if !handle_signal(&mut socket, &room, slot, parse(message)).await { break; }
+                    let Some(Ok(message))=message else{break;};budget+=1;if budget>30{socket.end("signaling_rate_limit");break;}last=Instant::now();
+                    if let Err(reason)=handle_signal(&mut socket, &room, slot, parse(message), &active).await { socket.end(reason); break; }
                 },
                 _=tick.tick()=>{
                     diagnostic_tick += 1;
@@ -907,7 +999,9 @@ async fn serve(mut socket: WebSocket, pool: DbPool, id: RequestId) {
                         let counters = ["sfu_video_ingress_packets", "sfu_video_ingress_dropped", "sfu_video_egress_dropped", "sfu_video_sent_packets", "sfu_video_send_timeouts"].into_iter().enumerate().map(|(i,n)| (n.to_owned(), metrics[i].load(Ordering::Relaxed))).collect();
                         if send(&mut socket, ServerEvent::MediaDiagnostics { counters }).await.is_err() { break; }
                     }
-                    budget=0;if last.elapsed()>Duration::from_secs(20)||!active.load(Ordering::Acquire){break;}
+                    budget=0;
+                    if last.elapsed()>Duration::from_secs(20){socket.end("signaling_heartbeat_timeout");break;}
+                    if !active.load(Ordering::Acquire){socket.end("media_inactive");break;}
                     let members=match access.refresh(&room,slot,&mut changed).await {
                         Ok(members)=>members,
                         Err(error)=>{access_failed(&mut socket,id,error).await;break;}
@@ -924,13 +1018,49 @@ async fn serve(mut socket: WebSocket, pool: DbPool, id: RequestId) {
         writers.abort_all();
         let _ = relay.await;
         while writers.join_next().await.is_some() {}
+    } else if !*replaced.borrow() {
+        socket.end(if matches!(negotiated, Some(Err(_))) {
+            "negotiation_timeout"
+        } else {
+            "negotiation_failed"
+        });
+    }
+    if *replaced.borrow() {
+        replaced_close(&mut socket).await;
     }
     active.store(false, Ordering::Release);
-    room.members.write().await.remove(&slot);
+    release_member(&room, slot, source_id).await;
+    tracing::info!(request_id = %id, "voice membership released");
     stats_task.0.abort();
     let _ = (&mut stats_task.0).await;
     let _ = tokio::time::timeout(Duration::from_secs(2), pc.close()).await;
-    let _ = tokio::time::timeout(Duration::from_secs(1), socket.send(Message::Close(None))).await;
+    if !*replaced.borrow() {
+        let _ =
+            tokio::time::timeout(Duration::from_secs(1), socket.send(Message::Close(None))).await;
+    }
+}
+
+async fn release_member(room: &Room, slot: usize, source_id: uuid::Uuid) {
+    let mut members = room.members.write().await;
+    if members
+        .get(&slot)
+        .is_some_and(|member| member.source_id == source_id)
+    {
+        members.remove(&slot);
+    }
+}
+
+async fn replaced_close(socket: &mut logging::Socket) {
+    socket.end("replaced");
+    let _ = send(socket, ServerEvent::Replaced {}).await;
+    let _ = tokio::time::timeout(
+        Duration::from_secs(1),
+        socket.send(Message::Close(Some(axum::extract::ws::CloseFrame {
+            code: REPLACED_CLOSE_CODE,
+            reason: "Voice connection replaced".into(),
+        }))),
+    )
+    .await;
 }
 
 /// Both endpoints participate in the drain. Epochs belong to each connection,
@@ -1044,6 +1174,9 @@ mod send_tests {
             room.members.write().await.insert(
                 slot,
                 Member {
+                    request_id: RequestId::from_uuid(uuid::Uuid::new_v4()),
+                    call_id: None,
+                    replaced: watch::channel(false).0,
                     network: Arc::new(RwLock::new(Default::default())),
                     info: Participant {
                         account_id: uuid::Uuid::new_v4().to_string().parse().unwrap(),
@@ -1087,12 +1220,20 @@ mod send_tests {
                     owner,
                     epoch: 7,
                     bitrate: 2_500_000,
-                }]
+                }],
+                &AtomicBool::new(true)
             )
             .await
         );
         for (viewer, publisher, stream_epoch) in [(7, 1, 7), (0, 7, 7), (1, 1, 7), (0, 1, 6)] {
-            request_keyframe(&room, viewer, publisher, stream_epoch).await;
+            request_keyframe(
+                &room,
+                viewer,
+                publisher,
+                stream_epoch,
+                &AtomicBool::new(true),
+            )
+            .await;
             assert!(receivers[1].try_recv().is_err());
         }
         room.members
@@ -1102,7 +1243,7 @@ mod send_tests {
             .unwrap()
             .info
             .deafened = true;
-        request_keyframe(&room, 0, 1, 7).await;
+        request_keyframe(&room, 0, 1, 7, &AtomicBool::new(true)).await;
         assert!(receivers[1].try_recv().is_err());
         room.members
             .write()
@@ -1111,9 +1252,9 @@ mod send_tests {
             .unwrap()
             .info
             .deafened = false;
-        request_keyframe(&room, 0, 1, 7).await;
+        request_keyframe(&room, 0, 1, 7, &AtomicBool::new(true)).await;
         assert_eq!(receivers[1].try_recv().unwrap(), 7);
-        request_keyframe(&room, 0, 1, 7).await;
+        request_keyframe(&room, 0, 1, 7, &AtomicBool::new(true)).await;
         assert!(receivers[1].try_recv().is_err());
         {
             let mut members = room.members.write().await;
@@ -1121,7 +1262,7 @@ mod send_tests {
             publisher.last_keyframe = None;
             publisher.info.can_speak = false;
         }
-        request_keyframe(&room, 0, 1, 7).await;
+        request_keyframe(&room, 0, 1, 7, &AtomicBool::new(true)).await;
         assert!(receivers[1].try_recv().is_err());
     }
     #[tokio::test]

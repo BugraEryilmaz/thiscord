@@ -23,7 +23,17 @@ use webrtc::{
     peer_connection::*,
 };
 
-type Job = (oneshot::Sender<()>, tokio::task::JoinHandle<()>);
+struct Job {
+    guild_id: GuildId,
+    channel_id: ChannelId,
+    stop: oneshot::Sender<()>,
+    task: tokio::task::JoinHandle<()>,
+}
+impl Job {
+    fn owns(&self, guild: GuildId, channel: ChannelId) -> bool {
+        self.guild_id == guild && self.channel_id == channel && !self.task.is_finished()
+    }
+}
 #[derive(Default)]
 pub struct VoiceState {
     job: tokio::sync::Mutex<Option<Job>>,
@@ -40,6 +50,13 @@ struct Handler {
     screen: crate::native_screen::ScreenState,
     keyframes: mpsc::Sender<(usize, u32)>,
 }
+
+fn terminal_peer_state(state: RTCPeerConnectionState) -> bool {
+    matches!(
+        state,
+        RTCPeerConnectionState::Closed | RTCPeerConnectionState::Failed
+    )
+}
 #[async_trait::async_trait]
 impl PeerConnectionEventHandler for Handler {
     async fn on_ice_gathering_state_change(&self, state: RTCIceGatheringState) {
@@ -48,7 +65,7 @@ impl PeerConnectionEventHandler for Handler {
         }
     }
     async fn on_connection_state_change(&self, state: RTCPeerConnectionState) {
-        thiscord_frontend::audio::diagnostics::event(
+        self.connection.event(
             "voice_peer_state",
             serde_json::json!({"state":format!("{state:?}")}),
         );
@@ -56,10 +73,7 @@ impl PeerConnectionEventHandler for Handler {
             state == RTCPeerConnectionState::Connected,
             Ordering::Release,
         );
-        if matches!(
-            state,
-            RTCPeerConnectionState::Closed | RTCPeerConnectionState::Failed
-        ) {
+        if terminal_peer_state(state) {
             self.failed.store(true, Ordering::Release);
         }
     }
@@ -118,9 +132,13 @@ pub async fn voice_leave(
     app: tauri::AppHandle,
     state: State<'_, VoiceState>,
 ) -> Result<(), String> {
-    app.state::<crate::native_screen::ScreenState>().clear();
     let mut guard = state.job.lock().await;
-    if let Some((stop, mut task)) = guard.take() {
+    stop_job(&app, &state, &mut guard).await;
+    Ok(())
+}
+async fn stop_job(app: &tauri::AppHandle, state: &VoiceState, job: &mut Option<Job>) {
+    app.state::<crate::native_screen::ScreenState>().clear();
+    if let Some(Job { stop, mut task, .. }) = job.take() {
         let _ = stop.send(());
         if tokio::time::timeout(Duration::from_secs(3), &mut task)
             .await
@@ -133,14 +151,13 @@ pub async fn voice_leave(
     app.state::<crate::native_audio::AudioState>()
         .engine
         .notify(Command::Stop);
-    crate::native_audio::unregister_ptt(&app);
+    crate::native_audio::unregister_ptt(app);
     if let Ok(mut status) = state.status.lock() {
         *status = VoiceStatus {
             message: "Disconnected from voice".into(),
             ..Default::default()
         };
     }
-    Ok(())
 }
 #[tauri::command]
 pub fn voice_status(state: State<'_, VoiceState>) -> Result<VoiceStatus, String> {
@@ -172,11 +189,16 @@ pub async fn voice_join(
     if token.len() != 43 {
         return Err("Sign in before joining voice".into());
     }
-    voice_leave(app.clone(), state.clone()).await?;
     let mut job = state.job.lock().await;
-    if job.is_some() {
-        return Err("A voice connection is already starting".into());
+    // This task owns setup, connected media, local recovery and retry backoff.
+    // Repeated IPC/UI joins cannot cancel it and create competing supervisors.
+    if job
+        .as_ref()
+        .is_some_and(|job| job.owns(guild_id, channel_id))
+    {
+        return Ok(());
     }
+    stop_job(&app, &state, &mut job).await;
     crate::native_audio::register_ptt(&app, &settings)?;
     *state
         .settings
@@ -220,50 +242,88 @@ pub async fn voice_join(
             };
         }
     });
-    *job = Some((stop, task));
+    *job = Some(Job {
+        guild_id,
+        channel_id,
+        stop,
+        task,
+    });
     Ok(())
 }
 struct Attempt {
+    call_id: Option<thiscord_shared::RequestId>,
     signaling: Option<crate::native_signaling::Sender>,
     peer: Option<Arc<dyn PeerConnection>>,
     connection: Connection,
     closed: watch::Sender<bool>,
     connected_at: Option<Instant>,
+    started_at: Instant,
+    last_received: Option<Instant>,
+    received_messages: u64,
+    stage: &'static str,
+    finished: bool,
 }
 impl Default for Attempt {
     fn default() -> Self {
         Self {
+            call_id: None,
             signaling: None,
             peer: None,
             connection: Connection::default(),
             closed: watch::channel(false).0,
             connected_at: None,
+            started_at: Instant::now(),
+            last_received: None,
+            received_messages: 0,
+            stage: "idle",
+            finished: false,
         }
     }
 }
 impl Attempt {
+    fn finish(&mut self, reason: &'static str, retryable: bool, failed: bool) {
+        if self.finished || self.stage == "idle" {
+            return;
+        }
+        self.finished = true;
+        self.connection.event(
+            "voice_attempt_finished",
+            serde_json::json!({
+                "reason":reason,"retryable":retryable,"failed":failed,"stage":self.stage,
+                "elapsed_ms":self.started_at.elapsed().as_millis(),
+                "connected_ms":self.connected_at.map(|at|at.elapsed().as_millis()),
+                "signaling_age_ms":self.last_received.map(|at|at.elapsed().as_millis()),
+                "received_messages":self.received_messages,
+            }),
+        );
+    }
     async fn close_signaling(&mut self) {
         if let Some(mut send) = self.signaling.take() {
             // A raw TCP drop through a proxy can leave the origin's membership
-            // alive until its heartbeat expires, rejecting every new join.
+            // alive until its heartbeat expires. Replacement admission fences it.
             // Retain the sink across run()/supervise() cancellation so all exits
             // explicitly release that membership before retrying.
             let outcome = tokio::time::timeout(Duration::from_millis(500), async {
-                send.send(frame(ClientEvent::Leave {}).map_err(|_| ())?)
-                    .await
-                    .map_err(|_| ())?;
-                send.close().await.map_err(|_| ())
+                send.send(frame(ClientEvent::Leave {}).expect("leave serializes"))
+                    .await?;
+                send.close().await
             })
             .await;
-            thiscord_frontend::audio::diagnostics::event(
+            let error = match &outcome {
+                Ok(Ok(())) => serde_json::Value::Null,
+                Ok(Err(error)) => crate::native_signaling::diagnostics::socket(error),
+                Err(_) => serde_json::json!({"kind":"timeout"}),
+            };
+            self.connection.event(
                 "voice_signaling_closed",
-                serde_json::json!({"sent":matches!(outcome, Ok(Ok(())))}),
+                serde_json::json!({"sent":matches!(outcome, Ok(Ok(()))),"error":error}),
             );
         }
     }
 }
 impl Drop for Attempt {
     fn drop(&mut self) {
+        self.finish("cancelled", false, false);
         self.connection.close();
         self.closed.send_replace(true);
     }
@@ -280,10 +340,10 @@ struct Runtime {
 }
 impl Runtime {
     async fn close(&mut self) {
-        thiscord_frontend::audio::diagnostics::event(
-            "voice_transport_closing",
-            serde_json::json!({}),
-        );
+        self.attempt.finish("cancelled", false, false);
+        self.attempt
+            .connection
+            .event("voice_transport_closing", serde_json::json!({}));
         self.app
             .state::<crate::native_screen::ScreenState>()
             .clear();
@@ -300,16 +360,19 @@ impl Runtime {
 }
 impl Connector for Runtime {
     async fn attempt(&mut self) -> (Failure, bool) {
-        thiscord_frontend::audio::diagnostics::event(
-            "voice_attempt_started",
-            serde_json::json!({}),
-        );
+        let call_id = self.attempt.call_id;
         self.attempt = Attempt::default();
+        self.attempt.call_id = call_id;
+        self.attempt.stage = "setup";
+        self.attempt
+            .connection
+            .event("voice_attempt_started", serde_json::json!({}));
         let configuration = self.settings.lock().map(|s| s.clone());
         let registration = configuration
             .map_err(|_| "Settings unavailable".to_string())
             .and_then(|s| crate::native_audio::register_ptt(&self.app, &s));
         if let Err(error) = registration {
+            self.attempt.finish("setup_failed", false, true);
             return (error.into(), false);
         }
         if let Ok(mut status) = self.status.lock() {
@@ -329,9 +392,14 @@ impl Connector for Runtime {
             &mut self.attempt,
         )
         .await;
-        thiscord_frontend::audio::diagnostics::event(
-            "voice_attempt_finished",
-            serde_json::json!({"failed":result.is_err(),"reason":result.as_ref().err().map(Failure::diagnostic_reason),"retryable":result.as_ref().err().is_some_and(|e|e.retryable),"connected_ms":self.attempt.connected_at.map(|at|at.elapsed().as_millis())}),
+        self.attempt.finish(
+            result
+                .as_ref()
+                .err()
+                .map(Failure::diagnostic_reason)
+                .unwrap_or("completed"),
+            result.as_ref().err().is_some_and(|e| e.retryable),
+            result.is_err(),
         );
         let stable = self
             .attempt
@@ -350,7 +418,7 @@ impl Connector for Runtime {
         )
     }
     fn waiting(&mut self, error: &Failure, delay: Duration) {
-        thiscord_frontend::audio::diagnostics::event(
+        self.attempt.connection.event(
             "voice_retry_wait",
             serde_json::json!({"reason":error.diagnostic_reason(),"delay_ms":delay.as_millis()}),
         );
@@ -367,17 +435,51 @@ impl Connector for Runtime {
         }
     }
 }
-async fn send_event<S: futures_util::Sink<Message> + Unpin>(
+async fn send_event<
+    S: futures_util::Sink<Message, Error = tokio_tungstenite::tungstenite::Error> + Unpin,
+>(
     send: &mut S,
     event: ClientEvent,
+    connection: &Connection,
 ) -> Result<(), Failure> {
     tokio::time::timeout(Duration::from_secs(3), send.send(frame(event)?))
         .await
         .map_err(|_| {
+            connection.event(
+                "voice_socket_error",
+                serde_json::json!({"operation":"send", "error":{"kind":"timeout"}}),
+            );
             Failure::temporary("Voice signaling sender stalled")
                 .with_reason("signaling_send_timeout")
         })?
-        .map_err(|_| Failure::temporary("Voice socket closed").with_reason("signaling_send_failed"))
+        .map_err(|error| socket_failure(connection, "send", &error))
+}
+fn socket_failure(
+    connection: &Connection,
+    operation: &'static str,
+    error: &tokio_tungstenite::tungstenite::Error,
+) -> Failure {
+    connection.event("voice_socket_error", serde_json::json!({"operation":operation,"error":crate::native_signaling::diagnostics::socket(error)}));
+    Failure::temporary("Voice socket failed").with_reason(if operation == "send" {
+        "signaling_send_failed"
+    } else {
+        "signaling_receive_failed"
+    })
+}
+fn log_close(connection: &Connection, message: &Message) {
+    if let Message::Close(frame) = message {
+        connection.event(
+            "voice_signaling_close_received",
+            serde_json::json!({"close_code":frame.as_ref().map(|f|u16::from(f.code))}),
+        );
+    }
+}
+fn server_failure(connection: &Connection, error: thiscord_shared::ApiError) -> Failure {
+    connection.event(
+        "voice_server_error",
+        serde_json::json!({"code":error.code,"error_request_id":error.request_id}),
+    );
+    Failure::server(error)
 }
 fn frame(event: ClientEvent) -> Result<Message, String> {
     Ok(Message::Text(
@@ -392,6 +494,9 @@ fn frame(event: ClientEvent) -> Result<Message, String> {
 fn closed(message: &Message) -> Failure {
     if let Message::Close(Some(frame)) = message {
         let code = u16::from(frame.code);
+        if code == REPLACED_CLOSE_CODE {
+            return Failure::replaced();
+        }
         if !matches!(code, 1000 | 1001 | 1006 | 1011..=1014) {
             // Policy/protocol closes are final; never display arbitrary close bodies.
             return Failure::from("Voice connection rejected or protocol unsupported")
@@ -422,7 +527,15 @@ async fn run(
         .engine
         .clone();
     let base = option_env!("THISCORD_API_URL").unwrap_or("http://localhost:3000");
-    let ws = crate::native_signaling::connect(base).await?;
+    attempt.stage = "connect";
+    let ws = crate::native_signaling::connect_for(base, &attempt.connection).await?;
+    attempt.stage = "offer";
+    let reconnect = attempt.call_id.is_some();
+    let request_id = attempt
+        .connection
+        .request_id()
+        .ok_or("Voice server did not provide a request ID")?;
+    let call_id = *attempt.call_id.get_or_insert(request_id);
     let (send, mut receive) = ws.split();
     attempt.signaling = Some(send);
     let send = attempt.signaling.as_mut().unwrap();
@@ -432,17 +545,20 @@ async fn run(
             token: token.into(),
             guild_id,
             channel_id,
+            attempt: Some(JoinAttempt { call_id, reconnect }),
         },
+        &attempt.connection,
     )
     .await?;
     let first = tokio::time::timeout(Duration::from_secs(20), receive.next())
         .await
         .map_err(|_| Failure::temporary("Voice offer timed out").with_reason("offer_timeout"))?
         .ok_or_else(|| Failure::temporary("Voice socket closed").with_reason("signaling_eof"))?
-        .map_err(|_| {
-            Failure::temporary("Voice socket failed").with_reason("signaling_receive_failed")
-        })?;
+        .map_err(|error| socket_failure(&attempt.connection, "receive_offer", &error))?;
+    attempt.last_received = Some(Instant::now());
+    attempt.received_messages += 1;
     if first.is_close() {
+        log_close(&attempt.connection, &first);
         return Err(closed(&first));
     }
     let first: ServerFrame = serde_json::from_str(first.to_text().map_err(|_| "Invalid offer")?)
@@ -476,9 +592,11 @@ async fn run(
             screen_feedback,
             screen_subscriptions,
         ),
-        ServerEvent::Error { error } => return Err(Failure::server(error)),
+        ServerEvent::Replaced {} => return Err(Failure::replaced()),
+        ServerEvent::Error { error } => return Err(server_failure(&attempt.connection, error)),
         _ => return Err("Invalid voice offer".into()),
     };
+    attempt.stage = "negotiate";
     let gathered = Arc::new(Notify::new());
     let failed = Arc::new(AtomicBool::new(false));
     let connected = Arc::new(AtomicBool::new(false));
@@ -601,14 +719,15 @@ async fn run(
             screen_feedback,
             screen_subscriptions,
         },
+        &attempt.connection,
     )
     .await?;
+    attempt.stage = "media_connect";
     let (tx, mut outgoing) = mpsc::channel::<thiscord_frontend::audio::outgoing::EncodedFrame>(
         thiscord_frontend::audio::outgoing::QUEUE_CAPACITY,
     );
     let transmit_control = engine.outgoing_control();
     let mut audio_started = false;
-    let mut disconnected_since: Option<Instant> = None;
     let mut roster: Vec<Participant> = Vec::new();
     let mut ticker = tokio::time::interval(Duration::from_millis(500));
     let start = Instant::now();
@@ -622,12 +741,14 @@ async fn run(
         tokio::select! {
             Some((slot, epoch))=keyframe_rx.recv()=>{
                 if screen_feedback && app.state::<crate::native_screen::ScreenState>().watching(slot, epoch) && roster.iter().any(|m| m.slot == slot && m.screen_epoch == epoch && m.sharing_screen) {
-                    send_event(send, ClientEvent::ScreenKeyframe { slot, epoch }).await?;
+                    send_event(send, ClientEvent::ScreenKeyframe { slot, epoch }, &attempt.connection).await?;
                 }
             },
             message=receive.next()=>{
-                let message=message.ok_or_else(||Failure::temporary("Voice connection closed").with_reason("signaling_eof"))?.map_err(|_|Failure::temporary("Voice socket failed").with_reason("signaling_receive_failed"))?;
-                if message.is_close(){return Err(closed(&message));}
+                let message=message.ok_or_else(||Failure::temporary("Voice connection closed").with_reason("signaling_eof"))?.map_err(|error|socket_failure(&attempt.connection, "receive", &error))?;
+                attempt.received_messages += 1;
+                attempt.last_received = Some(Instant::now());
+                if message.is_close(){log_close(&attempt.connection, &message);return Err(closed(&message));}
                 if !message.is_text(){continue;}
                 let message:ServerFrame=serde_json::from_str(message.to_text().map_err(|_|"Invalid voice event")?).map_err(|_|"Invalid voice event")?;
                 if message.version!=VOICE_VERSION{return Err("Unsupported voice version".into());}heard=Instant::now();
@@ -647,10 +768,14 @@ async fn run(
                         roster = members.iter().filter(|m|m.slot!=own_slot).cloned().collect();
                         engine.notify(Command::Roster{connection:attempt.connection.clone(),members:roster.clone()});
                         if let Ok(mut s)=status.lock(){s.participants=members;s.own_slot=Some(own_slot);}
-                    },ServerEvent::Error{error}=>return Err(Failure::server(error)),ServerEvent::Revoked{}=>return Err("Voice access changed. Join again if you still have permission.".into()),_=>{},
+                    },ServerEvent::Replaced{}=>return Err(Failure::replaced()),ServerEvent::Error{error}=>return Err(server_failure(&attempt.connection,error)),ServerEvent::Revoked{}=>return Err("Voice access changed. Join again if you still have permission.".into()),_=>{},
                 }
             },
             Some(mut frame)=outgoing.recv()=>{
+                if !connected.load(Ordering::Acquire) {
+                    frame.finish(thiscord_frontend::audio::quality::Count::OutgoingFailedPackets);
+                    continue;
+                }
                 if let Err(reason) = transmit_control.check(&frame, &attempt.connection, Instant::now()) {
                     transmit_control.dropped_frame(reason, &mut frame);
                     continue;
@@ -671,23 +796,24 @@ async fn run(
             },
             _=ticker.tick()=>{
                 if last_audio_stats.elapsed() >= Duration::from_secs(5) {
-                    thiscord_frontend::audio::diagnostics::event("voice_transmit", serde_json::json!({
+                    attempt.connection.event("voice_transmit", serde_json::json!({
                         "accepted_packets":accepted_packets,"accepted_payload_bytes":accepted_bytes,
                         "minimum_rtp_header_bytes":accepted_packets*12
                     }));
                     last_audio_stats = Instant::now();
                 }
                 if failed.load(Ordering::Acquire)||heard.elapsed()>Duration::from_secs(20){
-                    thiscord_frontend::audio::diagnostics::event("voice_connection_lost",serde_json::json!({"peer_failed":failed.load(Ordering::Acquire),"signaling_age_ms":heard.elapsed().as_millis()}));
+                    attempt.connection.event("voice_connection_lost",serde_json::json!({"peer_failed":failed.load(Ordering::Acquire),"signaling_age_ms":heard.elapsed().as_millis()}));
                     return Err(Failure::temporary("Voice connection lost").with_reason(if failed.load(Ordering::Acquire) { "peer_failed" } else { "signaling_heartbeat_timeout" }));
                 }
                 if !audio_started{
                     if start.elapsed()>Duration::from_secs(15){return Err(Failure::temporary("Media connection timed out").with_reason("media_connect_timeout"));}
                     if connected.load(Ordering::Acquire){
+                        attempt.stage="audio_start";
                         let configuration=settings.lock().map_err(|_|"Settings unavailable")?.clone();let audio_app=app.clone();let tx=tx.clone();let connection=attempt.connection.clone();
                         tauri::async_runtime::spawn_blocking(move||crate::native_audio::start_voice(&audio_app,guild_id,connection,configuration,tx,can_speak)).await.map_err(|_|"Audio task failed")??;
-                        audio_started=true;attempt.connected_at=Some(Instant::now());
-                        thiscord_frontend::audio::diagnostics::event("voice_media_connected",serde_json::json!({}));
+                        audio_started=true;attempt.connected_at=Some(Instant::now());attempt.stage="active";
+                        attempt.connection.event("voice_media_connected",serde_json::json!({}));
                         if screen_video { app.state::<crate::native_screen::ScreenState>().bind(crate::native_screen::Binding {
                             connection: attempt.connection.clone(), video: screen_track.clone(), audio: system_track.clone(), can_publish: can_speak,
                             subscriptions: screen_subscriptions,
@@ -706,19 +832,22 @@ async fn run(
                     let audio=tauri::async_runtime::spawn_blocking(move||e.command(Command::Keepalive(heartbeat_connection))).await.map_err(|_|"Audio worker failed")??;
                     if !audio.running {return Err(Failure::from(audio.message).with_reason("audio_stopped"));}
                     if let Ok(mut s)=status.lock(){s.message=audio.message;}
-                    if connected.load(Ordering::Acquire) { disconnected_since=None; }
-                    else if disconnected_since.get_or_insert_with(Instant::now).elapsed()>Duration::from_secs(5) {return Err(Failure::temporary("Voice media connection interrupted").with_reason("media_disconnected"));}
+                    // Disconnected is recoverable by ICE itself. Keep this peer
+                    // until Failed/Closed or an actual signaling failure occurs.
+                    if !connected.load(Ordering::Acquire) && let Ok(mut s)=status.lock() {
+                        s.message="Recovering voice connection...".into();
+                    }
                 }
                 if configuration.deafened { crate::native_screen::screen_stop(app.state::<crate::native_screen::ScreenState>()); }
                 let current_screen = app.state::<crate::native_screen::ScreenState>().sharing();
                 if current_screen != screen_state {
-                    send_event(send, ClientEvent::Screen { active: current_screen.0, audio: current_screen.1 }).await?;
+                    send_event(send, ClientEvent::Screen { active: current_screen.0, audio: current_screen.1 }, &attempt.connection).await?;
                     screen_state = current_screen;
                 }
-                send_event(send, ClientEvent::State{muted:configuration.muted,deafened:configuration.deafened}).await?;
+                send_event(send, ClientEvent::State{muted:configuration.muted,deafened:configuration.deafened}, &attempt.connection).await?;
                 if screen_subscriptions {
                     let views = if configuration.deafened { vec![] } else { app.state::<crate::native_screen::ScreenState>().subscriptions() };
-                    send_event(send, ClientEvent::ScreenViews { views }).await?;
+                    send_event(send, ClientEvent::ScreenViews { views }, &attempt.connection).await?;
                 }
             }
         }
@@ -728,6 +857,46 @@ async fn run(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn same_channel_join_reuses_the_whole_job_including_recovery_and_backoff() {
+        let guild = "00000000-0000-0000-0000-000000000001".parse().unwrap();
+        let channel = "00000000-0000-0000-0000-000000000002".parse().unwrap();
+        let other = "00000000-0000-0000-0000-000000000003".parse().unwrap();
+        let (stop, stopped) = oneshot::channel();
+        let mut job = Job {
+            guild_id: guild,
+            channel_id: channel,
+            stop,
+            task: tokio::spawn(async {
+                let _ = stopped.await;
+            }),
+        };
+        // Job ownership doesn't depend on the UI's polled connected flag or
+        // whether the task is negotiating, recovering audio/ICE, or in backoff.
+        for _ in 0..10 {
+            tokio::task::yield_now().await;
+            assert!(job.owns(guild, channel));
+            assert!(!job.owns(guild, other));
+        }
+        job.task.abort();
+        let _ = (&mut job.task).await;
+        assert!(!job.owns(guild, channel));
+    }
+
+    #[test]
+    fn recoverable_peer_states_are_not_retry_triggers() {
+        for state in [
+            RTCPeerConnectionState::New,
+            RTCPeerConnectionState::Connecting,
+            RTCPeerConnectionState::Connected,
+            RTCPeerConnectionState::Disconnected,
+        ] {
+            assert!(!terminal_peer_state(state));
+        }
+        assert!(terminal_peer_state(RTCPeerConnectionState::Failed));
+        assert!(terminal_peer_state(RTCPeerConnectionState::Closed));
+    }
 
     async fn signaling_endpoint() -> (String, tokio::task::JoinHandle<()>) {
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
@@ -811,6 +980,7 @@ mod tests {
     fn policy_closes_are_final_but_server_restart_closes_retry() {
         use tokio_tungstenite::tungstenite::protocol::{CloseFrame, frame::coding::CloseCode};
         for (code, retryable) in [
+            (CloseCode::from(REPLACED_CLOSE_CODE), false),
             (CloseCode::Policy, false),
             (CloseCode::Protocol, false),
             (CloseCode::Restart, true),

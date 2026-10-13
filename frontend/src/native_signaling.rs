@@ -2,7 +2,9 @@
 //! Diagnose each stage without logging account tokens, HTTP bodies or SDP.
 use futures_util::{StreamExt, stream::FuturesUnordered};
 use std::{io, net::SocketAddr, time::Duration};
+use thiscord_frontend::audio::connection::Connection;
 use thiscord_frontend::audio::reconnect::Failure;
+pub(crate) mod diagnostics;
 use tokio::{net::TcpStream, time::timeout};
 use tokio_tungstenite::{
     MaybeTlsStream, WebSocketStream,
@@ -96,8 +98,33 @@ fn handshake_error(error: Error, endpoint: &url::Url) -> Failure {
     }
 }
 
+fn record_request_id(
+    connection: &Connection,
+    headers: &tokio_tungstenite::tungstenite::http::HeaderMap,
+) {
+    // Accept only the server-generated UUID, including for a rejected upgrade.
+    if let Some(id) = headers
+        .get(thiscord_shared::REQUEST_ID_HEADER)
+        .and_then(|value| value.to_str().ok())
+        .and_then(|value| value.parse().ok())
+    {
+        connection.set_request_id(id);
+    }
+}
+
 pub async fn connect(base: &str) -> Result<Socket, Failure> {
-    connect_with_deadlines(base, DNS_TIMEOUT, TCP_TIMEOUT, HANDSHAKE_TIMEOUT).await
+    connect_for(base, &Connection::default()).await
+}
+
+pub async fn connect_for(base: &str, connection: &Connection) -> Result<Socket, Failure> {
+    connect_with_deadlines(
+        base,
+        DNS_TIMEOUT,
+        TCP_TIMEOUT,
+        HANDSHAKE_TIMEOUT,
+        connection,
+    )
+    .await
 }
 
 async fn connect_with_deadlines(
@@ -105,7 +132,9 @@ async fn connect_with_deadlines(
     dns_timeout: Duration,
     tcp_timeout: Duration,
     handshake_timeout: Duration,
+    connection: &Connection,
 ) -> Result<Socket, Failure> {
+    let started = std::time::Instant::now();
     let endpoint = endpoint(base)?;
     let port = endpoint
         .port_or_known_default()
@@ -116,11 +145,19 @@ async fn connect_with_deadlines(
         url::Host::Domain(host) => timeout(dns_timeout, tokio::net::lookup_host((host, port)))
             .await
             .map_err(|_| {
+                connection.event(
+                    "voice_connect_failed",
+                    serde_json::json!({"stage":"dns", "error":{"kind":"timeout"}}),
+                );
                 Failure::temporary(format!(
                     "Voice DNS lookup timed out for {host}. Check DNS and VPN settings."
                 ))
             })?
-            .map_err(|_| {
+            .map_err(|error| {
+                connection.event(
+                    "voice_connect_failed",
+                    serde_json::json!({"stage":"dns", "error":diagnostics::io(&error)}),
+                );
                 Failure::temporary(format!(
                     "Cannot resolve voice server {host}. Check DNS and VPN settings."
                 ))
@@ -130,12 +167,20 @@ async fn connect_with_deadlines(
     let stream = timeout(tcp_timeout, dial(addresses, Duration::from_millis(250)))
         .await
         .map_err(|_| {
+            connection.event(
+                "voice_connect_failed",
+                serde_json::json!({"stage":"tcp", "error":{"kind":"timeout"}}),
+            );
             Failure::temporary(format!(
                 "Voice TCP connection to {endpoint} timed out.{}",
                 network_hint()
             ))
         })?
         .map_err(|error| {
+            connection.event(
+                "voice_connect_failed",
+                serde_json::json!({"stage":"tcp", "error":diagnostics::io(&error)}),
+            );
             Failure::temporary(format!(
                 "Voice TCP connection to {endpoint} failed ({:?}).{}",
                 error.kind(),
@@ -152,7 +197,7 @@ async fn connect_with_deadlines(
         .insert("origin", "http://tauri.localhost".parse().unwrap());
     // Keep the hostname in the request for SNI/certificate validation even when
     // the TCP connection was made to a resolved address. Never bypass TLS checks.
-    let (socket, _) = timeout(
+    let (socket, response) = timeout(
         handshake_timeout,
         tokio_tungstenite::client_async_tls_with_config(
             request,
@@ -162,8 +207,22 @@ async fn connect_with_deadlines(
         ),
     )
     .await
-    .map_err(|_| Failure::temporary(format!("Voice TLS/WebSocket handshake with {endpoint} timed out. Check VPN, proxy and firewall settings.")))?
-    .map_err(|error| handshake_error(error, &endpoint))?;
+    .map_err(|_| {
+        connection.event("voice_connect_failed", serde_json::json!({"stage":"handshake", "error":{"kind":"timeout"}}));
+        Failure::temporary(format!("Voice TLS/WebSocket handshake with {endpoint} timed out. Check VPN, proxy and firewall settings."))
+    })?
+    .map_err(|error| {
+        if let Error::Http(response) = &error {
+            record_request_id(connection, response.headers());
+        }
+        connection.event("voice_connect_failed", serde_json::json!({"stage":"handshake", "error":diagnostics::socket(&error)}));
+        handshake_error(error, &endpoint)
+    })?;
+    record_request_id(connection, response.headers());
+    connection.event(
+        "voice_signaling_connected",
+        serde_json::json!({"elapsed_ms":started.elapsed().as_millis()}),
+    );
     Ok(socket)
 }
 
@@ -186,6 +245,20 @@ mod tests {
             endpoint("http://[::1]:3000").unwrap().as_str(),
             "ws://[::1]:3000/api/v1/voice"
         );
+    }
+
+    #[test]
+    fn arbitrary_request_id_headers_are_not_logged() {
+        let connection = Connection::default();
+        let mut headers = tokio_tungstenite::tungstenite::http::HeaderMap::new();
+        headers.insert(
+            thiscord_shared::REQUEST_ID_HEADER,
+            "private-header-content".parse().unwrap(),
+        );
+        record_request_id(&connection, &headers);
+        let details = connection.diagnostic_details(serde_json::json!({}));
+        assert!(details["request_id"].is_null());
+        assert!(!details.to_string().contains("private-header-content"));
     }
 
     #[test]
@@ -238,6 +311,7 @@ mod tests {
             Duration::from_secs(2),
             Duration::from_secs(2),
             Duration::from_millis(50),
+            &Connection::default(),
         )
         .await
         .unwrap_err();
@@ -255,9 +329,14 @@ mod tests {
             let (mut socket, _) = listener.accept().await.unwrap();
             let mut request = vec![0; 2048];
             assert!(socket.read(&mut request).await.unwrap() > 0);
-            socket.write_all(b"HTTP/1.1 403 Forbidden\r\nContent-Length: 12\r\nConnection: close\r\n\r\nprivate-data").await.unwrap();
+            socket.write_all(b"HTTP/1.1 403 Forbidden\r\nx-request-id: 00000000-0000-0000-0000-000000000001\r\nContent-Length: 12\r\nConnection: close\r\n\r\nprivate-data").await.unwrap();
         });
-        let error = connect(&base).await.unwrap_err();
+        let connection = Connection::default();
+        let error = connect_for(&base, &connection).await.unwrap_err();
+        assert_eq!(
+            connection.diagnostic_details(serde_json::json!({}))["request_id"],
+            "00000000-0000-0000-0000-000000000001"
+        );
         server.await.unwrap();
         assert!(error.message.contains("HTTP 403"));
         assert!(!error.message.contains("private-data"));
@@ -297,17 +376,23 @@ mod tests {
             let (socket, _) = listener.accept().await.unwrap();
             tokio_tungstenite::accept_hdr_async(
                 socket,
-                |request: &tokio_tungstenite::tungstenite::handshake::server::Request, response| {
+                |request: &tokio_tungstenite::tungstenite::handshake::server::Request, mut response: tokio_tungstenite::tungstenite::handshake::server::Response| {
                     assert_eq!(request.uri().path(), thiscord_shared::voice::VOICE_PATH);
                     assert_eq!(request.headers()["origin"], "http://tauri.localhost");
                     assert!(!request.headers().contains_key("authorization"));
+                    response.headers_mut().insert(thiscord_shared::REQUEST_ID_HEADER, "00000000-0000-0000-0000-000000000001".parse().unwrap());
                     Ok(response)
                 },
             )
             .await
             .unwrap()
         });
-        let _client = connect(&base).await.unwrap();
+        let connection = Connection::default();
+        let _client = connect_for(&base, &connection).await.unwrap();
+        assert_eq!(
+            connection.diagnostic_details(serde_json::json!({}))["request_id"],
+            "00000000-0000-0000-0000-000000000001"
+        );
         let _server = server.await.unwrap();
     }
 }

@@ -13,7 +13,12 @@ impl View {
     }
 }
 
-pub(super) async fn update(room: &Room, slot: usize, views: Vec<Subscription>) -> bool {
+pub(super) async fn update(
+    room: &Room,
+    slot: usize,
+    views: Vec<Subscription>,
+    owner: &AtomicBool,
+) -> bool {
     if views.len() >= ROOM_CAPACITY || views.iter().any(|v| !v.valid()) {
         return false;
     }
@@ -24,6 +29,9 @@ pub(super) async fn update(room: &Room, slot: usize, views: Vec<Subscription>) -
         }
     }
     let mut members = room.members.write().await;
+    if !owner.load(Ordering::Acquire) {
+        return false;
+    }
     let Some(receiver) = members.get(&slot) else {
         return false;
     };
@@ -146,6 +154,9 @@ mod tests {
             room.members.write().await.insert(
                 slot,
                 Member {
+                    request_id: thiscord_shared::RequestId::from_uuid(uuid::Uuid::new_v4()),
+                    call_id: None,
+                    replaced: watch::channel(false).0,
                     network: Arc::new(RwLock::new(Default::default())),
                     info: Participant {
                         account_id: account,
@@ -194,7 +205,7 @@ mod tests {
         for changed_slot in [0, 1] {
             let room = room().await;
             let view = subscription(&room).await;
-            assert!(update(&room, 1, vec![view]).await);
+            assert!(update(&room, 1, vec![view], &AtomicBool::new(true)).await);
             let account = room.members.read().await[&changed_slot].info.account_id;
             let mutation = access::pause(access::Scope::Account(account));
             for kind in MediaKind::ALL {
@@ -210,7 +221,7 @@ mod tests {
             );
             mutation.finish(true);
             // A completed mutation still needs a fresh authoritative grant.
-            assert!(update(&room, 1, vec![view]).await);
+            assert!(update(&room, 1, vec![view], &AtomicBool::new(true)).await);
             assert!(!allowed(&room, 1, MediaKind::ScreenVideo, Instant::now()).await);
             {
                 let members = room.members.read().await;
@@ -223,7 +234,7 @@ mod tests {
                     members[&1].generation.load(Ordering::Acquire)
                 );
             }
-            assert!(update(&room, 1, vec![view]).await);
+            assert!(update(&room, 1, vec![view], &AtomicBool::new(true)).await);
             for kind in MediaKind::ALL {
                 assert!(
                     allowed(&room, 1, kind, Instant::now()).await,
@@ -242,7 +253,7 @@ mod tests {
         assert!(allowed(&room, 1, MediaKind::Microphone, Instant::now()).await);
         assert!(!allowed(&room, 1, MediaKind::ScreenVideo, Instant::now()).await);
         assert!(!allowed(&room, 1, MediaKind::SystemAudio, Instant::now()).await);
-        assert!(update(&room, 1, vec![view]).await);
+        assert!(update(&room, 1, vec![view], &AtomicBool::new(true)).await);
         assert!(allowed(&room, 1, MediaKind::ScreenVideo, Instant::now()).await);
         assert!(allowed(&room, 1, MediaKind::SystemAudio, Instant::now()).await);
         assert!(!allowed(&room, 2, MediaKind::ScreenVideo, Instant::now()).await);
@@ -254,18 +265,19 @@ mod tests {
                 vec![Subscription {
                     bitrate: 500_000,
                     ..view
-                }]
+                }],
+                &AtomicBool::new(true)
             )
             .await
         );
         assert_eq!(target(&room, 0).await, Some((9, 500_000)));
-        assert!(update(&room, 2, vec![]).await);
+        assert!(update(&room, 2, vec![], &AtomicBool::new(true)).await);
         assert_eq!(target(&room, 0).await, Some((9, 5_000_000)));
         let queued = Instant::now();
-        assert!(update(&room, 1, vec![]).await);
+        assert!(update(&room, 1, vec![], &AtomicBool::new(true)).await);
         assert!(!allowed(&room, 1, MediaKind::ScreenVideo, queued).await);
         assert_eq!(target(&room, 0).await, Some((9, 0)));
-        assert!(update(&room, 1, vec![view]).await);
+        assert!(update(&room, 1, vec![view], &AtomicBool::new(true)).await);
         assert!(
             !allowed(&room, 1, MediaKind::ScreenVideo, queued).await,
             "old queued packets cannot reach a new viewer"
@@ -275,29 +287,33 @@ mod tests {
     async fn stale_leases_identity_epochs_deafen_and_access_fail_closed() {
         let room = room().await;
         let view = subscription(&room).await;
-        assert!(update(&room, 1, vec![view]).await);
+        assert!(update(&room, 1, vec![view], &AtomicBool::new(true)).await);
         room.members.write().await.get_mut(&1).unwrap().views[0]
             .as_mut()
             .unwrap()
             .renewed -= Duration::from_secs(VIEW_LEASE_SECS);
         assert!(!allowed(&room, 1, MediaKind::ScreenVideo, Instant::now()).await);
         assert_eq!(target(&room, 0).await, Some((9, 0)));
-        assert!(update(&room, 1, vec![view]).await);
-        update_voice_state(&room, 1, false, true).await;
+        assert!(update(&room, 1, vec![view], &AtomicBool::new(true)).await);
+        update_voice_state(&room, 1, false, true, &AtomicBool::new(true)).await;
         assert!(!allowed(&room, 1, MediaKind::ScreenVideo, Instant::now()).await);
-        update_voice_state(&room, 1, false, false).await;
+        update_voice_state(&room, 1, false, false, &AtomicBool::new(true)).await;
         assert!(!allowed(&room, 1, MediaKind::ScreenVideo, Instant::now()).await);
-        assert!(update(&room, 1, vec![view]).await);
+        assert!(update(&room, 1, vec![view], &AtomicBool::new(true)).await);
         let old_ingress = Instant::now();
-        update_screen_state(&room, 0, false, false).await.unwrap();
-        update_screen_state(&room, 0, true, true).await.unwrap();
+        update_screen_state(&room, 0, false, false, &AtomicBool::new(true))
+            .await
+            .unwrap();
+        update_screen_state(&room, 0, true, true, &AtomicBool::new(true))
+            .await
+            .unwrap();
         assert!(!may_relay(
             &room.members.read().await[&0],
             MediaKind::ScreenVideo,
             old_ingress
         ));
         assert!(!allowed(&room, 1, MediaKind::ScreenVideo, Instant::now()).await);
-        assert!(update(&room, 1, vec![view]).await); // Stale share epoch is ignored.
+        assert!(update(&room, 1, vec![view], &AtomicBool::new(true)).await); // Stale share epoch is ignored.
         assert!(room.members.read().await[&1].views[0].is_none());
         room.members
             .write()
@@ -306,7 +322,7 @@ mod tests {
             .unwrap()
             .info
             .screen_epoch = 9;
-        assert!(update(&room, 1, vec![view]).await);
+        assert!(update(&room, 1, vec![view], &AtomicBool::new(true)).await);
         room.members
             .write()
             .await
@@ -338,9 +354,17 @@ mod tests {
     async fn malformed_cross_room_and_self_subscriptions_never_grant_delivery() {
         let room = room().await;
         let view = subscription(&room).await;
-        assert!(!update(&room, 1, vec![view; ROOM_CAPACITY]).await);
-        assert!(!update(&room, 1, vec![view, view]).await);
-        assert!(!update(&room, 1, vec![Subscription { bitrate: 0, ..view }]).await);
+        assert!(!update(&room, 1, vec![view; ROOM_CAPACITY], &AtomicBool::new(true)).await);
+        assert!(!update(&room, 1, vec![view, view], &AtomicBool::new(true)).await);
+        assert!(
+            !update(
+                &room,
+                1,
+                vec![Subscription { bitrate: 0, ..view }],
+                &AtomicBool::new(true)
+            )
+            .await
+        );
         assert!(
             !update(
                 &room,
@@ -348,11 +372,12 @@ mod tests {
                 vec![Subscription {
                     slot: ROOM_CAPACITY,
                     ..view
-                }]
+                }],
+                &AtomicBool::new(true)
             )
             .await
         );
-        assert!(update(&room, 0, vec![view]).await);
+        assert!(update(&room, 0, vec![view], &AtomicBool::new(true)).await);
         assert!(room.members.read().await[&0].views[0].is_none());
         assert!(
             update(
@@ -361,7 +386,8 @@ mod tests {
                 vec![Subscription {
                     owner: thiscord_shared::AccountId::from_uuid(uuid::Uuid::new_v4()),
                     ..view
-                }]
+                }],
+                &AtomicBool::new(true)
             )
             .await
         );
@@ -372,13 +398,17 @@ mod tests {
             .get_mut(&1)
             .unwrap()
             .subscriptions_enabled = false;
-        assert!(!update(&room, 1, vec![view]).await);
+        assert!(!update(&room, 1, vec![view], &AtomicBool::new(true)).await);
         room.members
             .write()
             .await
             .get_mut(&0)
             .unwrap()
             .subscriptions_enabled = false;
-        assert!(update_screen_state(&room, 0, true, true).await.is_err());
+        assert!(
+            update_screen_state(&room, 0, true, true, &AtomicBool::new(true))
+                .await
+                .is_err()
+        );
     }
 }

@@ -183,6 +183,15 @@ async fn still_connected(socket: &mut Socket) {
     }
 }
 async fn join(addr: std::net::SocketAddr, token: &str, guild: Value, channel: Value) -> Socket {
+    join_attempt(addr, token, guild, channel, None).await
+}
+async fn join_attempt(
+    addr: std::net::SocketAddr,
+    token: &str,
+    guild: Value,
+    channel: Value,
+    attempt: Option<voice::JoinAttempt>,
+) -> Socket {
     let mut req = format!("ws://{addr}{}", voice::VOICE_PATH)
         .into_client_request()
         .unwrap();
@@ -195,6 +204,7 @@ async fn join(addr: std::net::SocketAddr, token: &str, guild: Value, channel: Va
             token: token.into(),
             guild_id: serde_json::from_value(guild).unwrap(),
             channel_id: serde_json::from_value(channel).unwrap(),
+            attempt,
         },
     )
     .await;
@@ -451,6 +461,140 @@ async fn screen_blocked(source: &mut Peer, receiver: &mut Peer) {
         );
     }
 }
+#[tokio::test]
+#[ignore = "requires TEST_DATABASE_URL; CI runs with --include-ignored"]
+async fn voice_takeover_fences_old_peers_and_delayed_retries() {
+    let db = database();
+    let (_, token) = user(&db, "takeover_owner");
+    let (_, listener_token) = user(&db, "takeover_listener");
+    let (_, outsider) = user(&db, "takeover_outsider");
+    permissions::bootstrap_owner(&db.pool, "takeover_owner").unwrap();
+    let app = api::router(
+        Some(db.pool.clone()),
+        vec!["http://localhost:1420".parse().unwrap()],
+    );
+    let mut state = command(
+        &app,
+        &token,
+        json!({"action":"create_guild","name":"Takeover"}),
+        StatusCode::OK,
+    )
+    .await["state"]
+        .clone();
+    change(
+        &app,
+        &token,
+        &mut state,
+        json!({"action":"add_member","username":"takeover_listener"}),
+        StatusCode::OK,
+    )
+    .await;
+    change(
+        &app,
+        &token,
+        &mut state,
+        json!({"action":"create_channel","name":"voice","kind":"voice"}),
+        StatusCode::OK,
+    )
+    .await;
+    let guild = state["guild"]["id"].clone();
+    let channel = state["channels"][0]["id"].clone();
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    let serving = tokio::spawn(axum::serve(listener, app.clone()).into_future());
+    let call = voice::JoinAttempt {
+        call_id: thiscord_shared::RequestId::from_uuid(Uuid::new_v4()),
+        reconnect: false,
+    };
+    let mut old =
+        Peer::new(join_attempt(addr, &token, guild.clone(), channel.clone(), Some(call)).await)
+            .await;
+    let mut witness =
+        Peer::new(join(addr, &listener_token, guild.clone(), channel.clone()).await).await;
+    forwarded(&mut old, &mut witness).await;
+    // A reconnect replaces its own live/stale socket immediately.
+    let mut resumed = Peer::new(
+        join_attempt(
+            addr,
+            &token,
+            guild.clone(),
+            channel.clone(),
+            Some(voice::JoinAttempt {
+                reconnect: true,
+                ..call
+            }),
+        )
+        .await,
+    )
+    .await;
+    assert_eq!(old.slot, resumed.slot);
+    expect_replaced(&mut old.socket).await;
+    old.close().await;
+    forwarded(&mut resumed, &mut witness).await;
+    // A fresh explicit join takes ownership; the displaced caller's delayed
+    // automatic retries must not start a takeover loop.
+    let new_call = voice::JoinAttempt {
+        call_id: thiscord_shared::RequestId::from_uuid(Uuid::new_v4()),
+        reconnect: false,
+    };
+    let mut newest =
+        Peer::new(join_attempt(addr, &token, guild.clone(), channel.clone(), Some(new_call)).await)
+            .await;
+    expect_replaced(&mut resumed.socket).await;
+    resumed.close().await;
+    let mut stale = join_attempt(
+        addr,
+        &token,
+        guild.clone(),
+        channel.clone(),
+        Some(voice::JoinAttempt {
+            reconnect: true,
+            ..call
+        }),
+    )
+    .await;
+    expect_replaced(&mut stale).await;
+    let mut denied =
+        join_attempt(addr, &outsider, guild.clone(), channel.clone(), Some(call)).await;
+    assert!(matches!(
+        event(&mut denied).await,
+        ServerEvent::Error { .. }
+    ));
+    still_connected(&mut newest.socket).await;
+    forwarded(&mut newest, &mut witness).await;
+    // Replacement also interrupts a peer waiting for its SDP answer.
+    let mut pending = join_attempt(addr, &token, guild.clone(), channel.clone(), Some(call)).await;
+    assert!(matches!(
+        event(&mut pending).await,
+        ServerEvent::Offer { .. }
+    ));
+    expect_replaced(&mut newest.socket).await;
+    newest.close().await;
+    let mut final_peer =
+        Peer::new(join_attempt(addr, &token, guild, channel, Some(new_call)).await).await;
+    expect_replaced(&mut pending).await;
+    still_connected(&mut final_peer.socket).await;
+    forwarded(&mut final_peer, &mut witness).await;
+    final_peer.close().await;
+    witness.close().await;
+    serving.abort();
+    let _ = serving.await;
+}
+
+async fn expect_replaced(socket: &mut Socket) {
+    tokio::time::timeout(Duration::from_secs(3), async {
+        loop {
+            match event(socket).await {
+                ServerEvent::Replaced {} => break,
+                ServerEvent::Participants { .. } | ServerEvent::MediaDiagnostics { .. } | ServerEvent::ScreenTarget { .. } => {},
+                _ => panic!("Expected terminal replacement notification"),
+            }
+        }
+        let message = socket.next().await.unwrap().unwrap();
+        assert!(matches!(message, Message::Close(Some(frame)) if u16::from(frame.code) == voice::REPLACED_CLOSE_CODE));
+    }).await.expect("Takeover must not wait for heartbeat or negotiation timeout");
+}
+
 #[tokio::test]
 #[ignore = "requires TEST_DATABASE_URL; CI runs with --include-ignored"]
 async fn sfu_forwarding_permissions_isolation_and_cleanup() {

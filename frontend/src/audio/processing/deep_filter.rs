@@ -1,5 +1,6 @@
 //! The only module that knows DeepFilterNet/tract types and model details.
 use super::stages::{Block, CaptureStage};
+use crate::audio::failure::Failure;
 use df::tract::{DfParams, DfTract, RuntimeParams};
 use ndarray::{ArrayView2, ArrayViewMut2};
 
@@ -36,14 +37,22 @@ impl CaptureStage for DeepFilter {
     fn name(&self) -> &'static str {
         "DeepFilterNet3"
     }
-    fn process(&mut self, block: &mut Block) -> Result<(), String> {
+    fn process(&mut self, block: &mut Block) -> Result<(), Failure> {
         let mut out = [0.0; 480];
         self.model
             .process(
-                ArrayView2::from_shape((1, 480), &block[..]).map_err(|e| e.to_string())?,
-                ArrayViewMut2::from_shape((1, 480), &mut out[..]).map_err(|e| e.to_string())?,
+                ArrayView2::from_shape((1, 480), &block[..])
+                    .map_err(|e| Failure::new("deep_filter", "array_shape", e.to_string()))?,
+                ArrayViewMut2::from_shape((1, 480), &mut out[..])
+                    .map_err(|e| Failure::new("deep_filter", "array_shape", e.to_string()))?,
             )
-            .map_err(|_| "Inference failed; audio stopped. Disable suppression and reconnect.")?;
+            .map_err(|_| {
+                Failure::new(
+                    "deep_filter",
+                    "inference_failed",
+                    "Inference failed; audio stopped. Disable suppression and reconnect.",
+                )
+            })?;
         *block = out;
         Ok(())
     }

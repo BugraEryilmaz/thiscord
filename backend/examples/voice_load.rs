@@ -233,6 +233,7 @@ async fn join(config: Arc<Config>, index: usize, stats: Arc<Mutex<Stats>>) -> Re
             token: common::token(&config.secret, index),
             guild_id: GuildId::from_uuid(common::id("guild", 0)),
             channel_id: ChannelId::from_uuid(common::id("channel", index / config.room_size)),
+            attempt: None,
         },
     )
     .await?;
