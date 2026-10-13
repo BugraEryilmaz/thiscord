@@ -12,6 +12,11 @@ Native capture runs at 48 kHz mono in 480-sample blocks:
 
 `capture -> Sonora AEC3 -> selected denoiser -> optional Sonora AGC2 -> transmit gate -> Opus`
 
+The activation detector observes the selected denoiser's output **before AGC2**;
+the gate retains the final processed PCM. Automatic activation adds a separate,
+fixed 60 ms delay; PTT adds none. Control boundaries clear enhancement history and
+pre-roll while preserving AEC adaptation. See [voice activation](voice-activation.md).
+
 `processing/stages.rs` defines `CaptureStage` (`process`, `reset`, `delay_samples`)
 and an ordered `CaptureChain`. Add an adapter implementing that interface to
 replace a model or compose more stages with `push`; stage order is explicit.
@@ -36,6 +41,10 @@ to an unprocessed microphone. Models and embeddings are never downloaded at runt
 The model adds **1,440 samples / 30 ms of output alignment delay**, plus the
 10 ms capture block acquisition (40 ms algorithmic framing budget). This excludes
 AEC/filter-bank delay, device buffering, Opus framing and network/jitter buffers.
+Native sender age/control fences include that 30 ms buffering; the RTP clock
+continues on capture sample positions. See [sender timing](audio.md#microphone-sender-timeline-and-expiry)
+for the 100 ms sender age budget plus fixed automatic-gate allowance, and
+timestamp-aware receiver recovery.
 The offline quality benchmark independently aligns all pipelines, including
 Sonora's filter-bank delay, before comparing SNR.
 

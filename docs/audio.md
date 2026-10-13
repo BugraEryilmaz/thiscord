@@ -276,6 +276,14 @@ WebView capture was not substituted for the requested native path.
 
 ## Audio timing and performance
 
+Voice activation now uses sustained energy after denoising and before AGC, with
+40 ms attack, separate opening/closing thresholds, 200 ms release and a fixed
+60 ms pre-roll delay. PTT bypasses this detector and delay. Existing persisted
+sensitivity/defaults remain supported. See [voice activation](voice-activation.md)
+for scheduling, control boundaries, detector evaluation and synthetic comparisons.
+The post-mix AEC reference and its timestamps/tuning are unchanged; closing the
+automatic gate never resets echo adaptation.
+
 Capture is averaged to mono, processed at 48 kHz and encoded as 20 ms Opus frames
 at 32 kbit/s. Capture callbacks only convert/copy samples and update atomics.
 Capture and post-mix reference callbacks assemble timestamped 10 ms blocks into
@@ -285,19 +293,211 @@ than 60 ms. Work per tick stays bounded, and stop/PTT release are checked while
 draining. Lost blocks carry a sequence gap that restarts DSP adaptation; playback
 reference overflows are counted too. No per-sample allocation or DSP runs on the
 device callback. The processor is constructed before starting either device.
+
+### Microphone sender timeline and expiry
+
+`frames::Frame.at` is the first sample's CPAL capture time mapped to monotonic
+`Instant`; subsequent samples in that callback use exact 48 kHz offsets. Capture
+blocks also carry a device-stream sample position, advanced even when the 120 ms
+ring is full. A forward callback-time hole greater than 2 ms adds the rounded
+missing sample count. Smaller differences are treated as timestamp mapping jitter,
+and backward timing never rewinds sample positions. A partial 10 ms block crossing
+a hole is discarded. This is capture-only handling: post-mix AEC reference assembly,
+timestamps, delay calculation and echo configuration remain unchanged.
+
+DSP preserves block timestamps and sample positions. It never combines two halves
+across a gap into one 20 ms Opus packet: the earlier half is discarded and the later
+half retained until a contiguous partner arrives. The existing gap reset then
+clears DSP history. There is at most one retained 480-sample block beyond the ring.
+Normal packets advance by exactly 960 samples. The session maps these positions
+to one 48 kHz media clock before queue admission, so discarded packets still occupy
+time. Device recovery/reconfiguration bridges new device positions using elapsed
+monotonic capture time from the session origin, clamped beyond the previous packet.
+A replacement connection starts a fresh clock; neither wall-clock nor dequeue time
+sets RTP timestamps.
+
+`audio::outgoing::EncodedFrame` is native-only: encoded payload, 64-bit media
+position, oldest capture time, control generation, connection identity, delivery
+lease, talkspurt marker and fixed activation delay. RTP
+uses the low 32 bits of media position, preserving wrapping. Sequence numbers wrap
+independently at 16 bits and advance only after WebRTC accepts a write. A frame
+discarded before admission consumes media time but no sequence number, including
+a pending write cancelled by a control boundary or expiry.
+
+RTP positions describe output slots on the capture clock. Explicit enhancement
+buffering delays the signal within those slots rather than retiming the clock on
+model changes. For age/control checks, the oldest capture time subtracts the active
+enhancer's declared buffering (DFN3: 1,440 samples / 30 ms) and the activation
+lookbehind (2,880 samples / 60 ms in automatic mode, zero in PTT). Frequency-dependent
+filter-bank/AEC phase delay and Opus lookahead are not exact capture-age estimates;
+these remain part of acoustic latency validation. No echo algorithm was replaced
+or retuned.
+
+The outgoing queue holds five packets plus at most one pending transport write.
+The capture-age budget is **100 ms plus the fixed activation delay**: 160 ms in
+automatic mode, 100 ms in PTT. The 60 ms allowance is capped and does not grow with
+queue occupancy. This leaves the same acquisition/DSP/transport budget in either
+mode; DFN3 with automatic activation normally needs 20 + 30 + 60 = 110 ms before
+enqueue. Packets reaching the budget are discarded before enqueue, at dequeue,
+and before every poll of a pending WebRTC write. The same deadline
+cancels blocked admission. Thus a stalled sender drains expired entries without
+replaying an arbitrarily old backlog; expiry alone does not disconnect the call.
+Transport errors retain the existing disconnect behavior. Work and memory stay
+bounded by capture/packet capacities; this does not guarantee downstream WebRTC,
+network or receiver latency after admission.
+
+Urgent stop, PTT release, mute/deafen and settings/session changes invalidate the
+generation independently of the command queue. Relaxing a restriction cannot
+revalidate old frames. A monotonic capture cutoff also prevents queued PCM and
+explicit enhancer delay from being relabeled as fresh speech after unmuting.
+Opus history resets on generation changes and on the transition to silence.
+Fresh muted/PTT-gated frames continue to encode silence; the microphone DTX
+policy below suppresses eligible packets after encoding.
+Connection identity and active-state checks reject closed/replaced peers before
+each transport poll. Gate gaps and device/session resets also close a delivery
+lease, invalidating pending pre-gap audio. A control notification wakes blocked writes; packets already
+admitted to WebRTC cannot be recalled. Backend permissions remain authoritative.
+
+Worker diagnostic snapshots include `outgoing.queue_full`, `outgoing.expired` and
+`outgoing.control_invalidated`, cumulative per audio-engine lifetime. Each rejected
+encoded packet increments one reason (invalidation takes precedence over expiry).
+They contain no audio or connection identifiers. Recording's `accepted` flag still
+means outgoing queue admission, not final network delivery.
+
+Native receive playout now consumes these timestamp holes, including sender-side
+drops with consecutive sequence numbers. The same receive path serves mono shared
+audio. Physical stalls, device drift and listening acceptance on Windows/macOS/Linux
+remain unverified by deterministic sender/receiver tests.
+
+### Playback timing
+
 Each received speaker owns a separate bounded packet jitter buffer, Opus decoder,
-PCM ring and gain. Jitter starts at roughly 60 ms, orders by RTP media timestamps,
-rejects duplicates/late packets, handles both RTP wraps, and requests at most three
-frames of Opus concealment during an unknown gap. Timestamp gaps with contiguous
-sequence numbers represent omitted media, not packet loss. A source switch resets
-decoding and its queued PCM.
-The worker refills decoded PCM from the output ring's actual consumption, aiming
-for 40-60 ms, instead of releasing one frame on an independent 20 ms timer. Work
-is capped at two decoded frames per stream per tick. Prefetch waits for missing
-packets while more than 10 ms of PCM remain, so filling the cushion early does
-not immediately trigger concealment of a delayed packet. A synthetic Opus/mixer
-regression checks sample continuity through irregular worker wakes and delayed
-packets; actual device scheduling and prolonged stalls still need live validation.
+PCM ring, rate converter and gain. Startup initially targets 40 ms; arrival
+variation adapts the combined packet/PCM target within 40-120 ms. The native media
+command preserves RTP timestamp and monotonic arrival time from the transport,
+before the bounded audio-worker queue. Only 20 ms Opus packets are supported;
+invalid packet headers and unsupported durations are rejected before clock admission. RTP
+timestamps advance a 48 kHz sample cursor, independently of sequence numbers.
+Reordering/deduplication handles both timestamp and sequence wrap; late, overlapping
+or contradictory packets cannot rewind consumed audio. A long media jump can
+re-establish sequence ordering after the 16-bit half-range (for example a long
+deafen); the timestamp floor still rejects old audio.
+
+Short timestamp holes produce at most 60 ms of consecutive concealment. Whole
+20 ms slots use the source's Opus FEC/PLC state; fractional holes use exact-length
+silence, since Opus PLC cannot represent arbitrary sample counts. Missing sequence
+numbers alone do not add silence if timestamps are contiguous. Missing media and
+FEC/PLC never refresh speaking indicators. Decode errors clear potentially modified
+decoder history and use bounded PLC, with silence if that fallback also fails.
+
+Each source retains at most 12 packets of 1,500 bytes. Queue age of **200 ms**,
+a worker stall above **100 ms**, more than **60 ms** of unknown missing media, a buffered
+timestamp span beyond **240 ms**, or queue pressure triggers recovery. A responsive
+worker also invalidates decoded PCM when arrivals have stopped for 200 ms. The receiver discards stale entries and reanchors at the newest
+40 ms of buffered media (at most three packets), rather than replaying an entire
+interruption or synthesizing seconds of concealment. Arrival age is measured from
+transport delivery, not worker dequeue. It cannot measure time already spent in
+the remote transport/network or establish an absolute sender-to-listener age bound.
+
+Recovery resets that source's decoder/activity/rate converter and requests a PCM flush through
+its existing atomic mixer generation. The callback acknowledges after discarding
+old PCM; the worker waits for that acknowledgement before writing fresh decoded
+audio. Other sources and gains are preserved. Deafen transitions and device changes
+also clear pending receive audio, retaining consumed sequence/media watermarks.
+A replacement source owns fresh decoder/jitter state and rejects media that was
+already in the local dispatch queue before its roster entry. Existing connection
+identity checks still reject old connection handlers. This does not add a new wire
+source epoch: packets from a replaced publisher delayed upstream of transport
+delivery still depend on the SFU's existing routing and RTP continuity guarantees.
+
+Audio diagnostic snapshots retain per-source `receive` counters and add `playout`
+metrics for target/current delay, arrival variation, occupancy, late/duplicate
+and stale discards, rebuffering, concealment, drift and correction. No payloads or
+source identifiers are logged. See [adaptive playout](audio-playout.md) for the
+estimator, hysteresis, bounds, measurements and remaining listening acceptance.
+AEC algorithms, the final post-mix reference and its timing remain unchanged.
+
+The worker refills decoded PCM when at most 15 ms remain, with at most two decode
+decisions per stream per tick and at most 35.125 ms of decoded PCM. Missing packets
+wait until at most 5 ms remain; prefetch cannot conceal them early. A bounded
+streaming sinc converter corrects sender/output drift before mixing, preserving
+phase across full packets and fractional media gaps. Tests cover irregular worker
+wakes, packet and sample continuity, FEC/PLC, long virtual calls, final AEC samples,
+queue pressure, stalls, flush acknowledgement, deafen and source replacement.
+Actual device scheduling, acoustic quality and prolonged stalls still need
+three-platform live validation.
+
+### Opus microphone FEC policy
+
+Microphone encoding retains 48 kHz mono, 20 ms frames, `Application::Voip` and
+32 kbit/s. It explicitly sets `set_inband_fec(true)` and
+`set_packet_loss_perc(5)`. This is a conservative **fixed 5% expected-loss hint**,
+not a measured loss rate or dynamic adaptation; no RTCP feedback drives it.
+Redundancy spends part of the existing bitrate budget on the preceding speech
+frame, reducing bits available for the current frame and potentially changing
+bandwidth/mode selection. VBR packet sizes still vary. FEC is conditional on the
+codec's mode, available bits and signal; it is not present in every packet.
+
+The reviewed lockfile pins `opus 0.4.0` / `opusic-sys 0.7.5`, whose bundled
+`opus/package_version` identifies libopus **1.6.1**. In the wrapper's `src/lib.rs`,
+the boolean FEC setter sends `OPUS_SET_INBAND_FEC(1)`, and the loss setter sends
+`OPUS_SET_PACKET_LOSS_PERC`. The bundled `src/opus_encoder.c` accepts FEC values
+0..2 and loss percentages 0..100. The wrapper exposes only modes 0/1; mode 2's
+music-preserving preference is not requested. See the official
+[encoder controls](https://opus-codec.org/docs/opus_api-1.5/group__opus__encoderctls.html).
+Shared system audio retains its separate `Application::Audio`, 64 kbit/s encoder
+and default disabled FEC/zero loss hint; the microphone speech policy is not
+applied to music. All native receivers can opportunistically decode redundancy.
+
+The jitter decision is normal packet, FEC from the immediate media successor,
+concealment (PLC or fractional silence), or wait. While more than 5 ms of PCM
+remain, a missing original can still arrive.
+At that playout deadline, an available successor is cloned by reference
+and decoded with `fec=true` into exactly 960 samples. It remains buffered for
+normal decoding exactly once, after the missing interval. The media cursor advances
+once, so a late original cannot replay the recovered interval. FEC requires both
+a successor exactly 960 samples ahead and a sequence hole after the last decoded
+packet. Consecutive sequence numbers with a timestamp hole may indicate capture
+discontinuity rather than a lost encoded interval, so they conservatively use PLC.
+Known DTX gaps use silence instead. Neither a talkspurt-marked packet nor an Opus
+no-data packet can donate FEC; no FEC is attempted while in DTX silence.
+Fractional holes use exact silence and cannot borrow a full FEC frame. No extra
+wait is introduced for FEC. With burst loss, earlier gaps use PLC; only the gap
+immediately preceding an available packet can use that packet's redundancy.
+The adaptive startup buffer, 12-packet cap, 60 ms consecutive-concealment limit and maximum
+two output frames per stream per worker tick remain bounded.
+
+The [Opus decoder API](https://opus-codec.org/docs/opus_api-1.5/group__opus__decoder.html)
+requires the exact missing duration and serial decode order. It may return PLC
+successfully when FEC is absent (also confirmed in bundled `src/opus_decoder.c`).
+Empty or non-20-ms packets are rejected before jitter admission. Malformed encoded
+frames admitted with a valid 20 ms header use explicit PLC. A decode failure resets
+potentially modified decoder state before one bounded PLC fallback; a failed PLC
+produces one silent interval. No codec work runs in device callbacks. Recovered
+audio uses the existing per-source PCM queues, generation invalidation, volume,
+deafen and post-mix AEC reference. Only successfully decoded **normal** packets
+refresh remote activity; FEC attempts cannot extend an indicator using PLC.
+
+Opt-in local `audio_snapshot` logs include per-live-decoder `opus_decode` counters:
+normal frames, FEC attempts, successful FEC-call output frames, explicit PLC
+frames, decode/validation errors and silent fallback frames. Counters reset with
+source replacement. `fec_output_frames` includes implicit PLC and is **not a
+verified recovery count**; `verified_fec_frames` is explicitly null because the
+API used here cannot establish that count. No payloads or speaker identities are
+included. Existing `useinbandfec=1` SDP remains appropriate: it advertises receiver
+capability/preference, not guaranteed encoder redundancy, including for shared
+audio ([RFC 7587](https://www.rfc-editor.org/rfc/rfc7587.html#section-6.1)).
+
+`audio::codec::tests` encodes the committed synthetic speech WAV with the production
+policy, compares aligned dropped intervals with a PLC-only decoder, and requires
+FEC output distinct from PLC. The deterministic transport/playout simulation covers
+isolated and burst loss, duplicates, reordering, sequence wrap and irregular worker
+wakes through the actual remote decoder/mixer. Additional jitter and codec tests
+cover deadline waiting, absent redundancy/successors, late packets, invalid packets,
+source reset, deafen and generation invalidation. These are software regressions,
+not evidence of acoustic quality or real-network latency. Listening, microphone
+quality/bitrate tradeoffs, real loss/jitter trials and Windows/macOS/Linux hardware
+acceptance remain pending.
 
 Playback mixes on the device callback with atomic gain changes. It allocates no
 buffers, waits on no locks, and does no networking/codec/DSP work. Queues cap
@@ -343,102 +543,107 @@ audio stream including packet overhead, eight active speakers imply roughly
 
 ### Microphone DTX and media timing
 
-The native microphone encoder has an explicit DTX policy; shared music/system
-audio explicitly disables it. The pinned `opus 0.4.0` wrapper exposes `set_dtx`
-and `get_in_dtx`, backed by `opusic-sys 0.7.5` / libopus **1.6.1**. The
-[official encoder API](https://opus-codec.org/docs/opus_api-1.6/group__opus__encoder.html)
-and the bundled `opus/include/opus.h` document that results of at most two bytes
-may be omitted. This is a codec-defined rule, not a guessed payload-size threshold.
-The [DTX-state query](https://opus-codec.org/docs/opus_api-1.6/group__opus__genericctls.html)
-also includes comfort-noise updates: those larger packets must still be sent.
-The worker continues feeding every 20 ms frame and only omits results satisfying
-both conditions. Capture, render-reference processing, AEC, denoising and gain
-continue throughout silence and mute; AEC configuration and reference timing are
-unchanged.
+The microphone retains the FEC policy above and explicitly enables Opus DTX;
+shared music/system audio explicitly disables DTX. The pinned `opus 0.4.0` wrapper
+exposes `set_dtx` and `get_in_dtx`, backed by `opusic-sys 0.7.5` / libopus **1.6.1**.
+The [official encoder API](https://opus-codec.org/docs/opus_api-1.6/group__opus__encoder.html)
+and bundled `opus/include/opus.h` permit omitting encoded results of at most two
+bytes. This is a documented codec rule, not an arbitrary size threshold. The
+[DTX-state query](https://opus-codec.org/docs/opus_api-1.6/group__opus__genericctls.html)
+also includes required comfort-noise updates; those larger packets must be sent.
+The worker feeds every 20 ms frame and only suppresses results meeting both rules.
+Capture, render-reference processing, AEC, denoising and gain continue throughout
+silence. AEC configuration and reference timing are unchanged.
 
-The previous gate had hangover but no pre-roll. A bounded one-frame look-behind
-now retains 20 ms before activation. It adds **20 ms after DSP**, without changing
-AEC input/reference timing. The existing activation threshold remains unchanged.
-DTX is disabled while encoding gate-admitted audio, including quiet pre-roll,
-so codec VAD cannot discard speech that the application gate accepted.
+DTX is disabled for gate-admitted audio, including the improved gate's **60 ms
+pre-roll**, so codec VAD cannot discard accepted quiet speech. PTT retains its
+immediate path without pre-roll. No additional gate delay is introduced by DTX.
+Control generations, capture cutoffs, delivery leases and pending-write deadlines
+above remain authoritative; relaxing mute or PTT cannot replay retained audio.
 
-Native queued packets carry the capture time, control generation, RTP timestamp
-and talkspurt marker. The 48 kHz clock follows capture sample positions through
-suppression, queue drops and callback overflow; a restarted device bridges its
-clock with monotonic capture time. A gap inside a 20 ms capture pair is processed
-for AEC but not transmitted as contiguous speech. Sequence numbers advance only
-on transport acceptance, as required by [RFC 7587](https://www.rfc-editor.org/rfc/rfc7587#section-4.1).
-Restrictions invalidate queued packets even across mute/unmute or PTT release/
-repress between worker ticks. Pre-roll and encoder history are cleared, buffered
-enhancement delay is excluded at the cutoff, and pending sends recheck age
-(100 ms maximum), generation, connection identity and urgent controls on each
-poll. Data already accepted by the underlying transport cannot be retracted.
-Backend permission enforcement is unchanged.
+One eligible no-data packet is sent after **each** comfort-noise update. This
+small extra packet explicitly cues silence to the receiver and repeats the cue
+if an earlier one was lost. Bundled `src/opus_decoder.c` confirms that payloads
+of zero or one byte after the TOC trigger PLC/DTX; receive admission first checks
+the 20 ms Opus header. All intervening eligible packets are omitted before payload
+allocation/queue admission. Sparse CN packets still decode normally, and the mixer
+supplies zero between updates. This trades some maximum packet savings for a
+receiver that need not infer silence solely from absent traffic.
 
-Reception retains the fixed 60 ms startup target and eight-packet bound. It
-advances media time with actual PCM consumption through omitted intervals, fills
-known silence with zeros, and never consumes sequence numbers for silence.
-Without a following packet, silence and an outage are inherently ambiguous:
-unknown gaps receive at most 60 ms of PLC, then inactive silence; previously
-confirmed silence also becomes inactive after one second without media.
-Neither state disconnects the call. Subsequent
-sequence gaps count missing packets, while timestamp gaps give a lower
-bound on omitted frames. Late packets are tracked separately; up to 64 recent
-losses can be reclassified within a two-second media window. Speech resumes on
-its media timeline without collecting another three packets. Clock discontinuities
-and late resumption after inactivity can realign the bounded buffer. Startup and
-inactivity do not accumulate callback-underrun alarms. Adaptive network jitter
-targets are still future work.
+The adaptive 40-120 ms receive target and 12-packet bound remain. On a decoded
+silence cue, empty intervals stop generating PLC, drift integration or callback
+underrun alarms. Rendered silence still advances the media watermark, rejecting
+late packets without consuming sequence numbers. Sparse updates/resumption retain
+their media timestamps and use
+the current receive target without a repeated recovery/flush cycle. A buffered
+resumption after a cue also preserves its intervening timestamp gap. Worker stalls,
+packet age and stale decoded PCM still trigger the existing bounded recovery.
+After one second without media the source is also marked inactive; signaling and
+roster identity, not audio absence, determine disconnection. If a cue is lost,
+the ordinary unknown-gap path allows at most 60 ms PLC until a later cue establishes
+silence. It never fabricates continuous packet loss throughout an idle interval.
 
-In-band FEC remains explicitly **off**, matching the preceding encoder/decoder
-behavior. The receiver never decodes a resumed talkspurt as FEC for an intentionally
-omitted timestamp. Future FEC recovery must require an actual sequence gap and
-an adjacent 960-sample media interval; it must not bridge DTX gaps.
+Resumed speech carries the RTP talkspurt marker. It clears silence mode and cannot
+be borrowed as FEC for preceding silence. Two consecutive data frames also exit
+silence mode, so losing that marker cannot strand a talkspurt. Ordinary subsequent
+speech loss still uses FEC under the adjacent-timestamp/sequence-hole rules above.
+Sequences advance on successful transport admission, while the 48 kHz media clock
+advances through every omitted frame, as required by
+[RFC 7587](https://www.rfc-editor.org/rfc/rfc7587#section-4.1).
 
-Native connection leases, 500 ms signaling/state heartbeats and WebRTC ICE/RTCP
-traffic remain independent of microphone packets. A two-hop encrypted loopback
-test resumes after 31 seconds with no RTP at all, beyond normal DTX update gaps.
-This does not establish public NAT/TURN or multi-hour call behavior. Deploy these
-clients together: older sequence-only receivers do not correctly play DTX gaps;
-there is currently no room-wide client-capability negotiation for mixed versions.
+Native leases, 500 ms signaling/state heartbeats and WebRTC ICE/RTCP traffic stay
+independent of microphone packets. The two-hop encrypted loopback test resumes
+after **31 seconds with no RTP**, beyond normal update gaps. This does not establish
+public NAT/TURN or multi-hour behavior. Deploy these clients together: older
+sequence-only receivers cannot play DTX gaps correctly, and older adaptive clients
+lack the silence cue handling. Room-wide client-capability negotiation is absent.
 
-Opt-in diagnostics record cumulative encoder frames/bytes/time, omitted packets,
-queue acceptance/drops and receive counters when a session ends. Every five seconds,
-transport diagnostics report accepted packet/payload counts, rejected stale packets
-and the minimum 12-byte RTP header cost. Acceptance is not remote delivery. These
-counts exclude SRTP extensions/tags, UDP/IP, RTCP, ICE and TURN overhead; a packet
-capture is still required for complete wire-cost measurement. No audio contents
-are logged. In debug-recording timelines, `accepted:false` also covers DTX omission;
-the encoder-input WAV still contains every gated frame, including the gate delay.
-
-Run the informational comparison with:
+Opt-in diagnostics record cumulative encoder frames/bytes/time, omitted packets
+and queue admission/drops at session end. Every five seconds transport diagnostics
+report accepted packets/payload bytes and the minimum 12-byte RTP header cost.
+Acceptance is not remote delivery. Existing outgoing counters separate expired,
+invalidated and full-queue drops. Receive metrics distinguish DTX, inactivity,
+observed sequence holes, late packets and silent media gaps (which can also include
+lost updates). No payloads or identities are logged. Counts exclude SRTP, UDP/IP,
+RTCP, ICE and TURN overhead; full wire cost needs a packet capture. Recording's
+`accepted:false` also includes DTX omission; its encoder-input WAV retains every
+frame and the gate delay.
 
 ```sh
 cargo run -p thiscord-frontend --example dtx_bench --features native-audio --profile ci --locked
 ```
 
-Local Windows x64 / i7-13700K / Rust 1.98.1, optimized `ci` profile, 2026-10-13;
-each synthetic case represents 60 seconds. These are codec-loop wall times, not
-whole-application CPU measurements or acoustic results:
+Windows x64 / i7-13700K / Rust 1.98.1, optimized `ci` profile, 2026-10-13 after
+merging main's FEC/gate/adaptive playout. Each synthetic case represents 60 seconds.
+These are codec-loop wall times, not whole-application CPU or acoustic measurements:
 
 | Input / policy | Packets | Payload bytes | Minimum RTP header bytes | Encode time |
 | --- | ---: | ---: | ---: | ---: |
-| Silence / continuous | 3,000 | 104,996 | 36,000 | 508.5 ms |
-| Silence / DTX | 152 | 5,316 | 1,824 | 513.9 ms |
-| Alternating tone and silence / continuous | 3,000 | 64,534 | 36,000 | 273.8 ms |
-| Alternating tone and silence / DTX | 990 | 58,504 | 11,880 | 271.7 ms |
+| Silence / continuous | 3,000 | 62,996 | 36,000 | 507.3 ms |
+| Silence / DTX | 295 | 3,331 | 3,540 | 506.1 ms |
+| Alternating tone and silence / continuous | 3,000 | 64,243 | 36,000 | 276.4 ms |
+| Alternating tone and silence / DTX | 1,110 | 58,333 | 13,320 | 280.3 ms |
 
-Silence packet rate fell from 50 to 2.53 packets/s (94.9% fewer packets); codec
-cost was essentially unchanged in this single run. DSP still runs continuously.
-Tests cover a simulated minute, quiet/abrupt onsets, alternating talkspurts,
-lost silence updates/onset, both RTP wraps, delayed packets, capture discontinuity,
-queued restrictions and pending writes. The loss simulation resumes detectable
-synthetic speech within 100 ms including one deliberately lost onset packet, with
-no false underruns or repeated rebuffering. That codec/receiver bound excludes
-devices, DSP and the 20 ms gate delay.
-Three-platform physical listening, first-syllable preservation, consented speech
-fixtures, real network/relay loss, clock drift, battery/thermal and full wire-cost
-acceptance remain open. Compilation and tone-energy checks do not establish them.
+Silence traffic falls from 50 to 4.92 packets/s (**90.2% fewer packets**); codec cost
+is essentially unchanged in this run. DSP still runs continuously. Compared with
+the pre-merge benchmark, the repeated silence cue intentionally spends an extra
+packet per update; FEC also changes payload sizes. The receive regression simulates
+a minute with lost cues/updates, both RTP wraps and quiet/abrupt onsets. It detects
+resumed synthetic speech within 100 ms even when the first onset packet is lost,
+without repeated silence rebuffering/underruns; that bound excludes capture, DSP,
+the 60 ms automatic gate delay and physical devices. Tests also retain the main
+branch's FEC, drift, pre-roll, queue expiry, control and AEC regressions.
+
+Merge verification on Windows uses the pinned toolchain, committed lockfile and
+configured shared compiler directory: **161 native audio tests** and **173 tests
+with DeepFilterNet3/neural-echo-probe** pass, including long-silence transport,
+late-packet rejection and queued/buffered resumption. The native desktop and WASM
+`thiscord-ui` builds, audio/desktop Clippy with warnings denied, and formatting
+checks pass. Backend/shared behavior and database state are unchanged.
+
+Physical listening, first-syllable preservation, real network/relay loss, long-call
+drift, battery/thermal cost, full wire savings and Windows/macOS/Linux runtime
+acceptance remain open. Compilation and synthetic tests do not establish them.
 
 ## Echo debug recordings and offline replay
 
@@ -503,6 +708,14 @@ Replay preserves the recorded transmit gates and refuses to overwrite output fil
 or accept incomplete/oversized input. Change the Rust processing modules to evaluate
 future algorithms against the same inputs. Listening and speech-preservation checks
 are still needed; a lower output level alone does not establish better cancellation.
+
+New recordings use timeline schema 2. Transmit blocks include
+`source_delay_samples` (2880 for automatic activation, zero for PTT); their timestamps
+stay on the current capture/output schedule. `capture_boundary` events record the
+enhancement-history reset and capture cutoff without resetting AEC. Updated replay
+supports schemas 1 and 2, applies the source delay and excludes old device blocks
+from enhancement. Retained samples predating the recording cannot be reconstructed
+and replay as silence. Earlier replay binaries reject schema 2.
 
 CI includes synchronized WAV/metadata, privacy-field omission, gap/timestamp handling,
 duration bounds, writer failure, queue overload, finalization and replay/gate tests.

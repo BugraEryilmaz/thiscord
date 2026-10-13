@@ -11,12 +11,7 @@ pub const BLOCKS: usize = CAPACITY / SAMPLES;
 pub struct Frame {
     pub samples: [f32; SAMPLES],
     pub at: Instant,
-    sequence: u64,
-}
-impl Frame {
-    pub fn sample_position(&self) -> u64 {
-        self.sequence.wrapping_mul(SAMPLES as u64)
-    }
+    pub position: u64,
 }
 
 pub struct Writer {
@@ -25,11 +20,15 @@ pub struct Writer {
     used: usize,
     callback_at: Instant,
     offset: usize,
+    position: u64,
+    capture_started: bool,
 }
 
 pub struct Reader {
     queue: HeapCons<Frame>,
     next: u64,
+    // Allocate with the ring, not on callback or gap handling. Keep Devices movable.
+    pending: Box<Option<(Frame, bool)>>,
 }
 
 pub fn queue() -> (Writer, Reader) {
@@ -41,35 +40,57 @@ pub fn queue() -> (Writer, Reader) {
             frame: Frame {
                 samples: [0.0; SAMPLES],
                 at: now,
-                sequence: 0,
+                position: 0,
             },
             used: 0,
             callback_at: now,
             offset: 0,
+            position: 0,
+            capture_started: false,
         },
         Reader {
             queue: consumer,
             next: 0,
+            pending: Box::new(None),
         },
     )
 }
 
 impl Writer {
+    /// Capture-only discontinuity handling; the AEC playback reference keeps its
+    /// original timing/assembly. Ignore <=2 ms timestamp mapping jitter.
+    pub fn begin_capture(&mut self, at: Instant) {
+        if self.capture_started {
+            let expected = self.callback_at + sample_duration(self.offset);
+            let missing = at.saturating_duration_since(expected);
+            if missing > Duration::from_millis(2) {
+                self.position = self
+                    .position
+                    .saturating_add(super::outgoing::samples(missing));
+                // Never splice a partial block across a device interruption.
+                self.used = 0;
+            }
+        }
+        self.capture_started = true;
+        self.begin(at);
+    }
     /// Time the first sample of this callback was captured / will be played.
     pub fn begin(&mut self, at: Instant) {
         self.callback_at = at;
         self.offset = 0;
     }
 
-    /// Returns samples lost on overflow. A gap retains its sequence number so
+    /// Returns samples lost on overflow. A gap retains its sample position so
     /// the worker can reset adaptation instead of treating disjoint PCM as continuous.
     pub fn push(&mut self, sample: f32) -> u64 {
         if self.used == 0 {
             self.frame.at = self.callback_at + sample_duration(self.offset);
+            self.frame.position = self.position;
         }
         self.frame.samples[self.used] = sample;
         self.used += 1;
         self.offset += 1;
+        self.position = self.position.saturating_add(1);
         if self.used != SAMPLES {
             return 0;
         }
@@ -79,21 +100,28 @@ impl Writer {
             0
         };
         self.used = 0;
-        self.frame.sequence = self.frame.sequence.wrapping_add(1);
         dropped
     }
 }
 
 impl Reader {
     pub fn len(&self) -> usize {
-        self.queue.occupied_len()
+        self.queue.occupied_len() + usize::from(self.pending.is_some())
     }
 
     pub fn pop(&mut self) -> Option<(Frame, bool)> {
+        if let Some(pending) = self.pending.take() {
+            return Some(pending);
+        }
         let frame = self.queue.try_pop()?;
-        let gap = frame.sequence != self.next;
-        self.next = frame.sequence.wrapping_add(1);
+        let gap = frame.position != self.next;
+        self.next = frame.position.saturating_add(SAMPLES as u64);
         Some((frame, gap))
+    }
+
+    pub fn retain(&mut self, frame: Frame) {
+        debug_assert!(self.pending.is_none());
+        *self.pending = Some((frame, true));
     }
 }
 
@@ -126,6 +154,50 @@ mod tests {
     use super::*;
 
     #[test]
+    fn capture_gap_discards_partial_block_and_keeps_missing_samples_in_position() {
+        let (mut writer, mut reader) = queue();
+        let at = Instant::now();
+        writer.begin_capture(at);
+        for _ in 0..617 {
+            writer.push(0.1);
+        }
+        assert_eq!(reader.pop().unwrap().0.position, 0);
+        // 137 partial samples followed by a 5 ms hole.
+        writer.begin_capture(at + sample_duration(617 + 240));
+        for _ in 0..480 {
+            writer.push(0.2);
+        }
+        let (frame, gap) = reader.pop().unwrap();
+        assert!(gap);
+        assert_eq!(frame.position, 857);
+        assert_eq!(frame.samples, [0.2; 480]);
+        assert_eq!(frame.at, at + sample_duration(857));
+        writer.begin_capture(at + sample_duration(1337));
+        for _ in 0..480 {
+            writer.push(0.3);
+        }
+        let (frame, gap) = reader.pop().unwrap();
+        assert!(!gap);
+        assert_eq!(frame.position, 1337);
+    }
+
+    #[test]
+    fn capture_timestamp_jitter_does_not_change_sample_clock() {
+        let (mut writer, mut reader) = queue();
+        let at = Instant::now();
+        for block in 0..100 {
+            let jitter = if block % 2 == 0 { 0 } else { 48 };
+            writer.begin_capture(at + sample_duration(block * 480 + jitter));
+            for _ in 0..480 {
+                writer.push(0.0);
+            }
+            let (frame, gap) = reader.pop().unwrap();
+            assert!(!gap);
+            assert_eq!(frame.position, block as u64 * 480);
+        }
+    }
+
+    #[test]
     fn large_and_partial_callbacks_preserve_samples_and_capture_times() {
         let (mut writer, mut reader) = queue();
         let start = Instant::now();
@@ -133,7 +205,7 @@ mod tests {
         let sizes = [137, 4800, 343];
         let mut total = 0;
         for size in sizes {
-            writer.begin(start + sample_duration(total));
+            writer.begin_capture(start + sample_duration(total));
             for i in total..total + size {
                 assert_eq!(writer.push(i as f32), 0);
             }
@@ -143,6 +215,7 @@ mod tests {
         for block in 0..total / SAMPLES {
             let (frame, gap) = reader.pop().unwrap();
             assert!(!gap);
+            assert_eq!(frame.position, (block * SAMPLES) as u64);
             let expected = start + sample_duration(block * SAMPLES);
             assert!(frame.at.max(expected) - frame.at.min(expected) < Duration::from_micros(1));
             for (i, sample) in frame.samples.iter().enumerate() {

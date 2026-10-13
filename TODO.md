@@ -104,6 +104,17 @@ and single-process chat/media enforcement.
 ## 5. Frontend audio and media feasibility
 
 - [x] Native CPAL capture/playback, per-stream SPSC ring buffers and Opus codecs.
+- [x] Preserve microphone media time across capture/queue drops and device recovery;
+  bound outgoing age to 100 ms plus fixed automatic-gate delay (at most 60 ms),
+  with control invalidation and distinct drop counters.
+- [x] Consume RTP timestamps in native audio playout, with bounded gap concealment,
+  stale-queue recovery and acknowledged per-source PCM/decoder resets.
+- [ ] Validate end-to-end stall recovery, urgent controls and device-clock drift on
+  physical three-platform clients.
+- [x] Explicit microphone Opus in-band FEC (fixed 5% loss hint), deadline-bounded
+  successor recovery/PLC, honest attempt counters and deterministic loss regressions.
+- [ ] Validate FEC speech/bitrate tradeoffs with listening and physical clients
+  on Windows/macOS/Linux under real packet loss and jitter.
 - [x] Windows/Linux encrypted WebRTC software probes; three-OS CI build/test matrix.
 - [x] Select Rust media libraries and document native dependencies in docs/audio.md.
 - [x] Enumerate/select devices, persist settings and refresh device lists.
@@ -120,6 +131,11 @@ and single-process chat/media enforcement.
   real Windows, macOS and Linux hardware, including exclusive-mode conflicts.
 - [x] Microphone permission/error UX, input levels and bounded playback/loopback tests.
 - [x] Mute/deafen, independent speaker volume, voice activation and in-app push-to-talk.
+- [x] Replace peak activation with a tested pre-AGC energy gate, hysteresis,
+  60 ms bounded pre-roll and restriction-safe capture/transport invalidation.
+- [ ] Listen-test activation/sensitivity and the added 60 ms delay with physical
+  microphones on Windows/macOS/Linux, including quiet Turkish/English speech,
+  typing, fans, TV voices and rapid mute/PTT transitions.
 - [x] Optional Rust echo cancellation, noise suppression and automatic gain processing.
 - [x] Optional global Ctrl+Shift+Space integration with conflict/error reporting.
 - [x] Retire devices on leave/logout/window destruction and lease expiry; stop retired
@@ -127,6 +143,11 @@ and single-process chat/media enforcement.
 - [ ] Physical microphone/headset, suspend and acoustic acceptance on all three OSes.
 - [ ] macOS runtime/permission spike; Wayland global shortcut portal integration.
 - [ ] Arbitrary sample-rate resampling and Bluetooth hands-free format support.
+- [x] Timestamp-aware adaptive receive playout, combined packet/PCM budgeting,
+  bounded fractional clock correction, deadline FEC/PLC and deterministic traces;
+  preserve exact capture gaps and acknowledged PCM flushes through rate correction.
+- [ ] Adaptive playout listening/long-call acceptance with physical devices on
+  Windows/macOS/Linux, loaded workers and real jitter/loss; see docs/audio-playout.md.
 
 ## 5a. Voice isolation and speech quality
 
@@ -198,7 +219,8 @@ speaker isolation and physical acoustic acceptance remain future work.
 - [x] Opus negotiation and per-hop DTLS-SRTP; encrypted two-hop probe.
 - [x] Microphone Opus DTX with retained comfort-noise updates, sample-clock RTP
   timestamps, timestamp-aware bounded playout, protected pre-roll and stale-send
-  rejection; synthetic traffic benchmark and long-silence encrypted transport tests.
+  rejection; integrated with adaptive playout, 60 ms activation pre-roll and FEC;
+  synthetic traffic benchmark and long-silence encrypted transport tests.
 - [ ] Validate DTX onset/listening quality, mixed-client rollout, clock drift,
   public NAT/TURN stability and full wire/CPU savings on Windows/macOS/Linux.
 - [x] Configurable STUN/TURN and backend-generated short-lived TURN credentials.
