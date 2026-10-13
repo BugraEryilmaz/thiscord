@@ -40,8 +40,18 @@ fn decoded(decoder: &mut opus::Decoder, payload: &[u8]) -> [f32; FRAME] {
 
 #[test]
 fn repeated_capture_timestamps_preserve_activation_and_receiver_playout() {
+    assert_capture_timing_playout(false);
+}
+
+#[test]
+fn callback_scheduling_preserves_activation_and_receiver_playout() {
+    assert_capture_timing_playout(true);
+}
+
+fn assert_capture_timing_playout(scheduling_jitter: bool) {
     let at = Instant::now();
     let (mut capture, mut reader) = frames::queue();
+    let mut clock = frames::CaptureClock::default();
     let settings = AudioSettings {
         echo_cancellation: false,
         neural_echo: false,
@@ -72,11 +82,24 @@ fn repeated_capture_timestamps_preserve_activation_and_receiver_playout() {
         if sample == next_packet {
             for half in 0..2 {
                 let observed = at + frames::sample_duration(sample);
-                capture.begin_capture(if half == 0 {
+                let observed = if scheduling_jitter {
+                    let block = sample / 480 + half;
+                    let elapsed = frames::sample_duration(block * 480);
+                    let device = cpal::StreamInstant::new(100, 0) + elapsed;
+                    let delay = [0, 4, 0, 9, 0, 3][block % 6];
+                    clock.map(
+                        at + elapsed + Duration::from_millis(20 + delay),
+                        cpal::InputStreamTimestamp {
+                            capture: device,
+                            callback: device + Duration::from_millis(20),
+                        },
+                    )
+                } else if half == 0 {
                     observed
                 } else {
                     observed - Duration::from_micros(167)
-                });
+                };
+                capture.begin_capture(observed);
                 for i in 0..480 {
                     let phase = (sample + half * 480 + i) as f32;
                     let tone = (phase * std::f32::consts::TAU * 440.0 / RATE as f32).sin();

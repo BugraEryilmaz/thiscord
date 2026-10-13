@@ -21,12 +21,21 @@ mod neural_echo_tests;
 #[cfg(all(test, feature = "deep-filter"))]
 mod neural_tests;
 pub mod stages;
+
+#[derive(Default, serde::Serialize)]
+pub(super) struct ResetCauses {
+    capture_gap: u64,
+    reference_gap: u64,
+    reconfiguration: u64,
+}
+
 pub struct Processing {
     pub metrics: std::sync::Arc<super::quality::Metrics>,
     apm: AudioProcessing,
     config: Config,
     render_at: Option<Instant>,
     pub resets: u64,
+    pub(super) reset_causes: ResetCauses,
     reference_level: f32,
     capture_frames: u64,
     clipped_samples: usize,
@@ -169,6 +178,7 @@ impl Processing {
             metrics: Default::default(),
             render_at: None,
             resets: 0,
+            reset_causes: ResetCauses::default(),
             reference_level: 0.0,
             capture_frames: 0,
             clipped_samples: 0,
@@ -274,6 +284,7 @@ impl Processing {
         self.clipped_samples = 0;
         self.clipped_input_percent = 0.0;
         self.resets += 1;
+        self.reset_causes.reconfiguration += 1;
         Ok(prepared)
     }
     pub fn settings(&mut self, s: &AudioSettings) -> Result<(), String> {
@@ -335,6 +346,7 @@ impl Processing {
                 break;
             };
             if gap {
+                self.reset_causes.reference_gap += 1;
                 self.reset();
             }
             tap(&frame, gap);
@@ -369,6 +381,7 @@ impl Processing {
             return Ok(None);
         }
         if first_gap {
+            self.reset_causes.capture_gap += 1;
             self.reset();
         }
         tap(
@@ -823,6 +836,9 @@ mod tests {
                 assert!(p.capture_queued(&mut reader).unwrap().is_some());
             }
             assert_eq!(p.resets, 1);
+            assert_eq!(p.reset_causes.reference_gap, u64::from(render_gap));
+            assert_eq!(p.reset_causes.capture_gap, u64::from(!render_gap));
+            assert_eq!(p.reset_causes.reconfiguration, 0);
         }
     }
 

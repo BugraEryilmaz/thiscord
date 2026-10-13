@@ -324,10 +324,16 @@ device callback. The processor is constructed before starting either device.
 ### Microphone sender timeline and expiry
 
 `frames::Frame.at` is the first sample's CPAL capture time mapped to monotonic
-`Instant`; subsequent samples in that callback use exact 48 kHz offsets. Capture
-blocks also carry a device-stream sample position, advanced even when the 120 ms
-ring is full. A forward callback-time hole greater than 2 ms adds the rounded
-missing sample count. Differences within 2 ms follow device-clock drift and mapping
+`Instant`. Each input stream anchors its device clock to `Instant` on its first
+callback, then maps capture timestamps relative to that fixed anchor. Subsequent
+callbacks never remap capture time against their invocation time: preemption or
+batched delivery would otherwise become false forward gaps, DSP/activation resets
+and inflated RTP positions. Delayed buffers retain their original capture age;
+opening a replacement stream establishes a new anchor. Only timestamps from the
+same CPAL stream are compared. Subsequent samples in a callback use exact 48 kHz
+offsets. Capture blocks also carry a device-stream sample position, advanced even
+when the 120 ms ring is full. A forward callback-time hole greater than 2 ms adds
+the rounded missing sample count. Differences within 2 ms follow device-clock drift and mapping
 jitter. A timestamp more than 2 ms behind the expected end of the previous callback
 uses that expected time instead: repeated/backward callback timestamps must not move
 the continuity baseline backward and manufacture a hole when they catch up. This
@@ -446,6 +452,13 @@ already in the local dispatch queue before its roster entry. Existing connection
 identity checks still reject old connection handlers. This does not add a new wire
 source epoch: packets from a replaced publisher delayed upstream of transport
 delivery still depend on the SFU's existing routing and RTP continuity guarantees.
+
+Audio diagnostic snapshots include the `processing_resets` total and
+`processing_reset_causes` counters for capture gaps, reference gaps and processing
+reconfiguration. These worker-side counts explain adaptation restarts without
+recording audio or device timestamps. Device activation/replacement also increments
+the total and is logged separately as `device_active`. Reference/capture queue overflow still
+requires a reset; the clock mapping does not hide lost samples.
 
 Audio diagnostic snapshots retain per-source `receive` counters and add `playout`
 metrics for target/current delay, arrival variation, occupancy, late/duplicate
