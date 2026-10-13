@@ -136,13 +136,31 @@ pub fn sample_duration(samples: usize) -> Duration {
     Duration::from_secs_f64(samples as f64 / f64::from(RATE))
 }
 
-/// CPAL times are device-local. Only use durations within one callback's clock,
-/// then map onto Instant so independently clocked input/output devices can compare.
-pub fn capture_time(now: Instant, time: cpal::InputStreamTimestamp) -> Instant {
-    now.checked_sub(time.callback.duration_since(time.capture))
-        .unwrap_or(now)
+/// One device-local clock mapping per input stream. Recreated with the stream.
+#[derive(Default)]
+pub(super) struct CaptureClock {
+    anchor: Option<(cpal::StreamInstant, Instant)>,
 }
 
+impl CaptureClock {
+    pub fn map(&mut self, now: Instant, time: cpal::InputStreamTimestamp) -> Instant {
+        // Only the first callback establishes the relation to Instant. Mapping
+        // each callback against `now` folds scheduling/preemption into capture
+        // time, inventing forward holes even when device samples are contiguous.
+        // CPAL instants from this stream share a monotonic clock; origins from
+        // different input/output streams must never be compared directly.
+        let (device, local) = *self.anchor.get_or_insert((time.callback, now));
+        if let Some(elapsed) = time.capture.checked_duration_since(device) {
+            local.checked_add(elapsed).unwrap_or(now)
+        } else {
+            local
+                .checked_sub(device.duration_since(time.capture))
+                .unwrap_or(now)
+        }
+    }
+}
+
+/// Playback-reference timing is independent of the input stream's clock mapping.
 pub fn playback_time(now: Instant, time: cpal::OutputStreamTimestamp) -> Instant {
     now.checked_add(time.playback.duration_since(time.callback))
         .unwrap_or(now)
@@ -159,6 +177,76 @@ pub fn delay_ms(render: Option<Instant>, capture: Instant) -> i32 {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn callback_scheduling_jitter_does_not_reset_capture() {
+        let mut clock = CaptureClock::default();
+        let (mut writer, mut reader) = queue();
+        let at = Instant::now();
+        let device = cpal::StreamInstant::new(100, 0);
+        let mut delivered = at;
+        for block in 0..6000 {
+            let elapsed = sample_duration(block * SAMPLES);
+            let timestamp = cpal::InputStreamTimestamp {
+                capture: device + elapsed,
+                callback: device + elapsed + Duration::from_millis(20),
+            };
+            // Timestamp collection and our callback can be separated by
+            // preemption. Delayed callbacks then drain in quick succession.
+            let delay = [0, 0, 4, 0, 25, 0, 0, 0, 45, 0, 0, 0, 0][block % 13];
+            delivered = (delivered + Duration::from_micros(100))
+                .max(at + elapsed + Duration::from_millis(20 + delay));
+            writer.begin_capture(clock.map(delivered, timestamp));
+            for _ in 0..SAMPLES {
+                writer.push(0.1);
+            }
+            let (frame, gap) = reader.pop().unwrap();
+            assert!(!gap, "scheduling became a capture gap at block {block}");
+            assert_eq!(frame.position, (block * SAMPLES) as u64);
+            assert_eq!(frame.at, at + elapsed);
+        }
+    }
+
+    #[test]
+    fn capture_clock_preserves_real_holes_and_age_of_delayed_audio() {
+        let mut clock = CaptureClock::default();
+        let (mut writer, mut reader) = queue();
+        let at = Instant::now();
+        let device = cpal::StreamInstant::new(100, 0);
+        for (sample, delay) in [(0, 0), (480, 300), (960 + 240, 300)] {
+            let elapsed = sample_duration(sample);
+            let timestamp = cpal::InputStreamTimestamp {
+                capture: device + elapsed,
+                callback: device + elapsed + Duration::from_millis(20),
+            };
+            let now = at + elapsed + Duration::from_millis(20 + delay);
+            writer.begin_capture(clock.map(now, timestamp));
+            for _ in 0..SAMPLES {
+                writer.push(0.1);
+            }
+            let (frame, gap) = reader.pop().unwrap();
+            assert_eq!(gap, sample == 1200);
+            assert_eq!(frame.position, sample as u64);
+            assert_eq!(frame.at, at + elapsed);
+            if delay > 0 {
+                assert!(now.duration_since(frame.at) > super::super::outgoing::MAX_PACKET_AGE);
+            }
+        }
+        // A replacement stream has its own origin and must not inherit this
+        // stream's clock. Its first buffer can precede the callback anchor.
+        let mut replacement = CaptureClock::default();
+        let later = at + Duration::from_secs(20);
+        assert_eq!(
+            replacement.map(
+                later,
+                cpal::InputStreamTimestamp {
+                    capture: cpal::StreamInstant::new(0, 0),
+                    callback: cpal::StreamInstant::new(0, 20_000_000),
+                },
+            ),
+            later - Duration::from_millis(20)
+        );
+    }
 
     #[test]
     fn capture_gap_discards_partial_block_and_keeps_missing_samples_in_position() {
