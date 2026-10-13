@@ -2,6 +2,8 @@ use super::*;
 
 fn packet(sequence: u16, timestamp: u32, arrived: Instant) -> Packet {
     Packet {
+        marker: false,
+        no_data: false,
         sequence,
         timestamp,
         arrived,

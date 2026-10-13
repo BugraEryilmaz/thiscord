@@ -44,10 +44,13 @@ receiver, worker and output clocks without sleeping or opening a device.
   silence through the continuous rate filter. Consecutive sequences with timestamp
   gaps do not borrow FEC; those gaps can be sender capture drops. Longer timestamp
   jumps rebuffer. Consumed sequence/media watermarks survive inactivity and deafen,
-  preventing late audio from rewinding the cursor. A future DTX sender can resume
-  with a forward timestamp jump without advancing sequences during silence. This
-  does not implement sender DTX, comfort noise, variable packet duration or
-  timestamp synchronization with screen video.
+  preventing late audio from rewinding the cursor. The microphone now uses
+  [Opus DTX](audio.md#microphone-dtx-and-media-timing), retaining CN updates and a
+  repeated no-data cue. Known silence suspends PLC and drift integration, preserves
+  timestamps, and resumes at the current target without counting a recovery.
+  Talkspurt/no-data packets cannot donate FEC. Silence, inactivity, sequence holes
+  and late packets have separate metrics; media inactivity does not disconnect.
+  Variable packet duration and screen-video timestamp synchronization are absent.
 - When actual late discards accompany a target deficit above 20 ms, existing PCM
   drains and a bounded interval (at most 80 ms) builds tolerance. Such increases
   are limited to once per five seconds. Smaller changes use continuous correction.

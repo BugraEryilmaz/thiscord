@@ -220,7 +220,7 @@ jobs:
           if ($LASTEXITCODE -or !$hostLine) { throw 'Cannot determine Rust host target.' }
           $target = $hostLine.ToString().Substring(6).Trim()
           "BENCH_TARGET=$target" >> $env:GITHUB_ENV
-          cargo build -p thiscord-frontend --example processing_bench --example neural_echo_bench --features deep-filter,neural-echo --release --target $target --locked
+          cargo build -p thiscord-frontend --example processing_bench --example neural_echo_bench --example dtx_bench --features deep-filter,neural-echo --release --target $target --locked
           if ($LASTEXITCODE) { exit $LASTEXITCODE }
       - name: Audio processing benchmark (informational)
         shell: pwsh
@@ -229,10 +229,13 @@ jobs:
           if ($LASTEXITCODE) { exit $LASTEXITCODE }
           cargo run -p thiscord-frontend --example neural_echo_bench --features deep-filter,neural-echo --release --target $env:BENCH_TARGET --locked -- frontend/models/ree-v2.tflite > neural-echo-bench.jsonl
           if ($LASTEXITCODE) { exit $LASTEXITCODE }
+          cargo run -p thiscord-frontend --example dtx_bench --features deep-filter,neural-echo --release --target $env:BENCH_TARGET --locked > dtx-bench.jsonl
+          if ($LASTEXITCODE) { exit $LASTEXITCODE }
       - uses: actions/upload-artifact@v4
         with:
           name: audio-processing-${{ matrix.os }}
           path: |
             processing-bench.jsonl
             neural-echo-bench.jsonl
+            dtx-bench.jsonl
           if-no-files-found: error

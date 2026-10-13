@@ -66,6 +66,8 @@ fn opus_continuity_through_irregular_worker_wakes_and_final_aec_reference() {
             if ms == seq * 20 {
                 remote.jitter.push_packet(
                     jitter::Packet {
+                        marker: false,
+                        no_data: false,
                         sequence: seq as u16,
                         timestamp: seq as u32 * 960,
                         arrived: now,
@@ -157,6 +159,8 @@ fn simultaneous_speakers_keep_network_estimates_and_decoders_independent() {
                 if ms == seq * 20 + jitter {
                     remote.jitter.push_packet(
                         jitter::Packet {
+                            marker: false,
+                            no_data: false,
                             sequence: seq as u16,
                             timestamp: seq as u32 * 960,
                             arrived: now,
@@ -195,6 +199,8 @@ fn unsupported_opus_duration_keeps_one_bounded_timeline_slot() {
     let (mut writers, _) = mixer::mixer(Arc::new(Controls::default()));
     remote.jitter.push_packet(
         jitter::Packet {
+            marker: false,
+            no_data: false,
             sequence: 0,
             timestamp: 0,
             arrived: at,
@@ -235,6 +241,8 @@ fn fec_carrier_is_decoded_again_normally_without_prefetch_plc() {
             let seq = (ms / 20) as usize;
             remote.jitter.push_packet(
                 jitter::Packet {
+                    marker: false,
+                    no_data: false,
                     sequence: seq as u16,
                     timestamp: seq as u32 * 960,
                     arrived: now,
@@ -299,6 +307,8 @@ fn speech_trace_comparison() {
                 } else {
                     remote.jitter.push_packet(
                         jitter::Packet {
+                            marker: false,
+                            no_data: false,
                             sequence: seq as u16,
                             timestamp: seq as u32 * 960,
                             arrived: now,

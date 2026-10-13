@@ -45,6 +45,7 @@ impl Default for Controls {
     }
 }
 pub struct StreamControl {
+    pub quiet: AtomicBool,
     pub volume: AtomicU32,
     pub active: AtomicBool,
     pub generation: AtomicU64,
@@ -72,6 +73,7 @@ pub fn mixer(controls: Arc<Controls>) -> (Vec<StreamWriter>, Mixer) {
     for _ in 0..MAX_STREAMS {
         let (queue, reader) = HeapRb::<f32>::new(CAPACITY).split();
         let control = Arc::new(StreamControl {
+            quiet: false.into(),
             volume: AtomicU32::new(1.0_f32.to_bits()),
             active: false.into(),
             generation: 0.into(),
@@ -165,7 +167,8 @@ impl Mixer {
                             sample * f32::from_bits(stream.control.volume.load(Ordering::Relaxed))
                     }
                     Some(_) => {}
-                    None => underruns += 1,
+                    None if !stream.control.quiet.load(Ordering::Relaxed) => underruns += 1,
+                    None => {}
                 }
             }
             let sample = if deafened {

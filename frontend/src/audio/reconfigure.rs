@@ -174,8 +174,7 @@ mod tests {
             connection: None,
             settings: AudioSettings::default(),
             devices: devices(true),
-            encoder: opus::Encoder::new(RATE, opus::Channels::Mono, opus::Application::Voip)
-                .unwrap(),
+            encoder: transmit::Encoder::new(true).unwrap(),
             decoder: opus::Decoder::new(RATE, opus::Channels::Mono).unwrap(),
             microphone: true,
             phase: 0.0,
@@ -447,10 +446,9 @@ mod tests {
         s.tick(&no, &yes, &no, &mut debug).unwrap();
         let silent = rx.try_recv().unwrap();
         assert_eq!(silent.media_position, 2880);
-        let mut clean =
-            opus::Encoder::new(RATE, opus::Channels::Mono, opus::Application::Voip).unwrap();
+        let mut clean = transmit::Encoder::new(true).unwrap();
         let mut expected = [0; 4000];
-        let len = clean.encode_float(&[0.0; FRAME], &mut expected).unwrap();
+        let (len, _, _) = clean.encode(&[0.0; FRAME], false, &mut expected).unwrap();
         assert_eq!(&silent.payload[..], &expected[..len]);
         assert!(!s.encoder_active);
     }
@@ -480,10 +478,9 @@ mod tests {
         .unwrap();
         let silent = rx.try_recv().unwrap();
         assert!(!s.encoder_active);
-        let mut clean =
-            opus::Encoder::new(RATE, opus::Channels::Mono, opus::Application::Voip).unwrap();
+        let mut clean = transmit::Encoder::new(true).unwrap();
         let mut expected = [0; 4000];
-        let len = clean.encode_float(&[0.0; FRAME], &mut expected).unwrap();
+        let (len, _, _) = clean.encode(&[0.0; FRAME], false, &mut expected).unwrap();
         assert_eq!(&silent.payload[..], &expected[..len]);
     }
     #[test]

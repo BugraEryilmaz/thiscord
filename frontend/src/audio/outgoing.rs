@@ -13,6 +13,7 @@ pub const MAX_PACKET_AGE: Duration = Duration::from_millis(100);
 pub struct EncodedFrame {
     pub payload: bytes::Bytes,
     pub media_position: u64,
+    pub marker: bool,
     pub oldest_capture: Instant,
     pub generation: u64,
     pub connection: Connection,
@@ -185,15 +186,19 @@ pub(super) fn oldest_capture(at: Instant, delay_samples: usize) -> Instant {
         .unwrap_or(at)
 }
 
-/// Sequence numbers count transport attempts, independently of capture time.
+/// Sequence numbers count transport admissions, independently of capture time.
 #[derive(Default)]
 pub struct RtpClock {
     sequence: u16,
 }
 impl RtpClock {
+    pub fn pending(&self, media_position: u64) -> (u16, u32) {
+        (self.sequence.wrapping_add(1), media_position as u32)
+    }
     pub fn next(&mut self, media_position: u64) -> (u16, u32) {
-        self.sequence = self.sequence.wrapping_add(1);
-        (self.sequence, media_position as u32)
+        let next = self.pending(media_position);
+        self.sequence = next.0;
+        next
     }
 }
 
@@ -215,6 +220,7 @@ mod tests {
             delivery: Connection::default(),
             activation_delay: Duration::ZERO,
             media_position,
+            marker: false,
         }
     }
 
@@ -265,6 +271,17 @@ mod tests {
         assert_eq!(media.position(at, 0), 97920);
         let mut replacement = MediaClock::default();
         assert_eq!(replacement.position(at + Duration::from_secs(3), 0), 0);
+    }
+
+    #[test]
+    fn cancelled_admission_preserves_sequence_but_not_media_time() {
+        let mut rtp = RtpClock::default();
+        assert_eq!(rtp.pending(0), (1, 0));
+        // A pending write was invalidated. The next fresh packet uses the same
+        // sequence with its new capture timestamp; silence never advances seq.
+        assert_eq!(rtp.pending(48_000), (1, 48_000));
+        assert_eq!(rtp.next(48_000), (1, 48_000));
+        assert_eq!(rtp.pending(48_960), (2, 48_960));
     }
 
     #[test]

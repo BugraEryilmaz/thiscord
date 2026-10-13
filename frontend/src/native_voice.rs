@@ -99,6 +99,7 @@ impl PeerConnectionEventHandler for Handler {
                         .and_then(|(kind, slot)| kind.mixer_slot(slot));
                     if let Some(slot) = slot {
                         engine.notify(Command::Packet {
+                            marker: packet.header.marker,
                             connection: connection.clone(),
                             slot,
                             sequence: packet.header.sequence_number,
@@ -611,6 +612,9 @@ async fn run(
     let mut heard = Instant::now();
     let mut screen_state = (false, false);
     let mut rtp_clock = thiscord_frontend::audio::outgoing::RtpClock::default();
+    let mut accepted_packets = 0_u64;
+    let mut accepted_bytes = 0_u64;
+    let mut last_audio_stats = Instant::now();
     loop {
         tokio::select! {
             Some((slot, epoch))=keyframe_rx.recv()=>{
@@ -648,14 +652,26 @@ async fn run(
                     transmit_control.dropped(reason);
                     continue;
                 }
-                let (sequence, timestamp) = rtp_clock.next(frame.media_position);
-                let packet=rtc::rtp::Packet{header:rtc::rtp::header::Header{version:2,payload_type:MediaKind::Microphone.payload_type(),ssrc:MediaKind::Microphone.publisher_ssrc(),sequence_number:sequence,timestamp,..Default::default()},payload:frame.payload.clone()};
+                let (sequence, timestamp) = rtp_clock.pending(frame.media_position);
+                let packet=rtc::rtp::Packet{header:rtc::rtp::header::Header{version:2,payload_type:MediaKind::Microphone.payload_type(),ssrc:MediaKind::Microphone.publisher_ssrc(),sequence_number:sequence,timestamp,marker:frame.marker,..Default::default()},payload:frame.payload.clone()};
                 match transmit_control.guard_write(&frame, &attempt.connection, track.write_rtp(packet)).await {
-                    Ok(result) => result.map_err(|_|Failure::temporary("Voice media connection failed").with_reason("media_send_failed"))?,
+                    Ok(result) => {
+                        result.map_err(|_|Failure::temporary("Voice media connection failed").with_reason("media_send_failed"))?;
+                        rtp_clock.next(frame.media_position);
+                        accepted_packets += 1;
+                        accepted_bytes += frame.payload.len() as u64;
+                    },
                     Err(reason) => transmit_control.dropped(reason),
                 }
             },
             _=ticker.tick()=>{
+                if last_audio_stats.elapsed() >= Duration::from_secs(5) {
+                    thiscord_frontend::audio::diagnostics::event("voice_transmit", serde_json::json!({
+                        "accepted_packets":accepted_packets,"accepted_payload_bytes":accepted_bytes,
+                        "minimum_rtp_header_bytes":accepted_packets*12
+                    }));
+                    last_audio_stats = Instant::now();
+                }
                 if failed.load(Ordering::Acquire)||heard.elapsed()>Duration::from_secs(20){
                     thiscord_frontend::audio::diagnostics::event("voice_connection_lost",serde_json::json!({"peer_failed":failed.load(Ordering::Acquire),"signaling_age_ms":heard.elapsed().as_millis()}));
                     return Err(Failure::temporary("Voice connection lost").with_reason(if failed.load(Ordering::Acquire) { "peer_failed" } else { "signaling_heartbeat_timeout" }));

@@ -12,6 +12,8 @@ const WINDOW: i32 = PACKETS as i32 * FRAME as i32;
 
 pub struct Packet {
     pub sequence: u16,
+    pub marker: bool,
+    pub no_data: bool,
     pub timestamp: u32,
     pub arrived: Instant,
     pub payload: bytes::Bytes,
@@ -44,6 +46,9 @@ pub struct Metrics {
     pub fec_attempts: u64,
     pub decode_errors: u64,
     pub inactive: bool,
+    pub dtx: bool,
+    pub silence_gap_samples: u64,
+    pub sequence_gaps: u64,
     pub drift_ppm: f64,
     pub correction_ppm: f64,
 }
@@ -81,6 +86,8 @@ pub struct Jitter {
     reset_pending: bool,
     counters: Counters,
     adaptive: bool,
+    dtx: bool,
+    last_data: Option<u32>,
     latest: Option<(u32, Instant)>,
     last_tick: Option<Instant>,
     last_service: Option<Instant>,
@@ -107,6 +114,8 @@ impl Default for Jitter {
             reset_pending: false,
             counters: Default::default(),
             adaptive: false,
+            dtx: false,
+            last_data: None,
             latest: None,
             last_tick: None,
             last_service: None,
@@ -133,11 +142,11 @@ impl Jitter {
         payload: bytes::Bytes,
         received: Instant,
         now: Instant,
-    ) {
+    ) -> bool {
         if now.saturating_duration_since(received) >= MAX_AGE {
             self.counters.expired += 1;
             self.metrics.worker_queue_discards += 1;
-            return;
+            return false;
         }
         if !payload.is_empty() && payload.len() <= 1500 {
             self.observe(sequence, timestamp, received);
@@ -168,7 +177,21 @@ impl Jitter {
             {
                 self.metrics.late_discards += 1;
             }
-            return;
+            return false;
+        }
+        if self.dtx && self.packets.is_empty() {
+            // An explicit Opus no-data frame established intentional silence.
+            // Sparse CN updates and resumed speech get the current adaptive
+            // delay without PLC, rate integration, or a recovery/flush cycle.
+            if let Some(cursor) = self.cursor
+                && (timestamp.wrapping_sub(cursor) as i32) >= 0
+            {
+                self.metrics.silence_gap_samples += u64::from(timestamp.wrapping_sub(cursor));
+                self.cursor = Some(timestamp);
+                self.first = Some(received);
+                self.play_at = Some(received + self.prebuffer());
+                self.playing = false;
+            }
         }
         if let Some(cursor) = self.cursor {
             let distance = timestamp.wrapping_sub(cursor) as i32;
@@ -176,7 +199,7 @@ impl Jitter {
                 // Reordering can move the initial anchor only before playout.
                 if self.playing || self.last_sequence.is_some() || distance < -WINDOW {
                     self.counters.rejected += 1;
-                    return;
+                    return false;
                 }
                 self.cursor = Some(timestamp);
                 self.play_at = self
@@ -200,7 +223,7 @@ impl Jitter {
                 .0;
             if timestamp.wrapping_sub(self.packets[oldest].timestamp) as i32 <= 0 {
                 self.counters.overflow += 1;
-                return;
+                return false;
             }
             self.packets.swap_remove(oldest);
             self.counters.overflow += 1;
@@ -208,10 +231,13 @@ impl Jitter {
         }
         self.packets.push(Packet {
             sequence,
+            marker: false,
+            no_data: false,
             timestamp,
             arrived: received,
             payload,
         });
+        true
     }
 
     /// Call even when PCM is full. True requires a decoder and callback-ring
@@ -221,30 +247,49 @@ impl Jitter {
         self.packets
             .retain(|p| now.saturating_duration_since(p.arrived) < MAX_AGE);
         self.counters.expired += (before - self.packets.len()) as u64;
-        let far = self.cursor.is_some_and(|cursor| {
-            self.packets
-                .iter()
-                .map(|p| p.timestamp.wrapping_sub(cursor) as i32)
-                .min()
-                .is_some_and(|gap| gap > MAX_GAP as i32 || (gap > 0 && self.missing >= MAX_GAP))
-        });
+        // Rendered silence still consumes media time. Move the watermark in
+        // whole 20 ms slots so a delayed pre-resumption packet cannot replay
+        // after seconds of silence. Periodic updates reanchor clock drift.
+        if self.dtx
+            && self.playing
+            && self.packets.is_empty()
+            && self.metrics.pcm_samples == 0
+            && let Some(at) = self.play_at
+        {
+            let slots = now.saturating_duration_since(at).as_millis() / 20;
+            let samples = (slots * FRAME as u128).min(i32::MAX as u128) as usize;
+            if samples > 0 {
+                self.metrics.silence_gap_samples += samples as u64;
+                self.advance(samples);
+            }
+        }
+        let far = !self.dtx
+            && self.cursor.is_some_and(|cursor| {
+                self.packets
+                    .iter()
+                    .map(|p| p.timestamp.wrapping_sub(cursor) as i32)
+                    .min()
+                    .is_some_and(|gap| gap > MAX_GAP as i32 || (gap > 0 && self.missing >= MAX_GAP))
+            });
         // The fixed anchor cannot detect lag during rate-corrected playback:
         // sender/output drift deliberately moves it relative to wall time.
         // Expire remaining PCM even when all packets have already been decoded.
-        let lagging = if self.adaptive {
-            self.playing
-                && self
-                    .latest
-                    .is_some_and(|(_, at)| now.saturating_duration_since(at) >= MAX_AGE)
-        } else {
-            self.play_at
-                .is_some_and(|at| now.saturating_duration_since(at) >= MAX_AGE)
-        };
-        let spread = self.cursor.is_some_and(|cursor| {
-            self.packets
-                .iter()
-                .any(|p| p.timestamp.wrapping_sub(cursor) as i32 > WINDOW)
-        });
+        let lagging = (!self.dtx || self.metrics.pcm_samples > 0)
+            && if self.adaptive {
+                self.playing
+                    && self
+                        .latest
+                        .is_some_and(|(_, at)| now.saturating_duration_since(at) >= MAX_AGE)
+            } else {
+                self.play_at
+                    .is_some_and(|at| now.saturating_duration_since(at) >= MAX_AGE)
+            };
+        let spread = !self.dtx
+            && self.cursor.is_some_and(|cursor| {
+                self.packets
+                    .iter()
+                    .any(|p| p.timestamp.wrapping_sub(cursor) as i32 > WINDOW)
+            });
         if !self.reset_pending && before == self.packets.len() && !far && !lagging && !spread {
             return false;
         }
@@ -299,10 +344,47 @@ impl Jitter {
         }
         if let Some(index) = self.packets.iter().position(|p| p.timestamp == cursor) {
             let packet = self.packets.swap_remove(index);
+            if packet.no_data {
+                self.dtx = true;
+                self.last_data = None;
+                self.filtered_error = 0.0;
+                self.metrics.correction_ppm = 0.0;
+            } else {
+                // A lost talkspurt marker must not leave speech in silence mode.
+                if packet.marker
+                    || self
+                        .last_data
+                        .is_some_and(|ts| packet.timestamp.wrapping_sub(ts) == FRAME as u32)
+                {
+                    self.dtx = false;
+                }
+                self.last_data = Some(packet.timestamp);
+            }
+            if let Some(last) = self.last_sequence {
+                self.metrics.sequence_gaps += (packet.sequence.wrapping_sub(last) as i16)
+                    .saturating_sub(1)
+                    .max(0) as u64;
+            }
             self.last_sequence = Some(packet.sequence);
             self.missing = 0;
             self.advance(FRAME);
             return Some(Playout::Packet(packet.payload));
+        }
+        if self.dtx {
+            // The next CN/talkspurt may already be queued when the silence cue
+            // is decoded (batched delivery). Keep its media gap on the render
+            // clock instead of waiting for packet expiry or compressing time.
+            if let Some(gap) = self
+                .packets
+                .iter()
+                .map(|p| p.timestamp.wrapping_sub(cursor))
+                .min()
+            {
+                self.metrics.silence_gap_samples += u64::from(gap);
+                self.advance(gap as usize);
+                self.playing = false;
+            }
+            return None;
         }
         if !conceal_missing || self.missing >= MAX_GAP {
             return None;
@@ -323,7 +405,9 @@ impl Jitter {
                 self.packets
                     .iter()
                     .find(|p| {
-                        p.timestamp == cursor.wrapping_add(FRAME as u32)
+                        !p.marker
+                            && !p.no_data
+                            && p.timestamp == cursor.wrapping_add(FRAME as u32)
                             && self
                                 .last_sequence
                                 .is_some_and(|last| p.sequence.wrapping_sub(last) as i16 > 1)
@@ -355,6 +439,8 @@ impl Jitter {
             self.last_sequence = Some(latest.sequence);
         }
         self.packets.clear();
+        self.dtx = false;
+        self.last_data = None;
         self.cursor = None;
         self.first = None;
         self.play_at = None;
@@ -378,14 +464,22 @@ impl Jitter {
     fn prebuffer(&self) -> Duration {
         Duration::from_secs_f64(self.metrics.target_ms / 1000.0)
     }
+    pub fn packet_flags(&mut self, timestamp: u32, marker: bool, no_data: bool) {
+        if let Some(packet) = self.packets.iter_mut().find(|p| p.timestamp == timestamp) {
+            packet.marker |= marker;
+            packet.no_data |= no_data;
+        }
+    }
     pub fn push_packet(&mut self, packet: Packet, now: Instant) {
-        self.push(
+        if self.push(
             packet.sequence,
             packet.timestamp,
             packet.payload,
             packet.arrived,
             now,
-        );
+        ) {
+            self.packet_flags(packet.timestamp, packet.marker, packet.no_data);
+        }
     }
     fn observe(&mut self, sequence: u16, timestamp: u32, arrived: Instant) {
         let identity = (sequence, timestamp);
@@ -446,7 +540,16 @@ impl Jitter {
                 .counters
                 .expired
                 .saturating_sub(self.metrics.worker_queue_discards),
-            inactive: self.cursor.is_none() || (self.packets.is_empty() && self.missing >= MAX_GAP),
+            dtx: self.dtx,
+            inactive: self.cursor.is_none()
+                || (self.packets.is_empty() && self.missing >= MAX_GAP)
+                || (self.dtx
+                    && self
+                        .latest
+                        .zip(self.last_service)
+                        .is_some_and(|((_, arrived), now)| {
+                            now.saturating_duration_since(arrived) >= Duration::from_secs(1)
+                        })),
             ..self.metrics.clone()
         }
     }
@@ -471,7 +574,7 @@ impl Jitter {
         if !self.playing && (now < self.play_at? || pcm_samples != 0) {
             return None;
         }
-        if let Some((latest, arrived)) = self.latest {
+        if let Some((latest, arrived)) = self.latest.filter(|_| !self.dtx) {
             let age = now.saturating_duration_since(arrived).as_secs_f64() * 1000.0;
             self.metrics.current_ms = age
                 + f64::from(latest.wrapping_sub(timestamp) as i32) / 48.0
@@ -825,5 +928,103 @@ mod tests {
             packet(&mut j, seq, now);
         }
         assert_eq!(j.counters.concealed_samples, 0);
+    }
+}
+
+#[cfg(test)]
+mod dtx_tests {
+    use super::*;
+
+    #[test]
+    fn silence_consumes_media_time_and_rejects_late_packets_without_losing_identity() {
+        let at = Instant::now();
+        let mut jitter = Jitter::default();
+        jitter.push_packet(
+            Packet {
+                sequence: 1,
+                timestamp: 0,
+                marker: false,
+                no_data: true,
+                arrived: at,
+                payload: bytes::Bytes::from_static(b"fixture"),
+            },
+            at,
+        );
+        jitter.prepare(at);
+        assert!(jitter.poll(at + Duration::from_millis(40), 0).is_some());
+        for ms in (60..=2000).step_by(20) {
+            let now = at + Duration::from_millis(ms);
+            assert!(!jitter.prepare(now));
+            assert!(jitter.poll(now, 0).is_none());
+        }
+        assert!(jitter.metrics().inactive);
+        assert!(jitter.metrics().dtx);
+        assert!(!jitter.push(
+            2,
+            960,
+            bytes::Bytes::from_static(b"late"),
+            at + Duration::from_secs(2),
+            at + Duration::from_secs(2)
+        ));
+        assert_eq!(jitter.metrics().late_discards, 1);
+        assert_eq!(jitter.last_sequence, Some(1));
+        assert_eq!(jitter.metrics().concealments, 0);
+        assert_eq!(jitter.metrics().rebufferings, 0);
+    }
+
+    #[test]
+    fn buffered_talkspurt_after_silence_cue_keeps_its_deadline() {
+        let at = Instant::now();
+        let mut jitter = Jitter::default();
+        for (sequence, timestamp, marker, no_data) in [
+            (1, 0, false, true),
+            (2, 2880, true, false),
+            (3, 3840, false, false),
+        ] {
+            jitter.push_packet(
+                Packet {
+                    sequence,
+                    timestamp,
+                    marker,
+                    no_data,
+                    arrived: at,
+                    payload: bytes::Bytes::from_static(b"fixture"),
+                },
+                at,
+            );
+        }
+        assert!(!jitter.prepare(at));
+        assert!(jitter.poll(at + Duration::from_millis(40), 0).is_some());
+        assert!(jitter.poll(at + Duration::from_millis(60), 0).is_none());
+        assert!(jitter.poll(at + Duration::from_millis(80), 0).is_none());
+        assert!(matches!(
+            jitter
+                .poll(at + Duration::from_millis(100), 0)
+                .unwrap()
+                .decode,
+            Playout::Packet(_)
+        ));
+        assert_eq!(jitter.metrics().silence_gap_samples, 1920);
+        assert_eq!(jitter.metrics().concealments, 0);
+        assert_eq!(jitter.metrics().rebufferings, 0);
+    }
+
+    #[test]
+    fn talkspurt_marker_and_no_data_are_never_fec_donors() {
+        for (marker, no_data) in [(true, false), (false, true)] {
+            let at = Instant::now();
+            let mut jitter = Jitter::default();
+            jitter.push(1, 0, bytes::Bytes::from_static(b"speech"), at, at);
+            jitter.push(3, 1920, bytes::Bytes::from_static(b"new talkspurt"), at, at);
+            jitter.packet_flags(1920, marker, no_data);
+            assert!(matches!(
+                jitter.pop(true, at + PREBUFFER),
+                Some(Playout::Packet(_))
+            ));
+            assert!(matches!(
+                jitter.pop(true, at + PREBUFFER),
+                Some(Playout::Conceal(FRAME))
+            ));
+        }
     }
 }

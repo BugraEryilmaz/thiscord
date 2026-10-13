@@ -92,7 +92,7 @@ fn sender_drop_and_partial_gap_reach_real_playout_without_compressing_samples() 
         if ms == 40 {
             controls.underruns.store(0, Ordering::Relaxed);
         }
-        let mut output = [0.0; 48];
+        let mut output = [0.0_f32; 48];
         let len = (expected.len() - actual.len()).min(48);
         mixer.render(&mut output[..len], 1);
         actual.extend_from_slice(&output[..len]);
@@ -265,5 +265,146 @@ fn unsupported_packet_duration_and_invalid_payload_do_not_advance_receive_clock(
             .jitter
             .pop(true, at + Duration::from_secs(1))
             .is_none()
+    );
+}
+
+#[test]
+fn dtx_updates_wrap_loss_and_onsets_preserve_adaptive_playout() {
+    for lose_entry_and_onset in [false, true] {
+        let at = Instant::now();
+        let controls = Arc::new(Controls::default());
+        let (mut writers, mut mixer) = mixer(controls.clone());
+        writers[0].control.active.store(true, Ordering::Release);
+        let mut remote = remote(at);
+        let mut encoder = transmit::Encoder::new(true).unwrap();
+        let mut sequence = u16::MAX - 20;
+        let origin = u32::MAX - 24_000;
+        let mut wire = [0; 1500];
+        let mut lost_entry = false;
+        let mut received_speech = None;
+        let mut stable = None;
+        let mut transmitted = 0;
+        for ms in 0..61_000u64 {
+            let now = at + Duration::from_millis(ms);
+            if ms % 20 == 0 {
+                let speech = ms >= 60_000;
+                let pcm = std::array::from_fn(|i| {
+                    // Quiet onset followed by an abrupt louder syllable.
+                    if speech {
+                        (i as f32 * 0.04).sin() * if ms < 60_100 { 0.001 } else { 0.2 }
+                    } else {
+                        0.0
+                    }
+                });
+                let (len, omitted, marker) = encoder.encode(&pcm, speech, &mut wire).unwrap();
+                if !omitted {
+                    sequence = sequence.wrapping_add(1);
+                    transmitted += 1;
+                    let drop_entry = lose_entry_and_onset && !lost_entry && len <= 2;
+                    lost_entry |= drop_entry;
+                    let dropped = drop_entry
+                        || (lose_entry_and_onset && ms == 60_000)
+                        || (1000..60_000).contains(&ms) && transmitted % 7 == 0
+                        || ms == 60_300;
+                    if !dropped {
+                        let timestamp = origin.wrapping_add((ms * 48) as u32);
+                        remote.push(
+                            sequence,
+                            timestamp,
+                            bytes::Bytes::copy_from_slice(&wire[..len]),
+                            now,
+                            now,
+                        );
+                        remote.jitter.packet_flags(timestamp, marker, false);
+                    }
+                }
+            }
+            if ms % 5 == 0 {
+                remote.refill(&mut writers[0], now);
+            }
+            let mut output = [0.0_f32; 48];
+            mixer.render(&mut output, 1);
+            assert!(output.iter().all(|v| v.is_finite()));
+            if ms >= 60_000 && output.iter().any(|v| v.abs() > 0.00005) {
+                received_speech.get_or_insert(ms);
+            }
+            if ms == 1500 {
+                stable = Some((
+                    remote.jitter.metrics().rebufferings,
+                    remote.decode_stats.plc_frames,
+                    controls.underruns.load(Ordering::Relaxed),
+                ));
+            }
+            if ms == 59_999 {
+                let (rebufferings, plc, underruns) = stable.unwrap();
+                assert!(remote.jitter.metrics().dtx);
+                assert_eq!(remote.jitter.metrics().rebufferings, rebufferings);
+                assert_eq!(remote.decode_stats.plc_frames, plc);
+                assert_eq!(controls.underruns.load(Ordering::Relaxed), underruns);
+                assert!(remote.jitter.metrics().silence_gap_samples > 50 * 48_000);
+                assert!(
+                    remote.jitter.metrics().sequence_gaps > 0,
+                    "lost updates remain distinguishable from omitted media"
+                );
+                assert!(remote.jitter.metrics().target_ms < 60.0);
+            }
+        }
+        assert!(
+            transmitted < 400,
+            "packet overhead must actually be removed"
+        );
+        assert!(
+            received_speech.unwrap() <= 60_100,
+            "resume within receive target plus codec delay, excluding capture/gate/device latency"
+        );
+        assert!(
+            !remote.jitter.metrics().dtx,
+            "lost marker must not strand speech in silence mode"
+        );
+        assert!(
+            remote.decode_stats.fec_attempts >= 1,
+            "ordinary speech loss still uses main's FEC policy"
+        );
+    }
+}
+
+#[test]
+fn dtx_does_not_disable_stale_pcm_flush_when_render_stalls() {
+    let at = Instant::now();
+    let controls = Arc::new(Controls::default());
+    let (mut writers, mut mixer) = mixer(controls);
+    writers[0].control.active.store(true, Ordering::Release);
+    let mut remote = remote(at);
+    let mut encoder = transmit::Encoder::new(true).unwrap();
+    let mut wire = [0; 1500];
+    let mut sequence = 0;
+    // Stop rendering only after a no-data packet establishes silence mode.
+    for ms in (0..2000).step_by(5) {
+        let now = at + Duration::from_millis(ms);
+        if ms % 20 == 0 && !remote.jitter.metrics().dtx {
+            let (len, omitted, _) = encoder.encode(&[0.0; FRAME], false, &mut wire).unwrap();
+            if !omitted {
+                remote.push(
+                    sequence,
+                    ms as u32 * 48,
+                    bytes::Bytes::copy_from_slice(&wire[..len]),
+                    now,
+                    now,
+                );
+                sequence += 1;
+            }
+        }
+        remote.refill(&mut writers[0], now);
+        if !remote.jitter.metrics().dtx {
+            mixer.render(&mut [0.0; 240], 1);
+        }
+    }
+    assert!(
+        remote.jitter.metrics().dtx,
+        "the regression must reach DTX before stalling render"
+    );
+    assert!(
+        !writers[0].ready(),
+        "stalled render must acknowledge stale PCM discard"
     );
 }

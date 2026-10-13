@@ -148,8 +148,83 @@ pub async fn probe() -> Result<String, String> {
 }
 #[cfg(test)]
 mod tests {
+    use super::*;
     #[tokio::test]
     async fn encrypted_opus_forwarding() {
         super::probe().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn encrypted_connections_survive_31_seconds_without_audio_packets() {
+        let mut peers = Vec::new();
+        let result = tokio::time::timeout(Duration::from_secs(45), async {
+            let (a, ag, _) = peer().await.unwrap();
+            peers.push(a.clone());
+            let (b, bg, mut ingress) = peer().await.unwrap();
+            peers.push(b.clone());
+            let (c, cg, _) = peer().await.unwrap();
+            peers.push(c.clone());
+            let (d, dg, mut egress) = peer().await.unwrap();
+            peers.push(d.clone());
+            let sender = track(101);
+            let relay = track(202);
+            a.add_track(sender.clone() as Arc<dyn TrackLocal>)
+                .await
+                .unwrap();
+            c.add_track(relay.clone() as Arc<dyn TrackLocal>)
+                .await
+                .unwrap();
+            connect(&a, &ag, &b, &bg).await.unwrap();
+            connect(&c, &cg, &d, &dg).await.unwrap();
+            let mut encoder = super::super::transmit::Encoder::new(true).unwrap();
+            let pcm = std::array::from_fn(|i| (i as f32 * 0.04).sin() * 0.01);
+            let mut output = [0; 4000];
+            let (n, _, _) = encoder.encode(&pcm, true, &mut output).unwrap();
+            let payload = bytes::Bytes::copy_from_slice(&output[..n]);
+            // Initial packets establish both DTLS hops. No RTP at all during
+            // the gap, even though normal DTX would also send periodic updates.
+            for sequence in 1..=2 {
+                let timestamp = 1000 + (sequence as u32 - 1) * 31 * 48_000;
+                let packet = rtp::Packet {
+                    header: rtp::header::Header {
+                        version: 2,
+                        payload_type: 111,
+                        ssrc: 101,
+                        sequence_number: sequence,
+                        timestamp,
+                        marker: true,
+                        ..Default::default()
+                    },
+                    payload: payload.clone(),
+                };
+                // Peer gathering does not imply DTLS is ready yet; retries here
+                // only establish the initial packet, never bridge the silent gap.
+                let mut retry = tokio::time::interval(Duration::from_millis(100));
+                let mut incoming = loop {
+                    tokio::select! {
+                        packet = ingress.recv() => break packet.unwrap(),
+                        _ = retry.tick() => { sender.write_rtp(packet.clone()).await.unwrap(); }
+                    }
+                };
+                incoming.header.ssrc = 202;
+                let received = loop {
+                    tokio::select! {
+                        packet = egress.recv() => break packet.unwrap(),
+                        _ = retry.tick() => { relay.write_rtp(incoming.clone()).await.unwrap(); }
+                    }
+                };
+                assert_eq!(received.header.sequence_number, sequence);
+                assert_eq!(received.header.timestamp, timestamp);
+                assert_eq!(received.payload, payload);
+                if sequence == 1 {
+                    tokio::time::sleep(Duration::from_secs(31)).await;
+                }
+            }
+        })
+        .await;
+        for peer in peers {
+            let _ = peer.close().await;
+        }
+        assert!(result.is_ok(), "silence must not expire the transport");
     }
 }

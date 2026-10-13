@@ -42,9 +42,11 @@ A fixed ring retains **three 960-sample packets (60 ms, 11,520 bytes of PCM)**.
 On opening, it marks the retained packets eligible and emits the oldest one.
 Every subsequent capture packet replaces exactly one ring slot and emits at most
 one packet. Initial empty slots and closed slots emit zeros. There is no drain
-loop on opening, no duplicate packet and no timestamp rewind. Silence continues
-at the existing Opus/RTP cadence. The existing bounded capture batch drain can
-still process up to six packets per tick; pre-roll adds no extra burst to it.
+loop on opening, no duplicate packet and no timestamp rewind. The encoder continues
+at its 20 ms cadence; [microphone DTX](audio.md#microphone-dtx-and-media-timing)
+omits eligible silent transmissions while retaining CN updates and silence cues.
+The existing bounded capture batch drain can still process up to six packets per
+tick; pre-roll adds no extra burst to it.
 
 Tagged-sequence tests measure **exactly 2,880 samples / 60 ms of added delay** on
 the automatic path, including continuously open speech. With ordinary 20 ms

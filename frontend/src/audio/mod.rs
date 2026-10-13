@@ -27,6 +27,7 @@ pub mod reconnect;
 mod recording;
 mod recovery;
 mod selection;
+pub mod transmit;
 pub mod transport;
 pub mod volumes;
 mod worker_health;
@@ -187,6 +188,7 @@ pub enum Command {
         microphone: bool,
     },
     Packet {
+        marker: bool,
         connection: connection::Connection,
         slot: usize,
         sequence: u16,
@@ -398,15 +400,22 @@ impl Remote {
         payload: bytes::Bytes,
         received_at: Instant,
         now: Instant,
-    ) {
+    ) -> bool {
         if !self.deafened
             && received_at >= self.since
             && opus::packet::get_nb_samples(&payload, RATE).is_ok_and(|n| n == FRAME)
         {
-            self.jitter
+            let no_data = payload.len() <= 2;
+            let accepted = self
+                .jitter
                 .push(sequence, timestamp, payload, received_at, now);
+            if accepted {
+                self.jitter.packet_flags(timestamp, false, no_data);
+            }
+            accepted
         } else {
             self.jitter.reject();
+            false
         }
     }
     fn clear(&mut self, writer: &StreamWriter, now: Instant) {
@@ -433,6 +442,11 @@ impl Remote {
         if self.jitter.prepare(now) {
             self.reset_decoder(writer);
         }
+        let metrics = self.jitter.metrics();
+        writer
+            .control
+            .quiet
+            .store(metrics.dtx || metrics.inactive, Ordering::Release);
         if !writer.ready() {
             return;
         }
@@ -469,6 +483,11 @@ impl Remote {
                     .process(&pcm[..samples], scheduled.correction_ppm, &mut corrected);
             writer.write(&corrected[..count]);
         }
+        let metrics = self.jitter.metrics();
+        writer
+            .control
+            .quiet
+            .store(metrics.dtx || metrics.inactive, Ordering::Release);
     }
 }
 struct Devices {
@@ -632,7 +651,7 @@ struct Session {
     connection: Option<connection::Connection>,
     settings: AudioSettings,
     devices: Devices,
-    encoder: opus::Encoder,
+    encoder: transmit::Encoder,
     decoder: opus::Decoder,
     microphone: bool,
     phase: f32,
@@ -663,7 +682,7 @@ impl Drop for Session {
         }
         diagnostics::event(
             "audio_session_ended",
-            serde_json::json!({"voice":self.connection.is_some(),"health":self.devices.health.diagnostics()}),
+            serde_json::json!({"voice":self.connection.is_some(),"health":self.devices.health.diagnostics(),"transmit":self.encoder.stats}),
         );
     }
 }
@@ -773,7 +792,7 @@ impl Session {
         diagnostics::event("processing_init_complete", serde_json::json!({}));
         let recovery = recovery::Recovery::starting();
         let devices = Devices::silent(settings);
-        let encoder = codec::microphone_encoder().map_err(|e| e.to_string())?;
+        let encoder = transmit::Encoder::new(true).map_err(|e| e.to_string())?;
         let decoder = opus::Decoder::new(RATE, opus::Channels::Mono).map_err(|e| e.to_string())?;
         devices.writers[0]
             .control
@@ -952,15 +971,15 @@ impl Session {
             || generation != self.encoder_generation
             || (!active && self.encoder_active)
         {
-            self.encoder.reset_state().map_err(|e| e.to_string())?;
+            self.encoder.reset().map_err(|e| e.to_string())?;
             self.decoder.reset_state().map_err(|e| e.to_string())?;
             self.reset_codec = false;
         }
         self.encoder_generation = generation;
         self.encoder_active = active;
-        let n = self
+        let (n, omitted, marker) = self
             .encoder
-            .encode_float(&pcm, &mut packet)
+            .encode(&pcm, active, &mut packet)
             .map_err(|e| e.to_string())?;
         // An urgent action may arrive while DSP or Opus runs. Discard that work
         // and clear codec lookbehind as well as pre-roll at the next boundary.
@@ -983,37 +1002,48 @@ impl Session {
             .unwrap_or(oldest_capture);
         if let Some(outgoing) = &self.outgoing {
             let connection = self.connection.as_ref().ok_or("Missing voice connection")?;
-            let frame = outgoing::EncodedFrame {
-                payload: bytes::Bytes::copy_from_slice(&packet[..n]),
-                media_position,
-                oldest_capture,
-                generation,
-                connection: connection.clone(),
-                delivery: self.delivery.clone(),
-                activation_delay: gate_delay,
-            };
-            let accepted = match self
-                .transmit_control
-                .check(&frame, connection, Instant::now())
-            {
-                Err(reason) => {
-                    self.transmit_control.dropped(reason);
-                    false
+            let accepted = if omitted {
+                false
+            } else {
+                let frame = outgoing::EncodedFrame {
+                    payload: bytes::Bytes::copy_from_slice(&packet[..n]),
+                    media_position,
+                    marker,
+                    oldest_capture,
+                    generation,
+                    connection: connection.clone(),
+                    delivery: self.delivery.clone(),
+                    activation_delay: gate_delay,
+                };
+                match self
+                    .transmit_control
+                    .check(&frame, connection, Instant::now())
+                {
+                    Err(reason) => {
+                        self.transmit_control.dropped(reason);
+                        false
+                    }
+                    Ok(()) => match outgoing.try_send(frame) {
+                        Ok(()) => true,
+                        Err(tokio::sync::mpsc::error::TrySendError::Full(_)) => {
+                            self.transmit_control
+                                .dropped(outgoing::DropReason::QueueFull);
+                            false
+                        }
+                        Err(tokio::sync::mpsc::error::TrySendError::Closed(_)) => {
+                            self.transmit_control
+                                .dropped(outgoing::DropReason::ControlInvalidated);
+                            false
+                        }
+                    },
                 }
-                Ok(()) => match outgoing.try_send(frame) {
-                    Ok(()) => true,
-                    Err(tokio::sync::mpsc::error::TrySendError::Full(_)) => {
-                        self.transmit_control
-                            .dropped(outgoing::DropReason::QueueFull);
-                        false
-                    }
-                    Err(tokio::sync::mpsc::error::TrySendError::Closed(_)) => {
-                        self.transmit_control
-                            .dropped(outgoing::DropReason::ControlInvalidated);
-                        false
-                    }
-                },
             };
+            if accepted {
+                self.encoder.stats.queued_packets += 1;
+                self.encoder.stats.queued_bytes += n as u64;
+            } else if !omitted {
+                self.encoder.stats.queue_drops += 1;
+            }
             self.devices
                 .control
                 .transmitting
@@ -1330,6 +1360,7 @@ fn run(
                             lease = Instant::now();
                         }
                         Command::Packet {
+                            marker,
                             connection,
                             slot,
                             sequence,
@@ -1345,8 +1376,9 @@ fn run(
                                 && let Some(Some(r)) = s.remotes.get_mut(slot)
                                 && !deafen.load(Ordering::Acquire)
                                 && !s.settings.deafened
+                                && r.push(sequence, timestamp, payload, received_at, Instant::now())
                             {
-                                r.push(sequence, timestamp, payload, received_at, Instant::now());
+                                r.jitter.packet_flags(timestamp, marker, false);
                             }
                         }
                         Command::Roster {
@@ -1722,6 +1754,7 @@ mod lifecycle_tests {
         };
         let connection = connection::Connection::default();
         let queued = outgoing::EncodedFrame {
+            marker: false,
             payload: bytes::Bytes::from_static(b"synthetic"),
             media_position: 0,
             oldest_capture: Instant::now(),
@@ -1732,6 +1765,7 @@ mod lifecycle_tests {
         };
         for _ in 0..10 {
             engine.notify(Command::Packet {
+                marker: false,
                 connection: Default::default(),
                 slot: 0,
                 sequence: 0,
@@ -1821,6 +1855,7 @@ mod lifecycle_tests {
         ] {
             let connection = connection::Connection::default();
             let frame = outgoing::EncodedFrame {
+                marker: false,
                 payload: bytes::Bytes::from_static(b"synthetic"),
                 media_position: 0,
                 oldest_capture: Instant::now(),
