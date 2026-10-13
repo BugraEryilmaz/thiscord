@@ -105,7 +105,8 @@ and single-process chat/media enforcement.
 
 - [x] Native CPAL capture/playback, per-stream SPSC ring buffers and Opus codecs.
 - [x] Preserve microphone media time across capture/queue drops and device recovery;
-  bound outgoing age to 100 ms with control invalidation and distinct drop counters.
+  bound outgoing age to 100 ms plus fixed automatic-gate delay (at most 60 ms),
+  with control invalidation and distinct drop counters.
 - [x] Consume RTP timestamps in native audio playout, with bounded gap concealment,
   stale-queue recovery and acknowledged per-source PCM/decoder resets.
 - [ ] Validate end-to-end stall recovery, urgent controls and device-clock drift on
@@ -130,6 +131,11 @@ and single-process chat/media enforcement.
   real Windows, macOS and Linux hardware, including exclusive-mode conflicts.
 - [x] Microphone permission/error UX, input levels and bounded playback/loopback tests.
 - [x] Mute/deafen, independent speaker volume, voice activation and in-app push-to-talk.
+- [x] Replace peak activation with a tested pre-AGC energy gate, hysteresis,
+  60 ms bounded pre-roll and restriction-safe capture/transport invalidation.
+- [ ] Listen-test activation/sensitivity and the added 60 ms delay with physical
+  microphones on Windows/macOS/Linux, including quiet Turkish/English speech,
+  typing, fans, TV voices and rapid mute/PTT transitions.
 - [x] Optional Rust echo cancellation, noise suppression and automatic gain processing.
 - [x] Optional global Ctrl+Shift+Space integration with conflict/error reporting.
 - [x] Retire devices on leave/logout/window destruction and lease expiry; stop retired

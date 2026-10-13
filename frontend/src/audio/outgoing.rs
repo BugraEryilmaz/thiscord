@@ -6,7 +6,8 @@ use std::{
 };
 
 pub const QUEUE_CAPACITY: usize = 5;
-/// Includes capture acquisition, explicit DSP buffering, encoding and queueing.
+/// Includes acquisition, enhancement, encoding and queueing. The fixed activation
+/// lookbehind has a separate bounded allowance, so DFN3 + pre-roll stays usable.
 pub const MAX_PACKET_AGE: Duration = Duration::from_millis(100);
 
 pub struct EncodedFrame {
@@ -15,6 +16,13 @@ pub struct EncodedFrame {
     pub oldest_capture: Instant,
     pub generation: u64,
     pub connection: Connection,
+    pub delivery: Connection,
+    pub activation_delay: Duration,
+}
+impl EncodedFrame {
+    fn deadline(&self) -> Instant {
+        self.oldest_capture + MAX_PACKET_AGE + self.activation_delay.min(super::gate::DELAY)
+    }
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -53,6 +61,9 @@ impl Control {
     pub fn invalidate(&self) {
         self.invalidate_at(Instant::now());
     }
+    pub(super) fn cancel_pending(&self) {
+        self.changed.notify_waiters();
+    }
     fn invalidate_at(&self, now: Instant) {
         let stamp = now.saturating_duration_since(self.origin).as_nanos() as u64 + 1;
         let _ = self
@@ -75,10 +86,13 @@ impl Control {
         connection: &Connection,
         now: Instant,
     ) -> Result<(), DropReason> {
-        if !connection.accepts(&frame.connection) || frame.generation != self.generation() {
+        if !connection.accepts(&frame.connection)
+            || !frame.delivery.active()
+            || frame.generation != self.generation()
+        {
             return Err(DropReason::ControlInvalidated);
         }
-        if now.saturating_duration_since(frame.oldest_capture) >= MAX_PACKET_AGE {
+        if now >= frame.deadline() {
             return Err(DropReason::Expired);
         }
         Ok(())
@@ -115,7 +129,7 @@ impl Control {
             biased;
             result = guarded => result,
             _ = &mut changed => Err(DropReason::ControlInvalidated),
-            _ = tokio::time::sleep_until((frame.oldest_capture + MAX_PACKET_AGE).into()) => Err(DropReason::Expired),
+            _ = tokio::time::sleep_until(frame.deadline().into()) => Err(DropReason::Expired),
         }
     }
     pub fn dropped(&self, reason: DropReason) {
@@ -198,6 +212,8 @@ mod tests {
             oldest_capture: at,
             generation,
             connection: connection.clone(),
+            delivery: Connection::default(),
+            activation_delay: Duration::ZERO,
             media_position,
         }
     }
@@ -324,6 +340,85 @@ mod tests {
             control.check(&f, &connection, at + Duration::from_millis(70)),
             Err(DropReason::Expired)
         );
+    }
+
+    #[test]
+    fn preroll_allowance_preserves_dsp_budget_without_allowing_unbounded_age() {
+        let at = Instant::now();
+        let control = Control::new(at);
+        let connection = Connection::default();
+        // Current output slot starts 90 ms after its oldest source sample:
+        // 30 ms DFN alignment + 60 ms activation lookbehind.
+        let mut f = frame(oldest_capture(at, 1440 + 2880), 0, &connection, 0);
+        f.activation_delay = super::super::gate::DELAY;
+        assert!(
+            control
+                .check(&f, &connection, at + Duration::from_millis(20))
+                .is_ok()
+        );
+        assert!(
+            control
+                .check(&f, &connection, at + Duration::from_millis(69))
+                .is_ok()
+        );
+        assert_eq!(
+            control.check(&f, &connection, at + Duration::from_millis(70)),
+            Err(DropReason::Expired)
+        );
+        // Even incorrectly supplied metadata cannot grant a larger allowance.
+        f.activation_delay = Duration::from_secs(10);
+        assert_eq!(
+            control.check(&f, &connection, at + Duration::from_millis(70)),
+            Err(DropReason::Expired)
+        );
+        f.activation_delay = Duration::ZERO;
+        assert_eq!(
+            control.check(&f, &connection, at + Duration::from_millis(20)),
+            Err(DropReason::Expired)
+        );
+    }
+
+    #[tokio::test]
+    async fn gap_delivery_invalidation_cancels_pending_write_without_changing_control_generation() {
+        let at = Instant::now();
+        let control = Control::new(at);
+        let connection = Connection::default();
+        let f = frame(at, 0, &connection, 0);
+        let write = std::future::poll_fn(|_| {
+            f.delivery.close();
+            control.cancel_pending();
+            std::task::Poll::<()>::Pending
+        });
+        assert_eq!(
+            control.guard_write(&f, &connection, write).await,
+            Err(DropReason::ControlInvalidated)
+        );
+        assert_eq!(control.generation(), 0);
+        assert!(connection.active());
+    }
+
+    #[tokio::test]
+    async fn pending_preroll_write_expires_at_the_same_bounded_deadline() {
+        let at = Instant::now();
+        let control = Control::new(at);
+        let connection = Connection::default();
+        let mut f = frame(at, 0, &connection, 0);
+        f.activation_delay = super::super::gate::DELAY;
+        let now = std::cell::Cell::new(at + Duration::from_millis(110));
+        let polls = std::cell::Cell::new(0);
+        let write = std::future::poll_fn(|cx| {
+            polls.set(polls.get() + 1);
+            now.set(at + Duration::from_millis(160));
+            cx.waker().wake_by_ref();
+            std::task::Poll::<()>::Pending
+        });
+        assert_eq!(
+            control
+                .guard_write_with_clock(&f, &connection, write, || now.get())
+                .await,
+            Err(DropReason::Expired)
+        );
+        assert_eq!(polls.get(), 1);
     }
 
     #[test]

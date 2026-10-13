@@ -10,6 +10,7 @@ pub mod diagnostics;
 mod fixture;
 mod format;
 mod frames;
+mod gate;
 mod health;
 pub mod jitter;
 mod lifecycle;
@@ -614,7 +615,12 @@ struct Session {
     phase: f32,
     next: Instant,
     started: Instant,
-    hold: usize,
+    gate: gate::Gate,
+    capture_epoch: u64,
+    capture_after: Option<Instant>,
+    record_boundary: Option<Instant>,
+    reset_codec: bool,
+    delivery: connection::Connection,
     outgoing: Option<tokio::sync::mpsc::Sender<outgoing::EncodedFrame>>,
     media_clock: outgoing::MediaClock,
     transmit_control: Arc<outgoing::Control>,
@@ -626,6 +632,8 @@ struct Session {
 }
 impl Drop for Session {
     fn drop(&mut self) {
+        self.delivery.close();
+        self.transmit_control.cancel_pending();
         self.devices.health.disable();
         if let Some(connection) = &self.connection {
             connection.close();
@@ -637,6 +645,29 @@ impl Drop for Session {
     }
 }
 impl Session {
+    fn clear_gate(&mut self) {
+        self.gate.reset();
+        self.delivery.close();
+        self.transmit_control.cancel_pending();
+        self.delivery = Default::default();
+        self.reset_codec = true;
+        self.devices
+            .control
+            .transmitting
+            .store(false, Ordering::Release);
+    }
+    fn reset_gate(&mut self, at: Instant) {
+        self.clear_gate();
+        self.capture_after = Some(at);
+        self.record_boundary = Some(at);
+        self.processing.restrict_capture(at);
+    }
+    fn capture_boundary(&mut self, epoch: u64, at: Instant) {
+        if self.capture_epoch != epoch {
+            self.capture_epoch = epoch;
+            self.reset_gate(at);
+        }
+    }
     fn resume_devices(
         &mut self,
         devices: Devices,
@@ -665,7 +696,7 @@ impl Session {
         self.device_watch = Default::default();
         diagnostics::event("device_active", self.devices.info.clone());
         self.processing.reset();
-        self.hold = 0;
+        self.reset_gate(Instant::now());
         self.next = Instant::now();
         for (remote, writer) in self.remotes.iter_mut().zip(&self.devices.writers) {
             if let Some(remote) = remote {
@@ -745,7 +776,12 @@ impl Session {
             phase: 0.0,
             next: Instant::now(),
             started: Instant::now(),
-            hold: 0,
+            gate: Default::default(),
+            capture_epoch: 0,
+            capture_after: None,
+            record_boundary: None,
+            reset_codec: false,
+            delivery: Default::default(),
             outgoing: None,
             media_clock: Default::default(),
             transmit_control: Default::default(),
@@ -764,6 +800,7 @@ impl Session {
         debug: &mut recording::Recorder,
     ) -> Result<(), String> {
         self.devices.health.check()?;
+        let resets = self.processing.resets;
         self.processing
             .render_tapped(&mut self.devices.reference, &mut |frame, gap| {
                 debug.block(
@@ -775,6 +812,9 @@ impl Session {
                     None,
                 );
             })?;
+        if self.processing.resets != resets {
+            self.clear_gate();
+        }
         if self.outgoing.is_some() {
             for (remote, writer) in self.remotes.iter_mut().zip(self.devices.writers.iter_mut()) {
                 if let Some(remote) = remote {
@@ -810,6 +850,10 @@ impl Session {
         // ring itself bounds latency; trimming each callback to 60 ms destroys
         // capture continuity and prevents the echo filter from converging.
         for _ in 0..CAPACITY / FRAME {
+            self.capture_boundary(self.transmit_control.generation(), Instant::now());
+            if let Some(at) = self.record_boundary.take() {
+                debug.capture_boundary(at);
+            }
             if stop.load(Ordering::Acquire) {
                 break;
             }
@@ -851,43 +895,69 @@ impl Session {
         let media_position = self.media_clock.position(captured.at[0], captured.position);
         let oldest_capture =
             outgoing::oldest_capture(captured.at[0], self.processing.enhancement_delay_samples());
-        let mut pcm = captured.pcm;
-        let peak = pcm.iter().fold(0.0_f32, |p, v| p.max(v.abs()));
+        let peak = captured.pcm.iter().fold(0.0_f32, |p, v| p.max(v.abs()));
         self.processed_level = peak;
-        if peak >= f32::from_bits(self.devices.control.threshold.load(Ordering::Relaxed)) {
-            self.hold = 10;
-        } else {
-            self.hold = self.hold.saturating_sub(1);
+        if self
+            .gate
+            .discontinuous(captured.at[0], captured.gap.iter().any(|gap| *gap))
+        {
+            self.clear_gate();
         }
-        let active = self
-            .transmit_control
-            .fresh_capture(generation, oldest_capture)
-            && !inhibit.load(Ordering::Acquire)
+        let allowed = !inhibit.load(Ordering::Acquire)
+            && generation == self.capture_epoch
+            && self
+                .transmit_control
+                .fresh_capture(generation, oldest_capture)
+            && self.connection.as_ref().is_none_or(|c| c.active())
+            && self
+                .capture_after
+                .is_none_or(|after| captured.at[0] >= after)
             && !self.devices.control.mute.load(Ordering::Relaxed)
-            && !self.devices.control.deafen.load(Ordering::Relaxed)
-            && if self.devices.control.push_to_talk.load(Ordering::Relaxed) {
-                self.devices.control.pressed.load(Ordering::Relaxed)
-            } else {
-                self.hold > 0
-            };
-        self.devices
-            .control
-            .transmitting
-            .store(active, Ordering::Relaxed);
-        if !active {
-            pcm.fill(0.0);
-        }
-        if generation != self.encoder_generation || (!active && self.encoder_active) {
-            // A zero-input Opus frame can otherwise retain earlier speech history.
+            && !self.devices.control.deafen.load(Ordering::Relaxed);
+        let gate::Output { pcm, active } = self.gate.process(
+            captured.pcm,
+            captured.evidence,
+            captured.at[0],
+            captured.gap.iter().any(|g| *g),
+            self.settings.mode,
+            self.settings.activation_threshold,
+            allowed,
+            self.devices.control.pressed.load(Ordering::Acquire),
+        );
+        let mut packet = [0_u8; 4000];
+        if self.reset_codec
+            || generation != self.encoder_generation
+            || (!active && self.encoder_active)
+        {
             self.encoder.reset_state().map_err(|e| e.to_string())?;
+            self.decoder.reset_state().map_err(|e| e.to_string())?;
+            self.reset_codec = false;
         }
         self.encoder_generation = generation;
         self.encoder_active = active;
-        let mut packet = [0_u8; 4000];
         let n = self
             .encoder
             .encode_float(&pcm, &mut packet)
             .map_err(|e| e.to_string())?;
+        // An urgent action may arrive while DSP or Opus runs. Discard that work
+        // and clear codec lookbehind as well as pre-roll at the next boundary.
+        if generation != self.transmit_control.generation()
+            || self.connection.as_ref().is_some_and(|c| !c.active())
+        {
+            self.devices
+                .control
+                .transmitting
+                .store(false, Ordering::Release);
+            return Ok(());
+        }
+        let gate_delay = if self.settings.mode == TransmitMode::VoiceActivity {
+            gate::DELAY
+        } else {
+            Duration::ZERO
+        };
+        let oldest_capture = oldest_capture
+            .checked_sub(gate_delay)
+            .unwrap_or(oldest_capture);
         if let Some(outgoing) = &self.outgoing {
             let connection = self.connection.as_ref().ok_or("Missing voice connection")?;
             let frame = outgoing::EncodedFrame {
@@ -896,6 +966,8 @@ impl Session {
                 oldest_capture,
                 generation,
                 connection: connection.clone(),
+                delivery: self.delivery.clone(),
+                activation_delay: gate_delay,
             };
             let accepted = match self
                 .transmit_control
@@ -919,6 +991,10 @@ impl Session {
                     }
                 },
             };
+            self.devices
+                .control
+                .transmitting
+                .store(active && accepted, Ordering::Release);
             for (index, frame) in pcm.as_chunks::<480>().0.iter().enumerate() {
                 debug.block(
                     recording::Track::Transmit,
@@ -929,7 +1005,15 @@ impl Session {
                         reset: false,
                     },
                     0,
-                    Some((accepted, active)),
+                    Some((
+                        accepted,
+                        active,
+                        if self.settings.mode == TransmitMode::VoiceActivity {
+                            gate::PRE_ROLL * FRAME
+                        } else {
+                            0
+                        },
+                    )),
                 );
             }
             return Ok(());
@@ -940,6 +1024,10 @@ impl Session {
             .decode_float(&packet[..n], &mut decoded, false)
             .map_err(|e| e.to_string())?;
         let written = self.devices.writers[0].write(&decoded[..n]);
+        self.devices
+            .control
+            .transmitting
+            .store(active && written > 0, Ordering::Release);
         self.devices
             .control
             .dropped
@@ -1072,6 +1160,9 @@ fn run(
     loop {
         probe.enter(worker_health::IDLE);
         probe.active.store(session.is_some(), Ordering::Release);
+        if let Some(s) = &mut session {
+            s.capture_boundary(s.transmit_control.generation(), Instant::now());
+        }
         if session
             .as_ref()
             .is_some_and(|s| s.connection.as_ref().is_some_and(|c| !c.active()))
@@ -1426,10 +1517,7 @@ fn run(
                 serde_json::json!({"error":error,"device":s.devices.info,"health":s.devices.health.diagnostics()}),
             );
             s.transmit_control.invalidate();
-            s.devices
-                .control
-                .transmitting
-                .store(false, Ordering::Release);
+            s.clear_gate();
             s.processed_level = 0.0;
             s.devices.control.peak.store(0, Ordering::Relaxed);
             // Release the failed endpoints before attempting to reopen them.
@@ -1692,6 +1780,8 @@ mod lifecycle_tests {
             oldest_capture: Instant::now(),
             generation: engine.probe.outgoing.generation(),
             connection: connection.clone(),
+            delivery: Default::default(),
+            activation_delay: Duration::ZERO,
         };
         for _ in 0..10 {
             engine.notify(Command::Packet {
@@ -1789,6 +1879,8 @@ mod lifecycle_tests {
                 oldest_capture: Instant::now(),
                 generation: engine.probe.outgoing.generation(),
                 connection: connection.clone(),
+                delivery: connection::Connection::default(),
+                activation_delay: Duration::ZERO,
             };
             engine.notify(command);
             // Relax before draining; old encoded speech remains invalid.

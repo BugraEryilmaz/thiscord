@@ -276,6 +276,14 @@ WebView capture was not substituted for the requested native path.
 
 ## Audio timing and performance
 
+Voice activation now uses sustained energy after denoising and before AGC, with
+40 ms attack, separate opening/closing thresholds, 200 ms release and a fixed
+60 ms pre-roll delay. PTT bypasses this detector and delay. Existing persisted
+sensitivity/defaults remain supported. See [voice activation](voice-activation.md)
+for scheduling, control boundaries, detector evaluation and synthetic comparisons.
+The post-mix AEC reference and its timestamps/tuning are unchanged; closing the
+automatic gate never resets echo adaptation.
+
 Capture is averaged to mono, processed at 48 kHz and encoded as 20 ms Opus frames
 at 32 kbit/s. Capture callbacks only convert/copy samples and update atomics.
 Capture and post-mix reference callbacks assemble timestamped 10 ms blocks into
@@ -309,7 +317,8 @@ A replacement connection starts a fresh clock; neither wall-clock nor dequeue ti
 sets RTP timestamps.
 
 `audio::outgoing::EncodedFrame` is native-only: encoded payload, 64-bit media
-position, oldest capture time, control generation and connection identity. RTP
+position, oldest capture time, control generation, connection identity, delivery
+lease and fixed activation delay. RTP
 uses the low 32 bits of media position, preserving wrapping. Sequence numbers wrap
 independently at 16 bits and advance only for transport attempts. A frame discarded
 before admission consumes media time but no sequence number. Cancellation after a
@@ -318,14 +327,19 @@ write has begun can consume a sequence number even if WebRTC did not admit it.
 RTP positions describe output slots on the capture clock. Explicit enhancement
 buffering delays the signal within those slots rather than retiming the clock on
 model changes. For age/control checks, the oldest capture time subtracts the active
-enhancer's declared buffering (DFN3: 1,440 samples / 30 ms). Frequency-dependent
+enhancer's declared buffering (DFN3: 1,440 samples / 30 ms) and the activation
+lookbehind (2,880 samples / 60 ms in automatic mode, zero in PTT). Frequency-dependent
 filter-bank/AEC phase delay and Opus lookahead are not exact capture-age estimates;
 these remain part of acoustic latency validation. No echo algorithm was replaced
 or retuned.
 
 The outgoing queue holds five packets plus at most one pending transport write.
-Packets aged **100 ms or more** from oldest capture are discarded before enqueue,
-at dequeue, and before every poll of a pending WebRTC write. The same deadline
+The capture-age budget is **100 ms plus the fixed activation delay**: 160 ms in
+automatic mode, 100 ms in PTT. The 60 ms allowance is capped and does not grow with
+queue occupancy. This leaves the same acquisition/DSP/transport budget in either
+mode; DFN3 with automatic activation normally needs 20 + 30 + 60 = 110 ms before
+enqueue. Packets reaching the budget are discarded before enqueue, at dequeue,
+and before every poll of a pending WebRTC write. The same deadline
 cancels blocked admission. Thus a stalled sender drains expired entries without
 replaying an arbitrarily old backlog; expiry alone does not disconnect the call.
 Transport errors retain the existing disconnect behavior. Work and memory stay
@@ -339,7 +353,8 @@ explicit enhancer delay from being relabeled as fresh speech after unmuting.
 Opus history resets on generation changes and on the transition to silence.
 Fresh muted/PTT-gated frames continue to encode silence; DTX is not enabled.
 Connection identity and active-state checks reject closed/replaced peers before
-each transport poll. A control notification wakes blocked writes; packets already
+each transport poll. Gate gaps and device/session resets also close a delivery
+lease, invalidating pending pre-gap audio. A control notification wakes blocked writes; packets already
 admitted to WebRTC cannot be recalled. Backend permissions remain authoritative.
 
 Worker diagnostic snapshots include `outgoing.queue_full`, `outgoing.expired` and
@@ -586,6 +601,14 @@ Replay preserves the recorded transmit gates and refuses to overwrite output fil
 or accept incomplete/oversized input. Change the Rust processing modules to evaluate
 future algorithms against the same inputs. Listening and speech-preservation checks
 are still needed; a lower output level alone does not establish better cancellation.
+
+New recordings use timeline schema 2. Transmit blocks include
+`source_delay_samples` (2880 for automatic activation, zero for PTT); their timestamps
+stay on the current capture/output schedule. `capture_boundary` events record the
+enhancement-history reset and capture cutoff without resetting AEC. Updated replay
+supports schemas 1 and 2, applies the source delay and excludes old device blocks
+from enhancement. Retained samples predating the recording cannot be reconstructed
+and replay as silence. Earlier replay binaries reject schema 2.
 
 CI includes synchronized WAV/metadata, privacy-field omission, gap/timestamp handling,
 duration bounds, writer failure, queue overload, finalization and replay/gate tests.
