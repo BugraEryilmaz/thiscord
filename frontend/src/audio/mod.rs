@@ -459,6 +459,8 @@ impl Remote {
     }
     fn refill(&mut self, writer: &mut StreamWriter, now: Instant) {
         writer.control.counts.drain(&self.jitter.quality);
+        self.jitter
+            .output_callback(writer.callback_samples(), writer.callback_due(now));
         if self.deafened {
             return;
         }
@@ -477,9 +479,9 @@ impl Remote {
         if !writer.ready() {
             return;
         }
-        // At most two frames per stream per worker tick. The callback remains
-        // PCM-only; jitter buffering and Opus stay on this worker.
-        for _ in 0..2 {
+        // Device-sized, bounded refill work. The callback remains PCM-only;
+        // jitter buffering and Opus stay on this worker.
+        for _ in 0..self.jitter.refill_budget() {
             let Some(scheduled) = self.jitter.poll(now, writer.queue.occupied_len()) else {
                 break;
             };

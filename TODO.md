@@ -146,6 +146,8 @@ and single-process chat/media enforcement.
 - [x] Timestamp-aware adaptive receive playout, combined packet/PCM budgeting,
   bounded fractional clock correction, deadline FEC/PLC and deterministic traces;
   preserve exact capture gaps and acknowledged PCM flushes through rate correction.
+- [x] Size receive refills/decode deadlines for device callback batches and expire
+  ambiguous RTP epochs after long inactivity; test variable callbacks and overnight deafen.
 - [ ] Adaptive playout listening/long-call acceptance with physical devices on
   Windows/macOS/Linux, loaded workers and real jitter/loss; see docs/audio-playout.md.
 

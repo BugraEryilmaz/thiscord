@@ -13,6 +13,9 @@ pub const MAX_AGE: Duration = Duration::from_millis(200);
 const PREBUFFER: Duration = Duration::from_millis(60);
 const MAX_GAP: u32 = 3 * FRAME as u32;
 const WINDOW: i32 = PACKETS as i32 * FRAME as i32;
+// Signed RTP ordering is only unambiguous within half the 32-bit timestamp
+// range (12.4 hours at 48 kHz). Forget an idle epoch well before that boundary.
+const EPOCH_IDLE: Duration = Duration::from_secs(6 * 60 * 60);
 
 pub struct Packet {
     pub sequence: u16,
@@ -93,6 +96,10 @@ pub struct Jitter {
     cursor: Option<u32>,
     floor: Option<u32>,
     last_sequence: Option<u16>,
+    last_accepted: Option<Instant>,
+    receive_after: Option<Instant>,
+    callback_samples: usize,
+    callback_due: bool,
     first: Option<Instant>,
     play_at: Option<Instant>,
     playing: bool,
@@ -122,6 +129,10 @@ impl Default for Jitter {
             cursor: None,
             floor: None,
             last_sequence: None,
+            last_accepted: None,
+            receive_after: None,
+            callback_samples: 0,
+            callback_due: true,
             first: None,
             play_at: None,
             playing: false,
@@ -159,13 +170,32 @@ impl Jitter {
         now: Instant,
     ) -> bool {
         self.quality.add(Count::ReceivedPackets, 1);
-        if now.saturating_duration_since(received) >= MAX_AGE {
+        if now.saturating_duration_since(received) >= MAX_AGE
+            || self.receive_after.is_some_and(|after| received < after)
+        {
             self.counters.expired += 1;
             self.metrics.worker_queue_discards += 1;
             self.quality.add(Count::ResyncDiscardedPackets, 1);
             return false;
         }
         if !payload.is_empty() && payload.len() <= 1500 {
+            if self
+                .last_accepted
+                .is_some_and(|at| received.saturating_duration_since(at) >= EPOCH_IDLE)
+            {
+                self.quality
+                    .add(Count::ResyncDiscardedPackets, self.packets.len() as u64);
+                self.discard();
+                self.floor = None;
+                self.last_sequence = None;
+                self.seen.fill(None);
+                self.seen_index = 0;
+                self.receive_after = Some(received);
+                self.metrics.variation_ms = 0.0;
+                self.metrics.target_ms = self.minimum_target_ms();
+                self.last_raise = None;
+                self.reset_pending = true; // Decoder/ring flush still needs acknowledgement.
+            }
             self.observe(sequence, timestamp, received);
         }
         if payload.is_empty()
@@ -261,6 +291,7 @@ impl Jitter {
             arrived: received,
             payload,
         });
+        self.last_accepted = Some(self.last_accepted.map_or(received, |at| at.max(received)));
         true
     }
 
@@ -499,6 +530,25 @@ impl Jitter {
     fn prebuffer(&self) -> Duration {
         Duration::from_secs_f64(self.metrics.target_ms / 1000.0)
     }
+    fn minimum_target_ms(&self) -> f64 {
+        ((super::mixer::refill_limit(self.callback_samples) + 480) as f64 / 48.0).max(40.0)
+    }
+    pub(super) fn output_callback(&mut self, samples: usize, due: bool) {
+        self.callback_samples = samples.min(super::mixer::CAPACITY);
+        self.callback_due = due;
+        let target = self.metrics.target_ms.max(self.minimum_target_ms());
+        if target > self.metrics.target_ms && !self.playing {
+            self.play_at = self
+                .play_at
+                .map(|at| at + Duration::from_secs_f64((target - self.metrics.target_ms) / 1000.0));
+        }
+        self.metrics.target_ms = target;
+    }
+    pub(super) fn refill_budget(&self) -> usize {
+        // At most six normal frames for the largest supported callback; small
+        // callbacks retain the original two-decision bound.
+        (super::mixer::refill_limit(self.callback_samples) / 955 + 1).max(2)
+    }
     pub fn packet_flags(&mut self, timestamp: u32, marker: bool, no_data: bool) {
         if let Some(packet) = self.packets.iter_mut().find(|p| p.timestamp == timestamp) {
             packet.marker |= marker;
@@ -536,7 +586,8 @@ impl Jitter {
                     .abs()
                     .min(120.0);
                 self.metrics.variation_ms += (variation - self.metrics.variation_ms) / 16.0;
-                let wanted = (40.0 + 4.0 * self.metrics.variation_ms).clamp(40.0, 120.0);
+                let minimum = self.minimum_target_ms();
+                let wanted = (minimum + 4.0 * self.metrics.variation_ms).clamp(minimum, 120.0);
                 if wanted > self.metrics.target_ms + 5.0 {
                     self.metrics.target_ms = wanted;
                     self.last_raise = Some(arrived);
@@ -546,7 +597,7 @@ impl Jitter {
                         .last_raise
                         .is_none_or(|t| arrived.saturating_duration_since(t).as_secs() >= 5)
                 {
-                    self.metrics.target_ms = (self.metrics.target_ms - elapsed).max(40.0);
+                    self.metrics.target_ms = (self.metrics.target_ms - elapsed).max(minimum);
                 }
             }
             if media > 0 {
@@ -669,10 +720,17 @@ impl Jitter {
             }
         }
 
-        if pcm_samples > 720 {
+        if pcm_samples > super::mixer::refill_limit(self.callback_samples) {
             return None;
         }
-        let decode = self.pop(pcm_samples <= 240, now)?;
+        let deadline = if self.callback_due {
+            self.callback_samples
+                .saturating_sub(1)
+                .clamp(240, super::mixer::refill_limit(self.callback_samples))
+        } else {
+            240
+        };
+        let decode = self.pop(pcm_samples <= deadline, now)?;
         match &decode {
             Playout::Fec(_) => {
                 self.metrics.fec_attempts += 1;

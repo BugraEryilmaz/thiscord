@@ -39,6 +39,134 @@ fn decoded(decoder: &mut opus::Decoder, payload: &[u8]) -> [f32; FRAME] {
 }
 
 #[test]
+fn device_callback_batches_do_not_starve_lossless_or_isolated_loss_playout() {
+    let packets = packets();
+    for sizes in [
+        &[48][..],
+        &[480],
+        &[960],
+        &[1024],
+        &[2048],
+        &[4096],
+        &[480, 1024, 960, 2048],
+    ] {
+        for loss in [false, true] {
+            let at = Instant::now();
+            let controls = Arc::new(Controls::default());
+            let (mut writers, mut mixer) = mixer(controls.clone());
+            writers[0].control.active.store(true, Ordering::Release);
+            let mut remote = remote(at);
+            let mut next_packet = 0;
+            let mut next_worker = 0;
+            let mut worker = 0;
+            let mut next_callback = 0;
+            let mut callback = 0;
+            let mut out = vec![0.0_f32; sizes.iter().max().unwrap() * 2];
+            loop {
+                let sample = next_packet.min(next_worker).min(next_callback);
+                if sample >= 120 * RATE as usize {
+                    break;
+                }
+                let now = at + frames::sample_duration(sample);
+                if sample == next_packet {
+                    let sequence = sample / FRAME;
+                    if !(loss && sequence == 100) {
+                        assert!(
+                            remote.push(
+                                sequence as u16,
+                                sample as u32,
+                                packets[sequence % packets.len()].clone(),
+                                now,
+                                now
+                            ),
+                            "sizes={sizes:?} loss={loss} sequence={sequence} metrics={}",
+                            serde_json::to_string(&remote.jitter.metrics()).unwrap()
+                        );
+                    }
+                    next_packet += FRAME;
+                }
+                if sample == next_worker {
+                    remote.refill(&mut writers[0], now);
+                    assert!(writers[0].occupied_samples() <= CAPACITY);
+                    next_worker += [240, 336, 576, 192, 384, 240][worker % 6];
+                    worker += 1;
+                }
+                if sample == next_callback {
+                    let size = sizes[callback % sizes.len()];
+                    // Exclude startup and discovery of variable callback sizes.
+                    if sample >= RATE as usize {
+                        assert!(
+                            writers[0].occupied_samples() >= size,
+                            "sizes={sizes:?} loss={loss} sample={sample} pcm={} metrics={}",
+                            writers[0].occupied_samples(),
+                            serde_json::to_string(&remote.jitter.metrics()).unwrap()
+                        );
+                    }
+                    mixer.render_at(&mut out[..size * 2], 2, now);
+                    next_callback += size;
+                    callback += 1;
+                }
+            }
+            assert_eq!(remote.jitter.metrics().rebufferings, 0, "{sizes:?}");
+            assert_eq!(remote.jitter.metrics().stale_discards, 0, "{sizes:?}");
+            assert_eq!(remote.jitter.metrics().late_discards, 0, "{sizes:?}");
+            assert_eq!(
+                remote.jitter.quality.snapshot().total.pcm_overflow_samples,
+                0
+            );
+            assert_eq!(
+                remote.jitter.metrics().concealments,
+                u64::from(loss),
+                "{sizes:?} loss={loss}"
+            );
+        }
+    }
+}
+
+#[test]
+fn overnight_deafen_reanchors_rtp_without_accepting_queued_old_audio() {
+    let packets = packets();
+    for hours in [13, 26, 49] {
+        let at = Instant::now();
+        let (mut writers, mut mixer) = mixer(Arc::new(Controls::default()));
+        writers[0].control.active.store(true, Ordering::Release);
+        let mut remote = remote(at);
+        for (i, packet) in packets.iter().take(3).enumerate() {
+            remote.push(i as u16, i as u32 * 960, packet.clone(), at, at);
+        }
+        remote.refill(&mut writers[0], at + Duration::from_millis(40));
+        remote.set_deafened(&writers[0], true, at + Duration::from_millis(50));
+        let later = at + Duration::from_secs(hours * 3600);
+        remote.set_deafened(&writers[0], false, later);
+        assert!(!remote.push(3, 2880, packets[0].clone(), at, later));
+        let sample = hours * 3600 * u64::from(RATE);
+        for i in 0..3 {
+            assert!(remote.push(
+                (sample / 960 + i) as u16,
+                (sample + i * 960) as u32,
+                packets[i as usize].clone(),
+                later,
+                later
+            ));
+        }
+        remote.refill(&mut writers[0], later);
+        assert!(!writers[0].ready());
+        mixer.render(&mut [0.0; 480], 1); // Required callback flush acknowledgement.
+        let due = later + Duration::from_secs_f64(remote.jitter.metrics().target_ms / 1000.0);
+        remote.refill(&mut writers[0], due);
+        assert!(writers[0].occupied_samples() >= FRAME);
+        assert!(remote.activity.speaking(due));
+        assert!(!remote.push(
+            (sample / 960) as u16,
+            sample as u32,
+            packets[0].clone(),
+            later + Duration::from_millis(45),
+            later + Duration::from_millis(45)
+        ));
+    }
+}
+
+#[test]
 fn sender_drop_and_partial_gap_reach_real_playout_without_compressing_samples() {
     let at = Instant::now();
     let packets = packets();

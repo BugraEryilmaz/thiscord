@@ -277,6 +277,13 @@ fn deterministic_transport_loss_matches_ordered_decoder_and_has_no_playout_gaps(
 
 #[test]
 fn recovered_pcm_obeys_deafen_and_generation_invalidation_and_isolates_speakers() {
+    // Use 1 ms callbacks so each refill below isolates one decode decision.
+    // Larger callbacks intentionally prefetch the normal FEC carrier as well.
+    let render = |mixer: &mut mixer::Mixer, pcm: &mut [f32; FRAME]| {
+        for block in pcm.chunks_mut(48) {
+            mixer.render(block, 1);
+        }
+    };
     let (_, packets, _) = packets(true);
     let now = Instant::now();
     let controls = Arc::new(Controls::default());
@@ -299,13 +306,13 @@ fn recovered_pcm_obeys_deafen_and_generation_invalidation_and_isolates_speakers(
     let play_at = now + Duration::from_millis(40);
     speaker.refill(&mut writers[0], play_at);
     let mut pcm = [0.0; FRAME];
-    mixer.render(&mut pcm, 1);
+    render(&mut mixer, &mut pcm);
     speaker.activity = Default::default();
     speaker.refill(&mut writers[0], play_at + Duration::from_millis(20));
     assert_eq!(speaker.decode_stats.fec_attempts, 1);
     // The normal successor, not speculative FEC, can light the indicator.
     assert_eq!(speaker.decode_stats.normal_frames, 1);
-    mixer.render(&mut pcm, 1);
+    render(&mut mixer, &mut pcm);
     assert!(
         !speaker
             .activity
@@ -314,14 +321,14 @@ fn recovered_pcm_obeys_deafen_and_generation_invalidation_and_isolates_speakers(
     speaker.refill(&mut writers[0], play_at + Duration::from_millis(40));
     assert_eq!(speaker.decode_stats.normal_frames, 2);
     controls.deafen.store(true, Ordering::Release);
-    mixer.render(&mut pcm, 1);
+    render(&mut mixer, &mut pcm);
     assert!(pcm.iter().all(|&s| s == 0.0));
     controls.deafen.store(false, Ordering::Release);
     speaker.refill(&mut writers[0], now);
     // Replacing a source invalidates queued FEC and normal PCM together.
     writers[0].control.generation.fetch_add(1, Ordering::AcqRel);
     speaker = remote(now);
-    mixer.render(&mut pcm, 1);
+    render(&mut mixer, &mut pcm);
     assert!(pcm.iter().all(|&s| s == 0.0));
     assert!(speaker.jitter.pop(true, now).is_none());
     assert!(!speaker.activity.speaking(now));
@@ -333,6 +340,6 @@ fn recovered_pcm_obeys_deafen_and_generation_invalidation_and_isolates_speakers(
     // Stopping/deactivating a stream silences any newly queued recovered PCM.
     writers[0].write(&[0.1; FRAME]);
     writers[0].control.active.store(false, Ordering::Release);
-    mixer.render(&mut pcm, 1);
+    render(&mut mixer, &mut pcm);
     assert!(pcm.iter().all(|&s| s == 0.0));
 }

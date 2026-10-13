@@ -6,7 +6,7 @@ use super::{
 use ringbuf::{HeapCons, HeapProd, HeapRb, traits::*};
 use std::sync::{
     Arc,
-    atomic::{AtomicBool, AtomicU8, AtomicU32, AtomicU64, Ordering},
+    atomic::{AtomicBool, AtomicU8, AtomicU32, AtomicU64, AtomicUsize, Ordering},
 };
 use std::time::Instant;
 
@@ -14,6 +14,19 @@ pub const RATE: u32 = 48_000;
 pub const FRAME: usize = 960;
 pub const MAX_STREAMS: usize = 32;
 pub const CAPACITY: usize = FRAME * 6;
+
+/// Leave space for one maximally stretched packet. Small device callbacks keep
+/// the original 15 ms refill cushion; larger ones need a complete callback plus
+/// a 12 ms worker wake allowance. All queues retain their fixed allocation.
+pub(super) fn refill_limit(callback_samples: usize) -> usize {
+    callback_samples
+        .saturating_add(576)
+        .clamp(720, CAPACITY - super::playout_rate::MAX_OUTPUT)
+}
+
+fn trim_limit(callback_samples: usize) -> usize {
+    (refill_limit(callback_samples) + super::playout_rate::MAX_OUTPUT).max(FRAME * 3)
+}
 
 /// Bounded callback updates without a CAS retry loop. A wrap latches saturation
 /// for the worker drain, so even artificially injected u64 overflow is visible.
@@ -97,6 +110,9 @@ impl PlaybackCounts {
 }
 pub struct Controls {
     pub counts: CallbackCounts,
+    callback_samples: AtomicUsize,
+    callback_origin: Instant,
+    callback_deadline_ns: AtomicU64,
     pub(super) cues: AtomicU8,
     pub mute: AtomicBool,
     pub deafen: AtomicBool,
@@ -114,6 +130,9 @@ impl Default for Controls {
     fn default() -> Self {
         Self {
             counts: Default::default(),
+            callback_samples: 0.into(),
+            callback_origin: Instant::now(),
+            callback_deadline_ns: 0.into(),
             cues: 0.into(),
             mute: false.into(),
             deafen: false.into(),
@@ -141,6 +160,7 @@ pub struct StreamControl {
 pub struct StreamWriter {
     pub queue: HeapProd<f32>,
     pub control: Arc<StreamControl>,
+    output: Arc<Controls>,
 }
 struct StreamReader {
     queue: HeapCons<f32>,
@@ -171,6 +191,7 @@ pub fn mixer(controls: Arc<Controls>) -> (Vec<StreamWriter>, Mixer) {
         writers.push(StreamWriter {
             queue,
             control: control.clone(),
+            output: controls.clone(),
         });
         readers.push(StreamReader {
             queue: reader,
@@ -189,6 +210,15 @@ pub fn mixer(controls: Arc<Controls>) -> (Vec<StreamWriter>, Mixer) {
     )
 }
 impl StreamWriter {
+    pub(super) fn callback_samples(&self) -> usize {
+        self.output.callback_samples.load(Ordering::Relaxed)
+    }
+    pub(super) fn callback_due(&self, now: Instant) -> bool {
+        now.saturating_duration_since(self.output.callback_origin)
+            .as_nanos()
+            + 12_000_000
+            >= u128::from(self.output.callback_deadline_ns.load(Ordering::Relaxed))
+    }
     pub fn occupied_samples(&self) -> usize {
         self.queue.occupied_len()
     }
@@ -225,12 +255,36 @@ impl Mixer {
         output: &mut [T],
         channels: usize,
     ) {
+        self.render_at(output, channels, Instant::now());
+    }
+    pub(super) fn render_at<T: cpal::Sample + cpal::FromSample<f32>>(
+        &mut self,
+        output: &mut [T],
+        channels: usize,
+        now: Instant,
+    ) {
+        let callback_samples = output.len().div_ceil(channels);
+        let deadline = now.saturating_duration_since(self.controls.callback_origin)
+            + frames::sample_duration(callback_samples.min(CAPACITY));
+        self.controls.callback_deadline_ns.store(
+            deadline.as_nanos().min(u128::from(u64::MAX)) as u64,
+            Ordering::Relaxed,
+        );
+        // One bounded atomic update, shared by every source. Retain the largest
+        // callback for this device lifetime so variable callback sizes cannot
+        // repeatedly shrink the worker's cushion before a larger callback.
+        let callback_samples = callback_samples
+            .max(self.controls.callback_samples.load(Ordering::Relaxed))
+            .min(CAPACITY);
+        self.controls
+            .callback_samples
+            .store(callback_samples, Ordering::Relaxed);
         let deafened = self.controls.deafen.load(Ordering::Relaxed);
         self.cues
             .request(self.controls.cues.swap(0, Ordering::Relaxed), deafened);
         let master = f32::from_bits(self.controls.master.load(Ordering::Relaxed));
-        // Adaptive remote queues top out below 36 ms: this legacy 60 ms safety
-        // trim applies to the local device tests, not to normal drift control.
+        // Keep the legacy local-test trim, but never trim the larger cushion
+        // needed by a device callback. Hard resets still discard the whole ring.
         for stream in &mut self.streams {
             let generation = stream.control.generation.load(Ordering::Acquire);
             let changed = generation != stream.generation;
@@ -238,7 +292,10 @@ impl Mixer {
             let discard = if changed || deafened || !stream.control.active.load(Ordering::Acquire) {
                 stream.queue.occupied_len()
             } else {
-                stream.queue.occupied_len().saturating_sub(FRAME * 3)
+                stream
+                    .queue
+                    .occupied_len()
+                    .saturating_sub(trim_limit(callback_samples))
             };
             stream.control.counts.discarded.add(discard as u64);
             for _ in 0..discard {
