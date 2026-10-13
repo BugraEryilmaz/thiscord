@@ -345,13 +345,19 @@ impl Processing {
         }
         let (first, first_gap) = queue.pop().expect("two complete frames");
         let (second, second_gap) = queue.pop().expect("two complete frames");
-        if first_gap || second_gap {
+        if second_gap {
+            // An Opus packet cannot describe a hole inside its 20 ms duration.
+            // Discard the earlier half and retain the later half for the next tick.
+            queue.retain(second);
+            return Ok(None);
+        }
+        if first_gap {
             self.reset();
         }
         tap(
             &first,
             first_gap,
-            first_gap || second_gap,
+            first_gap,
             frames::delay_ms(self.render_at, first.at),
         );
         tap(
@@ -375,6 +381,7 @@ impl Processing {
             pcm,
             at: [first.at, second.at],
             gap: [first_gap, second_gap],
+            position: first.position,
         }))
     }
     pub fn capture_frame(&mut self, frame: &mut [f32; 480], delay_ms: i32) -> Result<(), String> {
@@ -453,12 +460,13 @@ pub(super) struct Captured {
     pub pcm: [f32; 960],
     pub at: [Instant; 2],
     pub gap: [bool; 2],
+    pub position: u64,
 }
 #[cfg(test)]
 mod tests {
     use super::*;
     #[test]
-    fn recording_marks_second_frame_loss_separately_from_packet_reset() {
+    fn gap_inside_packet_retains_later_half_instead_of_compressing_time() {
         let (mut writer, mut reader) = frames::queue();
         let at = Instant::now();
         writer.begin(at);
@@ -474,16 +482,26 @@ mod tests {
         }
         let mut p = Processing::new(&AudioSettings::default()).unwrap();
         let mut taps = Vec::new();
+        assert!(
+            p.capture_tapped(&mut reader, &mut |_, _, _, _| {})
+                .unwrap()
+                .is_none()
+        );
+        assert_eq!(reader.len(), 1);
+        for _ in 0..480 {
+            writer.push(0.3);
+        }
         let captured = p
             .capture_tapped(&mut reader, &mut |frame, gap, reset, delay| {
                 taps.push((frame.samples[0], gap, reset, delay))
             })
             .unwrap()
             .unwrap();
-        assert_eq!(captured.gap, [false, true]);
-        assert_eq!(taps, [(0.1, false, true, 0), (0.2, true, false, 0)]);
-        assert_eq!(&captured.pcm[..480], &[0.1; 480]);
-        assert_eq!(&captured.pcm[480..], &[0.2; 480]);
+        assert_eq!(captured.gap, [true, false]);
+        assert_eq!(captured.position, (frames::BLOCKS as u64 + 1) * 480);
+        assert_eq!(taps, [(0.2, true, true, 0), (0.3, false, false, 0)]);
+        assert_eq!(&captured.pcm[..480], &[0.2; 480]);
+        assert_eq!(&captured.pcm[480..], &[0.3; 480]);
         assert_eq!(p.resets, 1);
     }
 

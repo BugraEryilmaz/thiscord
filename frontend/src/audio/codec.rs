@@ -29,7 +29,8 @@ pub(super) struct DecodeStats {
 }
 
 /// Returns true only for a successfully decoded normal packet (activity input).
-/// Every non-wait decision produces exactly FRAME samples, including failures.
+/// Full intervals produce FRAME samples, including failures; fractional gaps
+/// produce silence without advancing the Opus state by an invented full frame.
 pub(super) fn decode(
     decoder: &mut opus::Decoder,
     decision: &Playout,
@@ -42,10 +43,13 @@ pub(super) fn decode(
             stats.fec_attempts += 1;
             (packet.as_ref(), true)
         }
-        Playout::Plc => (&[][..], false),
-        Playout::Wait => return false,
+        Playout::Conceal(FRAME) => (&[][..], false),
+        Playout::Conceal(_) => {
+            pcm.fill(0.0);
+            return false;
+        }
     };
-    if !matches!(decision, Playout::Plc) {
+    if !matches!(decision, Playout::Conceal(_)) {
         // Reject malformed/variable-duration packets before changing decoder state.
         // Our transport emits one 20 ms frame; FEC/PLC must use that exact duration.
         if !packet.is_empty() && decoder.get_nb_samples(packet).is_ok_and(|n| n == FRAME) {

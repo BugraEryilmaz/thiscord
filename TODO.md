@@ -104,6 +104,12 @@ and single-process chat/media enforcement.
 ## 5. Frontend audio and media feasibility
 
 - [x] Native CPAL capture/playback, per-stream SPSC ring buffers and Opus codecs.
+- [x] Preserve microphone media time across capture/queue drops and device recovery;
+  bound outgoing age to 100 ms with control invalidation and distinct drop counters.
+- [x] Consume RTP timestamps in native audio playout, with bounded gap concealment,
+  stale-queue recovery and acknowledged per-source PCM/decoder resets.
+- [ ] Validate end-to-end stall recovery, urgent controls and device-clock drift on
+  physical three-platform clients.
 - [x] Explicit microphone Opus in-band FEC (fixed 5% loss hint), deadline-bounded
   successor recovery/PLC, honest attempt counters and deterministic loss regressions.
 - [ ] Validate FEC speech/bitrate tradeoffs with listening and physical clients

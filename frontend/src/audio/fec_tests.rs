@@ -38,8 +38,10 @@ fn decoded(decoder: &mut opus::Decoder, packet: &[u8], fec: bool) -> [f32; FRAME
     assert_eq!(decoder.decode_float(packet, &mut pcm, fec).unwrap(), FRAME);
     pcm
 }
-fn remote() -> Remote {
+fn remote(now: Instant) -> Remote {
     Remote {
+        since: now,
+        deafened: false,
         decode_stats: Default::default(),
         activity: Default::default(),
         id: "00000000-0000-0000-0000-000000000001".parse().unwrap(),
@@ -195,12 +197,12 @@ fn deterministic_transport_loss_matches_ordered_decoder_and_has_no_playout_gaps(
         };
         expected.extend_from_slice(&pcm);
     }
-    let mut remote = remote();
+    let start = Instant::now();
+    let mut remote = remote(start);
     let controls = Arc::new(Controls::default());
     let (mut writers, mut mixer) = mixer::mixer(controls.clone());
     let writer = &mut writers[0];
     writer.control.active.store(true, Ordering::Release);
-    let start = Instant::now();
     let mut actual = Vec::new();
     let mut seed = 0x12345678_u32;
     let arrivals: Vec<_> = (0..count + 4)
@@ -220,13 +222,17 @@ fn deterministic_transport_loss_matches_ordered_decoder_and_has_no_playout_gaps(
         let now = start + Duration::from_millis(ms as u64);
         for (i, &arrival) in arrivals.iter().enumerate() {
             if !drops.contains(&i) && (ms == arrival || ms == arrival + 3) {
-                remote
-                    .jitter
-                    .push_at((i as u16).wrapping_add(65530), packets[i].clone(), now);
+                remote.jitter.push(
+                    (i as u16).wrapping_add(65530),
+                    (i as u32 * FRAME as u32).wrapping_add(u32::MAX - 479),
+                    packets[i].clone(),
+                    now,
+                    now,
+                );
             }
         }
         if ms >= next_wake {
-            remote.refill_at(writer, now);
+            remote.refill(writer, now);
             next_wake += [5, 7, 4][ms % 3];
         }
         if ms >= 60 {
@@ -252,20 +258,26 @@ fn recovered_pcm_obeys_deafen_and_generation_invalidation_and_isolates_speakers(
     let now = Instant::now();
     let controls = Arc::new(Controls::default());
     let (mut writers, mut mixer) = mixer::mixer(controls.clone());
-    let mut speaker = remote();
+    let mut speaker = remote(now);
     // Warm the real decoder on speech, then lose one frame.
     for packet in &packets[..20] {
         decoded(&mut speaker.decoder, packet, false);
     }
     for i in [20, 22, 23] {
-        speaker.jitter.push_at(i as u16, packets[i].clone(), now);
+        speaker.jitter.push(
+            i as u16,
+            i as u32 * FRAME as u32,
+            packets[i].clone(),
+            now,
+            now,
+        );
     }
     writers[0].control.active.store(true, Ordering::Release);
-    speaker.refill_at(&mut writers[0], now);
+    speaker.refill(&mut writers[0], now);
     let mut pcm = [0.0; FRAME];
     mixer.render(&mut pcm, 1);
     speaker.activity = Default::default();
-    speaker.refill_at(&mut writers[0], now);
+    speaker.refill(&mut writers[0], now);
     assert_eq!(speaker.decode_stats.fec_attempts, 1);
     // The normal successor, not speculative FEC, can light the indicator.
     assert_eq!(speaker.decode_stats.normal_frames, 2);
@@ -273,13 +285,13 @@ fn recovered_pcm_obeys_deafen_and_generation_invalidation_and_isolates_speakers(
     mixer.render(&mut pcm, 1);
     assert!(pcm.iter().all(|&s| s == 0.0));
     controls.deafen.store(false, Ordering::Release);
-    speaker.refill_at(&mut writers[0], now);
+    speaker.refill(&mut writers[0], now);
     // Replacing a source invalidates queued FEC and normal PCM together.
     writers[0].control.generation.fetch_add(1, Ordering::AcqRel);
-    speaker = remote();
+    speaker = remote(now);
     mixer.render(&mut pcm, 1);
     assert!(pcm.iter().all(|&s| s == 0.0));
-    assert_eq!(speaker.jitter.pop_at(true, now), Playout::Wait);
+    assert!(speaker.jitter.pop(true, now).is_none());
     assert!(!speaker.activity.speaking(now));
     let mut independent = decoder();
     assert!(

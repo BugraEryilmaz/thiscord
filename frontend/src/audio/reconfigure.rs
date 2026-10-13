@@ -106,6 +106,13 @@ impl Pending {
                 debug.stop(); // New device clocks/formats require a new recording.
                 next.inherit(&s.devices);
                 std::mem::swap(&mut s.devices, next);
+                s.media_clock.restart_device();
+                s.transmit_control.invalidate();
+                for (remote, writer) in s.remotes.iter_mut().zip(&s.devices.writers) {
+                    if let Some(remote) = remote {
+                        remote.clear(writer, Instant::now());
+                    }
+                }
                 s.device_watch = Default::default();
                 diagnostics::event("device_reconfigured", s.devices.info.clone());
                 s.recovery.reconfigured(&s.devices.info);
@@ -176,10 +183,82 @@ mod tests {
             started: Instant::now(),
             hold: 100,
             outgoing: Some(tokio::sync::mpsc::channel(2).0),
+            media_clock: Default::default(),
+            transmit_control: Default::default(),
+            encoder_generation: 0,
+            encoder_active: false,
             remotes: (0..MAX_STREAMS).map(|_| None).collect(),
             processed_level: 0.5,
             processing: processing::Processing::new(&AudioSettings::default()).unwrap(),
         }
+    }
+    #[test]
+    fn capture_to_opus_queue_preserves_time_under_pressure_and_clears_encoder_speech() {
+        let mut s = session();
+        s.connection = Some(connection::Connection::default());
+        let (tx, mut rx) = tokio::sync::mpsc::channel(1);
+        s.outgoing = Some(tx);
+        let (mut writer, reader) = frames::queue();
+        s.devices.capture = reader;
+        let at = Instant::now() + Duration::from_secs(1);
+        let no = AtomicBool::new(false);
+        let mut debug = recording::Recorder::default();
+        writer.begin_capture(at);
+        for _ in 0..2880 {
+            writer.push(0.1);
+        }
+        s.tick(&no, &no, &no, &mut debug).unwrap();
+        let first = rx.try_recv().unwrap();
+        assert_eq!(first.media_position, 0);
+        assert_eq!(s.transmit_control.snapshot()["queue_full"], 2);
+        assert!(s.encoder_active);
+        // This fresh muted packet must be a clean silent encoding, not the
+        // tail of an encoder which has just processed nonzero speech.
+        s.devices.control.mute.store(true, Ordering::Release);
+        writer.begin_capture(at + Duration::from_millis(60));
+        for _ in 0..960 {
+            writer.push(0.1);
+        }
+        s.tick(&no, &no, &no, &mut debug).unwrap();
+        let silent = rx.try_recv().unwrap();
+        assert_eq!(silent.media_position, 2880);
+        let mut clean =
+            opus::Encoder::new(RATE, opus::Channels::Mono, opus::Application::Voip).unwrap();
+        let mut expected = [0; 4000];
+        let len = clean.encode_float(&[0.0; FRAME], &mut expected).unwrap();
+        assert_eq!(&silent.payload[..], &expected[..len]);
+        assert!(!s.encoder_active);
+    }
+
+    #[test]
+    fn buffered_capture_cannot_be_relabelled_as_fresh_speech_after_unmute() {
+        let mut s = session();
+        s.connection = Some(connection::Connection::default());
+        let (tx, mut rx) = tokio::sync::mpsc::channel(1);
+        s.outgoing = Some(tx);
+        let at = Instant::now();
+        s.transmit_control.invalidate(); // mute then unmute, before processing PCM
+        let generation = s.transmit_control.generation();
+        let captured = processing::Captured {
+            pcm: [0.1; FRAME],
+            at: [at, at + Duration::from_millis(10)],
+            gap: [false; 2],
+            position: 0,
+        };
+        s.capture_packet(
+            captured,
+            generation,
+            &AtomicBool::new(false),
+            &mut recording::Recorder::default(),
+        )
+        .unwrap();
+        let silent = rx.try_recv().unwrap();
+        assert!(!s.encoder_active);
+        let mut clean =
+            opus::Encoder::new(RATE, opus::Channels::Mono, opus::Application::Voip).unwrap();
+        let mut expected = [0; 4000];
+        let len = clean.encode_float(&[0.0; FRAME], &mut expected).unwrap();
+        assert_eq!(&silent.payload[..], &expected[..len]);
     }
     #[test]
     fn saved_speaker_volume_rejects_stale_slots_and_other_guilds() {
@@ -189,6 +268,8 @@ mod tests {
         let other = "00000000-0000-0000-0000-000000000003".parse().unwrap();
         s.volumes = Some(super::super::volumes::Store::default().profile(guild));
         s.remotes[3] = Some(super::super::Remote {
+            since: Instant::now(),
+            deafened: false,
             decode_stats: Default::default(),
             activity: Default::default(),
             id,
@@ -197,6 +278,8 @@ mod tests {
             decoder: opus::Decoder::new(RATE, opus::Channels::Mono).unwrap(),
         });
         s.remotes[3 + thiscord_shared::voice::ROOM_CAPACITY] = Some(super::super::Remote {
+            since: Instant::now(),
+            deafened: false,
             decode_stats: Default::default(),
             activity: Default::default(),
             id,
@@ -280,6 +363,8 @@ mod tests {
     #[test]
     fn recovery_retains_call_and_controls_and_clears_stale_audio() {
         let mut s = session();
+        let at = Instant::now();
+        assert_eq!(s.media_clock.position(at, 0), 0);
         s.recovery.begin("device busy".into());
         s.settings.muted = true;
         s.settings.input = Some("saved microphone".into());
@@ -289,6 +374,8 @@ mod tests {
         s.connection = Some(connection.clone());
         let id = "00000000-0000-0000-0000-000000000001".parse().unwrap();
         s.remotes[3] = Some(Remote {
+            since: Instant::now(),
+            deafened: false,
             decode_stats: Default::default(),
             activity: Default::default(),
             id,
@@ -333,6 +420,10 @@ mod tests {
         assert_eq!(s.settings.output.as_deref(), Some("unplugged headset"));
         assert!(s.status().message.contains("output is unavailable"));
         assert!(s.status().message.contains("System speakers"));
+        assert_eq!(
+            s.media_clock.position(at + Duration::from_secs(2), 0),
+            96000
+        );
     }
     #[test]
     fn recovery_cannot_start_after_stop_or_revocation_and_play_failure_stays_pending() {
@@ -386,6 +477,8 @@ mod tests {
         let transport = old.outgoing.as_ref().unwrap().clone();
         let id = "00000000-0000-0000-0000-000000000001".parse().unwrap();
         old.remotes[3] = Some(Remote {
+            since: Instant::now(),
+            deafened: false,
             decode_stats: Default::default(),
             activity: Default::default(),
             id,
