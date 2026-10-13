@@ -52,12 +52,20 @@ impl CaptureChain {
             .sum()
     }
     pub fn process(&mut self, block: &mut Block) -> Result<(), String> {
+        self.process_observed(block, &mut |_, _| {})
+    }
+    pub(super) fn process_observed(
+        &mut self,
+        block: &mut Block,
+        observe: &mut impl FnMut(usize, &Block),
+    ) -> Result<(), String> {
         if block.iter().any(|x| !x.is_finite()) {
             block.fill(0.0);
             return Err("Non-finite microphone samples".into());
         }
-        for (enabled, stage) in &mut self.stages {
+        for (index, (enabled, stage)) in self.stages.iter_mut().enumerate() {
             if !*enabled {
+                observe(index, block);
                 continue;
             }
             if let Err(error) = stage.process(block) {
@@ -68,6 +76,7 @@ impl CaptureChain {
                 block.fill(0.0);
                 return Err(format!("{} produced invalid audio", stage.name()));
             }
+            observe(index, block);
         }
         Ok(())
     }

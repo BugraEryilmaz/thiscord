@@ -48,6 +48,7 @@ pub struct StreamControl {
     pub volume: AtomicU32,
     pub active: AtomicBool,
     pub generation: AtomicU64,
+    cleared: AtomicU64,
 }
 pub struct StreamWriter {
     pub queue: HeapProd<f32>,
@@ -74,6 +75,7 @@ pub fn mixer(controls: Arc<Controls>) -> (Vec<StreamWriter>, Mixer) {
             volume: AtomicU32::new(1.0_f32.to_bits()),
             active: false.into(),
             generation: 0.into(),
+            cleared: 0.into(),
         });
         writers.push(StreamWriter {
             queue,
@@ -96,6 +98,13 @@ pub fn mixer(controls: Arc<Controls>) -> (Vec<StreamWriter>, Mixer) {
     )
 }
 impl StreamWriter {
+    pub fn discard(&self) {
+        self.control.generation.fetch_add(1, Ordering::AcqRel);
+    }
+    pub fn ready(&self) -> bool {
+        self.control.cleared.load(Ordering::Acquire)
+            == self.control.generation.load(Ordering::Acquire)
+    }
     pub fn write(&mut self, samples: &[f32]) -> usize {
         self.queue.push_slice(samples)
     }
@@ -140,6 +149,7 @@ impl Mixer {
             for _ in 0..discard {
                 let _ = stream.queue.try_pop();
             }
+            stream.control.cleared.store(generation, Ordering::Release);
         }
         let mut underruns = 0;
         let mut reference_dropped = 0;

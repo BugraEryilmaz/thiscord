@@ -51,13 +51,9 @@ impl Rate {
 
     /// Always the same 16-sample group delay, including at unity. Preserve phase
     /// and filter history across Opus packets; never periodically drop a frame.
-    pub fn process(
-        &mut self,
-        input: &[f32; FRAME],
-        ppm: f64,
-        output: &mut [f32; MAX_OUTPUT],
-    ) -> usize {
-        self.history[TAPS..].copy_from_slice(input);
+    pub fn process(&mut self, input: &[f32], ppm: f64, output: &mut [f32; MAX_OUTPUT]) -> usize {
+        assert!(input.len() <= FRAME);
+        self.history[TAPS..TAPS + input.len()].copy_from_slice(input);
         let step = 1.0
             + if ppm.is_finite() {
                 ppm.clamp(-5000.0, 5000.0)
@@ -66,7 +62,7 @@ impl Rate {
             } / 1_000_000.0;
         let filter = FILTER.get().expect("constructed on worker");
         let mut count = 0;
-        while self.phase < FRAME as f64 && count < MAX_OUTPUT {
+        while self.phase < input.len() as f64 && count < MAX_OUTPUT {
             let index = self.phase.floor() as usize + TAPS;
             let fraction = self.phase.fract() * PHASES as f64;
             let phase = fraction.floor() as usize;
@@ -80,8 +76,8 @@ impl Rate {
             count += 1;
             self.phase += step;
         }
-        self.phase -= FRAME as f64;
-        self.history.copy_within(FRAME..FRAME + TAPS, 0);
+        self.phase -= input.len() as f64;
+        self.history.copy_within(input.len()..input.len() + TAPS, 0);
         count
     }
 }
@@ -89,6 +85,32 @@ impl Rate {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn fractional_media_holes_preserve_filter_history_and_phase() {
+        for ppm in [-5000.0, 0.0, 5000.0] {
+            let input: [f32; FRAME] = std::array::from_fn(|i| (i as f32 * 0.1).sin() * 0.1);
+            let mut whole = Rate::default();
+            let mut split = Rate::default();
+            for _ in 0..10 {
+                let mut expected = [0.0; MAX_OUTPUT];
+                let n = whole.process(&input, ppm, &mut expected);
+                let mut actual = Vec::new();
+                for chunk in [&input[..137], &input[137..138], &input[138..]] {
+                    let mut output = [0.0; MAX_OUTPUT];
+                    let len = split.process(chunk, ppm, &mut output);
+                    actual.extend_from_slice(&output[..len]);
+                }
+                assert_eq!(actual.len(), n);
+                assert!(
+                    actual
+                        .iter()
+                        .zip(&expected)
+                        .all(|(a, b)| (a - b).abs() < 1e-6)
+                );
+            }
+        }
+    }
 
     #[test]
     fn fractional_rate_has_bounded_work_continuous_phase_and_measured_tone_error() {
@@ -99,7 +121,7 @@ mod tests {
                 let mut error = 0.0;
                 let mut signal = 0.0;
                 for block in 0..100 {
-                    let input = std::array::from_fn(|i| {
+                    let input: [f32; FRAME] = std::array::from_fn(|i| {
                         (std::f64::consts::TAU * hz * (block * FRAME + i) as f64 / 48000.0).sin()
                             as f32
                             * 0.5

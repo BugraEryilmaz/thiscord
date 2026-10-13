@@ -14,10 +14,11 @@ receiver, worker and output clocks without sleeping or opening a device.
 
 ## Timing and bounds
 
-- RTP sequences order packets; 48 kHz RTP timestamps establish media positions.
+- 48 kHz RTP timestamps order media; sequences detect duplicates and sequence holes.
   Both use signed wrapping comparisons within a short receive window. This path
   accepts the existing fixed 960-sample/20 ms Opus contract. Other packet durations
-  become one silent slot and a decode-error count, not an unbounded decode loop.
+  and malformed headers are rejected before jitter admission. Decode failures
+  use bounded PLC, or silence if that fallback fails.
 - Each source holds at most 12 packets of at most 1,500 bytes, a 32-entry duplicate
   history, one Opus decoder and fixed resampling state. Packet ordering, startup
   waits and decode decisions are separate operations. There are still 32 bounded
@@ -33,22 +34,30 @@ receiver, worker and output clocks without sleeping or opening a device.
   existing irregular-worker regression, which includes 12 ms wakes.
 - A missing packet is resolved only with at most 240 samples/5 ms left in the
   output ring: this is the worker's decode lead before the ring deadline. If the
-  following packet is present at the adjacent media timestamp, Opus FEC is tried
+  following packet is present at the adjacent media timestamp and has a sequence
+  hole after the last normal packet, Opus FEC is tried
   without consuming that carrier. Otherwise PLC runs. An FEC attempt can internally
   produce PLC when the sender supplied no redundancy; metrics do not claim recovery.
-- After three consecutive missing slots (60 ms), playout becomes inactive or
-  rebuffers from available media. Consecutive sequence numbers with timestamp gaps
-  are discontinuity evidence, not a run of losses. The received sequence watermark
-  is separate from the tentative PLC cursor, so a future DTX sender can resume
-  without having advanced its sequence during silence. This does not implement
-  sender DTX, comfort noise, variable packet duration or timestamp synchronization
-  with screen video.
+- Consecutive missing media is limited to 60 ms before inactivity/rebuffering.
+  Sequence holes alone never invent missing media. Short timestamp holes preserve
+  exact sample counts: whole slots use PLC, fractional holes use exact-length
+  silence through the continuous rate filter. Consecutive sequences with timestamp
+  gaps do not borrow FEC; those gaps can be sender capture drops. Longer timestamp
+  jumps rebuffer. Consumed sequence/media watermarks survive inactivity and deafen,
+  preventing late audio from rewinding the cursor. A future DTX sender can resume
+  with a forward timestamp jump without advancing sequences during silence. This
+  does not implement sender DTX, comfort noise, variable packet duration or
+  timestamp synchronization with screen video.
 - When actual late discards accompany a target deficit above 20 ms, existing PCM
   drains and a bounded interval (at most 80 ms) builds tolerance. Such increases
   are limited to once per five seconds. Smaller changes use continuous correction.
   A gap above 100 ms between scheduler ticks is a worker stall, not network jitter.
-  Worker-queued packets older than 160 ms are rejected. Rebuffering discards packet
-  entries older than 160 ms, and normal decode refuses packets older than 200 ms.
+  Worker-queued packets aged 200 ms are rejected; packet maintenance uses the same
+  age cap. Capacity pressure or media spans beyond 240 ms reanchor at the newest
+  40 ms (up to three packets). Hard recovery resets the decoder/filter and requests
+  a PCM flush, waiting for callback acknowledgement before admitting fresh PCM.
+  Maintenance runs even with a full ring; it invalidates remaining decoded speech
+  after 200 ms without arrivals, including when no encoded packets remain.
   These are explicit discontinuity boundaries, not the normal drift strategy.
   An arbitrarily stalled OS callback cannot offer a wall-clock latency guarantee.
 - The worker makes at most two decode decisions per source per tick. The rate
@@ -94,7 +103,8 @@ queue discards/stalls, rebuffer/discontinuity counts, FEC attempts, concealments
 decode errors, inactivity and estimated drift/applied correction in ppm. Global
 callback underrun samples remain available. `current_ms` excludes OS/device
 buffering and the fixed 0.333 ms filter delay; it is not an end-to-end latency
-measurement. Counters restart on source/device replacement and deafen resets.
+measurement. Counters restart on source replacement; device/deafen boundaries
+clear queued audio and rate state while retaining media watermarks and counters.
 
 Run with the pinned toolchain and existing shared build directory:
 
@@ -118,16 +128,22 @@ error against analytic fractional-time signals, including packet boundaries.
 The initial audit was reproduced: all 81 selected native audio tests passed on
 Windows before changes. Windows x64, Rust 1.98.1, `ci` profile results:
 
-All 96 native audio tests and all 108 audio tests with DeepFilterNet3 + neural
-echo enabled pass. Targeted library/test Clippy passes for both feature sets;
-native desktop check/Clippy and `cargo fmt --all -- --check` pass. Backend, shared
-and UI behavior did not change; no database operation was needed. Linux/macOS
-build/runtime and physical listening checks were not run locally for this change.
+After integrating main's sender timestamps, FEC policy and activation gate,
+the native audio suite contains 153 tests and the combined DeepFilterNet3/neural
+echo suite contains 165; both pass. Native library/tests and optional-processing
+examples pass Clippy with warnings denied. The Windows desktop build and desktop
+Clippy pass, as do the WASM `thiscord-ui` build and `cargo fmt --all -- --check`.
+Merge regressions cover exact fractional gaps through rate correction,
+decoded-only stalls, and callback flush acknowledgement when a
+gap becomes visible after decoding. The checks and trace results below use the
+merged receive path. Backend/shared behavior is unchanged; no database operation
+was needed. Linux/macOS build/runtime and physical listening checks were not run
+locally for this change.
 
 | Deterministic trace | Sequence-only baseline | Adaptive playout |
 | --- | --- | --- |
 | Stable LAN, 60 s | 40 ms delay, 55 ms maximum decoded PCM | 40 ms delay, 35 ms maximum decoded PCM; no concealment/underruns |
-| 80 ms bursts + isolated/burst loss, 180 s | 67 concealments, no empty-ring time | 10 concealments, 156 ms total empty-ring time, two rebufferings; target peaks at 120 ms; delay peaks at 145 ms and ends at 44.8 ms |
+| 80 ms bursts + isolated/burst loss, 180 s | 67 concealments, no empty-ring time | 9 concealments, 151 ms total empty-ring time, two rebufferings; target peaks at 120 ms; delay peaks at 120 ms and ends at 44.8 ms |
 | Sender +400 ppm, 30 min | Delay reaches 194 ms; 100 ms empty-ring time | Delay peaks at 44.04 ms and ends at 40 ms; +402 ppm final correction; no concealment, rebuffer or underrun |
 | Sender -400 ppm, 30 min | 200 concealments; 700 ms empty-ring time | Delay ends at 40 ms; -402 ppm final correction; no concealment, rebuffer or underrun |
 
@@ -143,8 +159,8 @@ quality, echo performance or an intelligibility score.
 
 A separate 16-second **real Opus/PCM** comparison uses the committed synthetic
 speech fixture with the same burst/loss pattern. Baseline/adaptive concealments
-are 66/6; empty-ring samples are 0/6,333 (about 132 ms); maximum adjacent-sample
-steps are 0.1955/0.2050. These values expose the rebuffer-silence tradeoff and do
+are 66/5; empty-ring samples are 0/7,680 (160 ms); maximum adjacent-sample
+steps are 0.1955/0.2038. These values expose the rebuffer-silence tradeoff and do
 not rank audible artifacts. Generate both WAVs for matched listening explicitly:
 
 ```powershell

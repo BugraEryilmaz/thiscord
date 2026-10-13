@@ -10,7 +10,7 @@ fn packet(sequence: u16, timestamp: u32, arrived: Instant) -> Packet {
 }
 
 fn push(j: &mut Jitter, sequence: u16, timestamp: u32, at: Instant) {
-    j.push(packet(sequence, timestamp, at), at);
+    j.push_packet(packet(sequence, timestamp, at), at);
 }
 
 #[test]
@@ -31,14 +31,14 @@ fn deadlines_reordering_fec_duplicates_and_both_wraps() {
         ts.wrapping_add(1920),
         at + Duration::from_millis(39),
     );
-    assert!(j.poll(at + Duration::from_millis(39), 0).is_none());
+    assert!(j.tick(at + Duration::from_millis(39), 0).is_none());
     assert!(matches!(
-        j.poll(at + Duration::from_millis(40), 0).unwrap().decode,
+        j.tick(at + Duration::from_millis(40), 0).unwrap().decode,
         Decode::Packet(_)
     ));
     for ms in 40..55 {
         assert!(
-            j.poll(
+            j.tick(
                 at + Duration::from_millis(ms),
                 960 - (ms as usize - 40) * 48
             )
@@ -48,11 +48,11 @@ fn deadlines_reordering_fec_duplicates_and_both_wraps() {
     // 5 ms from playback: FEC may now resolve the missing frame, but its
     // carrier remains queued and is normally decoded exactly once afterward.
     assert!(matches!(
-        j.poll(at + Duration::from_millis(55), 240).unwrap().decode,
+        j.tick(at + Duration::from_millis(55), 240).unwrap().decode,
         Decode::Fec(_)
     ));
     assert!(matches!(
-        j.poll(at + Duration::from_millis(75), 240).unwrap().decode,
+        j.tick(at + Duration::from_millis(75), 240).unwrap().decode,
         Decode::Packet(_)
     ));
     push(
@@ -73,11 +73,11 @@ fn late_but_before_pcm_deadline_avoids_concealment() {
     for seq in [0, 2, 3] {
         push(&mut j, seq, u32::from(seq) * 960, at);
     }
-    assert!(j.poll(at + Duration::from_millis(40), 0).is_some());
-    assert!(j.poll(at + Duration::from_millis(50), 480).is_none());
+    assert!(j.tick(at + Duration::from_millis(40), 0).is_some());
+    assert!(j.tick(at + Duration::from_millis(50), 480).is_none());
     push(&mut j, 1, 960, at + Duration::from_millis(54));
     assert!(matches!(
-        j.poll(at + Duration::from_millis(54), 288).unwrap().decode,
+        j.tick(at + Duration::from_millis(54), 288).unwrap().decode,
         Decode::Packet(_)
     ));
     assert_eq!(j.metrics().concealments, 0);
@@ -88,19 +88,20 @@ fn silence_and_timestamp_gaps_do_not_become_unbounded_loss() {
     let at = Instant::now();
     let mut j = Jitter::default();
     push(&mut j, 0, 0, at);
-    j.poll(at + Duration::from_millis(40), 0).unwrap();
+    j.tick(at + Duration::from_millis(40), 0).unwrap();
     // Consecutive sequence with a short timestamp gap is explicit DTX evidence.
     push(&mut j, 1, 4800, at + Duration::from_millis(100));
-    assert!(j.poll(at + Duration::from_millis(100), 0).is_none());
-    assert!(j.poll(at + Duration::from_millis(140), 0).unwrap().reset);
+    assert!(j.tick(at + Duration::from_millis(100), 0).is_none());
+    assert!(j.tick(at + Duration::from_millis(140), 0).unwrap().reset);
     assert_eq!(j.metrics().concealments, 0);
     for ms in [160, 180, 200, 220, 240, 260] {
-        j.poll(at + Duration::from_millis(ms), 0);
+        j.tick(at + Duration::from_millis(ms), 0);
     }
     assert_eq!(j.metrics().concealments, 3);
     assert!(j.metrics().inactive);
     push(&mut j, 2, 48000, at + Duration::from_secs(1));
-    assert!(j.poll(at + Duration::from_millis(1040), 0).unwrap().reset);
+    assert!(j.tick(at + Duration::from_secs(1), 0).is_none());
+    assert!(j.tick(at + Duration::from_millis(1040), 0).unwrap().reset);
 }
 
 #[test]
@@ -110,18 +111,18 @@ fn worker_queue_delay_is_not_network_jitter_and_stalls_rebuffer() {
     let mut b = Jitter::default();
     for seq in 0..6 {
         let arrival = at + Duration::from_millis(u64::from(seq) * 20);
-        a.push(packet(seq, u32::from(seq) * 960, arrival), arrival);
-        b.push(
+        a.push_packet(packet(seq, u32::from(seq) * 960, arrival), arrival);
+        b.push_packet(
             packet(seq, u32::from(seq) * 960, arrival),
             arrival + Duration::from_millis(80),
         );
     }
     assert_eq!(a.metrics().variation_ms, b.metrics().variation_ms);
     assert_eq!(a.metrics().target_ms, b.metrics().target_ms);
-    b.poll(at + Duration::from_millis(180), 0).unwrap();
-    assert!(b.poll(at + Duration::from_millis(400), 0).is_none());
+    b.tick(at + Duration::from_millis(180), 0).unwrap();
+    assert!(b.tick(at + Duration::from_millis(400), 0).is_none());
     assert_eq!(b.metrics().worker_stalls, 1);
-    b.push(packet(10, 9600, at), at + Duration::from_secs(1));
+    b.push_packet(packet(10, 9600, at), at + Duration::from_secs(1));
     assert_eq!(b.metrics().worker_queue_discards, 1);
     assert_eq!(b.metrics().variation_ms, 0.0);
 }
@@ -138,13 +139,13 @@ fn stalled_output_discards_stale_packets_without_inflating_network_variation() {
             at + Duration::from_millis(u64::from(seq) * 20),
         );
     }
-    j.poll(at + Duration::from_millis(60), 0).unwrap();
+    j.tick(at + Duration::from_millis(60), 0).unwrap();
     // Worker remains responsive but output stops consuming. The ring remains
     // bounded, then the scheduler refuses old speech once the device resumes.
     for ms in (65..400).step_by(5) {
-        assert!(j.poll(at + Duration::from_millis(ms), 960).is_none());
+        assert!(j.tick(at + Duration::from_millis(ms), 960).is_none());
     }
-    assert!(j.poll(at + Duration::from_millis(400), 0).is_none());
+    assert!(j.tick(at + Duration::from_millis(400), 0).is_none());
     assert_eq!(j.metrics().stale_discards, 3);
     assert_eq!(j.metrics().worker_stalls, 0);
     assert_eq!(j.metrics().variation_ms, 0.0);
@@ -160,13 +161,17 @@ fn bounded_capacity_payloads_and_forward_discontinuity() {
     assert_eq!(j.metrics().packets, MAX_PACKETS);
     assert_eq!(j.metrics().capacity_discards, 64 - MAX_PACKETS as u64);
     push(&mut j, 1000, 960000, at);
+    // Admission stays bounded; worker maintenance moves to the live edge and
+    // requests a PCM flush before the new timestamp epoch can play.
+    assert_eq!(j.metrics().packets, MAX_PACKETS);
+    assert!(j.prepare(at));
     assert_eq!(j.metrics().packets, 1);
     assert_eq!(j.metrics().discontinuities, 1);
     let mut invalid = packet(1001, 960960, at);
     invalid.payload = bytes::Bytes::from(vec![0; 1501]);
-    j.push(invalid, at);
+    j.push_packet(invalid, at);
     assert_eq!(j.metrics().packets, 1);
-    assert!(j.poll(at + Duration::from_millis(120), 0).unwrap().reset);
+    assert!(j.tick(at + Duration::from_millis(120), 0).unwrap().reset);
 }
 
 #[derive(Default, Debug)]
@@ -257,7 +262,7 @@ fn run_trace(
                     started = true;
                     continue;
                 }
-                let Some(p) = j.poll(now, pcm.round() as usize) else {
+                let Some(p) = j.tick(now, pcm.round() as usize) else {
                     break;
                 };
                 pcm += 960.0 / (1.0 + p.correction_ppm / 1e6);

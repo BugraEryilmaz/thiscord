@@ -1,4 +1,4 @@
-#[cfg(all(test, any(feature = "neural-echo", feature = "deep-filter")))]
+#[cfg(test)]
 use super::fixture;
 use super::frames;
 use sonora::{
@@ -34,6 +34,7 @@ pub struct Processing {
     model: NoiseSuppressionModel,
     spare_noise: Option<Box<dyn stages::CaptureStage>>,
     automatic_gain: bool,
+    capture_after: Option<Instant>,
     neural_requested: bool,
     neural_model_path: Option<String>,
     #[cfg(feature = "neural-echo")]
@@ -174,6 +175,7 @@ impl Processing {
             model,
             spare_noise: None,
             automatic_gain,
+            capture_after: None,
             neural_requested: false,
             neural_model_path: None,
             #[cfg(feature = "neural-echo")]
@@ -197,6 +199,17 @@ impl Processing {
         self.clipped_samples = 0;
         self.clipped_input_percent = 0.0;
         self.resets += 1;
+    }
+    /// Discard enhancement history at a privacy boundary without restarting AEC.
+    /// Old device blocks still advance AEC/reference timing, but feed zeros into
+    /// the downstream chain so delayed denoiser output cannot retain them.
+    pub(super) fn restrict_capture(&mut self, after: Instant) {
+        self.capture_after = Some(after);
+        self.clear_enhancement_history();
+    }
+    /// Replay and live privacy boundaries clear delayed enhancement, not AEC.
+    pub fn clear_enhancement_history(&mut self) {
+        self.chain.reset();
     }
     pub(super) fn needs_replacement(&self, s: &AudioSettings) -> bool {
         s.neural_echo != self.neural_requested
@@ -345,13 +358,19 @@ impl Processing {
         }
         let (first, first_gap) = queue.pop().expect("two complete frames");
         let (second, second_gap) = queue.pop().expect("two complete frames");
-        if first_gap || second_gap {
+        if second_gap {
+            // An Opus packet cannot describe a hole inside its 20 ms duration.
+            // Discard the earlier half and retain the later half for the next tick.
+            queue.retain(second);
+            return Ok(None);
+        }
+        if first_gap {
             self.reset();
         }
         tap(
             &first,
             first_gap,
-            first_gap || second_gap,
+            first_gap,
             frames::delay_ms(self.render_at, first.at),
         );
         tap(
@@ -361,23 +380,50 @@ impl Processing {
             frames::delay_ms(self.render_at, second.at),
         );
         let mut pcm = [0.0; 960];
+        let mut evidence = super::gate::Evidence::default();
         pcm[..480].copy_from_slice(&first.samples);
         pcm[480..].copy_from_slice(&second.samples);
-        for (frame, at) in pcm
+        for (index, (frame, at)) in pcm
             .as_chunks_mut::<480>()
             .0
             .iter_mut()
             .zip([first.at, second.at])
+            .enumerate()
         {
-            self.capture_frame(frame, frames::delay_ms(self.render_at, at))?;
+            evidence.0[index] = self.capture_frame_metered(
+                frame,
+                frames::delay_ms(self.render_at, at),
+                self.capture_after.is_none_or(|after| at >= after),
+            )?;
         }
         Ok(Some(Captured {
             pcm,
+            evidence,
             at: [first.at, second.at],
             gap: [first_gap, second_gap],
+            position: first.position,
         }))
     }
     pub fn capture_frame(&mut self, frame: &mut [f32; 480], delay_ms: i32) -> Result<(), String> {
+        self.capture_frame_retained(frame, delay_ms, true)
+    }
+    /// Advance AEC normally, but exclude pre-boundary capture from enhancement.
+    /// Used by offline replay with the recorded capture-boundary timestamps.
+    pub fn capture_frame_retained(
+        &mut self,
+        frame: &mut [f32; 480],
+        delay_ms: i32,
+        retain: bool,
+    ) -> Result<(), String> {
+        self.capture_frame_metered(frame, delay_ms, retain)
+            .map(|_| ())
+    }
+    fn capture_frame_metered(
+        &mut self,
+        frame: &mut [f32; 480],
+        delay_ms: i32,
+        retain: bool,
+    ) -> Result<f32, String> {
         let _float_mode = denormals::Guard::new();
         if frame.iter().any(|x| !x.is_finite()) {
             frame.fill(0.0);
@@ -407,11 +453,19 @@ impl Processing {
             return Err("Neural echo processing failed. Stop audio and select conventional echo cancellation or reload the model.".into());
         }
         frame.copy_from_slice(&out);
-        self.chain.process(frame)?;
+        if !retain {
+            frame.fill(0.0);
+        }
+        let mut rms = 0.0;
+        self.chain.process_observed(frame, &mut |index, block| {
+            if index == 0 {
+                rms = super::gate::Evidence::rms(block);
+            }
+        })?;
         for sample in frame.iter_mut() {
             *sample = sample.clamp(-1.0, 1.0);
         }
-        Ok(())
+        Ok(rms)
     }
     pub fn echo_diagnostics(&self) -> Option<EchoDiagnostics> {
         self.config.echo_canceller.as_ref()?;
@@ -451,14 +505,93 @@ impl Processing {
 }
 pub(super) struct Captured {
     pub pcm: [f32; 960],
+    pub evidence: super::gate::Evidence,
     pub at: [Instant; 2],
     pub gap: [bool; 2],
+    pub position: u64,
 }
 #[cfg(test)]
 mod tests {
     use super::*;
     #[test]
-    fn recording_marks_second_frame_loss_separately_from_packet_reset() {
+    fn activation_evidence_is_after_denoising_and_independent_of_agc() {
+        let speech = fixture::speech();
+        let mut models = vec![NoiseSuppressionModel::Sonora];
+        if cfg!(feature = "deep-filter") {
+            models.push(NoiseSuppressionModel::DeepFilterNet3);
+        }
+        for model in models {
+            for neural in [false, true] {
+                if neural && !cfg!(feature = "neural-echo") {
+                    continue;
+                }
+                let s = AudioSettings {
+                    noise_suppression: true,
+                    noise_suppression_model: model,
+                    echo_cancellation: true,
+                    neural_echo: neural,
+                    ..Default::default()
+                };
+                let mut plain = Processing::new(&s).unwrap();
+                let mut gain = Processing::new(&AudioSettings {
+                    automatic_gain: true,
+                    ..s
+                })
+                .unwrap();
+                let mut different = false;
+                for n in 0..400 {
+                    let input = std::array::from_fn(|i| speech[(n * 480 + i) % speech.len()] * 0.2);
+                    plain.render(&[0.0; 480]).unwrap();
+                    gain.render(&[0.0; 480]).unwrap();
+                    let (mut a, mut b) = (input, input);
+                    let a_rms = plain.capture_frame_metered(&mut a, 20, true).unwrap();
+                    let b_rms = gain.capture_frame_metered(&mut b, 20, true).unwrap();
+                    assert_eq!(a_rms, b_rms, "{model:?}, neural={neural}");
+                    assert!((a_rms - super::super::gate::Evidence::rms(&a)).abs() < 1e-6);
+                    different |= a != b;
+                }
+                assert!(
+                    different,
+                    "Test must exercise real AGC: {model:?}, neural={neural}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn boundary_discards_old_device_blocks_and_denoiser_history_without_resetting_aec() {
+        let mut models = vec![NoiseSuppressionModel::Sonora];
+        if cfg!(feature = "deep-filter") {
+            models.push(NoiseSuppressionModel::DeepFilterNet3);
+        }
+        for model in models {
+            let mut p = Processing::new(&AudioSettings {
+                noise_suppression: true,
+                noise_suppression_model: model,
+                ..Default::default()
+            })
+            .unwrap();
+            for _ in 0..20 {
+                p.capture_frame(&mut [0.3; 480], 0).unwrap();
+            }
+            let at = Instant::now();
+            p.restrict_capture(at + std::time::Duration::from_millis(40));
+            let (mut writer, mut reader) = frames::queue();
+            writer.begin(at);
+            for _ in 0..1920 {
+                writer.push(0.8);
+            }
+            for _ in 0..2880 {
+                writer.push(0.0);
+            }
+            while let Some(packet) = p.capture_tapped(&mut reader, &mut |_, _, _, _| {}).unwrap() {
+                assert!(packet.pcm.iter().all(|v| v.abs() < 1e-8), "{model:?}");
+            }
+            assert_eq!(p.resets, 0, "Privacy boundaries do not restart AEC");
+        }
+    }
+    #[test]
+    fn gap_inside_packet_retains_later_half_instead_of_compressing_time() {
         let (mut writer, mut reader) = frames::queue();
         let at = Instant::now();
         writer.begin(at);
@@ -474,16 +607,26 @@ mod tests {
         }
         let mut p = Processing::new(&AudioSettings::default()).unwrap();
         let mut taps = Vec::new();
+        assert!(
+            p.capture_tapped(&mut reader, &mut |_, _, _, _| {})
+                .unwrap()
+                .is_none()
+        );
+        assert_eq!(reader.len(), 1);
+        for _ in 0..480 {
+            writer.push(0.3);
+        }
         let captured = p
             .capture_tapped(&mut reader, &mut |frame, gap, reset, delay| {
                 taps.push((frame.samples[0], gap, reset, delay))
             })
             .unwrap()
             .unwrap();
-        assert_eq!(captured.gap, [false, true]);
-        assert_eq!(taps, [(0.1, false, true, 0), (0.2, true, false, 0)]);
-        assert_eq!(&captured.pcm[..480], &[0.1; 480]);
-        assert_eq!(&captured.pcm[480..], &[0.2; 480]);
+        assert_eq!(captured.gap, [true, false]);
+        assert_eq!(captured.position, (frames::BLOCKS as u64 + 1) * 480);
+        assert_eq!(taps, [(0.2, true, true, 0), (0.3, false, false, 0)]);
+        assert_eq!(&captured.pcm[..480], &[0.2; 480]);
+        assert_eq!(&captured.pcm[480..], &[0.3; 480]);
         assert_eq!(p.resets, 1);
     }
 

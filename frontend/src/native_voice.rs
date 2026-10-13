@@ -103,7 +103,7 @@ impl PeerConnectionEventHandler for Handler {
                             slot,
                             sequence: packet.header.sequence_number,
                             timestamp: packet.header.timestamp,
-                            arrived,
+                            received_at: arrived,
                             payload: packet.payload,
                         });
                     }
@@ -599,7 +599,10 @@ async fn run(
         },
     )
     .await?;
-    let (tx, mut outgoing) = mpsc::channel(5);
+    let (tx, mut outgoing) = mpsc::channel::<thiscord_frontend::audio::outgoing::EncodedFrame>(
+        thiscord_frontend::audio::outgoing::QUEUE_CAPACITY,
+    );
+    let transmit_control = engine.outgoing_control();
     let mut audio_started = false;
     let mut disconnected_since: Option<Instant> = None;
     let mut roster: Vec<Participant> = Vec::new();
@@ -607,8 +610,7 @@ async fn run(
     let start = Instant::now();
     let mut heard = Instant::now();
     let mut screen_state = (false, false);
-    let mut sequence = 0_u16;
-    let mut timestamp = 0_u32;
+    let mut rtp_clock = thiscord_frontend::audio::outgoing::RtpClock::default();
     loop {
         tokio::select! {
             Some((slot, epoch))=keyframe_rx.recv()=>{
@@ -641,9 +643,17 @@ async fn run(
                     },ServerEvent::Error{error}=>return Err(Failure::server(error)),ServerEvent::Revoked{}=>return Err("Voice access changed. Join again if you still have permission.".into()),_=>{},
                 }
             },
-            Some(payload)=outgoing.recv()=>{
-                sequence=sequence.wrapping_add(1);timestamp=timestamp.wrapping_add(960);let packet=rtc::rtp::Packet{header:rtc::rtp::header::Header{version:2,payload_type:MediaKind::Microphone.payload_type(),ssrc:MediaKind::Microphone.publisher_ssrc(),sequence_number:sequence,timestamp,..Default::default()},payload};
-                tokio::time::timeout(Duration::from_millis(100),track.write_rtp(packet)).await.map_err(|_|Failure::temporary("Voice sender stalled").with_reason("media_send_timeout"))?.map_err(|_|Failure::temporary("Voice media connection failed").with_reason("media_send_failed"))?;
+            Some(frame)=outgoing.recv()=>{
+                if let Err(reason) = transmit_control.check(&frame, &attempt.connection, Instant::now()) {
+                    transmit_control.dropped(reason);
+                    continue;
+                }
+                let (sequence, timestamp) = rtp_clock.next(frame.media_position);
+                let packet=rtc::rtp::Packet{header:rtc::rtp::header::Header{version:2,payload_type:MediaKind::Microphone.payload_type(),ssrc:MediaKind::Microphone.publisher_ssrc(),sequence_number:sequence,timestamp,..Default::default()},payload:frame.payload.clone()};
+                match transmit_control.guard_write(&frame, &attempt.connection, track.write_rtp(packet)).await {
+                    Ok(result) => result.map_err(|_|Failure::temporary("Voice media connection failed").with_reason("media_send_failed"))?,
+                    Err(reason) => transmit_control.dropped(reason),
+                }
             },
             _=ticker.tick()=>{
                 if failed.load(Ordering::Acquire)||heard.elapsed()>Duration::from_secs(20){

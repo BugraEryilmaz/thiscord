@@ -4,6 +4,9 @@ use super::*;
 
 fn remote() -> Remote {
     Remote {
+        since: Instant::now(),
+        deafened: false,
+        decode_stats: Default::default(),
         activity: Default::default(),
         id: "00000000-0000-0000-0000-000000000001".parse().unwrap(),
         label: "fixture".into(),
@@ -61,7 +64,7 @@ fn opus_continuity_through_irregular_worker_wakes_and_final_aec_reference() {
         let now = at + Duration::from_millis(ms as u64);
         for (seq, packet) in packets.iter().enumerate() {
             if ms == seq * 20 {
-                remote.jitter.push(
+                remote.jitter.push_packet(
                     jitter::Packet {
                         sequence: seq as u16,
                         timestamp: seq as u32 * 960,
@@ -110,7 +113,7 @@ fn independent_sources_correction_deafen_and_generation_replacement() {
     let mut outputs = [[0.0; playout_rate::MAX_OUTPUT]; 2];
     for (i, ppm) in [-400.0, 400.0].into_iter().enumerate() {
         writers[i].control.active.store(true, Ordering::Release);
-        let input = std::array::from_fn(|sample| (sample as f32 * 0.02).sin() * 0.1);
+        let input: [f32; FRAME] = std::array::from_fn(|sample| (sample as f32 * 0.02).sin() * 0.1);
         let count = rates[i].process(&input, ppm, &mut outputs[i]);
         writers[i].write(&outputs[i][..count]);
     }
@@ -152,7 +155,7 @@ fn simultaneous_speakers_keep_network_estimates_and_decoders_independent() {
             for (seq, payload) in packets.iter().enumerate() {
                 let jitter = if source == 0 { 0 } else { (seq * 7) % 24 };
                 if ms == seq * 20 + jitter {
-                    remote.jitter.push(
+                    remote.jitter.push_packet(
                         jitter::Packet {
                             sequence: seq as u16,
                             timestamp: seq as u32 * 960,
@@ -190,7 +193,7 @@ fn unsupported_opus_duration_keeps_one_bounded_timeline_slot() {
     let size = encoder.encode_float(&[0.0; 480], &mut packet).unwrap();
     let mut remote = remote();
     let (mut writers, _) = mixer::mixer(Arc::new(Controls::default()));
-    remote.jitter.push(
+    remote.jitter.push_packet(
         jitter::Packet {
             sequence: 0,
             timestamp: 0,
@@ -230,7 +233,7 @@ fn fec_carrier_is_decoded_again_normally_without_prefetch_plc() {
         let now = at + Duration::from_millis(ms);
         if ms == 0 || ms == 40 {
             let seq = (ms / 20) as usize;
-            remote.jitter.push(
+            remote.jitter.push_packet(
                 jitter::Packet {
                     sequence: seq as u16,
                     timestamp: seq as u32 * 960,
@@ -294,7 +297,7 @@ fn speech_trace_comparison() {
                 if old {
                     legacy.push(seq as u16, packets[seq].clone(), now);
                 } else {
-                    remote.jitter.push(
+                    remote.jitter.push_packet(
                         jitter::Packet {
                             sequence: seq as u16,
                             timestamp: seq as u32 * 960,
