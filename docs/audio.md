@@ -327,10 +327,16 @@ device callback. The processor is constructed before starting either device.
 `Instant`; subsequent samples in that callback use exact 48 kHz offsets. Capture
 blocks also carry a device-stream sample position, advanced even when the 120 ms
 ring is full. A forward callback-time hole greater than 2 ms adds the rounded
-missing sample count. Smaller differences are treated as timestamp mapping jitter,
-and backward timing never rewinds sample positions. A partial 10 ms block crossing
-a hole is discarded. This is capture-only handling: post-mix AEC reference assembly,
-timestamps, delay calculation and echo configuration remain unchanged.
+missing sample count. Differences within 2 ms follow device-clock drift and mapping
+jitter. A timestamp more than 2 ms behind the expected end of the previous callback
+uses that expected time instead: repeated/backward callback timestamps must not move
+the continuity baseline backward and manufacture a hole when they catch up. This
+prevents repeated DSP/activation resets and inflated RTP timestamps when 10 ms
+capture buffers arrive with paired timestamps. Real forward holes and queue
+overflows still preserve missing sample positions and reset processing. A partial
+10 ms block crossing a hole is discarded. This is capture-only handling: post-mix
+AEC reference assembly, timestamps, delay calculation and echo configuration
+remain unchanged.
 
 DSP preserves block timestamps and sample positions. It never combines two halves
 across a gap into one 20 ms Opus packet: the earlier half is discarded and the later

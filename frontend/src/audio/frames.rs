@@ -58,8 +58,9 @@ pub fn queue() -> (Writer, Reader) {
 
 impl Writer {
     /// Capture-only discontinuity handling; the AEC playback reference keeps its
-    /// original timing/assembly. Ignore <=2 ms timestamp mapping jitter.
-    pub fn begin_capture(&mut self, at: Instant) {
+    /// original timing/assembly. Follow <=2 ms mapping jitter/clock drift, but
+    /// never reanchor on a larger regression and turn its recovery into a hole.
+    pub fn begin_capture(&mut self, mut at: Instant) {
         if self.capture_started {
             let expected = self.callback_at + sample_duration(self.offset);
             let missing = at.saturating_duration_since(expected);
@@ -69,6 +70,12 @@ impl Writer {
                     .saturating_add(super::outgoing::samples(missing));
                 // Never splice a partial block across a device interruption.
                 self.used = 0;
+            } else if expected.saturating_duration_since(at) > Duration::from_millis(2) {
+                // Some callback timestamps repeat/backtrack when buffers arrive
+                // in a batch. Those samples still advance capture time. Moving
+                // the baseline backward invents a gap when timestamps catch up,
+                // repeatedly resets DSP/VAD and inflates the RTP sample clock.
+                at = expected;
             }
         }
         self.capture_started = true;
@@ -194,6 +201,78 @@ mod tests {
             let (frame, gap) = reader.pop().unwrap();
             assert!(!gap);
             assert_eq!(frame.position, block as u64 * 480);
+        }
+    }
+
+    #[test]
+    fn repeated_capture_timestamps_do_not_create_gaps_or_rewind_frames() {
+        let (mut writer, mut reader) = queue();
+        let at = Instant::now();
+        // The recording delivered pairs of 10 ms blocks at almost the same
+        // timestamp, then advanced about 20 ms. Include a small backward step.
+        for block in 0..1600 {
+            let observed = at + sample_duration(block / 2 * 960);
+            let observed = if block % 2 == 1 {
+                observed - sample_duration(8)
+            } else {
+                observed
+            };
+            writer.begin_capture(observed);
+            for _ in 0..SAMPLES {
+                writer.push(0.1);
+            }
+            let (frame, gap) = reader.pop().unwrap();
+            assert!(!gap, "false capture gap at block {block}");
+            assert_eq!(frame.position, (block * SAMPLES) as u64);
+            assert_eq!(frame.at, at + sample_duration(block * SAMPLES));
+        }
+    }
+
+    #[test]
+    fn real_capture_hole_after_repeated_timestamp_still_discards_partial_audio() {
+        let (mut writer, mut reader) = queue();
+        let at = Instant::now();
+        for _ in 0..2 {
+            writer.begin_capture(at);
+            for _ in 0..617 {
+                writer.push(0.1);
+            }
+        }
+        // Two callbacks supplied 1234 samples despite sharing a timestamp.
+        // Only the following 5 ms are missing, not either callback's samples.
+        let resumed = at + sample_duration(1234 + 240);
+        writer.begin_capture(resumed);
+        for _ in 0..SAMPLES {
+            writer.push(0.2);
+        }
+        assert!(!reader.pop().unwrap().1);
+        assert!(!reader.pop().unwrap().1);
+        let (frame, gap) = reader.pop().unwrap();
+        assert!(gap);
+        assert_eq!(frame.position, 1474);
+        assert_eq!(frame.at, resumed);
+        assert_eq!(frame.samples, [0.2; SAMPLES]);
+    }
+
+    #[test]
+    fn capture_clock_skew_does_not_accumulate_into_false_discontinuities() {
+        // One sample per callback is more drift than expected from real clocks.
+        // Small adjustments must still follow the device in both directions;
+        // forcing every callback onto a rigid 48 kHz wall clock would diverge.
+        for step in [479, 481] {
+            let (mut writer, mut reader) = queue();
+            let at = Instant::now();
+            for block in 0..10_000 {
+                let observed = at + sample_duration(block * step);
+                writer.begin_capture(observed);
+                for _ in 0..SAMPLES {
+                    writer.push(0.0);
+                }
+                let (frame, gap) = reader.pop().unwrap();
+                assert!(!gap, "step={step} block={block}");
+                assert_eq!(frame.position, (block * SAMPLES) as u64);
+                assert_eq!(frame.at, observed);
+            }
         }
     }
 
