@@ -1,8 +1,13 @@
 mod activity;
+mod codec;
 pub mod connection;
 mod cues;
 mod device_users;
 pub mod diagnostics;
+#[cfg(test)]
+#[path = "../../tests/support/audio_fixture.rs"]
+#[allow(dead_code)]
+mod fixture;
 mod format;
 mod frames;
 mod health;
@@ -372,6 +377,7 @@ impl AudioEngine {
 struct Remote {
     since: Instant,
     deafened: bool,
+    decode_stats: codec::DecodeStats,
     activity: activity::Activity,
     id: thiscord_shared::AccountId,
     label: String,
@@ -430,26 +436,12 @@ impl Remote {
                 break;
             };
             let mut pcm = [0.0_f32; FRAME];
-            let (payload, samples) = match &packet {
-                jitter::Playout::Packet(payload) => (Some(payload.as_ref()), FRAME),
-                jitter::Playout::Conceal(samples) => (None, *samples),
+            let samples = match &packet {
+                jitter::Playout::Conceal(samples) => *samples,
+                _ => FRAME,
             };
-            if samples == FRAME {
-                match self
-                    .decoder
-                    .decode_float(payload.unwrap_or(&[]), &mut pcm, false)
-                {
-                    Ok(FRAME) => {
-                        if payload.is_some() {
-                            self.activity.observe(&pcm, now);
-                        }
-                    }
-                    _ => {
-                        // Malformed media still occupies its declared slot.
-                        pcm.fill(0.0);
-                        let _ = self.decoder.reset_state();
-                    }
-                }
+            if codec::decode(&mut self.decoder, &packet, &mut pcm, &mut self.decode_stats) {
+                self.activity.observe(&pcm, now);
             }
             writer.write(&pcm[..samples]);
         }
@@ -727,11 +719,7 @@ impl Session {
         diagnostics::event("processing_init_complete", serde_json::json!({}));
         let recovery = recovery::Recovery::starting();
         let devices = Devices::silent(settings);
-        let mut encoder = opus::Encoder::new(RATE, opus::Channels::Mono, opus::Application::Voip)
-            .map_err(|e| e.to_string())?;
-        encoder
-            .set_bitrate(opus::Bitrate::Bits(32_000))
-            .map_err(|e| e.to_string())?;
+        let encoder = codec::microphone_encoder().map_err(|e| e.to_string())?;
         let decoder = opus::Decoder::new(RATE, opus::Channels::Mono).map_err(|e| e.to_string())?;
         devices.writers[0]
             .control
@@ -1131,7 +1119,7 @@ fn run(
             if let Some(s) = &session {
                 diagnostics::event(
                     "audio_snapshot",
-                    serde_json::json!({"receive":s.remotes.iter().flatten().map(|r|r.jitter.diagnostics()).collect::<Vec<_>>(),"health":s.devices.health.diagnostics(),"recovering":s.recovery.active(),"muted":s.settings.muted,"deafened":s.settings.deafened,"echo":s.settings.echo_cancellation,"neural_echo":s.settings.neural_echo,"suppression":s.settings.noise_suppression,"suppression_model":s.settings.noise_suppression_model,"automatic_gain":s.settings.automatic_gain,"dropped_samples":s.devices.control.dropped.load(Ordering::Relaxed),"underrun_samples":s.devices.control.underruns.load(Ordering::Relaxed)}),
+                    serde_json::json!({"opus_decode":s.remotes.iter().flatten().map(|r| &r.decode_stats).collect::<Vec<_>>(),"verified_fec_frames":null,"receive":s.remotes.iter().flatten().map(|r|r.jitter.diagnostics()).collect::<Vec<_>>(),"health":s.devices.health.diagnostics(),"recovering":s.recovery.active(),"muted":s.settings.muted,"deafened":s.settings.deafened,"echo":s.settings.echo_cancellation,"neural_echo":s.settings.neural_echo,"suppression":s.settings.noise_suppression,"suppression_model":s.settings.noise_suppression_model,"automatic_gain":s.settings.automatic_gain,"dropped_samples":s.devices.control.dropped.load(Ordering::Relaxed),"underrun_samples":s.devices.control.underruns.load(Ordering::Relaxed)}),
                 );
             }
         }
@@ -1296,6 +1284,7 @@ fn run(
                                                 Ok::<_, String>(Remote {
                                                     since: Instant::now(),
                                                     deafened: false,
+                                                    decode_stats: Default::default(),
                                                     activity: Default::default(),
                                                     id: m.account_id,
                                                     label: if shared_audio {
@@ -1567,6 +1556,7 @@ mod lifecycle_tests {
         let mut remote = Remote {
             since: at,
             deafened: false,
+            decode_stats: Default::default(),
             activity: Default::default(),
             id: "00000000-0000-0000-0000-000000000001".parse().unwrap(),
             label: "synthetic shared audio".into(),

@@ -110,6 +110,10 @@ and single-process chat/media enforcement.
   stale-queue recovery and acknowledged per-source PCM/decoder resets.
 - [ ] Validate end-to-end stall recovery, urgent controls and device-clock drift on
   physical three-platform clients.
+- [x] Explicit microphone Opus in-band FEC (fixed 5% loss hint), deadline-bounded
+  successor recovery/PLC, honest attempt counters and deterministic loss regressions.
+- [ ] Validate FEC speech/bitrate tradeoffs with listening and physical clients
+  on Windows/macOS/Linux under real packet loss and jitter.
 - [x] Windows/Linux encrypted WebRTC software probes; three-OS CI build/test matrix.
 - [x] Select Rust media libraries and document native dependencies in docs/audio.md.
 - [x] Enumerate/select devices, persist settings and refresh device lists.
@@ -239,6 +243,7 @@ speaker isolation and physical acoustic acceptance remain future work.
 - [x] Moderator voice disconnect with hierarchy enforcement and targeted transport revocation.
 - [ ] Moderator mute/deafen/move-to-channel controls with hierarchy enforcement.
 - [x] Desktop voice overlay with participant roster, speaking activity and focus visibility.
+- [x] Customizable global mute/deafen shortcuts and clickable self controls on overlay hover.
 - [ ] In-app remote speaking indicators and connection-quality UI.
 - [ ] Overlay runtime acceptance in games, mixed-DPI monitors, macOS Spaces and Linux compositors.
 - [x] Automatic transport reconnection after network failure or server restart.

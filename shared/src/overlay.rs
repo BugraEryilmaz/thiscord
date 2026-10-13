@@ -8,6 +8,8 @@ pub struct OverlaySnapshot {
 
 #[derive(Clone, Serialize, Deserialize)]
 pub struct OverlayParticipant {
+    #[serde(default)]
+    pub is_self: bool,
     pub account_id: crate::AccountId,
     pub name: String,
     #[serde(default)]

@@ -15,8 +15,11 @@ struct Packet {
     received: Instant,
     payload: bytes::Bytes,
 }
+#[derive(Debug, PartialEq)]
 pub enum Playout {
     Packet(bytes::Bytes),
+    /// Borrow the following packet; its normal decode remains due.
+    Fec(bytes::Bytes),
     /// Full packets use Opus PLC; fractional holes use exact-length silence.
     Conceal(usize),
 }
@@ -217,10 +220,26 @@ impl Jitter {
             .unwrap_or(FRAME as u32)
             .min(FRAME as u32)
             .min(MAX_GAP - self.missing);
+        // FEC describes the preceding encoded 20 ms interval. Require both an
+        // exact media successor and a sequence hole: consecutive sequences with
+        // a timestamp gap can be capture discontinuities, with no such interval.
+        let fec = (gap == FRAME as u32)
+            .then(|| {
+                self.packets
+                    .iter()
+                    .find(|p| {
+                        p.timestamp == cursor.wrapping_add(FRAME as u32)
+                            && self
+                                .last_sequence
+                                .is_some_and(|last| p.sequence.wrapping_sub(last) as i16 > 1)
+                    })
+                    .map(|p| p.payload.clone())
+            })
+            .flatten();
         self.missing += gap;
         self.counters.concealed_samples += u64::from(gap);
         self.advance(gap as usize);
-        Some(Playout::Conceal(gap as usize))
+        Some(fec.map_or(Playout::Conceal(gap as usize), Playout::Fec))
     }
     fn advance(&mut self, samples: usize) {
         self.cursor = self.cursor.map(|v| v.wrapping_add(samples as u32));
@@ -325,6 +344,63 @@ mod tests {
     }
 
     #[test]
+    fn fec_waits_for_deadline_and_borrows_successor_once_across_both_wraps() {
+        let now = Instant::now();
+        let mut j = Jitter::default();
+        let start = u32::MAX - 479;
+        for (seq, offset) in [(65534, 0), (0, 1920), (1, 2880)] {
+            push(&mut j, seq, start.wrapping_add(offset), now);
+        }
+        packet(&mut j, 65534, now);
+        for _ in 0..5 {
+            assert!(j.pop(false, now).is_none());
+        }
+        assert_eq!(
+            j.pop(true, now),
+            Some(Playout::Fec(bytes::Bytes::from_static(b"0")))
+        );
+        push(&mut j, 65535, start.wrapping_add(960), now);
+        push(&mut j, 0, start.wrapping_add(1920), now);
+        packet(&mut j, 0, now);
+        packet(&mut j, 1, now);
+        assert_eq!(j.counters.rejected, 2);
+        assert_eq!(j.counters.concealed_samples, 960);
+    }
+
+    #[test]
+    fn burst_loss_uses_fec_only_immediately_before_successor_and_never_replays() {
+        let now = Instant::now();
+        let mut j = Jitter::default();
+        for seq in [0, 3, 4] {
+            push(&mut j, seq, u32::from(seq) * 960, now);
+        }
+        packet(&mut j, 0, now);
+        conceal(&mut j, 960, now);
+        assert_eq!(
+            j.pop(true, now),
+            Some(Playout::Fec(bytes::Bytes::from_static(b"3")))
+        );
+        packet(&mut j, 3, now);
+        packet(&mut j, 4, now);
+        conceal(&mut j, 960, now);
+        push(&mut j, 6, 5760, now);
+        packet(&mut j, 6, now);
+    }
+
+    #[test]
+    fn a_fractional_media_gap_with_sequence_loss_does_not_borrow_fec() {
+        let now = Instant::now();
+        let mut j = Jitter::default();
+        for (seq, ts) in [(0, 0), (2, 1097), (3, 2057)] {
+            push(&mut j, seq, ts, now);
+        }
+        packet(&mut j, 0, now);
+        conceal(&mut j, 137, now);
+        packet(&mut j, 2, now);
+        packet(&mut j, 3, now);
+    }
+
+    #[test]
     fn network_loss_conceals_once_and_prefetch_waits_for_delayed_packets() {
         let now = Instant::now();
         let mut j = Jitter::default();
@@ -340,7 +416,10 @@ mod tests {
         packet(&mut j, 2, now);
         packet(&mut j, 3, now);
         push(&mut j, 5, 4800, now);
-        conceal(&mut j, 960, now);
+        assert_eq!(
+            j.pop(true, now),
+            Some(Playout::Fec(bytes::Bytes::from_static(b"5")))
+        );
         packet(&mut j, 5, now);
         assert_eq!(j.counters.concealed_samples, 960);
     }

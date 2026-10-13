@@ -270,6 +270,7 @@ mod tests {
         s.remotes[3] = Some(super::super::Remote {
             since: Instant::now(),
             deafened: false,
+            decode_stats: Default::default(),
             activity: Default::default(),
             id,
             label: "A speaker".into(),
@@ -279,6 +280,7 @@ mod tests {
         s.remotes[3 + thiscord_shared::voice::ROOM_CAPACITY] = Some(super::super::Remote {
             since: Instant::now(),
             deafened: false,
+            decode_stats: Default::default(),
             activity: Default::default(),
             id,
             label: "Shared audio".into(),
@@ -374,6 +376,7 @@ mod tests {
         s.remotes[3] = Some(Remote {
             since: Instant::now(),
             deafened: false,
+            decode_stats: Default::default(),
             activity: Default::default(),
             id,
             label: "speaker".into(),
@@ -476,6 +479,7 @@ mod tests {
         old.remotes[3] = Some(Remote {
             since: Instant::now(),
             deafened: false,
+            decode_stats: Default::default(),
             activity: Default::default(),
             id,
             label: "speaker".into(),

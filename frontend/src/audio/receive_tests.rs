@@ -3,6 +3,7 @@ use super::*;
 
 fn remote(at: Instant) -> Remote {
     Remote {
+        decode_stats: Default::default(),
         since: at,
         deafened: false,
         activity: Default::default(),

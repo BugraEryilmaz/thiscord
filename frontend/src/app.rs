@@ -12,6 +12,7 @@ mod profile;
 mod screen;
 mod screen_player;
 mod servers;
+mod shortcuts;
 mod updates;
 mod window;
 

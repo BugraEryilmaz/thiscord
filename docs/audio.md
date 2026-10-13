@@ -19,8 +19,10 @@ available while reading text channels. Disconnect releases the devices.
 
 The desktop client shows a transparent, always-on-top roster when connected to
 voice and the main window is out of focus (including when minimized). It sits at
-the top left of the display containing Thiscord and passes mouse input through to
-the game. Initials stand in for profile pictures. Green rings identify speakers;
+the top left of the display containing Thiscord. Your entry stays first; hovering
+it reveals clickable Mute/Unmute and Deafen/Undeafen buttons. Other rows and empty
+space pass mouse input through to the game. Initials stand in for missing profile
+pictures. Green rings identify speakers;
 mute/deafen marks remain visible. Audio & voice has an overlay toggle for the
 current app session, enabled by default. Returning to Thiscord, disconnecting or
 losing voice access hides the overlay.
@@ -32,14 +34,16 @@ fullscreen Spaces. macOS transparency enables Tauri's `macos-private-api` featur
 this is for the existing direct-distribution builds, not Mac App Store submission.
 Actual game/monitor behavior still needs Windows/macOS/Linux runtime acceptance.
 
-Only participant presentation metadata is exposed to the overlay's read-only IPC
-capability; credentials and audio controls stay scoped to the main window.
+The overlay capability exposes participant presentation metadata and a narrow
+self mute/deafen command, available only while connected. It cannot select another
+participant, change audio devices, or access credentials. Native cursor hit testing
+enables mouse input only over your own row; the overlay stays non-activating.
 Remote indicators use decoded microphone energy before playback gain, with a
 250 ms hangover; missing packets and concealment do not extend activity. Screen
 audio never lights a microphone indicator. Local activity follows the transmit
 gate (including PTT), and mute/deafen/speak restrictions override activity. This is
 an activity indicator, not speech recognition. Native visibility and UI metadata
-are polled every 100 ms; no audio samples cross IPC.
+are polled every 50/100 ms respectively; no audio samples cross IPC.
 
 Short local two-note sounds announce your own successful voice join and other
 participants joining/leaving the connected channel. Reconnecting plays a fresh
@@ -171,6 +175,26 @@ The in-app Hold to talk button handles pointer cancellation, key release and
 focus loss. Optional global Ctrl+Shift+Space uses the Tauri 2 Rust shortcut plugin
 on Windows/macOS/X11. Registration conflicts are reported. Wayland explicitly
 falls back to the in-app button; portal integration remains future work.
+
+### Mute and deafen shortcuts
+
+Audio & voice → Keyboard shortcuts configures global toggle shortcuts. Defaults
+are Ctrl+Shift+M (mute) and Ctrl+Shift+D (deafen). Enter a modifier/key combination
+and choose Save shortcuts; an empty field disables that action. Reset to defaults
+fills the default combinations for review before saving. Preferences persist in
+`shortcuts.json` in the local app configuration directory. Holding a key toggles
+once until released. Duplicate combinations (including aliases), invalid keys,
+and the reserved Ctrl+Shift+Space PTT binding are rejected. OS registration
+conflicts preserve the previous working bindings. Startup failures appear in the
+shortcut settings panel. Windows, macOS and Linux/X11 use the native shortcut
+plugin; Wayland requires disabling the global shortcuts and using the UI controls.
+
+The voice bar, global shortcuts and overlay toggle the same native preferences.
+Device/processing saves preserve the current native mute/deafen values, and the
+main view polls them so out-of-focus actions appear on return. Deafen blocks both
+capture transmission and playback; undeafening preserves your manual mute choice.
+Shortcuts also work before joining voice. Backend speak restrictions remain
+independent and cannot be bypassed by unmuting.
 
 ## Changing settings during a call
 
@@ -343,11 +367,11 @@ re-establish sequence ordering after the 16-bit half-range (for example a long
 deafen); the timestamp floor still rejects old audio.
 
 Short timestamp holes produce at most 60 ms of consecutive concealment. Whole
-20 ms slots use the source's Opus PLC state; fractional holes use exact-length
+20 ms slots use the source's Opus FEC/PLC state; fractional holes use exact-length
 silence, since Opus PLC cannot represent arbitrary sample counts. Missing sequence
 numbers alone do not add silence if timestamps are contiguous. Missing media and
-PLC never refresh speaking indicators. Decode errors fill the declared slot with
-silence and clear decoder history.
+FEC/PLC never refresh speaking indicators. Decode errors clear potentially modified
+decoder history and use bounded PLC, with silence if that fallback also fails.
 
 Each source retains at most eight packets of 1,500 bytes. Queue age of **120 ms**,
 a cursor lag of **120 ms** against its monotonic playout anchor, more than **60 ms**
@@ -386,6 +410,76 @@ packets. Deterministic RTP/Opus/mixer tests also cover sender drops, fractional
 capture gaps, wrap/reordering, bounded queue pressure, long stalls, decoder/ring
 reset, deafen and source replacement. Actual device scheduling, acoustic quality
 and prolonged stalls still need three-platform live validation.
+
+### Opus microphone FEC policy
+
+Microphone encoding retains 48 kHz mono, 20 ms frames, `Application::Voip` and
+32 kbit/s. It explicitly sets `set_inband_fec(true)` and
+`set_packet_loss_perc(5)`. This is a conservative **fixed 5% expected-loss hint**,
+not a measured loss rate or dynamic adaptation; no RTCP feedback drives it.
+Redundancy spends part of the existing bitrate budget on the preceding speech
+frame, reducing bits available for the current frame and potentially changing
+bandwidth/mode selection. VBR packet sizes still vary. FEC is conditional on the
+codec's mode, available bits and signal; it is not present in every packet.
+
+The reviewed lockfile pins `opus 0.4.0` / `opusic-sys 0.7.5`, whose bundled
+`opus/package_version` identifies libopus **1.6.1**. In the wrapper's `src/lib.rs`,
+the boolean FEC setter sends `OPUS_SET_INBAND_FEC(1)`, and the loss setter sends
+`OPUS_SET_PACKET_LOSS_PERC`. The bundled `src/opus_encoder.c` accepts FEC values
+0..2 and loss percentages 0..100. The wrapper exposes only modes 0/1; mode 2's
+music-preserving preference is not requested. See the official
+[encoder controls](https://opus-codec.org/docs/opus_api-1.5/group__opus__encoderctls.html).
+Shared system audio retains its separate `Application::Audio`, 64 kbit/s encoder
+and default disabled FEC/zero loss hint; the microphone speech policy is not
+applied to music. All native receivers can opportunistically decode redundancy.
+
+The jitter decision is normal packet, FEC from the immediate media successor,
+concealment (PLC or fractional silence), or wait. While more than 10 ms of PCM
+remain, a missing original can still arrive.
+At that existing refill deadline, an available successor is cloned by reference
+and decoded with `fec=true` into exactly 960 samples. It remains buffered for
+normal decoding exactly once, after the missing interval. The media cursor advances
+once, so a late original cannot replay the recovered interval. FEC requires both
+a successor exactly 960 samples ahead and a sequence hole after the last decoded
+packet. Consecutive sequence numbers with a timestamp hole may indicate capture
+discontinuity rather than a lost encoded interval, so they conservatively use PLC.
+Fractional holes use exact silence and cannot borrow a full FEC frame. No extra
+wait is introduced for FEC. With burst loss, earlier gaps use PLC; only the gap
+immediately preceding an available packet can use that packet's redundancy.
+The startup buffer, eight-packet cap, 60 ms consecutive-concealment limit and maximum
+two output frames per stream per worker tick remain bounded.
+
+The [Opus decoder API](https://opus-codec.org/docs/opus_api-1.5/group__opus__decoder.html)
+requires the exact missing duration and serial decode order. It may return PLC
+successfully when FEC is absent (also confirmed in bundled `src/opus_decoder.c`).
+Empty or non-20-ms packets are rejected before jitter admission. Malformed encoded
+frames admitted with a valid 20 ms header use explicit PLC. A decode failure resets
+potentially modified decoder state before one bounded PLC fallback; a failed PLC
+produces one silent interval. No codec work runs in device callbacks. Recovered
+audio uses the existing per-source PCM queues, generation invalidation, volume,
+deafen and post-mix AEC reference. Only successfully decoded **normal** packets
+refresh remote activity; FEC attempts cannot extend an indicator using PLC.
+
+Opt-in local `audio_snapshot` logs include per-live-decoder `opus_decode` counters:
+normal frames, FEC attempts, successful FEC-call output frames, explicit PLC
+frames, decode/validation errors and silent fallback frames. Counters reset with
+source replacement. `fec_output_frames` includes implicit PLC and is **not a
+verified recovery count**; `verified_fec_frames` is explicitly null because the
+API used here cannot establish that count. No payloads or speaker identities are
+included. Existing `useinbandfec=1` SDP remains appropriate: it advertises receiver
+capability/preference, not guaranteed encoder redundancy, including for shared
+audio ([RFC 7587](https://www.rfc-editor.org/rfc/rfc7587.html#section-6.1)).
+
+`audio::codec::tests` encodes the committed synthetic speech WAV with the production
+policy, compares aligned dropped intervals with a PLC-only decoder, and requires
+FEC output distinct from PLC. The deterministic transport/playout simulation covers
+isolated and burst loss, duplicates, reordering, sequence wrap and irregular worker
+wakes through the actual remote decoder/mixer. Additional jitter and codec tests
+cover deadline waiting, absent redundancy/successors, late packets, invalid packets,
+source reset, deafen and generation invalidation. These are software regressions,
+not evidence of acoustic quality or real-network latency. Listening, microphone
+quality/bitrate tradeoffs, real loss/jitter trials and Windows/macOS/Linux hardware
+acceptance remain pending.
 
 Playback mixes on the device callback with atomic gain changes. It allocates no
 buffers, waits on no locks, and does no networking/codec/DSP work. Queues cap
