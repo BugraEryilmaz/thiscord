@@ -4,6 +4,7 @@ use std::time::{Duration, Instant};
 use thiscord_shared::audio::TransmitMode;
 
 pub(super) const PRE_ROLL: usize = 3;
+pub(super) const DELAY: Duration = Duration::from_millis(PRE_ROLL as u64 * 20);
 const ATTACK: usize = 2;
 const RELEASE: usize = 10;
 

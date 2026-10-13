@@ -1,8 +1,13 @@
 mod activity;
+mod codec;
 pub mod connection;
 mod cues;
 mod device_users;
 pub mod diagnostics;
+#[cfg(test)]
+#[path = "../../tests/support/audio_fixture.rs"]
+#[allow(dead_code)]
+mod fixture;
 mod format;
 mod frames;
 mod gate;
@@ -10,7 +15,10 @@ mod health;
 pub mod jitter;
 mod lifecycle;
 pub mod mixer;
+pub mod outgoing;
 pub mod processing;
+#[cfg(test)]
+mod receive_tests;
 mod reconfigure;
 pub mod reconnect;
 mod recording;
@@ -26,7 +34,7 @@ use mixer::*;
 use std::{
     sync::{
         Arc,
-        atomic::{AtomicBool, AtomicU64, Ordering},
+        atomic::{AtomicBool, Ordering},
         mpsc,
     },
     thread,
@@ -127,7 +135,7 @@ where
                     return;
                 }
                 activity.callback(true);
-                writer.begin(frames::capture_time(Instant::now(), info.timestamp()));
+                writer.begin_capture(frames::capture_time(Instant::now(), info.timestamp()));
                 let mut peak = 0.0_f32;
                 let mut dropped = 0;
                 for frame in data.chunks_exact(channels) {
@@ -164,17 +172,6 @@ where
     }
 }
 
-/// Native-only transport item. Restriction epochs also invalidate encoded work
-/// already waiting in the bounded sender queue; nothing here crosses Tauri IPC.
-pub struct MicrophonePacket {
-    pub payload: bytes::Bytes,
-    epoch: u64,
-    created: Instant,
-    push_to_talk: bool,
-    active: bool,
-    delivery: connection::Connection,
-}
-
 pub enum Command {
     DebugStart(std::path::PathBuf),
     DebugStop,
@@ -182,13 +179,15 @@ pub enum Command {
         volumes: volumes::Profile,
         connection: connection::Connection,
         settings: AudioSettings,
-        outgoing: tokio::sync::mpsc::Sender<MicrophonePacket>,
+        outgoing: tokio::sync::mpsc::Sender<outgoing::EncodedFrame>,
         microphone: bool,
     },
     Packet {
         connection: connection::Connection,
         slot: usize,
         sequence: u16,
+        timestamp: u32,
+        received_at: Instant,
         payload: bytes::Bytes,
     },
     Roster {
@@ -237,7 +236,6 @@ pub struct AudioEngine {
     inhibit: Arc<AtomicBool>,
     debug_stop: Arc<AtomicBool>,
     deafen: Arc<AtomicBool>,
-    capture_epoch: Arc<AtomicU64>,
 }
 impl Default for AudioEngine {
     fn default() -> Self {
@@ -245,6 +243,9 @@ impl Default for AudioEngine {
     }
 }
 impl AudioEngine {
+    pub fn outgoing_control(&self) -> Arc<outgoing::Control> {
+        self.probe.outgoing.clone()
+    }
     pub fn diagnostic_snapshot(&self) {
         diagnostics::event("requested_worker_snapshot", self.probe.snapshot());
     }
@@ -273,8 +274,6 @@ impl AudioEngine {
         let worker_debug_stop = debug_stop.clone();
         let deafen = Arc::new(AtomicBool::new(false));
         let worker_deafen = deafen.clone();
-        let capture_epoch = Arc::new(AtomicU64::new(0));
-        let worker_epoch = capture_epoch.clone();
         thread::Builder::new()
             .name("thiscord-audio-control".into())
             .spawn(move || {
@@ -282,10 +281,11 @@ impl AudioEngine {
                 for restart in 0..=3 {
                     let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| run(
                         &receiver, &packets, worker_stop.clone(), worker_pressed.clone(),
-                        worker_inhibit.clone(), worker_debug_stop.clone(), worker_deafen.clone(), worker_epoch.clone(), &worker_probe,
+                        worker_inhibit.clone(), worker_debug_stop.clone(), worker_deafen.clone(), &worker_probe,
                     )));
                     if result.is_ok() { break; }
                     worker_inhibit.store(true, Ordering::Release);
+                    worker_probe.outgoing.invalidate();
                     worker_deafen.store(true, Ordering::Release);
                     worker_pressed.store(false, Ordering::Release);
                     worker_probe.active.store(false, Ordering::Release);
@@ -306,32 +306,28 @@ impl AudioEngine {
             inhibit,
             debug_stop,
             deafen,
-            capture_epoch,
         }
     }
     fn urgent(&self, command: &Command) {
-        if matches!(
-            command,
-            Command::Stop | Command::Settings(_) | Command::Start { .. }
-        ) || matches!(command, Command::VoiceStart { connection, .. } if connection.active())
-            || matches!(command, Command::Pressed(value) if *value != self.pressed.load(Ordering::Acquire))
-        {
-            self.capture_epoch.fetch_add(1, Ordering::AcqRel);
-        }
         match command {
             Command::VoiceStart { connection, .. } if !connection.active() => {}
             Command::DebugStop => {
                 self.debug_stop.store(true, Ordering::Release);
             }
             Command::Stop => {
+                self.probe.outgoing.invalidate();
                 self.stop.store(true, Ordering::Release);
             }
             Command::Pressed(value) => {
+                if !value || !self.pressed.load(Ordering::Acquire) {
+                    self.probe.outgoing.invalidate();
+                }
                 self.pressed.store(*value, Ordering::Release);
             }
             Command::Settings(settings)
             | Command::Start { settings, .. }
             | Command::VoiceStart { settings, .. } => {
+                self.probe.outgoing.invalidate();
                 self.inhibit
                     .store(settings.muted || settings.deafened, Ordering::Release);
                 self.deafen.store(settings.deafened, Ordering::Release);
@@ -343,26 +339,12 @@ impl AudioEngine {
     /// is in flight. Only an ordered settings command can relax them again.
     pub fn restrict(&self, settings: &AudioSettings) {
         if settings.muted || settings.deafened {
-            self.capture_epoch.fetch_add(1, Ordering::AcqRel);
+            self.probe.outgoing.invalidate();
             self.inhibit.store(true, Ordering::Release);
         }
         if settings.deafened {
             self.deafen.store(true, Ordering::Release);
         }
-    }
-    /// Last native transport admission check. Already-written RTP cannot be
-    /// recalled; queued packets from before release/mute can never resume later.
-    pub fn accepts_microphone(&self, packet: &MicrophonePacket) -> bool {
-        self.accepts_microphone_at(packet, Instant::now())
-    }
-    fn accepts_microphone_at(&self, packet: &MicrophonePacket, now: Instant) -> bool {
-        packet.epoch == self.capture_epoch.load(Ordering::Acquire)
-            && packet.delivery.active()
-            && !self.stop.load(Ordering::Acquire)
-            && (!packet.active
-                || (!self.inhibit.load(Ordering::Acquire)
-                    && (!packet.push_to_talk || self.pressed.load(Ordering::Acquire))))
-            && now.saturating_duration_since(packet.created) <= Duration::from_millis(100)
     }
     pub fn command(&self, command: Command) -> Result<AudioStatus, String> {
         self.urgent(&command);
@@ -394,6 +376,9 @@ impl AudioEngine {
     }
 }
 struct Remote {
+    since: Instant,
+    deafened: bool,
+    decode_stats: codec::DecodeStats,
     activity: activity::Activity,
     id: thiscord_shared::AccountId,
     label: String,
@@ -401,24 +386,65 @@ struct Remote {
     decoder: opus::Decoder,
 }
 impl Remote {
-    fn refill(&mut self, writer: &mut StreamWriter) {
+    fn push(
+        &mut self,
+        sequence: u16,
+        timestamp: u32,
+        payload: bytes::Bytes,
+        received_at: Instant,
+        now: Instant,
+    ) {
+        if !self.deafened
+            && received_at >= self.since
+            && opus::packet::get_nb_samples(&payload, RATE).is_ok_and(|n| n == FRAME)
+        {
+            self.jitter
+                .push(sequence, timestamp, payload, received_at, now);
+        } else {
+            self.jitter.reject();
+        }
+    }
+    fn clear(&mut self, writer: &StreamWriter, now: Instant) {
+        self.since = now;
+        self.jitter.discard();
+        self.reset_decoder(writer);
+    }
+    fn set_deafened(&mut self, writer: &StreamWriter, deafened: bool, now: Instant) {
+        if deafened != self.deafened {
+            self.deafened = deafened;
+            self.clear(writer, now);
+        }
+    }
+    fn reset_decoder(&mut self, writer: &StreamWriter) {
+        let _ = self.decoder.reset_state();
+        self.activity = Default::default();
+        writer.discard();
+    }
+    fn refill(&mut self, writer: &mut StreamWriter, now: Instant) {
+        if self.deafened {
+            return;
+        }
+        if self.jitter.maintain(now) {
+            self.reset_decoder(writer);
+        }
+        if !writer.ready() {
+            return;
+        }
         // At most two frames per stream per worker tick. The callback remains
         // PCM-only; jitter buffering and Opus stay on this worker.
         for _ in 0..writer.refill_frames() {
-            let Some(packet) = self.jitter.pop(writer.needs_concealment()) else {
+            let Some(packet) = self.jitter.pop(writer.needs_concealment(), now) else {
                 break;
             };
             let mut pcm = [0.0_f32; FRAME];
-            if let Ok(n) =
-                self.decoder
-                    .decode_float(packet.as_deref().unwrap_or(&[]), &mut pcm, false)
-                && n == FRAME
-            {
-                if packet.is_some() {
-                    self.activity.observe(&pcm[..n], Instant::now());
-                }
-                writer.write(&pcm[..n]);
+            let samples = match &packet {
+                jitter::Playout::Conceal(samples) => *samples,
+                _ => FRAME,
+            };
+            if codec::decode(&mut self.decoder, &packet, &mut pcm, &mut self.decode_stats) {
+                self.activity.observe(&pcm, now);
             }
+            writer.write(&pcm[..samples]);
         }
     }
 }
@@ -595,7 +621,11 @@ struct Session {
     record_boundary: Option<Instant>,
     reset_codec: bool,
     delivery: connection::Connection,
-    outgoing: Option<tokio::sync::mpsc::Sender<MicrophonePacket>>,
+    outgoing: Option<tokio::sync::mpsc::Sender<outgoing::EncodedFrame>>,
+    media_clock: outgoing::MediaClock,
+    transmit_control: Arc<outgoing::Control>,
+    encoder_generation: u64,
+    encoder_active: bool,
     remotes: Vec<Option<Remote>>,
     processed_level: f32,
     processing: processing::Processing,
@@ -603,6 +633,7 @@ struct Session {
 impl Drop for Session {
     fn drop(&mut self) {
         self.delivery.close();
+        self.transmit_control.cancel_pending();
         self.devices.health.disable();
         if let Some(connection) = &self.connection {
             connection.close();
@@ -617,6 +648,7 @@ impl Session {
     fn clear_gate(&mut self) {
         self.gate.reset();
         self.delivery.close();
+        self.transmit_control.cancel_pending();
         self.delivery = Default::default();
         self.reset_codec = true;
         self.devices
@@ -658,14 +690,18 @@ impl Session {
             .store(pressed.load(Ordering::Acquire), Ordering::Release);
         devices.play()?;
         self.recovery.succeeded(&devices.info);
+        self.transmit_control.invalidate();
         self.devices = devices;
+        self.media_clock.restart_device();
         self.device_watch = Default::default();
         diagnostics::event("device_active", self.devices.info.clone());
         self.processing.reset();
         self.reset_gate(Instant::now());
         self.next = Instant::now();
-        for remote in self.remotes.iter_mut().flatten() {
-            remote.jitter = Default::default();
+        for (remote, writer) in self.remotes.iter_mut().zip(&self.devices.writers) {
+            if let Some(remote) = remote {
+                remote.clear(writer, Instant::now());
+            }
         }
         Ok(true)
     }
@@ -714,11 +750,7 @@ impl Session {
         diagnostics::event("processing_init_complete", serde_json::json!({}));
         let recovery = recovery::Recovery::starting();
         let devices = Devices::silent(settings);
-        let mut encoder = opus::Encoder::new(RATE, opus::Channels::Mono, opus::Application::Voip)
-            .map_err(|e| e.to_string())?;
-        encoder
-            .set_bitrate(opus::Bitrate::Bits(32_000))
-            .map_err(|e| e.to_string())?;
+        let encoder = codec::microphone_encoder().map_err(|e| e.to_string())?;
         let decoder = opus::Decoder::new(RATE, opus::Channels::Mono).map_err(|e| e.to_string())?;
         devices.writers[0]
             .control
@@ -751,6 +783,10 @@ impl Session {
             reset_codec: false,
             delivery: Default::default(),
             outgoing: None,
+            media_clock: Default::default(),
+            transmit_control: Default::default(),
+            encoder_generation: 0,
+            encoder_active: false,
             remotes: (0..MAX_STREAMS).map(|_| None).collect(),
             processed_level: 0.0,
             processing,
@@ -761,7 +797,6 @@ impl Session {
         stop: &AtomicBool,
         pressed: &AtomicBool,
         inhibit: &AtomicBool,
-        epoch: &AtomicU64,
         debug: &mut recording::Recorder,
     ) -> Result<(), String> {
         self.devices.health.check()?;
@@ -783,7 +818,12 @@ impl Session {
         if self.outgoing.is_some() {
             for (remote, writer) in self.remotes.iter_mut().zip(self.devices.writers.iter_mut()) {
                 if let Some(remote) = remote {
-                    remote.refill(writer);
+                    remote.set_deafened(
+                        writer,
+                        self.devices.control.deafen.load(Ordering::Acquire),
+                        Instant::now(),
+                    );
+                    remote.refill(writer, Instant::now());
                 }
             }
         }
@@ -810,13 +850,14 @@ impl Session {
         // ring itself bounds latency; trimming each callback to 60 ms destroys
         // capture continuity and prevents the echo filter from converging.
         for _ in 0..CAPACITY / FRAME {
-            self.capture_boundary(epoch.load(Ordering::Acquire), Instant::now());
+            self.capture_boundary(self.transmit_control.generation(), Instant::now());
             if let Some(at) = self.record_boundary.take() {
                 debug.capture_boundary(at);
             }
             if stop.load(Ordering::Acquire) {
                 break;
             }
+            let generation = self.transmit_control.generation();
             let Some(packet) = self.processing.capture_tapped(
                 &mut self.devices.capture,
                 &mut |frame, gap, reset, delay| {
@@ -840,19 +881,20 @@ impl Session {
                 .control
                 .pressed
                 .store(pressed.load(Ordering::Acquire), Ordering::Relaxed);
-            self.capture_packet(packet, stop, pressed, inhibit, epoch, debug)?;
+            self.capture_packet(packet, generation, inhibit, debug)?;
         }
         Ok(())
     }
     fn capture_packet(
         &mut self,
         captured: processing::Captured,
-        stop: &AtomicBool,
-        pressed: &AtomicBool,
+        generation: u64,
         inhibit: &AtomicBool,
-        epoch: &AtomicU64,
         debug: &mut recording::Recorder,
     ) -> Result<(), String> {
+        let media_position = self.media_clock.position(captured.at[0], captured.position);
+        let oldest_capture =
+            outgoing::oldest_capture(captured.at[0], self.processing.enhancement_delay_samples());
         let peak = captured.pcm.iter().fold(0.0_f32, |p, v| p.max(v.abs()));
         self.processed_level = peak;
         if self
@@ -862,8 +904,10 @@ impl Session {
             self.clear_gate();
         }
         let allowed = !inhibit.load(Ordering::Acquire)
-            && !stop.load(Ordering::Acquire)
-            && epoch.load(Ordering::Acquire) == self.capture_epoch
+            && generation == self.capture_epoch
+            && self
+                .transmit_control
+                .fresh_capture(generation, oldest_capture)
             && self.connection.as_ref().is_none_or(|c| c.active())
             && self
                 .capture_after
@@ -878,22 +922,26 @@ impl Session {
             self.settings.mode,
             self.settings.activation_threshold,
             allowed,
-            pressed.load(Ordering::Acquire),
+            self.devices.control.pressed.load(Ordering::Acquire),
         );
         let mut packet = [0_u8; 4000];
-        if self.reset_codec {
+        if self.reset_codec
+            || generation != self.encoder_generation
+            || (!active && self.encoder_active)
+        {
             self.encoder.reset_state().map_err(|e| e.to_string())?;
             self.decoder.reset_state().map_err(|e| e.to_string())?;
             self.reset_codec = false;
         }
+        self.encoder_generation = generation;
+        self.encoder_active = active;
         let n = self
             .encoder
             .encode_float(&pcm, &mut packet)
             .map_err(|e| e.to_string())?;
         // An urgent action may arrive while DSP or Opus runs. Discard that work
         // and clear codec lookbehind as well as pre-roll at the next boundary.
-        if stop.load(Ordering::Acquire)
-            || epoch.load(Ordering::Acquire) != self.capture_epoch
+        if generation != self.transmit_control.generation()
             || self.connection.as_ref().is_some_and(|c| !c.active())
         {
             self.devices
@@ -902,17 +950,47 @@ impl Session {
                 .store(false, Ordering::Release);
             return Ok(());
         }
+        let gate_delay = if self.settings.mode == TransmitMode::VoiceActivity {
+            gate::DELAY
+        } else {
+            Duration::ZERO
+        };
+        let oldest_capture = oldest_capture
+            .checked_sub(gate_delay)
+            .unwrap_or(oldest_capture);
         if let Some(outgoing) = &self.outgoing {
-            let accepted = outgoing
-                .try_send(MicrophonePacket {
-                    payload: bytes::Bytes::copy_from_slice(&packet[..n]),
-                    epoch: self.capture_epoch,
-                    created: Instant::now(),
-                    push_to_talk: self.settings.mode == TransmitMode::PushToTalk,
-                    active,
-                    delivery: self.delivery.clone(),
-                })
-                .is_ok();
+            let connection = self.connection.as_ref().ok_or("Missing voice connection")?;
+            let frame = outgoing::EncodedFrame {
+                payload: bytes::Bytes::copy_from_slice(&packet[..n]),
+                media_position,
+                oldest_capture,
+                generation,
+                connection: connection.clone(),
+                delivery: self.delivery.clone(),
+                activation_delay: gate_delay,
+            };
+            let accepted = match self
+                .transmit_control
+                .check(&frame, connection, Instant::now())
+            {
+                Err(reason) => {
+                    self.transmit_control.dropped(reason);
+                    false
+                }
+                Ok(()) => match outgoing.try_send(frame) {
+                    Ok(()) => true,
+                    Err(tokio::sync::mpsc::error::TrySendError::Full(_)) => {
+                        self.transmit_control
+                            .dropped(outgoing::DropReason::QueueFull);
+                        false
+                    }
+                    Err(tokio::sync::mpsc::error::TrySendError::Closed(_)) => {
+                        self.transmit_control
+                            .dropped(outgoing::DropReason::ControlInvalidated);
+                        false
+                    }
+                },
+            };
             self.devices
                 .control
                 .transmitting
@@ -1065,7 +1143,6 @@ fn run(
     inhibit: Arc<AtomicBool>,
     debug_stop: Arc<AtomicBool>,
     deafen: Arc<AtomicBool>,
-    capture_epoch: Arc<AtomicU64>,
     probe: &worker_health::Probe,
 ) {
     let mut debug = recording::Recorder::default();
@@ -1084,7 +1161,7 @@ fn run(
         probe.enter(worker_health::IDLE);
         probe.active.store(session.is_some(), Ordering::Release);
         if let Some(s) = &mut session {
-            s.capture_boundary(capture_epoch.load(Ordering::Acquire), Instant::now());
+            s.capture_boundary(s.transmit_control.generation(), Instant::now());
         }
         if session
             .as_ref()
@@ -1133,7 +1210,7 @@ fn run(
             if let Some(s) = &session {
                 diagnostics::event(
                     "audio_snapshot",
-                    serde_json::json!({"health":s.devices.health.diagnostics(),"recovering":s.recovery.active(),"muted":s.settings.muted,"deafened":s.settings.deafened,"echo":s.settings.echo_cancellation,"neural_echo":s.settings.neural_echo,"suppression":s.settings.noise_suppression,"suppression_model":s.settings.noise_suppression_model,"automatic_gain":s.settings.automatic_gain,"dropped_samples":s.devices.control.dropped.load(Ordering::Relaxed),"underrun_samples":s.devices.control.underruns.load(Ordering::Relaxed)}),
+                    serde_json::json!({"opus_decode":s.remotes.iter().flatten().map(|r| &r.decode_stats).collect::<Vec<_>>(),"verified_fec_frames":null,"receive":s.remotes.iter().flatten().map(|r|r.jitter.diagnostics()).collect::<Vec<_>>(),"health":s.devices.health.diagnostics(),"recovering":s.recovery.active(),"muted":s.settings.muted,"deafened":s.settings.deafened,"echo":s.settings.echo_cancellation,"neural_echo":s.settings.neural_echo,"suppression":s.settings.noise_suppression,"suppression_model":s.settings.noise_suppression_model,"automatic_gain":s.settings.automatic_gain,"dropped_samples":s.devices.control.dropped.load(Ordering::Relaxed),"underrun_samples":s.devices.control.underruns.load(Ordering::Relaxed)}),
                 );
             }
         }
@@ -1202,6 +1279,7 @@ fn run(
                             debug.stop();
                             session = None;
                             session = Some(Session::start(&settings, microphone)?);
+                            session.as_mut().unwrap().transmit_control = probe.outgoing.clone();
                             lease = Instant::now();
                             message.clear();
                         }
@@ -1223,6 +1301,7 @@ fn run(
                             }
                             s.volumes = Some(volumes);
                             s.outgoing = Some(outgoing);
+                            s.transmit_control = probe.outgoing.clone();
                             s.connection = Some(connection);
                             session = Some(s);
                             lease = Instant::now();
@@ -1231,6 +1310,8 @@ fn run(
                             connection,
                             slot,
                             sequence,
+                            timestamp,
+                            received_at,
                             payload,
                         } => {
                             if let Some(s) = &mut session
@@ -1238,8 +1319,10 @@ fn run(
                                     .as_ref()
                                     .is_some_and(|c| c.accepts(&connection))
                                 && let Some(Some(r)) = s.remotes.get_mut(slot)
+                                && !deafen.load(Ordering::Acquire)
+                                && !s.settings.deafened
                             {
-                                r.jitter.push(sequence, payload);
+                                r.push(sequence, timestamp, payload, received_at, Instant::now());
                             }
                         }
                         Command::Roster {
@@ -1290,6 +1373,9 @@ fn run(
                                         s.remotes[slot] = member
                                             .map(|m| {
                                                 Ok::<_, String>(Remote {
+                                                    since: Instant::now(),
+                                                    deafened: false,
+                                                    decode_stats: Default::default(),
                                                     activity: Default::default(),
                                                     id: m.account_id,
                                                     label: if shared_audio {
@@ -1352,9 +1438,14 @@ fn run(
                                 s.processing.settings(&settings)?;
                                 s.settings = settings.clone();
                                 debug.settings(&settings);
-                                if settings.deafened {
-                                    for remote in s.remotes.iter_mut().flatten() {
-                                        remote.jitter = Default::default();
+                                for (remote, writer) in s.remotes.iter_mut().zip(&s.devices.writers)
+                                {
+                                    if let Some(remote) = remote {
+                                        remote.set_deafened(
+                                            writer,
+                                            settings.deafened,
+                                            Instant::now(),
+                                        );
                                     }
                                 }
                                 apply(&s.devices.control, &settings);
@@ -1425,6 +1516,7 @@ fn run(
                 "device_failure",
                 serde_json::json!({"error":error,"device":s.devices.info,"health":s.devices.health.diagnostics()}),
             );
+            s.transmit_control.invalidate();
             s.clear_gate();
             s.processed_level = 0.0;
             s.devices.control.peak.store(0, Ordering::Relaxed);
@@ -1497,7 +1589,7 @@ fn run(
             } else if let Err(error) = {
                 probe.enter(worker_health::PROCESS);
                 let started = Instant::now();
-                let result = s.tick(&stop, &pressed, &inhibit, &capture_epoch, &mut debug);
+                let result = s.tick(&stop, &pressed, &inhibit, &mut debug);
                 probe.processed(started.elapsed());
                 result
             } {
@@ -1548,7 +1640,11 @@ mod lifecycle_tests {
             );
             expected.extend_from_slice(&decoded);
         }
+        let at = Instant::now();
         let mut remote = Remote {
+            since: at,
+            deafened: false,
+            decode_stats: Default::default(),
             activity: Default::default(),
             id: "00000000-0000-0000-0000-000000000001".parse().unwrap(),
             label: "synthetic shared audio".into(),
@@ -1560,9 +1656,9 @@ mod lifecycle_tests {
         let writer = &mut writers[thiscord_shared::voice::ROOM_CAPACITY];
         writer.control.active.store(true, Ordering::Release);
         for (i, packet) in packets.iter().take(3).enumerate() {
-            remote.jitter.push(i as u16, packet.clone());
+            remote.push(i as u16, i as u32 * FRAME as u32, packet.clone(), at, at);
         }
-        remote.refill(writer);
+        remote.refill(writer, at);
         let mut actual = Vec::new();
         let mut next_worker = 5;
         let intervals = [5, 7, 12, 4, 8, 5];
@@ -1571,11 +1667,18 @@ mod lifecycle_tests {
             for (sequence, packet) in packets.iter().enumerate().skip(3) {
                 let arrival = (sequence - 2) * 20 + if sequence % 7 == 0 { 15 } else { 0 };
                 if ms == arrival {
-                    remote.jitter.push(sequence as u16, packet.clone());
+                    let now = at + Duration::from_millis(ms as u64);
+                    remote.push(
+                        sequence as u16,
+                        sequence as u32 * FRAME as u32,
+                        packet.clone(),
+                        now,
+                        now,
+                    );
                 }
             }
             if ms >= next_worker {
-                remote.refill(writer);
+                remote.refill(writer, at + Duration::from_millis(ms as u64));
                 next_worker += intervals[wake % intervals.len()];
                 wake += 1;
             }
@@ -1669,53 +1772,24 @@ mod lifecycle_tests {
             inhibit: Arc::new(AtomicBool::new(false)),
             debug_stop: Arc::new(AtomicBool::new(false)),
             deafen: Arc::new(AtomicBool::new(false)),
-            capture_epoch: Arc::new(AtomicU64::new(0)),
         };
-        let stale = MicrophonePacket {
-            payload: bytes::Bytes::new(),
-            epoch: 0,
-            created: Instant::now(),
-            push_to_talk: true,
-            active: true,
+        let connection = connection::Connection::default();
+        let queued = outgoing::EncodedFrame {
+            payload: bytes::Bytes::from_static(b"synthetic"),
+            media_position: 0,
+            oldest_capture: Instant::now(),
+            generation: engine.probe.outgoing.generation(),
+            connection: connection.clone(),
             delivery: Default::default(),
+            activation_delay: Duration::ZERO,
         };
-        assert!(engine.accepts_microphone_at(&stale, stale.created + Duration::from_millis(100)));
-        assert!(!engine.accepts_microphone_at(&stale, stale.created + Duration::from_millis(101)));
-        // Release and re-press happen without the worker seeing either edge.
-        engine.urgent(&Command::Pressed(false));
-        engine.urgent(&Command::Pressed(true));
-        assert!(!engine.accepts_microphone(&stale));
-        let before_mute = engine.capture_epoch.load(Ordering::Acquire);
-        engine.restrict(&AudioSettings {
-            muted: true,
-            ..Default::default()
-        });
-        engine.urgent(&Command::Settings(AudioSettings::default()));
-        assert!(!engine.accepts_microphone(&MicrophonePacket {
-            epoch: before_mute,
-            ..stale
-        }));
-        let mut silence = MicrophonePacket {
-            payload: bytes::Bytes::new(),
-            epoch: engine.capture_epoch.load(Ordering::Acquire),
-            created: Instant::now(),
-            push_to_talk: true,
-            active: false,
-            delivery: Default::default(),
-        };
-        engine.inhibit.store(true, Ordering::Release);
-        engine.pressed.store(false, Ordering::Release);
-        assert!(engine.accepts_microphone_at(&silence, silence.created));
-        silence.active = true;
-        assert!(!engine.accepts_microphone_at(&silence, silence.created));
-        silence.active = false;
-        silence.delivery.close();
-        assert!(!engine.accepts_microphone_at(&silence, silence.created));
         for _ in 0..10 {
             engine.notify(Command::Packet {
                 connection: Default::default(),
                 slot: 0,
                 sequence: 0,
+                timestamp: 0,
+                received_at: Instant::now(),
                 payload: bytes::Bytes::new(),
             });
         }
@@ -1730,6 +1804,15 @@ mod lifecycle_tests {
                 .contains("queue is full")
         );
         engine.notify(Command::Pressed(false));
+        engine.notify(Command::Pressed(true));
+        assert_eq!(
+            engine
+                .probe
+                .outgoing
+                .check(&queued, &connection, Instant::now()),
+            Err(outgoing::DropReason::ControlInvalidated)
+        );
+        engine.notify(Command::Pressed(false));
         engine.notify(Command::Stop);
         engine.notify(Command::DebugStop);
         engine.notify(Command::Settings(AudioSettings {
@@ -1740,6 +1823,13 @@ mod lifecycle_tests {
         assert!(engine.stop.load(Ordering::Acquire));
         assert!(engine.debug_stop.load(Ordering::Acquire));
         assert!(engine.inhibit.load(Ordering::Acquire));
+        assert_eq!(
+            engine
+                .probe
+                .outgoing
+                .check(&queued, &connection, Instant::now()),
+            Err(outgoing::DropReason::ControlInvalidated)
+        );
         drop(receiver);
         assert!(
             engine
@@ -1754,5 +1844,56 @@ mod lifecycle_tests {
         engine.restrict(&AudioSettings::default()); // Restrictions cannot unmute/deafen.
         assert!(engine.deafen.load(Ordering::Acquire));
         assert!(engine.inhibit.load(Ordering::Acquire));
+    }
+
+    #[test]
+    fn urgent_mute_deafen_stop_and_replacement_invalidate_before_queue_drain() {
+        let (sender, _receiver) = mpsc::sync_channel(1);
+        let (media, _packets) = mpsc::sync_channel(1);
+        let engine = AudioEngine {
+            sender,
+            media,
+            probe: worker_health::Probe::new(),
+            stop: Default::default(),
+            pressed: Default::default(),
+            inhibit: Default::default(),
+            debug_stop: Default::default(),
+            deafen: Default::default(),
+        };
+        for command in [
+            Command::Settings(AudioSettings {
+                muted: true,
+                ..Default::default()
+            }),
+            Command::Settings(AudioSettings {
+                deafened: true,
+                ..Default::default()
+            }),
+            Command::Pressed(false),
+            Command::Stop,
+        ] {
+            let connection = connection::Connection::default();
+            let frame = outgoing::EncodedFrame {
+                payload: bytes::Bytes::from_static(b"synthetic"),
+                media_position: 0,
+                oldest_capture: Instant::now(),
+                generation: engine.probe.outgoing.generation(),
+                connection: connection.clone(),
+                delivery: connection::Connection::default(),
+                activation_delay: Duration::ZERO,
+            };
+            engine.notify(command);
+            // Relax before draining; old encoded speech remains invalid.
+            engine.notify(Command::Settings(AudioSettings::default()));
+            engine.notify(Command::Pressed(true));
+            assert_eq!(
+                engine
+                    .probe
+                    .outgoing
+                    .check(&frame, &connection, Instant::now()),
+                Err(outgoing::DropReason::ControlInvalidated)
+            );
+        }
+        engine.probe.exited();
     }
 }

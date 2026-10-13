@@ -63,19 +63,28 @@ connection closure or backend permissions.
 
 ## Restrictions and resets
 
-Atomic epochs preserve stop, mute/deafen, settings changes and both PTT edges even
-when several actions occur between worker ticks or the control queue is full.
-On observing an epoch, the worker clears gate/enhancement history, resets the
-local Opus state and rejects capture starting before that observation time. Old
+The native outgoing control generation, shared by the worker and sender, preserves
+stop, mute/deafen, settings changes and both PTT edges even when several actions
+occur between worker ticks or the control queue is full. On observing a generation
+change, the worker clears gate/enhancement history, resets the local Opus state
+and rejects capture starting before that observation time. Old
 device blocks still advance AEC with the original reference timestamps, but feed
 zero into enhancement. This prevents queued capture or DFN delay from seeding
 new pre-roll after unmute. It conservatively discards a partial boundary packet.
 Ordinary automatic gate closure does **not** reset enhancement or AEC.
 
-Encoded packets carry the control epoch and a native delivery lease. The desktop
-sender checks them, the connection, current restrictions and a 100 ms queue age
-before writing RTP. Stop/restriction/relaxation invalidates prior epochs; device
-replacement, DSP gaps, recovery and session drop invalidate delivery leases.
+Encoded packets carry the control generation and a native delivery lease. The
+sender checks them and connection identity at enqueue, dequeue and every poll of
+a pending RTP write. Capture age includes enhancement and gate delay; its budget
+is 100 ms plus the fixed gate delay (160 ms automatic, 100 ms PTT), with the gate
+allowance capped at 60 ms. A stall never expands this budget. For DFN3 automatic
+activation, normal 20 ms acquisition + 30 ms enhancement + 60 ms gate delay uses
+110 ms of the 160 ms budget. Output RTP positions stay on the current capture
+clock, including holes from capture/queue drops; pre-roll never rewinds it.
+Stop/restriction/relaxation invalidates prior generations; device
+replacement, DSP gaps, recovery and session drop invalidate delivery leases and
+wake pending writes. A generation change racing boundary observation also rejects
+fresh capture until old pre-roll has been cleared.
 Already-admitted transport writes cannot be recalled. Newly generated silence
 can still be sent while restricted so the receiver does not keep concealing old
 speech. No PCM or encoded payload crosses Tauri IPC or enters diagnostic logs.
@@ -131,7 +140,8 @@ cargo test -p thiscord-frontend --lib --features native-audio --locked audio:: -
 cargo test -p thiscord-frontend --lib --features native-audio --locked labelled_synthetic_comparison -- --nocapture
 cargo test -p thiscord-frontend --lib --example audio_replay --features deep-filter,neural-echo --profile ci --locked
 cargo clippy -p thiscord-frontend --lib --tests --examples --features deep-filter,neural-echo --profile ci --locked -- -D warnings
-cargo check -p thiscord-frontend --bin thiscord-desktop --features desktop --locked
+cargo build -p thiscord-frontend --bin thiscord-desktop --features desktop --locked
+cargo clippy -p thiscord-frontend --bin thiscord-desktop --features desktop --locked -- -D warnings
 cargo fmt --all -- --check
 ```
 
@@ -142,9 +152,14 @@ replacement, gaps, enhancement/codec history and replay compatibility. The exist
 three-platform CI audio job already runs these tests/replay and Clippy; build
 requirements and Cargo.lock are unchanged.
 
-Local Windows x64 verification: 93 selected native-audio tests; 116 library tests
-plus two replay tests with deep-filter/neural-echo enabled; audio and desktop
-Clippy with warnings denied; native desktop check; formatting and diff checks.
+Local Windows x64 verification after merging sender timing/FEC: 133 selected
+native-audio tests; 156 library tests plus two replay tests with deep-filter/neural-echo
+enabled; audio and desktop Clippy with warnings denied; native desktop build;
+formatting and diff checks. The Windows debug link emitted OpenH264 LNK4255
+(duplicate object names omit some dependency debug information) but succeeded.
+Merge regressions cover fixed pre-roll age allowance with DFN delay, expiry and
+cancellation during transport waits, current RTP slots across gate opening/gaps,
+and a control change between boundary observation and capture processing.
 The original AEC/double-talk regressions remain passing. No database, backend or
 UI/shared-contract change required backend/WSL or WASM checks for this task.
 
