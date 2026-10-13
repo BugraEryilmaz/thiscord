@@ -105,6 +105,7 @@ impl Pending {
                 }
                 debug.stop(); // New device clocks/formats require a new recording.
                 next.inherit(&s.devices);
+                s.collect_metrics();
                 std::mem::swap(&mut s.devices, next);
                 s.media_clock.restart_device();
                 s.transmit_control.invalidate();
@@ -196,6 +197,78 @@ mod tests {
             processing: processing::Processing::new(&AudioSettings::default()).unwrap(),
         }
     }
+    #[test]
+    fn device_recovery_preserves_numeric_totals_but_snapshot_omits_identity() {
+        let mut s = session();
+        s.devices.control.counts.capture_overflow.add(480);
+        s.devices.control.counts.input_samples.add(960);
+        s.devices.control.counts.input_clipped.add(3);
+        let stop = AtomicBool::new(false);
+        let pressed = AtomicBool::new(false);
+        let deafen = AtomicBool::new(false);
+        assert!(
+            s.resume_devices(devices(true), &stop, &pressed, &deafen)
+                .unwrap()
+        );
+        let q = s.quality();
+        assert_eq!(q.metrics.total.capture_overflow_samples, 480);
+        assert_eq!(q.metrics.total.input_samples, 960);
+        assert_eq!(q.metrics.total.input_clipped_samples, 3);
+        let text = serde_json::to_string(&q).unwrap();
+        for forbidden in [
+            "account_id",
+            "guild_id",
+            "label",
+            "payload",
+            "token",
+            "sdp",
+            "model_path",
+        ] {
+            assert!(!text.contains(forbidden));
+        }
+    }
+
+    #[test]
+    fn dtx_omissions_are_neither_offered_packets_nor_transport_drops() {
+        let mut s = session();
+        s.settings.mode = TransmitMode::PushToTalk;
+        let connection = connection::Connection::default();
+        s.connection = Some(connection.clone());
+        let (tx, mut rx) = tokio::sync::mpsc::channel(1);
+        s.outgoing = Some(tx);
+        let at = Instant::now() + Duration::from_secs(1);
+        let mut debug = recording::Recorder::default();
+        for n in 0..100u64 {
+            let time = at + Duration::from_millis(n * 20);
+            s.capture_packet(
+                processing::Captured {
+                    pcm: [0.0; FRAME],
+                    evidence: gate::Evidence([0.0; 2]),
+                    at: [time, time + Duration::from_millis(10)],
+                    gap: [false; 2],
+                    position: n * FRAME as u64,
+                },
+                0,
+                &AtomicBool::new(false),
+                &mut debug,
+            )
+            .unwrap();
+            if let Ok(mut frame) = rx.try_recv() {
+                frame.finish(Count::OutgoingSentPackets);
+            }
+        }
+        assert!(s.encoder.stats.omitted_packets > 50);
+        let q = connection.metrics.snapshot().total;
+        assert_eq!(
+            q.outgoing_offered_packets,
+            100 - s.encoder.stats.omitted_packets
+        );
+        assert_eq!(q.outgoing_sent_packets, q.outgoing_offered_packets);
+        assert_eq!(q.outgoing_full_packets, 0);
+        assert_eq!(q.outgoing_expired_packets, 0);
+        assert_eq!(q.outgoing_invalidated_packets, 0);
+    }
+
     #[test]
     fn preroll_keeps_current_rtp_slots_and_invalidates_pending_audio_on_gaps() {
         let mut s = session();

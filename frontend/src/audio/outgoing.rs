@@ -11,6 +11,7 @@ pub const QUEUE_CAPACITY: usize = 5;
 pub const MAX_PACKET_AGE: Duration = Duration::from_millis(100);
 
 pub struct EncodedFrame {
+    pub(super) accounted: bool,
     pub payload: bytes::Bytes,
     pub media_position: u64,
     pub marker: bool,
@@ -20,7 +21,22 @@ pub struct EncodedFrame {
     pub delivery: Connection,
     pub activation_delay: Duration,
 }
+impl Drop for EncodedFrame {
+    fn drop(&mut self) {
+        if !self.accounted {
+            self.finish(super::quality::Count::OutgoingInvalidatedPackets);
+        }
+    }
+}
 impl EncodedFrame {
+    /// Exactly one outcome, including cancellation while still in the queue.
+    pub fn finish(&mut self, outcome: super::quality::Count) {
+        if !self.accounted {
+            self.accounted = true;
+            self.connection.metrics.add(outcome, 1);
+        }
+    }
+
     fn deadline(&self) -> Instant {
         self.oldest_capture + MAX_PACKET_AGE + self.activation_delay.min(super::gate::DELAY)
     }
@@ -133,6 +149,16 @@ impl Control {
             _ = tokio::time::sleep_until(frame.deadline().into()) => Err(DropReason::Expired),
         }
     }
+    /// Report the transport decision in the owning connection's bounded window.
+    pub fn dropped_frame(&self, reason: DropReason, frame: &mut EncodedFrame) {
+        use super::quality::Count;
+        frame.finish(match reason {
+            DropReason::QueueFull => Count::OutgoingFullPackets,
+            DropReason::Expired => Count::OutgoingExpiredPackets,
+            DropReason::ControlInvalidated => Count::OutgoingInvalidatedPackets,
+        });
+        self.dropped(reason);
+    }
     pub fn dropped(&self, reason: DropReason) {
         match reason {
             DropReason::QueueFull => &self.queue_full,
@@ -213,6 +239,7 @@ mod tests {
         media_position: u64,
     ) -> EncodedFrame {
         EncodedFrame {
+            accounted: false,
             payload: bytes::Bytes::from_static(b"synthetic"),
             oldest_capture: at,
             generation,
@@ -222,6 +249,43 @@ mod tests {
             media_position,
             marker: false,
         }
+    }
+
+    #[test]
+    fn quality_counts_each_disposition_once_and_receiver_drop_invalidates_backlog() {
+        use super::super::quality::Count;
+        let at = Instant::now();
+        let connection = Connection::default();
+        let control = Control::new(at);
+        for reason in [
+            DropReason::QueueFull,
+            DropReason::Expired,
+            DropReason::ControlInvalidated,
+        ] {
+            let mut packet = frame(at, 0, &connection, 0);
+            control.dropped_frame(reason, &mut packet);
+        }
+        let (tx, rx) = tokio::sync::mpsc::channel(1);
+        assert!(tx.try_send(frame(at, 0, &connection, 960)).is_ok());
+        drop(rx);
+        let mut sent = frame(at, 0, &connection, 1920);
+        sent.finish(Count::OutgoingSentPackets);
+        sent.finish(Count::OutgoingFailedPackets);
+        drop(sent);
+        let counts = connection.metrics.snapshot().total;
+        assert_eq!(counts.outgoing_full_packets, 1);
+        assert_eq!(counts.outgoing_expired_packets, 1);
+        assert_eq!(counts.outgoing_invalidated_packets, 2);
+        assert_eq!(counts.outgoing_sent_packets, 1);
+        assert_eq!(counts.outgoing_failed_packets, 0);
+        assert_eq!(
+            Connection::default()
+                .metrics
+                .snapshot()
+                .total
+                .outgoing_invalidated_packets,
+            0
+        );
     }
 
     #[test]

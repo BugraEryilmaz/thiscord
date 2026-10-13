@@ -38,6 +38,10 @@ while calls and screen sharing continue. Use the Thiscord system tray icon
 On macOS, clicking the Dock icon also restores the window. Linux minimizes to the
 taskbar as well, keeping a recovery path on desktops without a tray host. Tray creation failures
 disable the preference for that run. With the setting off, closing exits the app.
+The voice bar shows recent quality observations; Audio & voice has advanced
+[voice-quality diagnostics](docs/audio-quality.md) for local buffering, timing,
+clipping and packet handling. Metrics work without logging or recording audio.
+
 Optional rotating audio diagnostics are off by default. Turn on **Settings > Audio &
 voice > Enable diagnostic logging** before reproducing a failure, then use **Open
 diagnostic logs** to share the `audio-diagnostics*.jsonl` files. The preference

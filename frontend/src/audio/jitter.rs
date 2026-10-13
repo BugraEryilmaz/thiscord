@@ -1,6 +1,10 @@
 //! Bounded 48 kHz/20 ms playout. Timestamps measure media; sequences reject
 //! duplicates and packets behind already consumed audio. Clocks are injectable.
-use super::{frames::sample_duration, mixer::FRAME};
+use super::{
+    frames::sample_duration,
+    mixer::FRAME,
+    quality::{self, Count},
+};
 use std::time::{Duration, Instant};
 
 pub const PACKETS: usize = 12;
@@ -18,13 +22,22 @@ pub struct Packet {
     pub arrived: Instant,
     pub payload: bytes::Bytes,
 }
-#[derive(Debug, PartialEq)]
+#[derive(PartialEq)]
 pub enum Playout {
     Packet(bytes::Bytes),
     /// Borrow the following packet; its normal decode remains due.
     Fec(bytes::Bytes),
     /// Full packets use Opus PLC; fractional holes use exact-length silence.
     Conceal(usize),
+}
+impl std::fmt::Debug for Playout {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Packet(_) => f.write_str("Packet(<redacted>)"),
+            Self::Fec(_) => f.write_str("Fec(<redacted>)"),
+            Self::Conceal(samples) => f.debug_tuple("Conceal").field(samples).finish(),
+        }
+    }
 }
 #[derive(Default, Clone, serde::Serialize)]
 pub struct Metrics {
@@ -75,6 +88,7 @@ struct Counters {
     concealed_samples: u64,
 }
 pub struct Jitter {
+    pub quality: std::sync::Arc<quality::Metrics>,
     packets: Vec<Packet>,
     cursor: Option<u32>,
     floor: Option<u32>,
@@ -103,6 +117,7 @@ pub struct Jitter {
 impl Default for Jitter {
     fn default() -> Self {
         Self {
+            quality: Default::default(),
             packets: Vec::with_capacity(PACKETS),
             cursor: None,
             floor: None,
@@ -143,9 +158,11 @@ impl Jitter {
         received: Instant,
         now: Instant,
     ) -> bool {
+        self.quality.add(Count::ReceivedPackets, 1);
         if now.saturating_duration_since(received) >= MAX_AGE {
             self.counters.expired += 1;
             self.metrics.worker_queue_discards += 1;
+            self.quality.add(Count::ResyncDiscardedPackets, 1);
             return false;
         }
         if !payload.is_empty() && payload.len() <= 1500 {
@@ -171,11 +188,15 @@ impl Jitter {
             })
         {
             self.counters.rejected += 1;
+            if payload.is_empty() || payload.len() > 1500 {
+                self.quality.add(Count::InvalidPackets, 1);
+            }
             if self
                 .floor
                 .is_some_and(|floor| (timestamp.wrapping_sub(floor) as i32) < 0)
             {
                 self.metrics.late_discards += 1;
+                self.quality.add(Count::LatePackets, 1);
             }
             return false;
         }
@@ -199,6 +220,7 @@ impl Jitter {
                 // Reordering can move the initial anchor only before playout.
                 if self.playing || self.last_sequence.is_some() || distance < -WINDOW {
                     self.counters.rejected += 1;
+                    self.quality.add(Count::LatePackets, 1);
                     return false;
                 }
                 self.cursor = Some(timestamp);
@@ -223,10 +245,12 @@ impl Jitter {
                 .0;
             if timestamp.wrapping_sub(self.packets[oldest].timestamp) as i32 <= 0 {
                 self.counters.overflow += 1;
+                self.quality.add(Count::JitterOverflowPackets, 1);
                 return false;
             }
             self.packets.swap_remove(oldest);
             self.counters.overflow += 1;
+            self.quality.add(Count::JitterOverflowPackets, 1);
             self.reset_pending = true;
         }
         self.packets.push(Packet {
@@ -247,6 +271,10 @@ impl Jitter {
         self.packets
             .retain(|p| now.saturating_duration_since(p.arrived) < MAX_AGE);
         self.counters.expired += (before - self.packets.len()) as u64;
+        self.quality.add(
+            Count::ResyncDiscardedPackets,
+            (before - self.packets.len()) as u64,
+        );
         // Rendered silence still consumes media time. Move the watermark in
         // whole 20 ms slots so a delayed pre-resumption packet cannot replay
         // after seconds of silence. Periodic updates reanchor clock drift.
@@ -311,8 +339,13 @@ impl Jitter {
                 .max_by_key(|p| p.timestamp.wrapping_sub(cursor) as i32)
                 .map(|p| p.timestamp)
         {
+            let before = self.packets.len();
             self.packets
                 .retain(|p| latest.wrapping_sub(p.timestamp) <= 2 * FRAME as u32);
+            self.quality.add(
+                Count::ResyncDiscardedPackets,
+                (before - self.packets.len()) as u64,
+            );
             let first = self
                 .packets
                 .iter()
@@ -361,9 +394,11 @@ impl Jitter {
                 self.last_data = Some(packet.timestamp);
             }
             if let Some(last) = self.last_sequence {
-                self.metrics.sequence_gaps += (packet.sequence.wrapping_sub(last) as i16)
+                let gaps = (packet.sequence.wrapping_sub(last) as i16)
                     .saturating_sub(1)
                     .max(0) as u64;
+                self.metrics.sequence_gaps += gaps;
+                self.quality.add(Count::SequenceGapPackets, gaps);
             }
             self.last_sequence = Some(packet.sequence);
             self.missing = 0;
@@ -485,12 +520,16 @@ impl Jitter {
         let identity = (sequence, timestamp);
         if self.seen.contains(&Some(identity)) {
             self.metrics.duplicates += 1;
+            self.quality.add(Count::DuplicatePackets, 1);
             return;
         }
         self.seen[self.seen_index] = Some(identity);
         self.seen_index = (self.seen_index + 1) % self.seen.len();
         if let Some((ts, at)) = self.latest {
             let media = timestamp.wrapping_sub(ts) as i32;
+            if media < 0 {
+                self.quality.add(Count::ReorderedPackets, 1);
+            }
             let elapsed = arrived.saturating_duration_since(at).as_secs_f64();
             if arrived >= at && media.unsigned_abs() <= 48000 && elapsed <= 1.0 {
                 let variation = (elapsed * 1000.0 - f64::from(media) / 48.0)
@@ -531,6 +570,10 @@ impl Jitter {
             self.metrics.worker_stalls += 1;
         }
         self.maintain(now)
+    }
+    /// Buffered-media evidence only: empty tails and explicit DTX are not starvation.
+    pub fn pending_media(&self) -> bool {
+        self.playing && !self.dtx && !self.packets.is_empty()
     }
     pub fn metrics(&self) -> Metrics {
         Metrics {
@@ -1025,6 +1068,57 @@ mod dtx_tests {
                 jitter.pop(true, at + PREBUFFER),
                 Some(Playout::Conceal(FRAME))
             ));
+        }
+    }
+}
+
+#[cfg(test)]
+mod quality_tests {
+    use super::*;
+
+    #[test]
+    fn observations_distinguish_reorder_duplicates_late_and_local_expiry() {
+        let at = Instant::now();
+        let mut jitter = Jitter::default();
+        let push = |j: &mut Jitter, seq, ts, received, now| {
+            j.push(
+                seq,
+                ts,
+                bytes::Bytes::from_static(b"synthetic"),
+                received,
+                now,
+            )
+        };
+        assert!(push(&mut jitter, 10, 0, at, at));
+        assert!(push(&mut jitter, 12, 1920, at, at));
+        assert!(push(&mut jitter, 11, 960, at, at));
+        assert!(!push(&mut jitter, 11, 960, at, at));
+        for _ in 0..3 {
+            assert!(jitter.pop(false, at).is_some());
+        }
+        assert!(!push(&mut jitter, 9, 0u32.wrapping_sub(960), at, at));
+        assert!(!push(&mut jitter, 13, 2880, at, at + MAX_AGE));
+        let q = jitter.quality.snapshot().total;
+        assert_eq!(q.received_packets, 6);
+        assert_eq!(q.duplicate_packets, 1);
+        assert_eq!(q.reordered_packets, 2);
+        assert_eq!(q.late_packets, 1);
+        assert_eq!(q.resync_discarded_packets, 1);
+        assert_eq!(q.sequence_gap_packets, 0);
+        assert_eq!(
+            Jitter::default().quality.snapshot().total.received_packets,
+            0
+        );
+    }
+
+    #[test]
+    fn debug_decisions_redact_encoded_bytes() {
+        for decision in [
+            Playout::Packet(bytes::Bytes::from_static(b"private-audio")),
+            Playout::Fec(bytes::Bytes::from_static(b"private-audio")),
+        ] {
+            assert!(format!("{decision:?}").contains("<redacted>"));
+            assert!(!format!("{decision:?}").contains("private-audio"));
         }
     }
 }

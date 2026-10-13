@@ -552,6 +552,9 @@ async fn run(
             )
             .await
             {
+                diagnostics_connection
+                    .metrics
+                    .set_network(thiscord_frontend::audio::quality::network(&report));
                 diagnostics_screen.network_diagnostics(
                     &diagnostics_connection,
                     thiscord_frontend::screen::metrics::network(&report),
@@ -647,21 +650,23 @@ async fn run(
                     },ServerEvent::Error{error}=>return Err(Failure::server(error)),ServerEvent::Revoked{}=>return Err("Voice access changed. Join again if you still have permission.".into()),_=>{},
                 }
             },
-            Some(frame)=outgoing.recv()=>{
+            Some(mut frame)=outgoing.recv()=>{
                 if let Err(reason) = transmit_control.check(&frame, &attempt.connection, Instant::now()) {
-                    transmit_control.dropped(reason);
+                    transmit_control.dropped_frame(reason, &mut frame);
                     continue;
                 }
                 let (sequence, timestamp) = rtp_clock.pending(frame.media_position);
                 let packet=rtc::rtp::Packet{header:rtc::rtp::header::Header{version:2,payload_type:MediaKind::Microphone.payload_type(),ssrc:MediaKind::Microphone.publisher_ssrc(),sequence_number:sequence,timestamp,marker:frame.marker,..Default::default()},payload:frame.payload.clone()};
                 match transmit_control.guard_write(&frame, &attempt.connection, track.write_rtp(packet)).await {
                     Ok(result) => {
+                        use thiscord_frontend::audio::quality::Count;
+                        frame.finish(if result.is_ok() { Count::OutgoingSentPackets } else { Count::OutgoingFailedPackets });
                         result.map_err(|_|Failure::temporary("Voice media connection failed").with_reason("media_send_failed"))?;
                         rtp_clock.next(frame.media_position);
                         accepted_packets += 1;
                         accepted_bytes += frame.payload.len() as u64;
                     },
-                    Err(reason) => transmit_control.dropped(reason),
+                    Err(reason) => transmit_control.dropped_frame(reason, &mut frame),
                 }
             },
             _=ticker.tick()=>{

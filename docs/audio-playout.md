@@ -103,8 +103,10 @@ Existing opt-in `audio_snapshot` logs include per-source playout metrics without
 account IDs, timestamps, PCM or packet contents: target/current delay, arrival
 variation, packet/PCM occupancy, late/duplicate/capacity/stale discards, worker
 queue discards/stalls, rebuffer/discontinuity counts, FEC attempts, concealments,
-decode errors, inactivity and estimated drift/applied correction in ppm. Global
-callback underrun samples remain available. `current_ms` excludes OS/device
+decode errors, inactivity and estimated drift/applied correction in ppm.
+Per-stream callback starvation samples remain available (buffered-media evidence
+required; explicit DTX, inactive slots and deafen excluded). These are not device
+xrun counts; see [quality definitions](audio-quality.md). `current_ms` excludes OS/device
 buffering and the fixed 0.333 ms filter delay; it is not an end-to-end latency
 measurement. Counters restart on source replacement; device/deafen boundaries
 clear queued audio and rate state while retaining media watermarks and counters.

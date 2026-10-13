@@ -87,6 +87,13 @@ pub fn event(name: &'static str, details: serde_json::Value) {
     logger.event(name, details);
 }
 
+/// Lazy numeric snapshots: opt-out performs no serialization or writer work.
+pub fn quality(snapshot: impl FnOnce() -> thiscord_shared::audio::AudioQuality) {
+    if let Some(logger) = LOGGER.get() {
+        logger.quality(snapshot);
+    }
+}
+
 struct Logger {
     directory: PathBuf,
     preference: PathBuf,
@@ -94,6 +101,18 @@ struct Logger {
 }
 
 impl Logger {
+    fn quality(&self, snapshot: impl FnOnce() -> thiscord_shared::audio::AudioQuality) {
+        if !self.active.try_lock().is_ok_and(|s| s.is_some()) {
+            return;
+        }
+        let mut quality = snapshot();
+        let streams = std::mem::take(&mut quality.streams);
+        self.event("voice_quality", serde_json::json!(quality));
+        // Each record stays below the existing 16 KiB limit even at room capacity.
+        for stream in streams.into_iter().take(super::mixer::MAX_STREAMS) {
+            self.event("voice_stream_quality", serde_json::json!(stream));
+        }
+    }
     fn new(directory: PathBuf, preference: PathBuf) -> Self {
         Self {
             directory,
@@ -319,12 +338,55 @@ mod tests {
     }
 
     #[test]
+    fn quality_logs_all_slots_in_bounded_identity_free_records() {
+        let root = temporary();
+        let directory = root.join("logs");
+        let logger = Logger::new(directory.clone(), root.join("diagnostics.json"));
+        logger.set_enabled(true).unwrap();
+        logger.quality(|| thiscord_shared::audio::AudioQuality {
+            streams: (0..super::super::mixer::MAX_STREAMS)
+                .map(|slot| thiscord_shared::audio::StreamQuality {
+                    slot,
+                    ..Default::default()
+                })
+                .collect(),
+            ..Default::default()
+        });
+        logger.event("quality_complete", serde_json::json!({}));
+        wait_for(&directory, "quality_complete");
+        logger.set_enabled(false).unwrap();
+        let text = fs::read_to_string(directory.join("audio-diagnostics.jsonl")).unwrap();
+        let mut streams = 0;
+        for line in text.lines() {
+            assert!(line.len() < 16 * 1024);
+            let value: serde_json::Value = serde_json::from_str(line).unwrap();
+            if value["event"] == "voice_stream_quality" {
+                streams += 1;
+            }
+            assert!(value.get("details_omitted").is_none());
+        }
+        assert_eq!(streams, super::super::mixer::MAX_STREAMS);
+        for forbidden in [
+            "account_id",
+            "guild_id",
+            "payload",
+            "token",
+            "sdp",
+            "model_path",
+        ] {
+            assert!(!text.contains(forbidden));
+        }
+        drop(logger);
+        fs::remove_dir_all(root).unwrap();
+    }
+    #[test]
     fn opt_in_persists_and_disable_stops_writes_without_deleting_logs() {
         let root = temporary();
         let directory = root.join("logs");
         let preference = root.join("config/diagnostics.json");
         let logger = Logger::new(directory.clone(), preference.clone());
         logger.restore().unwrap();
+        logger.quality(|| panic!("opt-out must not request a snapshot"));
         logger.event("off_by_default", serde_json::json!({}));
         assert!(!root.exists());
         logger.set_enabled(true).unwrap();
@@ -341,6 +403,7 @@ mod tests {
             logger.event("queued", serde_json::json!({}));
         }
         logger.set_enabled(false).unwrap();
+        logger.quality(|| panic!("disabled writer must stay stopped"));
         let file = directory.join("audio-diagnostics.jsonl");
         let before = fs::read(&file).unwrap();
         logger.event("disabled_event", serde_json::json!({}));

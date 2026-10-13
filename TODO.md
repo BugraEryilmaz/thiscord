@@ -230,7 +230,12 @@ speaker isolation and physical acoustic acceptance remain future work.
 - [ ] In-place ICE restart and proactive long-call relay credential refresh.
 - [x] Docker coturn deployment, shared-secret configuration and local relay tests.
 - [ ] Restrictive NAT, forced WebRTC relay fallback and off-site public UDP acceptance.
-- [ ] Packet-loss/jitter network trials, connection quality metrics and adaptive microphone bitrate.
+- [x] Bounded local voice-quality metrics, separate transport/CPU/buffer causes,
+  compact status and advanced diagnostics (docs/audio-quality.md), integrated with
+  capture-age transport deadlines, Opus FEC/DTX and adaptive playout.
+- [ ] Packet-loss/jitter network trials and adaptive microphone bitrate.
+- [ ] Physical multi-user acceptance of quality attribution, overhead and device
+  behavior on Windows/macOS/Linux, including inactivity/DTX and CPU contention.
 
 ## 7. Backend Rust SFU
 
@@ -261,7 +266,8 @@ speaker isolation and physical acoustic acceptance remain future work.
 - [ ] Moderator mute/deafen/move-to-channel controls with hierarchy enforcement.
 - [x] Desktop voice overlay with participant roster, speaking activity and focus visibility.
 - [x] Customizable global mute/deafen shortcuts and clickable self controls on overlay hover.
-- [ ] In-app remote speaking indicators and connection-quality UI.
+- [x] Compact connection-quality UI with local failure attribution and unavailable values.
+- [ ] In-app remote speaking indicators.
 - [ ] Overlay runtime acceptance in games, mixed-DPI monitors, macOS Spaces and Linux compositors.
 - [x] Automatic transport reconnection after network failure or server restart.
 - [ ] Validate real network switching/server outages across native hosts; support

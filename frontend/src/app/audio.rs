@@ -115,7 +115,7 @@ fn VoiceControls(ui: Ui) -> impl IntoView {
 #[component]
 pub(super) fn VoiceBar(ui: Ui) -> impl IntoView {
     view! {<Show when=move||ui.voice.get().channel_id.is_some()><aside class="flex shrink-0 flex-wrap items-center justify-between gap-3 rounded-lg bg-black/20 p-3" aria-label="Voice controls">
-        <span class="text-sm">{move||ui.voice.get().message}</span><VoiceControls ui=ui/><super::screen::ScreenControls ui=ui/>
+        <div class="text-sm"><p>{move||ui.voice.get().message}</p><p class="text-xs text-slate-400">{move||thiscord_frontend::audio_quality::summary(ui.audio_status.get().and_then(|s|s.quality).as_ref())}</p></div><VoiceControls ui=ui/><super::screen::ScreenControls ui=ui/>
         <Show when=move||ui.audio_status.get().and_then(|s|s.recording).is_some_and(|r|r.active)>
             <button class="rounded bg-red-700 px-3 py-2 text-sm text-white" on:click=move |_|debug_command(ui,"audio_debug_stop")>
                 {move||format!("● Recording {}s · Stop",ui.audio_status.get().and_then(|s|s.recording).map_or(0,|r|r.elapsed_ms/1000))}
@@ -357,7 +357,12 @@ pub(super) fn AudioSettingsPanel(ui: Ui) -> impl IntoView {
             <super::diagnostics::DiagnosticsSettings/>
             <label class="block">"Raw microphone"<meter class="ml-3 w-48" min="0" max="1" value=move||ui.audio_status.get().map(|s|s.raw_input_level).unwrap_or(0.0) /></label>
             <label class="block">"After noise / echo processing"<meter class="ml-3 w-48" min="0" max="1" value=move||ui.audio_status.get().map(|s|s.input_level).unwrap_or(0.0) /></label>
-            <p class="text-sm" role="status">{move||ui.audio_status.get().map(|s|format!("{} · dropped {} · underruns {} · processing resets {}",s.message,s.dropped_samples,s.underrun_samples,s.processing_resets))}</p>
+            <p class="text-sm" role="status">{move||ui.audio_status.get().map(|s|format!("{} · processing resets {}",s.message,s.processing_resets))}</p>
+            <p class="text-sm text-slate-300">{move||thiscord_frontend::audio_quality::summary(ui.audio_status.get().and_then(|s|s.quality).as_ref())}</p>
+            <details class="rounded border border-white/10 p-3 text-sm">
+                <summary class="cursor-pointer">"Advanced voice quality diagnostics"</summary>
+                <pre class="mt-3 max-h-96 overflow-auto whitespace-pre-wrap text-xs text-slate-300">{move||thiscord_frontend::audio_quality::detail(ui.audio_status.get().and_then(|s|s.quality).as_ref())}</pre>
+            </details>
             <details class="space-y-2 text-sm text-white/70">
                 <summary class="cursor-pointer">"Echo diagnostics"</summary>
                 <p>{move||ui.audio_status.get().and_then(|s|s.echo).map(|d|format!(

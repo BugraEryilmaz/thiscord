@@ -103,6 +103,11 @@ fn sender_drop_and_partial_gap_reach_real_playout_without_compressing_samples() 
     );
     assert_eq!(controls.underruns.load(Ordering::Relaxed), 0);
     assert_eq!(remote.jitter.diagnostics()["concealed_samples"], 1097);
+    let q = remote.jitter.quality.snapshot();
+    assert_eq!(q.total.plc_samples, FRAME as u64); // Fractional gap is silence, not Opus PLC.
+    assert_eq!(q.total.sequence_gap_packets, 0); // Sender-side omission preserved time.
+    assert_eq!(q.total.fec_attempts, 0);
+    assert_eq!(q.decode.calls, 6); // Four packets (including lookahead), full PLC and fractional silence.
 }
 
 #[test]
@@ -340,6 +345,10 @@ fn dtx_updates_wrap_loss_and_onsets_preserve_adaptive_playout() {
                 assert!(remote.jitter.metrics().dtx);
                 assert_eq!(remote.jitter.metrics().rebufferings, rebufferings);
                 assert_eq!(remote.decode_stats.plc_frames, plc);
+                let quality = remote.jitter.quality.snapshot().total;
+                assert_eq!(quality.plc_samples, plc * FRAME as u64);
+                assert_eq!(quality.starvation_samples, 0);
+                assert!(quality.intentional_silence_samples > 50 * 48_000);
                 assert_eq!(controls.underruns.load(Ordering::Relaxed), underruns);
                 assert!(remote.jitter.metrics().silence_gap_samples > 50 * 48_000);
                 assert!(
@@ -364,6 +373,16 @@ fn dtx_updates_wrap_loss_and_onsets_preserve_adaptive_playout() {
         assert!(
             remote.decode_stats.fec_attempts >= 1,
             "ordinary speech loss still uses main's FEC policy"
+        );
+        let quality = remote.jitter.quality.snapshot();
+        assert_eq!(quality.total.fec_attempts, remote.decode_stats.fec_attempts);
+        assert_eq!(
+            quality.total.plc_samples,
+            remote.decode_stats.plc_frames * FRAME as u64
+        );
+        assert_eq!(
+            quality.total.sequence_gap_packets,
+            remote.jitter.metrics().sequence_gaps
         );
     }
 }
