@@ -1,8 +1,13 @@
 mod activity;
+mod codec;
 pub mod connection;
 mod cues;
 mod device_users;
 pub mod diagnostics;
+#[cfg(test)]
+#[path = "../../tests/support/audio_fixture.rs"]
+#[allow(dead_code)]
+mod fixture;
 mod format;
 mod frames;
 mod health;
@@ -355,6 +360,7 @@ impl AudioEngine {
     }
 }
 struct Remote {
+    decode_stats: codec::DecodeStats,
     activity: activity::Activity,
     id: thiscord_shared::AccountId,
     label: String,
@@ -363,23 +369,26 @@ struct Remote {
 }
 impl Remote {
     fn refill(&mut self, writer: &mut StreamWriter) {
+        self.refill_at(writer, Instant::now());
+    }
+    fn refill_at(&mut self, writer: &mut StreamWriter, now: Instant) {
         // At most two frames per stream per worker tick. The callback remains
         // PCM-only; jitter buffering and Opus stay on this worker.
         for _ in 0..writer.refill_frames() {
-            let Some(packet) = self.jitter.pop(writer.needs_concealment()) else {
+            let decision = self.jitter.pop_at(writer.needs_concealment(), now);
+            if decision == jitter::Playout::Wait {
                 break;
-            };
-            let mut pcm = [0.0_f32; FRAME];
-            if let Ok(n) =
-                self.decoder
-                    .decode_float(packet.as_deref().unwrap_or(&[]), &mut pcm, false)
-                && n == FRAME
-            {
-                if packet.is_some() {
-                    self.activity.observe(&pcm[..n], Instant::now());
-                }
-                writer.write(&pcm[..n]);
             }
+            let mut pcm = [0.0_f32; FRAME];
+            if codec::decode(
+                &mut self.decoder,
+                &decision,
+                &mut pcm,
+                &mut self.decode_stats,
+            ) {
+                self.activity.observe(&pcm, now);
+            }
+            writer.write(&pcm);
         }
     }
 }
@@ -647,11 +656,7 @@ impl Session {
         diagnostics::event("processing_init_complete", serde_json::json!({}));
         let recovery = recovery::Recovery::starting();
         let devices = Devices::silent(settings);
-        let mut encoder = opus::Encoder::new(RATE, opus::Channels::Mono, opus::Application::Voip)
-            .map_err(|e| e.to_string())?;
-        encoder
-            .set_bitrate(opus::Bitrate::Bits(32_000))
-            .map_err(|e| e.to_string())?;
+        let encoder = codec::microphone_encoder().map_err(|e| e.to_string())?;
         let decoder = opus::Decoder::new(RATE, opus::Channels::Mono).map_err(|e| e.to_string())?;
         devices.writers[0]
             .control
@@ -1001,7 +1006,7 @@ fn run(
             if let Some(s) = &session {
                 diagnostics::event(
                     "audio_snapshot",
-                    serde_json::json!({"health":s.devices.health.diagnostics(),"recovering":s.recovery.active(),"muted":s.settings.muted,"deafened":s.settings.deafened,"echo":s.settings.echo_cancellation,"neural_echo":s.settings.neural_echo,"suppression":s.settings.noise_suppression,"suppression_model":s.settings.noise_suppression_model,"automatic_gain":s.settings.automatic_gain,"dropped_samples":s.devices.control.dropped.load(Ordering::Relaxed),"underrun_samples":s.devices.control.underruns.load(Ordering::Relaxed)}),
+                    serde_json::json!({"health":s.devices.health.diagnostics(),"recovering":s.recovery.active(),"muted":s.settings.muted,"deafened":s.settings.deafened,"echo":s.settings.echo_cancellation,"neural_echo":s.settings.neural_echo,"suppression":s.settings.noise_suppression,"suppression_model":s.settings.noise_suppression_model,"automatic_gain":s.settings.automatic_gain,"dropped_samples":s.devices.control.dropped.load(Ordering::Relaxed),"underrun_samples":s.devices.control.underruns.load(Ordering::Relaxed),"opus_decode":s.remotes.iter().flatten().map(|r| &r.decode_stats).collect::<Vec<_>>(),"verified_fec_frames":null}),
                 );
             }
         }
@@ -1158,6 +1163,7 @@ fn run(
                                         s.remotes[slot] = member
                                             .map(|m| {
                                                 Ok::<_, String>(Remote {
+                                                    decode_stats: Default::default(),
                                                     activity: Default::default(),
                                                     id: m.account_id,
                                                     label: if shared_audio {
@@ -1420,6 +1426,7 @@ mod lifecycle_tests {
             expected.extend_from_slice(&decoded);
         }
         let mut remote = Remote {
+            decode_stats: Default::default(),
             activity: Default::default(),
             id: "00000000-0000-0000-0000-000000000001".parse().unwrap(),
             label: "synthetic shared audio".into(),
