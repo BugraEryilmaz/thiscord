@@ -6,6 +6,23 @@ use thiscord_shared::overlay::OverlaySnapshot;
 #[component]
 pub fn VoiceOverlay() -> impl IntoView {
     let snapshot = RwSignal::new(OverlaySnapshot::default());
+    let busy = RwSignal::new(false);
+    let error = RwSignal::new(String::new());
+    let toggle = move |action| {
+        busy.set(true);
+        leptos::task::spawn_local(async move {
+            match native::<()>("overlay_toggle_audio", json!({"action":action})).await {
+                Ok(()) => {
+                    error.set(String::new());
+                    if let Ok(value) = native("overlay_snapshot", json!({})).await {
+                        snapshot.set(value);
+                    }
+                }
+                Err(message) => error.set(message),
+            }
+            busy.set(false);
+        });
+    };
     let (abort, registration) = futures_util::future::AbortHandle::new_pair();
     on_cleanup(move || abort.abort());
     if desktop() {
@@ -40,14 +57,27 @@ pub fn VoiceOverlay() -> impl IntoView {
                     format!("{}: {state}", p.name)
                 };
                 view! {
-                    <div class="overlay-person" class:overlay-speaking=move || person.get().speaking aria-label=accessible_name>
+                    <div class="overlay-person" class:overlay-self=move || person.get().is_self class:overlay-speaking=move || person.get().speaking aria-label=accessible_name>
                         <crate::avatar::Avatar class="overlay-avatar" name=Signal::derive(move || person.get().name) avatar_id=Signal::derive(move || person.get().avatar_id)/>
                         <span class="overlay-label"><span class="truncate">{move || person.get().name}</span>
                             <span class="overlay-status" aria-hidden="true">{move || { let p=person.get(); if p.deafened { "⊘" } else if p.muted { "×" } else if p.speaking { "•" } else { "" } }}</span>
                         </span>
+                        <Show when=move || person.get().is_self>
+                            <span class="overlay-actions">
+                                <button aria-pressed=move || person.get().muted disabled=move || busy.get()
+                                    on:click=move |_| toggle(thiscord_shared::audio::AudioToggle::Mute)>
+                                    {move || if person.get().muted { "Unmute" } else { "Mute" }}
+                                </button>
+                                <button aria-pressed=move || person.get().deafened disabled=move || busy.get()
+                                    on:click=move |_| toggle(thiscord_shared::audio::AudioToggle::Deafen)>
+                                    {move || if person.get().deafened { "Undeafen" } else { "Deafen" }}
+                                </button>
+                            </span>
+                        </Show>
                     </div>
                 }
             }/>
+            <Show when=move || !error.get().is_empty()><p class="rounded bg-slate-900 p-2 text-sm text-red-300" role="status">{move || error.get()}</p></Show>
         </main>
     }
 }
@@ -84,7 +114,7 @@ pub fn OverlaySettings() -> impl IntoView {
                     }/>
                 "Show voice participants when Thiscord is out of focus"
             </label>
-            <p class="text-sm text-white/60">"Click-through roster at the top left of this display. Green rings show who is talking. Use windowed or borderless games; exclusive fullscreen is not supported. Applies until you restart Thiscord."</p>
+            <p class="text-sm text-white/60">"Hover over your own entry at the top left to mute or deafen. The rest of the roster passes clicks through. Green rings show who is talking. Use windowed or borderless games; exclusive fullscreen is not supported. Applies until you restart Thiscord."</p>
             <p class="text-sm text-red-300" role="status">{move || error.get()}</p>
         </section>
     }

@@ -19,8 +19,10 @@ available while reading text channels. Disconnect releases the devices.
 
 The desktop client shows a transparent, always-on-top roster when connected to
 voice and the main window is out of focus (including when minimized). It sits at
-the top left of the display containing Thiscord and passes mouse input through to
-the game. Initials stand in for profile pictures. Green rings identify speakers;
+the top left of the display containing Thiscord. Your entry stays first; hovering
+it reveals clickable Mute/Unmute and Deafen/Undeafen buttons. Other rows and empty
+space pass mouse input through to the game. Initials stand in for missing profile
+pictures. Green rings identify speakers;
 mute/deafen marks remain visible. Audio & voice has an overlay toggle for the
 current app session, enabled by default. Returning to Thiscord, disconnecting or
 losing voice access hides the overlay.
@@ -32,14 +34,16 @@ fullscreen Spaces. macOS transparency enables Tauri's `macos-private-api` featur
 this is for the existing direct-distribution builds, not Mac App Store submission.
 Actual game/monitor behavior still needs Windows/macOS/Linux runtime acceptance.
 
-Only participant presentation metadata is exposed to the overlay's read-only IPC
-capability; credentials and audio controls stay scoped to the main window.
+The overlay capability exposes participant presentation metadata and a narrow
+self mute/deafen command, available only while connected. It cannot select another
+participant, change audio devices, or access credentials. Native cursor hit testing
+enables mouse input only over your own row; the overlay stays non-activating.
 Remote indicators use decoded microphone energy before playback gain, with a
 250 ms hangover; missing packets and concealment do not extend activity. Screen
 audio never lights a microphone indicator. Local activity follows the transmit
 gate (including PTT), and mute/deafen/speak restrictions override activity. This is
 an activity indicator, not speech recognition. Native visibility and UI metadata
-are polled every 100 ms; no audio samples cross IPC.
+are polled every 50/100 ms respectively; no audio samples cross IPC.
 
 Short local two-note sounds announce your own successful voice join and other
 participants joining/leaving the connected channel. Reconnecting plays a fresh
@@ -171,6 +175,26 @@ The in-app Hold to talk button handles pointer cancellation, key release and
 focus loss. Optional global Ctrl+Shift+Space uses the Tauri 2 Rust shortcut plugin
 on Windows/macOS/X11. Registration conflicts are reported. Wayland explicitly
 falls back to the in-app button; portal integration remains future work.
+
+### Mute and deafen shortcuts
+
+Audio & voice → Keyboard shortcuts configures global toggle shortcuts. Defaults
+are Ctrl+Shift+M (mute) and Ctrl+Shift+D (deafen). Enter a modifier/key combination
+and choose Save shortcuts; an empty field disables that action. Reset to defaults
+fills the default combinations for review before saving. Preferences persist in
+`shortcuts.json` in the local app configuration directory. Holding a key toggles
+once until released. Duplicate combinations (including aliases), invalid keys,
+and the reserved Ctrl+Shift+Space PTT binding are rejected. OS registration
+conflicts preserve the previous working bindings. Startup failures appear in the
+shortcut settings panel. Windows, macOS and Linux/X11 use the native shortcut
+plugin; Wayland requires disabling the global shortcuts and using the UI controls.
+
+The voice bar, global shortcuts and overlay toggle the same native preferences.
+Device/processing saves preserve the current native mute/deafen values, and the
+main view polls them so out-of-focus actions appear on return. Deafen blocks both
+capture transmission and playback; undeafening preserves your manual mute choice.
+Shortcuts also work before joining voice. Backend speak restrictions remain
+independent and cannot be bypassed by unmuting.
 
 ## Changing settings during a call
 

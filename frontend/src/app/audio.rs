@@ -1,4 +1,5 @@
 use super::Ui;
+use super::shortcuts::ShortcutSettings;
 use crate::account_client::{desktop, native};
 use leptos::prelude::*;
 use serde_json::json;
@@ -6,12 +7,6 @@ use thiscord_shared::{ChannelId, GuildId, audio::*, voice::VoiceStatus};
 
 pub(super) fn save(ui: Ui) {
     ui.audio_revision.update(|r| *r = r.wrapping_add(1));
-    let settings = ui.audio.get_untracked();
-    if settings.muted || settings.deafened {
-        leptos::task::spawn_local(async move {
-            let _ = native::<()>("audio_restrict", json!({"settings":settings})).await;
-        });
-    }
     if ui.audio_saving.get_untracked() {
         return; // The save pump picks up the newest controls after this change.
     }
@@ -22,13 +17,9 @@ pub(super) fn save(ui: Ui) {
             let settings = ui.audio.get_untracked();
             if let Err(error) = native::<()>("audio_save", json!({"settings":settings})).await {
                 ui.status.set(error);
-                if let Ok(mut saved) = native::<AudioSettings>("audio_current", json!({})).await
+                if let Ok(saved) = native::<AudioSettings>("audio_current", json!({})).await
                     && ui.audio_revision.get_untracked() == revision
                 {
-                    // A failed device/model change must not visually undo an
-                    // urgent mute/deafen that already took effect.
-                    saved.muted |= settings.muted;
-                    saved.deafened |= settings.deafened;
                     ui.audio.set(saved);
                 }
             }
@@ -83,6 +74,14 @@ pub(super) fn AudioHost(ui: Ui) -> impl IntoView {
                         if let Ok(status) = native::<AudioStatus>("audio_status", json!({})).await {
                             ui.audio_status.set(Some(status));
                         }
+                        if let Ok(settings) =
+                            native::<AudioSettings>("audio_current", json!({})).await
+                        {
+                            ui.audio.update(|current| {
+                                current.muted = settings.muted;
+                                current.deafened = settings.deafened;
+                            });
+                        }
                         gloo_timers::future::TimeoutFuture::new(500).await;
                     }
                 },
@@ -92,11 +91,24 @@ pub(super) fn AudioHost(ui: Ui) -> impl IntoView {
         });
     }
 }
+fn toggle(ui: Ui, action: AudioToggle) {
+    leptos::task::spawn_local(async move {
+        if let Err(error) = native::<()>("audio_toggle", json!({"action":action})).await {
+            ui.status.set(error);
+        }
+        if let Ok(settings) = native::<AudioSettings>("audio_current", json!({})).await {
+            ui.audio.update(|current| {
+                current.muted = settings.muted;
+                current.deafened = settings.deafened;
+            });
+        }
+    });
+}
 #[component]
 fn VoiceControls(ui: Ui) -> impl IntoView {
     view! {<div class="flex flex-wrap items-center gap-3">
-        <button class="rounded bg-white/10 px-3 py-2 text-sm" on:click=move |_|{ui.audio.update(|s|s.muted = !s.muted);save(ui);}>{move||if ui.audio.get().muted{"Unmute"}else{"Mute"}}</button>
-        <button class="rounded bg-white/10 px-3 py-2 text-sm" on:click=move |_|{ui.audio.update(|s|s.deafened = !s.deafened);save(ui);}>{move||if ui.audio.get().deafened{"Undeafen"}else{"Deafen"}}</button>
+        <button class="rounded bg-white/10 px-3 py-2 text-sm" aria-pressed=move || ui.audio.get().muted on:click=move |_|toggle(ui, AudioToggle::Mute)>{move||if ui.audio.get().muted{"Unmute"}else{"Mute"}}</button>
+        <button class="rounded bg-white/10 px-3 py-2 text-sm" aria-pressed=move || ui.audio.get().deafened on:click=move |_|toggle(ui, AudioToggle::Deafen)>{move||if ui.audio.get().deafened{"Undeafen"}else{"Deafen"}}</button>
         <Show when=move||ui.audio.get().mode==TransmitMode::PushToTalk><button class="touch-none select-none rounded bg-brand px-3 py-2 text-sm" on:pointerdown=move |_|pressed(true) on:pointerup=move |_|pressed(false) on:pointerleave=move |_|pressed(false) on:pointercancel=move |_|pressed(false) on:keydown=move|e|{if matches!(e.key().as_str()," "|"Enter"){e.prevent_default();pressed(true);}} on:keyup=move|_|pressed(false) on:blur=move |_|pressed(false)>"Hold to talk"</button></Show>
     </div>}
 }
@@ -313,7 +325,7 @@ pub(super) fn AudioSettingsPanel(ui: Ui) -> impl IntoView {
         });
     };
     view! {<div class="space-y-5"><h2 class="text-xl font-semibold">"Audio & voice"</h2>
-        <Show when=desktop><crate::overlay::OverlaySettings/></Show>
+        <Show when=desktop><ShortcutSettings/><crate::overlay::OverlaySettings/></Show>
         <Show when=desktop fallback=||view!{<p>"Audio devices and voice are available in the desktop app."</p>}>
             <p class="text-sm text-white/60">"Devices refresh automatically. Changes apply during a call; switching devices may briefly interrupt audio. Settings stay on this computer."</p>
             {[(true,"Microphone"),(false,"Speakers / headphones")].into_iter().map(move|(input,label)|view!{
