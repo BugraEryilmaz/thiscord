@@ -113,7 +113,7 @@ impl Pending {
                 debug.settings(&self.settings);
             }
             prepared.processing = s.processing.install(prepared.processing)?;
-            s.hold = 0;
+            s.reset_gate(Instant::now());
             s.processed_level = 0.0;
             s.settings = self.settings.clone();
             apply(&s.devices.control, &self.settings);
@@ -174,12 +174,131 @@ mod tests {
             phase: 0.0,
             next: Instant::now(),
             started: Instant::now(),
-            hold: 100,
+            gate: Default::default(),
+            capture_epoch: 0,
+            capture_after: None,
+            record_boundary: None,
+            reset_codec: false,
+            delivery: Default::default(),
             outgoing: Some(tokio::sync::mpsc::channel(2).0),
             remotes: (0..MAX_STREAMS).map(|_| None).collect(),
             processed_level: 0.5,
             processing: processing::Processing::new(&AudioSettings::default()).unwrap(),
         }
+    }
+    #[test]
+    fn session_boundaries_clear_preroll_codec_and_stale_capture_without_resetting_aec() {
+        for mode in [TransmitMode::VoiceActivity, TransmitMode::PushToTalk] {
+            let mut s = session();
+            s.settings.mode = mode;
+            let (tx, mut rx) = tokio::sync::mpsc::channel(32);
+            s.outgoing = Some(tx);
+            let start = Instant::now();
+            let no = AtomicBool::new(false);
+            let pressed = AtomicBool::new(true);
+            let epoch = AtomicU64::new(0);
+            let mut debug = recording::Recorder::default();
+            for index in 0..6 {
+                s.capture_packet(
+                    processing::Captured {
+                        pcm: [0.8; FRAME],
+                        evidence: gate::Evidence([0.8; 2]),
+                        at: [
+                            start + Duration::from_millis(index * 20),
+                            start + Duration::from_millis(index * 20 + 10),
+                        ],
+                        gap: [false; 2],
+                    },
+                    &no,
+                    &pressed,
+                    &no,
+                    &epoch,
+                    &mut debug,
+                )
+                .unwrap();
+                rx.try_recv().unwrap();
+            }
+            assert!(s.status().transmitting);
+            let boundary = start + Duration::from_millis(120);
+            let pending_delivery = s.delivery.clone();
+            epoch.store(1, Ordering::Release);
+            s.capture_boundary(1, boundary);
+            assert!(!pending_delivery.active());
+            assert!(!s.status().transmitting);
+            assert_eq!(s.processing.resets, 0);
+            let mut listener = opus::Decoder::new(RATE, opus::Channels::Mono).unwrap();
+            // Includes an old device packet delivered *after* relaxation, then
+            // fresh silence. No retained audio may emerge from the encoder.
+            for index in 0..8 {
+                let at = boundary + Duration::from_millis(index * 20) - Duration::from_millis(20);
+                s.capture_packet(
+                    processing::Captured {
+                        pcm: [if index == 0 { 0.8 } else { 0.0 }; FRAME],
+                        evidence: gate::Evidence([if index == 0 { 0.8 } else { 0.0 }; 2]),
+                        at: [at, at + Duration::from_millis(10)],
+                        gap: [false; 2],
+                    },
+                    &no,
+                    &pressed,
+                    &no,
+                    &epoch,
+                    &mut debug,
+                )
+                .unwrap();
+                let mut decoded = [0.0; FRAME];
+                listener
+                    .decode_float(&rx.try_recv().unwrap().payload, &mut decoded, false)
+                    .unwrap();
+                let peak = decoded.iter().fold(0.0_f32, |a, v| a.max(v.abs()));
+                // Opus may synthesize a few PCM16 LSBs of comfort noise.
+                assert!(
+                    peak < 4.0 / 32768.0,
+                    "mode={mode:?}, packet={index}, decoded peak={peak}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn transmission_indicators_follow_queue_acceptance_and_connection_restrictions() {
+        let mut s = session();
+        s.settings.mode = TransmitMode::PushToTalk;
+        let (tx, mut rx) = tokio::sync::mpsc::channel(1);
+        s.outgoing = Some(tx);
+        let start = Instant::now();
+        let no = AtomicBool::new(false);
+        let yes = AtomicBool::new(true);
+        let epoch = AtomicU64::new(0);
+        let mut debug = recording::Recorder::default();
+        let packet = |n: u64| processing::Captured {
+            pcm: [0.1; FRAME],
+            evidence: gate::Evidence([0.1; 2]),
+            at: [
+                start + Duration::from_millis(n * 20),
+                start + Duration::from_millis(n * 20 + 10),
+            ],
+            gap: [false; 2],
+        };
+        s.capture_packet(packet(0), &no, &yes, &no, &epoch, &mut debug)
+            .unwrap();
+        assert!(s.status().transmitting);
+        s.capture_packet(packet(1), &no, &yes, &no, &epoch, &mut debug)
+            .unwrap();
+        assert!(
+            !s.status().transmitting,
+            "Full sender queue is not transmitting"
+        );
+        rx.try_recv().unwrap();
+        s.connection = Some(Default::default());
+        s.connection.as_ref().unwrap().close();
+        s.capture_packet(packet(2), &no, &yes, &no, &epoch, &mut debug)
+            .unwrap();
+        assert!(!s.status().transmitting);
+        assert!(rx.try_recv().is_err());
+        s.connection = Some(Default::default());
+        s.capture_packet(packet(3), &no, &no, &no, &epoch, &mut debug)
+            .unwrap();
+        assert!(!s.status().transmitting, "PTT release has no tail");
     }
     #[test]
     fn saved_speaker_volume_rejects_stale_slots_and_other_guilds() {
@@ -325,7 +444,7 @@ mod tests {
         assert!(s.devices.control.deafen.load(Ordering::Acquire));
         assert!(s.devices.control.mute.load(Ordering::Acquire));
         assert!(!s.devices.control.pressed.load(Ordering::Acquire));
-        assert_eq!(s.hold, 0);
+        assert!(s.capture_after.is_some());
         assert_eq!(s.settings.input.as_deref(), Some("saved microphone"));
         assert_eq!(s.settings.output.as_deref(), Some("unplugged headset"));
         assert!(s.status().message.contains("output is unavailable"));
@@ -406,7 +525,7 @@ mod tests {
         );
         assert!(s.devices.writers[3].control.active.load(Ordering::Acquire));
         assert!(s.devices.control.deafen.load(Ordering::Acquire));
-        assert_eq!(s.hold, 0);
+        assert!(s.capture_after.is_some());
         assert!(response.recv().unwrap().unwrap().running);
         assert!(
             retired
@@ -430,7 +549,7 @@ mod tests {
         assert!(Arc::ptr_eq(&control, &s.devices.control));
         assert!(!control.deafen.load(Ordering::Acquire));
         assert!(s.settings.output.is_none());
-        assert_eq!(s.hold, 100);
+        assert!(s.capture_after.is_none());
         assert!(response.recv().unwrap().is_err());
         assert!(retired.try_recv().is_ok());
     }

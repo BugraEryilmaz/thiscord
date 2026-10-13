@@ -638,7 +638,9 @@ async fn run(
                     },ServerEvent::Error{error}=>return Err(Failure::server(error)),ServerEvent::Revoked{}=>return Err("Voice access changed. Join again if you still have permission.".into()),_=>{},
                 }
             },
-            Some(payload)=outgoing.recv()=>{
+            Some(captured)=outgoing.recv()=>{
+                if !attempt.connection.active() || !engine.accepts_microphone(&captured) { continue; }
+                let payload = captured.payload;
                 sequence=sequence.wrapping_add(1);timestamp=timestamp.wrapping_add(960);let packet=rtc::rtp::Packet{header:rtc::rtp::header::Header{version:2,payload_type:MediaKind::Microphone.payload_type(),ssrc:MediaKind::Microphone.publisher_ssrc(),sequence_number:sequence,timestamp,..Default::default()},payload};
                 tokio::time::timeout(Duration::from_millis(100),track.write_rtp(packet)).await.map_err(|_|Failure::temporary("Voice sender stalled").with_reason("media_send_timeout"))?.map_err(|_|Failure::temporary("Voice media connection failed").with_reason("media_send_failed"))?;
             },

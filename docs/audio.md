@@ -276,6 +276,14 @@ WebView capture was not substituted for the requested native path.
 
 ## Audio timing and performance
 
+Voice activation now uses sustained energy after denoising and before AGC, with
+40 ms attack, separate opening/closing thresholds, 200 ms release and a fixed
+60 ms pre-roll delay. PTT bypasses this detector and delay. Existing persisted
+sensitivity/defaults remain supported. See [voice activation](voice-activation.md)
+for scheduling, control boundaries, detector evaluation and synthetic comparisons.
+The post-mix AEC reference and its timestamps/tuning are unchanged; closing the
+automatic gate never resets echo adaptation.
+
 Capture is averaged to mono, processed at 48 kHz and encoded as 20 ms Opus frames
 at 32 kbit/s. Capture callbacks only convert/copy samples and update atomics.
 Capture and post-mix reference callbacks assemble timestamped 10 ms blocks into
@@ -402,6 +410,14 @@ Replay preserves the recorded transmit gates and refuses to overwrite output fil
 or accept incomplete/oversized input. Change the Rust processing modules to evaluate
 future algorithms against the same inputs. Listening and speech-preservation checks
 are still needed; a lower output level alone does not establish better cancellation.
+
+New recordings use timeline schema 2. Transmit blocks include
+`source_delay_samples` (2880 for automatic activation, zero for PTT); their timestamps
+stay on the current capture/output schedule. `capture_boundary` events record the
+enhancement-history reset and capture cutoff without resetting AEC. Updated replay
+supports schemas 1 and 2, applies the source delay and excludes old device blocks
+from enhancement. Retained samples predating the recording cannot be reconstructed
+and replay as silence. Earlier replay binaries reject schema 2.
 
 CI includes synchronized WAV/metadata, privacy-field omission, gap/timestamp handling,
 duration bounds, writer failure, queue overload, finalization and replay/gate tests.

@@ -12,6 +12,11 @@ Native capture runs at 48 kHz mono in 480-sample blocks:
 
 `capture -> Sonora AEC3 -> selected denoiser -> optional Sonora AGC2 -> transmit gate -> Opus`
 
+The activation detector observes the selected denoiser's output **before AGC2**;
+the gate retains the final processed PCM. Automatic activation adds a separate,
+fixed 60 ms delay; PTT adds none. Control boundaries clear enhancement history and
+pre-roll while preserving AEC adaptation. See [voice activation](voice-activation.md).
+
 `processing/stages.rs` defines `CaptureStage` (`process`, `reset`, `delay_samples`)
 and an ordered `CaptureChain`. Add an adapter implementing that interface to
 replace a model or compose more stages with `push`; stage order is explicit.

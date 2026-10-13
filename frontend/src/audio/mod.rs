@@ -5,6 +5,7 @@ mod device_users;
 pub mod diagnostics;
 mod format;
 mod frames;
+mod gate;
 mod health;
 pub mod jitter;
 mod lifecycle;
@@ -25,7 +26,7 @@ use mixer::*;
 use std::{
     sync::{
         Arc,
-        atomic::{AtomicBool, Ordering},
+        atomic::{AtomicBool, AtomicU64, Ordering},
         mpsc,
     },
     thread,
@@ -163,6 +164,17 @@ where
     }
 }
 
+/// Native-only transport item. Restriction epochs also invalidate encoded work
+/// already waiting in the bounded sender queue; nothing here crosses Tauri IPC.
+pub struct MicrophonePacket {
+    pub payload: bytes::Bytes,
+    epoch: u64,
+    created: Instant,
+    push_to_talk: bool,
+    active: bool,
+    delivery: connection::Connection,
+}
+
 pub enum Command {
     DebugStart(std::path::PathBuf),
     DebugStop,
@@ -170,7 +182,7 @@ pub enum Command {
         volumes: volumes::Profile,
         connection: connection::Connection,
         settings: AudioSettings,
-        outgoing: tokio::sync::mpsc::Sender<bytes::Bytes>,
+        outgoing: tokio::sync::mpsc::Sender<MicrophonePacket>,
         microphone: bool,
     },
     Packet {
@@ -225,6 +237,7 @@ pub struct AudioEngine {
     inhibit: Arc<AtomicBool>,
     debug_stop: Arc<AtomicBool>,
     deafen: Arc<AtomicBool>,
+    capture_epoch: Arc<AtomicU64>,
 }
 impl Default for AudioEngine {
     fn default() -> Self {
@@ -260,6 +273,8 @@ impl AudioEngine {
         let worker_debug_stop = debug_stop.clone();
         let deafen = Arc::new(AtomicBool::new(false));
         let worker_deafen = deafen.clone();
+        let capture_epoch = Arc::new(AtomicU64::new(0));
+        let worker_epoch = capture_epoch.clone();
         thread::Builder::new()
             .name("thiscord-audio-control".into())
             .spawn(move || {
@@ -267,7 +282,7 @@ impl AudioEngine {
                 for restart in 0..=3 {
                     let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| run(
                         &receiver, &packets, worker_stop.clone(), worker_pressed.clone(),
-                        worker_inhibit.clone(), worker_debug_stop.clone(), worker_deafen.clone(), &worker_probe,
+                        worker_inhibit.clone(), worker_debug_stop.clone(), worker_deafen.clone(), worker_epoch.clone(), &worker_probe,
                     )));
                     if result.is_ok() { break; }
                     worker_inhibit.store(true, Ordering::Release);
@@ -291,9 +306,18 @@ impl AudioEngine {
             inhibit,
             debug_stop,
             deafen,
+            capture_epoch,
         }
     }
     fn urgent(&self, command: &Command) {
+        if matches!(
+            command,
+            Command::Stop | Command::Settings(_) | Command::Start { .. }
+        ) || matches!(command, Command::VoiceStart { connection, .. } if connection.active())
+            || matches!(command, Command::Pressed(value) if *value != self.pressed.load(Ordering::Acquire))
+        {
+            self.capture_epoch.fetch_add(1, Ordering::AcqRel);
+        }
         match command {
             Command::VoiceStart { connection, .. } if !connection.active() => {}
             Command::DebugStop => {
@@ -319,11 +343,26 @@ impl AudioEngine {
     /// is in flight. Only an ordered settings command can relax them again.
     pub fn restrict(&self, settings: &AudioSettings) {
         if settings.muted || settings.deafened {
+            self.capture_epoch.fetch_add(1, Ordering::AcqRel);
             self.inhibit.store(true, Ordering::Release);
         }
         if settings.deafened {
             self.deafen.store(true, Ordering::Release);
         }
+    }
+    /// Last native transport admission check. Already-written RTP cannot be
+    /// recalled; queued packets from before release/mute can never resume later.
+    pub fn accepts_microphone(&self, packet: &MicrophonePacket) -> bool {
+        self.accepts_microphone_at(packet, Instant::now())
+    }
+    fn accepts_microphone_at(&self, packet: &MicrophonePacket, now: Instant) -> bool {
+        packet.epoch == self.capture_epoch.load(Ordering::Acquire)
+            && packet.delivery.active()
+            && !self.stop.load(Ordering::Acquire)
+            && (!packet.active
+                || (!self.inhibit.load(Ordering::Acquire)
+                    && (!packet.push_to_talk || self.pressed.load(Ordering::Acquire))))
+            && now.saturating_duration_since(packet.created) <= Duration::from_millis(100)
     }
     pub fn command(&self, command: Command) -> Result<AudioStatus, String> {
         self.urgent(&command);
@@ -550,14 +589,20 @@ struct Session {
     phase: f32,
     next: Instant,
     started: Instant,
-    hold: usize,
-    outgoing: Option<tokio::sync::mpsc::Sender<bytes::Bytes>>,
+    gate: gate::Gate,
+    capture_epoch: u64,
+    capture_after: Option<Instant>,
+    record_boundary: Option<Instant>,
+    reset_codec: bool,
+    delivery: connection::Connection,
+    outgoing: Option<tokio::sync::mpsc::Sender<MicrophonePacket>>,
     remotes: Vec<Option<Remote>>,
     processed_level: f32,
     processing: processing::Processing,
 }
 impl Drop for Session {
     fn drop(&mut self) {
+        self.delivery.close();
         self.devices.health.disable();
         if let Some(connection) = &self.connection {
             connection.close();
@@ -569,6 +614,28 @@ impl Drop for Session {
     }
 }
 impl Session {
+    fn clear_gate(&mut self) {
+        self.gate.reset();
+        self.delivery.close();
+        self.delivery = Default::default();
+        self.reset_codec = true;
+        self.devices
+            .control
+            .transmitting
+            .store(false, Ordering::Release);
+    }
+    fn reset_gate(&mut self, at: Instant) {
+        self.clear_gate();
+        self.capture_after = Some(at);
+        self.record_boundary = Some(at);
+        self.processing.restrict_capture(at);
+    }
+    fn capture_boundary(&mut self, epoch: u64, at: Instant) {
+        if self.capture_epoch != epoch {
+            self.capture_epoch = epoch;
+            self.reset_gate(at);
+        }
+    }
     fn resume_devices(
         &mut self,
         devices: Devices,
@@ -595,7 +662,7 @@ impl Session {
         self.device_watch = Default::default();
         diagnostics::event("device_active", self.devices.info.clone());
         self.processing.reset();
-        self.hold = 0;
+        self.reset_gate(Instant::now());
         self.next = Instant::now();
         for remote in self.remotes.iter_mut().flatten() {
             remote.jitter = Default::default();
@@ -677,7 +744,12 @@ impl Session {
             phase: 0.0,
             next: Instant::now(),
             started: Instant::now(),
-            hold: 0,
+            gate: Default::default(),
+            capture_epoch: 0,
+            capture_after: None,
+            record_boundary: None,
+            reset_codec: false,
+            delivery: Default::default(),
             outgoing: None,
             remotes: (0..MAX_STREAMS).map(|_| None).collect(),
             processed_level: 0.0,
@@ -689,9 +761,11 @@ impl Session {
         stop: &AtomicBool,
         pressed: &AtomicBool,
         inhibit: &AtomicBool,
+        epoch: &AtomicU64,
         debug: &mut recording::Recorder,
     ) -> Result<(), String> {
         self.devices.health.check()?;
+        let resets = self.processing.resets;
         self.processing
             .render_tapped(&mut self.devices.reference, &mut |frame, gap| {
                 debug.block(
@@ -703,6 +777,9 @@ impl Session {
                     None,
                 );
             })?;
+        if self.processing.resets != resets {
+            self.clear_gate();
+        }
         if self.outgoing.is_some() {
             for (remote, writer) in self.remotes.iter_mut().zip(self.devices.writers.iter_mut()) {
                 if let Some(remote) = remote {
@@ -733,6 +810,10 @@ impl Session {
         // ring itself bounds latency; trimming each callback to 60 ms destroys
         // capture continuity and prevents the echo filter from converging.
         for _ in 0..CAPACITY / FRAME {
+            self.capture_boundary(epoch.load(Ordering::Acquire), Instant::now());
+            if let Some(at) = self.record_boundary.take() {
+                debug.capture_boundary(at);
+            }
             if stop.load(Ordering::Acquire) {
                 break;
             }
@@ -759,48 +840,83 @@ impl Session {
                 .control
                 .pressed
                 .store(pressed.load(Ordering::Acquire), Ordering::Relaxed);
-            self.capture_packet(packet, inhibit, debug)?;
+            self.capture_packet(packet, stop, pressed, inhibit, epoch, debug)?;
         }
         Ok(())
     }
     fn capture_packet(
         &mut self,
         captured: processing::Captured,
+        stop: &AtomicBool,
+        pressed: &AtomicBool,
         inhibit: &AtomicBool,
+        epoch: &AtomicU64,
         debug: &mut recording::Recorder,
     ) -> Result<(), String> {
-        let mut pcm = captured.pcm;
-        let peak = pcm.iter().fold(0.0_f32, |p, v| p.max(v.abs()));
+        let peak = captured.pcm.iter().fold(0.0_f32, |p, v| p.max(v.abs()));
         self.processed_level = peak;
-        if peak >= f32::from_bits(self.devices.control.threshold.load(Ordering::Relaxed)) {
-            self.hold = 10;
-        } else {
-            self.hold = self.hold.saturating_sub(1);
+        if self
+            .gate
+            .discontinuous(captured.at[0], captured.gap.iter().any(|gap| *gap))
+        {
+            self.clear_gate();
         }
-        let active = !inhibit.load(Ordering::Acquire)
+        let allowed = !inhibit.load(Ordering::Acquire)
+            && !stop.load(Ordering::Acquire)
+            && epoch.load(Ordering::Acquire) == self.capture_epoch
+            && self.connection.as_ref().is_none_or(|c| c.active())
+            && self
+                .capture_after
+                .is_none_or(|after| captured.at[0] >= after)
             && !self.devices.control.mute.load(Ordering::Relaxed)
-            && !self.devices.control.deafen.load(Ordering::Relaxed)
-            && if self.devices.control.push_to_talk.load(Ordering::Relaxed) {
-                self.devices.control.pressed.load(Ordering::Relaxed)
-            } else {
-                self.hold > 0
-            };
-        self.devices
-            .control
-            .transmitting
-            .store(active, Ordering::Relaxed);
-        if !active {
-            pcm.fill(0.0);
-        }
+            && !self.devices.control.deafen.load(Ordering::Relaxed);
+        let gate::Output { pcm, active } = self.gate.process(
+            captured.pcm,
+            captured.evidence,
+            captured.at[0],
+            captured.gap.iter().any(|g| *g),
+            self.settings.mode,
+            self.settings.activation_threshold,
+            allowed,
+            pressed.load(Ordering::Acquire),
+        );
         let mut packet = [0_u8; 4000];
+        if self.reset_codec {
+            self.encoder.reset_state().map_err(|e| e.to_string())?;
+            self.decoder.reset_state().map_err(|e| e.to_string())?;
+            self.reset_codec = false;
+        }
         let n = self
             .encoder
             .encode_float(&pcm, &mut packet)
             .map_err(|e| e.to_string())?;
+        // An urgent action may arrive while DSP or Opus runs. Discard that work
+        // and clear codec lookbehind as well as pre-roll at the next boundary.
+        if stop.load(Ordering::Acquire)
+            || epoch.load(Ordering::Acquire) != self.capture_epoch
+            || self.connection.as_ref().is_some_and(|c| !c.active())
+        {
+            self.devices
+                .control
+                .transmitting
+                .store(false, Ordering::Release);
+            return Ok(());
+        }
         if let Some(outgoing) = &self.outgoing {
             let accepted = outgoing
-                .try_send(bytes::Bytes::copy_from_slice(&packet[..n]))
+                .try_send(MicrophonePacket {
+                    payload: bytes::Bytes::copy_from_slice(&packet[..n]),
+                    epoch: self.capture_epoch,
+                    created: Instant::now(),
+                    push_to_talk: self.settings.mode == TransmitMode::PushToTalk,
+                    active,
+                    delivery: self.delivery.clone(),
+                })
                 .is_ok();
+            self.devices
+                .control
+                .transmitting
+                .store(active && accepted, Ordering::Release);
             for (index, frame) in pcm.as_chunks::<480>().0.iter().enumerate() {
                 debug.block(
                     recording::Track::Transmit,
@@ -811,7 +927,15 @@ impl Session {
                         reset: false,
                     },
                     0,
-                    Some((accepted, active)),
+                    Some((
+                        accepted,
+                        active,
+                        if self.settings.mode == TransmitMode::VoiceActivity {
+                            gate::PRE_ROLL * FRAME
+                        } else {
+                            0
+                        },
+                    )),
                 );
             }
             return Ok(());
@@ -822,6 +946,10 @@ impl Session {
             .decode_float(&packet[..n], &mut decoded, false)
             .map_err(|e| e.to_string())?;
         let written = self.devices.writers[0].write(&decoded[..n]);
+        self.devices
+            .control
+            .transmitting
+            .store(active && written > 0, Ordering::Release);
         self.devices
             .control
             .dropped
@@ -937,6 +1065,7 @@ fn run(
     inhibit: Arc<AtomicBool>,
     debug_stop: Arc<AtomicBool>,
     deafen: Arc<AtomicBool>,
+    capture_epoch: Arc<AtomicU64>,
     probe: &worker_health::Probe,
 ) {
     let mut debug = recording::Recorder::default();
@@ -954,6 +1083,9 @@ fn run(
     loop {
         probe.enter(worker_health::IDLE);
         probe.active.store(session.is_some(), Ordering::Release);
+        if let Some(s) = &mut session {
+            s.capture_boundary(capture_epoch.load(Ordering::Acquire), Instant::now());
+        }
         if session
             .as_ref()
             .is_some_and(|s| s.connection.as_ref().is_some_and(|c| !c.active()))
@@ -1293,10 +1425,7 @@ fn run(
                 "device_failure",
                 serde_json::json!({"error":error,"device":s.devices.info,"health":s.devices.health.diagnostics()}),
             );
-            s.devices
-                .control
-                .transmitting
-                .store(false, Ordering::Release);
+            s.clear_gate();
             s.processed_level = 0.0;
             s.devices.control.peak.store(0, Ordering::Relaxed);
             // Release the failed endpoints before attempting to reopen them.
@@ -1368,7 +1497,7 @@ fn run(
             } else if let Err(error) = {
                 probe.enter(worker_health::PROCESS);
                 let started = Instant::now();
-                let result = s.tick(&stop, &pressed, &inhibit, &mut debug);
+                let result = s.tick(&stop, &pressed, &inhibit, &capture_epoch, &mut debug);
                 probe.processed(started.elapsed());
                 result
             } {
@@ -1540,7 +1669,48 @@ mod lifecycle_tests {
             inhibit: Arc::new(AtomicBool::new(false)),
             debug_stop: Arc::new(AtomicBool::new(false)),
             deafen: Arc::new(AtomicBool::new(false)),
+            capture_epoch: Arc::new(AtomicU64::new(0)),
         };
+        let stale = MicrophonePacket {
+            payload: bytes::Bytes::new(),
+            epoch: 0,
+            created: Instant::now(),
+            push_to_talk: true,
+            active: true,
+            delivery: Default::default(),
+        };
+        assert!(engine.accepts_microphone_at(&stale, stale.created + Duration::from_millis(100)));
+        assert!(!engine.accepts_microphone_at(&stale, stale.created + Duration::from_millis(101)));
+        // Release and re-press happen without the worker seeing either edge.
+        engine.urgent(&Command::Pressed(false));
+        engine.urgent(&Command::Pressed(true));
+        assert!(!engine.accepts_microphone(&stale));
+        let before_mute = engine.capture_epoch.load(Ordering::Acquire);
+        engine.restrict(&AudioSettings {
+            muted: true,
+            ..Default::default()
+        });
+        engine.urgent(&Command::Settings(AudioSettings::default()));
+        assert!(!engine.accepts_microphone(&MicrophonePacket {
+            epoch: before_mute,
+            ..stale
+        }));
+        let mut silence = MicrophonePacket {
+            payload: bytes::Bytes::new(),
+            epoch: engine.capture_epoch.load(Ordering::Acquire),
+            created: Instant::now(),
+            push_to_talk: true,
+            active: false,
+            delivery: Default::default(),
+        };
+        engine.inhibit.store(true, Ordering::Release);
+        engine.pressed.store(false, Ordering::Release);
+        assert!(engine.accepts_microphone_at(&silence, silence.created));
+        silence.active = true;
+        assert!(!engine.accepts_microphone_at(&silence, silence.created));
+        silence.active = false;
+        silence.delivery.close();
+        assert!(!engine.accepts_microphone_at(&silence, silence.created));
         for _ in 0..10 {
             engine.notify(Command::Packet {
                 connection: Default::default(),
