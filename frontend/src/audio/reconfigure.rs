@@ -501,6 +501,7 @@ mod tests {
             id,
             label: "A speaker".into(),
             jitter: Default::default(),
+            rate: Default::default(),
             decoder: opus::Decoder::new(RATE, opus::Channels::Mono).unwrap(),
         });
         s.remotes[3 + thiscord_shared::voice::ROOM_CAPACITY] = Some(super::super::Remote {
@@ -511,6 +512,7 @@ mod tests {
             id,
             label: "Shared audio".into(),
             jitter: Default::default(),
+            rate: Default::default(),
             decoder: opus::Decoder::new(RATE, opus::Channels::Mono).unwrap(),
         });
         let target = thiscord_shared::audio::SpeakerVolumeTarget {
@@ -607,6 +609,7 @@ mod tests {
             id,
             label: "speaker".into(),
             jitter: Default::default(),
+            rate: Default::default(),
             decoder: opus::Decoder::new(RATE, opus::Channels::Mono).unwrap(),
         });
         s.devices.writers[3].volume(0.37).unwrap();
@@ -710,6 +713,7 @@ mod tests {
             id,
             label: "speaker".into(),
             jitter: Default::default(),
+            rate: Default::default(),
             decoder: opus::Decoder::new(RATE, opus::Channels::Mono).unwrap(),
         });
         old.devices.writers[3].volume(0.37).unwrap();

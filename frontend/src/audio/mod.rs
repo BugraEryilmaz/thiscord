@@ -16,6 +16,9 @@ pub mod jitter;
 mod lifecycle;
 pub mod mixer;
 pub mod outgoing;
+mod playout_rate;
+#[cfg(test)]
+mod playout_tests;
 pub mod processing;
 #[cfg(test)]
 mod receive_tests;
@@ -31,6 +34,7 @@ use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
 use format::config;
 use health::StreamHealth;
 use mixer::*;
+use ringbuf::traits::Observer;
 use std::{
     sync::{
         Arc,
@@ -384,6 +388,7 @@ struct Remote {
     label: String,
     jitter: jitter::Jitter,
     decoder: opus::Decoder,
+    rate: playout_rate::Rate,
 }
 impl Remote {
     fn push(
@@ -418,13 +423,14 @@ impl Remote {
     fn reset_decoder(&mut self, writer: &StreamWriter) {
         let _ = self.decoder.reset_state();
         self.activity = Default::default();
+        self.rate.reset();
         writer.discard();
     }
     fn refill(&mut self, writer: &mut StreamWriter, now: Instant) {
         if self.deafened {
             return;
         }
-        if self.jitter.maintain(now) {
+        if self.jitter.prepare(now) {
             self.reset_decoder(writer);
         }
         if !writer.ready() {
@@ -432,19 +438,36 @@ impl Remote {
         }
         // At most two frames per stream per worker tick. The callback remains
         // PCM-only; jitter buffering and Opus stay on this worker.
-        for _ in 0..writer.refill_frames() {
-            let Some(packet) = self.jitter.pop(writer.needs_concealment(), now) else {
+        for _ in 0..2 {
+            let Some(scheduled) = self.jitter.poll(now, writer.queue.occupied_len()) else {
                 break;
             };
+            if scheduled.reset {
+                let _ = self.decoder.reset_state();
+                self.rate.reset();
+            }
             let mut pcm = [0.0_f32; FRAME];
-            let samples = match &packet {
+            let samples = match &scheduled.decode {
                 jitter::Playout::Conceal(samples) => *samples,
                 _ => FRAME,
             };
-            if codec::decode(&mut self.decoder, &packet, &mut pcm, &mut self.decode_stats) {
+            let errors = self.decode_stats.decode_errors;
+            if codec::decode(
+                &mut self.decoder,
+                &scheduled.decode,
+                &mut pcm,
+                &mut self.decode_stats,
+            ) {
                 self.activity.observe(&pcm, now);
             }
-            writer.write(&pcm[..samples]);
+            if self.decode_stats.decode_errors > errors {
+                self.jitter.decode_failed();
+            }
+            let mut corrected = [0.0; playout_rate::MAX_OUTPUT];
+            let count =
+                self.rate
+                    .process(&pcm[..samples], scheduled.correction_ppm, &mut corrected);
+            writer.write(&corrected[..count]);
         }
     }
 }
@@ -1210,7 +1233,7 @@ fn run(
             if let Some(s) = &session {
                 diagnostics::event(
                     "audio_snapshot",
-                    serde_json::json!({"opus_decode":s.remotes.iter().flatten().map(|r| &r.decode_stats).collect::<Vec<_>>(),"verified_fec_frames":null,"receive":s.remotes.iter().flatten().map(|r|r.jitter.diagnostics()).collect::<Vec<_>>(),"health":s.devices.health.diagnostics(),"recovering":s.recovery.active(),"muted":s.settings.muted,"deafened":s.settings.deafened,"echo":s.settings.echo_cancellation,"neural_echo":s.settings.neural_echo,"suppression":s.settings.noise_suppression,"suppression_model":s.settings.noise_suppression_model,"automatic_gain":s.settings.automatic_gain,"dropped_samples":s.devices.control.dropped.load(Ordering::Relaxed),"underrun_samples":s.devices.control.underruns.load(Ordering::Relaxed)}),
+                    serde_json::json!({"opus_decode":s.remotes.iter().flatten().map(|r| &r.decode_stats).collect::<Vec<_>>(),"verified_fec_frames":null,"playout":s.remotes.iter().flatten().map(|r|r.jitter.metrics()).collect::<Vec<_>>(),"receive":s.remotes.iter().flatten().map(|r|r.jitter.diagnostics()).collect::<Vec<_>>(),"health":s.devices.health.diagnostics(),"recovering":s.recovery.active(),"muted":s.settings.muted,"deafened":s.settings.deafened,"echo":s.settings.echo_cancellation,"neural_echo":s.settings.neural_echo,"suppression":s.settings.noise_suppression,"suppression_model":s.settings.noise_suppression_model,"automatic_gain":s.settings.automatic_gain,"dropped_samples":s.devices.control.dropped.load(Ordering::Relaxed),"underrun_samples":s.devices.control.underruns.load(Ordering::Relaxed)}),
                 );
             }
         }
@@ -1318,6 +1341,7 @@ fn run(
                                 && s.connection
                                     .as_ref()
                                     .is_some_and(|c| c.accepts(&connection))
+                                && !s.devices.control.deafen.load(Ordering::Acquire)
                                 && let Some(Some(r)) = s.remotes.get_mut(slot)
                                 && !deafen.load(Ordering::Acquire)
                                 && !s.settings.deafened
@@ -1387,6 +1411,7 @@ fn run(
                                                         m.display_name().to_owned()
                                                     },
                                                     jitter: Default::default(),
+                                                    rate: Default::default(),
                                                     decoder: opus::Decoder::new(
                                                         RATE,
                                                         opus::Channels::Mono,
@@ -1616,84 +1641,6 @@ fn run(
 #[cfg(test)]
 mod lifecycle_tests {
     use super::*;
-    #[test]
-    fn remote_pcm_survives_worker_jitter_and_delayed_packets_without_sample_gaps() {
-        let mut encoder =
-            opus::Encoder::new(RATE, opus::Channels::Mono, opus::Application::Audio).unwrap();
-        let mut reference = opus::Decoder::new(RATE, opus::Channels::Mono).unwrap();
-        let mut packets = Vec::new();
-        let mut expected = Vec::new();
-        for sequence in 0..60 {
-            let pcm: [f32; FRAME] = std::array::from_fn(|i| {
-                ((sequence * FRAME + i) as f32 * std::f32::consts::TAU * 440.0 / RATE as f32).sin()
-                    * 0.1
-            });
-            let mut encoded = [0u8; 4000];
-            let n = encoder.encode_float(&pcm, &mut encoded).unwrap();
-            packets.push(bytes::Bytes::copy_from_slice(&encoded[..n]));
-            let mut decoded = [0.0; FRAME];
-            assert_eq!(
-                reference
-                    .decode_float(&encoded[..n], &mut decoded, false)
-                    .unwrap(),
-                FRAME
-            );
-            expected.extend_from_slice(&decoded);
-        }
-        let at = Instant::now();
-        let mut remote = Remote {
-            since: at,
-            deafened: false,
-            decode_stats: Default::default(),
-            activity: Default::default(),
-            id: "00000000-0000-0000-0000-000000000001".parse().unwrap(),
-            label: "synthetic shared audio".into(),
-            jitter: Default::default(),
-            decoder: opus::Decoder::new(RATE, opus::Channels::Mono).unwrap(),
-        };
-        let controls = Arc::new(Controls::default());
-        let (mut writers, mut mixer) = mixer::mixer(controls.clone());
-        let writer = &mut writers[thiscord_shared::voice::ROOM_CAPACITY];
-        writer.control.active.store(true, Ordering::Release);
-        for (i, packet) in packets.iter().take(3).enumerate() {
-            remote.push(i as u16, i as u32 * FRAME as u32, packet.clone(), at, at);
-        }
-        remote.refill(writer, at);
-        let mut actual = Vec::new();
-        let mut next_worker = 5;
-        let intervals = [5, 7, 12, 4, 8, 5];
-        let mut wake = 0;
-        for ms in 0..1000 {
-            for (sequence, packet) in packets.iter().enumerate().skip(3) {
-                let arrival = (sequence - 2) * 20 + if sequence % 7 == 0 { 15 } else { 0 };
-                if ms == arrival {
-                    let now = at + Duration::from_millis(ms as u64);
-                    remote.push(
-                        sequence as u16,
-                        sequence as u32 * FRAME as u32,
-                        packet.clone(),
-                        now,
-                        now,
-                    );
-                }
-            }
-            if ms >= next_worker {
-                remote.refill(writer, at + Duration::from_millis(ms as u64));
-                next_worker += intervals[wake % intervals.len()];
-                wake += 1;
-            }
-            let mut output = [0.0; 48]; // 1 ms of real device consumption.
-            mixer.render(&mut output, 1);
-            actual.extend_from_slice(&output);
-        }
-        assert_eq!(controls.underruns.load(Ordering::Relaxed), 0);
-        assert_eq!(
-            actual,
-            expected[..actual.len()],
-            "no premature PLC, PCM trimming or missing samples"
-        );
-    }
-
     #[test]
     fn worker_panic_is_recoverable_and_restart_budget_is_finite() {
         let engine = AudioEngine::new();

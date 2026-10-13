@@ -3,17 +3,18 @@
 use super::{frames::sample_duration, mixer::FRAME};
 use std::time::{Duration, Instant};
 
-pub const PACKETS: usize = 8;
-pub const MAX_AGE: Duration = Duration::from_millis(120);
+pub const PACKETS: usize = 12;
+pub const MAX_PACKETS: usize = PACKETS;
+pub const MAX_AGE: Duration = Duration::from_millis(200);
 const PREBUFFER: Duration = Duration::from_millis(60);
 const MAX_GAP: u32 = 3 * FRAME as u32;
 const WINDOW: i32 = PACKETS as i32 * FRAME as i32;
 
-struct Packet {
-    sequence: u16,
-    timestamp: u32,
-    received: Instant,
-    payload: bytes::Bytes,
+pub struct Packet {
+    pub sequence: u16,
+    pub timestamp: u32,
+    pub arrived: Instant,
+    pub payload: bytes::Bytes,
 }
 #[derive(Debug, PartialEq)]
 pub enum Playout {
@@ -23,6 +24,43 @@ pub enum Playout {
     /// Full packets use Opus PLC; fractional holes use exact-length silence.
     Conceal(usize),
 }
+#[derive(Default, Clone, serde::Serialize)]
+pub struct Metrics {
+    pub target_ms: f64,
+    /// Arrival-to-render estimate, excluding the OS/device buffer.
+    pub current_ms: f64,
+    pub variation_ms: f64,
+    pub packets: usize,
+    pub pcm_samples: usize,
+    pub late_discards: u64,
+    pub duplicates: u64,
+    pub capacity_discards: u64,
+    pub rebufferings: u64,
+    pub discontinuities: u64,
+    pub worker_stalls: u64,
+    pub worker_queue_discards: u64,
+    pub stale_discards: u64,
+    pub concealments: u64,
+    pub fec_attempts: u64,
+    pub decode_errors: u64,
+    pub inactive: bool,
+    pub drift_ppm: f64,
+    pub correction_ppm: f64,
+}
+
+pub type Decode = Playout;
+pub struct Scheduled {
+    pub decode: Playout,
+    pub reset: bool,
+    pub correction_ppm: f64,
+}
+
+#[cfg(test)]
+#[path = "jitter/tests.rs"]
+mod adaptive_tests;
+#[cfg(test)]
+pub(super) mod legacy;
+
 #[derive(Default)]
 struct Counters {
     rejected: u64,
@@ -42,6 +80,18 @@ pub struct Jitter {
     missing: u32,
     reset_pending: bool,
     counters: Counters,
+    adaptive: bool,
+    latest: Option<(u32, Instant)>,
+    last_tick: Option<Instant>,
+    last_service: Option<Instant>,
+    last_raise: Option<Instant>,
+    last_rebuffer: Option<Instant>,
+    late_at_rebuffer: u64,
+    filtered_error: f64,
+    reset_rate: bool,
+    seen: [Option<(u16, u32)>; 32],
+    seen_index: usize,
+    metrics: Metrics,
 }
 impl Default for Jitter {
     fn default() -> Self {
@@ -56,6 +106,22 @@ impl Default for Jitter {
             missing: 0,
             reset_pending: false,
             counters: Default::default(),
+            adaptive: false,
+            latest: None,
+            last_tick: None,
+            last_service: None,
+            last_raise: None,
+            last_rebuffer: None,
+            late_at_rebuffer: 0,
+            filtered_error: 0.0,
+            reset_rate: true,
+            seen: [None; 32],
+            seen_index: 0,
+            metrics: Metrics {
+                target_ms: 40.0,
+                inactive: true,
+                ..Default::default()
+            },
         }
     }
 }
@@ -70,7 +136,11 @@ impl Jitter {
     ) {
         if now.saturating_duration_since(received) >= MAX_AGE {
             self.counters.expired += 1;
+            self.metrics.worker_queue_discards += 1;
             return;
+        }
+        if !payload.is_empty() && payload.len() <= 1500 {
+            self.observe(sequence, timestamp, received);
         }
         if payload.is_empty()
             || payload.len() > 1500
@@ -92,6 +162,12 @@ impl Jitter {
             })
         {
             self.counters.rejected += 1;
+            if self
+                .floor
+                .is_some_and(|floor| (timestamp.wrapping_sub(floor) as i32) < 0)
+            {
+                self.metrics.late_discards += 1;
+            }
             return;
         }
         if let Some(cursor) = self.cursor {
@@ -110,10 +186,10 @@ impl Jitter {
         } else {
             self.cursor = Some(timestamp);
             self.first = Some(received);
-            self.play_at = Some(received + PREBUFFER);
+            self.play_at = Some(received + self.prebuffer());
         }
         if self.packets.len() == PACKETS {
-            // Keep the live edge without allocating a ninth slot.
+            // Keep the live edge without allocating beyond the packet cap.
             let cursor = self.cursor.unwrap();
             let oldest = self
                 .packets
@@ -133,7 +209,7 @@ impl Jitter {
         self.packets.push(Packet {
             sequence,
             timestamp,
-            received,
+            arrived: received,
             payload,
         });
     }
@@ -143,7 +219,7 @@ impl Jitter {
     pub fn maintain(&mut self, now: Instant) -> bool {
         let before = self.packets.len();
         self.packets
-            .retain(|p| now.saturating_duration_since(p.received) < MAX_AGE);
+            .retain(|p| now.saturating_duration_since(p.arrived) < MAX_AGE);
         self.counters.expired += (before - self.packets.len()) as u64;
         let far = self.cursor.is_some_and(|cursor| {
             self.packets
@@ -152,9 +228,18 @@ impl Jitter {
                 .min()
                 .is_some_and(|gap| gap > MAX_GAP as i32 || (gap > 0 && self.missing >= MAX_GAP))
         });
-        let lagging = self
-            .play_at
-            .is_some_and(|at| now.saturating_duration_since(at) >= MAX_AGE);
+        // The fixed anchor cannot detect lag during rate-corrected playback:
+        // sender/output drift deliberately moves it relative to wall time.
+        // Expire remaining PCM even when all packets have already been decoded.
+        let lagging = if self.adaptive {
+            self.playing
+                && self
+                    .latest
+                    .is_some_and(|(_, at)| now.saturating_duration_since(at) >= MAX_AGE)
+        } else {
+            self.play_at
+                .is_some_and(|at| now.saturating_duration_since(at) >= MAX_AGE)
+        };
         let spread = self.cursor.is_some_and(|cursor| {
             self.packets
                 .iter()
@@ -164,6 +249,12 @@ impl Jitter {
             return false;
         }
         self.counters.resets += 1;
+        self.metrics.rebufferings += 1;
+        self.metrics.discontinuities += 1;
+        self.reset_rate = true;
+        self.filtered_error = 0.0;
+        self.metrics.correction_ppm = 0.0;
+        self.metrics.drift_ppm = 0.0;
         self.reset_pending = false;
         self.playing = false;
         self.missing = 0;
@@ -186,7 +277,7 @@ impl Jitter {
             self.floor = self.cursor;
             self.last_sequence = Some(first.sequence.wrapping_sub(1));
             self.first = Some(now);
-            self.play_at = Some(now + PREBUFFER);
+            self.play_at = Some(now + self.prebuffer());
         } else {
             self.cursor = None;
             self.first = None;
@@ -197,7 +288,11 @@ impl Jitter {
     pub fn pop(&mut self, conceal_missing: bool, now: Instant) -> Option<Playout> {
         let cursor = self.cursor?;
         if !self.playing {
-            if self.packets.len() < 3 && now.saturating_duration_since(self.first?) < PREBUFFER {
+            if (self.adaptive && now < self.play_at?)
+                || (!self.adaptive
+                    && self.packets.len() < 3
+                    && now.saturating_duration_since(self.first?) < PREBUFFER)
+            {
                 return None;
             }
             self.playing = true;
@@ -266,12 +361,187 @@ impl Jitter {
         self.playing = false;
         self.missing = 0;
         self.reset_pending = false;
+        self.latest = None;
+        self.last_tick = None;
+        self.last_service = None;
+        self.reset_rate = true;
+        self.filtered_error = 0.0;
+        self.metrics.drift_ppm = 0.0;
+        self.metrics.correction_ppm = 0.0;
     }
     pub fn diagnostics(&self) -> serde_json::Value {
         serde_json::json!({"rejected":self.counters.rejected,"expired":self.counters.expired,
             "overflow":self.counters.overflow,"resets":self.counters.resets,
             "concealed_samples":self.counters.concealed_samples})
     }
+
+    fn prebuffer(&self) -> Duration {
+        Duration::from_secs_f64(self.metrics.target_ms / 1000.0)
+    }
+    pub fn push_packet(&mut self, packet: Packet, now: Instant) {
+        self.push(
+            packet.sequence,
+            packet.timestamp,
+            packet.payload,
+            packet.arrived,
+            now,
+        );
+    }
+    fn observe(&mut self, sequence: u16, timestamp: u32, arrived: Instant) {
+        let identity = (sequence, timestamp);
+        if self.seen.contains(&Some(identity)) {
+            self.metrics.duplicates += 1;
+            return;
+        }
+        self.seen[self.seen_index] = Some(identity);
+        self.seen_index = (self.seen_index + 1) % self.seen.len();
+        if let Some((ts, at)) = self.latest {
+            let media = timestamp.wrapping_sub(ts) as i32;
+            let elapsed = arrived.saturating_duration_since(at).as_secs_f64();
+            if arrived >= at && media.unsigned_abs() <= 48000 && elapsed <= 1.0 {
+                let variation = (elapsed * 1000.0 - f64::from(media) / 48.0)
+                    .abs()
+                    .min(120.0);
+                self.metrics.variation_ms += (variation - self.metrics.variation_ms) / 16.0;
+                let wanted = (40.0 + 4.0 * self.metrics.variation_ms).clamp(40.0, 120.0);
+                if wanted > self.metrics.target_ms + 5.0 {
+                    self.metrics.target_ms = wanted;
+                    self.last_raise = Some(arrived);
+                } else if media > 0
+                    && wanted < self.metrics.target_ms - 5.0
+                    && self
+                        .last_raise
+                        .is_none_or(|t| arrived.saturating_duration_since(t).as_secs() >= 5)
+                {
+                    self.metrics.target_ms = (self.metrics.target_ms - elapsed).max(40.0);
+                }
+            }
+            if media > 0 {
+                self.latest = Some((timestamp, arrived));
+            }
+        } else {
+            self.latest = Some((timestamp, arrived));
+        }
+    }
+    /// Maintenance runs even with a full ring. The caller must flush and await
+    /// callback acknowledgement before scheduling PCM after a hard reset.
+    pub fn prepare(&mut self, now: Instant) -> bool {
+        self.adaptive = true;
+        if self
+            .last_service
+            .replace(now)
+            .is_some_and(|at| now.saturating_duration_since(at) > Duration::from_millis(100))
+            && self.playing
+        {
+            self.reset_pending = true;
+            self.metrics.worker_stalls += 1;
+        }
+        self.maintain(now)
+    }
+    pub fn metrics(&self) -> Metrics {
+        Metrics {
+            packets: self.packets.len(),
+            capacity_discards: self.counters.overflow,
+            stale_discards: self
+                .counters
+                .expired
+                .saturating_sub(self.metrics.worker_queue_discards),
+            inactive: self.cursor.is_none() || (self.packets.is_empty() && self.missing >= MAX_GAP),
+            ..self.metrics.clone()
+        }
+    }
+    pub fn decode_failed(&mut self) {
+        self.metrics.decode_errors += 1;
+    }
+    #[cfg(test)]
+    fn tick(&mut self, now: Instant, pcm_samples: usize) -> Option<Scheduled> {
+        self.prepare(now);
+        self.poll(now, pcm_samples)
+    }
+    /// The worker must call prepare once before its bounded decode loop and
+    /// honor the flush acknowledgement. Never perform a hidden hard reset here.
+    pub fn poll(&mut self, now: Instant, pcm_samples: usize) -> Option<Scheduled> {
+        self.metrics.pcm_samples = pcm_samples;
+        let elapsed = self
+            .last_tick
+            .replace(now)
+            .map(|at| now.saturating_duration_since(at))
+            .unwrap_or_default();
+        let timestamp = self.cursor?;
+        if !self.playing && (now < self.play_at? || pcm_samples != 0) {
+            return None;
+        }
+        if let Some((latest, arrived)) = self.latest {
+            let age = now.saturating_duration_since(arrived).as_secs_f64() * 1000.0;
+            self.metrics.current_ms = age
+                + f64::from(latest.wrapping_sub(timestamp) as i32) / 48.0
+                + pcm_samples as f64 / 48.0;
+            let deficit = self.metrics.target_ms - self.metrics.current_ms;
+            if deficit > 20.0
+                && self.metrics.variation_ms > 5.0
+                && self.metrics.late_discards > self.late_at_rebuffer
+                && self
+                    .last_rebuffer
+                    .is_none_or(|t| now.saturating_duration_since(t).as_secs() >= 5)
+            {
+                // A sudden path change needs tolerance now, not after tens of
+                // seconds of gentle rate correction. Drain existing PCM, then
+                // insert one explicit bounded rebuffer interval. Never cut PCM.
+                self.playing = false;
+                self.play_at = Some(
+                    now + Duration::from_secs_f64(
+                        (deficit.min(80.0) + pcm_samples as f64 / 48.0) / 1000.0,
+                    ),
+                );
+                self.last_rebuffer = Some(now);
+                self.late_at_rebuffer = self.metrics.late_discards;
+                self.metrics.rebufferings += 1;
+                self.filtered_error = 0.0;
+                self.metrics.correction_ppm = 0.0;
+                return None;
+            }
+            if elapsed <= Duration::from_millis(100) && age < 200.0 && self.missing == 0 {
+                let dt = elapsed.as_secs_f64();
+                let error = self.metrics.current_ms - self.metrics.target_ms;
+                self.filtered_error += dt / (5.0 + dt) * (error - self.filtered_error);
+                // Slow integral learns sender/output clock skew. Fast delay
+                // changes remain the proportional term, not the drift estimate.
+                if self.metrics.variation_ms < 5.0
+                    && error.abs() < 10.0
+                    && self
+                        .last_raise
+                        .is_none_or(|at| now.saturating_duration_since(at).as_secs() >= 10)
+                {
+                    self.metrics.drift_ppm = (self.metrics.drift_ppm
+                        + self.filtered_error * dt * 5.0)
+                        .clamp(-1000.0, 1000.0);
+                }
+                let wanted =
+                    (self.metrics.drift_ppm + self.filtered_error * 100.0).clamp(-5000.0, 5000.0);
+                self.metrics.correction_ppm +=
+                    (wanted - self.metrics.correction_ppm).clamp(-1000.0 * dt, 1000.0 * dt);
+            }
+        }
+
+        if pcm_samples > 720 {
+            return None;
+        }
+        let decode = self.pop(pcm_samples <= 240, now)?;
+        match &decode {
+            Playout::Fec(_) => {
+                self.metrics.fec_attempts += 1;
+                self.metrics.concealments += 1;
+            }
+            Playout::Conceal(_) => self.metrics.concealments += 1,
+            Playout::Packet(_) => {}
+        }
+        Some(Scheduled {
+            decode,
+            reset: std::mem::take(&mut self.reset_rate),
+            correction_ppm: self.metrics.correction_ppm,
+        })
+    }
+
     pub(super) fn reject(&mut self) {
         self.counters.rejected += 1;
     }
@@ -508,7 +778,7 @@ mod tests {
             now,
         );
         assert!(j.packets.is_empty());
-        assert_eq!(j.counters.overflow, 9992);
+        assert_eq!(j.counters.overflow, 10000 - PACKETS as u64);
     }
 
     #[test]

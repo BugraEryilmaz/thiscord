@@ -90,6 +90,7 @@ impl PeerConnectionEventHandler for Handler {
                     event = track.poll() => match event { Some(event) => event, None => break },
                 };
                 if let TrackRemoteEvent::OnRtpPacket(packet) = event {
+                    let arrived = Instant::now();
                     if let Some(receiver) = &screen_receiver {
                         receiver.push(packet, Instant::now());
                         continue;
@@ -102,7 +103,7 @@ impl PeerConnectionEventHandler for Handler {
                             slot,
                             sequence: packet.header.sequence_number,
                             timestamp: packet.header.timestamp,
-                            received_at: Instant::now(),
+                            received_at: arrived,
                             payload: packet.payload,
                         });
                     }

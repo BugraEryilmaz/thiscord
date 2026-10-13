@@ -46,6 +46,7 @@ fn remote(now: Instant) -> Remote {
         activity: Default::default(),
         id: "00000000-0000-0000-0000-000000000001".parse().unwrap(),
         label: "fixture".into(),
+        rate: Default::default(),
         jitter: Jitter::default(),
         decoder: decoder(),
     }
@@ -185,7 +186,7 @@ fn deterministic_transport_loss_matches_ordered_decoder_and_has_no_playout_gaps(
     let drops = [15, 30, 31, 47];
     let mut expected_decoder = decoder();
     let mut expected = Vec::new();
-    for i in 0..count {
+    for i in 0..count + 4 {
         let pcm = if drops.contains(&i) {
             if drops.contains(&(i + 1)) {
                 decoded(&mut expected_decoder, &[], false)
@@ -218,6 +219,9 @@ fn deterministic_transport_loss_matches_ordered_decoder_and_has_no_playout_gaps(
         })
         .collect();
     let mut next_wake = 60;
+    let mut rate = crate::audio::playout_rate::Rate::default();
+    let mut rendered_reference = Vec::new();
+    let mut reference_frames = 0;
     for ms in 0..60 + count * 20 {
         let now = start + Duration::from_millis(ms as u64);
         for (i, &arrival) in arrivals.iter().enumerate() {
@@ -233,6 +237,21 @@ fn deterministic_transport_loss_matches_ordered_decoder_and_has_no_playout_gaps(
         }
         if ms >= next_wake {
             remote.refill(writer, now);
+            // The expected codec order is independent of the scheduler. Apply
+            // only its measured rate to compare the actual rendered samples.
+            let frames = remote.decode_stats.normal_frames
+                + remote.decode_stats.fec_output_frames
+                + remote.decode_stats.plc_frames;
+            while reference_frames < frames as usize && reference_frames < count + 4 {
+                let mut output = [0.0; crate::audio::playout_rate::MAX_OUTPUT];
+                let n = rate.process(
+                    &expected[reference_frames * FRAME..(reference_frames + 1) * FRAME],
+                    remote.jitter.metrics().correction_ppm,
+                    &mut output,
+                );
+                rendered_reference.extend_from_slice(&output[..n]);
+                reference_frames += 1;
+            }
             next_wake += [5, 7, 4][ms % 3];
         }
         if ms >= 60 {
@@ -241,15 +260,19 @@ fn deterministic_transport_loss_matches_ordered_decoder_and_has_no_playout_gaps(
             actual.extend_from_slice(&pcm);
         }
     }
-    assert_eq!(actual.len(), expected.len());
+    assert!(rendered_reference.len() >= actual.len());
     assert!(
-        actual.iter().zip(&expected).all(|(a, b)| a == b),
+        actual.iter().zip(&rendered_reference).all(|(a, b)| a == b),
         "ordered output differs first at sample {:?}",
-        actual.iter().zip(&expected).position(|(a, b)| a != b)
+        actual
+            .iter()
+            .zip(&rendered_reference)
+            .position(|(a, b)| a != b)
     );
     assert_eq!(controls.underruns.load(Ordering::Relaxed), 0);
     assert_eq!(remote.decode_stats.fec_attempts, 3);
     assert_eq!(remote.decode_stats.plc_frames, 1);
+    assert_eq!(remote.jitter.metrics().rebufferings, 0);
 }
 
 #[test]
@@ -273,13 +296,22 @@ fn recovered_pcm_obeys_deafen_and_generation_invalidation_and_isolates_speakers(
         );
     }
     writers[0].control.active.store(true, Ordering::Release);
-    speaker.refill(&mut writers[0], now);
+    let play_at = now + Duration::from_millis(40);
+    speaker.refill(&mut writers[0], play_at);
     let mut pcm = [0.0; FRAME];
     mixer.render(&mut pcm, 1);
     speaker.activity = Default::default();
-    speaker.refill(&mut writers[0], now);
+    speaker.refill(&mut writers[0], play_at + Duration::from_millis(20));
     assert_eq!(speaker.decode_stats.fec_attempts, 1);
     // The normal successor, not speculative FEC, can light the indicator.
+    assert_eq!(speaker.decode_stats.normal_frames, 1);
+    mixer.render(&mut pcm, 1);
+    assert!(
+        !speaker
+            .activity
+            .speaking(play_at + Duration::from_millis(20))
+    );
+    speaker.refill(&mut writers[0], play_at + Duration::from_millis(40));
     assert_eq!(speaker.decode_stats.normal_frames, 2);
     controls.deafen.store(true, Ordering::Release);
     mixer.render(&mut pcm, 1);
