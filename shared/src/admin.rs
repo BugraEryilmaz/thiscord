@@ -1,4 +1,4 @@
-//! Read-only, instance-wide diagnostics. Never contains credentials or message content.
+//! Instance-wide diagnostics. Never contains credentials or message content.
 use crate::{ChannelId, GuildId, permissions::InstanceRole, voice::Participant};
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
@@ -39,6 +39,9 @@ pub struct RoomDiagnostics {
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct ParticipantDiagnostics {
+    /// Present only for a connected desktop supporting remote audio controls.
+    #[serde(default)]
+    pub audio_connection_id: Option<crate::RequestId>,
     pub participant: Participant,
     pub network: NetworkMetrics,
     /// Video ingress, ingress drops, egress drops, sent packets, send timeouts.

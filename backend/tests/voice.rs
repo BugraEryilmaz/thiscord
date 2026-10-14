@@ -313,6 +313,7 @@ impl Peer {
         send(
             &mut socket,
             ClientEvent::Answer {
+                remote_audio: true,
                 screen_feedback: true,
                 screen_subscriptions: true,
                 sdp: serde_json::to_string(&pc.local_description().await.unwrap()).unwrap(),
@@ -771,6 +772,82 @@ async fn sfu_forwarding_permissions_isolation_and_cleanup() {
     if cfg!(target_os = "linux") {
         assert!(diagnostic_snapshot.host.memory_total_bytes.is_some());
     }
+    // Remote control is delivered to the exact live connection and accepts replies only there.
+    let audio_connection = diagnostic_snapshot
+        .rooms
+        .iter()
+        .flat_map(|r| &r.participants)
+        .find(|p| p.participant.account_id == member)
+        .unwrap()
+        .audio_connection_id
+        .unwrap();
+    let request_app = app.clone();
+    let admin_token = ot.clone();
+    let mut request = tokio::spawn(async move {
+        call(
+            &request_app,
+            thiscord_shared::remote_audio::PATH,
+            &admin_token,
+            json!({"connection_id":audio_connection,"command":{"command":"audio_current"}}),
+        )
+        .await
+    });
+    let request_id = tokio::time::timeout(Duration::from_secs(5), async {
+        loop {
+            if let ServerEvent::AudioCommand {
+                request_id,
+                command,
+            } = event(&mut b.socket).await
+            {
+                assert!(matches!(
+                    command,
+                    thiscord_shared::remote_audio::Command::AudioCurrent {}
+                ));
+                break request_id;
+            }
+        }
+    })
+    .await
+    .unwrap();
+    send(
+        &mut isolated.socket,
+        ClientEvent::AudioReply {
+            request_id,
+            chunk: r#"{"Ok":"forged"}"#.into(),
+            done: true,
+        },
+    )
+    .await;
+    assert!(
+        tokio::time::timeout(Duration::from_millis(100), &mut request)
+            .await
+            .is_err(),
+        "another connection cannot supply the response"
+    );
+    send(
+        &mut b.socket,
+        ClientEvent::AudioReply {
+            request_id,
+            chunk: r#"{"Ok":{"output_"#.into(),
+            done: false,
+        },
+    )
+    .await;
+    send(
+        &mut b.socket,
+        ClientEvent::AudioReply {
+            request_id,
+            chunk: r#"volume":0.5}}"#.into(),
+            done: true,
+        },
+    )
+    .await;
+    let (status, value) = tokio::time::timeout(Duration::from_secs(5), request)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(value["Ok"]["output_volume"], 0.5);
     // Screen publishing requires explicit state, even for an authorized speaker.
     screen_blocked(&mut a, &mut b).await;
     send(

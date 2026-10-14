@@ -6,6 +6,8 @@ media compatibility spike can happen before chat to expose platform constraints.
 
 ## 0. Foundation
 
+- [x] Remote audio settings and diagnostic JSON downloads for connected desktop participants, with instance authorization and stale-edit checks.
+- [ ] Verify remote hardware changes, shortcut/overlay behavior and downloads with real Windows/macOS/Linux desktop clients.
 - [x] Browser `/admin` dashboard with current instance-owner/admin authorization, host metrics and live voice diagnostics.
 - [ ] Deploy the admin bundle to the VPS and verify production password/Google login and real-client telemetry.
 

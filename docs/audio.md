@@ -7,6 +7,15 @@ Only settings, levels and participant metadata cross Tauri IPC. PCM and encoded
 audio never pass through WASM or handwritten JavaScript. Browser preview supports
 text chat; voice requires the desktop executable. Exactly three packages remain.
 
+## Remote support
+
+Instance owners/admins can open a connected participant's audio settings in the
+browser admin panel and adjust the same native preferences. They can explicitly
+request technical diagnostic logs, including device names, while that voice
+connection is active. Recordings and raw media are excluded. See
+[remote audio support](admin.md#remote-audio-support) for commands, limits and
+concurrency behavior. No diagnostic logs are uploaded without an admin request.
+
 ## Use
 
 Restart the backend and desktop app after building. In Settings → Audio & voice,
@@ -151,7 +160,7 @@ file is opened, and panic stacks are not captured for these logs. Opening the fo
 does not enable logging. Backend `tracing` logs remain independently controlled by
 `RUST_LOG` (default `info`).
 
-Enabled logging is asynchronous and local-only, with a bounded 512-record queue
+Enabled logging is asynchronous and stored locally, with a bounded 512-record queue
 and three files of up to 2 MiB each. Records include timestamps, app/platform details,
 device names/formats, processing options, callback/drop counts, recovery attempts,
 cleanup progress, worker watchdog state, window focus, voice lifecycle and panic

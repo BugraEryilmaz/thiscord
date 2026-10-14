@@ -3,6 +3,7 @@
 mod native_account;
 mod native_audio;
 mod native_overlay;
+mod native_remote_audio;
 mod native_screen;
 mod native_shortcuts;
 mod native_signaling;

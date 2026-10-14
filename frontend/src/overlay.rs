@@ -83,14 +83,22 @@ pub fn VoiceOverlay() -> impl IntoView {
 }
 
 #[component]
-pub fn OverlaySettings() -> impl IntoView {
+pub fn OverlaySettings(
+    #[prop(default = crate::audio_control::AudioControl::default())]
+    control: crate::audio_control::AudioControl,
+) -> impl IntoView {
     let enabled = RwSignal::new(true);
     let busy = RwSignal::new(true);
     let error = RwSignal::new(String::new());
-    leptos::task::spawn_local(async move {
-        match native("overlay_enabled", json!({})).await {
+    let loaded = RwSignal::new(false);
+    control.poll::<bool>("overlay_enabled", move |result| {
+        if loaded.get_untracked() && busy.get_untracked() {
+            return;
+        }
+        match result {
             Ok(value) => {
                 enabled.set(value);
+                loaded.set(true);
                 busy.set(false);
             }
             Err(message) => error.set(message),
@@ -105,7 +113,9 @@ pub fn OverlaySettings() -> impl IntoView {
                         let value = event_target_checked(&ev);
                         busy.set(true);
                         leptos::task::spawn_local(async move {
-                            match native::<()>("overlay_enable", json!({"enabled": value})).await {
+                            let result = control.invoke::<()>("overlay_enable", json!({"enabled": value})).await;
+                            if busy.is_disposed() { return; }
+                            match result {
                                 Ok(()) => { enabled.set(value); error.set(String::new()); },
                                 Err(message) => error.set(message),
                             }
