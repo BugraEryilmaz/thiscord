@@ -13,13 +13,51 @@ pub(super) fn save(ui: Ui) {
     ui.audio_saving.set(true);
     leptos::task::spawn_local(async move {
         loop {
-            let revision = ui.audio_revision.get_untracked();
+            let Some(revision) = ui.audio_revision.try_get_untracked() else {
+                return;
+            };
             let settings = ui.audio.get_untracked();
-            if let Err(error) = native::<()>("audio_save", json!({"settings":settings})).await {
+            if let Err(error) = ui
+                .audio_control
+                .invoke::<()>("audio_save", json!({"settings":settings}))
+                .await
+            {
+                if ui.status.is_disposed() {
+                    return;
+                }
                 ui.status.set(error);
-                if let Ok(saved) = native::<AudioSettings>("audio_current", json!({})).await
-                    && ui.audio_revision.get_untracked() == revision
+                if let Ok(saved) = ui
+                    .audio_control
+                    .invoke::<AudioSettings>("audio_current", json!({}))
+                    .await
+                    && !ui.audio_revision.is_disposed()
+                    && (ui.audio_control.is_remote()
+                        || ui.audio_revision.get_untracked() == revision)
                 {
+                    ui.audio_control.observe(&saved);
+                    ui.audio.set(saved);
+                }
+                if ui.audio_control.is_remote() {
+                    if !ui.audio_saving.is_disposed() {
+                        ui.audio_saving.set(false);
+                    }
+                    return;
+                }
+            }
+            if ui.audio_revision.is_disposed() {
+                return;
+            }
+            if ui.audio_control.is_remote()
+                && let Ok(saved) = ui
+                    .audio_control
+                    .invoke::<AudioSettings>("audio_current", json!({}))
+                    .await
+            {
+                if ui.audio.is_disposed() {
+                    return;
+                }
+                ui.audio_control.observe(&saved);
+                if ui.audio_revision.get_untracked() == revision {
                     ui.audio.set(saved);
                 }
             }
@@ -37,7 +75,11 @@ fn pressed(pressed: bool) {
 }
 pub(super) fn leave(ui: Ui) {
     leptos::task::spawn_local(async move {
-        if let Err(error) = native::<()>("voice_leave", json!({})).await {
+        if let Err(error) = ui
+            .audio_control
+            .invoke::<()>("voice_leave", json!({}))
+            .await
+        {
             ui.status.set(error);
         }
     });
@@ -48,9 +90,15 @@ pub(super) fn AudioHost(ui: Ui) -> impl IntoView {
     on_cleanup(move || {
         abort.abort();
         if desktop() {
-            leptos::task::spawn_local(async {
-                let _ = native::<()>("voice_leave", json!({})).await;
-                let _ = native::<AudioStatus>("audio_stop", json!({})).await;
+            leptos::task::spawn_local(async move {
+                let _ = ui
+                    .audio_control
+                    .invoke::<()>("voice_leave", json!({}))
+                    .await;
+                let _ = ui
+                    .audio_control
+                    .invoke::<AudioStatus>("audio_stop", json!({}))
+                    .await;
             });
         }
     });
@@ -58,12 +106,20 @@ pub(super) fn AudioHost(ui: Ui) -> impl IntoView {
         leptos::task::spawn_local(async move {
             let _ = futures_util::future::Abortable::new(
                 async move {
-                    match native::<AudioSettings>("audio_load", json!({})).await {
+                    match ui
+                        .audio_control
+                        .invoke::<AudioSettings>("audio_load", json!({}))
+                        .await
+                    {
                         Ok(settings) => ui.audio.set(settings),
                         Err(error) => ui.status.set(error),
                     }
                     loop {
-                        if let Ok(status) = native::<VoiceStatus>("voice_status", json!({})).await {
+                        if let Ok(status) = ui
+                            .audio_control
+                            .invoke::<VoiceStatus>("voice_status", json!({}))
+                            .await
+                        {
                             if ui.voice.get_untracked().channel_id.is_some()
                                 && status.channel_id.is_none()
                             {
@@ -71,16 +127,20 @@ pub(super) fn AudioHost(ui: Ui) -> impl IntoView {
                             }
                             ui.voice.set(status);
                         }
-                        if let Ok(status) = native::<AudioStatus>("audio_status", json!({})).await {
+                        if let Ok(status) = ui
+                            .audio_control
+                            .invoke::<AudioStatus>("audio_status", json!({}))
+                            .await
+                        {
                             ui.audio_status.set(Some(status));
                         }
-                        if let Ok(settings) =
-                            native::<AudioSettings>("audio_current", json!({})).await
+                        if let Ok(settings) = ui
+                            .audio_control
+                            .invoke::<AudioSettings>("audio_current", json!({}))
+                            .await
+                            && !ui.audio_saving.get_untracked()
                         {
-                            ui.audio.update(|current| {
-                                current.muted = settings.muted;
-                                current.deafened = settings.deafened;
-                            });
+                            ui.audio.set(settings);
                         }
                         gloo_timers::future::TimeoutFuture::new(500).await;
                     }
@@ -93,10 +153,22 @@ pub(super) fn AudioHost(ui: Ui) -> impl IntoView {
 }
 fn toggle(ui: Ui, action: AudioToggle) {
     leptos::task::spawn_local(async move {
-        if let Err(error) = native::<()>("audio_toggle", json!({"action":action})).await {
+        let result = ui
+            .audio_control
+            .invoke::<()>("audio_toggle", json!({"action":action}))
+            .await;
+        if ui.status.is_disposed() {
+            return;
+        }
+        if let Err(error) = result {
             ui.status.set(error);
         }
-        if let Ok(settings) = native::<AudioSettings>("audio_current", json!({})).await {
+        if let Ok(settings) = ui
+            .audio_control
+            .invoke::<AudioSettings>("audio_current", json!({}))
+            .await
+            && !ui.audio.is_disposed()
+        {
             ui.audio.update(|current| {
                 current.muted = settings.muted;
                 current.deafened = settings.deafened;
@@ -109,7 +181,7 @@ fn VoiceControls(ui: Ui) -> impl IntoView {
     view! {<div class="flex flex-wrap items-center gap-3">
         <button class="rounded bg-white/10 px-3 py-2 text-sm" aria-pressed=move || ui.audio.get().muted on:click=move |_|toggle(ui, AudioToggle::Mute)>{move||if ui.audio.get().muted{"Unmute"}else{"Mute"}}</button>
         <button class="rounded bg-white/10 px-3 py-2 text-sm" aria-pressed=move || ui.audio.get().deafened on:click=move |_|toggle(ui, AudioToggle::Deafen)>{move||if ui.audio.get().deafened{"Undeafen"}else{"Deafen"}}</button>
-        <Show when=move||ui.audio.get().mode==TransmitMode::PushToTalk><button class="touch-none select-none rounded bg-brand px-3 py-2 text-sm" on:pointerdown=move |_|pressed(true) on:pointerup=move |_|pressed(false) on:pointerleave=move |_|pressed(false) on:pointercancel=move |_|pressed(false) on:keydown=move|e|{if matches!(e.key().as_str()," "|"Enter"){e.prevent_default();pressed(true);}} on:keyup=move|_|pressed(false) on:blur=move |_|pressed(false)>"Hold to talk"</button></Show>
+        <Show when=move||!ui.audio_control.is_remote() && ui.audio.get().mode==TransmitMode::PushToTalk><button class="touch-none select-none rounded bg-brand px-3 py-2 text-sm" on:pointerdown=move |_|pressed(true) on:pointerup=move |_|pressed(false) on:pointerleave=move |_|pressed(false) on:pointercancel=move |_|pressed(false) on:keydown=move|e|{if matches!(e.key().as_str()," "|"Enter"){e.prevent_default();pressed(true);}} on:keyup=move|_|pressed(false) on:blur=move |_|pressed(false)>"Hold to talk"</button></Show>
     </div>}
 }
 #[component]
@@ -127,7 +199,11 @@ pub(super) fn VoiceBar(ui: Ui) -> impl IntoView {
 }
 fn debug_command(ui: Ui, command: &'static str) {
     leptos::task::spawn_local(async move {
-        match native::<AudioStatus>(command, json!({})).await {
+        match ui
+            .audio_control
+            .invoke::<AudioStatus>(command, json!({}))
+            .await
+        {
             Ok(status) => ui.audio_status.set(Some(status)),
             Err(error) => ui.status.set(error),
         }
@@ -152,7 +228,7 @@ fn DebugRecording(ui: Ui) -> impl IntoView {
                 <button class="rounded bg-red-700 px-3 py-2 text-sm" on:click=move |_|debug_command(ui,"audio_debug_stop")>"Stop and save"</button>
             </Show>
             <button class="text-sm underline disabled:opacity-50" disabled=move||ui.audio_status.get().and_then(|s|s.recording).is_none_or(|r|r.active||r.saving)
-                on:click=move |_|leptos::task::spawn_local(async move {if let Err(error)=native::<()>("audio_debug_folder",json!({})).await{ui.status.set(error);}})>"Open recording folder"</button>
+                on:click=move |_|leptos::task::spawn_local(async move {if let Err(error)=ui.audio_control.invoke::<()>("audio_debug_folder",json!({})).await{ui.status.set(error);}})>"Open recording folder"</button>
         </Show>
         <p class="text-xs text-white/60">"Join voice first. For a useful sample, have one person speak for 5–10 seconds, then talk at the same time. Delete the recording when it is no longer needed."</p>
     </section>}
@@ -192,11 +268,13 @@ pub(super) fn StreamVolume(ui: Ui, stream: StreamLevel) -> impl IntoView {
         busy.set(true);
         error.set(String::new());
         leptos::task::spawn_local(async move {
-            let result = native::<AudioStatus>(
-                "audio_volume",
-                json!({"stream":id,"gain":value,"target":target}),
-            )
-            .await;
+            let result = ui
+                .audio_control
+                .invoke::<AudioStatus>(
+                    "audio_volume",
+                    json!({"stream":id,"gain":value,"target":target}),
+                )
+                .await;
             if busy.try_get_untracked().is_none() {
                 return;
             }
@@ -246,13 +324,13 @@ pub(super) fn VoiceChannel(
     let pending = RwSignal::new(false);
     view! {<section class="min-h-0 min-w-0 space-y-5 overflow-y-auto rounded-xl border border-white/10 p-5">
         <h2 class="text-xl font-semibold">{name}</h2>
-        <Show when=desktop fallback=||view!{<p>"Open the desktop app to use native voice audio."</p>}>
+        <Show when=move ||desktop() || ui.audio_control.is_remote() fallback=||view!{<p>"Open the desktop app to use native voice audio."</p>}>
             <p class="text-sm text-white/60" role="status">{move||ui.voice.get().message}</p>
             <Show when=move||ui.voice.get().channel_id!=Some(channel) fallback=move||view!{<button class="rounded bg-white/10 px-4 py-2" on:click=move |_|leave(ui)>"Leave voice"</button>}>
                 <p class="text-sm text-white/60">"Joining uses your selected microphone. Use headphones for the best audio quality."</p>
                 <button class="rounded bg-brand px-4 py-2 disabled:opacity-50" disabled=move||pending.get() on:click=move |_|{
                     pending.set(true);let token=ui.token.get_untracked();let settings=ui.audio.get_untracked();
-                    leptos::task::spawn_local(async move{let result=native::<()>("voice_join",json!({"token":token.unwrap_or_default(),"guildId":guild,"channelId":channel,"settings":settings})).await;if pending.try_get_untracked().is_some(){pending.set(false);}
+                    leptos::task::spawn_local(async move{let result=ui.audio_control.invoke::<()>("voice_join",json!({"token":token.unwrap_or_default(),"guildId":guild,"channelId":channel,"settings":settings})).await;if pending.try_get_untracked().is_some(){pending.set(false);}
                         if let Err(error)=result{ui.status.set(error);}});
                 }>"Join voice"</button>
             </Show>
@@ -282,18 +360,28 @@ pub(super) fn AudioSettingsPanel(ui: Ui) -> impl IntoView {
     let (abort, registration) = futures_util::future::AbortHandle::new_pair();
     on_cleanup(move || {
         abort.abort();
-        if desktop() && ui.voice.get_untracked().channel_id.is_none() {
-            leptos::task::spawn_local(async {
-                let _ = native::<AudioStatus>("audio_stop", json!({})).await;
+        if desktop()
+            && !ui.audio_control.is_remote()
+            && ui.voice.get_untracked().channel_id.is_none()
+        {
+            leptos::task::spawn_local(async move {
+                let _ = ui
+                    .audio_control
+                    .invoke::<AudioStatus>("audio_stop", json!({}))
+                    .await;
             });
         }
     });
-    if desktop() {
+    if desktop() || ui.audio_control.is_remote() {
         leptos::task::spawn_local(async move {
             let _ = futures_util::future::Abortable::new(
                 async move {
                     loop {
-                        match native::<Vec<AudioDevice>>("audio_devices", json!({})).await {
+                        match ui
+                            .audio_control
+                            .invoke::<Vec<AudioDevice>>("audio_devices", json!({}))
+                            .await
+                        {
                             Ok(list) => devices.set(list),
                             Err(error) => message.set(error),
                         }
@@ -309,11 +397,13 @@ pub(super) fn AudioSettingsPanel(ui: Ui) -> impl IntoView {
         busy.set(true);
         let settings = ui.audio.get_untracked();
         leptos::task::spawn_local(async move {
-            let result = native::<AudioStatus>(
-                "audio_test",
-                json!({"settings":settings,"microphone":microphone}),
-            )
-            .await;
+            let result = ui
+                .audio_control
+                .invoke::<AudioStatus>(
+                    "audio_test",
+                    json!({"settings":settings,"microphone":microphone}),
+                )
+                .await;
             if busy.try_get_untracked().is_none() {
                 return;
             }
@@ -325,9 +415,10 @@ pub(super) fn AudioSettingsPanel(ui: Ui) -> impl IntoView {
         });
     };
     view! {<div class="space-y-5"><h2 class="text-xl font-semibold">"Audio & voice"</h2>
-        <Show when=desktop><ShortcutSettings/><crate::overlay::OverlaySettings/></Show>
-        <Show when=desktop fallback=||view!{<p>"Audio devices and voice are available in the desktop app."</p>}>
-            <p class="text-sm text-white/60">"Devices refresh automatically. Changes apply during a call; switching devices may briefly interrupt audio. Settings stay on this computer."</p>
+        <Show when=move ||desktop() || ui.audio_control.is_remote()><ShortcutSettings control=ui.audio_control/><crate::overlay::OverlaySettings control=ui.audio_control/></Show>
+        <Show when=move ||desktop() || ui.audio_control.is_remote() fallback=||view!{<p>"Audio devices and voice are available in the desktop app."</p>}>
+            <Show when=move || !ui.audio_control.is_remote()><p class="text-sm text-white/60">"While connected to voice, instance admins can adjust these settings and download technical diagnostics to help troubleshoot."</p></Show>
+            <p class="text-sm text-white/60">"Devices refresh automatically. Changes apply during a call; switching devices may briefly interrupt audio. Settings are saved on the selected desktop."</p>
             {[(true,"Microphone"),(false,"Speakers / headphones")].into_iter().map(move|(input,label)|view!{
                 <label class="block space-y-2"><span>{label}</span><select class="w-full rounded bg-slate-900 p-2 disabled:opacity-50" disabled=move||ui.audio_saving.get() prop:value=move||{let s=ui.audio.get();if input{s.input}else{s.output}.unwrap_or_default()} on:change=move|e|{let v=event_target_value(&e);ui.audio.update(|s|{let value=(!v.is_empty()).then_some(v);if input{s.input=value;}else{s.output=value;}});save(ui);}>
                     <option value="">"System default"</option>{move||devices.get().into_iter().filter(|d|d.input==input).map(|d|view!{<option value=d.id>{d.name}</option>}).collect_view()}
@@ -353,8 +444,8 @@ pub(super) fn AudioSettingsPanel(ui: Ui) -> impl IntoView {
             </div>
             <Show when=move||ui.audio_saving.get()><p class="text-sm text-white/60" role="status">"Applying audio settings..."</p></Show>
             <VoiceControls ui=ui/>
-            <DebugRecording ui=ui/>
-            <super::diagnostics::DiagnosticsSettings/>
+            <Show when=move || !ui.audio_control.is_remote()><DebugRecording ui=ui/></Show>
+            <super::diagnostics::DiagnosticsSettings control=ui.audio_control/>
             <label class="block">"Raw microphone"<meter class="ml-3 w-48" min="0" max="1" value=move||ui.audio_status.get().map(|s|s.raw_input_level).unwrap_or(0.0) /></label>
             <label class="block">"After noise / echo processing"<meter class="ml-3 w-48" min="0" max="1" value=move||ui.audio_status.get().map(|s|s.input_level).unwrap_or(0.0) /></label>
             <p class="text-sm" role="status">{move||ui.audio_status.get().map(|s|format!("{} · processing resets {}",s.message,s.processing_resets))}</p>
@@ -375,12 +466,12 @@ pub(super) fn AudioSettingsPanel(ui: Ui) -> impl IntoView {
                 <p>"The filter estimate is not a measurement of audible echo. Compare these values while only the other person speaks, then while both of you speak. Rising processing resets indicate lost audio blocks. Repeated input clipping suggests lowering microphone gain."</p>
             </details>
             <p class="text-sm text-white/60">"Allow microphone access in your OS privacy settings. Use headphones for the microphone test. Echo cancellation removes Thiscord playback from your microphone; it cannot remove sound from other apps. Allow a few seconds for it to adapt. Compare the meters while someone else speaks and you stay quiet."</p>
-            <div class="flex flex-wrap gap-3">
+            <Show when=move || !ui.audio_control.is_remote()><div class="flex flex-wrap gap-3">
                 <button class="rounded bg-brand px-4 py-2 disabled:opacity-50" disabled=move||busy.get()||ui.voice.get().channel_id.is_some() on:click=move |_|test(false)>"Test playback (5 seconds)"</button>
                 <button class="rounded bg-white/10 px-4 py-2 disabled:opacity-50" disabled=move||busy.get()||ui.voice.get().channel_id.is_some() on:click=move |_|test(true)>"Test microphone (60 seconds)"</button>
-                <button class="underline" on:click=move |_|{leave(ui);leptos::task::spawn_local(async{let _=native::<AudioStatus>("audio_stop",json!({})).await;});}>"Stop audio"</button>
-                <button class="underline disabled:opacity-50" disabled=move||busy.get() on:click=move |_|{busy.set(true);message.set("Testing encrypted WebRTC forwarding…".into());leptos::task::spawn_local(async move{let result=native::<String>("audio_webrtc_probe",json!({})).await;if busy.try_get_untracked().is_some(){busy.set(false);message.set(result.unwrap_or_else(|e|e));}});}>"Test WebRTC"</button>
-            </div>
+                <button class="underline" on:click=move |_|{leave(ui);leptos::task::spawn_local(async move{let _=ui.audio_control.invoke::<AudioStatus>("audio_stop",json!({})).await;});}>"Stop audio"</button>
+                <button class="underline disabled:opacity-50" disabled=move||busy.get() on:click=move |_|{busy.set(true);message.set("Testing encrypted WebRTC forwarding…".into());leptos::task::spawn_local(async move{let result=ui.audio_control.invoke::<String>("audio_webrtc_probe",json!({})).await;if busy.try_get_untracked().is_some(){busy.set(false);message.set(result.unwrap_or_else(|e|e));}});}>"Test WebRTC"</button>
+            </div></Show>
             <StreamVolumes ui=ui/><p role="status" class="text-sm text-white/70">{move||message.get()}</p>
         </Show>
     </div>}

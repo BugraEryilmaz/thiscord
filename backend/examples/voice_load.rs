@@ -333,6 +333,7 @@ async fn join(config: Arc<Config>, index: usize, stats: Arc<Mutex<Stats>>) -> Re
         send(
             &mut socket,
             ClientEvent::Answer {
+                remote_audio: false,
                 screen_feedback: false,
                 screen_subscriptions: false,
                 sdp: serde_json::to_string(&pc.local_description().await.ok_or("Missing answer")?)

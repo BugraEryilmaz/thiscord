@@ -62,6 +62,8 @@ pub(super) async fn snapshot() -> HashMap<ChannelId, Vec<ParticipantDiagnostics>
             }
             let network = member.network.read().await.clone();
             participants.push(ParticipantDiagnostics {
+                audio_connection_id: crate::admin::audio::available(member.request_id)
+                    .then_some(member.request_id),
                 participant: member.info,
                 network,
                 video_counters: std::array::from_fn(|i| member.metrics[i].load(Ordering::Relaxed)),

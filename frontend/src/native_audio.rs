@@ -113,7 +113,7 @@ pub async fn audio_toggle(app: tauri::AppHandle, action: AudioToggle) -> Result<
         action.apply(&mut settings);
         audio_restrict(app.clone(), app.state(), settings)?;
     }
-    change_settings(app, None, Some(action)).await
+    change_settings(app, None, Some(action), None).await
 }
 #[tauri::command]
 pub fn audio_restrict(
@@ -132,17 +132,33 @@ pub fn audio_restrict(
 #[tauri::command]
 pub async fn audio_save(app: tauri::AppHandle, settings: AudioSettings) -> Result<(), String> {
     settings.validate()?;
-    change_settings(app, Some(settings), None).await
+    change_settings(app, Some(settings), None, None).await
+}
+pub async fn remote_save(
+    app: tauri::AppHandle,
+    settings: AudioSettings,
+    expected: AudioSettings,
+    connection: thiscord_frontend::audio::connection::Connection,
+) -> Result<(), String> {
+    settings.validate()?;
+    change_settings(app, Some(settings), None, Some((expected, connection))).await
 }
 async fn change_settings(
     app: tauri::AppHandle,
     requested: Option<AudioSettings>,
     action: Option<AudioToggle>,
+    remote: Option<(
+        AudioSettings,
+        thiscord_frontend::audio::connection::Connection,
+    )>,
 ) -> Result<(), String> {
     tauri::async_runtime::spawn_blocking(move || {
         let state = app.state::<AudioState>();
         let mut cached = state.file_lock.lock().map_err(|_| "Settings unavailable")?;
         let previous = load_settings(&app, &mut cached)?;
+        if let Some((expected, connection)) = remote {
+            validate_remote_settings(&previous, &expected, &connection)?;
+        }
         let settings = merge_settings(&previous, requested, action);
         state.engine.restrict(&settings);
         if settings.deafened {
@@ -208,6 +224,20 @@ async fn change_settings(
     .map_err(|_| "Settings task failed")?
 }
 
+fn validate_remote_settings(
+    previous: &AudioSettings,
+    expected: &AudioSettings,
+    connection: &thiscord_frontend::audio::connection::Connection,
+) -> Result<(), String> {
+    if !connection.active() {
+        return Err("Voice connection ended".into());
+    }
+    if previous != expected {
+        return Err("Audio settings changed on the desktop. Refresh and try again.".into());
+    }
+    Ok(())
+}
+
 fn merge_settings(
     previous: &AudioSettings,
     requested: Option<AudioSettings>,
@@ -226,6 +256,21 @@ fn merge_settings(
 #[cfg(test)]
 mod control_tests {
     use super::*;
+    #[test]
+    fn remote_edits_reject_stale_settings_and_closed_connections() {
+        let connection = thiscord_frontend::audio::connection::Connection::default();
+        let expected = AudioSettings::default();
+        assert!(validate_remote_settings(&expected, &expected, &connection).is_ok());
+        let changed = AudioSettings {
+            input: Some("new microphone".into()),
+            ..expected.clone()
+        };
+        assert!(validate_remote_settings(&changed, &expected, &connection).is_err());
+        let muted = merge_settings(&expected, None, Some(AudioToggle::Mute));
+        assert!(validate_remote_settings(&muted, &expected, &connection).is_err());
+        connection.close();
+        assert!(validate_remote_settings(&expected, &expected, &connection).is_err());
+    }
     #[test]
     fn stale_device_saves_cannot_undo_toggles_and_toggles_preserve_devices() {
         let before = AudioSettings::default();

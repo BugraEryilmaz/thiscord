@@ -5,6 +5,7 @@ use thiscord_shared::{ApiError, account::AccountRequest, admin::*};
 #[component]
 pub(super) fn Dashboard(ui: Ui) -> impl IntoView {
     let data = RwSignal::new(None::<Diagnostics>);
+    let selected = RwSignal::new(None::<Selection>);
     let error = RwSignal::new(String::new());
     let busy = RwSignal::new(false);
     let filter = RwSignal::new(String::new());
@@ -70,6 +71,7 @@ pub(super) fn Dashboard(ui: Ui) -> impl IntoView {
                 }
                 Err(message) => {
                     data.set(None);
+                    selected.set(None);
                     error.set(message);
                 }
             }
@@ -128,13 +130,14 @@ pub(super) fn Dashboard(ui: Ui) -> impl IntoView {
                                 view!{{move || {
                                     let query=filter.get().to_lowercase();
                                     let visible:Vec<_>=rooms.iter().filter(|r|format!("{} {} {}",r.guild_name,r.channel_name,r.participants.iter().map(|p|format!("{} {}",p.participant.username,p.participant.display_name)).collect::<Vec<_>>().join(" ")).to_lowercase().contains(&query)).cloned().collect();
-                                    if visible.is_empty() {view!{<p class="py-8 text-slate-400">"No rooms match your search."</p>}.into_any()} else {visible.into_iter().map(|room|view!{<Room room=room sampled_at=d.sampled_at/>}).collect_view().into_any()}
+                                    if visible.is_empty() {view!{<p class="py-8 text-slate-400">"No rooms match your search."</p>}.into_any()} else {visible.into_iter().map(|room|view!{<Room room=room sampled_at=d.sampled_at selected=selected/>}).collect_view().into_any()}
                                 }}}.into_any()
                             }}
                         </section>
                     }
                 })}
-                <footer class="border-t border-slate-800 pt-5 text-xs leading-relaxed text-slate-500">"Read-only instance diagnostics. Host values describe the Linux host or VM. Room data covers this backend process. No message content or media is exposed."</footer>
+                <For each=move || {selected.get().into_iter().collect::<Vec<_>>()} key=|s| (s.connection, s.name.clone()) children=move |selection| view! {<RemoteAudioPanel ui=ui selection=selection close=Callback::new(move |_| selected.set(None))/>}/>
+                <footer class="border-t border-slate-800 pt-5 text-xs leading-relaxed text-slate-500">"Instance diagnostics and remote desktop audio support. Host values describe the Linux host or VM. Room data covers this backend process. No message content or media is exposed."</footer>
             </div>
         </main>
     }
@@ -154,17 +157,92 @@ fn ms(value: Option<f64>) -> String {
 }
 
 #[component]
-fn Room(room: RoomDiagnostics, sampled_at: thiscord_shared::Timestamp) -> impl IntoView {
+fn Room(
+    room: RoomDiagnostics,
+    sampled_at: thiscord_shared::Timestamp,
+    selected: RwSignal<Option<Selection>>,
+) -> impl IntoView {
     view! {
         <article class="mb-4 overflow-hidden rounded-xl border border-slate-800 bg-slate-900/60">
             <header class="flex flex-wrap items-center justify-between gap-3 border-b border-slate-800 px-5 py-4"><div><h3 class="font-semibold">{room.channel_name}</h3><p class="mt-1 text-xs text-slate-400">{room.guild_name}</p></div><span class="rounded-full bg-indigo-500/10 px-3 py-1 text-xs text-indigo-300">{format!("{} people",room.participants.len())}</span></header>
             <div class="overflow-x-auto"><table class="w-full whitespace-nowrap text-left text-sm"><thead class="text-xs text-slate-400"><tr><th class="px-5 py-3">"Participant"</th><th class="px-5 py-3">"State"</th><th class="px-5 py-3">"Latency (RTT)"</th><th class="px-5 py-3">"Mic jitter"</th><th class="px-5 py-3">"Mic received / lost"</th><th class="px-5 py-3">"Video drops in / out"</th></tr></thead><tbody>
-            {room.participants.into_iter().map(|p| {
+            {room.participants.into_iter().map(move |p| {
+                let selection = Selection { connection: p.audio_connection_id, name: p.participant.display_name().to_owned() };
                 let fresh=p.network.sampled_at.is_some_and(|at|(sampled_at-at).num_seconds()<=15);
                 let state=if p.participant.deafened {"Deafened"} else if p.participant.muted {"Muted"} else {"Listening / speaking"};
-                view!{<tr class="border-t border-slate-800"><td class="px-5 py-4"><p class="font-medium">{p.participant.display_name().to_string()}</p><p class="mt-1 text-xs text-slate-500">{format!("@{}",p.participant.username)}</p></td><td class="px-5 py-4 text-slate-400">{state}{if p.participant.sharing_screen {" · Sharing screen"} else {""}}</td><td class="px-5 py-4 font-mono">{ms(p.network.round_trip_ms.filter(|_|fresh))}</td><td class="px-5 py-4 font-mono">{ms(p.network.microphone_jitter_ms.filter(|_|fresh))}</td><td class="px-5 py-4 font-mono">{if fresh {p.network.microphone_packets_received.zip(p.network.microphone_packets_lost).map(|(r,l)|format!("{r} / {l}")).unwrap_or_else(||"—".into())} else {"—".into()}}</td><td class="px-5 py-4 font-mono" title="Cumulative SFU queue drops for this connection">{format!("{} / {}",p.video_counters[1],p.video_counters[2])}</td></tr>}
+                view!{<tr class="border-t border-slate-800"><td class="px-5 py-4"><button class="font-medium text-indigo-300 underline decoration-indigo-500/40 underline-offset-4 hover:text-indigo-100" on:click=move |_| selected.set(Some(selection.clone()))>{p.participant.display_name().to_string()}</button><p class="mt-1 text-xs text-slate-500">{format!("@{}",p.participant.username)}</p></td><td class="px-5 py-4 text-slate-400">{state}{if p.participant.sharing_screen {" · Sharing screen"} else {""}}</td><td class="px-5 py-4 font-mono">{ms(p.network.round_trip_ms.filter(|_|fresh))}</td><td class="px-5 py-4 font-mono">{ms(p.network.microphone_jitter_ms.filter(|_|fresh))}</td><td class="px-5 py-4 font-mono">{if fresh {p.network.microphone_packets_received.zip(p.network.microphone_packets_lost).map(|(r,l)|format!("{r} / {l}")).unwrap_or_else(||"—".into())} else {"—".into()}}</td><td class="px-5 py-4 font-mono" title="Cumulative SFU queue drops for this connection">{format!("{} / {}",p.video_counters[1],p.video_counters[2])}</td></tr>}
             }).collect_view()}
             </tbody></table></div>
         </article>
+    }
+}
+
+#[derive(Clone)]
+struct Selection {
+    connection: Option<thiscord_shared::RequestId>,
+    name: String,
+}
+
+#[component]
+fn RemoteAudioPanel(ui: Ui, selection: Selection, close: Callback<()>) -> impl IntoView {
+    let dialog = NodeRef::<leptos::html::Dialog>::new();
+    Effect::new(move |_| {
+        if let Some(dialog) = dialog.get() {
+            let _ = dialog.show_modal();
+        }
+    });
+    let content = selection.connection.map(|connection| {
+        let ui = Ui {
+            audio_control: crate::audio_control::AudioControl::remote(connection, ui.token),
+            audio: RwSignal::new(Default::default()), audio_status: RwSignal::new(None),
+            audio_saving: RwSignal::new(false), audio_revision: RwSignal::new(0),
+            voice: RwSignal::new(Default::default()), status: RwSignal::new(String::new()),
+            ..ui
+        };
+        let loaded = RwSignal::new(false);
+        let downloading = RwSignal::new(false);
+        let (abort, registration) = futures_util::future::AbortHandle::new_pair();
+        on_cleanup(move || abort.abort());
+        leptos::task::spawn_local(async move {
+            let _ = futures_util::future::Abortable::new(async move {
+                loop {
+                    if !ui.audio_saving.get_untracked() {
+                        let revision = ui.audio_revision.get_untracked();
+                        let settings = ui.audio_control.invoke("audio_current", serde_json::json!({})).await;
+                        let status = ui.audio_control.invoke("audio_status", serde_json::json!({})).await;
+                        match (settings, status) {
+                            (Ok(settings), Ok(status)) => {
+                                if !ui.audio_saving.get_untracked() && ui.audio_revision.get_untracked() == revision { ui.audio_control.observe(&settings); ui.audio.set(settings); }
+                                ui.audio_status.set(Some(status)); loaded.set(true);
+                            }
+                            (Err(error), _) | (_, Err(error)) => { ui.status.set(error); loaded.set(false); ui.audio_status.set(None); }
+                        }
+                    }
+                    gloo_timers::future::TimeoutFuture::new(3000).await;
+                }
+            }, registration).await;
+        });
+        view! {
+            <p class="text-sm text-slate-400">"Changes apply and are saved on this user's connected computer. Device changes can briefly interrupt their audio. Diagnostic downloads contain technical logs, not recordings."</p>
+            <button class="my-3 rounded bg-indigo-600 px-4 py-2 text-sm disabled:opacity-50" disabled=move || downloading.get() on:click=move |_| {
+                downloading.set(true);
+                leptos::task::spawn_local(async move {
+                    let result = ui.audio_control.download().await;
+                    if !downloading.is_disposed() {
+                        downloading.set(false);
+                        ui.status.set(result.err().unwrap_or_else(|| "Diagnostic download prepared".into()));
+                    }
+                });
+            }>{move || if downloading.get() {"Preparing diagnostics…"} else {"Download diagnostics"}}</button>
+            <p role="status" class="my-3 text-amber-300">{move || ui.status.get()}</p>
+            <Show when=move || !loaded.get()><p class="my-3 text-slate-400">"Waiting for the connected desktop…"</p></Show>
+            <fieldset disabled=move || !loaded.get() || ui.audio_saving.get() class="mt-5 disabled:opacity-50"><super::audio::AudioSettingsPanel ui=ui/></fieldset>
+        }.into_any()
+    });
+    view! {
+        <dialog node_ref=dialog on:cancel=move |_: web_sys::Event| close.run(()) class="fixed inset-0 m-auto max-h-[90vh] w-full max-w-3xl overflow-auto rounded-xl border border-slate-700 bg-slate-950 p-6 text-slate-100 backdrop:bg-black/70">
+            <header class="mb-5 flex items-center justify-between gap-4"><h2 class="text-xl font-semibold">{format!("Audio settings · {}", selection.name)}</h2><button autofocus class="rounded bg-slate-800 px-4 py-2" on:click=move |_| close.run(())>"Close"</button></header>
+            {content.unwrap_or_else(|| view! {<p>"Remote audio is unavailable for this connection. Update the user's desktop app and reconnect to voice."</p>}.into_any())}
+        </dialog>
     }
 }

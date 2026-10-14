@@ -55,3 +55,5 @@ pub mod admin;
 pub mod audio;
 pub mod update;
 pub mod voice;
+
+pub mod remote_audio;

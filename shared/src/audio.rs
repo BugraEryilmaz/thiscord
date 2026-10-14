@@ -56,7 +56,7 @@ pub enum NoiseSuppressionModel {
     DeepFilterNet3,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(default, deny_unknown_fields)]
 pub struct AudioSettings {
     pub input: Option<String>,
@@ -71,7 +71,7 @@ pub struct AudioSettings {
     pub echo_cancellation: bool,
     /// Experimental residual estimator, independent of the noise suppressor.
     pub neural_echo: bool,
-    /// Optional local override; None uses the bundled model. Never sent to the backend.
+    /// Optional local override; None uses the bundled model. Exposed only to instance admins during explicit remote audio support.
     pub neural_echo_model: Option<String>,
     pub muted: bool,
     pub deafened: bool,

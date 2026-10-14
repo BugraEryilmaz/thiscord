@@ -29,7 +29,14 @@ pub enum ClientEvent {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         attempt: Option<JoinAttempt>,
     },
+    AudioReply {
+        request_id: crate::RequestId,
+        chunk: String,
+        done: bool,
+    },
     Answer {
+        #[serde(default, skip_serializing_if = "is_false")]
+        remote_audio: bool,
         sdp: String,
         #[serde(default, skip_serializing_if = "is_false")]
         screen_feedback: bool,
@@ -94,6 +101,10 @@ pub struct ServerFrame {
 #[derive(Clone, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum ServerEvent {
+    AudioCommand {
+        request_id: crate::RequestId,
+        command: crate::remote_audio::Command,
+    },
     ScreenTarget {
         epoch: u32,
         /// Zero pauses video. Otherwise the lowest active receiver budget.
@@ -106,6 +117,8 @@ pub enum ServerEvent {
         counters: std::collections::BTreeMap<String, u64>,
     },
     Offer {
+        #[serde(default)]
+        remote_audio: bool,
         sdp: String,
         slot: usize,
         can_speak: bool,

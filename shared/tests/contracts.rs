@@ -337,6 +337,7 @@ fn screen_feedback_capabilities_are_opt_in_and_legacy_answers_stay_compatible() 
     assert!(matches!(
         old,
         ClientEvent::Answer {
+            remote_audio: false,
             screen_feedback: false,
             screen_subscriptions: false,
             ..
@@ -351,6 +352,7 @@ fn screen_feedback_capabilities_are_opt_in_and_legacy_answers_stay_compatible() 
     assert!(matches!(
         offer,
         ServerEvent::Offer {
+            remote_audio: false,
             screen_feedback: false,
             screen_subscriptions: false,
             ..
