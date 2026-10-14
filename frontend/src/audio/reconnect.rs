@@ -24,19 +24,21 @@ impl Failure {
     pub fn diagnostic_reason(&self) -> &'static str {
         self.reason
     }
+    pub fn replaced() -> Self {
+        Failure::from("This voice call was opened in another connection.").with_reason("replaced")
+    }
     pub fn server(error: ApiError) -> Self {
-        // The current server reports a still-live connection as validation failure.
+        // Legacy servers reported a still-live connection as validation failure.
         let legacy_closing = error.code == ErrorCode::ValidationFailed
             && error.message == "Already connected to this voice channel";
         Self {
-            retryable: legacy_closing
-                || matches!(
-                    error.code,
-                    ErrorCode::Conflict
-                        | ErrorCode::RateLimited
-                        | ErrorCode::ServiceUnavailable
-                        | ErrorCode::InternalError
-                ),
+            retryable: matches!(
+                error.code,
+                ErrorCode::Conflict
+                    | ErrorCode::RateLimited
+                    | ErrorCode::ServiceUnavailable
+                    | ErrorCode::InternalError
+            ),
             message: error.message,
             reason: if legacy_closing {
                 "duplicate_join"
@@ -231,8 +233,25 @@ mod tests {
         assert_eq!(connector.attempts, 1);
         assert_eq!(connector.waits, 0);
     }
+
+    #[tokio::test]
+    async fn replacement_is_terminal_and_never_enters_backoff() {
+        struct Replaced;
+        impl Connector for Replaced {
+            async fn attempt(&mut self) -> (Failure, bool) {
+                (Failure::replaced(), true)
+            }
+            fn waiting(&mut self, _: &Failure, _: Duration) {
+                panic!("A displaced call must not retry");
+            }
+        }
+        let (_keep_alive, stopped) = tokio::sync::oneshot::channel();
+        let result = supervise(&mut Replaced, stopped, || 0).await.unwrap();
+        assert!(!result.retryable);
+        assert_eq!(result.diagnostic_reason(), "replaced");
+    }
     #[test]
-    fn only_the_exact_legacy_duplicate_join_error_gets_a_grace_retry() {
+    fn legacy_duplicate_join_is_terminal_to_prevent_competing_retries() {
         let mut error = ApiError {
             code: ErrorCode::ValidationFailed,
             message: "Already connected to this voice channel".into(),
@@ -240,7 +259,7 @@ mod tests {
             fields: vec![],
         };
         let duplicate = Failure::server(error.clone());
-        assert!(duplicate.retryable);
+        assert!(!duplicate.retryable);
         assert_eq!(duplicate.diagnostic_reason(), "duplicate_join");
         error.message = "Invalid voice request".into();
         assert!(!Failure::server(error).retryable);

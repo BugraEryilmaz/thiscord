@@ -1,3 +1,4 @@
+use super::failure::Failure;
 #[cfg(test)]
 use super::fixture;
 use super::frames;
@@ -320,7 +321,7 @@ impl Processing {
     pub fn enhancement_delay_samples(&self) -> usize {
         self.chain.delay_samples()
     }
-    pub fn render(&mut self, frame: &[f32; 480]) -> Result<(), String> {
+    pub fn render(&mut self, frame: &[f32; 480]) -> Result<(), Failure> {
         let metrics = self.metrics.clone();
         let _timer = metrics.timed(super::quality::Stage::Render);
         let _float_mode = denormals::Guard::new();
@@ -330,17 +331,17 @@ impl Processing {
         let mut out = [0.0; 480];
         self.apm
             .process_render_f32(&[frame], &mut [&mut out])
-            .map_err(|e| e.to_string())
+            .map_err(|e| Failure::sonora("echo_render", e))
     }
     #[cfg(test)]
-    pub(super) fn render_queued(&mut self, queue: &mut frames::Reader) -> Result<(), String> {
+    pub(super) fn render_queued(&mut self, queue: &mut frames::Reader) -> Result<(), Failure> {
         self.render_tapped(queue, &mut |_, _| {})
     }
     pub(super) fn render_tapped(
         &mut self,
         queue: &mut frames::Reader,
         tap: &mut impl FnMut(&frames::Frame, bool),
-    ) -> Result<(), String> {
+    ) -> Result<(), Failure> {
         for _ in 0..frames::BLOCKS {
             let Some((frame, gap)) = queue.pop() else {
                 break;
@@ -359,7 +360,7 @@ impl Processing {
     pub(super) fn capture_queued(
         &mut self,
         queue: &mut frames::Reader,
-    ) -> Result<Option<[f32; 960]>, String> {
+    ) -> Result<Option<[f32; 960]>, Failure> {
         Ok(self
             .capture_tapped(queue, &mut |_, _, _, _| {})?
             .map(|p| p.pcm))
@@ -368,7 +369,7 @@ impl Processing {
         &mut self,
         queue: &mut frames::Reader,
         tap: &mut impl FnMut(&frames::Frame, bool, bool, i32),
-    ) -> Result<Option<Captured>, String> {
+    ) -> Result<Option<Captured>, Failure> {
         if queue.len() < 2 {
             return Ok(None);
         }
@@ -421,7 +422,7 @@ impl Processing {
             position: first.position,
         }))
     }
-    pub fn capture_frame(&mut self, frame: &mut [f32; 480], delay_ms: i32) -> Result<(), String> {
+    pub fn capture_frame(&mut self, frame: &mut [f32; 480], delay_ms: i32) -> Result<(), Failure> {
         self.capture_frame_retained(frame, delay_ms, true)
     }
     /// Advance AEC normally, but exclude pre-boundary capture from enhancement.
@@ -431,7 +432,7 @@ impl Processing {
         frame: &mut [f32; 480],
         delay_ms: i32,
         retain: bool,
-    ) -> Result<(), String> {
+    ) -> Result<(), Failure> {
         self.capture_frame_metered(frame, delay_ms, retain)
             .map(|_| ())
     }
@@ -440,13 +441,17 @@ impl Processing {
         frame: &mut [f32; 480],
         delay_ms: i32,
         retain: bool,
-    ) -> Result<f32, String> {
+    ) -> Result<f32, Failure> {
         let metrics = self.metrics.clone();
         let _timer = metrics.timed(super::quality::Stage::Capture);
         let _float_mode = denormals::Guard::new();
         if frame.iter().any(|x| !x.is_finite()) {
             frame.fill(0.0);
-            return Err("Non-finite microphone samples".into());
+            return Err(Failure::new(
+                "capture",
+                "non_finite_input",
+                "Non-finite microphone samples",
+            ));
         }
         self.clipped_samples += frame.iter().filter(|v| v.abs() >= 0.999).count();
         self.capture_frames += 1;
@@ -458,18 +463,22 @@ impl Processing {
         // path, including room reflections, from the actual playback reference.
         self.apm
             .set_stream_delay_ms(delay_ms.clamp(0, 500))
-            .map_err(|e| e.to_string())?;
+            .map_err(|e| Failure::sonora("echo_delay", e))?;
         let mut out = [0.0; 480];
         self.apm
             .process_capture_f32(&[frame], &mut [&mut out])
-            .map_err(|e| e.to_string())?;
+            .map_err(|e| Failure::sonora("echo_capture", e))?;
         #[cfg(feature = "neural-echo")]
         if self
             .neural_failed
             .load(std::sync::atomic::Ordering::Relaxed)
         {
             frame.fill(0.0);
-            return Err("Neural echo processing failed. Stop audio and select conventional echo cancellation or reload the model.".into());
+            return Err(Failure::new(
+                "neural_echo",
+                "estimator_failed",
+                "Neural echo processing failed. Stop audio and select conventional echo cancellation or reload the model.",
+            ));
         }
         frame.copy_from_slice(&out);
         if !retain {

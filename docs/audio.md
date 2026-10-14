@@ -843,18 +843,37 @@ connection; master volume, mute/deafen and processing settings persist.
 Each attempt retains its signaling sender through failures and cancellation.
 Cleanup sends an explicit Leave followed by a WebSocket close, with a 500 ms
 deadline, before retrying. Dropping only the TCP socket through a proxy can leave
-the origin's old membership alive for its 20-second heartbeat timeout; repeated
-duplicate-join rejections can then extend the interruption through retry backoff.
-If signaling is unreachable, cleanup is best effort and that server timeout still
-applies. Diagnostic logs record fixed failure categories, peer-state transitions,
+the origin's old membership alive for its 20-second heartbeat timeout. A new
+authorized join for the same account and channel now replaces that membership
+atomically, including when the room is full. Old ingress/egress, signaling state
+changes and cleanup are fenced off before the new member occupies its slot.
+The old socket receives `replaced` and close code 4001, which ends client retries.
+Cleanup remains best effort when signaling is unreachable. Diagnostic logs record
+fixed failure categories, peer-state transitions,
 retry delays and whether signaling cleanup was sent, without logging error bodies.
 
 Retries use 1/2/4/8/16/30-second backoff plus up to 500 ms jitter, capped thereafter;
 30 seconds of connected audio resets the backoff. They continue until successful or
-cancelled. DNS/TCP failures, timeouts, HTTP 429/5xx, transient server errors and a
-previous connection still being cleaned up are retryable. A disconnected media
-state gets five seconds to recover before creating a new peer. Every attempt still
-passes the backend's join rate limits and current authorization checks.
+cancelled. DNS/TCP failures, timeouts, HTTP 429/5xx and transient server errors
+are retryable. Replacement notifications and legacy duplicate-join errors are
+terminal. A disconnected media state keeps the
+existing peer and lets ICE recover; only Failed/Closed or an actual signaling or
+transport failure triggers replacement. Every attempt still passes the backend's
+join rate limits and current authorization checks.
+
+A single native task owns each call through negotiation, connected media, device
+or ICE recovery and retry backoff. Repeated joins to that same channel are
+idempotent; a channel switch cancels and drains the old task while holding the
+same join/leave lock. Cleanup finishes before the next transport attempt begins.
+The optional Join `attempt` object carries the first upgrade request ID as
+`call_id`, plus `reconnect`. Explicit joins can take over an existing call;
+automatic retries can only replace an existing membership with the same call ID.
+This prevents a delayed retry on a displaced device from evicting the newer call
+even when its replacement notification could not be delivered. Install the backend
+update before the new client: older clients can still join the new server without
+`attempt`, but older servers reject that new field. Replacement is scoped to the
+same account and channel; joins to different channels remain independent on the
+server.
 
 Explicit Disconnect/logout, revoked/expired sessions, denied access, deleted
 channels, incompatible protocol, certificate verification failures and local
@@ -894,6 +913,48 @@ until refresh/ICE restart is implemented. Router/firewall forwarding and off-sit
 restrictive-NAT acceptance still require verification for each deployment.
 
 ## Native voice connection diagnostics
+
+Opt-in desktop logs record a per-process `connection_id` for every voice attempt.
+After the WebSocket upgrade, `voice_signaling_connected` also records the validated
+UUID from the server's `x-request-id` response header. Subsequent socket, peer,
+retry, audio-failure and audio-session-end events carry that `request_id`, which
+matches the backend HTTP and voice lifecycle logs. A retry gets a new connection
+and request ID. Older servers or proxies that omit the header leave it null.
+
+For a call drop, start with `voice_attempt_finished`: it records the reason,
+retryability, connection stage, elapsed/connected time, last received signaling
+age and received-message count. `voice_socket_error` adds the send/receive
+operation and safe underlying error fields: I/O kind and OS code, WebSocket
+protocol category (including `reset_without_closing_handshake`), capacity limits,
+TLS category or HTTP status. Close events include the numeric close code;
+`voice_server_error` includes the wire error code and error request ID.
+`voice_signaling_closed` records whether cleanup succeeded, failed or timed out.
+Cancellation is recorded separately from a failed attempt.
+
+`audio_processing_failed` includes a typed stage/code, current processing options
+and device health. It distinguishes non-finite input/output, Sonora render/capture
+and delay errors, neural estimator failures, DeepFilter inference failures, and
+Opus reset/encode/loopback-decode errors (with Opus function and numeric code).
+The detailed user-facing message remains separate from log fields: arbitrary
+library error strings can contain model paths or other private data.
+
+At backend log level `info`, each upgraded voice socket records start/end events,
+stage, reason, message counts and last-receive age, plus peer state changes and
+membership release. The first failure survives subsequent cleanup errors. Reasons
+distinguish client leave/close, invalid frames, rate limits, heartbeat/negotiation
+timeouts, authorization failures and transport failures. Connection replacements
+include the previous connection's request ID and active flag. Abrupt process termination
+can prevent a final event; correlate with the service journal's stop/start records.
+No frame bodies, close-reason text, headers, URLs, SDP, media payloads or credentials
+are included in these new diagnostic fields. Logging adds no audio callback work. The reconnect policy above is implemented
+separately from these diagnostics.
+
+To correlate a shared desktop log with the VPS, copy its `request_id` and filter
+the service journal, using UTC times for the query:
+
+```sh
+sudo journalctl -u thiscord --since '2026-10-13 19:10:00 UTC' --until '2026-10-13 19:45:00 UTC' --no-pager | rg 'REQUEST_UUID'
+```
 
 Text chat uses the WebView's network stack; voice signaling uses a native Rust
 WebSocket. Working text chat alone therefore does not establish native voice

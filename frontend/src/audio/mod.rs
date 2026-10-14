@@ -4,6 +4,7 @@ pub mod connection;
 mod cues;
 mod device_users;
 pub mod diagnostics;
+pub mod failure;
 #[cfg(test)]
 #[path = "../../tests/support/audio_fixture.rs"]
 #[allow(dead_code)]
@@ -736,10 +737,11 @@ impl Drop for Session {
         if let Some(connection) = &self.connection {
             connection.close();
         }
-        diagnostics::event(
-            "audio_session_ended",
-            serde_json::json!({"voice":self.connection.is_some(),"health":self.devices.health.diagnostics(),"transmit":self.encoder.stats}),
-        );
+        let mut details = serde_json::json!({"voice":self.connection.is_some(),"health":self.devices.health.diagnostics(),"transmit":self.encoder.stats});
+        if let Some(connection) = &self.connection {
+            details = connection.diagnostic_details(details);
+        }
+        diagnostics::event("audio_session_ended", details);
     }
 }
 impl Session {
@@ -897,9 +899,12 @@ impl Session {
         pressed: &AtomicBool,
         inhibit: &AtomicBool,
         debug: &mut recording::Recorder,
-    ) -> Result<(), String> {
+    ) -> Result<(), failure::Failure> {
         self.devices.control.counts.drain(&self.processing.metrics);
-        self.devices.health.check()?;
+        self.devices
+            .health
+            .check()
+            .map_err(|e| failure::Failure::new("device_health", "device_unhealthy", e))?;
         let resets = self.processing.resets;
         self.processing
             .render_tapped(&mut self.devices.reference, &mut |frame, gap| {
@@ -991,7 +996,7 @@ impl Session {
         generation: u64,
         inhibit: &AtomicBool,
         debug: &mut recording::Recorder,
-    ) -> Result<(), String> {
+    ) -> Result<(), failure::Failure> {
         let media_position = self.media_clock.position(captured.at[0], captured.position);
         let oldest_capture =
             outgoing::oldest_capture(captured.at[0], self.processing.enhancement_delay_samples());
@@ -1029,8 +1034,12 @@ impl Session {
             || generation != self.encoder_generation
             || (!active && self.encoder_active)
         {
-            self.encoder.reset().map_err(|e| e.to_string())?;
-            self.decoder.reset_state().map_err(|e| e.to_string())?;
+            self.encoder
+                .reset()
+                .map_err(|e| failure::Failure::opus("encoder_reset", e))?;
+            self.decoder
+                .reset_state()
+                .map_err(|e| failure::Failure::opus("decoder_reset", e))?;
             self.reset_codec = false;
         }
         self.encoder_generation = generation;
@@ -1039,7 +1048,7 @@ impl Session {
         let (n, omitted, marker) = self
             .encoder
             .encode(&pcm, active, &mut packet)
-            .map_err(|e| e.to_string())?;
+            .map_err(|e| failure::Failure::opus("encode", e))?;
         drop(timer);
         if !omitted
             && self.outgoing.is_some()
@@ -1073,7 +1082,9 @@ impl Session {
             .checked_sub(gate_delay)
             .unwrap_or(oldest_capture);
         if let Some(outgoing) = &self.outgoing {
-            let connection = self.connection.as_ref().ok_or("Missing voice connection")?;
+            let connection = self.connection.as_ref().ok_or_else(|| {
+                failure::Failure::new("transmit", "missing_connection", "Missing voice connection")
+            })?;
             let accepted = if omitted {
                 false
             } else {
@@ -1151,7 +1162,7 @@ impl Session {
         let n = self
             .decoder
             .decode_float(&packet[..n], &mut decoded, false)
-            .map_err(|e| e.to_string())?;
+            .map_err(|e| failure::Failure::opus("loopback_decode", e))?;
         drop(timer);
         let written = self.devices.writers[0].write(&decoded[..n]);
         self.devices
@@ -1788,12 +1799,13 @@ fn run(
                     pending.cancel("Audio device failed; pending settings were cancelled");
                 }
                 debug.stop();
-                diagnostics::event(
-                    "audio_processing_failed",
-                    serde_json::json!({"reason":"processing_tick_failed"}),
-                );
+                let mut details = serde_json::json!({"reason":"processing_tick_failed", "error":error.details(), "health":s.devices.health.diagnostics(), "echo":s.settings.echo_cancellation, "suppression":s.settings.noise_suppression, "neural_echo":s.settings.neural_echo});
+                if let Some(connection) = &s.connection {
+                    details = connection.diagnostic_details(details);
+                }
+                diagnostics::event("audio_processing_failed", details);
                 session = None;
-                message = error;
+                message = error.into();
             }
         }
     }

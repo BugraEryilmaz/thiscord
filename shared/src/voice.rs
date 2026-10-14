@@ -4,6 +4,15 @@ pub const VOICE_PATH: &str = "/api/v1/voice";
 pub const VOICE_VERSION: u8 = 1;
 pub const ROOM_CAPACITY: usize = 8;
 pub const SSRC_BASE: u32 = 10_000;
+/// A displaced connection must never automatically take the call back.
+pub const REPLACED_CLOSE_CODE: u16 = 4001;
+#[derive(Debug, Clone, Copy, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct JoinAttempt {
+    /// The first upgrade's request ID, retained across automatic retries.
+    pub call_id: crate::RequestId,
+    pub reconnect: bool,
+}
 #[derive(Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct ClientFrame {
@@ -17,6 +26,8 @@ pub enum ClientEvent {
         token: String,
         guild_id: GuildId,
         channel_id: ChannelId,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        attempt: Option<JoinAttempt>,
     },
     Answer {
         sdp: String,
@@ -112,6 +123,7 @@ pub enum ServerEvent {
     },
     Pong {},
     Revoked {},
+    Replaced {},
     Error {
         error: ApiError,
     },
@@ -203,6 +215,42 @@ impl MediaKind {
 #[cfg(test)]
 mod media_tests {
     use super::*;
+    #[test]
+    fn join_attempt_is_optional_for_old_clients_and_replacement_is_typed() {
+        let legacy = serde_json::json!({"version":1,"event":{
+            "type":"join","token":"not-a-real-token",
+            "guild_id":"00000000-0000-0000-0000-000000000001",
+            "channel_id":"00000000-0000-0000-0000-000000000002"
+        }});
+        let mut frame: ClientFrame = serde_json::from_value(legacy.clone()).unwrap();
+        let ClientEvent::Join { attempt, .. } = &mut frame.event else {
+            panic!("join")
+        };
+        assert!(attempt.is_none());
+        *attempt = Some(JoinAttempt {
+            call_id: "00000000-0000-0000-0000-000000000003".parse().unwrap(),
+            reconnect: true,
+        });
+        let encoded = serde_json::to_value(&frame).unwrap();
+        assert_eq!(encoded["event"]["attempt"]["reconnect"], true);
+        let decoded: ClientFrame = serde_json::from_value(encoded).unwrap();
+        assert!(matches!(
+            decoded.event,
+            ClientEvent::Join {
+                attempt: Some(JoinAttempt {
+                    reconnect: true,
+                    ..
+                }),
+                ..
+            }
+        ));
+        let old: ClientFrame = serde_json::from_value(legacy.clone()).unwrap();
+        assert_eq!(serde_json::to_value(old).unwrap(), legacy);
+        assert_eq!(
+            serde_json::to_value(ServerEvent::Replaced {}).unwrap(),
+            serde_json::json!({"type":"replaced"})
+        );
+    }
     #[test]
     fn media_mappings_round_trip_and_reject_unknown_sources() {
         assert_eq!(

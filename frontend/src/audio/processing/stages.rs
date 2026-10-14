@@ -1,12 +1,13 @@
 //! Ordered, replaceable capture stages. These run only on the native worker.
 //! Each stage consumes/emits exactly 10 ms of normalized 48 kHz mono PCM.
+use crate::audio::failure::Failure;
 use sonora::{AudioProcessing, Config, StreamConfig};
 
 pub type Block = [f32; 480];
 
 pub trait CaptureStage {
     fn name(&self) -> &'static str;
-    fn process(&mut self, block: &mut Block) -> Result<(), String>;
+    fn process(&mut self, block: &mut Block) -> Result<(), Failure>;
     /// Restore fresh state, including delayed samples. Never reload model files here.
     fn reset(&mut self);
     /// Explicit block buffering; frequency-dependent filter-bank delay is excluded.
@@ -51,30 +52,39 @@ impl CaptureChain {
             .map(|(_, s)| s.delay_samples())
             .sum()
     }
-    pub fn process(&mut self, block: &mut Block) -> Result<(), String> {
+    pub fn process(&mut self, block: &mut Block) -> Result<(), Failure> {
         self.process_observed(block, &mut |_, _| {})
     }
     pub(super) fn process_observed(
         &mut self,
         block: &mut Block,
         observe: &mut impl FnMut(usize, &Block),
-    ) -> Result<(), String> {
+    ) -> Result<(), Failure> {
         if block.iter().any(|x| !x.is_finite()) {
             block.fill(0.0);
-            return Err("Non-finite microphone samples".into());
+            return Err(Failure::new(
+                "capture_chain",
+                "non_finite_input",
+                "Non-finite microphone samples",
+            ));
         }
         for (index, (enabled, stage)) in self.stages.iter_mut().enumerate() {
             if !*enabled {
                 observe(index, block);
                 continue;
             }
-            if let Err(error) = stage.process(block) {
+            if let Err(mut error) = stage.process(block) {
                 block.fill(0.0);
-                return Err(format!("{}: {error}", stage.name()));
+                error.message = format!("{}: {error}", stage.name());
+                return Err(error);
             }
             if block.iter().any(|x| !x.is_finite()) {
                 block.fill(0.0);
-                return Err(format!("{} produced invalid audio", stage.name()));
+                return Err(Failure::new(
+                    stage.name(),
+                    "non_finite_output",
+                    format!("{} produced invalid audio", stage.name()),
+                ));
             }
             observe(index, block);
         }
@@ -104,11 +114,11 @@ impl CaptureStage for SonoraStage {
     fn name(&self) -> &'static str {
         self.name
     }
-    fn process(&mut self, block: &mut Block) -> Result<(), String> {
+    fn process(&mut self, block: &mut Block) -> Result<(), Failure> {
         let mut out = [0.0; 480];
         self.processor
             .process_capture_f32(&[block], &mut [&mut out])
-            .map_err(|e| e.to_string())?;
+            .map_err(|e| Failure::sonora(self.name, e))?;
         *block = out;
         Ok(())
     }
@@ -125,7 +135,7 @@ mod tests {
         fn name(&self) -> &'static str {
             "test"
         }
-        fn process(&mut self, b: &mut Block) -> Result<(), String> {
+        fn process(&mut self, b: &mut Block) -> Result<(), Failure> {
             b.iter_mut().for_each(|v| *v = *v * self.0 + self.1);
             Ok(())
         }
@@ -153,7 +163,34 @@ mod tests {
         c.push(true, Math(f32::NAN, 0.0));
         c.push(true, Math(0.0, 0.5));
         let mut b = [0.1; 480];
-        assert!(c.process(&mut b).is_err());
+        let error = c.process(&mut b).unwrap_err();
+        assert_eq!(error.details()["stage"], "test");
+        assert_eq!(error.details()["code"], "non_finite_output");
         assert_eq!(b, [0.0; 480]);
+    }
+    #[test]
+    fn failing_stage_retains_its_code_without_recording_message_contents() {
+        struct Failing;
+        impl CaptureStage for Failing {
+            fn name(&self) -> &'static str {
+                "test_inference"
+            }
+            fn reset(&mut self) {}
+            fn process(&mut self, _: &mut Block) -> Result<(), Failure> {
+                Err(Failure::new(
+                    "test_inference",
+                    "inference_failed",
+                    "private path",
+                ))
+            }
+        }
+        let mut chain = CaptureChain::default();
+        chain.push(true, Failing);
+        chain.push(true, Math(0.0, 0.5));
+        let mut block = [0.1; 480];
+        let error = chain.process(&mut block).unwrap_err();
+        assert_eq!(block, [0.0; 480]);
+        assert_eq!(error.details()["code"], "inference_failed");
+        assert!(!error.details().to_string().contains("private path"));
     }
 }

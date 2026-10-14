@@ -127,6 +127,8 @@ and single-process chat/media enforcement.
 - [x] Persist rotating audio diagnostics, callback/watchdog/cleanup state and safe
   panic metadata; expose a logs-folder button independent of the audio worker.
 - [x] Make local diagnostic logging opt-in through a persistent Audio & voice toggle.
+- [x] Correlate desktop/backend voice failures by request ID; log safe socket errors,
+  close codes, connection exit reasons and typed audio processing failures.
 - [ ] Validate recovery/default microphone fallback and busy-device diagnostics on
   real Windows, macOS and Linux hardware, including exclusive-mode conflicts.
 - [x] Microphone permission/error UX, input levels and bounded playback/loopback tests.
@@ -226,7 +228,8 @@ speaker isolation and physical acoustic acceptance remain future work.
 - [ ] Validate DTX onset/listening quality, mixed-client rollout, clock drift,
   public NAT/TURN stability and full wire/CPU savings on Windows/macOS/Linux.
 - [x] Configurable STUN/TURN and backend-generated short-lived TURN credentials.
-- [x] Validate current sessions/voice permissions; reject duplicate negotiation.
+- [x] Validate current sessions/voice permissions; replace previous same-account channel membership.
+- [x] Replace existing same-account voice connections atomically; fence stale media/cleanup, stop displaced retries and reuse local connected/recovering jobs.
 - [x] Document WSL/Windows UDP addressing and firewall requirements.
 - [x] Automatic full peer reconnection with fresh offers and relay credentials.
 - [ ] In-place ICE restart and proactive long-call relay credential refresh.

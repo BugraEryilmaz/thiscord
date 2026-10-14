@@ -47,6 +47,8 @@ voice > Enable diagnostic logging** before reproducing a failure, then use **Ope
 diagnostic logs** to share the `audio-diagnostics*.jsonl` files. The preference
 persists on this computer; disabling logging keeps existing files. Logs contain
 technical events, not voice recordings or credentials, and are never auto-uploaded.
+Voice failures include safe transport error categories, audio processing stages and
+request IDs for correlation with backend logs; see [disconnect diagnostics](docs/audio.md#native-voice-connection-diagnostics).
 Windows desktop clients can share a screen or window with system audio from the
 voice bar, with selectable quality up to 4K/60 fps (hardware/network dependent).
 Capture uses continuous FP16 Windows Graphics Capture with GPU scaling, HDR-to-SDR

@@ -262,7 +262,14 @@ impl Writer {
     async fn dropped(&self, kind: MediaKind, source_slot: usize, epoch: u32) {
         if kind == MediaKind::ScreenVideo {
             self.metrics[2].fetch_add(1, Ordering::Relaxed);
-            request_keyframe(&self.room, self.receiver_slot, source_slot, epoch).await;
+            request_keyframe(
+                &self.room,
+                self.receiver_slot,
+                source_slot,
+                epoch,
+                &self.active,
+            )
+            .await;
         }
     }
 }
@@ -289,7 +296,8 @@ mod tests {
                     owner: publisher.account_id,
                     epoch: publisher.screen_epoch,
                     bitrate: 2_500_000,
-                }]
+                }],
+                &AtomicBool::new(true)
             )
             .await
         );
@@ -298,7 +306,7 @@ mod tests {
     async fn change_viewer(room: &Room, change: ViewerChange) {
         match change {
             ViewerChange::Unsubscribe => {
-                assert!(viewing::update(room, 0, vec![]).await);
+                assert!(viewing::update(room, 0, vec![], &AtomicBool::new(true)).await);
             }
             ViewerChange::Expire => {
                 room.members.write().await.get_mut(&0).unwrap().views[1]
@@ -307,8 +315,12 @@ mod tests {
                     .renewed -= Duration::from_secs(thiscord_shared::screen::VIEW_LEASE_SECS);
             }
             ViewerChange::Restart => {
-                update_screen_state(room, 1, false, false).await.unwrap();
-                update_screen_state(room, 1, true, true).await.unwrap();
+                update_screen_state(room, 1, false, false, &AtomicBool::new(true))
+                    .await
+                    .unwrap();
+                update_screen_state(room, 1, true, true, &AtomicBool::new(true))
+                    .await
+                    .unwrap();
                 // A new viewer of the new share must never receive the old share's packets.
                 subscribe(room).await;
             }
@@ -516,6 +528,9 @@ mod tests {
             room.members.write().await.insert(
                 slot,
                 Member {
+                    request_id: thiscord_shared::RequestId::from_uuid(uuid::Uuid::new_v4()),
+                    call_id: None,
+                    replaced: watch::channel(false).0,
                     network: Arc::new(RwLock::new(Default::default())),
                     info: Participant {
                         account_id: endpoint.identity.account,
@@ -555,7 +570,8 @@ mod tests {
                     owner,
                     epoch: 7,
                     bitrate: 2_500_000,
-                }]
+                }],
+                &AtomicBool::new(true)
             )
             .await
         );
