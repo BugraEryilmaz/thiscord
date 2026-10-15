@@ -12,6 +12,7 @@ concurrency:
 
 env:
   CARGO_TERM_COLOR: always
+  CARGO_INCREMENTAL: "0"
   THISCORD_DISABLE_LOCAL_CACHE: ${{ vars.THISCORD_DISABLE_LOCAL_CACHE }}
   THISCORD_API_URL: http://localhost:3000
 
@@ -80,6 +81,10 @@ jobs:
         run: |
           diesel print-schema > "$RUNNER_TEMP/schema.rs"
           diff -u src/schema.rs "$RUNNER_TEMP/schema.rs"
+      - name: Report Cargo storage
+        if: always() && env.CARGO_TARGET_DIR != ''
+        shell: pwsh
+        run: ./scripts/maintain-cargo-builds.ps1 -BuildRoot $env:CARGO_TARGET_DIR | Format-Table -AutoSize
 
   voice-load-macos:
     name: macOS voice load generator
@@ -97,6 +102,10 @@ jobs:
           key: voice-load-macos
       - run: cargo clippy -p thiscord-backend --example voice_load --locked -- -D warnings
       - run: cargo test -p thiscord-backend --example voice_load --locked
+      - name: Report Cargo storage
+        if: always() && env.CARGO_TARGET_DIR != ''
+        shell: pwsh
+        run: ./scripts/maintain-cargo-builds.ps1 -BuildRoot $env:CARGO_TARGET_DIR | Format-Table -AutoSize
 
   wasm:
     name: Leptos and Tailwind build
@@ -131,6 +140,10 @@ jobs:
           name: admin-assets
           path: frontend/dist-admin/
           if-no-files-found: error
+      - name: Report Cargo storage
+        if: always() && env.CARGO_TARGET_DIR != ''
+        shell: pwsh
+        run: ./scripts/maintain-cargo-builds.ps1 -BuildRoot $env:CARGO_TARGET_DIR | Format-Table -AutoSize
 
   desktop:
     name: Desktop (${{ matrix.os }})
@@ -183,6 +196,10 @@ jobs:
             ${{ env.CARGO_TARGET_DIR }}/debug/thiscord-desktop
             ${{ env.CARGO_TARGET_DIR }}/debug/thiscord-desktop.exe
           if-no-files-found: error
+      - name: Report Cargo storage
+        if: always() && env.CARGO_TARGET_DIR != ''
+        shell: pwsh
+        run: ./scripts/maintain-cargo-builds.ps1 -BuildRoot $env:CARGO_TARGET_DIR | Format-Table -AutoSize
 
   audio:
     name: Audio (${{ matrix.os }})
@@ -241,3 +258,7 @@ jobs:
             neural-echo-bench.jsonl
             dtx-bench.jsonl
           if-no-files-found: error
+      - name: Report Cargo storage
+        if: always() && env.CARGO_TARGET_DIR != ''
+        shell: pwsh
+        run: ./scripts/maintain-cargo-builds.ps1 -BuildRoot $env:CARGO_TARGET_DIR | Format-Table -AutoSize

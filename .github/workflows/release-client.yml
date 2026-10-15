@@ -14,6 +14,7 @@ concurrency:
 
 env:
   CARGO_TERM_COLOR: always
+  CARGO_INCREMENTAL: "0"
   THISCORD_DISABLE_LOCAL_CACHE: ${{ vars.THISCORD_DISABLE_LOCAL_CACHE }}
   THISCORD_API_URL: https://thiscord.com.tr
 
@@ -51,6 +52,10 @@ jobs:
           name: frontend-assets
           path: frontend/dist/
           if-no-files-found: error
+      - name: Report Cargo storage
+        if: always() && env.CARGO_TARGET_DIR != ''
+        shell: pwsh
+        run: ./scripts/maintain-cargo-builds.ps1 -BuildRoot $env:CARGO_TARGET_DIR | Format-Table -AutoSize
 
   installers:
     needs: assets
@@ -85,3 +90,7 @@ jobs:
           RELEASE_TAG: ${{ github.ref_name }}
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: ./scripts/release-client.ps1 -Mode Publish -Tag $env:RELEASE_TAG
+      - name: Report Cargo storage
+        if: always() && env.CARGO_TARGET_DIR != ''
+        shell: pwsh
+        run: ./scripts/maintain-cargo-builds.ps1 -BuildRoot $env:CARGO_TARGET_DIR | Format-Table -AutoSize

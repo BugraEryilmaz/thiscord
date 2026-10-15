@@ -22,7 +22,8 @@ media compatibility spike can happen before chat to expose platform constraints.
 - [x] Add typed IDs, wire errors, validation, pagination and timestamps as needed.
 - [x] CI: format/Clippy, backend/shared tests, WASM build and native desktop matrix.
 - [x] Shared Cargo intermediates across development worktrees, stable CI runner slots and preview-first legacy cache cleanup.
-- [ ] Measure warm CI timings on all runners and retire historical caches while their consumers are stopped.
+- [x] Smaller debug information, non-incremental CI, per-job storage reports and explicit idle-only build-cache maintenance.
+- [ ] Measure cold/warm CI timings and storage on all runners after adopting the smaller profiles; review cache budgets weekly.
 - [x] Database readiness endpoint and request IDs, separate from process liveness.
 
 ## 1. Accounts and login: backend and frontend

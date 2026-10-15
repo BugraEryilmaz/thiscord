@@ -7,6 +7,7 @@ param(
     [switch]$RunnersStopped
 )
 $ErrorActionPreference = 'Stop'
+$ProgressPreference = 'SilentlyContinue'
 if ($Apply -and !$RunnersStopped) {
     throw 'Stop every runner/build using this root, then pass -RunnersStopped with -Apply.'
 }

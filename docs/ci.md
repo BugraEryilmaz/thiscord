@@ -80,8 +80,11 @@ keeps its Cargo home in the stable slot's `/cache/cargo-home`. Container registr
 downloads are reused across release tags/PRs; host and container Cargo homes remain
 separate to avoid importing host configuration and installed binaries into Ubuntu.
 
-Self-hosted jobs keep local compiled dependencies, workspace artifacts, and Cargo
-incremental state without downloading/uploading the target directory. Normal
+Self-hosted jobs keep local compiled dependencies and workspace artifacts without
+downloading/uploading the target directory. All three workflows set
+`CARGO_INCREMENTAL=0`; the Linux installer container sets it explicitly too.
+Unchanged dependencies remain reusable, but changed crates do not retain rustc's
+additional incremental state. Normal
 Cargo registry/git downloads and Rust toolchains also remain in the runner user's
 home. A fresh runner or build environment still needs an initial cold build.
 Runner routing and available parallel slots determine the wall-clock benefit;
@@ -139,7 +142,60 @@ Historical worktree targets and tool-version directories require a separate,
 reviewed cleanup after their consumers are stopped. Do not blindly move or merge
 old `deps`, `build` or `incremental` trees: build scripts can embed absolute paths.
 
+## Build storage maintenance
+
+Every build job reports profile and incremental sizes at the end, including failed
+jobs when the cache was selected. `scripts/maintain-cargo-builds.ps1` also reports
+development caches. Sizes are logical file bytes, not unique filesystem blocks;
+hard links, compression and filesystem snapshots can change actual reclaimed space.
+The default budget is 40 GiB across known build profiles in one slot. Exceeding it
+prints a warning, never deletes files or fails an otherwise successful build.
+Registry downloads, tools and files outside those profiles are excluded from this
+budget. Container profiles under `target/` are included.
+
+Review reports weekly and after Rust/toolchain or dependency upgrades. During a
+maintenance window, stop all runner services and development/editor builds using
+the selected root, and wait for artifact uploads, signing and running binaries to
+finish. Keep consumers stopped throughout inspection and deletion. `-BuildsStopped`
+is an operator assertion, not an automatic stop or a lock. The tool rejects linked
+roots/ancestors and links inside any selected deletion tree before deleting anything.
+Reports count omitted links without following them; retained installer bundles can
+contain links without preventing cleanup of unrelated debug/incremental trees.
+
+```powershell
+# Read-only report for one current slot (use its printed CARGO_TARGET_DIR).
+./scripts/maintain-cargo-builds.ps1 -BuildRoot C:\thiscord-runner\_work\tc\<slot>
+# One-time removal of old CI incremental state after disabling incremental builds.
+./scripts/maintain-cargo-builds.ps1 -BuildRoot C:\thiscord-runner\_work\tc\<slot> -Mode Incremental -MinimumAgeDays 0
+# Development: preview only crate incremental directories untouched for 14 days.
+./scripts/maintain-cargo-builds.ps1 -BuildRoot "$env:USERPROFILE/.cargo/thiscord" -Mode Incremental
+# If still over budget, preview resetting complete debug trees in the slot.
+./scripts/maintain-cargo-builds.ps1 -BuildRoot C:\thiscord-runner\_work\tc\<slot> -Mode ResetDebug
+```
+
+Replace `<slot>` with the actual directory. Run the same script with `pwsh` on
+Linux/macOS and their absolute paths. After reviewing the preview with consumers
+stopped, repeat the chosen cleanup command with `-Apply -BuildsStopped`.
+`Incremental` preserves compiled dependencies and executables. `ResetDebug` removes
+whole `debug` profile trees only when the total exceeds `-MaximumGiB` (default 40),
+including host and WASM debug output. It preserves release/ci profiles, slot markers,
+Cargo homes and tools. It requires a cold debug rebuild; do not run it after every
+job. `-MaximumGiB 0` explicitly forces a one-time debug reset, for example after
+switching debug-information settings. Changing settings alone does not delete old
+artifacts. Use the separate legacy pruning script for obsolete hash-named slots.
+No unattended deletion is scheduled. Older branches can recreate incremental or
+legacy artifacts until they adopt these settings. Cargo's download-cache garbage
+collection does not clean compiled build artifacts.
+
 ## Compilation profiles and measurement
+
+Development and test profiles use `debug = "line-tables-only"` for file/line
+backtraces without full variable/type debug information. Development incremental
+compilation stays enabled. For a debugger session needing variables, override both
+`CARGO_PROFILE_DEV_DEBUG=2` and `CARGO_PROFILE_TEST_DEBUG=2` in that terminal; this
+creates another artifact variant. Debug assertions, overflow checks and the existing
+DSP optimization overrides are unchanged. CI disables incremental compilation through
+its workflow environment rather than changing local development defaults.
 
 Functional audio tests and audio Clippy use `--profile ci`: release optimization
 without LTO, with 16 codegen units. They use the same audio/probe feature graph.

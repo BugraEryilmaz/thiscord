@@ -321,7 +321,9 @@ intermediate cache configured in `.cargo/config.toml`: `${CARGO_HOME}/thiscord`
 (normally `~/.cargo/thiscord`). Final executables stay in each checkout's `target`
 directory. This prevents a full compiler cache per T3 worktree or editor window.
 Cargo serializes builds using that cache. See [build cache configuration](docs/ci.md)
-for fixed parallel slots, CI isolation and preview-only legacy cleanup.
+for fixed parallel slots, CI isolation, storage budgets and preview-first cleanup.
+Development/tests keep line-number backtraces and incremental compilation; CI
+disables incremental state and reports build storage after each job.
 
 Native checks require Tauri platform dependencies and PostgreSQL client development
 libraries on the host running rust-analyzer. The backend still runs in WSL as

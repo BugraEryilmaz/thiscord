@@ -20,7 +20,7 @@ class CacheTests(unittest.TestCase):
                 break
             script.append(line[8:])
         with tempfile.TemporaryDirectory(prefix='thiscord-cache-test-') as directory:
-            root = Path(directory)
+            root = Path(directory).resolve()
             def select(job, group='', **overrides):
                 output = root / 'env'
                 output.write_text('')
@@ -60,7 +60,7 @@ class CacheTests(unittest.TestCase):
 
     def test_real_cargo_reuses_dependencies_and_preserves_checkout_binaries(self):
         with tempfile.TemporaryDirectory(prefix='thiscord-cargo-reuse-') as directory:
-            root = Path(directory)
+            root = Path(directory).resolve()
             dependency = root / 'dependency'
             (dependency / 'src').mkdir(parents=True)
             (dependency / 'Cargo.toml').write_text(
@@ -103,7 +103,7 @@ class CacheTests(unittest.TestCase):
                 break
             script.append(line[8:])
         with tempfile.TemporaryDirectory(prefix='thiscord-tools-test-') as directory:
-            root = Path(directory)
+            root = Path(directory).resolve()
             def select(**overrides):
                 output = root / 'output'
                 output.write_text('')
@@ -153,7 +153,7 @@ class PruneTests(unittest.TestCase):
 
     def test_preview_retention_and_explicit_idle_cleanup(self):
         with tempfile.TemporaryDirectory(prefix='thiscord-prune-test-') as directory:
-            root = Path(directory) / 'tc'
+            root = Path(directory).resolve() / 'tc'
             root.mkdir()
             old, recent, current, unrelated = [root / name for name in (
                 'a' * 32, 'b' * 64, 'c' * 32, 'not-a-cache')]
@@ -183,9 +183,9 @@ class PruneTests(unittest.TestCase):
 
     def test_links_cannot_escape_cleanup_root(self):
         with tempfile.TemporaryDirectory(prefix='thiscord-prune-links-') as directory:
-            root = Path(directory) / 'thiscord-cargo'
+            root = Path(directory).resolve() / 'thiscord-cargo'
             root.mkdir()
-            outside = Path(directory) / 'outside'
+            outside = Path(directory).resolve() / 'outside'
             outside.mkdir()
             (outside / 'keep').write_text('keep')
             nested = root / ('b' * 32)
@@ -205,6 +205,132 @@ class PruneTests(unittest.TestCase):
             self.assertEqual(result.returncode, 0, result.stderr)
             self.assertTrue((outside / 'keep').exists())
             self.assertTrue(nested.exists())
+
+
+class BuildMaintenanceTests(unittest.TestCase):
+    def invoke(self, root, *args):
+        quote = lambda value: "'" + str(value).replace("'", "''") + "'"
+        command = ('& ' + quote(REPOSITORY / 'scripts/maintain-cargo-builds.ps1') +
+                   ' -BuildRoot ' + quote(root) + ' ' + ' '.join(args) +
+                   ' -WarningAction SilentlyContinue | ConvertTo-Json -AsArray')
+        return subprocess.run(['pwsh', '-NoProfile', '-Command', command],
+                              text=True, capture_output=True)
+
+    def fixture(self, root):
+        root.mkdir()
+        (root / 'thiscord-cache.json').write_text('{"version":2}')
+        for name in ('debug', 'wasm32-unknown-unknown/debug', 'ci', 'release',
+                     'target/x86_64-unknown-linux-gnu/debug',
+                     'target/x86_64-unknown-linux-gnu/release'):
+            profile = root / name
+            (profile / 'deps').mkdir(parents=True)
+            (profile / 'deps/keep').write_text('dependency')
+            (profile / '.fingerprint').mkdir()
+            (profile / 'incremental/old').mkdir(parents=True)
+            (profile / 'incremental/old/state').write_text('incremental')
+            past = time.time() - 60 * 86400
+            for path in (profile / 'incremental/old/state', profile / 'incremental/old'):
+                os.utime(path, (past, past))
+        for name in ('cargo-home/registry/keep', 'source/keep', 'unknown-profile/keep'):
+            path = root / name
+            path.parent.mkdir(parents=True)
+            path.write_text('keep')
+
+    def test_report_and_incremental_retention_preserve_dependencies(self):
+        with tempfile.TemporaryDirectory(prefix='thiscord-maintenance-') as directory:
+            root = Path(directory).resolve() / 'slot'
+            self.fixture(root)
+            fresh = root / 'debug/incremental/fresh'
+            fresh.mkdir()
+            (fresh / 'state').write_text('fresh')
+            # A recent file protects even a directory with an old timestamp.
+            past = time.time() - 60 * 86400
+            os.utime(fresh, (past, past))
+            report = self.invoke(root)
+            self.assertEqual(0, report.returncode, report.stderr)
+            self.assertEqual(6, len(json.loads(report.stdout)))
+            preview = self.invoke(root, '-Mode Incremental')
+            self.assertEqual(0, preview.returncode, preview.stderr)
+            self.assertEqual(6, len(json.loads(preview.stdout)))
+            self.assertTrue((root / 'debug/incremental/old').exists())
+            self.assertNotEqual(0, self.invoke(root, '-Mode Incremental', '-Apply').returncode)
+            result = self.invoke(root, '-Mode Incremental', '-Apply', '-BuildsStopped')
+            self.assertEqual(0, result.returncode, result.stderr)
+            self.assertFalse((root / 'debug/incremental/old').exists())
+            self.assertTrue(fresh.exists())
+            self.assertTrue((root / 'debug/deps/keep').exists())
+            result = self.invoke(root, '-Mode Incremental', '-MinimumAgeDays 0',
+                                 '-Apply', '-BuildsStopped')
+            self.assertEqual(0, result.returncode, result.stderr)
+            self.assertFalse(fresh.exists())
+
+    def test_debug_budget_reset_preserves_other_profiles_and_downloads(self):
+        with tempfile.TemporaryDirectory(prefix='thiscord-maintenance-') as directory:
+            root = Path(directory).resolve() / 'slot'
+            self.fixture(root)
+            result = self.invoke(root, '-Mode ResetDebug', '-Apply', '-BuildsStopped')
+            self.assertEqual(0, result.returncode, result.stderr)
+            self.assertTrue((root / 'debug').exists())  # Below the default budget.
+            preview = self.invoke(root, '-Mode ResetDebug', '-MaximumGiB 0')
+            self.assertEqual(0, preview.returncode, preview.stderr)
+            self.assertEqual(3, len(json.loads(preview.stdout)))
+            self.assertTrue((root / 'debug').exists())
+            result = self.invoke(root, '-Mode ResetDebug', '-MaximumGiB 0',
+                                 '-Apply', '-BuildsStopped')
+            self.assertEqual(0, result.returncode, result.stderr)
+            for path in ('debug', 'wasm32-unknown-unknown/debug',
+                         'target/x86_64-unknown-linux-gnu/debug'):
+                self.assertFalse((root / path).exists())
+            for path in ('thiscord-cache.json', 'cargo-home/registry/keep', 'source/keep',
+                         'unknown-profile/keep', 'release/deps/keep', 'ci/deps/keep',
+                         'target/x86_64-unknown-linux-gnu/release/deps/keep'):
+                self.assertTrue((root / path).exists(), path)
+            self.assertNotEqual(0, self.invoke(root, '-Apply', '-BuildsStopped').returncode)
+            (root / 'thiscord-cache.json').unlink()
+            self.assertNotEqual(0, self.invoke(root, '-Mode ResetDebug', '-MaximumGiB 0',
+                                             '-Apply', '-BuildsStopped').returncode)
+
+    def test_link_rejection_happens_before_any_deletion(self):
+        with tempfile.TemporaryDirectory(prefix='thiscord-maintenance-links-') as directory:
+            root = Path(directory).resolve() / 'slot'
+            self.fixture(root)
+            outside = Path(directory).resolve() / 'outside'
+            outside.mkdir()
+            (outside / 'keep').write_text('keep')
+
+            def link_to(link, target):
+                if os.name == 'nt':
+                    quote = lambda value: "'" + str(value).replace("'", "''") + "'"
+                    subprocess.run(['pwsh', '-NoProfile', '-Command',
+                                    'New-Item -ItemType Junction -Path ' + quote(link) +
+                                    ' -Target ' + quote(target)], check=True, capture_output=True)
+                else:
+                    link.symlink_to(target, target_is_directory=True)
+
+            link_to(root / 'wasm32-unknown-unknown/debug/linked', outside)
+            report = self.invoke(root)
+            self.assertEqual(0, report.returncode, report.stderr)
+            self.assertEqual(1, sum(row['LinksOmitted'] for row in json.loads(report.stdout)))
+            result = self.invoke(root, '-Mode ResetDebug', '-MaximumGiB 0',
+                                 '-Apply', '-BuildsStopped')
+            self.assertNotEqual(0, result.returncode)
+            self.assertTrue((root / 'debug/deps/keep').exists())
+            self.assertTrue((outside / 'keep').exists())
+            # Links in retained release bundles do not block debug maintenance.
+            link = root / 'wasm32-unknown-unknown/debug/linked'
+            if os.name == 'nt':
+                link.rmdir()
+            else:
+                link.unlink()
+            link_to(root / 'release/linked', outside)
+            result = self.invoke(root, '-Mode ResetDebug', '-MaximumGiB 0',
+                                 '-Apply', '-BuildsStopped')
+            self.assertEqual(0, result.returncode, result.stderr)
+            self.assertTrue((root / 'release/linked/keep').exists())
+            self.assertTrue((outside / 'keep').exists())
+            alias = Path(directory).resolve() / 'alias'
+            link_to(alias, root)
+            self.assertNotEqual(0, self.invoke(alias).returncode)
 
 
 if __name__ == '__main__':
