@@ -1,30 +1,47 @@
 //! Per-upgrade lifecycle records. Never format arbitrary transport errors or frames.
 use axum::extract::ws::{Message, WebSocket};
 use serde_json::{Value, json};
-use std::{error::Error as _, time::Instant};
+use std::{
+    error::Error as _,
+    time::{Duration, Instant},
+};
 use thiscord_shared::RequestId;
 
 pub(super) struct Socket {
-    inner: WebSocket,
+    inner: Option<WebSocket>,
+    pub permit: Option<tokio::sync::OwnedSemaphorePermit>,
+    pub recoverable: bool,
+    detached: Option<Instant>,
     pub id: RequestId,
     pub stage: &'static str,
     started: Instant,
     last_received: Option<Instant>,
     received: u64,
     sent: u64,
+    pings: u64,
+    pongs: u64,
+    control_window: Instant,
+    control_frames: u32,
     reason: Option<&'static str>,
 }
 impl Socket {
     pub fn new(inner: WebSocket, id: RequestId) -> Self {
         tracing::info!(request_id = %id, "voice connection started");
         Self {
-            inner,
+            inner: Some(inner),
+            permit: None,
+            recoverable: false,
+            detached: None,
             id,
             stage: "join",
             started: Instant::now(),
             last_received: None,
             received: 0,
             sent: 0,
+            pings: 0,
+            pongs: 0,
+            control_window: Instant::now(),
+            control_frames: 0,
             reason: None,
         }
     }
@@ -32,27 +49,77 @@ impl Socket {
     pub fn end(&mut self, reason: &'static str) {
         self.reason.get_or_insert(reason);
     }
-    pub async fn recv(&mut self) -> Option<Result<Message, axum::Error>> {
-        let result = self.inner.recv().await;
-        match &result {
-            Some(Ok(message)) => {
-                self.received += 1;
-                self.last_received = Some(Instant::now());
-                if let Message::Close(frame) = message {
-                    self.end("client_close");
-                    tracing::info!(request_id = %self.id, close_code = ?frame.as_ref().map(|f| f.code), "voice signaling close received");
-                }
-            }
-            Some(Err(error)) => {
-                self.end("signaling_receive_failed");
-                tracing::warn!(request_id = %self.id, stage = self.stage, error = %error_details(error), "voice signaling receive failed");
-            }
-            None => self.end("signaling_eof"),
+    pub fn silent_for(&self) -> Duration {
+        self.last_received.unwrap_or(self.started).elapsed()
+    }
+    pub fn detach(&mut self) {
+        if self.inner.take().is_some() {
+            self.detached = Some(Instant::now());
+            tracing::info!(request_id = %self.id, "voice signaling detached; media retained");
         }
-        result
+    }
+    pub fn recovery_expired(&self) -> bool {
+        self.detached.is_some_and(|at| {
+            at.elapsed() >= Duration::from_secs(thiscord_shared::voice::SIGNALING_GRACE_SECS)
+        })
+    }
+
+    pub async fn recv(&mut self) -> Option<Result<Message, axum::Error>> {
+        loop {
+            let Some(inner) = self.inner.as_mut() else {
+                return std::future::pending().await;
+            };
+            let result = inner.recv().await;
+            match &result {
+                Some(Ok(message)) => {
+                    self.received += 1;
+                    self.last_received = Some(Instant::now());
+                    if matches!(message, Message::Ping(_) | Message::Pong(_)) {
+                        // Axum/tungstenite queues the matching Pong automatically;
+                        // the next receive/send flushes it. Never parse control frames
+                        // as JSON commands, including before Join or Answer.
+                        if matches!(message, Message::Ping(_)) {
+                            self.pings += 1;
+                        } else {
+                            self.pongs += 1;
+                        }
+                        if self.control_window.elapsed() >= Duration::from_secs(1) {
+                            self.control_window = Instant::now();
+                            self.control_frames = 0;
+                        }
+                        self.control_frames += 1;
+                        if self.control_frames > 30 {
+                            self.end("signaling_control_rate_limit");
+                            return None;
+                        }
+                        continue;
+                    }
+                    if let Message::Close(frame) = message {
+                        self.end("client_close");
+                        tracing::info!(request_id = %self.id, close_code = ?frame.as_ref().map(|f| f.code), "voice signaling close received");
+                    }
+                }
+                Some(Err(error)) => {
+                    self.end("signaling_receive_failed");
+                    tracing::warn!(request_id = %self.id, stage = self.stage, error = %error_details(error), "voice signaling receive failed");
+                }
+                None => self.end("signaling_eof"),
+            }
+            if self.recoverable
+                && (matches!(&result, Some(Err(error)) if recoverable_error(error))
+                    || result.is_none())
+            {
+                self.detach();
+                continue;
+            }
+            return result;
+        }
     }
     pub async fn send(&mut self, message: Message) -> Result<(), axum::Error> {
-        let result = self.inner.send(message).await;
+        let Some(inner) = self.inner.as_mut() else {
+            return Ok(());
+        };
+        let result = inner.send(message).await;
         match &result {
             Ok(()) => self.sent += 1,
             Err(error) => {
@@ -60,8 +127,17 @@ impl Socket {
                 tracing::warn!(request_id = %self.id, stage = self.stage, error = %error_details(error), "voice signaling send failed");
             }
         }
+        if self.recoverable && result.as_ref().is_err_and(recoverable_error) {
+            self.detach();
+            return Ok(());
+        }
         result
     }
+}
+
+fn recoverable_error(error: &axum::Error) -> bool {
+    let details = error_details(error);
+    details["kind"] == "io" || details["code"] == "reset_without_closing_handshake"
 }
 impl Drop for Socket {
     fn drop(&mut self) {
@@ -69,6 +145,7 @@ impl Drop for Socket {
             elapsed_ms = self.started.elapsed().as_millis() as u64,
             signaling_age_ms = ?self.last_received.map(|t| t.elapsed().as_millis() as u64),
             received_messages = self.received, sent_messages = self.sent,
+            received_pings = self.pings, received_pongs = self.pongs,
             "voice connection ended");
     }
 }
@@ -138,6 +215,58 @@ fn websocket_error(error: &tungstenite::Error) -> Value {
 mod tests {
     use super::*;
     use std::sync::{Arc, Mutex};
+    // Keep uninstrumented socket fixtures from racing first-use registration
+    // of the callsites whose scoped subscriber is asserted below.
+    static SOCKET_TESTS: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
+
+    #[tokio::test]
+    async fn control_flood_is_bounded_before_join() {
+        let _serial = SOCKET_TESTS.lock().await;
+        use axum::{Router, extract::WebSocketUpgrade, routing::get};
+        use futures_util::SinkExt;
+        let (done, finished) = tokio::sync::oneshot::channel();
+        let done = Arc::new(Mutex::new(Some(done)));
+        let app = Router::new().route(
+            "/",
+            get(move |ws: WebSocketUpgrade| {
+                let done = done.clone();
+                async move {
+                    ws.on_upgrade(move |inner| async move {
+                        let id = "00000000-0000-0000-0000-000000000001".parse().unwrap();
+                        let mut socket = Socket::new(inner, id);
+                        let ended = socket.recv().await.is_none();
+                        done.lock()
+                            .unwrap()
+                            .take()
+                            .unwrap()
+                            .send((ended, socket.reason, socket.pongs))
+                            .unwrap();
+                    })
+                }
+            }),
+        );
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let server = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+        let (mut client, _) = tokio_tungstenite::connect_async(format!("ws://{address}/"))
+            .await
+            .unwrap();
+        // Queue a burst in one flush so scheduler delays do not space it out.
+        for _ in 0..31 {
+            client
+                .feed(tungstenite::Message::Pong(Default::default()))
+                .await
+                .unwrap();
+        }
+        client.flush().await.unwrap();
+        let result = tokio::time::timeout(Duration::from_secs(2), finished)
+            .await
+            .unwrap()
+            .unwrap();
+        server.abort();
+        assert_eq!(result, (true, Some("signaling_control_rate_limit"), 31));
+    }
+
     #[derive(Clone, Default)]
     struct Capture(Arc<Mutex<Vec<u8>>>);
     impl std::io::Write for Capture {
@@ -152,6 +281,7 @@ mod tests {
 
     #[tokio::test]
     async fn actual_socket_closes_log_reason_and_id_without_close_body() {
+        let _serial = SOCKET_TESTS.lock().await;
         use axum::{Router, extract::WebSocketUpgrade, routing::get};
         use futures_util::SinkExt;
         use tracing::instrument::WithSubscriber;
