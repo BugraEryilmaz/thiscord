@@ -1,8 +1,31 @@
 use thiscord_shared::{
+    AccountId, ChannelId,
     audio::AudioStatus,
     overlay::{OverlayParticipant, OverlaySnapshot},
     voice::VoiceStatus,
 };
+
+/// Reuse overlay activity rules in channel views, without attributing another
+/// call's audio or screen-share audio to a visible participant.
+pub fn speaking_in_channel(
+    voice: &VoiceStatus,
+    audio: Option<&AudioStatus>,
+    channel: ChannelId,
+) -> std::collections::BTreeSet<AccountId> {
+    if voice.channel_id != Some(channel) {
+        return Default::default();
+    }
+    audio
+        .map(|audio| {
+            snapshot(voice, audio)
+                .participants
+                .into_iter()
+                .filter(|p| p.speaking)
+                .map(|p| p.account_id)
+                .collect()
+        })
+        .unwrap_or_default()
+}
 
 pub fn snapshot(voice: &VoiceStatus, audio: &AudioStatus) -> OverlaySnapshot {
     if !voice.connected || voice.channel_id.is_none() {
@@ -68,6 +91,22 @@ mod tests {
         }))
         .unwrap();
         (voice, audio)
+    }
+
+    #[test]
+    fn channel_activity_is_scoped_to_the_connected_call_and_excludes_screen_audio() {
+        let (mut voice, mut audio) = fixture();
+        let channel = voice.channel_id.unwrap();
+        assert_eq!(speaking_in_channel(&voice, Some(&audio), channel).len(), 2);
+        let other = "00000000-0000-0000-0000-000000000099".parse().unwrap();
+        assert!(speaking_in_channel(&voice, Some(&audio), other).is_empty());
+        assert!(speaking_in_channel(&voice, None, channel).is_empty());
+        audio.streams[0].target.as_mut().unwrap().shared_audio = true;
+        assert_eq!(speaking_in_channel(&voice, Some(&audio), channel).len(), 1);
+        voice.participants[0].muted = true;
+        assert!(speaking_in_channel(&voice, Some(&audio), channel).is_empty());
+        voice.connected = false;
+        assert!(speaking_in_channel(&voice, Some(&audio), channel).is_empty());
     }
 
     #[test]

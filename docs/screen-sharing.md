@@ -1,11 +1,19 @@
 # Screen sharing (Windows first)
 
 Join a voice channel in the Windows desktop app, then choose **Share screen**
-in the persistent voice bar. Select a screen or a visible window and choose
-whether to include system audio. **Start sharing** is the only capture trigger.
-Other participants choose **Watch stream** in that voice channel. **Stop watching**
-closes their viewer and unsubscribes video and shared audio. **Stop sharing**
-remains available while reading text channels or settings.
+in the persistent voice bar. The source picker separates Screens and Windows;
+select a source, resolution/frame rate and whether to include system audio, then
+choose **Go live**. Selecting a source alone never starts capture.
+Click a sharing participant or their **LIVE** badge in the sidebar to open their
+stream directly in the channel canvas. This joins their voice channel if needed,
+using the current microphone settings. A deafened viewer must explicitly undeafen.
+Live share buttons switch between publishers; **Close stream** stops watching and
+unsubscribes video and shared audio. A restarted share requires a new selection.
+**Stop sharing** remains available in the voice bar while reading text or settings.
+The voice canvas contains streams; participants and speaking highlights stay in
+the sidebar, per-person volume lives in the right-click menu, and call controls
+stay in the persistent voice bar. Your own share shows its live status, not a local
+video preview.
 
 System audio captures all other applications, even for a single-window share.
 It excludes Thiscord's process tree, so received voice and shared audio are not
@@ -17,8 +25,8 @@ volume. Both levels persist locally per guild/account. Existing voice preference
 are preserved; shared audio defaults to 100%. System audio is currently downmixed
 to mono.
 
-**Full screen** expands the received video within the app window while keeping its
-audio controls available. **Exit full screen** or Escape restores the inline view.
+**Expand stream** expands the received video within the app window while keeping its
+audio controls available. **Exit expanded view** or Escape restores the inline view.
 The existing player continues running through the layout change; this does not
 enter operating-system fullscreen.
 

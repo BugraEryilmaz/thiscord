@@ -14,7 +14,6 @@ enum Action {
     Preference(ChannelId, bool),
     Join(Guild, Channel),
     Disconnect,
-    Voice(SpeakerVolumeTarget),
     Change(GuildId, i64, GuildChange, String),
 }
 #[derive(Clone)]
@@ -45,6 +44,7 @@ pub(super) struct Menu {
     note: String,
     x: f64,
     y: f64,
+    volume: Option<(GuildId, ChannelId, AccountId)>,
 }
 #[derive(Clone, Copy)]
 struct Target {
@@ -76,6 +76,42 @@ fn close(ui: Ui) {
 }
 fn preference_key(account: AccountId) -> String {
     format!("thiscord.sidebar.v1.{account}")
+}
+
+#[component]
+fn ParticipantVolume(
+    ui: Ui,
+    guild: GuildId,
+    channel: ChannelId,
+    member: AccountId,
+) -> impl IntoView {
+    let target = SpeakerVolumeTarget {
+        guild_id: guild,
+        account_id: member,
+        shared_audio: false,
+    };
+    let connected = move || ui.voice.get().connected && ui.voice.get().channel_id == Some(channel);
+    let streams = Memo::new(move |_| {
+        ui.audio_status
+            .get()
+            .map(|s| {
+                s.streams
+                    .into_iter()
+                    .filter(|s| s.target == Some(target))
+                    .map(|s| s.id)
+                    .collect::<Vec<_>>()
+            })
+            .unwrap_or_default()
+    });
+    view! {<section class="context-volume" role="group" aria-label="Participant volume">
+        <Show when=move ||connected() && !streams.get().is_empty() fallback=move ||view!{<label class="volume-placeholder">"Voice volume"<input type="range" min="0" max="200" value="100" disabled aria-label="Voice volume"/></label><p class="volume-hint">{move ||if connected(){"Waiting for voice audio…"}else{"Join this call to adjust volume."}}</p>}>
+            <For each=move ||streams.get() key=|id|id.clone() children=move |id|{
+                let stream=ui.audio_status.get_untracked().and_then(|s|s.streams.into_iter().find(|s|s.id==id && s.target==Some(target)));
+                stream.map(|stream|view!{<super::audio::StreamVolume ui=ui stream=stream compact=true/>})
+            }/>
+        </Show>
+        <p class="volume-hint">"Only changes what you hear. 0% mutes."</p>
+    </section>}
 }
 fn save_preference(ui: Ui, channel: ChannelId, pin: bool) {
     ui.sidebar_preferences.update(|p| p.toggle(channel, pin));
@@ -115,6 +151,11 @@ fn open(ui: Ui, element: web_sys::Element, x: f64, y: f64) {
         note: String::new(),
         x,
         y,
+        volume: target
+            .member
+            .filter(|id| ui.account.get_untracked().is_some_and(|a| a.id != *id))
+            .zip(target.channel)
+            .map(|(member, channel)| (target.guild, channel, member)),
     }));
     leptos::task::spawn_local(async move {
         let result = items(ui, target).await;
@@ -179,21 +220,6 @@ async fn items(ui: Ui, target: Target) -> Result<(String, Vec<Item>), String> {
                 Action::Page(guild.id, "audio", None),
             ));
         } else {
-            let connected = ui.voice.get_untracked().channel_id == Some(channel);
-            let mut item = Item::new(
-                if connected {
-                    "Voice settings…"
-                } else {
-                    "Voice settings · join this call first"
-                },
-                Action::Voice(SpeakerVolumeTarget {
-                    guild_id: guild.id,
-                    account_id: member,
-                    shared_audio: false,
-                }),
-            );
-            item.disabled = !connected;
-            items.push(item);
             if home.can_manage_roles
                 && let Ok(PermissionResponse::State { state }) =
                     super::servers::request(ui, PermissionRequest::Inspect { guild_id: guild.id })
@@ -473,28 +499,22 @@ fn execute(ui: Ui, action: Action) {
                 ui.busy.set(false);
             });
         }
-        Action::Voice(_) => {}
     }
 }
 
 #[component]
 pub(super) fn Host(ui: Ui) -> impl IntoView {
     let menu_node = NodeRef::<leptos::html::Div>::new();
+    let volume = Memo::new(move |_| ui.context_menu.get().and_then(|m| m.volume));
     let position = RwSignal::new((8.0, 8.0));
     let return_focus = StoredValue::new_local(None::<web_sys::HtmlElement>);
     let pending = RwSignal::new(None::<Action>);
     let confirm = NodeRef::<leptos::html::Dialog>::new();
-    let voice_target = RwSignal::new(None::<SpeakerVolumeTarget>);
-    let voice_dialog = NodeRef::<leptos::html::Dialog>::new();
     let account = Memo::new(move |_| ui.account.get().map(|a| a.id));
     Effect::new(move |_| {
         close(ui);
         pending.set(None);
-        voice_target.set(None);
         if let Some(dialog) = confirm.get_untracked() {
-            dialog.close();
-        }
-        if let Some(dialog) = voice_dialog.get_untracked() {
             dialog.close();
         }
         let preferences = account
@@ -538,15 +558,18 @@ pub(super) fn Host(ui: Ui) -> impl IntoView {
                 open(ui, element, 0.0, 0.0);
             }
         } else if ui.context_menu.get_untracked().is_some() {
-            if e.key() == "Escape" || e.key() == "Tab" {
+            if e.key() == "Escape" {
                 close(ui);
-                if e.key() == "Escape" {
-                    e.prevent_default();
-                    if let Some(element) = return_focus.get_value() {
-                        let _ = element.focus();
-                    }
+                e.prevent_default();
+                if let Some(element) = return_focus.get_value() {
+                    let _ = element.focus();
                 }
-            } else if matches!(e.key().as_str(), "ArrowDown" | "ArrowUp" | "Home" | "End") {
+            } else if matches!(e.key().as_str(), "ArrowDown" | "ArrowUp" | "Home" | "End")
+                && !e
+                    .target()
+                    .and_then(|t| t.dyn_into::<web_sys::Element>().ok())
+                    .is_some_and(|e| e.matches("input[type=range]").unwrap_or(false))
+            {
                 e.prevent_default();
                 if let Some(menu) = menu_node.get()
                     && let Ok(nodes) =
@@ -573,6 +596,16 @@ pub(super) fn Host(ui: Ui) -> impl IntoView {
             }
         }
     });
+    let focus = window_event_listener(leptos::ev::focusin, move |e| {
+        if ui.context_menu.get_untracked().is_some()
+            && e.target()
+                .and_then(|t| t.dyn_into::<web_sys::Element>().ok())
+                .and_then(|e| e.closest(".app-context-menu").ok().flatten())
+                .is_none()
+        {
+            close(ui);
+        }
+    });
     let resize = window_event_listener(leptos::ev::resize, move |_| close(ui));
     let blur = window_event_listener(leptos::ev::blur, move |_| close(ui));
     let wheel = window_event_listener(leptos::ev::wheel, move |e| {
@@ -589,6 +622,7 @@ pub(super) fn Host(ui: Ui) -> impl IntoView {
         context.remove();
         outside.remove();
         key.remove();
+        focus.remove();
         resize.remove();
         blur.remove();
         wheel.remove();
@@ -612,7 +646,12 @@ pub(super) fn Host(ui: Ui) -> impl IntoView {
                 menu.x.clamp(8.0, (w - rect.width() - 8.0).max(8.0)),
                 menu.y.clamp(8.0, (h - rect.height() - 8.0).max(8.0)),
             ));
-            if let Ok(Some(first)) = node.query_selector("button:not(:disabled)")
+            if !document()
+                .active_element()
+                .is_some_and(|e| node.contains(Some(&e)))
+                && let Ok(Some(first)) = node.query_selector(
+                    "input[type=range]:not(:disabled),button[role=menuitem]:not(:disabled)",
+                )
                 && let Ok(first) = first.dyn_into::<web_sys::HtmlElement>()
             {
                 let _ = first.focus();
@@ -628,12 +667,6 @@ pub(super) fn Host(ui: Ui) -> impl IntoView {
                     let _ = dialog.show_modal();
                 }
             }
-            Action::Voice(target) => {
-                voice_target.set(Some(target));
-                if let Some(dialog) = voice_dialog.get() {
-                    let _ = dialog.show_modal();
-                }
-            }
             other => execute(ui, other),
         }
     };
@@ -641,6 +674,7 @@ pub(super) fn Host(ui: Ui) -> impl IntoView {
         <Show when=move ||ui.context_menu.get().is_some()>
             <div node_ref=menu_node class="app-context-menu" role="menu" aria-label=move ||ui.context_menu.get().map(|m|m.title).unwrap_or_default() style:left=move ||format!("{}px",position.get().0) style:top=move ||format!("{}px",position.get().1)>
                 <p class="context-heading">{move ||ui.context_menu.get().map(|m|m.title)}</p>
+                {move ||volume.get().map(|(guild,channel,member)|view!{<ParticipantVolume ui=ui guild=guild channel=channel member=member/>})}
                 {move ||ui.context_menu.get().map(|m|m.items.into_iter().map(|item|view!{<button role="menuitem" class="context-item" class:context-danger=item.danger disabled=item.disabled on:click=move |_|run(item.action.clone())>{item.label}</button>}).collect_view())}
                 <p class="px-2 text-xs text-white/60" role="status">{move ||ui.context_menu.get().map(|m|m.note)}</p>
             </div>
@@ -650,11 +684,6 @@ pub(super) fn Host(ui: Ui) -> impl IntoView {
             <div class="mt-6 flex justify-end gap-3"><button class="rounded bg-white/10 px-4 py-2" on:click=move |_|if let Some(d)=confirm.get(){d.close();}>"Cancel"</button><button class="rounded bg-red-500/20 px-4 py-2 text-red-200" disabled=move ||ui.busy.get() on:click=move |_|{if let Some(action)=pending.get_untracked(){execute(ui,action);}
                 if let Some(d)=confirm.get(){d.close();}}>"Confirm"</button></div>
         </dialog>
-        <dialog node_ref=voice_dialog class="context-dialog" aria-label="Participant voice settings" on:click=move |e|super::dialog::dismiss_outside(e,voice_dialog,false) on:close=move |_|voice_target.set(None)>
-            <header class="mb-5 flex justify-between gap-4"><h2 class="text-xl font-semibold">"Participant voice settings"</h2><button aria-label="Close voice settings" on:click=move |_|if let Some(d)=voice_dialog.get(){d.close();}>"×"</button></header>
-            <p class="mb-4 text-sm text-white/60">"Volume affects only what you hear. Set it to 0% to mute this person for you."</p>
-            <For each=move ||{ui.audio_status.get().map(|s|s.streams).unwrap_or_default().into_iter().filter(|s|s.target.is_some() && s.target==voice_target.get()).collect::<Vec<_>>()} key=|s|(s.id.clone(),s.target) children=move |stream|view!{<super::audio::StreamVolume ui=ui stream=stream/>}/>
-            <Show when=move ||!ui.audio_status.get().is_some_and(|s|s.streams.iter().any(|s|s.target.is_some() && s.target==voice_target.get()))><p role="status" class="text-sm text-white/60">"Waiting for this participant's audio stream. Stay connected to the same call."</p></Show>
-        </dialog>
+
     }
 }

@@ -8,3 +8,4 @@ pub mod voice_overlay;
 
 pub mod audio_quality;
 pub mod sidebar;
+pub mod stream_ui;

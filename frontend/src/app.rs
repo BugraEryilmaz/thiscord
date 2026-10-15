@@ -33,6 +33,7 @@ struct Ui {
     voice: RwSignal<thiscord_shared::voice::VoiceStatus>,
     voice_location: RwSignal<Option<audio::VoiceLocation>>,
     voice_joining: RwSignal<bool>,
+    active_stream: RwSignal<Option<screen::StreamTarget>>,
     selected_channel: RwSignal<Option<thiscord_shared::permissions::Channel>>,
     sidebar_preferences: RwSignal<thiscord_frontend::sidebar::Preferences>,
     context_menu: RwSignal<Option<context_menu::Menu>>,
@@ -91,6 +92,7 @@ async fn clear_local(ui: Ui) {
     ui.server.set(None);
     ui.selected_channel.set(None);
     ui.voice_location.set(None);
+    ui.active_stream.set(None);
     ui.can_create_server.set(false);
     ui.token.set(None);
     ui.account.set(None);
@@ -315,6 +317,7 @@ pub fn App() -> impl IntoView {
         voice: RwSignal::new(Default::default()),
         voice_location: RwSignal::new(None),
         voice_joining: RwSignal::new(false),
+        active_stream: RwSignal::new(None),
         selected_channel: RwSignal::new(None),
         sidebar_preferences: RwSignal::new(Default::default()),
         context_menu: RwSignal::new(None),

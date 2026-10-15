@@ -204,7 +204,7 @@ pub(super) fn AudioHost(ui: Ui) -> impl IntoView {
         });
     }
 }
-fn toggle(ui: Ui, action: AudioToggle) {
+pub(super) fn toggle(ui: Ui, action: AudioToggle) {
     leptos::task::spawn_local(async move {
         let result = ui
             .audio_control
@@ -326,7 +326,11 @@ fn StreamVolumes(ui: Ui) -> impl IntoView {
 }
 
 #[component]
-pub(super) fn StreamVolume(ui: Ui, stream: StreamLevel) -> impl IntoView {
+pub(super) fn StreamVolume(
+    ui: Ui,
+    stream: StreamLevel,
+    #[prop(default = false)] compact: bool,
+) -> impl IntoView {
     let id = stream.id.parse::<usize>().unwrap_or(0);
     let target = stream.target;
     let shared_audio = target.is_some_and(|t| t.shared_audio);
@@ -337,6 +341,7 @@ pub(super) fn StreamVolume(ui: Ui, stream: StreamLevel) -> impl IntoView {
         1.0
     });
     let busy = RwSignal::new(false);
+    let dragging = RwSignal::new(false);
     let error = RwSignal::new(String::new());
     let current_volume = Memo::new(move |_| {
         ui.audio_status.get().and_then(|s| {
@@ -347,11 +352,15 @@ pub(super) fn StreamVolume(ui: Ui, stream: StreamLevel) -> impl IntoView {
         })
     });
     Effect::new(move |_| {
-        if let Some(current) = current_volume.get() {
+        if let Some(current) = current_volume.get()
+            && !dragging.get_untracked()
+            && !busy.get_untracked()
+        {
             gain.set((current * 100.0).round());
         }
     });
     let save = move |value: f32| {
+        dragging.set(false);
         busy.set(true);
         error.set(String::new());
         leptos::task::spawn_local(async move {
@@ -378,24 +387,26 @@ pub(super) fn StreamVolume(ui: Ui, stream: StreamLevel) -> impl IntoView {
         });
     };
     view! {
-        <div class="flex flex-wrap items-center gap-3">
+        <div class="stream-volume" class:compact=compact>
             <label class="flex flex-wrap items-center gap-3">
-                <span class="min-w-24 text-sm">{if shared_audio { "Screen share audio".to_owned() } else { stream.label }}</span>
+                <span class="volume-label">{if shared_audio { "Stream audio".to_owned() } else if compact {"Voice volume".to_owned()} else { stream.label }}</span>
                 <input aria-label=if shared_audio { "Screen share volume" } else { "Speaker volume" } type="range" min="0" max="200" step="1"
                     disabled=move || busy.get() prop:value=move || gain.get().to_string()
-                    on:input=move |e| { if let Ok(value) = event_target_value(&e).parse::<f32>() { gain.set(value); } }
+                    on:input=move |e| { if let Ok(value) = event_target_value(&e).parse::<f32>() { dragging.set(true);gain.set(value); } }
                     on:change=move |e| { if let Ok(value) = event_target_value(&e).parse::<f32>() { save(value / 100.0); } }/>
-                <span class="text-xs">{move || format!("{}%", gain.get())}</span>
+                <output class="volume-value">{move || format!("{}%", gain.get())}</output>
             </label>
             {shared_audio.then(|| view! {
-                <button class="rounded bg-white/10 px-3 py-2 text-sm disabled:opacity-50" disabled=move || busy.get()
+                <button class="icon-button" disabled=move || busy.get()
+                    aria-label=move ||if gain.get()==0.0{"Unmute stream audio"}else{"Mute stream audio"}
+                    data-tip=move ||if gain.get()==0.0{"Unmute stream audio"}else{"Mute stream audio"}
                     aria-pressed=move || (gain.get() == 0.0).to_string()
                     on:click=move |_| {
                         if gain.get_untracked() > 0.0 {
                             restore.set(gain.get_untracked() / 100.0);
                             save(0.0);
                         } else { save(restore.get_untracked()); }
-                    }>{move || if gain.get() == 0.0 { "Unmute screen share" } else { "Mute screen share" }}</button>
+                    }>{move ||view!{<Icon kind=if gain.get()==0.0{Glyph::VolumeOff}else{Glyph::Volume}/ >}}</button>
             })}
             <Show when=move || !error.get().is_empty()><p class="w-full text-sm text-red-300" role="alert">{move || error.get()}</p></Show>
         </div>
@@ -408,35 +419,14 @@ pub(super) fn VoiceChannel(
     channel: ChannelId,
     name: String,
 ) -> impl IntoView {
-    let channel_name = StoredValue::new(name.clone());
-    view! {<section class="min-h-0 min-w-0 space-y-5 overflow-y-auto rounded-xl border border-white/10 p-5">
-        <h2 class="text-xl font-semibold">{name}</h2>
-        <Show when=move ||desktop() || ui.audio_control.is_remote() fallback=||view!{<p>"Open the desktop app to use native voice audio."</p>}>
-            <p class="text-sm text-white/60" role="status">{move||ui.voice.get().message}</p>
-            <Show when=move||ui.voice.get().channel_id!=Some(channel) fallback=move||view!{<button class="icon-button danger" aria-label="Leave voice" data-tip="Leave voice" on:click=move |_|leave(ui)><Icon kind=Glyph::Disconnect/></button>}>
-                <p class="text-sm text-white/60">"Joining uses your selected microphone. Use headphones for the best audio quality."</p>
-                <button class="icon-button bg-brand" aria-label="Join voice" data-tip="Join voice" disabled=move||ui.voice_joining.get() on:click=move |_|{
-                    if let Some(home)=ui.server.get_untracked().filter(|s|s.guild.id==guild) {
-                        join(ui, home.guild, thiscord_shared::permissions::Channel{id:channel,name:channel_name.get_value(),kind:thiscord_shared::permissions::ChannelKind::Voice});
-                    }
-                }><Icon kind=Glyph::Join/></button>
-            </Show>
-            <Show when=move||ui.voice.get().channel_id==Some(channel)>
-                <ul class="space-y-2"><For each=move || ui.voice.get().participants key=|m| m.account_id children=move |m| {
-                    let id = m.account_id;
-                    let member = Signal::derive(move || ui.voice.with(|v| v.participants.iter().find(|m| m.account_id == id).cloned()).unwrap_or_else(|| m.clone()));
-                    view! { <li tabindex="0" aria-haspopup="menu" data-context-server=guild.to_string() data-context-channel=channel.to_string() data-context-member=id.to_string() class="flex flex-wrap items-center gap-3">
-                        <crate::avatar::Avatar name=Signal::derive(move || member.get().display_name().to_owned()) avatar_id=Signal::derive(move || member.get().avatar_id)/>
-                        <span>{move || member.get().display_name().to_owned()}{move || {let m=member.get(); if m.deafened {" · deafened"} else if m.muted || !m.can_speak {" · muted"} else {""}}}</span>
-                    </li> }
-                }/></ul>
-                <super::screen::ScreenViewer ui=ui/>
-                <h3 class="font-semibold">"Speaker volumes"</h3><StreamVolumes ui=ui/>
-                <super::screen::ShareDiagnostics/>
-            </Show>
+    view! {<section class="voice-channel-view">
+        <header class="voice-channel-header"><Icon kind=Glyph::Volume/><h2>{name}</h2></header>
+        <Show when=move ||desktop() || ui.audio_control.is_remote() fallback=||view!{<p class="voice-channel-empty">"Open the desktop app to use voice and watch streams."</p>}>
+            <super::screen::ScreenViewer ui=ui guild=guild channel=channel/>
         </Show>
     </section>}
 }
+
 #[component]
 pub(super) fn AudioSettingsPanel(ui: Ui) -> impl IntoView {
     let devices = RwSignal::new(Vec::<AudioDevice>::new());
@@ -561,7 +551,7 @@ pub(super) fn AudioSettingsPanel(ui: Ui) -> impl IntoView {
                     <button class="underline" on:click=move |_|{leave(ui);leptos::task::spawn_local(async move{let _=ui.audio_control.invoke::<AudioStatus>("audio_stop",json!({})).await;});}>"Stop audio"</button>
                     <button class="underline disabled:opacity-50" disabled=move||busy.get() on:click=move |_|{busy.set(true);message.set("Testing encrypted WebRTC forwarding…".into());leptos::task::spawn_local(async move{let result=ui.audio_control.invoke::<String>("audio_webrtc_probe",json!({})).await;if busy.try_get_untracked().is_some(){busy.set(false);message.set(result.unwrap_or_else(|e|e));}});}>"Test WebRTC"</button>
                 </div></Show>
-                <StreamVolumes ui=ui/><p role="status" class="text-sm text-white/70">{move||message.get()}</p></div></details>
+                <StreamVolumes ui=ui/><super::screen::ShareDiagnostics/><p role="status" class="text-sm text-white/70">{move||message.get()}</p></div></details>
             </Show>
         </div>}
 }
