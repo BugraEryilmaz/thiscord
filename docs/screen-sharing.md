@@ -37,6 +37,14 @@ the display stops capture; it never falls back to another window/display.
   frames before they become inter-frame dependencies. Capture throttling preserves
   cadence phase, including 59.94 Hz displays, instead of discarding every second
   frame near a 60 fps limit. The system capture border is preserved.
+  Encoder cadence advances only on actual input submission; empty polls, missing
+  hardware credit and sender backpressure do not consume a frame slot. This avoids
+  holding a newly arrived capture for a full adaptive frame period (200 ms at 5 FPS).
+  Fresh captures are not throttled a second time on the worker clock; only repeat
+  submissions of the held image have a separate minimum interval.
+  RTP timestamps and capture admission use WGC's compositor/QPC timestamp rather
+  than callback arrival time. An asynchronous MFT event wakes the encoder worker;
+  it does not wait for the next capture or a coarse timer to collect output.
 - Pixel processing and encoding: capture requests **FP16 linear scRGB** surfaces.
   Three owned capture textures decouple WGC callbacks from the encoder. A D3D11
   shader scales the selected source and normalizes by its monitor's SDR reference
@@ -57,7 +65,9 @@ the display stops capture; it never falls back to another window/display.
   The Windows path requires D3D11 FP16 shader/video-processor support,
   D3DCompiler_47 (Windows system component), and an MF D3D11-aware hardware MFT.
   OpenH264 remains a portable test decoder/diagnostic encoder, not a hidden CPU
-  fallback. AMD/Intel and mixed-display visual acceptance remain required.
+  fallback. AMD and mixed-display visual acceptance remain required; integrated
+  Intel throughput has been measured below, but its full capture path still needs
+  acceptance on a display driven by that adapter.
 - Video offers 720p, 1080p, 1440p and 2160p (4K), each at 15/30/60 fps; default
   1080p/30. Aspect ratio is preserved without upscaling. These are targets, not
   measured throughput guarantees. The selected preset is a maximum; adaptive modes
@@ -75,17 +85,21 @@ the display stops capture; it never falls back to another window/display.
   property, allowing two seconds rather than the intended quarter-second.
   Diagnostics expose buffer acceptance and readback; acceptance is not a hard
   per-frame size guarantee. Smaller buffers can trade scene-change detail for latency.
+  Automatic GOP IDRs reset the elapsed recovery timer too, avoiding adjacent
+  automatic/forced keyframes. The optional quality/speed hint is 0 (fastest);
+  it preserves selected dimensions, FPS and bitrate but can reduce coding fidelity.
+  Diagnostics expose its readback; the measured quality tradeoff is listed below.
 - The network remains the Rust WebRTC client and single-process SFU; the SFU
   forwards compressed video without transcoding. The publisher byte-paces packets
   at 1.2 times target codec bitrate (transport overhead allowance), with at most
-  8 ms of burst credit and batched wakeups to accommodate OS timer granularity. It does not accumulate
+  16 ms of burst credit and nominal 8 ms batch sleeps to accommodate OS timer granularity. It does not accumulate
   catch-up credit during stalls. Stale/partially sent frames trigger IDR recovery
   instead of terminating the share. Encoded queues hold 200 ms of target-rate
   frames (six at 30 FPS, twelve at 60 FPS); frames older than 200 ms are rejected
   before sending. The in-flight frame retains a 350 ms capture-age deadline, and
   each RTP write has a 100 ms timeout, so this is not an end-to-end latency bound.
   Admission reserves queue space for pending hardware output and also pauses raw
-  input when unsent wire bytes exceed 50 ms at the pacing rate. This count includes
+  input when unsent wire bytes exceed 100 ms at the pacing rate. This count includes
   the in-flight frame and decreases after successful packet writes; failed enqueue,
   recovery drops and cancellation release the remainder. Large frames therefore
   suppress new encoding before filling the queue with H.264 dependencies, even
@@ -96,6 +110,9 @@ the display stops capture; it never falls back to another window/display.
   compositor event. These admission limits do not bound unfinished hardware output or
   shorten an individual oversized frame. Discarding dependent frames during recovery does not
   request another keyframe for each skipped delta.
+  Native peers request 1 MiB receive/256 KiB send UDP socket buffers through the
+  existing WebRTC runtime. This prevents kernel loss during coarse pacing wakes;
+  application frame/age bounds remain independent. The OS can clamp socket sizes.
   SFU egress uses independent microphone, video and shared-audio writers. Per
   receiver, video is bounded to 512 queued packets and 512 KiB; each audio queue
   has 32 packet slots and 32 KiB. Byte reservations include the in-flight packet,
@@ -128,6 +145,11 @@ the display stops capture; it never falls back to another window/display.
   timing and GPU composition; actual hardware decode depends on its codec/driver
   support and must be checked on each host. This adds a local encrypted transport
   hop, not another encode. No raw pixels or PCM cross Tauri IPC.
+  Where supported, `jitterBufferTarget=150` ms gives the player time to smooth
+  paced keyframe bursts. This deliberately trades some playback latency for
+  consistent presentation; it is a target, not an end-to-end delay guarantee.
+  Unsupported WebViews retain their native buffering. Diagnostics are sampled
+  once per second while the independent 250 ms viewer heartbeat continues.
 - Viewers send control heartbeats at 250 ms, expire after three seconds (tolerating short UI stalls), and close on
   unmount/document hiding. Replacement viewers have distinct leases. Roster/epoch,
   deafen and connection changes revoke forwarding and close the local peer;
@@ -170,8 +192,9 @@ packets. Local close/hide reaches the SFU on the next 500 ms renewal; a stalled 
 first loses its three-second local viewer lease. Publisher shared-audio capture
 continues until Stop sharing; it is not forwarded to non-viewers.
 
-Receivers sample native packet-loss/frame-queue counters and WebView dropped-frame,
-presentation-stall or decoder PLI feedback once per second. Budgets start at 2.5 Mbit/s, decrease by
+Receivers sample native packet-loss/frame-queue counters and sustained WebView
+decoder overload once per second. Budgets start at 32 Mbit/s so the selected
+maximum is attempted immediately, decrease by
 35% on congestion, and increase by 25% after ten healthy samples, bounded to
 200 kbit/s–32 Mbit/s. Three initial samples allow setup; three consecutive empty
 samples detect stalls without treating a static source's one-second IDR cadence
@@ -180,6 +203,16 @@ selects a resolution/FPS/bitrate combination within that budget and its selected
 maximum, recreates the GPU encoder with an IDR when quality changes, and updates
 capture cadence, byte admission and RTP pacing together. Diagnostics expose actual
 `target_bitrate`, `target_fps`, `resolution` and `video_paused`.
+`requested_height`, `requested_fps` and `viewer_bitrate_budget` distinguish the
+selected maximum from receiver-driven adaptation. A 4K preset does not upscale
+an ultrawide 3440x1440 source to 3840x2160.
+Presentation drops and PLI recovery requests are not themselves congestion.
+Decoder pressure requires three consecutive intervals with arriving frames and
+either no decoded output, at least 80% of elapsed time spent decoding, or decoded
+throughput below 80% of arriving complete frames. This also detects overloaded
+hardware decoders with low reported CPU decode time. Hidden presentation,
+different display refresh rates and an isolated recovery request
+therefore cannot drive a healthy decoder down to 5 FPS.
 
 This is an application feedback controller, not a bandwidth guarantee or per-viewer
 simulcast. One constrained viewer lowers the common stream; independent multi-share
@@ -311,6 +344,13 @@ Publisher diagnostics now include `sender_queue_wait` (enqueue to dequeue),
 deadline), `rtp_write` (each WebRTC write, including failed/timed-out attempts),
 and `frame_send` (packet pacing plus writes for completed frames). All report
 sample count, mean and maximum. `pacing_sleeps` counts batch wakeups;
+`encode_latency` includes capture waiting, GPU processing and encoding;
+`encode_input_age` measures capture to MFT submission, and `encoder_service`
+measures MFT submission to output retrieval, including output polling delay.
+These separate raw-input scheduling delays from time inside the encoder.
+`capture_surface_busy`, `encoder_input_busy` and `conversion_surface_busy`
+split the aggregate `gpu_busy` counter into capture-pool, MFT-credit and
+conversion-pool pressure.
 `encoded_peak_frame_bytes` and `sender_peak_frame_packets` expose large bursts.
 `sender_peak_bytes` includes queued and in-flight unsent packet bytes, using the
 same overhead estimate as pacing. `sender_backlog_budget_ms` is the raw-input
@@ -338,10 +378,10 @@ keyframes. This exercises rate control without desktop capture or network traffi
 Local NVIDIA validation accepted/read back the 225,000-byte HRD target, decoded
 all 180 frames and produced three IDRs around 170 KB (170,123-byte peak). This is
 synthetic evidence, not a before/after measurement of a user's shared content.
-The deterministic pacing regression replays 524 KB frame bursts and coarse timer
+The deterministic pacing regression replays 700 KB wire bursts and coarse timer
 wakeups: slot-only admission exceeds the sender age limit; byte admission avoids
 those queued-frame expirations at the same pacing rate by deferring raw input.
-Live two-client playback and scene-change quality still require acceptance.
+Live two-client playback and representative scene-change quality still require acceptance.
 
 `screen_encode_probe` tests the legacy system-memory input encoder API with
 synthetic data; that API is not the production capture path. `screen_preview_probe`
@@ -350,6 +390,81 @@ seconds. No desktop pixels, accounts, microphones, recording, STUN or TURN are u
 A local browser run decoded 60 FPS with zero reported decoder freezes/loss; the
 hidden preview dropped presentation frames. This does not establish two-client
 capture-to-display performance or hardware decoder selection in the actual app.
+
+### 4K throughput and playback probes
+
+Use an optimized build for performance measurements:
+
+```powershell
+cargo build -p thiscord-frontend --example screen_gpu_probe --example screen_pipeline_probe --features screen-share --profile ci --locked
+.\target\ci\examples\screen_gpu_probe.exe --throughput --adapter=0
+.\target\ci\examples\screen_gpu_probe.exe --quality --adapter=0
+.\target\ci\examples\screen_pipeline_probe.exe --seconds=180 --assert
+.\target\ci\examples\screen_pipeline_probe.exe --browser --seconds=180 --assert
+```
+
+`--throughput` pre-renders eight moving FP16 source frames, then measures 600
+frames at 60 FPS and 600 without a cadence limit. Both modes perform the production
+capture copy, tone map, NV12 conversion and hardware encoding. Source application
+rendering is excluded. The unpaced run is GPU-path capacity, not displayed FPS or
+a network throughput claim. `--adapter=N` chooses a DXGI adapter for this probe.
+`--quality` separately reads back NV12 and software-decodes 120 frames to compare
+luma PSNR against the driver default. Its readback/decode costs are never included
+in the throughput result and are absent from the production capture path.
+
+`screen_pipeline_probe` instead captures an animated, DPI-correct **3840x2160**
+synthetic window with WGC, even on a smaller monitor. It exercises the production
+encoder, sender, expiring demand, receiver controller and receive queue through
+two encrypted WebRTC peers. `--browser` adds the production loopback preview
+bridge. Negotiate a video-only receive offer via `POST /offer` on the local probe
+page at `http://127.0.0.1:18741`, using the collaborative browser tools, and set
+its receiver's `jitterBufferTarget` to the player's 150 ms value. Keep the preview
+visible and measure `requestVideoFrameCallback` presentation counts as well as
+`getStats` decoded counts; hidden playback does not establish displayed FPS.
+Only the dedicated synthetic window is captured. No account, microphone or
+desktop content is used. The native `--assert` checks dimensions, sustained
+throughput, encoded losses, RTP loss and preview errors; it cannot assert browser
+presentation and is intentionally separate from the visible browser measurement.
+
+On the local i7-13700K/RTX 4070 Ti (Windows, HDR monitor with 240-nit SDR white),
+the optimized GPU path measured **201.56 FPS**, or **3.36 times** the 60 FPS
+target. Encoder service time in that unpaced run was 4.33 ms mean/4.67 ms p95;
+CPU submission p95 was 0.50 ms. The integrated UHD 770 also sustained 60 FPS,
+but its unpaced result was 67.22 FPS: little spare capacity on that adapter.
+This is evidence for the measured hardware, not a guarantee for arbitrary GPUs.
+
+The final three-minute WGC/transport/browser run on 2026-10-15 delivered all
+10,844 encoded frames with no encoded drops, RTP loss or preview errors. Native
+throughput after five seconds of warm-up was 59.70 FPS. A fixed 154-second visible
+browser interval (excluding startup and teardown) measured **59.76 presented FPS**,
+one presentation skip, zero decoder drops, zero freezes and zero local-hop loss.
+Mean decode time was 0.66 ms/frame; mean browser jitter-buffer residence was
+114.9 ms with the 150 ms target. Native encoder service averaged 4.60 ms and
+capture-to-completed-send averaged 19.16 ms. These are separate local timings,
+not a synchronized capture-to-display latency measurement. A GPU utilization
+sample during playback was 15% overall, 10% encoder and 30% decoder. The full
+probe includes synthetic source rendering and both local peers on one machine.
+
+The longer run exposed a second worker-clock throttle that the short runs missed.
+Removing it reduced raw replacements from 182 to 34 over three minutes, while
+capture admission continued to cap source work. This, asynchronous MFT output
+wakes, bounded pacing credit/socket buffers, normal keyframe spacing and playback
+buffering address distinct bottlenecks; changing the quality picker is not a fix.
+
+The speed hint has a measurable fidelity tradeoff on the moving synthetic scene:
+31.29 dB luma PSNR versus 32.87 dB for the NVIDIA driver's default hint (33), at
+the same 3840x2160/60 FPS/32 Mbit/s configuration. This does not establish
+subjective text or video quality for every source. Re-test representative content
+before changing the speed hint or claiming equivalent image quality.
+
+The ignored PostgreSQL test
+`sfu_sustains_4k60_transport_with_two_times_bitrate_headroom` exercises actual
+authenticated peers and the SFU at 32 and 64 Mbit/s with concurrent microphone
+traffic. Local WSL validation forwarded 28,800/28,800 and 57,600/57,600 video
+packets respectively, plus all 160 microphone packets in each eight-second
+phase. Payloads have video packet sizes but are not decoded images. This is
+separate SFU capacity evidence; the Windows pipeline probe does not itself
+traverse the remote VPS or emulate its network path.
 
 Tests cover sequence wrap, duplicates, bounded reordering deadlines, recoverable
 and overflowing backlogs, feedback throttling/permissions and compatible wire
@@ -361,4 +476,7 @@ network conditions and actual WebView hardware decode still require acceptance.
 HDR/device references: [Microsoft Advanced Color](https://learn.microsoft.com/en-us/windows/win32/direct3darticles/high-dynamic-range),
 [MF D3D device manager](https://learn.microsoft.com/en-us/windows/win32/medfound/mft-message-set-d3d-manager),
 [H.264 HRD buffer units](https://learn.microsoft.com/en-us/windows/win32/codecapi/avenccommonbuffersize-property),
+[encoder quality/speed](https://learn.microsoft.com/en-us/windows/win32/codecapi/avenccommonqualityvsspeed-property),
+[WGC compositor timestamps](https://learn.microsoft.com/en-us/uwp/api/windows.graphics.capture.direct3d11captureframe.systemrelativetime),
+[asynchronous MF events](https://learn.microsoft.com/en-us/windows/win32/api/mfobjects/nf-mfobjects-imfmediaeventgenerator-begingetevent),
 [WebRTC statistics](https://www.w3.org/TR/webrtc-stats/).

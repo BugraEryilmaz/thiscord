@@ -113,7 +113,10 @@ impl Quality {
 
 pub const MIN_VIEW_BITRATE: u32 = 200_000;
 pub const MAX_VIEW_BITRATE: u32 = 32_000_000;
-pub const INITIAL_VIEW_BITRATE: u32 = 2_500_000;
+// Try the publisher's selected preset immediately. Measured receiver congestion
+// still reduces this bounded budget; a healthy link need not spend two minutes
+// climbing from 2.5 Mbit/s before a selected 4K/60 preset is even attempted.
+pub const INITIAL_VIEW_BITRATE: u32 = MAX_VIEW_BITRATE;
 pub const VIEW_LEASE_SECS: u64 = 3;
 
 /// Full replacement of a receiver's active viewers, renewed over authenticated signaling.

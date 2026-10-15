@@ -303,6 +303,8 @@ speaker isolation and physical acoustic acceptance remain future work.
   pacing and bounded recovery queues with loss/wrap/backlog/permission tests.
 - [x] Correct H.264 HRD buffer units, report driver acceptance and gate raw encoding
   on queued/in-flight bytes; synthetic large-frame backlog regression and NVIDIA probe.
+- [x] Reproducible 4K capture/playback, GPU headroom and fidelity probes; coarse-timer,
+  UDP-burst and encoder-event regressions, plus SFU 32/64 Mbit/s load validation.
 - [ ] Live HDR/SDR capture acceptance across Intel/AMD/NVIDIA and mixed-HDR displays.
 - [ ] Measured end-to-end 30/60 fps, high-resolution performance and real WebView
   hardware-decoder verification on Windows/macOS/Linux.

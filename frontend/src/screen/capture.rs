@@ -33,6 +33,7 @@ struct Pixels {
 struct Mailbox {
     latest: Option<Pixels>,
     closed: bool,
+    encoder_event: bool,
 }
 #[derive(Clone)]
 struct Flags {
@@ -49,16 +50,30 @@ struct Capture {
     cadence: super::cadence::Cadence,
     textures: Vec<Arc<ID3D11Texture2D>>,
     dimensions: (u32, u32),
+    clock: (i64, Instant),
 }
 impl GraphicsCaptureApiHandler for Capture {
     type Flags = Flags;
     type Error = String;
     fn new(ctx: Context<Flags>) -> Result<Self, String> {
+        use windows::Win32::System::Performance::{
+            QueryPerformanceCounter, QueryPerformanceFrequency,
+        };
+        let (mut ticks, mut frequency) = (0, 0);
+        unsafe {
+            QueryPerformanceFrequency(&mut frequency).map_err(|_| "Cannot read capture clock")?;
+            QueryPerformanceCounter(&mut ticks).map_err(|_| "Cannot read capture clock")?;
+        }
+        let clock = (
+            (i128::from(ticks) * 10_000_000 / i128::from(frequency)) as i64,
+            Instant::now(),
+        );
         Ok(Self {
             cadence: super::cadence::Cadence::new(ctx.flags.period),
             flags: ctx.flags,
             textures: Vec::new(),
             dimensions: (0, 0),
+            clock,
         })
     }
     fn on_frame_arrived(
@@ -82,9 +97,25 @@ impl GraphicsCaptureApiHandler for Capture {
             self.cadence = super::cadence::Cadence::new(period);
         }
         let now = Instant::now();
+        // RTP timing follows compositor render time, not callback scheduling.
+        // Callback jitter otherwise turns evenly rendered frames into pairs that
+        // the receiving compositor must discard on a 60 Hz presentation clock.
+        let ticks = frame
+            .timestamp()
+            .map_err(|_| "Cannot timestamp capture")?
+            .Duration;
+        let delta = ticks.saturating_sub(self.clock.0);
+        let offset = Duration::from_nanos(delta.unsigned_abs().saturating_mul(100));
+        let captured_at = if delta >= 0 {
+            self.clock.1.checked_add(offset)
+        } else {
+            self.clock.1.checked_sub(offset)
+        }
+        .ok_or("Invalid capture timestamp")?
+        .min(now);
         self.flags.metrics.add("capture_events", 1);
         // Rate-limit work on compositor events, never sleep in the callback.
-        if !self.cadence.accept(now) {
+        if !self.cadence.accept(captured_at) {
             self.flags.metrics.add("capture_throttled", 1);
             return Ok(());
         }
@@ -115,6 +146,7 @@ impl GraphicsCaptureApiHandler for Capture {
         }
         let Some(texture) = self.textures.iter().find(|t| Arc::strong_count(t) == 1) else {
             self.flags.metrics.add("gpu_busy", 1);
+            self.flags.metrics.add("capture_surface_busy", 1);
             return Ok(());
         };
         {
@@ -136,7 +168,7 @@ impl GraphicsCaptureApiHandler for Capture {
             device: frame.device().clone(),
             width,
             height,
-            arrived: now,
+            arrived: captured_at,
         });
         self.flags.metrics.time("capture_submit", now.elapsed());
         self.flags.mailbox.1.notify_one();
@@ -285,8 +317,7 @@ fn encode(
     let mut paused = true;
     let mut reconfigure = true;
     let mut last_raw: Option<Pixels> = None;
-    let mut encode_cadence =
-        super::cadence::Cadence::new(Duration::from_secs_f64(1.0 / f64::from(quality.fps)));
+    let mut refresh_after = Instant::now();
     let mut hardware: Option<super::hardware::HardwareEncoder> = None;
     let mut processor: Option<gpu::Processor> = None;
     let mut configured = None;
@@ -298,9 +329,12 @@ fn encode(
     let mut color_checked = Instant::now() - Duration::from_secs(2);
     let mut color = (1.0, false);
     let mut previous = Instant::now();
+    let mut previous_bitrate = None;
     let mut send_budget =
         super::pacing::SendBudget::new(super::pacing::transport_bitrate(quality.bitrate()));
     metrics.label("sender_backlog_budget_ms", super::pacing::BACKLOG_BUDGET_MS);
+    metrics.label("requested_fps", requested.fps);
+    metrics.label("requested_height", requested.height);
     metrics.label("video_paused", true);
     while !stop.load(Ordering::Acquire) && connection.active() {
         if previous.elapsed() > Duration::from_secs(2) {
@@ -311,6 +345,10 @@ fn encode(
             return Err("The shared source closed or became unavailable; sharing stopped.".into());
         }
         let bitrate = demand.bitrate();
+        if previous_bitrate != Some(bitrate) {
+            metrics.label("viewer_bitrate_budget", bitrate);
+            previous_bitrate = Some(bitrate);
+        }
         if bitrate == 0 {
             if !paused {
                 hardware = None;
@@ -327,8 +365,7 @@ fn encode(
         let next = requested.constrained(bitrate);
         if paused || next != quality {
             quality = next;
-            encode_cadence =
-                super::cadence::Cadence::new(Duration::from_secs_f64(1.0 / f64::from(quality.fps)));
+            refresh_after = Instant::now();
             hardware = None;
             processor = None;
             configured = None;
@@ -356,6 +393,29 @@ fn encode(
             metrics.label("sdr_white_nits", color.0 * 80.0);
             color_checked = Instant::now();
         }
+        let (pixels, fresh) = {
+            let guard = mailbox.0.lock().unwrap();
+            let (mut guard, _) = mailbox
+                .1
+                .wait_timeout_while(guard, Duration::from_millis(3), |m| {
+                    m.latest.is_none() && !m.closed && !m.encoder_event
+                })
+                .unwrap();
+            guard.encoder_event = false;
+            if guard.closed {
+                return Err("The shared source closed; sharing stopped.".into());
+            }
+            // Consume the old pending texture even when a newer capture wins;
+            // retaining it would submit an older timestamp after the new frame.
+            let pending = pending_pixels.take();
+            if guard.latest.is_some() && pending.is_some() {
+                metrics.add("raw_replaced", 1);
+            }
+            let fresh = guard.latest.is_some();
+            (guard.latest.take().or(pending), fresh)
+        };
+        // Capture waiting can outlast an MFT NeedInput/HaveOutput event. Drain
+        // after waking, before testing encoder readiness for this new frame.
         if let Some(hw) = hardware.as_mut() {
             metrics.peak("encoder_peak_pending", hw.pending() as u64);
             metrics.peak(
@@ -365,7 +425,9 @@ fn encode(
             let frames = hw
                 .poll()
                 .map_err(|e| format!("GPU encoder failed: {}", e.code()))?;
-            record_frames(&frames, started, metrics);
+            if record_frames(&frames, started, metrics) {
+                keyframe = Instant::now();
+            }
             if !send_frames(
                 frames,
                 started,
@@ -379,26 +441,6 @@ fn encode(
                 metrics.event("encoded frame dropped before paced sender; requesting keyframe");
             }
         }
-        let (pixels, fresh) = {
-            let guard = mailbox.0.lock().unwrap();
-            let (mut guard, _) = mailbox
-                .1
-                .wait_timeout_while(guard, Duration::from_millis(3), |m| {
-                    m.latest.is_none() && !m.closed
-                })
-                .unwrap();
-            if guard.closed {
-                return Err("The shared source closed; sharing stopped.".into());
-            }
-            // Consume the old pending texture even when a newer capture wins;
-            // retaining it would submit an older timestamp after the new frame.
-            let pending = pending_pixels.take();
-            if guard.latest.is_some() && pending.is_some() {
-                metrics.add("raw_replaced", 1);
-            }
-            let fresh = guard.latest.is_some();
-            (guard.latest.take().or(pending), fresh)
-        };
         let pixels = pixels
             .map(|mut p| {
                 if reconfigure {
@@ -416,7 +458,11 @@ fn encode(
                     None
                 }
             });
-        if !encode_cadence.accept(Instant::now()) {
+        // Fresh input was already rate-limited on the compositor clock. Gating
+        // it again on worker wake time loses frames when a previous submission
+        // was delayed, even though the encoder has ample throughput. The second
+        // cadence only limits refresh/feedback submissions of the held image.
+        if pixels.is_none() && Instant::now() < refresh_after {
             pending_pixels = pixels;
             continue;
         }
@@ -465,6 +511,15 @@ fn encode(
                     )
                     .map_err(|e| format!("GPU H.264 surface encoding unavailable: {}", e.code()))?,
                 );
+                let wake = mailbox.clone();
+                hardware
+                    .as_mut()
+                    .unwrap()
+                    .notify(move || {
+                        wake.0.lock().unwrap().encoder_event = true;
+                        wake.1.notify_one();
+                    })
+                    .map_err(|e| format!("GPU encoder event subscription failed: {}", e.code()))?;
                 processor = Some(
                     gpu::Processor::new(&pixels.device, w, h)
                         .map_err(|e| format!("GPU video conversion unavailable: {}", e.code()))?,
@@ -479,6 +534,11 @@ fn encode(
                     super::hardware::buffer_bytes(quality.bitrate()),
                 );
                 metrics.label("encoder_buffer_applied", hw.buffer_applied);
+                metrics.label(
+                    "encoder_quality_vs_speed",
+                    hw.quality_vs_speed()
+                        .map_or_else(|| "unavailable".into(), |v| v.to_string()),
+                );
                 metrics.label(
                     "encoder_buffer_readback_bytes",
                     hw.buffer_readback_bytes()
@@ -502,6 +562,7 @@ fn encode(
             }
             if !hardware.as_ref().unwrap().ready() {
                 metrics.add("gpu_busy", 1);
+                metrics.add("encoder_input_busy", 1);
                 pending_pixels = Some(pixels);
                 continue;
             }
@@ -514,6 +575,7 @@ fn encode(
             metrics.time("gpu_submit", at.elapsed());
             let Some(texture) = texture else {
                 metrics.add("gpu_busy", 1);
+                metrics.add("conversion_surface_busy", 1);
                 continue;
             };
             last_texture = Some(texture);
@@ -541,10 +603,16 @@ fn encode(
             keyframe = Instant::now();
         }
         let micros = captured_at.saturating_duration_since(started).as_micros() as u64;
+        // Empty polls, busy hardware and raw-input backpressure must not advance
+        // the encoder clock ahead of the separately throttled capture callback.
+        refresh_after = Instant::now() + Duration::from_secs_f64(1.0 / f64::from(quality.fps));
+        metrics.time("encode_input_age", captured_at.elapsed());
         let frames = hw
             .encode_texture(texture.clone(), micros)
             .map_err(|e| format!("GPU encode failed: {}", e.code()))?;
-        record_frames(&frames, started, metrics);
+        if record_frames(&frames, started, metrics) {
+            keyframe = Instant::now();
+        }
         if !send_frames(
             frames,
             started,
@@ -559,19 +627,23 @@ fn encode(
     }
     Ok(())
 }
-fn record_frames(frames: &[super::hardware::Encoded], started: Instant, metrics: &Metrics) {
+fn record_frames(frames: &[super::hardware::Encoded], started: Instant, metrics: &Metrics) -> bool {
+    let mut keyframe = false;
     for frame in frames {
         metrics.add("encoded_frames", 1);
         metrics.add("encoded_bytes", frame.data.len() as u64);
         metrics.peak("encoded_peak_frame_bytes", frame.data.len() as u64);
         if super::recovery_frame(&frame.data) {
             metrics.add("keyframes", 1);
+            keyframe = true;
         }
         metrics.time(
             "encode_latency",
             (started + Duration::from_micros(frame.timestamp)).elapsed(),
         );
+        metrics.time("encoder_service", frame.encoding_duration);
     }
+    keyframe
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -648,6 +720,7 @@ mod tests {
                 vec![0, 0, 1, 0x41, 1]
             },
             timestamp: 0,
+            encoding_duration: Duration::ZERO,
         };
         assert!(
             send_frames(

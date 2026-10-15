@@ -222,11 +222,14 @@ struct Peer {
     views: Vec<thiscord_shared::screen::Subscription>,
 }
 impl Peer {
-    async fn new(mut socket: Socket) -> Self {
+    async fn new(socket: Socket) -> Self {
+        Self::with_packet_capacity(socket, 64).await
+    }
+    async fn with_packet_capacity(mut socket: Socket, capacity: usize) -> Self {
         let ServerEvent::Offer { sdp, slot, .. } = event(&mut socket).await else {
             panic!("Expected offer")
         };
-        let (tx, rx) = mpsc::channel(64);
+        let (tx, rx) = mpsc::channel(capacity);
         let gathered = Arc::new(Notify::new());
         let mut media = MediaEngine::default();
         media.register_default_codecs().unwrap();
@@ -461,6 +464,178 @@ async fn screen_blocked(source: &mut Peer, receiver: &mut Peer) {
             "Stopped or unauthorized screen media was forwarded"
         );
     }
+}
+
+/// Transport load, not a codec benchmark: real authenticated peers send opaque
+/// H.264-sized payloads through the production SFU while microphone RTP continues.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[ignore = "requires TEST_DATABASE_URL; CI runs with --include-ignored"]
+async fn sfu_sustains_4k60_transport_with_two_times_bitrate_headroom() {
+    let db = database();
+    let (_, ot) = user(&db, "load_owner");
+    let (_, mt) = user(&db, "load_viewer");
+    permissions::bootstrap_owner(&db.pool, "load_owner").unwrap();
+    let app = api::router(
+        Some(db.pool.clone()),
+        vec!["http://localhost:1420".parse().unwrap()],
+    );
+    let mut state = command(
+        &app,
+        &ot,
+        json!({"action":"create_guild","name":"Media load"}),
+        StatusCode::OK,
+    )
+    .await["state"]
+        .clone();
+    let guild = state["guild"]["id"].clone();
+    change(
+        &app,
+        &ot,
+        &mut state,
+        json!({"action":"add_member","username":"load_viewer"}),
+        StatusCode::OK,
+    )
+    .await;
+    change(
+        &app,
+        &ot,
+        &mut state,
+        json!({"action":"create_channel","name":"voice","kind":"voice"}),
+        StatusCode::OK,
+    )
+    .await;
+    let channel = state["channels"][0]["id"].clone();
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    let serving = tokio::spawn(axum::serve(listener, app).into_future());
+    let mut a = Peer::new(join(addr, &ot, guild.clone(), channel.clone()).await).await;
+    let mut b = Peer::with_packet_capacity(join(addr, &mt, guild, channel).await, 4096).await;
+    forwarded(&mut a, &mut b).await;
+    send(
+        &mut a.socket,
+        ClientEvent::Screen {
+            active: true,
+            audio: false,
+        },
+    )
+    .await;
+    watch_screen(&mut a, &mut b).await;
+    b.views[0].bitrate = thiscord_shared::screen::MAX_VIEW_BITRATE;
+    screen_forwarded(&mut a, &mut b, 0).await;
+    let mut sequence = a.screen_sequences[0];
+    let mut microphone_sequence = a.sequence;
+    for fps in [60u32, 120] {
+        while b.packets.try_recv().is_ok() {}
+        let frames = fps * 8;
+        let expected = frames as usize * 60;
+        let video_ssrc = thiscord_shared::screen::SSRC_BASE + a.slot as u32;
+        let audio_ssrc = voice::SSRC_BASE + a.slot as u32;
+        let video = a.screen_tracks[0].clone();
+        let microphone = a.track.clone();
+        let started = tokio::time::Instant::now();
+        let transmitting = tokio::spawn(async move {
+            for frame in 0..frames {
+                tokio::time::sleep_until(
+                    started + Duration::from_secs_f64(f64::from(frame) / f64::from(fps)),
+                )
+                .await;
+                for fragment in 0..60u32 {
+                    sequence = sequence.wrapping_add(1);
+                    let mut payload = vec![1u8; 1112];
+                    payload[0] = 0x7c; // FU-A with explicit start/end boundaries.
+                    payload[1] = 5 | if fragment == 0 {
+                        0x80
+                    } else if fragment == 59 {
+                        0x40
+                    } else {
+                        0
+                    };
+                    payload[2..6].copy_from_slice(&(frame * 60 + fragment).to_be_bytes());
+                    video
+                        .write_rtp(rtp::Packet {
+                            header: rtp::header::Header {
+                                version: 2,
+                                payload_type: 125,
+                                ssrc: 901,
+                                sequence_number: sequence,
+                                timestamp: frame * (90000 / fps),
+                                marker: fragment == 59,
+                                ..Default::default()
+                            },
+                            payload: payload.into(),
+                        })
+                        .await
+                        .unwrap();
+                }
+                if frame.is_multiple_of(fps / 20) {
+                    microphone_sequence = microphone_sequence.wrapping_add(1);
+                    microphone
+                        .write_rtp(rtp::Packet {
+                            header: rtp::header::Header {
+                                version: 2,
+                                payload_type: 111,
+                                ssrc: 900,
+                                sequence_number: microphone_sequence,
+                                timestamp: u32::from(microphone_sequence) * 2400,
+                                ..Default::default()
+                            },
+                            payload: vec![0xf8, 0xff, 0xfe].into(),
+                        })
+                        .await
+                        .unwrap();
+                }
+            }
+            (sequence, microphone_sequence, started.elapsed())
+        });
+        let mut seen = vec![false; expected];
+        let mut received = 0;
+        let mut audio = 0;
+        let mut renew = tokio::time::interval(Duration::from_millis(500));
+        let deadline = started + Duration::from_secs(11);
+        while received < expected {
+            tokio::select! {
+                _ = tokio::time::sleep_until(deadline) => break,
+                _ = renew.tick() => {
+                    send(&mut b.socket, ClientEvent::ScreenViews { views: b.views.clone() }).await;
+                    send(&mut a.socket, ClientEvent::Ping {}).await;
+                },
+                packet = b.packets.recv() => {
+                    let packet = packet.expect("media peer closed");
+                    if packet.header.ssrc == video_ssrc && packet.payload.len() == 1112 {
+                        let index = u32::from_be_bytes(packet.payload[2..6].try_into().unwrap()) as usize;
+                        assert!(index < expected);
+                        assert!(!seen[index], "duplicate video packet");
+                        seen[index] = true;
+                        received += 1;
+                    } else if packet.header.ssrc == audio_ssrc {
+                        audio += 1;
+                    }
+                }
+            }
+        }
+        let (last_sequence, last_microphone_sequence, elapsed) = transmitting.await.unwrap();
+        sequence = last_sequence;
+        microphone_sequence = last_microphone_sequence;
+        println!(
+            "SFU load: fps={fps}, Mbps={:.2}, received={received}/{expected}, microphone={audio}",
+            expected as f64 * 1112.0 * 8.0 / elapsed.as_secs_f64() / 1e6
+        );
+        assert_eq!(
+            received, expected,
+            "SFU must forward the full video burst load"
+        );
+        assert!(
+            audio >= 150,
+            "microphone delivery must continue under video load"
+        );
+        assert!(
+            elapsed < Duration::from_millis(8200),
+            "load generator did not sustain target rate"
+        );
+    }
+    a.close().await;
+    b.close().await;
+    serving.abort();
 }
 #[tokio::test]
 #[ignore = "requires TEST_DATABASE_URL; CI runs with --include-ignored"]
