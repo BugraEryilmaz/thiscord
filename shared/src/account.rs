@@ -9,6 +9,22 @@ pub const MAX_AVATAR_BASE64: usize = MAX_AVATAR_BYTES.div_ceil(3) * 4;
 pub const AVATAR_SIZE: u32 = 256;
 pub const GOOGLE_CALLBACK_PATH: &str = "/api/v1/account/google/callback";
 pub const EMAIL_VERIFICATION_PATH: &str = "/api/v1/account/verify-email";
+pub const PASSWORD_RESET_PATH: &str = "/api/v1/account/reset-password";
+
+#[derive(Serialize, Deserialize)]
+pub struct PasswordResetQuery {
+    #[serde(default)]
+    pub token: String,
+}
+
+/// Browser form transport; secrets deliberately do not implement Debug.
+#[derive(Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct PasswordResetForm {
+    pub token: String,
+    pub password: String,
+    pub confirm_password: String,
+}
 
 #[derive(Serialize, Deserialize)]
 pub struct EmailVerificationQuery {

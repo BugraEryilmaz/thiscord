@@ -86,7 +86,7 @@ pub(super) fn Login(ui: Ui, #[prop(default = false)] admin: bool) -> impl IntoVi
                     <h2 id="account-dialog-title" class="text-2xl font-semibold">{move ||match mode.get(){"register"=>"Create an account","reset"=>"Reset password",_=>"Forgot password?"}}</h2>
                     <button type="button" aria-label="Close dialog" class="rounded px-2 py-1 text-white/70 hover:bg-white/10" on:click=move |_|if let Some(dialog)=dialog.get(){dialog.close();}>"✕"</button>
                 </header>
-                <p class="mb-5 text-sm text-white/60">{move ||match mode.get(){"register"=>"We’ll email you a link to verify your address.","reset"=>"Enter your reset code and choose a new password.",_=>"Enter your email and we’ll send password reset instructions."}}</p>
+                <p class="mb-5 text-sm text-white/60">{move ||match mode.get(){"register"=>"We’ll email you a link to verify your address.","reset"=>"Enter your backup reset code and choose a new password.",_=>"We’ll email you a link to choose a new password in your browser, plus a backup code."}}</p>
                 <form class="space-y-4" on:submit=submit_modal>
                     <Show when=move ||mode.get()=="register"><Field label="Username" value=username autocomplete="username"/></Show>
                     <Show when=move ||mode.get()!="reset"><Field label="Email" value=email kind="email" autocomplete="email"/></Show>
