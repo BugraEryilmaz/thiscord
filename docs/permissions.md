@@ -34,13 +34,29 @@ their ordinary membership and previously assigned roles, losing the owner bypass
 For now, a member with ManageInvites adds an existing verified username directly;
 invite links and acceptance workflows remain separate roadmap work.
 
-The main screen has a left server rail with circular initials avatars and server
-names on hover and accessible labels. Select a server to see its ID and visible channels. Custom
-server image uploads are not implemented. Account settings remain accessible at
-the bottom of the rail.
+The main screen has a left server rail with initials avatars and immediate server
+names on hover or keyboard focus, with accessible labels. Select a server to see
+its ID and visible channels. Custom server image uploads are not implemented.
+Account settings sit in the bottom ribbon spanning the rail and channel list.
+Server settings sit in the channel header beside the name and copy-ID control.
+Right-click menus replace the browser menu: servers offer copy ID, settings,
+moderation and leave; channels offer personal pins/mutes, mark-as-read for text,
+voice join/disconnect, permissions and deletion when authorized. Participant menus
+offer local voice volume, role editing for lower-ranked members and the specific
+actions returned by `InspectModeration`. Destructive actions require confirmation.
+Menus fetch current capabilities when opened, submit the viewed guild revision,
+and never automatically retry a rejected mutation. Backend checks remain authoritative.
+Shift+F10 opens menus from focused items; arrows, Home/End, Enter and Escape
+support keyboard use. Outside clicks, scrolling and window changes dismiss menus.
+Pins/mutes persist per account in local device storage, contain no credentials and
+do not sync across devices. Notification mute hides unread/mention badges; it does
+not alter read state or audio. Mark-as-read uses the existing read endpoint, whose
+server-side cursor clamp prevents future messages from being marked read.
+Voice participant rosters require membership and ViewChannel, but not JoinVoice;
+they expose no hidden channels and grant no media or signaling access.
 
 Verified instance owners/admins see **+** to create a server in a dialog with its
-name and optional password. **Join** opens a dialog for a server UUID and optional
+name and optional password. The **Join a server** icon opens a dialog for a server UUID and optional
 password. Verified accounts can join unprotected servers by ID; protected servers
 require the password. Existing members can reopen/join their server without
 creating another membership. A removal is not a ban: someone who still knows the

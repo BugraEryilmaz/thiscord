@@ -1,3 +1,4 @@
+use super::icons::{Glyph, Icon};
 use super::{Field, Ui};
 use leptos::prelude::*;
 use thiscord_shared::{GuildId, permissions::*};
@@ -55,15 +56,85 @@ pub(super) async fn refresh(ui: Ui) {
     }
 }
 
-async fn select(ui: Ui, id: GuildId) -> Result<(), String> {
+pub(super) async fn select(ui: Ui, id: GuildId) -> Result<(), String> {
     let PermissionResponse::Home { home } =
         request(ui, PermissionRequest::ViewGuild { guild_id: id }).await?
     else {
         return Err("Unexpected server response".into());
     };
+    if ui.server.get_untracked().is_none_or(|s| s.guild.id != id) {
+        ui.voice_roster.set(vec![]);
+    }
+    if ui
+        .selected_channel
+        .get_untracked()
+        .is_some_and(|c| !home.channels.iter().any(|v| v.id == c.id))
+    {
+        ui.selected_channel.set(None);
+    }
     ui.server.set(Some(home));
     ui.page.set("servers");
     Ok(())
+}
+
+pub(super) fn open_voice(ui: Ui) {
+    let Some(location) = ui.voice_location.get_untracked() else {
+        return;
+    };
+    leptos::task::spawn_local(async move {
+        if let Err(error) = select(ui, location.guild_id).await {
+            ui.status.set(error);
+            return;
+        }
+        if ui.voice.get_untracked().channel_id == Some(location.channel_id) {
+            ui.selected_channel.set(
+                ui.server
+                    .get_untracked()
+                    .and_then(|s| s.channels.into_iter().find(|c| c.id == location.channel_id)),
+            );
+        }
+    });
+}
+
+#[component]
+fn GuildButton(ui: Ui, guild: Guild) -> impl IntoView {
+    let id = guild.id;
+    let initials = guild
+        .name
+        .split_whitespace()
+        .take(2)
+        .filter_map(|s| s.chars().next())
+        .collect::<String>()
+        .to_uppercase();
+    view! {
+        <button class="guild-button" data-context-server=id.to_string() aria-haspopup="menu" class:selected=move ||ui.server.get().is_some_and(|s|s.guild.id==id) aria-label=guild.name.clone() data-tip=guild.name disabled=move ||ui.busy.get()
+            on:click=move |_|{ui.busy.set(true);leptos::task::spawn_local(async move{if let Err(e)=select(ui,id).await{ui.status.set(e);refresh(ui).await;}ui.busy.set(false);});}>{initials}</button>
+    }
+}
+
+#[component]
+fn VoiceRoster(ui: Ui, guild: GuildId, channel: thiscord_shared::ChannelId) -> impl IntoView {
+    let members = Memo::new(move |_| {
+        ui.voice_roster
+            .get()
+            .into_iter()
+            .find(|c| c.channel_id == channel)
+            .map(|c| c.members)
+            .unwrap_or_default()
+    });
+    view! {<ul class="ml-5 space-y-1 border-l border-white/10 pl-3" aria-label="In this voice channel">
+        <For each=move ||members.get() key=|m|m.account_id children=move |initial|{
+            let id=initial.account_id;
+            let member=Signal::derive(move ||members.get().into_iter().find(|m|m.account_id==id).unwrap_or_else(||initial.clone()));
+            view!{<li tabindex="0" aria-haspopup="menu" data-context-server=guild.to_string() data-context-channel=channel.to_string() data-context-member=id.to_string() class="flex min-w-0 items-center gap-2 rounded py-1 text-xs text-white/65 hover:bg-white/5" data-tip=move ||format!("{} (@{})",member.get().display_name(),member.get().username)>
+                <crate::avatar::Avatar class="size-6 text-xs" name=Signal::derive(move ||member.get().display_name().to_owned()) avatar_id=Signal::derive(move ||member.get().avatar_id)/>
+                <span class="min-w-0 flex-1 truncate">{move ||member.get().display_name().to_owned()}</span>
+                <Show when=move ||member.get().deafened><span aria-label="Deafened"><Icon kind=Glyph::Deafen/></span></Show>
+                <Show when=move ||!member.get().deafened && (member.get().muted || !member.get().can_speak)><span aria-label="Muted"><Icon kind=Glyph::MicOff/></span></Show>
+                <Show when=move ||member.get().sharing_screen><span class="text-emerald-400" aria-label="Sharing screen"><Icon kind=Glyph::Screen/></span></Show>
+            </li>}
+        }/>
+    </ul>}
 }
 
 #[component]
@@ -140,25 +211,18 @@ pub(super) fn ServerRail(ui: Ui) -> impl IntoView {
         });
     };
     view! {
-        <aside class="fixed inset-y-0 left-0 z-20 flex w-20 flex-col items-center border-r border-white/10 bg-slate-950 py-4" aria-label="Servers">
-            <button class="mb-4 h-12 w-12 shrink-0 rounded-2xl bg-brand text-xl font-bold" title="Thiscord home" aria-label="Thiscord home" on:click=move |_|{ui.server.set(None);ui.page.set("servers");}>"T"</button>
+        <aside class="server-rail" aria-label="Servers">
+            <button class="mb-4 h-12 w-12 shrink-0 rounded-2xl bg-brand text-xl font-bold" data-tip="Thiscord home" aria-label="Thiscord home" on:click=move |_|{ui.voice_roster.set(vec![]);ui.server.set(None);ui.page.set("servers");}>"T"</button>
             <nav class="flex min-h-0 w-full flex-1 flex-col items-center gap-3 overflow-y-auto py-2" aria-label="Joined servers">
-                {move ||ui.guilds.get().into_iter().map(move |guild|{
-                    let id=guild.id;let initials=guild.name.split_whitespace().take(2).filter_map(|s|s.chars().next()).collect::<String>().to_uppercase();
-                    view!{<button class="h-12 w-12 shrink-0 overflow-hidden rounded-full border-2 border-transparent bg-slate-700 transition hover:border-white/70 focus-visible:outline-2 focus-visible:outline-white disabled:opacity-50" class:border-white=move ||ui.server.get().is_some_and(|s|s.guild.id==id) title=guild.name.clone() aria-label=guild.name disabled=move ||ui.busy.get()
-                        on:click=move |_|{ui.busy.set(true);leptos::task::spawn_local(async move{if let Err(e)=select(ui,id).await{ui.status.set(e);refresh(ui).await;}ui.busy.set(false);});}>
-                        <svg viewBox="0 0 48 48" role="img" aria-hidden="true"><circle cx="24" cy="24" r="24" fill="#5865f2"/><text x="24" y="25" text-anchor="middle" dominant-baseline="middle" fill="white" font-size="16" font-weight="600">{initials}</text></svg>
-                    </button>}
-                }).collect_view()}
+                {move ||ui.guilds.get().into_iter().map(move |guild|view!{<GuildButton ui=ui guild= guild/>}).collect_view()}
             </nav>
             <div class="mt-3 flex shrink-0 flex-col items-center gap-3 border-t border-white/10 pt-4">
-                <Show when=move ||ui.can_create_server.get()><button class="h-12 w-12 rounded-full bg-white/10 text-3xl text-emerald-300 hover:bg-emerald-500/20 disabled:opacity-50" title="Create a server" aria-label="Create a server" disabled=move ||ui.busy.get() on:click=move |_|open(true)>"+"</button></Show>
-                <button class="h-12 w-12 rounded-full bg-white/10 text-xs font-semibold text-emerald-300 hover:bg-emerald-500/20 disabled:opacity-50" title="Join a server" aria-label="Join a server" disabled=move ||ui.busy.get() on:click=move |_|open(false)>"Join"</button>
-                <button class="h-10 w-12 text-xs text-white/60 hover:text-white disabled:opacity-50" title="Refresh servers" disabled=move ||ui.busy.get() on:click=move |_|{ui.busy.set(true);leptos::task::spawn_local(async move{refresh(ui).await;ui.busy.set(false);});}>"Refresh"</button>
-                <button class="h-10 w-12 text-xs text-white/60 hover:text-white" title="Account settings" aria-label="Account settings" on:click=move |_|ui.page.set("profile")>"Settings"</button>
+                <Show when=move ||ui.can_create_server.get()><button class="rail-action" data-tip="Create a server" aria-label="Create a server" disabled=move ||ui.busy.get() on:click=move |_|open(true)><Icon kind=Glyph::Plus/></button></Show>
+                <button class="rail-action" data-tip="Join a server" aria-label="Join a server" disabled=move ||ui.busy.get() on:click=move |_|open(false)><Icon kind=Glyph::Compass/></button>
+                <button class="rail-action" aria-label="Refresh servers" data-tip="Refresh servers" disabled=move ||ui.busy.get() on:click=move |_|{ui.busy.set(true);leptos::task::spawn_local(async move{refresh(ui).await;ui.busy.set(false);});}><Icon kind=Glyph::Refresh/></button>
             </div>
         </aside>
-        <dialog node_ref=dialog aria-labelledby="server-dialog-title" class="m-auto max-h-[85vh] w-[calc(100%-2rem)] max-w-md overflow-y-auto rounded-2xl border border-white/15 bg-surface p-7 text-white shadow-2xl backdrop:bg-black/70 backdrop:backdrop-blur-sm" on:close=move |_|password.set(String::new()) on:cancel=move |ev: web_sys::Event|{if ui.busy.get_untracked(){ev.prevent_default();}}>
+        <dialog node_ref=dialog on:click=move |e|super::dialog::dismiss_outside(e,dialog,ui.busy.get_untracked()) aria-labelledby="server-dialog-title" class="m-auto max-h-[85vh] w-[calc(100%-2rem)] max-w-md overflow-y-auto rounded-2xl border border-white/15 bg-surface p-7 text-white shadow-2xl backdrop:bg-black/70 backdrop:backdrop-blur-sm" on:close=move |_|password.set(String::new()) on:cancel=move |ev: web_sys::Event|{if ui.busy.get_untracked(){ev.prevent_default();}}>
             <header class="mb-6 flex items-center justify-between"><h2 id="server-dialog-title" class="text-2xl font-semibold">{move ||if creating.get(){"Create a server"}else{"Join a server"}}</h2><button aria-label="Close dialog" class="px-2 text-xl" disabled=move ||ui.busy.get() on:click=move |_|if let Some(dialog)=dialog.get(){dialog.close();}>"×"</button></header>
             <form class="space-y-5" on:submit=submit>
                 <Show when=move ||creating.get() fallback=move ||view!{<Field label="Server ID" value=server_id/>}><Field label="Server name" value=name/></Show>
@@ -173,7 +237,7 @@ pub(super) fn ServerRail(ui: Ui) -> impl IntoView {
 
 #[component]
 pub(super) fn ServerHome(ui: Ui) -> impl IntoView {
-    let selected = RwSignal::new(None::<Channel>);
+    let selected = ui.selected_channel;
     let dialog = NodeRef::<leptos::html::Dialog>::new();
     let target = RwSignal::new(None::<Guild>);
     let name = RwSignal::new(String::new());
@@ -270,10 +334,11 @@ pub(super) fn ServerHome(ui: Ui) -> impl IntoView {
             <section class="flex h-full min-h-0 flex-col items-center justify-center gap-4 text-center"><h2 class="text-3xl font-bold">"Welcome to Thiscord"</h2><p class="max-w-md text-white/60">"Choose a server on the left, or join one with its server ID."</p><Show when=move ||ui.can_create_server.get()><p class="text-white/60">"Use + to create your own server."</p></Show></section>
         }>
             {move ||ui.server.get().map(|home|view!{
-                <section class="grid h-full min-h-0 min-w-0 grid-cols-[160px_minmax(0,1fr)] gap-3 lg:grid-cols-[220px_minmax(0,1fr)] lg:gap-5">
-                    <nav class="flex min-h-0 min-w-0 flex-col gap-5 rounded-xl bg-white/5 p-3 lg:p-4" aria-label="Server channels">
-                        <div class="flex items-center gap-2"><h2 class="min-w-0 flex-1 break-words text-lg font-bold">{home.guild.name.clone()}</h2>
-                            <button class="shrink-0 rounded p-1 text-white/50 hover:bg-white/10 hover:text-white" title=format!("Copy server ID: {}",home.guild.id) aria-label="Copy server ID" on:click=move |_| {
+                <section class="server-layout">
+                    <nav class="channel-sidebar" aria-label="Server channels">
+                        <div class="flex items-center gap-2" data-context-server=home.guild.id.to_string()><h2 class="min-w-0 flex-1 break-words text-lg font-bold">{home.guild.name.clone()}</h2>
+                            <Show when=move ||home.can_manage_roles><button class="icon-button shrink-0" aria-label="Server roles and settings" data-tip="Server settings" on:click=move |_|{ui.role_target.set(None);ui.permission_channel.set(None);ui.page.set("permissions");}><Icon kind=Glyph::Settings/></button></Show>
+                            <button class="shrink-0 rounded p-1 text-white/50 hover:bg-white/10 hover:text-white" data-tip="Copy server ID" aria-label="Copy server ID" on:click=move |_| {
                                 let id = home.guild.id.to_string();
                                 leptos::task::spawn_local(async move {
                                     let result = wasm_bindgen_futures::JsFuture::from(window().navigator().clipboard().write_text(&id)).await;
@@ -282,22 +347,29 @@ pub(super) fn ServerHome(ui: Ui) -> impl IntoView {
                             }><svg viewBox="0 0 24 24" class="h-4 w-4" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true"><rect x="8" y="8" width="12" height="12" rx="2"/><path d="M16 8V4a1 1 0 0 0-1-1H4a1 1 0 0 0-1 1v11a1 1 0 0 0 1 1h4"/></svg></button>
                         </div>
                         <div class="flex items-center justify-between"><h3 class="text-xs font-semibold uppercase tracking-widest text-white/50">"Channels"</h3>
-                            <Show when=move ||home.can_manage_channels><button class="rounded px-2 text-xl text-white/60 hover:bg-white/10 hover:text-white" title="Create channel" aria-label="Create channel" disabled=move ||ui.busy.get() on:click=move |_| {
+                            <Show when=move ||home.can_manage_channels><button class="rounded px-2 text-xl text-white/60 hover:bg-white/10 hover:text-white" data-tip="Create channel" aria-label="Create channel" disabled=move ||ui.busy.get() on:click=move |_| {
                                 target.set(ui.server.get_untracked().map(|s|s.guild));name.set(String::new());voice.set(false);error.set(String::new());
                                 if let Some(dialog)=dialog.get(){let _=dialog.show_modal();}
                             }>"+"</button></Show>
                         </div>
-                        <ul class="min-h-0 flex-1 space-y-2 overflow-y-auto text-white/70">{home.channels.into_iter().map(move |ch|{let id=ch.id;let label=format!("{} {}",if ch.kind==ChannelKind::Voice{"◖"}else{"#"},ch.name);view!{<li><button class="flex w-full items-center justify-between gap-2 rounded p-2 text-left hover:bg-white/10 disabled:opacity-40" on:click=move |_|selected.set(Some(ch.clone()))><span class="truncate">{label}</span><span class="shrink-0 text-xs text-brand">{move||unread.get().iter().find(|u|u.channel_id==id&&u.count>0).map(|u|format!("{}{}",u.count,if u.mentions>0{" @"}else{""}))}</span></button></li>}}).collect_view()}</ul>
-                        <Show when=move ||home.can_moderate><button class="text-sm text-brand underline" on:click=move |_|{ui.moderation_target.set(None);ui.page.set("moderation");}>"Moderation"</button></Show>
-                        <Show when=move ||home.can_manage_roles><button class="text-sm text-brand underline" on:click=move |_|ui.page.set("permissions")>"Server roles & settings"</button></Show>
+                        <ul class="min-h-0 flex-1 space-y-1 overflow-y-auto text-white/70">{let channel_guild=home.guild.clone();let channels=home.channels;move ||{let mut channels=channels.clone();channels.sort_by_key(|c|!ui.sidebar_preferences.get().pinned.contains(&c.id));let channel_guild=channel_guild.clone();channels.into_iter().map(move |ch|{
+                            let id=ch.id; let is_voice=ch.kind==ChannelKind::Voice; let name=ch.name.clone();let guild=channel_guild.clone();let guild_id=guild.id;
+                            view!{<li><button data-context-server=guild_id.to_string() data-context-channel=id.to_string() aria-haspopup="menu" class="flex w-full items-center gap-2 rounded-md px-2 py-2 text-left hover:bg-white/10" class:channel-selected=move ||selected.get().is_some_and(|c|c.id==id) class:voice-active=move ||ui.voice.get().channel_id==Some(id) aria-label=name.clone() data-tip=name.clone() disabled=move ||is_voice && ui.voice_joining.get() on:click=move |_|if is_voice {super::audio::join(ui,guild.clone(),ch.clone());}else{selected.set(Some(ch.clone()));}>
+                                {if is_voice {view!{<Icon kind=Glyph::Volume/>}.into_any()}else{view!{<span class="w-5 text-center text-xl text-white/40">"#"</span>}.into_any()}}
+                                <span class="min-w-0 flex-1 truncate text-sm">{name.clone()}</span>
+                                <Show when=move ||ui.sidebar_preferences.get().pinned.contains(&id)><span aria-label="Pinned" class="channel-indicator"><Icon kind=Glyph::Pin/></span></Show>
+                                <Show when=move ||ui.sidebar_preferences.get().muted.contains(&id)><span aria-label="Notifications muted" class="channel-indicator"><Icon kind=Glyph::BellOff/></span></Show>
+                                <span class="shrink-0 text-xs text-brand">{move||if ui.sidebar_preferences.get().muted.contains(&id){None}else{unread.get().iter().find(|u|u.channel_id==id&&u.count>0).map(|u|format!("{}{}",u.count,if u.mentions>0{" @"}else{""}))}}</span>
+                            </button>{is_voice.then(||view!{<VoiceRoster ui=ui guild=guild_id channel=id/>})}</li>}
+                        }).collect_view()}}</ul>
                     </nav>
-                    <Show when=move||selected.get().is_some() fallback=move||view!{<div class="flex items-center justify-center rounded-xl border border-white/10 p-8 text-white/60">"Choose a text channel to start chatting."</div>}>
+                    <Show when=move||selected.get().is_some() fallback=move||view!{<div class="flex items-center justify-center rounded-xl border border-white/10 p-8 text-white/60">"Choose a channel to get started."</div>}>
                         {move||selected.get().map(|ch|if ch.kind==ChannelKind::Voice {view!{<super::audio::VoiceChannel ui=ui guild=home.guild.id channel=ch.id name=ch.name/>}.into_any()}else{view!{<super::chat::ChatPanel ui=ui guild=home.guild.id channel=ch.id name=ch.name/>}.into_any()})}
                     </Show>
                 </section>
             })}
         </Show>
-        <dialog node_ref=dialog aria-labelledby="channel-dialog-title" class="m-auto max-h-[85vh] w-[calc(100%-2rem)] max-w-md overflow-y-auto rounded-2xl border border-white/15 bg-surface p-6 text-white shadow-2xl backdrop:bg-black/70" on:cancel=move |ev: web_sys::Event|{if ui.busy.get_untracked(){ev.prevent_default();}}>
+        <dialog node_ref=dialog on:click=move |e|super::dialog::dismiss_outside(e,dialog,ui.busy.get_untracked()) aria-labelledby="channel-dialog-title" class="m-auto max-h-[85vh] w-[calc(100%-2rem)] max-w-md overflow-y-auto rounded-2xl border border-white/15 bg-surface p-6 text-white shadow-2xl backdrop:bg-black/70" on:cancel=move |ev: web_sys::Event|{if ui.busy.get_untracked(){ev.prevent_default();}}>
             <header class="mb-5 flex items-center justify-between"><h2 id="channel-dialog-title" class="text-xl font-semibold">"Create channel"</h2><button aria-label="Close dialog" disabled=move ||ui.busy.get() on:click=move |_|if let Some(dialog)=dialog.get(){dialog.close();}>"×"</button></header>
             <form class="space-y-5" on:submit=submit>
                 <Field label="Channel name" value=name/>

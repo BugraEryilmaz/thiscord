@@ -6,3 +6,4 @@ pub mod screen;
 pub mod voice_overlay;
 
 pub mod audio_quality;
+pub mod sidebar;

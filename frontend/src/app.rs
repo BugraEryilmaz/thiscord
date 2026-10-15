@@ -4,7 +4,10 @@ use thiscord_shared::account::*;
 mod admin;
 mod audio;
 mod chat;
+mod context_menu;
 mod diagnostics;
+mod dialog;
+mod icons;
 mod login;
 mod moderation;
 mod permissions;
@@ -13,6 +16,7 @@ mod screen;
 mod screen_player;
 mod servers;
 mod shortcuts;
+mod tooltip;
 mod updates;
 mod window;
 
@@ -26,6 +30,16 @@ struct Ui {
     audio_revision: RwSignal<u64>,
     audio_status: RwSignal<Option<thiscord_shared::audio::AudioStatus>>,
     voice: RwSignal<thiscord_shared::voice::VoiceStatus>,
+    voice_location: RwSignal<Option<audio::VoiceLocation>>,
+    voice_joining: RwSignal<bool>,
+    selected_channel: RwSignal<Option<thiscord_shared::permissions::Channel>>,
+    sidebar_preferences: RwSignal<thiscord_frontend::sidebar::Preferences>,
+    context_menu: RwSignal<Option<context_menu::Menu>>,
+    context_generation: RwSignal<u64>,
+    role_target: RwSignal<Option<(thiscord_shared::GuildId, thiscord_shared::AccountId)>>,
+    permission_channel: RwSignal<Option<(thiscord_shared::GuildId, thiscord_shared::ChannelId)>>,
+    voice_roster: RwSignal<Vec<thiscord_shared::voice::ChannelRoster>>,
+    socket_status: RwSignal<chat::ConnectionStatus>,
     chat_epoch: RwSignal<u64>,
     active_chat: RwSignal<Option<chat::Chat>>,
     unread: RwSignal<Vec<thiscord_shared::chat::Unread>>,
@@ -73,6 +87,8 @@ async fn apply(ui: Ui, response: AccountResponse) {
 async fn clear_local(ui: Ui) {
     ui.guilds.set(vec![]);
     ui.server.set(None);
+    ui.selected_channel.set(None);
+    ui.voice_location.set(None);
     ui.can_create_server.set(false);
     ui.token.set(None);
     ui.account.set(None);
@@ -295,6 +311,16 @@ pub fn App() -> impl IntoView {
         audio_revision: RwSignal::new(0),
         audio_status: RwSignal::new(None),
         voice: RwSignal::new(Default::default()),
+        voice_location: RwSignal::new(None),
+        voice_joining: RwSignal::new(false),
+        selected_channel: RwSignal::new(None),
+        sidebar_preferences: RwSignal::new(Default::default()),
+        context_menu: RwSignal::new(None),
+        context_generation: RwSignal::new(0),
+        role_target: RwSignal::new(None),
+        permission_channel: RwSignal::new(None),
+        voice_roster: RwSignal::new(vec![]),
+        socket_status: RwSignal::new(chat::ConnectionStatus::Offline),
         chat_epoch: RwSignal::new(0),
         active_chat: RwSignal::new(None),
         unread: RwSignal::new(vec![]),
@@ -313,6 +339,7 @@ pub fn App() -> impl IntoView {
     };
     if crate::account_client::admin_page() {
         return view! {
+            <tooltip::Host/><context_menu::Host ui=ui/>
             <Show when=move ||ui.account.get().is_some() fallback=move ||view!{<login::Login ui=ui admin=true/>}>
                 <admin::Dashboard ui=ui/>
             </Show>
@@ -379,16 +406,20 @@ pub fn App() -> impl IntoView {
         }
     });
     view! {
+        <tooltip::Host/><context_menu::Host ui=ui/>
         <updates::Host ui=ui/>
         <Show when=move ||ui.account.get().is_some() fallback=move ||view!{<login::Login ui=ui/>}>
+        <div class="app-shell" class:in-voice=move ||ui.voice.get().channel_id.is_some()>
         <servers::ServerRail ui=ui/>
         <audio::AudioHost ui=ui/>
         <chat::ChatHost ui=ui/>
-        <main class="ml-20 flex h-dvh min-w-0 flex-col gap-4 overflow-hidden p-4 md:p-6">
+        <main class="app-main" class:settings-page=move ||ui.page.get()!="servers">
+            <Show when=move ||ui.page.get()!="servers">
             <header class="flex shrink-0 flex-wrap items-center justify-between gap-4">
-                <div><h1 class="text-4xl font-bold">"Thiscord"</h1><p class="mt-2 text-white/60">"Your place to chat and hang out."</p></div>
+                <button class="flex items-center gap-2 text-white/60 hover:text-white" on:click=move |_|ui.page.set("servers")><icons::Icon kind=icons::Glyph::Close/>"Close settings"</button>
                 <Show when=move ||ui.account.get().is_some()><button class="rounded-md bg-white/10 px-4 py-2" disabled=move ||ui.busy.get() on:click=move |_|run(ui,AccountRequest::Logout)>"Sign out"</button></Show>
             </header>
+            </Show>
             <StatusNotice ui=ui/>
             <Show when=move ||ui.ticket.get().is_some()><div class="flex flex-wrap gap-4 rounded-lg bg-white/5 p-4">
                 {move ||ui.authorization_url.get().map(|url|view!{<a class="text-brand underline" href=url target="_blank" rel="noopener noreferrer">"Continue in Google"</a>})}
@@ -435,7 +466,7 @@ pub fn App() -> impl IntoView {
                                 <p class="text-sm text-white/60">{move ||ui.account.get().map(|a|format!("@{} · {} · {}",a.username,a.email,if a.email_verified {"Email verified"} else {"Email not verified"}))}</p>
                                 <profile::ProfilePicture ui=ui/>
                                 <Field label="Display name" value=display_name/><Field label="Bio (up to 500 characters)" value=bio/>
-                                <button type="button" class="underline" disabled=move ||ui.busy.get() on:click=move |_|run(ui,AccountRequest::Current)>"Refresh account"</button>
+                                <button type="button" class="icon-button" aria-label="Refresh account" data-tip="Refresh account" disabled=move ||ui.busy.get() on:click=move |_|run(ui,AccountRequest::Current)><icons::Icon kind=icons::Glyph::Refresh/></button>
                                 <Show when=move ||ui.account.get().is_some_and(|a|!a.email_verified)>
                                     <p class="text-sm text-white/70">"Check your email and click the verification link. Your status updates when you return to Thiscord."</p>
                                     <button type="button" class="text-brand underline" disabled=move ||ui.busy.get() on:click=move |_|run(ui,AccountRequest::SendVerification)>"Resend verification link"</button>
@@ -452,8 +483,9 @@ pub fn App() -> impl IntoView {
                 </section>
             </div>
             </Show>
-            <audio::VoiceBar ui=ui/>
         </main>
+        <audio::VoiceBar ui=ui/>
+        </div>
         </Show>
     }.into_any()
 }

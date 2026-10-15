@@ -106,12 +106,32 @@ pub(super) fn PermissionEditor(ui: Ui) -> impl IntoView {
         selected_role: RwSignal::new(String::new()),
     };
     let member_name = RwSignal::new(String::new());
-    let member_id = RwSignal::new(String::new());
+    let member_id = RwSignal::new(
+        ui.role_target
+            .get_untracked()
+            .filter(|(guild, _)| {
+                ui.server
+                    .get_untracked()
+                    .is_some_and(|s| s.guild.id == *guild)
+            })
+            .map(|(_, member)| member.to_string())
+            .unwrap_or_default(),
+    );
     let role_id = editor.selected_role;
     let role_name = RwSignal::new(String::new());
     let position = RwSignal::new("1".to_string());
     let grants = RwSignal::new(Permissions::new());
-    let channel_id = RwSignal::new(String::new());
+    let channel_id = RwSignal::new(
+        ui.permission_channel
+            .get_untracked()
+            .filter(|(guild, _)| {
+                ui.server
+                    .get_untracked()
+                    .is_some_and(|s| s.guild.id == *guild)
+            })
+            .map(|(_, channel)| channel.to_string())
+            .unwrap_or_default(),
+    );
     let channel_name = RwSignal::new(String::new());
     let voice = RwSignal::new(false);
     let member_target = RwSignal::new(false);
@@ -200,7 +220,7 @@ pub(super) fn PermissionEditor(ui: Ui) -> impl IntoView {
             <h2 class="text-2xl font-semibold">"Guilds & roles"</h2>
             <p class="text-sm text-white/60">"Instance roles and guild roles are independent. Refresh after a conflict. Ownership changes require recent reauthentication."</p>
             <fieldset class="space-y-6 disabled:opacity-60" disabled=move ||ui.busy.get()>
-                <div class="flex flex-wrap gap-4"><button class="underline" on:click=move |_|editor.request(PermissionRequest::ListGuilds {})>"Refresh guilds"</button><button class="underline" on:click=move |_|editor.request(PermissionRequest::Instance {})>"Instance access"</button></div>
+                <div class="flex flex-wrap gap-4"><button class="icon-button" on:click=move |_|editor.request(PermissionRequest::ListGuilds {}) aria-label="Refresh guilds" data-tip="Refresh guilds"><super::icons::Icon kind=super::icons::Glyph::Refresh/></button><button class="underline" on:click=move |_|editor.request(PermissionRequest::Instance {})>"Instance access"</button></div>
                 <Show when=move ||editor.access.get().is_some()>
                     <p>{move ||editor.access.get().map(|a|format!("Instance role: {:?}",a.role))}</p>
                     <Show when=move ||editor.access.get().is_some_and(|a|a.role==InstanceRole::Owner)>
@@ -228,7 +248,7 @@ pub(super) fn PermissionEditor(ui: Ui) -> impl IntoView {
                     <Show when=move ||editor.state.get().is_some_and(|s|ui.account.get().is_some_and(|a|a.id==s.guild.owner))>
                         <p class="text-sm text-brand">"You are the server owner. You have full administrator permissions and can create and assign roles to other members."</p>
                     </Show>
-                    <button class="underline" on:click=move |_|if let Some(s)=editor.state.get_untracked(){editor.request(PermissionRequest::Inspect{guild_id:s.guild.id});}>"Refresh selected guild"</button>
+                    <button class="icon-button" on:click=move |_|if let Some(s)=editor.state.get_untracked(){editor.request(PermissionRequest::Inspect{guild_id:s.guild.id});} aria-label="Refresh selected guild" data-tip="Refresh selected guild"><super::icons::Icon kind=super::icons::Glyph::Refresh/></button>
                     <Field label="Add verified member by username" value=member_name/>
                     <button class="underline" on:click=move |_|editor.change(GuildChange::AddMember{username:member_name.get_untracked()})>"Add member"</button>
                     <label class="block space-y-2"><span>"Member"</span><select class="w-full rounded bg-slate-900 p-2" prop:value=move ||member_id.get() on:change=move |ev|member_id.set(event_target_value(&ev))>

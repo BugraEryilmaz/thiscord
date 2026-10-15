@@ -7,6 +7,19 @@ Only settings, levels and participant metadata cross Tauri IPC. PCM and encoded
 audio never pass through WASM or handwritten JavaScript. Browser preview supports
 text chat; voice requires the desktop executable. Exactly three packages remain.
 
+The persistent bottom account ribbon has microphone, deafen and settings icons,
+with accessible labels and hover/focus hints. Joining expands it to show the voice
+channel/server, connection state, disconnect, screen sharing and audio settings.
+The camera icon is disabled and explicitly labeled unavailable. Push-to-talk keeps
+its hold/release control when enabled. Screen selection opens a modal dialog;
+screen pipeline diagnostics remain in the joined voice channel view. Audio quality
+details remain in Audio & voice settings. Clicking a sidebar voice channel joins
+directly; the ribbon's channel name opens call controls. Hovering or focusing
+**Voice connected** shows server-hop RTT, recent measured health, cumulative
+server-hop loss and local transport drops. Intentional control discards are
+excluded; unavailable metrics remain labeled unavailable. Sidebar rosters are available before
+joining through permission-filtered chat socket updates; see [chat.md](chat.md).
+
 ## Remote support
 
 Instance owners/admins can open a connected participant's audio settings in the
