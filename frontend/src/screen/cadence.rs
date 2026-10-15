@@ -10,11 +10,14 @@ impl Cadence {
     pub fn new(period: Duration) -> Self {
         Self { period, next: None }
     }
+    /// Checking admission must not consume a slot when no input is available or
+    /// downstream is busy. Commit with `accept` only when work is submitted.
+    pub fn ready(&self, now: Instant) -> bool {
+        self.next
+            .is_none_or(|at| now + Duration::from_millis(1) >= at)
+    }
     pub fn accept(&mut self, now: Instant) -> bool {
-        if self
-            .next
-            .is_some_and(|at| now + Duration::from_millis(1) < at)
-        {
+        if !self.ready(now) {
             return false;
         }
         self.next = Some(match self.next {
@@ -27,6 +30,35 @@ impl Cadence {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn idle_polling_and_busy_encoder_do_not_consume_capture_slots() {
+        // A 5 FPS capture arrives between encoder polls, with a gap for a static
+        // source and a delayed first NeedInput event after reconfiguration.
+        // Advancing on every poll used to hold each input for almost 200 ms.
+        let start = Instant::now();
+        let mut cadence = Cadence::new(Duration::from_millis(200));
+        let mut pending = None;
+        let mut ages = Vec::new();
+        for ms in 0..2400 {
+            if ms % 200 == 40 && !(800..1400).contains(&ms) {
+                pending = Some(ms);
+            }
+            let now = start + Duration::from_millis(ms);
+            if ms % 3 != 0 || !cadence.ready(now) {
+                continue;
+            }
+            // Polling without pixels/encoder credit leaves the slot available.
+            if ms < 50 {
+                continue;
+            }
+            if let Some(captured) = pending.take() {
+                assert!(cadence.accept(now));
+                ages.push(ms - captured);
+            }
+        }
+        assert_eq!(ages.len(), 9);
+        assert!(ages.into_iter().all(|age| age <= 12));
+    }
     #[test]
     fn compositor_jitter_does_not_halve_sixty_fps() {
         let start = Instant::now();

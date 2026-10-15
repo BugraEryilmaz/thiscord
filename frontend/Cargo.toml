@@ -9,8 +9,8 @@ default-run = "thiscord-desktop"
 [features]
 default = []
 desktop = ["screen-share", "dep:tauri", "dep:tauri-build", "dep:keyring", "dep:open", "dep:tokio", "dep:rand", "dep:base64", "dep:url", "native-audio", "deep-filter", "neural-echo", "dep:tauri-plugin-global-shortcut", "dep:tauri-plugin-updater", "dep:tokio-tungstenite", "dep:futures-util"]
-screen-share = ["native-audio", "dep:windows-capture", "dep:windows", "dep:openh264", "dep:wasapi"]
-native-audio = ["dep:cpal", "dep:ringbuf", "dep:opus", "dep:webrtc", "dep:tokio", "dep:bytes", "dep:rtc", "dep:async-trait", "dep:sonora", "dep:hound", "dep:windows"]
+screen-share = ["native-audio", "dep:windows-capture", "dep:windows", "dep:windows-core", "dep:openh264", "dep:wasapi"]
+native-audio = ["dep:cpal", "dep:ringbuf", "dep:opus", "dep:webrtc", "dep:tokio", "dep:bytes", "dep:rtc", "dep:async-trait", "dep:sonora", "dep:hound", "dep:windows", "dep:socket2"]
 deep-filter = ["native-audio", "dep:deep_filter", "dep:ndarray", "dep:tract-core", "dep:tract-hir", "dep:tract-onnx", "dep:tract-pulse"]
 release-tools = ["dep:base64", "dep:minisign-verify"]
 neural-echo = ["native-audio", "dep:tract-tflite", "dep:sha2", "dep:rustfft"]
@@ -62,6 +62,10 @@ required-features = ["screen-share"]
 name = "screen_preview_probe"
 required-features = ["screen-share"]
 
+[[example]]
+name = "screen_pipeline_probe"
+required-features = ["screen-share"]
+
 [target.'cfg(not(target_arch = "wasm32"))'.dev-dependencies]
 hound = "3.5"
 
@@ -80,7 +84,7 @@ wasm-bindgen = "0.2"
 wasm-bindgen-futures = "0.4"
 serde-wasm-bindgen = "0.6"
 js-sys = "0.3"
-web-sys = { version = "0.3", features = ["Storage", "NodeList", "Url", "BlobPropertyBag", "HtmlAnchorElement", "ResizeObserver", "ResizeObserverEntry", "File", "FileList", "Blob", "HtmlInputElement", "Window", "Location", "HtmlDialogElement", "DomRect", "Crypto", "Document", "HtmlElement", "Navigator", "Clipboard", "HtmlVideoElement", "MediaStream", "MediaStreamTrack", "RtcPeerConnection", "RtcConfiguration", "RtcSessionDescriptionInit", "RtcSessionDescription", "RtcSdpType", "RtcTrackEvent", "RtcRtpTransceiverInit", "RtcRtpTransceiverDirection", "RtcRtpTransceiver", "RtcIceGatheringState", "RtcPeerConnectionState", "RtcStatsReport", "VideoPlaybackQuality"] }
+web-sys = { version = "0.3", features = ["Storage", "NodeList", "Url", "BlobPropertyBag", "HtmlAnchorElement", "ResizeObserver", "ResizeObserverEntry", "File", "FileList", "Blob", "HtmlInputElement", "Window", "Location", "HtmlDialogElement", "DomRect", "Crypto", "Document", "HtmlElement", "Navigator", "Clipboard", "HtmlVideoElement", "MediaStream", "MediaStreamTrack", "RtcPeerConnection", "RtcConfiguration", "RtcSessionDescriptionInit", "RtcSessionDescription", "RtcSdpType", "RtcTrackEvent", "RtcRtpReceiver", "RtcRtpTransceiverInit", "RtcRtpTransceiverDirection", "RtcRtpTransceiver", "RtcIceGatheringState", "RtcPeerConnectionState", "RtcStatsReport", "VideoPlaybackQuality"] }
 gloo-timers = { version = "0.3", features = ["futures"] }
 
 [target.'cfg(not(target_arch = "wasm32"))'.dependencies]
@@ -109,6 +113,7 @@ rustfft = { version = "6", optional = true }
 ringbuf = { version = "0.5.2", optional = true }
 opus = { version = "0.4.0", optional = true }
 webrtc = { version = "0.21.0", optional = true }
+socket2 = { version = "0.6", optional = true }
 bytes = { version = "1", optional = true }
 rtc = { version = "0.21.0", optional = true }
 async-trait = { version = "0.1", optional = true }
@@ -120,7 +125,8 @@ futures-util = { version = "0.3", features = ["sink"], optional = true }
 
 [target.'cfg(target_os = "windows")'.dependencies]
 windows-capture = { version = "=2.0.1", optional = true }
-windows = { version = "0.62.2", features = ["Win32_Media_Audio", "Win32_System_Threading", "Win32_System_Com_StructuredStorage", "Win32_UI_WindowsAndMessaging", "Win32_Media_MediaFoundation", "Win32_System_Com", "Win32_System_Variant", "Win32_System_Ole", "Win32_Graphics_Direct3D11", "Win32_Graphics_Direct3D_Fxc", "Win32_Graphics_Dxgi_Common", "Win32_Graphics_Dxgi", "Win32_Devices_Display", "Win32_Graphics_Gdi"], optional = true }
+windows-core = { version = "0.62.2", optional = true }
+windows = { version = "0.62.2", features = ["Win32_Media_Audio", "Win32_System_Threading", "Win32_System_Performance", "Win32_System_Com_StructuredStorage", "Win32_UI_WindowsAndMessaging", "Win32_UI_HiDpi", "Win32_Media_MediaFoundation", "Win32_System_Com", "Win32_System_Variant", "Win32_System_Ole", "Win32_Graphics_Direct3D11", "Win32_Graphics_Direct3D_Fxc", "Win32_Graphics_Dxgi_Common", "Win32_Graphics_Dxgi", "Win32_Devices_Display", "Win32_Graphics_Gdi"], optional = true }
 wasapi = { version = "0.22", optional = true }
 
 [build-dependencies]

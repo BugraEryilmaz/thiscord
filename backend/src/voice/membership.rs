@@ -48,6 +48,7 @@ mod tests {
     fn member(account: thiscord_shared::AccountId, call_id: RequestId) -> Member {
         let access = access::Access::new();
         Member {
+            resumption: None,
             request_id: RequestId::from_uuid(uuid::Uuid::new_v4()),
             call_id: Some(call_id),
             replaced: watch::channel(false).0,

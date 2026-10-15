@@ -152,11 +152,16 @@ impl PeerConnectionEventHandler for Handler {
     }
 }
 async fn event(socket: &mut Socket) -> ServerEvent {
-    let frame = tokio::time::timeout(Duration::from_secs(20), socket.next())
-        .await
-        .unwrap()
-        .unwrap()
-        .unwrap();
+    let frame = tokio::time::timeout(Duration::from_secs(20), async {
+        loop {
+            let frame = socket.next().await.unwrap().unwrap();
+            if !matches!(frame, Message::Ping(_) | Message::Pong(_)) {
+                break frame;
+            }
+        }
+    })
+    .await
+    .unwrap();
     serde_json::from_str::<ServerFrame>(frame.to_text().unwrap())
         .unwrap()
         .event
@@ -200,6 +205,14 @@ async fn join_attempt(
     req.headers_mut()
         .insert("origin", "http://localhost:1420".parse().unwrap());
     let (mut socket, _) = tokio_tungstenite::connect_async(req).await.unwrap();
+    socket
+        .send(Message::Ping(b"before-join".as_slice().into()))
+        .await
+        .unwrap();
+    socket
+        .send(Message::Pong(b"unsolicited".as_slice().into()))
+        .await
+        .unwrap();
     send(
         &mut socket,
         ClientEvent::Join {
@@ -214,6 +227,7 @@ async fn join_attempt(
 }
 struct Peer {
     socket: Socket,
+    resume_token: String,
     pc: Arc<dyn PeerConnection>,
     track: Arc<TrackLocalStaticRTP>,
     packets: mpsc::Receiver<rtp::Packet>,
@@ -224,11 +238,24 @@ struct Peer {
     views: Vec<thiscord_shared::screen::Subscription>,
 }
 impl Peer {
-    async fn new(mut socket: Socket) -> Self {
-        let ServerEvent::Offer { sdp, slot, .. } = event(&mut socket).await else {
+    async fn new(socket: Socket) -> Self {
+        Self::with_packet_capacity(socket, 64).await
+    }
+    async fn with_packet_capacity(mut socket: Socket, capacity: usize) -> Self {
+        let ServerEvent::Offer {
+            sdp,
+            slot,
+            resume_token,
+            ..
+        } = event(&mut socket).await
+        else {
             panic!("Expected offer")
         };
-        let (tx, rx) = mpsc::channel(64);
+        socket
+            .send(Message::Ping(b"before-answer".as_slice().into()))
+            .await
+            .unwrap();
+        let (tx, rx) = mpsc::channel(capacity);
         let gathered = Arc::new(Notify::new());
         let mut media = MediaEngine::default();
         media.register_default_codecs().unwrap();
@@ -324,6 +351,7 @@ impl Peer {
         .await;
         Self {
             socket,
+            resume_token: resume_token.expect("resume capability"),
             pc,
             track,
             packets: rx,
@@ -464,12 +492,184 @@ async fn screen_blocked(source: &mut Peer, receiver: &mut Peer) {
         );
     }
 }
+
+/// Transport load, not a codec benchmark: real authenticated peers send opaque
+/// H.264-sized payloads through the production SFU while microphone RTP continues.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[ignore = "requires TEST_DATABASE_URL; CI runs with --include-ignored"]
+async fn sfu_sustains_4k60_transport_with_two_times_bitrate_headroom() {
+    let db = database();
+    let (_, ot) = user(&db, "load_owner");
+    let (_, mt) = user(&db, "load_viewer");
+    permissions::bootstrap_owner(&db.pool, "load_owner").unwrap();
+    let app = api::router(
+        Some(db.pool.clone()),
+        vec!["http://localhost:1420".parse().unwrap()],
+    );
+    let mut state = command(
+        &app,
+        &ot,
+        json!({"action":"create_guild","name":"Media load"}),
+        StatusCode::OK,
+    )
+    .await["state"]
+        .clone();
+    let guild = state["guild"]["id"].clone();
+    change(
+        &app,
+        &ot,
+        &mut state,
+        json!({"action":"add_member","username":"load_viewer"}),
+        StatusCode::OK,
+    )
+    .await;
+    change(
+        &app,
+        &ot,
+        &mut state,
+        json!({"action":"create_channel","name":"voice","kind":"voice"}),
+        StatusCode::OK,
+    )
+    .await;
+    let channel = state["channels"][0]["id"].clone();
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    let serving = tokio::spawn(axum::serve(listener, app).into_future());
+    let mut a = Peer::new(join(addr, &ot, guild.clone(), channel.clone()).await).await;
+    let mut b = Peer::with_packet_capacity(join(addr, &mt, guild, channel).await, 4096).await;
+    forwarded(&mut a, &mut b).await;
+    send(
+        &mut a.socket,
+        ClientEvent::Screen {
+            active: true,
+            audio: false,
+        },
+    )
+    .await;
+    watch_screen(&mut a, &mut b).await;
+    b.views[0].bitrate = thiscord_shared::screen::MAX_VIEW_BITRATE;
+    screen_forwarded(&mut a, &mut b, 0).await;
+    let mut sequence = a.screen_sequences[0];
+    let mut microphone_sequence = a.sequence;
+    for fps in [60u32, 120] {
+        while b.packets.try_recv().is_ok() {}
+        let frames = fps * 8;
+        let expected = frames as usize * 60;
+        let video_ssrc = thiscord_shared::screen::SSRC_BASE + a.slot as u32;
+        let audio_ssrc = voice::SSRC_BASE + a.slot as u32;
+        let video = a.screen_tracks[0].clone();
+        let microphone = a.track.clone();
+        let started = tokio::time::Instant::now();
+        let transmitting = tokio::spawn(async move {
+            for frame in 0..frames {
+                tokio::time::sleep_until(
+                    started + Duration::from_secs_f64(f64::from(frame) / f64::from(fps)),
+                )
+                .await;
+                for fragment in 0..60u32 {
+                    sequence = sequence.wrapping_add(1);
+                    let mut payload = vec![1u8; 1112];
+                    payload[0] = 0x7c; // FU-A with explicit start/end boundaries.
+                    payload[1] = 5 | if fragment == 0 {
+                        0x80
+                    } else if fragment == 59 {
+                        0x40
+                    } else {
+                        0
+                    };
+                    payload[2..6].copy_from_slice(&(frame * 60 + fragment).to_be_bytes());
+                    video
+                        .write_rtp(rtp::Packet {
+                            header: rtp::header::Header {
+                                version: 2,
+                                payload_type: 125,
+                                ssrc: 901,
+                                sequence_number: sequence,
+                                timestamp: frame * (90000 / fps),
+                                marker: fragment == 59,
+                                ..Default::default()
+                            },
+                            payload: payload.into(),
+                        })
+                        .await
+                        .unwrap();
+                }
+                if frame.is_multiple_of(fps / 20) {
+                    microphone_sequence = microphone_sequence.wrapping_add(1);
+                    microphone
+                        .write_rtp(rtp::Packet {
+                            header: rtp::header::Header {
+                                version: 2,
+                                payload_type: 111,
+                                ssrc: 900,
+                                sequence_number: microphone_sequence,
+                                timestamp: u32::from(microphone_sequence) * 2400,
+                                ..Default::default()
+                            },
+                            payload: vec![0xf8, 0xff, 0xfe].into(),
+                        })
+                        .await
+                        .unwrap();
+                }
+            }
+            (sequence, microphone_sequence, started.elapsed())
+        });
+        let mut seen = vec![false; expected];
+        let mut received = 0;
+        let mut audio = 0;
+        let mut renew = tokio::time::interval(Duration::from_millis(500));
+        let deadline = started + Duration::from_secs(11);
+        while received < expected {
+            tokio::select! {
+                _ = tokio::time::sleep_until(deadline) => break,
+                _ = renew.tick() => {
+                    send(&mut b.socket, ClientEvent::ScreenViews { views: b.views.clone() }).await;
+                    send(&mut a.socket, ClientEvent::Ping {}).await;
+                },
+                packet = b.packets.recv() => {
+                    let packet = packet.expect("media peer closed");
+                    if packet.header.ssrc == video_ssrc && packet.payload.len() == 1112 {
+                        let index = u32::from_be_bytes(packet.payload[2..6].try_into().unwrap()) as usize;
+                        assert!(index < expected);
+                        assert!(!seen[index], "duplicate video packet");
+                        seen[index] = true;
+                        received += 1;
+                    } else if packet.header.ssrc == audio_ssrc {
+                        audio += 1;
+                    }
+                }
+            }
+        }
+        let (last_sequence, last_microphone_sequence, elapsed) = transmitting.await.unwrap();
+        sequence = last_sequence;
+        microphone_sequence = last_microphone_sequence;
+        println!(
+            "SFU load: fps={fps}, Mbps={:.2}, received={received}/{expected}, microphone={audio}",
+            expected as f64 * 1112.0 * 8.0 / elapsed.as_secs_f64() / 1e6
+        );
+        assert_eq!(
+            received, expected,
+            "SFU must forward the full video burst load"
+        );
+        assert!(
+            audio >= 150,
+            "microphone delivery must continue under video load"
+        );
+        assert!(
+            elapsed < Duration::from_millis(8200),
+            "load generator did not sustain target rate"
+        );
+    }
+    a.close().await;
+    b.close().await;
+    serving.abort();
+}
 #[tokio::test]
 #[ignore = "requires TEST_DATABASE_URL; CI runs with --include-ignored"]
 async fn voice_takeover_fences_old_peers_and_delayed_retries() {
     let db = database();
     let (_, token) = user(&db, "takeover_owner");
-    let (_, listener_token) = user(&db, "takeover_listener");
+    let (listener_id, listener_token) = user(&db, "takeover_listener");
     let (_, outsider) = user(&db, "takeover_outsider");
     permissions::bootstrap_owner(&db.pool, "takeover_owner").unwrap();
     let app = api::router(
@@ -515,6 +715,77 @@ async fn voice_takeover_fences_old_peers_and_delayed_retries() {
     let mut witness =
         Peer::new(join(addr, &listener_token, guild.clone(), channel.clone()).await).await;
     forwarded(&mut old, &mut witness).await;
+    // RFC 6455 control frames are legal during an active call. A protocol ping
+    // is different from our JSON ClientEvent::Ping and must not terminate voice.
+    old.socket
+        .send(Message::Ping(b"keepalive".as_slice().into()))
+        .await
+        .unwrap();
+    old.socket
+        .send(Message::Pong(b"unsolicited".as_slice().into()))
+        .await
+        .unwrap();
+    still_connected(&mut old.socket).await;
+    forwarded(&mut old, &mut witness).await;
+    // Cut TCP without sending Leave or closing WebRTC. Media must flow in
+    // both directions before any replacement signaling has authenticated.
+    let replacement = open_voice(addr).await;
+    drop(std::mem::replace(&mut old.socket, replacement));
+    tokio::time::sleep(Duration::from_millis(100)).await;
+    forwarded(&mut old, &mut witness).await;
+    forwarded(&mut witness, &mut old).await;
+    resume(
+        &mut old.socket,
+        &token,
+        &guild,
+        &channel,
+        &old.resume_token,
+        1,
+    )
+    .await;
+    assert!(matches!(
+        event(&mut old.socket).await,
+        ServerEvent::Resumed {}
+    ));
+    forwarded(&mut old, &mut witness).await;
+    // A proxy can reset only the client leg while the original server socket
+    // is still healthy. Reattachment must work in that case as well.
+    let mut newer_socket = open_voice(addr).await;
+    resume(
+        &mut newer_socket,
+        &token,
+        &guild,
+        &channel,
+        &old.resume_token,
+        2,
+    )
+    .await;
+    assert!(matches!(
+        event(&mut newer_socket).await,
+        ServerEvent::Resumed {}
+    ));
+    old.socket = newer_socket;
+    let mut replay = open_voice(addr).await;
+    resume(&mut replay, &token, &guild, &channel, &old.resume_token, 1).await;
+    assert!(
+        matches!(event(&mut replay).await, ServerEvent::Error { error } if error.code == thiscord_shared::ErrorCode::Conflict)
+    );
+    let mut cross_account = open_voice(addr).await;
+    resume(
+        &mut cross_account,
+        &listener_token,
+        &guild,
+        &channel,
+        &old.resume_token,
+        3,
+    )
+    .await;
+    assert!(matches!(
+        event(&mut cross_account).await,
+        ServerEvent::Replaced {}
+    ));
+    forwarded(&mut old, &mut witness).await;
+    still_connected(&mut old.socket).await;
     // A reconnect replaces its own live/stale socket immediately.
     let mut resumed = Peer::new(
         join_attempt(
@@ -532,6 +803,20 @@ async fn voice_takeover_fences_old_peers_and_delayed_retries() {
     .await;
     assert_eq!(old.slot, resumed.slot);
     expect_replaced(&mut old.socket).await;
+    let mut stale_resume = open_voice(addr).await;
+    resume(
+        &mut stale_resume,
+        &token,
+        &guild,
+        &channel,
+        &old.resume_token,
+        3,
+    )
+    .await;
+    assert!(matches!(
+        event(&mut stale_resume).await,
+        ServerEvent::Replaced {}
+    ));
     old.close().await;
     forwarded(&mut resumed, &mut witness).await;
     // A fresh explicit join takes ownership; the displaced caller's delayed
@@ -574,14 +859,98 @@ async fn voice_takeover_fences_old_peers_and_delayed_retries() {
     expect_replaced(&mut newest.socket).await;
     newest.close().await;
     let mut final_peer =
-        Peer::new(join_attempt(addr, &token, guild, channel, Some(new_call)).await).await;
+        Peer::new(join_attempt(addr, &token, guild.clone(), channel.clone(), Some(new_call)).await)
+            .await;
     expect_replaced(&mut pending).await;
     still_connected(&mut final_peer.socket).await;
     forwarded(&mut final_peer, &mut witness).await;
+    // Revocation during the detached grace period still fences media and
+    // refuses the capability even though the original peer remains allocated.
+    let replacement = open_voice(addr).await;
+    drop(std::mem::replace(&mut witness.socket, replacement));
+    change(
+        &app,
+        &token,
+        &mut state,
+        json!({"action":"ban_member","account_id":listener_id}),
+        StatusCode::OK,
+    )
+    .await;
+    resume(
+        &mut witness.socket,
+        &listener_token,
+        &guild,
+        &channel,
+        &witness.resume_token,
+        1,
+    )
+    .await;
+    assert!(matches!(
+        event(&mut witness.socket).await,
+        ServerEvent::Error { .. }
+    ));
+    while final_peer.packets.try_recv().is_ok() {}
+    for _ in 0..5 {
+        witness.publish().await;
+        assert!(
+            tokio::time::timeout(Duration::from_millis(40), final_peer.packets.recv())
+                .await
+                .is_err()
+        );
+    }
+    // A detached session has a bounded lifetime, even when its ICE peer is
+    // otherwise healthy. Expiry must not allocate a peer during Resume.
+    let replacement = open_voice(addr).await;
+    drop(std::mem::replace(&mut final_peer.socket, replacement));
+    tokio::time::sleep(Duration::from_secs(voice::SIGNALING_GRACE_SECS + 2)).await;
+    final_peer.socket = open_voice(addr).await;
+    resume(
+        &mut final_peer.socket,
+        &token,
+        &guild,
+        &channel,
+        &final_peer.resume_token,
+        1,
+    )
+    .await;
+    assert!(matches!(
+        event(&mut final_peer.socket).await,
+        ServerEvent::ResumeUnavailable {}
+    ));
     final_peer.close().await;
     witness.close().await;
     serving.abort();
     let _ = serving.await;
+}
+
+async fn open_voice(addr: std::net::SocketAddr) -> Socket {
+    let mut request = format!("ws://{addr}{}", voice::VOICE_PATH)
+        .into_client_request()
+        .unwrap();
+    request
+        .headers_mut()
+        .insert("origin", "http://localhost:1420".parse().unwrap());
+    tokio_tungstenite::connect_async(request).await.unwrap().0
+}
+async fn resume(
+    socket: &mut Socket,
+    token: &str,
+    guild: &Value,
+    channel: &Value,
+    secret: &str,
+    sequence: u64,
+) {
+    send(
+        socket,
+        ClientEvent::Resume {
+            token: token.into(),
+            guild_id: serde_json::from_value(guild.clone()).unwrap(),
+            channel_id: serde_json::from_value(channel.clone()).unwrap(),
+            resume_token: secret.into(),
+            sequence,
+        },
+    )
+    .await;
 }
 
 async fn expect_replaced(socket: &mut Socket) {
@@ -850,6 +1219,70 @@ async fn sfu_forwarding_permissions_isolation_and_cleanup() {
         .unwrap();
     assert_eq!(status, StatusCode::OK);
     assert_eq!(value["Ok"]["output_volume"], 0.5);
+    // Signaling recovery preserves the admin connection identity, but an
+    // interrupted chunked response must fail instead of returning partial JSON.
+    for interrupted in [true, false] {
+        let request_app = app.clone();
+        let admin_token = ot.clone();
+        let request = tokio::spawn(async move {
+            call(
+                &request_app,
+                thiscord_shared::remote_audio::PATH,
+                &admin_token,
+                json!({"connection_id":audio_connection,"command":{"command":"audio_current"}}),
+            )
+            .await
+        });
+        let request_id = tokio::time::timeout(Duration::from_secs(5), async {
+            loop {
+                if let ServerEvent::AudioCommand { request_id, .. } = event(&mut b.socket).await {
+                    break request_id;
+                }
+            }
+        })
+        .await
+        .unwrap();
+        if interrupted {
+            send(
+                &mut b.socket,
+                ClientEvent::AudioReply {
+                    request_id,
+                    chunk: r#"{"Ok":{"output_"#.into(),
+                    done: false,
+                },
+            )
+            .await;
+            still_connected(&mut b.socket).await;
+            let replacement = open_voice(addr).await;
+            drop(std::mem::replace(&mut b.socket, replacement));
+            forwarded(&mut a, &mut b).await;
+            resume(&mut b.socket, &mt, &guild, &channel, &b.resume_token, 1).await;
+            assert!(matches!(
+                event(&mut b.socket).await,
+                ServerEvent::Resumed {}
+            ));
+        } else {
+            send(
+                &mut b.socket,
+                ClientEvent::AudioReply {
+                    request_id,
+                    chunk: r#"{"Ok":{"output_volume":0.75}}"#.into(),
+                    done: true,
+                },
+            )
+            .await;
+        }
+        let (status, value) = tokio::time::timeout(Duration::from_secs(5), request)
+            .await
+            .unwrap()
+            .unwrap();
+        if interrupted {
+            assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE);
+        } else {
+            assert_eq!(status, StatusCode::OK);
+            assert_eq!(value["Ok"]["output_volume"], 0.75);
+        }
+    }
     // Screen publishing requires explicit state, even for an authorized speaker.
     screen_blocked(&mut a, &mut b).await;
     send(

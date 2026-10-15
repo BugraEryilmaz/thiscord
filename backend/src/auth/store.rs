@@ -319,8 +319,9 @@ fn enqueue_code(c: &mut PgConnection, a: &Account, purpose: &str) -> Result<(), 
             "Thiscord verify email (valid for 30 minutes):\n\n{link}\n\nClick the link to automatically verify your email. If you did not create a Thiscord account, ignore this email."
         )
     } else {
+        let link = super::verification::account_link(PASSWORD_RESET_PATH, &code)?;
         format!(
-            "Thiscord {purpose} code (valid for 30 minutes):\n\n{code}\n\nPaste this code in Thiscord. If you did not request it, ignore this email."
+            "Thiscord reset password (valid for 30 minutes):\n\n{link}\n\nClick the link to choose a new password in your browser.\n\nBackup reset code:\n\n{code}\n\nIf the link does not work, open Forgot password in Thiscord and select I already have a reset code. The link and code are single-use; using either invalidates both. If you did not request this, ignore this email."
         )
     };
     execute(
@@ -414,7 +415,7 @@ pub(super) fn dispatch(
             c.transaction(|c| {
                 let ids: Vec<AccountId> = query(c,"SELECT to_jsonb(id) AS data FROM accounts WHERE email=$1 AND email_verified FOR UPDATE", &[&address])?;
                 if let Some(id) = ids.first() { let a = account(c,*id)?; enqueue_code(c,&a,"reset")?; }
-                Ok(done("If a verified account exists, a reset code will be sent"))
+                Ok(done("If a verified account exists, we’ll email a link to reset your password in your browser, plus a backup code"))
             })
         }
         AccountRequest::VerifyEmail { code }
@@ -549,6 +550,19 @@ fn revoke_all(c: &mut PgConnection, id: AccountId) -> Result<(), Failure> {
     )?;
     Ok(())
 }
+pub(super) fn check_reset_code(pool: &DbPool, code: &str) -> Result<(), Failure> {
+    let valid: Vec<bool> = query(
+        &mut *connection(pool)?,
+        "SELECT to_jsonb(EXISTS(SELECT 1 FROM account_codes WHERE token_hash=$1 AND purpose='reset' AND expires_at>now())) AS data",
+        &[&digest(code)],
+    )?;
+    if valid == [true] {
+        Ok(())
+    } else {
+        Err(Failure::Unauthorized)
+    }
+}
+
 fn consume_code(
     c: &mut PgConnection,
     code: &str,

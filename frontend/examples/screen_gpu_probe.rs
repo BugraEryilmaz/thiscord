@@ -1,5 +1,14 @@
 //! Synthetic FP16 input only. No desktop capture, accounts or network.
 #[cfg(windows)]
+#[path = "screen_gpu_probe/quality.rs"]
+mod quality;
+#[cfg(windows)]
+#[path = "screen_gpu_probe/scene.rs"]
+mod scene;
+#[cfg(windows)]
+#[path = "screen_gpu_probe/throughput.rs"]
+mod throughput;
+#[cfg(windows)]
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     use std::{
         sync::Arc,
@@ -8,14 +17,35 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     use thiscord_frontend::screen::{gpu, hardware::HardwareEncoder};
     use windows::Win32::{
         Foundation::HMODULE,
-        Graphics::{Direct3D::*, Direct3D11::*, Dxgi::Common::*},
+        Graphics::{
+            Direct3D::*,
+            Direct3D11::*,
+            Dxgi::{Common::*, *},
+        },
     };
     unsafe {
+        let index = std::env::args().find_map(|arg| {
+            arg.strip_prefix("--adapter=")
+                .and_then(|s| s.parse::<u32>().ok())
+        });
+        let adapter = if let Some(index) = index {
+            Some(
+                CreateDXGIFactory1::<IDXGIFactory1>()?
+                    .EnumAdapters1(index)?
+                    .cast::<IDXGIAdapter>()?,
+            )
+        } else {
+            None
+        };
         let mut device = None;
         let mut context = None;
         D3D11CreateDevice(
-            None,
-            D3D_DRIVER_TYPE_HARDWARE,
+            adapter.as_ref(),
+            if adapter.is_some() {
+                D3D_DRIVER_TYPE_UNKNOWN
+            } else {
+                D3D_DRIVER_TYPE_HARDWARE
+            },
             HMODULE::default(),
             D3D11_CREATE_DEVICE_BGRA_SUPPORT,
             Some(&[D3D_FEATURE_LEVEL_11_1, D3D_FEATURE_LEVEL_11_0]),
@@ -25,6 +55,18 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             Some(&mut context),
         )?;
         let device = device.unwrap();
+        use windows::core::Interface;
+        let desc = device.cast::<IDXGIDevice>()?.GetAdapter()?.GetDesc()?;
+        println!(
+            "GPU adapter: {}",
+            String::from_utf16_lossy(
+                &desc.Description[..desc
+                    .Description
+                    .iter()
+                    .position(|&v| v == 0)
+                    .unwrap_or(desc.Description.len())]
+            )
+        );
         let context = context.unwrap();
         let _guard = gpu::ContextGuard::lock(&context)?;
         drop(_guard);
@@ -39,6 +81,12 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         }
         if std::env::args().any(|arg| arg == "--burst") {
             return burst_probe(&device, &context);
+        }
+        if std::env::args().any(|arg| arg == "--throughput") {
+            return throughput::run(&device, &context);
+        }
+        if std::env::args().any(|arg| arg == "--quality") {
+            return quality::run(&device, &context);
         }
         if std::env::args().any(|arg| arg == "--adaptive") {
             return adaptive_probe(&device, &context);

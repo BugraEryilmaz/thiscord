@@ -36,6 +36,7 @@ media compatibility spike can happen before chat to expose platform constraints.
 - [x] Registration, standard password login, logout and current-user API/UI.
 - [x] Argon2id password hashing, input validation and registration/login rate limits.
 - [x] Email verification, password change, forgotten-password and reset flows.
+- [x] Browser password-reset links with an in-app backup code and shared single-use lifecycle.
 - [x] Session expiry, rotation, revocation, multi-device management and logout-all.
 - [x] Desktop session storage using OS credential storage through Rust integration.
 - [x] Google OIDC authorization-code login with PKCE, state and nonce validation.
@@ -239,6 +240,8 @@ speaker isolation and physical acoustic acceptance remain future work.
 - [x] Replace existing same-account voice connections atomically; fence stale media/cleanup, stop displaced retries and reuse local connected/recovering jobs.
 - [x] Document WSL/Windows UDP addressing and firewall requirements.
 - [x] Automatic full peer reconnection with fresh offers and relay credentials.
+- [x] Authenticated signaling reattachment preserves media across brief socket loss,
+  with bounded grace, cancellation, sequence fencing and permission revalidation.
 - [ ] In-place ICE restart and proactive long-call relay credential refresh.
 - [x] Docker coturn deployment, shared-secret configuration and local relay tests.
 - [ ] Restrictive NAT, forced WebRTC relay fallback and off-site public UDP acceptance.
@@ -281,7 +284,8 @@ speaker isolation and physical acoustic acceptance remain future work.
 - [x] Compact connection-quality UI with local failure attribution and unavailable values.
 - [ ] In-app remote speaking indicators.
 - [ ] Overlay runtime acceptance in games, mixed-DPI monitors, macOS Spaces and Linux compositors.
-- [x] Automatic transport reconnection after network failure or server restart.
+- [x] Automatic media transport reconnection after failure; signaling recovery
+  preserves existing media, while expired/missing sessions require an explicit join.
 - [ ] Validate real network switching/server outages across native hosts; support
   explicit local device suspend/resume recovery without unexpected capture.
 - [ ] Multi-user acceptance on Windows/macOS/Linux with real microphones.
@@ -308,6 +312,8 @@ speaker isolation and physical acoustic acceptance remain future work.
   pacing and bounded recovery queues with loss/wrap/backlog/permission tests.
 - [x] Correct H.264 HRD buffer units, report driver acceptance and gate raw encoding
   on queued/in-flight bytes; synthetic large-frame backlog regression and NVIDIA probe.
+- [x] Reproducible 4K capture/playback, GPU headroom and fidelity probes; coarse-timer,
+  UDP-burst and encoder-event regressions, plus SFU 32/64 Mbit/s load validation.
 - [ ] Live HDR/SDR capture acceptance across Intel/AMD/NVIDIA and mixed-HDR displays.
 - [ ] Measured end-to-end 30/60 fps, high-resolution performance and real WebView
   hardware-decoder verification on Windows/macOS/Linux.

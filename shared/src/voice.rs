@@ -6,6 +6,8 @@ pub const ROOM_CAPACITY: usize = 8;
 pub const SSRC_BASE: u32 = 10_000;
 /// A displaced connection must never automatically take the call back.
 pub const REPLACED_CLOSE_CODE: u16 = 4001;
+/// A lost signaling transport may be reattached without renegotiating media.
+pub const SIGNALING_GRACE_SECS: u64 = 30;
 #[derive(Debug, Clone, Copy, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct JoinAttempt {
@@ -22,6 +24,13 @@ pub struct ClientFrame {
 #[derive(Clone, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case", deny_unknown_fields)]
 pub enum ClientEvent {
+    Resume {
+        token: String,
+        guild_id: GuildId,
+        channel_id: ChannelId,
+        resume_token: String,
+        sequence: u64,
+    },
     Join {
         token: String,
         guild_id: GuildId,
@@ -136,7 +145,14 @@ pub enum ServerEvent {
         screen_subscriptions: bool,
         #[serde(default)]
         ice_servers: Vec<IceServer>,
+        /// Secret capability bound to this media session; never persist or log it.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        resume_token: Option<String>,
     },
+    Resumed {},
+    /// The media session no longer exists. Only an explicit new join is allowed:
+    /// absence can also mean a moderator ended the call while signaling was lost.
+    ResumeUnavailable {},
     Participants {
         members: Vec<Participant>,
     },
@@ -234,6 +250,39 @@ impl MediaKind {
 #[cfg(test)]
 mod media_tests {
     use super::*;
+    #[test]
+    fn resume_contract_and_legacy_offer_remain_compatible() {
+        let wire = serde_json::json!({"version":1,"event":{
+            "type":"resume", "token":"test-session", "resume_token":"test-capability", "sequence":2,
+            "guild_id":"00000000-0000-0000-0000-000000000001",
+            "channel_id":"00000000-0000-0000-0000-000000000002"
+        }});
+        let frame: ClientFrame = serde_json::from_value(wire.clone()).unwrap();
+        assert!(matches!(
+            &frame.event,
+            ClientEvent::Resume { sequence: 2, .. }
+        ));
+        assert_eq!(serde_json::to_value(frame).unwrap(), wire);
+        let legacy: ServerEvent = serde_json::from_value(serde_json::json!({
+            "type":"offer","sdp":"test","slot":0,"can_speak":true
+        }))
+        .unwrap();
+        assert!(matches!(
+            legacy,
+            ServerEvent::Offer {
+                resume_token: None,
+                ..
+            }
+        ));
+        assert_eq!(
+            serde_json::to_value(ServerEvent::Resumed {}).unwrap(),
+            serde_json::json!({"type":"resumed"})
+        );
+        assert_eq!(
+            serde_json::to_value(ServerEvent::ResumeUnavailable {}).unwrap(),
+            serde_json::json!({"type":"resume_unavailable"})
+        );
+    }
     #[test]
     fn join_attempt_is_optional_for_old_clients_and_replacement_is_typed() {
         let legacy = serde_json::json!({"version":1,"event":{

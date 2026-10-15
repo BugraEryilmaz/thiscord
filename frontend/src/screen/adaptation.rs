@@ -78,6 +78,18 @@ impl Receiver {
 mod tests {
     use super::*;
     #[test]
+    fn healthy_viewer_attempts_selected_4k60_immediately() {
+        let quality = thiscord_shared::screen::Quality {
+            height: 2160,
+            fps: 60,
+        };
+        let mut receiver = Receiver::default();
+        for _ in 0..120 {
+            assert_eq!(quality.constrained(receiver.bitrate()), quality);
+            receiver.sample(false, true);
+        }
+    }
+    #[test]
     fn congestion_reduces_budget_and_recovery_requires_sustained_health() {
         let mut receiver = Receiver::default();
         for _ in 0..3 {

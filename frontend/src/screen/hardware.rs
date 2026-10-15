@@ -8,7 +8,7 @@ use std::{
     mem::ManuallyDrop,
     ptr,
     rc::Rc,
-    sync::Arc,
+    sync::{Arc, Mutex},
     time::{Duration, Instant},
 };
 use thiscord_shared::screen::{MAX_FRAME_BYTES, Quality};
@@ -21,7 +21,7 @@ use windows::{
             Variant::VARIANT,
         },
     },
-    core::{Interface, Result},
+    core::{AgileReference, Interface, Result},
 };
 
 struct Runtime(PhantomData<Rc<()>>);
@@ -48,6 +48,7 @@ impl Drop for Runtime {
 pub struct HardwareEncoder {
     transform: IMFTransform,
     events: IMFMediaEventGenerator,
+    notification: Option<EventNotification>,
     codec: ICodecAPI,
     input: u32,
     output: u32,
@@ -63,6 +64,31 @@ pub struct HardwareEncoder {
     _manager: Option<IMFDXGIDeviceManager>,
     surfaces: Vec<(u64, Arc<ID3D11Texture2D>)>,
     _runtime: Runtime,
+}
+// One outstanding asynchronous request, rearmed only by the encoder thread.
+// The MF callback never touches the transform or textures and owns no reference
+// back to the event generator. Shutdown can therefore break every COM reference.
+struct EventNotification {
+    callback: IMFAsyncCallback,
+    result: EventResult,
+}
+type EventResult = Arc<Mutex<Option<Result<AgileReference<IMFAsyncResult>>>>>;
+#[windows::core::implement(IMFAsyncCallback)]
+struct EventCallback {
+    result: EventResult,
+    wake: Box<dyn Fn() + Send + Sync>,
+}
+impl IMFAsyncCallback_Impl for EventCallback_Impl {
+    fn GetParameters(&self, _: *mut u32, _: *mut u32) -> Result<()> {
+        Err(windows::core::Error::from_hresult(
+            windows::Win32::Foundation::E_NOTIMPL,
+        ))
+    }
+    fn Invoke(&self, result: windows::core::Ref<IMFAsyncResult>) -> Result<()> {
+        *self.result.lock().unwrap() = Some(AgileReference::new(result.as_ref().ok_or_else(fail)?));
+        (self.wake)();
+        Ok(())
+    }
 }
 struct Configuration {
     events: IMFMediaEventGenerator,
@@ -82,13 +108,15 @@ pub fn buffer_bytes(bitrate: u32) -> u32 {
 pub struct Encoded {
     pub data: Vec<u8>,
     pub timestamp: u64,
+    /// MFT input submission to output retrieval, excluding raw capture waiting.
+    pub encoding_duration: Duration,
 }
 fn fail() -> windows::core::Error {
     windows::core::Error::from_hresult(windows::Win32::Foundation::E_FAIL)
 }
 impl HardwareEncoder {
     pub fn new(width: usize, height: usize, quality: Quality) -> Result<Self> {
-        Self::create(width, height, quality, None)
+        Self::create(width, height, quality, None, Some(0))
     }
     pub fn new_gpu(
         width: usize,
@@ -96,13 +124,28 @@ impl HardwareEncoder {
         quality: Quality,
         device: &ID3D11Device,
     ) -> Result<Self> {
-        Self::create(width, height, quality, Some(device))
+        Self::create(width, height, quality, Some(device), Some(0))
+    }
+    /// Diagnostic comparison at identical dimensions/rate. `None` leaves the
+    /// driver's complexity default untouched; production uses the speed hint.
+    pub fn new_gpu_with_quality_speed(
+        width: usize,
+        height: usize,
+        quality: Quality,
+        device: &ID3D11Device,
+        quality_speed: Option<u32>,
+    ) -> Result<Self> {
+        if quality_speed.is_some_and(|v| v > 100) {
+            return Err(fail());
+        }
+        Self::create(width, height, quality, Some(device), quality_speed)
     }
     fn create(
         width: usize,
         height: usize,
         quality: Quality,
         device: Option<&ID3D11Device>,
+        quality_speed: Option<u32>,
     ) -> Result<Self> {
         if !quality.encoding_valid()
             || width < 2
@@ -173,7 +216,7 @@ impl HardwareEncoder {
         for activation in activations {
             let transform: Result<IMFTransform> = unsafe { activation.ActivateObject() };
             if let Ok(transform) = transform {
-                match Self::configure(&transform, width, height, quality, device) {
+                match Self::configure(&transform, width, height, quality, device, quality_speed) {
                     Ok(config) => {
                         let name = unsafe {
                             let mut text = [0u16; 256];
@@ -193,6 +236,7 @@ impl HardwareEncoder {
                         return Ok(Self {
                             transform,
                             events: config.events,
+                            notification: None,
                             codec: config.codec,
                             input: config.input,
                             output: config.output,
@@ -224,6 +268,7 @@ impl HardwareEncoder {
         height: usize,
         quality: Quality,
         device: Option<&ID3D11Device>,
+        quality_speed: Option<u32>,
     ) -> Result<Configuration> {
         unsafe {
             let attributes = transform.GetAttributes()?;
@@ -247,6 +292,11 @@ impl HardwareEncoder {
             let codec = transform.cast::<ICodecAPI>()?;
             // Baseline + low latency prevents frame reordering on the RTP path.
             codec.SetValue(&CODECAPI_AVLowLatencyMode, &VARIANT::from(true))?;
+            // Interactive capture favors the hardware's low-complexity path.
+            // This optional hint never changes resolution, FPS or bitrate.
+            if let Some(value) = quality_speed {
+                let _ = codec.SetValue(&CODECAPI_AVEncCommonQualityVsSpeed, &VARIANT::from(value));
+            }
             let _ = codec.SetValue(&CODECAPI_AVEncMPVDefaultBPictureCount, &VARIANT::from(0u32));
             codec.SetValue(
                 &CODECAPI_AVEncCommonRateControlMode,
@@ -313,11 +363,34 @@ impl HardwareEncoder {
             .ok()
             .and_then(|value| u32::try_from(&value).ok())
     }
+    pub fn quality_vs_speed(&self) -> Option<u32> {
+        unsafe { self.codec.GetValue(&CODECAPI_AVEncCommonQualityVsSpeed) }
+            .ok()
+            .and_then(|value| u32::try_from(&value).ok())
+    }
     pub fn force_keyframe(&self) -> Result<()> {
         unsafe {
             self.codec
                 .SetValue(&CODECAPI_AVEncVideoForceKeyFrame, &VARIANT::from(1u32))
         }
+    }
+    /// Wake capture's worker as soon as input credit or encoded output arrives.
+    /// Timer polling can add a full Windows scheduler tick to every frame.
+    pub fn notify(&mut self, wake: impl Fn() + Send + Sync + 'static) -> Result<()> {
+        if self.notification.is_some() {
+            return Err(fail());
+        }
+        let result = Arc::new(Mutex::new(None));
+        let callback: IMFAsyncCallback = EventCallback {
+            result: result.clone(),
+            wake: Box::new(wake),
+        }
+        .into();
+        unsafe {
+            self.events.BeginGetEvent(&callback, None)?;
+        }
+        self.notification = Some(EventNotification { callback, result });
+        Ok(())
     }
     /// Nonblocking event drain with bounded output. No MFT GetEvent may block
     /// cancellation indefinitely. NeedInput credits persist between calls.
@@ -331,10 +404,21 @@ impl HardwareEncoder {
         }
         let mut output = Vec::new();
         for _ in 0..32 {
-            let event = match unsafe { self.events.GetEvent(MF_EVENT_FLAG_NO_WAIT) } {
-                Ok(event) => event,
-                Err(e) if e.code() == MF_E_NO_EVENTS_AVAILABLE => break,
-                Err(e) => return Err(e),
+            let event = if let Some(notification) = &self.notification {
+                let Some(result) = notification.result.lock().unwrap().take() else {
+                    break;
+                };
+                let event = unsafe { self.events.EndGetEvent(&result?.resolve()?)? };
+                unsafe {
+                    self.events.BeginGetEvent(&notification.callback, None)?;
+                }
+                event
+            } else {
+                match unsafe { self.events.GetEvent(MF_EVENT_FLAG_NO_WAIT) } {
+                    Ok(event) => event,
+                    Err(e) if e.code() == MF_E_NO_EVENTS_AVAILABLE => break,
+                    Err(e) => return Err(e),
+                }
             };
             unsafe {
                 event.GetStatus()?.ok()?;
@@ -460,17 +544,18 @@ impl HardwareEncoder {
             }
             let sample = sample.ok_or_else(fail)?;
             let time = sample.GetSampleTime()?;
-            if let Some(index) = self
+            let encoding_duration = if let Some(index) = self
                 .pending
                 .iter()
                 .position(|(timestamp, _)| *timestamp == (time as u64 / 10))
             {
-                self.pending.remove(index);
+                let (_, submitted) = self.pending.remove(index).ok_or_else(fail)?;
                 self.surfaces
                     .retain(|(stamp, _)| *stamp != time as u64 / 10);
+                submitted.elapsed()
             } else {
                 return Err(fail());
-            }
+            };
             let buffer = sample.ConvertToContiguousBuffer()?;
             let length = buffer.GetCurrentLength()? as usize;
             if length > MAX_FRAME_BYTES || time < 0 {
@@ -510,6 +595,7 @@ impl HardwareEncoder {
             Ok(Some(Encoded {
                 data: bytes,
                 timestamp: time as u64 / 10,
+                encoding_duration,
             }))
         }
     }
@@ -530,6 +616,59 @@ impl Drop for HardwareEncoder {
 
 #[cfg(test)]
 mod tests {
+    use super::*;
+    #[test]
+    fn asynchronous_events_wake_worker_and_release_after_shutdown() {
+        let _runtime = Runtime::new().unwrap();
+        let queue = unsafe { MFCreateEventQueue().unwrap() };
+        let result: EventResult = Arc::new(Mutex::new(None));
+        let (wake, receiving) = std::sync::mpsc::sync_channel(1);
+        let callback: IMFAsyncCallback = EventCallback {
+            result: result.clone(),
+            wake: Box::new(move || {
+                let _ = wake.try_send(());
+            }),
+        }
+        .into();
+        for kind in [METransformNeedInput, METransformHaveOutput] {
+            unsafe {
+                queue.BeginGetEvent(&callback, None).unwrap();
+                let event = MFCreateMediaEvent(
+                    kind.0 as u32,
+                    &windows::core::GUID::zeroed(),
+                    windows::Win32::Foundation::S_OK,
+                    None,
+                )
+                .unwrap();
+                queue.QueueEvent(&event).unwrap();
+            }
+            receiving
+                .recv_timeout(Duration::from_secs(2))
+                .expect("MFT callback did not wake worker");
+            let event_result = result
+                .lock()
+                .unwrap()
+                .take()
+                .unwrap()
+                .unwrap()
+                .resolve()
+                .unwrap();
+            let event = unsafe { queue.EndGetEvent(&event_result).unwrap() };
+            assert_eq!(unsafe { event.GetType().unwrap() }, kind.0 as u32);
+        }
+        // Cancel an outstanding request just as capture pause/reconfiguration
+        // does. Neither callback nor result retains a reference to the encoder.
+        unsafe {
+            queue.BeginGetEvent(&callback, None).unwrap();
+            queue.Shutdown().unwrap();
+        }
+        drop(queue);
+        drop(callback);
+        assert!(matches!(
+            receiving.recv_timeout(Duration::from_secs(2)),
+            Err(std::sync::mpsc::RecvTimeoutError::Disconnected)
+        ));
+    }
     #[test]
     fn h264_buffer_uses_bytes_and_leaves_sender_deadline_headroom() {
         assert_eq!(super::buffer_bytes(18_000_000), 225_000);

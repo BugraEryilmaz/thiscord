@@ -5,6 +5,7 @@ use std::{io, net::SocketAddr, time::Duration};
 use thiscord_frontend::audio::connection::Connection;
 use thiscord_frontend::audio::reconnect::Failure;
 pub(crate) mod diagnostics;
+pub(crate) mod recovery;
 use tokio::{net::TcpStream, time::timeout};
 use tokio_tungstenite::{
     MaybeTlsStream, WebSocketStream,
@@ -16,6 +17,24 @@ const TCP_TIMEOUT: Duration = Duration::from_secs(10);
 const HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(10);
 type Socket = WebSocketStream<MaybeTlsStream<TcpStream>>;
 pub type Sender = futures_util::stream::SplitSink<Socket, tokio_tungstenite::tungstenite::Message>;
+
+/// Control frames can arrive before the offer as well as during an active call.
+/// Reading again flushes tungstenite's automatic Pong; callers retain their
+/// existing negotiation timeout or select-based cancellation.
+pub async fn next_data<S>(
+    stream: &mut S,
+) -> Option<Result<tokio_tungstenite::tungstenite::Message, Error>>
+where
+    S: futures_util::Stream<Item = Result<tokio_tungstenite::tungstenite::Message, Error>> + Unpin,
+{
+    use tokio_tungstenite::tungstenite::Message;
+    loop {
+        match stream.next().await {
+            Some(Ok(Message::Ping(_) | Message::Pong(_))) => continue,
+            result => return result,
+        }
+    }
+}
 
 fn endpoint(base: &str) -> Result<url::Url, String> {
     let mut url = url::Url::parse(base).map_err(|_| "Invalid voice server URL")?;
@@ -230,6 +249,45 @@ async fn connect_with_deadlines(
 mod tests {
     use super::*;
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+    #[tokio::test]
+    async fn offer_reader_answers_protocol_ping_and_ignores_unsolicited_pong() {
+        use futures_util::SinkExt;
+        use tokio_tungstenite::tungstenite::Message;
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let base = format!("http://{}", listener.local_addr().unwrap());
+        let server = tokio::spawn(async move {
+            let (tcp, _) = listener.accept().await.unwrap();
+            let mut socket = tokio_tungstenite::accept_async(tcp).await.unwrap();
+            socket
+                .send(Message::Ping(b"probe".as_slice().into()))
+                .await
+                .unwrap();
+            // Don't send the offer until the client has flushed its automatic reply.
+            let pong = tokio::time::timeout(Duration::from_secs(2), socket.next())
+                .await
+                .unwrap()
+                .unwrap()
+                .unwrap();
+            assert!(matches!(pong, Message::Pong(bytes) if bytes.as_ref() == b"probe"));
+            socket
+                .send(Message::Pong(b"unsolicited".as_slice().into()))
+                .await
+                .unwrap();
+            socket.send(Message::Text("offer".into())).await.unwrap();
+            socket.close(None).await.unwrap();
+        });
+        let (_send, mut receive) = connect(&base).await.unwrap().split();
+        let frame = tokio::time::timeout(Duration::from_secs(3), next_data(&mut receive))
+            .await
+            .unwrap()
+            .unwrap()
+            .unwrap();
+        assert_eq!(frame.to_text().unwrap(), "offer");
+        // Filtering controls must preserve the terminal close frame.
+        assert!(next_data(&mut receive).await.unwrap().unwrap().is_close());
+        server.await.unwrap();
+    }
 
     #[test]
     fn endpoint_does_not_expose_credentials_queries_or_fragments() {

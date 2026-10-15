@@ -14,7 +14,7 @@ pub fn transport_bitrate(codec_bitrate: u32) -> u32 {
 /// Count unsent wire bytes, including the frame currently being paced. Frame
 /// count alone cannot distinguish a small delta from a 500 KB scene change.
 /// This is raw-input admission, not an encoded-frame size/drop limit.
-pub const BACKLOG_BUDGET_MS: u32 = 50;
+pub const BACKLOG_BUDGET_MS: u32 = 100;
 pub struct SendBudget {
     outstanding: Arc<AtomicUsize>,
     limit: usize,
@@ -74,10 +74,15 @@ impl Pacer {
         }
     }
     pub fn reserve(&mut self, now: Instant, bytes: usize) -> Instant {
-        // At most 8 ms of burst credit amortizes OS timer resolution. A stall
-        // never accumulates an entire frame/second of catch-up credit.
+        // Keep at most one 16 ms OS timer tick of credit. An 8 ms sleep can
+        // wake after 15.6 ms on Windows; capping credit at 8 ms discarded
+        // half the byte budget every batch. Long stalls still cannot release
+        // an unbounded catch-up burst.
         let quantum = Duration::from_millis(8);
-        let at = self.next.unwrap_or(now).max(now - quantum);
+        let at = self
+            .next
+            .unwrap_or(now)
+            .max(now - Duration::from_millis(16));
         self.next =
             Some(at + Duration::from_secs_f64(bytes as f64 / self.bytes_per_second.max(1) as f64));
         if at <= now {
@@ -113,7 +118,7 @@ mod tests {
         let budget = SendBudget::new(transport_bitrate(18_000_000));
         let mut frame = budget.track(555_000);
         assert!(!budget.has_capacity());
-        frame.sent(420_001);
+        frame.sent(300_001);
         assert!(budget.has_capacity());
         let queued = budget.track(40_000);
         assert!(!budget.has_capacity());
@@ -126,7 +131,7 @@ mod tests {
 
     #[test]
     fn large_frame_trace_avoids_stale_dependencies_without_faster_pacing() {
-        // Replay repeated 524 KB access units (~555 KB with RTP overhead) at
+        // Replay repeated 700 KB wire bursts at
         // 60 fps. A coarse 9 ms wake models the reported Windows pacing sleeps.
         // Compare old slot-only admission with the same pacer plus byte admission.
         fn replay(byte_admission: bool) -> (usize, usize) {
@@ -149,7 +154,7 @@ mod tests {
                 while *next <= now && *captured < 300 {
                     if queue.len() < 12 && (!byte_admission || budget.has_capacity()) {
                         let bytes = if (*captured).is_multiple_of(60) {
-                            555_000
+                            700_000
                         } else {
                             35_000
                         };
@@ -224,7 +229,7 @@ mod tests {
         assert_eq!(p.reserve(now, 1000), now + Duration::from_millis(8));
         let later = now + Duration::from_secs(1);
         assert_eq!(p.reserve(later, 1000), later);
-        for _ in 0..8 {
+        for _ in 0..16 {
             assert_eq!(p.reserve(later, 1000), later);
         }
         assert_eq!(p.reserve(later, 1000), later + Duration::from_millis(8));
@@ -247,6 +252,24 @@ mod tests {
         assert!(
             sleeps < 150,
             "must batch instead of sleeping for every packet"
+        );
+    }
+    #[test]
+    fn windows_sixteen_ms_wakes_preserve_the_full_bitrate() {
+        let start = Instant::now();
+        let mut now = start;
+        let mut pacer = Pacer::new(transport_bitrate(32_000_000));
+        // A ready 4.8 MB stream must take one second even when each nominal
+        // 8 ms sleep returns at the next 16 ms scheduler tick. The old 8 ms
+        // credit ceiling discarded half the available transport capacity.
+        for _ in 0..4000 {
+            if pacer.reserve(now, 1200) > now {
+                now += Duration::from_millis(16);
+            }
+        }
+        assert!(
+            (Duration::from_millis(990)..=Duration::from_millis(1024))
+                .contains(&now.duration_since(start))
         );
     }
 }

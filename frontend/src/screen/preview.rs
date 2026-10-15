@@ -64,6 +64,9 @@ impl Preview {
         let connected = Arc::new(AtomicBool::new(false));
         let peer: Arc<dyn PeerConnection> = Arc::new(
             PeerConnectionBuilder::new()
+                .with_runtime(Arc::new(
+                    crate::audio::media_runtime::MediaRuntime::default(),
+                ))
                 .with_media_engine(media)
                 .with_interceptor_registry(registry)
                 .with_handler(Arc::new(Handler {
@@ -198,7 +201,7 @@ mod tests {
             },RtpCodecKind::Video).unwrap();
             let gathered = Arc::new(Notify::new());
             let (packets, mut received) = tokio::sync::mpsc::channel(128);
-            let receiver = PeerConnectionBuilder::new()
+            let receiver = PeerConnectionBuilder::new().with_runtime(Arc::new(crate::audio::media_runtime::MediaRuntime::default()))
                 .with_media_engine(media)
                 .with_handler(Arc::new(Receiver {
                     gathered: gathered.clone(),

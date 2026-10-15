@@ -853,35 +853,48 @@ No media permit survives a pending transport poll. Each receiver gets only its
 channel's streams; own audio is not looped back. Self mute/deafen is enforced by
 the SFU. This assumes a single backend process.
 
-Temporary signaling/ICE/heartbeat/media-write failures now reconnect automatically.
-The selected room stays in the voice bar with a reconnect message and an available
-Disconnect button. Each retry obtains a new authenticated offer, current permissions
-and fresh ICE/TURN configuration, creates a new peer and reopens local audio using
-the latest settings. The old peer, media readers, devices and debug recording are
-closed first. This is full reconnection, not in-place ICE restart. Participant
-snapshots are rebuilt, and saved per-speaker volumes are restored for the new
-connection; master volume, mute/deafen and processing settings persist.
+After negotiation, transient signaling failures recover independently of media.
+The native signaling worker drops only the failed WebSocket and sends authenticated
+`Resume` requests using the secret capability supplied in the original Offer.
+It never sends Join. The same peer, RTP tracks, audio devices, native audio
+heartbeat, mute/deafen processing and screen capture continue running. The UI
+shows "Recovering voice signaling..." while keeping the room connected.
 
-Each attempt retains its signaling sender through failures and cancellation.
-Cleanup sends an explicit Leave followed by a WebSocket close, with a 500 ms
-deadline, before retrying. Dropping only the TCP socket through a proxy can leave
-the origin's old membership alive for its 20-second heartbeat timeout. A new
-authorized join for the same account and channel now replaces that membership
-atomically, including when the room is full. Old ingress/egress, signaling state
-changes and cleanup are fenced off before the new member occupies its slot.
-The old socket receives `replaced` and close code 4001, which ends client retries.
-Cleanup remains best effort when signaling is unreachable. Diagnostic logs record
-fixed failure categories, peer-state transitions,
-retry delays and whether signaling cleanup was sent, without logging error bodies.
+The backend keeps detached media for up to 30 seconds after detecting transport
+loss (or after its 20-second signaling silence detector fires). Access refresh,
+revocation and publisher/receiver authorization continue during that grace period.
+Resume checks the account token, current guild/channel permissions, original
+session access, media capability and an increasing sequence number before handing
+one bounded socket to the media owner. The owner rechecks access and membership
+before acknowledging. A new socket can supersede an apparently healthy old socket;
+this covers a proxy losing only its client-facing leg. A lost acknowledgement can
+be retried with a higher sequence. Stale requests cannot evict an acknowledged
+newer socket, and a replaced call cannot resume into its replacement's media.
+Capabilities stay in memory and are never logged. Resume has a separate rate limit
+of 30 authenticated requests per account per minute.
 
-Retries use 1/2/4/8/16/30-second backoff plus up to 500 ms jitter, capped thereafter;
-30 seconds of connected audio resets the backoff. They continue until successful or
-cancelled. DNS/TCP failures, timeouts, HTTP 429/5xx and transient server errors
-are retryable. Replacement notifications and legacy duplicate-join errors are
-terminal. A disconnected media state keeps the
-existing peer and lets ICE recover; only Failed/Closed or an actual signaling or
-transport failure triggers replacement. Every attempt still passes the backend's
-join rate limits and current authorization checks.
+The client attempts immediate signaling recovery, then retries with roughly
+0.5-1 second backoff and jitter, with a five-second limit per attempt and a
+20-second overall deadline. Resumed is followed by fresh participant snapshots;
+the client resends current mute/deafen, screen state and subscriptions instead of
+replaying commands queued during the outage. Leaving cancels recovery immediately.
+Missing/revoked/replaced sessions and exhausted recovery end the call and require
+an explicit join. In particular, an unavailable session must not automatically
+rejoin: a moderator may have disconnected it while signaling was lost.
+
+ICE/media-write failures still use full reconnection with fresh authorization,
+offers and ICE/TURN configuration. The old media and devices close before a new
+peer starts. A recoverable ICE Disconnected state retains the existing peer.
+Full retries use 1/2/4/8/16/30-second backoff plus up to 500 ms jitter; 30 seconds
+of connected audio resets the backoff. Authentication, policy/protocol errors and
+replacement notifications are terminal. Older servers without a resume capability
+retain the previous full-reconnection behavior. Deploy the backend first.
+
+Explicit Disconnect/logout closes signaling with Leave and a bounded close
+handshake. A new authorized Join for the same account and channel still replaces
+its membership atomically, including in a full room. Old media, state changes and
+cleanup are fenced off before the replacement occupies its slot. The old socket
+receives `replaced` and close code 4001 when reachable.
 
 A single native task owns each call through negotiation, connected media, device
 or ICE recovery and retry backoff. Repeated joins to that same channel are
@@ -951,7 +964,18 @@ protocol category (including `reset_without_closing_handshake`), capacity limits
 TLS category or HTTP status. Close events include the numeric close code;
 `voice_server_error` includes the wire error code and error request ID.
 `voice_signaling_closed` records whether cleanup succeeded, failed or timed out.
-Cancellation is recorded separately from a failed attempt.
+Cancellation is recorded separately from a failed attempt. Signaling-only recovery
+logs `voice_signaling_recovery_started` and `voice_signaling_recovered` on the
+client; server detach/reattach events correlate the new upgrade request ID with
+the original media request ID and sequence, without recording the capability.
+
+WebSocket Ping/Pong control frames are accepted before Join, before Answer and
+during a call; they are never decoded as JSON voice commands. The transport
+automatically replies to Ping. Backend control frames refresh receive liveness,
+have a separate limit of 30 frames per second, and appear as `received_pings` and
+`received_pongs` in the final lifecycle event. Exceeding that limit records
+`signaling_control_rate_limit`. The native client's offer reader also accepts
+control frames while retaining its negotiation deadline.
 
 `audio_processing_failed` includes a typed stage/code, current processing options
 and device health. It distinguishes non-finite input/output, Sonora render/capture

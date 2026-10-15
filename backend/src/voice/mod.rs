@@ -5,6 +5,7 @@ mod egress;
 mod ice;
 mod logging;
 mod membership;
+mod resumption;
 mod store;
 mod viewing;
 use crate::{auth::Failure, db::DbPool};
@@ -12,7 +13,7 @@ use axum::{
     Extension, Router,
     extract::{
         State, WebSocketUpgrade,
-        ws::{Message, WebSocket, rejection::WebSocketUpgradeRejection},
+        ws::{Message, rejection::WebSocketUpgradeRejection},
     },
     http::{HeaderMap, HeaderValue},
     response::{IntoResponse, Response},
@@ -45,6 +46,7 @@ use webrtc::{
 
 #[derive(Clone)]
 struct Member {
+    resumption: Option<resumption::Handle>,
     request_id: RequestId,
     call_id: Option<RequestId>,
     replaced: watch::Sender<bool>,
@@ -217,7 +219,8 @@ async fn upgrade(
     ws.max_message_size(128 * 1024)
         .max_frame_size(128 * 1024)
         .on_upgrade(move |socket| async move {
-            let _permit = permit;
+            let mut socket = logging::Socket::new(socket, id);
+            socket.permit = Some(permit);
             serve(socket, pool, id).await
         })
         .into_response()
@@ -230,12 +233,17 @@ async fn send(socket: &mut logging::Socket, event: ServerEvent) -> Result<(), ()
     .map_err(|_| {
         socket.end("signaling_serialize_failed");
     })?;
-    tokio::time::timeout(
+    let result = tokio::time::timeout(
         Duration::from_secs(2),
         socket.send(Message::Text(text.into())),
     )
-    .await
-    .map_err(|_| {
+    .await;
+    if result.is_err() && socket.recoverable {
+        socket.end("signaling_send_timeout");
+        socket.detach();
+        return Ok(());
+    }
+    result.map_err(|_| {
         socket.end("signaling_send_timeout");
         tracing::warn!(request_id = %socket.id, stage = socket.stage, "voice signaling send timed out");
     })?
@@ -620,19 +628,39 @@ async fn log_selected_route(pc: &dyn PeerConnection, id: RequestId) -> bool {
     }
     false
 }
-async fn serve(socket: WebSocket, pool: DbPool, id: RequestId) {
-    let mut socket = logging::Socket::new(socket, id);
+async fn serve(mut socket: logging::Socket, pool: DbPool, id: RequestId) {
     let Ok(Some(Ok(first))) = tokio::time::timeout(Duration::from_secs(5), socket.recv()).await
     else {
         socket.end("join_timeout");
         return;
     };
+    let first = parse(first);
+    if let Some(ClientEvent::Resume {
+        token,
+        guild_id,
+        channel_id,
+        resume_token,
+        sequence,
+    }) = first
+    {
+        resumption::attach(
+            socket,
+            &pool,
+            token,
+            guild_id,
+            channel_id,
+            resume_token,
+            sequence,
+        )
+        .await;
+        return;
+    }
     let Some(ClientEvent::Join {
         token,
         guild_id,
         channel_id,
         attempt,
-    }) = parse(first)
+    }) = first
     else {
         fail(
             &mut socket,
@@ -711,9 +739,12 @@ async fn serve(socket: WebSocket, pool: DbPool, id: RequestId) {
         .fetch_add(1, Ordering::Relaxed)
         .wrapping_add(1);
     let (replaced_tx, mut replaced) = watch::channel(false);
+    let (resume_handle, mut resumes) = resumption::channel(guild_id);
+    let resume_token = resume_handle.secret.clone();
     let slot = match membership::admit(
         &room,
         Member {
+            resumption: Some(resume_handle),
             request_id: id,
             call_id: attempt.map(|a| a.call_id),
             replaced: replaced_tx,
@@ -848,6 +879,7 @@ async fn serve(socket: WebSocket, pool: DbPool, id: RequestId) {
                     screen_feedback: true,
                     screen_subscriptions: true,
                     ice_servers,
+                    resume_token: Some(resume_token),
                 },
             )
             .await?;
@@ -891,6 +923,7 @@ async fn serve(socket: WebSocket, pool: DbPool, id: RequestId) {
         result = negotiated => Some(result),
     };
     if matches!(negotiated, Some(Ok(Ok(())))) {
+        socket.recoverable = true;
         socket.stage = "active";
         tracing::info!(request_id = %id, "voice signaling negotiated");
         let relay_room = room.clone();
@@ -1011,7 +1044,6 @@ async fn serve(socket: WebSocket, pool: DbPool, id: RequestId) {
             (None, mpsc::channel(1).1)
         };
         let mut audio_call: Option<crate::admin::audio::Call> = None;
-        let mut last = Instant::now();
         let mut budget = 0;
         let mut audio_reply_budget = 0;
         let mut route_logged = false;
@@ -1019,6 +1051,27 @@ async fn serve(socket: WebSocket, pool: DbPool, id: RequestId) {
         loop {
             tokio::select! {biased;
                 _ = async { let _ = replaced.wait_for(|value| *value).await; } => break,
+                Some(mut resume) = resumes.recv() => {
+                    if socket.recovery_expired() {
+                        let _ = send(&mut resume.socket, ServerEvent::ResumeUnavailable {}).await;
+                        break;
+                    }
+                    if !resumption::current(&room, slot, source_id, resume.sequence).await { continue; }
+                    if let Err(error) = access.refresh(&room, slot, &mut changed).await {
+                        let request_id = resume.socket.id;
+                        access_failed(&mut resume.socket, request_id, error).await;
+                        break;
+                    }
+                    socket.end("signaling_reattached");
+                    tracing::info!(request_id = %resume.socket.id, media_request_id = %id, sequence = resume.sequence, "voice signaling reattached");
+                    socket = resume.socket;
+                    socket.stage = "active";
+                    socket.recoverable = true;
+                    budget = 0;
+                    audio_reply_budget = 0;
+                    if let Some(call) = audio_call.take() { call.reject(Failure::Unavailable); }
+                    if send(&mut socket, ServerEvent::Resumed {}).await.is_err() { break; }
+                },
                 result=changed.changed()=>{
                     if result.is_err(){socket.end("access_watcher_closed");break;}
                     if let Err(error)=access.refresh(&room,slot,&mut changed).await {
@@ -1033,6 +1086,7 @@ async fn serve(socket: WebSocket, pool: DbPool, id: RequestId) {
                     if allowed && send(&mut socket, ServerEvent::ScreenKeyframe { epoch }).await.is_err() { break; }
                 },
                 Some(call)=audio_requests.recv()=>{
+                    if socket.detached() { call.reject(Failure::Unavailable); continue; }
                     if audio_call.as_ref().is_some_and(|c| !c.expired()) { call.reject(Failure::Limited); continue; }
                     if call.expired() { continue; }
                     let Some(_admin_delivery) = call.authorized.clone().deliver() else { call.reject(Failure::Forbidden); continue; };
@@ -1044,7 +1098,7 @@ async fn serve(socket: WebSocket, pool: DbPool, id: RequestId) {
                     audio_call = Some(call);
                 },
                 message=socket.recv()=>{
-                    let Some(Ok(message))=message else{break;};last=Instant::now();
+                    let Some(Ok(message))=message else{break;};
                     let event = parse(message);
                     if let Some(ClientEvent::AudioReply { request_id, chunk, done }) = event {
                         audio_reply_budget += 1;
@@ -1071,7 +1125,8 @@ async fn serve(socket: WebSocket, pool: DbPool, id: RequestId) {
                     }
                     budget=0;
                     audio_reply_budget=0;
-                    if last.elapsed()>Duration::from_secs(20){socket.end("signaling_heartbeat_timeout");break;}
+                    if socket.recovery_expired(){socket.end("signaling_recovery_expired");break;}
+                    if socket.silent_for()>Duration::from_secs(20){socket.detach();}
                     if !active.load(Ordering::Acquire){socket.end("media_inactive");break;}
                     let members=match access.refresh(&room,slot,&mut changed).await {
                         Ok(members)=>members,
@@ -1245,6 +1300,7 @@ mod send_tests {
             room.members.write().await.insert(
                 slot,
                 Member {
+                    resumption: None,
                     request_id: RequestId::from_uuid(uuid::Uuid::new_v4()),
                     call_id: None,
                     replaced: watch::channel(false).0,
