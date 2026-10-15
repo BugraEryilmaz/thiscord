@@ -106,7 +106,7 @@ fn mail_value(db: &Database, purpose: &str) -> String {
 }
 fn code(db: &Database, purpose: &str) -> String {
     let value = mail_value(db, purpose);
-    if purpose == "verify" {
+    if matches!(purpose, "verify" | "reset") {
         url::Url::parse(&value)
             .unwrap()
             .query_pairs()
@@ -117,6 +117,329 @@ fn code(db: &Database, purpose: &str) -> String {
     } else {
         value
     }
+}
+
+async fn reset_page(
+    app: &Router,
+    method: &str,
+    uri: &str,
+    fields: &[(&str, &str)],
+    expected: StatusCode,
+) -> String {
+    let body = url::form_urlencoded::Serializer::new(String::new())
+        .extend_pairs(fields.iter().copied())
+        .finish();
+    let response = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method(method)
+                .uri(uri)
+                .header("content-type", "application/x-www-form-urlencoded")
+                .body(Body::from(body))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), expected);
+    assert_eq!(response.headers()["cache-control"], "no-store");
+    assert_eq!(response.headers()["referrer-policy"], "no-referrer");
+    assert_eq!(response.headers()["x-content-type-options"], "nosniff");
+    assert!(
+        response.headers()["content-security-policy"]
+            .to_str()
+            .unwrap()
+            .contains("form-action 'self'")
+    );
+    assert!(response.headers().contains_key("x-request-id"));
+    if expected == StatusCode::TOO_MANY_REQUESTS {
+        assert_eq!(response.headers()["retry-after"], "60");
+    }
+    String::from_utf8(
+        to_bytes(response.into_body(), 16384)
+            .await
+            .unwrap()
+            .to_vec(),
+    )
+    .unwrap()
+}
+
+#[tokio::test]
+async fn reset_browser_rejects_malformed_inputs_and_handles_unavailable_database() {
+    let app = api::router(None, vec![]);
+    for query in ["", "?token=short", "?token=%22%3E%3Cscript%3E"] {
+        let html = reset_page(
+            &app,
+            "GET",
+            &format!("{PASSWORD_RESET_PATH}{query}"),
+            &[],
+            StatusCode::BAD_REQUEST,
+        )
+        .await;
+        assert!(html.contains("This reset link is no longer valid"));
+        assert!(!html.contains("<script>"));
+        assert!(!html.contains("<form"));
+    }
+    let token = "a".repeat(43);
+    let json = reset_page(
+        &app,
+        "GET",
+        &format!("{PASSWORD_RESET_PATH}?token=a&token=b"),
+        &[],
+        StatusCode::BAD_REQUEST,
+    )
+    .await;
+    assert!(serde_json::from_str::<ApiError>(&json).is_ok());
+    let html = reset_page(
+        &app,
+        "GET",
+        &format!("{PASSWORD_RESET_PATH}?token={token}"),
+        &[],
+        StatusCode::SERVICE_UNAVAILABLE,
+    )
+    .await;
+    assert!(!html.contains(&token));
+    let json = reset_page(
+        &app,
+        "POST",
+        PASSWORD_RESET_PATH,
+        &[("token", &token)],
+        StatusCode::BAD_REQUEST,
+    )
+    .await;
+    let error: ApiError = serde_json::from_str(&json).unwrap();
+    assert_eq!(error.code, thiscord_shared::ErrorCode::ValidationFailed);
+    let oversized = "x".repeat(17 * 1024);
+    let json = reset_page(
+        &app,
+        "POST",
+        PASSWORD_RESET_PATH,
+        &[
+            ("token", &token),
+            ("password", &oversized),
+            ("confirm_password", &oversized),
+        ],
+        StatusCode::BAD_REQUEST,
+    )
+    .await;
+    assert!(serde_json::from_str::<ApiError>(&json).is_ok());
+    assert!(
+        reset_page(
+            &app,
+            "HEAD",
+            PASSWORD_RESET_PATH,
+            &[],
+            StatusCode::NO_CONTENT
+        )
+        .await
+        .is_empty()
+    );
+}
+
+#[tokio::test]
+#[ignore = "requires TEST_DATABASE_URL; CI runs with --include-ignored"]
+async fn reset_browser_links_and_backup_codes_share_single_use_lifecycle() {
+    let _fixture = FIXTURES.acquire().await.unwrap();
+    let db = database();
+    let app = api::router(Some(db.pool.clone()), vec![]);
+    let session = token(&call(&app, json!({"action":"register","username":"browser_reset","email":"reset@example.test","password":"original password","device":"test"}), None, StatusCode::OK).await);
+    let verify = code(&db, "verify");
+    // A verification token cannot be used as a reset token.
+    reset_page(
+        &app,
+        "GET",
+        &format!("{PASSWORD_RESET_PATH}?token={verify}"),
+        &[],
+        StatusCode::BAD_REQUEST,
+    )
+    .await;
+    call(
+        &app,
+        json!({"action":"verify_email","code":verify}),
+        None,
+        StatusCode::OK,
+    )
+    .await;
+    let request = json!({"action":"forgot_password","email":"reset@example.test"});
+    call(&app, request.clone(), None, StatusCode::OK).await;
+    let link = url::Url::parse(&mail_value(&db, "reset")).unwrap();
+    assert_eq!(link.path(), PASSWORD_RESET_PATH);
+    let uri = format!("{}?{}", link.path(), link.query().unwrap());
+    let reset = code(&db, "reset");
+    let body = diesel::sql_query("SELECT body FROM mail_outbox WHERE body LIKE 'Thiscord reset%' ORDER BY created_at DESC LIMIT 1")
+        .get_result::<BodyRow>(&mut db.pool.get().unwrap()).unwrap().body;
+    assert!(body.contains(&format!("Backup reset code:\n\n{reset}\n\n")));
+    reset_page(&app, "HEAD", &uri, &[], StatusCode::NO_CONTENT).await;
+    for _ in 0..2 {
+        let html = reset_page(&app, "GET", &uri, &[], StatusCode::OK).await;
+        assert!(html.contains("Choose a new password"));
+        assert!(html.contains(&format!("name=\"token\" value=\"{reset}\"")));
+        assert!(html.contains(&format!("method=\"post\" action=\"{PASSWORD_RESET_PATH}\"")));
+    }
+    // Opening/scanning the link does not change the password or revoke sessions.
+    call(
+        &app,
+        json!({"action":"current"}),
+        Some(&session),
+        StatusCode::OK,
+    )
+    .await;
+    let submit = |password: &str, confirmation: &str| {
+        vec![
+            ("token".to_owned(), reset.clone()),
+            ("password".to_owned(), password.to_owned()),
+            ("confirm_password".to_owned(), confirmation.to_owned()),
+        ]
+    };
+    for (password, confirmation, message) in [
+        (
+            "new password with <>&+",
+            "different password",
+            "Passwords do not match",
+        ),
+        ("short", "short", "at least 12 characters"),
+    ] {
+        let values = submit(password, confirmation);
+        let fields: Vec<_> = values
+            .iter()
+            .map(|(k, v)| (k.as_str(), v.as_str()))
+            .collect();
+        let html = reset_page(
+            &app,
+            "POST",
+            PASSWORD_RESET_PATH,
+            &fields,
+            StatusCode::BAD_REQUEST,
+        )
+        .await;
+        assert!(html.contains(message));
+        assert!(html.contains("<form"));
+        assert!(!html.contains(password));
+    }
+    let password = "new password with <>&+";
+    let values = submit(password, password);
+    let fields: Vec<_> = values
+        .iter()
+        .map(|(k, v)| (k.as_str(), v.as_str()))
+        .collect();
+    let html = reset_page(&app, "POST", PASSWORD_RESET_PATH, &fields, StatusCode::OK).await;
+    assert!(html.contains("Password changed"));
+    assert!(!html.contains(&reset));
+    assert!(!html.contains(password));
+    assert!(!html.contains("<form"));
+    reset_page(
+        &app,
+        "POST",
+        PASSWORD_RESET_PATH,
+        &fields,
+        StatusCode::BAD_REQUEST,
+    )
+    .await;
+    reset_page(&app, "GET", &uri, &[], StatusCode::BAD_REQUEST).await;
+    call(
+        &app,
+        json!({"action":"reset_password","code":reset,"password":"another password"}),
+        None,
+        StatusCode::UNAUTHORIZED,
+    )
+    .await;
+    call(
+        &app,
+        json!({"action":"current"}),
+        Some(&session),
+        StatusCode::UNAUTHORIZED,
+    )
+    .await;
+    call(&app, json!({"action":"login","login":"browser_reset","password":"original password","device":"test"}), None, StatusCode::UNAUTHORIZED).await;
+    call(
+        &app,
+        json!({"action":"login","login":"browser_reset","password":password,"device":"test"}),
+        None,
+        StatusCode::OK,
+    )
+    .await;
+    // A resend invalidates the older link, and using the backup invalidates the new one.
+    call(&app, request.clone(), None, StatusCode::OK).await;
+    let old = code(&db, "reset");
+    call(&app, request.clone(), None, StatusCode::OK).await;
+    reset_page(
+        &app,
+        "GET",
+        &format!("{PASSWORD_RESET_PATH}?token={old}"),
+        &[],
+        StatusCode::BAD_REQUEST,
+    )
+    .await;
+    let backup = code(&db, "reset");
+    call(
+        &app,
+        json!({"action":"reset_password","code":backup,"password":"backup password"}),
+        None,
+        StatusCode::OK,
+    )
+    .await;
+    reset_page(
+        &app,
+        "GET",
+        &format!("{PASSWORD_RESET_PATH}?token={backup}"),
+        &[],
+        StatusCode::BAD_REQUEST,
+    )
+    .await;
+    call(&app, request, None, StatusCode::OK).await;
+    let expired = code(&db, "reset");
+    sql(
+        &db,
+        "UPDATE account_codes SET expires_at=now()-interval '1 second' WHERE purpose='reset'",
+    );
+    reset_page(
+        &app,
+        "GET",
+        &format!("{PASSWORD_RESET_PATH}?token={expired}"),
+        &[],
+        StatusCode::BAD_REQUEST,
+    )
+    .await;
+    reset_page(
+        &app,
+        "POST",
+        PASSWORD_RESET_PATH,
+        &[
+            ("token", &expired),
+            ("password", password),
+            ("confirm_password", password),
+        ],
+        StatusCode::BAD_REQUEST,
+    )
+    .await;
+    // Browser attempts use the same durable per-IP sensitive-operation budget.
+    sql(&db, "DELETE FROM auth_limits");
+    for _ in 0..30 {
+        reset_page(
+            &app,
+            "POST",
+            PASSWORD_RESET_PATH,
+            &[
+                ("token", &expired),
+                ("password", password),
+                ("confirm_password", password),
+            ],
+            StatusCode::BAD_REQUEST,
+        )
+        .await;
+    }
+    reset_page(
+        &app,
+        "POST",
+        PASSWORD_RESET_PATH,
+        &[
+            ("token", &expired),
+            ("password", password),
+            ("confirm_password", password),
+        ],
+        StatusCode::TOO_MANY_REQUESTS,
+    )
+    .await;
 }
 
 #[tokio::test]

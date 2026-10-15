@@ -31,6 +31,7 @@ media compatibility spike can happen before chat to expose platform constraints.
 - [x] Registration, standard password login, logout and current-user API/UI.
 - [x] Argon2id password hashing, input validation and registration/login rate limits.
 - [x] Email verification, password change, forgotten-password and reset flows.
+- [x] Browser password-reset links with an in-app backup code and shared single-use lifecycle.
 - [x] Session expiry, rotation, revocation, multi-device management and logout-all.
 - [x] Desktop session storage using OS credential storage through Rust integration.
 - [x] Google OIDC authorization-code login with PKCE, state and nonce validation.

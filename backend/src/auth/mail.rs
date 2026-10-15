@@ -103,9 +103,15 @@ fn html_body(body: &str) -> String {
                 .replace('>', "&gt;")
                 .replace('"', "&quot;")
                 .replace('\'', "&#39;");
-            if url::Url::parse(paragraph).is_ok_and(|url| matches!(url.scheme(), "http" | "https"))
+            if let Ok(url) = url::Url::parse(paragraph)
+                && matches!(url.scheme(), "http" | "https")
             {
-                format!("<p><a href=\"{escaped}\">Verify email</a></p>")
+                let label = if url.path() == thiscord_shared::account::PASSWORD_RESET_PATH {
+                    "Reset password"
+                } else {
+                    "Verify email"
+                };
+                format!("<p><a href=\"{escaped}\">{label}</a></p>")
             } else {
                 format!("<p>{escaped}</p>")
             }
@@ -233,6 +239,16 @@ mod tests {
         routing::post,
     };
     use std::sync::{Arc, Mutex};
+
+    #[test]
+    fn reset_email_has_clickable_link_and_backup_code() {
+        let html = html_body(
+            "Thiscord reset password:\n\nhttps://example.test/api/v1/account/reset-password?token=test\n\nBackup reset code:\n\ntest",
+        );
+        assert!(html.contains("<a href=\"https://example.test/api/v1/account/reset-password?token=test\">Reset password</a>"));
+        assert!(html.contains("<p>Backup reset code:</p><p>test</p>"));
+        assert!(!html.contains("Verify email"));
+    }
 
     #[tokio::test]
     async fn resend_request_and_failure_preserve_retry_identity() {

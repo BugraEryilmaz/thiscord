@@ -22,10 +22,14 @@ in shared models, logs or checked-in configuration.
    printed in the terminal. The directory is ignored by Git. On Linux, newly
    created directories/files use 0700/0600; Windows-mounted files inherit Windows
    ACLs. Set `MAIL_DIRECTORY` to a private Linux directory if needed.
-3. **Forgot password** sends a code only for verified accounts, with the same
-   response for absent accounts. In that dialog, select **I already have a reset code**
-   to finish resetting the password. Verification links and reset codes expire
-   after 30 minutes, are single-use and are replaced on resend.
+3. **Forgot password** emails a link only for verified accounts, with the same
+   response for absent accounts. Click **Reset password** to choose and confirm a
+   new password directly in your browser; you do not need to reopen the app.
+   The email also includes a backup code for **I already have a reset code** in
+   the app's Forgot password dialog. Links and codes expire after 30 minutes,
+   are single-use and are replaced on resend. The reset link and backup code
+   represent the same credential: using either invalidates both. Opening or
+   previewing a reset link does not consume it; submitting a valid new password does.
    The worker removes expired mail files and database codes. Production email
    already delivered to an inbox cannot be recalled.
 4. **Reauthenticate** before changing/adding a password, linking/unlinking Google,
@@ -110,10 +114,20 @@ Use `MAIL_MODE=file` for offline development or `MAIL_MODE=smtp` for the SMTP op
 Set `PUBLIC_BACKEND_URL` to the origin users can reach, such as
 `https://api.thiscord.com.tr`; the local default is `http://localhost:3000`.
 Verification emails link to `/api/v1/account/verify-email?token=...` on that origin.
+Password-reset emails link to `/api/v1/account/reset-password?token=...` on the same
+origin. The backend serves the reset form itself, with no separate website bundle,
+JavaScript, cookies or desktop installation required. A backend update enables
+links in newly requested emails; previously delivered code-only emails still work
+through the app. The form posts to the same path without a query string, uses the
+shared reset operation, and retains account locking, bounded workers, rate limits
+and session/voice revocation. Password validation or confirmation errors allow
+retrying without consuming the code or echoing the password. Expired, replaced or
+used links show a recovery message. Success asks the user to sign in again in Thiscord.
 The backend never constructs links from untrusted request Host headers. HTTP is
-allowed only for localhost development. Exclude query strings on this route from
-reverse-proxy logs. Verification responses use no-store and no-referrer headers;
-HEAD requests do not consume the link. Resend verification from the profile page
+allowed only for localhost development. Exclude query strings on both routes from
+reverse-proxy logs. Both pages use no-store and no-referrer headers, block framing
+and third-party resources; reset forms submit only to the same origin.
+HEAD requests do not consume either link. Resend verification from the profile page
 to replace any older code-only email.
 
 ### Optional SMTP delivery
@@ -218,7 +232,8 @@ password request types deliberately lack `Debug` implementations.
 
 Run backend/shared tests in WSL with `--include-ignored` and a dedicated
 `TEST_DATABASE_URL`. They create/drop only random schemas. Tests cover real
-PostgreSQL migrations, credentials, verification/reset replay, session rotation,
+PostgreSQL migrations, credentials, verification/reset replay, browser reset links
+and backup-code equivalence, validation, expiry/resend, session rotation,
 expiry/revocation, reauthentication, throttling, deletion, callback cancellation
 and OAuth failures. Signed offline OIDC fixtures exercise token validation;
 the RSA fixture key is deliberately public and never used by the application.
