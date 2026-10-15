@@ -99,17 +99,13 @@ fn ServerModeration(ui: Ui, guild: GuildId) -> impl IntoView {
     });
     view! {
         <section class="space-y-6">
-            <header class="flex flex-wrap items-center justify-between gap-3">
-                <div><p class="text-sm text-white/60">{move ||panel.state.get().map(|s|s.guild.name)}</p><h2 class="text-2xl font-semibold">"Server moderation"</h2></div>
-                <button class="rounded bg-white/10 px-4 py-2" on:click=move |_|ui.page.set("servers")>"Back to server"</button>
-            </header>
-            <p class="text-sm text-white/60">"Actions apply only to this server. You can moderate members below your highest role. The owner and members at or above your role are protected."</p>
+            <p class="settings-hint">"Manage members below your highest role. The owner and members at or above your role are protected."</p>
             <p role="status" class="text-sm text-amber-200">{move ||panel.message.get()}</p>
             <button class="icon-button" disabled=move ||ui.busy.get() on:click=move |_|{
                 ui.busy.set(true);leptos::task::spawn_local(async move {panel.load().await;ui.busy.set(false);});
             } aria-label="Refresh members" data-tip="Refresh members"><super::icons::Icon kind=super::icons::Glyph::Refresh/></button>
             <Show when=move ||panel.state.get().is_some()>
-                <fieldset class="space-y-5 disabled:opacity-50" disabled=move ||ui.busy.get()>
+                <fieldset class="settings-card disabled:opacity-50" disabled=move ||ui.busy.get()>
                     <label class="block space-y-2"><span class="font-semibold">"Member"</span>
                         <select class="w-full rounded-lg bg-slate-900 p-3" prop:value=move ||selected.get().map(|id|id.to_string()).unwrap_or_default() on:change=move |ev|selected.set(event_target_value(&ev).parse::<AccountId>().ok())>
                             <option value="">"Choose a member"</option>
@@ -145,7 +141,7 @@ fn ServerModeration(ui: Ui, guild: GuildId) -> impl IntoView {
                 </fieldset>
             </Show>
         </section>
-        <dialog node_ref=dialog aria-labelledby="moderation-confirm-title" class="m-auto w-[calc(100%-2rem)] max-w-md space-y-5 rounded-2xl border border-white/15 bg-surface p-6 text-white shadow-2xl backdrop:bg-black/70" on:close=move |_|pending.set(None)>
+        <dialog node_ref=dialog on:click=move |e|super::dialog::dismiss_outside(e,dialog,ui.busy.get_untracked()) aria-labelledby="moderation-confirm-title" class="m-auto w-[calc(100%-2rem)] max-w-md space-y-5 rounded-2xl border border-white/15 bg-surface p-6 text-white shadow-2xl backdrop:bg-black/70" on:close=move |_|pending.set(None)>
             <h2 id="moderation-confirm-title" class="text-xl font-semibold">{move ||pending.get().map(|(_,title,_)|title)}</h2>
             <p class="text-sm text-white/70">{move ||pending.get().map(|(_,_,detail)|detail)}</p>
             <div class="flex justify-end gap-3"><button class="rounded bg-white/10 px-4 py-2" on:click=move |_|if let Some(dialog)=dialog.get(){dialog.close();}>"Cancel"</button><button class="rounded bg-red-500/20 px-4 py-2 text-red-200" on:click=move |_|{

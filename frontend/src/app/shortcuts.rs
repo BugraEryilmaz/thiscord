@@ -6,6 +6,7 @@ use thiscord_shared::audio::{AudioShortcutStatus, AudioShortcuts};
 #[component]
 pub(super) fn ShortcutSettings(
     #[prop(default = AudioControl::default())] control: AudioControl,
+    #[prop(optional)] on_dirty: Option<Callback<bool>>,
 ) -> impl IntoView {
     let mute = RwSignal::new(String::new());
     let deafen = RwSignal::new(String::new());
@@ -13,6 +14,17 @@ pub(super) fn ShortcutSettings(
     let message = RwSignal::new(String::new());
     let loaded = RwSignal::new(false);
     let dirty = RwSignal::new(false);
+    Effect::new(move |_| {
+        let changed = dirty.get();
+        if let Some(callback) = on_dirty {
+            callback.run(changed);
+        }
+    });
+    on_cleanup(move || {
+        if let Some(callback) = on_dirty {
+            callback.run(false);
+        }
+    });
     control.poll::<AudioShortcutStatus>("audio_shortcuts", move |result| {
         if loaded.get_untracked() && (busy.get_untracked() || dirty.get_untracked()) {
             return;

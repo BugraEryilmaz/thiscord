@@ -499,65 +499,69 @@ pub(super) fn AudioSettingsPanel(ui: Ui) -> impl IntoView {
             }
         });
     };
-    view! {<div class="space-y-5"><h2 class="text-xl font-semibold">"Audio & voice"</h2>
-        <Show when=move ||desktop() || ui.audio_control.is_remote()><ShortcutSettings control=ui.audio_control/><crate::overlay::OverlaySettings control=ui.audio_control/></Show>
-        <Show when=move ||desktop() || ui.audio_control.is_remote() fallback=||view!{<p>"Audio devices and voice are available in the desktop app."</p>}>
-            <Show when=move || !ui.audio_control.is_remote()><p class="text-sm text-white/60">"While connected to voice, instance admins can adjust these settings and download technical diagnostics to help troubleshoot."</p></Show>
-            <p class="text-sm text-white/60">"Devices refresh automatically. Changes apply during a call; switching devices may briefly interrupt audio. Settings are saved on the selected desktop."</p>
-            {[(true,"Microphone"),(false,"Speakers / headphones")].into_iter().map(move|(input,label)|view!{
-                <label class="block space-y-2"><span>{label}</span><select class="w-full rounded bg-slate-900 p-2 disabled:opacity-50" disabled=move||ui.audio_saving.get() prop:value=move||{let s=ui.audio.get();if input{s.input}else{s.output}.unwrap_or_default()} on:change=move|e|{let v=event_target_value(&e);ui.audio.update(|s|{let value=(!v.is_empty()).then_some(v);if input{s.input=value;}else{s.output=value;}});save(ui);}>
-                    <option value="">"System default"</option>{move||devices.get().into_iter().filter(|d|d.input==input).map(|d|view!{<option value=d.id>{d.name}</option>}).collect_view()}
-                </select></label>
-            }).collect_view()}
-            <label class="flex flex-wrap gap-3"><span>"Output volume"</span><input type="range" min="0" max="200" prop:value=move||(ui.audio.get().output_volume*100.0).to_string() on:change=move|e|{if let Ok(v)=event_target_value(&e).parse::<f32>(){ui.audio.update(|s|s.output_volume=v/100.0);save(ui);}}/></label>
-            <label class="block space-y-2"><span>"Transmit mode"</span><select class="w-full rounded bg-slate-900 p-2" prop:value=move||if ui.audio.get().mode==TransmitMode::PushToTalk{"ptt"}else{"activity"} on:change=move|e|{ui.audio.update(|s|s.mode=if event_target_value(&e)=="ptt"{TransmitMode::PushToTalk}else{TransmitMode::VoiceActivity});save(ui);}><option value="activity">"Voice activation"</option><option value="ptt">"Push to talk"</option></select></label>
-            <label class="flex flex-wrap gap-3"><span>"Activation threshold"</span><input type="range" min="1" max="100" prop:value=move||(ui.audio.get().activation_threshold*1000.0).to_string() on:change=move|e|{if let Ok(v)=event_target_value(&e).parse::<f32>(){ui.audio.update(|s|s.activation_threshold=v/1000.0);save(ui);}}/></label>
-            <label class="flex items-center gap-3"><input type="checkbox" disabled=move||ui.audio_saving.get() prop:checked=move||ui.audio.get().global_push_to_talk on:change=move|e|{ui.audio.update(|s|s.global_push_to_talk=event_target_checked(&e));save(ui);}/>"Global push-to-talk: Ctrl+Shift+Space (Windows, macOS, Linux/X11)"</label>
-            <div class="space-y-2">
-                <label class="flex gap-3"><input type="checkbox" prop:checked=move||ui.audio.get().noise_suppression on:change=move|e|{ui.audio.update(|s|s.noise_suppression=event_target_checked(&e));save(ui);}/>"Noise suppression"</label>
-                <label class="block space-y-2"><span>"Noise suppression model"</span><select class="w-full rounded bg-slate-900 p-2 disabled:opacity-50" disabled=move||ui.audio_saving.get() prop:value=move||match ui.audio.get().noise_suppression_model { NoiseSuppressionModel::Sonora=>"sonora", NoiseSuppressionModel::DeepFilterNet3=>"deep_filter_net3" } on:change=move|e|{ui.audio.update(|s|s.noise_suppression_model=if event_target_value(&e)=="deep_filter_net3" {NoiseSuppressionModel::DeepFilterNet3}else{NoiseSuppressionModel::Sonora});save(ui);}>
-                    <option value="sonora">"Standard (Sonora)"</option><option value="deep_filter_net3">"DeepFilterNet3 (experimental)"</option>
-                </select></label>
-                <p class="text-sm text-white/60">"Models can be changed during a call. Echo cancellation needs time to adapt after a change. DeepFilterNet3 uses more CPU and adds buffering; test it with your microphone. It reduces noise but may preserve other people's voices."</p>
-                <label class="flex gap-3"><input type="checkbox" prop:checked=move||ui.audio.get().automatic_gain on:change=move|e|{ui.audio.update(|s|s.automatic_gain=event_target_checked(&e));save(ui);}/>"Automatic microphone gain"</label>
-                <label class="flex gap-3"><input type="checkbox" prop:checked=move||ui.audio.get().echo_cancellation on:change=move|e|{ui.audio.update(|s|s.echo_cancellation=event_target_checked(&e));save(ui);}/>"Echo cancellation"</label>
-                <label class="flex gap-3"><input type="checkbox" disabled=move||ui.audio_saving.get() prop:checked=move||ui.audio.get().neural_echo on:change=move|e|{ui.audio.update(|s|s.neural_echo=event_target_checked(&e));save(ui);}/>"Neural residual echo estimation (experimental)"</label>
-                <Show when=move||ui.audio.get().neural_echo>
-                    <details><summary class="cursor-pointer text-sm text-white/60">"Advanced model settings"</summary><label class="mt-2 block space-y-2"><span>"Model file override (optional)"</span><input type="text" class="w-full rounded bg-slate-900 p-2 disabled:opacity-50" placeholder="Bundled REE v2 model" disabled=move||ui.audio_saving.get() prop:value=move||ui.audio.get().neural_echo_model.unwrap_or_default() on:change=move|e|{let value=event_target_value(&e);ui.audio.update(|s|s.neural_echo_model=(!value.trim().is_empty()).then_some(value));save(ui);}/></label></details>
-                    <p class="text-sm text-slate-400">"Uses the bundled model when the override is empty. Enable echo cancellation too. Changes apply without leaving voice."</p>
-                </Show>
-            </div>
-            <Show when=move||ui.audio_saving.get()><p class="text-sm text-white/60" role="status">"Applying audio settings..."</p></Show>
-            <VoiceControls ui=ui/>
-            <Show when=move || !ui.audio_control.is_remote()><DebugRecording ui=ui/></Show>
-            <super::diagnostics::DiagnosticsSettings control=ui.audio_control/>
-            <label class="block">"Raw microphone"<meter class="ml-3 w-48" min="0" max="1" value=move||ui.audio_status.get().map(|s|s.raw_input_level).unwrap_or(0.0) /></label>
-            <label class="block">"After noise / echo processing"<meter class="ml-3 w-48" min="0" max="1" value=move||ui.audio_status.get().map(|s|s.input_level).unwrap_or(0.0) /></label>
-            <p class="text-sm" role="status">{move||ui.audio_status.get().map(|s|format!("{} · processing resets {}",s.message,s.processing_resets))}</p>
-            <p class="text-sm text-slate-300">{move||thiscord_frontend::audio_quality::summary(ui.audio_status.get().and_then(|s|s.quality).as_ref())}</p>
-            <details class="rounded border border-white/10 p-3 text-sm">
-                <summary class="cursor-pointer">"Advanced voice quality diagnostics"</summary>
-                <pre class="mt-3 max-h-96 overflow-auto whitespace-pre-wrap text-xs text-slate-300">{move||thiscord_frontend::audio_quality::detail(ui.audio_status.get().and_then(|s|s.quality).as_ref())}</pre>
-            </details>
-            <details class="space-y-2 text-sm text-white/70">
-                <summary class="cursor-pointer">"Echo diagnostics"</summary>
-                <p>{move||ui.audio_status.get().and_then(|s|s.echo).map(|d|format!(
-                    "Playback reference: {:.1}% · Filter estimate: {} · Estimated delay: {} · Input clipping: {:.2}% · Automatic gain: {}",
-                    d.reference_level*100.0,
-                    d.filter_reduction_db.map(|v|format!("{v:.1} dB")).unwrap_or_else(||"warming up / no playback".into()),
-                    d.estimated_delay_ms.map(|v|format!("{v} ms")).unwrap_or_else(||"unavailable".into()),
-                    d.clipped_input_percent,if d.automatic_gain{"on"}else{"off"}
-                )).unwrap_or_else(||"Join voice and enable echo cancellation to view diagnostics.".into())}</p>
-                <p>"The filter estimate is not a measurement of audible echo. Compare these values while only the other person speaks, then while both of you speak. Rising processing resets indicate lost audio blocks. Repeated input clipping suggests lowering microphone gain."</p>
-            </details>
-            <p class="text-sm text-white/60">"Allow microphone access in your OS privacy settings. Use headphones for the microphone test. Echo cancellation removes Thiscord playback from your microphone; it cannot remove sound from other apps. Allow a few seconds for it to adapt. Compare the meters while someone else speaks and you stay quiet."</p>
-            <Show when=move || !ui.audio_control.is_remote()><div class="flex flex-wrap gap-3">
-                <button class="rounded bg-brand px-4 py-2 disabled:opacity-50" disabled=move||busy.get()||ui.voice.get().channel_id.is_some() on:click=move |_|test(false)>"Test playback (5 seconds)"</button>
-                <button class="rounded bg-white/10 px-4 py-2 disabled:opacity-50" disabled=move||busy.get()||ui.voice.get().channel_id.is_some() on:click=move |_|test(true)>"Test microphone (60 seconds)"</button>
-                <button class="underline" on:click=move |_|{leave(ui);leptos::task::spawn_local(async move{let _=ui.audio_control.invoke::<AudioStatus>("audio_stop",json!({})).await;});}>"Stop audio"</button>
-                <button class="underline disabled:opacity-50" disabled=move||busy.get() on:click=move |_|{busy.set(true);message.set("Testing encrypted WebRTC forwarding…".into());leptos::task::spawn_local(async move{let result=ui.audio_control.invoke::<String>("audio_webrtc_probe",json!({})).await;if busy.try_get_untracked().is_some(){busy.set(false);message.set(result.unwrap_or_else(|e|e));}});}>"Test WebRTC"</button>
-            </div></Show>
-            <StreamVolumes ui=ui/><p role="status" class="text-sm text-white/70">{move||message.get()}</p>
-        </Show>
-    </div>}
+    view! {<div class="space-y-5"><h2 class="settings-panel-title text-xl font-semibold">"Audio & voice"</h2>
+            <Show when=move ||ui.audio_control.is_remote()><ShortcutSettings control=ui.audio_control/><crate::overlay::OverlaySettings control=ui.audio_control/></Show>
+            <Show when=move ||desktop() || ui.audio_control.is_remote() fallback=||view!{<p>"Audio devices and voice are available in the desktop app."</p>}>
+                <section class="settings-card"><h3>"Devices & microphone"</h3><p class="settings-hint">"Changes save automatically and apply to your current call."</p>
+                {[(true,"Microphone"),(false,"Speakers / headphones")].into_iter().map(move|(input,label)|view!{
+                    <label class="block space-y-2"><span>{label}</span><select class="w-full rounded bg-slate-900 p-2 disabled:opacity-50" disabled=move||ui.audio_saving.get() prop:value=move||{let s=ui.audio.get();if input{s.input}else{s.output}.unwrap_or_default()} on:change=move|e|{let v=event_target_value(&e);ui.audio.update(|s|{let value=(!v.is_empty()).then_some(v);if input{s.input=value;}else{s.output=value;}});save(ui);}>
+                        <option value="">"System default"</option>{move||devices.get().into_iter().filter(|d|d.input==input).map(|d|view!{<option value=d.id>{d.name}</option>}).collect_view()}
+                    </select></label>
+                }).collect_view()}
+                <label class="flex flex-wrap gap-3"><span>"Output volume"</span><output class="text-xs text-white/60">{move ||format!("{}%",(ui.audio.get().output_volume*100.0).round())}</output><input type="range" min="0" max="200" prop:value=move||(ui.audio.get().output_volume*100.0).to_string() on:change=move|e|{if let Ok(v)=event_target_value(&e).parse::<f32>(){ui.audio.update(|s|s.output_volume=v/100.0);save(ui);}}/></label>
+                <label class="block space-y-2"><span>"Transmit mode"</span><select class="w-full rounded bg-slate-900 p-2" prop:value=move||if ui.audio.get().mode==TransmitMode::PushToTalk{"ptt"}else{"activity"} on:change=move|e|{ui.audio.update(|s|s.mode=if event_target_value(&e)=="ptt"{TransmitMode::PushToTalk}else{TransmitMode::VoiceActivity});save(ui);}><option value="activity">"Voice activation"</option><option value="ptt">"Push to talk"</option></select></label>
+                <label class="flex flex-wrap gap-3"><span>"Activation threshold"</span><input type="range" min="1" max="100" prop:value=move||(ui.audio.get().activation_threshold*1000.0).to_string() on:change=move|e|{if let Ok(v)=event_target_value(&e).parse::<f32>(){ui.audio.update(|s|s.activation_threshold=v/1000.0);save(ui);}}/></label>
+                <label class="flex items-center gap-3"><input type="checkbox" disabled=move||ui.audio_saving.get() prop:checked=move||ui.audio.get().global_push_to_talk on:change=move|e|{ui.audio.update(|s|s.global_push_to_talk=event_target_checked(&e));save(ui);}/>"Global push-to-talk: Ctrl+Shift+Space (Windows, macOS, Linux/X11)"</label>
+                <div class="settings-actions">                <button class="rounded bg-brand px-4 py-2 disabled:opacity-50" disabled=move||busy.get()||ui.voice.get().channel_id.is_some() on:click=move |_|test(false)>"Test playback (5 seconds)"</button>
+                    <button class="rounded bg-white/10 px-4 py-2 disabled:opacity-50" disabled=move||busy.get()||ui.voice.get().channel_id.is_some() on:click=move |_|test(true)>"Test microphone (60 seconds)"</button>
+    </div><p class="settings-hint">"Use headphones for the microphone test. Sound tests are available when you’re outside a call."</p>
+                </section>
+                <section class="settings-card"><h3>"Voice processing"</h3>
+                    <label class="flex gap-3"><input type="checkbox" prop:checked=move||ui.audio.get().noise_suppression on:change=move|e|{ui.audio.update(|s|s.noise_suppression=event_target_checked(&e));save(ui);}/>"Noise suppression"</label>
+                    <details><summary>"Noise suppression model"</summary><label class="block space-y-2"><span>"Model"</span><select class="w-full rounded bg-slate-900 p-2 disabled:opacity-50" disabled=move||ui.audio_saving.get() prop:value=move||match ui.audio.get().noise_suppression_model { NoiseSuppressionModel::Sonora=>"sonora", NoiseSuppressionModel::DeepFilterNet3=>"deep_filter_net3" } on:change=move|e|{ui.audio.update(|s|s.noise_suppression_model=if event_target_value(&e)=="deep_filter_net3" {NoiseSuppressionModel::DeepFilterNet3}else{NoiseSuppressionModel::Sonora});save(ui);}>
+                        <option value="sonora">"Standard (Sonora)"</option><option value="deep_filter_net3">"DeepFilterNet3 (experimental)"</option>
+                    </select></label>
+                    <p class="text-sm text-white/60">"Models can be changed during a call. Echo cancellation needs time to adapt after a change. DeepFilterNet3 uses more CPU and adds buffering; test it with your microphone. It reduces noise but may preserve other people's voices."</p>
+                    </details>
+                    <label class="flex gap-3"><input type="checkbox" prop:checked=move||ui.audio.get().automatic_gain on:change=move|e|{ui.audio.update(|s|s.automatic_gain=event_target_checked(&e));save(ui);}/>"Automatic microphone gain"</label>
+                    <label class="flex gap-3"><input type="checkbox" prop:checked=move||ui.audio.get().echo_cancellation on:change=move|e|{ui.audio.update(|s|s.echo_cancellation=event_target_checked(&e));save(ui);}/>"Echo cancellation"</label>
+                    <details><summary>"Experimental echo processing"</summary><label class="flex gap-3"><input type="checkbox" disabled=move||ui.audio_saving.get() prop:checked=move||ui.audio.get().neural_echo on:change=move|e|{ui.audio.update(|s|s.neural_echo=event_target_checked(&e));save(ui);}/>"Neural residual echo estimation (experimental)"</label>
+                    <Show when=move||ui.audio.get().neural_echo>
+                        <details><summary class="cursor-pointer text-sm text-white/60">"Advanced model settings"</summary><label class="mt-2 block space-y-2"><span>"Model file override (optional)"</span><input type="text" class="w-full rounded bg-slate-900 p-2 disabled:opacity-50" placeholder="Bundled REE v2 model" disabled=move||ui.audio_saving.get() prop:value=move||ui.audio.get().neural_echo_model.unwrap_or_default() on:change=move|e|{let value=event_target_value(&e);ui.audio.update(|s|s.neural_echo_model=(!value.trim().is_empty()).then_some(value));save(ui);}/></label></details>
+                        <p class="text-sm text-slate-400">"Uses the bundled model when the override is empty. Enable echo cancellation too. Changes apply without leaving voice."</p>
+                    </Show>
+                    </details>
+                </section>
+                <Show when=move||ui.audio_saving.get()><p class="text-sm text-white/60" role="status">"Applying audio settings..."</p></Show>
+                <VoiceControls ui=ui/>
+                <details class="settings-card"><summary>"Advanced & troubleshooting"</summary><div class="space-y-5"><p class="settings-hint">"During calls, instance administrators can adjust audio settings and request technical diagnostics for support."</p>
+                <Show when=move || !ui.audio_control.is_remote()><DebugRecording ui=ui/></Show>
+                <super::diagnostics::DiagnosticsSettings control=ui.audio_control/>
+                <label class="block">"Raw microphone"<meter class="ml-3 w-48" min="0" max="1" value=move||ui.audio_status.get().map(|s|s.raw_input_level).unwrap_or(0.0) /></label>
+                <label class="block">"After noise / echo processing"<meter class="ml-3 w-48" min="0" max="1" value=move||ui.audio_status.get().map(|s|s.input_level).unwrap_or(0.0) /></label>
+                <p class="text-sm" role="status">{move||ui.audio_status.get().map(|s|format!("{} · processing resets {}",s.message,s.processing_resets))}</p>
+                <p class="text-sm text-slate-300">{move||thiscord_frontend::audio_quality::summary(ui.audio_status.get().and_then(|s|s.quality).as_ref())}</p>
+                <details class="rounded border border-white/10 p-3 text-sm">
+                    <summary class="cursor-pointer">"Advanced voice quality diagnostics"</summary>
+                    <pre class="mt-3 max-h-96 overflow-auto whitespace-pre-wrap text-xs text-slate-300">{move||thiscord_frontend::audio_quality::detail(ui.audio_status.get().and_then(|s|s.quality).as_ref())}</pre>
+                </details>
+                <details class="space-y-2 text-sm text-white/70">
+                    <summary class="cursor-pointer">"Echo diagnostics"</summary>
+                    <p>{move||ui.audio_status.get().and_then(|s|s.echo).map(|d|format!(
+                        "Playback reference: {:.1}% · Filter estimate: {} · Estimated delay: {} · Input clipping: {:.2}% · Automatic gain: {}",
+                        d.reference_level*100.0,
+                        d.filter_reduction_db.map(|v|format!("{v:.1} dB")).unwrap_or_else(||"warming up / no playback".into()),
+                        d.estimated_delay_ms.map(|v|format!("{v} ms")).unwrap_or_else(||"unavailable".into()),
+                        d.clipped_input_percent,if d.automatic_gain{"on"}else{"off"}
+                    )).unwrap_or_else(||"Join voice and enable echo cancellation to view diagnostics.".into())}</p>
+                    <p>"The filter estimate is not a measurement of audible echo. Compare these values while only the other person speaks, then while both of you speak. Rising processing resets indicate lost audio blocks. Repeated input clipping suggests lowering microphone gain."</p>
+                </details>
+                <p class="text-sm text-white/60">"Allow microphone access in your OS privacy settings. Use headphones for the microphone test. Echo cancellation removes Thiscord playback from your microphone; it cannot remove sound from other apps. Allow a few seconds for it to adapt. Compare the meters while someone else speaks and you stay quiet."</p>
+                <Show when=move || !ui.audio_control.is_remote()><div class="flex flex-wrap gap-3">
+                    <button class="underline" on:click=move |_|{leave(ui);leptos::task::spawn_local(async move{let _=ui.audio_control.invoke::<AudioStatus>("audio_stop",json!({})).await;});}>"Stop audio"</button>
+                    <button class="underline disabled:opacity-50" disabled=move||busy.get() on:click=move |_|{busy.set(true);message.set("Testing encrypted WebRTC forwarding…".into());leptos::task::spawn_local(async move{let result=ui.audio_control.invoke::<String>("audio_webrtc_probe",json!({})).await;if busy.try_get_untracked().is_some(){busy.set(false);message.set(result.unwrap_or_else(|e|e));}});}>"Test WebRTC"</button>
+                </div></Show>
+                <StreamVolumes ui=ui/><p role="status" class="text-sm text-white/70">{move||message.get()}</p></div></details>
+            </Show>
+        </div>}
 }

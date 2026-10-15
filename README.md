@@ -27,6 +27,13 @@ Hover **Voice connected** for brief latency, health and drop diagnostics; click
 the channel name in the ribbon to open call controls. Server/channel creation,
 server joining and screen-picker dialogs close when clicking their backdrop.
 
+Settings open in a focused modal over the current conversation. Account/app settings
+and server settings have separate navigation. Profile, roles and channel permissions
+have explicit save/reset controls; closing or switching sections confirms unsaved
+changes. Audio changes save automatically, with diagnostics under **Advanced & troubleshooting**.
+Use the account ribbon’s gear for app settings or the server-header gear for server
+settings. Escape and outside clicks close the modal; keyboard focus stays inside it.
+
 Guild memberships, role hierarchy, channel overrides and the role editor are
 implemented. Right-click servers, channels or voice participants for relevant
 actions; the browser context menu is suppressed. Server settings sit beside the
@@ -37,30 +44,29 @@ Participant voice settings adjust local playback volume (0% mutes that person).
 Each server has a **Moderation** panel for voice disconnects,
 timeouts, kicks, bans and unbans, with server-side permission and hierarchy checks.
 After verifying an account, run `./run-wsl.ps1 -BootstrapOwner YOUR_USERNAME`
-from `backend/`, then open **Guilds & roles**. See [permission rules and setup](docs/permissions.md).
+from `backend/`, then open your server’s **Server settings > Roles**. See [permission rules and setup](docs/permissions.md).
 Text chat includes persisted history, edits/deletes, unread mentions and authenticated
 live sockets. See [chat protocol and limits](docs/chat.md). Desktop voice channels
 use native Rust audio, independent speaker volume controls and a Rust WebRTC SFU.
-Open **Settings > Audio & voice** to select devices and test audio, then join a
+Open **Settings > Voice & audio** to select devices and test audio, then join a
 voice channel. See [audio setup, networking and remaining checks](docs/audio.md).
 Missing saved audio devices immediately fall back to the system default for that
 direction on join or recovery, preserving the other selection and saved preferences.
 Other device failures retry selected devices three times, then system defaults
 three times; the voice bar reports recovery and the devices actually opened.
 Windows can list possible conflicting audio-session processes after retries fail.
-Desktop clients have an opt-in **Settings > Desktop > Keep Thiscord running when
+Desktop clients have an opt-in **Settings > App behavior > Keep Thiscord running when
 I close the window** preference, saved on this computer. Closing hides the window
 while calls and screen sharing continue. Use the Thiscord system tray icon
 (Windows/Linux) or menu-bar icon (macOS) to **Open Thiscord** or **Quit Thiscord**.
 On macOS, clicking the Dock icon also restores the window. Linux minimizes to the
 taskbar as well, keeping a recovery path on desktops without a tray host. Tray creation failures
 disable the preference for that run. With the setting off, closing exits the app.
-The voice bar shows recent quality observations; Audio & voice has advanced
+The voice bar shows recent quality observations; Voice & audio has advanced
 [voice-quality diagnostics](docs/audio-quality.md) for local buffering, timing,
 clipping and packet handling. Metrics work without logging or recording audio.
 
-Optional rotating audio diagnostics are off by default. Turn on **Settings > Audio &
-voice > Enable diagnostic logging** before reproducing a failure, then use **Open
+Optional rotating audio diagnostics are off by default. Turn on **Settings > Voice & audio > Advanced & troubleshooting > Enable diagnostic logging** before reproducing a failure, then use **Open
 diagnostic logs** to share the `audio-diagnostics*.jsonl` files. The preference
 persists on this computer; disabling logging keeps existing files. Logs contain
 technical events, not voice recordings or credentials, and are never auto-uploaded.
@@ -75,12 +81,12 @@ WebRTC video player with in-app fullscreen and separate screen share volume/mute
 controls. Choose **Watch stream** to subscribe; video adapts to active viewers and
 pauses when nobody watches. Sender/playback diagnostics report measured rates and drops.
 See [screen sharing, requirements and acceptance checks](docs/screen-sharing.md).
-For echo troubleshooting, Audio & voice can save a 60-second local debug recording
+For echo troubleshooting, Voice & audio can save a 60-second local debug recording
 of playback, raw microphone and outgoing audio, with metadata for offline DSP replay.
 Voice activation uses sustained energy before automatic gain, hysteresis and a
 60 ms pre-roll delay to retain short quiet onsets. Push-to-talk bypasses the
 automatic gate and its delay. See [activation behavior and limits](docs/voice-activation.md).
-Experimental DeepFilterNet3 noise suppression is available in Audio & voice;
+Experimental DeepFilterNet3 noise suppression is available in Voice & audio;
 see [model selection, regression tests and benchmarks](docs/deep-filter.md).
 Experimental neural residual echo estimation is also available, independently
 of denoising. Its model is bundled with native clients; enable echo cancellation
@@ -104,7 +110,7 @@ Exactly three Cargo packages share a root lockfile:
 
 Desktop voice includes a participant overlay with green speaking rings while
 Thiscord is out of focus. Hover your own entry for mute/deafen controls; other
-areas pass clicks through. Audio & voice also has customizable global mute/deafen
+areas pass clicks through. Voice & audio also has customizable global mute/deafen
 shortcuts (Ctrl+Shift+M / Ctrl+Shift+D by default). Use windowed or
 borderless games. See [overlay behavior and platform limits](docs/audio.md#in-game-voice-overlay).
 

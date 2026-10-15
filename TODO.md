@@ -29,6 +29,7 @@ media compatibility spike can happen before chat to expose platform constraints.
 
 - [x] Immediate unclipped sidebar tooltips, consistent rail icons, persistent account/connection ribbon, accessible icon controls and permission-filtered sidebar voice rosters before joining.
 - [x] Direct sidebar voice joins, brief connection hover diagnostics and backdrop dismissal for server/channel/screen-picker dialogs.
+- [x] Separate account/app and server settings modal views, focused sections, explicit save/reset controls, unsaved-edit dismissal guards, and collapsed advanced audio tools.
 - [x] Server/channel/participant context menus with permission-filtered management, personal persistent channel pins/mutes, mark-as-read, local participant volume and server settings in the header.
 - [ ] Validate the expanded account ribbon and screen picker on native Windows/macOS/Linux clients; camera remains unimplemented.
 

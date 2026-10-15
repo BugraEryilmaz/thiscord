@@ -3,6 +3,29 @@ use super::{Field, Ui};
 use leptos::prelude::*;
 use thiscord_shared::{GuildId, permissions::*};
 
+fn update_home(ui: Ui, home: GuildHome) {
+    let unchanged = ui.server.with_untracked(|current| {
+        current.as_ref().is_some_and(|old| {
+            old.guild.id == home.guild.id
+                && old.guild.revision == home.guild.revision
+                && old.guild.name == home.guild.name
+                && old.guild.owner == home.guild.owner
+                && old.can_manage_roles == home.can_manage_roles
+                && old.can_manage_channels == home.can_manage_channels
+                && old.can_moderate == home.can_moderate
+                && old
+                    .channels
+                    .iter()
+                    .map(|c| (c.id, &c.name, c.kind))
+                    .eq(home.channels.iter().map(|c| (c.id, &c.name, c.kind)))
+        })
+    });
+    // A profile refresh must not recreate the open conversation and its draft.
+    if !unchanged {
+        ui.server.set(Some(home));
+    }
+}
+
 pub(super) async fn request(
     ui: Ui,
     command: PermissionRequest,
@@ -36,7 +59,7 @@ pub(super) async fn refresh(ui: Ui) {
                 )
                 .await
                 {
-                    Ok(PermissionResponse::Home { home }) => ui.server.set(Some(home)),
+                    Ok(PermissionResponse::Home { home }) => update_home(ui, home),
                     _ => ui.server.set(None),
                 }
             }
@@ -72,7 +95,7 @@ pub(super) async fn select(ui: Ui, id: GuildId) -> Result<(), String> {
     {
         ui.selected_channel.set(None);
     }
-    ui.server.set(Some(home));
+    update_home(ui, home);
     ui.page.set("servers");
     Ok(())
 }

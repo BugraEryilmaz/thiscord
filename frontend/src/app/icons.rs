@@ -24,6 +24,10 @@ pub(super) enum Glyph {
     Send,
     Close,
     Expand,
+    Person,
+    Shield,
+    Connections,
+    Keyboard,
 }
 
 #[component]
@@ -61,6 +65,12 @@ pub(super) fn Icon(kind: Glyph) -> impl IntoView {
         Glyph::Send => "m3 3 19 9-19 9 4-9-4-9ZM7 12h15",
         Glyph::Close => "m6 6 12 12M6 18 18 6",
         Glyph::Expand => "M8 3H3v5M16 3h5v5M21 16v5h-5M8 21H3v-5",
+        Glyph::Person => "M16 7a4 4 0 1 1-8 0 4 4 0 0 1 8 0ZM4 21v-2a8 8 0 0 1 16 0v2",
+        Glyph::Shield => "m12 3 8 3v6c0 5-8 9-8 9s-8-4-8-9V6l8-3Zm-4 9 3 3 5-6",
+        Glyph::Connections => "M3 4h18v12H3V4ZM8 21h8M12 16v5M8 9h8M8 12h4",
+        Glyph::Keyboard => {
+            "M3 6h18v13H3V6ZM7 10h.01M11 10h.01M15 10h.01M18 10h.01M7 13h.01M11 13h.01M15 13h.01M7 16h10"
+        }
     };
     view! { <svg class="size-5 shrink-0" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d=path/></svg> }
 }

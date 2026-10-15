@@ -144,7 +144,7 @@ paginated management APIs. Only members with ManageRoles can inspect the full
 editor state (including hidden-channel configuration). Members may preview their
 own effective permissions; role managers may preview other members.
 
-Sign in and open **Guilds & roles**. **Instance access** loads the instance controls.
+Open the account ribbon’s **Settings > Instance access** for installation-wide administration. Open the server-header gear for server settings. Overview, Roles, Members, Channels & permissions, Moderation, and Ownership & deletion are separate sections in the server modal. Only sections allowed by the current server snapshot are shown; the backend rechecks every action.
 Choose **Server settings** on a guild, select a member and role, edit permissions or
 assign/unassign roles. Channel overrides have separate allow/deny checkboxes and a
 **Load saved override** action. Preview reports saved effective permissions, not

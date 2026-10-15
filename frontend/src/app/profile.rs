@@ -72,7 +72,7 @@ pub(super) fn ProfilePicture(ui: Ui) -> impl IntoView {
         });
     };
     view! {
-        <section class="space-y-3 rounded-lg border border-white/15 p-4" aria-label="Profile picture">
+        <section class="settings-card" aria-label="Profile picture">
             <h3 class="font-semibold">"Profile picture"</h3>
             <div class="flex flex-wrap items-center gap-4">
                 <Avatar class="size-20 text-2xl"
@@ -80,12 +80,12 @@ pub(super) fn ProfilePicture(ui: Ui) -> impl IntoView {
                     avatar_id=Signal::derive(move || ui.account.get().and_then(|a| a.avatar_id))/>
                 <div class="space-y-2">
                     <label class="block space-y-2 text-sm">
-                        <span>"Choose picture"</span>
-                        <input class="block max-w-full rounded text-sm file:mr-3 file:rounded-md file:border-0 file:bg-brand file:px-3 file:py-2 file:text-white disabled:opacity-50"
+                        <span class="settings-secondary">"Change picture"</span>
+                        <input class="sr-only"
                             type="file" accept="image/png,image/jpeg,image/webp" disabled=move || ui.busy.get()
                             on:change=choose/>
                     </label>
-                    <button type="button" class="text-sm underline disabled:opacity-50"
+                    <button type="button" class="settings-link disabled:opacity-50"
                         disabled=move || ui.busy.get() || ui.account.get().is_none_or(|a| a.avatar_id.is_none())
                         on:click=move |_| {
                             if ui.busy.get_untracked() { return; }
@@ -97,7 +97,7 @@ pub(super) fn ProfilePicture(ui: Ui) -> impl IntoView {
                         }>"Remove picture"</button>
                 </div>
             </div>
-            <p class="text-sm text-white/60">"PNG, JPEG or WebP, up to 2 MiB and 4096 × 4096 pixels. Choosing a picture saves it immediately, cropped to a square. It appears in voice chat and the overlay."</p>
+            <p class="text-sm text-white/60">"PNG, JPEG or WebP, up to 2 MiB. Pictures are cropped to a square and save immediately."</p>
         </section>
     }
 }

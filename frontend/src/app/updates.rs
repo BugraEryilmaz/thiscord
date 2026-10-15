@@ -67,8 +67,8 @@ pub(super) fn Host(ui: Ui) -> impl IntoView {
 
 #[component]
 pub(super) fn Panel(ui: Ui) -> impl IntoView {
-    view! {<div class="space-y-4">
-        <h2 class="text-xl font-semibold">"Application updates"</h2>
+    view! {<div class="settings-card">
+        <h2 class="settings-panel-title text-xl font-semibold">"Application updates"</h2>
         <Show when=desktop fallback=||view!{<p>"Refresh the browser to load the latest web version."</p>}>
             <p>{move||format!("Installed version: {}",ui.updates.get().current_version)}</p>
             <p class="text-sm text-white/60">"Thiscord checks on launch and every six hours. Updates install only when you choose Install and restart."</p>

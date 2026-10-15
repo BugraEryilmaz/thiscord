@@ -15,6 +15,7 @@ mod profile;
 mod screen;
 mod screen_player;
 mod servers;
+mod settings;
 mod shortcuts;
 mod tooltip;
 mod updates;
@@ -52,6 +53,8 @@ struct Ui {
     status: RwSignal<String>,
     busy: RwSignal<bool>,
     page: RwSignal<&'static str>,
+    settings_dirty: RwSignal<bool>,
+    settings_pending: RwSignal<Option<&'static str>>,
     sessions: RwSignal<Vec<SessionInfo>>,
     ticket: RwSignal<Option<String>>,
     authorization_url: RwSignal<Option<String>>,
@@ -77,7 +80,6 @@ async fn apply(ui: Ui, response: AccountResponse) {
         }
         AccountResponse::Sessions { sessions } => {
             ui.sessions.set(sessions);
-            ui.page.set("devices");
             ui.status.set("Active devices loaded".into());
         }
         AccountResponse::Done { message } => ui.status.set(message),
@@ -333,6 +335,8 @@ pub fn App() -> impl IntoView {
         status: RwSignal::new("Welcome to Thiscord".into()),
         busy: RwSignal::new(false),
         page: RwSignal::new("login"),
+        settings_dirty: RwSignal::new(false),
+        settings_pending: RwSignal::new(None),
         sessions: RwSignal::new(vec![]),
         ticket: RwSignal::new(None),
         authorization_url: RwSignal::new(None),
@@ -345,17 +349,6 @@ pub fn App() -> impl IntoView {
             </Show>
         }.into_any();
     }
-    let password = RwSignal::new(String::new());
-    let display_name = RwSignal::new(String::new());
-    let bio = RwSignal::new(String::new());
-    let confirmation = RwSignal::new(String::new());
-    let profile_text = Memo::new(move |_| ui.account.get().map(|a| (a.id, a.display_name, a.bio)));
-    Effect::new(move |_| {
-        if let Some((_, name, text)) = profile_text.get() {
-            display_name.set(name);
-            bio.set(text);
-        }
-    });
     if client::desktop() {
         ui.busy.set(true);
         leptos::task::spawn_local(async move {
@@ -374,27 +367,6 @@ pub fn App() -> impl IntoView {
             ui.busy.set(false);
         });
     }
-    let submit = move |event: leptos::ev::SubmitEvent| {
-        event.prevent_default();
-        let command = match ui.page.get_untracked() {
-            "reauthenticate" => AccountRequest::Reauthenticate {
-                password: password.get_untracked(),
-            },
-            "password" => AccountRequest::ChangePassword {
-                password: password.get_untracked(),
-            },
-            "delete" => AccountRequest::DeleteAccount {
-                confirmation: confirmation.get_untracked(),
-            },
-            _ => AccountRequest::UpdateProfile {
-                display_name: display_name.get_untracked(),
-                bio: bio.get_untracked(),
-            },
-        };
-        password.set(String::new());
-        run(ui, command);
-    };
-    let cancel = move |_| cancel_google(ui);
     window_event_listener(leptos::ev::focus, move |_| {
         if !ui.busy.get_untracked()
             && ui
@@ -413,79 +385,14 @@ pub fn App() -> impl IntoView {
         <servers::ServerRail ui=ui/>
         <audio::AudioHost ui=ui/>
         <chat::ChatHost ui=ui/>
-        <main class="app-main" class:settings-page=move ||ui.page.get()!="servers">
-            <Show when=move ||ui.page.get()!="servers">
-            <header class="flex shrink-0 flex-wrap items-center justify-between gap-4">
-                <button class="flex items-center gap-2 text-white/60 hover:text-white" on:click=move |_|ui.page.set("servers")><icons::Icon kind=icons::Glyph::Close/>"Close settings"</button>
-                <Show when=move ||ui.account.get().is_some()><button class="rounded-md bg-white/10 px-4 py-2" disabled=move ||ui.busy.get() on:click=move |_|run(ui,AccountRequest::Logout)>"Sign out"</button></Show>
-            </header>
-            </Show>
+        <main class="app-main">
             <StatusNotice ui=ui/>
-            <Show when=move ||ui.ticket.get().is_some()><div class="flex flex-wrap gap-4 rounded-lg bg-white/5 p-4">
-                {move ||ui.authorization_url.get().map(|url|view!{<a class="text-brand underline" href=url target="_blank" rel="noopener noreferrer">"Continue in Google"</a>})}
-                <button class="underline" on:click=cancel>"Cancel Google sign-in"</button>
-            </div></Show>
-            <Show when=move ||ui.page.get()=="servers"><div class="min-h-0 min-w-0 flex-1"><servers::ServerHome ui=ui/></div></Show>
-            <Show when=move ||ui.page.get()!="servers">
-            <div class="grid min-h-0 flex-1 gap-6 overflow-y-auto md:grid-cols-[220px_1fr]">
-                <nav class="flex flex-col gap-2" aria-label="Account navigation">
-                    {move || {
-                        let tabs = vec![("profile","Profile"),("audio","Audio & voice"),("desktop","Desktop"),("updates","App updates"),("permissions","Guilds & roles"),("reauthenticate","Reauthenticate"),("password","Set / change password"),("devices","Devices & identities"),("delete","Delete account")];
-                        tabs.into_iter().filter(|(page,_)| *page != "desktop" || client::desktop()).map(move |(page,label)|view!{
-                            <button class="rounded-md px-4 py-3 text-left hover:bg-white/10 disabled:opacity-50" class:bg-brand=move ||ui.page.get()==page disabled=move ||ui.busy.get()
-                                on:click=move |_| {password.set(String::new());ui.page.set(page);if page=="devices" {run(ui,AccountRequest::Sessions);}}>{label}</button>
-                        }).collect_view()
-                    }}
-                </nav>
-                <section class="space-y-5 rounded-xl border border-white/10 bg-white/5 p-6">
-                    <Show when=move ||ui.page.get()=="moderation"><moderation::ModerationPanel ui=ui/></Show>
-                    <Show when=move ||ui.page.get()=="permissions"><permissions::PermissionEditor ui=ui/></Show>
-                    <Show when=move ||ui.page.get()=="audio"><audio::AudioSettingsPanel ui=ui/></Show>
-                    <Show when=move ||ui.page.get()=="updates"><updates::Panel ui=ui/></Show>
-                    <Show when=move ||ui.page.get()=="desktop" && client::desktop()><window::WindowSettings/></Show>
-                    <Show when=move ||ui.page.get()=="devices">
-                        <h2 class="text-xl font-semibold">"Devices & identities"</h2>
-                        <ul class="space-y-3">{move ||ui.sessions.get().into_iter().map(|s| {let id=s.id; view!{
-                            <li class="flex flex-wrap items-center justify-between gap-3 rounded-md bg-black/20 p-3">
-                                <div><p>{s.device}{if s.current {" (this device)"} else {""}}</p><p class="text-xs text-white/60">{format!("Last active: {} · Expires: {}",s.last_seen_at,s.expires_at)}</p></div>
-                                <button class="underline" disabled=move ||ui.busy.get() on:click=move |_|run(ui,AccountRequest::RevokeSession {session_id:id})>"Revoke"</button>
-                            </li>}}).collect_view()}</ul>
-                        <button class="rounded-md bg-white/10 px-4 py-2" disabled=move ||ui.busy.get() on:click=move |_|run(ui,AccountRequest::LogoutAll)>"Sign out all devices"</button>
-                        <p class="text-sm text-white/60">"Reauthenticate before linking or removing an identity. Keep at least one login method."</p>
-                        {move ||ui.account.get().map(|a|a.identities.into_iter().map(|provider|view!{
-                            <div class="flex justify-between"><span>{format!("{provider:?}")}</span><button class="underline" disabled=move ||ui.busy.get() on:click=move |_|run(ui,AccountRequest::UnlinkIdentity {provider})>"Remove identity"</button></div>
-                        }).collect_view())}
-                        <button class="rounded-md bg-brand px-4 py-2" disabled=move ||ui.busy.get() on:click=move |_|google(ui,GooglePurpose::Link)>"Link Google account"</button>
-                    </Show>
-                    <Show when=move ||!matches!(ui.page.get(),"devices"|"permissions"|"moderation"|"audio"|"updates"|"desktop")>
-                        <h2 class="text-xl font-semibold">{move ||match ui.page.get(){"register"=>"Create your account","login"=>"Welcome back","forgot"=>"Request a password reset","reset"=>"Reset your password","verify"=>"Verify your email","reauthenticate"=>"Confirm it’s you","password"=>"Set or change password","delete"=>"Permanently delete account",_=>"Your profile"}}</h2>
-                        <form class="space-y-4" on:submit=submit>
-                            <Show when=move ||ui.page.get()=="reauthenticate"><Field label="Current password" value=password kind="password" autocomplete="current-password"/></Show>
-                            <Show when=move ||ui.page.get()=="password"><Field label="New password (at least 12 characters)" value=password kind="password" autocomplete="new-password"/></Show>
-                            <Show when=move ||ui.page.get()=="profile">
-                                <p class="text-sm text-white/60">{move ||ui.account.get().map(|a|format!("@{} · {} · {}",a.username,a.email,if a.email_verified {"Email verified"} else {"Email not verified"}))}</p>
-                                <profile::ProfilePicture ui=ui/>
-                                <Field label="Display name" value=display_name/><Field label="Bio (up to 500 characters)" value=bio/>
-                                <button type="button" class="icon-button" aria-label="Refresh account" data-tip="Refresh account" disabled=move ||ui.busy.get() on:click=move |_|run(ui,AccountRequest::Current)><icons::Icon kind=icons::Glyph::Refresh/></button>
-                                <Show when=move ||ui.account.get().is_some_and(|a|!a.email_verified)>
-                                    <p class="text-sm text-white/70">"Check your email and click the verification link. Your status updates when you return to Thiscord."</p>
-                                    <button type="button" class="text-brand underline" disabled=move ||ui.busy.get() on:click=move |_|run(ui,AccountRequest::SendVerification)>"Resend verification link"</button>
-                                </Show>
-                            </Show>
-                            <Show when=move ||matches!(ui.page.get(),"password"|"delete")><p class="text-sm text-white/60">"Reauthenticate first. This action signs you out on every device."</p></Show>
-                            <Show when=move ||ui.page.get()=="delete"><p>"This permanently deletes your profile, credentials and sessions."</p><Field label="Type your username to confirm" value=confirmation/></Show>
-                            <button class="rounded-md bg-brand px-5 py-3 font-semibold disabled:opacity-50" type="submit" disabled=move ||ui.busy.get()>{move ||if ui.page.get()=="delete" {"Permanently delete"} else {"Continue"}}</button>
-                        </form>
-                        <Show when=move ||ui.page.get()=="reauthenticate">
-                            <button class="w-full rounded-md border border-white/20 px-4 py-3 disabled:opacity-50" disabled=move ||ui.busy.get() on:click=move |_|google(ui,if ui.page.get_untracked()=="reauthenticate" {GooglePurpose::Reauthenticate} else {GooglePurpose::Login})>"Continue with Google"</button>
-                        </Show>
-                    </Show>
-                </section>
-            </div>
-            </Show>
+            <div class="min-h-0 min-w-0 flex-1"><servers::ServerHome ui=ui/></div>
         </main>
+        <settings::Host ui=ui/>
         <audio::VoiceBar ui=ui/>
         </div>
         </Show>
-    }.into_any()
+    }
+    .into_any()
 }
