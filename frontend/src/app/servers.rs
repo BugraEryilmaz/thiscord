@@ -137,6 +137,13 @@ fn GuildButton(ui: Ui, guild: Guild) -> impl IntoView {
 
 #[component]
 fn VoiceRoster(ui: Ui, guild: GuildId, channel: thiscord_shared::ChannelId) -> impl IntoView {
+    let speaking = Memo::new(move |_| {
+        thiscord_frontend::voice_overlay::speaking_in_channel(
+            &ui.voice.get(),
+            ui.audio_status.get().as_ref(),
+            channel,
+        )
+    });
     let members = Memo::new(move |_| {
         ui.voice_roster
             .get()
@@ -149,12 +156,14 @@ fn VoiceRoster(ui: Ui, guild: GuildId, channel: thiscord_shared::ChannelId) -> i
         <For each=move ||members.get() key=|m|m.account_id children=move |initial|{
             let id=initial.account_id;
             let member=Signal::derive(move ||members.get().into_iter().find(|m|m.account_id==id).unwrap_or_else(||initial.clone()));
-            view!{<li tabindex="0" aria-haspopup="menu" data-context-server=guild.to_string() data-context-channel=channel.to_string() data-context-member=id.to_string() class="flex min-w-0 items-center gap-2 rounded py-1 text-xs text-white/65 hover:bg-white/5" data-tip=move ||format!("{} (@{})",member.get().display_name(),member.get().username)>
-                <crate::avatar::Avatar class="size-6 text-xs" name=Signal::derive(move ||member.get().display_name().to_owned()) avatar_id=Signal::derive(move ||member.get().avatar_id)/>
+            view!{<li tabindex="0" aria-haspopup="menu" data-context-server=guild.to_string() data-context-channel=channel.to_string() data-context-member=id.to_string() class="voice-member sidebar-member" class:voice-speaking=move ||speaking.get().contains(&id) data-tip=move ||format!("{} (@{})",member.get().display_name(),member.get().username)>
+                <button class="voice-person" class:has-stream=move ||member.get().sharing_screen aria-label=move ||if member.get().sharing_screen{format!("Watch {}’s stream",member.get().display_name())}else{member.get().display_name().to_owned()} data-tip=move ||if member.get().sharing_screen{"Watch stream"}else{"Right-click for options"} on:click=move |_|if member.get_untracked().sharing_screen{super::screen::open_stream(ui,guild,channel,member.get_untracked());}>
+                <span class="voice-avatar"><crate::avatar::Avatar class="size-6 text-xs" name=Signal::derive(move ||member.get().display_name().to_owned()) avatar_id=Signal::derive(move ||member.get().avatar_id)/></span>
                 <span class="min-w-0 flex-1 truncate">{move ||member.get().display_name().to_owned()}</span>
+                </button><Show when=move ||speaking.get().contains(&id)><span class="sr-only">"Speaking"</span></Show>
                 <Show when=move ||member.get().deafened><span aria-label="Deafened"><Icon kind=Glyph::Deafen/></span></Show>
                 <Show when=move ||!member.get().deafened && (member.get().muted || !member.get().can_speak)><span aria-label="Muted"><Icon kind=Glyph::MicOff/></span></Show>
-                <Show when=move ||member.get().sharing_screen><span class="text-emerald-400" aria-label="Sharing screen"><Icon kind=Glyph::Screen/></span></Show>
+                <Show when=move ||member.get().sharing_screen><button class="stream-live-badge" aria-label=move ||format!("Watch {}’s stream",member.get().display_name()) data-tip="Watch stream" on:click=move |_|super::screen::open_stream(ui,guild,channel,member.get_untracked())>"LIVE"</button></Show>
             </li>}
         }/>
     </ul>}

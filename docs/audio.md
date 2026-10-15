@@ -76,7 +76,10 @@ volume and deafen, and are included in the echo reference/debug speaker track.
 They are not inserted into the outgoing microphone stream. PCM is synthesized
 before device startup; callback playback uses no allocation, locks or file I/O.
 
-Each speaker has an independent 0-200% voice volume slider. Received screen shares
+Each speaker has an independent 0-200% voice volume slider directly in their
+right-click menu while connected to the same call. Sidebar avatars gain a green
+ring while speaking, using the same native activity and mute/deafen rules as the
+overlay; other channels do not show inferred activity. Received screen shares
 have separate volume and mute controls beside their video; changing either level
 does not change the other. Gains persist locally per
 guild/account ID in `speaker-volumes.json`, including 0% mutes, and restore on
