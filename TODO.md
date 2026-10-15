@@ -235,6 +235,8 @@ speaker isolation and physical acoustic acceptance remain future work.
 - [x] Replace existing same-account voice connections atomically; fence stale media/cleanup, stop displaced retries and reuse local connected/recovering jobs.
 - [x] Document WSL/Windows UDP addressing and firewall requirements.
 - [x] Automatic full peer reconnection with fresh offers and relay credentials.
+- [x] Authenticated signaling reattachment preserves media across brief socket loss,
+  with bounded grace, cancellation, sequence fencing and permission revalidation.
 - [ ] In-place ICE restart and proactive long-call relay credential refresh.
 - [x] Docker coturn deployment, shared-secret configuration and local relay tests.
 - [ ] Restrictive NAT, forced WebRTC relay fallback and off-site public UDP acceptance.
@@ -277,7 +279,8 @@ speaker isolation and physical acoustic acceptance remain future work.
 - [x] Compact connection-quality UI with local failure attribution and unavailable values.
 - [ ] In-app remote speaking indicators.
 - [ ] Overlay runtime acceptance in games, mixed-DPI monitors, macOS Spaces and Linux compositors.
-- [x] Automatic transport reconnection after network failure or server restart.
+- [x] Automatic media transport reconnection after failure; signaling recovery
+  preserves existing media, while expired/missing sessions require an explicit join.
 - [ ] Validate real network switching/server outages across native hosts; support
   explicit local device suspend/resume recovery without unexpected capture.
 - [ ] Multi-user acceptance on Windows/macOS/Linux with real microphones.

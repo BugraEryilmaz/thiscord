@@ -114,9 +114,12 @@ cannot dispatch queued commands or retrieve pending replies. Already dispatched
 operations may have applied; a timeout is not an acknowledgment and is never
 retried automatically. The browser should refresh before another change.
 
-Requests bind to a specific voice connection ID. Reconnecting, replacing a client,
-leaving voice or revoking voice access removes that target; commands never follow
-an account to a new connection. Offline users and older clients show an unavailable
+Requests bind to a specific media session's voice connection ID. A full reconnect,
+replacement, leave or voice-access revocation removes that target; commands never
+follow an account to a new media session. Signaling-only recovery retains the target,
+but rejects an interrupted request instead of replaying commands or partial replies.
+New requests while signaling is detached receive an unavailable error; after resume,
+administrators can issue a fresh request to the same target. Offline users and older clients show an unavailable
 message. Both offer and answer negotiate support, retaining compatibility with old
 servers and clients. No extra socket, database migration or persistent remote
 settings store is introduced.

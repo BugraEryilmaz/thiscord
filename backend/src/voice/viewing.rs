@@ -154,6 +154,7 @@ mod tests {
             room.members.write().await.insert(
                 slot,
                 Member {
+                    resumption: None,
                     request_id: thiscord_shared::RequestId::from_uuid(uuid::Uuid::new_v4()),
                     call_id: None,
                     replaced: watch::channel(false).0,
