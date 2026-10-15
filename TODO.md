@@ -27,6 +27,11 @@ media compatibility spike can happen before chat to expose platform constraints.
 
 ## 1. Accounts and login: backend and frontend
 
+- [x] Immediate unclipped sidebar tooltips, consistent rail icons, persistent account/connection ribbon, accessible icon controls and permission-filtered sidebar voice rosters before joining.
+- [x] Direct sidebar voice joins, brief connection hover diagnostics and backdrop dismissal for server/channel/screen-picker dialogs.
+- [x] Server/channel/participant context menus with permission-filtered management, personal persistent channel pins/mutes, mark-as-read, local participant volume and server settings in the header.
+- [ ] Validate the expanded account ribbon and screen picker on native Windows/macOS/Linux clients; camera remains unimplemented.
+
 - [x] Migrations for accounts, unique usernames/emails, credential identities and sessions.
 - [x] Registration, standard password login, logout and current-user API/UI.
 - [x] Argon2id password hashing, input validation and registration/login rate limits.

@@ -11,6 +11,8 @@ use thiscord_backend::{api, db, permissions};
 use thiscord_shared::{AccountId, account::ACCOUNT_PATH, permissions::*};
 use tower::ServiceExt;
 use uuid::Uuid;
+#[path = "voice/roster.rs"]
+mod roster;
 
 struct Database {
     connection: PgConnection,

@@ -8,6 +8,44 @@
   --color-surface: #202127;
   --color-content: #f2f3f5;
   --color-brand: #5865f2;
+  --color-rail: #121318;
+  --color-sidebar: #191a21;
+  --color-dock: #292a32;
+}
+
+/* The account ribbon spans the rail and channel list; content keeps its height. */
+.app-shell { --sidebar-width: 248px; --dock-height: 84px; height: 100dvh; }
+.app-shell.in-voice { --dock-height: 186px; }
+.app-shell:has(.user-dock button.bg-red-700) { --dock-height: 218px; }
+.app-main { margin-left: 80px; height: 100%; display: flex; flex-direction: column; min-width: 0; overflow: hidden; }
+.app-main.settings-page { padding: 24px 24px var(--dock-height); gap: 20px; }
+.server-rail { position: fixed; inset: 0 auto var(--dock-height) 0; z-index: 20; width: 80px; display: flex; flex-direction: column; align-items: center; padding: 16px 0 8px; background: var(--color-rail); border-right: 1px solid #ffffff08; }
+.server-layout { display: grid; grid-template-columns: var(--sidebar-width) minmax(0, 1fr); height: 100%; min-height: 0; }
+.channel-sidebar { display: flex; flex-direction: column; gap: 18px; min-height: 0; min-width: 0; background: var(--color-sidebar); padding: 20px 12px var(--dock-height); }
+.server-layout > section { border-radius: 0; border-width: 0; }
+.guild-button { width: 48px; height: 48px; flex-shrink: 0; border-radius: 18px; background: #30313c; color: #d8d9e0; font-weight: 650; transition: background .12s, border-radius .12s; }
+.guild-button:hover, .guild-button.selected { background: var(--color-brand); color: white; border-radius: 14px; }
+.guild-button.selected { box-shadow: -32px 0 0 -20px white; }
+.user-dock { position: fixed; bottom: 8px; left: 8px; z-index: 30; width: calc(64px + var(--sidebar-width)); border: 1px solid #ffffff08; border-radius: 12px; background: var(--color-dock); box-shadow: 0 4px 16px #0003; }
+.voice-dock { padding: 12px; border-bottom: 1px solid #ffffff0c; }
+.connection-dot { position: absolute; right: -1px; bottom: -1px; width: 13px; height: 13px; border: 3px solid var(--color-dock); border-radius: 50%; background: #858894; }
+.connection-dot.connected { background: #53bd84; }
+.connection-dot.connecting { background: #f4be58; }
+.icon-button { position: relative; display: inline-flex; align-items: center; justify-content: center; width: 34px; height: 36px; border-radius: 7px; color: #b7b9c4; cursor: pointer; }
+.icon-button:hover { background: #ffffff12; color: white; }
+.icon-button[aria-pressed="true"], .icon-button.danger { color: #ff828a; }
+.icon-button[aria-pressed="true"] { background: #ff6b7914; }
+.icon-button:disabled { opacity: .4; cursor: not-allowed; }
+button:focus-visible { outline: 2px solid #a4adff; outline-offset: 2px; }
+.voice-action { width: 100%; height: 34px; background: #ffffff08; }
+.voice-dock .voice-action, .screen-control { flex: 1; }
+.screen-control { min-width: 0; }
+.screen-error { position: absolute; left: 0; right: 0; bottom: 100%; padding: 12px; background: #17181e; border-radius: 8px; }
+@media (max-width: 800px) {
+  .app-shell { --sidebar-width: 216px; }
+  .channel-sidebar { padding-left: 8px; padding-right: 8px; }
+  .user-dock .icon-button { width: 30px; }
+  .user-dock .voice-action { width: 100%; }
 }
 
 /* The overlay is a separate, transparent native window. */
@@ -52,3 +90,25 @@ html:has(.voice-overlay), body:has(.voice-overlay) {
     @apply bg-surface font-sans text-content;
   }
 }
+
+.channel-selected { background: #ffffff0f; color: white; }
+
+/* Matching rail hit targets and stroke icons; labels render in the root overlay. */
+.rail-action { display: grid; place-items: center; flex-shrink: 0; width: 48px; height: 48px; border-radius: 16px; background: #262830; color: #aab0bf; cursor: pointer; transition: background .12s, color .12s; }
+.rail-action svg { width: 24px; height: 24px; stroke-width: 1.9; }
+.rail-action:hover { background: #39463e; color: #77e3b1; }
+.rail-action:disabled { opacity: .45; cursor: wait; }
+.quick-tooltip { position: fixed; z-index: 100; width: max-content; max-width: min(320px, calc(100vw - 16px)); padding: 9px 12px; border: 1px solid #ffffff14; border-radius: 8px; background: #090a0e; color: #f2f3f5; box-shadow: 0 4px 16px #0005; font-size: 12px; font-weight: 500; line-height: 1.5; white-space: pre-line; overflow-wrap: anywhere; pointer-events: none; }
+.voice-active { color: #77e3b1; }
+.voice-health { cursor: help; text-align: left; border-radius: 4px; }
+.app-context-menu { position: fixed; z-index: 120; width: 240px; max-width: calc(100vw - 16px); max-height: calc(100dvh - 16px); overflow-y: auto; padding: 6px; border: 1px solid #ffffff14; border-radius: 10px; background: #111218; box-shadow: 0 8px 32px #0008; }
+.context-heading { padding: 6px 8px 9px; margin-bottom: 4px; border-bottom: 1px solid #ffffff10; color: #9da1b0; font-size: 12px; overflow-wrap: anywhere; }
+.context-item { display: block; width: 100%; padding: 9px 10px; border-radius: 5px; text-align: left; font-size: 13px; color: #e1e2e9; cursor: pointer; }
+.context-item:hover, .context-item:focus-visible { background: var(--color-brand); color: white; outline: none; }
+.context-danger { color: #ff828a; }
+.context-danger:hover, .context-danger:focus-visible { background: #a73042; }
+.context-item:disabled { opacity: .4; cursor: default; background: transparent; }
+.context-dialog { margin: auto; width: min(480px, calc(100vw - 32px)); max-height: 85dvh; overflow-y: auto; border: 1px solid #ffffff20; border-radius: 14px; padding: 24px; background: var(--color-surface); color: var(--color-content); }
+.context-dialog::backdrop { background: #000b; }
+.channel-indicator svg { width: 13px; height: 13px; opacity: .6; }
+[data-context-member]:focus-visible { outline: 2px solid #a4adff; outline-offset: 2px; }

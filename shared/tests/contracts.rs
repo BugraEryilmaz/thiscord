@@ -102,6 +102,19 @@ fn chat_envelopes_and_bounds_are_stable() {
 #[test]
 fn chat_session_subscription_contracts_are_additive() {
     use thiscord_shared::chat::*;
+    let legacy = from_value::<ClientFrame>(json!({"version":1,"event":{"type":"subscribe","subscription":1,"guild_id":ID,"channel_id":null}})).unwrap();
+    assert!(matches!(
+        legacy.event,
+        ClientEvent::Subscribe {
+            voice_roster: false,
+            ..
+        }
+    ));
+    let roster = from_value::<ServerFrame>(json!({"version":1,"event":{"type":"update","subscription":1,"event":{"type":"voice_roster","channels":[{"channel_id":ID,"members":[]}]}}})).unwrap();
+    assert_eq!(
+        to_value(roster).unwrap()["event"]["event"]["channels"][0]["channel_id"],
+        ID
+    );
     let connect =
         from_value::<ClientFrame>(json!({"version":1,"event":{"type":"connect","token":"test"}}))
             .unwrap();
@@ -112,6 +125,7 @@ fn chat_session_subscription_contracts_are_additive() {
             subscription: 7,
             guild_id: None,
             channel_id: None,
+            voice_roster: false,
         },
     };
     assert_eq!(

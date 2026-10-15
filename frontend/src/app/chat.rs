@@ -1,4 +1,5 @@
 use super::Ui;
+use super::icons::{Glyph, Icon};
 use futures_util::{
     SinkExt, StreamExt,
     future::{AbortHandle, Abortable},
@@ -287,6 +288,24 @@ impl Chat {
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
+pub(super) enum ConnectionStatus {
+    Connecting,
+    Connected,
+    Reconnecting,
+    Offline,
+}
+impl ConnectionStatus {
+    pub(super) fn label(self) -> &'static str {
+        match self {
+            Self::Connecting => "Connecting…",
+            Self::Connected => "Connected",
+            Self::Reconnecting => "Reconnecting…",
+            Self::Offline => "Offline",
+        }
+    }
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
 struct Subscription {
     guild: Option<GuildId>,
     channel: Option<ChannelId>,
@@ -321,6 +340,8 @@ pub(super) fn ChatHost(ui: Ui) -> impl IntoView {
             previous.abort();
         }
         ui.unread.set(vec![]);
+        ui.voice_roster.set(vec![]);
+        ui.socket_status.set(ConnectionStatus::Offline);
         let Some(token) = token else {
             return;
         };
@@ -331,11 +352,24 @@ pub(super) fn ChatHost(ui: Ui) -> impl IntoView {
                 async move {
                     let mut delay = 1000;
                     loop {
+                        if !window().navigator().on_line() {
+                            ui.socket_status.set(ConnectionStatus::Offline);
+                            gloo_timers::future::TimeoutFuture::new(1000).await;
+                            continue;
+                        }
+                        ui.socket_status.set(ConnectionStatus::Connecting);
                         let started = js_sys::Date::now();
                         let error = connected(ui, &token)
                             .await
                             .err()
                             .unwrap_or_else(|| "Disconnected".into());
+                        ui.socket_status.set(if window().navigator().on_line() {
+                            ConnectionStatus::Reconnecting
+                        } else {
+                            ConnectionStatus::Offline
+                        });
+                        ui.voice_roster.set(vec![]);
+                        ui.unread.set(vec![]);
                         if let Some(chat) = ui.active_chat.get_untracked() {
                             chat.online.set(vec![]);
                             chat.status.set(format!("{error}. Retrying..."));
@@ -395,7 +429,10 @@ async fn connected(ui: Ui, token: &str) -> Result<(), String> {
                 return Err("Unsupported socket version".into());
             }
             match frame.event {
-                ServerEvent::Authenticated {} => authenticated.set(true),
+                ServerEvent::Authenticated {} => {
+                    authenticated.set(true);
+                    ui.socket_status.set(ConnectionStatus::Connected);
+                }
                 ServerEvent::Pong {} => {}
                 ServerEvent::Revoked {} => {
                     ui.unread.set(vec![]);
@@ -439,6 +476,7 @@ async fn connected(ui: Ui, token: &str) -> Result<(), String> {
                     }
                     match *event {
                         ServerEvent::Unread { channels } => ui.unread.set(channels),
+                        ServerEvent::VoiceRoster { channels } => ui.voice_roster.set(channels),
                         event => {
                             if let Some(chat) = ui
                                 .active_chat
@@ -461,6 +499,9 @@ async fn connected(ui: Ui, token: &str) -> Result<(), String> {
             // Local scheduling only: no network request unless a subscription,
             // typing state, read position or heartbeat actually needs sending.
             gloo_timers::future::TimeoutFuture::new(100).await;
+            if !window().navigator().on_line() {
+                return Err("Offline".to_string());
+            }
             if !authenticated.get() {
                 continue;
             }
@@ -470,10 +511,12 @@ async fn connected(ui: Ui, token: &str) -> Result<(), String> {
                 serial += 1;
                 sent.set(Some((serial, wanted)));
                 ui.unread.set(vec![]);
+                ui.voice_roster.set(vec![]);
                 Some(ClientEvent::Subscribe {
                     subscription: serial,
                     guild_id: wanted.guild,
                     channel_id: wanted.channel,
+                    voice_roster: true,
                 })
             } else if count.is_multiple_of(100) {
                 Some(ClientEvent::Ping {})
@@ -610,13 +653,13 @@ fn MessageRow(
                 <Show when=move || message.with(|m| !m.deleted)>
                     <div class="flex gap-3 text-xs text-white/50">
                         <Show when=move || own() && chat.permissions.with(|p| p.contains(&Permission::EditOwnMessages))>
-                            <button class="hover:underline" on:click=move |_| {
+                            <button class="icon-button" aria-label="Edit message" data-tip="Edit" on:click=move |_| {
                                 editing.set(Some(id));
                                 draft.set(message.with_untracked(|m| m.content.clone()));
-                            }>"Edit"</button>
+                            }><Icon kind=Glyph::Edit/></button>
                         </Show>
                         <Show when=move || chat.permissions.with(|p| p.contains(&Permission::ManageMessages) || (own() && p.contains(&Permission::DeleteOwnMessages)))>
-                            <button class="hover:underline" on:click=move |_| {
+                            <button class="icon-button danger" aria-label="Delete message" data-tip="Delete" on:click=move |_| {
                                 if !window().confirm_with_message("Delete this message?").unwrap_or(false) { return; }
                                 let revision = message.with_untracked(|m| m.revision);
                                 leptos::task::spawn_local(async move {
@@ -630,7 +673,7 @@ fn MessageRow(
                                         _ => {}
                                     }
                                 });
-                            }>"Delete"</button>
+                            }><Icon kind=Glyph::Trash/></button>
                         </Show>
                     </div>
                 </Show>
@@ -815,10 +858,10 @@ pub(super) fn ChatPanel(ui: Ui, guild: GuildId, channel: ChannelId, name: String
                                     <p>{move || pending.with(|p| p.as_ref().map(|p| p.content.clone()).unwrap_or_default())}</p>
                                     {move || if pending.with(|p| p.as_ref().is_some_and(|p| p.failed)) { "Failed to send" } else { "Sending…" }}
                                     <Show when=move || pending.with(|p| p.as_ref().is_some_and(|p| p.failed))>
-                                        <button class="ml-3 text-brand underline" on:click=move |_| {
+                                        <button class="icon-button" aria-label="Retry message" data-tip="Retry" on:click=move |_| {
                                             if let Some(p) = chat.pending.with_untracked(|p| p.iter().find(|p| p.id == id).cloned()) { chat.send(p); }
-                                        }>"Retry"</button>
-                                        <button class="ml-3 text-brand underline" on:click=move |_| chat.pending.update(|p| p.retain(|p| p.id != id))>"Discard"</button>
+                                        }><Icon kind=Glyph::Refresh/></button>
+                                        <button class="icon-button" aria-label="Discard message" data-tip="Discard" on:click=move |_| chat.pending.update(|p| p.retain(|p| p.id != id))><Icon kind=Glyph::Trash/></button>
                                     </Show>
                                 </li>
                             }
@@ -833,7 +876,7 @@ pub(super) fn ChatPanel(ui: Ui, guild: GuildId, channel: ChannelId, name: String
                 <p class="text-xs text-white/50">{move||format!("Online here: {}",chat.online.with(|members| members.iter().map(|m|m.display_name()).collect::<Vec<_>>().join(", ")))}</p>
                 <p class="min-h-4 text-xs text-white/60" aria-live="polite">{move||{let names=chat.online.with(|members| members.iter().filter(|m|m.typing&&ui.account.with(|a|a.as_ref().is_none_or(|a|a.id!=m.account_id))).map(|m|m.display_name().to_owned()).collect::<Vec<_>>());if names.is_empty(){String::new()}else{format!("{} typing…",names.join(", "))}}}</p>
                 <Show when=move||editing.get().is_some()><button class="text-sm text-brand underline" on:click=move |_|{editing.set(None);draft.set(String::new());}>"Cancel edit"</button></Show>
-                <form class="flex gap-3" on:submit=submit><label class="min-w-0 flex-1"><span class="sr-only">"Message"</span><textarea class="w-full resize-none rounded-lg bg-black/20 p-3 outline-none focus:ring-2 focus:ring-brand" on:keydown=keydown rows="2" maxlength="4000" placeholder="Message this channel · @username to mention" prop:value=move||draft.get() disabled=move||!chat.permissions.with(|p|p.contains(&Permission::SendMessages)) on:input=move|ev|{draft.set(event_target_value(&ev));chat.typing.set(true);}/></label><button class="self-end rounded-lg bg-brand px-4 py-3 disabled:opacity-50" disabled=move||loading.get()||draft.with(|d|d.trim().is_empty())||!chat.permissions.with(|p|p.contains(&Permission::SendMessages))>{move||if editing.get().is_some(){"Save"}else{"Send"}}</button></form>
+                <form class="flex gap-3" on:submit=submit><label class="min-w-0 flex-1"><span class="sr-only">"Message"</span><textarea class="w-full resize-none rounded-lg bg-black/20 p-3 outline-none focus:ring-2 focus:ring-brand" on:keydown=keydown rows="2" maxlength="4000" placeholder="Message this channel · @username to mention" prop:value=move||draft.get() disabled=move||!chat.permissions.with(|p|p.contains(&Permission::SendMessages)) on:input=move|ev|{draft.set(event_target_value(&ev));chat.typing.set(true);}/></label><button class="icon-button self-end bg-brand" aria-label=move ||if editing.get().is_some(){"Save message"}else{"Send message"} data-tip=move ||if editing.get().is_some(){"Save"}else{"Send"} disabled=move||loading.get()||draft.with(|d|d.trim().is_empty())||!chat.permissions.with(|p|p.contains(&Permission::SendMessages))><Icon kind=Glyph::Send/></button></form>
             </footer>
         </section>
     }

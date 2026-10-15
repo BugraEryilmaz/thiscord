@@ -6,6 +6,17 @@ pub fn summary(value: Option<&AudioQuality>) -> String {
     let Some(q) = value else {
         return "Voice quality unavailable".into();
     };
+    let mut causes = faults(q);
+    if causes.is_empty() {
+        causes.push("No recent measured quality faults");
+    }
+    format!(
+        "{} · SFU-hop RTT {}",
+        causes.join(" · "),
+        optional(q.sfu_hop_rtt_ms, "ms")
+    )
+}
+fn faults(q: &AudioQuality) -> Vec<&'static str> {
     let c = &q.metrics.recent;
     let mut causes = Vec::new();
     if q.metrics.capture.deadline_misses > 0
@@ -50,15 +61,47 @@ pub fn summary(value: Option<&AudioQuality>) -> String {
     {
         causes.push("Media decode errors; inspect advanced details");
     }
-    if causes.is_empty() {
-        causes.push("No recent measured quality faults");
-    }
-    format!(
-        "{} · SFU-hop RTT {}",
-        causes.join(" · "),
-        optional(q.sfu_hop_rtt_ms, "ms")
-    )
+    causes
 }
+
+/// Compact hover diagnostics. Local transport discards and server-hop loss are
+/// distinct measurements; neither is presented as end-to-end packet loss.
+pub fn brief(value: Option<&AudioQuality>) -> String {
+    let Some(q) = value else {
+        return "Measuring · latency unavailable\nDrops unavailable".into();
+    };
+    let rtt = q.sfu_hop_rtt_ms.filter(|v| v.is_finite() && *v >= 0.0);
+    let health = if !faults(q).is_empty() {
+        "Audio issues"
+    } else if rtt.is_some_and(|v| v > 250.0) {
+        "High latency"
+    } else if q.metrics.window_ms == 0 || rtt.is_none() {
+        "Measuring"
+    } else {
+        "Healthy"
+    };
+    let latency = rtt
+        .map(|v| format!("{v:.0} ms server RTT"))
+        .unwrap_or_else(|| "latency unavailable".into());
+    let c = &q.metrics.total;
+    let drops = c
+        .outgoing_full_packets
+        .saturating_add(c.outgoing_expired_packets)
+        .saturating_add(c.outgoing_failed_packets)
+        .saturating_add(c.incoming_queue_dropped_packets);
+    let loss = match (q.sfu_hop_received_packets, q.sfu_hop_lost_packets) {
+        (Some(received), Some(lost)) if received.saturating_add(lost.max(0) as u64) > 0 => {
+            let lost = lost.max(0) as u64;
+            format!(
+                "{:.1}%",
+                lost as f64 * 100.0 / received.saturating_add(lost) as f64
+            )
+        }
+        _ => "unavailable".into(),
+    };
+    format!("{health} · {latency}\nServer loss {loss} · local drops {drops} packets")
+}
+
 fn optional(v: Option<f64>, unit: &str) -> String {
     v.filter(|v| v.is_finite())
         .map(|v| format!("{v:.1} {unit}"))
@@ -242,6 +285,54 @@ pub fn detail(value: Option<&AudioQuality>) -> String {
 mod tests {
     use super::*;
     use thiscord_shared::audio::QualityCounts;
+    #[test]
+    fn brief_separates_server_loss_from_local_drops() {
+        let mut q = AudioQuality {
+            sfu_hop_rtt_ms: Some(38.4),
+            sfu_hop_received_packets: Some(990),
+            sfu_hop_lost_packets: Some(10),
+            ..Default::default()
+        };
+        q.metrics.window_ms = 1000;
+        q.metrics.total = QualityCounts {
+            outgoing_full_packets: 2,
+            outgoing_expired_packets: 3,
+            outgoing_failed_packets: 4,
+            incoming_queue_dropped_packets: 5,
+            outgoing_invalidated_packets: 100,
+            ..Default::default()
+        };
+        assert_eq!(
+            brief(Some(&q)),
+            "Healthy · 38 ms server RTT\nServer loss 1.0% · local drops 14 packets"
+        );
+        q.metrics.recent.outgoing_full_packets = 1;
+        assert!(brief(Some(&q)).starts_with("Audio issues"));
+        q.metrics.recent.outgoing_full_packets = 0;
+        q.sfu_hop_rtt_ms = Some(300.0);
+        assert!(brief(Some(&q)).starts_with("High latency"));
+    }
+
+    #[test]
+    fn brief_handles_missing_and_invalid_measurements() {
+        assert_eq!(
+            brief(None),
+            "Measuring · latency unavailable\nDrops unavailable"
+        );
+        let mut q = AudioQuality::default();
+        assert!(brief(Some(&q)).contains("Server loss unavailable"));
+        for rtt in [f64::NAN, f64::INFINITY, -1.0] {
+            q.sfu_hop_rtt_ms = Some(rtt);
+            assert!(brief(Some(&q)).starts_with("Measuring · latency unavailable"));
+        }
+        q.sfu_hop_received_packets = Some(100);
+        q.sfu_hop_lost_packets = Some(-1);
+        assert!(brief(Some(&q)).contains("Server loss 0.0%"));
+        q.metrics.total.outgoing_full_packets = u64::MAX;
+        q.metrics.total.outgoing_failed_packets = 1;
+        assert!(brief(Some(&q)).contains(&format!("local drops {} packets", u64::MAX)));
+    }
+
     #[test]
     fn missing_metrics_remain_unavailable_and_cpu_is_not_a_bad_connection() {
         assert!(summary(None).contains("unavailable"));

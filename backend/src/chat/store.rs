@@ -70,6 +70,23 @@ pub(super) fn check_channel(
     }
     Ok(permissions)
 }
+pub(super) fn visible_voice_channels(
+    pool: &DbPool,
+    token: &str,
+    guild: GuildId,
+) -> Result<Vec<ChannelId>, Failure> {
+    checked(pool, token, guild, None, None, |_, actor, state| {
+        Ok(state
+            .channels
+            .iter()
+            .filter(|channel| {
+                channel.kind == ChannelKind::Voice
+                    && effective(state, actor, Some(channel.id)).contains(&Permission::ViewChannel)
+            })
+            .map(|channel| channel.id)
+            .collect())
+    })
+}
 fn message(c: &mut PgConnection, id: MessageId) -> Result<ChatMessage, Failure> {
     query(c,"SELECT to_jsonb(m)||jsonb_build_object('username',COALESCE(a.username,'Deleted account'),'display_name',COALESCE(NULLIF(a.display_name,''),a.username,'Deleted account')) AS data FROM messages m LEFT JOIN accounts a ON a.id=m.author_id WHERE m.id=$1::uuid", &[&id.to_string()])?.pop().ok_or(Failure::Forbidden)
 }

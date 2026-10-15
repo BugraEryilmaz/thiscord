@@ -129,6 +129,9 @@ pub enum ClientEvent {
         subscription: u64,
         guild_id: Option<GuildId>,
         channel_id: Option<ChannelId>,
+        /// Opt in so older clients never receive an unknown event variant.
+        #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+        voice_roster: bool,
     },
     Authenticate {
         token: String,
@@ -160,6 +163,9 @@ pub enum ServerEvent {
     },
     Unread {
         channels: Vec<Unread>,
+    },
+    VoiceRoster {
+        channels: Vec<crate::voice::ChannelRoster>,
     },
     Ready {
         history: History,

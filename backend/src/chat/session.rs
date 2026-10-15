@@ -99,6 +99,10 @@ pub(super) async fn serve(mut socket: WebSocket, pool: DbPool, id: RequestId, to
     let mut typing_expiry = None::<Instant>;
     let mut maintenance = tokio::time::interval(Duration::from_secs(10));
     maintenance.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+    let mut roster_tick = tokio::time::interval(Duration::from_secs(1));
+    roster_tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+    let mut watch_voice = false;
+    let mut last_roster = None;
     loop {
         tokio::select! { biased;
             _ = session_revoked.changed() => { let _ = send(&mut socket, ServerEvent::Revoked {}).await; break; }
@@ -113,7 +117,7 @@ pub(super) async fn serve(mut socket: WebSocket, pool: DbPool, id: RequestId, to
                 if count > 30 { let _ = send(&mut socket, error(id, ErrorCode::RateLimited, "Socket event limit exceeded")).await; break; }
                 last_seen = Instant::now();
                 match frame(incoming) {
-                    Some(ClientEvent::Subscribe { subscription: serial, guild_id, channel_id }) => {
+                    Some(ClientEvent::Subscribe { subscription: serial, guild_id, channel_id, voice_roster }) => {
                         if revoked.has_changed().unwrap_or(true) || session_revoked.has_changed().unwrap_or(true) { let _ = send(&mut socket, ServerEvent::Revoked {}).await; break; }
                         let p = pool.clone();
                         let _ = tokio::task::spawn_blocking(move || store::cleanup(&p, connection)).await;
@@ -122,6 +126,8 @@ pub(super) async fn serve(mut socket: WebSocket, pool: DbPool, id: RequestId, to
                         subscription = None; typing_expiry = None;
                         messages_dirty = false; presence_dirty = false; unread_dirty = false; unread_due = None;
                         last_members.clear(); last_unread.clear();
+                        watch_voice = voice_roster; last_roster = None;
+                        roster_tick.reset_immediately();
                         if channel_id.is_some() && guild_id.is_none() {
                             let _ = send(&mut socket, error(id, ErrorCode::BadRequest, "A channel requires a guild")).await; break;
                         }
@@ -219,6 +225,20 @@ pub(super) async fn serve(mut socket: WebSocket, pool: DbPool, id: RequestId, to
                     if !matches!(tokio::task::spawn_blocking(move || store::presence(&p, &t, sub.guild, channel, connection, None)).await, Ok(Ok(_))) {
                         let _ = send(&mut socket, ServerEvent::Revoked {}).await; break;
                     }
+                }
+            }
+            _ = roster_tick.tick(), if watch_voice && subscription.is_some() => {
+                let sub = subscription.unwrap();
+                let Some(authorized) = account_access.snapshot(guild_access.as_ref(), member_access.as_ref()) else { let _ = send(&mut socket, ServerEvent::Revoked {}).await; break; };
+                let p = pool.clone(); let t = token.clone();
+                let Ok(Ok(channels)) = tokio::task::spawn_blocking(move || store::visible_voice_channels(&p, &t, sub.guild)).await else {
+                    let _ = send(&mut socket, ServerEvent::Revoked {}).await; break;
+                };
+                let channels = crate::voice::roster(channels).await;
+                let Some(_delivery) = authorized.deliver() else { let _ = send(&mut socket, ServerEvent::Revoked {}).await; break; };
+                if last_roster.as_ref() != Some(&channels) {
+                    last_roster = Some(channels.clone());
+                    if update(&mut socket, sub, ServerEvent::VoiceRoster { channels }).await.is_err() { break; }
                 }
             }
             _ = maintenance.tick() => {

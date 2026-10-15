@@ -139,6 +139,37 @@ impl VoiceAccess {
     }
 }
 static ROOMS: OnceLock<Mutex<HashMap<ChannelId, Weak<Room>>>> = OnceLock::new();
+/// Callers must authorize channel visibility and fence delivery against revocation.
+pub(crate) async fn roster(channels: Vec<ChannelId>) -> Vec<thiscord_shared::voice::ChannelRoster> {
+    let rooms: Vec<_> = {
+        let registry = ROOMS.get_or_init(Default::default).lock().await;
+        channels
+            .into_iter()
+            .map(|id| (id, registry.get(&id).and_then(Weak::upgrade)))
+            .collect()
+    };
+    let mut result = Vec::with_capacity(rooms.len());
+    for (channel_id, room) in rooms {
+        let mut members = Vec::new();
+        if let Some(room) = room {
+            for member in room.members.read().await.values() {
+                let epoch = member.generation.load(Ordering::Acquire);
+                if member.active.load(Ordering::Acquire)
+                    && member.access.packet(epoch, epoch).is_some()
+                {
+                    members.push(member.info.clone());
+                }
+            }
+        }
+        members.sort_by_key(|m| m.account_id);
+        result.push(thiscord_shared::voice::ChannelRoster {
+            channel_id,
+            members,
+        });
+    }
+    result.sort_by_key(|c| c.channel_id);
+    result
+}
 async fn room(id: ChannelId) -> Arc<Room> {
     let mut rooms = ROOMS.get_or_init(Default::default).lock().await;
     rooms.retain(|_, r| r.strong_count() > 0);

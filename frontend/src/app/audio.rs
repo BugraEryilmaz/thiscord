@@ -1,9 +1,62 @@
 use super::Ui;
+use super::icons::{Glyph, Icon};
 use super::shortcuts::ShortcutSettings;
 use crate::account_client::{desktop, native};
 use leptos::prelude::*;
 use serde_json::json;
 use thiscord_shared::{ChannelId, GuildId, audio::*, voice::VoiceStatus};
+
+#[derive(Clone)]
+pub(super) struct VoiceLocation {
+    pub guild_id: GuildId,
+    pub channel_id: ChannelId,
+    pub channel_name: String,
+    pub guild_name: String,
+}
+
+pub(super) fn join(
+    ui: Ui,
+    guild: thiscord_shared::permissions::Guild,
+    channel: thiscord_shared::permissions::Channel,
+) {
+    if !desktop() && !ui.audio_control.is_remote() {
+        ui.status.set("Open the desktop app to join voice".into());
+        return;
+    }
+    if ui.voice_joining.get_untracked() || ui.voice.get_untracked().channel_id == Some(channel.id) {
+        return;
+    }
+    let Some(token) = ui.token.get_untracked() else {
+        return;
+    };
+    ui.voice_joining.set(true);
+    let settings = ui.audio.get_untracked();
+    leptos::task::spawn_local(async move {
+        let result = ui.audio_control.invoke::<()>("voice_join", json!({"token":token,"guildId":guild.id,"channelId":channel.id,"settings":settings})).await;
+        ui.voice_joining.set(false);
+        if ui.token.get_untracked().as_deref() != Some(&token) {
+            return;
+        }
+        match result {
+            Ok(()) => {
+                ui.voice_location.set(Some(VoiceLocation {
+                    guild_id: guild.id,
+                    channel_id: channel.id,
+                    channel_name: channel.name,
+                    guild_name: guild.name,
+                }));
+                if let Ok(status) = ui
+                    .audio_control
+                    .invoke::<VoiceStatus>("voice_status", json!({}))
+                    .await
+                {
+                    ui.voice.set(status);
+                }
+            }
+            Err(error) => ui.status.set(error),
+        }
+    });
+}
 
 pub(super) fn save(ui: Ui) {
     ui.audio_revision.update(|r| *r = r.wrapping_add(1));
@@ -178,24 +231,58 @@ fn toggle(ui: Ui, action: AudioToggle) {
 }
 #[component]
 fn VoiceControls(ui: Ui) -> impl IntoView {
-    view! {<div class="flex flex-wrap items-center gap-3">
-        <button class="rounded bg-white/10 px-3 py-2 text-sm" aria-pressed=move || ui.audio.get().muted on:click=move |_|toggle(ui, AudioToggle::Mute)>{move||if ui.audio.get().muted{"Unmute"}else{"Mute"}}</button>
-        <button class="rounded bg-white/10 px-3 py-2 text-sm" aria-pressed=move || ui.audio.get().deafened on:click=move |_|toggle(ui, AudioToggle::Deafen)>{move||if ui.audio.get().deafened{"Undeafen"}else{"Deafen"}}</button>
-        <Show when=move||!ui.audio_control.is_remote() && ui.audio.get().mode==TransmitMode::PushToTalk><button class="touch-none select-none rounded bg-brand px-3 py-2 text-sm" on:pointerdown=move |_|pressed(true) on:pointerup=move |_|pressed(false) on:pointerleave=move |_|pressed(false) on:pointercancel=move |_|pressed(false) on:keydown=move|e|{if matches!(e.key().as_str()," "|"Enter"){e.prevent_default();pressed(true);}} on:keyup=move|_|pressed(false) on:blur=move |_|pressed(false)>"Hold to talk"</button></Show>
+    let available = move || desktop() || ui.audio_control.is_remote();
+    view! {<div class="flex shrink-0 items-center">
+        <button class="icon-button" disabled=move ||!available() aria-label=move ||if ui.audio.get().muted {"Unmute"}else{"Mute"} data-tip=move ||if !available(){"Microphone requires desktop"}else if ui.audio.get().muted{"Unmute"}else{"Mute"} aria-pressed=move || ui.audio.get().muted on:click=move |_|toggle(ui, AudioToggle::Mute)>{move||view!{<Icon kind=if ui.audio.get().muted{Glyph::MicOff}else{Glyph::Mic}/>}}</button>
+        <button class="icon-button" disabled=move ||!available() aria-label=move ||if ui.audio.get().deafened {"Undeafen"}else{"Deafen"} data-tip=move ||if !available(){"Audio requires desktop"}else if ui.audio.get().deafened{"Undeafen"}else{"Deafen"} aria-pressed=move || ui.audio.get().deafened on:click=move |_|toggle(ui, AudioToggle::Deafen)>{move||view!{<Icon kind=if ui.audio.get().deafened{Glyph::Deafen}else{Glyph::Headphones}/>}}</button>
     </div>}
 }
 #[component]
 pub(super) fn VoiceBar(ui: Ui) -> impl IntoView {
-    view! {<Show when=move||ui.voice.get().channel_id.is_some()><aside class="flex shrink-0 flex-wrap items-center justify-between gap-3 rounded-lg bg-black/20 p-3" aria-label="Voice controls">
-        <div class="text-sm"><p>{move||ui.voice.get().message}</p><p class="text-xs text-slate-400">{move||thiscord_frontend::audio_quality::summary(ui.audio_status.get().and_then(|s|s.quality).as_ref())}</p></div><VoiceControls ui=ui/><super::screen::ScreenControls ui=ui/>
+    let location = move || {
+        let channel = ui.voice.get().channel_id;
+        ui.voice_location
+            .get()
+            .filter(|location| Some(location.channel_id) == channel)
+            .map(|location| format!("{} / {}", location.channel_name, location.guild_name))
+            .or_else(|| {
+                ui.server.get().and_then(|home| {
+                    home.channels
+                        .iter()
+                        .find(|c| Some(c.id) == channel)
+                        .map(|c| format!("{} / {}", c.name, home.guild.name))
+                })
+            })
+            .unwrap_or_else(|| "Voice channel".into())
+    };
+    view! {<aside class="user-dock" aria-label="Your account and voice controls">
+        <Show when=move||ui.voice.get().channel_id.is_some()><div class="voice-dock">
+            <div class="flex items-center gap-2">
+                <span class="text-emerald-400"><Icon kind=Glyph::Signal/></span>
+                <div class="min-w-0 flex-1"><button class="voice-health text-sm font-semibold" aria-label="Voice connection diagnostics" data-tip=move ||if ui.voice.get().connected {thiscord_frontend::audio_quality::brief(ui.audio_status.get().and_then(|s|s.quality).as_ref())}else{"Connecting · diagnostics pending".into()} class:text-emerald-400=move ||ui.voice.get().connected class:text-amber-300=move ||!ui.voice.get().connected role="status">{move ||if ui.voice.get().connected{"Voice connected"}else{"Connecting to voice…"}}</button><button class="block max-w-full truncate text-left text-xs text-white/55 hover:text-white" data-tip="Open call controls" aria-label="Open call controls" on:click=move |_|super::servers::open_voice(ui)>{location}</button></div>
+                <button class="icon-button danger" aria-label="Disconnect voice" data-tip="Disconnect" disabled=move ||ui.voice_joining.get() on:click=move |_|leave(ui)><Icon kind=Glyph::Disconnect/></button>
+            </div>
+            <div class="mt-2 flex items-center gap-2">
+                <button class="icon-button voice-action" disabled aria-label="Camera — not available yet" data-tip="Camera — not available yet"><Icon kind=Glyph::CameraOff/></button>
+                <super::screen::ScreenControls ui=ui/>
+                <button class="icon-button voice-action" aria-label="Audio settings" data-tip="Audio settings" on:click=move |_|ui.page.set("audio")><Icon kind=Glyph::Volume/></button>
+                <Show when=move||!ui.audio_control.is_remote() && ui.audio.get().mode==TransmitMode::PushToTalk><button class="icon-button voice-action touch-none select-none" aria-label="Hold to talk" data-tip="Hold to talk" on:pointerdown=move |_|pressed(true) on:pointerup=move |_|pressed(false) on:pointerleave=move |_|pressed(false) on:pointercancel=move |_|pressed(false) on:keydown=move|e|{if matches!(e.key().as_str()," "|"Enter"){e.prevent_default();pressed(true);}} on:keyup=move|_|pressed(false) on:blur=move |_|pressed(false)><Icon kind=Glyph::Mic/></button></Show>
+            </div>
         <Show when=move||ui.audio_status.get().and_then(|s|s.recording).is_some_and(|r|r.active)>
-            <button class="rounded bg-red-700 px-3 py-2 text-sm text-white" on:click=move |_|debug_command(ui,"audio_debug_stop")>
+            <button class="mt-2 rounded bg-red-700 px-3 py-1 text-xs text-white" on:click=move |_|debug_command(ui,"audio_debug_stop")>
                 {move||format!("● Recording {}s · Stop",ui.audio_status.get().and_then(|s|s.recording).map_or(0,|r|r.elapsed_ms/1000))}
             </button>
         </Show>
-        <button class="text-sm underline" on:click=move |_|ui.page.set("audio")>"Audio settings"</button>
-        <button class="text-sm text-red-300" on:click=move |_|leave(ui)>"Disconnect"</button>
-    </aside></Show>}
+        </div></Show>
+        <div class="flex min-w-0 items-center gap-2 p-2">
+            <button class="flex min-w-0 flex-1 items-center gap-2 rounded-lg p-1 text-left hover:bg-white/5" aria-label="Your profile" data-tip=move ||ui.account.get().map(|a|format!("{} (@{})",a.display_name,a.username)).unwrap_or_default() on:click=move |_|ui.page.set("profile")>
+                <span class="relative shrink-0"><crate::avatar::Avatar name=Signal::derive(move ||ui.account.get().map(|a|a.display_name).unwrap_or_default()) avatar_id=Signal::derive(move ||ui.account.get().and_then(|a|a.avatar_id))/><span class="connection-dot" class:connected=move ||ui.socket_status.get()==super::chat::ConnectionStatus::Connected class:connecting=move ||matches!(ui.socket_status.get(),super::chat::ConnectionStatus::Connecting|super::chat::ConnectionStatus::Reconnecting)></span></span>
+                <span class="min-w-0"><span class="block truncate text-sm font-semibold">{move ||ui.account.get().map(|a|if a.display_name.is_empty(){a.username}else{a.display_name})}</span><span class="block truncate text-xs text-white/55" role="status">{move ||ui.socket_status.get().label()}</span></span>
+            </button>
+            <VoiceControls ui=ui/>
+            <button class="icon-button shrink-0" aria-label="Settings" data-tip="Settings" on:click=move |_|ui.page.set("profile")><Icon kind=Glyph::Settings/></button>
+        </div>
+    </aside>}
 }
 fn debug_command(ui: Ui, command: &'static str) {
     leptos::task::spawn_local(async move {
@@ -321,33 +408,31 @@ pub(super) fn VoiceChannel(
     channel: ChannelId,
     name: String,
 ) -> impl IntoView {
-    let pending = RwSignal::new(false);
+    let channel_name = StoredValue::new(name.clone());
     view! {<section class="min-h-0 min-w-0 space-y-5 overflow-y-auto rounded-xl border border-white/10 p-5">
         <h2 class="text-xl font-semibold">{name}</h2>
         <Show when=move ||desktop() || ui.audio_control.is_remote() fallback=||view!{<p>"Open the desktop app to use native voice audio."</p>}>
             <p class="text-sm text-white/60" role="status">{move||ui.voice.get().message}</p>
-            <Show when=move||ui.voice.get().channel_id!=Some(channel) fallback=move||view!{<button class="rounded bg-white/10 px-4 py-2" on:click=move |_|leave(ui)>"Leave voice"</button>}>
+            <Show when=move||ui.voice.get().channel_id!=Some(channel) fallback=move||view!{<button class="icon-button danger" aria-label="Leave voice" data-tip="Leave voice" on:click=move |_|leave(ui)><Icon kind=Glyph::Disconnect/></button>}>
                 <p class="text-sm text-white/60">"Joining uses your selected microphone. Use headphones for the best audio quality."</p>
-                <button class="rounded bg-brand px-4 py-2 disabled:opacity-50" disabled=move||pending.get() on:click=move |_|{
-                    pending.set(true);let token=ui.token.get_untracked();let settings=ui.audio.get_untracked();
-                    leptos::task::spawn_local(async move{let result=ui.audio_control.invoke::<()>("voice_join",json!({"token":token.unwrap_or_default(),"guildId":guild,"channelId":channel,"settings":settings})).await;if pending.try_get_untracked().is_some(){pending.set(false);}
-                        if let Err(error)=result{ui.status.set(error);}});
-                }>"Join voice"</button>
+                <button class="icon-button bg-brand" aria-label="Join voice" data-tip="Join voice" disabled=move||ui.voice_joining.get() on:click=move |_|{
+                    if let Some(home)=ui.server.get_untracked().filter(|s|s.guild.id==guild) {
+                        join(ui, home.guild, thiscord_shared::permissions::Channel{id:channel,name:channel_name.get_value(),kind:thiscord_shared::permissions::ChannelKind::Voice});
+                    }
+                }><Icon kind=Glyph::Join/></button>
             </Show>
             <Show when=move||ui.voice.get().channel_id==Some(channel)>
                 <ul class="space-y-2"><For each=move || ui.voice.get().participants key=|m| m.account_id children=move |m| {
                     let id = m.account_id;
                     let member = Signal::derive(move || ui.voice.with(|v| v.participants.iter().find(|m| m.account_id == id).cloned()).unwrap_or_else(|| m.clone()));
-                    view! { <li class="flex flex-wrap items-center gap-3">
+                    view! { <li tabindex="0" aria-haspopup="menu" data-context-server=guild.to_string() data-context-channel=channel.to_string() data-context-member=id.to_string() class="flex flex-wrap items-center gap-3">
                         <crate::avatar::Avatar name=Signal::derive(move || member.get().display_name().to_owned()) avatar_id=Signal::derive(move || member.get().avatar_id)/>
                         <span>{move || member.get().display_name().to_owned()}{move || {let m=member.get(); if m.deafened {" · deafened"} else if m.muted || !m.can_speak {" · muted"} else {""}}}</span>
-                        <Show when=move || ui.server.get().is_some_and(|s| s.guild.id == guild && s.can_moderate) && ui.account.get().is_some_and(|a| a.id != id)>
-                            <button class="text-sm text-brand underline" on:click=move |_| {ui.moderation_target.set(Some(id)); ui.page.set("moderation");}>"Moderate"</button>
-                        </Show>
                     </li> }
                 }/></ul>
                 <super::screen::ScreenViewer ui=ui/>
                 <h3 class="font-semibold">"Speaker volumes"</h3><StreamVolumes ui=ui/>
+                <super::screen::ShareDiagnostics/>
             </Show>
         </Show>
     </section>}

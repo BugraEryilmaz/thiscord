@@ -105,9 +105,9 @@ fn ServerModeration(ui: Ui, guild: GuildId) -> impl IntoView {
             </header>
             <p class="text-sm text-white/60">"Actions apply only to this server. You can moderate members below your highest role. The owner and members at or above your role are protected."</p>
             <p role="status" class="text-sm text-amber-200">{move ||panel.message.get()}</p>
-            <button class="text-sm text-brand underline disabled:opacity-50" disabled=move ||ui.busy.get() on:click=move |_|{
+            <button class="icon-button" disabled=move ||ui.busy.get() on:click=move |_|{
                 ui.busy.set(true);leptos::task::spawn_local(async move {panel.load().await;ui.busy.set(false);});
-            }>"Refresh members"</button>
+            } aria-label="Refresh members" data-tip="Refresh members"><super::icons::Icon kind=super::icons::Glyph::Refresh/></button>
             <Show when=move ||panel.state.get().is_some()>
                 <fieldset class="space-y-5 disabled:opacity-50" disabled=move ||ui.busy.get()>
                     <label class="block space-y-2"><span class="font-semibold">"Member"</span>

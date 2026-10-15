@@ -73,7 +73,7 @@ pub enum ClientEvent {
 fn is_false(value: &bool) -> bool {
     !value
 }
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Participant {
     pub account_id: AccountId,
     pub username: String,
@@ -91,6 +91,12 @@ pub struct Participant {
     pub sharing_audio: bool,
     #[serde(default)]
     pub screen_epoch: u32,
+}
+/// A visible voice channel's live membership, without joining its media transport.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ChannelRoster {
+    pub channel_id: ChannelId,
+    pub members: Vec<Participant>,
 }
 impl Participant {
     /// Profile label, falling back to the username for older servers.

@@ -1,4 +1,5 @@
 use super::Ui;
+use super::icons::{Glyph, Icon};
 use crate::account_client::native;
 use leptos::prelude::*;
 use serde_json::json;
@@ -14,20 +15,21 @@ pub(super) fn ScreenControls(ui: Ui) -> impl IntoView {
     let quality = RwSignal::new(Quality::default());
     let busy = RwSignal::new(false);
     let error = RwSignal::new(String::new());
-    let diagnostics = RwSignal::new(String::new());
+    let dialog = NodeRef::<leptos::html::Dialog>::new();
+    Effect::new(move |_| {
+        if picking.get()
+            && let Some(dialog) = dialog.get()
+        {
+            let _ = dialog.show_modal();
+        }
+    });
     let (abort, registration) = futures_util::future::AbortHandle::new_pair();
     on_cleanup(move || abort.abort());
     leptos::task::spawn_local(async move {
         let _ = futures_util::future::Abortable::new(
             async move {
-                let mut previous = thiscord_shared::screen::Diagnostics::default();
                 loop {
                     if let Ok(value) = native::<Status>("screen_status", json!({})).await {
-                        diagnostics.set(super::screen_player::describe(
-                            &value.diagnostics,
-                            &previous,
-                        ));
-                        previous = value.diagnostics.clone();
                         status.set(value);
                     }
                     gloo_timers::future::TimeoutFuture::new(300).await;
@@ -38,9 +40,9 @@ pub(super) fn ScreenControls(ui: Ui) -> impl IntoView {
         .await;
     });
     view! {
-        <div class="flex flex-wrap items-center gap-2" aria-label="Screen sharing">
+        <div class="screen-control" aria-label="Screen sharing">
             <Show when=move || status.get().sharing fallback=move || view! {
-                <button class="rounded bg-white/10 px-3 py-2 text-sm disabled:opacity-50"
+                <button class="icon-button voice-action" aria-label="Share screen" data-tip=move ||if ui.audio.get().deafened {"Undeafen to share"}else if !status.get().available{"Screen sharing unavailable"}else{"Share screen"}
                     disabled=move || !status.get().available || ui.audio.get().deafened || busy.get()
                     on:click=move |_| {
                         busy.set(true); error.set(String::new());
@@ -53,19 +55,17 @@ pub(super) fn ScreenControls(ui: Ui) -> impl IntoView {
                             }
                             busy.set(false);
                         });
-                    }>"Share screen"</button>
+                    }><Icon kind=Glyph::Screen/></button>
             }>
-                <span class="text-sm text-green-300">{move || status.get().message}</span>
-                <span class="text-xs text-white/60">{move || status.get().encoder.unwrap_or_default()}</span>
-                <button class="rounded bg-red-700 px-3 py-2 text-sm" on:click=move |_| {
+                <button class="icon-button voice-action text-emerald-400" aria-label="Stop sharing" data-tip="Stop sharing" on:click=move |_| {
                     leptos::task::spawn_local(async move {
                         if let Err(message) = native::<()>("screen_stop", json!({})).await && error.try_get_untracked().is_some() { error.set(message); }
                     });
-                }>"Stop sharing"</button>
+                }><Icon kind=Glyph::Stop/></button>
             </Show>
-            <DiagnosticsPanel label="Screen pipeline diagnostics" text=diagnostics/>
             <Show when=move || picking.get()>
-                <section class="w-full space-y-3 rounded-lg border border-white/20 bg-zinc-900 p-4" aria-label="Choose what to share">
+                <dialog node_ref=dialog on:click=move |e|super::dialog::dismiss_outside(e,dialog,busy.get_untracked()) on:close=move |_|picking.set(false) class="m-auto max-h-[85vh] w-[min(520px,90vw)] space-y-4 overflow-y-auto rounded-xl border border-white/15 bg-zinc-900 p-6 text-white shadow-2xl backdrop:bg-black/70" aria-label="Choose what to share">
+                    <h2 class="text-lg font-semibold">"Share your screen"</h2>
                     <p class="text-sm">"Choose a screen or window. Everyone in this voice channel can watch. Sharing a screen includes notifications and other visible windows."</p>
                     <select class="max-w-full rounded bg-black/40 p-2" aria-label="Screen or window" prop:value=move || selected.get().to_string()
                         on:change=move |event| selected.set(event_target_value(&event).parse().unwrap_or(0))>
@@ -101,15 +101,43 @@ pub(super) fn ScreenControls(ui: Ui) -> impl IntoView {
                             });
                         }>"Start sharing"</button>
                     <button class="ml-3 text-sm underline" on:click=move |_| picking.set(false)>"Cancel"</button>
-                </section>
+                    <p class="text-sm text-red-300" role="alert">{move ||error.get()}</p>
+                </dialog>
             </Show>
-            <Show when=move || !error.get().is_empty()><p class="w-full text-sm text-red-300" role="alert">{move || error.get()}</p></Show>
-            <Show when=move || !status.get().sharing && !status.get().message.is_empty()><p class="text-xs text-white/60" role="status">{move || status.get().message}</p></Show>
+            <Show when=move || !error.get().is_empty() && !picking.get()><p class="screen-error text-xs text-red-300" role="alert">{move || error.get()}</p></Show>
+
         </div>
     }
 }
 
 static NEXT_VIEWER: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(1);
+
+#[component]
+pub(super) fn ShareDiagnostics() -> impl IntoView {
+    let diagnostics = RwSignal::new(String::new());
+    let (abort, registration) = futures_util::future::AbortHandle::new_pair();
+    on_cleanup(move || abort.abort());
+    leptos::task::spawn_local(async move {
+        let _ = futures_util::future::Abortable::new(
+            async move {
+                let mut previous = Default::default();
+                loop {
+                    if let Ok(status) = native::<Status>("screen_status", json!({})).await {
+                        diagnostics.set(super::screen_player::describe(
+                            &status.diagnostics,
+                            &previous,
+                        ));
+                        previous = status.diagnostics;
+                    }
+                    gloo_timers::future::TimeoutFuture::new(1000).await;
+                }
+            },
+            registration,
+        )
+        .await;
+    });
+    view! { <DiagnosticsPanel label="Screen pipeline diagnostics" text=diagnostics/> }
+}
 
 #[component]
 pub(super) fn ScreenViewer(ui: Ui) -> impl IntoView {
@@ -134,9 +162,9 @@ pub(super) fn ScreenViewer(ui: Ui) -> impl IntoView {
                                 watching.update(|value| *value = !*value);
                                 if !watching.get_untracked() { expanded.set(false); }
                             }>{move || if watching.get() { "Stop watching" } else { "Watch stream" }}</button>
-                            <button disabled=move || !watching.get() class="rounded bg-white/10 px-3 py-2 disabled:opacity-50" aria-pressed=move || expanded.get().to_string()
+                            <button disabled=move || !watching.get() class="icon-button" aria-label=move ||if expanded.get(){"Exit full screen"}else{"Full screen"} data-tip=move ||if expanded.get(){"Exit full screen"}else{"Full screen"} aria-pressed=move || expanded.get().to_string()
                                 on:click=move |_| expanded.update(|value| *value = !*value)>
-                                {move || if expanded.get() { "Exit full screen" } else { "Full screen" }}
+                                <Icon kind=Glyph::Expand/>
                             </button>
                         })}
                     </figcaption>

@@ -7,3 +7,4 @@ pub mod video_feedback;
 pub mod voice_overlay;
 
 pub mod audio_quality;
+pub mod sidebar;

@@ -17,9 +17,24 @@ emails default to ignored `backend/.mail/`; Resend, SMTP and Google use provider
 credentials configured in `backend/.env` (see `docs/accounts.md`).
 Everyone can upload or remove a profile picture in **Settings > Profile**. Pictures
 appear in voice chat and the desktop overlay, with initials when no picture is set.
+The bottom account ribbon spans the server rail and channel list, showing your
+profile, authenticated socket status, mute/deafen and settings controls. It expands
+during calls with the channel/server name, screen sharing and disconnect controls.
+Camera is labeled unavailable. Sidebar controls show immediate hover/focus hints
+outside the scroll area. Visible voice channels show participants before joining;
+clicking a voice channel joins directly while keeping the current text chat open.
+Hover **Voice connected** for brief latency, health and drop diagnostics; click
+the channel name in the ribbon to open call controls. Server/channel creation,
+server joining and screen-picker dialogs close when clicking their backdrop.
 
 Guild memberships, role hierarchy, channel overrides and the role editor are
-implemented. Each server has a **Moderation** panel for voice disconnects,
+implemented. Right-click servers, channels or voice participants for relevant
+actions; the browser context menu is suppressed. Server settings sit beside the
+server name, and moderation is available through context menus. Channel pins and
+notification mutes are saved per account on this device; muted channels hide unread
+and mention badges without marking messages as read or changing voice playback.
+Participant voice settings adjust local playback volume (0% mutes that person).
+Each server has a **Moderation** panel for voice disconnects,
 timeouts, kicks, bans and unbans, with server-side permission and hierarchy checks.
 After verifying an account, run `./run-wsl.ps1 -BootstrapOwner YOUR_USERNAME`
 from `backend/`, then open **Guilds & roles**. See [permission rules and setup](docs/permissions.md).
