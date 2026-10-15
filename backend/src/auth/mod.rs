@@ -2,6 +2,7 @@
 mod avatar;
 mod google;
 pub mod mail;
+mod password_reset;
 pub(crate) mod store;
 mod verification;
 
@@ -129,6 +130,13 @@ pub fn router() -> Router<Option<DbPool>> {
         .route(ACCOUNT_PATH, post(handle))
         .route(&format!("{AVATAR_PATH}/{{avatar_id}}"), get(avatar::get))
         .route(GOOGLE_CALLBACK_PATH, get(google::callback))
+        .route(
+            PASSWORD_RESET_PATH,
+            get(password_reset::open)
+                .head(password_reset::head)
+                .post(password_reset::submit)
+                .layer(DefaultBodyLimit::max(16 * 1024)),
+        )
         .route(
             EMAIL_VERIFICATION_PATH,
             get(verification::verify)

@@ -150,11 +150,16 @@ impl PeerConnectionEventHandler for Handler {
     }
 }
 async fn event(socket: &mut Socket) -> ServerEvent {
-    let frame = tokio::time::timeout(Duration::from_secs(20), socket.next())
-        .await
-        .unwrap()
-        .unwrap()
-        .unwrap();
+    let frame = tokio::time::timeout(Duration::from_secs(20), async {
+        loop {
+            let frame = socket.next().await.unwrap().unwrap();
+            if !matches!(frame, Message::Ping(_) | Message::Pong(_)) {
+                break frame;
+            }
+        }
+    })
+    .await
+    .unwrap();
     serde_json::from_str::<ServerFrame>(frame.to_text().unwrap())
         .unwrap()
         .event
@@ -198,6 +203,14 @@ async fn join_attempt(
     req.headers_mut()
         .insert("origin", "http://localhost:1420".parse().unwrap());
     let (mut socket, _) = tokio_tungstenite::connect_async(req).await.unwrap();
+    socket
+        .send(Message::Ping(b"before-join".as_slice().into()))
+        .await
+        .unwrap();
+    socket
+        .send(Message::Pong(b"unsolicited".as_slice().into()))
+        .await
+        .unwrap();
     send(
         &mut socket,
         ClientEvent::Join {
@@ -212,6 +225,7 @@ async fn join_attempt(
 }
 struct Peer {
     socket: Socket,
+    resume_token: String,
     pc: Arc<dyn PeerConnection>,
     track: Arc<TrackLocalStaticRTP>,
     packets: mpsc::Receiver<rtp::Packet>,
@@ -226,9 +240,19 @@ impl Peer {
         Self::with_packet_capacity(socket, 64).await
     }
     async fn with_packet_capacity(mut socket: Socket, capacity: usize) -> Self {
-        let ServerEvent::Offer { sdp, slot, .. } = event(&mut socket).await else {
+        let ServerEvent::Offer {
+            sdp,
+            slot,
+            resume_token,
+            ..
+        } = event(&mut socket).await
+        else {
             panic!("Expected offer")
         };
+        socket
+            .send(Message::Ping(b"before-answer".as_slice().into()))
+            .await
+            .unwrap();
         let (tx, rx) = mpsc::channel(capacity);
         let gathered = Arc::new(Notify::new());
         let mut media = MediaEngine::default();
@@ -325,6 +349,7 @@ impl Peer {
         .await;
         Self {
             socket,
+            resume_token: resume_token.expect("resume capability"),
             pc,
             track,
             packets: rx,
@@ -642,7 +667,7 @@ async fn sfu_sustains_4k60_transport_with_two_times_bitrate_headroom() {
 async fn voice_takeover_fences_old_peers_and_delayed_retries() {
     let db = database();
     let (_, token) = user(&db, "takeover_owner");
-    let (_, listener_token) = user(&db, "takeover_listener");
+    let (listener_id, listener_token) = user(&db, "takeover_listener");
     let (_, outsider) = user(&db, "takeover_outsider");
     permissions::bootstrap_owner(&db.pool, "takeover_owner").unwrap();
     let app = api::router(
@@ -688,6 +713,77 @@ async fn voice_takeover_fences_old_peers_and_delayed_retries() {
     let mut witness =
         Peer::new(join(addr, &listener_token, guild.clone(), channel.clone()).await).await;
     forwarded(&mut old, &mut witness).await;
+    // RFC 6455 control frames are legal during an active call. A protocol ping
+    // is different from our JSON ClientEvent::Ping and must not terminate voice.
+    old.socket
+        .send(Message::Ping(b"keepalive".as_slice().into()))
+        .await
+        .unwrap();
+    old.socket
+        .send(Message::Pong(b"unsolicited".as_slice().into()))
+        .await
+        .unwrap();
+    still_connected(&mut old.socket).await;
+    forwarded(&mut old, &mut witness).await;
+    // Cut TCP without sending Leave or closing WebRTC. Media must flow in
+    // both directions before any replacement signaling has authenticated.
+    let replacement = open_voice(addr).await;
+    drop(std::mem::replace(&mut old.socket, replacement));
+    tokio::time::sleep(Duration::from_millis(100)).await;
+    forwarded(&mut old, &mut witness).await;
+    forwarded(&mut witness, &mut old).await;
+    resume(
+        &mut old.socket,
+        &token,
+        &guild,
+        &channel,
+        &old.resume_token,
+        1,
+    )
+    .await;
+    assert!(matches!(
+        event(&mut old.socket).await,
+        ServerEvent::Resumed {}
+    ));
+    forwarded(&mut old, &mut witness).await;
+    // A proxy can reset only the client leg while the original server socket
+    // is still healthy. Reattachment must work in that case as well.
+    let mut newer_socket = open_voice(addr).await;
+    resume(
+        &mut newer_socket,
+        &token,
+        &guild,
+        &channel,
+        &old.resume_token,
+        2,
+    )
+    .await;
+    assert!(matches!(
+        event(&mut newer_socket).await,
+        ServerEvent::Resumed {}
+    ));
+    old.socket = newer_socket;
+    let mut replay = open_voice(addr).await;
+    resume(&mut replay, &token, &guild, &channel, &old.resume_token, 1).await;
+    assert!(
+        matches!(event(&mut replay).await, ServerEvent::Error { error } if error.code == thiscord_shared::ErrorCode::Conflict)
+    );
+    let mut cross_account = open_voice(addr).await;
+    resume(
+        &mut cross_account,
+        &listener_token,
+        &guild,
+        &channel,
+        &old.resume_token,
+        3,
+    )
+    .await;
+    assert!(matches!(
+        event(&mut cross_account).await,
+        ServerEvent::Replaced {}
+    ));
+    forwarded(&mut old, &mut witness).await;
+    still_connected(&mut old.socket).await;
     // A reconnect replaces its own live/stale socket immediately.
     let mut resumed = Peer::new(
         join_attempt(
@@ -705,6 +801,20 @@ async fn voice_takeover_fences_old_peers_and_delayed_retries() {
     .await;
     assert_eq!(old.slot, resumed.slot);
     expect_replaced(&mut old.socket).await;
+    let mut stale_resume = open_voice(addr).await;
+    resume(
+        &mut stale_resume,
+        &token,
+        &guild,
+        &channel,
+        &old.resume_token,
+        3,
+    )
+    .await;
+    assert!(matches!(
+        event(&mut stale_resume).await,
+        ServerEvent::Replaced {}
+    ));
     old.close().await;
     forwarded(&mut resumed, &mut witness).await;
     // A fresh explicit join takes ownership; the displaced caller's delayed
@@ -747,14 +857,98 @@ async fn voice_takeover_fences_old_peers_and_delayed_retries() {
     expect_replaced(&mut newest.socket).await;
     newest.close().await;
     let mut final_peer =
-        Peer::new(join_attempt(addr, &token, guild, channel, Some(new_call)).await).await;
+        Peer::new(join_attempt(addr, &token, guild.clone(), channel.clone(), Some(new_call)).await)
+            .await;
     expect_replaced(&mut pending).await;
     still_connected(&mut final_peer.socket).await;
     forwarded(&mut final_peer, &mut witness).await;
+    // Revocation during the detached grace period still fences media and
+    // refuses the capability even though the original peer remains allocated.
+    let replacement = open_voice(addr).await;
+    drop(std::mem::replace(&mut witness.socket, replacement));
+    change(
+        &app,
+        &token,
+        &mut state,
+        json!({"action":"ban_member","account_id":listener_id}),
+        StatusCode::OK,
+    )
+    .await;
+    resume(
+        &mut witness.socket,
+        &listener_token,
+        &guild,
+        &channel,
+        &witness.resume_token,
+        1,
+    )
+    .await;
+    assert!(matches!(
+        event(&mut witness.socket).await,
+        ServerEvent::Error { .. }
+    ));
+    while final_peer.packets.try_recv().is_ok() {}
+    for _ in 0..5 {
+        witness.publish().await;
+        assert!(
+            tokio::time::timeout(Duration::from_millis(40), final_peer.packets.recv())
+                .await
+                .is_err()
+        );
+    }
+    // A detached session has a bounded lifetime, even when its ICE peer is
+    // otherwise healthy. Expiry must not allocate a peer during Resume.
+    let replacement = open_voice(addr).await;
+    drop(std::mem::replace(&mut final_peer.socket, replacement));
+    tokio::time::sleep(Duration::from_secs(voice::SIGNALING_GRACE_SECS + 2)).await;
+    final_peer.socket = open_voice(addr).await;
+    resume(
+        &mut final_peer.socket,
+        &token,
+        &guild,
+        &channel,
+        &final_peer.resume_token,
+        1,
+    )
+    .await;
+    assert!(matches!(
+        event(&mut final_peer.socket).await,
+        ServerEvent::ResumeUnavailable {}
+    ));
     final_peer.close().await;
     witness.close().await;
     serving.abort();
     let _ = serving.await;
+}
+
+async fn open_voice(addr: std::net::SocketAddr) -> Socket {
+    let mut request = format!("ws://{addr}{}", voice::VOICE_PATH)
+        .into_client_request()
+        .unwrap();
+    request
+        .headers_mut()
+        .insert("origin", "http://localhost:1420".parse().unwrap());
+    tokio_tungstenite::connect_async(request).await.unwrap().0
+}
+async fn resume(
+    socket: &mut Socket,
+    token: &str,
+    guild: &Value,
+    channel: &Value,
+    secret: &str,
+    sequence: u64,
+) {
+    send(
+        socket,
+        ClientEvent::Resume {
+            token: token.into(),
+            guild_id: serde_json::from_value(guild.clone()).unwrap(),
+            channel_id: serde_json::from_value(channel.clone()).unwrap(),
+            resume_token: secret.into(),
+            sequence,
+        },
+    )
+    .await;
 }
 
 async fn expect_replaced(socket: &mut Socket) {
@@ -1023,6 +1217,70 @@ async fn sfu_forwarding_permissions_isolation_and_cleanup() {
         .unwrap();
     assert_eq!(status, StatusCode::OK);
     assert_eq!(value["Ok"]["output_volume"], 0.5);
+    // Signaling recovery preserves the admin connection identity, but an
+    // interrupted chunked response must fail instead of returning partial JSON.
+    for interrupted in [true, false] {
+        let request_app = app.clone();
+        let admin_token = ot.clone();
+        let request = tokio::spawn(async move {
+            call(
+                &request_app,
+                thiscord_shared::remote_audio::PATH,
+                &admin_token,
+                json!({"connection_id":audio_connection,"command":{"command":"audio_current"}}),
+            )
+            .await
+        });
+        let request_id = tokio::time::timeout(Duration::from_secs(5), async {
+            loop {
+                if let ServerEvent::AudioCommand { request_id, .. } = event(&mut b.socket).await {
+                    break request_id;
+                }
+            }
+        })
+        .await
+        .unwrap();
+        if interrupted {
+            send(
+                &mut b.socket,
+                ClientEvent::AudioReply {
+                    request_id,
+                    chunk: r#"{"Ok":{"output_"#.into(),
+                    done: false,
+                },
+            )
+            .await;
+            still_connected(&mut b.socket).await;
+            let replacement = open_voice(addr).await;
+            drop(std::mem::replace(&mut b.socket, replacement));
+            forwarded(&mut a, &mut b).await;
+            resume(&mut b.socket, &mt, &guild, &channel, &b.resume_token, 1).await;
+            assert!(matches!(
+                event(&mut b.socket).await,
+                ServerEvent::Resumed {}
+            ));
+        } else {
+            send(
+                &mut b.socket,
+                ClientEvent::AudioReply {
+                    request_id,
+                    chunk: r#"{"Ok":{"output_volume":0.75}}"#.into(),
+                    done: true,
+                },
+            )
+            .await;
+        }
+        let (status, value) = tokio::time::timeout(Duration::from_secs(5), request)
+            .await
+            .unwrap()
+            .unwrap();
+        if interrupted {
+            assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE);
+        } else {
+            assert_eq!(status, StatusCode::OK);
+            assert_eq!(value["Ok"]["output_volume"], 0.75);
+        }
+    }
     // Screen publishing requires explicit state, even for an authorized speaker.
     screen_blocked(&mut a, &mut b).await;
     send(
