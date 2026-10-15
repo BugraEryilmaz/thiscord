@@ -235,3 +235,103 @@ async fn diagnostics_rejects_revocations_during_collection_without_blocking_muta
     finish(second, StatusCode::OK).await;
     get(&app, &other, StatusCode::UNAUTHORIZED).await;
 }
+
+#[tokio::test]
+#[ignore = "requires TEST_DATABASE_URL; CI runs with --include-ignored"]
+async fn remote_audio_rechecks_instance_privileges_and_never_retargets_connections() {
+    let db = database();
+    let (_, owner) = user(&db, "remote_owner");
+    let (admin_id, admin) = user(&db, "remote_admin");
+    let (_, ordinary) = user(&db, "remote_user");
+    crate::permissions::bootstrap_owner(&db.pool, "remote_owner").unwrap();
+    let app = crate::api::router(Some(db.pool.clone()), vec![]);
+    let connection = RequestId::from_uuid(Uuid::new_v4());
+    let (registration, mut requests) = super::audio::register(connection);
+    let path = thiscord_shared::remote_audio::PATH;
+    let request = json!({"connection_id":connection,"command":{"command":"audio_current"}});
+    command(
+        &app,
+        &ordinary,
+        path,
+        request.clone(),
+        StatusCode::FORBIDDEN,
+    )
+    .await;
+    command(&app, "", path, request.clone(), StatusCode::UNAUTHORIZED).await;
+    assert!(requests.try_recv().is_err());
+    command(
+        &app,
+        &owner,
+        path,
+        json!({"connection_id":connection,"command":{"command":"audio_debug_start"}}),
+        StatusCode::BAD_REQUEST,
+    )
+    .await;
+    command(
+        &app,
+        &owner,
+        PERMISSIONS_PATH,
+        json!({"action":"set_instance_admin","account_id":admin_id,"admin":true}),
+        StatusCode::OK,
+    )
+    .await;
+    let post = |token: String| {
+        let app = app.clone();
+        let request = request.clone();
+        tokio::spawn(async move {
+            app.oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri(thiscord_shared::remote_audio::PATH)
+                    .header("content-type", "application/json")
+                    .header("authorization", format!("Bearer {token}"))
+                    .body(Body::from(request.to_string()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap()
+        })
+    };
+    let response = post(admin.clone());
+    let mut pending = tokio::time::timeout(std::time::Duration::from_secs(5), requests.recv())
+        .await
+        .unwrap()
+        .unwrap();
+    assert!(pending.authorized.clone().deliver().is_some());
+    pending.chunk(r#"{"Ok":{"output_volume":0.5}}"#).unwrap();
+    pending.finish();
+    let value = assert_response(response.await.unwrap(), StatusCode::OK).await;
+    assert_eq!(value["Ok"]["output_volume"], 0.5);
+
+    let response = post(admin.clone());
+    let mut pending = requests.recv().await.unwrap();
+    command(
+        &app,
+        &owner,
+        PERMISSIONS_PATH,
+        json!({"action":"set_instance_admin","account_id":admin_id,"admin":false}),
+        StatusCode::OK,
+    )
+    .await;
+    assert!(
+        pending.authorized.clone().deliver().is_none(),
+        "demotion rejects queued dispatch"
+    );
+    pending
+        .chunk(r#"{"Ok":{"private":"diagnostics"}}"#)
+        .unwrap();
+    pending.finish();
+    assert_response(response.await.unwrap(), StatusCode::FORBIDDEN).await;
+    command(&app, &admin, path, request.clone(), StatusCode::FORBIDDEN).await;
+
+    let response = post(owner.clone());
+    let pending = requests.recv().await.unwrap();
+    drop(registration);
+    drop(pending);
+    drop(requests);
+    assert_response(response.await.unwrap(), StatusCode::CONFLICT).await;
+    assert!(!super::audio::available(connection));
+    let (_replacement, _replacement_requests) =
+        super::audio::register(RequestId::from_uuid(Uuid::new_v4()));
+    command(&app, &owner, path, request, StatusCode::CONFLICT).await;
+}

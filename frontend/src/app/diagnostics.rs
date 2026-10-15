@@ -1,16 +1,17 @@
-use crate::account_client::native;
+use crate::audio_control::AudioControl;
 use leptos::prelude::*;
 use serde_json::json;
 
 #[component]
-pub fn DiagnosticsSettings() -> impl IntoView {
+pub fn DiagnosticsSettings(
+    #[prop(default = AudioControl::default())] control: AudioControl,
+) -> impl IntoView {
     let enabled = RwSignal::new(false);
     let loaded = RwSignal::new(false);
     let busy = RwSignal::new(false);
     let error = RwSignal::new(String::new());
-    leptos::task::spawn_local(async move {
-        let result = native::<bool>("audio_diagnostics_enabled", json!({})).await;
-        if loaded.try_get_untracked().is_none() {
+    control.poll::<bool>("audio_diagnostics_enabled", move |result| {
+        if busy.get_untracked() {
             return;
         }
         match result {
@@ -35,7 +36,7 @@ pub fn DiagnosticsSettings() -> impl IntoView {
                         busy.set(true);
                         error.set(String::new());
                         leptos::task::spawn_local(async move {
-                            let result = native::<()>("audio_diagnostics_enable", json!({"enabled":value})).await;
+                            let result = control.invoke::<()>("audio_diagnostics_enable", json!({"enabled":value})).await;
                             if busy.try_get_untracked().is_none() { return; }
                             if let Err(message) = result {
                                 enabled.set(previous);
@@ -46,14 +47,14 @@ pub fn DiagnosticsSettings() -> impl IntoView {
                     }/>
                 "Enable diagnostic logging"
             </label>
-            <p>"Off by default. Saves technical events and device names on this computer, up to 6 MiB. No voice recordings, messages or credentials. Your choice is remembered across restarts."</p>
-            <p>"Enable before reproducing a voice issue, then share the audio-diagnostics files if needed. Turning logging off keeps existing files. Logs are never uploaded automatically."</p>
-            <button class="underline" on:click=move |_| leptos::task::spawn_local(async move {
-                let result = native::<()>("audio_diagnostics_folder", json!({})).await;
+            <p>"Off by default. Saves technical events and device names on the selected computer, up to 6 MiB. No voice recordings, messages or credentials. Your choice is remembered across restarts."</p>
+            <p>"Enable before reproducing a voice issue, then share the audio-diagnostics files if needed. Turning logging off keeps existing files. Instance admins can request these logs from the admin panel while you are connected to voice."</p>
+            <Show when=move || !control.is_remote()><button class="underline" on:click=move |_| leptos::task::spawn_local(async move {
+                let result = control.invoke::<()>("audio_diagnostics_folder", json!({})).await;
                 if error.try_get_untracked().is_some() {
                     error.set(result.err().unwrap_or_default());
                 }
-            })>"Open diagnostic logs"</button>
+            })>"Open diagnostic logs"</button></Show>
             <Show when=move || busy.get()><p role="status">"Saving…"</p></Show>
             <p role="status" class="text-red-300">{move || error.get()}</p>
         </section>

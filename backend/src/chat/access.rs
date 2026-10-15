@@ -120,6 +120,7 @@ impl Drop for Mutation {
     }
 }
 
+#[derive(Clone)]
 pub(crate) struct Snapshot(Vec<(Arc<Access>, u64)>);
 pub(crate) fn snapshot(account: &Arc<Access>, resource: Option<&Arc<Access>>) -> Option<Snapshot> {
     let mut scopes = vec![account.clone()];

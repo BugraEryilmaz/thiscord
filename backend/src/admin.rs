@@ -1,4 +1,5 @@
-//! Explicit instance privilege boundary for operational metadata only.
+//! Explicit instance privilege boundary for diagnostics and remote audio support.
+pub(crate) mod audio;
 mod host;
 pub mod web;
 
@@ -27,6 +28,7 @@ use tokio::sync::Semaphore;
 pub fn router() -> Router<Option<DbPool>> {
     Router::new()
         .route(DIAGNOSTICS_PATH, get(handle))
+        .merge(audio::router())
         .layer(Extension(Instant::now()))
 }
 

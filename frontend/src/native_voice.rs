@@ -596,6 +596,7 @@ async fn run(
         screen_feedback,
         screen_subscriptions,
         resume_token,
+        remote_audio,
     ) = match first.event {
         ServerEvent::Offer {
             sdp,
@@ -606,6 +607,7 @@ async fn run(
             screen_feedback,
             screen_subscriptions,
             resume_token,
+            remote_audio,
         } if first.version == VOICE_VERSION && slot < ROOM_CAPACITY => (
             sdp,
             slot,
@@ -615,6 +617,7 @@ async fn run(
             screen_feedback,
             screen_subscriptions,
             resume_token,
+            remote_audio,
         ),
         ServerEvent::Replaced {} => return Err(Failure::replaced()),
         ServerEvent::Error { error } => return Err(server_failure(&attempt.connection, error)),
@@ -739,6 +742,7 @@ async fn run(
     send_event(
         send,
         ClientEvent::Answer {
+            remote_audio,
             sdp,
             screen_feedback,
             screen_subscriptions,
@@ -773,8 +777,28 @@ async fn run(
     let mut accepted_packets = 0_u64;
     let mut accepted_bytes = 0_u64;
     let mut last_audio_stats = Instant::now();
+    let mut remote_jobs = tokio::task::JoinSet::new();
+    let mut remote_reply: Option<(
+        thiscord_shared::RequestId,
+        std::collections::VecDeque<String>,
+    )> = None;
+    let mut remote_tick = tokio::time::interval(Duration::from_millis(100));
+    remote_tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
     loop {
         tokio::select! {
+            Some(result) = remote_jobs.join_next() => {
+                if let Ok((id, chunks)) = result {
+                    remote_reply = Some((id, chunks));
+                }
+            },
+            _ = remote_tick.tick(), if remote_reply.is_some() => {
+                if let Some((id, chunks)) = remote_reply.as_mut() {
+                    if let Some(chunk) = chunks.pop_front() {
+                        signaling.send(ClientEvent::AudioReply { request_id: *id, chunk, done: chunks.is_empty() });
+                    }
+                    if chunks.is_empty() { remote_reply = None; }
+                }
+            },
             Some((slot, epoch))=keyframe_rx.recv()=>{
                 if screen_feedback && app.state::<crate::native_screen::ScreenState>().watching(slot, epoch) && roster.iter().any(|m| m.slot == slot && m.screen_epoch == epoch && m.sharing_screen) {
                     signaling.send(ClientEvent::ScreenKeyframe { slot, epoch });
@@ -789,7 +813,26 @@ async fn run(
                 let message:ServerFrame=serde_json::from_str(message.to_text().map_err(|_|"Invalid voice event")?).map_err(|_|"Invalid voice event")?;
                 if message.version!=VOICE_VERSION{return Err("Unsupported voice version".into());}
                 match message.event{
-                    ServerEvent::Resumed {} => { screen_state = None; },
+                    ServerEvent::Resumed {} => {
+                        screen_state = None;
+                        // An interrupted chunked admin reply cannot be replayed
+                        // safely. The server rejects that request on reattachment.
+                        remote_jobs.abort_all();
+                        remote_jobs.detach_all();
+                        remote_reply = None;
+                    },
+                    ServerEvent::AudioCommand { request_id, command } => {
+                        if remote_jobs.is_empty() && remote_reply.is_none() {
+                            let app = app.clone();
+                            let connection = attempt.connection.clone();
+                            remote_jobs.spawn(async move {
+                                let result = crate::native_remote_audio::execute(app, connection, command).await;
+                                let chunks = tokio::task::spawn_blocking(move || crate::native_remote_audio::encode(result)).await
+                                    .unwrap_or_else(|_| crate::native_remote_audio::encode(Err("Audio response task failed".into())));
+                                (request_id, chunks)
+                            });
+                        }
+                    },
                     ServerEvent::ScreenTarget { epoch, bitrate } => {
                         if status.lock().ok().is_some_and(|s| s.participants.iter().any(|m| m.slot == own_slot && m.screen_epoch == epoch && m.sharing_screen)) {
                             app.state::<crate::native_screen::ScreenState>().target(bitrate);

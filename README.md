@@ -2,6 +2,8 @@
 
 A browser dashboard at `/admin` provides instance-owner/admin-only CPU/RAM,
 backend health, active voice rooms and per-participant network diagnostics.
+Click a participant to adjust their connected desktop's audio settings using the
+same controls as the desktop app, or download their technical diagnostic logs.
 See [admin build, access and deployment](docs/admin.md).
 
 A personal Discord-style application built with Rust: Leptos/WASM inside Tauri,

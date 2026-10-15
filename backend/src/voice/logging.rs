@@ -52,6 +52,9 @@ impl Socket {
     pub fn silent_for(&self) -> Duration {
         self.last_received.unwrap_or(self.started).elapsed()
     }
+    pub fn detached(&self) -> bool {
+        self.inner.is_none()
+    }
     pub fn detach(&mut self) {
         if self.inner.take().is_some() {
             self.detached = Some(Instant::now());

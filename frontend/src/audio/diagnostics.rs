@@ -61,6 +61,42 @@ pub fn directory() -> Result<PathBuf, String> {
         .ok_or_else(|| "Audio diagnostics could not be initialized".into())
 }
 
+/// Fixed diagnostic files only; no recordings, arbitrary paths or recursive traversal.
+/// Rotation can race the snapshot, so missing generations are harmless.
+pub fn export() -> Result<Vec<thiscord_shared::remote_audio::DiagnosticFile>, String> {
+    export_directory(&directory()?)
+}
+fn export_directory(
+    directory: &Path,
+) -> Result<Vec<thiscord_shared::remote_audio::DiagnosticFile>, String> {
+    let mut files = Vec::new();
+    for index in (0..COPIES).rev() {
+        let name = if index == 0 {
+            "audio-diagnostics.jsonl".to_owned()
+        } else {
+            format!("audio-diagnostics.{index}.jsonl")
+        };
+        let path = directory.join(&name);
+        let metadata = match fs::symlink_metadata(&path) {
+            Ok(value) => value,
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => continue,
+            Err(_) => return Err("Cannot read diagnostic logs".into()),
+        };
+        if !metadata.is_file() || metadata.file_type().is_symlink() || metadata.len() > LIMIT {
+            return Err("Invalid diagnostic log file".into());
+        }
+        let mut bytes = Vec::new();
+        File::open(path)
+            .and_then(|file| file.take(LIMIT).read_to_end(&mut bytes))
+            .map_err(|_| "Cannot read diagnostic logs")?;
+        files.push(thiscord_shared::remote_audio::DiagnosticFile {
+            name,
+            contents: String::from_utf8_lossy(&bytes).into_owned(),
+        });
+    }
+    Ok(files)
+}
+
 pub fn enabled() -> Result<bool, String> {
     let logger = LOGGER.get().ok_or("Audio diagnostics unavailable")?;
     Ok(logger
@@ -321,6 +357,26 @@ mod tests {
                 .unwrap()
                 .as_nanos()
         ))
+    }
+
+    #[test]
+    fn export_contains_only_bounded_technical_log_generations() {
+        let root = temporary();
+        fs::create_dir_all(&root).unwrap();
+        fs::write(root.join("audio-diagnostics.jsonl"), "current\n").unwrap();
+        fs::write(root.join("audio-diagnostics.1.jsonl"), "previous\n").unwrap();
+        fs::write(root.join("microphone.wav"), "private recording").unwrap();
+        fs::write(root.join("audio.json"), "preferences").unwrap();
+        let exported = export_directory(&root).unwrap();
+        assert_eq!(exported.len(), 2);
+        assert_eq!(exported[0].contents, "previous\n");
+        assert_eq!(exported[1].contents, "current\n");
+        File::create(root.join("audio-diagnostics.2.jsonl"))
+            .unwrap()
+            .set_len(LIMIT + 1)
+            .unwrap();
+        assert!(export_directory(&root).is_err());
+        fs::remove_dir_all(root).unwrap();
     }
 
     fn wait_for(directory: &Path, marker: &str) {

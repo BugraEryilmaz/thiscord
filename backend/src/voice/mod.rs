@@ -817,6 +817,7 @@ async fn serve(mut socket: logging::Socket, pool: DbPool, id: RequestId) {
     socket.stage = "negotiate";
     let mut tracks = Vec::new();
     let mut screen_feedback = false;
+    let mut remote_audio = false;
     let negotiated = async {
         tokio::time::timeout(Duration::from_secs(15), async {
             socket.stage = "add_tracks";
@@ -839,6 +840,7 @@ async fn serve(mut socket: logging::Socket, pool: DbPool, id: RequestId) {
             send(
                 &mut socket,
                 ServerEvent::Offer {
+                    remote_audio: true,
                     sdp,
                     slot,
                     can_speak: info.can_speak,
@@ -858,11 +860,13 @@ async fn serve(mut socket: logging::Socket, pool: DbPool, id: RequestId) {
                 sdp,
                 screen_feedback: enabled,
                 screen_subscriptions,
+                remote_audio: audio_enabled,
             }) = parse(answer)
             else {
                 return Err(());
             };
             screen_feedback = enabled;
+            remote_audio = audio_enabled;
             if let Some(member) = room
                 .members
                 .write()
@@ -1002,7 +1006,15 @@ async fn serve(mut socket: logging::Socket, pool: DbPool, id: RequestId) {
             generation,
             active: active.clone(),
         };
+        let (_audio_registration, mut audio_requests) = if remote_audio {
+            let (guard, receiver) = crate::admin::audio::register(id);
+            (Some(guard), receiver)
+        } else {
+            (None, mpsc::channel(1).1)
+        };
+        let mut audio_call: Option<crate::admin::audio::Call> = None;
         let mut budget = 0;
+        let mut audio_reply_budget = 0;
         let mut route_logged = false;
         let mut diagnostic_tick = 0;
         loop {
@@ -1025,6 +1037,8 @@ async fn serve(mut socket: logging::Socket, pool: DbPool, id: RequestId) {
                     socket.stage = "active";
                     socket.recoverable = true;
                     budget = 0;
+                    audio_reply_budget = 0;
+                    if let Some(call) = audio_call.take() { call.reject(Failure::Unavailable); }
                     if send(&mut socket, ServerEvent::Resumed {}).await.is_err() { break; }
                 },
                 result=changed.changed()=>{
@@ -1040,17 +1054,46 @@ async fn serve(mut socket: logging::Socket, pool: DbPool, id: RequestId) {
                         && room.members.read().await.get(&slot).is_some_and(|m| m.source_id == source_id && m.feedback_enabled && m.active.load(Ordering::Acquire) && m.info.sharing_screen && m.info.screen_epoch == epoch);
                     if allowed && send(&mut socket, ServerEvent::ScreenKeyframe { epoch }).await.is_err() { break; }
                 },
+                Some(call)=audio_requests.recv()=>{
+                    if socket.detached() { call.reject(Failure::Unavailable); continue; }
+                    if audio_call.as_ref().is_some_and(|c| !c.expired()) { call.reject(Failure::Limited); continue; }
+                    if call.expired() { continue; }
+                    let Some(_admin_delivery) = call.authorized.clone().deliver() else { call.reject(Failure::Forbidden); continue; };
+                    let epoch = access.generation.load(Ordering::Acquire);
+                    let Some(_target_delivery) = connection_access.packet(epoch, epoch) else { call.reject(Failure::Forbidden); continue; };
+                    if !active.load(Ordering::Acquire) { call.reject(Failure::Conflict); continue; }
+                    if send(&mut socket, ServerEvent::AudioCommand { request_id: call.id, command: call.command.clone() }).await.is_err() { break; }
+                    tracing::info!(request_id = %call.id, connection_id = %id, "admin audio command dispatched");
+                    audio_call = Some(call);
+                },
                 message=socket.recv()=>{
-                    let Some(Ok(message))=message else{break;};budget+=1;if budget>30{socket.end("signaling_rate_limit");break;}
-                    if let Err(reason)=handle_signal(&mut socket, &room, slot, parse(message), &active).await { socket.end(reason); break; }
+                    let Some(Ok(message))=message else{break;};
+                    let event = parse(message);
+                    if let Some(ClientEvent::AudioReply { request_id, chunk, done }) = event {
+                        audio_reply_budget += 1;
+                        if audio_reply_budget > 20 { socket.end("audio_reply_rate_limit"); break; }
+                        if let Some(mut call) = audio_call.take() {
+                            if call.id != request_id { audio_call = Some(call); continue; }
+                            if call.expired() { continue; }
+                            if let Err(error) = call.chunk(&chunk) { call.reject(error); }
+                            else if done { call.finish(); }
+                            else { audio_call = Some(call); }
+                        }
+                        continue;
+                    }
+                    budget += 1;
+                    if budget > 30 { socket.end("signaling_rate_limit"); break; }
+                    if let Err(reason)=handle_signal(&mut socket, &room, slot, event, &active).await { socket.end(reason); break; }
                 },
                 _=tick.tick()=>{
+                    if audio_call.as_ref().is_some_and(|c| c.expired()) { audio_call = None; }
                     diagnostic_tick += 1;
                     if screen_feedback && diagnostic_tick % 5 == 0 {
                         let counters = ["sfu_video_ingress_packets", "sfu_video_ingress_dropped", "sfu_video_egress_dropped", "sfu_video_sent_packets", "sfu_video_send_timeouts"].into_iter().enumerate().map(|(i,n)| (n.to_owned(), metrics[i].load(Ordering::Relaxed))).collect();
                         if send(&mut socket, ServerEvent::MediaDiagnostics { counters }).await.is_err() { break; }
                     }
                     budget=0;
+                    audio_reply_budget=0;
                     if socket.recovery_expired(){socket.end("signaling_recovery_expired");break;}
                     if socket.silent_for()>Duration::from_secs(20){socket.detach();}
                     if !active.load(Ordering::Acquire){socket.end("media_inactive");break;}

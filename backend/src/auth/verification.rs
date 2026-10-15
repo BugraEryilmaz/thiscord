@@ -10,6 +10,10 @@ use std::net::SocketAddr;
 use thiscord_shared::account::{AccountRequest, EMAIL_VERIFICATION_PATH, EmailVerificationQuery};
 
 pub(super) fn link(token: &str) -> Result<String, Failure> {
+    account_link(EMAIL_VERIFICATION_PATH, token)
+}
+
+pub(super) fn account_link(path: &str, token: &str) -> Result<String, Failure> {
     let base =
         std::env::var("PUBLIC_BACKEND_URL").unwrap_or_else(|_| "http://localhost:3000".into());
     let mut url =
@@ -24,7 +28,7 @@ pub(super) fn link(token: &str) -> Result<String, Failure> {
     {
         return Err(Failure::Configuration("PUBLIC_BACKEND_URL"));
     }
-    url.set_path(EMAIL_VERIFICATION_PATH);
+    url.set_path(path);
     url.query_pairs_mut().append_pair("token", token);
     Ok(url.into())
 }

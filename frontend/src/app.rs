@@ -18,6 +18,7 @@ mod window;
 
 #[derive(Clone, Copy)]
 struct Ui {
+    audio_control: crate::audio_control::AudioControl,
     updates: RwSignal<thiscord_shared::update::UpdateStatus>,
     update_error: RwSignal<String>,
     audio: RwSignal<thiscord_shared::audio::AudioSettings>,
@@ -286,6 +287,7 @@ fn StatusNotice(ui: Ui) -> impl IntoView {
 #[component]
 pub fn App() -> impl IntoView {
     let ui = Ui {
+        audio_control: Default::default(),
         updates: RwSignal::new(Default::default()),
         update_error: RwSignal::new(String::new()),
         audio: RwSignal::new(Default::default()),

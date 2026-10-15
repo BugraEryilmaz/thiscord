@@ -82,3 +82,62 @@ admin-assets artifact without changing desktop asset paths.
 Tests cover current instance privileges, demotion/revocation, static routing/CSP,
 measurement units and live multi-room presence/telemetry/cleanup. No migration or
 additional package is needed.
+
+
+## Remote audio support
+
+Click any participant name to open **Audio settings**. Updated desktop clients in
+an active voice connection expose their actual devices, saved preferences, meters,
+echo/quality diagnostics and speaker gains. The dialog renders the same
+`AudioSettingsPanel`, shortcut, overlay and diagnostic-logging components as the
+local desktop, using an explicit remote command adapter. Changes use the native
+save path, apply during the call, and persist on that computer; the overlay toggle
+retains its existing session-only behavior. The desktop refreshes audio preferences
+so remote changes appear locally. Local-only recording, filesystem-opening,
+push-to-talk hold and connection/test actions are not remotely callable.
+
+**Download diagnostics** produces JSON containing current settings, numeric audio
+status and the three technical JSONL log generations (up to 6 MiB of source logs).
+Downloads remain available if live audio status fails, with the failure included
+in the JSON and unavailable snapshot fields set to null.
+Logging may be enabled before reproducing the issue; when disabled, existing logs
+remain downloadable alongside the current snapshot. Recording files, PCM, session
+tokens and arbitrary files are excluded. Device names and configured model paths
+are visible to the administrator. Log rotation can overlap a download; the export
+is a best-effort snapshot, not an atomic capture of the logger queue.
+
+`POST /api/v1/admin/audio` accepts shared, allowlisted commands. Each request checks
+current instance owner/admin privileges under account/session locks, then validates
+the scoped authorization snapshot before signaling and again before returning data.
+Guild administrators do not qualify. Revoked/expired sessions and demoted admins
+cannot dispatch queued commands or retrieve pending replies. Already dispatched
+operations may have applied; a timeout is not an acknowledgment and is never
+retried automatically. The browser should refresh before another change.
+
+Requests bind to a specific media session's voice connection ID. A full reconnect,
+replacement, leave or voice-access revocation removes that target; commands never
+follow an account to a new media session. Signaling-only recovery retains the target,
+but rejects an interrupted request instead of replaying commands or partial replies.
+New requests while signaling is detached receive an unavailable error; after resume,
+administrators can issue a fresh request to the same target. Offline users and older clients show an unavailable
+message. Both offer and answer negotiate support, retaining compatibility with old
+servers and clients. No extra socket, database migration or persistent remote
+settings store is introduced.
+
+At most eight admin operations are admitted globally, with one active operation
+and one queued request per connection. A 60-second deadline and 16 MiB reply cap
+bound retained state. Replies travel over authenticated voice signaling in 32 KiB
+UTF-8 chunks paced at ten per second, separately rate limited from media signaling.
+Only the targeted socket can complete a request. No settings, log contents or
+command payloads are written to server logs. Large reply parsing and serialization
+run on bounded blocking workers. Responses use `Cache-Control: no-store`.
+
+Device/processing edits compare the administrator's displayed settings against the
+latest native preferences under the same lock as application and persistence.
+Concurrent desktop/admin changes are rejected with a refresh message, rather than
+silently overwritten. Mute/deafen commands retain the native latest-state toggle
+behavior and device saves preserve those controls.
+
+Tests cover authorization/demotion, disconnect identity, reply bounds, cross-socket
+reply rejection, legacy capability defaults, stale native settings and export file
+selection. Real-device acceptance remains listed in TODO.md.

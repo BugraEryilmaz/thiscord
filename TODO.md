@@ -6,6 +6,8 @@ media compatibility spike can happen before chat to expose platform constraints.
 
 ## 0. Foundation
 
+- [x] Remote audio settings and diagnostic JSON downloads for connected desktop participants, with instance authorization and stale-edit checks.
+- [ ] Verify remote hardware changes, shortcut/overlay behavior and downloads with real Windows/macOS/Linux desktop clients.
 - [x] Browser `/admin` dashboard with current instance-owner/admin authorization, host metrics and live voice diagnostics.
 - [ ] Deploy the admin bundle to the VPS and verify production password/Google login and real-client telemetry.
 
@@ -29,6 +31,7 @@ media compatibility spike can happen before chat to expose platform constraints.
 - [x] Registration, standard password login, logout and current-user API/UI.
 - [x] Argon2id password hashing, input validation and registration/login rate limits.
 - [x] Email verification, password change, forgotten-password and reset flows.
+- [x] Browser password-reset links with an in-app backup code and shared single-use lifecycle.
 - [x] Session expiry, rotation, revocation, multi-device management and logout-all.
 - [x] Desktop session storage using OS credential storage through Rust integration.
 - [x] Google OIDC authorization-code login with PKCE, state and nonce validation.

@@ -7,6 +7,15 @@ Only settings, levels and participant metadata cross Tauri IPC. PCM and encoded
 audio never pass through WASM or handwritten JavaScript. Browser preview supports
 text chat; voice requires the desktop executable. Exactly three packages remain.
 
+## Remote support
+
+Instance owners/admins can open a connected participant's audio settings in the
+browser admin panel and adjust the same native preferences. They can explicitly
+request technical diagnostic logs, including device names, while that voice
+connection is active. Recordings and raw media are excluded. See
+[remote audio support](admin.md#remote-audio-support) for commands, limits and
+concurrency behavior. No diagnostic logs are uploaded without an admin request.
+
 ## Use
 
 Restart the backend and desktop app after building. In Settings â†’ Audio & voice,
@@ -151,7 +160,7 @@ file is opened, and panic stacks are not captured for these logs. Opening the fo
 does not enable logging. Backend `tracing` logs remain independently controlled by
 `RUST_LOG` (default `info`).
 
-Enabled logging is asynchronous and local-only, with a bounded 512-record queue
+Enabled logging is asynchronous and stored locally, with a bounded 512-record queue
 and three files of up to 2 MiB each. Records include timestamps, app/platform details,
 device names/formats, processing options, callback/drop counts, recovery attempts,
 cleanup progress, worker watchdog state, window focus, voice lifecycle and panic
@@ -836,7 +845,7 @@ The native signaling worker drops only the failed WebSocket and sends authentica
 `Resume` requests using the secret capability supplied in the original Offer.
 It never sends Join. The same peer, RTP tracks, audio devices, native audio
 heartbeat, mute/deafen processing and screen capture continue running. The UI
-shows “Recovering voice signaling...” while keeping the room connected.
+shows "Recovering voice signaling..." while keeping the room connected.
 
 The backend keeps detached media for up to 30 seconds after detecting transport
 loss (or after its 20-second signaling silence detector fires). Access refresh,
@@ -852,7 +861,7 @@ Capabilities stay in memory and are never logged. Resume has a separate rate lim
 of 30 authenticated requests per account per minute.
 
 The client attempts immediate signaling recovery, then retries with roughly
-0.5–1 second backoff and jitter, with a five-second limit per attempt and a
+0.5-1 second backoff and jitter, with a five-second limit per attempt and a
 20-second overall deadline. Resumed is followed by fresh participant snapshots;
 the client resends current mute/deafen, screen state and subscriptions instead of
 replaying commands queued during the outage. Leaving cancels recovery immediately.
