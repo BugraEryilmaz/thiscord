@@ -17,12 +17,16 @@ pub(super) fn Host() -> impl IntoView {
     let position = RwSignal::new((0.0, 0.0));
     let visible = RwSignal::new(false);
     let tooltip = NodeRef::<leptos::html::Div>::new();
+    let original_parent = StoredValue::new_local(None::<web_sys::Node>);
     let clear = move || {
         if let Some(element) = active.get_value() {
             let _ = element.remove_attribute("aria-describedby");
         }
         active.set_value(None);
         visible.set(false);
+        if let (Some(node), Some(parent)) = (tooltip.get_untracked(), original_parent.get_value()) {
+            let _ = parent.append_child(&node);
+        }
     };
     let show = move |element: Option<web_sys::Element>| {
         let Some(element) = element else {
@@ -48,6 +52,16 @@ pub(super) fn Host() -> impl IntoView {
         let Some(element) = active.get_value() else {
             return;
         };
+        if original_parent.get_value().is_none() {
+            original_parent.set_value(node.parent_node());
+        }
+        // Native modal dialogs occupy the browser's top layer. Keep their hints
+        // in that layer too, while retaining one tooltip and one accessible ID.
+        if let Some(dialog) = element.closest("dialog[open]").ok().flatten() {
+            let _ = dialog.append_child(&node);
+        } else if let Some(parent) = original_parent.get_value() {
+            let _ = parent.append_child(&node);
+        }
         let rect = element.get_bounding_client_rect();
         let size = node.get_bounding_client_rect();
         let width = window()

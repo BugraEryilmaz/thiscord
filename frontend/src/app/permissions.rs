@@ -12,11 +12,40 @@ struct Editor {
     selected_role: RwSignal<String>,
 }
 impl Editor {
+    fn allowed(self, permission: Permission) -> bool {
+        self.state
+            .get()
+            .zip(self.ui.account.get())
+            .is_some_and(|(s, a)| {
+                a.id == s.guild.owner
+                    || s.members
+                        .iter()
+                        .find(|m| m.account_id == a.id)
+                        .is_some_and(|m| {
+                            s.roles
+                                .iter()
+                                .filter(|r| r.everyone || m.roles.contains(&r.id))
+                                .any(|r| {
+                                    r.permissions.contains(&Permission::Administrator)
+                                        || r.permissions.contains(&permission)
+                                })
+                        })
+            })
+    }
     fn request(self, command: PermissionRequest) {
+        self.dispatch(command, None);
+    }
+    fn dispatch(self, command: PermissionRequest, on_success: Option<Callback<()>>) {
         if self.ui.busy.get_untracked() {
             return;
         }
         self.ui.busy.set(true);
+        let mutation = matches!(
+            &command,
+            PermissionRequest::Change { .. }
+                | PermissionRequest::SetInstanceAdmin { .. }
+                | PermissionRequest::TransferInstance { .. }
+        );
         let creating_role = matches!(
             &command,
             PermissionRequest::Change {
@@ -32,6 +61,10 @@ impl Editor {
                 token.as_deref(),
             )
             .await;
+            if self.ui.token.get_untracked() != token || self.state.is_disposed() {
+                self.ui.busy.set(false);
+                return;
+            }
             match result {
                 Ok(response) => {
                     self.ui.status.set(String::new());
@@ -60,16 +93,39 @@ impl Editor {
                             self.preview.set(String::new());
                             self.state.set(Some(state));
                         }
-                        PermissionResponse::Effective { permissions, .. } => {
-                            self.preview.set(format!("{permissions:?}"))
-                        }
+                        PermissionResponse::Effective { permissions, .. } => self.preview.set(
+                            permissions
+                                .into_iter()
+                                .map(permission_name)
+                                .collect::<Vec<_>>()
+                                .join(", "),
+                        ),
                         PermissionResponse::Done => {
                             self.state.set(None);
                             self.preview.set(String::new());
                         }
                     }
-                    super::servers::refresh(self.ui).await;
-                    self.guilds.set(self.ui.guilds.get_untracked());
+                    if mutation {
+                        super::servers::refresh(self.ui).await;
+                    }
+                    if !self.state.is_disposed() {
+                        self.guilds.set(self.ui.guilds.get_untracked());
+                        if let Some(callback) = on_success {
+                            callback.run(());
+                        }
+                    }
+                    if mutation {
+                        self.ui.status.set("Changes saved".into());
+                    }
+                    if super::settings::server_page(self.ui.page.get_untracked())
+                        && self
+                            .ui
+                            .server
+                            .get_untracked()
+                            .is_none_or(|s| !s.can_manage_roles)
+                    {
+                        self.ui.page.set("servers");
+                    }
                 }
                 Err(error) => self.ui.status.set(error),
             }
@@ -77,246 +133,270 @@ impl Editor {
         });
     }
     fn change(self, change: GuildChange) {
+        self.change_then(change, None);
+    }
+    fn change_then(self, change: GuildChange, on_success: Option<Callback<()>>) {
         if let Some(state) = self.state.get_untracked() {
-            self.request(PermissionRequest::Change {
-                guild_id: state.guild.id,
-                revision: state.guild.revision,
-                change,
-            });
+            self.dispatch(
+                PermissionRequest::Change {
+                    guild_id: state.guild.id,
+                    revision: state.guild.revision,
+                    change,
+                },
+                on_success,
+            );
         }
     }
 }
 
-#[component]
-fn PermissionChecks(value: RwSignal<Permissions>, label: &'static str) -> impl IntoView {
-    view! { <fieldset class="space-y-2"><legend class="font-semibold">{label}</legend>
-    <div class="grid gap-2 sm:grid-cols-2">{Permission::ALL.into_iter().map(move |p|view! {
-        <label class="flex items-center gap-2 text-sm"><input type="checkbox" prop:checked=move ||value.get().contains(&p) on:change=move |ev|value.update(|v| {if event_target_checked(&ev) {v.insert(p);} else {v.remove(&p);}})/>{format!("{p:?}")}</label>
-    }).collect_view()}</div></fieldset> }
-}
-
-#[component]
-pub(super) fn PermissionEditor(ui: Ui) -> impl IntoView {
-    let editor = Editor {
+fn editor(ui: Ui) -> Editor {
+    Editor {
         ui,
-        guilds: RwSignal::new(ui.guilds.get_untracked()),
+        guilds: RwSignal::new(vec![]),
         state: RwSignal::new(None),
         access: RwSignal::new(None),
         preview: RwSignal::new(String::new()),
         selected_role: RwSignal::new(String::new()),
+    }
+}
+fn permission_name(p: Permission) -> &'static str {
+    match p {
+        Permission::Administrator => "Administrator (full access)",
+        Permission::ManageGuild => "Manage server",
+        Permission::ManageChannels => "Manage channels",
+        Permission::ManageRoles => "Manage roles & permissions",
+        Permission::ManageInvites => "Add members",
+        Permission::ViewChannel => "View channel",
+        Permission::ReadHistory => "Read message history",
+        Permission::SendMessages => "Send messages",
+        Permission::EditOwnMessages => "Edit own messages",
+        Permission::DeleteOwnMessages => "Delete own messages",
+        Permission::ManageMessages => "Manage messages",
+        Permission::KickMembers => "Kick members",
+        Permission::BanMembers => "Ban members",
+        Permission::ModerateMembers => "Timeout members",
+        Permission::JoinVoice => "Join voice",
+        Permission::Speak => "Speak in voice",
+        Permission::MuteMembers => "Mute members",
+        Permission::DeafenMembers => "Deafen members",
+        Permission::MoveMembers => "Move & disconnect members",
+    }
+}
+#[component]
+fn PermissionChecks(value: RwSignal<Permissions>) -> impl IntoView {
+    view! {<div>{Permission::ALL.into_iter().map(move |p|view!{<label class="settings-permission-row"><span>{permission_name(p)}</span><input type="checkbox" prop:checked=move ||value.get().contains(&p) on:change=move |e|value.update(|v|{if event_target_checked(&e){v.insert(p);}else{v.remove(&p);}})/></label>}).collect_view()}</div>}
+}
+
+#[component]
+pub(super) fn PermissionEditor(ui: Ui) -> impl IntoView {
+    let editor = editor(ui);
+    if let Some(home) = ui.server.get_untracked().filter(|s| s.can_manage_roles) {
+        editor.request(PermissionRequest::Inspect {
+            guild_id: home.guild.id,
+        });
+    }
+    view! {<Show when=move ||editor.state.get().is_some() fallback=move ||view!{<section class="settings-card"><p class="settings-hint">{move ||if ui.busy.get(){"Loading server settings…"}else{"Server settings are unavailable. Your permissions may have changed."}}</p><button class="settings-secondary" disabled=move ||ui.busy.get() on:click=move |_|if let Some(s)=ui.server.get_untracked(){editor.request(PermissionRequest::Inspect{guild_id:s.guild.id});}>"Retry"</button></section>}>
+        <fieldset disabled=move ||ui.busy.get() class="space-y-5 disabled:opacity-60">
+            <Show when=move ||matches!(ui.page.get(),"permissions"|"server_overview")><Overview editor=editor/></Show>
+            <Show when=move ||ui.page.get()=="server_roles"><Roles editor=editor/></Show>
+            <Show when=move ||ui.page.get()=="server_members"><Members editor=editor/></Show>
+            <Show when=move ||ui.page.get()=="server_channels"><Channels editor=editor/></Show>
+            <Show when=move ||ui.page.get()=="server_danger"><Ownership editor=editor/></Show>
+        </fieldset>
+    </Show>}
+}
+
+#[component]
+fn Overview(editor: Editor) -> impl IntoView {
+    let ui = editor.ui;
+    let name = RwSignal::new(String::new());
+    let saved = Memo::new(move |_| editor.state.get().map(|s| s.guild.name).unwrap_or_default());
+    Effect::new(move |_| name.set(saved.get()));
+    Effect::new(move |_| ui.settings_dirty.set(name.get() != saved.get()));
+    on_cleanup(move || ui.settings_dirty.set(false));
+    view! {
+        <div class="settings-card"><h3>"Your community"</h3><div class="settings-info-row"><span>"Server"</span><strong>{saved}</strong></div><div class="settings-info-row"><span>"Members"</span><strong>{move ||editor.state.get().map(|s|s.members.len())}</strong></div><div class="settings-info-row"><span>"Channels"</span><strong>{move ||editor.state.get().map(|s|s.channels.len())}</strong></div><div class="settings-info-row"><span>"Server ID"</span><strong class="text-xs">{move ||editor.state.get().map(|s|s.guild.id.to_string())}</strong></div><p class="settings-hint">"Share the server ID with people you want to invite. Protected servers also require a password."</p></div>
+        <Show when=move ||editor.allowed(Permission::ManageGuild)><form class="settings-card" on:submit=move |e:leptos::ev::SubmitEvent|{e.prevent_default();editor.change(GuildChange::Rename{name:name.get_untracked()});}><h3>"Server name"</h3><Field label="Name" value=name/><div class="settings-actions"><button type="button" class="settings-secondary" disabled=move ||!ui.settings_dirty.get() on:click=move |_|name.set(saved.get_untracked())>"Reset"</button><button class="settings-primary" disabled=move ||!ui.settings_dirty.get()||name.get().trim().is_empty()>"Save changes"</button></div></form></Show>
+    }
+}
+
+#[component]
+fn Roles(editor: Editor) -> impl IntoView {
+    let ui = editor.ui;
+    let role = editor.selected_role;
+    let name = RwSignal::new(String::new());
+    let position = RwSignal::new("1".to_owned());
+    let grants = RwSignal::new(Permissions::new());
+    let baseline = Memo::new(move |_| {
+        editor
+            .state
+            .get()
+            .and_then(|s| s.roles.into_iter().find(|r| r.id.to_string() == role.get()))
+            .map(|r| (r.name, r.position.to_string(), r.permissions))
+            .unwrap_or_else(|| (String::new(), "1".into(), Permissions::new()))
+    });
+    let reset = move || {
+        let (n, p, g) = baseline.get_untracked();
+        name.set(n);
+        position.set(p);
+        grants.set(g);
     };
-    let member_name = RwSignal::new(String::new());
-    let member_id = RwSignal::new(
+    Effect::new(move |_| {
+        baseline.track();
+        reset();
+    });
+    Effect::new(move |_| {
+        ui.settings_dirty
+            .set((name.get(), position.get(), grants.get()) != baseline.get())
+    });
+    on_cleanup(move || ui.settings_dirty.set(false));
+    view! {<div class="settings-split"><div class="settings-item-list" aria-label="Server roles"><button aria-pressed=move ||role.get().is_empty() disabled=move ||ui.settings_dirty.get() on:click=move |_|role.set(String::new())>"＋ New role"</button>{move ||editor.state.get().map(|s|s.roles.into_iter().map(|r|{let id=r.id.to_string();let selected=id.clone();view!{<button aria-pressed=move ||role.get()==selected disabled=move ||ui.settings_dirty.get() on:click=move |_|role.set(id.clone())>{r.name}</button>}}).collect_view())}</div>
+        <form class="settings-card" on:submit=move |e:leptos::ev::SubmitEvent|{e.prevent_default();let Ok(position)=position.get_untracked().parse()else{ui.status.set("Enter a valid rank".into());return;};let change=if let Ok(role_id)=role.get_untracked().parse(){GuildChange::EditRole{role_id,name:name.get_untracked(),position,permissions:grants.get_untracked()}}else{GuildChange::CreateRole{name:name.get_untracked(),position,permissions:grants.get_untracked()}};editor.change(change);}>
+            <h3>{move ||if role.get().is_empty(){"Create role"}else{"Edit role"}}</h3><Field label="Role name" value=name/><Field label="Hierarchy rank" value=position kind="number"/><p class="settings-hint">"Higher ranks can manage lower ranks. Everyone stays at rank 0. You can only grant permissions you already have."</p>
+            <details><summary>"Permissions"</summary><PermissionChecks value=grants/></details>
+            <Show when=move ||ui.settings_dirty.get()><p class="settings-hint">"Unsaved changes. Save or reset before selecting another role."</p></Show><div class="settings-actions"><button type="button" class="settings-secondary" disabled=move ||!ui.settings_dirty.get() on:click=move |_|reset()>"Reset"</button><button class="settings-primary" disabled=move ||!ui.settings_dirty.get()||name.get().trim().is_empty()>"Save role"</button></div>
+            <Show when=move ||editor.state.get().is_some_and(|s|s.roles.iter().any(|r|!r.everyone&&r.id.to_string()==role.get()))><super::settings::ConfirmButton ui=ui label="Delete role" title="Delete this role?" detail="Members will lose the permissions this role grants." on_confirm=Callback::new(move |()|if let Ok(role_id)=role.get_untracked().parse(){editor.change(GuildChange::DeleteRole{role_id});role.set(String::new());})/></Show>
+        </form>
+    </div>}
+}
+
+#[component]
+fn Members(editor: Editor) -> impl IntoView {
+    let ui = editor.ui;
+    let username = RwSignal::new(String::new());
+    let selected = RwSignal::new(
         ui.role_target
             .get_untracked()
-            .filter(|(guild, _)| {
-                ui.server
-                    .get_untracked()
-                    .is_some_and(|s| s.guild.id == *guild)
-            })
-            .map(|(_, member)| member.to_string())
+            .map(|(_, id)| id.to_string())
             .unwrap_or_default(),
     );
-    let role_id = editor.selected_role;
-    let role_name = RwSignal::new(String::new());
-    let position = RwSignal::new("1".to_string());
-    let grants = RwSignal::new(Permissions::new());
-    let channel_id = RwSignal::new(
+    let member = Signal::derive(move || {
+        editor.state.get().and_then(|s| {
+            s.members
+                .into_iter()
+                .find(|m| m.account_id.to_string() == selected.get())
+        })
+    });
+    let lower = move || {
+        editor
+            .state
+            .get()
+            .zip(ui.account.get())
+            .zip(member.get())
+            .is_some_and(|((s, a), m)| {
+                thiscord_frontend::sidebar::lower_member(&s, a.id, m.account_id)
+            })
+    };
+    view! {
+        <Show when=move ||editor.allowed(Permission::ManageInvites)><form class="settings-card" on:submit=move |e:leptos::ev::SubmitEvent|{e.prevent_default();editor.change(GuildChange::AddMember{username:username.get_untracked()});}><h3>"Add a member"</h3><p class="settings-hint">"Enter the username of an existing verified account. Requires permission to add members."</p><Field label="Username" value=username/><button class="settings-primary" disabled=move ||username.get().trim().is_empty()>"Add member"</button></form></Show>
+        <section class="settings-card"><label class="settings-field"><span>"Member"</span><select prop:value=move ||selected.get() on:change=move |e|selected.set(event_target_value(&e))><option value="">"Choose a member"</option>{move ||editor.state.get().map(|s|s.members.into_iter().map(|m|view!{<option value=m.account_id.to_string()>{format!("{}{}",m.display_name(),if m.account_id==s.guild.owner{" · Owner"}else{""})}</option>}).collect_view())}</select></label>
+            <Show when=move ||member.get().is_some()><h3>{move ||member.get().map(|m|m.display_name().to_owned())}</h3><p class="settings-hint">"Role changes save immediately. Everyone applies to every member."</p>
+                {move ||editor.state.get().map(|s|s.roles.into_iter().map(move |r|{let role_id=r.id;view!{<label class="settings-permission-row"><span>{r.name}</span><input type="checkbox" disabled=move ||r.everyone||!lower() prop:checked=move ||r.everyone||member.get().is_some_and(|m|m.roles.contains(&role_id)) on:change=move |e|if let Some(m)=member.get_untracked(){editor.change(GuildChange::AssignRole{account_id:m.account_id,role_id,assigned:event_target_checked(&e)});}/></label>}}).collect_view())}
+                <Show when=move ||!lower()><p class="settings-hint">"The owner, your own account, and members at or above your highest role are protected."</p></Show>
+                <Show when=move ||ui.server.get().is_some_and(|s|s.can_moderate)><button class="settings-secondary" on:click=move |_|{ui.moderation_target.set(member.get_untracked().map(|m|m.account_id));super::settings::navigate(ui,"moderation");}>"Moderation options"</button></Show>
+            </Show>
+        </section>
+    }
+}
+
+#[component]
+fn Channels(editor: Editor) -> impl IntoView {
+    let ui = editor.ui;
+    let name = RwSignal::new(String::new());
+    let voice = RwSignal::new(false);
+    let channel = RwSignal::new(
         ui.permission_channel
             .get_untracked()
-            .filter(|(guild, _)| {
-                ui.server
-                    .get_untracked()
-                    .is_some_and(|s| s.guild.id == *guild)
-            })
-            .map(|(_, channel)| channel.to_string())
+            .map(|(_, c)| c.to_string())
             .unwrap_or_default(),
     );
-    let channel_name = RwSignal::new(String::new());
-    let voice = RwSignal::new(false);
-    let member_target = RwSignal::new(false);
+    let preview_member = RwSignal::new(
+        ui.account
+            .get_untracked()
+            .map(|a| a.id.to_string())
+            .unwrap_or_default(),
+    );
+    let target_id = RwSignal::new(String::new());
     let allow = RwSignal::new(Permissions::new());
     let deny = RwSignal::new(Permissions::new());
-    let confirmation = RwSignal::new(String::new());
-    let delete_confirmation = RwSignal::new(String::new());
-    let instance_confirmation = RwSignal::new(String::new());
-    let instance_target = RwSignal::new(String::new());
-    let target = move || -> Option<OverrideTarget> {
-        if member_target.get_untracked() {
-            member_id
-                .get_untracked()
-                .parse()
-                .ok()
-                .map(OverrideTarget::Member)
+    let target = move || {
+        let value = target_id.get();
+        if let Some(id) = value.strip_prefix("member:") {
+            id.parse().ok().map(OverrideTarget::Member)
         } else {
-            role_id
-                .get_untracked()
-                .parse()
-                .ok()
-                .map(OverrideTarget::Role)
+            value.parse().ok().map(OverrideTarget::Role)
         }
     };
+    let baseline = Memo::new(move |_| {
+        editor
+            .state
+            .get()
+            .and_then(|s| {
+                s.overrides.into_iter().find(|o| {
+                    o.channel_id.to_string() == channel.get() && Some(o.target) == target()
+                })
+            })
+            .map(|o| (o.allow, o.deny))
+            .unwrap_or_default()
+    });
+    let reset = move || {
+        let (a, d) = baseline.get_untracked();
+        allow.set(a);
+        deny.set(d);
+    };
+    Effect::new(move |_| {
+        baseline.track();
+        reset();
+    });
+    Effect::new(move |_| {
+        ui.settings_dirty
+            .set((allow.get(), deny.get()) != baseline.get() || !name.get().is_empty())
+    });
+    on_cleanup(move || ui.settings_dirty.set(false));
+    view! {
+        <Show when=move ||editor.allowed(Permission::ManageChannels)><details class="settings-card"><summary>"Create a channel"</summary><form class="space-y-4" on:submit=move |e:leptos::ev::SubmitEvent|{e.prevent_default();editor.change_then(GuildChange::CreateChannel{name:name.get_untracked(),kind:if voice.get_untracked(){ChannelKind::Voice}else{ChannelKind::Text}},Some(Callback::new(move |()|name.set(String::new()))));}><Field label="Channel name" value=name/><label class="settings-field"><span>"Type"</span><select on:change=move |e|voice.set(event_target_value(&e)=="voice")><option value="text">"Text"</option><option value="voice">"Voice"</option></select></label><button class="settings-primary" disabled=move ||name.get().trim().is_empty()>"Create channel"</button></form></details></Show>
+        <section class="settings-card"><label class="settings-field"><span>"Channel"</span><select disabled=move ||ui.settings_dirty.get() prop:value=move ||channel.get() on:change=move |e|channel.set(event_target_value(&e))><option value="">"Choose a channel"</option>{move ||editor.state.get().map(|s|s.channels.into_iter().map(|c|view!{<option value=c.id.to_string()>{format!("{} {}",if c.kind==ChannelKind::Voice{"◖"}else{"#"},c.name)}</option>}).collect_view())}</select></label>
+            <Show when=move ||!channel.get().is_empty()>
+                <h3>"Who can access this channel?"</h3><p class="settings-hint">"Inherit uses the member’s server roles. Allow or deny changes a permission in this channel only."</p>
+                <label class="settings-field"><span>"Role or member"</span><select prop:value=move ||target_id.get() disabled=move ||ui.settings_dirty.get() on:change=move |e|target_id.set(event_target_value(&e))><option value="">"Choose a role or member"</option>{move ||editor.state.get().map(|s|view!{<optgroup label="Roles">{s.roles.into_iter().map(|r|view!{<option value=r.id.to_string()>{r.name}</option>}).collect_view()}</optgroup><optgroup label="Members">{s.members.into_iter().map(|m|view!{<option value=format!("member:{}",m.account_id)>{m.display_name().to_owned()}</option>}).collect_view()}</optgroup>})}</select></label>
+                <Show when=move ||target().is_some()><form on:submit=move |e:leptos::ev::SubmitEvent|{e.prevent_default();if let (Ok(channel_id),Some(target))=(channel.get_untracked().parse(),target()){editor.change(GuildChange::SetOverride{channel_id,target,allow:allow.get_untracked(),deny:deny.get_untracked()});}}>
+                    {Permission::ALL.into_iter().filter(|p|*p!=Permission::Administrator).map(move |p|view!{<label class="settings-permission-row"><span>{permission_name(p)}</span><select aria-label=permission_name(p) prop:value=move ||if allow.get().contains(&p){"allow"}else if deny.get().contains(&p){"deny"}else{"inherit"} on:change=move |e|{let v=event_target_value(&e);allow.update(|a|{a.remove(&p);if v=="allow"{a.insert(p);}});deny.update(|d|{d.remove(&p);if v=="deny"{d.insert(p);}});} ><option value="inherit">"Inherit"</option><option value="allow">"Allow"</option><option value="deny">"Deny"</option></select></label>}).collect_view()}
+                    <div class="settings-actions mt-5"><button type="button" class="settings-secondary" disabled=move ||!ui.settings_dirty.get() on:click=move |_|reset()>"Reset"</button><button class="settings-primary" disabled=move ||!ui.settings_dirty.get()>"Save permissions"</button></div>
+                    <button type="button" class="settings-link mt-4" on:click=move |_|if let (Ok(channel_id),Some(target))=(channel.get_untracked().parse(),target()){editor.change(GuildChange::DeleteOverride{channel_id,target});}>"Remove this override"</button>
+                </form></Show>
+                <details><summary>"Check a member’s access"</summary><label class="settings-field"><span>"Member"</span><select prop:value=move ||preview_member.get() on:change=move |e|preview_member.set(event_target_value(&e))>{move ||editor.state.get().map(|s|s.members.into_iter().map(|m|view!{<option value=m.account_id.to_string()>{m.display_name().to_owned()}</option>}).collect_view())}</select></label><button class="settings-secondary mt-3" on:click=move |_|if let (Some(s),Ok(account_id),Ok(channel_id))=(editor.state.get_untracked(),preview_member.get_untracked().parse::<AccountId>(),channel.get_untracked().parse()){editor.request(PermissionRequest::Preview{guild_id:s.guild.id,account_id,channel_id:Some(channel_id)});}>"Check access"</button><p class="settings-hint mt-3" role="status">{move ||editor.preview.get()}</p></details>
+                <Show when=move ||editor.allowed(Permission::ManageChannels)><super::settings::ConfirmButton ui=ui label="Delete channel" title="Delete this channel?" detail="The channel and its messages will be permanently deleted." on_confirm=Callback::new(move |()|if let Ok(channel_id)=channel.get_untracked().parse(){editor.change(GuildChange::DeleteChannel{channel_id});channel.set(String::new());})/></Show>
+            </Show>
+        </section>
+    }
+}
+
+#[component]
+fn Ownership(editor: Editor) -> impl IntoView {
+    let ui = editor.ui;
+    let member = RwSignal::new(String::new());
+    let confirmation = RwSignal::new(String::new());
     let confirmed = move || {
         editor
             .state
             .get()
             .is_some_and(|s| confirmation.get() == s.guild.name)
     };
-    let load_role = move |value: String| {
-        role_id.set(value.clone());
-        if let Some(r) = editor
-            .state
-            .get_untracked()
-            .and_then(|s| s.roles.into_iter().find(|r| r.id.to_string() == value))
-        {
-            role_name.set(r.name);
-            position.set(r.position.to_string());
-            grants.set(r.permissions);
-        } else {
-            role_name.set(String::new());
-            position.set("1".into());
-            grants.set(Permissions::new());
-        }
-    };
-    let assign = move |assigned| {
-        let Ok(account_id) = member_id.get_untracked().parse() else {
-            ui.status.set("Select a member first".into());
-            return;
-        };
-        let Ok(role_id) = role_id.get_untracked().parse() else {
-            ui.status
-                .set("Save a new role or select an existing role first".into());
-            return;
-        };
-        if let Some(state) = editor.state.get_untracked() {
-            if state.roles.iter().any(|r| r.id == role_id && r.everyone) {
-                ui.status.set(
-                    "Everyone already applies to every member and cannot be assigned or removed"
-                        .into(),
-                );
-                return;
-            }
-            if account_id == state.guild.owner {
-                ui.status
-                    .set("The server owner already has full administrator permissions".into());
-                return;
-            }
-        }
-        editor.change(GuildChange::AssignRole {
-            account_id,
-            role_id,
-            assigned,
-        });
-    };
-    if let Some(home) = ui.server.get_untracked().filter(|s| s.can_manage_roles) {
-        editor.request(PermissionRequest::Inspect {
-            guild_id: home.guild.id,
-        });
-    } else {
-        editor.request(PermissionRequest::ListGuilds {});
-    }
-    view! {
-        <div class="space-y-6">
-            <h2 class="text-2xl font-semibold">"Guilds & roles"</h2>
-            <p class="text-sm text-white/60">"Instance roles and guild roles are independent. Refresh after a conflict. Ownership changes require recent reauthentication."</p>
-            <fieldset class="space-y-6 disabled:opacity-60" disabled=move ||ui.busy.get()>
-                <div class="flex flex-wrap gap-4"><button class="icon-button" on:click=move |_|editor.request(PermissionRequest::ListGuilds {}) aria-label="Refresh guilds" data-tip="Refresh guilds"><super::icons::Icon kind=super::icons::Glyph::Refresh/></button><button class="underline" on:click=move |_|editor.request(PermissionRequest::Instance {})>"Instance access"</button></div>
-                <Show when=move ||editor.access.get().is_some()>
-                    <p>{move ||editor.access.get().map(|a|format!("Instance role: {:?}",a.role))}</p>
-                    <Show when=move ||editor.access.get().is_some_and(|a|a.role==InstanceRole::Owner)>
-                        <Field label="Verified account ID for instance administration" value=instance_target/>
-                        <div class="flex flex-wrap gap-4">
-                            <button class="underline" on:click=move |_|if let Ok(id)=instance_target.get_untracked().parse(){editor.request(PermissionRequest::SetInstanceAdmin{account_id:id,admin:true});}>"Make instance admin"</button>
-                            <button class="underline" on:click=move |_|if let Ok(id)=instance_target.get_untracked().parse(){editor.request(PermissionRequest::SetInstanceAdmin{account_id:id,admin:false});}>"Remove instance admin"</button>
-                            <button class="underline" disabled=move ||instance_confirmation.get()!="TRANSFER INSTANCE" on:click=move |_|if instance_confirmation.get_untracked()=="TRANSFER INSTANCE" && let Ok(id)=instance_target.get_untracked().parse(){editor.request(PermissionRequest::TransferInstance{account_id:id});}>"Transfer instance ownership"</button>
-                        </div>
-                        <p class="text-sm text-white/60">"To transfer the instance, type TRANSFER INSTANCE here, then click Transfer instance ownership. You will become a regular user."</p>
-                        <Field label="Confirm instance transfer" value=instance_confirmation/>
-                    </Show>
-                </Show>
-                <ul class="space-y-2">{move ||editor.guilds.get().into_iter().map(move |g| {let id=g.id;let revision=g.revision;view! {
-                    <li class="flex flex-wrap justify-between gap-3"><span>{g.name}</span><div class="flex gap-4">
-                        <button class="underline" on:click=move |_| {role_id.set(String::new());member_id.set(String::new());channel_id.set(String::new());confirmation.set(String::new());delete_confirmation.set(String::new());editor.request(PermissionRequest::Inspect{guild_id:id});}>"Server settings"</button>
-                        <button class="underline" on:click=move |_|if let Some(a)=ui.account.get_untracked(){editor.request(PermissionRequest::Preview{guild_id:id,account_id:a.id,channel_id:None});}>"My permissions"</button>
-                        <Show when=move ||ui.account.get().is_some_and(|a|a.id==g.owner) fallback=move ||view!{
-                            <button class="underline" on:click=move |_|if window().confirm_with_message("Leave this server? You will lose access to its channels.").unwrap_or(false){editor.request(PermissionRequest::Change{guild_id:id,revision,change:GuildChange::Leave {}});}>"Leave server"</button>
-                        }><span class="cursor-not-allowed" tabindex="0" title="Owner: transfer ownership or delete the server to leave."><button type="button" class="pointer-events-none text-white/30 underline" disabled aria-label="Leave server unavailable: transfer ownership or delete the server first">"Leave server"</button></span></Show>
-                    </div></li>
-                }}).collect_view()}</ul>
-                <Show when=move ||editor.state.get().is_some()>
-                    <h3 class="text-xl font-semibold">{move ||editor.state.get().map(|s|s.guild.name)}</h3>
-                    <Show when=move ||editor.state.get().is_some_and(|s|ui.account.get().is_some_and(|a|a.id==s.guild.owner))>
-                        <p class="text-sm text-brand">"You are the server owner. You have full administrator permissions and can create and assign roles to other members."</p>
-                    </Show>
-                    <button class="icon-button" on:click=move |_|if let Some(s)=editor.state.get_untracked(){editor.request(PermissionRequest::Inspect{guild_id:s.guild.id});} aria-label="Refresh selected guild" data-tip="Refresh selected guild"><super::icons::Icon kind=super::icons::Glyph::Refresh/></button>
-                    <Field label="Add verified member by username" value=member_name/>
-                    <button class="underline" on:click=move |_|editor.change(GuildChange::AddMember{username:member_name.get_untracked()})>"Add member"</button>
-                    <label class="block space-y-2"><span>"Member"</span><select class="w-full rounded bg-slate-900 p-2" prop:value=move ||member_id.get() on:change=move |ev|member_id.set(event_target_value(&ev))>
-                        <option value="">"Select member"</option>{move ||editor.state.get().map(|s|s.members.into_iter().map(|m|view!{<option value=m.account_id.to_string()>{if m.account_id==s.guild.owner {format!("{} (Owner)",m.display_name().to_owned())} else {m.display_name().to_owned()}}</option>}).collect_view())}
-                    </select></label>
-                    <p class="break-all text-sm text-white/60">{move ||editor.state.get().and_then(|s|s.members.iter().find(|m|m.account_id.to_string()==member_id.get()).map(|m|format!("Account: {} · {}Roles: {}",m.account_id,if m.account_id==s.guild.owner {"Owner (full administrator access) · "} else {""},s.roles.iter().filter(|r|r.everyone || m.roles.contains(&r.id)).map(|r|r.name.clone()).collect::<Vec<_>>().join(", "))))}</p>
-                    <label class="block space-y-2"><span>"Role"</span><select class="w-full rounded bg-slate-900 p-2" prop:value=move ||role_id.get() on:change=move |ev|load_role(event_target_value(&ev))>
-                        <option value="">"New role"</option>{move ||editor.state.get().map(|s|s.roles.into_iter().map(|r|view!{<option value=r.id.to_string()>{format!("{} (rank {})",r.name,r.position)}</option>}).collect_view())}
-                    </select></label>
-                    <Field label="Role name" value=role_name/><Field label="Rank (1–10000; Everyone stays 0)" value=position kind="number"/>
-                    <PermissionChecks value=grants label="Role permissions"/>
-                    <div class="flex flex-wrap gap-4">
-                        <button class="rounded-md bg-brand px-4 py-2" on:click=move |_| {
-                            let Ok(p)=position.get_untracked().parse() else {ui.status.set("Enter a valid rank".into());return;};
-                            let change=if let Ok(id)=role_id.get_untracked().parse() {GuildChange::EditRole{role_id:id,name:role_name.get_untracked(),position:p,permissions:grants.get_untracked()}}
-                            else {GuildChange::CreateRole{name:role_name.get_untracked(),position:p,permissions:grants.get_untracked()}};
-                            editor.change(change);
-                        }>"Save role"</button>
-                        <button class="underline" on:click=move |_|assign(true)>"Assign role"</button>
-                        <button class="underline" on:click=move |_|assign(false)>"Unassign role"</button>
-                    </div>
-                    <Field label="New channel name" value=channel_name/>
-                    <label class="flex gap-2"><input type="checkbox" on:change=move |ev|voice.set(event_target_checked(&ev))/>"Voice channel"</label>
-                    <button class="underline" on:click=move |_|editor.change(GuildChange::CreateChannel{name:channel_name.get_untracked(),kind:if voice.get_untracked(){ChannelKind::Voice}else{ChannelKind::Text}})>"Create channel"</button>
-                    <label class="block space-y-2"><span>"Channel"</span><select class="w-full rounded bg-slate-900 p-2" prop:value=move ||channel_id.get() on:change=move |ev|channel_id.set(event_target_value(&ev))>
-                        <option value="">"Guild base permissions"</option>{move ||editor.state.get().map(|s|s.channels.into_iter().map(|ch|view!{<option value=ch.id.to_string()>{ch.name}</option>}).collect_view())}
-                    </select></label>
-                    <h3 class="font-semibold">"Channel overrides"</h3>
-                    <label class="flex gap-2"><input type="checkbox" on:change=move |ev|member_target.set(event_target_checked(&ev))/>"Override selected member (otherwise selected role)"</label>
-                    <button class="underline" on:click=move |_| {
-                        let old=editor.state.get_untracked().and_then(|s|s.overrides.into_iter().find(|o|o.channel_id.to_string()==channel_id.get_untracked() && Some(o.target)==target()));
-                        allow.set(old.as_ref().map(|o|o.allow.clone()).unwrap_or_default());deny.set(old.map(|o|o.deny).unwrap_or_default());
-                    }>"Load saved override"</button>
-                    <PermissionChecks value=allow label="Allow"/><PermissionChecks value=deny label="Deny"/>
-                    <div class="flex flex-wrap gap-4">
-                        <button class="underline" on:click=move |_|if let (Ok(channel_id),Some(target))=(channel_id.get_untracked().parse(),target()){editor.change(GuildChange::SetOverride{channel_id,target,allow:allow.get_untracked(),deny:deny.get_untracked()});}>"Save override"</button>
-                        <button class="underline" on:click=move |_|if let (Ok(channel_id),Some(target))=(channel_id.get_untracked().parse(),target()){editor.change(GuildChange::DeleteOverride{channel_id,target});}>"Clear override"</button>
-                        <button class="underline" on:click=move |_|if let (Some(s),Ok(account_id))=(editor.state.get_untracked(),member_id.get_untracked().parse::<AccountId>()){editor.request(PermissionRequest::Preview{guild_id:s.guild.id,account_id,channel_id:channel_id.get_untracked().parse().ok()});}>"Preview effective permissions"</button>
-                    </div>
-                    <p class="text-sm text-white/60">"Type the selected server name, then click the specific action below. Select the role, channel or member to change first."</p>
-                    <Field label="Server name to confirm the action" value=confirmation/>
-                    <div class="flex flex-wrap gap-4">
-                        <button class="text-red-300 underline" disabled=move ||!confirmed() on:click=move |_|if let Ok(id)=role_id.get_untracked().parse(){editor.change(GuildChange::DeleteRole{role_id:id});}>"Delete role"</button>
-                        <button class="text-red-300 underline" disabled=move ||!confirmed() on:click=move |_|if let Ok(id)=channel_id.get_untracked().parse(){editor.change(GuildChange::DeleteChannel{channel_id:id});}>"Delete channel"</button>
-                        <button class="text-red-300 underline" disabled=move ||!confirmed() on:click=move |_|if let Ok(id)=member_id.get_untracked().parse(){editor.change(GuildChange::RemoveMember{account_id:id});}>"Remove member"</button>
-                        <Show when=move ||editor.state.get().is_some_and(|s|ui.account.get().is_some_and(|a|a.id==s.guild.owner))><button class="text-red-300 underline disabled:opacity-40" disabled=move ||!confirmed()||!editor.state.get().is_some_and(|s|s.members.iter().any(|m|m.account_id!=s.guild.owner&&m.account_id.to_string()==member_id.get())) on:click=move |_|if let Ok(id)=member_id.get_untracked().parse(){editor.change(GuildChange::TransferOwner{account_id:id});}>"Transfer server ownership"</button></Show>
-                    </div>
-                </Show>
-                <p class="text-sm" role="status">{move ||editor.preview.get()}</p>
-                <Show when=move ||editor.state.get().is_some_and(|s|ui.account.get().is_some_and(|a|a.id==s.guild.owner))>
-                        <form class="space-y-3 rounded-lg border border-red-400/30 p-4" on:submit=move |ev: leptos::ev::SubmitEvent| {
-                            ev.prevent_default();
-                            if editor.state.get_untracked().is_some_and(|s|delete_confirmation.get_untracked()==s.guild.name) {
-                                editor.change(GuildChange::Delete {});
-                            }
-                        }>
-                            <h4 class="font-semibold text-red-300">"Delete server"</h4>
-                            <p class="text-sm text-white/60">"Permanently deletes this server, its channels and all messages. This cannot be undone. Type the server name below, then click Delete server."</p>
-                            <p class="break-words font-semibold">{move ||editor.state.get().map(|s|s.guild.name)}</p>
-                            <Field label="Server name to confirm deletion" value=delete_confirmation/>
-                            <div class="flex flex-wrap items-center gap-4">
-                                <button type="submit" class="rounded bg-red-600 px-4 py-2 font-semibold disabled:opacity-40" disabled=move ||!editor.state.get().is_some_and(|s|delete_confirmation.get()==s.guild.name)>"Delete server"</button>
-                                <button type="button" class="text-sm underline" on:click=move |_|ui.page.set("reauthenticate")>"Reauthenticate"</button>
-                            </div>
-                            <p class="text-xs text-white/60">"Recent authentication is required. If your session is too old, reauthenticate, then return to Server settings."</p>
-                        </form>
-                </Show>
-            </fieldset>
-        </div>
-    }
+    view! {<Show when=move ||editor.state.get().is_some_and(|s|ui.account.get().is_some_and(|a|a.id==s.guild.owner))>
+        <div class="settings-card"><h3>"Before you continue"</h3><p class="settings-hint">"Ownership changes and deletion require a recent identity confirmation."</p><button class="settings-secondary" on:click=move |_|super::settings::navigate(ui,"reauthenticate")>"Confirm identity"</button></div>
+        <section class="settings-card settings-danger-zone"><h3>"Transfer ownership"</h3><p class="settings-hint">"The new owner gets full control. You remain a member and lose owner privileges."</p><label class="settings-field"><span>"New owner"</span><select prop:value=move ||member.get() on:change=move |e|member.set(event_target_value(&e))><option value="">"Choose a member"</option>{move ||editor.state.get().map(|s|s.members.into_iter().filter(|m|m.account_id!=s.guild.owner).map(|m|view!{<option value=m.account_id.to_string()>{m.display_name().to_owned()}</option>}).collect_view())}</select></label><super::settings::ConfirmButton ui=ui label="Transfer ownership" title="Transfer this server’s ownership?" detail="You will lose owner privileges. This requires recent authentication." disabled=Signal::derive(move ||member.get().is_empty()) on_confirm=Callback::new(move |()|if let Ok(account_id)=member.get_untracked().parse(){editor.change(GuildChange::TransferOwner{account_id});})/></section>
+        <section class="settings-card settings-danger-zone"><h3>"Delete server"</h3><p class="settings-hint">"Permanently deletes this server, its channels and all messages. This cannot be undone."</p><p class="settings-hint">{move ||editor.state.get().map(|s|format!("Type {} to confirm.",s.guild.name))}</p><Field label="Server name" value=confirmation/><super::settings::ConfirmButton ui=ui label="Delete server" title="Permanently delete this server?" detail="All channels, messages and memberships will be removed. This cannot be undone." disabled=Signal::derive(move ||!confirmed()) on_confirm=Callback::new(move |()|editor.change(GuildChange::Delete{}))/></section>
+    </Show>}
+}
+
+#[component]
+pub(super) fn InstanceSettings(ui: Ui) -> impl IntoView {
+    let editor = editor(ui);
+    let target = RwSignal::new(String::new());
+    let confirmation = RwSignal::new(String::new());
+    editor.request(PermissionRequest::Instance {});
+    view! {<section class="settings-card"><h3>"Instance access"</h3><p class="settings-hint">"Instance administrators can create servers. Their role does not grant access to other people’s servers."</p><p class="settings-hint">{move ||editor.access.get().map(|a|format!("Your instance role: {}",match a.role{InstanceRole::Owner=>"Owner",InstanceRole::Admin=>"Administrator",InstanceRole::User=>"Member"}))}</p>
+        <Show when=move ||editor.access.get().is_some_and(|a|a.role==InstanceRole::Owner)><Field label="Verified account ID" value=target/><div class="settings-actions"><button class="settings-secondary" disabled=move ||{ui.busy.get()||target.get().parse::<AccountId>().is_err()} on:click=move |_|if let Ok(account_id)=target.get_untracked().parse(){editor.request(PermissionRequest::SetInstanceAdmin{account_id,admin:true});}>"Make administrator"</button><button class="settings-secondary" disabled=move ||{ui.busy.get()||target.get().parse::<AccountId>().is_err()} on:click=move |_|if let Ok(account_id)=target.get_untracked().parse(){editor.request(PermissionRequest::SetInstanceAdmin{account_id,admin:false});}>"Remove administrator"</button></div>
+        <details class="settings-danger-zone"><summary>"Transfer instance ownership"</summary><p class="settings-hint">"Requires recent authentication. You will become a regular instance member. Type TRANSFER INSTANCE to continue."</p><Field label="Confirmation" value=confirmation/><super::settings::ConfirmButton ui=ui label="Transfer instance" title="Transfer instance ownership?" detail="The selected account becomes the instance owner. You lose owner privileges." disabled=Signal::derive(move ||confirmation.get()!="TRANSFER INSTANCE"||target.get().parse::<AccountId>().is_err()) on_confirm=Callback::new(move |()|if let Ok(account_id)=target.get_untracked().parse(){editor.request(PermissionRequest::TransferInstance{account_id});})/></details></Show>
+    </section>}
 }
