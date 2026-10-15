@@ -2,6 +2,7 @@
 use crate::account_client::native;
 use leptos::prelude::*;
 use serde_json::json;
+use thiscord_frontend::video_feedback::{DecoderPressure, DecoderSample};
 use thiscord_shared::screen::{ViewAnswer, Watch};
 use wasm_bindgen::{JsCast, prelude::*};
 use wasm_bindgen_futures::JsFuture;
@@ -28,6 +29,15 @@ async fn connect(video: HtmlVideoElement, watch: Watch) -> Result<Player, String
     let pc = RtcPeerConnection::new().map_err(|_| "This WebView cannot play WebRTC video")?;
     let target = video.clone();
     let track = Closure::<dyn FnMut(RtcTrackEvent)>::new(move |event: RtcTrackEvent| {
+        // A 4K IDR can take ~100 ms to pace even on a healthy link. The local
+        // bridge forwards complete frames in bursts. Let the native player
+        // smooth those bursts without interpreting presentation skips as decode
+        // overload. This is a bounded latency target, not an extra encoded queue.
+        let receiver = event.receiver();
+        let property = JsValue::from_str("jitterBufferTarget");
+        if js_sys::Reflect::has(receiver.as_ref(), &property).unwrap_or(false) {
+            let _ = js_sys::Reflect::set(receiver.as_ref(), &property, &JsValue::from_f64(150.0));
+        }
         if let Ok(stream) = MediaStream::new() {
             stream.add_track(&event.track());
             target.set_muted(true);
@@ -93,11 +103,10 @@ pub async fn run(
             Ok(player) => {
                 let mut pending = 0;
                 let mut previous = thiscord_shared::screen::Diagnostics::default();
-                let mut last_stats = 0.0;
+                let mut last_stats = js_sys::Date::now();
                 let mut last_presented = 0;
-                let mut last_presentation = js_sys::Date::now();
                 let mut last_pli = 0;
-                let mut last_dropped = 0;
+                let mut decoder_load = DecoderPressure::default();
                 let mut decoder_pressure = false;
                 while visible() {
                     let state = player.pc.connection_state();
@@ -127,7 +136,7 @@ pub async fn run(
                     }
                     decoder_pressure = false;
                     let now = js_sys::Date::now();
-                    if now - last_stats > 200.0 {
+                    if now - last_stats >= 1000.0 {
                         let seconds = (now - last_stats) / 1000.0;
                         last_stats = now;
                         if let Ok(stats) = native::<thiscord_shared::screen::Diagnostics>(
@@ -136,27 +145,19 @@ pub async fn run(
                         )
                         .await
                         {
-                            let (browser, pli) = browser_stats(&player.pc).await;
+                            let (browser, pli, decoder) = browser_stats(&player.pc).await;
                             if pli > last_pli {
                                 let _ =
                                     native::<bool>("screen_view_keyframe", json!({"watch":watch}))
                                         .await;
                             }
-                            decoder_pressure = pli > last_pli;
+                            decoder_pressure = decoder.is_some_and(|s| decoder_load.sample(s));
                             last_pli = pli;
                             let playback = {
                                 let q = player.video.get_video_playback_quality();
-                                decoder_pressure |=
-                                    q.dropped_video_frames().saturating_sub(last_dropped) > 0;
-                                last_dropped = q.dropped_video_frames();
                                 let presented = q
                                     .total_video_frames()
                                     .saturating_sub(q.dropped_video_frames());
-                                if presented > last_presented {
-                                    last_presentation = now;
-                                } else {
-                                    decoder_pressure |= now - last_presentation > 3000.0;
-                                }
                                 let fps = presented.saturating_sub(last_presented) as f64
                                     / seconds.max(0.001);
                                 last_presented = presented;
@@ -230,7 +231,7 @@ pub fn describe(
     }
     text
 }
-async fn browser_stats(pc: &RtcPeerConnection) -> (String, u64) {
+async fn browser_stats(pc: &RtcPeerConnection) -> (String, u64, Option<DecoderSample>) {
     // Whitelist scalars: SDP, candidate addresses and stream identifiers stay out.
     let future = JsFuture::from(pc.get_stats());
     let result = futures_util::future::select(
@@ -239,7 +240,7 @@ async fn browser_stats(pc: &RtcPeerConnection) -> (String, u64) {
     )
     .await;
     let futures_util::future::Either::Left((Ok(report), _)) = result else {
-        return ("Browser stats unavailable".into(), 0);
+        return ("Browser stats unavailable".into(), 0, None);
     };
     let mut output = serde_json::Map::new();
     if let Ok(Some(entries)) = js_sys::try_iter(&report) {
@@ -255,6 +256,8 @@ async fn browser_stats(pc: &RtcPeerConnection) -> (String, u64) {
             }
             for name in [
                 "framesPerSecond",
+                "frameWidth",
+                "frameHeight",
                 "framesDecoded",
                 "framesDropped",
                 "framesReceived",
@@ -265,6 +268,8 @@ async fn browser_stats(pc: &RtcPeerConnection) -> (String, u64) {
                 "packetsReceived",
                 "jitter",
                 "jitterBufferDelay",
+                "jitterBufferTargetDelay",
+                "jitterBufferMinimumDelay",
                 "jitterBufferEmittedCount",
                 "totalDecodeTime",
                 "nackCount",
@@ -283,6 +288,21 @@ async fn browser_stats(pc: &RtcPeerConnection) -> (String, u64) {
             }
         }
     }
+    for receiver in pc.get_receivers().iter() {
+        if let Ok(value) = js_sys::Reflect::get(&receiver, &JsValue::from_str("jitterBufferTarget"))
+            && let Some(target) = value.as_f64()
+        {
+            output.insert("playoutTargetMs".into(), json!(target));
+        }
+    }
+    let decoder = (|| {
+        Some(DecoderSample {
+            at_ms: js_sys::Date::now(),
+            received: output.get("framesReceived")?.as_f64()? as u64,
+            decoded: output.get("framesDecoded")?.as_f64()? as u64,
+            decode_seconds: output.get("totalDecodeTime")?.as_f64()?,
+        })
+    })();
     let pli = output
         .get("pliCount")
         .and_then(|v| v.as_f64())
@@ -293,5 +313,6 @@ async fn browser_stats(pc: &RtcPeerConnection) -> (String, u64) {
             serde_json::to_string_pretty(&output).unwrap_or_default()
         ),
         pli,
+        decoder,
     )
 }

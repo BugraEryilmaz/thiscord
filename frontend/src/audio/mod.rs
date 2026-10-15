@@ -15,6 +15,7 @@ mod gate;
 mod health;
 pub mod jitter;
 mod lifecycle;
+pub mod media_runtime;
 pub mod mixer;
 pub mod outgoing;
 mod playout_rate;

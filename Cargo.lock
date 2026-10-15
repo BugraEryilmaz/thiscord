@@ -7839,6 +7839,7 @@ dependencies = [
  "serde-wasm-bindgen",
  "serde_json",
  "sha2",
+ "socket2",
  "sonora",
  "tauri",
  "tauri-build",
@@ -7860,6 +7861,7 @@ dependencies = [
  "webrtc",
  "windows",
  "windows-capture",
+ "windows-core",
 ]
 
 [[package]]

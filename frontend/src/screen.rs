@@ -10,6 +10,7 @@ pub mod hardware;
 pub mod metrics;
 pub mod pacing;
 pub mod preview;
+pub mod send;
 pub const SENDER_QUEUE_AGE: std::time::Duration = std::time::Duration::from_millis(200);
 pub fn sender_queue_frames(fps: u32) -> usize {
     (fps.clamp(1, 60) as usize).div_ceil(5)

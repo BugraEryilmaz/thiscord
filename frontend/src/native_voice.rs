@@ -661,6 +661,9 @@ async fn run(
         .build();
     let pc: Arc<dyn PeerConnection> = Arc::new(
         PeerConnectionBuilder::new()
+            .with_runtime(Arc::new(
+                thiscord_frontend::audio::media_runtime::MediaRuntime::default(),
+            ))
             .with_configuration(configuration)
             .with_interceptor_registry(registry)
             .with_media_engine(media)
