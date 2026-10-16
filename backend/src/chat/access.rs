@@ -86,7 +86,7 @@ pub(crate) struct Access {
     changed: watch::Sender<u64>,
 }
 impl Access {
-    pub(super) fn subscribe(&self) -> watch::Receiver<u64> {
+    pub(crate) fn subscribe(&self) -> watch::Receiver<u64> {
         self.changed.subscribe()
     }
     fn current(&self, epoch: u64) -> bool {

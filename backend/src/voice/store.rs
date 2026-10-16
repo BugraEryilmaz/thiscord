@@ -22,6 +22,12 @@ pub(super) fn authorize(
     let session = auth::authenticate(&mut c, token)?;
     c.transaction(|c| {
         auth::read_session(c, token, &session)?;
+        // Direct calls use a dedicated equal scope/room UUID pair. Authorization
+        // always consults the accepted friendship and active invitation; no guild
+        // role (including instance administration) grants private-call access.
+        if guild.as_uuid() == channel.as_uuid() {
+            return crate::friends::store::voice(c, session.account_id, channel);
+        }
         execute(
             c,
             // Stable permission snapshot against guild writes, without serializing readers.

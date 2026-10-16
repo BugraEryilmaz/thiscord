@@ -3,6 +3,7 @@ pub mod api;
 pub mod auth;
 pub mod chat;
 pub mod db;
+pub mod friends;
 pub mod permissions;
 pub mod schema;
 

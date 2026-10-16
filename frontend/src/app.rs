@@ -7,6 +7,7 @@ mod chat;
 mod context_menu;
 mod diagnostics;
 mod dialog;
+mod friends;
 mod icons;
 mod login;
 mod moderation;
@@ -23,6 +24,7 @@ mod window;
 
 #[derive(Clone, Copy)]
 struct Ui {
+    friends: friends::State,
     audio_control: crate::audio_control::AudioControl,
     updates: RwSignal<thiscord_shared::update::UpdateStatus>,
     update_error: RwSignal<String>,
@@ -307,6 +309,7 @@ fn StatusNotice(ui: Ui) -> impl IntoView {
 #[component]
 pub fn App() -> impl IntoView {
     let ui = Ui {
+        friends: friends::State::new(),
         audio_control: Default::default(),
         updates: RwSignal::new(Default::default()),
         update_error: RwSignal::new(String::new()),
@@ -388,6 +391,7 @@ pub fn App() -> impl IntoView {
         <servers::ServerRail ui=ui/>
         <audio::AudioHost ui=ui/>
         <chat::ChatHost ui=ui/>
+        <friends::Host ui=ui/>
         <main class="app-main">
             <StatusNotice ui=ui/>
             <div class="min-h-0 min-w-0 flex-1"><servers::ServerHome ui=ui/></div>

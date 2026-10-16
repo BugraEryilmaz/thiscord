@@ -1,5 +1,10 @@
 # Thiscord
 
+The home screen includes friends, online presence, friend requests, private text
+conversations and one-to-one desktop voice calls. Use **Add friend** in the top
+right to search usernames. See [friends and private conversations](docs/friends.md)
+for behavior, access rules and current limitations.
+
 A browser dashboard at `/admin` provides instance-owner/admin-only CPU/RAM,
 backend health, active voice rooms and per-participant network diagnostics.
 Click a participant to adjust their connected desktop's audio settings using the

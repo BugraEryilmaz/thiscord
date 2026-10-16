@@ -4,6 +4,16 @@ Foundation and account-management code are implemented; provider/platform accept
 checks are tracked below. Work roughly in order; the early
 media compatibility spike can happen before chat to expose platform constraints.
 
+## Friends and private conversations
+
+- [x] Friends homepage with online/all/request filters and top-right username search.
+- [x] Mutual friend requests, accept/decline/cancel/remove, and account-wide online presence.
+- [x] Persistent private messages with authorized history, keyset paging and idempotent retries.
+- [x] Private voice invitations, acceptance, decline/hang-up, native audio reuse and media revocation.
+- [x] PostgreSQL/socket and loopback WebRTC tests for private access and lifecycle.
+- [ ] Validate physical private calls and incoming-call controls on Windows/macOS/Linux.
+- [ ] DM unread badges, typing, edit/delete, blocking/reporting, ring sounds and push notifications.
+
 ## 0. Foundation
 
 - [x] Remote audio settings and diagnostic JSON downloads for connected desktop participants, with instance authorization and stale-edit checks.

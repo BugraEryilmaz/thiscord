@@ -104,6 +104,21 @@ pub(super) fn open_voice(ui: Ui) {
     let Some(location) = ui.voice_location.get_untracked() else {
         return;
     };
+    if location.guild_id.as_uuid() == location.channel_id.as_uuid() {
+        if let Some(call) = ui
+            .friends
+            .snapshot
+            .get_untracked()
+            .calls
+            .into_iter()
+            .find(|c| c.voice_channel() == location.channel_id)
+        {
+            ui.friends.selected.set(Some(call.conversation_id));
+            ui.server.set(None);
+            ui.page.set("servers");
+        }
+        return;
+    }
     leptos::task::spawn_local(async move {
         if let Err(error) = select(ui, location.guild_id).await {
             ui.status.set(error);
@@ -244,7 +259,7 @@ pub(super) fn ServerRail(ui: Ui) -> impl IntoView {
     };
     view! {
         <aside class="server-rail" aria-label="Servers">
-            <button class="mb-4 h-12 w-12 shrink-0 rounded-2xl bg-brand text-xl font-bold" data-tip="Thiscord home" aria-label="Thiscord home" on:click=move |_|{ui.voice_roster.set(vec![]);ui.server.set(None);ui.page.set("servers");}>"T"</button>
+            <button class="mb-4 h-12 w-12 shrink-0 rounded-2xl bg-brand text-xl font-bold" data-tip="Thiscord home" aria-label="Thiscord home" on:click=move |_|{ui.voice_roster.set(vec![]);ui.friends.selected.set(None);ui.server.set(None);ui.page.set("servers");}>"T"</button>
             <nav class="flex min-h-0 w-full flex-1 flex-col items-center gap-3 overflow-y-auto py-2" aria-label="Joined servers">
                 {move ||ui.guilds.get().into_iter().map(move |guild|view!{<GuildButton ui=ui guild= guild/>}).collect_view()}
             </nav>
@@ -363,7 +378,7 @@ pub(super) fn ServerHome(ui: Ui) -> impl IntoView {
     });
     view! {
         <Show when=move ||ui.server.get().is_some() fallback=move ||view!{
-            <section class="flex h-full min-h-0 flex-col items-center justify-center gap-4 text-center"><h2 class="text-3xl font-bold">"Welcome to Thiscord"</h2><p class="max-w-md text-white/60">"Choose a server on the left, or join one with its server ID."</p><Show when=move ||ui.can_create_server.get()><p class="text-white/60">"Use + to create your own server."</p></Show></section>
+            <super::friends::Home ui=ui/>
         }>
             {move ||ui.server.get().map(|home|view!{
                 <section class="server-layout">
