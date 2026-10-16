@@ -79,6 +79,42 @@ diesel::table! {
 }
 
 diesel::table! {
+    direct_messages (id) {
+        id -> Uuid,
+        conversation_id -> Uuid,
+        author_id -> Uuid,
+        client_id -> Uuid,
+        content -> Text,
+        created_at -> Timestamptz,
+    }
+}
+
+diesel::table! {
+    friend_calls (id) {
+        id -> Uuid,
+        conversation_id -> Uuid,
+        caller -> Uuid,
+        callee -> Uuid,
+        state -> Text,
+        expires_at -> Timestamptz,
+        caller_until -> Timestamptz,
+        callee_until -> Timestamptz,
+    }
+}
+
+diesel::table! {
+    friendships (id) {
+        id -> Uuid,
+        low_id -> Uuid,
+        high_id -> Uuid,
+        requester -> Uuid,
+        state -> Text,
+        created_at -> Timestamptz,
+        last_message_at -> Timestamptz,
+    }
+}
+
+diesel::table! {
     guild_member_roles (guild_id, account_id, role_id) {
         guild_id -> Uuid,
         account_id -> Uuid,
@@ -227,6 +263,9 @@ diesel::table! {
 diesel::joinable!(account_avatars -> accounts (account_id));
 diesel::joinable!(account_codes -> accounts (account_id));
 diesel::joinable!(channels -> guilds (guild_id));
+diesel::joinable!(direct_messages -> accounts (author_id));
+diesel::joinable!(direct_messages -> friendships (conversation_id));
+diesel::joinable!(friend_calls -> friendships (conversation_id));
 diesel::joinable!(guild_members -> accounts (account_id));
 diesel::joinable!(guild_moderation -> accounts (account_id));
 diesel::joinable!(guild_moderation -> guilds (guild_id));
@@ -252,6 +291,9 @@ diesel::allow_tables_to_appear_in_same_query!(
     channel_reads,
     channels,
     chat_presence,
+    direct_messages,
+    friend_calls,
+    friendships,
     guild_member_roles,
     guild_members,
     guild_moderation,

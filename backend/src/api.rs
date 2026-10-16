@@ -43,6 +43,7 @@ fn routes(
         .route(HEALTH_PATH, get(health))
         .route(READY_PATH, get(ready))
         .merge(crate::chat::router(origins.clone()))
+        .merge(crate::friends::router(origins.clone()))
         .merge(voice)
         .merge(crate::auth::router())
         .merge(crate::permissions::router())

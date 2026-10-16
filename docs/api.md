@@ -95,6 +95,10 @@ and media enforcement still needed when those handlers are added.
 
 ## Chat
 
+Friends and private conversations use `POST /api/v1/friends` and
+`/api/v1/friends/socket`, with contracts in `shared/src/friends.rs`.
+See [friends.md](friends.md) for consent, presence, history and private voice access.
+
 `POST /api/v1/chat` and `/api/v1/socket` use shared contracts in `shared/src/chat.rs`.
 See [chat.md](chat.md) for authentication, socket versioning, history, deduplication
 and reconnect behavior. History uses a reverse keyset `before` cursor to load older

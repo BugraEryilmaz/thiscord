@@ -19,11 +19,26 @@ pub(super) fn join(
     guild: thiscord_shared::permissions::Guild,
     channel: thiscord_shared::permissions::Channel,
 ) {
+    super::friends::end_call(ui);
+    join_location(
+        ui,
+        VoiceLocation {
+            guild_id: guild.id,
+            channel_id: channel.id,
+            channel_name: channel.name,
+            guild_name: guild.name,
+        },
+    );
+}
+
+pub(super) fn join_location(ui: Ui, location: VoiceLocation) {
     if !desktop() && !ui.audio_control.is_remote() {
         ui.status.set("Open the desktop app to join voice".into());
         return;
     }
-    if ui.voice_joining.get_untracked() || ui.voice.get_untracked().channel_id == Some(channel.id) {
+    if ui.voice_joining.get_untracked()
+        || ui.voice.get_untracked().channel_id == Some(location.channel_id)
+    {
         return;
     }
     let Some(token) = ui.token.get_untracked() else {
@@ -32,19 +47,14 @@ pub(super) fn join(
     ui.voice_joining.set(true);
     let settings = ui.audio.get_untracked();
     leptos::task::spawn_local(async move {
-        let result = ui.audio_control.invoke::<()>("voice_join", json!({"token":token,"guildId":guild.id,"channelId":channel.id,"settings":settings})).await;
+        let result = ui.audio_control.invoke::<()>("voice_join", json!({"token":token,"guildId":location.guild_id,"channelId":location.channel_id,"settings":settings})).await;
         ui.voice_joining.set(false);
         if ui.token.get_untracked().as_deref() != Some(&token) {
             return;
         }
         match result {
             Ok(()) => {
-                ui.voice_location.set(Some(VoiceLocation {
-                    guild_id: guild.id,
-                    channel_id: channel.id,
-                    channel_name: channel.name,
-                    guild_name: guild.name,
-                }));
+                ui.voice_location.set(Some(location));
                 if let Ok(status) = ui
                     .audio_control
                     .invoke::<VoiceStatus>("voice_status", json!({}))
@@ -127,6 +137,7 @@ fn pressed(pressed: bool) {
     });
 }
 pub(super) fn leave(ui: Ui) {
+    super::friends::end_call(ui);
     leptos::task::spawn_local(async move {
         if let Err(error) = ui
             .audio_control

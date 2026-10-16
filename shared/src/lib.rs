@@ -6,6 +6,7 @@ use serde::{Deserialize, Serialize};
 pub mod account;
 pub mod chat;
 pub mod error;
+pub mod friends;
 pub mod ids;
 pub mod overlay;
 pub mod pagination;
