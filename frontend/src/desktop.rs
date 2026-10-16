@@ -2,6 +2,7 @@
 
 mod native_account;
 mod native_audio;
+mod native_camera;
 mod native_notifications;
 mod native_overlay;
 mod native_remote_audio;
@@ -70,6 +71,7 @@ fn main() {
         .manage(native_audio::AudioState::default())
         .manage(native_voice::VoiceState::default())
         .manage(native_screen::ScreenState::default())
+        .manage(native_camera::CameraState::default())
         .on_window_event(|window, event| {
             use tauri::Manager;
             if window.label() != "main" {
@@ -97,6 +99,7 @@ fn main() {
                         serde_json::json!({}),
                     );
                     window.state::<native_screen::ScreenState>().clear();
+                    window.state::<native_camera::CameraState>().clear();
                     engine.notify(thiscord_frontend::audio::Command::Stop);
                     // Auxiliary windows must not keep a normally closed app alive.
                     window.app_handle().exit(0);
@@ -144,6 +147,9 @@ fn main() {
             native_audio::audio_volume,
             native_audio::audio_pressed,
             native_audio::audio_webrtc_probe,
+            native_camera::camera_open,
+            native_camera::camera_keepalive,
+            native_camera::camera_stop,
             native_screen::screen_status,
             native_screen::screen_view_diagnostics,
             native_screen::screen_view_keyframe,

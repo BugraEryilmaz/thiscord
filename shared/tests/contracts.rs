@@ -372,7 +372,11 @@ fn screen_feedback_capabilities_are_opt_in_and_legacy_answers_stay_compatible() 
             ..
         }
     ));
-    let event = ClientEvent::ScreenKeyframe { slot: 2, epoch: 3 };
+    let event = ClientEvent::ScreenKeyframe {
+        kind: thiscord_shared::voice::MediaKind::ScreenVideo,
+        slot: 2,
+        epoch: 3,
+    };
     assert_eq!(
         serde_json::to_value(event).unwrap(),
         serde_json::json!({"type":"screen_keyframe","slot":2,"epoch":3})
@@ -383,6 +387,7 @@ fn screen_feedback_capabilities_are_opt_in_and_legacy_answers_stay_compatible() 
 fn screen_view_subscriptions_and_pause_targets_keep_stable_wire_shapes() {
     use thiscord_shared::{screen::Subscription, voice::*};
     let view = Subscription {
+        kind: MediaKind::ScreenVideo,
         slot: 2,
         owner: ID.parse().unwrap(),
         epoch: 3,
@@ -399,6 +404,7 @@ fn screen_view_subscriptions_and_pause_targets_keep_stable_wire_shapes() {
     let pause = json!({"type":"screen_target","epoch":3,"bitrate":0});
     assert_eq!(
         to_value(ServerEvent::ScreenTarget {
+            kind: MediaKind::ScreenVideo,
             epoch: 3,
             bitrate: 0
         })
@@ -414,5 +420,38 @@ fn screen_view_subscriptions_and_pause_targets_keep_stable_wire_shapes() {
     assert!(view.valid());
     for bitrate in [0, 199_999, 32_000_001, u32::MAX] {
         assert!(!Subscription { bitrate, ..view }.valid());
+    }
+}
+
+#[test]
+fn camera_contract_is_independent_and_legacy_rosters_default_off() {
+    use thiscord_shared::{screen::Subscription, voice::*};
+    let old:Participant=from_value(json!({"account_id":ID,"username":"a","slot":0,"muted":false,"deafened":false,"can_speak":true})).unwrap();
+    assert!(!old.camera_active);
+    assert_eq!(old.camera_epoch, 0);
+    let camera = Subscription {
+        kind: MediaKind::Camera,
+        slot: 0,
+        owner: ID.parse().unwrap(),
+        epoch: 9,
+        bitrate: 1_500_000,
+    };
+    assert!(camera.valid());
+    assert_eq!(to_value(camera).unwrap()["kind"], "camera");
+    let keyframe = ClientEvent::ScreenKeyframe {
+        kind: MediaKind::Camera,
+        slot: 0,
+        epoch: 9,
+    };
+    assert_eq!(
+        to_value(keyframe).unwrap(),
+        json!({"type":"screen_keyframe","kind":"camera","slot":0,"epoch":9})
+    );
+    assert_eq!(
+        to_value(ClientEvent::Camera { active: true }).unwrap(),
+        json!({"type":"camera","active":true})
+    );
+    for kind in [MediaKind::Microphone, MediaKind::SystemAudio] {
+        assert!(!Subscription { kind, ..camera }.valid());
     }
 }

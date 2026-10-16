@@ -65,6 +65,7 @@ async fn direct_calls_require_acceptance_and_revoke_both_media_peers() {
         let mut bob = Peer::new(join(address, &b, id.clone(), id.clone()).await).await;
         forwarded(&mut alice, &mut bob).await;
         forwarded(&mut bob, &mut alice).await;
+        camera_grid(&mut alice, &mut bob).await;
         if remove {
             social(&app, &a, json!({"action":"remove","account_id":b_id})).await;
         } else {

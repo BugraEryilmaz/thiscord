@@ -123,6 +123,11 @@ pub const VIEW_LEASE_SECS: u64 = 3;
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Subscription {
+    #[serde(
+        default = "crate::voice::screen_kind",
+        skip_serializing_if = "crate::voice::is_screen_kind"
+    )]
+    pub kind: crate::voice::MediaKind,
     pub slot: usize,
     pub owner: crate::AccountId,
     pub epoch: u32,
@@ -130,7 +135,8 @@ pub struct Subscription {
 }
 impl Subscription {
     pub fn valid(self) -> bool {
-        self.slot < crate::voice::ROOM_CAPACITY
+        self.kind.is_video()
+            && self.slot < crate::voice::ROOM_CAPACITY
             && (MIN_VIEW_BITRATE..=MAX_VIEW_BITRATE).contains(&self.bitrate)
     }
 }
@@ -214,6 +220,11 @@ mod tests {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Watch {
+    #[serde(
+        default = "crate::voice::screen_kind",
+        skip_serializing_if = "crate::voice::is_screen_kind"
+    )]
+    pub kind: crate::voice::MediaKind,
     pub slot: usize,
     pub owner: crate::AccountId,
     pub epoch: u32,

@@ -4,6 +4,7 @@
 use serde::{Deserialize, Serialize};
 
 pub mod account;
+pub mod camera;
 pub mod chat;
 pub mod error;
 pub mod friends;

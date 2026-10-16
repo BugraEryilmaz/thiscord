@@ -4,31 +4,31 @@ Join a voice channel in the Windows desktop app, then choose **Share screen**
 in the persistent voice bar. The source picker separates Screens and Windows;
 select a source, resolution/frame rate and whether to include system audio, then
 choose **Go live**. Selecting a source alone never starts capture.
-Click a sharing participant or their **LIVE** badge in the sidebar to open their
-stream directly in the channel canvas. This joins their voice channel if needed,
-using the current microphone settings. A deafened viewer must explicitly undeafen.
-Live share buttons switch between publishers; **Close stream** stops watching and
-unsubscribes video and shared audio. A restarted share requires a new selection.
-**Stop sharing** remains available in the voice bar while reading text or settings.
-The voice canvas contains streams; participants and speaking highlights stay in
-the sidebar, per-person volume lives in the right-click menu, and call controls
-stay in the persistent voice bar. Your own share shows its live status, not a local
-video preview.
+Voice rooms and private calls show a grid of all active webcams and screen shares.
+Click a participant's name or LIVE badge to open the room's grid; this joins that
+voice channel if needed, using the current microphone settings. A participant
+may publish a camera and a screen simultaneously. Your camera and screen have
+local previews; the screen preview uses the same encoded frames without an SFU
+round trip. Self-preview alone does not upload screen video.
+
+Click any tile to enter fullscreen; Escape or its fullscreen button restores the
+grid. WebViews without DOM fullscreen use an expanded app view. Players remain
+mounted while expanding. Right-click a tile for **Hide this item**; **Show hidden
+items** restores it. Hiding a received screen unsubscribes its video and shared
+audio. Hidden state lasts while this grid is mounted and is scoped to the stream
+generation. Hiding your own tile does not stop publishing. All other tiles
+continue playing. Keyboard users can focus a tile and press Enter to expand.
 
 System audio captures all other applications, even for a single-window share.
-It excludes Thiscord's process tree, so received voice and shared audio are not
-sent back into the call. Microphone mute and push-to-talk affect the microphone
-only. Stop sharing stops both screen and shared audio. Deafen also stops local
-sharing and blocks received media. Each received screen share has its own 0-200%
-volume and mute/unmute controls beside the video, independent of the sharer's voice
-volume. Both levels persist locally per guild/account. Existing voice preferences
-are preserved; shared audio defaults to 100%. System audio is currently downmixed
-to mono.
+It excludes Thiscord's process tree. Microphone mute/PTT affects only the
+microphone. Stop sharing stops screen and shared audio. Deafen also stops local
+screen/camera publication and received media. Use a participant's right-click
+menu (sidebar or grid) for separate voice and **Stream audio** volume/mute.
+Both levels persist locally per guild/account; shared audio defaults to 100%
+and is currently downmixed to mono. **Stop sharing** remains in the voice bar
+while reading text or settings.
 
-**Expand stream** expands the received video within the app window while keeping its
-audio controls available. **Exit expanded view** or Escape restores the inline view.
-The existing player continues running through the layout change; this does not
-enter operating-system fullscreen.
+See [cameras](cameras.md) for camera permissions, limits and testing without hardware.
 
 Windows system audio requires build 20348 or newer, normally Windows 11.
 Unsupported or unavailable loopback capture stops the share with an error;
@@ -243,7 +243,7 @@ write releases both and revalidates before resuming; a slow receiver cannot hold
 up room updates or subsequent media readers. This relies on the pinned WebRTC
 `write_rtp` implementation enqueuing atomically on its final poll.
 
-Each microphone, video and shared-audio writer keeps its independent bounded
+Each microphone, screen video, camera video and shared-audio writer keeps its independent bounded
 queue. Queue admission checks the current viewer lease and share epoch before
 reserving bytes; intentional filtering does not count as congestion or request
 recovery. The same viewer and epoch checks run under the room lock on every
@@ -277,7 +277,7 @@ slots whose epoch no longer matches their roster. Clients only send the new scre
 ## Compatibility and acceptance
 
 This delivery prioritizes Windows publishing, as requested. macOS/Linux desktop
-builds retain the receiving/video-player path; their publishing controls are disabled.
+builds retain the receiving/video-player path; their screen publishing controls are disabled. Camera capture instead uses the WebView on all three platforms, subject to its H.264/WebRTC support; hardware acceptance remains required.
 Their native screen/audio permission and capture implementations remain follow-up
 work. The existing Rust WebRTC implementation is retained. No new SFU or WebView
 capture library is selected in place of the native transport.

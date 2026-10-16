@@ -30,8 +30,8 @@ Everyone can upload or remove a profile picture in **Settings > Profile**. Pictu
 appear in voice chat and the desktop overlay, with initials when no picture is set.
 The bottom account ribbon spans the server rail and channel list, showing your
 profile, authenticated socket status, mute/deafen and settings controls. It expands
-during calls with the channel/server name, screen sharing and disconnect controls.
-Camera is labeled unavailable. Sidebar controls show immediate hover/focus hints
+during calls with the channel/server name, camera, screen sharing and disconnect controls.
+Sidebar controls show immediate hover/focus hints
 outside the scroll area. Visible voice channels show participants before joining;
 clicking a voice channel joins directly while keeping the current text chat open.
 Hover **Voice connected** for brief latency, health and drop diagnostics; click
@@ -83,17 +83,14 @@ persists on this computer; disabling logging keeps existing files. Logs contain
 technical events, not voice recordings or credentials, and are never auto-uploaded.
 Voice failures include safe transport error categories, audio processing stages and
 request IDs for correlation with backend logs; see [disconnect diagnostics](docs/audio.md#native-voice-connection-diagnostics).
-Windows desktop clients can share a screen or window with system audio from the
-voice bar, with selectable quality up to 4K/60 fps (hardware/network dependent).
-Capture uses continuous FP16 Windows Graphics Capture with GPU scaling, HDR-to-SDR
-tone mapping, NV12 conversion and H.264 surface encoding. Windows publishing
-requires a compatible D3D11 hardware encoder. Received video uses the WebView's
-WebRTC video player with in-app fullscreen and separate screen share volume/mute
-controls. Click a sharing participant or their **LIVE** badge in the sidebar to
-watch directly; the channel canvas stays focused on streams. The source picker
-separates screens/windows with quality and system-audio options. Video adapts to active viewers and
-pauses when nobody watches. Sender/playback diagnostics report measured rates and drops.
-See [screen sharing, requirements and acceptance checks](docs/screen-sharing.md).
+Desktop calls and voice rooms show simultaneous webcams and screen shares in a
+grid, with local previews, click-to-fullscreen and right-click hide/restore.
+The camera button uses the system default webcam (up to 720p/30); right-click a
+participant for separate voice and screen-audio volume/mute controls. Camera
+publishing requires WebView H.264/WebRTC and device permissions. Windows screen
+sharing retains its explicit source/quality picker, D3D11 hardware encoder and
+system audio capture. See [cameras and hardware-free tests](docs/cameras.md) and
+[screen sharing requirements](docs/screen-sharing.md) for limits and platform checks.
 For echo troubleshooting, Voice & audio can save a 60-second local debug recording
 of playback, raw microphone and outgoing audio, with metadata for offline DSP replay.
 Voice activation uses sustained energy before automatic gain, hysteresis and a

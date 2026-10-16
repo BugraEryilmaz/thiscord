@@ -48,7 +48,8 @@ struct Handler {
     connection: Connection,
     closed: watch::Receiver<bool>,
     screen: crate::native_screen::ScreenState,
-    keyframes: mpsc::Sender<(usize, u32)>,
+    camera: crate::native_screen::ScreenState,
+    keyframes: mpsc::Sender<(MediaKind, usize, u32)>,
 }
 
 fn terminal_peer_state(state: RTCPeerConnectionState) -> bool {
@@ -80,8 +81,15 @@ impl PeerConnectionEventHandler for Handler {
     async fn on_track(&self, track: Arc<dyn TrackRemote>) {
         let ssrc = track.ssrcs().await.first().copied().unwrap_or(0);
         let screen_receiver = MediaKind::from_relay_ssrc(ssrc)
-            .filter(|(kind, _)| *kind == MediaKind::ScreenVideo)
-            .map(|(_, slot)| self.screen.receiver(self.connection.clone(), slot));
+            .filter(|(kind, _)| kind.is_video())
+            .map(|(kind, slot)| {
+                if kind == MediaKind::Camera {
+                    &self.camera
+                } else {
+                    &self.screen
+                }
+                .receiver(self.connection.clone(), slot)
+            });
         let keyframes = self.keyframes.clone();
         let engine = self.engine.clone();
         let connection = self.connection.clone();
@@ -98,7 +106,7 @@ impl PeerConnectionEventHandler for Handler {
                     _ = tick.tick(), if screen_receiver.is_some() => {
                         let receiver = screen_receiver.as_ref().unwrap();
                         receiver.tick(Instant::now());
-                        if let Some(epoch) = receiver.keyframe_request(Instant::now()) && let Some((_, slot)) = MediaKind::from_relay_ssrc(ssrc) { let _ = keyframes.try_send((slot, epoch)); }
+                        if let Some(epoch) = receiver.keyframe_request(Instant::now()) && let Some((kind, slot)) = MediaKind::from_relay_ssrc(ssrc) { let _ = keyframes.try_send((kind, slot, epoch)); }
                         continue;
                     },
                     event = track.poll() => match event { Some(event) => event, None => break },
@@ -138,6 +146,7 @@ pub async fn voice_leave(
 }
 async fn stop_job(app: &tauri::AppHandle, state: &VoiceState, job: &mut Option<Job>) {
     app.state::<crate::native_screen::ScreenState>().clear();
+    app.state::<crate::native_camera::CameraState>().clear();
     if let Some(Job { stop, mut task, .. }) = job.take() {
         let _ = stop.send(());
         if tokio::time::timeout(Duration::from_secs(3), &mut task)
@@ -351,6 +360,9 @@ impl Runtime {
             .event("voice_transport_closing", serde_json::json!({}));
         self.app
             .state::<crate::native_screen::ScreenState>()
+            .clear();
+        self.app
+            .state::<crate::native_camera::CameraState>()
             .clear();
         self.attempt.connection.close();
         self.attempt.closed.send_replace(true);
@@ -593,6 +605,7 @@ async fn run(
         can_speak,
         ice_servers,
         screen_video,
+        camera_video,
         screen_feedback,
         screen_subscriptions,
         resume_token,
@@ -604,6 +617,7 @@ async fn run(
             can_speak,
             ice_servers,
             screen_video,
+            camera_video,
             screen_feedback,
             screen_subscriptions,
             resume_token,
@@ -614,6 +628,7 @@ async fn run(
             can_speak,
             ice_servers,
             screen_video,
+            camera_video,
             screen_feedback,
             screen_subscriptions,
             resume_token,
@@ -675,6 +690,10 @@ async fn run(
                 connection: attempt.connection.clone(),
                 closed: attempt.closed.subscribe(),
                 keyframes: keyframe_tx,
+                camera: app
+                    .state::<crate::native_camera::CameraState>()
+                    .views
+                    .clone(),
                 screen: app
                     .state::<crate::native_screen::ScreenState>()
                     .inner()
@@ -719,6 +738,12 @@ async fn run(
     pc.add_track(track.clone() as Arc<dyn TrackLocal>)
         .await
         .map_err(|_| "Cannot add microphone track")?;
+    let camera_track = thiscord_frontend::screen::track(MediaKind::Camera.publisher_ssrc());
+    if camera_video {
+        pc.add_track(camera_track.clone() as Arc<dyn TrackLocal>)
+            .await
+            .map_err(|_| "Cannot add camera track")?;
+    }
     let screen_track = thiscord_frontend::screen::track(MediaKind::ScreenVideo.publisher_ssrc());
     let system_track =
         thiscord_frontend::audio::transport::track(MediaKind::SystemAudio.publisher_ssrc());
@@ -776,6 +801,7 @@ async fn run(
     let mut ticker = tokio::time::interval(Duration::from_millis(500));
     let start = Instant::now();
     let mut screen_state = Some((false, false));
+    let mut camera_state = Some(false);
     let mut rtp_clock = thiscord_frontend::audio::outgoing::RtpClock::default();
     let mut accepted_packets = 0_u64;
     let mut accepted_bytes = 0_u64;
@@ -802,9 +828,9 @@ async fn run(
                     if chunks.is_empty() { remote_reply = None; }
                 }
             },
-            Some((slot, epoch))=keyframe_rx.recv()=>{
-                if screen_feedback && app.state::<crate::native_screen::ScreenState>().watching(slot, epoch) && roster.iter().any(|m| m.slot == slot && m.screen_epoch == epoch && m.sharing_screen) {
-                    signaling.send(ClientEvent::ScreenKeyframe { slot, epoch });
+            Some((kind, slot, epoch))=keyframe_rx.recv()=>{
+                if screen_feedback && crate::native_screen::video_state(app, kind).watching(slot, epoch) && roster.iter().any(|m| m.slot == slot && m.video_epoch(kind) == epoch && m.video_active(kind)) {
+                    signaling.send(ClientEvent::ScreenKeyframe { kind, slot, epoch });
                 }
             },
             message=signaling.events.recv()=>{
@@ -818,6 +844,7 @@ async fn run(
                 match message.event{
                     ServerEvent::Resumed {} => {
                         screen_state = None;
+                        camera_state = None;
                         // An interrupted chunked admin reply cannot be replayed
                         // safely. The server rejects that request on reattachment.
                         remote_jobs.abort_all();
@@ -836,18 +863,20 @@ async fn run(
                             });
                         }
                     },
-                    ServerEvent::ScreenTarget { epoch, bitrate } => {
-                        if status.lock().ok().is_some_and(|s| s.participants.iter().any(|m| m.slot == own_slot && m.screen_epoch == epoch && m.sharing_screen)) {
-                            app.state::<crate::native_screen::ScreenState>().target(bitrate);
+                    ServerEvent::ScreenTarget { kind, epoch, bitrate } => {
+                        if status.lock().ok().is_some_and(|s| s.participants.iter().any(|m| m.slot == own_slot && m.video_epoch(kind) == epoch && m.video_active(kind))) {
+                            if kind == MediaKind::Camera { app.state::<crate::native_camera::CameraState>().target(bitrate); } else { app.state::<crate::native_screen::ScreenState>().target(bitrate); }
                         }
                     },
                     ServerEvent::MediaDiagnostics{counters}=>{ app.state::<crate::native_screen::ScreenState>().server_diagnostics(counters); },
-                    ServerEvent::ScreenKeyframe{epoch}=>{
+                    ServerEvent::ScreenKeyframe{kind, epoch}=>{
+                        if kind == MediaKind::Camera { app.state::<crate::native_camera::CameraState>().keyframe(); continue; }
                         if status.lock().ok().is_some_and(|s| s.participants.iter().any(|m| m.slot == own_slot && m.screen_epoch == epoch && m.sharing_screen)) { force_keyframe.store(true, Ordering::Release); }
                     },
                     ServerEvent::Participants{members}=>{
                         if members.len()>ROOM_CAPACITY||members.iter().any(|m|m.slot>=ROOM_CAPACITY){return Err("Invalid participant list".into());}
                         app.state::<crate::native_screen::ScreenState>().roster(if settings.lock().map_err(|_|"Settings unavailable")?.deafened { &[] } else { &members });
+                        app.state::<crate::native_camera::CameraState>().views.roster(if settings.lock().map_err(|_|"Settings unavailable")?.deafened { &[] } else { &members });
                         roster = members.iter().filter(|m|m.slot!=own_slot).cloned().collect();
                         engine.notify(Command::Roster{connection:attempt.connection.clone(),members:roster.clone()});
                         if let Ok(mut s)=status.lock(){s.participants=members;s.own_slot=Some(own_slot);}
@@ -898,11 +927,17 @@ async fn run(
                         audio_started=true;attempt.connected_at=Some(Instant::now());attempt.stage="active";
                         attempt.connection.event("voice_media_connected",serde_json::json!({}));
                         if screen_video { app.state::<crate::native_screen::ScreenState>().bind(crate::native_screen::Binding {
+                            own_slot, local_epoch: Default::default(), local_visible: Default::default(),
                             connection: attempt.connection.clone(), video: screen_track.clone(), audio: system_track.clone(), can_publish: can_speak,
                             subscriptions: screen_subscriptions,
-                            demand: Default::default(),
+                            demand: Default::default(), network_demand: Default::default(),
                             force_keyframe: force_keyframe.clone(), metrics: Default::default(),
                             video_sequence: Default::default(), audio_sequence: Default::default(), audio_timestamp: Default::default(), started: Instant::now(),
+                        }); }
+                        if camera_video { app.state::<crate::native_camera::CameraState>().bind(crate::native_screen::Binding {
+                            own_slot, local_epoch: Default::default(), local_visible: Default::default(),
+                            connection: attempt.connection.clone(), video: camera_track.clone(), audio: system_track.clone(), can_publish: can_speak, subscriptions: screen_subscriptions,
+                            demand: Default::default(), network_demand: Default::default(), force_keyframe: Default::default(), metrics: Default::default(), video_sequence: Default::default(), audio_sequence: Default::default(), audio_timestamp: Default::default(), started: Instant::now(),
                         }); }
                         engine.notify(Command::Roster{connection:attempt.connection.clone(),members:roster.clone()});
                         if let Ok(mut s)=status.lock(){s.connected=true;s.message="Connected".into();}
@@ -924,6 +959,12 @@ async fn run(
                     }
                 }
                 if configuration.deafened { crate::native_screen::screen_stop(app.state::<crate::native_screen::ScreenState>()); }
+                let camera = app.state::<crate::native_camera::CameraState>();
+                if configuration.deafened { camera.stop(None); }
+                if camera_video {
+                    let active = camera.active();
+                    if camera_state != Some(active) { signaling.send(ClientEvent::Camera { active }); camera_state = Some(active); }
+                }
                 let current_screen = app.state::<crate::native_screen::ScreenState>().sharing();
                 if Some(current_screen) != screen_state {
                     signaling.send(ClientEvent::Screen { active: current_screen.0, audio: current_screen.1 });
@@ -931,7 +972,8 @@ async fn run(
                 }
                 signaling.send(ClientEvent::State{muted:configuration.muted,deafened:configuration.deafened});
                 if screen_subscriptions {
-                    let views = if configuration.deafened { vec![] } else { app.state::<crate::native_screen::ScreenState>().subscriptions() };
+                    let mut views = if configuration.deafened { vec![] } else { app.state::<crate::native_screen::ScreenState>().subscriptions() };
+                    if !configuration.deafened { views.extend(camera.views.subscriptions()); }
                     signaling.send(ClientEvent::ScreenViews { views });
                 }
             }

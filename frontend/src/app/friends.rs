@@ -516,6 +516,9 @@ fn Conversation(ui: Ui, id: ConversationId) -> impl IntoView {
         <For each=move ||{ui.friends.snapshot.get().calls.into_iter().filter(|c|c.conversation_id==id && c.state==CallState::Ringing && ui.account.get().is_some_and(|a|a.id==c.callee)).collect::<Vec<_>>()} key=|c|c.id children=move |call|view!{
             <div class="flex items-center gap-3 border-b border-white/10 px-6 py-3" aria-label="Incoming call controls"><span class="flex-1">"Incoming voice call"</span><button class="rounded bg-emerald-600 px-4 py-2 disabled:opacity-50" disabled=move ||!available(ui)||ui.voice_joining.get() on:click=move |_|action(ui,Request::AcceptCall {call_id:call.id})>"Accept"</button><button class="rounded bg-red-500/20 px-4 py-2" on:click=move |_|action(ui,Request::EndCall {call_id:call.id})>"Decline"</button></div>
         }/>
+        <For each=move ||{ui.friends.snapshot.get().calls.into_iter().filter(|c|c.conversation_id==id && ui.voice.get().connected && ui.voice.get().channel_id==Some(c.voice_channel())).collect::<Vec<_>>()} key=|c|c.id children=move |call|view!{
+            <div class="private-call-media"><super::screen::ScreenViewer ui=ui guild=call.voice_scope() channel=call.voice_channel()/></div>
+        }/>
         <div node_ref=list class="min-h-0 flex-1 overflow-y-auto px-6 py-4" on:scroll=move |_|if let Some(node)=list.get(){bottom.set(node.scroll_height()-node.scroll_top()-node.client_height()<80);}>
             <Show when=move ||older.get().is_some()><button class="mb-4 text-sm text-brand disabled:opacity-50" disabled=move ||loading.get() on:click=move |_| {
                 let before=older.get_untracked();if loading.get_untracked(){return;}loading.set(true);
