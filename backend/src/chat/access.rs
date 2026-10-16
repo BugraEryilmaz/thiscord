@@ -19,6 +19,8 @@ enum Key {
     Session(SessionId),
     Member(GuildId, AccountId),
     InstanceRole(AccountId),
+    Notifications(AccountId),
+    NotificationCalls(AccountId),
 }
 
 fn scope(key: Key) -> Arc<Access> {
@@ -43,6 +45,12 @@ fn scope(key: Key) -> Arc<Access> {
 }
 pub(crate) fn account(id: AccountId) -> Arc<Access> {
     scope(Key::Account(id))
+}
+pub(crate) fn notification_preferences(id: AccountId) -> Arc<Access> {
+    scope(Key::Notifications(id))
+}
+pub(crate) fn notification_calls(id: AccountId) -> Arc<Access> {
+    scope(Key::NotificationCalls(id))
 }
 // Instance privilege affects diagnostics, never guild/chat access.
 pub(crate) fn instance_role(id: AccountId) -> Arc<Access> {

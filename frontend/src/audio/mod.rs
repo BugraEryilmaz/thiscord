@@ -191,6 +191,10 @@ where
 }
 
 pub enum Command {
+    Notification {
+        kind: thiscord_shared::notifications::Kind,
+        volume: u8,
+    },
     DebugStart(std::path::PathBuf),
     DebugStop,
     VoiceStart {
@@ -688,6 +692,14 @@ impl Devices {
             old.control.cues.swap(0, Ordering::AcqRel),
             Ordering::Release,
         );
+        for (next, previous) in self
+            .control
+            .cue_volumes
+            .iter()
+            .zip(&old.control.cue_volumes)
+        {
+            next.store(previous.load(Ordering::Acquire), Ordering::Release);
+        }
         for (next, previous) in self.writers.iter().zip(&old.writers) {
             next.control.volume.store(
                 previous.control.volume.load(Ordering::Relaxed),
@@ -704,7 +716,6 @@ struct Session {
     device_watch: health::Watch,
     recovery: recovery::Recovery,
     volumes: Option<volumes::Profile>,
-    cues: cues::Roster,
     connection: Option<connection::Connection>,
     settings: AudioSettings,
     devices: Devices,
@@ -869,7 +880,6 @@ impl Session {
             device_watch: Default::default(),
             settings: settings.clone(),
             volumes: None,
-            cues: Default::default(),
             connection: None,
             devices,
             encoder,
@@ -1526,10 +1536,6 @@ fn run(
                                     .as_ref()
                                     .is_some_and(|c| c.accepts(&connection))
                             {
-                                let cue = s.cues.update(members.iter().map(|m| m.account_id));
-                                if !s.devices.control.deafen.load(Ordering::Relaxed) {
-                                    s.devices.control.cues.fetch_or(cue, Ordering::Relaxed);
-                                }
                                 for slot in 0..MAX_STREAMS {
                                     let shared_audio =
                                         slot >= thiscord_shared::voice::ROOM_CAPACITY;
@@ -1668,6 +1674,27 @@ fn run(
                                 .is_some_and(|c| c.accepts(&connection))
                             {
                                 lease = Instant::now();
+                            }
+                        }
+                        Command::Notification { kind, volume } => {
+                            if let Some(s) = &session {
+                                use thiscord_shared::notifications::Kind;
+                                let index = match kind {
+                                    Kind::VoiceJoin => 0,
+                                    Kind::VoiceLeave => 1,
+                                    Kind::DirectMessage => 2,
+                                    Kind::GuildMessage => 3,
+                                    Kind::IncomingCall => 4,
+                                    Kind::Update => 5,
+                                };
+                                s.devices.control.cue_volumes[index]
+                                    .store(volume.min(100), Ordering::Relaxed);
+                                if !s.devices.control.deafen.load(Ordering::Relaxed) {
+                                    s.devices
+                                        .control
+                                        .cues
+                                        .fetch_or(1 << index, Ordering::Relaxed);
+                                }
                             }
                         }
                         Command::Status | Command::Peek => {}

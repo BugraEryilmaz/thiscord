@@ -224,6 +224,21 @@ diesel::table! {
 }
 
 diesel::table! {
+    notification_preferences (account_id) {
+        account_id -> Uuid,
+        revision -> Int8,
+        settings -> Jsonb,
+    }
+}
+
+diesel::table! {
+    notification_release (singleton) {
+        singleton -> Bool,
+        version -> Text,
+    }
+}
+
+diesel::table! {
     oauth_attempts (state_hash) {
         state_hash -> Text,
         ticket_hash -> Text,
@@ -277,6 +292,7 @@ diesel::joinable!(instance_admins -> accounts (account_id));
 diesel::joinable!(mail_outbox -> accounts (account_id));
 diesel::joinable!(message_events -> messages (message_id));
 diesel::joinable!(messages -> accounts (author_id));
+diesel::joinable!(notification_preferences -> accounts (account_id));
 diesel::joinable!(oauth_attempts -> accounts (account_id));
 diesel::joinable!(oauth_attempts -> sessions (session_id));
 diesel::joinable!(session_tokens -> sessions (session_id));
@@ -305,6 +321,8 @@ diesel::allow_tables_to_appear_in_same_query!(
     mail_outbox,
     message_events,
     messages,
+    notification_preferences,
+    notification_release,
     oauth_attempts,
     session_tokens,
     sessions,

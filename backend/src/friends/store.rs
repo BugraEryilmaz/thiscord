@@ -73,6 +73,8 @@ pub(super) fn dispatch(pool: &DbPool, token: &str, request: Request) -> Result<R
     auth::rate_limit(pool, &format!("friends:{actor}"), None, write)?;
     let mut c = connection(pool)?;
     let mut guards = vec![];
+    let mut call_guards = vec![];
+    let mut notification = None;
     let result = c.transaction::<_,Failure,_>(|c| {
         // Pair mutations serialize both people's capacity/call-busy checks, in UUID order.
         let other = match &request {
@@ -125,8 +127,14 @@ pub(super) fn dispatch(pool: &DbPool, token: &str, request: Request) -> Result<R
                 Ok(Response::History {history:history(c,conversation_id,before,limit)?})
             }
             Request::Send {conversation_id,client_id,content} => {
-                pair(c,conversation_id,actor,true)?;
-                send(c,actor,conversation_id,client_id,content).map(|message|Response::Message {message})
+                let p = pair(c,conversation_id,actor,true)?;
+                let duplicate = !query::<bool>(c,"SELECT to_jsonb(TRUE) AS data FROM direct_messages WHERE author_id=$1::uuid AND client_id=$2::uuid", &[&actor.to_string(), &client_id.to_string()])?.is_empty();
+                let message = send(c,actor,conversation_id,client_id,content)?;
+                if !duplicate {
+                    let mut event = crate::notifications::Candidate::new(thiscord_shared::notifications::Target::Conversation { conversation_id }, thiscord_shared::notifications::Kind::DirectMessage, "New direct message".into(), Some(actor));
+                    event.id = message.id.to_string(); event.recipients = Some(vec![p.other(actor)?]); notification = Some(event);
+                }
+                Ok(Response::Message { message })
             }
             Request::StartCall {conversation_id} => {
                 let p=pair(c,conversation_id,actor,true)?;
@@ -135,6 +143,8 @@ pub(super) fn dispatch(pool: &DbPool, token: &str, request: Request) -> Result<R
                 if !query::<bool>(c,"SELECT to_jsonb(TRUE) AS data FROM friend_calls WHERE state IN ('ringing','active') AND expires_at>now() AND (caller IN ($1::uuid,$2::uuid) OR callee IN ($1::uuid,$2::uuid)) LIMIT 1", &[&actor.to_string(),&other.to_string()])?.is_empty() {return Err(Failure::Conflict);}
                 let id=CallId::from_uuid(Uuid::new_v4());
                 execute(c,"INSERT INTO friend_calls(id,conversation_id,caller,callee,state) VALUES($1::uuid,$2::uuid,$3::uuid,$4::uuid,'ringing')", &[&id.to_string(),&conversation_id.to_string(),&actor.to_string(),&other.to_string()])?;
+                call_guards.push(crate::chat::access::notification_calls(actor).pause());
+                call_guards.push(crate::chat::access::notification_calls(other).pause());
                 Ok(Response::Call {call:call(c,id,actor)?})
             }
             Request::AcceptCall {call_id} => {
@@ -142,17 +152,34 @@ pub(super) fn dispatch(pool: &DbPool, token: &str, request: Request) -> Result<R
                 pair(c,v.conversation_id,actor,true)?;
                 if v.callee!=actor {return Err(Failure::Forbidden);}
                 execute(c,"UPDATE friend_calls SET state='active',expires_at=now()+interval '60 seconds',caller_until=now()+interval '60 seconds',callee_until=now()+interval '60 seconds' WHERE id=$1::uuid AND state='ringing'", &[&call_id.to_string()])?;
+                call_guards.push(crate::chat::access::notification_calls(v.caller).pause());
+                call_guards.push(crate::chat::access::notification_calls(v.callee).pause());
                 Ok(Response::Call {call:call(c,call_id,actor)?})
             }
             Request::EndCall {call_id} => {
                 let v=call(c,call_id,actor)?;
                 execute(c,"UPDATE friend_calls SET state='ended' WHERE id=$1::uuid", &[&call_id.to_string()])?;
                 guards.push(access::pause(Scope::Guild(v.voice_scope())));
+                call_guards.push(crate::chat::access::notification_calls(v.caller).pause());
+                call_guards.push(crate::chat::access::notification_calls(v.callee).pause());
+                let mut event = crate::notifications::Candidate::new(thiscord_shared::notifications::Target::Conversation { conversation_id: v.conversation_id }, thiscord_shared::notifications::Kind::VoiceLeave, if v.state == CallState::Active { "Voice call ended" } else { "Call invitation ended" }.into(), Some(actor));
+                event.id = format!("call-ended:{call_id}");
+                event.recipients = Some(vec![if v.caller == actor { v.callee } else { v.caller }]);
+                notification = Some(event);
                 Ok(Response::Done)
             }
         }
     });
-    access::complete(result, &mut guards)
+    let result = access::complete(result, &mut guards);
+    for guard in call_guards {
+        guard.finish(result.is_ok());
+    }
+    if result.is_ok()
+        && let Some(event) = notification
+    {
+        crate::notifications::publish(event);
+    }
+    result
 }
 fn send(
     c: &mut PgConnection,

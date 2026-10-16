@@ -77,6 +77,7 @@ struct Delivery {
 }
 #[derive(Default)]
 struct Room {
+    notification_target: Option<(GuildId, ChannelId)>,
     screen_epoch: AtomicU32,
     members: RwLock<HashMap<usize, Member>>,
 }
@@ -170,13 +171,16 @@ pub(crate) async fn roster(channels: Vec<ChannelId>) -> Vec<thiscord_shared::voi
     result.sort_by_key(|c| c.channel_id);
     result
 }
-async fn room(id: ChannelId) -> Arc<Room> {
+async fn room(guild: GuildId, id: ChannelId) -> Arc<Room> {
     let mut rooms = ROOMS.get_or_init(Default::default).lock().await;
     rooms.retain(|_, r| r.strong_count() > 0);
     if let Some(room) = rooms.get(&id).and_then(Weak::upgrade) {
         return room;
     }
-    let room = Arc::new(Room::default());
+    let room = Arc::new(Room {
+        notification_target: Some((guild, id)),
+        ..Default::default()
+    });
     rooms.insert(id, Arc::downgrade(&room));
     room
 }
@@ -725,7 +729,7 @@ async fn serve(mut socket: logging::Socket, pool: DbPool, id: RequestId) {
             return;
         }
     };
-    let room = room(channel_id).await;
+    let room = room(guild_id, channel_id).await;
     let active = Arc::new(AtomicBool::new(true));
     let (out_tx, out_rx) = egress::channel(MediaKind::Microphone);
     let (video_tx, video_rx) = egress::channel(MediaKind::ScreenVideo);
@@ -1171,9 +1175,50 @@ async fn release_member(room: &Room, slot: usize, source_id: uuid::Uuid) {
     if members
         .get(&slot)
         .is_some_and(|member| member.source_id == source_id)
+        && let Some(member) = members.remove(&slot)
     {
-        members.remove(&slot);
+        voice_notification(
+            room,
+            &members,
+            &member.info,
+            thiscord_shared::notifications::Kind::VoiceLeave,
+        );
     }
+}
+
+fn voice_notification(
+    room: &Room,
+    members: &HashMap<usize, Member>,
+    actor: &Participant,
+    kind: thiscord_shared::notifications::Kind,
+) {
+    let Some((guild_id, channel_id)) = room.notification_target else {
+        return;
+    };
+    // Private rooms use the call namespace. Resolve their conversation during delivery.
+    let target = thiscord_shared::notifications::Target::Channel {
+        guild_id,
+        channel_id,
+    };
+    let verb = if kind == thiscord_shared::notifications::Kind::VoiceJoin {
+        "joined voice"
+    } else {
+        "left voice"
+    };
+    let mut event = crate::notifications::Candidate::new(
+        target,
+        kind,
+        format!("{} {verb}", actor.display_name()),
+        Some(actor.account_id),
+    );
+    event.recipients = Some(
+        members
+            .values()
+            .filter(|m| m.active.load(Ordering::Acquire))
+            .map(|m| m.info.account_id)
+            .collect(),
+    );
+    crate::notifications::publish(event);
 }
 
 async fn replaced_close(socket: &mut logging::Socket) {

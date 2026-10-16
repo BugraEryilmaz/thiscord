@@ -32,6 +32,7 @@ fn title(page: &str) -> &'static str {
         "security" | "password" | "delete" | "reauthenticate" => "Password & security",
         "desktop" => "App behavior",
         "updates" => "Updates",
+        "notifications" => "Notifications",
         "administration" => "Instance administration",
         "server_roles" => "Roles",
         "server_members" => "Members",
@@ -52,6 +53,7 @@ fn subtitle(page: &str) -> &'static str {
         }
         "desktop" => "Make Thiscord fit the way you use your computer.",
         "updates" => "Keep Thiscord up to date, on your schedule.",
+        "notifications" => "Choose your sounds, banners and subscriptions.",
         "administration" => "Manage administrators for this Thiscord installation.",
         "server_roles" => "Give people the right access with clear, named roles.",
         "server_members" => "Invite members and manage their roles.",
@@ -132,6 +134,7 @@ pub(super) fn Host(ui: Ui) -> impl IntoView {
                             <NavItem ui=ui page="audio" label="Voice & audio" icon=Glyph::Headphones/>
                             <Show when=client::desktop><NavItem ui=ui page="shortcuts" label="Shortcuts & overlay" icon=Glyph::Keyboard/><NavItem ui=ui page="desktop" label="App behavior" icon=Glyph::Screen/></Show>
                             <NavItem ui=ui page="updates" label="Updates" icon=Glyph::Refresh/>
+                            <NavItem ui=ui page="notifications" label="Notifications" icon=Glyph::Volume/>
                             <Show when=move ||ui.can_create_server.get()><p class="settings-nav-label">"Administration"</p><NavItem ui=ui page="administration" label="Instance access" icon=Glyph::Shield/></Show>
                         </nav>
                         <button class="settings-signout" disabled=move ||ui.busy.get() || ui.settings_dirty.get() on:click=move |_|super::run(ui,AccountRequest::Logout)><Icon kind=Glyph::Join/>"Sign out"</button>
@@ -158,6 +161,7 @@ pub(super) fn Host(ui: Ui) -> impl IntoView {
                         <Show when=move ||matches!(ui.page.get(),"security"|"password"|"delete"|"reauthenticate")><Security ui=ui/></Show>
                         <Show when=move ||ui.page.get()=="devices"><Devices ui=ui/></Show>
                         <Show when=move ||ui.page.get()=="audio"><super::audio::AudioSettingsPanel ui=ui/></Show>
+                        <Show when=move ||ui.page.get()=="notifications"><super::notifications::Panel ui=ui/></Show>
                         <Show when=move ||ui.page.get()=="shortcuts"><super::shortcuts::ShortcutSettings control=ui.audio_control on_dirty=Callback::new(move |dirty|ui.settings_dirty.set(dirty))/><crate::overlay::OverlaySettings control=ui.audio_control/></Show>
                         <Show when=move ||ui.page.get()=="desktop"><super::window::WindowSettings/></Show>
                         <Show when=move ||ui.page.get()=="updates"><super::updates::Panel ui=ui/></Show>

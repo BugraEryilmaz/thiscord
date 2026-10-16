@@ -11,6 +11,7 @@ mod friends;
 mod icons;
 mod login;
 mod moderation;
+mod notifications;
 mod permissions;
 mod profile;
 mod screen;
@@ -24,6 +25,7 @@ mod window;
 
 #[derive(Clone, Copy)]
 struct Ui {
+    notifications: notifications::State,
     friends: friends::State,
     audio_control: crate::audio_control::AudioControl,
     updates: RwSignal<thiscord_shared::update::UpdateStatus>,
@@ -310,6 +312,7 @@ fn StatusNotice(ui: Ui) -> impl IntoView {
 pub fn App() -> impl IntoView {
     let ui = Ui {
         friends: friends::State::new(),
+        notifications: notifications::State::new(),
         audio_control: Default::default(),
         updates: RwSignal::new(Default::default()),
         update_error: RwSignal::new(String::new()),
@@ -386,6 +389,7 @@ pub fn App() -> impl IntoView {
     view! {
         <tooltip::Host/><context_menu::Host ui=ui/>
         <updates::Host ui=ui/>
+        <notifications::Host ui=ui/>
         <Show when=move ||ui.account.get().is_some() fallback=move ||view!{<login::Login ui=ui/>}>
         <div class="app-shell" class:in-voice=move ||ui.voice.get().channel_id.is_some()>
         <servers::ServerRail ui=ui/>

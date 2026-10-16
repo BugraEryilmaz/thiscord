@@ -44,6 +44,7 @@ pub async fn save_session(token: String) -> Result<(), String> {
 #[tauri::command]
 pub async fn clear_session(app: tauri::AppHandle) -> Result<(), String> {
     use tauri::Manager;
+    let _ = crate::native_notifications::notification_clear(app.clone());
     // Clearing credentials also cancels a sleeping/in-flight voice retry.
     crate::native_voice::voice_leave(app.clone(), app.state()).await?;
     tauri::async_runtime::spawn_blocking(|| match entry()?.delete_credential() {

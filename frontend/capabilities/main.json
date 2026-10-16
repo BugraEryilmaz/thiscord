@@ -6,6 +6,8 @@
     "main"
   ],
   "permissions": [
-    "main-commands"
+    "main-commands",
+    "core:event:allow-listen",
+    "core:event:allow-unlisten"
   ]
 }

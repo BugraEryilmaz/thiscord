@@ -106,5 +106,7 @@ and outsider joins, and revoke both peers on hang-up or unfriend. Existing CI ru
 these ignored database tests with `--include-ignored`, plus WASM and native builds.
 
 Physical microphone/speaker acceptance on Windows/macOS/Linux remains necessary.
-Unread DM badges, typing indicators, message editing/deletion, blocking/reporting,
-ring sounds, push notifications and cross-process presence/fanout are not implemented.
+Direct-message and incoming-call alerts use the separate server subscription
+stream; see [notifications.md](notifications.md). Unread DM badges, typing
+indicators, message editing/deletion, blocking/reporting and cross-process
+presence/fanout are not implemented.

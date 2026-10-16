@@ -1,7 +1,8 @@
 # Desktop releases and updates
 
-The native client checks the public GitHub update feed three seconds after launch
-and every six hours. It shows an optional update prompt and an **Install and
+The native client checks the public GitHub update feed when a newer release is
+announced through its server notification subscription. It shows a customizable
+update banner and an **Install and
 restart** button. Nothing downloads or installs until that button is clicked.
 **Settings → App updates** also provides a manual check. Installation is blocked
 while connected to voice; joining voice is blocked during installation/download.

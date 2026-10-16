@@ -2,6 +2,12 @@
 identifier = "main-commands"
 description = "Account, media and settings commands for the main window only."
 commands.allow = [
+  "notification_show",
+  "notification_clear",
+  "notification_remove",
+  "notification_sync_calls",
+  "notification_snoozed",
+  "notification_sound",
   "window_close_to_tray",
   "window_set_close_to_tray",
   "load_session",
@@ -58,3 +64,8 @@ commands.allow = ["overlay_snapshot"]
 identifier = "overlay-self-controls"
 description = "Toggle only the local microphone mute and deafen while connected to voice."
 commands.allow = ["overlay_toggle_audio"]
+
+[[permission]]
+identifier = "notification-banner"
+description = "Read notification presentation and act on an existing banner; no account or media commands."
+commands.allow = ["notification_snapshot", "notification_action"]

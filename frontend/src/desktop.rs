@@ -2,6 +2,7 @@
 
 mod native_account;
 mod native_audio;
+mod native_notifications;
 mod native_overlay;
 mod native_remote_audio;
 mod native_screen;
@@ -39,6 +40,7 @@ fn main() {
     tauri::Builder::default()
         .plugin(tauri_plugin_updater::Builder::new().build())
         .manage(native_update::UpdateState::default())
+        .manage(native_notifications::NotificationState::default())
         .manage(native_overlay::OverlayState::default())
         .manage(native_shortcuts::ShortcutStateStore::default())
         .setup(|app| {
@@ -161,6 +163,14 @@ fn main() {
             native_overlay::overlay_enabled,
             native_overlay::overlay_enable,
             native_update::update_status,
+            native_notifications::notification_show,
+            native_notifications::notification_clear,
+            native_notifications::notification_remove,
+            native_notifications::notification_sync_calls,
+            native_notifications::notification_snoozed,
+            native_notifications::notification_sound,
+            native_notifications::notification_snapshot,
+            native_notifications::notification_action,
             native_update::update_check,
             native_update::update_install
         ])

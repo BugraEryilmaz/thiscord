@@ -89,6 +89,8 @@ jobs:
         env:
           RELEASE_TAG: ${{ github.ref_name }}
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          THISCORD_NOTIFICATION_URL: ${{ vars.THISCORD_NOTIFICATION_URL }}
+          THISCORD_NOTIFICATION_TOKEN: ${{ secrets.THISCORD_NOTIFICATION_TOKEN }}
         run: ./scripts/release-client.ps1 -Mode Publish -Tag $env:RELEASE_TAG
       - name: Report Cargo storage
         if: always() && env.CARGO_TARGET_DIR != ''

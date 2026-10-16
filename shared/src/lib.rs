@@ -8,6 +8,7 @@ pub mod chat;
 pub mod error;
 pub mod friends;
 pub mod ids;
+pub mod notifications;
 pub mod overlay;
 pub mod pagination;
 pub mod permissions;

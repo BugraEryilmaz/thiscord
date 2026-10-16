@@ -193,7 +193,8 @@ Each socket refresh shares one session/guild authorization transaction between
 unread counts and channel events. Commit notifications are scoped to the subscribed
 guild, channel and account.
 Event-log compaction, cross-process fanout, full-guild presence and load tests are
-future work. Attachments, search and desktop notifications remain pending.
+future work. Attachments and search remain pending. Customizable alert subscriptions
+and desktop banners are described in [notifications.md](notifications.md).
 Native voice uses a separate signaling socket and media admission/drain mechanism;
 see [audio.md](audio.md).
 

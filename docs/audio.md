@@ -67,11 +67,11 @@ gate (including PTT), and mute/deafen/speak restrictions override activity. This
 an activity indicator, not speech recognition. Native visibility and UI metadata
 are polled every 50/100 ms respectively; no audio samples cross IPC.
 
-Short local two-note sounds announce your own successful voice join and other
-participants joining/leaving the connected channel. Reconnecting plays a fresh
-join sound. Initial members produce one cue, not one per participant; repeated
-snapshots, slot reordering and mute/deafen updates stay silent. Bursts coalesce
-into bounded join/leave cues. Sounds follow the selected output device, master
+Short local two-note sounds announce other participants joining/leaving the
+connected room through server notification subscriptions. Own joins and
+connection replacements/resumptions stay silent. Event/source notification
+preferences can disable sound or enable a banner; see [notifications.md](notifications.md).
+Bursts coalesce into bounded cues. During voice, sounds follow the selected output device, master
 volume and deafen, and are included in the echo reference/debug speaker track.
 They are not inserted into the outgoing microphone stream. PCM is synthesized
 before device startup; callback playback uses no allocation, locks or file I/O.
