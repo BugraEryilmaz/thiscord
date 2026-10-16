@@ -19,12 +19,12 @@ pub(super) async fn update(
     views: Vec<Subscription>,
     owner: &AtomicBool,
 ) -> bool {
-    if views.len() >= ROOM_CAPACITY || views.iter().any(|v| !v.valid()) {
+    if views.len() > (ROOM_CAPACITY - 1) * 2 || views.iter().any(|v| !v.valid()) {
         return false;
     }
-    let mut seen = [false; ROOM_CAPACITY];
+    let mut seen = [false; ROOM_CAPACITY * 2];
     for view in &views {
-        if std::mem::replace(&mut seen[view.slot], true) {
+        if std::mem::replace(&mut seen[view.kind.view_index(view.slot)], true) {
             return false;
         }
     }
@@ -43,7 +43,7 @@ pub(super) async fn update(
         return true;
     };
     let now = Instant::now();
-    let mut next = [None; ROOM_CAPACITY];
+    let mut next = [None; ROOM_CAPACITY * 2];
     let mut source_permits = Vec::new();
     if receiver.active.load(Ordering::Acquire) && !receiver.info.deafened {
         for subscription in views {
@@ -52,9 +52,9 @@ pub(super) async fn update(
             };
             if source.info.slot == slot
                 || source.info.account_id != subscription.owner
-                || source.info.screen_epoch != subscription.epoch
+                || source.info.video_epoch(subscription.kind) != subscription.epoch
                 || !source.active.load(Ordering::Acquire)
-                || !may_publish(&source.info, MediaKind::ScreenVideo)
+                || !may_publish(&source.info, subscription.kind)
             {
                 continue;
             }
@@ -63,14 +63,14 @@ pub(super) async fn update(
                 continue;
             };
             source_permits.push(permit);
-            let since = receiver.views[subscription.slot]
+            let since = receiver.views[subscription.kind.view_index(subscription.slot)]
                 .filter(|old| {
                     old.live()
                         && old.subscription.owner == subscription.owner
                         && old.subscription.epoch == subscription.epoch
                 })
                 .map_or(now, |old| old.since);
-            next[subscription.slot] = Some(View {
+            next[subscription.kind.view_index(subscription.slot)] = Some(View {
                 subscription,
                 since,
                 renewed: now,
@@ -105,20 +105,20 @@ pub(super) fn receives(
     if kind == MediaKind::Microphone {
         return true;
     }
-    receiver.views[source.info.slot].is_some_and(|v| {
+    receiver.views[kind.view_index(source.info.slot)].is_some_and(|v| {
         v.live()
             && queued >= v.since
             && v.subscription.owner == source.info.account_id
-            && v.subscription.epoch == source.info.screen_epoch
+            && v.subscription.epoch == source.info.video_epoch(kind)
     })
 }
 
-pub(super) async fn target(room: &Room, slot: usize) -> Option<(u32, u32)> {
+pub(super) async fn target(room: &Room, slot: usize, kind: MediaKind) -> Option<(u32, u32)> {
     let members = room.members.read().await;
     let source = members.get(&slot)?;
     if !source.subscriptions_enabled
         || !source.active.load(Ordering::Acquire)
-        || !may_publish(&source.info, MediaKind::ScreenVideo)
+        || !may_publish(&source.info, kind)
     {
         return None;
     }
@@ -127,15 +127,15 @@ pub(super) async fn target(room: &Room, slot: usize) -> Option<(u32, u32)> {
     let mut receiver_permits = Vec::new();
     let bitrate = members
         .values()
-        .filter(|receiver| receives(receiver, source, MediaKind::ScreenVideo, Instant::now()))
+        .filter(|receiver| receives(receiver, source, kind, Instant::now()))
         .filter_map(|receiver| {
             let epoch = receiver.generation.load(Ordering::Acquire);
             receiver_permits.push(receiver.access.packet(epoch, epoch)?);
-            receiver.views[slot].map(|v| v.subscription.bitrate)
+            receiver.views[kind.view_index(slot)].map(|v| v.subscription.bitrate)
         })
         .min()
         .unwrap_or(0);
-    Some((source.info.screen_epoch, bitrate))
+    Some((source.info.video_epoch(kind), bitrate))
 }
 
 #[cfg(test)]
@@ -171,15 +171,18 @@ mod tests {
                         sharing_screen: slot == 0,
                         sharing_audio: slot == 0,
                         screen_epoch: 9,
+                        camera_active: false,
+                        camera_epoch: 0,
                     },
                     source_id: uuid::Uuid::new_v4(),
                     screen_started: Instant::now(),
+                    camera_started: Instant::now(),
                     outgoing: MediaKind::ALL.map(|kind| egress::channel(kind).0),
                     keyframes,
-                    last_keyframe: None,
+                    last_keyframe: [None; 2],
                     feedback_enabled: true,
                     subscriptions_enabled: true,
-                    views: [None; ROOM_CAPACITY],
+                    views: [None; ROOM_CAPACITY * 2],
                     generation: Arc::new(AtomicU64::new(0)),
                     access,
                     metrics: Arc::new(std::array::from_fn(|_| AtomicU64::new(0))),
@@ -191,6 +194,7 @@ mod tests {
     }
     async fn subscription(room: &Room) -> Subscription {
         Subscription {
+            kind: thiscord_shared::voice::MediaKind::ScreenVideo,
             slot: 0,
             owner: room.members.read().await[&0].info.account_id,
             epoch: 9,
@@ -209,11 +213,15 @@ mod tests {
             assert!(update(&room, 1, vec![view], &AtomicBool::new(true)).await);
             let account = room.members.read().await[&changed_slot].info.account_id;
             let mutation = access::pause(access::Scope::Account(account));
-            for kind in MediaKind::ALL {
+            for kind in [
+                MediaKind::Microphone,
+                MediaKind::ScreenVideo,
+                MediaKind::SystemAudio,
+            ] {
                 assert!(!allowed(&room, 1, kind, Instant::now()).await);
             }
             assert_eq!(
-                target(&room, 0).await,
+                target(&room, 0, MediaKind::ScreenVideo).await,
                 if changed_slot == 0 {
                     None
                 } else {
@@ -236,13 +244,20 @@ mod tests {
                 );
             }
             assert!(update(&room, 1, vec![view], &AtomicBool::new(true)).await);
-            for kind in MediaKind::ALL {
+            for kind in [
+                MediaKind::Microphone,
+                MediaKind::ScreenVideo,
+                MediaKind::SystemAudio,
+            ] {
                 assert!(
                     allowed(&room, 1, kind, Instant::now()).await,
                     "valid unequal epochs rejected: {kind:?}"
                 );
             }
-            assert_eq!(target(&room, 0).await, Some((9, 5_000_000)));
+            assert_eq!(
+                target(&room, 0, MediaKind::ScreenVideo).await,
+                Some((9, 5_000_000))
+            );
         }
     }
 
@@ -250,7 +265,7 @@ mod tests {
     async fn viewers_control_fanout_shared_audio_and_lowest_budget() {
         let room = room().await;
         let view = subscription(&room).await;
-        assert_eq!(target(&room, 0).await, Some((9, 0)));
+        assert_eq!(target(&room, 0, MediaKind::ScreenVideo).await, Some((9, 0)));
         assert!(allowed(&room, 1, MediaKind::Microphone, Instant::now()).await);
         assert!(!allowed(&room, 1, MediaKind::ScreenVideo, Instant::now()).await);
         assert!(!allowed(&room, 1, MediaKind::SystemAudio, Instant::now()).await);
@@ -258,7 +273,10 @@ mod tests {
         assert!(allowed(&room, 1, MediaKind::ScreenVideo, Instant::now()).await);
         assert!(allowed(&room, 1, MediaKind::SystemAudio, Instant::now()).await);
         assert!(!allowed(&room, 2, MediaKind::ScreenVideo, Instant::now()).await);
-        assert_eq!(target(&room, 0).await, Some((9, 5_000_000)));
+        assert_eq!(
+            target(&room, 0, MediaKind::ScreenVideo).await,
+            Some((9, 5_000_000))
+        );
         assert!(
             update(
                 &room,
@@ -271,13 +289,19 @@ mod tests {
             )
             .await
         );
-        assert_eq!(target(&room, 0).await, Some((9, 500_000)));
+        assert_eq!(
+            target(&room, 0, MediaKind::ScreenVideo).await,
+            Some((9, 500_000))
+        );
         assert!(update(&room, 2, vec![], &AtomicBool::new(true)).await);
-        assert_eq!(target(&room, 0).await, Some((9, 5_000_000)));
+        assert_eq!(
+            target(&room, 0, MediaKind::ScreenVideo).await,
+            Some((9, 5_000_000))
+        );
         let queued = Instant::now();
         assert!(update(&room, 1, vec![], &AtomicBool::new(true)).await);
         assert!(!allowed(&room, 1, MediaKind::ScreenVideo, queued).await);
-        assert_eq!(target(&room, 0).await, Some((9, 0)));
+        assert_eq!(target(&room, 0, MediaKind::ScreenVideo).await, Some((9, 0)));
         assert!(update(&room, 1, vec![view], &AtomicBool::new(true)).await);
         assert!(
             !allowed(&room, 1, MediaKind::ScreenVideo, queued).await,
@@ -294,7 +318,7 @@ mod tests {
             .unwrap()
             .renewed -= Duration::from_secs(VIEW_LEASE_SECS);
         assert!(!allowed(&room, 1, MediaKind::ScreenVideo, Instant::now()).await);
-        assert_eq!(target(&room, 0).await, Some((9, 0)));
+        assert_eq!(target(&room, 0, MediaKind::ScreenVideo).await, Some((9, 0)));
         assert!(update(&room, 1, vec![view], &AtomicBool::new(true)).await);
         update_voice_state(&room, 1, false, true, &AtomicBool::new(true)).await;
         assert!(!allowed(&room, 1, MediaKind::ScreenVideo, Instant::now()).await);
@@ -349,7 +373,7 @@ mod tests {
         room.members.read().await[&1]
             .active
             .store(false, Ordering::Release);
-        assert_eq!(target(&room, 0).await, Some((9, 0)));
+        assert_eq!(target(&room, 0, MediaKind::ScreenVideo).await, Some((9, 0)));
     }
     #[tokio::test]
     async fn malformed_cross_room_and_self_subscriptions_never_grant_delivery() {
@@ -392,7 +416,7 @@ mod tests {
             )
             .await
         );
-        assert_eq!(target(&room, 0).await, Some((9, 0)));
+        assert_eq!(target(&room, 0, MediaKind::ScreenVideo).await, Some((9, 0)));
         room.members
             .write()
             .await
@@ -410,6 +434,85 @@ mod tests {
             update_screen_state(&room, 0, true, true, &AtomicBool::new(true))
                 .await
                 .is_err()
+        );
+    }
+    #[tokio::test]
+    async fn camera_and_screen_views_are_independent_and_access_fenced() {
+        let room = room().await;
+        let screen = subscription(&room).await;
+        {
+            let mut members = room.members.write().await;
+            let p = &mut members.get_mut(&0).unwrap().info;
+            p.camera_active = true;
+            p.camera_epoch = 23;
+        }
+        let camera = Subscription {
+            kind: MediaKind::Camera,
+            epoch: 23,
+            ..screen
+        };
+        let live = AtomicBool::new(true);
+        assert!(update(&room, 1, vec![screen, camera], &live).await);
+        for kind in MediaKind::ALL {
+            assert!(allowed(&room, 1, kind, Instant::now()).await);
+        }
+        assert!(update(&room, 1, vec![camera], &live).await);
+        assert!(!allowed(&room, 1, MediaKind::ScreenVideo, Instant::now()).await);
+        assert!(!allowed(&room, 1, MediaKind::SystemAudio, Instant::now()).await);
+        assert!(allowed(&room, 1, MediaKind::Camera, Instant::now()).await);
+        assert!(!update(&room, 1, vec![camera, camera], &live).await);
+        assert!(
+            !update(
+                &room,
+                1,
+                vec![Subscription {
+                    kind: MediaKind::Microphone,
+                    ..camera
+                }],
+                &live
+            )
+            .await
+        );
+        let old = Instant::now();
+        assert!(update(&room, 1, vec![], &live).await);
+        assert!(update(&room, 1, vec![camera], &live).await);
+        assert!(!allowed(&room, 1, MediaKind::Camera, old).await);
+        room.members
+            .write()
+            .await
+            .get_mut(&0)
+            .unwrap()
+            .info
+            .camera_epoch += 1;
+        assert!(!allowed(&room, 1, MediaKind::Camera, Instant::now()).await);
+        assert!(update(&room, 1, vec![camera], &live).await);
+        assert!(room.members.read().await[&1].views[MediaKind::Camera.view_index(0)].is_none());
+        room.members
+            .write()
+            .await
+            .get_mut(&0)
+            .unwrap()
+            .info
+            .camera_epoch = 23;
+        assert!(update(&room, 1, vec![camera], &live).await);
+        let account = room.members.read().await[&0].info.account_id;
+        let mutation = access::pause(access::Scope::Account(account));
+        assert!(!allowed(&room, 1, MediaKind::Camera, Instant::now()).await);
+        mutation.finish(false);
+        room.members
+            .write()
+            .await
+            .get_mut(&0)
+            .unwrap()
+            .info
+            .can_speak = false;
+        assert!(!allowed(&room, 1, MediaKind::Camera, Instant::now()).await);
+        update_voice_state(&room, 1, false, true, &live).await;
+        assert!(
+            room.members.read().await[&1]
+                .views
+                .iter()
+                .all(Option::is_none)
         );
     }
 }

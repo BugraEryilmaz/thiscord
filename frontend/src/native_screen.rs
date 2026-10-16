@@ -7,7 +7,7 @@ use std::{
     },
     time::{Duration, Instant},
 };
-use tauri::State;
+use tauri::{Manager, State};
 const VIEWER_LEASE: Duration = Duration::from_secs(3);
 use thiscord_frontend::{
     audio::connection::Connection,
@@ -31,6 +31,9 @@ use webrtc::media_stream::track_local::static_rtp::TrackLocalStaticRTP;
 )]
 pub struct Binding {
     pub connection: Connection,
+    pub own_slot: usize,
+    pub local_epoch: Arc<AtomicU32>,
+    pub local_visible: Arc<AtomicBool>,
     pub video: Arc<TrackLocalStaticRTP>,
     pub audio: Arc<TrackLocalStaticRTP>,
     pub can_publish: bool,
@@ -41,11 +44,13 @@ pub struct Binding {
     pub started: Instant,
     pub force_keyframe: Arc<AtomicBool>,
     pub demand: Arc<thiscord_frontend::screen::adaptation::Demand>,
+    pub network_demand: Arc<thiscord_frontend::screen::adaptation::Demand>,
     pub metrics: thiscord_frontend::screen::metrics::Metrics,
 }
 #[derive(Default)]
 struct Inner {
     binding: Option<Binding>,
+    local: Option<Arc<Sender>>,
     stop: Option<Arc<AtomicBool>>,
     worker: Option<std::thread::JoinHandle<()>>,
     status: Status,
@@ -77,13 +82,49 @@ impl Drop for Viewer {
     }
 }
 #[derive(Clone, Default)]
-pub struct ScreenState(Arc<Mutex<Inner>>);
+pub struct ScreenState(Arc<Mutex<Inner>>, Option<thiscord_shared::voice::MediaKind>);
+impl ScreenState {
+    pub fn camera() -> Self {
+        Self(
+            Default::default(),
+            Some(thiscord_shared::voice::MediaKind::Camera),
+        )
+    }
+    fn kind(&self) -> thiscord_shared::voice::MediaKind {
+        self.1
+            .unwrap_or(thiscord_shared::voice::MediaKind::ScreenVideo)
+    }
+}
+pub fn video_state(app: &tauri::AppHandle, kind: thiscord_shared::voice::MediaKind) -> ScreenState {
+    if kind == thiscord_shared::voice::MediaKind::Camera {
+        app.state::<crate::native_camera::CameraState>()
+            .views
+            .clone()
+    } else {
+        app.state::<ScreenState>().inner().clone()
+    }
+}
 impl ScreenState {
     pub fn target(&self, bitrate: u32) {
         if let Ok(inner) = self.0.lock()
             && let Some(binding) = &inner.binding
         {
-            binding.demand.update(bitrate);
+            if binding.network_demand.bitrate() == 0 && bitrate > 0 {
+                binding.force_keyframe.store(true, Ordering::Release);
+            }
+            binding.network_demand.update(bitrate);
+            let own_view = inner.viewers[binding.own_slot].as_ref().filter(|v| {
+                v.connection.active() && v.touched.elapsed() < VIEWER_LEASE && v.preview.is_some()
+            });
+            // A local preview keeps capture alive without making an SFU round trip.
+            let budget = own_view.map_or(bitrate, |v| {
+                if bitrate == 0 {
+                    v.feedback.receiver.bitrate()
+                } else {
+                    bitrate.min(v.feedback.receiver.bitrate())
+                }
+            });
+            binding.demand.update(budget);
         }
     }
     pub fn subscriptions(&self) -> Vec<Subscription> {
@@ -96,6 +137,15 @@ impl ScreenState {
             .is_none_or(|b| !b.connection.active())
         {
             return vec![];
+        }
+        let own_slot = inner.binding.as_ref().map(|b| b.own_slot);
+        if let Some(binding) = &inner.binding {
+            let live = inner.viewers[binding.own_slot].as_ref().is_some_and(|v| {
+                v.connection.active() && v.touched.elapsed() < VIEWER_LEASE && v.preview.is_some()
+            });
+            if binding.local_visible.swap(live, Ordering::AcqRel) != live && live {
+                binding.force_keyframe.store(true, Ordering::Release);
+            }
         }
         let mut views = Vec::new();
         for slot in 0..ROOM_CAPACITY {
@@ -138,7 +188,11 @@ impl ScreenState {
                 feedback.previous = stats;
                 feedback.sampled = Some(Instant::now());
             }
+            if Some(slot) == own_slot {
+                continue;
+            }
             views.push(Subscription {
+                kind: self.kind(),
                 slot,
                 owner: viewer.watch.owner,
                 epoch: viewer.watch.epoch,
@@ -182,6 +236,8 @@ impl ScreenState {
 
     pub fn bind(&self, binding: Binding) {
         self.clear();
+        let local = (self.kind() == thiscord_shared::voice::MediaKind::ScreenVideo)
+            .then(|| Arc::new(self.receiver(binding.connection.clone(), binding.own_slot)));
         if let Ok(mut inner) = self.0.lock() {
             inner.status.available =
                 binding.can_publish && binding.subscriptions && cfg!(target_os = "windows");
@@ -194,6 +250,7 @@ impl ScreenState {
             } else if !binding.can_publish {
                 inner.status.message = "Speak permission is needed to share your screen.".into();
             }
+            inner.local = local;
             inner.binding = Some(binding);
         }
     }
@@ -203,6 +260,7 @@ impl ScreenState {
                 stop.store(true, Ordering::Release);
             }
             inner.binding = None;
+            inner.local = None;
             inner.server.clear();
             inner.network.clear();
             inner.receivers = Default::default();
@@ -225,8 +283,15 @@ impl ScreenState {
             for slot in 0..ROOM_CAPACITY {
                 let owner = members
                     .iter()
-                    .find(|m| m.slot == slot && m.sharing_screen)
-                    .map(|m| (m.account_id, m.screen_epoch));
+                    .find(|m| m.slot == slot && m.video_active(self.kind()))
+                    .map(|m| (m.account_id, m.video_epoch(self.kind())));
+                if let Some(binding) = &inner.binding
+                    && slot == binding.own_slot
+                {
+                    binding
+                        .local_epoch
+                        .store(owner.map_or(0, |(_, e)| e), Ordering::Release);
+                }
                 if owner != inner.owners[slot] {
                     inner.viewers[slot] = None;
                     inner.owners[slot] = owner;
@@ -364,11 +429,12 @@ impl ScreenState {
 
 #[tauri::command]
 pub fn screen_view_keepalive(
-    state: State<'_, ScreenState>,
+    app: tauri::AppHandle,
     watch: Watch,
     visible: bool,
     decoder_pressure: Option<bool>,
 ) -> bool {
+    let state = video_state(&app, watch.kind);
     if decoder_pressure == Some(true)
         && let Ok(mut inner) = state.0.lock()
         && let Some(viewer) = inner.viewers.get_mut(watch.slot).and_then(Option::as_mut)
@@ -380,10 +446,12 @@ pub fn screen_view_keepalive(
 }
 #[tauri::command]
 pub async fn screen_view_open(
-    state: State<'_, ScreenState>,
+    app: tauri::AppHandle,
     offer: ViewOffer,
 ) -> Result<ViewAnswer, String> {
-    static NEGOTIATIONS: tokio::sync::Semaphore = tokio::sync::Semaphore::const_new(ROOM_CAPACITY);
+    let state = video_state(&app, offer.watch.kind);
+    static NEGOTIATIONS: tokio::sync::Semaphore =
+        tokio::sync::Semaphore::const_new(ROOM_CAPACITY * 2);
     let _permit = NEGOTIATIONS
         .try_acquire()
         .map_err(|_| "Too many screen viewers connecting")?;
@@ -404,7 +472,16 @@ pub async fn screen_view_open(
             metrics.event("viewer connection opened");
         }
         inner.viewers[watch.slot] = Some(Viewer {
-            feedback: Feedback::default(),
+            feedback: Feedback {
+                receiver: thiscord_frontend::screen::adaptation::Receiver::with_maximum(
+                    if watch.kind == thiscord_shared::voice::MediaKind::Camera {
+                        thiscord_shared::camera::MAX_BITRATE
+                    } else {
+                        MAX_VIEW_BITRATE
+                    },
+                ),
+                ..Default::default()
+            },
             watch,
             touched: Instant::now(),
             connection: lease.clone(),
@@ -430,6 +507,9 @@ pub async fn screen_view_open(
         .ok_or("Screen viewer was closed")?;
     viewer.preview = Some(Arc::new(preview));
     viewer.touched = Instant::now();
+    if let Some(inbox) = &inner.inboxes[watch.slot] {
+        inbox.restart_subscription();
+    }
     let weak = Arc::downgrade(&state.0);
     tauri::async_runtime::spawn(async move {
         while lease.active() {
@@ -455,7 +535,8 @@ pub async fn screen_view_open(
 }
 
 #[tauri::command]
-pub fn screen_view_keyframe(state: State<'_, ScreenState>, watch: Watch) -> bool {
+pub fn screen_view_keyframe(app: tauri::AppHandle, watch: Watch) -> bool {
+    let state = video_state(&app, watch.kind);
     let Ok(inner) = state.0.lock() else {
         return false;
     };
@@ -469,6 +550,11 @@ pub fn screen_view_keyframe(state: State<'_, ScreenState>, watch: Watch) -> bool
     {
         return false;
     }
+    if let Some(binding) = &inner.binding
+        && binding.own_slot == watch.slot
+    {
+        binding.force_keyframe.store(true, Ordering::Release);
+    }
     if let Some(inbox) = &inner.inboxes[watch.slot] {
         inbox.request_keyframe();
         return true;
@@ -476,10 +562,8 @@ pub fn screen_view_keyframe(state: State<'_, ScreenState>, watch: Watch) -> bool
     false
 }
 #[tauri::command]
-pub fn screen_view_diagnostics(
-    state: State<'_, ScreenState>,
-    watch: Watch,
-) -> Result<Diagnostics, String> {
+pub fn screen_view_diagnostics(app: tauri::AppHandle, watch: Watch) -> Result<Diagnostics, String> {
+    let state = video_state(&app, watch.kind);
     let inner = state.0.lock().map_err(|_| "Screen state unavailable")?;
     if inner.owners.get(watch.slot) != Some(&Some((watch.owner, watch.epoch)))
         || !inner
@@ -574,9 +658,18 @@ pub async fn screen_start(
     binding.metrics.label("sender_queue_budget_ms", 200);
     let (tx, rx) = mpsc::channel::<thiscord_frontend::screen::Outgoing>(queue_frames);
     let sender = thiscord_frontend::screen::send::Sender {
+        local: inner
+            .local
+            .clone()
+            .map(|tx| thiscord_frontend::screen::send::LocalPreview {
+                sender: tx,
+                epoch: binding.local_epoch.clone(),
+                visible: binding.local_visible.clone(),
+            }),
         connection: binding.connection.clone(),
         video: binding.video.clone(),
         demand: binding.demand.clone(),
+        network_demand: Some(binding.network_demand.clone()),
         force_keyframe: binding.force_keyframe.clone(),
         sequence: binding.video_sequence.clone(),
         metrics: binding.metrics.clone(),
@@ -669,6 +762,7 @@ mod tests {
         let state = ScreenState::default();
         let owner: AccountId = "00000000-0000-0000-0000-000000000001".parse().unwrap();
         let watch = Watch {
+            kind: thiscord_shared::voice::MediaKind::ScreenVideo,
             slot: 0,
             owner,
             epoch: 1,

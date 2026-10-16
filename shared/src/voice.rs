@@ -56,11 +56,16 @@ pub enum ClientEvent {
         muted: bool,
         deafened: bool,
     },
+    Camera {
+        active: bool,
+    },
     Screen {
         active: bool,
         audio: bool,
     },
     ScreenKeyframe {
+        #[serde(default = "screen_kind", skip_serializing_if = "is_screen_kind")]
+        kind: MediaKind,
         slot: usize,
         epoch: u32,
     },
@@ -91,6 +96,10 @@ pub struct Participant {
     pub sharing_audio: bool,
     #[serde(default)]
     pub screen_epoch: u32,
+    #[serde(default)]
+    pub camera_active: bool,
+    #[serde(default)]
+    pub camera_epoch: u32,
 }
 /// A visible voice channel's live membership, without joining its media transport.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -99,6 +108,20 @@ pub struct ChannelRoster {
     pub members: Vec<Participant>,
 }
 impl Participant {
+    pub fn video_epoch(&self, kind: MediaKind) -> u32 {
+        if kind == MediaKind::Camera {
+            self.camera_epoch
+        } else {
+            self.screen_epoch
+        }
+    }
+    pub fn video_active(&self, kind: MediaKind) -> bool {
+        if kind == MediaKind::Camera {
+            self.camera_active
+        } else {
+            self.sharing_screen
+        }
+    }
     /// Profile label, falling back to the username for older servers.
     pub fn display_name(&self) -> &str {
         if self.display_name.trim().is_empty() {
@@ -121,11 +144,15 @@ pub enum ServerEvent {
         command: crate::remote_audio::Command,
     },
     ScreenTarget {
+        #[serde(default = "screen_kind", skip_serializing_if = "is_screen_kind")]
+        kind: MediaKind,
         epoch: u32,
         /// Zero pauses video. Otherwise the lowest active receiver budget.
         bitrate: u32,
     },
     ScreenKeyframe {
+        #[serde(default = "screen_kind", skip_serializing_if = "is_screen_kind")]
+        kind: MediaKind,
         epoch: u32,
     },
     MediaDiagnostics {
@@ -139,6 +166,8 @@ pub enum ServerEvent {
         can_speak: bool,
         #[serde(default)]
         screen_video: bool,
+        #[serde(default)]
+        camera_video: bool,
         #[serde(default)]
         screen_feedback: bool,
         #[serde(default)]
@@ -181,32 +210,41 @@ pub struct IceServer {
 }
 
 /// Media ordering is stable on the wire and in negotiated track slots.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
 #[repr(usize)]
 pub enum MediaKind {
     Microphone = 0,
     ScreenVideo = 1,
     SystemAudio = 2,
+    Camera = 3,
 }
 impl MediaKind {
-    pub const ALL: [Self; 3] = [Self::Microphone, Self::ScreenVideo, Self::SystemAudio];
+    pub const ALL: [Self; 4] = [
+        Self::Microphone,
+        Self::ScreenVideo,
+        Self::SystemAudio,
+        Self::Camera,
+    ];
+    pub const fn is_video(self) -> bool {
+        matches!(self, Self::ScreenVideo | Self::Camera)
+    }
+    pub const fn view_index(self, slot: usize) -> usize {
+        if matches!(self, Self::Camera) {
+            ROOM_CAPACITY + slot
+        } else {
+            slot
+        }
+    }
     pub const TRACK_COUNT: usize = ROOM_CAPACITY * Self::ALL.len();
     pub const fn publisher_ssrc(self) -> u32 {
         900 + self as u32
     }
     pub const fn payload_type(self) -> u8 {
-        if matches!(self, Self::ScreenVideo) {
-            125
-        } else {
-            111
-        }
+        if self.is_video() { 125 } else { 111 }
     }
     pub const fn clock_rate(self) -> u32 {
-        if matches!(self, Self::ScreenVideo) {
-            90_000
-        } else {
-            48_000
-        }
+        if self.is_video() { 90_000 } else { 48_000 }
     }
     pub const fn track_index(self, slot: usize) -> usize {
         self as usize * ROOM_CAPACITY + slot
@@ -222,6 +260,7 @@ impl MediaKind {
             Self::Microphone => SSRC_BASE,
             Self::ScreenVideo => 20_000,
             Self::SystemAudio => 30_000,
+            Self::Camera => 40_000,
         }
     }
     pub const fn relay_ssrc(self, slot: usize) -> u32 {
@@ -243,10 +282,17 @@ impl MediaKind {
         match self {
             Self::Microphone => Some(slot),
             Self::SystemAudio => Some(ROOM_CAPACITY + slot),
-            Self::ScreenVideo => None,
+            Self::ScreenVideo | Self::Camera => None,
         }
     }
 }
+pub fn is_screen_kind(kind: &MediaKind) -> bool {
+    *kind == MediaKind::ScreenVideo
+}
+pub const fn screen_kind() -> MediaKind {
+    MediaKind::ScreenVideo
+}
+
 #[cfg(test)]
 mod media_tests {
     use super::*;
@@ -323,13 +369,16 @@ mod media_tests {
     fn media_mappings_round_trip_and_reject_unknown_sources() {
         assert_eq!(
             MediaKind::ALL.map(MediaKind::publisher_ssrc),
-            [900, 901, 902]
+            [900, 901, 902, 903]
         );
         assert_eq!(
             MediaKind::ALL.map(MediaKind::ssrc_base),
-            [10_000, 20_000, 30_000]
+            [10_000, 20_000, 30_000, 40_000]
         );
-        assert_eq!(MediaKind::ALL.map(MediaKind::payload_type), [111, 125, 111]);
+        assert_eq!(
+            MediaKind::ALL.map(MediaKind::payload_type),
+            [111, 125, 111, 125]
+        );
         for kind in MediaKind::ALL {
             for slot in 0..ROOM_CAPACITY {
                 assert_eq!(
@@ -348,6 +397,6 @@ mod media_tests {
         }
         assert_eq!(MediaKind::from_track(MediaKind::TRACK_COUNT), None);
         assert_eq!(MediaKind::from_relay_ssrc(20_008), None);
-        assert_eq!(MediaKind::from_publisher_ssrc(903), None);
+        assert_eq!(MediaKind::from_publisher_ssrc(904), None);
     }
 }
