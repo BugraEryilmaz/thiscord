@@ -226,6 +226,8 @@ pub(super) fn dispatch(
     };
     let mut c = connection(pool)?;
     let mut change = None;
+    let mut notification_recipients = vec![];
+    let is_send = matches!(command, ChatRequest::Send { .. });
     let response = checked_session(
         &mut c,
         token,
@@ -305,6 +307,7 @@ pub(super) fn dispatch(
                         return Err(Failure::Conflict);
                     }
                     event(c, guild, channel_id, id)?;
+                    notification_recipients = crate::notifications::guild_recipients(c, guild)?;
                     change = Some(super::notifications::Change::Message(guild, channel_id));
                     Ok(ChatResponse::Message {
                         message: message(c, id)?,
@@ -396,6 +399,25 @@ pub(super) fn dispatch(
             }
         },
     )?;
+    if is_send
+        && change.is_some()
+        && let ChatResponse::Message { message } = &response
+    {
+        use thiscord_shared::notifications::{Kind, Target};
+        let mut event = crate::notifications::Candidate::new(
+            Target::Channel {
+                guild_id: guild,
+                channel_id: message.channel_id,
+            },
+            Kind::GuildMessage,
+            format!("{} sent a message", message.display_name()),
+            message.author_id,
+        );
+        event.id = message.id.to_string();
+        event.mentions = message.mentions.clone();
+        event.recipients = Some(notification_recipients);
+        crate::notifications::publish(event);
+    }
     Ok((response, change))
 }
 

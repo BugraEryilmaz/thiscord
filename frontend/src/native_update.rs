@@ -1,11 +1,15 @@
 //! Signed desktop updates. No account token is sent to the public release feed.
-use std::{sync::Mutex, time::Duration};
-use tauri::{Manager, State};
+use std::{
+    sync::{Mutex, OnceLock},
+    time::Duration,
+};
+use tauri::{Emitter, Manager, State};
 use tauri_plugin_updater::{Update, UpdaterExt};
 use thiscord_shared::update::{UpdatePhase, UpdateStatus};
 
 #[derive(Default)]
 pub struct UpdateState {
+    app: OnceLock<tauri::AppHandle>,
     status: Mutex<UpdateStatus>,
     pending: Mutex<Option<Update>>,
     operation: tokio::sync::Mutex<()>,
@@ -17,6 +21,9 @@ impl UpdateState {
     fn change(&self, f: impl FnOnce(&mut UpdateStatus)) {
         if let Ok(mut status) = self.status.lock() {
             f(&mut status);
+            if let Some(app) = self.app.get() {
+                let _ = app.emit_to("main", "update-status", &*status);
+            }
         }
     }
     fn failure(&self, message: &str) -> String {
@@ -42,6 +49,7 @@ fn unsupported() -> Option<&'static str> {
 }
 
 pub fn start(app: &tauri::AppHandle) {
+    let _ = app.state::<UpdateState>().app.set(app.clone());
     app.state::<UpdateState>().change(|s| {
         s.current_version = app.package_info().version.to_string();
         if let Some(message) = unsupported() {
@@ -49,17 +57,8 @@ pub fn start(app: &tauri::AppHandle) {
             s.message = message.into();
         }
     });
-    if unsupported().is_some() {
-        return;
-    }
-    let app = app.clone();
-    tauri::async_runtime::spawn(async move {
-        tokio::time::sleep(Duration::from_secs(3)).await;
-        loop {
-            let _ = check(&app).await;
-            tokio::time::sleep(Duration::from_secs(6 * 60 * 60)).await;
-        }
-    });
+    // Release announcements arrive on the authenticated notification stream.
+    // The UI requests one signed manifest check for a newer announced version.
 }
 
 #[tauri::command]

@@ -171,7 +171,6 @@ mod tests {
             device_watch: Default::default(),
             recovery: Default::default(),
             volumes: None,
-            cues: Default::default(),
             connection: None,
             settings: AudioSettings::default(),
             devices: devices(true),

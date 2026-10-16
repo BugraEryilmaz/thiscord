@@ -44,7 +44,7 @@ async fn request(ui: Ui, command: &Request) -> Result<Response, String> {
     }
     response
 }
-fn action(ui: Ui, command: Request) {
+pub(super) fn action(ui: Ui, command: Request) {
     leptos::task::spawn_local(async move {
         match request(ui, &command).await {
             Ok(Response::Call { call }) => {
@@ -64,7 +64,7 @@ pub(super) fn end_call(ui: Ui) {
         action(ui, Request::EndCall { call_id: id });
     }
 }
-fn open(ui: Ui, id: ConversationId) {
+pub(super) fn open(ui: Ui, id: ConversationId) {
     ui.friends.selected.set(Some(id));
     ui.server.set(None);
     ui.page.set("servers");
@@ -125,7 +125,7 @@ pub(super) fn Host(ui: Ui) -> impl IntoView {
         });
     });
     view! {<div class="fixed right-6 top-14 z-40 max-w-sm space-y-2" aria-live="polite">
-        <For each=move ||ui.friends.snapshot.get().calls key=|c|c.id children=move |initial| {
+        <For each=move ||{ui.friends.snapshot.get().calls.into_iter().filter(|c| c.state!=CallState::Ringing || ui.account.get().is_some_and(|a|a.id==c.caller)).collect::<Vec<_>>()} key=|c|c.id children=move |initial| {
             let id=initial.id;
             let call=Signal::derive(move ||ui.friends.snapshot.get().calls.into_iter().find(|c|c.id==id).unwrap_or_else(||initial.clone()));
             let label=move ||ui.friends.snapshot.get().friends.into_iter().find(|f|f.conversation_id==call.get().conversation_id).map(|f|f.person.display_name).unwrap_or_else(||"Friend".into());
@@ -304,7 +304,7 @@ pub(super) fn Home(ui: Ui) -> impl IntoView {
                 <For each=move ||{ui.friends.snapshot.get().friends.into_iter().filter(|f|f.relationship==Relationship::Friend).collect::<Vec<_>>()} key=|f|f.conversation_id children=move |f| {
                     let id=f.conversation_id;
                     let friend=Signal::derive(move ||ui.friends.snapshot.get().friends.into_iter().find(|f|f.conversation_id==id).unwrap_or_else(||f.clone()));
-                    view!{<button class="mb-1 flex w-full items-center gap-2 rounded-lg p-2 text-left hover:bg-white/5" class=("bg-white/10",move ||ui.friends.selected.get()==Some(id)) on:click=move |_|open(ui,id)><span class="size-2 shrink-0 rounded-full" class:bg-emerald-400=move ||friend.get().online class=("bg-white/30",move ||!friend.get().online)></span><span class="truncate">{move ||friend.get().person.display_name}</span></button>}
+                    view!{<button data-context-conversation=id.to_string() class="mb-1 flex w-full items-center gap-2 rounded-lg p-2 text-left hover:bg-white/5" class=("bg-white/10",move ||ui.friends.selected.get()==Some(id)) on:click=move |_|open(ui,id)><span class="size-2 shrink-0 rounded-full" class:bg-emerald-400=move ||friend.get().online class=("bg-white/30",move ||!friend.get().online)></span><span class="truncate">{move ||friend.get().person.display_name}</span><Show when=move ||super::notifications::muted(ui,thiscord_shared::notifications::Target::Conversation {conversation_id:id})><span aria-label="Notifications muted"><Icon kind=Glyph::BellOff/></span></Show></button>}
                 }/>
             </aside>
             <div class="min-h-0 min-w-0 flex-1">
@@ -337,7 +337,7 @@ fn FriendList(ui: Ui, filter: RwSignal<&'static str>) -> impl IntoView {
         <For each=move ||friends.get() key=|f|f.conversation_id children=move |initial| {
             let id=initial.conversation_id;let person=initial.person.id;
             let f=Signal::derive(move ||ui.friends.snapshot.get().friends.into_iter().find(|f|f.conversation_id==id).unwrap_or_else(||initial.clone()));
-            view!{<div class="flex flex-wrap items-center gap-4 border-t border-white/10 py-4">
+            view!{<div data-context-conversation=id.to_string() class="flex flex-wrap items-center gap-4 border-t border-white/10 py-4">
                 <crate::avatar::Avatar class="size-10 text-sm" name=Signal::derive(move ||f.get().person.display_name) avatar_id=Signal::derive(move ||f.get().person.avatar_id)/>
                 <div class="min-w-0 flex-1"><p class="truncate font-semibold">{move ||f.get().person.display_name}<span class="ml-2 text-sm font-normal text-white/40">{move ||format!("@{}",f.get().person.username)}</span></p><p class="text-xs text-white/50">{move ||match f.get().relationship {Relationship::Incoming=>"Incoming request",Relationship::Outgoing=>"Request sent",Relationship::Friend if f.get().online=>"Online",Relationship::Friend=>"Offline"}}</p></div>
                 <Show when=move ||f.get().relationship==Relationship::Friend>
@@ -512,7 +512,10 @@ fn Conversation(ui: Ui, id: ConversationId) -> impl IntoView {
         });
     };
     view! {<section class="flex h-full min-h-0 flex-col">
-        <header class="flex items-center gap-3 border-b border-white/10 px-6 py-4"><button class="icon-button lg:hidden" aria-label="Back to friends" on:click=move |_|ui.friends.selected.set(None)><Icon kind=Glyph::Close/></button><h2 class="min-w-0 flex-1 truncate font-semibold">{move ||friend.get().map(|f|f.person.display_name).unwrap_or_default()}</h2><span class="text-xs text-white/50">{move ||if friend.get().is_some_and(|f|f.online){"Online"}else{"Offline"}}</span><button class="icon-button disabled:opacity-40" aria-label="Start private voice call" data-tip="Voice call (desktop)" disabled=move ||!available(ui) || !ui.friends.snapshot.get().calls.is_empty() on:click=move |_|action(ui,Request::StartCall {conversation_id:id})><Icon kind=Glyph::Headphones/></button></header>
+        <header data-context-conversation=id.to_string() class="flex items-center gap-3 border-b border-white/10 px-6 py-4"><button class="icon-button lg:hidden" aria-label="Back to friends" on:click=move |_|ui.friends.selected.set(None)><Icon kind=Glyph::Close/></button><h2 class="min-w-0 flex-1 truncate font-semibold">{move ||friend.get().map(|f|f.person.display_name).unwrap_or_default()}</h2><span class="text-xs text-white/50">{move ||if friend.get().is_some_and(|f|f.online){"Online"}else{"Offline"}}</span><button class="icon-button disabled:opacity-40" aria-label="Start private voice call" data-tip="Voice call (desktop)" disabled=move ||!available(ui) || !ui.friends.snapshot.get().calls.is_empty() on:click=move |_|action(ui,Request::StartCall {conversation_id:id})><Icon kind=Glyph::Headphones/></button></header>
+        <For each=move ||{ui.friends.snapshot.get().calls.into_iter().filter(|c|c.conversation_id==id && c.state==CallState::Ringing && ui.account.get().is_some_and(|a|a.id==c.callee)).collect::<Vec<_>>()} key=|c|c.id children=move |call|view!{
+            <div class="flex items-center gap-3 border-b border-white/10 px-6 py-3" aria-label="Incoming call controls"><span class="flex-1">"Incoming voice call"</span><button class="rounded bg-emerald-600 px-4 py-2 disabled:opacity-50" disabled=move ||!available(ui)||ui.voice_joining.get() on:click=move |_|action(ui,Request::AcceptCall {call_id:call.id})>"Accept"</button><button class="rounded bg-red-500/20 px-4 py-2" on:click=move |_|action(ui,Request::EndCall {call_id:call.id})>"Decline"</button></div>
+        }/>
         <div node_ref=list class="min-h-0 flex-1 overflow-y-auto px-6 py-4" on:scroll=move |_|if let Some(node)=list.get(){bottom.set(node.scroll_height()-node.scroll_top()-node.client_height()<80);}>
             <Show when=move ||older.get().is_some()><button class="mb-4 text-sm text-brand disabled:opacity-50" disabled=move ||loading.get() on:click=move |_| {
                 let before=older.get_untracked();if loading.get_untracked(){return;}loading.set(true);

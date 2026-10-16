@@ -1,0 +1,7 @@
+{
+  "$schema": "../gen/schemas/desktop-schema.json",
+  "identifier": "notifications",
+  "description": "Local notification presentation and actions only.",
+  "windows": ["notifications"],
+  "permissions": ["notification-banner", "core:event:allow-listen", "core:event:allow-unlisten"]
+}

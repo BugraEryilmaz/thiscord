@@ -37,6 +37,14 @@ pub(super) async fn admit(
         previous.replaced.send_replace(true);
     }
     member.info.slot = slot;
+    if previous_slot.is_none() {
+        voice_notification(
+            room,
+            &members,
+            &member.info,
+            thiscord_shared::notifications::Kind::VoiceJoin,
+        );
+    }
     members.insert(slot, member);
     Ok(slot)
 }
@@ -85,6 +93,31 @@ mod tests {
     }
     fn account() -> thiscord_shared::AccountId {
         thiscord_shared::AccountId::from_uuid(uuid::Uuid::new_v4())
+    }
+
+    #[tokio::test]
+    async fn notification_membership_push_excludes_self_replacements_and_stale_cleanup() {
+        use thiscord_shared::notifications::Kind;
+        let room = Room {
+            notification_target: Some((
+                GuildId::from_uuid(uuid::Uuid::new_v4()),
+                ChannelId::from_uuid(uuid::Uuid::new_v4()),
+            )),
+            ..Default::default()
+        };
+        let a = member(account(), id());
+        let b = member(account(), id());
+        let mut events = crate::notifications::test_listener(a.info.account_id);
+        admit(&room, a, false).await.unwrap();
+        assert!(events.receiver.try_recv().is_err());
+        let slot = admit(&room, b.clone(), false).await.unwrap();
+        assert_eq!(events.receiver.recv().await.unwrap().kind, Kind::VoiceJoin);
+        let replacement = member(b.info.account_id, id());
+        admit(&room, replacement.clone(), false).await.unwrap();
+        release_member(&room, slot, b.source_id).await;
+        assert!(events.receiver.try_recv().is_err());
+        release_member(&room, slot, replacement.source_id).await;
+        assert_eq!(events.receiver.recv().await.unwrap().kind, Kind::VoiceLeave);
     }
 
     #[tokio::test]

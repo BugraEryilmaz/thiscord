@@ -1,32 +1,15 @@
-//! Local membership earcons. Generate PCM before opening the device, then only
+//! Server-selected notification earcons. Generate PCM before opening the device, then only
 //! read samples in the callback. A bounded bitset coalesces bursts of changes.
 use super::mixer::RATE;
-use thiscord_shared::AccountId;
 
+#[cfg(test)]
 pub(super) const JOIN: u8 = 1;
+#[cfg(test)]
 pub(super) const LEAVE: u8 = 2;
 
-#[derive(Default)]
-pub(super) struct Roster(Option<Vec<AccountId>>);
-
-impl Roster {
-    pub fn update(&mut self, members: impl Iterator<Item = AccountId>) -> u8 {
-        let members: Vec<_> = members.collect();
-        let cue = match &self.0 {
-            // One self-join sound, not a sound for every existing participant.
-            None => JOIN,
-            Some(old) => {
-                (u8::from(members.iter().any(|id| !old.contains(id))) * JOIN)
-                    | (u8::from(old.iter().any(|id| !members.contains(id))) * LEAVE)
-            }
-        };
-        self.0 = Some(members);
-        cue
-    }
-}
-
 pub(super) struct Player {
-    sounds: [Vec<f32>; 2],
+    sounds: [Vec<f32>; 6],
+    pub volumes: [u8; 6],
     pending: u8,
     active: Option<usize>,
     position: usize,
@@ -35,7 +18,15 @@ pub(super) struct Player {
 impl Player {
     pub fn new() -> Self {
         Self {
-            sounds: [tone([660.0, 880.0]), tone([660.0, 440.0])],
+            sounds: [
+                tone([660.0, 880.0]),
+                tone([660.0, 440.0]),
+                tone([660.0, 780.0]),
+                tone([600.0, 660.0]),
+                tone([740.0, 980.0]),
+                tone([520.0, 660.0]),
+            ],
+            volumes: [100; 6],
             pending: 0,
             active: None,
             position: 0,
@@ -47,25 +38,23 @@ impl Player {
             self.pending = 0;
             self.active = None;
         } else {
-            self.pending |= cues & (JOIN | LEAVE);
+            self.pending |= cues & 63;
         }
     }
 
     pub fn next(&mut self) -> f32 {
         if self.active.is_none() {
-            let (index, bit) = if self.pending & LEAVE != 0 {
-                (1, LEAVE)
-            } else if self.pending & JOIN != 0 {
-                (0, JOIN)
-            } else {
+            if self.pending == 0 {
                 return 0.0;
-            };
+            }
+            let index = self.pending.trailing_zeros() as usize;
+            let bit = 1 << index;
             self.pending &= !bit;
             self.active = Some(index);
             self.position = 0;
         }
         let sound = &self.sounds[self.active.unwrap()];
-        let sample = sound[self.position];
+        let sample = sound[self.position] * f32::from(self.volumes[self.active.unwrap()]) / 100.0;
         self.position += 1;
         if self.position == sound.len() {
             self.active = None;
@@ -96,19 +85,6 @@ fn tone(notes: [f32; 2]) -> Vec<f32> {
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn membership_snapshots_only_cue_actual_identity_changes() {
-        let a = "00000000-0000-0000-0000-000000000001".parse().unwrap();
-        let b = "00000000-0000-0000-0000-000000000002".parse().unwrap();
-        let mut roster = Roster::default();
-        assert_eq!(roster.update([a, b].into_iter()), JOIN);
-        assert_eq!(roster.update([b, a].into_iter()), 0);
-        assert_eq!(roster.update([a].into_iter()), LEAVE);
-        assert_eq!(roster.update([b].into_iter()), JOIN | LEAVE);
-        assert_eq!(roster.update([b].into_iter()), 0);
-        assert_eq!(Roster::default().update([].into_iter()), JOIN);
-    }
 
     #[test]
     fn cues_are_short_bounded_distinct_and_deafen_cancels_backlog() {

@@ -12,6 +12,11 @@ enum Action {
     ChannelPermissions(GuildId, ChannelId),
     Read(GuildId, ChannelId),
     Preference(ChannelId, bool),
+    Notifications(thiscord_shared::notifications::Target, String),
+    Snooze(
+        thiscord_shared::notifications::Target,
+        thiscord_shared::notifications::Snooze,
+    ),
     Join(Guild, Channel),
     Disconnect,
     Change(GuildId, i64, GuildChange, String),
@@ -322,14 +327,24 @@ async fn items(ui: Ui, target: Target) -> Result<(String, Vec<Item>), String> {
             }
         }
         let preferences = ui.sidebar_preferences.get_untracked();
+        let notification_target = thiscord_shared::notifications::Target::Channel {
+            guild_id: guild.id,
+            channel_id: id,
+        };
         items.push(Item::new(
-            if preferences.muted.contains(&id) {
-                "Unmute notifications"
-            } else {
-                "Mute notifications"
-            },
-            Action::Preference(id, false),
+            "Notification settings…",
+            Action::Notifications(notification_target, channel.name.clone()),
         ));
+        for (duration, label) in thiscord_shared::notifications::Snooze::OPTIONS {
+            items.push(Item::new(
+                if duration == thiscord_shared::notifications::Snooze::Resume {
+                    label.to_owned()
+                } else {
+                    format!("Mute · {label}")
+                },
+                Action::Snooze(notification_target, duration),
+            ));
+        }
         items.push(Item::new(
             if preferences.pinned.contains(&id) {
                 "Unpin from top"
@@ -416,6 +431,8 @@ async fn items(ui: Ui, target: Target) -> Result<(String, Vec<Item>), String> {
 
 fn execute(ui: Ui, action: Action) {
     match action {
+        Action::Notifications(target, title) => super::notifications::edit(ui, target, title),
+        Action::Snooze(target, duration) => super::notifications::snooze(ui, target, duration),
         Action::Preference(channel, pin) => save_preference(ui, channel, pin),
         Action::Join(guild, channel) => super::audio::join(ui, guild, channel),
         Action::Disconnect => super::audio::leave(ui),
@@ -502,6 +519,51 @@ fn execute(ui: Ui, action: Action) {
     }
 }
 
+fn conversation_menu(ui: Ui, event_target: Option<web_sys::EventTarget>, x: f64, y: f64) -> bool {
+    let Some(conversation_id) = event_target
+        .and_then(|t| t.dyn_into::<web_sys::Element>().ok())
+        .and_then(|e| e.closest("[data-context-conversation]").ok().flatten())
+        .and_then(|e| e.get_attribute("data-context-conversation"))
+        .and_then(|id| id.parse().ok())
+    else {
+        return false;
+    };
+    let target = thiscord_shared::notifications::Target::Conversation { conversation_id };
+    let title = ui
+        .friends
+        .snapshot
+        .get_untracked()
+        .friends
+        .into_iter()
+        .find(|f| f.conversation_id == conversation_id)
+        .map(|f| f.person.display_name)
+        .unwrap_or_else(|| "Conversation".into());
+    let mut items = vec![Item::new(
+        "Notification settings…",
+        Action::Notifications(target, title.clone()),
+    )];
+    for (duration, label) in thiscord_shared::notifications::Snooze::OPTIONS {
+        items.push(Item::new(
+            if duration == thiscord_shared::notifications::Snooze::Resume {
+                label.to_owned()
+            } else {
+                format!("Mute · {label}")
+            },
+            Action::Snooze(target, duration),
+        ));
+    }
+    close(ui);
+    ui.context_menu.set(Some(Menu {
+        title,
+        items,
+        note: String::new(),
+        x,
+        y,
+        volume: None,
+    }));
+    true
+}
+
 #[component]
 pub(super) fn Host(ui: Ui) -> impl IntoView {
     let menu_node = NodeRef::<leptos::html::Div>::new();
@@ -534,6 +596,9 @@ pub(super) fn Host(ui: Ui) -> impl IntoView {
     let context = window_event_listener(leptos::ev::contextmenu, move |e| {
         e.prevent_default();
         return_focus.set_value(document().active_element().and_then(|e| e.dyn_into().ok()));
+        if conversation_menu(ui, e.target(), e.client_x().into(), e.client_y().into()) {
+            return;
+        }
         if let Some(element) = element(e.target()) {
             open(ui, element, e.client_x().into(), e.client_y().into());
         } else {
@@ -554,6 +619,9 @@ pub(super) fn Host(ui: Ui) -> impl IntoView {
         if e.key() == "ContextMenu" || (e.key() == "F10" && e.shift_key()) {
             e.prevent_default();
             return_focus.set_value(document().active_element().and_then(|e| e.dyn_into().ok()));
+            if conversation_menu(ui, e.target(), 0.0, 0.0) {
+                return;
+            }
             if let Some(element) = element(e.target()) {
                 open(ui, element, 0.0, 0.0);
             }

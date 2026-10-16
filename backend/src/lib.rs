@@ -4,6 +4,7 @@ pub mod auth;
 pub mod chat;
 pub mod db;
 pub mod friends;
+pub mod notifications;
 pub mod permissions;
 pub mod schema;
 

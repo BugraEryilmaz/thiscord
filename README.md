@@ -5,6 +5,12 @@ conversations and one-to-one desktop voice calls. Use **Add friend** in the top
 right to search usernames. See [friends and private conversations](docs/friends.md)
 for behavior, access rules and current limitations.
 
+**Settings → Notifications** controls sounds, banners, volume and event filters.
+Right-click channels or conversations for per-source settings and quick mute;
+banners offer snooze and incoming-call actions. Alerts use authenticated server
+subscriptions across all accessible chats, with preferences synced between devices.
+See [notifications and release announcements](docs/notifications.md).
+
 A browser dashboard at `/admin` provides instance-owner/admin-only CPU/RAM,
 backend health, active voice rooms and per-participant network diagnostics.
 Click a participant to adjust their connected desktop's audio settings using the

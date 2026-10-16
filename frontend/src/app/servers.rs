@@ -405,8 +405,8 @@ pub(super) fn ServerHome(ui: Ui) -> impl IntoView {
                                 {if is_voice {view!{<Icon kind=Glyph::Volume/>}.into_any()}else{view!{<span class="w-5 text-center text-xl text-white/40">"#"</span>}.into_any()}}
                                 <span class="min-w-0 flex-1 truncate text-sm">{name.clone()}</span>
                                 <Show when=move ||ui.sidebar_preferences.get().pinned.contains(&id)><span aria-label="Pinned" class="channel-indicator"><Icon kind=Glyph::Pin/></span></Show>
-                                <Show when=move ||ui.sidebar_preferences.get().muted.contains(&id)><span aria-label="Notifications muted" class="channel-indicator"><Icon kind=Glyph::BellOff/></span></Show>
-                                <span class="shrink-0 text-xs text-brand">{move||if ui.sidebar_preferences.get().muted.contains(&id){None}else{unread.get().iter().find(|u|u.channel_id==id&&u.count>0).map(|u|format!("{}{}",u.count,if u.mentions>0{" @"}else{""}))}}</span>
+                                <Show when=move ||super::notifications::muted(ui, thiscord_shared::notifications::Target::Channel { guild_id, channel_id: id })><span aria-label="Notifications muted" class="channel-indicator"><Icon kind=Glyph::BellOff/></span></Show>
+                                <span class="shrink-0 text-xs text-brand">{move||if super::notifications::muted(ui, thiscord_shared::notifications::Target::Channel { guild_id, channel_id: id }){None}else{unread.get().iter().find(|u|u.channel_id==id&&u.count>0).map(|u|format!("{}{}",u.count,if u.mentions>0{" @"}else{""}))}}</span>
                             </button>{is_voice.then(||view!{<VoiceRoster ui=ui guild=guild_id channel=id/>})}</li>}
                         }).collect_view()}}</ul>
                     </nav>

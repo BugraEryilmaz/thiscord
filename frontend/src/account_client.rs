@@ -41,6 +41,42 @@ pub async fn native<T: serde::de::DeserializeOwned>(
     })?;
     serde_wasm_bindgen::from_value(value).map_err(|_| "Invalid desktop response".into())
 }
+
+#[wasm_bindgen]
+extern "C" {
+    #[wasm_bindgen(catch, js_namespace = ["__TAURI__", "event"], js_name = listen)]
+    async fn event_listen(name: &str, callback: &js_sys::Function) -> Result<JsValue, JsValue>;
+}
+pub struct EventListener {
+    unlisten: js_sys::Function,
+    _callback: Closure<dyn FnMut(JsValue)>,
+}
+impl Drop for EventListener {
+    fn drop(&mut self) {
+        let _ = self.unlisten.call0(&JsValue::NULL);
+    }
+}
+pub async fn listen<T: serde::de::DeserializeOwned + 'static>(
+    name: &str,
+    mut callback: impl FnMut(T) + 'static,
+) -> Result<EventListener, String> {
+    let callback = Closure::wrap(Box::new(move |event: JsValue| {
+        if let Ok(payload) = js_sys::Reflect::get(&event, &JsValue::from_str("payload"))
+            && let Ok(value) = serde_wasm_bindgen::from_value(payload)
+        {
+            callback(value);
+        }
+    }) as Box<dyn FnMut(JsValue)>);
+    let unlisten = event_listen(name, callback.as_ref().unchecked_ref())
+        .await
+        .map_err(|_| "Desktop events unavailable")?
+        .dyn_into()
+        .map_err(|_| "Invalid desktop listener")?;
+    Ok(EventListener {
+        unlisten,
+        _callback: callback,
+    })
+}
 pub async fn request(
     command: &AccountRequest,
     token: Option<&str>,

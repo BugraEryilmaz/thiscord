@@ -70,7 +70,7 @@ pub(super) async fn attach(
         })
         .await
         .unwrap_or(Err(Failure::Unavailable))?;
-        let room = room(channel).await;
+        let room = room(guild, channel).await;
         let mut members = room.members.write().await;
         let _admission = access.packet(epoch, epoch).ok_or(Failure::Unavailable)?;
         let Some(member) = members

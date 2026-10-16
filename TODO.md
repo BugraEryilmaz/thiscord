@@ -12,7 +12,18 @@ media compatibility spike can happen before chat to expose platform constraints.
 - [x] Private voice invitations, acceptance, decline/hang-up, native audio reuse and media revocation.
 - [x] PostgreSQL/socket and loopback WebRTC tests for private access and lifecycle.
 - [ ] Validate physical private calls and incoming-call controls on Windows/macOS/Linux.
-- [ ] DM unread badges, typing, edit/delete, blocking/reporting, ring sounds and push notifications.
+- [ ] DM unread badges, typing, edit/delete and blocking/reporting.
+
+## Notifications
+
+- [x] Authenticated server push subscriptions for guild/DM messages, incoming calls, voice membership and release announcements.
+- [x] Persistent event defaults and per-source overrides for mode, sound, banner and volume; cross-device synchronization.
+- [x] Channel/DM context-menu mute and banner snooze for 15 minutes, 1 hour, 1 day, 30 days and forever.
+- [x] App-owned desktop banners with call actions, native tones and in-browser previews; event-driven updater discovery/status.
+- [x] Authorization, deduplication, preference revision, expiry and socket integration tests.
+- [ ] Physical Windows/macOS/Linux banner focus/fullscreen, sound-device and call-action acceptance.
+- [ ] Configure production release announcement URL/admin session and verify release workflow delivery.
+- [ ] OS notification-center integration and alerts while the app is fully closed.
 
 ## 0. Foundation
 
@@ -119,7 +130,7 @@ and single-process chat/media enforcement.
 - [ ] Measure unread fan-out with large backlogs; evaluate maintained sequence-bucket aggregates (see docs/unread-performance.md).
 - [x] Safe message rendering, bounded payloads and spam controls.
 - [x] Reconnect, duplicate delivery, channel isolation and channel deletion tests.
-- [ ] Later: access-controlled attachments/quotas, search and desktop notifications.
+- [ ] Later: access-controlled attachments/quotas and search.
 
 ## 5. Frontend audio and media feasibility
 

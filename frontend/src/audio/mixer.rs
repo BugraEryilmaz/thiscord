@@ -114,6 +114,7 @@ pub struct Controls {
     callback_origin: Instant,
     callback_deadline_ns: AtomicU64,
     pub(super) cues: AtomicU8,
+    pub(super) cue_volumes: [AtomicU8; 6],
     pub mute: AtomicBool,
     pub deafen: AtomicBool,
     pub push_to_talk: AtomicBool,
@@ -134,6 +135,7 @@ impl Default for Controls {
             callback_origin: Instant::now(),
             callback_deadline_ns: 0.into(),
             cues: 0.into(),
+            cue_volumes: std::array::from_fn(|_| AtomicU8::new(100)),
             mute: false.into(),
             deafen: false.into(),
             push_to_talk: false.into(),
@@ -280,6 +282,9 @@ impl Mixer {
             .callback_samples
             .store(callback_samples, Ordering::Relaxed);
         let deafened = self.controls.deafen.load(Ordering::Relaxed);
+        for (index, volume) in self.controls.cue_volumes.iter().enumerate() {
+            self.cues.volumes[index] = volume.load(Ordering::Relaxed);
+        }
         self.cues
             .request(self.controls.cues.swap(0, Ordering::Relaxed), deafened);
         let master = f32::from_bits(self.controls.master.load(Ordering::Relaxed));
