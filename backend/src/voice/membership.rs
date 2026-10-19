@@ -46,6 +46,7 @@ pub(super) async fn admit(
         );
     }
     members.insert(slot, member);
+    room.changed.send_replace(());
     Ok(slot)
 }
 
@@ -73,6 +74,8 @@ mod tests {
                 sharing_screen: false,
                 sharing_audio: false,
                 screen_epoch: 1,
+                microphone_epoch: 1,
+                microphone_source_epoch: 1,
                 camera_active: false,
                 camera_epoch: 0,
                 screen_viewers: vec![],
@@ -80,6 +83,11 @@ mod tests {
             },
             source_id: uuid::Uuid::new_v4(),
             screen_started: Instant::now(),
+            microphone_started: Instant::now(),
+            packet_redundancy: false,
+            expected_sender_generation: None,
+            restricted_sender_generation: None,
+            red: red::Barrier::default(),
             camera_started: Instant::now(),
             outgoing: MediaKind::ALL.map(|kind| egress::channel(kind).0),
             keyframes: mpsc::channel(1).0,

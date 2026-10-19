@@ -56,6 +56,7 @@ pub enum ReadinessStatus {
 
 pub mod admin;
 pub mod audio;
+pub mod rtp_red;
 pub mod update;
 pub mod voice;
 

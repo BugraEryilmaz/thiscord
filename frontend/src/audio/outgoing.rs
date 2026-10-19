@@ -1,7 +1,7 @@
 //! Native microphone timing and bounded transport admission. Never sent over IPC.
 use super::{connection::Connection, frames, mixer::RATE};
 use std::{
-    sync::atomic::{AtomicU64, Ordering},
+    sync::atomic::{AtomicBool, AtomicU64, Ordering},
     time::{Duration, Instant},
 };
 
@@ -11,6 +11,7 @@ pub const QUEUE_CAPACITY: usize = 5;
 pub const MAX_PACKET_AGE: Duration = Duration::from_millis(100);
 
 pub struct EncodedFrame {
+    pub packet_redundancy: bool,
     pub(super) accounted: bool,
     pub payload: bytes::Bytes,
     pub media_position: u64,
@@ -37,7 +38,7 @@ impl EncodedFrame {
         }
     }
 
-    fn deadline(&self) -> Instant {
+    pub(crate) fn deadline(&self) -> Instant {
         self.oldest_capture + MAX_PACKET_AGE + self.activation_delay.min(super::gate::DELAY)
     }
 }
@@ -52,6 +53,9 @@ pub enum DropReason {
 /// One atomic cutoff is both an invalidation generation and a capture-time fence.
 /// A worker cannot stamp pre-mute PCM with a fresh generation after unmuting.
 pub struct Control {
+    receive_protected: AtomicBool,
+    receive_paused: AtomicBool,
+    receive_generation: AtomicU64,
     changed: tokio::sync::Notify,
     origin: Instant,
     cutoff: AtomicU64,
@@ -67,6 +71,9 @@ impl Default for Control {
 impl Control {
     fn new(origin: Instant) -> Self {
         Self {
+            receive_protected: AtomicBool::new(false),
+            receive_paused: AtomicBool::new(true),
+            receive_generation: AtomicU64::new(0),
             changed: Default::default(),
             origin,
             cutoff: AtomicU64::new(0),
@@ -75,8 +82,46 @@ impl Control {
             invalidated: AtomicU64::new(0),
         }
     }
+    pub fn enable_receive_protection(&self) {
+        self.receive_protected.store(true, Ordering::Release);
+    }
+    pub fn disable_receive_protection(&self) {
+        self.receive_protected.store(false, Ordering::Release);
+    }
+    pub fn pause_receive(&self) {
+        self.receive_paused.store(true, Ordering::Release);
+    }
+    pub fn admit_receive(&self, generation: u64) -> bool {
+        if generation != self.generation() {
+            return false;
+        }
+        self.receive_generation.store(generation, Ordering::Release);
+        self.receive_paused.store(false, Ordering::Release);
+        generation == self.generation()
+    }
+    pub fn receive_allowed(&self) -> bool {
+        !self.receive_protected.load(Ordering::Acquire)
+            || (!self.receive_paused.load(Ordering::Acquire)
+                && self.receive_generation.load(Ordering::Acquire) == self.generation())
+    }
     pub fn invalidate(&self) {
         self.invalidate_at(Instant::now());
+    }
+    /// A server-requested source refresh must never absorb a concurrent local
+    /// PTT/settings boundary into its source-only acknowledgment.
+    pub fn refresh_generation(&self, expected: u64) -> Option<u64> {
+        let stamp = Instant::now()
+            .saturating_duration_since(self.origin)
+            .as_nanos();
+        let next = u64::try_from(stamp)
+            .ok()?
+            .checked_add(1)?
+            .max(expected.checked_add(1)?);
+        self.cutoff
+            .compare_exchange(expected, next, Ordering::AcqRel, Ordering::Acquire)
+            .ok()?;
+        self.changed.notify_waiters();
+        Some(next)
     }
     pub(super) fn cancel_pending(&self) {
         self.changed.notify_waiters();
@@ -89,6 +134,9 @@ impl Control {
                 Some(stamp.max(old.saturating_add(1)))
             });
         self.changed.notify_waiters();
+    }
+    pub async fn changed(&self) {
+        self.changed.notified().await;
     }
     pub fn generation(&self) -> u64 {
         self.cutoff.load(Ordering::Acquire)
@@ -122,9 +170,20 @@ impl Control {
         connection: &Connection,
         write: F,
     ) -> Result<F::Output, DropReason> {
-        self.guard_write_with_clock(frame, connection, write, Instant::now)
+        self.guard_write_until(frame, connection, frame.deadline(), write)
             .await
     }
+    pub async fn guard_write_until<F: std::future::Future>(
+        &self,
+        frame: &EncodedFrame,
+        connection: &Connection,
+        deadline: Instant,
+        write: F,
+    ) -> Result<F::Output, DropReason> {
+        self.guard_until_with_clock(frame, connection, deadline, write, Instant::now)
+            .await
+    }
+    #[cfg(test)]
     async fn guard_write_with_clock<F: std::future::Future>(
         &self,
         frame: &EncodedFrame,
@@ -132,6 +191,18 @@ impl Control {
         write: F,
         now: impl Fn() -> Instant,
     ) -> Result<F::Output, DropReason> {
+        self.guard_until_with_clock(frame, connection, frame.deadline(), write, now)
+            .await
+    }
+    async fn guard_until_with_clock<F: std::future::Future>(
+        &self,
+        frame: &EncodedFrame,
+        connection: &Connection,
+        deadline: Instant,
+        write: F,
+        now: impl Fn() -> Instant,
+    ) -> Result<F::Output, DropReason> {
+        let deadline = deadline.min(frame.deadline());
         let changed = self.changed.notified();
         tokio::pin!(changed);
         changed.as_mut().enable();
@@ -140,13 +211,16 @@ impl Control {
             if let Err(reason) = self.check(frame, connection, now()) {
                 return std::task::Poll::Ready(Err(reason));
             }
+            if now() >= deadline {
+                return std::task::Poll::Ready(Err(DropReason::Expired));
+            }
             write.as_mut().poll(cx).map(Ok)
         });
         tokio::select! {
             biased;
             result = guarded => result,
             _ = &mut changed => Err(DropReason::ControlInvalidated),
-            _ = tokio::time::sleep_until(frame.deadline().into()) => Err(DropReason::Expired),
+            _ = tokio::time::sleep_until(deadline.into()) => Err(DropReason::Expired),
         }
     }
     /// Report the transport decision in the owning connection's bounded window.
@@ -232,6 +306,23 @@ impl RtpClock {
 mod tests {
     use super::*;
 
+    #[test]
+    fn source_refresh_cannot_absorb_local_control_before_or_after_compare_exchange() {
+        let control = Control::default();
+        control.enable_receive_protection();
+        assert!(control.admit_receive(0));
+        let observed = control.generation();
+        control.invalidate(); // real PTT/deafen wins before source-only CAS
+        assert!(control.refresh_generation(observed).is_none());
+        assert!(!control.receive_allowed());
+        let local = control.generation();
+        let refresh = control.refresh_generation(local).unwrap();
+        control.invalidate(); // real PTT/deafen wins after source-only CAS
+        assert!(!control.admit_receive(refresh));
+        assert!(!control.receive_allowed());
+        assert!(control.generation() > refresh);
+    }
+
     fn frame(
         at: Instant,
         generation: u64,
@@ -239,6 +330,7 @@ mod tests {
         media_position: u64,
     ) -> EncodedFrame {
         EncodedFrame {
+            packet_redundancy: false,
             accounted: false,
             payload: bytes::Bytes::from_static(b"synthetic"),
             oldest_capture: at,
@@ -500,6 +592,32 @@ mod tests {
             Err(DropReason::Expired)
         );
         assert_eq!(polls.get(), 1);
+    }
+
+    #[tokio::test]
+    async fn pending_red_write_expires_with_oldest_repeated_capture() {
+        let at = Instant::now();
+        let control = Control::new(at);
+        let connection = Connection::default();
+        let primary = frame(at + Duration::from_millis(40), 0, &connection, 1920);
+        let history_deadline = at + MAX_PACKET_AGE;
+        let now = std::cell::Cell::new(at + Duration::from_millis(99));
+        let polls = std::cell::Cell::new(0);
+        let write = std::future::poll_fn(|cx| {
+            polls.set(polls.get() + 1);
+            now.set(history_deadline);
+            cx.waker().wake_by_ref();
+            std::task::Poll::<()>::Pending
+        });
+        assert_eq!(
+            control
+                .guard_until_with_clock(&primary, &connection, history_deadline, write, || now
+                    .get())
+                .await,
+            Err(DropReason::Expired)
+        );
+        assert_eq!(polls.get(), 1);
+        assert!(control.check(&primary, &connection, now.get()).is_ok());
     }
 
     #[test]

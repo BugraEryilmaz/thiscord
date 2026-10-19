@@ -38,12 +38,25 @@ pub enum ClientEvent {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         attempt: Option<JoinAttempt>,
     },
+    MicrophoneBoundary {
+        generation: u64,
+    },
+    MicrophoneRefresh {
+        generation: u64,
+        challenge: u32,
+    },
+    MicrophoneRefreshReady {
+        generation: u64,
+        challenge: u32,
+    },
     AudioReply {
         request_id: crate::RequestId,
         chunk: String,
         done: bool,
     },
     Answer {
+        #[serde(default, skip_serializing_if = "is_false")]
+        packet_redundancy: bool,
         #[serde(default, skip_serializing_if = "is_false")]
         remote_audio: bool,
         sdp: String,
@@ -75,6 +88,9 @@ pub enum ClientEvent {
     Ping {},
     Leave {},
 }
+fn accepted_by_default() -> bool {
+    true
+}
 fn is_false(value: &bool) -> bool {
     !value
 }
@@ -87,6 +103,10 @@ pub struct Participant {
     #[serde(default)]
     pub avatar_id: Option<crate::AvatarId>,
     pub slot: usize,
+    #[serde(default)]
+    pub microphone_epoch: u32,
+    #[serde(default)]
+    pub microphone_source_epoch: u32,
     pub muted: bool,
     pub deafened: bool,
     pub can_speak: bool,
@@ -152,6 +172,20 @@ pub struct ServerFrame {
 #[derive(Clone, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum ServerEvent {
+    MicrophoneRefreshRequired {
+        challenge: u32,
+    },
+    MicrophoneBoundaryAccepted {
+        generation: u64,
+        /// Listener barrier; a source-only refresh never advances this floor.
+        microphone_epoch: u32,
+        /// Current publisher privacy revision, matching Participant.microphone_epoch.
+        source_epoch: u32,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        challenge: Option<u32>,
+        #[serde(default = "accepted_by_default")]
+        accepted: bool,
+    },
     AudioCommand {
         request_id: crate::RequestId,
         command: crate::remote_audio::Command,
@@ -172,6 +206,8 @@ pub enum ServerEvent {
         counters: std::collections::BTreeMap<String, u64>,
     },
     Offer {
+        #[serde(default)]
+        packet_redundancy: bool,
         #[serde(default)]
         remote_audio: bool,
         sdp: String,

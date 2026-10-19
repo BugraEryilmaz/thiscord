@@ -5,7 +5,7 @@ use super::{
 };
 use ringbuf::{HeapCons, HeapProd, HeapRb, traits::*};
 use std::sync::{
-    Arc,
+    Arc, OnceLock,
     atomic::{AtomicBool, AtomicU8, AtomicU32, AtomicU64, AtomicUsize, Ordering},
 };
 use std::time::Instant;
@@ -109,6 +109,7 @@ impl PlaybackCounts {
     }
 }
 pub struct Controls {
+    pub(super) receive_guard: OnceLock<Arc<super::outgoing::Control>>,
     pub counts: CallbackCounts,
     callback_samples: AtomicUsize,
     callback_origin: Instant,
@@ -130,6 +131,7 @@ pub struct Controls {
 impl Default for Controls {
     fn default() -> Self {
         Self {
+            receive_guard: OnceLock::new(),
             counts: Default::default(),
             callback_samples: 0.into(),
             callback_origin: Instant::now(),
@@ -290,11 +292,21 @@ impl Mixer {
         let master = f32::from_bits(self.controls.master.load(Ordering::Relaxed));
         // Keep the legacy local-test trim, but never trim the larger cushion
         // needed by a device callback. Hard resets still discard the whole ring.
-        for stream in &mut self.streams {
+        for (index, stream) in self.streams.iter_mut().enumerate() {
             let generation = stream.control.generation.load(Ordering::Acquire);
             let changed = generation != stream.generation;
             stream.generation = generation;
-            let discard = if changed || deafened || !stream.control.active.load(Ordering::Acquire) {
+            let receive_blocked = index < thiscord_shared::voice::ROOM_CAPACITY
+                && self
+                    .controls
+                    .receive_guard
+                    .get()
+                    .is_some_and(|guard| !guard.receive_allowed());
+            let discard = if changed
+                || deafened
+                || receive_blocked
+                || !stream.control.active.load(Ordering::Acquire)
+            {
                 stream.queue.occupied_len()
             } else {
                 stream
@@ -317,7 +329,25 @@ impl Mixer {
         for frame in output.chunks_mut(channels) {
             let mut mix = self.cues.next();
             for (index, stream) in self.streams.iter_mut().enumerate() {
-                if deafened || !stream.control.active.load(Ordering::Relaxed) {
+                // An urgent cutoff can arrive during this callback. Observe it
+                // before each microphone sample and never affect shared audio.
+                let receive_blocked = index < thiscord_shared::voice::ROOM_CAPACITY
+                    && self
+                        .controls
+                        .receive_guard
+                        .get()
+                        .is_some_and(|guard| !guard.receive_allowed());
+                let generation = stream.control.generation.load(Ordering::Acquire);
+                if receive_blocked || generation != stream.generation {
+                    let discard = stream.queue.occupied_len();
+                    stream.control.counts.discarded.add(discard as u64);
+                    for _ in 0..discard {
+                        let _ = stream.queue.try_pop();
+                    }
+                    stream.generation = generation;
+                    stream.control.cleared.store(generation, Ordering::Release);
+                }
+                if deafened || receive_blocked || !stream.control.active.load(Ordering::Relaxed) {
                     silence[index] += 1;
                     continue;
                 }

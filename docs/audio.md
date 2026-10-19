@@ -598,6 +598,15 @@ Physical multi-client impairment/listening and native macOS/Linux device
 acceptance remain unverified. Existing CI runs these native tests on all three
 platforms; no new dependency or CI feature is required.
 
+### Optional microphone packet redundancy
+
+Advanced audio settings offer default-off negotiated RFC 2198 RED, repeating up
+to two bounded recent microphone packets. Updated connections also use
+authenticated privacy generations across signaling/RTP; control boundaries briefly
+pause microphone transmission and listening for a network round trip. See
+[packet redundancy](packet-redundancy.md) for compatibility, limits, DRED/padding
+combination policy and deterministic recovery/bandwidth results.
+
 ### Opus microphone FEC policy
 
 Microphone encoding retains 48 kHz mono, 20 ms frames, `Application::Voip` and

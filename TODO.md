@@ -147,6 +147,10 @@ and single-process chat/media enforcement.
 - [x] Optional live adaptive Opus FEC from authenticated microphone uplink RTCP,
   with bounded smoothing, stale/default fallback, persisted local/remote settings
   and numeric diagnostics; see `docs/audio.md` for limitations and integration.
+- [x] Optional negotiated RFC2198 microphone RED with two bounded previous frames,
+  legacy Opus fallback and challenge-bound source/receiver privacy fencing.
+- [ ] Validate RED bandwidth, control-boundary interruptions and recovery quality
+  with physical Windows/macOS/Linux clients on adverse real networks.
 - [ ] Validate FEC speech/bitrate tradeoffs with listening and physical clients
   on Windows/macOS/Linux under real packet loss and jitter.
 - [x] Windows/Linux encrypted WebRTC software probes; three-OS CI build/test matrix.

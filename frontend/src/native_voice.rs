@@ -120,7 +120,16 @@ impl PeerConnectionEventHandler for Handler {
                     let slot = MediaKind::from_relay_ssrc(packet.header.ssrc)
                         .and_then(|(kind, slot)| kind.mixer_slot(slot));
                     if let Some(slot) = slot {
+                        if slot < ROOM_CAPACITY && !matches!(packet.header.csrc.len(), 0 | 2) {
+                            continue;
+                        }
                         engine.notify(Command::Packet {
+                            payload_type: packet.header.payload_type,
+                            source_epoch: (slot < ROOM_CAPACITY)
+                                .then(|| packet.header.csrc.first().copied())
+                                .flatten(),
+                            privacy_epoch: (slot < ROOM_CAPACITY && packet.header.csrc.len() == 2)
+                                .then(|| packet.header.csrc[1]),
                             marker: packet.header.marker,
                             connection: connection.clone(),
                             slot,
@@ -610,8 +619,10 @@ async fn run(
         screen_subscriptions,
         resume_token,
         remote_audio,
+        packet_redundancy,
     ) = match first.event {
         ServerEvent::Offer {
+            packet_redundancy,
             sdp,
             slot,
             can_speak,
@@ -633,6 +644,7 @@ async fn run(
             screen_subscriptions,
             resume_token,
             remote_audio,
+            packet_redundancy,
         ),
         ServerEvent::Replaced {} => return Err(Failure::replaced()),
         ServerEvent::Error { error } => return Err(server_failure(&attempt.connection, error)),
@@ -657,6 +669,9 @@ async fn run(
             rtc::rtp_transceiver::rtp_sender::RtpCodecKind::Video,
         )
         .expect("valid screen codec");
+    if packet_redundancy {
+        thiscord_frontend::audio::red::register(&mut media)?;
+    }
     media.register_default_codecs().map_err(|e| e.to_string())?;
     let (keyframe_tx, mut keyframe_rx) = mpsc::channel(ROOM_CAPACITY);
     let force_keyframe = Arc::new(AtomicBool::new(false));
@@ -733,6 +748,7 @@ async fn run(
         }
     });
     let offer: RTCSessionDescription = serde_json::from_str(&sdp).map_err(|_| "Invalid SDP")?;
+    let packet_redundancy = packet_redundancy && thiscord_shared::rtp_red::negotiated(&offer.sdp);
     pc.set_remote_description(offer)
         .await
         .map_err(|_| "Cannot accept server offer")?;
@@ -772,6 +788,7 @@ async fn run(
     send_event(
         send,
         ClientEvent::Answer {
+            packet_redundancy,
             remote_audio,
             sdp,
             screen_feedback,
@@ -798,13 +815,22 @@ async fn run(
         thiscord_frontend::audio::outgoing::QUEUE_CAPACITY,
     );
     let transmit_control = engine.outgoing_control();
+    if packet_redundancy {
+        transmit_control.enable_receive_protection();
+        transmit_control.pause_receive();
+    } else {
+        transmit_control.disable_receive_protection();
+    }
     let mut audio_started = false;
     let mut roster: Vec<Participant> = Vec::new();
+    let mut roster_compatibility = thiscord_frontend::audio::red::RosterCompatibility::default();
     let mut ticker = tokio::time::interval(Duration::from_millis(500));
     let start = Instant::now();
     let mut screen_state = Some((false, false));
     let mut camera_state = Some(false);
     let mut rtp_clock = thiscord_frontend::audio::outgoing::RtpClock::default();
+    let mut boundary = thiscord_frontend::audio::red::boundary::Boundary::default();
+    let mut red_sender = thiscord_frontend::audio::red::Sender::default();
     let mut accepted_packets = 0_u64;
     let mut accepted_bytes = 0_u64;
     let mut last_audio_stats = Instant::now();
@@ -816,7 +842,43 @@ async fn run(
     let mut remote_tick = tokio::time::interval(Duration::from_millis(100));
     remote_tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
     loop {
+        if packet_redundancy && audio_started {
+            let observed_control = transmit_control.generation();
+            if boundary.control(observed_control)? {
+                red_sender.clear();
+                engine.notify_control(Command::ReceiveBoundary {
+                    connection: attempt.connection.clone(),
+                    generation: transmit_control.generation(),
+                    epoch: None,
+                })?;
+            }
+            if !signaling.recovering() && boundary.needs_refresh() {
+                let Some(generation) = transmit_control.refresh_generation(observed_control) else {
+                    continue;
+                };
+                boundary.start_refresh(generation)?;
+                red_sender.clear();
+                engine.notify_control(Command::ReceiveBoundary {
+                    connection: attempt.connection.clone(),
+                    generation,
+                    epoch: None,
+                })?;
+            }
+            if signaling.recovering() {
+                boundary.resume();
+                transmit_control.pause_receive();
+            } else if let Some((generation, challenge)) = boundary.request(Instant::now())? {
+                signaling.send(match challenge {
+                    Some(challenge) => ClientEvent::MicrophoneRefresh {
+                        generation,
+                        challenge,
+                    },
+                    None => ClientEvent::MicrophoneBoundary { generation },
+                });
+            }
+        }
         tokio::select! {
+            _ = transmit_control.changed(), if packet_redundancy => { red_sender.clear(); },
             Some(result) = remote_jobs.join_next() => {
                 if let Ok((id, chunks)) = result {
                     remote_reply = Some((id, chunks));
@@ -844,7 +906,22 @@ async fn run(
                 let message:ServerFrame=serde_json::from_str(message.to_text().map_err(|_|"Invalid voice event")?).map_err(|_|"Invalid voice event")?;
                 if message.version!=VOICE_VERSION{return Err("Unsupported voice version".into());}
                 match message.event{
+                    ServerEvent::MicrophoneRefreshRequired { challenge } => {
+                        if packet_redundancy { boundary.require_refresh(challenge); }
+                    },
+                    ServerEvent::MicrophoneBoundaryAccepted { generation, microphone_epoch, source_epoch, challenge, accepted } => {
+                        let acknowledged_control = transmit_control.generation();
+                        if boundary.acknowledge(generation, challenge, accepted) && boundary.ready_control(acknowledged_control) && microphone_epoch != 0 && source_epoch != 0 {
+                            engine.notify_control(Command::ReceiveBoundary { connection: attempt.connection.clone(), generation: acknowledged_control, epoch: Some(microphone_epoch) })?;
+                            if let Some((generation, challenge)) = boundary.ready_notice() {
+                                signaling.send(ClientEvent::MicrophoneRefreshReady { generation, challenge });
+                            }
+                        }
+                    },
                     ServerEvent::Resumed {} => {
+                        boundary.resume();
+                        red_sender.clear();
+                        if packet_redundancy { engine.notify_control(Command::ReceiveBoundary { connection: attempt.connection.clone(), generation: transmit_control.generation(), epoch: None })?; }
                         screen_state = None;
                         camera_state = None;
                         // An interrupted chunked admin reply cannot be replayed
@@ -876,37 +953,65 @@ async fn run(
                         if status.lock().ok().is_some_and(|s| s.participants.iter().any(|m| m.slot == own_slot && m.screen_epoch == epoch && m.sharing_screen)) { force_keyframe.store(true, Ordering::Release); }
                     },
                     ServerEvent::Participants{members}=>{
+                        roster_compatibility.observe(&members)?;
                         if members.len()>ROOM_CAPACITY||members.iter().any(|m|m.slot>=ROOM_CAPACITY){return Err("Invalid participant list".into());}
                         app.state::<crate::native_screen::ScreenState>().roster(if settings.lock().map_err(|_|"Settings unavailable")?.deafened { &[] } else { &members });
                         app.state::<crate::native_camera::CameraState>().views.roster(if settings.lock().map_err(|_|"Settings unavailable")?.deafened { &[] } else { &members });
                         roster = members.iter().filter(|m|m.slot!=own_slot).cloned().collect();
-                        engine.notify(Command::Roster{connection:attempt.connection.clone(),members:roster.clone()});
+                        engine.notify_control(Command::Roster{connection:attempt.connection.clone(),members:roster.clone()})?;
                         if let Ok(mut s)=status.lock(){s.participants=members;s.own_slot=Some(own_slot);}
                     },ServerEvent::Replaced{}=>return Err(Failure::replaced()),ServerEvent::Error{error}=>return Err(server_failure(&attempt.connection,error)),ServerEvent::Revoked{}=>return Err("Voice access changed. Join again if you still have permission.".into()),_=>{},
                 }
             },
             Some(mut frame)=outgoing.recv()=>{
                 if !connected.load(Ordering::Acquire) {
+                    red_sender.clear();
                     frame.finish(thiscord_frontend::audio::quality::Count::OutgoingFailedPackets);
                     continue;
                 }
                 if let Err(reason) = transmit_control.check(&frame, &attempt.connection, Instant::now()) {
+                    red_sender.clear();
                     transmit_control.dropped_frame(reason, &mut frame);
                     continue;
                 }
+                if packet_redundancy {
+                    if boundary.frame(&frame)? {
+                        // Delivery/device gaps reset the codec even without a UI
+                        // setting change. Make their receive fence urgent too.
+                        transmit_control.invalidate();
+                        red_sender.clear();
+                        engine.notify_control(Command::ReceiveBoundary { connection: attempt.connection.clone(), generation: transmit_control.generation(), epoch: None })?;
+                    }
+                    if !boundary.ready() {
+                        red_sender.clear();
+                        transmit_control.dropped_frame(thiscord_frontend::audio::outgoing::DropReason::ControlInvalidated, &mut frame);
+                        continue;
+                    }
+                }
+                if !red_sender.within_budget(&frame) {
+                    frame.finish(thiscord_frontend::audio::quality::Count::OutgoingFailedPackets);
+                    continue;
+                }
                 let (sequence, timestamp) = rtp_clock.pending(frame.media_position);
-                let packet=rtc::rtp::Packet{header:rtc::rtp::header::Header{version:2,payload_type:MediaKind::Microphone.payload_type(),ssrc:MediaKind::Microphone.publisher_ssrc(),sequence_number:sequence,timestamp,marker:frame.marker,..Default::default()},payload:frame.payload.clone()};
-                match transmit_control.guard_write(&frame, &attempt.connection, track.write_rtp(packet)).await {
+                let red_enabled = packet_redundancy && frame.packet_redundancy;
+                let (payload_type, payload) = red_sender.packet(&frame, red_enabled, Instant::now());
+                let payload_bytes = payload.len();
+                let packet=rtc::rtp::Packet{header:rtc::rtp::header::Header{version:2,payload_type,ssrc:MediaKind::Microphone.publisher_ssrc(),sequence_number:sequence,timestamp,marker:frame.marker,csrc:if packet_redundancy { boundary.csrc() } else { vec![] },..Default::default()},payload};
+                match transmit_control.guard_write_until(&frame, &attempt.connection, red_sender.deadline(&frame), track.write_rtp(packet)).await {
                     Ok(result) => {
                         use thiscord_frontend::audio::quality::Count;
                         frame.finish(if result.is_ok() { Count::OutgoingSentPackets } else { Count::OutgoingFailedPackets });
                         result.map_err(|_|Failure::temporary("Voice media connection failed").with_reason("media_send_failed"))?;
+                        // One admitted outer RTP packet. Source 0 belongs to this
+                        // unique Connection; privacy tags and RED copies do not
+                        // replace its stable FEC feedback identity.
                         attempt.connection.uplink_sent(0, sequence);
                         rtp_clock.next(frame.media_position);
                         accepted_packets += 1;
-                        accepted_bytes += frame.payload.len() as u64;
+                        accepted_bytes += payload_bytes as u64;
+                        red_sender.admitted(frame, red_enabled);
                     },
-                    Err(reason) => transmit_control.dropped_frame(reason, &mut frame),
+                    Err(reason) => { red_sender.clear(); transmit_control.dropped_frame(reason, &mut frame); },
                 }
             },
             _=ticker.tick()=>{
@@ -942,7 +1047,7 @@ async fn run(
                             connection: attempt.connection.clone(), video: camera_track.clone(), audio: system_track.clone(), can_publish: can_speak, subscriptions: screen_subscriptions,
                             demand: Default::default(), network_demand: Default::default(), force_keyframe: Default::default(), metrics: Default::default(), video_sequence: Default::default(), audio_sequence: Default::default(), audio_timestamp: Default::default(), started: Instant::now(),
                         }); }
-                        engine.notify(Command::Roster{connection:attempt.connection.clone(),members:roster.clone()});
+                        engine.notify_control(Command::Roster{connection:attempt.connection.clone(),members:roster.clone()})?;
                         if let Ok(mut s)=status.lock(){s.connected=true;s.message="Connected".into();}
                     }
                 }
@@ -973,7 +1078,13 @@ async fn run(
                     signaling.send(ClientEvent::Screen { active: current_screen.0, audio: current_screen.1 });
                     screen_state = Some(current_screen);
                 }
-                signaling.send(ClientEvent::State{muted:configuration.muted,deafened:configuration.deafened});
+                if packet_redundancy && boundary.control(transmit_control.generation())? {
+                    red_sender.clear();
+                    engine.notify_control(Command::ReceiveBoundary { connection: attempt.connection.clone(), generation: transmit_control.generation(), epoch: None })?;
+                }
+                if !packet_redundancy || configuration.muted || configuration.deafened || boundary.ready() {
+                    signaling.send(ClientEvent::State{muted:configuration.muted,deafened:configuration.deafened});
+                }
                 if screen_subscriptions {
                     let mut views = if configuration.deafened { vec![] } else { app.state::<crate::native_screen::ScreenState>().subscriptions() };
                     if !configuration.deafened { views.extend(camera.views.subscriptions()); }

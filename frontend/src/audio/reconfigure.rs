@@ -192,6 +192,8 @@ mod tests {
             encoder_generation: 0,
             encoder_active: false,
             remotes: (0..MAX_STREAMS).map(|_| None).collect(),
+            receive_fences: Default::default(),
+            receive_floor: 0,
             processed_level: 0.5,
             processing: processing::Processing::new(&AudioSettings::default()).unwrap(),
         }
@@ -563,6 +565,8 @@ mod tests {
         let other = "00000000-0000-0000-0000-000000000003".parse().unwrap();
         s.volumes = Some(super::super::volumes::Store::default().profile(guild));
         s.remotes[3] = Some(super::super::Remote {
+            source_epoch: 0,
+            privacy_epoch: 0,
             since: Instant::now(),
             deafened: false,
             decode_stats: Default::default(),
@@ -574,6 +578,8 @@ mod tests {
             decoder: opus::Decoder::new(RATE, opus::Channels::Mono).unwrap(),
         });
         s.remotes[3 + thiscord_shared::voice::ROOM_CAPACITY] = Some(super::super::Remote {
+            source_epoch: 0,
+            privacy_epoch: 0,
             since: Instant::now(),
             deafened: false,
             decode_stats: Default::default(),
@@ -671,6 +677,8 @@ mod tests {
         s.connection = Some(connection.clone());
         let id = "00000000-0000-0000-0000-000000000001".parse().unwrap();
         s.remotes[3] = Some(Remote {
+            source_epoch: 0,
+            privacy_epoch: 0,
             since: Instant::now(),
             deafened: false,
             decode_stats: Default::default(),
@@ -775,6 +783,8 @@ mod tests {
         let transport = old.outgoing.as_ref().unwrap().clone();
         let id = "00000000-0000-0000-0000-000000000001".parse().unwrap();
         old.remotes[3] = Some(Remote {
+            source_epoch: 0,
+            privacy_epoch: 0,
             since: Instant::now(),
             deafened: false,
             decode_stats: Default::default(),

@@ -74,12 +74,27 @@ async fn peer() -> Result<
     ),
     String,
 > {
+    peer_with_red(false).await
+}
+async fn peer_with_red(
+    red: bool,
+) -> Result<
+    (
+        Arc<dyn PeerConnection>,
+        Arc<Notify>,
+        mpsc::Receiver<rtp::Packet>,
+    ),
+    String,
+> {
     let (tx, rx) = mpsc::channel(16);
     let gathered = Arc::new(Notify::new());
     let mut engine = MediaEngine::default();
     engine
         .register_default_codecs()
         .map_err(|e| e.to_string())?;
+    if red {
+        super::red::register(&mut engine)?;
+    }
     let p = PeerConnectionBuilder::new()
         .with_media_engine(engine)
         .with_handler(Arc::new(Handler {
@@ -149,6 +164,9 @@ pub async fn probe() -> Result<String, String> {
     }
     result
 }
+#[cfg(test)]
+#[path = "transport_red_tests.rs"]
+mod red_tests;
 #[cfg(test)]
 mod tests {
     use super::*;
