@@ -46,6 +46,9 @@ jobs:
           version: 0.21.14
       - name: Build production web assets
         working-directory: frontend
+        env:
+          # Match CI's Linux wasm-opt workaround (docs/ci.md).
+          BINARYEN_CORES: "1"
         run: trunk build --release --locked
       - uses: actions/upload-artifact@v4
         with:

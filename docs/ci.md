@@ -9,6 +9,53 @@ then verify and publish. That workflow does not rerun the PR test suite; only ta
 a commit whose checks have passed. Signed artifacts and the complete platform feed
 are verified before publication.
 
+## Linux web optimizer workaround
+
+The Linux CI standard/admin web steps and the Linux release asset step set
+`BINARYEN_CORES=1` in their **step environment**, inherited by Trunk and its
+`wasm-opt` child. Cargo's `[env]` cannot configure its parent Trunk process.
+This keeps the existing `-O` optimization and tool versions; it only serializes
+Binaryen work. Installer jobs consume those assets and disable Tauri's build
+hook, so they do not run another optimizer. Windows/macOS builds and machine-wide
+environment settings are unchanged. For a local Linux reproduction use
+`BINARYEN_CORES=1 trunk build --release --locked` (and the usual admin arguments).
+
+This is a workaround for observed multithreaded optimizer failures, not a proven
+upstream root-cause fix. In runs `39331053849` (PR 53) and `39330549170` (PR 52),
+Rust and Tailwind succeeded before Binaryen 123 crashed with SIGSEGV. PR 52's
+second attempt passed the standard bundle, then failed the admin bundle. The
+runner's retained wasm-bindgen input was copied to temporary storage before
+standalone testing: 41,775,405 bytes, SHA-256
+`7456272bad2fc1f1a5fd26a6b84579c4892698aca8822a7190ab1eaa21252566`.
+It was timestamped at the second attempt's admin build, not PR 53's earlier build.
+The cached executable matched the freshly downloaded official version 123
+Linux x86_64 executable byte for byte, SHA-256
+`d66c6724c07334155720eb2def29c434dcaaf741ce859b4f7f389e22674f9c4a`.
+
+With immutable input and separate temporary outputs, default concurrency failed
+three of three bounded trials with SIGSEGV (another preliminary trial raised
+SIGILL). All three single-worker trials passed in 17.10-20.66 seconds, producing
+byte-identical output with SHA-256
+`b8490523f61deb23b0af1323fb573f8d56907d4b7a069f715ff36a144f74242d`.
+The earlier serial/debug runs and three two-worker trials also produced that
+output. One worker is chosen to bypass the worker pool completely; two workers
+passing this small sample does not establish a generally safe concurrency limit.
+Increasing the stack size on a temporary executable copy did not fix the crash;
+official version 130 also crashed, so neither a stack diagnosis nor a version
+upgrade is justified by this evidence. Initial measured trials used under
+0.5 GiB peak RSS with several GiB available; no OOM kill was observed. This
+isolates a concurrency-sensitive tool/runner failure, but does not establish
+its underlying defect.
+
+Binaryen's [version 123 thread implementation](https://github.com/WebAssembly/binaryen/blob/version_123/src/support/threads.cpp)
+reads `BINARYEN_CORES`; one core bypasses its worker pool. Trunk's
+[pinned command runner](https://github.com/trunk-rs/trunk/blob/v0.21.14/src/common/mod.rs)
+inherits the environment. Upstream's [Alpine stack fix](https://github.com/WebAssembly/binaryen/pull/8595)
+describes a different possible cause; our enlarged-stack experiment did not
+resolve this case. Reassess the workaround only with the same input, verified
+tool provenance and repeated successful optimized builds; do not clear caches
+or disable optimization to hide the failure.
+
 ## Development and worktrees
 
 The pinned Cargo supports separate intermediate and final output directories.
