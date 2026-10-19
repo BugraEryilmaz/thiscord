@@ -191,6 +191,10 @@ pub fn packetize(
         .collect())
 }
 
+// Preserve the previous worst-case reference-picture budget (four 4K frames),
+// while allowing smaller camera frames to use H.264's limit of 16 references.
+const MAX_REFERENCE_PIXELS: u64 = MAX_WIDTH as u64 * (MAX_HEIGHT.div_ceil(16) * 16) as u64 * 4;
+
 /// Restrict remote SPS dimensions/reference counts before the video decoder can
 /// allocate its picture buffers. Only progressive baseline is negotiated here.
 pub fn bounded_parameter_sets(data: &[u8]) -> bool {
@@ -201,14 +205,26 @@ pub fn bounded_parameter_sets(data: &[u8]) -> bool {
 #[derive(Debug, PartialEq, Eq)]
 pub enum ParameterSetError {
     Malformed,
-    Profile { id: u8, constraints: u8, level: u8 },
+    Profile {
+        id: u8,
+        constraints: u8,
+        level: u8,
+    },
     SpsId(u32),
     FrameNumberBits(u32),
     PictureOrderBits(u32),
     PictureOrder(u32),
     PictureOrderCycle(u32),
     References(u32),
-    Dimensions { width: u32, height: u32 },
+    ReferenceBudget {
+        references: u32,
+        width: u32,
+        height: u32,
+    },
+    Dimensions {
+        width: u32,
+        height: u32,
+    },
     Interlaced,
 }
 impl std::fmt::Display for ParameterSetError {
@@ -235,8 +251,16 @@ impl std::fmt::Display for ParameterSetError {
                 write!(f, "H.264 picture-order cycle {value} exceeds 255")
             }
             Self::References(value) => {
-                write!(f, "H.264 reference frames {value} exceed decoder limit 4")
+                write!(f, "H.264 reference frames {value} exceed codec limit 16")
             }
+            Self::ReferenceBudget {
+                references,
+                width,
+                height,
+            } => write!(
+                f,
+                "H.264 {references} reference frames at {width}x{height} exceed reference-picture budget {MAX_REFERENCE_PIXELS} pixels"
+            ),
             Self::Dimensions { width, height } => write!(
                 f,
                 "H.264 coded dimensions {width}x{height} exceed {MAX_WIDTH}x{MAX_HEIGHT}"
@@ -331,7 +355,7 @@ fn inspect_sps(nal: &[u8]) -> Option<Result<(), ParameterSetError>> {
         value => return Some(Err(ParameterSetError::PictureOrder(value))),
     }
     let references = bits.ue()?;
-    if references > 4 {
+    if references > 16 {
         return Some(Err(ParameterSetError::References(references)));
     }
     bits.bit()?;
@@ -342,6 +366,12 @@ fn inspect_sps(nal: &[u8]) -> Option<Result<(), ParameterSetError>> {
         Err(ParameterSetError::Interlaced)
     } else if width > MAX_WIDTH || height > MAX_HEIGHT.div_ceil(16) * 16 {
         Err(ParameterSetError::Dimensions { width, height })
+    } else if u64::from(width) * u64::from(height) * u64::from(references) > MAX_REFERENCE_PIXELS {
+        Err(ParameterSetError::ReferenceBudget {
+            references,
+            width,
+            height,
+        })
     } else {
         Ok(())
     })
@@ -423,13 +453,16 @@ mod tests {
         for (profile, flags) in [(66, 0xe0), (77, 0x80), (88, 0xc0)] {
             for order in 0..=2 {
                 for cycle in [0, 2, 255] {
-                    let nal = sps(profile, flags, order, cycle, 4, 1280);
-                    assert_eq!(super::bounded_sps(&nal), Some(true));
-                    let frame = [vec![0, 0, 0, 1], nal].concat();
-                    assert!(super::bounded_parameter_sets(&frame));
+                    // Mac camera diagnostics reported 5, 8 and 9 references.
+                    for refs in [0, 4, 5, 8, 9, 16] {
+                        let nal = sps(profile, flags, order, cycle, refs, 1280);
+                        assert_eq!(super::bounded_sps(&nal), Some(true));
+                        let frame = [vec![0, 0, 0, 1], nal].concat();
+                        assert!(super::bounded_parameter_sets(&frame));
+                    }
                 }
                 assert_eq!(
-                    super::bounded_sps(&sps(profile, flags, order, 2, 5, 1280)),
+                    super::bounded_sps(&sps(profile, flags, order, 2, 17, 1280)),
                     Some(false)
                 );
                 assert_eq!(
@@ -467,8 +500,8 @@ mod tests {
             }),
         );
         assert_eq!(
-            check(sps(66, 0xe0, 2, 0, 5, 1280)),
-            Err(ParameterSetError::References(5))
+            check(sps(66, 0xe0, 2, 0, 17, 1280)),
+            Err(ParameterSetError::References(17))
         );
         assert_eq!(
             check(sps(66, 0xe0, 2, 0, 1, 4096)),
@@ -637,10 +670,10 @@ mod quality_tests {
         }
     }
     #[test]
-    fn sps_rejects_dimensions_beyond_receiver_budget() {
-        fn sps(width: u32, height: u32) -> Vec<u8> {
+    fn sps_enforces_dimensions_and_reference_memory_budget() {
+        fn sps(width: u32, height: u32, references: u32) -> Vec<u8> {
             let mut bits = String::new();
-            for value in [0, 0, 2, 1] {
+            for value in [0, 0, 2, references] {
                 let code = format!("{:b}", value + 1);
                 bits.push_str(&"0".repeat(code.len() - 1));
                 bits.push_str(&code);
@@ -661,10 +694,23 @@ mod quality_tests {
             }
             nal
         }
-        assert_eq!(bounded_sps(&sps(1920, 1088)), Some(true));
-        assert_eq!(bounded_sps(&sps(3840, 2160)), Some(true));
-        assert_eq!(bounded_sps(&sps(3856, 2160)), Some(false));
-        assert_eq!(bounded_sps(&sps(3840, 2176)), Some(false));
+        assert_eq!(bounded_sps(&sps(1920, 1088, 1)), Some(true));
+        assert_eq!(bounded_sps(&sps(3840, 2160, 4)), Some(true));
+        assert_eq!(bounded_sps(&sps(3856, 2160, 1)), Some(false));
+        assert_eq!(bounded_sps(&sps(3840, 2176, 1)), Some(false));
+        // At 720p all 16 reference pictures fit inside the previous 4K budget.
+        assert_eq!(bounded_sps(&sps(1280, 720, 16)), Some(true));
+        assert_eq!(bounded_sps(&sps(1280, 720, 17)), Some(false));
+        assert_eq!(bounded_sps(&sps(3840, 2160, 5)), Some(false));
+        // Use coded, macroblock-padded dimensions, not the cropped display size.
+        assert_eq!(bounded_sps(&sps(1920, 1088, 15)), Some(true));
+        assert_eq!(bounded_sps(&sps(1920, 1088, 16)), Some(false));
+        let error = ParameterSetError::ReferenceBudget {
+            references: 5,
+            width: 3840,
+            height: 2160,
+        };
+        assert_eq!(inspect_sps(&sps(3840, 2160, 5)), Some(Err(error)));
     }
 }
 
