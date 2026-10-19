@@ -18,6 +18,107 @@ use webrtc::{
     peer_connection::*,
 };
 
+/// Keep the camera encoder within the baseline format used by the SFU/viewer
+/// bridges. rtc falls back to matching H.264 by MIME type when profile bytes do
+/// not match exactly; an unfiltered WebKit offer can then select Main or High.
+fn camera_offer(
+    sdp: &str,
+) -> Result<
+    (
+        String,
+        Vec<rtc::rtp_transceiver::rtp_sender::RTCRtpCodecParameters>,
+    ),
+    String,
+> {
+    use rtc::rtp_transceiver::rtp_sender::{RTCRtpCodec, RTCRtpCodecParameters};
+    let mut parsed = rtc::sdp::description::session::SessionDescription::unmarshal(
+        &mut std::io::Cursor::new(sdp.as_bytes()),
+    )
+    .map_err(|_| "Invalid camera offer")?;
+    let [media] = parsed.media_descriptions.as_mut_slice() else {
+        return Err("Camera offer must contain one video track".into());
+    };
+    if media.media_name.media != "video" || media.media_name.port.value == 0 {
+        return Err("Camera offer must contain one video track".into());
+    }
+    let offered = media.codecs();
+    let codecs: Vec<_> = media
+        .media_name
+        .formats
+        .iter()
+        .filter_map(|format| offered.get(&format.parse::<u8>().ok()?))
+        .filter(|codec| {
+            codec.payload_type <= 127
+                && codec.name.eq_ignore_ascii_case("H264")
+                && codec.clock_rate == 90_000
+                && camera_fmtp(&codec.fmtp)
+        })
+        .map(|codec| RTCRtpCodecParameters {
+            rtp_codec: RTCRtpCodec {
+                mime_type: "video/H264".into(),
+                clock_rate: 90_000,
+                // Register the offered variant verbatim for an exact rtc match.
+                sdp_fmtp_line: codec.fmtp.clone(),
+                ..Default::default()
+            },
+            payload_type: codec.payload_type,
+        })
+        .collect();
+    if codecs.is_empty() {
+        return Err(
+            "This WebView must support baseline H.264 camera video with packetization mode 1"
+                .into(),
+        );
+    }
+    let formats: Vec<_> = codecs.iter().map(|c| c.payload_type.to_string()).collect();
+    media.attributes.retain(|attribute| {
+        if !matches!(attribute.key.as_str(), "rtpmap" | "fmtp" | "rtcp-fb") {
+            return true;
+        }
+        attribute
+            .value
+            .as_deref()
+            .and_then(|value| value.split_whitespace().next())
+            .is_some_and(|id| {
+                (attribute.key == "rtcp-fb" && id == "*") || formats.iter().any(|f| f == id)
+            })
+    });
+    media.media_name.formats = formats;
+    Ok((parsed.marshal(), codecs))
+}
+
+fn camera_fmtp(fmtp: &str) -> bool {
+    let mut profile = None;
+    let mut mode = None;
+    for parameter in fmtp.split(';') {
+        let Some((key, value)) = parameter.trim().split_once('=') else {
+            continue;
+        };
+        let slot = match key.trim() {
+            "profile-level-id" => &mut profile,
+            "packetization-mode" => &mut mode,
+            _ => continue,
+        };
+        if slot.replace(value.trim()).is_some() {
+            return false;
+        }
+    }
+    let Some(profile) = profile.filter(|p| p.len() == 6 && p.is_ascii()) else {
+        return false;
+    };
+    let Ok(profile) = u32::from_str_radix(profile, 16) else {
+        return false;
+    };
+    let flags = (profile >> 8) as u8;
+    let baseline = match profile >> 16 {
+        66 => true,
+        77 => flags & 0x8f == 0x80,
+        88 => flags & 0xcf == 0xc0,
+        _ => false,
+    };
+    mode == Some("1") && baseline && profile & 0xff != 0
+}
+
 struct Session {
     id: u32,
     lease: Connection,
@@ -382,6 +483,7 @@ async fn open(state: &CameraState, session: u32, sdp: String) -> Result<ViewAnsw
     if sdp.len() > 64 * 1024 {
         return Err("Invalid camera offer".into());
     }
+    let (sdp, codecs) = camera_offer(&sdp)?;
     let lease = Connection::default();
     let force = Arc::new(AtomicBool::new(true));
     let connected = Arc::new(AtomicBool::new(false));
@@ -408,20 +510,11 @@ async fn open(state: &CameraState, session: u32, sdp: String) -> Result<ViewAnsw
     };
     let result = async {
         let mut media = MediaEngine::default();
-        media
-            .register_codec(
-                rtc::rtp_transceiver::rtp_sender::RTCRtpCodecParameters {
-                    rtp_codec: rtc::rtp_transceiver::rtp_sender::RTCRtpCodec {
-                        mime_type: "video/H264".into(),
-                        clock_rate: 90_000,
-                        sdp_fmtp_line: thiscord_shared::screen::H264_FMTP.into(),
-                        ..Default::default()
-                    },
-                    payload_type: 125,
-                },
-                rtc::rtp_transceiver::rtp_sender::RtpCodecKind::Video,
-            )
-            .map_err(|_| "Cannot configure camera codec")?;
+        for codec in codecs {
+            media
+                .register_codec(codec, rtc::rtp_transceiver::rtp_sender::RtpCodecKind::Video)
+                .map_err(|_| "Cannot configure camera codec")?;
+        }
         let registry = register_default_interceptors(Registry::new(), &mut media)
             .map_err(|_| "Cannot configure camera transport")?;
         let gathered = Arc::new(Notify::new());
@@ -508,6 +601,117 @@ mod tests {
     use super::*;
     use tokio::sync::mpsc;
     use webrtc::media_stream::track_local::{TrackLocal, static_rtp::TrackLocalStaticRTP};
+
+    #[test]
+    fn camera_offer_rejects_incompatible_only_codecs_before_bridge_creation() {
+        for fmtp in [
+            "packetization-mode=1;profile-level-id=64001f",
+            "packetization-mode=1;profile-level-id=4d001f",
+            "packetization-mode=0;profile-level-id=42e01f",
+            "profile-level-id=42e01f",
+            "packetization-mode=1;profile-level-id=42e01f;profile-level-id=64001f",
+        ] {
+            let sdp = format!(
+                "v=0\r\no=- 1 1 IN IP4 127.0.0.1\r\ns=-\r\nt=0 0\r\nm=video 9 UDP/TLS/RTP/SAVPF 102\r\na=rtpmap:102 H264/90000\r\na=fmtp:102 {fmtp}\r\n"
+            );
+            assert!(camera_offer(&sdp).is_err(), "must reject {fmtp}");
+        }
+    }
+
+    #[tokio::test]
+    async fn camera_answer_selects_baseline_variant_even_when_high_profile_is_first() {
+        use rtc::sdp::{description::common::Attribute, description::session::SessionDescription};
+        async fn answer(
+            sdp: String,
+            codecs: Vec<rtc::rtp_transceiver::rtp_sender::RTCRtpCodecParameters>,
+        ) -> SessionDescription {
+            let mut engine = MediaEngine::default();
+            for codec in codecs {
+                engine
+                    .register_codec(codec, rtc::rtp_transceiver::rtp_sender::RtpCodecKind::Video)
+                    .unwrap();
+            }
+            let answerer = PeerConnectionBuilder::new()
+                .with_media_engine(engine)
+                .with_runtime(Arc::new(
+                    thiscord_frontend::audio::media_runtime::MediaRuntime::default(),
+                ))
+                .with_handler(Arc::new(Receiver {
+                    gathered: Arc::new(Notify::new()),
+                    packets: mpsc::channel(1).0,
+                }))
+                .with_udp_addrs(vec!["127.0.0.1:0".to_owned()])
+                .build()
+                .await
+                .unwrap();
+            answerer
+                .set_remote_description(
+                    serde_json::from_value(serde_json::json!({"type":"offer","sdp":sdp})).unwrap(),
+                )
+                .await
+                .unwrap();
+            let answer = serde_json::to_value(answerer.create_answer(None).await.unwrap()).unwrap();
+            let answer = SessionDescription::unmarshal(&mut std::io::Cursor::new(
+                answer["sdp"].as_str().unwrap().as_bytes(),
+            ))
+            .unwrap();
+            answerer.close().await.unwrap();
+            answer
+        }
+        tokio::time::timeout(Duration::from_secs(20), async {
+            let (browser, gathered, _) = peer().await;
+            browser
+                .add_track(thiscord_frontend::screen::track(777) as Arc<dyn TrackLocal>)
+                .await
+                .unwrap();
+            let original = serde_json::to_value(offer(&browser, &gathered).await).unwrap();
+            for profile in ["42c01f", "42001f", "4d801f", "58c01f"] {
+                let mut offer = SessionDescription::unmarshal(&mut std::io::Cursor::new(
+                    original["sdp"].as_str().unwrap().as_bytes(),
+                ))
+                .unwrap();
+                let media = &mut offer.media_descriptions[0];
+                media.media_name.formats = ["102", "103", "104", "105"]
+                    .into_iter()
+                    .map(str::to_owned)
+                    .collect();
+                media.attributes.retain(|a| {
+                    !matches!(a.key.as_str(), "rtpmap" | "fmtp" | "rtcp-fb")
+                });
+                for (pt, offered_profile, mode) in [
+                    (102, "64001f", 1),
+                    (103, "4d001f", 1),
+                    (104, "42e01f", 0),
+                    (105, profile, 1),
+                ] {
+                    media.attributes.push(Attribute::new(
+                        "rtpmap".into(),
+                        Some(format!("{pt} H264/90000")),
+                    ));
+                    media.attributes.push(Attribute::new(
+                        "fmtp".into(),
+                        Some(format!("{pt} level-asymmetry-allowed=1;packetization-mode={mode};profile-level-id={offered_profile}")),
+                    ));
+                }
+                let offer = offer.marshal();
+                // The previous single 42e0 codec registration accepts the
+                // incompatible first High profile through rtc's MIME fallback.
+                let (_, previous_codecs) = camera_offer(original["sdp"].as_str().unwrap()).unwrap();
+                let previous = answer(offer.clone(), previous_codecs).await;
+                assert_eq!(previous.media_descriptions[0].media_name.formats[0], "102");
+                assert!(previous.media_descriptions[0].codecs()[&102].fmtp.contains("64001f"));
+                let (filtered, codecs) = camera_offer(&offer).unwrap();
+                assert_eq!(codecs.len(), 1);
+                assert_eq!(codecs[0].payload_type, 105);
+                let answer = answer(filtered, codecs).await;
+                assert_eq!(answer.media_descriptions[0].media_name.formats, ["105"]);
+                let codecs = answer.media_descriptions[0].codecs();
+                assert_eq!(codecs.len(), 1);
+                assert!(codecs[&105].fmtp.contains(profile));
+            }
+            browser.close().await.unwrap();
+        }).await.expect("camera codec negotiation should complete without camera hardware");
+    }
     #[test]
     fn camera_commands_are_allowed_only_in_the_local_main_window() {
         // Exercise the same compiled ACL used by the desktop app, without a
