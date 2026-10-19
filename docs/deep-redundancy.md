@@ -1,11 +1,10 @@
 # Experimental Opus deep redundancy
 
-**Integration gate:** this change depends on RED's reviewed publisher-generation,
-source-epoch and privacy-epoch protocol. The standalone main-based branch is not
-merge-ready. Same-account replacement and remote restrictions must reset the
-decoder and pending PCM even when RTP sequence/timestamps remain continuous.
-Legacy epoch-zero sources must use ordinary Opus fallback, with no DRED recovery.
-The parent will integrate and re-review these boundaries before marking ready.
+**Stack dependency:** reviewed FEC+RED commit
+`a0228279f314793bfb83ccc1e0a0210d40292f9e` supplies the authenticated publisher,
+source and receiver privacy protocol independently of the RED preference. This
+branch integrates that protocol; PR #52 remains draft pending the final combined
+checks and review. The parent owns CI, merge order and readiness.
 
 The `deep_redundancy` preference defaults to false, survives `audio.json`, and uses
 the existing local and admin settings command paths. Audio & voice → Advanced &
@@ -16,9 +15,12 @@ work or media logging is added. Browser voice remains unsupported.
 Enabling requests six 10 ms units of encoder history, raises the total Opus VBR
 target from 32 to 40 kbit/s and uses a 20% expected-loss hint. This hint is a policy
 input, not a measured loss report: libopus 1.6.1 can allocate too few DRED chunks
-at 5% and emit no extension. Disabling restores 32 kbit/s and 5% on this standalone
-branch. Adaptive-FEC integration must instead restore the adaptive hint when
-adaptive FEC remains enabled, and preserve a 20% floor while DRED is enabled.
+at 5% and emit no extension. One live encoder function writes the loss-hint CTL.
+The adaptive estimate remains independent of DRED; the applied hint is the maximum
+of that estimate and DRED's 20% floor (including zero, absent or stale feedback).
+Disabling DRED restores 32 kbit/s and the measured adaptive policy when adaptive
+FEC remains enabled, or 5% when it is off. Source replacement and stale feedback
+rebaseline the adaptive estimate; the DRED floor survives those resets.
 Neither a successful CTL nor a successful ordinary FEC call proves recovery.
 
 The receive buffer minimum is 80 ms instead of 40 ms while enabled. Device buffer
@@ -39,9 +41,24 @@ The packet cap stays 12, packet age stays 200 ms, history parsing is capped at
 existing device-sized refill budget (2–6 decisions) runs per worker service.
 Each DRED parser/feature object is owned and freed within one decision. No extra
 packet/PCM history survives between calls. Neural synthesis history remains in
-the source's Opus decoder; `OPUS_RESET_STATE` clears LPCNet, while the encoder's
-reset clears DRED latents and neural state. Settings/deafen/device resets retain
-the existing callback-safe PCM generation invalidation.
+the source's Opus decoder. Enabled decoders use full `opus_decoder_init` through
+a reviewed owned binding: same allocation, stored channel count and sample rate,
+with complexity restored. This performs no allocation and runs only on the native
+worker. Decoder gain and phase-inversion controls return to creation defaults;
+this application does not change those controls. The encoder's reset clears its
+DRED latents. Settings/deafen/device resets retain the callback-safe PCM generation
+invalidation.
+
+**Reset correction:** the earlier ordinary-reset claim was incomplete. A new
+PLC-first comparison failed after `OPUS_RESET_STATE` even though the prior
+normal-packet-first comparison passed. In pinned libopus 1.6.1,
+`LPCNetPLCState.fargan` precedes `LPCNET_PLC_RESET_START` (`fec`), so
+`lpcnet_plc_reset` leaves FARGAN pitch/deemphasis/GRU state intact. Full decoder
+initialization calls `fargan_init`. Privacy, scheduled and decode-error resets all
+use the full initialization when neural complexity is enabled. Any get/init/restore
+failure poisons decoding and immediately stops refill; normal, FEC, DRED and PLC
+outputs remain silent until a successful reset. Tests cover PLC immediately after
+a boundary and complexity 5 → 0 → 5, so old neural state cannot hide while off.
 
 Diagnostics expose `dred_attempts` and `dred_output_frames` in existing technical
 Opus decode logs. Output counts mean a covered interval was synthesized from DRED,
@@ -56,8 +73,29 @@ padding and decode the primary audio. Compatible enabled receivers parse the
 extension; absence/incompatible versions fall back safely. No separate RTP codec
 payload type or SDP DRED codec negotiation is necessary. Both encoder and receiver
 must enable this preference for DRED recovery. The source/privacy fence protocol
-is independently required; RTP/WS boundary negotiation is supplied by the RED
-dependency and must work even when the RED preference is false.
+is independently required and works with the RED preference off. Modern SFU-to-receiver RTP
+carries exactly two CSRCs: stable source identity and effective privacy revision
+(the maximum of source and listener privacy). Roster source authorization,
+receiver floors and persistent high-water tombstones reject stale media before
+Opus parsing or donor admission. Forward revisions reset neural state, donors and
+PCM immediately, without waiting for a roster. Normal packets and unchanged
+rosters do not restart the 80 ms buffer.
+
+Legacy source epoch zero uses ordinary Opus, complexity zero, no DRED borrowing
+and the ordinary 40 ms minimum even if the local preference is on. Replacing a
+modern source with a legacy publisher can require rejoining, explicitly reported
+by the connection layer. Shared audio does not enable DRED. The active status
+reports DRED configured, eligible stream count, legacy fallback count and receive
+pause; eligibility is not proof the sender emitted DRED. Older remote support
+clients can reject an enabled unknown setting; false is omitted from the wire to
+preserve old settings compatibility.
+
+PTT/settings/restriction boundaries use the reviewed challenge/Ready exchange and
+briefly pause both microphone sending and receiving. The dependency measured
+384.033 ms from receiver challenge to fresh RTP on loopback; this is environment
+dependent and separate from the 80 ms playout minimum. Guarantee begins when the
+receiver observes the authoritative fence/restriction; already-played media cannot
+be recalled.
 
 RED integration uses PT112 and at most two previous frames, with 160 bytes per
 repeated block and 1,100 bytes total. Its padding check excludes DRED-bearing
@@ -113,7 +151,19 @@ Production `Remote::refill` tests exercise real scheduling/mixer output with an
 deafen flush, settings target restoration and source receive-time fences. Other
 tests cover DTX, disabled output equality, wraps, malformed inputs, payload bounds,
 padding, and native encoder/neural decoder reset equivalence to fresh objects.
-The publisher/roster epoch race tests remain a required integration gate above.
+Integrated tests now drive the actual worker roster/packet/boundary commands:
+muted/deafened/can-speak restrictions, same-account source replacement, effective
+revision tombstones, delayed pre-deafen UDP, stale acknowledgments, missing epochs,
+legacy rejoin, callback invalidation and no restart on ordinary packets. Eight
+preference combinations exercise real encoder → RED sender → worker ingress →
+playout with absent feedback; a separate eight-combination test covers zero/high/
+stale/absent feedback, resets/replacement, toggles and DTX.
+
+For the three-loss ingress fixture, every DRED-on combination reconstructs two
+frames and uses PLC for one, starting at 80 ms; DRED-off starts at 40 ms with zero
+DRED attempts. Both RED settings preserve the same DRED output. Of 100 encoded
+frames, 97 have real code-3 padding; RED carries no repeated blocks for them.
+These tests do not claim additive RED/DRED benefit or cover every network pattern.
 
 `codec_worker_cost_is_measured_without_device_or_network_claims` reports optimized
 worker encode/decode totals and maximum decode call time; timing is informational,
@@ -129,7 +179,7 @@ The production three-loss test recovered two frames and used PLC for one; with
 late donors it recovered zero and used PLC for three. First decode was 80 ms in
 both cases. CI retains this report separately on each native audio platform.
 
-## Review and local validation (2026-10-19)
+## Original standalone validation (2026-10-19)
 
 Independent native reviewers `/root/dred_correctness_review` (three rounds) and
 `/root/dred_lifecycle_review` (two rounds) inspected the actual working tree.
@@ -180,6 +230,62 @@ the repository at
 `thiscord-voice-loopback-check.py` in that directory (checkout path and `all`
 arguments). No backend/test-protocol edit was needed for this validation.
 
-This resolves the standalone voice-test validation limitation only. The PR stays
-draft: RED/FEC integration, publisher/source/receiver privacy fences, legacy
-fallback, combined race tests and renewed independent review remain required.
+These results describe the original standalone commit, not the rebased head.
+
+## Integrated validation (2026-10-20)
+
+Rebased on reviewed FEC+RED `a0228279`. The targeted DRED run passes all 16 tests,
+including eight policy combinations, eight production worker combinations,
+PLC-first reset equivalence and poison/fallback tests. Independent reviewers
+`/root/dred_correctness_review` (six rounds total) and
+`/root/dred_lifecycle_review` (five rounds total) inspected the actual changes.
+Their final rounds closed all must-fix findings, including the neural reset and
+documentation correction; the parent also reviewed the integrated diff. Reviews
+were static and do not substitute for the following executed checks.
+
+| Check | Result |
+| --- | --- |
+| Windows native library/audio + replay (`ci`, deep-filter/neural-echo-probe) | 292 + 2 passed |
+| Windows native audio Clippy, lib/tests/examples, same features/profile | passed, warnings denied |
+| WASM `thiscord-ui` Clippy | passed, warnings denied |
+| Windows desktop Clippy and build (`desktop`) | passed; existing OpenH264 LNK4255 link warning |
+| WSL backend + shared, including ignored PostgreSQL/voice tests | 129 backend (including 6 voice) + 40 shared passed |
+| WSL backend/shared all-targets Clippy (`load-test`) | passed, warnings denied |
+| Linux native library/audio + replay, same optimized features | 291 + 2 passed |
+| Linux native audio Clippy, lib/tests/examples | passed, warnings denied |
+| Formatting, diff whitespace, exactly three application workspace packages | passed |
+
+Commands (all Cargo commands use `--locked`):
+
+```text
+cargo test -p thiscord-frontend --lib --example audio_replay --features deep-filter,neural-echo-probe --profile ci --locked
+cargo test -p thiscord-frontend --lib --features deep-filter,neural-echo-probe --profile ci --locked dred -- --nocapture --test-threads=1
+cargo clippy -p thiscord-frontend --lib --tests --examples --features deep-filter,neural-echo-probe --profile ci --locked -- -D warnings
+cargo clippy -p thiscord-frontend --bin thiscord-ui --target wasm32-unknown-unknown --locked -- -D warnings
+cargo clippy -p thiscord-frontend --bin thiscord-desktop --features desktop --locked -- -D warnings
+cargo build -p thiscord-frontend --bin thiscord-desktop --features desktop --locked
+cargo test -p thiscord-backend -p thiscord-shared --locked -- --include-ignored --test-threads=1
+cargo clippy -p thiscord-backend -p thiscord-shared --all-targets --features load-test --locked -- -D warnings
+```
+
+WSL used only `TEST_DATABASE_URL` from ignored configuration, omitting every
+`THISCORD_*` variable. The six voice tests passed in 88.37 seconds. PostgreSQL
+reported its existing collation-version mismatch, without test failures; no
+database configuration was changed. Windows and WSL used coordinated developer
+cache slots with refreshed local crate timestamps; no shared cache was cleaned.
+Windows final outputs remain checkout-local; WSL final outputs remain at
+`~/.cache/thiscord-targets/t3-668100c8`, shared intermediates `~/.cargo/thiscord`.
+GitHub Actions service builds used their separate configured runner cache slots.
+
+Ignored checkout-local evidence: `dred-combined-targeted.log`,
+`dred-integrated-audio.log`, `dred-integrated-clippy.log`,
+`dred-integrated-wasm.log`, `dred-integrated-desktop-clippy.log`,
+`dred-integrated-desktop.log`, `dred-integrated-wsl.log`, and
+`dred-integrated-linux-audio.log`. The isolated WSL runner is
+`C:/Users/bugra/AppData/Local/Temp/thiscord-dred-integrated-check.py`.
+The earlier standalone baseline log remains at its path above.
+
+macOS and the final exact-head three-platform CI matrix remain parent/CI checks;
+no physical-device, subjective listening or many-speaker CPU acceptance is claimed.
+The PR remains draft for the parent's final CI/readiness assessment. No deployment,
+release tag, version bump or merge is performed by this implementation task.

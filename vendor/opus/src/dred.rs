@@ -1,5 +1,5 @@
 //! Thiscord's narrow, owned bindings to the bundled libopus 1.6.1 DRED API.
-use super::{ffi, Decoder, Encoder, Error, Result};
+use super::{Decoder, Encoder, Error, Result, ffi};
 
 impl Encoder {
     /// Redundancy duration in 10 ms units (0 disables DRED, maximum 100).

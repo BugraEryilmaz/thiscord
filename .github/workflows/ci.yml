@@ -239,7 +239,7 @@ jobs:
       - name: Measure bundled DRED recovery, payload and worker cost
         shell: pwsh
         run: |
-          cargo test -p thiscord-frontend --lib --features deep-filter,neural-echo-probe --profile ci --locked audio::dred:: -- --nocapture --test-threads=1 > dred-results.txt 2>&1
+          cargo test -p thiscord-frontend --lib --features deep-filter,neural-echo-probe --profile ci --locked dred -- --nocapture --test-threads=1 > dred-results.txt 2>&1
           if ($LASTEXITCODE) { exit $LASTEXITCODE }
       - name: Build production benchmark executables together
         shell: pwsh

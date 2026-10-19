@@ -483,11 +483,16 @@ impl Remote {
         let enabled = enabled && self.source_epoch != 0 && self.privacy_epoch != 0;
         if self.jitter.deep_redundancy != enabled {
             self.clear(writer, now);
+            if self.decode_stats.reset_failed {
+                return Err("Opus full decoder reset failed".into());
+            }
             self.jitter.set_deep_redundancy(enabled);
         }
-        self.decoder
-            .set_complexity(if enabled { 5 } else { 0 })
-            .map_err(|e| e.to_string())?;
+        if let Err(error) = self.decoder.set_complexity(if enabled { 5 } else { 0 }) {
+            self.decode_stats.reset_failed = true;
+            self.deafened = true;
+            return Err(error.to_string());
+        }
         Ok(())
     }
     fn push(
@@ -1154,7 +1159,7 @@ impl Session {
         self.encoder
             .adapt(
                 self.settings.adaptive_fec,
-                5, // Integration: use 20 while deep_redundancy is enabled.
+                5, // Encoder combines the measured policy with its DRED 20% floor.
                 self.connection.as_ref().and_then(|c| c.uplink_sample(0)),
                 Instant::now(),
             )
@@ -1305,7 +1310,7 @@ impl Session {
         // These legacy cumulative counters are maintained separately; new
         // callback counters are drained exactly once on the worker.
         AudioQuality {
-            adaptive_fec: Some(self.encoder.adaptive.diagnostics(Instant::now())),
+            adaptive_fec: Some(self.encoder.adaptive_diagnostics(Instant::now())),
             metrics: metrics.snapshot(),
             streams: self
                 .remotes

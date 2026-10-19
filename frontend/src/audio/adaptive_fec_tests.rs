@@ -335,3 +335,7 @@ fn deterministic_isolated_and_burst_loss_measure_real_opus_fec() {
         }
     }
 }
+
+mod dred_combinations {
+    include!("dred/combination_tests.rs");
+}

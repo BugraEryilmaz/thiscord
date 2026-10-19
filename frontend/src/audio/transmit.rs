@@ -22,6 +22,7 @@ pub struct Encoder {
     no_data_sent: bool,
     dtx_enabled: bool,
     deep_redundancy: bool,
+    loss_floor: u8,
 }
 impl Encoder {
     pub fn new(dtx: bool) -> Result<Self, opus::Error> {
@@ -37,6 +38,7 @@ impl Encoder {
             no_data_sent: false,
             dtx_enabled: dtx,
             deep_redundancy: false,
+            loss_floor: 5,
         })
     }
     pub fn reset(&mut self) -> Result<(), opus::Error> {
@@ -44,8 +46,8 @@ impl Encoder {
         self.no_data_sent = false;
         self.codec.reset_state()
     }
-    /// The sole live writer of the Opus loss-hint CTL. Integration passes floor
-    /// 20 when DRED is enabled, otherwise 5; codec bitrate belongs to that policy.
+    /// Preserve the measured adaptive policy independently of DRED's minimum.
+    /// Toggling DRED off restores that policy, not a newly reset 5% estimate.
     pub(crate) fn adapt(
         &mut self,
         enabled: bool,
@@ -53,7 +55,28 @@ impl Encoder {
         sample: Option<super::adaptive_fec::Sample>,
         now: Instant,
     ) -> Result<(), opus::Error> {
-        let hint = self.adaptive.update(enabled, floor, sample, now);
+        self.adaptive.update(enabled, 5, sample, now);
+        self.loss_floor = floor.clamp(5, 30);
+        self.apply_loss_hint()
+    }
+    pub(crate) fn adaptive_diagnostics(
+        &self,
+        now: Instant,
+    ) -> thiscord_shared::audio::AdaptiveFecDiagnostics {
+        let mut status = self.adaptive.diagnostics(now);
+        status.baseline_loss_percent =
+            self.loss_floor
+                .max(if self.deep_redundancy { 20 } else { 5 });
+        status.effective_loss_percent = status
+            .effective_loss_percent
+            .max(status.baseline_loss_percent);
+        status
+    }
+    /// Sole live writer of the native loss-hint CTL, shared by both preferences.
+    fn apply_loss_hint(&mut self) -> Result<(), opus::Error> {
+        let hint = self
+            .adaptive_diagnostics(Instant::now())
+            .effective_loss_percent;
         if self.codec.get_packet_loss_perc()? != i32::from(hint) {
             self.codec.set_packet_loss_perc(i32::from(hint))?;
         }
@@ -68,12 +91,8 @@ impl Encoder {
             } else {
                 32_000
             }))?;
-            // At 5%, libopus 1.6.1 may allocate too few bits to emit DRED at
-            // all. This fixed DRED budget uses 20%; adaptive FEC integration
-            // must preserve that floor while DRED is enabled.
-            self.codec
-                .set_packet_loss_perc(if enabled { 20 } else { 5 })?;
             self.deep_redundancy = enabled;
+            self.apply_loss_hint()?;
         }
         Ok(())
     }
