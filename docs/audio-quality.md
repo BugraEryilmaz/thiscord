@@ -11,6 +11,11 @@ identity or report bodies. These describe microphone-to-SFU feedback separately
 from the existing listener receive counters. Absent/undersampled/stale reports
 use baseline (normally 5%). Suspended capture may still show a previous applied
 CTL; the next encode applies fallback. See [adaptive FEC](audio.md#adaptive-microphone-fec).
+Experimental DRED adds technical decoder counters `dred_attempts` and
+`dred_output_frames`, plus configured preference/bitrate in audio logs. Output
+counts require a parsed, covered interval; they are neural reconstruction, not
+sample-exact recovery or an intelligibility score. The existing UI's ordinary
+FEC recovery remains unavailable. See [DRED policy and limitations](deep-redundancy.md).
 
 ## Definitions (established before instrumentation)
 

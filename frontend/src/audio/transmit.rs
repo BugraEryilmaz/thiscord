@@ -21,6 +21,7 @@ pub struct Encoder {
     in_dtx: bool,
     no_data_sent: bool,
     dtx_enabled: bool,
+    deep_redundancy: bool,
 }
 impl Encoder {
     pub fn new(dtx: bool) -> Result<Self, opus::Error> {
@@ -35,6 +36,7 @@ impl Encoder {
             in_dtx: false,
             no_data_sent: false,
             dtx_enabled: dtx,
+            deep_redundancy: false,
         })
     }
     pub fn reset(&mut self) -> Result<(), opus::Error> {
@@ -57,6 +59,24 @@ impl Encoder {
         }
         Ok(())
     }
+    pub fn set_deep_redundancy(&mut self, enabled: bool) -> Result<(), opus::Error> {
+        if self.deep_redundancy != enabled {
+            self.reset()?;
+            self.codec.set_dred_duration(0)?;
+            self.codec.set_bitrate(opus::Bitrate::Bits(if enabled {
+                super::dred::BITRATE
+            } else {
+                32_000
+            }))?;
+            // At 5%, libopus 1.6.1 may allocate too few bits to emit DRED at
+            // all. This fixed DRED budget uses 20%; adaptive FEC integration
+            // must preserve that floor while DRED is enabled.
+            self.codec
+                .set_packet_loss_perc(if enabled { 20 } else { 5 })?;
+            self.deep_redundancy = enabled;
+        }
+        Ok(())
+    }
     pub fn encode(
         &mut self,
         pcm: &[f32; FRAME],
@@ -66,7 +86,20 @@ impl Encoder {
         let start = Instant::now();
         // Do not let codec VAD discard quiet speech/pre-roll admitted by our gate.
         self.codec.set_dtx(self.dtx_enabled && !protect_speech)?;
-        let n = self.codec.encode_float(pcm, output)?;
+        // DRED must not pad no-data frames or defeat silence omission. Existing
+        // gate/control resets clear encoder latents before entering silence.
+        self.codec
+            .set_dred_duration(if self.deep_redundancy && protect_speech {
+                super::dred::DURATION
+            } else {
+                0
+            })?;
+        let budget = if self.deep_redundancy {
+            output.len().min(1100)
+        } else {
+            output.len()
+        };
+        let n = self.codec.encode_float(pcm, &mut output[..budget])?;
         let dtx = self.codec.get_in_dtx()?;
         self.stats.encode_ns += start.elapsed().as_nanos() as u64;
         self.stats.encoded_frames += 1;

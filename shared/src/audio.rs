@@ -77,6 +77,8 @@ pub struct AudioSettings {
     /// Adapt the Opus loss hint from authenticated microphone uplink RTCP reports.
     #[serde(skip_serializing_if = "is_false")]
     pub adaptive_fec: bool,
+    /// Experimental Opus DRED encoding and bounded receive recovery; native only.
+    pub deep_redundancy: bool,
     pub echo_cancellation: bool,
     /// Experimental residual estimator, independent of the noise suppressor.
     pub neural_echo: bool,
@@ -102,6 +104,7 @@ impl Default for AudioSettings {
             noise_suppression_model: NoiseSuppressionModel::Sonora,
             automatic_gain: false,
             adaptive_fec: false,
+            deep_redundancy: false,
             echo_cancellation: false,
             neural_echo: false,
             packet_redundancy: false,

@@ -26,6 +26,8 @@ pub(super) struct DecodeStats {
     pub plc_frames: u64,
     pub decode_errors: u64,
     pub silence_frames: u64,
+    pub dred_attempts: u64,
+    pub dred_output_frames: u64,
 }
 
 /// Returns true only for a successfully decoded normal packet (activity input).
@@ -38,6 +40,16 @@ pub(super) fn decode(
     stats: &mut DecodeStats,
 ) -> bool {
     let (packet, fec) = match decision {
+        Playout::Dred(packet, offset) => {
+            if super::dred::decode(decoder, packet, *offset, pcm, stats) {
+                return false; // Synthesized recovery never refreshes activity.
+            }
+            // Older/no-DRED peers: ordinary adjacent FEC or PLC, safely.
+            if *offset == FRAME as u32 {
+                return decode(decoder, &Playout::Fec(packet.clone()), pcm, stats);
+            }
+            return decode(decoder, &Playout::Conceal(FRAME), pcm, stats);
+        }
         Playout::Packet(packet) => (packet.as_ref(), false),
         Playout::Fec(packet) => {
             stats.fec_attempts += 1;

@@ -30,6 +30,8 @@ pub enum Playout {
     Packet(bytes::Bytes),
     /// Borrow the following packet; its normal decode remains due.
     Fec(bytes::Bytes),
+    /// DRED donor remains queued for its normal playout; offset is 48 kHz samples.
+    Dred(bytes::Bytes, u32),
     /// Full packets use Opus PLC; fractional holes use exact-length silence.
     Conceal(usize),
 }
@@ -38,6 +40,7 @@ impl std::fmt::Debug for Playout {
         match self {
             Self::Packet(_) => f.write_str("Packet(<redacted>)"),
             Self::Fec(_) => f.write_str("Fec(<redacted>)"),
+            Self::Dred(_, offset) => f.debug_tuple("Dred(<redacted>)").field(offset).finish(),
             Self::Conceal(samples) => f.debug_tuple("Conceal").field(samples).finish(),
         }
     }
@@ -108,6 +111,7 @@ pub struct Jitter {
     reset_pending: bool,
     counters: Counters,
     adaptive: bool,
+    pub(super) deep_redundancy: bool,
     dtx: bool,
     last_data: Option<u32>,
     latest: Option<(u32, Instant)>,
@@ -142,6 +146,7 @@ impl Default for Jitter {
             reset_pending: false,
             counters: Default::default(),
             adaptive: false,
+            deep_redundancy: false,
             dtx: false,
             last_data: None,
             latest: None,
@@ -163,6 +168,10 @@ impl Default for Jitter {
     }
 }
 impl Jitter {
+    pub(super) fn set_deep_redundancy(&mut self, enabled: bool) {
+        self.deep_redundancy = enabled;
+        self.metrics.target_ms = self.minimum_target_ms();
+    }
     pub fn push(
         &mut self,
         sequence: u16,
@@ -515,10 +524,17 @@ impl Jitter {
                     .map(|p| p.payload.clone())
             })
             .flatten();
+        let dred = (self.deep_redundancy && gap == FRAME as u32)
+            .then(|| super::dred::donor(&self.packets, cursor, self.last_sequence, self.missing))
+            .flatten();
         self.missing += gap;
         self.counters.concealed_samples += u64::from(gap);
         self.advance(gap as usize);
-        Some(fec.map_or(Playout::Conceal(gap as usize), Playout::Fec))
+        Some(if let Some((packet, offset)) = dred {
+            Playout::Dred(packet, offset)
+        } else {
+            fec.map_or(Playout::Conceal(gap as usize), Playout::Fec)
+        })
     }
     fn advance(&mut self, samples: usize) {
         self.cursor = self.cursor.map(|v| v.wrapping_add(samples as u32));
@@ -568,7 +584,13 @@ impl Jitter {
         Duration::from_secs_f64(self.metrics.target_ms / 1000.0)
     }
     fn minimum_target_ms(&self) -> f64 {
-        ((super::mixer::refill_limit(self.callback_samples) + 480) as f64 / 48.0).max(40.0)
+        ((super::mixer::refill_limit(self.callback_samples) + 480) as f64 / 48.0).max(
+            if self.deep_redundancy {
+                super::dred::TARGET_MS
+            } else {
+                40.0
+            },
+        )
     }
     pub(super) fn output_callback(&mut self, samples: usize, due: bool) {
         self.callback_samples = samples.min(super::mixer::CAPACITY);
@@ -773,7 +795,7 @@ impl Jitter {
                 self.metrics.fec_attempts += 1;
                 self.metrics.concealments += 1;
             }
-            Playout::Conceal(_) => self.metrics.concealments += 1,
+            Playout::Conceal(_) | Playout::Dred(..) => self.metrics.concealments += 1,
             Playout::Packet(_) => {}
         }
         Some(Scheduled {

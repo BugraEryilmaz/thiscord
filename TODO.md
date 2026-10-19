@@ -286,6 +286,9 @@ speaker isolation and physical acoustic acceptance remain future work.
 ## 7. Backend Rust SFU
 
 - [x] Native Rust WebRTC SFU architecture recorded in docs/audio.md.
+- [ ] Complete DRED source/privacy epoch integration and renewed review before
+  merge readiness; experimental codec/recovery work and measured limitations are
+  recorded in docs/deep-redundancy.md. Legacy sources require ordinary Opus fallback.
 - [x] In-memory rooms, publisher/subscriber slots and participant lifecycle.
 - [x] Forward encoded audio without transcoding; per-hop RTCP interceptors.
 - [x] Bounded ingress/egress, slow-receiver deadlines and eight-person room limits.
