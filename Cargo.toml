@@ -1,10 +1,11 @@
 [workspace]
 members = ["frontend", "backend", "shared"]
-exclude = ["vendor/sonora", "vendor/sonora-aec3"]
+exclude = ["vendor/sonora", "vendor/sonora-aec3", "vendor/opus"]
 default-members = ["shared"]
 resolver = "3"
 
 [patch.crates-io]
+opus = { path = "vendor/opus" }
 sonora = { path = "vendor/sonora" }
 sonora-aec3 = { path = "vendor/sonora-aec3" }
 

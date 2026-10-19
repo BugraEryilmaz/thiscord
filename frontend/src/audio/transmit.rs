@@ -21,6 +21,8 @@ pub struct Encoder {
     in_dtx: bool,
     no_data_sent: bool,
     dtx_enabled: bool,
+    deep_redundancy: bool,
+    loss_floor: u8,
 }
 impl Encoder {
     pub fn new(dtx: bool) -> Result<Self, opus::Error> {
@@ -35,6 +37,8 @@ impl Encoder {
             in_dtx: false,
             no_data_sent: false,
             dtx_enabled: dtx,
+            deep_redundancy: false,
+            loss_floor: 5,
         })
     }
     pub fn reset(&mut self) -> Result<(), opus::Error> {
@@ -42,8 +46,8 @@ impl Encoder {
         self.no_data_sent = false;
         self.codec.reset_state()
     }
-    /// The sole live writer of the Opus loss-hint CTL. Integration passes floor
-    /// 20 when DRED is enabled, otherwise 5; codec bitrate belongs to that policy.
+    /// Preserve the measured adaptive policy independently of DRED's minimum.
+    /// Toggling DRED off restores that policy, not a newly reset 5% estimate.
     pub(crate) fn adapt(
         &mut self,
         enabled: bool,
@@ -51,9 +55,44 @@ impl Encoder {
         sample: Option<super::adaptive_fec::Sample>,
         now: Instant,
     ) -> Result<(), opus::Error> {
-        let hint = self.adaptive.update(enabled, floor, sample, now);
+        self.adaptive.update(enabled, 5, sample, now);
+        self.loss_floor = floor.clamp(5, 30);
+        self.apply_loss_hint()
+    }
+    pub(crate) fn adaptive_diagnostics(
+        &self,
+        now: Instant,
+    ) -> thiscord_shared::audio::AdaptiveFecDiagnostics {
+        let mut status = self.adaptive.diagnostics(now);
+        status.baseline_loss_percent =
+            self.loss_floor
+                .max(if self.deep_redundancy { 20 } else { 5 });
+        status.effective_loss_percent = status
+            .effective_loss_percent
+            .max(status.baseline_loss_percent);
+        status
+    }
+    /// Sole live writer of the native loss-hint CTL, shared by both preferences.
+    fn apply_loss_hint(&mut self) -> Result<(), opus::Error> {
+        let hint = self
+            .adaptive_diagnostics(Instant::now())
+            .effective_loss_percent;
         if self.codec.get_packet_loss_perc()? != i32::from(hint) {
             self.codec.set_packet_loss_perc(i32::from(hint))?;
+        }
+        Ok(())
+    }
+    pub fn set_deep_redundancy(&mut self, enabled: bool) -> Result<(), opus::Error> {
+        if self.deep_redundancy != enabled {
+            self.reset()?;
+            self.codec.set_dred_duration(0)?;
+            self.codec.set_bitrate(opus::Bitrate::Bits(if enabled {
+                super::dred::BITRATE
+            } else {
+                32_000
+            }))?;
+            self.deep_redundancy = enabled;
+            self.apply_loss_hint()?;
         }
         Ok(())
     }
@@ -66,7 +105,20 @@ impl Encoder {
         let start = Instant::now();
         // Do not let codec VAD discard quiet speech/pre-roll admitted by our gate.
         self.codec.set_dtx(self.dtx_enabled && !protect_speech)?;
-        let n = self.codec.encode_float(pcm, output)?;
+        // DRED must not pad no-data frames or defeat silence omission. Existing
+        // gate/control resets clear encoder latents before entering silence.
+        self.codec
+            .set_dred_duration(if self.deep_redundancy && protect_speech {
+                super::dred::DURATION
+            } else {
+                0
+            })?;
+        let budget = if self.deep_redundancy {
+            output.len().min(1100)
+        } else {
+            output.len()
+        };
+        let n = self.codec.encode_float(pcm, &mut output[..budget])?;
         let dtx = self.codec.get_in_dtx()?;
         self.stats.encode_ns += start.elapsed().as_nanos() as u64;
         self.stats.encoded_frames += 1;

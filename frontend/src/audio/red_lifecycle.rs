@@ -254,6 +254,11 @@ impl Session {
                 decoder: opus::Decoder::new(RATE, opus::Channels::Mono)
                     .map_err(|e| e.to_string())?,
             });
+            self.remotes[slot].as_mut().unwrap().set_deep_redundancy(
+                writer,
+                self.settings.deep_redundancy && !shared_audio,
+                now,
+            )?;
             writer.control.active.store(true, Ordering::Release);
         }
         Ok(())
@@ -272,6 +277,10 @@ impl Session {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    mod dred_lifecycle {
+        include!("dred/lifecycle_tests.rs");
+    }
 
     struct FakeStreams;
     impl DeviceStreams for FakeStreams {

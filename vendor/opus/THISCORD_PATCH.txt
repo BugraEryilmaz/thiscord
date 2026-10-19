@@ -1,0 +1,10 @@
+Source: opus 0.4.0, crates.io release, https://github.com/SpaceManiac/opus-rs
+License: MIT OR Apache-2.0; both original notices retained.
+Original lib.rs retained except declaring/re-exporting the dred module.
+Thiscord adds src/dred.rs: encoder DRED duration CTL, decoder complexity CTL,
+full decoder reinitialization preserving complexity (same allocation, no allocation),
+and bounded, owned DRED parse/decode bindings. No borrowed C pointers escape.
+Cargo.toml pins opusic-sys =0.7.5 and enables its bundled dred feature.
+This dependency is excluded from the application workspace (still 3 packages).
+The libopus C sources and built-in model arrays remain in the Cargo.lock-pinned
+opusic-sys crate; no build-time model download or native source modification.

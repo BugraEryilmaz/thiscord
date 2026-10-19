@@ -609,6 +609,10 @@ combination policy and deterministic recovery/bandwidth results.
 
 ### Opus microphone FEC policy
 
+The optional experimental [deep redundancy policy](deep-redundancy.md) adds
+bounded Opus DRED recovery and documents its source/privacy protocol merge gate.
+It is separate from the default ordinary FEC behavior below.
+
 Microphone encoding retains 48 kHz mono, 20 ms frames, `Application::Voip` and
 32 kbit/s. It explicitly sets `set_inband_fec(true)` and
 `set_packet_loss_perc(5)` by default. This conservative **fixed 5% expected-loss

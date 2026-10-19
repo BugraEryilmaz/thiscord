@@ -236,6 +236,11 @@ jobs:
         run: cargo test -p thiscord-frontend --lib --example audio_replay --features deep-filter,neural-echo-probe --profile ci --locked
       - name: Lint audio stages, regressions and benchmarks
         run: cargo clippy -p thiscord-frontend --lib --tests --examples --features deep-filter,neural-echo-probe --profile ci --locked -- -D warnings
+      - name: Measure bundled DRED recovery, payload and worker cost
+        shell: pwsh
+        run: |
+          cargo test -p thiscord-frontend --lib --features deep-filter,neural-echo-probe --profile ci --locked dred -- --nocapture --test-threads=1 > dred-results.txt 2>&1
+          if ($LASTEXITCODE) { exit $LASTEXITCODE }
       - name: Build production benchmark executables together
         shell: pwsh
         run: |
@@ -262,6 +267,7 @@ jobs:
             processing-bench.jsonl
             neural-echo-bench.jsonl
             dtx-bench.jsonl
+            dred-results.txt
           if-no-files-found: error
       - name: Report Cargo storage
         if: always() && env.CARGO_TARGET_DIR != ''

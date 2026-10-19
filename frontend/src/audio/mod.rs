@@ -5,6 +5,7 @@ pub mod connection;
 mod cues;
 mod device_users;
 pub mod diagnostics;
+mod dred;
 pub mod failure;
 #[cfg(test)]
 #[path = "../../tests/support/audio_fixture.rs"]
@@ -472,6 +473,28 @@ struct Remote {
     rate: playout_rate::Rate,
 }
 impl Remote {
+    fn set_deep_redundancy(
+        &mut self,
+        writer: &StreamWriter,
+        enabled: bool,
+        now: Instant,
+    ) -> Result<(), String> {
+        // Epoch-zero sources cannot fence redundant audio at remote boundaries.
+        let enabled = enabled && self.source_epoch != 0 && self.privacy_epoch != 0;
+        if self.jitter.deep_redundancy != enabled {
+            self.clear(writer, now);
+            if self.decode_stats.reset_failed {
+                return Err("Opus full decoder reset failed".into());
+            }
+            self.jitter.set_deep_redundancy(enabled);
+        }
+        if let Err(error) = self.decoder.set_complexity(if enabled { 5 } else { 0 }) {
+            self.decode_stats.reset_failed = true;
+            self.deafened = true;
+            return Err(error.to_string());
+        }
+        Ok(())
+    }
     fn push(
         &mut self,
         sequence: u16,
@@ -513,7 +536,9 @@ impl Remote {
         }
     }
     fn reset_decoder(&mut self, writer: &StreamWriter) {
-        let _ = self.decoder.reset_state();
+        if !codec::reset(&mut self.decoder, &mut self.decode_stats) {
+            self.deafened = true;
+        }
         self.activity = Default::default();
         self.rate.reset();
         writer.discard();
@@ -527,6 +552,9 @@ impl Remote {
         }
         if self.jitter.prepare(now) {
             self.reset_decoder(writer);
+            if self.deafened {
+                return;
+            }
         }
         let metrics = self.jitter.metrics();
         writer
@@ -547,7 +575,11 @@ impl Remote {
                 break;
             };
             if scheduled.reset {
-                let _ = self.decoder.reset_state();
+                if !codec::reset(&mut self.decoder, &mut self.decode_stats) {
+                    self.deafened = true;
+                    writer.discard();
+                    return;
+                }
                 self.rate.reset();
             }
             let mut pcm = [0.0_f32; FRAME];
@@ -568,6 +600,11 @@ impl Remote {
                 self.activity.observe(&pcm, now);
             }
             drop(timer);
+            if self.decode_stats.reset_failed {
+                self.deafened = true;
+                writer.discard();
+                return;
+            }
             self.jitter
                 .quality
                 .add(Count::DecodedSamples, samples as u64);
@@ -922,7 +959,10 @@ impl Session {
         diagnostics::event("processing_init_complete", serde_json::json!({}));
         let recovery = recovery::Recovery::starting();
         let devices = Devices::silent(settings);
-        let encoder = transmit::Encoder::new(true).map_err(|e| e.to_string())?;
+        let mut encoder = transmit::Encoder::new(true).map_err(|e| e.to_string())?;
+        encoder
+            .set_deep_redundancy(settings.deep_redundancy)
+            .map_err(|e| e.to_string())?;
         let decoder = opus::Decoder::new(RATE, opus::Channels::Mono).map_err(|e| e.to_string())?;
         devices.writers[0]
             .control
@@ -1119,7 +1159,7 @@ impl Session {
         self.encoder
             .adapt(
                 self.settings.adaptive_fec,
-                5, // Integration: use 20 while deep_redundancy is enabled.
+                5, // Encoder combines the measured policy with its DRED 20% floor.
                 self.connection.as_ref().and_then(|c| c.uplink_sample(0)),
                 Instant::now(),
             )
@@ -1270,7 +1310,7 @@ impl Session {
         // These legacy cumulative counters are maintained separately; new
         // callback counters are drained exactly once on the worker.
         AudioQuality {
-            adaptive_fec: Some(self.encoder.adaptive.diagnostics(Instant::now())),
+            adaptive_fec: Some(self.encoder.adaptive_diagnostics(Instant::now())),
             metrics: metrics.snapshot(),
             streams: self
                 .remotes
@@ -1311,15 +1351,14 @@ impl Session {
             echo: self.processing.echo_diagnostics(),
             transmitting: self.devices.control.transmitting.load(Ordering::Relaxed),
             message: if let Some(message) = self.recovery.message() {
-                message
+                message.into()
             } else if self.outgoing.is_some() {
-                "Voice audio active"
+                self.dred_voice_status()
             } else if self.microphone {
-                "Microphone test: local Opus loopback (use headphones)"
+                "Microphone test: local Opus loopback (use headphones)".into()
             } else {
-                "Output test: two independent streams"
-            }
-            .into(),
+                "Output test: two independent streams".into()
+            },
             streams: if self.outgoing.is_some() {
                 self.remotes
                     .iter()
@@ -1479,7 +1518,7 @@ fn run(
                 diagnostics::quality(|| s.quality());
                 diagnostics::event(
                     "audio_snapshot",
-                    serde_json::json!({"processing_resets":s.processing.resets,"processing_reset_causes":s.processing.reset_causes,"opus_decode":s.remotes.iter().flatten().map(|r| &r.decode_stats).collect::<Vec<_>>(),"verified_fec_frames":null,"playout":s.remotes.iter().flatten().map(|r|r.jitter.metrics()).collect::<Vec<_>>(),"receive":s.remotes.iter().flatten().map(|r|r.jitter.diagnostics()).collect::<Vec<_>>(),"health":s.devices.health.diagnostics(),"recovering":s.recovery.active(),"muted":s.settings.muted,"deafened":s.settings.deafened,"echo":s.settings.echo_cancellation,"neural_echo":s.settings.neural_echo,"suppression":s.settings.noise_suppression,"suppression_model":s.settings.noise_suppression_model,"automatic_gain":s.settings.automatic_gain,"capture_overflow_samples":s.devices.control.dropped.load(Ordering::Relaxed),"playback_starvation_samples":s.devices.control.underruns.load(Ordering::Relaxed)}),
+                    serde_json::json!({"processing_resets":s.processing.resets,"processing_reset_causes":s.processing.reset_causes,"opus_decode":s.remotes.iter().flatten().map(|r| &r.decode_stats).collect::<Vec<_>>(),"verified_fec_frames":null,"playout":s.remotes.iter().flatten().map(|r|r.jitter.metrics()).collect::<Vec<_>>(),"receive":s.remotes.iter().flatten().map(|r|r.jitter.diagnostics()).collect::<Vec<_>>(),"health":s.devices.health.diagnostics(),"recovering":s.recovery.active(),"muted":s.settings.muted,"deafened":s.settings.deafened,"deep_redundancy":s.settings.deep_redundancy,"dred_bitrate_target":if s.settings.deep_redundancy { dred::BITRATE } else { 32_000 },"echo":s.settings.echo_cancellation,"neural_echo":s.settings.neural_echo,"suppression":s.settings.noise_suppression,"suppression_model":s.settings.noise_suppression_model,"automatic_gain":s.settings.automatic_gain,"capture_overflow_samples":s.devices.control.dropped.load(Ordering::Relaxed),"playback_starvation_samples":s.devices.control.underruns.load(Ordering::Relaxed)}),
                 );
             }
         }
@@ -1626,6 +1665,7 @@ fn run(
                                     return Ok(());
                                 }
                                 s.processing.settings(&settings)?;
+                                s.set_deep_redundancy(settings.deep_redundancy)?;
                                 s.settings = settings.clone();
                                 debug.settings(&settings);
                                 for (remote, writer) in s.remotes.iter_mut().zip(&s.devices.writers)

@@ -123,6 +123,7 @@ impl Pending {
             prepared.processing = s.processing.install(prepared.processing)?;
             s.reset_gate(Instant::now());
             s.processed_level = 0.0;
+            s.set_deep_redundancy(self.settings.deep_redundancy)?;
             s.settings = self.settings.clone();
             apply(&s.devices.control, &self.settings);
             if deafened {
