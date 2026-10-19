@@ -116,6 +116,32 @@ async fn search_matches_partial_display_names_and_usernames() {
     assert_eq!(people.len(), 20);
     assert_eq!(people[0]["username"], "limit_00");
     assert_eq!(people[19]["username"], "limit_19");
+
+    // A generated username and an existing pending request must not hide a
+    // person when searching part of the display name shown in the friend list.
+    let (pending_id, _) = user(&db, "user_5e3b930b842c44b9b4c8");
+    diesel::sql_query("UPDATE accounts SET display_name=$2 WHERE id=$1::uuid")
+        .bind::<Text, _>(pending_id.to_string())
+        .bind::<Text, _>("memedin kocası")
+        .execute(&mut db.pool.get().unwrap())
+        .unwrap();
+    social(
+        &app,
+        &actor,
+        json!({"action":"add","account_id":pending_id}),
+        StatusCode::OK,
+    )
+    .await;
+    let result = social(
+        &app,
+        &actor,
+        json!({"action":"search","query":"memedi"}),
+        StatusCode::OK,
+    )
+    .await;
+    assert_eq!(result["people"].as_array().unwrap().len(), 1);
+    assert_eq!(result["people"][0]["id"], json!(pending_id));
+    assert_eq!(result["people"][0]["display_name"], "memedin kocası");
 }
 
 async fn socket(address: std::net::SocketAddr, token: &str) -> Socket {

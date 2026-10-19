@@ -307,7 +307,7 @@ pub(super) fn Home(ui: Ui) -> impl IntoView {
             <div class="ml-auto"><AddFriend ui=ui/></div>
         </header>
         <div class="flex min-h-0 flex-1">
-            <aside class="hidden w-56 shrink-0 overflow-y-auto border-r border-white/10 p-4 pb-[var(--dock-height)] lg:block" aria-label="Direct messages">
+            <aside class="hidden w-[var(--sidebar-width)] shrink-0 overflow-y-auto border-r border-white/10 bg-sidebar p-4 pb-[var(--dock-height)] lg:block" aria-label="Direct messages">
                 <h3 class="mb-3 text-xs font-semibold uppercase tracking-wider text-white/40">"Direct messages"</h3>
                 <For each=move ||{ui.friends.snapshot.get().friends.into_iter().filter(|f|f.relationship==Relationship::Friend).collect::<Vec<_>>()} key=|f|f.conversation_id children=move |f| {
                     let id=f.conversation_id;
