@@ -543,6 +543,9 @@ pub(super) fn AudioSettingsPanel(ui: Ui) -> impl IntoView {
                 <Show when=move||ui.audio_saving.get()><p class="text-sm text-white/60" role="status">"Applying audio settings..."</p></Show>
                 <VoiceControls ui=ui/>
                 <details class="settings-card"><summary>"Advanced & troubleshooting"</summary><div class="space-y-5"><p class="settings-hint">"During calls, instance administrators can adjust audio settings and request technical diagnostics for support."</p>
+                <label class="flex gap-3"><input type="checkbox" disabled=move||ui.audio_saving.get() prop:checked=move||ui.audio.get().adaptive_fec on:change=move|e|{ui.audio.update(|s|s.adaptive_fec=event_target_checked(&e));save(ui);}/>"Adaptive Opus in-band FEC"</label>
+                <p class="settings-hint">"Adjusts microphone loss protection from server receiver reports during your call. Keeps the 32 kbit/s codec budget; more protection can reduce speech detail. Adds no buffering delay. Uses the standard 5% hint while feedback is unavailable or stale; burst losses may remain audible."</p>
+                <Show when=move||ui.audio_control.is_remote() && ui.audio_status.get().is_some_and(|s|s.quality.is_none_or(|q|q.adaptive_fec.is_none()))><p class="settings-hint">"Adaptive FEC status is unavailable on this client. Update the remote desktop app if it does not support or retain this setting."</p></Show>
                 <Show when=move || !ui.audio_control.is_remote()><DebugRecording ui=ui/></Show>
                 <super::diagnostics::DiagnosticsSettings control=ui.audio_control/>
                 <label class="block">"Raw microphone"<meter class="ml-3 w-48" min="0" max="1" value=move||ui.audio_status.get().map(|s|s.raw_input_level).unwrap_or(0.0) /></label>

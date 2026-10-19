@@ -1,4 +1,7 @@
 //! Loopback-only feasibility probe. This is not an authenticated production SFU.
+#[cfg(test)]
+#[path = "adaptive_fec_transport_tests.rs"]
+mod adaptive_fec_tests;
 use rtc::{
     media_stream::MediaStreamTrack,
     rtp,

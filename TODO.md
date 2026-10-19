@@ -144,6 +144,9 @@ and single-process chat/media enforcement.
   physical three-platform clients.
 - [x] Explicit microphone Opus in-band FEC (fixed 5% loss hint), deadline-bounded
   successor recovery/PLC, honest attempt counters and deterministic loss regressions.
+- [x] Optional live adaptive Opus FEC from authenticated microphone uplink RTCP,
+  with bounded smoothing, stale/default fallback, persisted local/remote settings
+  and numeric diagnostics; see `docs/audio.md` for limitations and integration.
 - [ ] Validate FEC speech/bitrate tradeoffs with listening and physical clients
   on Windows/macOS/Linux under real packet loss and jitter.
 - [x] Windows/Linux encrypted WebRTC software probes; three-OS CI build/test matrix.

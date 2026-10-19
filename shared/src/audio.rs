@@ -1,6 +1,10 @@
 //! Native audio control contracts; PCM never crosses the WebView bridge.
 use serde::{Deserialize, Serialize};
 
+fn is_false(value: &bool) -> bool {
+    !value
+}
+
 /// Local self controls; deafen suppresses transmission without changing manual mute.
 #[derive(Debug, Clone, Copy, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -70,6 +74,9 @@ pub struct AudioSettings {
     pub noise_suppression: bool,
     pub noise_suppression_model: NoiseSuppressionModel,
     pub automatic_gain: bool,
+    /// Adapt the Opus loss hint from authenticated microphone uplink RTCP reports.
+    #[serde(skip_serializing_if = "is_false")]
+    pub adaptive_fec: bool,
     pub echo_cancellation: bool,
     /// Experimental residual estimator, independent of the noise suppressor.
     pub neural_echo: bool,
@@ -91,6 +98,7 @@ impl Default for AudioSettings {
             noise_suppression: false,
             noise_suppression_model: NoiseSuppressionModel::Sonora,
             automatic_gain: false,
+            adaptive_fec: false,
             echo_cancellation: false,
             neural_echo: false,
             neural_echo_model: None,
@@ -263,6 +271,16 @@ mod control_tests {
     fn shortcut_defaults_and_toggle_wire_values_are_stable() {
         let old: AudioSettings = serde_json::from_str("{}").unwrap();
         assert!(!old.muted && !old.deafened);
+        assert!(!old.adaptive_fec);
+        let enabled = AudioSettings {
+            adaptive_fec: true,
+            ..old
+        };
+        assert_eq!(
+            serde_json::from_str::<AudioSettings>(&serde_json::to_string(&enabled).unwrap())
+                .unwrap(),
+            enabled
+        );
         let defaults: AudioShortcuts = serde_json::from_str("{}").unwrap();
         assert_eq!(defaults, AudioShortcuts::default());
         assert_eq!(
@@ -343,9 +361,20 @@ pub struct StreamQuality {
     pub buffered_playout_ms: f64,
     pub verified_fec_packets: Option<u64>,
 }
+/// Numeric sender-only diagnostics, with no media or participant identifiers.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(default)]
+pub struct AdaptiveFecDiagnostics {
+    pub baseline_loss_percent: u8,
+    pub enabled: bool,
+    pub effective_loss_percent: u8,
+    pub feedback_age_ms: Option<u64>,
+    pub adapting: bool,
+}
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 #[serde(default)]
 pub struct AudioQuality {
+    pub adaptive_fec: Option<AdaptiveFecDiagnostics>,
     pub metrics: QualityMetrics,
     pub streams: Vec<StreamQuality>,
     pub capture_blocks: usize,

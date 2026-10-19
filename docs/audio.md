@@ -510,12 +510,101 @@ queue pressure, stalls, flush acknowledgement, deafen and source replacement.
 Actual device scheduling, acoustic quality and prolonged stalls still need
 three-platform live validation.
 
+### Adaptive microphone FEC
+
+**Audio & voice > Advanced & troubleshooting > Adaptive Opus in-band FEC**
+(`adaptive_fec`, default false) persists in `audio.json` and uses the existing
+local and remote settings path. It takes effect during a call without rejoining.
+Off restores the existing 5% hint; in-band FEC itself remains enabled. The false
+field is omitted on serialization, preserving the old default settings shape.
+Older remote clients may reject an enabled setting; the UI identifies missing
+adaptive diagnostics and instructs updating that desktop client.
+
+The sole live loss-hint writer is `transmit::Encoder::adapt`. A narrow Rust
+interceptor observes authenticated RTCP Receiver Reports (and reception blocks
+in Sender Reports) before the transport's default RTCP terminus. Only the
+publisher microphone SSRC qualifies. Listener statistics, accepted-write counts
+and RTP timestamp gaps are never used as delivery loss. Pinned rtc 0.21 defines
+its remote stats updater but never calls it; polling `RemoteInboundRtp` would
+leave this feature inert. The encrypted integration test exercises the direct
+interceptor. No custom signaling, payload type or server upgrade is needed;
+a peer without usable standard reports stays at baseline.
+
+A fixed numeric mailbox accepts at most one advancing report per second. It
+rejects future sequences, reports before the stable source's first sent packet,
+duplicates, reordered reports and unusable 24-bit loss values. The transport
+records successfully submitted **outer RTP** sequences; RED copies and raw/RED
+switching must not create extra receipt counts. The controller uses deltas in
+extended highest sequence and cumulative loss. A window needs at least 25
+packets, at least one second, less than six seconds and at most 400 packets.
+Sequence wrap is modular; loss-counter regression or implausible jumps rebaseline.
+This is the server's transport estimate, not proof of audible or permanent loss.
+
+The bounded 5-30% hint uses a 0.25 EWMA, one point of hysteresis, and at most
++3/-1 percentage points per accepted window. Six seconds without a usable window
+restores baseline; replayed reports cannot refresh it. Sparse DTX feedback stays
+at baseline because omitted silence advances media time, not sent sequence.
+Reconnect clears all state. PTT, mute/deafen and other privacy revisions preserve
+numeric path estimates; existing generation fences and Opus resets still erase
+all retained audio.
+
+`Connection::uplink_sent(source_generation, sequence)` and the worker's matching
+`uplink_sample(source_generation)` are the stable-source integration hooks.
+Current peers have one source, generation 0. A future authoritative stable source
+change must change both arguments; passing the new generation to the getter
+immediately rejects prior-source feedback. Never pass the PTT/privacy revision
+or `EncodedFrame::generation` here. The first successful new-source send clears
+the mailbox and establishes its sequence fence. Within one peer/SSRC this assumes
+continuous RTP sequence numbers; a sequence restart requires a fresh peer or an
+explicit matching transport/report reset.
+
+For DRED integration, pass **floor 20 when `deep_redundancy` is enabled, otherwise
+5** to `Encoder::adapt` immediately before encoding, even when adaptive FEC is
+off. That method owns the final `OPUS_SET_PACKET_LOSS_PERC` call; DRED must not
+write it afterward. Off/absent/stale/reset/low-loss states all honor the floor,
+and floor changes apply immediately. DRED separately owns its 40 kbit/s total
+codec budget; adaptive FEC never changes bitrate. This branch implements neither
+DRED nor RED. Parent integration must test all eight combined toggle states and
+update combined UI bitrate/fallback copy.
+
+Adaptive FEC adds no packets, retained PCM, buffering delay or codec budget:
+the microphone remains 32 kbit/s VBR. Reallocated bits can reduce speech detail;
+packet sizes still vary. Interception retains ordinary pass-through packets only
+during synchronous chain traversal, with a 1024-packet cap per direction. It
+scans at most 32 RTCP packets by 31 report blocks, and never logs media, reports,
+credentials or identities. Feedback storage is under 256 bytes. Device callbacks
+are unchanged. Tests cover bounded ingress, source/SSRC rejection, replay, rate
+limits, counter resets, wrap and floor precedence.
+
+The committed synthetic speech fixture with pinned Opus 1.6.1 and deterministic
+approximately 20% loss produced these Windows results. Adaptive encoding was
+warmed to a 20% hint; this is not a listening score or real-network convergence
+claim. Lost-frame squared error against aligned input:
+
+- Isolated loss: fixed 5% FEC 237.834; adaptive 20% FEC 196.568 (17.4% lower).
+  Both had 71 missing intervals and 71 immediate-successor opportunities.
+- Three-packet bursts: fixed FEC 565.231; adaptive FEC 552.042 (2.3% lower).
+  Of 72 missing intervals only 24 had a successor; the other 48 required PLC.
+- Payload: 25,445 vs 25,483 bytes, 27.58 vs 27.62 kbit/s (+0.15%). Minimum RTP
+  headers are unchanged (50 times 12 bytes/s); UDP/IP/SRTP/TURN is excluded.
+- Encoder lookahead was 6.5 ms in both cases; added buffering was 0 ms.
+
+All eligible FEC outputs differed from a separate PLC decoder, but divergent
+codec histories and Opus's implicit PLC mean these are **not verified recovery
+counts**. The encrypted two-peer test must observe real reports and change the
+encoder above 5% before passing. Reproduce with
+`cargo test -p thiscord-frontend --lib --features native-audio --profile ci --locked adaptive_fec -- --nocapture`.
+Physical multi-client impairment/listening and native macOS/Linux device
+acceptance remain unverified. Existing CI runs these native tests on all three
+platforms; no new dependency or CI feature is required.
+
 ### Opus microphone FEC policy
 
 Microphone encoding retains 48 kHz mono, 20 ms frames, `Application::Voip` and
 32 kbit/s. It explicitly sets `set_inband_fec(true)` and
-`set_packet_loss_perc(5)`. This is a conservative **fixed 5% expected-loss hint**,
-not a measured loss rate or dynamic adaptation; no RTCP feedback drives it.
+`set_packet_loss_perc(5)` by default. This conservative **fixed 5% expected-loss
+hint** remains the disabled/fallback policy. The optional adaptive policy below
+uses authenticated server reception reports; it is off for existing and new installs.
 Redundancy spends part of the existing bitrate budget on the preceding speech
 frame, reducing bits available for the current frame and potentially changing
 bandwidth/mode selection. VBR packet sizes still vary. FEC is conditional on the
@@ -527,7 +616,7 @@ the boolean FEC setter sends `OPUS_SET_INBAND_FEC(1)`, and the loss setter sends
 `OPUS_SET_PACKET_LOSS_PERC`. The bundled `src/opus_encoder.c` accepts FEC values
 0..2 and loss percentages 0..100. The wrapper exposes only modes 0/1; mode 2's
 music-preserving preference is not requested. See the official
-[encoder controls](https://opus-codec.org/docs/opus_api-1.5/group__opus__encoderctls.html).
+[encoder controls](https://opus-codec.org/docs/opus_api-1.6/group__opus__encoderctls.html).
 Shared system audio retains its separate `Application::Audio`, 64 kbit/s encoder
 and default disabled FEC/zero loss hint; the microphone speech policy is not
 applied to music. All native receivers can opportunistically decode redundancy.

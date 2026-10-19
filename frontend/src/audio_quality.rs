@@ -232,6 +232,23 @@ pub fn detail(value: Option<&AudioQuality>) -> String {
         return "Join native voice or start an audio test. Metrics are unavailable in browser preview and older clients.".into();
     };
     let mut out = String::new();
+    if let Some(fec) = &q.adaptive_fec {
+        let _ = writeln!(
+            out,
+            "Microphone uplink adaptive FEC: {}; effective loss hint {}%; usable feedback age {}; {}",
+            if fec.enabled { "on" } else { "off" },
+            fec.effective_loss_percent,
+            optional(fec.feedback_age_ms.map(|ms| ms as f64), "ms"),
+            if fec.adapting {
+                "adapting from server RTCP".into()
+            } else {
+                format!(
+                    "baseline {}% (off, warming up, stale or unavailable); last applied CTL shown above",
+                    fec.baseline_loss_percent
+                )
+            }
+        );
+    }
     let _ = writeln!(
         out,
         "Local observations; no audio is recorded. Timing percentiles are histogram upper bounds.\nSFU-hop RTT: {} (not end-to-end latency)",
