@@ -363,6 +363,8 @@ impl ScreenState {
                     }
                 }
                 if !thiscord_frontend::screen::bounded_parameter_sets(&frame.data) {
+                    metrics.add("rejected_parameter_sets", 1);
+                    metrics.event("video parameter set is unsupported or exceeds decoder bounds");
                     rx.resync();
                     continue;
                 }

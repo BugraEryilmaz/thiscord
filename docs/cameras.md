@@ -39,7 +39,7 @@ compressed video over the authenticated call's existing encrypted WebRTC session
 the SFU forwards without decoding or transcoding. The server can access media
 because these hops terminate encryption; this is not end-to-end encryption.
 No new application server, JavaScript pipeline or camera library is used.
-The local main window's `main-commands` permission allows `camera_open`,
+The local main window's `main-commands` permission allows `camera_prepare`, `camera_open`,
 `camera_keepalive` and `camera_stop`. Notification and voice-overlay windows have
 no camera command access; camera transport still requires the active call's
 authoritative media permissions.
@@ -62,6 +62,12 @@ WebRTC-to-WebView playback bridge. Screens retain their existing GPU encode path
 Local screen preview keeps capture alive but does not upload video without remote
 viewers. Hiding it also stops local frame assembly and keyframe requests.
 
+The receiver accepts baseline H.264 picture-order modes 0, 1 and 2, including
+equivalent constrained-baseline profile identifiers from hardware encoders. It
+still enforces the decoder's dimension and reference-frame limits. A connected
+player awaiting its first decoded frame shows "Waiting for video" and offers
+"Copy video diagnostics"; rejected parameter sets appear in those counters.
+
 Capture stops on deafen, leaving, switching calls, disconnect/replacement, logout,
 window destruction, lost device or expired UI lease. Cancellation stops acquired
 tracks even during negotiation; permission requests that complete after cancellation
@@ -69,6 +75,13 @@ immediately release their tracks. Initial connection has a ten-second deadline a
 prolonged disconnection a ten-second grace period. Camera state is not persisted
 or automatically restarted on rejoin. Camera and screen recovery requests use
 independent rate limits, with signaling capacity for a full eight-person grid.
+
+The client reserves a native capture lease before requesting camera permission;
+an abandoned permission/start attempt expires after 60 seconds. On macOS 12 and
+newer, native stop, call teardown and lease expiry also tell WKWebView to stop
+physical camera capture, even if its UI polling is suspended. Replacement starts
+wait for that shutdown to finish, and delayed stops cannot close a replacement's
+camera. Older WebKit versions retain the normal browser track cleanup.
 
 ## Platform requirements and checks
 
@@ -91,7 +104,9 @@ No physical camera is required for the automated tests:
   permission rejection. Existing H.264 decode/receive tests cover the common player.
   Receiver regressions cover restoring a hidden stream after a large RTP sequence
   gap and keeping camera congestion feedback within its encoder budget.
-- A compiled Tauri ACL regression checks all three camera commands are available
+- Native lifecycle regressions cover cancellation before negotiation, stale stops,
+  replacement during asynchronous camera shutdown, disconnect and pending lease expiry.
+- A compiled Tauri ACL regression checks all four camera commands are available
   to the local main window and denied to auxiliary windows and remote pages.
 
 Run the backend tests in WSL with TEST_DATABASE_URL for the dedicated test database

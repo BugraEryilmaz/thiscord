@@ -117,7 +117,13 @@ pub async fn run(
                         break;
                     }
                     if state == RtcPeerConnectionState::Connected {
-                        message.set(String::new());
+                        message.set(
+                            if player.video.ready_state() >= HtmlMediaElement::HAVE_CURRENT_DATA {
+                                String::new()
+                            } else {
+                                "Waiting for video…".into()
+                            },
+                        );
                         pending = 0;
                     } else {
                         pending += 1;

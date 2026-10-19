@@ -3,7 +3,7 @@
 use crate::native_screen::{Binding, ScreenState};
 use std::{
     sync::{
-        Arc, Mutex,
+        Arc, Mutex, OnceLock,
         atomic::{AtomicBool, Ordering},
     },
     time::{Duration, Instant},
@@ -41,21 +41,113 @@ impl Drop for Session {
 struct Inner {
     binding: Option<Binding>,
     session: Option<Session>,
+    capture: Option<(u32, Instant)>,
+    stopping: bool,
 }
+type ReleaseCapture = Box<dyn Fn(CameraState) + Send + Sync>;
 #[derive(Clone)]
 pub struct CameraState {
     inner: Arc<Mutex<Inner>>,
+    release: Arc<OnceLock<ReleaseCapture>>,
+    released: Arc<Notify>,
     pub views: ScreenState,
 }
 impl Default for CameraState {
     fn default() -> Self {
         Self {
             inner: Default::default(),
+            release: Default::default(),
+            released: Default::default(),
             views: ScreenState::camera(),
         }
     }
 }
 impl CameraState {
+    // Reserve ownership before getUserMedia, including the permission prompt.
+    async fn prepare(&self, session: u32) -> Result<(), String> {
+        let wait = async {
+            loop {
+                let notified = self.released.notified();
+                tokio::pin!(notified);
+                notified.as_mut().enable();
+                {
+                    let mut inner = self.inner.lock().map_err(|_| "Camera unavailable")?;
+                    if !inner.stopping {
+                        if inner.binding.as_ref().is_none_or(|b| {
+                            !b.connection.active() || !b.can_publish || !b.subscriptions
+                        }) {
+                            return Err(
+                                "Join a call with Speak permission before turning on your camera"
+                                    .into(),
+                            );
+                        }
+                        if inner.capture.is_some() {
+                            return Err("Camera is already starting or sharing".into());
+                        }
+                        inner.capture = Some((session, Instant::now()));
+                        return Ok(());
+                    }
+                }
+                notified.await;
+            }
+        };
+        tokio::time::timeout(Duration::from_secs(3), wait)
+            .await
+            .unwrap_or_else(|_| Err("Camera is still stopping. Try again.".into()))
+    }
+    fn release_capture(&self) {
+        if let Some(release) = self.release.get() {
+            release(self.clone());
+        }
+    }
+    // Called on the WebView thread, not when the stop is queued. A replacement
+    // may have acquired the camera in between. Block new starts until WebKit's
+    // asynchronous stop completes, so it cannot stop a replacement either.
+    #[cfg(any(target_os = "macos", test))]
+    fn begin_release(&self) -> bool {
+        let Ok(mut inner) = self.inner.lock() else {
+            return false;
+        };
+        if inner.capture.is_some() || inner.stopping {
+            return false;
+        }
+        inner.stopping = true;
+        true
+    }
+    #[cfg(any(target_os = "macos", test))]
+    fn finish_release(&self) {
+        if let Ok(mut inner) = self.inner.lock() {
+            inner.stopping = false;
+        }
+        self.released.notify_waiters();
+    }
+    #[cfg(target_os = "macos")]
+    pub fn attach(&self, window: tauri::WebviewWindow) {
+        let _ = self.release.set(Box::new(move |state| {
+            let _ = window.with_webview(move |webview| {
+                use objc2::{runtime::NSObjectProtocol, sel};
+                use objc2_web_kit::{WKMediaCaptureState, WKWebView};
+                // SAFETY: Tauri supplies the live WKWebView on its main thread.
+                let webview = unsafe { &*webview.inner().cast::<WKWebView>() };
+                // This API is available from macOS 12. Older WebKit versions
+                // still use the normal MediaStreamTrack.stop cleanup.
+                if !webview.respondsToSelector(sel!(setCameraCaptureState:completionHandler:))
+                    || !state.begin_release()
+                {
+                    return;
+                }
+                let done = block2::RcBlock::new(move || state.finish_release());
+                // SAFETY: selector availability was checked; WebKit copies the
+                // completion block and calls it after physical capture stops.
+                unsafe {
+                    webview.setCameraCaptureState_completionHandler(
+                        WKMediaCaptureState::None,
+                        Some(&done),
+                    );
+                }
+            });
+        }));
+    }
     pub fn bind(&self, binding: Binding) {
         self.clear();
         self.views.bind(binding.clone());
@@ -65,19 +157,35 @@ impl CameraState {
     }
     pub fn clear(&self) {
         self.views.clear();
-        if let Ok(mut inner) = self.inner.lock() {
+        let release = if let Ok(mut inner) = self.inner.lock() {
             inner.session = None;
             inner.binding = None;
+            inner.capture.take().is_some()
+        } else {
+            false
+        };
+        if release {
+            self.release_capture();
         }
     }
     pub fn stop(&self, session: Option<u32>) {
-        if let Ok(mut inner) = self.inner.lock()
-            && inner
-                .session
-                .as_ref()
-                .is_some_and(|s| session.is_none_or(|id| id == s.id))
-        {
-            inner.session = None;
+        let release = if let Ok(mut inner) = self.inner.lock() {
+            match inner.capture {
+                Some((id, _)) if session.is_none_or(|requested| requested == id) => {
+                    inner.session = None;
+                    inner.capture = None;
+                    true
+                }
+                // getUserMedia can resolve after its reservation was cancelled.
+                // Its explicit cleanup still needs physical capture shutdown.
+                None => session.is_some(),
+                _ => false,
+            }
+        } else {
+            false
+        };
+        if release {
+            self.release_capture();
         }
     }
     pub fn active(&self) -> bool {
@@ -92,8 +200,19 @@ impl CameraState {
                 !s.lease.active()
                     || s.touched.elapsed() > Duration::from_secs(if s.ready { 3 } else { 10 })
             })
+            || (inner.session.is_none()
+                && inner
+                    .capture
+                    .as_ref()
+                    .is_some_and(|(_, started)| started.elapsed() > Duration::from_secs(60)))
         {
             inner.session = None;
+            let release = inner.capture.take().is_some();
+            drop(inner);
+            if release {
+                self.release_capture();
+            }
+            return false;
         }
         inner
             .session
@@ -123,6 +242,10 @@ impl CameraState {
             s.force.store(true, Ordering::Release);
         }
     }
+}
+#[tauri::command]
+pub async fn camera_prepare(state: State<'_, CameraState>, session: u32) -> Result<(), String> {
+    state.prepare(session).await
 }
 struct Handler {
     gathered: Arc<Notify>,
@@ -264,6 +387,9 @@ async fn open(state: &CameraState, session: u32, sdp: String) -> Result<ViewAnsw
     let connected = Arc::new(AtomicBool::new(false));
     let binding = {
         let mut inner = state.inner.lock().map_err(|_| "Camera unavailable")?;
+        if inner.capture.as_ref().is_none_or(|(id, _)| *id != session) {
+            return Err("Camera start cancelled".into());
+        }
         let binding = inner
             .binding
             .clone()
@@ -389,7 +515,12 @@ mod tests {
         // insufficient when the app has an explicit command allowlist.
         let mut context: tauri::Context<tauri::Wry> = tauri::generate_context!();
         let authority = context.runtime_authority_mut();
-        for command in ["camera_open", "camera_keepalive", "camera_stop"] {
+        for command in [
+            "camera_prepare",
+            "camera_open",
+            "camera_keepalive",
+            "camera_stop",
+        ] {
             assert!(
                 authority
                     .resolve_access(command, "main", "main", &tauri::ipc::Origin::Local)
@@ -527,6 +658,7 @@ mod tests {
                 .unwrap();
             let state = CameraState::default();
             state.bind(binding(outgoing));
+            state.prepare(1).await.unwrap();
             let (browser, browser_gathered, _) = peer().await;
             let camera = thiscord_frontend::screen::track(777);
             browser
@@ -605,16 +737,20 @@ mod tests {
     #[tokio::test]
     async fn camera_permission_connection_and_lease_fail_closed() {
         let state = CameraState::default();
+        assert!(state.prepare(1).await.is_err());
         assert!(open(&state, 1, String::new()).await.is_err());
         let mut b = binding(thiscord_frontend::screen::track(903));
         b.can_publish = false;
         state.bind(b.clone());
+        assert!(state.prepare(1).await.is_err());
         assert!(open(&state, 1, String::new()).await.is_err());
         b.can_publish = true;
         b.connection.close();
         state.bind(b);
+        assert!(state.prepare(1).await.is_err());
         assert!(open(&state, 1, String::new()).await.is_err());
         state.bind(binding(thiscord_frontend::screen::track(903)));
+        state.prepare(2).await.unwrap();
         let lease = Connection::default();
         state.inner.lock().unwrap().session = Some(Session {
             id: 2,
@@ -627,5 +763,90 @@ mod tests {
         });
         assert!(!state.active());
         assert!(!lease.active());
+        assert!(state.inner.lock().unwrap().capture.is_none());
+    }
+
+    #[tokio::test]
+    async fn capture_stop_covers_permission_prompt_and_rejects_late_open() {
+        let state = CameraState::default();
+        state.bind(binding(thiscord_frontend::screen::track(903)));
+        state.prepare(1).await.unwrap();
+        state.stop(Some(1));
+        assert!(state.inner.lock().unwrap().capture.is_none());
+        state.prepare(2).await.unwrap();
+        state.stop(Some(1));
+        assert!(
+            !state.begin_release(),
+            "queued old stop must not release replacement"
+        );
+        assert!(open(&state, 1, String::new()).await.is_err());
+        assert_eq!(state.inner.lock().unwrap().capture.unwrap().0, 2);
+    }
+
+    #[tokio::test]
+    async fn replacement_waits_for_physical_camera_shutdown() {
+        let state = CameraState::default();
+        state.bind(binding(thiscord_frontend::screen::track(903)));
+        state.prepare(1).await.unwrap();
+        state.stop(Some(1));
+        assert!(state.begin_release());
+        let next = state.prepare(2);
+        tokio::pin!(next);
+        assert!(
+            tokio::time::timeout(Duration::from_millis(20), &mut next)
+                .await
+                .is_err()
+        );
+        state.finish_release();
+        next.await.unwrap();
+        assert_eq!(state.inner.lock().unwrap().capture.unwrap().0, 2);
+    }
+
+    #[tokio::test]
+    async fn native_teardown_releases_capture_without_webview_keepalive() {
+        let state = CameraState::default();
+        let releases = Arc::new(std::sync::atomic::AtomicU32::new(0));
+        let count = releases.clone();
+        assert!(
+            state
+                .release
+                .set(Box::new(move |state| {
+                    if state.begin_release() {
+                        count.fetch_add(1, Ordering::Relaxed);
+                        state.finish_release();
+                    }
+                }))
+                .is_ok()
+        );
+        let b = binding(thiscord_frontend::screen::track(903));
+        state.bind(b.clone());
+        state.prepare(1).await.unwrap();
+        let before = releases.load(Ordering::Relaxed);
+        b.connection.close();
+        assert!(!state.active());
+        assert_eq!(releases.load(Ordering::Relaxed), before + 1);
+        state.bind(binding(thiscord_frontend::screen::track(903)));
+        state.prepare(2).await.unwrap();
+        state.inner.lock().unwrap().capture.as_mut().unwrap().1 =
+            Instant::now() - Duration::from_secs(61);
+        let before = releases.load(Ordering::Relaxed);
+        assert!(!state.active());
+        assert_eq!(releases.load(Ordering::Relaxed), before + 1);
+        state.prepare(3).await.unwrap();
+        let before = releases.load(Ordering::Relaxed);
+        state.clear();
+        assert_eq!(releases.load(Ordering::Relaxed), before + 1);
+        assert!(state.prepare(4).await.is_err());
+        // A permission prompt can finish after call teardown. An explicit late
+        // track cleanup must still reach WebKit even without a native session.
+        let before = releases.load(Ordering::Relaxed);
+        state.stop(Some(3));
+        assert_eq!(releases.load(Ordering::Relaxed), before + 1);
+        state.stop(None);
+        assert_eq!(
+            releases.load(Ordering::Relaxed),
+            before + 1,
+            "idle polling must not stop capture repeatedly"
+        );
     }
 }

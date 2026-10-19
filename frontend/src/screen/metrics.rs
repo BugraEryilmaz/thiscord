@@ -43,6 +43,7 @@ const COUNTERS: &[&str] = &[
     "received_frames",
     "preview_frames",
     "preview_errors",
+    "rejected_parameter_sets",
     "keyframe_requests",
     "keyframe_feedback",
     "gpu_busy",
@@ -221,4 +222,20 @@ pub fn network(
         }
     }
     labels
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn rejected_video_parameters_are_visible_in_diagnostics() {
+        let metrics = Metrics::default();
+        metrics.add("rejected_parameter_sets", 1);
+        metrics.clone().add("rejected_parameter_sets", 2);
+        let snapshot = metrics.snapshot();
+        assert_eq!(snapshot.counters.get("rejected_parameter_sets"), Some(&3));
+        let wire = serde_json::to_value(snapshot).unwrap();
+        assert_eq!(wire["counters"]["rejected_parameter_sets"], 3);
+    }
 }

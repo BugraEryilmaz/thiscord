@@ -213,7 +213,15 @@ fn bounded_sps(nal: &[u8]) -> Option<bool> {
         zeros = if b == 0 { zeros + 1 } else { 0 };
         rbsp.push(b);
     }
-    if rbsp.first() != Some(&66) {
+    // Constrained baseline has equivalent profile encodings (RFC 6184,
+    // table 5). Hardware encoders need not use profile_idc 66.
+    let baseline = match (rbsp.first(), rbsp.get(1)) {
+        (Some(66), Some(_)) => true,
+        (Some(77), Some(flags)) => flags & 0x8f == 0x80,
+        (Some(88), Some(flags)) => flags & 0xcf == 0xc0,
+        _ => false,
+    };
+    if !baseline {
         return Some(false);
     }
     let mut bits = Bits {
@@ -227,6 +235,22 @@ fn bounded_sps(nal: &[u8]) -> Option<bool> {
         0 => {
             if bits.ue()? > 12 {
                 return Some(false);
+            }
+        }
+        1 => {
+            // Baseline also permits explicit picture-order offsets. They do
+            // not change the dimension/reference budget, but must be consumed
+            // before reading those fields. Signed Exp-Golomb has the same bit
+            // length as unsigned, and these values are only skipped here.
+            bits.bit()?;
+            bits.ue()?;
+            bits.ue()?;
+            let cycle = bits.ue()?;
+            if cycle > 255 {
+                return Some(false);
+            }
+            for _ in 0..cycle {
+                bits.ue()?;
             }
         }
         2 => {}
@@ -269,6 +293,90 @@ impl Bits<'_> {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn baseline_camera_picture_order_and_profiles_preserve_decoder_bounds() {
+        fn ue(bits: &mut String, value: u32) {
+            let code = format!("{:b}", value + 1);
+            bits.push_str(&"0".repeat(code.len() - 1));
+            bits.push_str(&code);
+        }
+        fn sps(profile: u8, flags: u8, order: u32, cycle: u32, refs: u32, width: u32) -> Vec<u8> {
+            let mut bits = String::new();
+            ue(&mut bits, 0); // SPS id
+            ue(&mut bits, 0); // log2_max_frame_num_minus4
+            ue(&mut bits, order);
+            match order {
+                0 => ue(&mut bits, 0),
+                1 => {
+                    bits.push('1'); // delta_pic_order_always_zero_flag
+                    ue(&mut bits, 1); // signed +1
+                    ue(&mut bits, 2); // signed -1
+                    ue(&mut bits, cycle);
+                    for i in 0..cycle {
+                        ue(&mut bits, i % 3);
+                    }
+                }
+                _ => {}
+            }
+            ue(&mut bits, refs);
+            bits.push('0');
+            ue(&mut bits, width / 16 - 1);
+            ue(&mut bits, 44); // 720px
+            bits.push_str("11001"); // progressive, inference, no crop/VUI, trailing stop
+            while !bits.len().is_multiple_of(8) {
+                bits.push('0');
+            }
+            let mut nal = vec![0x67, profile, flags, 31];
+            let mut zeros = 0;
+            for byte in bits.as_bytes().chunks(8) {
+                let byte = byte.iter().fold(0, |v, b| v * 2 + (b - b'0'));
+                if zeros == 2 && byte <= 3 {
+                    nal.push(3);
+                    zeros = 0;
+                }
+                nal.push(byte);
+                zeros = if byte == 0 { zeros + 1 } else { 0 };
+            }
+            nal
+        }
+        for (profile, flags) in [(66, 0xe0), (77, 0x80), (88, 0xc0)] {
+            for order in 0..=2 {
+                for cycle in [0, 2, 255] {
+                    let nal = sps(profile, flags, order, cycle, 4, 1280);
+                    assert_eq!(super::bounded_sps(&nal), Some(true));
+                    let frame = [vec![0, 0, 0, 1], nal].concat();
+                    assert!(super::bounded_parameter_sets(&frame));
+                }
+                assert_eq!(
+                    super::bounded_sps(&sps(profile, flags, order, 2, 5, 1280)),
+                    Some(false)
+                );
+                assert_eq!(
+                    super::bounded_sps(&sps(profile, flags, order, 2, 4, 4096)),
+                    Some(false)
+                );
+            }
+        }
+        assert_eq!(
+            super::bounded_sps(&sps(66, 0xe0, 1, 256, 4, 1280)),
+            Some(false)
+        );
+        assert_eq!(
+            super::bounded_sps(&sps(66, 0xe0, 3, 0, 4, 1280)),
+            Some(false)
+        );
+        for (profile, flags) in [(77, 0), (88, 0), (100, 0)] {
+            assert_eq!(
+                super::bounded_sps(&sps(profile, flags, 1, 2, 4, 1280)),
+                Some(false)
+            );
+        }
+        let nal = sps(66, 0xe0, 1, 2, 4, 1280);
+        for end in 0..nal.len() - 1 {
+            assert_ne!(super::bounded_sps(&nal[..end]), Some(true));
+        }
+    }
+
     #[test]
     fn sender_admission_reserves_space_for_unfinished_encodes() {
         for fps in [30, 60] {

@@ -46,6 +46,10 @@ fn main() {
         .manage(native_shortcuts::ShortcutStateStore::default())
         .setup(|app| {
             use tauri::Manager;
+            #[cfg(target_os = "macos")]
+            if let Some(window) = app.get_webview_window("main") {
+                app.state::<native_camera::CameraState>().attach(window);
+            }
             if native_window::start(app.handle()).is_err() {
                 eprintln!("System tray unavailable; close-to-tray is disabled");
             }
@@ -147,6 +151,7 @@ fn main() {
             native_audio::audio_volume,
             native_audio::audio_pressed,
             native_audio::audio_webrtc_probe,
+            native_camera::camera_prepare,
             native_camera::camera_open,
             native_camera::camera_keepalive,
             native_camera::camera_stop,

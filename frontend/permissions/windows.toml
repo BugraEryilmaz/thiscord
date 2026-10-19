@@ -36,6 +36,7 @@ commands.allow = [
   "audio_volume",
   "audio_pressed",
   "audio_webrtc_probe",
+  "camera_prepare",
   "camera_open",
   "camera_keepalive",
   "camera_stop",
