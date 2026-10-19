@@ -6,7 +6,7 @@ media compatibility spike can happen before chat to expose platform constraints.
 
 ## Friends and private conversations
 
-- [x] Friends homepage with online/all/request filters and top-right username search.
+- [x] Friends homepage with online/all/request filters and partial display name/username search.
 - [x] Mutual friend requests, accept/decline/cancel/remove, and account-wide online presence.
 - [x] Persistent private messages with authorized history, keyset paging and idempotent retries.
 - [x] Private voice invitations, acceptance, decline/hang-up, native audio reuse and media revocation.

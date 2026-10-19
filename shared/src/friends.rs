@@ -78,6 +78,8 @@ pub struct Snapshot {
 #[derive(Clone, Serialize, Deserialize)]
 #[serde(tag = "action", rename_all = "snake_case", deny_unknown_fields)]
 pub enum Request {
+    /// Case-insensitive literal substring of a display name or username.
+    /// Trimmed input must contain 2–64 Unicode characters and no controls.
     Search {
         query: String,
     },

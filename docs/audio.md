@@ -67,7 +67,7 @@ gate (including PTT), and mute/deafen/speak restrictions override activity. This
 an activity indicator, not speech recognition. Native visibility and UI metadata
 are polled every 50/100 ms respectively; no audio samples cross IPC.
 
-Short local two-note sounds announce other participants joining/leaving the
+Short local rising/falling tones announce other participants joining/leaving the
 connected room through server notification subscriptions. Own joins and
 connection replacements/resumptions stay silent. Event/source notification
 preferences can disable sound or enable a banner; see [notifications.md](notifications.md).
@@ -75,6 +75,8 @@ Bursts coalesce into bounded cues. During voice, sounds follow the selected outp
 volume and deafen, and are included in the echo reference/debug speaker track.
 They are not inserted into the outgoing microphone stream. PCM is synthesized
 before device startup; callback playback uses no allocation, locks or file I/O.
+The Rust palette in `frontend/src/notification_sound.rs` also renders the browser
+and out-of-call desktop cues so the same event keeps the same sound everywhere.
 
 Each speaker has an independent 0-200% voice volume slider directly in their
 right-click menu while connected to the same call. Sidebar avatars gain a green

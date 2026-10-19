@@ -19,26 +19,31 @@ enum Action {
     ),
     Join(Guild, Channel),
     Disconnect,
+    Friend(thiscord_shared::friends::Request),
+    Unfriend(AccountId),
     Change(GuildId, i64, GuildChange, String),
 }
 #[derive(Clone)]
-struct Item {
-    label: String,
-    action: Action,
-    danger: bool,
-    disabled: bool,
+enum Item {
+    Command {
+        label: String,
+        action: Action,
+        danger: bool,
+    },
+    Mute(thiscord_shared::notifications::Target),
 }
 impl Item {
     fn new(label: impl Into<String>, action: Action) -> Self {
-        Self {
+        Self::Command {
             label: label.into(),
             action,
             danger: false,
-            disabled: false,
         }
     }
     fn danger(mut self) -> Self {
-        self.danger = true;
+        if let Self::Command { danger, .. } = &mut self {
+            *danger = true;
+        }
         self
     }
 }
@@ -50,6 +55,7 @@ pub(super) struct Menu {
     x: f64,
     y: f64,
     volume: Option<(GuildId, ChannelId, AccountId)>,
+    member: Option<AccountId>,
 }
 #[derive(Clone, Copy)]
 struct Target {
@@ -157,6 +163,7 @@ fn open(ui: Ui, element: web_sys::Element, x: f64, y: f64) {
         note: String::new(),
         x,
         y,
+        member: target.member,
         volume: target
             .member
             .filter(|id| ui.account.get_untracked().is_some_and(|a| a.id != *id))
@@ -336,16 +343,7 @@ async fn items(ui: Ui, target: Target) -> Result<(String, Vec<Item>), String> {
             "Notification settings…",
             Action::Notifications(notification_target, channel.name.clone()),
         ));
-        for (duration, label) in thiscord_shared::notifications::Snooze::OPTIONS {
-            items.push(Item::new(
-                if duration == thiscord_shared::notifications::Snooze::Resume {
-                    label.to_owned()
-                } else {
-                    format!("Mute · {label}")
-                },
-                Action::Snooze(notification_target, duration),
-            ));
-        }
+        items.push(Item::Mute(notification_target));
         items.push(Item::new(
             if preferences.pinned.contains(&id) {
                 "Unpin from top"
@@ -432,6 +430,10 @@ async fn items(ui: Ui, target: Target) -> Result<(String, Vec<Item>), String> {
 
 fn execute(ui: Ui, action: Action) {
     match action {
+        Action::Friend(command) => super::friends::action(ui, command),
+        Action::Unfriend(account_id) => {
+            super::friends::action(ui, thiscord_shared::friends::Request::Remove { account_id })
+        }
         Action::Notifications(target, title) => super::notifications::edit(ui, target, title),
         Action::Snooze(target, duration) => super::notifications::snooze(ui, target, duration),
         Action::Preference(channel, pin) => save_preference(ui, channel, pin),
@@ -521,38 +523,39 @@ fn execute(ui: Ui, action: Action) {
 }
 
 fn conversation_menu(ui: Ui, event_target: Option<web_sys::EventTarget>, x: f64, y: f64) -> bool {
-    let Some(conversation_id) = event_target
+    let Some(element) = event_target
         .and_then(|t| t.dyn_into::<web_sys::Element>().ok())
         .and_then(|e| e.closest("[data-context-conversation]").ok().flatten())
-        .and_then(|e| e.get_attribute("data-context-conversation"))
+    else {
+        return false;
+    };
+    let Some(conversation_id) = element
+        .get_attribute("data-context-conversation")
         .and_then(|id| id.parse().ok())
     else {
         return false;
     };
     let target = thiscord_shared::notifications::Target::Conversation { conversation_id };
-    let title = ui
+    let friend = ui
         .friends
         .snapshot
         .get_untracked()
         .friends
         .into_iter()
-        .find(|f| f.conversation_id == conversation_id)
-        .map(|f| f.person.display_name)
-        .unwrap_or_else(|| "Conversation".into());
+        .find(|f| f.conversation_id == conversation_id);
+    let Some(friend) = friend else {
+        return false;
+    };
+    let title = friend.person.display_name;
     let mut items = vec![Item::new(
         "Notification settings…",
         Action::Notifications(target, title.clone()),
     )];
-    for (duration, label) in thiscord_shared::notifications::Snooze::OPTIONS {
-        items.push(Item::new(
-            if duration == thiscord_shared::notifications::Snooze::Resume {
-                label.to_owned()
-            } else {
-                format!("Mute · {label}")
-            },
-            Action::Snooze(target, duration),
-        ));
+    items.push(Item::Mute(target));
+    if friend.relationship != thiscord_shared::friends::Relationship::Friend {
+        items.clear();
     }
+    let (x, y) = menu_position(&element, x, y);
     close(ui);
     ui.context_menu.set(Some(Menu {
         title,
@@ -561,8 +564,192 @@ fn conversation_menu(ui: Ui, event_target: Option<web_sys::EventTarget>, x: f64,
         x,
         y,
         volume: None,
+        member: Some(friend.person.id),
     }));
     true
+}
+
+fn menu_position(element: &web_sys::Element, x: f64, y: f64) -> (f64, f64) {
+    if x == 0.0 && y == 0.0 {
+        let rect = element.get_bounding_client_rect();
+        (rect.left(), rect.bottom())
+    } else {
+        (x, y)
+    }
+}
+
+fn user_menu(ui: Ui, event_target: Option<web_sys::EventTarget>, x: f64, y: f64) -> bool {
+    let Some(element) = event_target
+        .and_then(|t| t.dyn_into::<web_sys::Element>().ok())
+        .and_then(|e| e.closest("[data-context-user]").ok().flatten())
+    else {
+        return false;
+    };
+    let Some(member) = element
+        .get_attribute("data-context-user")
+        .and_then(|id| id.parse::<AccountId>().ok())
+    else {
+        return false;
+    };
+    let (x, y) = menu_position(&element, x, y);
+    close(ui);
+    ui.context_menu.set(Some(Menu {
+        title: element
+            .get_attribute("data-context-name")
+            .unwrap_or_else(|| "User".into()),
+        items: vec![Item::new("Copy user ID", Action::Copy(member.to_string()))],
+        note: String::new(),
+        x,
+        y,
+        volume: None,
+        member: Some(member),
+    }));
+    true
+}
+
+#[component]
+fn FriendActions(ui: Ui, member: AccountId, run: Callback<Action>) -> impl IntoView {
+    use thiscord_frontend::sidebar::{FriendAction, friend_actions};
+    view! { {move || {
+        let account = ui.account.get();
+        let own = account.as_ref().is_none_or(|a|a.id == member);
+        let relationship = ui.friends.snapshot.with(|s|s.friends.iter().find(|f|f.person.id==member).map(|f|f.relationship));
+        friend_actions(own, relationship).iter().copied().map(|action| {
+            let disabled = !ui.friends.connected.get() || (action==FriendAction::Add && !account.as_ref().is_some_and(|a|a.email_verified));
+            view! {<button role="menuitem" class="context-item" class:context-danger=action==FriendAction::Unfriend disabled=disabled on:click=move |_|run.run(if action==FriendAction::Unfriend {Action::Unfriend(member)} else {Action::Friend(action.request(member))})>{action.label()}</button>}
+        }).collect_view()
+    }} }
+}
+
+#[component]
+fn MuteSubmenu(
+    target: thiscord_shared::notifications::Target,
+    open: RwSignal<bool>,
+    parent_position: RwSignal<(f64, f64)>,
+    run: Callback<Action>,
+) -> impl IntoView {
+    let group = NodeRef::<leptos::html::Div>::new();
+    let trigger = NodeRef::<leptos::html::Button>::new();
+    let submenu = NodeRef::<leptos::html::Div>::new();
+    let position = RwSignal::new((8.0, 8.0));
+    let focus_on_open = RwSignal::new(false);
+    let dismiss = move || {
+        if let Some(menu) = submenu.get_untracked()
+            && document()
+                .active_element()
+                .is_some_and(|e| menu.contains(Some(&e)))
+            && let Some(button) = trigger.get_untracked()
+        {
+            let _ = button.focus();
+        }
+        open.set(false);
+        focus_on_open.set(false);
+    };
+    Effect::new(move |_| {
+        parent_position.track();
+        if open.get()
+            && let (Some(button), Some(menu)) = (trigger.get(), submenu.get())
+        {
+            let anchor = button.get_bounding_client_rect();
+            let rect = menu.get_bounding_client_rect();
+            let w = window()
+                .inner_width()
+                .ok()
+                .and_then(|v| v.as_f64())
+                .unwrap_or(800.0);
+            let h = window()
+                .inner_height()
+                .ok()
+                .and_then(|v| v.as_f64())
+                .unwrap_or(600.0);
+            // Touch the trigger so moving into the flyout never crosses a hover gap.
+            let x = if anchor.right() + rect.width() <= w - 8.0 {
+                anchor.right()
+            } else {
+                anchor.left() - rect.width()
+            };
+            position.set((
+                x.clamp(8.0, (w - rect.width() - 8.0).max(8.0)),
+                anchor.top().clamp(8.0, (h - rect.height() - 8.0).max(8.0)),
+            ));
+            if focus_on_open.get() {
+                focus_menu_item(&menu, "Home");
+                focus_on_open.set(false);
+            }
+        }
+    });
+    view! {
+        <div node_ref=group class="context-submenu-group"
+            on:pointerenter=move |_|open.set(true)
+            on:pointerleave=move |_|dismiss()
+            on:focusout=move |e| {
+                let inside = e.related_target().and_then(|t|t.dyn_into::<web_sys::Node>().ok())
+                    .is_some_and(|next|group.get_untracked().is_some_and(|node|node.contains(Some(&next))));
+                if !inside {open.set(false);}
+            }
+            on:keydown=move |e| {
+                let in_submenu = e.target().and_then(|t|t.dyn_into::<web_sys::Node>().ok())
+                    .is_some_and(|node|submenu.get_untracked().is_some_and(|menu|menu.contains(Some(&node))));
+                let key = e.key();
+                if open.get_untracked() && matches!(key.as_str(), "Escape" | "ArrowLeft") {
+                    e.prevent_default();
+                    e.stop_propagation();
+                    dismiss();
+                } else if in_submenu && matches!(key.as_str(), "ArrowDown" | "ArrowUp" | "Home" | "End") {
+                    e.prevent_default();
+                    e.stop_propagation();
+                    if let Some(menu) = submenu.get_untracked() {focus_menu_item(&menu, &key);}
+                } else if !in_submenu && matches!(key.as_str(), "ArrowRight" | "ArrowDown" | "Enter" | " ") {
+                    e.prevent_default();
+                    e.stop_propagation();
+                    focus_on_open.set(true);
+                    open.set(true);
+                }
+            }>
+            <button node_ref=trigger role="menuitem" class="context-item context-submenu-trigger"
+                aria-haspopup="menu" aria-expanded=move ||open.get().to_string()
+                aria-controls="context-mute-options"
+                on:click=move |_|{focus_on_open.set(true);open.set(true);}>
+                <span>"Mute"</span><span aria-hidden="true">"›"</span>
+            </button>
+            <Show when=move ||open.get()>
+                <div node_ref=submenu id="context-mute-options" class="context-submenu" role="menu" aria-label="Mute duration"
+                    style:left=move ||format!("{}px",position.get().0)
+                    style:top=move ||format!("{}px",position.get().1)>
+                    {thiscord_shared::notifications::Snooze::OPTIONS.into_iter().map(|(duration,label)|view! {
+                        <button role="menuitem" class="context-item" on:click=move |_|run.run(Action::Snooze(target,duration))>{label}</button>
+                    }).collect_view()}
+                </div>
+            </Show>
+        </div>
+    }
+}
+
+fn focus_menu_item(menu: &web_sys::Element, key: &str) {
+    // Only traverse this menu's level; flyout entries have their own navigation.
+    let Ok(nodes) = menu.query_selector_all(
+        ":scope > button[role=menuitem]:not(:disabled), :scope > .context-submenu-group > button[role=menuitem]:not(:disabled)",
+    ) else {
+        return;
+    };
+    let buttons = (0..nodes.length())
+        .filter_map(|i| nodes.item(i)?.dyn_into::<web_sys::HtmlElement>().ok())
+        .collect::<Vec<_>>();
+    if buttons.is_empty() {
+        return;
+    }
+    let current = buttons
+        .iter()
+        .position(|b| document().active_element().as_ref() == Some(b.as_ref()));
+    let index = match key {
+        "Home" => 0,
+        "End" => buttons.len() - 1,
+        "ArrowUp" => current.map_or(buttons.len() - 1, |i| {
+            (i + buttons.len() - 1) % buttons.len()
+        }),
+        _ => current.map_or(0, |i| (i + 1) % buttons.len()),
+    };
+    let _ = buttons[index].focus();
 }
 
 #[component]
@@ -570,6 +757,11 @@ pub(super) fn Host(ui: Ui) -> impl IntoView {
     let menu_node = NodeRef::<leptos::html::Div>::new();
     let volume = Memo::new(move |_| ui.context_menu.get().and_then(|m| m.volume));
     let position = RwSignal::new((8.0, 8.0));
+    let mute_open = RwSignal::new(false);
+    Effect::new(move |_| {
+        ui.context_generation.track();
+        mute_open.set(false);
+    });
     let return_focus = StoredValue::new_local(None::<web_sys::HtmlElement>);
     let pending = RwSignal::new(None::<Action>);
     let confirm = NodeRef::<leptos::html::Dialog>::new();
@@ -597,7 +789,9 @@ pub(super) fn Host(ui: Ui) -> impl IntoView {
     let context = window_event_listener(leptos::ev::contextmenu, move |e| {
         e.prevent_default();
         return_focus.set_value(document().active_element().and_then(|e| e.dyn_into().ok()));
-        if conversation_menu(ui, e.target(), e.client_x().into(), e.client_y().into()) {
+        if user_menu(ui, e.target(), e.client_x().into(), e.client_y().into())
+            || conversation_menu(ui, e.target(), e.client_x().into(), e.client_y().into())
+        {
             return;
         }
         if let Some(element) = element(e.target()) {
@@ -620,7 +814,7 @@ pub(super) fn Host(ui: Ui) -> impl IntoView {
         if e.key() == "ContextMenu" || (e.key() == "F10" && e.shift_key()) {
             e.prevent_default();
             return_focus.set_value(document().active_element().and_then(|e| e.dyn_into().ok()));
-            if conversation_menu(ui, e.target(), 0.0, 0.0) {
+            if user_menu(ui, e.target(), 0.0, 0.0) || conversation_menu(ui, e.target(), 0.0, 0.0) {
                 return;
             }
             if let Some(element) = element(e.target()) {
@@ -640,27 +834,8 @@ pub(super) fn Host(ui: Ui) -> impl IntoView {
                     .is_some_and(|e| e.matches("input[type=range]").unwrap_or(false))
             {
                 e.prevent_default();
-                if let Some(menu) = menu_node.get()
-                    && let Ok(nodes) =
-                        menu.query_selector_all("button[role=menuitem]:not(:disabled)")
-                {
-                    let buttons = (0..nodes.length())
-                        .filter_map(|i| nodes.item(i)?.dyn_into::<web_sys::HtmlElement>().ok())
-                        .collect::<Vec<_>>();
-                    if !buttons.is_empty() {
-                        let current = buttons
-                            .iter()
-                            .position(|b| document().active_element().as_ref() == Some(b.as_ref()));
-                        let index = match e.key().as_str() {
-                            "Home" => 0,
-                            "End" => buttons.len() - 1,
-                            "ArrowUp" => current.map_or(buttons.len() - 1, |i| {
-                                (i + buttons.len() - 1) % buttons.len()
-                            }),
-                            _ => current.map_or(0, |i| (i + 1) % buttons.len()),
-                        };
-                        let _ = buttons[index].focus();
-                    }
+                if let Some(menu) = menu_node.get() {
+                    focus_menu_item(&menu, &e.key());
                 }
             }
         }
@@ -730,7 +905,7 @@ pub(super) fn Host(ui: Ui) -> impl IntoView {
     let run = move |action: Action| {
         close(ui);
         match action {
-            Action::Change(..) => {
+            Action::Change(..) | Action::Unfriend(_) => {
                 pending.set(Some(action));
                 if let Some(dialog) = confirm.get() {
                     let _ = dialog.show_modal();
@@ -741,15 +916,20 @@ pub(super) fn Host(ui: Ui) -> impl IntoView {
     };
     view! {
         <Show when=move ||ui.context_menu.get().is_some()>
-            <div node_ref=menu_node class="app-context-menu" role="menu" aria-label=move ||ui.context_menu.get().map(|m|m.title).unwrap_or_default() style:left=move ||format!("{}px",position.get().0) style:top=move ||format!("{}px",position.get().1)>
+            <div node_ref=menu_node class="app-context-menu" role="menu" aria-label=move ||ui.context_menu.get().map(|m|m.title).unwrap_or_default() style:left=move ||format!("{}px",position.get().0) style:top=move ||format!("{}px",position.get().1) on:scroll=move |_|mute_open.set(false)>
                 <p class="context-heading">{move ||ui.context_menu.get().map(|m|m.title)}</p>
+                {move ||ui.context_menu.get().and_then(|m|m.member).map(|member|view!{<FriendActions ui=ui member=member run=Callback::new(run)/>})}
                 {move ||volume.get().map(|(guild,channel,member)|view!{<ParticipantVolume ui=ui guild=guild channel=channel member=member/>})}
-                {move ||ui.context_menu.get().map(|m|m.items.into_iter().map(|item|view!{<button role="menuitem" class="context-item" class:context-danger=item.danger disabled=item.disabled on:click=move |_|run(item.action.clone())>{item.label}</button>}).collect_view())}
+                {move ||ui.context_menu.get().map(|m|m.items.into_iter().map(|item|match item {
+                    Item::Command {label,action,danger} => view!{<button role="menuitem" class="context-item" class:context-danger=danger on:click=move |_|run(action.clone())>{label}</button>}.into_any(),
+                    Item::Mute(target) => view!{<MuteSubmenu target=target open=mute_open parent_position=position run=Callback::new(run)/>}.into_any(),
+                }).collect_view())}
                 <p class="px-2 text-xs text-white/60" role="status">{move ||ui.context_menu.get().map(|m|m.note)}</p>
             </div>
         </Show>
         <dialog node_ref=confirm class="context-dialog" aria-label="Confirm action" on:click=move |e|super::dialog::dismiss_outside(e,confirm,ui.busy.get_untracked()) on:close=move |_|pending.set(None)>
-            <h2 class="text-xl font-semibold">{move ||pending.get().and_then(|a|if let Action::Change(_,_,_,title)=a{Some(title)}else{None})}</h2>
+            <h2 class="text-xl font-semibold">{move ||pending.get().and_then(|a|match a {Action::Change(_,_,_,title)=>Some(title),Action::Unfriend(_)=>Some("Remove this friend?".into()),_=>None})}</h2>
+            <Show when=move ||matches!(pending.get(),Some(Action::Unfriend(_)))><p class="mt-3 text-sm text-white/60">"Private messages and calls will be unavailable until you become friends again."</p></Show>
             <div class="mt-6 flex justify-end gap-3"><button class="rounded bg-white/10 px-4 py-2" on:click=move |_|if let Some(d)=confirm.get(){d.close();}>"Cancel"</button><button class="rounded bg-red-500/20 px-4 py-2 text-red-200" disabled=move ||ui.busy.get() on:click=move |_|{if let Some(action)=pending.get_untracked(){execute(ui,action);}
                 if let Some(d)=confirm.get(){d.close();}}>"Confirm"</button></div>
         </dialog>

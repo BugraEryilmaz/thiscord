@@ -36,6 +36,9 @@ commands.allow = [
   "audio_volume",
   "audio_pressed",
   "audio_webrtc_probe",
+  "camera_open",
+  "camera_keepalive",
+  "camera_stop",
   "screen_status",
   "screen_view_diagnostics",
   "screen_view_keyframe",
@@ -67,5 +70,5 @@ commands.allow = ["overlay_toggle_audio"]
 
 [[permission]]
 identifier = "notification-banner"
-description = "Read notification presentation and act on an existing banner; no account or media commands."
-commands.allow = ["notification_snapshot", "notification_action"]
+description = "Read notification presentation, fit its window to the current cards, and act on an existing banner; no account or media commands."
+commands.allow = ["notification_snapshot", "notification_action", "notification_resize"]

@@ -93,11 +93,11 @@ pub(super) fn dispatch(pool: &DbPool, token: &str, request: Request) -> Result<R
         auth::read_session(c,token,&session)?;
         match request {
             Request::Search {query: text} => {
-                let text=text.trim().to_ascii_lowercase();
-                if !(2..=32).contains(&text.len()) || !text.bytes().all(|b| b.is_ascii_alphanumeric() || b==b'_') {
-                    return Err(Failure::Invalid("Search with 2–32 username letters, numbers or underscores"));
+                let text=text.trim();
+                if !(2..=64).contains(&text.chars().count()) || text.chars().any(char::is_control) {
+                    return Err(Failure::Invalid("Search with 2–64 display name or username characters, without control characters"));
                 }
-                let people=query(c,"SELECT jsonb_build_object('id',a.id,'username',a.username,'display_name',a.display_name,'avatar_id',v.id) AS data FROM accounts a LEFT JOIN account_avatars v ON v.account_id=a.id WHERE a.id<>$1::uuid AND starts_with(lower(a.username),$2) ORDER BY a.username,a.id LIMIT 20", &[&actor.to_string(), &text])?;
+                let people=query(c,"SELECT jsonb_build_object('id',a.id,'username',a.username,'display_name',a.display_name,'avatar_id',v.id) AS data FROM accounts a LEFT JOIN account_avatars v ON v.account_id=a.id WHERE a.id<>$1::uuid AND (strpos(lower(a.username),lower($2))>0 OR strpos(lower(a.display_name),lower($2))>0) ORDER BY a.username,a.id LIMIT 20", &[&actor.to_string(), text])?;
                 Ok(Response::People {people})
             }
             Request::Add {account_id: other} => {

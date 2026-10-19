@@ -15,10 +15,20 @@ Defaults:
 | Someone joins/leaves your voice room | On | Off |
 | Application update | Off | On |
 
-Right-click a channel or conversation for notification settings or an immediate
-mute: 15 minutes, 1 hour, 1 day, 30 days, or until manually unmuted. Banners include
-the same snooze choices. A source override applies to every event from that source;
-**Use event defaults** restores separate message/call/voice defaults. Snoozing does
+Each event has a distinct sound, shared by Settings previews, browser playback,
+desktop alerts and the in-call mixer: a bright double chime for direct messages,
+a short low knock for server messages, two pairs of ringing tones for calls,
+a rising sweep for voice joins, a falling sweep for leaves, and a four-note chime
+for updates. Sounds vary in rhythm, pitch movement and timbre, with smooth edges
+and bounded levels. The longest is the 1.09-second incoming-call cue. Browser
+previews replace the previous sound to avoid overlapping previews.
+
+Right-click a channel or conversation for notification settings or hover **Mute**
+to choose 15 minutes, 1 hour, 1 day, 30 days, until manually unmuted, or Unmute.
+The submenu also opens with a click, Enter, Space or Right Arrow; Left Arrow or
+Escape returns to the parent menu. It opens to the left near the window edge.
+Banners include the same snooze choices. A source override applies to every event
+from that source; **Use event defaults** restores separate message/call/voice defaults. Snoozing does
 not change the underlying settings or remove message history. Own messages and
 own voice transitions do not alert. Voice membership replacements/resumptions do
 not produce join/leave pairs. Voice notifications go to other participants in the
@@ -90,11 +100,15 @@ transports; neither drives notification sound/banner discovery.
 
 ## Desktop and browser presentation
 
-The desktop uses a small, always-on-top Tauri banner window, including while the
-main app is hidden in the tray. Its capability only permits reading presentation
-state and acting on an existing banner. It has no credential, account, network or
-media command access. Accept/Decline are forwarded to the main window and then to
-the authenticated, authoritative call API. Clicking a banner opens its source.
+The desktop uses a compact, always-on-top Tauri banner window, including while the
+main app is hidden in the tray. The transparent window fits the rendered cards and
+stays inside the monitor's work area above the taskbar. Cards show an event icon,
+source title, dismiss and snooze controls, with Accept/Decline for calls.
+Its capability only permits reading presentation state, reporting bounded layout
+height for the current revision, and acting on an existing banner. It has no
+credential, account, network or media command access. Accept/Decline are forwarded
+to the main window and then to the authenticated, authoritative call API. Clicking
+a banner opens its source.
 Up to three banners are retained, with 12-second lifetimes (30 seconds for calls).
 Logout clears the native banner state and advances its session generation. Delayed
 presentation/actions from the previous session are rejected; popup revisions prevent

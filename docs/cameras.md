@@ -39,6 +39,10 @@ compressed video over the authenticated call's existing encrypted WebRTC session
 the SFU forwards without decoding or transcoding. The server can access media
 because these hops terminate encryption; this is not end-to-end encryption.
 No new application server, JavaScript pipeline or camera library is used.
+The local main window's `main-commands` permission allows `camera_open`,
+`camera_keepalive` and `camera_stop`. Notification and voice-overlay windows have
+no camera command access; camera transport still requires the active call's
+authoritative media permissions.
 
 Camera tracks have separate publisher/relay SSRCs, publication epochs, viewer
 leases, recovery feedback and bounded SFU egress queues. Speak permission grants
@@ -87,6 +91,8 @@ No physical camera is required for the automated tests:
   permission rejection. Existing H.264 decode/receive tests cover the common player.
   Receiver regressions cover restoring a hidden stream after a large RTP sequence
   gap and keeping camera congestion feedback within its encoder budget.
+- A compiled Tauri ACL regression checks all three camera commands are available
+  to the local main window and denied to auxiliary windows and remote pages.
 
 Run the backend tests in WSL with TEST_DATABASE_URL for the dedicated test database
 and THISCORD_VOICE_BIND=127.0.0.1:0. Do not import production STUN/TURN configuration

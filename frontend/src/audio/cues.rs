@@ -18,14 +18,8 @@ pub(super) struct Player {
 impl Player {
     pub fn new() -> Self {
         Self {
-            sounds: [
-                tone([660.0, 880.0]),
-                tone([660.0, 440.0]),
-                tone([660.0, 780.0]),
-                tone([600.0, 660.0]),
-                tone([740.0, 980.0]),
-                tone([520.0, 660.0]),
-            ],
+            sounds: crate::notification_sound::MIXER_KINDS
+                .map(|kind| crate::notification_sound::render(kind, RATE)),
             volumes: [100; 6],
             pending: 0,
             active: None,
@@ -63,25 +57,6 @@ impl Player {
     }
 }
 
-fn tone(notes: [f32; 2]) -> Vec<f32> {
-    // Two soft, 90 ms notes separated by 15 ms; cosine envelope avoids clicks.
-    let length = RATE as usize * 90 / 1000;
-    let gap = RATE as usize * 15 / 1000;
-    let mut samples = Vec::with_capacity(length * 2 + gap);
-    for (index, frequency) in notes.into_iter().enumerate() {
-        if index != 0 {
-            samples.extend(std::iter::repeat_n(0.0, gap));
-        }
-        for n in 0..length {
-            let phase = std::f32::consts::TAU * frequency * n as f32 / RATE as f32;
-            let envelope =
-                0.5 - 0.5 * (std::f32::consts::TAU * n as f32 / (length - 1) as f32).cos();
-            samples.push(0.12 * envelope * phase.sin());
-        }
-    }
-    samples
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -91,7 +66,7 @@ mod tests {
         let mut player = Player::new();
         assert_ne!(player.sounds[0], player.sounds[1]);
         for sound in &player.sounds {
-            assert!(sound.len() < RATE as usize / 4);
+            assert!(sound.len() < RATE as usize * 2);
             assert!(sound.iter().all(|s| s.is_finite() && s.abs() <= 0.12));
             assert_eq!(sound[0], 0.0);
             assert_eq!(*sound.last().unwrap(), 0.0);
@@ -101,7 +76,7 @@ mod tests {
         }
         let samples: Vec<_> = (0..RATE).map(|_| player.next()).collect();
         assert!(samples.iter().any(|s| s.abs() > 0.05));
-        assert!(samples[RATE as usize / 2..].iter().all(|s| *s == 0.0));
+        assert!(samples[RATE as usize * 3 / 4..].iter().all(|s| *s == 0.0));
         player.request(JOIN, false);
         player.next();
         player.request(LEAVE, true);
