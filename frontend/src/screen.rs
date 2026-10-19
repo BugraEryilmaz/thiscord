@@ -194,15 +194,76 @@ pub fn packetize(
 /// Restrict remote SPS dimensions/reference counts before the video decoder can
 /// allocate its picture buffers. Only progressive baseline is negotiated here.
 pub fn bounded_parameter_sets(data: &[u8]) -> bool {
-    openh264::nal_units(data).all(|nal| {
+    validate_parameter_sets(data).is_ok()
+}
+
+/// Safe diagnostic metadata only: never include encoded bytes or SDP.
+#[derive(Debug, PartialEq, Eq)]
+pub enum ParameterSetError {
+    Malformed,
+    Profile { id: u8, constraints: u8, level: u8 },
+    SpsId(u32),
+    FrameNumberBits(u32),
+    PictureOrderBits(u32),
+    PictureOrder(u32),
+    PictureOrderCycle(u32),
+    References(u32),
+    Dimensions { width: u32, height: u32 },
+    Interlaced,
+}
+impl std::fmt::Display for ParameterSetError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Malformed => write!(f, "malformed or truncated H.264 SPS"),
+            Self::Profile {
+                id,
+                constraints,
+                level,
+            } => write!(
+                f,
+                "unsupported H.264 profile-level-id={id:02x}{constraints:02x}{level:02x}; expected baseline"
+            ),
+            Self::SpsId(value) => write!(f, "H.264 SPS id {value} exceeds 31"),
+            Self::FrameNumberBits(value) => {
+                write!(f, "H.264 frame-number bit offset {value} exceeds 12")
+            }
+            Self::PictureOrderBits(value) => {
+                write!(f, "H.264 picture-order bit offset {value} exceeds 12")
+            }
+            Self::PictureOrder(value) => write!(f, "unsupported H.264 picture-order type {value}"),
+            Self::PictureOrderCycle(value) => {
+                write!(f, "H.264 picture-order cycle {value} exceeds 255")
+            }
+            Self::References(value) => {
+                write!(f, "H.264 reference frames {value} exceed decoder limit 4")
+            }
+            Self::Dimensions { width, height } => write!(
+                f,
+                "H.264 coded dimensions {width}x{height} exceed {MAX_WIDTH}x{MAX_HEIGHT}"
+            ),
+            Self::Interlaced => write!(
+                f,
+                "interlaced H.264 is unsupported; expected progressive video"
+            ),
+        }
+    }
+}
+
+pub fn validate_parameter_sets(data: &[u8]) -> Result<(), ParameterSetError> {
+    for nal in openh264::nal_units(data) {
         let nal = nal.strip_prefix(&[0, 0, 1]).unwrap_or(nal);
         if nal.first().is_none_or(|b| b & 31 != 7) {
-            return true;
+            continue;
         }
-        bounded_sps(nal).unwrap_or(false)
-    })
+        inspect_sps(nal).ok_or(ParameterSetError::Malformed)??;
+    }
+    Ok(())
 }
+#[cfg(test)]
 fn bounded_sps(nal: &[u8]) -> Option<bool> {
+    inspect_sps(nal).map(|result| result.is_ok())
+}
+fn inspect_sps(nal: &[u8]) -> Option<Result<(), ParameterSetError>> {
     let mut rbsp = Vec::with_capacity(nal.len());
     let mut zeros = 0;
     for &b in nal.get(1..)? {
@@ -215,26 +276,39 @@ fn bounded_sps(nal: &[u8]) -> Option<bool> {
     }
     // Constrained baseline has equivalent profile encodings (RFC 6184,
     // table 5). Hardware encoders need not use profile_idc 66.
-    let baseline = match (rbsp.first(), rbsp.get(1)) {
-        (Some(66), Some(_)) => true,
-        (Some(77), Some(flags)) => flags & 0x8f == 0x80,
-        (Some(88), Some(flags)) => flags & 0xcf == 0xc0,
+    let id = *rbsp.first()?;
+    let constraints = *rbsp.get(1)?;
+    let level = *rbsp.get(2)?;
+    let baseline = match id {
+        66 => true,
+        77 => constraints & 0x8f == 0x80,
+        88 => constraints & 0xcf == 0xc0,
         _ => false,
     };
     if !baseline {
-        return Some(false);
+        return Some(Err(ParameterSetError::Profile {
+            id,
+            constraints,
+            level,
+        }));
     }
     let mut bits = Bits {
         bytes: &rbsp,
         offset: 24,
     };
-    if bits.ue()? > 31 || bits.ue()? > 12 {
-        return Some(false);
+    let sps_id = bits.ue()?;
+    if sps_id > 31 {
+        return Some(Err(ParameterSetError::SpsId(sps_id)));
+    }
+    let frame_bits = bits.ue()?;
+    if frame_bits > 12 {
+        return Some(Err(ParameterSetError::FrameNumberBits(frame_bits)));
     }
     match bits.ue()? {
         0 => {
-            if bits.ue()? > 12 {
-                return Some(false);
+            let order_bits = bits.ue()?;
+            if order_bits > 12 {
+                return Some(Err(ParameterSetError::PictureOrderBits(order_bits)));
             }
         }
         1 => {
@@ -247,23 +321,30 @@ fn bounded_sps(nal: &[u8]) -> Option<bool> {
             bits.ue()?;
             let cycle = bits.ue()?;
             if cycle > 255 {
-                return Some(false);
+                return Some(Err(ParameterSetError::PictureOrderCycle(cycle)));
             }
             for _ in 0..cycle {
                 bits.ue()?;
             }
         }
         2 => {}
-        _ => return Some(false),
+        value => return Some(Err(ParameterSetError::PictureOrder(value))),
     }
-    if bits.ue()? > 4 {
-        return Some(false);
+    let references = bits.ue()?;
+    if references > 4 {
+        return Some(Err(ParameterSetError::References(references)));
     }
     bits.bit()?;
     let width = bits.ue()?.checked_add(1)?.checked_mul(16)?;
     let height = bits.ue()?.checked_add(1)?.checked_mul(16)?;
     let progressive = bits.bit()?;
-    Some(progressive && width <= MAX_WIDTH && height <= MAX_HEIGHT.div_ceil(16) * 16)
+    Some(if !progressive {
+        Err(ParameterSetError::Interlaced)
+    } else if width > MAX_WIDTH || height > MAX_HEIGHT.div_ceil(16) * 16 {
+        Err(ParameterSetError::Dimensions { width, height })
+    } else {
+        Ok(())
+    })
 }
 struct Bits<'a> {
     bytes: &'a [u8],
@@ -375,6 +456,41 @@ mod tests {
         for end in 0..nal.len() - 1 {
             assert_ne!(super::bounded_sps(&nal[..end]), Some(true));
         }
+        use super::{ParameterSetError, validate_parameter_sets};
+        let check = |nal: Vec<u8>| validate_parameter_sets(&[vec![0, 0, 0, 1], nal].concat());
+        assert_eq!(
+            check(sps(100, 0x0c, 2, 0, 1, 1280)),
+            Err(ParameterSetError::Profile {
+                id: 100,
+                constraints: 0x0c,
+                level: 31
+            }),
+        );
+        assert_eq!(
+            check(sps(66, 0xe0, 2, 0, 5, 1280)),
+            Err(ParameterSetError::References(5))
+        );
+        assert_eq!(
+            check(sps(66, 0xe0, 2, 0, 1, 4096)),
+            Err(ParameterSetError::Dimensions {
+                width: 4096,
+                height: 720
+            })
+        );
+        assert_eq!(
+            check(sps(66, 0xe0, 1, 256, 1, 1280)),
+            Err(ParameterSetError::PictureOrderCycle(256))
+        );
+        assert_eq!(check(vec![0x67, 66]), Err(ParameterSetError::Malformed));
+        assert_eq!(
+            ParameterSetError::Profile {
+                id: 100,
+                constraints: 0x0c,
+                level: 31
+            }
+            .to_string(),
+            "unsupported H.264 profile-level-id=640c1f; expected baseline",
+        );
     }
 
     #[test]

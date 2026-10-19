@@ -67,6 +67,14 @@ equivalent constrained-baseline profile identifiers from hardware encoders. It
 still enforces the decoder's dimension and reference-frame limits. A connected
 player awaiting its first decoded frame shows "Waiting for video" and offers
 "Copy video diagnostics"; rejected parameter sets appear in those counters.
+Rejections identify the specific unsupported profile, invalid SPS field or decoder
+budget (reference frames/dimensions), without including encoded data or SDP.
+
+Camera negotiation selects baseline H.264 with packetization mode 1 explicitly.
+Equivalent baseline offer profiles are registered exactly as offered; incompatible
+profiles are removed before negotiation, avoiding the transport library's MIME-only
+fallback. An unsupported camera offer fails with an error instead of publishing
+video that the receiver cannot decode.
 
 Capture stops on deafen, leaving, switching calls, disconnect/replacement, logout,
 window destruction, lost device or expired UI lease. Cancellation stops acquired
