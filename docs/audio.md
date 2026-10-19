@@ -33,6 +33,9 @@ concurrency behavior. No diagnostic logs are uploaded without an admin request.
 
 Restart the backend and desktop app after building. In Settings → Audio & voice,
 select devices, adjust output level and choose voice activation or push-to-talk.
+For quiet microphones, increase Microphone boost (1×–10×, default 1×). This fixed
+gain runs after denoising and before voice activation and automatic gain; it also
+boosts transmitted audio. See [microphone activation](voice-activation.md).
 Device lists refresh every three seconds. Open a voice channel and click Join
 voice. Select another voice channel and join to move yourself. The voice bar stays
 available while reading text channels. Disconnect releases the devices.
@@ -88,7 +91,7 @@ guild/account ID in `speaker-volumes.json`, including 0% mutes, and restore on
 rejoin/reconnect/restart regardless of username or stream slot. The same person
 can have different gains in different guilds. Preferences belong to this local
 installation, are not synced to the backend and are shared by accounts using this
-OS profile. Test-stream gains are temporary. Device IDs, master gain, activation
+OS profile. Test-stream gains are temporary. Device IDs, master gain, microphone boost, activation
 threshold, mute/deafen,
 transmit mode and processing choices persist in the OS app config directory's
 `audio.json`. No tokens or recorded audio go there. Device and processing settings
@@ -330,7 +333,7 @@ AEC3 processing, configuration and reference timestamps are unchanged.
 
 ## Audio timing and performance
 
-Voice activation now uses sustained energy after denoising and before AGC, with
+Voice activation uses sustained energy after denoising and microphone boost, before AGC, with
 40 ms attack, separate opening/closing thresholds, 200 ms release and a fixed
 60 ms pre-roll delay. PTT bypasses this detector and delay. Existing persisted
 sensitivity/defaults remain supported. See [voice activation](voice-activation.md)

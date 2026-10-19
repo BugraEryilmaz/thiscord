@@ -45,6 +45,7 @@ pub struct Processing {
     model: NoiseSuppressionModel,
     spare_noise: Option<Box<dyn stages::CaptureStage>>,
     automatic_gain: bool,
+    input_gain: f32,
     capture_after: Option<Instant>,
     neural_requested: bool,
     neural_model_path: Option<String>,
@@ -137,6 +138,7 @@ impl Processing {
                 return Err("This build does not include DeepFilterNet3".into());
             }
         }
+        chain.push(true, stages::FixedGain(s.input_gain));
         chain.push(
             s.automatic_gain,
             stages::SonoraStage::new("Automatic gain", gain_config()),
@@ -146,6 +148,7 @@ impl Processing {
             chain,
             s.noise_suppression_model,
             s.automatic_gain,
+            s.input_gain,
         );
         processing.neural_requested = s.neural_echo;
         processing.neural_model_path = s.neural_echo_model.clone();
@@ -168,6 +171,7 @@ impl Processing {
         chain: stages::CaptureChain,
         model: NoiseSuppressionModel,
         automatic_gain: bool,
+        input_gain: f32,
     ) -> Self {
         Self {
             apm: AudioProcessing::builder()
@@ -188,6 +192,7 @@ impl Processing {
             model,
             spare_noise: None,
             automatic_gain,
+            input_gain,
             capture_after: None,
             neural_requested: false,
             neural_model_path: None,
@@ -266,7 +271,8 @@ impl Processing {
         }
         self.chain.reset();
         self.chain.set_enabled(0, s.noise_suppression);
-        self.chain.set_enabled(1, s.automatic_gain);
+        self.set_input_gain(s.input_gain);
+        self.chain.set_enabled(2, s.automatic_gain);
         self.automatic_gain = s.automatic_gain;
         self.config = config(s);
         self.neural_requested = s.neural_echo;
@@ -297,7 +303,8 @@ impl Processing {
             return Ok(());
         }
         self.chain.set_enabled(0, s.noise_suppression);
-        self.chain.set_enabled(1, s.automatic_gain);
+        self.set_input_gain(s.input_gain);
+        self.chain.set_enabled(2, s.automatic_gain);
         self.automatic_gain = s.automatic_gain;
         let config = config(s);
         if config.echo_canceller != self.config.echo_canceller
@@ -315,6 +322,12 @@ impl Processing {
             self.attach_neural();
         }
         Ok(())
+    }
+    fn set_input_gain(&mut self, gain: f32) {
+        if gain != self.input_gain {
+            self.chain.replace(1, Box::new(stages::FixedGain(gain)));
+            self.input_gain = gain;
+        }
     }
     /// Explicit block buffering in active stages. Excludes filter-bank phase/
     /// group delay, AEC, devices, Opus and network latency.
@@ -486,7 +499,7 @@ impl Processing {
         }
         let mut rms = 0.0;
         self.chain.process_observed(frame, &mut |index, block| {
-            if index == 0 {
+            if index == 1 {
                 rms = super::gate::Evidence::rms(block);
             }
         })?;
@@ -541,6 +554,85 @@ pub(super) struct Captured {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn microphone_boost_opens_and_holds_quiet_speech_without_bypassing_restrictions() {
+        use super::super::gate::{Evidence, Gate};
+        use thiscord_shared::audio::TransmitMode;
+
+        let start = Instant::now();
+        for gain in [1.0, 4.0] {
+            let settings = AudioSettings {
+                input_gain: gain,
+                ..Default::default()
+            };
+            let mut processing = Processing::new(&settings).unwrap();
+            let mut gate = Gate::default();
+            for packet in 0..40 {
+                // A quiet onset followed by even quieter sustained speech.
+                let amplitude = if packet < 10 { 0.006 } else { 0.0025 };
+                let mut pcm = [0.0; 960];
+                let mut evidence = Evidence::default();
+                for (half, block) in pcm.as_chunks_mut::<480>().0.iter_mut().enumerate() {
+                    *block = std::array::from_fn(|i| {
+                        (i as f32 * 200.0 * std::f32::consts::TAU / 48_000.0).sin() * amplitude
+                    });
+                    evidence.0[half] = processing.capture_frame_metered(block, 0, true).unwrap();
+                    let expected_rms = amplitude * gain * std::f32::consts::FRAC_1_SQRT_2;
+                    assert!((evidence.0[half] - expected_rms).abs() < 1e-5);
+                    assert!((Evidence::rms(block) - expected_rms).abs() < 1e-5);
+                }
+                let allowed = packet < 35;
+                let output = gate.process(
+                    pcm,
+                    evidence,
+                    start + std::time::Duration::from_millis(packet * 20),
+                    false,
+                    TransmitMode::VoiceActivity,
+                    settings.activation_threshold,
+                    allowed,
+                    false,
+                );
+                if packet >= 5 {
+                    assert_eq!(output.active, gain > 1.0 && allowed, "packet {packet}");
+                    if !output.active {
+                        assert_eq!(output.pcm, [0.0; 960]);
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn microphone_boost_updates_live_survives_replacement_and_clamps() {
+        let mut settings = AudioSettings::default();
+        let mut processing = Processing::new(&settings).unwrap();
+        for gain in [1.0, 4.0, 10.0, 1.0] {
+            settings.input_gain = gain;
+            processing.settings(&settings).unwrap();
+            let mut block = [0.2; 480];
+            let rms = processing
+                .capture_frame_metered(&mut block, 0, true)
+                .unwrap();
+            let expected = (0.2 * gain).min(1.0);
+            assert!(block.iter().all(|v| (*v - expected).abs() < 1e-6));
+            assert!((rms - expected).abs() < 1e-5);
+        }
+        settings.input_gain = 3.0;
+        processing
+            .install(Prepared::new(&settings).unwrap())
+            .unwrap();
+        let mut block = [-0.5; 480];
+        processing.capture_frame(&mut block, 0).unwrap();
+        assert_eq!(block, [-1.0; 480]);
+        // A pre-boundary block stays silent even at the configured boost.
+        let mut block = [0.5; 480];
+        processing
+            .capture_frame_retained(&mut block, 0, false)
+            .unwrap();
+        assert_eq!(block, [0.0; 480]);
+    }
+
     #[test]
     fn activation_evidence_is_after_denoising_and_independent_of_agc() {
         let speech = fixture::speech();
@@ -554,6 +646,7 @@ mod tests {
                     continue;
                 }
                 let s = AudioSettings {
+                    input_gain: 2.0,
                     noise_suppression: true,
                     noise_suppression_model: model,
                     echo_cancellation: true,

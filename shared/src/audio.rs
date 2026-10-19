@@ -62,6 +62,8 @@ pub struct AudioSettings {
     pub input: Option<String>,
     pub output: Option<String>,
     pub output_volume: f32,
+    /// Fixed microphone amplitude multiplier, after denoising and before activation/AGC.
+    pub input_gain: f32,
     pub activation_threshold: f32,
     pub mode: TransmitMode,
     pub global_push_to_talk: bool,
@@ -82,6 +84,7 @@ impl Default for AudioSettings {
             input: None,
             output: None,
             output_volume: 1.0,
+            input_gain: 1.0,
             activation_threshold: 0.015,
             mode: TransmitMode::VoiceActivity,
             global_push_to_talk: false,
@@ -100,6 +103,8 @@ impl AudioSettings {
     pub fn validate(&self) -> Result<(), &'static str> {
         if !self.output_volume.is_finite()
             || !(0.0..=2.0).contains(&self.output_volume)
+            || !self.input_gain.is_finite()
+            || !(1.0..=10.0).contains(&self.input_gain)
             || !self.activation_threshold.is_finite()
             || !(0.001..=0.5).contains(&self.activation_threshold)
             || self
@@ -193,6 +198,25 @@ pub struct AudioRecordingStatus {
 #[cfg(test)]
 mod control_tests {
     use super::*;
+
+    #[test]
+    fn microphone_gain_defaults_round_trips_and_rejects_invalid_values() {
+        let mut legacy = serde_json::to_value(AudioSettings::default()).unwrap();
+        legacy.as_object_mut().unwrap().remove("input_gain");
+        let mut settings: AudioSettings = serde_json::from_value(legacy).unwrap();
+        assert_eq!(settings.input_gain, 1.0);
+        for gain in [1.0, 2.5, 10.0] {
+            settings.input_gain = gain;
+            settings.validate().unwrap();
+            let decoded: AudioSettings =
+                serde_json::from_str(&serde_json::to_string(&settings).unwrap()).unwrap();
+            assert_eq!(decoded, settings);
+        }
+        for gain in [0.0, 0.99, 10.01, f32::NAN, f32::INFINITY, f32::NEG_INFINITY] {
+            settings.input_gain = gain;
+            assert!(settings.validate().is_err());
+        }
+    }
 
     #[test]
     fn quality_is_backward_compatible_optional_and_contains_only_numeric_metadata() {

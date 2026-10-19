@@ -92,6 +92,24 @@ impl CaptureChain {
     }
 }
 
+/// Stateless, bounded boost on the worker; never runs in a device callback.
+pub(super) struct FixedGain(pub f32);
+impl CaptureStage for FixedGain {
+    fn name(&self) -> &'static str {
+        "Microphone boost"
+    }
+    fn process(&mut self, block: &mut Block) -> Result<(), Failure> {
+        if self.0 == 1.0 {
+            return Ok(());
+        }
+        for sample in block {
+            *sample = (*sample * self.0).clamp(-1.0, 1.0);
+        }
+        Ok(())
+    }
+    fn reset(&mut self) {}
+}
+
 pub(super) struct SonoraStage {
     name: &'static str,
     config: Config,

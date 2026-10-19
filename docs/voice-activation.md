@@ -8,12 +8,23 @@ no new model, dependency, callback work or shared wire contract was added.
 
 ## Behavior and sensitivity
 
-`AEC3 -> selected denoiser -> RMS observation -> optional AGC2 -> gate -> Opus`
+`AEC3 -> selected denoiser -> microphone boost -> RMS observation -> optional AGC2 -> gate -> Opus`
 
-Each 20 ms packet carries the RMS of its two denoised 10 ms halves. Detection uses
+Each 20 ms packet carries the RMS of its two denoised, boosted 10 ms halves. Detection uses
 these values even if AGC is enabled; the retained/emitted audio includes AGC.
 The existing sensitivity slider, `audio.json` persistence, finite range
-0.001–0.5 and default 0.015 remain unchanged. There is no settings migration.
+0.001–0.5 and default 0.015 remain unchanged.
+
+**Microphone boost** in Settings → Audio & voice is a fixed amplitude multiplier
+(`input_gain` in `audio.json`), configurable from 1× to 10×. Existing settings
+default to 1× without a migration. It amplifies both activation evidence and
+outgoing audio, including push-to-talk, after denoising and before optional AGC.
+Start at 2× for a quiet microphone and adjust while speaking. Higher values also
+amplify remaining background noise and can distort loud speech. Boosted samples
+are clamped to full scale before detection/AGC; unity preserves the existing path.
+The setting applies during a call through the existing settings boundary/reset
+and is also available through remote audio support and offline replay.
+
 The opening RMS is `activation_threshold / sqrt(2)`, approximately preserving
 the previous slider scale for sustained sine-like signals. Real microphones may
 need readjustment because single peaks and AGC-amplified output no longer qualify.

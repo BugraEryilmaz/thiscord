@@ -166,6 +166,7 @@ and single-process chat/media enforcement.
 - [x] Mute/deafen, independent speaker volume, voice activation and in-app push-to-talk.
 - [x] Replace peak activation with a tested pre-AGC energy gate, hysteresis,
   60 ms bounded pre-roll and restriction-safe capture/transport invalidation.
+- [x] Configurable, persisted microphone boost before activation and automatic gain.
 - [ ] Listen-test activation/sensitivity and the added 60 ms delay with physical
   microphones on Windows/macOS/Linux, including quiet Turkish/English speech,
   typing, fans, TV voices and rapid mute/PTT transitions.

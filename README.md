@@ -97,6 +97,8 @@ of playback, raw microphone and outgoing audio, with metadata for offline DSP re
 Voice activation uses sustained energy before automatic gain, hysteresis and a
 60 ms pre-roll delay to retain short quiet onsets. Push-to-talk bypasses the
 automatic gate and its delay. See [activation behavior and limits](docs/voice-activation.md).
+Quiet microphones can use the saved Microphone boost control (1×–10×, default 1×)
+in Audio & voice to amplify audio before activation and automatic gain.
 Experimental DeepFilterNet3 noise suppression is available in Voice & audio;
 see [model selection, regression tests and benchmarks](docs/deep-filter.md).
 Experimental neural residual echo estimation is also available, independently

@@ -8,7 +8,7 @@ pub(super) const DELAY: Duration = Duration::from_millis(PRE_ROLL as u64 * 20);
 const ATTACK: usize = 2;
 const RELEASE: usize = 10;
 
-/// RMS of each denoised 10 ms half, before optional automatic gain.
+/// RMS of each denoised, statically boosted 10 ms half, before optional automatic gain.
 #[derive(Clone, Copy, Default)]
 pub(super) struct Evidence(pub [f32; 2]);
 impl Evidence {
