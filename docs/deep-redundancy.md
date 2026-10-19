@@ -154,9 +154,32 @@ without cache cleaning or task-specific build directories.
 WSL `kali-linux`, using the configured isolated test database and including ignored
 tests: 62 backend unit tests and accounts (7), admin web (1), chat (20), HTTP (3),
 permissions (7), PostgreSQL migration (1) and TLS (1) integration tests pass.
-All five voice integration tests fail at `backend/tests/voice.rs:168`, parsing an
-empty received frame (`EOF while parsing a value`) after about 15 seconds. An
-isolated `sfu_forwarding_permissions_isolation_and_cleanup` rerun reproduces it.
-The clean-base comparison is pending; this is not established as a baseline
-failure. No unrelated backend/test-protocol edit was made. The DRED/RED combined
-branch and platform CI must resolve or establish this limitation before readiness.
+The initial voice runs inherited deployment configuration and failed at
+`backend/tests/voice.rs:168` with `EOF while parsing a value` after about 15 seconds.
+Root reproduced the isolated `sfu_forwarding_permissions_isolation_and_cleanup`
+failure on clean main `de9ac41f6689394d7aeaf85f87df28589505b6f0` in 15.24 seconds
+with deployment configuration; the same clean-base test passed in 23.44 seconds
+with only `TEST_DATABASE_URL` supplied and every `THISCORD_*` variable omitted.
+This establishes an environment-dependent baseline failure, without identifying
+one particular deployment setting as its cause.
+
+Root then rebuilt exact DRED commit
+`162d3ce7009f85fb3975292ba11b0f6560ccb3b9` in that isolated test environment,
+preventing the test dotenv path from loading deployment settings:
+
+```sh
+cargo test -p thiscord-backend --test voice --locked -- --include-ignored --test-threads=1
+```
+
+All five voice integration tests passed, zero failed, in 85.74 seconds after
+54.49 seconds of compilation. Final outputs used
+`~/.cache/thiscord-targets/t3-668100c8`; the shared intermediate cache remained
+`~/.cargo/thiscord`. No secret values are recorded. Evidence is retained outside
+the repository at
+`C:/Users/bugra/AppData/Local/Temp/thiscord-dred-voice-isolated.log`; the runner is
+`thiscord-voice-loopback-check.py` in that directory (checkout path and `all`
+arguments). No backend/test-protocol edit was needed for this validation.
+
+This resolves the standalone voice-test validation limitation only. The PR stays
+draft: RED/FEC integration, publisher/source/receiver privacy fences, legacy
+fallback, combined race tests and renewed independent review remain required.
