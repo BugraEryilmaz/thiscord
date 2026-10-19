@@ -81,6 +81,7 @@ pub struct AudioSettings {
     /// Experimental residual estimator, independent of the noise suppressor.
     pub neural_echo: bool,
     /// Optional bounded RFC 2198 microphone redundancy.
+    #[serde(skip_serializing_if = "is_false")]
     pub packet_redundancy: bool,
     /// Optional local override; None uses the bundled model. Exposed only to instance admins during explicit remote audio support.
     pub neural_echo_model: Option<String>,
@@ -214,8 +215,13 @@ mod control_tests {
     fn packet_redundancy_is_opt_in_and_round_trips() {
         let old: AudioSettings = serde_json::from_str("{}").unwrap();
         assert!(!old.packet_redundancy);
+        assert!(!old.adaptive_fec);
+        let legacy_wire = serde_json::to_value(&old).unwrap();
+        assert!(legacy_wire.get("packet_redundancy").is_none());
+        assert!(legacy_wire.get("adaptive_fec").is_none());
         let enabled = AudioSettings {
             packet_redundancy: true,
+            adaptive_fec: true,
             ..old
         };
         let restored: AudioSettings =

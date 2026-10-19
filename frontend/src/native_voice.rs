@@ -1002,6 +1002,9 @@ async fn run(
                         use thiscord_frontend::audio::quality::Count;
                         frame.finish(if result.is_ok() { Count::OutgoingSentPackets } else { Count::OutgoingFailedPackets });
                         result.map_err(|_|Failure::temporary("Voice media connection failed").with_reason("media_send_failed"))?;
+                        // One admitted outer RTP packet. Source 0 belongs to this
+                        // unique Connection; privacy tags and RED copies do not
+                        // replace its stable FEC feedback identity.
                         attempt.connection.uplink_sent(0, sequence);
                         rtp_clock.next(frame.media_position);
                         accepted_packets += 1;

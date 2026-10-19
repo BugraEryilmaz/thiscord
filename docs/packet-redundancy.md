@@ -3,6 +3,9 @@
 Audio & voice → Advanced & troubleshooting contains **Microphone packet redundancy
 (RED)**. `packet_redundancy` defaults to false, including existing `audio.json` files.
 The existing local and administrator remote settings paths persist the preference.
+The false field is omitted from serialized settings so older strict settings
+readers can accept the disabled configuration. Enabling it on an older remote
+client can be rejected until that client is updated.
 Browser preview has no native voice transport.
 
 When negotiated, RED repeats up to two previously admitted 20 ms Opus frames.
@@ -51,6 +54,12 @@ padding, RED adds no packet recovery protection; this is not additive RED+DRED
 history. Adaptive in-band FEC remains inside the primary Opus payload and is subject
 to the same size limits. Oversized, expired and rejected transport frames also
 invalidate retained history.
+
+Adaptive FEC feedback counts each successfully admitted outer RTP packet once,
+regardless of redundant block count. Its source identity is stable for the unique
+connection; privacy/PTT/refresh generations clear audio history without resetting
+the numeric path estimate. Connection replacement starts fresh feedback, and
+omitted or rejected packets never advance the outgoing sequence.
 
 For an 80-byte/20 ms Opus primary, steady RED payload is 249 bytes: three copies
 plus nine RED header bytes, **99.6 kbit/s versus 32 kbit/s** before RTP/UDP/IP/SRTP.

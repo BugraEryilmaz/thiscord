@@ -218,6 +218,95 @@ mod tests {
     }
 
     #[test]
+    fn adaptive_fec_red_counts_outer_packets_and_keeps_feedback_across_privacy() {
+        use crate::audio::transmit::Encoder;
+        use rtc::rtcp::reception_report::ReceptionReport;
+        use thiscord_shared::voice::MediaKind;
+
+        let start = Instant::now();
+        let connection = Connection::default();
+        let mut encoder = Encoder::new(false).unwrap();
+        encoder.codec.set_vbr(false).unwrap();
+        let mut sender = Sender::default();
+        let mut privacy = 1;
+        let mut copies = 0;
+        for sequence in 0..=100u16 {
+            let now = start + Duration::from_millis(u64::from(sequence) * 20);
+            if sequence == 51 {
+                privacy += 1;
+                sender.clear();
+                encoder.reset().unwrap();
+                assert!(connection.uplink_sample(0).is_some());
+            }
+            encoder
+                .adapt(true, 5, connection.uplink_sample(0), now)
+                .unwrap();
+            let pcm = std::array::from_fn(|i| (i as f32 * 0.07).sin() * 0.1);
+            let mut bytes = [0; 1100];
+            let (len, omitted, _) = encoder.encode(&pcm, false, &mut bytes).unwrap();
+            assert!(!omitted);
+            let mut current = frame(now, u64::from(sequence) * 960, &bytes[..len], &connection);
+            current.generation = privacy;
+            let enabled = !(60..70).contains(&sequence);
+            let (pt, payload) = sender.packet(&current, enabled, now);
+            if enabled {
+                let parsed = wire::parse(&payload).unwrap();
+                copies += parsed.history.len();
+                if sequence == 51 || sequence == 70 {
+                    assert!(parsed.history.is_empty());
+                }
+            } else {
+                assert_eq!(pt, wire::OPUS_PAYLOAD_TYPE);
+            }
+            // Production records only a successfully written outer packet.
+            connection.uplink_sent(0, sequence);
+            sender.admitted(current, enabled);
+            if sequence.is_multiple_of(50) {
+                connection.observe_uplink(
+                    &ReceptionReport {
+                        ssrc: MediaKind::Microphone.publisher_ssrc(),
+                        last_sequence_number: u32::from(sequence),
+                        total_lost: u32::from(sequence / 5),
+                        ..Default::default()
+                    },
+                    now,
+                );
+                encoder
+                    .adapt(true, 5, connection.uplink_sample(0), now)
+                    .unwrap();
+            }
+        }
+        assert!(copies > 100);
+        assert!(encoder.codec.get_packet_loss_perc().unwrap() > 5);
+        // No outer packet 150 was emitted: copies cannot authorize that report.
+        let later = start + Duration::from_secs(3);
+        connection.observe_uplink(
+            &ReceptionReport {
+                ssrc: MediaKind::Microphone.publisher_ssrc(),
+                last_sequence_number: 150,
+                total_lost: 30,
+                ..Default::default()
+            },
+            later,
+        );
+        encoder.reset().unwrap();
+        encoder
+            .adapt(true, 5, connection.uplink_sample(0), later)
+            .unwrap();
+        assert_eq!(
+            encoder.adaptive.diagnostics(later).feedback_age_ms,
+            Some(1000)
+        );
+        assert!(encoder.codec.get_packet_loss_perc().unwrap() > 5);
+        assert!(Connection::default().uplink_sample(0).is_none());
+        connection.close();
+        encoder
+            .adapt(true, 5, connection.uplink_sample(0), later)
+            .unwrap();
+        assert_eq!(encoder.codec.get_packet_loss_perc().unwrap(), 5);
+    }
+
+    #[test]
     fn legacy_replacement_requires_visible_rejoin_without_forgetting_tombstones() {
         let legacy: thiscord_shared::voice::Participant =
             serde_json::from_value(serde_json::json!({
