@@ -61,7 +61,7 @@ async fn adaptive_fec_uses_real_rtcp_and_rejects_closed_peer_feedback() {
         connection.uplink_sent(0, 65_500);
         for i in 1..=400u32 {
             tick.tick().await;
-            if i % 5 != 0 {
+            if !i.is_multiple_of(5) {
                 microphone.write_rtp(rtp::Packet {
                     header: rtp::header::Header { version: 2, sequence_number: (65_500 + i) as u16,
                         timestamp: i * 960, ssrc: MediaKind::Microphone.publisher_ssrc(), payload_type: 111, ..Default::default() }, payload: payload.clone()
@@ -69,7 +69,7 @@ async fn adaptive_fec_uses_real_rtcp_and_rejects_closed_peer_feedback() {
                 connection.uplink_sent(0, (65_500 + i) as u16);
             }
             while received.try_recv().is_ok() {}
-            if i % 50 == 0 {
+            if i.is_multiple_of(50) {
                 encoder.adapt(true, 5, connection.uplink_sample(0), Instant::now()).unwrap();
             }
         }

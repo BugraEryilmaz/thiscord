@@ -272,7 +272,14 @@ fn deterministic_isolated_and_burst_loss_measure_real_opus_fec() {
             .collect();
         let bytes: usize = packets.iter().map(Vec::len).sum();
         for burst in [false, true] {
-            let missing = |i: usize| i > 10 && if burst { i % 15 < 3 } else { i % 5 == 0 };
+            let missing = |i: usize| {
+                i > 10
+                    && if burst {
+                        i % 15 < 3
+                    } else {
+                        i.is_multiple_of(5)
+                    }
+            };
             let mut fec = opus::Decoder::new(RATE, opus::Channels::Mono).unwrap();
             let mut plc = opus::Decoder::new(RATE, opus::Channels::Mono).unwrap();
             let (mut lost, mut opportunities, mut distinct) = (0, 0, 0);
