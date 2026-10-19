@@ -6,6 +6,118 @@ async fn social(app: &Router, token: &str, value: Value, status: StatusCode) -> 
     assert_eq!(got, status, "{body}");
     body
 }
+
+#[tokio::test]
+#[ignore = "requires TEST_DATABASE_URL"]
+async fn search_matches_partial_display_names_and_usernames() {
+    let _lock = TEST_LOCK.lock().await;
+    let db = database();
+    let (actor_id, actor) = user(&db, "search_actor");
+    let (first_id, _) = user(&db, "account_first");
+    let (second_id, _) = user(&db, "account_second");
+    let (other_id, _) = user(&db, "unrelated");
+    let long_name = "界".repeat(64);
+    for (id, name) in [
+        (actor_id, "Buğra Smith 🎮 100%_"),
+        (first_id, "Buğra Smith 🎮 100%_"),
+        (second_id, "Buğra Smith 🎮 100%_"),
+        (other_id, long_name.as_str()),
+    ] {
+        diesel::sql_query("UPDATE accounts SET display_name=$2 WHERE id=$1::uuid")
+            .bind::<Text, _>(id.to_string())
+            .bind::<Text, _>(name)
+            .execute(&mut db.pool.get().unwrap())
+            .unwrap();
+    }
+    let app = api::router(Some(db.pool.clone()), vec![]);
+    social(
+        &app,
+        "",
+        json!({"action":"search","query":"Smith"}),
+        StatusCode::UNAUTHORIZED,
+    )
+    .await;
+    for query in ["  sMiTh  ", "ĞRA", "Smith 🎮", "100%_", "%_"] {
+        let result = social(
+            &app,
+            &actor,
+            json!({"action":"search","query":query}),
+            StatusCode::OK,
+        )
+        .await;
+        let people = result["people"].as_array().unwrap();
+        assert_eq!(people.len(), 2, "query: {query}");
+        assert_eq!(people[0]["id"], json!(first_id));
+        assert_eq!(people[1]["id"], json!(second_id));
+        assert_eq!(people[0]["username"], "account_first");
+        assert_eq!(people[1]["username"], "account_second");
+        for person in people {
+            assert_eq!(person.as_object().unwrap().len(), 4);
+            assert!(person.get("display_name").is_some());
+            assert!(person.get("avatar_id").is_some());
+        }
+    }
+    // Username matching also works in the middle, with case ignored.
+    let result = social(
+        &app,
+        &actor,
+        json!({"action":"search","query":"UNT_FIR"}),
+        StatusCode::OK,
+    )
+    .await;
+    assert_eq!(result["people"].as_array().unwrap().len(), 1);
+    assert_eq!(result["people"][0]["id"], json!(first_id));
+    let result = social(
+        &app,
+        &actor,
+        json!({"action":"search","query":long_name}),
+        StatusCode::OK,
+    )
+    .await;
+    assert_eq!(result["people"][0]["id"], json!(other_id));
+    for query in ["no match", "__", "%%", "' OR true --"] {
+        let result = social(
+            &app,
+            &actor,
+            json!({"action":"search","query":query}),
+            StatusCode::OK,
+        )
+        .await;
+        assert_eq!(result["people"], json!([]));
+    }
+    for query in [
+        "".into(),
+        "  ".into(),
+        "a".into(),
+        "界".repeat(65),
+        "Sm\nith".into(),
+        "Sm\0ith".into(),
+    ] {
+        social(
+            &app,
+            &actor,
+            json!({"action":"search","query":query}),
+            StatusCode::BAD_REQUEST,
+        )
+        .await;
+    }
+    // Broad partial searches stay bounded and have stable ordering.
+    for index in 0..22 {
+        user(&db, &format!("limit_{index:02}"));
+    }
+    let result = social(
+        &app,
+        &actor,
+        json!({"action":"search","query":"imit_"}),
+        StatusCode::OK,
+    )
+    .await;
+    let people = result["people"].as_array().unwrap();
+    assert_eq!(people.len(), 20);
+    assert_eq!(people[0]["username"], "limit_00");
+    assert_eq!(people[19]["username"], "limit_19");
+}
+
 async fn socket(address: std::net::SocketAddr, token: &str) -> Socket {
     let mut request = format!("ws://{address}{FRIENDS_SOCKET_PATH}")
         .into_client_request()

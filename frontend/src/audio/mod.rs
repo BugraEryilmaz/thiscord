@@ -1678,15 +1678,7 @@ fn run(
                         }
                         Command::Notification { kind, volume } => {
                             if let Some(s) = &session {
-                                use thiscord_shared::notifications::Kind;
-                                let index = match kind {
-                                    Kind::VoiceJoin => 0,
-                                    Kind::VoiceLeave => 1,
-                                    Kind::DirectMessage => 2,
-                                    Kind::GuildMessage => 3,
-                                    Kind::IncomingCall => 4,
-                                    Kind::Update => 5,
-                                };
+                                let index = crate::notification_sound::mixer_index(kind);
                                 s.devices.control.cue_volumes[index]
                                     .store(volume.min(100), Ordering::Relaxed);
                                 if !s.devices.control.deafen.load(Ordering::Relaxed) {

@@ -81,6 +81,39 @@ html:has(.voice-overlay), body:has(.voice-overlay) {
 .overlay-speaking .overlay-label { color: white; }
 .overlay-speaking .overlay-status { color: #54e697; }
 
+/* Content-sized native banners and the matching in-app fallback. */
+html:has(.notification-window), body:has(.notification-window) { margin: 0; background: transparent; overflow: hidden; }
+.notification-window { max-height: 100dvh; overflow-y: auto; }
+.notification-stack { display: flex; flex-direction: column; gap: 8px; padding: 8px; }
+.notification-card { padding: 14px; border: 1px solid #ffffff14; border-radius: 12px; background: #25262f; color: #f2f3f5; box-shadow: 0 3px 7px #0005; }
+.notification-heading { display: flex; align-items: flex-start; gap: 8px; }
+.notification-open { display: flex; align-items: flex-start; gap: 12px; flex: 1; min-width: 0; text-align: left; border-radius: 6px; cursor: pointer; }
+.notification-icon { display: grid; place-items: center; flex: 0 0 38px; height: 38px; border-radius: 11px; background: #5865f224; color: #a5adff; }
+.notification-icon svg { width: 21px; height: 21px; }
+.notification-call .notification-icon { background: #53bd8420; color: #75d5a0; }
+.notification-copy { min-width: 0; padding-top: 1px; }
+.notification-kind { display: block; color: #b4b6c5; font-size: 11px; line-height: 16px; font-weight: 500; }
+.notification-app { color: #9295a5; }
+.notification-title { display: -webkit-box; -webkit-box-orient: vertical; -webkit-line-clamp: 2; overflow: hidden; overflow-wrap: anywhere; margin-top: 3px; font-size: 14px; font-weight: 650; line-height: 20px; }
+.notification-open:hover .notification-title { color: #c7ccff; }
+.notification-dismiss { display: grid; place-items: center; flex: 0 0 26px; height: 26px; margin: -4px -4px 0 0; border-radius: 6px; color: #a0a3b3; cursor: pointer; }
+.notification-dismiss svg { width: 16px; height: 16px; }
+.notification-dismiss:hover { color: white; background: #ffffff0d; }
+.notification-actions { display: flex; align-items: center; gap: 8px; margin: 10px 0 0 50px; }
+.notification-actions button, .notification-snooze { min-height: 28px; border-radius: 6px; font-size: 12px; line-height: 18px; cursor: pointer; }
+.notification-link { padding: 3px 0; color: #b2baff; font-weight: 600; }
+.notification-link:hover { color: white; }
+.notification-accept { padding: 4px 12px; background: #3b8b60; color: white; font-weight: 600; }
+.notification-accept:hover { background: #439c6d; }
+.notification-accept:disabled { opacity: .5; cursor: not-allowed; }
+.notification-decline { padding: 4px 10px; background: #ffffff0a; color: #d6d7df; }
+.notification-decline:hover { background: #ffffff14; }
+.notification-snooze { min-width: 0; width: 94px; margin-left: auto; padding: 4px 6px; background: #ffffff08; color: #b4b6c5; border: 1px solid #ffffff0a; }
+.notification-snooze:hover { background: #ffffff10; color: white; }
+.notification-snooze:focus-visible { outline: 2px solid #a4adff; outline-offset: 2px; }
+.notification-snooze option { background: #25262f; color: #f2f3f5; }
+.notification-hint { margin: 9px 0 0 50px; font-size: 12px; line-height: 18px; color: #b4b6c5; }
+
 @layer base {
   :root {
     color-scheme: dark;
@@ -108,6 +141,10 @@ html:has(.voice-overlay), body:has(.voice-overlay) {
 .context-danger { color: #ff828a; }
 .context-danger:hover, .context-danger:focus-visible { background: #a73042; }
 .context-item:disabled { opacity: .4; cursor: default; background: transparent; }
+.context-submenu-trigger { display: flex; align-items: center; justify-content: space-between; gap: 16px; }
+.context-submenu-trigger[aria-expanded=true] { background: var(--color-brand); color: white; }
+.context-submenu-trigger > [aria-hidden] { font-size: 20px; line-height: 16px; }
+.context-submenu { position: fixed; z-index: 121; width: 200px; max-width: calc(100vw - 16px); max-height: calc(100dvh - 16px); overflow-y: auto; padding: 6px; border: 1px solid #ffffff14; border-radius: 8px; background: #111218; box-shadow: 0 8px 32px #0008; }
 .context-dialog { margin: auto; width: min(480px, calc(100vw - 32px)); max-height: 85dvh; overflow-y: auto; border: 1px solid #ffffff20; border-radius: 14px; padding: 24px; background: var(--color-surface); color: var(--color-content); }
 .context-dialog::backdrop { background: #000b; }
 .channel-indicator svg { width: 13px; height: 13px; opacity: .6; }

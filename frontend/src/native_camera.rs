@@ -382,6 +382,43 @@ mod tests {
     use super::*;
     use tokio::sync::mpsc;
     use webrtc::media_stream::track_local::{TrackLocal, static_rtp::TrackLocalStaticRTP};
+    #[test]
+    fn camera_commands_are_allowed_only_in_the_local_main_window() {
+        // Exercise the same compiled ACL used by the desktop app, without a
+        // camera, WebView or permission prompt. Handler registration alone is
+        // insufficient when the app has an explicit command allowlist.
+        let mut context: tauri::Context<tauri::Wry> = tauri::generate_context!();
+        let authority = context.runtime_authority_mut();
+        for command in ["camera_open", "camera_keepalive", "camera_stop"] {
+            assert!(
+                authority
+                    .resolve_access(command, "main", "main", &tauri::ipc::Origin::Local)
+                    .is_some(),
+                "{command} must be allowed in the main window"
+            );
+            for window in ["voice-overlay", "notifications", "unknown"] {
+                assert!(
+                    authority
+                        .resolve_access(command, window, window, &tauri::ipc::Origin::Local)
+                        .is_none(),
+                    "{command} must not be allowed in {window}"
+                );
+            }
+            assert!(
+                authority
+                    .resolve_access(
+                        command,
+                        "main",
+                        "main",
+                        &tauri::ipc::Origin::Remote {
+                            url: "https://example.test".parse().unwrap()
+                        }
+                    )
+                    .is_none(),
+                "{command} must not be exposed to remote pages"
+            );
+        }
+    }
     struct Receiver {
         gathered: Arc<Notify>,
         packets: mpsc::Sender<rtc::rtp::Packet>,

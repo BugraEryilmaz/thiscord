@@ -2,6 +2,7 @@
 pub mod audio;
 pub mod chat_history;
 pub mod notification_queue;
+pub mod notification_sound;
 #[cfg(all(not(target_arch = "wasm32"), feature = "screen-share"))]
 pub mod screen;
 pub mod video_feedback;

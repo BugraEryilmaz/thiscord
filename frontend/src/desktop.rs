@@ -176,6 +176,7 @@ fn main() {
             native_notifications::notification_snoozed,
             native_notifications::notification_sound,
             native_notifications::notification_snapshot,
+            native_notifications::notification_resize,
             native_notifications::notification_action,
             native_update::update_check,
             native_update::update_install

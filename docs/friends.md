@@ -1,13 +1,21 @@
 # Friends, private messages and calls
 
 The home button opens Friends, with Online, All and Requests tabs. Add friend in
-the top right searches username prefixes (2–32 letters, digits or underscores,
-up to 20 results). Search returns only account ID, username, display name and avatar;
+the top right searches anywhere within display names and usernames, ignoring case
+(2–64 Unicode characters after trimming, no control characters, up to 20 results).
+Spaces, accents and punctuation are accepted; `%` and `_` match literally.
+Results show usernames to distinguish people with identical display names, and
+friend requests target the selected account ID. Search returns only account ID,
+username, display name and avatar;
 it never returns email, identities, sessions or presence. Sending requests requires
 a verified email. The recipient explicitly accepts; crossing requests do not
 silently establish a friendship. Requests can be declined or cancelled, and either
 friend can remove the relationship. Each account can have at most 200 accepted or
 pending relationships, enforced while locking both accounts in UUID order.
+Right-click a voice participant, a message author's name, or a person in the home
+friend list to add or unfriend them. Pending requests offer Accept/Decline or
+Cancel instead; removing a friend requires confirmation. These actions follow
+the live relationship state and are disabled while the friends socket reconnects.
 
 Accepted friends can open a private conversation and start a voice call without
 sharing a guild. Online means at least one authenticated friends socket is alive,
@@ -40,6 +48,8 @@ lock. History uses the shared reverse `(created_at,id)` keyset cursor, defaults 
 50-message snapshot, and pages older history separately. Jump to latest restores
 the current snapshot. Failed sends retain their UUID and content for explicit retry;
 drafts and retries are in memory for the open conversation.
+Enter sends the draft; Shift+Enter inserts a newline. IME confirmation and held-key
+repeats do not send messages, and sending waits until the friends socket is connected.
 
 Removal retains private history but denies access to both parties. Accepting a new
 request between the same accounts restores that history. Account deletion cascades
@@ -89,9 +99,12 @@ drains both accounts. Existing media ingress/egress epoch checks reject queued d
 after revocation. The SFU admits only the two account identities, with the existing
 single-connection-per-account takeover behavior.
 
-Incoming/outgoing call controls appear throughout the app. Acceptance and automatic
-joining apply to the device that explicitly started/accepted the call; other devices
-may explicitly join. The existing mute, deafen, devices and hang-up controls apply.
+Incoming/outgoing call controls appear throughout the app. Once joined, call status
+and hang-up live in the bottom-left voice dock; the duplicate floating card is hidden.
+Outgoing ringing and unjoined calls retain their cancel/join controls. Acceptance
+and automatic joining apply to the device that explicitly started/accepted the
+call; other devices may explicitly join. The existing mute, deafen, devices and
+hang-up controls apply.
 Voice requires the desktop app; browser preview supports friends and messaging.
 Calls use the existing server-terminated WebRTC encryption and STUN/TURN requirements
 from [audio.md](audio.md), and are not end-to-end encrypted between accounts.

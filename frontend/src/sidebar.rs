@@ -3,6 +3,50 @@ use serde::{Deserialize, Serialize};
 use std::collections::BTreeSet;
 use thiscord_shared::{AccountId, ChannelId, permissions::GuildState};
 
+/// Presentation choices for a person's menu. The backend still authorizes every command.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum FriendAction {
+    Add,
+    Accept,
+    Decline,
+    Cancel,
+    Unfriend,
+}
+impl FriendAction {
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::Add => "Add friend",
+            Self::Accept => "Accept friend request",
+            Self::Decline => "Decline friend request",
+            Self::Cancel => "Cancel friend request",
+            Self::Unfriend => "Unfriend…",
+        }
+    }
+    pub fn request(self, account_id: AccountId) -> thiscord_shared::friends::Request {
+        use thiscord_shared::friends::Request;
+        match self {
+            Self::Add => Request::Add { account_id },
+            Self::Accept => Request::Accept { account_id },
+            Self::Decline | Self::Cancel | Self::Unfriend => Request::Remove { account_id },
+        }
+    }
+}
+pub fn friend_actions(
+    own: bool,
+    relationship: Option<thiscord_shared::friends::Relationship>,
+) -> &'static [FriendAction] {
+    use thiscord_shared::friends::Relationship;
+    if own {
+        return &[];
+    }
+    match relationship {
+        None => &[FriendAction::Add],
+        Some(Relationship::Friend) => &[FriendAction::Unfriend],
+        Some(Relationship::Incoming) => &[FriendAction::Accept, FriendAction::Decline],
+        Some(Relationship::Outgoing) => &[FriendAction::Cancel],
+    }
+}
+
 #[derive(Clone, Default, Serialize, Deserialize)]
 #[serde(default)]
 pub struct Preferences {
@@ -48,6 +92,47 @@ pub fn lower_member(state: &GuildState, actor: AccountId, target: AccountId) -> 
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn friend_menu_preserves_consent_and_never_offers_self_actions() {
+        use thiscord_shared::friends::{Relationship, Request};
+        assert_eq!(friend_actions(false, None), &[FriendAction::Add]);
+        assert_eq!(
+            friend_actions(false, Some(Relationship::Friend)),
+            &[FriendAction::Unfriend]
+        );
+        assert_eq!(
+            friend_actions(false, Some(Relationship::Incoming)),
+            &[FriendAction::Accept, FriendAction::Decline]
+        );
+        assert_eq!(
+            friend_actions(false, Some(Relationship::Outgoing)),
+            &[FriendAction::Cancel]
+        );
+        for relationship in [
+            None,
+            Some(Relationship::Friend),
+            Some(Relationship::Incoming),
+            Some(Relationship::Outgoing),
+        ] {
+            assert!(friend_actions(true, relationship).is_empty());
+        }
+        let target: AccountId = id(7);
+        assert!(
+            matches!(FriendAction::Add.request(target), Request::Add {account_id} if account_id==target)
+        );
+        assert!(
+            matches!(FriendAction::Accept.request(target), Request::Accept {account_id} if account_id==target)
+        );
+        for action in [
+            FriendAction::Decline,
+            FriendAction::Cancel,
+            FriendAction::Unfriend,
+        ] {
+            assert!(
+                matches!(action.request(target), Request::Remove {account_id} if account_id==target)
+            );
+        }
+    }
     use thiscord_shared::permissions::*;
     fn id<T: std::str::FromStr>(n: u8) -> T
     where

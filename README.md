@@ -2,7 +2,7 @@
 
 The home screen includes friends, online presence, friend requests, private text
 conversations and one-to-one desktop voice calls. Use **Add friend** in the top
-right to search usernames. See [friends and private conversations](docs/friends.md)
+right to search by part of a display name or username. See [friends and private conversations](docs/friends.md)
 for behavior, access rules and current limitations.
 
 **Settings → Notifications** controls sounds, banners, volume and event filters.

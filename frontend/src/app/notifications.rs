@@ -7,6 +7,7 @@ use futures_util::{
 use gloo_net::websocket::{Message, futures::WebSocket};
 use leptos::prelude::*;
 use thiscord_shared::notifications::*;
+use wasm_bindgen::JsCast;
 
 #[derive(Clone, Copy)]
 pub(super) struct State {
@@ -145,40 +146,72 @@ fn sound(ui: Ui, kind: Kind, volume: u8) {
         BROWSER_AUDIO.with(|slot| {
             let mut slot = slot.borrow_mut();
             if slot.is_none() {
-                *slot = web_sys::AudioContext::new().ok();
-            }
-            if let Some(context) = slot.as_ref() {
-                let _ = context.resume();
-                if let (Ok(osc), Ok(gain)) = (context.create_oscillator(), context.create_gain()) {
-                    let frequency = match kind {
-                        Kind::VoiceJoin => 880.0,
-                        Kind::VoiceLeave => 440.0,
-                        Kind::IncomingCall => 740.0,
-                        Kind::Update => 520.0,
-                        _ => 660.0,
-                    };
-                    osc.frequency().set_value(frequency);
-                    gain.gain().set_value(0.0);
-                    let at = context.current_time();
-                    let _ = gain
-                        .gain()
-                        .linear_ramp_to_value_at_time(0.12 * f32::from(volume) / 100.0, at + 0.025);
-                    let _ = gain.gain().linear_ramp_to_value_at_time(0.0, at + 0.25);
-                    let _ = osc.connect_with_audio_node(&gain);
-                    let _ = gain.connect_with_audio_node(&context.destination());
-                    let _ = osc.start();
-                    let _ = osc.stop_with_when(at + 0.26);
-                    leptos::task::spawn_local(async move {
-                        gloo_timers::future::TimeoutFuture::new(300).await;
-                        let _ = osc.disconnect();
-                        let _ = gain.disconnect();
+                *slot = web_sys::AudioContext::new()
+                    .ok()
+                    .map(|context| BrowserAudio {
+                        context,
+                        active: None,
                     });
+            }
+            if let Some(audio) = slot.as_mut() {
+                let context = &audio.context;
+                let _ = context.resume();
+                let samples = thiscord_frontend::notification_sound::render(
+                    kind,
+                    context.sample_rate() as u32,
+                );
+                if let (Ok(buffer), Ok(source), Ok(gain)) = (
+                    context.create_buffer(1, samples.len() as u32, context.sample_rate()),
+                    context.create_buffer_source(),
+                    context.create_gain(),
+                ) {
+                    if buffer.copy_to_channel(&samples, 0).is_err() {
+                        return;
+                    }
+                    source.set_buffer(Some(&buffer));
+                    gain.gain().set_value(f32::from(volume.min(100)) / 100.0);
+                    if source.connect_with_audio_node(&gain).is_err()
+                        || gain
+                            .connect_with_audio_node(&context.destination())
+                            .is_err()
+                    {
+                        return;
+                    }
+                    // Bound browser playback to one sound; rapid previews must
+                    // not layer into an indistinguishable, louder chord.
+                    if let Some(previous) = audio.active.take() {
+                        let _ = previous
+                            .unchecked_ref::<web_sys::AudioScheduledSourceNode>()
+                            .stop();
+                        let _ = previous.disconnect();
+                    }
+                    if source.start().is_err() {
+                        let _ = source.disconnect();
+                        let _ = gain.disconnect();
+                        return;
+                    }
+                    let cleanup = source.clone();
+                    let ended = wasm_bindgen::closure::Closure::once_into_js(move || {
+                        let _ = cleanup.disconnect();
+                        let _ = gain.disconnect();
+                        cleanup
+                            .unchecked_ref::<web_sys::AudioScheduledSourceNode>()
+                            .set_onended(None);
+                    });
+                    source
+                        .unchecked_ref::<web_sys::AudioScheduledSourceNode>()
+                        .set_onended(Some(ended.unchecked_ref()));
+                    audio.active = Some(source);
                 }
             }
         });
     }
 }
-thread_local! { static BROWSER_AUDIO: std::cell::RefCell<Option<web_sys::AudioContext>> = const { std::cell::RefCell::new(None) }; }
+struct BrowserAudio {
+    context: web_sys::AudioContext,
+    active: Option<web_sys::AudioBufferSourceNode>,
+}
+thread_local! { static BROWSER_AUDIO: std::cell::RefCell<Option<BrowserAudio>> = const { std::cell::RefCell::new(None) }; }
 fn receive(ui: Ui, mut alert: Alert, replayed: bool) {
     if let Target::Conversation { conversation_id } = alert.target
         && let Some(friend) = ui
@@ -440,7 +473,7 @@ pub(super) fn Host(ui: Ui) -> impl IntoView {
         });
     });
     view! {
-        <aside class="fixed bottom-6 right-6 z-50 w-80 max-w-[90vw] space-y-2" aria-live="polite"><For each=move ||ui.notifications.banners.get() key=|a|a.id.clone() children=move |alert| {
+        <aside class="fixed bottom-6 right-6 z-50 w-[380px] max-w-[90vw] space-y-2" aria-live="polite"><For each=move ||ui.notifications.banners.get() key=|a|a.id.clone() children=move |alert| {
             let saved=StoredValue::new(alert.clone()); view!{<crate::notification_banner::Banner alert=alert can_accept=client::desktop()||ui.audio_control.is_remote() action=Callback::new(move |action|interaction(ui,saved.get_value(),action))/>}
         }/></aside>
         <Editor ui=ui/>
@@ -556,7 +589,7 @@ pub(super) fn Panel(ui: Ui) -> impl IntoView {
         <div class="settings-card"><p>"Choose what reaches you, and how. Changes are saved to your account and apply to every connected device."</p><p class="text-sm text-white/60">"Right-click a channel or conversation to mute it or choose its own settings. Mentions only is available for server messages."</p><p role="status">{move ||if ui.notifications.connected.get(){"Notifications connected"}else{"Reconnecting notifications…"}}</p><p role="alert" class="text-red-200">{move ||ui.notifications.error.get()}</p></div>
         {Kind::ALL.into_iter().map(|kind| {
             let delivery=Signal::derive(move ||ui.notifications.preferences.get().defaults.iter().find(|r|r.kind==kind).map_or_else(||Delivery::default_for(kind),|r|r.delivery));
-            view!{<section class="settings-card"><h3 class="mb-3 font-semibold">{kind.label()}</h3><Controls delivery=delivery mentions=matches!(kind,Kind::GuildMessage) disabled=Signal::derive(move ||ui.notifications.saving.get()||!ui.notifications.connected.get()) change=Callback::new(move |delivery|request(ui,Request::SetDefault {revision:ui.notifications.preferences.get_untracked().revision,kind,delivery}))/><button class="mt-3 text-sm text-brand" on:click=move |_|sound(ui,kind,delivery.get_untracked().volume)>"Preview sound"</button></section>}
+            view!{<section class="settings-card"><h3 class="mb-3 font-semibold">{kind.label()}</h3><p class="mb-3 text-sm text-white/60">{thiscord_frontend::notification_sound::description(kind)}</p><Controls delivery=delivery mentions=matches!(kind,Kind::GuildMessage) disabled=Signal::derive(move ||ui.notifications.saving.get()||!ui.notifications.connected.get()) change=Callback::new(move |delivery|request(ui,Request::SetDefault {revision:ui.notifications.preferences.get_untracked().revision,kind,delivery}))/><button class="mt-3 text-sm text-brand" on:click=move |_|sound(ui,kind,delivery.get_untracked().volume)>"Preview sound"</button></section>}
         }).collect_view()}
         <section class="settings-card"><h3 class="font-semibold">"Custom subscriptions"</h3><For each=move ||ui.notifications.preferences.get().subscriptions key=|s|format!("{:?}",s.target) children=move |s| {
             let target=s.target; view!{<button class="mt-2 block text-sm text-brand" on:click=move |_|edit(ui,target,target_name(ui,target))>{target_name(ui,target)}</button>}

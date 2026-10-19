@@ -645,7 +645,7 @@ fn MessageRow(
                 "rounded-lg bg-brand/10 px-3 py-2"
             } else { "rounded-lg px-3 py-2" }>
                 <div class="flex flex-wrap items-center gap-3">
-                    <strong>{move || message.with(|m| m.display_name().to_owned())}</strong>
+                    <button class="font-semibold hover:underline" aria-haspopup="menu" data-context-user=move ||message.with(|m|m.author_id.map(|id|id.to_string())) data-context-name=move ||message.with(|m|m.display_name().to_owned())>{move || message.with(|m| m.display_name().to_owned())}</button>
                     <time class="text-xs text-white/40">{move || message.with(|m| m.created_at.format("%Y-%m-%d %H:%M").to_string())}</time>
                     <Show when=move || message.with(|m| m.edited_at.is_some() && !m.deleted)><span class="text-xs text-white/40">"edited"</span></Show>
                 </div>
