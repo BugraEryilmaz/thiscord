@@ -371,6 +371,7 @@ fn ScreenVideo(watch: thiscord_shared::screen::Watch) -> impl IntoView {
     let video = NodeRef::<leptos::html::Video>::new();
     let message = RwSignal::new("Connecting video...".to_owned());
     let diagnostics = RwSignal::new(String::new());
+    let copied = RwSignal::new(false);
     let (abort, registration) = futures_util::future::AbortHandle::new_pair();
     let registration = std::cell::RefCell::new(Some(registration));
     on_cleanup(move || {
@@ -401,7 +402,17 @@ fn ScreenVideo(watch: thiscord_shared::screen::Watch) -> impl IntoView {
     });
     view! {
         <div class="stream-player"><video node_ref=video autoplay muted playsinline aria-label="Live video"/>
-        <Show when=move ||!message.get().is_empty()><p class="stream-player-status" role="status">{move ||message.get()}</p></Show></div>
+        <Show when=move ||!message.get().is_empty()><p class="stream-player-status" role="status">{move ||message.get()}</p></Show>
+        <Show when=move ||!message.get().is_empty() && !diagnostics.get().is_empty()>
+            <button class="absolute bottom-2 right-2 rounded bg-black/70 px-3 py-2 text-xs text-white/80 hover:bg-black" on:click=move |event| {
+                event.stop_propagation();
+                let text = diagnostics.get_untracked();
+                leptos::task::spawn_local(async move {
+                    let result = wasm_bindgen_futures::JsFuture::from(window().navigator().clipboard().write_text(&text)).await;
+                    if copied.try_get_untracked().is_some() { copied.set(result.is_ok()); }
+                });
+            }>{move ||if copied.get(){"Copied"}else{"Copy video diagnostics"}}</button>
+        </Show></div>
 
     }
 }

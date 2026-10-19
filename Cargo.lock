@@ -7815,6 +7815,7 @@ version = "0.1.30"
 dependencies = [
  "async-trait",
  "base64 0.22.1",
+ "block2",
  "bytes",
  "console_error_panic_hook",
  "cpal",
@@ -7828,6 +7829,8 @@ dependencies = [
  "leptos",
  "minisign-verify",
  "ndarray",
+ "objc2",
+ "objc2-web-kit",
  "open",
  "openh264",
  "opus",

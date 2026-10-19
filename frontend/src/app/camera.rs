@@ -4,7 +4,7 @@ use crate::account_client::native;
 use leptos::prelude::*;
 use serde_json::json;
 use std::{
-    cell::RefCell,
+    cell::{Cell, RefCell},
     rc::Rc,
     sync::atomic::{AtomicU32, Ordering},
 };
@@ -38,9 +38,13 @@ struct Capture {
     stream: MediaStream,
     pc: RtcPeerConnection,
     session: u32,
+    stopped: Cell<bool>,
 }
 impl Capture {
     fn stop(&self) {
+        if self.stopped.replace(true) {
+            return;
+        }
         for track in self.stream.get_tracks().iter() {
             track.unchecked_into::<MediaStreamTrack>().stop();
         }
@@ -75,7 +79,12 @@ fn media_error(error: JsValue) -> String {
     }
     .into()
 }
-async fn capture(session: u32) -> Result<Capture, String> {
+async fn capture(session: u32, generation: &Cell<u32>) -> Result<Capture, String> {
+    native::<()>("camera_prepare", json!({"session":session})).await?;
+    if generation.get() != session {
+        let _ = native::<()>("camera_stop", json!({"session":session})).await;
+        return Err("Camera start cancelled".into());
+    }
     let devices = window().navigator().media_devices().map_err(media_error)?;
     let constraints = MediaStreamConstraints::new();
     constraints.set_audio(&JsValue::FALSE);
@@ -105,6 +114,7 @@ async fn capture(session: u32) -> Result<Capture, String> {
         stream,
         pc,
         session,
+        stopped: Cell::new(false),
     })
 }
 fn json_value(value: serde_json::Value) -> JsValue {
@@ -198,16 +208,24 @@ pub(super) fn CameraControls(ui: Ui) -> impl IntoView {
     let busy = RwSignal::new(false);
     let error = RwSignal::new(String::new());
     let generation = Rc::new(std::cell::Cell::new(0u32));
+    let owned_session = Rc::new(Cell::new(None));
     let current: Rc<RefCell<Option<Rc<Capture>>>> = Rc::new(RefCell::new(None));
     let stop = {
         let current = current.clone();
         let generation = generation.clone();
+        let owned_session = owned_session.clone();
         Rc::new(move || {
             generation.set(generation.get().wrapping_add(1));
             if let Some(c) = current.borrow_mut().take() {
                 c.stop();
             }
             local_stream(None);
+            // Also release a reservation while getUserMedia/permission is pending.
+            if let Some(session) = owned_session.take() {
+                leptos::task::spawn_local(async move {
+                    let _ = native::<()>("camera_stop", json!({"session":session})).await;
+                });
+            }
             if active.try_get_untracked().is_some() {
                 active.set(false);
                 busy.set(false);
@@ -232,6 +250,7 @@ pub(super) fn CameraControls(ui: Ui) -> impl IntoView {
             return;
         }
         let session = NEXT_SESSION.fetch_add(1, Ordering::Relaxed);
+        owned_session.set(Some(session));
         generation.set(session);
         busy.set(true);
         error.set(String::new());
@@ -239,7 +258,7 @@ pub(super) fn CameraControls(ui: Ui) -> impl IntoView {
         let current = current.clone();
         let stop = stop.clone();
         leptos::task::spawn_local(async move {
-            let result = capture(session).await;
+            let result = capture(session, &generation).await;
             if generation.get() != session {
                 drop(result);
                 return;
@@ -296,6 +315,13 @@ pub(super) fn CameraControls(ui: Ui) -> impl IntoView {
                             break;
                         }
                         let capture = current.borrow().clone();
+                        if !live || !allowed.alive {
+                            stop();
+                            error.set(
+                                "Camera stopped. Check the device and your call connection.".into(),
+                            );
+                            break;
+                        }
                         if let Some(capture) = capture {
                             if capture.pc.connection_state() == RtcPeerConnectionState::Connected {
                                 disconnected = 0;
@@ -316,7 +342,7 @@ pub(super) fn CameraControls(ui: Ui) -> impl IntoView {
                         if generation.get() != session {
                             break;
                         }
-                        if !live || !allowed.alive || disconnected >= 20 {
+                        if disconnected >= 20 {
                             stop();
                             error.set(
                                 "Camera stopped. Check the device and your call connection.".into(),
