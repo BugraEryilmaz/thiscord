@@ -78,6 +78,7 @@ pub struct AudioSettings {
     #[serde(skip_serializing_if = "is_false")]
     pub adaptive_fec: bool,
     /// Experimental Opus DRED encoding and bounded receive recovery; native only.
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
     pub deep_redundancy: bool,
     pub echo_cancellation: bool,
     /// Experimental residual estimator, independent of the noise suppressor.
@@ -213,6 +214,25 @@ pub struct AudioRecordingStatus {
 #[cfg(test)]
 mod control_tests {
     use super::*;
+
+    #[test]
+    fn deep_redundancy_false_preserves_legacy_settings_wire_shape() {
+        let old: AudioSettings = serde_json::from_str("{}").unwrap();
+        assert!(!old.deep_redundancy);
+        let value = serde_json::to_value(&old).unwrap();
+        assert!(value.get("deep_redundancy").is_none());
+        let enabled = AudioSettings {
+            deep_redundancy: true,
+            ..old
+        };
+        let value = serde_json::to_value(&enabled).unwrap();
+        assert_eq!(value["deep_redundancy"], true);
+        assert!(
+            serde_json::from_value::<AudioSettings>(value)
+                .unwrap()
+                .deep_redundancy
+        );
+    }
 
     #[test]
     fn packet_redundancy_is_opt_in_and_round_trips() {

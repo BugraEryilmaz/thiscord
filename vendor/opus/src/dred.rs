@@ -13,6 +13,30 @@ impl Encoder {
 }
 
 impl Decoder {
+    /// Reinitialize the entire owned decoder, including FARGAN state which
+    /// OPUS_RESET_STATE in libopus 1.6.1 does not clear. Preserves complexity;
+    /// other decoder controls return to creation defaults. No allocation.
+    pub fn reset_full_state(&mut self) -> Result<()> {
+        let rate = self.get_sample_rate()?;
+        let complexity = self.get_complexity()?;
+        // SAFETY: uniquely owned live allocation, same channel count and rate
+        // as its creation, so opus_decoder_get_size(channels) fits exactly.
+        // The pinned init clears that entire allocation and calls fargan_init.
+        let code = unsafe { ffi::opus_decoder_init(self.ptr, rate as i32, self.channels as i32) };
+        check(code, "opus_decoder_init")?;
+        self.set_complexity(complexity)
+    }
+
+    /// Current decoder complexity (including whether neural synthesis is enabled).
+    pub fn get_complexity(&mut self) -> Result<i32> {
+        let mut complexity = 0i32;
+        // SAFETY: live owned decoder, and a valid writable int for this CTL.
+        let code = unsafe {
+            ffi::opus_decoder_ctl(self.ptr, ffi::OPUS_GET_COMPLEXITY_REQUEST, &mut complexity)
+        };
+        check(code, "OPUS_GET_COMPLEXITY").map(|_| complexity)
+    }
+
     /// Decoder complexity; 5 enables the neural synthesis required by DRED.
     pub fn set_complexity(&mut self, complexity: i32) -> Result<()> {
         // SAFETY: self uniquely owns the live decoder; the CTL takes an int.

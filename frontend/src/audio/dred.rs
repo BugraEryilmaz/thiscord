@@ -8,9 +8,36 @@ pub const BITRATE: i32 = 40_000;
 pub const DURATION: i32 = 6; // 60 ms requested, in 10 ms units.
 
 impl super::Session {
+    pub(super) fn dred_voice_status(&self) -> String {
+        if !self.settings.deep_redundancy {
+            return "Voice audio active".into();
+        }
+        let eligible = self
+            .remotes
+            .iter()
+            .take(thiscord_shared::voice::ROOM_CAPACITY)
+            .flatten()
+            .filter(|remote| remote.jitter.deep_redundancy)
+            .count();
+        let legacy = self
+            .remotes
+            .iter()
+            .take(thiscord_shared::voice::ROOM_CAPACITY)
+            .flatten()
+            .filter(|remote| remote.source_epoch == 0)
+            .count();
+        if !self.transmit_control.receive_allowed() {
+            return "Voice audio: DRED configured; microphone reception paused for privacy exchange".into();
+        }
+        format!(
+            "Voice audio active · DRED configured, {eligible} eligible streams (80 ms minimum buffer), {legacy} legacy Opus fallbacks; recovery needs sender DRED"
+        )
+    }
+
     pub(super) fn set_deep_redundancy(&mut self, enabled: bool) -> Result<(), String> {
         if self.settings.deep_redundancy != enabled {
-            self.reset_gate(std::time::Instant::now());
+            let now = std::time::Instant::now();
+            self.reset_gate(now);
             self.encoder
                 .set_deep_redundancy(enabled)
                 .map_err(|e| e.to_string())?;
@@ -24,6 +51,7 @@ impl super::Session {
                     remote.set_deep_redundancy(
                         writer,
                         enabled && index < thiscord_shared::voice::ROOM_CAPACITY,
+                        now,
                     )?;
                 }
             }
@@ -87,7 +115,7 @@ pub fn decode(
         Ok(None) => false,
         _ => {
             stats.decode_errors += 1;
-            let _ = decoder.reset_state();
+            super::codec::reset(decoder, stats);
             pcm.fill(0.0);
             false
         }

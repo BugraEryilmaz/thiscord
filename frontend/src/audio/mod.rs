@@ -473,14 +473,21 @@ struct Remote {
     rate: playout_rate::Rate,
 }
 impl Remote {
-    fn set_deep_redundancy(&mut self, writer: &StreamWriter, enabled: bool) -> Result<(), String> {
+    fn set_deep_redundancy(
+        &mut self,
+        writer: &StreamWriter,
+        enabled: bool,
+        now: Instant,
+    ) -> Result<(), String> {
+        // Epoch-zero sources cannot fence redundant audio at remote boundaries.
+        let enabled = enabled && self.source_epoch != 0 && self.privacy_epoch != 0;
         if self.jitter.deep_redundancy != enabled {
-            self.clear(writer, Instant::now());
-            self.decoder
-                .set_complexity(if enabled { 5 } else { 0 })
-                .map_err(|e| e.to_string())?;
+            self.clear(writer, now);
             self.jitter.set_deep_redundancy(enabled);
         }
+        self.decoder
+            .set_complexity(if enabled { 5 } else { 0 })
+            .map_err(|e| e.to_string())?;
         Ok(())
     }
     fn push(
@@ -524,7 +531,9 @@ impl Remote {
         }
     }
     fn reset_decoder(&mut self, writer: &StreamWriter) {
-        let _ = self.decoder.reset_state();
+        if !codec::reset(&mut self.decoder, &mut self.decode_stats) {
+            self.deafened = true;
+        }
         self.activity = Default::default();
         self.rate.reset();
         writer.discard();
@@ -538,6 +547,9 @@ impl Remote {
         }
         if self.jitter.prepare(now) {
             self.reset_decoder(writer);
+            if self.deafened {
+                return;
+            }
         }
         let metrics = self.jitter.metrics();
         writer
@@ -558,7 +570,11 @@ impl Remote {
                 break;
             };
             if scheduled.reset {
-                let _ = self.decoder.reset_state();
+                if !codec::reset(&mut self.decoder, &mut self.decode_stats) {
+                    self.deafened = true;
+                    writer.discard();
+                    return;
+                }
                 self.rate.reset();
             }
             let mut pcm = [0.0_f32; FRAME];
@@ -579,6 +595,11 @@ impl Remote {
                 self.activity.observe(&pcm, now);
             }
             drop(timer);
+            if self.decode_stats.reset_failed {
+                self.deafened = true;
+                writer.discard();
+                return;
+            }
             self.jitter
                 .quality
                 .add(Count::DecodedSamples, samples as u64);
@@ -1325,15 +1346,14 @@ impl Session {
             echo: self.processing.echo_diagnostics(),
             transmitting: self.devices.control.transmitting.load(Ordering::Relaxed),
             message: if let Some(message) = self.recovery.message() {
-                message
+                message.into()
             } else if self.outgoing.is_some() {
-                "Voice audio active"
+                self.dred_voice_status()
             } else if self.microphone {
-                "Microphone test: local Opus loopback (use headphones)"
+                "Microphone test: local Opus loopback (use headphones)".into()
             } else {
-                "Output test: two independent streams"
-            }
-            .into(),
+                "Output test: two independent streams".into()
+            },
             streams: if self.outgoing.is_some() {
                 self.remotes
                     .iter()

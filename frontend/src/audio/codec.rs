@@ -20,6 +20,8 @@ pub(super) fn microphone_encoder() -> Result<opus::Encoder, opus::Error> {
 /// These counters intentionally never claim a verified recovery count.
 #[derive(Default, serde::Serialize)]
 pub(super) struct DecodeStats {
+    #[serde(skip)]
+    pub reset_failed: bool,
     pub normal_frames: u64,
     pub fec_attempts: u64,
     pub fec_output_frames: u64,
@@ -28,6 +30,20 @@ pub(super) struct DecodeStats {
     pub silence_frames: u64,
     pub dred_attempts: u64,
     pub dred_output_frames: u64,
+}
+
+/// Failures poison this stream until a successful reset. No old neural state
+/// can feed a later PLC call after a failed boundary/error reinitialization.
+pub(super) fn reset(decoder: &mut opus::Decoder, stats: &mut DecodeStats) -> bool {
+    let result = decoder.get_complexity().and_then(|complexity| {
+        if complexity >= 5 {
+            decoder.reset_full_state()
+        } else {
+            decoder.reset_state()
+        }
+    });
+    stats.reset_failed = result.is_err();
+    !stats.reset_failed
 }
 
 /// Returns true only for a successfully decoded normal packet (activity input).
@@ -39,10 +55,18 @@ pub(super) fn decode(
     pcm: &mut [f32; FRAME],
     stats: &mut DecodeStats,
 ) -> bool {
+    if stats.reset_failed {
+        pcm.fill(0.0);
+        return false;
+    }
     let (packet, fec) = match decision {
         Playout::Dred(packet, offset) => {
             if super::dred::decode(decoder, packet, *offset, pcm, stats) {
                 return false; // Synthesized recovery never refreshes activity.
+            }
+            if stats.reset_failed {
+                pcm.fill(0.0);
+                return false;
             }
             // Older/no-DRED peers: ordinary adjacent FEC or PLC, safely.
             if *offset == FRAME as u32 {
@@ -78,7 +102,11 @@ pub(super) fn decode(
                 return !fec;
             }
             // A failed decode may have touched state. Do not reuse partial output.
-            let _ = decoder.reset_state();
+            if !reset(decoder, stats) {
+                stats.decode_errors += 1;
+                pcm.fill(0.0);
+                return false;
+            }
         }
         stats.decode_errors += 1;
     }
@@ -91,7 +119,7 @@ pub(super) fn decode(
     } else {
         stats.decode_errors += 1;
         stats.silence_frames += 1;
-        let _ = decoder.reset_state();
+        reset(decoder, stats);
         pcm.fill(0.0);
     }
     false

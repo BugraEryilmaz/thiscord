@@ -230,13 +230,19 @@ fn encoder_and_neural_decoder_resets_remove_all_previous_speech() {
         &mut output,
         &mut stats
     ));
-    dec.reset_state().unwrap();
+    assert!(codec::reset(&mut dec, &mut stats));
     let mut fresh = decoder(true);
     let mut clean = [0.0; FRAME];
+    dec.decode_float(&[], &mut output, false).unwrap();
+    fresh.decode_float(&[], &mut clean, false).unwrap();
+    assert!(
+        output == clean,
+        "PLC immediately after reset must match fresh state"
+    );
     for p in &packets(false)[..5] {
         dec.decode_float(p, &mut output, false).unwrap();
         fresh.decode_float(p, &mut clean, false).unwrap();
-        assert_eq!(output, clean);
+        assert!(output == clean, "reset state must match fresh decoder");
     }
     let mut encoder = transmit::Encoder::new(true).unwrap();
     encoder.set_deep_redundancy(true).unwrap();
@@ -257,6 +263,8 @@ fn encoder_and_neural_decoder_resets_remove_all_previous_speech() {
 
 fn remote(at: Instant) -> crate::audio::Remote {
     crate::audio::Remote {
+        source_epoch: 1,
+        privacy_epoch: 1,
         since: at,
         deafened: false,
         decode_stats: Default::default(),
@@ -281,7 +289,7 @@ fn production_playout_obeys_deadline_and_recovers_three_packet_burst() {
         let (mut writers, mut mixer) = mixer::mixer(controls);
         let writer = &mut writers[0];
         writer.control.active.store(true, Ordering::Release);
-        remote.set_deep_redundancy(writer, true).unwrap();
+        remote.set_deep_redundancy(writer, true, at).unwrap();
         let mut first_decode = None;
         let mut first_recovery = None;
         let mut recovered_slots = Vec::new();
@@ -366,7 +374,7 @@ fn deafen_settings_and_source_recreation_discard_queued_dred() {
     let writer = &mut writers[0];
     writer.control.active.store(true, Ordering::Release);
     let mut speaker = remote(at);
-    speaker.set_deep_redundancy(writer, true).unwrap();
+    speaker.set_deep_redundancy(writer, true, at).unwrap();
     assert_eq!(speaker.jitter.metrics().target_ms, 80.0);
     for n in [20, 23, 24] {
         speaker.push(n as u16, (n * FRAME) as u32, encoded[n].clone(), at, at);
@@ -385,7 +393,9 @@ fn deafen_settings_and_source_recreation_discard_queued_dred() {
         at,
         at + Duration::from_millis(90)
     ));
-    speaker.set_deep_redundancy(writer, false).unwrap();
+    speaker
+        .set_deep_redundancy(writer, false, at + Duration::from_millis(91))
+        .unwrap();
     assert_eq!(speaker.jitter.metrics().target_ms, 40.0);
     // Replacement is a new decoder and receipt fence; the RED dependency adds
     // the roster epoch that invokes this path for the same account as well.
