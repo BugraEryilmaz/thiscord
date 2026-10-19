@@ -9,6 +9,11 @@ Camera choice currently follows the system default; an in-app device selector is
 not implemented.
 
 Cameras and screen shares appear together in a grid, including local previews.
+Only active media gets a tile; voice-only participants remain in the sidebar.
+The grid fills the available call area and adapts its columns to the tile count
+and window width. Clicking your connected voice channel opens its room view
+without reconnecting. Private-call grids use the space above the message composer,
+with existing messages kept in a smaller scrollable area.
 Click a tile for fullscreen; Escape restores the grid. Right-click to hide an
 item or change the participant's voice/shared-screen audio levels. Hiding a
 remote tile unsubscribes its media; hiding your own tile keeps publishing. Use

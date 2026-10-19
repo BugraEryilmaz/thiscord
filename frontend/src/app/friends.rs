@@ -519,14 +519,14 @@ fn Conversation(ui: Ui, id: ConversationId) -> impl IntoView {
         <For each=move ||{ui.friends.snapshot.get().calls.into_iter().filter(|c|c.conversation_id==id && ui.voice.get().connected && ui.voice.get().channel_id==Some(c.voice_channel())).collect::<Vec<_>>()} key=|c|c.id children=move |call|view!{
             <div class="private-call-media"><super::screen::ScreenViewer ui=ui guild=call.voice_scope() channel=call.voice_channel()/></div>
         }/>
-        <div node_ref=list class="min-h-0 flex-1 overflow-y-auto px-6 py-4" on:scroll=move |_|if let Some(node)=list.get(){bottom.set(node.scroll_height()-node.scroll_top()-node.client_height()<80);}>
+        <div node_ref=list class="private-messages min-h-0 flex-1 overflow-y-auto px-6 py-4" on:scroll=move |_|if let Some(node)=list.get(){bottom.set(node.scroll_height()-node.scroll_top()-node.client_height()<80);}>
             <Show when=move ||older.get().is_some()><button class="mb-4 text-sm text-brand disabled:opacity-50" disabled=move ||loading.get() on:click=move |_| {
                 let before=older.get_untracked();if loading.get_untracked(){return;}loading.set(true);
 
                 leptos::task::spawn_local(async move {let result=request(ui,&Request::History {conversation_id:id,before,limit:Default::default()}).await;if loading.is_disposed(){return;}loading.set(false);match result {Ok(Response::History {history})=>{past.set(true);older.set(history.older);messages.set(history.messages);request_animation_frame(move ||if let Some(n)=list.get_untracked(){n.set_scroll_top(0);});},Err(e)=>error.set(e),_=>{}}});
             }>{move ||if loading.get(){"Loading…"}else{"Older messages"}}</button></Show>
             <Show when=move ||past.get()><button class="mb-4 ml-4 text-sm text-brand" on:click=move |_|{bottom.set(true);past.set(false);}>"Jump to latest"</button></Show>
-            <Show when=move ||messages.get().is_empty()><div class="py-12 text-center"><h3 class="text-xl font-semibold">"Start a conversation"</h3><p class="mt-2 text-sm text-white/45">"Only you and your friend can access this conversation."</p></div></Show>
+            <Show when=move ||messages.get().is_empty()><div class="private-empty py-12 text-center"><h3 class="text-xl font-semibold">"Start a conversation"</h3><p class="mt-2 text-sm text-white/45">"Only you and your friend can access this conversation."</p></div></Show>
             <ol class="space-y-5" aria-label="Private messages"><For each=move ||messages.get() key=|m|m.id children=move |m| {
                 let own=ui.account.get_untracked().is_some_and(|a|a.id==m.author_id);
                 view!{<li><div class="flex items-baseline gap-3"><strong class="text-sm">{if own {"You".into()}else{friend.get_untracked().map(|f|f.person.display_name).unwrap_or_else(||"Friend".into())}}</strong><time class="text-xs text-white/35" datetime=m.created_at.to_rfc3339()>{m.created_at.format("%b %d, %H:%M UTC").to_string()}</time></div><p class="mt-1 whitespace-pre-wrap break-words text-white/85">{m.content}</p></li>}

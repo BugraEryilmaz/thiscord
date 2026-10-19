@@ -34,6 +34,7 @@ during calls with the channel/server name, camera, screen sharing and disconnect
 Sidebar controls show immediate hover/focus hints
 outside the scroll area. Visible voice channels show participants before joining;
 clicking a voice channel joins directly while keeping the current text chat open.
+Clicking that channel again opens its voice room without reconnecting.
 Hover **Voice connected** for brief latency, health and drop diagnostics; click
 the channel name in the ribbon to open call controls. Server/channel creation,
 server joining and screen-picker dialogs close when clicking their backdrop.

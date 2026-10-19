@@ -19,6 +19,11 @@ pub(super) fn join(
     guild: thiscord_shared::permissions::Guild,
     channel: thiscord_shared::permissions::Channel,
 ) {
+    if ui.voice.get_untracked().channel_id == Some(channel.id) {
+        ui.selected_channel.set(Some(channel));
+        ui.page.set("servers");
+        return;
+    }
     super::friends::end_call(ui);
     join_location(
         ui,

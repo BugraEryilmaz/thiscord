@@ -223,11 +223,15 @@ pub(super) fn ScreenViewer(ui: Ui, guild: GuildId, channel: ChannelId) -> impl I
                 if m.sharing_screen {
                     tiles.push((m.clone(), MediaKind::ScreenVideo, m.screen_epoch));
                 }
-                if !m.camera_active && !m.sharing_screen {
-                    tiles.push((m, MediaKind::Microphone, 0));
-                }
                 tiles
             })
+            .collect::<Vec<_>>()
+    });
+    let visible = Memo::new(move |_| {
+        tiles
+            .get()
+            .into_iter()
+            .filter(|(m, kind, epoch)| !hidden.get().contains(&(m.account_id, *kind, *epoch)))
             .collect::<Vec<_>>()
     });
     let escape = window_event_listener(leptos::ev::keydown, move |e| {
@@ -266,9 +270,14 @@ pub(super) fn ScreenViewer(ui: Ui, guild: GuildId, channel: ChannelId) -> impl I
     });
     view! {<div class="channel-streams">
         <Show when=move ||!hidden.get().is_empty()><button class="stream-choice" on:click=move |_|hidden.set(vec![])>"Show hidden items"</button></Show>
-        <Show when=move ||tiles.get().is_empty()><p class="voice-channel-empty">"Join this call to see cameras and screen shares."</p></Show>
-        <div class="media-grid">
-        <For each=move ||{tiles.get().into_iter().filter(|(m,k,e)|!hidden.get().contains(&(m.account_id,*k,*e))).collect::<Vec<_>>()} key=|(m,k,e)|(m.account_id,m.slot,*k,*e) children=move |(member,kind,epoch)| {
+        <Show when=move ||visible.get().is_empty()><p class="voice-channel-empty">{move || {
+            let voice = ui.voice.get();
+            if !voice.connected || voice.channel_id != Some(channel) { "Join this call to see cameras and screen shares." }
+            else if !tiles.get().is_empty() { "All media is hidden. Choose Show hidden items to restore it." }
+            else { "No cameras or screen shares are active." }
+        }}</p></Show>
+        <div class="media-grid" style:--media-columns=move ||match visible.get().len() {0|1=>"1",2..=4=>"2",5..=9=>"3",_=>"4"}>
+        <For each=move ||visible.get() key=|(m,k,e)|(m.account_id,m.slot,*k,*e) children=move |(member,kind,epoch)| {
             let owner=member.account_id;
             let key=(owner,kind,epoch);
             let own=ui.account.get_untracked().is_some_and(|a|a.id==owner);
@@ -280,13 +289,12 @@ pub(super) fn ScreenViewer(ui: Ui, guild: GuildId, channel: ChannelId) -> impl I
             };
             view!{<figure node_ref=figure class="stream-view media-tile" class:expanded=move ||expanded.get()==Some(key)
                 on:contextmenu=move |e|{e.prevent_default();e.stop_propagation();ui.context_menu.set(None);menu.set(Some(key));}>
-                <figcaption class="stream-toolbar"><button class="stream-title" on:click=move |_|full()>{member.display_name().to_owned()}<span class="stream-live-badge">{match kind {MediaKind::Camera=>"CAMERA",MediaKind::ScreenVideo=>"SCREEN",_=>"VOICE"}}</span></button>
+                <figcaption class="stream-toolbar"><button class="stream-title" on:click=move |_|full()>{member.display_name().to_owned()}<span class="stream-live-badge">{if kind==MediaKind::Camera {"CAMERA"} else {"SCREEN"}}</span></button>
                     <button class="icon-button" aria-label="Toggle fullscreen" on:click=move |_|full()><Icon kind=Glyph::Expand/></button>
                 </figcaption>
                 <div class="media-tile-content" role="button" tabindex="0" aria-label="View fullscreen" on:click=move |_|full() on:keydown=move |e|{if e.key()=="Enter" || e.key()==" "{e.prevent_default();full();}}>
                     <Show when=move ||!ui.audio.get().deafened fallback=||view!{<div class="stream-placeholder">"Undeafen to view media"</div>}>
-                        {if kind==MediaKind::Microphone {view!{<div class="stream-placeholder"><Icon kind=Glyph::Person/>"Camera off"</div>}.into_any()}
-                        else if own && kind==MediaKind::Camera {view!{<super::camera::LocalCamera/>}.into_any()}
+                        {if own && kind==MediaKind::Camera {view!{<super::camera::LocalCamera/>}.into_any()}
 
                         else {view!{<ScreenVideo watch=watch/>}.into_any()}}
                     </Show>
