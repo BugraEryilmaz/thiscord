@@ -272,6 +272,12 @@ mod control_tests {
         let old: AudioSettings = serde_json::from_str("{}").unwrap();
         assert!(!old.muted && !old.deafened);
         assert!(!old.adaptive_fec);
+        assert!(
+            serde_json::to_value(&old)
+                .unwrap()
+                .get("adaptive_fec")
+                .is_none()
+        );
         let enabled = AudioSettings {
             adaptive_fec: true,
             ..old

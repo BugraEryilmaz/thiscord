@@ -50,6 +50,27 @@ fn disabled_toggle_staleness_and_source_replacement() {
 }
 
 #[test]
+fn intentional_privacy_pause_has_no_loss_and_preserves_recent_path_estimate() {
+    let start = Instant::now();
+    let (mut c, last) = warmed(start);
+    let previous = c.hint;
+    // Several seconds of an acknowledged privacy boundary/DTX do not imply
+    // missing RTP. Fresh reports with unchanged sequence have no loss sample.
+    for second in 20..23 {
+        let paused = sample(start, second, last.sequence, last.lost);
+        assert_eq!(c.update(true, 5, Some(paused), paused.at), previous);
+    }
+    let resumed = sample(start, 23, last.sequence + 50, last.lost);
+    assert_eq!(c.update(true, 5, Some(resumed), resumed.at), previous - 1);
+    // A real stable source replacement, even on the same peer, must rebaseline.
+    let replacement = Sample {
+        generation: 1,
+        ..resumed
+    };
+    assert_eq!(c.update(true, 5, Some(replacement), replacement.at), 5);
+}
+
+#[test]
 fn small_samples_dtx_counter_resets_reordering_and_wrap_are_bounded() {
     let start = Instant::now();
     for sequence in [65_500_u32, u32::MAX - 20] {
