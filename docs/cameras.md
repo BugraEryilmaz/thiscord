@@ -64,7 +64,9 @@ viewers. Hiding it also stops local frame assembly and keyframe requests.
 
 The receiver accepts baseline H.264 picture-order modes 0, 1 and 2, including
 equivalent constrained-baseline profile identifiers from hardware encoders. It
-still enforces the decoder's dimension and reference-frame limits. A connected
+still enforces coded dimension limits and a reference-picture budget equivalent
+to four 4K frames. Smaller camera frames can use up to 16 references (including
+the 5–9 reported by the Mac encoder), while 4K remains limited to four. A connected
 player awaiting its first decoded frame shows "Waiting for video" and offers
 "Copy video diagnostics"; rejected parameter sets appear in those counters.
 Rejections identify the specific unsupported profile, invalid SPS field or decoder
