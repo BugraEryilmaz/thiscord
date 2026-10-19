@@ -336,6 +336,14 @@ fn StreamWatchers(
             .cloned()
             .collect::<Vec<_>>()
     });
+    let viewer_names = Memo::new(move |_| {
+        viewers
+            .get()
+            .iter()
+            .map(|p| p.display_name())
+            .collect::<Vec<_>>()
+            .join(", ")
+    });
     view! {
         <Show when=move ||!viewers.get().is_empty()>
             <div class="stream-watchers" role="group" aria-label="Watching this stream">
@@ -344,7 +352,7 @@ fn StreamWatchers(
                     let person=Signal::derive(move ||ui.voice.get().participants.into_iter().find(|p|p.account_id==id).unwrap_or_else(||initial.clone()));
                     view! {<span class="stream-watcher" tabindex="0" role="img"
                         aria-label=move ||format!("Watching: {}",person.get().display_name())
-                        data-tip=move ||person.get().display_name().to_owned()>
+                        data-tip=move ||viewer_names.get()>
                         <crate::avatar::Avatar class="size-6 text-[10px]" name=Signal::derive(move ||person.get().display_name().to_owned()) avatar_id=Signal::derive(move ||person.get().avatar_id)/>
                     </span>}
                 }/>

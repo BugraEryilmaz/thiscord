@@ -21,8 +21,9 @@ Show hidden items to restore it. Clicking a camera/screen participant in a guild
 sidebar opens that room's grid. Private-call grids appear in their conversation.
 
 Small overlapping avatars on each video show its current remote viewers. Hover
-or keyboard-focus an avatar to see the name. These overlays use no extra layout
-space and work in fullscreen. Self-preview does not count as a viewer. The backend
+or keyboard-focus any avatar to see all viewers' names for that stream. These
+overlays use no extra layout space and work in fullscreen. Self-preview does not
+count as a viewer. The backend
 derives camera and screen audiences separately from authorized, live subscriptions;
 hiding, deafening, disconnecting, expiry or permission loss removes the viewer.
 Presence updates arrive with the call roster, normally within one to two seconds;
