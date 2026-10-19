@@ -126,6 +126,9 @@ jobs:
           version: 0.21.14
       - name: Build production web assets
         working-directory: frontend
+        env:
+          # Work around multithreaded Linux wasm-opt crashes; retain full -O.
+          BINARYEN_CORES: "1"
         run: trunk build --release --locked
       - uses: actions/upload-artifact@v4
         with:
@@ -134,6 +137,8 @@ jobs:
           if-no-files-found: error
       - name: Build browser admin bundle
         working-directory: frontend
+        env:
+          BINARYEN_CORES: "1"
         run: trunk build --release --locked --public-url /admin/ --dist dist-admin
       - uses: actions/upload-artifact@v4
         with:

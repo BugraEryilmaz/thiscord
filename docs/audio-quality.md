@@ -5,6 +5,13 @@ They never contain account IDs, names, payloads, SDP, addresses or model paths.
 The connection view and advanced details work with diagnostic logging disabled.
 The existing opt-in logger is the only diagnostic file writer.
 
+Adaptive sender diagnostics expose enabled state, baseline and last-applied
+Opus loss hint, usable loss-window age, and freshness. They contain no source
+identity or report bodies. These describe microphone-to-SFU feedback separately
+from the existing listener receive counters. Absent/undersampled/stale reports
+use baseline (normally 5%). Suspended capture may still show a previous applied
+CTL; the next encode applies fallback. See [adaptive FEC](audio.md#adaptive-microphone-fec).
+
 ## Definitions (established before instrumentation)
 
 Application counters are unsigned, saturating worker aggregates; the WebRTC loss estimate is signed. Totals reset on a new

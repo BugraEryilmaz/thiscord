@@ -1,4 +1,5 @@
 mod activity;
+pub mod adaptive_fec;
 mod codec;
 pub mod connection;
 mod cues;
@@ -1055,6 +1056,14 @@ impl Session {
         }
         self.encoder_generation = generation;
         self.encoder_active = active;
+        self.encoder
+            .adapt(
+                self.settings.adaptive_fec,
+                5, // Integration: use 20 while deep_redundancy is enabled.
+                self.connection.as_ref().and_then(|c| c.uplink_sample(0)),
+                Instant::now(),
+            )
+            .map_err(|e| failure::Failure::opus("adaptive_fec", e))?;
         let timer = self.processing.metrics.timed(Stage::Encode);
         let (n, omitted, marker) = self
             .encoder
@@ -1200,6 +1209,7 @@ impl Session {
         // These legacy cumulative counters are maintained separately; new
         // callback counters are drained exactly once on the worker.
         AudioQuality {
+            adaptive_fec: Some(self.encoder.adaptive.diagnostics(Instant::now())),
             metrics: metrics.snapshot(),
             streams: self
                 .remotes

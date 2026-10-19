@@ -11,6 +11,7 @@ pub struct Connection {
     diagnostic_id: u64,
     request_id: Arc<OnceLock<RequestId>>,
     pub metrics: Arc<super::quality::Metrics>,
+    uplink: Arc<super::adaptive_fec::Feedback>,
 }
 impl Default for Connection {
     fn default() -> Self {
@@ -19,10 +20,33 @@ impl Default for Connection {
             diagnostic_id: NEXT_ID.fetch_add(1, Ordering::Relaxed),
             request_id: Arc::default(),
             metrics: Arc::default(),
+            uplink: Arc::default(),
         }
     }
 }
 impl Connection {
+    pub(super) fn observe_uplink(
+        &self,
+        report: &rtc::rtcp::reception_report::ReceptionReport,
+        now: std::time::Instant,
+    ) {
+        if self.active() {
+            self.uplink.observe(self.diagnostic_id, report, now);
+        }
+    }
+    /// Source generation is stable across PTT/privacy revisions; use a new value
+    /// only for an authoritative microphone source replacement. Peer replacement
+    /// already creates a fresh Connection. Current calls have one source (0).
+    pub fn uplink_sent(&self, generation: u64, sequence: u16) {
+        if self.active() {
+            self.uplink.sent(generation, sequence);
+        }
+    }
+    pub(crate) fn uplink_sample(&self, generation: u64) -> Option<super::adaptive_fec::Sample> {
+        self.active()
+            .then(|| self.uplink.sample(generation))
+            .flatten()
+    }
     pub fn request_id(&self) -> Option<RequestId> {
         self.request_id.get().copied()
     }

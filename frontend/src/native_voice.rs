@@ -662,6 +662,8 @@ async fn run(
     let force_keyframe = Arc::new(AtomicBool::new(false));
     let registry =
         register_default_interceptors(Registry::new(), &mut media).map_err(|e| e.to_string())?;
+    let registry =
+        thiscord_frontend::audio::adaptive_fec::register(registry, attempt.connection.clone());
     let configuration = RTCConfigurationBuilder::new()
         .with_ice_servers(
             ice_servers
@@ -899,6 +901,7 @@ async fn run(
                         use thiscord_frontend::audio::quality::Count;
                         frame.finish(if result.is_ok() { Count::OutgoingSentPackets } else { Count::OutgoingFailedPackets });
                         result.map_err(|_|Failure::temporary("Voice media connection failed").with_reason("media_send_failed"))?;
+                        attempt.connection.uplink_sent(0, sequence);
                         rtp_clock.next(frame.media_position);
                         accepted_packets += 1;
                         accepted_bytes += frame.payload.len() as u64;

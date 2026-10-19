@@ -15,6 +15,7 @@ pub struct Stats {
 }
 
 pub struct Encoder {
+    pub(crate) adaptive: super::adaptive_fec::Controller,
     pub codec: opus::Encoder,
     pub stats: Stats,
     in_dtx: bool,
@@ -24,6 +25,7 @@ pub struct Encoder {
 impl Encoder {
     pub fn new(dtx: bool) -> Result<Self, opus::Error> {
         Ok(Self {
+            adaptive: Default::default(),
             codec: {
                 let mut codec = super::codec::microphone_encoder()?;
                 codec.set_dtx(dtx)?;
@@ -39,6 +41,21 @@ impl Encoder {
         self.in_dtx = false;
         self.no_data_sent = false;
         self.codec.reset_state()
+    }
+    /// The sole live writer of the Opus loss-hint CTL. Integration passes floor
+    /// 20 when DRED is enabled, otherwise 5; codec bitrate belongs to that policy.
+    pub(crate) fn adapt(
+        &mut self,
+        enabled: bool,
+        floor: u8,
+        sample: Option<super::adaptive_fec::Sample>,
+        now: Instant,
+    ) -> Result<(), opus::Error> {
+        let hint = self.adaptive.update(enabled, floor, sample, now);
+        if self.codec.get_packet_loss_perc()? != i32::from(hint) {
+            self.codec.set_packet_loss_perc(i32::from(hint))?;
+        }
+        Ok(())
     }
     pub fn encode(
         &mut self,
