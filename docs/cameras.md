@@ -12,13 +12,22 @@ Cameras and screen shares appear together in a grid, including local previews.
 Only active media gets a tile; voice-only participants remain in the sidebar.
 The grid fills the available call area and adapts its columns to the tile count
 and window width. Clicking your connected voice channel opens its room view
-without reconnecting. Private-call grids use the space above the message composer,
-with existing messages kept in a smaller scrollable area.
+without reconnecting. Private calls keep a compact video area above the chat,
+leaving message history and the composer visible.
 Click a tile for fullscreen; Escape restores the grid. Right-click to hide an
 item or change the participant's voice/shared-screen audio levels. Hiding a
 remote tile unsubscribes its media; hiding your own tile keeps publishing. Use
 Show hidden items to restore it. Clicking a camera/screen participant in a guild
 sidebar opens that room's grid. Private-call grids appear in their conversation.
+
+Small overlapping avatars on each video show its current remote viewers. Hover
+or keyboard-focus an avatar to see the name. These overlays use no extra layout
+space and work in fullscreen. Self-preview does not count as a viewer. The backend
+derives camera and screen audiences separately from authorized, live subscriptions;
+hiding, deafening, disconnecting, expiry or permission loss removes the viewer.
+Presence updates arrive with the call roster, normally within one to two seconds;
+abandoned subscriptions expire after three seconds. Viewer lists are only sent
+inside the connected call, not in the outside-call sidebar roster.
 
 ## Transport and lifecycle
 

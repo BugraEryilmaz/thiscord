@@ -429,6 +429,16 @@ fn camera_contract_is_independent_and_legacy_rosters_default_off() {
     let old:Participant=from_value(json!({"account_id":ID,"username":"a","slot":0,"muted":false,"deafened":false,"can_speak":true})).unwrap();
     assert!(!old.camera_active);
     assert_eq!(old.camera_epoch, 0);
+    assert!(old.screen_viewers.is_empty() && old.camera_viewers.is_empty());
+    let mut audience = old.clone();
+    audience.camera_viewers.push(ID.parse().unwrap());
+    let value = to_value(&audience).unwrap();
+    assert_eq!(value["camera_viewers"], json!([ID]));
+    assert!(value.get("screen_viewers").is_none());
+    assert_eq!(
+        from_value::<Participant>(value).unwrap().camera_viewers,
+        audience.camera_viewers
+    );
     let camera = Subscription {
         kind: MediaKind::Camera,
         slot: 0,

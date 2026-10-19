@@ -132,7 +132,7 @@ impl VoiceAccess {
             member.info.display_name = info.display_name;
             member.info.avatar_id = info.avatar_id;
             self.generation.store(epoch, Ordering::Release);
-            Ok(members.values().map(|m| m.info.clone()).collect())
+            Ok(viewing::participants(&members))
         });
         if result.is_err() {
             self.active.store(false, Ordering::Release);
@@ -1405,6 +1405,8 @@ mod send_tests {
                         screen_epoch: 7,
                         camera_active: false,
                         camera_epoch: 0,
+                        screen_viewers: vec![],
+                        camera_viewers: vec![],
                     },
                     source_id: uuid::Uuid::new_v4(),
                     screen_started: Instant::now(),

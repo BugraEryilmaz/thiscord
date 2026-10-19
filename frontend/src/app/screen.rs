@@ -299,6 +299,7 @@ pub(super) fn ScreenViewer(ui: Ui, guild: GuildId, channel: ChannelId) -> impl I
                         else {view!{<ScreenVideo watch=watch/>}.into_any()}}
                     </Show>
                 </div>
+                <StreamWatchers ui=ui owner=owner kind=kind epoch=epoch/>
                 <Show when=move ||menu.get()==Some(key)>
                     <div class="media-item-menu" role="menu" aria-label="Media options" on:pointerdown=move |e|e.stop_propagation() on:click=move |e|e.stop_propagation()>
                         <button role="menuitem" class="stream-choice" on:click=move |_|{hidden.update(|h|h.push(key));menu.set(None);if expanded.get_untracked()==Some(key){expanded.set(None);document().exit_fullscreen();}}>"Hide this item"</button>
@@ -309,6 +310,47 @@ pub(super) fn ScreenViewer(ui: Ui, guild: GuildId, channel: ChannelId) -> impl I
         }/>
         </div>
     </div>}
+}
+
+#[component]
+fn StreamWatchers(
+    ui: Ui,
+    owner: thiscord_shared::AccountId,
+    kind: thiscord_shared::voice::MediaKind,
+    epoch: u32,
+) -> impl IntoView {
+    let viewers = Memo::new(move |_| {
+        let voice = ui.voice.get();
+        if !voice.connected {
+            return vec![];
+        }
+        let Some(source) = voice.participants.iter().find(|p| {
+            p.account_id == owner && p.video_active(kind) && p.video_epoch(kind) == epoch
+        }) else {
+            return vec![];
+        };
+        voice
+            .participants
+            .iter()
+            .filter(|p| source.video_viewers(kind).contains(&p.account_id))
+            .cloned()
+            .collect::<Vec<_>>()
+    });
+    view! {
+        <Show when=move ||!viewers.get().is_empty()>
+            <div class="stream-watchers" role="group" aria-label="Watching this stream">
+                <For each=move ||viewers.get() key=|p|p.account_id children=move |initial| {
+                    let id=initial.account_id;
+                    let person=Signal::derive(move ||ui.voice.get().participants.into_iter().find(|p|p.account_id==id).unwrap_or_else(||initial.clone()));
+                    view! {<span class="stream-watcher" tabindex="0" role="img"
+                        aria-label=move ||format!("Watching: {}",person.get().display_name())
+                        data-tip=move ||person.get().display_name().to_owned()>
+                        <crate::avatar::Avatar class="size-6 text-[10px]" name=Signal::derive(move ||person.get().display_name().to_owned()) avatar_id=Signal::derive(move ||person.get().avatar_id)/>
+                    </span>}
+                }/>
+            </div>
+        </Show>
+    }
 }
 
 #[component]

@@ -138,6 +138,30 @@ pub(super) async fn target(room: &Room, slot: usize, kind: MediaKind) -> Option<
     Some((source.info.video_epoch(kind), bitrate))
 }
 
+/// Derive viewer presence from the same live, authorized leases used for media delivery.
+/// Never cache it in Member.info or include it in the outside-call sidebar roster.
+pub(super) fn participants(members: &HashMap<usize, Member>) -> Vec<Participant> {
+    let now = Instant::now();
+    members
+        .values()
+        .map(|source| {
+            let viewers = |kind| {
+                let mut ids: Vec<_> = members
+                    .values()
+                    .filter(|receiver| receives(receiver, source, kind, now))
+                    .map(|receiver| receiver.info.account_id)
+                    .collect();
+                ids.sort();
+                ids
+            };
+            let mut info = source.info.clone();
+            info.screen_viewers = viewers(MediaKind::ScreenVideo);
+            info.camera_viewers = viewers(MediaKind::Camera);
+            info
+        })
+        .collect()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -173,6 +197,8 @@ mod tests {
                         screen_epoch: 9,
                         camera_active: false,
                         camera_epoch: 0,
+                        screen_viewers: vec![],
+                        camera_viewers: vec![],
                     },
                     source_id: uuid::Uuid::new_v4(),
                     screen_started: Instant::now(),
@@ -204,6 +230,96 @@ mod tests {
     async fn allowed(room: &Room, receiver: usize, kind: MediaKind, queued: Instant) -> bool {
         let members = room.members.read().await;
         receives(&members[&receiver], &members[&0], kind, queued)
+    }
+    async fn audience(room: &Room) -> Participant {
+        participants(&*room.members.read().await)
+            .into_iter()
+            .find(|p| p.slot == 0)
+            .unwrap()
+    }
+    #[tokio::test]
+    async fn viewer_presence_follows_kind_epoch_hide_expiry_deafen_and_access() {
+        let room = room().await;
+        let screen = subscription(&room).await;
+        {
+            let mut members = room.members.write().await;
+            let source = &mut members.get_mut(&0).unwrap().info;
+            source.camera_active = true;
+            source.camera_epoch = 23;
+        }
+        let camera = Subscription {
+            kind: MediaKind::Camera,
+            epoch: 23,
+            ..screen
+        };
+        let live = AtomicBool::new(true);
+        let viewer = room.members.read().await[&1].info.account_id;
+        assert!(update(&room, 1, vec![screen, camera], &live).await);
+        let info = audience(&room).await;
+        assert_eq!(info.screen_viewers, [viewer]);
+        assert_eq!(info.camera_viewers, [viewer]);
+        assert!(
+            room.members.read().await[&0].info.screen_viewers.is_empty(),
+            "sidebar roster must not inherit viewer presence"
+        );
+        assert!(update(&room, 1, vec![camera], &live).await);
+        assert!(audience(&room).await.screen_viewers.is_empty());
+        assert_eq!(audience(&room).await.camera_viewers, [viewer]);
+        room.members
+            .write()
+            .await
+            .get_mut(&0)
+            .unwrap()
+            .info
+            .camera_epoch += 1;
+        assert!(audience(&room).await.camera_viewers.is_empty());
+        room.members
+            .write()
+            .await
+            .get_mut(&0)
+            .unwrap()
+            .info
+            .camera_epoch = 23;
+        room.members.write().await.get_mut(&1).unwrap().views[MediaKind::Camera.view_index(0)]
+            .as_mut()
+            .unwrap()
+            .renewed -= Duration::from_secs(VIEW_LEASE_SECS);
+        assert!(audience(&room).await.camera_viewers.is_empty());
+        assert!(update(&room, 1, vec![camera], &live).await);
+        let revoked = access::pause(access::Scope::Account(viewer));
+        assert!(audience(&room).await.camera_viewers.is_empty());
+        revoked.finish(false);
+        assert!(audience(&room).await.camera_viewers.is_empty());
+        {
+            let members = room.members.read().await;
+            let receiver = &members[&1];
+            receiver
+                .generation
+                .store(receiver.access.snapshot().unwrap(), Ordering::Release);
+        }
+        assert_eq!(audience(&room).await.camera_viewers, [viewer]);
+        let revoked = access::pause(access::Scope::Account(screen.owner));
+        assert!(audience(&room).await.camera_viewers.is_empty());
+        revoked.finish(false);
+        {
+            let members = room.members.read().await;
+            let source = &members[&0];
+            source
+                .generation
+                .store(source.access.snapshot().unwrap(), Ordering::Release);
+        }
+        update_voice_state(&room, 1, false, true, &live).await;
+        assert!(audience(&room).await.camera_viewers.is_empty());
+        update_voice_state(&room, 1, false, false, &live).await;
+        assert!(update(&room, 1, vec![camera], &live).await);
+        room.members
+            .write()
+            .await
+            .get_mut(&1)
+            .unwrap()
+            .active
+            .store(false, Ordering::Release);
+        assert!(audience(&room).await.camera_viewers.is_empty());
     }
     #[tokio::test]
     async fn viewer_admission_and_bitrate_validate_each_endpoint_epoch() {

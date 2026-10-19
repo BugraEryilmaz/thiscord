@@ -1827,6 +1827,47 @@ async fn camera_roster(peer: &mut Peer) -> voice::Participant {
         }
     }
 }
+async fn expect_viewers(
+    source: &mut Peer,
+    viewer: &mut Peer,
+    publisher: &voice::Participant,
+    watcher: &voice::Participant,
+    screen: bool,
+    camera: bool,
+) {
+    tokio::time::timeout(Duration::from_secs(8), async {
+        loop {
+            send(
+                &mut viewer.socket,
+                ClientEvent::ScreenViews {
+                    views: viewer.views.clone(),
+                },
+            )
+            .await;
+            if let ServerEvent::Participants { members } = event(&mut source.socket).await
+                && let Some(info) = members
+                    .iter()
+                    .find(|m| m.account_id == publisher.account_id)
+                && info.screen_viewers
+                    == if screen {
+                        vec![watcher.account_id]
+                    } else {
+                        vec![]
+                    }
+                && info.camera_viewers
+                    == if camera {
+                        vec![watcher.account_id]
+                    } else {
+                        vec![]
+                    }
+            {
+                break;
+            }
+        }
+    })
+    .await
+    .expect("Call participant snapshots must report current per-stream viewers");
+}
 async fn camera_grid(source: &mut Peer, viewer: &mut Peer) {
     use voice::MediaKind;
     for peer in [&mut *source, &mut *viewer] {
@@ -1865,11 +1906,13 @@ async fn camera_grid(source: &mut Peer, viewer: &mut Peer) {
         );
         screen_forwarded(viewer, source, kind).await;
     }
+    expect_viewers(source, viewer, &a, &b, true, true).await;
     // Hiding a screen removes its audio, independently of the same owner's camera.
     viewer.views.retain(|v| v.kind == MediaKind::Camera);
     screen_forwarded(source, viewer, 2).await;
     screen_blocked(source, viewer).await;
     forwarded(source, viewer).await;
+    expect_viewers(source, viewer, &a, &b, false, true).await;
     // A restarted camera cannot inherit an old subscription.
     send(&mut source.socket, ClientEvent::Camera { active: false }).await;
     send(&mut source.socket, ClientEvent::Camera { active: true }).await;
@@ -1894,6 +1937,7 @@ async fn camera_grid(source: &mut Peer, viewer: &mut Peer) {
                 .is_err()
         );
     }
+    expect_viewers(source, viewer, &restarted, &b, false, false).await;
     viewer.views[0].epoch = restarted.camera_epoch;
     screen_forwarded(source, viewer, 2).await;
     for peer in [source, viewer] {

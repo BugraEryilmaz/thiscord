@@ -100,6 +100,12 @@ pub struct Participant {
     pub camera_active: bool,
     #[serde(default)]
     pub camera_epoch: u32,
+    /// Remote viewers with a current authorized subscription; local preview is excluded.
+    /// Populated only in the connected call's participant snapshots.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub screen_viewers: Vec<AccountId>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub camera_viewers: Vec<AccountId>,
 }
 /// A visible voice channel's live membership, without joining its media transport.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -120,6 +126,13 @@ impl Participant {
             self.camera_active
         } else {
             self.sharing_screen
+        }
+    }
+    pub fn video_viewers(&self, kind: MediaKind) -> &[AccountId] {
+        match kind {
+            MediaKind::Camera => &self.camera_viewers,
+            MediaKind::ScreenVideo => &self.screen_viewers,
+            _ => &[],
         }
     }
     /// Profile label, falling back to the username for older servers.

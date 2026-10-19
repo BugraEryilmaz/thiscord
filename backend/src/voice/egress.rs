@@ -554,6 +554,8 @@ mod tests {
                         screen_epoch: 7,
                         camera_active: false,
                         camera_epoch: 0,
+                        screen_viewers: vec![],
+                        camera_viewers: vec![],
                     },
                     source_id: endpoint.id,
                     screen_started: Instant::now(),

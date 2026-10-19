@@ -75,6 +75,8 @@ mod tests {
                 screen_epoch: 1,
                 camera_active: false,
                 camera_epoch: 0,
+                screen_viewers: vec![],
+                camera_viewers: vec![],
             },
             source_id: uuid::Uuid::new_v4(),
             screen_started: Instant::now(),

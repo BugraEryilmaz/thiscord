@@ -335,8 +335,14 @@ button.stream-live-badge:hover { background: #ef466540; }
 .media-tile:fullscreen video, .media-tile.expanded video { height: 100%; max-height: calc(100dvh - 52px); }
 .media-item-menu { position: absolute; right: 8px; top: 44px; z-index: 70; width: min(300px, calc(100% - 16px)); padding: 12px; border: 1px solid #ffffff20; border-radius: 12px; background: #20232e; box-shadow: 0 12px 32px #0008; }
 .private-call-media { display: flex; flex: 0 0 auto; min-height: 0; overflow: auto; border-bottom: 1px solid #ffffff15; }
-.private-call-media:has(.media-tile) { flex: 1; min-height: 200px; }
+.private-call-media:has(.media-tile) { flex: 0 1 clamp(200px, 36dvh, 380px); min-height: 160px; max-height: 42%; }
+.private-call-media .channel-streams { padding: 12px; gap: 8px; }
+.private-call-media .media-grid { grid-auto-rows: minmax(120px, 1fr); gap: 10px; }
+.private-call-media .media-grid:has(> :nth-child(3):last-child) > :last-child { grid-column: auto; }
+@container (min-width: 850px) { .private-call-media .media-grid:has(> :nth-child(3):last-child) { grid-template-columns: repeat(3, minmax(0, 1fr)); } }
 .private-call-media .voice-channel-empty { min-height: 100px; }
-.private-call-media:has(.media-tile) ~ .private-messages { flex: 0 1 auto; max-height: 25%; }
-.private-call-media:has(.media-tile) ~ .private-messages:has(.private-empty) { padding-block: 0; }
-.private-call-media:has(.media-tile) ~ .private-messages .private-empty { display: none; }
+
+.stream-watchers { position: absolute; right: 10px; bottom: 10px; z-index: 2; display: flex; flex-direction: row; align-items: center; padding: 3px; border-radius: 999px; background: #08090c99; }
+.stream-watcher { display: inline-flex; position: relative; border: 2px solid #202127; border-radius: 50%; background: #30313c; outline-offset: 2px; }
+.stream-watcher + .stream-watcher { margin-left: -6px; }
+.stream-watcher:hover, .stream-watcher:focus-visible { z-index: 1; outline: 2px solid #a4adff; }

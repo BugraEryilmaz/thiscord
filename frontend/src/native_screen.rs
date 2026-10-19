@@ -156,7 +156,10 @@ impl ScreenState {
             };
             if !viewer.connection.active()
                 || viewer.touched.elapsed() >= VIEWER_LEASE
-                || viewer.preview.is_none()
+                || viewer
+                    .preview
+                    .as_ref()
+                    .is_none_or(|p| !p.connected.load(Ordering::Acquire))
                 || owner != Some((viewer.watch.owner, viewer.watch.epoch))
             {
                 continue;
