@@ -154,7 +154,7 @@ pub(super) fn participants(members: &HashMap<usize, Member>) -> Vec<Participant>
                 ids.sort();
                 ids
             };
-            let mut info = source.info.clone();
+            let mut info = red::participant(source);
             info.screen_viewers = viewers(MediaKind::ScreenVideo);
             info.camera_viewers = viewers(MediaKind::Camera);
             info
@@ -195,6 +195,8 @@ mod tests {
                         sharing_screen: slot == 0,
                         sharing_audio: slot == 0,
                         screen_epoch: 9,
+                        microphone_epoch: 9,
+                        microphone_source_epoch: 9,
                         camera_active: false,
                         camera_epoch: 0,
                         screen_viewers: vec![],
@@ -202,6 +204,11 @@ mod tests {
                     },
                     source_id: uuid::Uuid::new_v4(),
                     screen_started: Instant::now(),
+                    microphone_started: Instant::now(),
+                    packet_redundancy: false,
+                    expected_sender_generation: None,
+                    restricted_sender_generation: None,
+                    red: red::Barrier::default(),
                     camera_started: Instant::now(),
                     outgoing: MediaKind::ALL.map(|kind| egress::channel(kind).0),
                     keyframes,

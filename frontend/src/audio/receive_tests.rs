@@ -3,6 +3,8 @@ use super::*;
 
 fn remote(at: Instant) -> Remote {
     Remote {
+        source_epoch: 0,
+        privacy_epoch: 0,
         decode_stats: Default::default(),
         since: at,
         deafened: false,

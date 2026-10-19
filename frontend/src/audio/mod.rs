@@ -26,6 +26,8 @@ pub mod processing;
 pub mod quality;
 #[cfg(test)]
 mod receive_tests;
+pub mod red;
+mod red_lifecycle;
 use quality::{Count, Stage};
 mod reconfigure;
 pub mod reconnect;
@@ -206,6 +208,9 @@ pub enum Command {
         microphone: bool,
     },
     Packet {
+        payload_type: u8,
+        source_epoch: Option<u32>,
+        privacy_epoch: Option<u32>,
         marker: bool,
         connection: connection::Connection,
         slot: usize,
@@ -217,6 +222,11 @@ pub enum Command {
     Roster {
         connection: connection::Connection,
         members: Vec<thiscord_shared::voice::Participant>,
+    },
+    ReceiveBoundary {
+        connection: connection::Connection,
+        generation: u64,
+        epoch: Option<u32>,
     },
     Start {
         settings: AudioSettings,
@@ -274,6 +284,13 @@ impl AudioEngine {
         diagnostics::event("requested_worker_snapshot", self.probe.snapshot());
     }
     pub fn notify(&self, command: Command) {
+        if matches!(
+            command,
+            Command::Roster { .. } | Command::ReceiveBoundary { .. }
+        ) {
+            let _ = self.notify_control(command);
+            return;
+        }
         self.urgent(&command);
         if matches!(command, Command::Packet { .. }) {
             if let Err(error) = self.media.try_send(command) {
@@ -290,6 +307,32 @@ impl AudioEngine {
         } else if self.sender.try_send((command, None)).is_err() {
             diagnostics::event("control_notification_dropped", self.probe.snapshot());
         }
+    }
+    /// Privacy-critical controls may not be silently dropped. The caller must
+    /// reconnect after an error; close this command's connection immediately.
+    pub fn notify_control(&self, command: Command) -> Result<(), String> {
+        if !matches!(
+            command,
+            Command::Roster { .. } | Command::ReceiveBoundary { .. }
+        ) {
+            return Err("Not a voice privacy control".into());
+        }
+        self.urgent(&command);
+        self.sender.try_send((command, None)).map_err(|error| {
+            let request = match error {
+                mpsc::TrySendError::Full(request) | mpsc::TrySendError::Disconnected(request) => {
+                    request
+                }
+            };
+            self.probe.outgoing.pause_receive();
+            self.probe.outgoing.enable_receive_protection();
+            match request.0 {
+                Command::Roster { connection, .. }
+                | Command::ReceiveBoundary { connection, .. } => connection.close(),
+                _ => unreachable!(),
+            }
+            "Voice privacy control could not be queued; reconnect voice".into()
+        })
     }
     pub fn new() -> Self {
         let (sender, receiver) = mpsc::sync_channel(32);
@@ -343,6 +386,14 @@ impl AudioEngine {
     fn urgent(&self, command: &Command) {
         match command {
             Command::VoiceStart { connection, .. } if !connection.active() => {}
+            Command::ReceiveBoundary {
+                connection,
+                epoch: None,
+                ..
+            } if connection.active() => {
+                self.probe.outgoing.pause_receive();
+                self.probe.outgoing.enable_receive_protection();
+            }
             Command::DebugStop => {
                 self.debug_stop.store(true, Ordering::Release);
             }
@@ -408,6 +459,8 @@ impl AudioEngine {
     }
 }
 struct Remote {
+    source_epoch: u32,
+    privacy_epoch: u32,
     since: Instant,
     deafened: bool,
     decode_stats: codec::DecodeStats,
@@ -689,6 +742,9 @@ impl Devices {
     }
     fn inherit(&self, old: &Self) {
         old.control.deafen.store(true, Ordering::Release);
+        if let Some(guard) = old.control.receive_guard.get() {
+            let _ = self.control.receive_guard.set(guard.clone());
+        }
         self.control.cues.store(
             old.control.cues.swap(0, Ordering::AcqRel),
             Ordering::Release,
@@ -738,6 +794,8 @@ struct Session {
     encoder_generation: u64,
     encoder_active: bool,
     remotes: Vec<Option<Remote>>,
+    receive_fences: [Option<red_lifecycle::ReceiveFence>; MAX_STREAMS],
+    receive_floor: u32,
     processed_level: f32,
     processing: processing::Processing,
 }
@@ -901,6 +959,8 @@ impl Session {
             encoder_generation: 0,
             encoder_active: false,
             remotes: (0..MAX_STREAMS).map(|_| None).collect(),
+            receive_fences: Default::default(),
+            receive_floor: 0,
             processed_level: 0.0,
             processing,
         })
@@ -1109,6 +1169,7 @@ impl Session {
                 false
             } else {
                 let mut frame = outgoing::EncodedFrame {
+                    packet_redundancy: self.settings.packet_redundancy,
                     accounted: false,
                     payload: bytes::Bytes::copy_from_slice(&packet[..n]),
                     media_position,
@@ -1451,6 +1512,7 @@ fn run(
                         | Command::CurrentSettings(_)
                         | Command::Packet { .. }
                         | Command::Roster { .. }
+                        | Command::ReceiveBoundary { .. }
                         | Command::Keepalive(_)
                 ) && session.as_ref().is_none_or(|s| s.connection.is_none())
                 {
@@ -1511,110 +1573,24 @@ fn run(
                             s.outgoing = Some(outgoing);
                             s.processing.metrics = connection.metrics.clone();
                             s.transmit_control = probe.outgoing.clone();
+                            let _ = s
+                                .devices
+                                .control
+                                .receive_guard
+                                .set(s.transmit_control.clone());
                             s.connection = Some(connection);
                             session = Some(s);
                             lease = Instant::now();
                         }
-                        Command::Packet {
-                            marker,
-                            connection,
-                            slot,
-                            sequence,
-                            timestamp,
-                            received_at,
-                            payload,
-                        } => {
-                            if let Some(s) = &mut session
-                                && s.connection
-                                    .as_ref()
-                                    .is_some_and(|c| c.accepts(&connection))
-                                && !s.devices.control.deafen.load(Ordering::Acquire)
-                                && let Some(Some(r)) = s.remotes.get_mut(slot)
-                                && !deafen.load(Ordering::Acquire)
-                                && !s.settings.deafened
-                                && r.push(sequence, timestamp, payload, received_at, Instant::now())
-                            {
-                                r.jitter.packet_flags(timestamp, marker, false);
-                            }
-                        }
-                        Command::Roster {
-                            connection,
-                            members,
-                        } => {
-                            if let Some(s) = &mut session
-                                && s.connection
-                                    .as_ref()
-                                    .is_some_and(|c| c.accepts(&connection))
-                            {
-                                for slot in 0..MAX_STREAMS {
-                                    let shared_audio =
-                                        slot >= thiscord_shared::voice::ROOM_CAPACITY;
-                                    let member = members.iter().find(|m| {
-                                        if shared_audio {
-                                            m.sharing_audio
-                                                && m.slot + thiscord_shared::voice::ROOM_CAPACITY
-                                                    == slot
-                                        } else {
-                                            m.slot == slot
-                                        }
-                                    });
-                                    if s.remotes[slot].as_ref().map(|r| r.id)
-                                        != member.map(|m| m.account_id)
-                                    {
-                                        s.devices.writers[slot]
-                                            .control
-                                            .active
-                                            .store(false, Ordering::Release);
-                                        s.devices.writers[slot]
-                                            .control
-                                            .generation
-                                            .fetch_add(1, Ordering::AcqRel);
-                                        s.devices.writers[slot].volume(
-                                            member
-                                                .and_then(|m| {
-                                                    s.volumes
-                                                        .as_ref()
-                                                        .map(|p| p.gain(m.account_id, shared_audio))
-                                                })
-                                                .unwrap_or(1.0),
-                                        )?;
-                                        s.devices.writers[slot]
-                                            .control
-                                            .pending_media
-                                            .store(false, Ordering::Relaxed);
-                                        s.devices.writers[slot].control.counts.clear();
-                                        s.remotes[slot] = member
-                                            .map(|m| {
-                                                Ok::<_, String>(Remote {
-                                                    since: Instant::now(),
-                                                    deafened: false,
-                                                    decode_stats: Default::default(),
-                                                    activity: Default::default(),
-                                                    id: m.account_id,
-                                                    label: if shared_audio {
-                                                        format!(
-                                                            "{} - shared audio",
-                                                            m.display_name().to_owned()
-                                                        )
-                                                    } else {
-                                                        m.display_name().to_owned()
-                                                    },
-                                                    jitter: Default::default(),
-                                                    rate: Default::default(),
-                                                    decoder: opus::Decoder::new(
-                                                        RATE,
-                                                        opus::Channels::Mono,
-                                                    )
-                                                    .map_err(|e| e.to_string())?,
-                                                })
-                                            })
-                                            .transpose()?;
-                                        s.devices.writers[slot]
-                                            .control
-                                            .active
-                                            .store(member.is_some(), Ordering::Release);
-                                    }
-                                }
+                        command @ (Command::Packet { .. }
+                        | Command::Roster { .. }
+                        | Command::ReceiveBoundary { .. }) => {
+                            if let Some(s) = &mut session {
+                                s.receive_command(
+                                    command,
+                                    deafen.load(Ordering::Acquire),
+                                    Instant::now(),
+                                )?;
                             }
                         }
                         Command::Stop => {
@@ -1925,6 +1901,7 @@ mod lifecycle_tests {
         };
         let connection = connection::Connection::default();
         let queued = outgoing::EncodedFrame {
+            packet_redundancy: false,
             accounted: false,
             marker: false,
             payload: bytes::Bytes::from_static(b"synthetic"),
@@ -1937,6 +1914,9 @@ mod lifecycle_tests {
         };
         for _ in 0..10 {
             engine.notify(Command::Packet {
+                payload_type: 111,
+                source_epoch: None,
+                privacy_epoch: None,
                 marker: false,
                 connection: Default::default(),
                 slot: 0,
@@ -2027,6 +2007,7 @@ mod lifecycle_tests {
         ] {
             let connection = connection::Connection::default();
             let frame = outgoing::EncodedFrame {
+                packet_redundancy: false,
                 accounted: false,
                 marker: false,
                 payload: bytes::Bytes::from_static(b"synthetic"),

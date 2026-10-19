@@ -4,6 +4,8 @@ use super::*;
 
 fn remote() -> Remote {
     Remote {
+        source_epoch: 0,
+        privacy_epoch: 0,
         since: Instant::now(),
         deafened: false,
         decode_stats: Default::default(),

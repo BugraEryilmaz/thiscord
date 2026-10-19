@@ -333,6 +333,7 @@ async fn join(config: Arc<Config>, index: usize, stats: Arc<Mutex<Stats>>) -> Re
         send(
             &mut socket,
             ClientEvent::Answer {
+                packet_redundancy: false,
                 remote_audio: false,
                 screen_feedback: false,
                 screen_subscriptions: false,

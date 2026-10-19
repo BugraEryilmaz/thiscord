@@ -59,10 +59,27 @@ impl Sender {
             || !delivery.source_active.load(Ordering::Acquire)
             || delivery.epoch != source.generation.load(Ordering::Acquire)
             || delivery.receiver_epoch != receiver.generation.load(Ordering::Acquire)
-            || (self.kind != MediaKind::Microphone
-                && delivery.packet.header.csrc.first().copied()
-                    != Some(source.info.video_epoch(self.kind)))
+            || delivery
+                .packet
+                .header
+                .csrc
+                .get(if self.kind == MediaKind::Microphone {
+                    1
+                } else {
+                    0
+                })
+                .copied()
+                != Some(if self.kind == MediaKind::Microphone {
+                    source.info.microphone_epoch
+                } else {
+                    source.info.video_epoch(self.kind)
+                })
+            || (self.kind == MediaKind::Microphone
+                && (delivery.queued_at < receiver.red.receiver_started
+                    || delivery.packet.header.csrc.first().copied()
+                        != Some(source.info.microphone_source_epoch)))
             || !viewing::receives(receiver, source, self.kind, delivery.queued_at)
+            || (self.kind == MediaKind::Microphone && !red::receives(source, receiver))
         {
             return Ok(());
         }
@@ -136,6 +153,7 @@ impl Writer {
         Fut: Future<Output = Result<(), ()>>,
     {
         let mut sources = [None; ROOM_CAPACITY];
+        let mut red_floors = [red::Floor::default(); ROOM_CAPACITY];
         let mut offsets = [(0_u16, 0_u32); ROOM_CAPACITY];
         let mut last = [(0_u16, 0_u32); ROOM_CAPACITY];
         let mut retry_after = [None; ROOM_CAPACITY];
@@ -155,8 +173,55 @@ impl Writer {
             }
             let (packet_kind, source_slot) = MediaKind::from_track(slot).expect("delivery track");
             debug_assert_eq!(kind, packet_kind);
-            let packet_epoch = packet.header.csrc.first().copied();
+            let source_epoch = packet.header.csrc.first().copied();
+            let packet_epoch = packet
+                .header
+                .csrc
+                .get(if kind == MediaKind::Microphone { 1 } else { 0 })
+                .copied();
             let screen_epoch = packet_epoch.unwrap_or(0);
+            let receiver_microphone_epoch = if kind == MediaKind::Microphone {
+                let members = self.room.members.read().await;
+                let Some(publisher) = members.get(&source_slot) else {
+                    continue;
+                };
+                let Some(receiver) = members.get(&self.receiver_slot) else {
+                    continue;
+                };
+                if publisher.source_id != source
+                    || packet_epoch != Some(publisher.info.microphone_epoch)
+                    || source_epoch != Some(publisher.info.microphone_source_epoch)
+                    || queued_at < receiver.red.receiver_started
+                    || !viewing::receives(receiver, publisher, kind, queued_at)
+                    || !red::receives(publisher, receiver)
+                    || !red_floors[source_slot].prepare(
+                        &mut packet,
+                        source,
+                        publisher.info.microphone_epoch,
+                        receiver.red.receiver_floor,
+                        receiver.packet_redundancy,
+                    )
+                {
+                    continue;
+                }
+                // A globally ordered effective privacy revision also fences
+                // ciphertext already sent before this listener's deafen boundary.
+                // Keep packet_epoch above as the ORIGINAL source revision for
+                // final source authorization; never compare this maximum to it.
+                if publisher.packet_redundancy {
+                    packet.header.csrc[1] = publisher
+                        .info
+                        .microphone_epoch
+                        .max(receiver.red.receiver_floor);
+                } else {
+                    // Old publishers do not acknowledge capture generations:
+                    // never advertise strict privacy/DRED support for them.
+                    packet.header.csrc.clear();
+                }
+                Some(receiver.red.receiver_floor)
+            } else {
+                None
+            };
             if sources[source_slot] != Some(source) {
                 sources[source_slot] = Some(source);
                 retry_after[source_slot] = None;
@@ -212,10 +277,22 @@ impl Writer {
                             && source_active.load(Ordering::Acquire)
                             && members.get(&source_slot).is_some_and(|m| {
                                 m.source_id == source
-                                    && (kind == MediaKind::Microphone
-                                        || packet_epoch == Some(m.info.video_epoch(kind)))
+                                    && (kind != MediaKind::Microphone
+                                        || source_epoch == Some(m.info.microphone_source_epoch))
+                                    && packet_epoch
+                                        == Some(if kind == MediaKind::Microphone {
+                                            m.info.microphone_epoch
+                                        } else {
+                                            m.info.video_epoch(kind)
+                                        })
                                     && members.get(&self.receiver_slot).is_some_and(|receiver| {
-                                        viewing::receives(receiver, m, kind, queued_at)
+                                        (kind != MediaKind::Microphone
+                                            || (receiver_microphone_epoch
+                                                == Some(receiver.red.receiver_floor)
+                                                && queued_at >= receiver.red.receiver_started))
+                                            && viewing::receives(receiver, m, kind, queued_at)
+                                            && (kind != MediaKind::Microphone
+                                                || red::receives(m, receiver))
                                     })
                             })
                     },
@@ -365,8 +442,12 @@ mod tests {
                 );
                 subscribe(&writer.room).await;
                 let mut fresh = delivery(kind, &source, 100);
-                fresh.packet.header.csrc =
-                    vec![writer.room.members.read().await[&1].info.screen_epoch];
+                let info = writer.room.members.read().await[&1].info.clone();
+                fresh.packet.header.csrc = if kind == MediaKind::Microphone {
+                    vec![info.microphone_source_epoch, info.microphone_epoch]
+                } else {
+                    vec![info.screen_epoch]
+                };
                 forward(&writer.room, &tx, fresh).await;
                 drop(
                     rx.try_recv()
@@ -469,12 +550,22 @@ mod tests {
                 }
                 subscribe(&room).await;
                 let mut fresh = delivery(kind, &source, 100);
-                let epoch = room.members.read().await[&1].info.screen_epoch;
-                fresh.packet.header.csrc = vec![epoch];
+                let info = room.members.read().await[&1].info.clone();
+                let epoch = if kind == MediaKind::Microphone {
+                    info.microphone_epoch
+                } else {
+                    info.screen_epoch
+                };
+                let csrc = if kind == MediaKind::Microphone {
+                    vec![info.microphone_source_epoch, epoch]
+                } else {
+                    vec![epoch]
+                };
+                fresh.packet.header.csrc = csrc.clone();
                 forward(&room, &tx, fresh).await;
                 drop(tx);
                 run.await;
-                assert_eq!(received.try_recv().unwrap().header.csrc, vec![epoch]);
+                assert_eq!(received.try_recv().unwrap().header.csrc, csrc);
                 assert!(received.try_recv().is_err());
                 assert!(active.load(Ordering::Acquire));
             }
@@ -511,7 +602,12 @@ mod tests {
             packet: rtp::Packet {
                 header: rtp::header::Header {
                     version: 2,
-                    csrc: vec![7],
+                    csrc: if kind == MediaKind::Microphone {
+                        vec![7, 7]
+                    } else {
+                        vec![7]
+                    },
+                    payload_type: kind.payload_type(),
                     sequence_number: 100,
                     timestamp: 1234,
                     ..Default::default()
@@ -552,6 +648,8 @@ mod tests {
                         sharing_screen: true,
                         sharing_audio: true,
                         screen_epoch: 7,
+                        microphone_epoch: 7,
+                        microphone_source_epoch: 7,
                         camera_active: false,
                         camera_epoch: 0,
                         screen_viewers: vec![],
@@ -559,6 +657,13 @@ mod tests {
                     },
                     source_id: endpoint.id,
                     screen_started: Instant::now(),
+                    microphone_started: Instant::now() - Duration::from_secs(1),
+                    packet_redundancy: slot == 1,
+                    expected_sender_generation: None,
+                    restricted_sender_generation: None,
+                    red: red::Barrier::with_receiver_started(
+                        Instant::now() - Duration::from_secs(1),
+                    ),
                     camera_started: Instant::now(),
                     outgoing: MediaKind::ALL.map(|kind| channel(kind).0),
                     keyframes: keyframes.clone(),
@@ -611,6 +716,897 @@ mod tests {
             active: writer.active.clone(),
             generation: writer.generation.clone(),
             metrics: writer.metrics.clone(),
+        }
+    }
+
+    #[tokio::test]
+    async fn microphone_red_fallback_and_remap_preserve_offsets() {
+        use thiscord_shared::rtp_red as wire;
+        for negotiated in [false, true] {
+            let (writer, source, _) = fixture().await;
+            writer
+                .room
+                .members
+                .write()
+                .await
+                .get_mut(&0)
+                .unwrap()
+                .packet_redundancy = negotiated;
+            let (tx, rx) = channel(MediaKind::Microphone);
+            let (sent, mut received) = mpsc::channel(4);
+            let task = tokio::spawn(writer.run(MediaKind::Microphone, rx, move |_, p| {
+                let sent = sent.clone();
+                async move { sent.send(p).await.map_err(|_| ()) }
+            }));
+            for n in 0..3u32 {
+                let mut d = delivery(MediaKind::Microphone, &source, 0);
+                d.packet.header.payload_type = wire::PAYLOAD_TYPE;
+                d.packet.header.timestamp = (u32::MAX - 959).wrapping_add(n * 960);
+                d.packet.header.sequence_number = 65535u16.wrapping_add(n as u16);
+                d.packet.payload = wire::encode(
+                    &[0x78, 3, 4],
+                    &[
+                        wire::Block {
+                            offset: 1920,
+                            payload: &[0x78, 1, 2],
+                        },
+                        wire::Block {
+                            offset: 960,
+                            payload: &[0x78, 2, 3],
+                        },
+                    ],
+                )
+                .unwrap()
+                .into();
+                tx.try_send(d).unwrap();
+            }
+            drop(tx);
+            task.await.unwrap();
+            for n in 0..3u32 {
+                let p = received.recv().await.unwrap();
+                assert_eq!(p.header.sequence_number, 1 + n as u16);
+                assert_eq!(p.header.timestamp, 960 + n * 960);
+                assert_eq!(p.header.csrc, vec![7, 7]);
+                if negotiated {
+                    assert_eq!(p.header.payload_type, wire::PAYLOAD_TYPE);
+                    let red = wire::parse(&p.payload).unwrap();
+                    assert_eq!(red.history.len(), n as usize);
+                    for h in red.history {
+                        assert!(p.header.timestamp - u32::from(h.offset) >= 960);
+                    }
+                } else {
+                    assert_eq!(p.header.payload_type, wire::OPUS_PAYLOAD_TYPE);
+                    assert_eq!(&p.payload[..], &[0x78, 3, 4]);
+                }
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn microphone_queue_cannot_survive_mute_or_deafen_cycle() {
+        for affected_slot in [0, 1] {
+            let (writer, source, _) = fixture().await;
+            let stale = delivery(MediaKind::Microphone, &source, 3);
+            update_voice_state(
+                &writer.room,
+                affected_slot,
+                affected_slot == 1,
+                affected_slot == 0,
+                &writer.active,
+            )
+            .await;
+            update_voice_state(&writer.room, affected_slot, false, false, &writer.active).await;
+            let (tx, rx) = channel(MediaKind::Microphone);
+            tx.try_send(stale).unwrap();
+            let mut fresh = delivery(MediaKind::Microphone, &source, 3);
+            let info = writer.room.members.read().await[&1].info.clone();
+            fresh.packet.header.csrc = vec![info.microphone_source_epoch, info.microphone_epoch];
+            tx.try_send(fresh).unwrap();
+            drop(tx);
+            let (sent, mut received) = mpsc::channel(4);
+            writer
+                .run(MediaKind::Microphone, rx, move |_, p| {
+                    let sent = sent.clone();
+                    async move { sent.send(p).await.map_err(|_| ()) }
+                })
+                .await;
+            assert!(
+                received.recv().await.is_some(),
+                "fresh microphone packet rejected"
+            );
+            assert!(
+                received.recv().await.is_none(),
+                "pre-boundary packet survived"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn microphone_boundary_is_monotonic_idempotent_and_generation_tagged() {
+        let (writer, source, _) = fixture().await;
+        writer.room.microphone_epoch.store(7, Ordering::Relaxed);
+        let mut room_changes = writer.room.changed.subscribe();
+        let mut members = writer.room.members.write().await;
+        let member = members.get_mut(&1).unwrap();
+        let stable = member.info.microphone_source_epoch;
+        member.packet_redundancy = false;
+        assert!(
+            !red::accept_boundary(&writer.room, member, 1),
+            "legacy signaling cannot enable generations"
+        );
+        member.packet_redundancy = true;
+        assert!(
+            !red::accept_boundary(&writer.room, member, 0),
+            "zero is reserved"
+        );
+        let mut p = delivery(MediaKind::Microphone, &source, 3).packet;
+        p.header.csrc = vec![0, 1];
+        assert!(
+            !red::sender_generation(&p, member),
+            "unacknowledged generation accepted"
+        );
+        assert!(red::accept_boundary(&writer.room, member, 1));
+        assert!(
+            room_changes.has_changed().unwrap(),
+            "privacy update must wake roster listeners"
+        );
+        room_changes.borrow_and_update();
+        assert_eq!(member.info.microphone_epoch, 8);
+        assert_eq!(member.info.microphone_source_epoch, stable);
+        assert!(red::sender_generation(&p, member));
+        assert!(red::accept_boundary(&writer.room, member, 1));
+        assert!(
+            !room_changes.has_changed().unwrap(),
+            "duplicate boundary caused a roster flood"
+        );
+        assert_eq!(member.info.microphone_epoch, 8, "duplicate rotated epoch");
+        assert!(red::accept_boundary(&writer.room, member, 2));
+        assert!(!red::sender_generation(&p, member));
+        assert!(!red::accept_boundary(&writer.room, member, 1));
+        p.header.csrc = vec![0, 2];
+        assert!(red::sender_generation(&p, member));
+        p.header.csrc.push(3);
+        assert!(
+            !red::sender_generation(&p, member),
+            "noncanonical tag accepted"
+        );
+        writer
+            .room
+            .microphone_epoch
+            .store(u32::MAX, Ordering::Relaxed);
+        assert!(
+            !red::accept_boundary(&writer.room, member, 3),
+            "epoch overflow must fail closed"
+        );
+        assert!(!member.active.load(Ordering::Acquire));
+        assert_eq!(member.info.microphone_epoch, 9);
+        assert_eq!(red::next_epoch(&writer.room), None);
+    }
+
+    #[tokio::test]
+    async fn modern_unmute_requires_a_new_acknowledged_sender_generation() {
+        let (writer, _, _) = fixture().await;
+        {
+            let mut members = writer.room.members.write().await;
+            let member = members.get_mut(&1).unwrap();
+            member.packet_redundancy = true;
+            assert!(red::accept_boundary(&writer.room, member, 1));
+        }
+        assert!(update_voice_state(&writer.room, 1, true, false, &writer.active).await);
+        assert!(!update_voice_state(&writer.room, 1, false, false, &writer.active).await);
+        assert!(writer.room.members.read().await[&1].info.muted);
+        {
+            let mut members = writer.room.members.write().await;
+            assert!(red::accept_boundary(
+                &writer.room,
+                members.get_mut(&1).unwrap(),
+                2
+            ));
+        }
+        assert!(update_voice_state(&writer.room, 1, false, false, &writer.active).await);
+        assert!(!writer.room.members.read().await[&1].info.muted);
+        assert!(
+            update_voice_state(&writer.room, 1, false, false, &writer.active).await,
+            "unchanged state is idempotent"
+        );
+    }
+
+    #[tokio::test]
+    async fn microphone_effective_revision_includes_listener_privacy_boundary() {
+        let (writer, source, _) = fixture().await;
+        let mut changes = writer.room.changed.subscribe();
+        writer.room.microphone_epoch.store(10, Ordering::Relaxed);
+        let stale = delivery(MediaKind::Microphone, &source, 3);
+        {
+            let mut members = writer.room.members.write().await;
+            assert!(red::accept_boundary(
+                &writer.room,
+                members.get_mut(&1).unwrap(),
+                1
+            ));
+            let receiver = members.get_mut(&0).unwrap();
+            receiver.packet_redundancy = true;
+            assert!(red::accept_boundary(&writer.room, receiver, 1));
+            red::challenge_publishers(&mut members, 0);
+            assert!(
+                !red::receives(&members[&1], &members[&0]),
+                "old source was relabeled across receiver barrier"
+            );
+            let publisher = members.get_mut(&1).unwrap();
+            let challenge = publisher.red.request(Instant::now()).unwrap();
+            assert!(red::accept_refresh(&writer.room, publisher, 2, challenge));
+        }
+        assert!(changes.has_changed().unwrap());
+        changes.borrow_and_update();
+        let mut fresh = delivery(MediaKind::Microphone, &source, 3);
+        fresh.packet.header.csrc[1] = writer.room.members.read().await[&1].info.microphone_epoch;
+        let (tx, rx) = channel(MediaKind::Microphone);
+        tx.try_send(stale).unwrap();
+        tx.try_send(fresh).unwrap();
+        drop(tx);
+        let (sent, mut received) = mpsc::channel(4);
+        writer
+            .run(MediaKind::Microphone, rx, move |_, packet| {
+                let sent = sent.clone();
+                async move { sent.send(packet).await.map_err(|_| ()) }
+            })
+            .await;
+        let packet = received
+            .recv()
+            .await
+            .expect("new listener revision must permit fresh media");
+        assert_eq!(packet.header.csrc, vec![7, 13]);
+        assert!(
+            received.recv().await.is_none(),
+            "queued pre-listener-boundary packet survived"
+        );
+    }
+
+    #[tokio::test]
+    async fn legacy_publishers_never_advertise_strict_privacy_or_dred_support() {
+        let (writer, source, _) = fixture().await;
+        {
+            let mut members = writer.room.members.write().await;
+            members.get_mut(&0).unwrap().packet_redundancy = true;
+            let publisher = members.get_mut(&1).unwrap();
+            publisher.packet_redundancy = false;
+            let visible = red::participant(publisher);
+            assert_eq!(visible.microphone_epoch, 0);
+            assert_eq!(visible.microphone_source_epoch, 0);
+            assert_ne!(
+                publisher.info.microphone_epoch, 0,
+                "internal fence was erased"
+            );
+        }
+        let (tx, rx) = channel(MediaKind::Microphone);
+        tx.try_send(delivery(MediaKind::Microphone, &source, 3))
+            .unwrap();
+        drop(tx);
+        let (sent, mut received) = mpsc::channel(1);
+        writer
+            .run(MediaKind::Microphone, rx, move |_, packet| {
+                let sent = sent.clone();
+                async move { sent.send(packet).await.map_err(|_| ()) }
+            })
+            .await;
+        let packet = received.recv().await.unwrap();
+        assert!(packet.header.csrc.is_empty());
+        assert_eq!(
+            packet.header.payload_type,
+            thiscord_shared::rtp_red::OPUS_PAYLOAD_TYPE
+        );
+    }
+
+    #[tokio::test]
+    async fn challenge_proof_blocks_delayed_ingress_and_preissued_generic_generations() {
+        let (writer, source, _) = fixture().await;
+        writer.room.microphone_epoch.store(7, Ordering::Relaxed);
+        let mut members = writer.room.members.write().await;
+        members.get_mut(&0).unwrap().packet_redundancy = true;
+        assert!(red::accept_boundary(
+            &writer.room,
+            members.get_mut(&1).unwrap(),
+            1
+        ));
+        assert!(red::accept_boundary(
+            &writer.room,
+            members.get_mut(&0).unwrap(),
+            1
+        ));
+        red::challenge_publishers(&mut members, 0);
+        let challenge = members
+            .get_mut(&1)
+            .unwrap()
+            .red
+            .request(Instant::now())
+            .unwrap();
+        let mut held = delivery(MediaKind::Microphone, &source, 3).packet;
+        held.header.csrc = vec![0, 1];
+        assert!(red::sender_generation(&held, &members[&1]));
+        assert!(
+            !red::receives(&members[&1], &members[&0]),
+            "delayed old ingress was relabeled"
+        );
+        // This generic request may have been sent before the listener barrier
+        // and delayed independently. Numeric freshness is not causal proof.
+        assert!(red::accept_boundary(
+            &writer.room,
+            members.get_mut(&1).unwrap(),
+            10
+        ));
+        held.header.csrc = vec![0, 10];
+        assert!(red::sender_generation(&held, &members[&1]));
+        assert!(!red::receives(&members[&1], &members[&0]));
+        assert!(!red::accept_refresh(
+            &writer.room,
+            members.get_mut(&1).unwrap(),
+            10,
+            challenge
+        ));
+        let receiver_floor = members[&1].red.receiver_floor;
+        let other_pending = members[&0].red.pending;
+        assert!(red::accept_refresh(
+            &writer.room,
+            members.get_mut(&1).unwrap(),
+            11,
+            challenge
+        ));
+        assert_eq!(
+            members[&1].red.receiver_floor, receiver_floor,
+            "source refresh moved receive barrier"
+        );
+        assert_eq!(
+            members[&0].red.pending, other_pending,
+            "refresh recursively challenged another peer"
+        );
+        assert!(red::receives(&members[&1], &members[&0]));
+        assert!(
+            !red::sender_generation(&held, &members[&1]),
+            "held prechallenge UDP survived proof acknowledgement"
+        );
+        held.header.csrc = vec![0, 11];
+        assert!(red::sender_generation(&held, &members[&1]));
+        assert!(
+            !red::accept_boundary(&writer.room, members.get_mut(&1).unwrap(), 11),
+            "source-only ACK was confused with full barrier ACK"
+        );
+    }
+
+    #[tokio::test]
+    async fn challenges_coalesce_concurrent_receivers_and_bind_publisher_membership() {
+        let (writer, _, _) = fixture().await;
+        writer.room.microphone_epoch.store(7, Ordering::Relaxed);
+        let mut members = writer.room.members.write().await;
+        let mut second = members[&0].clone();
+        second.source_id = uuid::Uuid::new_v4();
+        second.info.slot = 2;
+        second.packet_redundancy = true;
+        second.red = red::Barrier::default();
+        members.insert(2, second);
+        members.get_mut(&0).unwrap().packet_redundancy = true;
+        assert!(red::accept_boundary(
+            &writer.room,
+            members.get_mut(&1).unwrap(),
+            1
+        ));
+        assert!(red::accept_boundary(
+            &writer.room,
+            members.get_mut(&0).unwrap(),
+            1
+        ));
+        red::challenge_publishers(&mut members, 0);
+        let now = Instant::now();
+        let first = members.get_mut(&1).unwrap().red.request(now).unwrap();
+        assert!(red::accept_boundary(
+            &writer.room,
+            members.get_mut(&2).unwrap(),
+            1
+        ));
+        red::challenge_publishers(&mut members, 2);
+        let latest = members[&2].red.receiver_floor;
+        let before = members[&1].info.microphone_epoch;
+        assert!(latest > first);
+        assert!(
+            !red::accept_refresh(&writer.room, members.get_mut(&1).unwrap(), 2, latest),
+            "unissued challenge accepted"
+        );
+        assert_eq!(members[&1].info.microphone_epoch, before);
+        // Current ISSUED challenge remains valid despite newer pending floors.
+        assert!(red::accept_refresh_at(
+            &writer.room,
+            members.get_mut(&1).unwrap(),
+            2,
+            first,
+            now
+        ));
+        assert!(red::ready(members.get_mut(&1).unwrap(), 2, first, now));
+        assert!(members[&1].info.microphone_epoch > latest);
+        assert!(red::receives(&members[&1], &members[&0]));
+        assert!(
+            !red::receives(&members[&1], &members[&2]),
+            "new high source revision laundered unproven receiver barrier"
+        );
+        assert_eq!(
+            members.get_mut(&1).unwrap().red.request(now),
+            None,
+            "ACK bypassed issue cadence"
+        );
+        assert_eq!(
+            members
+                .get_mut(&1)
+                .unwrap()
+                .red
+                .request(now + Duration::from_millis(250)),
+            Some(latest)
+        );
+        assert!(
+            !red::accept_refresh(&writer.room, members.get_mut(&1).unwrap(), 3, first),
+            "stale issued challenge accepted"
+        );
+        assert!(red::accept_refresh(
+            &writer.room,
+            members.get_mut(&1).unwrap(),
+            3,
+            latest
+        ));
+        assert!(red::receives(&members[&1], &members[&0]));
+        assert!(red::receives(&members[&1], &members[&2]));
+        // Source replacement cannot inherit its predecessor's satisfaction or
+        // outstanding request, even if its generation counter starts similarly.
+        let source = members.get_mut(&1).unwrap();
+        source.source_id = uuid::Uuid::new_v4();
+        source.red = red::Barrier::default();
+        source.expected_sender_generation = None;
+        assert!(!red::accept_refresh(&writer.room, source, 2, latest));
+        red::challenge_new_publisher(&mut members, 1);
+        assert!(!red::receives(&members[&1], &members[&0]));
+        assert!(red::accept_boundary(
+            &writer.room,
+            members.get_mut(&1).unwrap(),
+            1
+        ));
+        assert_eq!(
+            red::request(members.get_mut(&1).unwrap(), Instant::now()),
+            Some(latest)
+        );
+        assert!(red::accept_refresh(
+            &writer.room,
+            members.get_mut(&1).unwrap(),
+            2,
+            latest
+        ));
+        assert!(red::receives(&members[&1], &members[&2]));
+    }
+
+    #[tokio::test]
+    async fn delayed_ack_readiness_guarantees_actual_media_service_before_next_challenge() {
+        let (writer, source, _) = fixture().await;
+        writer.room.microphone_epoch.store(7, Ordering::Relaxed);
+        let mut members = writer.room.members.write().await;
+        members.get_mut(&0).unwrap().packet_redundancy = true;
+        assert!(red::accept_boundary(
+            &writer.room,
+            members.get_mut(&1).unwrap(),
+            1
+        ));
+        assert!(red::accept_boundary(
+            &writer.room,
+            members.get_mut(&0).unwrap(),
+            1
+        ));
+        red::challenge_publishers(&mut members, 0);
+        let now = Instant::now();
+        let issued = red::request(members.get_mut(&1).unwrap(), now).unwrap();
+        for elapsed in [250, 500] {
+            assert_eq!(
+                red::request(
+                    members.get_mut(&1).unwrap(),
+                    now + Duration::from_millis(elapsed)
+                ),
+                Some(issued)
+            );
+        }
+        let mut churned = members[&0].clone();
+        churned.info.slot = 2;
+        members.insert(2, churned);
+        for generation in 2..100 {
+            assert!(red::accept_boundary(
+                &writer.room,
+                members.get_mut(&2).unwrap(),
+                generation
+            ));
+            red::challenge_publishers(&mut members, 2);
+        }
+        let pending = members[&2].red.receiver_floor;
+        assert!(red::accept_refresh_at(
+            &writer.room,
+            members.get_mut(&1).unwrap(),
+            2,
+            issued,
+            now + Duration::from_secs(1)
+        ));
+        assert_eq!(
+            red::request(
+                members.get_mut(&1).unwrap(),
+                now + Duration::from_millis(1500)
+            ),
+            None
+        );
+        assert!(!red::receives(&members[&1], &members[&2]));
+        assert!(!red::ready(
+            members.get_mut(&1).unwrap(),
+            1,
+            issued,
+            now + Duration::from_secs(2)
+        ));
+        // A full PTT boundary can outrank the proof ACK before Ready is emitted.
+        assert!(red::accept_boundary(
+            &writer.room,
+            members.get_mut(&1).unwrap(),
+            3
+        ));
+        assert!(red::ready(
+            members.get_mut(&1).unwrap(),
+            3,
+            issued,
+            now + Duration::from_secs(2)
+        ));
+        let epoch = members[&1].info.microphone_epoch;
+        assert!(red::ready(
+            members.get_mut(&1).unwrap(),
+            3,
+            issued,
+            now + Duration::from_millis(2200)
+        ));
+        assert_eq!(members[&1].info.microphone_epoch, epoch);
+        assert_eq!(
+            red::request(
+                members.get_mut(&1).unwrap(),
+                now + Duration::from_millis(2249)
+            ),
+            None
+        );
+        drop(members);
+        let mut fresh = delivery(MediaKind::Microphone, &source, 3);
+        fresh.packet.header.csrc[1] = epoch;
+        let (tx, rx) = channel(MediaKind::Microphone);
+        tx.try_send(fresh).unwrap();
+        drop(tx);
+        let (sent, mut received) = mpsc::channel(1);
+        clone_writer(&writer)
+            .run(MediaKind::Microphone, rx, move |_, packet| {
+                let sent = sent.clone();
+                async move { sent.send(packet).await.map_err(|_| ()) }
+            })
+            .await;
+        assert_eq!(
+            received
+                .recv()
+                .await
+                .expect("eligible listener received fresh RTP during Ready cooldown")
+                .header
+                .csrc[1],
+            epoch
+        );
+        let mut members = writer.room.members.write().await;
+        assert_eq!(
+            red::request(
+                members.get_mut(&1).unwrap(),
+                now + Duration::from_millis(2250)
+            ),
+            Some(pending)
+        );
+        assert!(red::receives(&members[&1], &members[&0]));
+        assert!(!red::receives(&members[&1], &members[&2]));
+    }
+
+    #[tokio::test]
+    async fn lost_proof_ack_reproof_after_full_boundary_preserves_deadline_and_cooldown() {
+        let (writer, _, _) = fixture().await;
+        let mut members = writer.room.members.write().await;
+        members.get_mut(&0).unwrap().packet_redundancy = true;
+        assert!(red::accept_boundary(
+            &writer.room,
+            members.get_mut(&1).unwrap(),
+            1
+        ));
+        assert!(red::accept_boundary(
+            &writer.room,
+            members.get_mut(&0).unwrap(),
+            1
+        ));
+        red::challenge_publishers(&mut members, 0);
+        let now = Instant::now();
+        let source = members.get_mut(&1).unwrap();
+        let challenge = red::request(source, now).unwrap();
+        assert!(red::accept_refresh_at(
+            &writer.room,
+            source,
+            2,
+            challenge,
+            now + Duration::from_secs(1)
+        ));
+        // Generation 2 proof ACK is lost; a real local boundary supersedes it.
+        assert!(red::accept_boundary(&writer.room, source, 3));
+        let receiver_floor = source.red.receiver_floor;
+        let epoch = source.info.microphone_epoch;
+        assert!(red::accept_refresh_at(
+            &writer.room,
+            source,
+            4,
+            challenge,
+            now + Duration::from_secs(4)
+        ));
+        assert!(source.info.microphone_epoch > epoch);
+        assert_eq!(source.red.receiver_floor, receiver_floor);
+        assert_eq!(source.expected_sender_generation, Some(4));
+        assert!(!red::accept_refresh_at(
+            &writer.room,
+            source,
+            3,
+            challenge,
+            now + Duration::from_secs(4)
+        ));
+        // Without Ready, neither fresh nor duplicate proof can extend the
+        // original t=1+5 deadline. Use an isolated active flag for this branch.
+        let mut missing_ready = source.clone();
+        missing_ready.active = Arc::new(AtomicBool::new(true));
+        assert!(!red::accept_refresh_at(
+            &writer.room,
+            &mut missing_ready,
+            5,
+            challenge,
+            now + Duration::from_secs(6)
+        ));
+        assert!(!red::accept_refresh_at(
+            &writer.room,
+            &mut missing_ready,
+            4,
+            challenge,
+            now + Duration::from_secs(6)
+        ));
+        assert!(red::expire(
+            &writer.room,
+            &missing_ready,
+            now + Duration::from_secs(6)
+        ));
+        assert!(red::ready(
+            source,
+            4,
+            challenge,
+            now + Duration::from_secs(4)
+        ));
+        assert!(red::accept_refresh_at(
+            &writer.room,
+            source,
+            5,
+            challenge,
+            now + Duration::from_millis(4200)
+        ));
+        assert!(red::ready(
+            source,
+            5,
+            challenge,
+            now + Duration::from_millis(4200)
+        ));
+        assert!(!red::expire(
+            &writer.room,
+            source,
+            now + Duration::from_secs(10)
+        ));
+        assert!(red::accept_boundary(
+            &writer.room,
+            members.get_mut(&0).unwrap(),
+            2
+        ));
+        red::challenge_publishers(&mut members, 0);
+        let latest = members[&0].red.receiver_floor;
+        assert_eq!(
+            red::request(
+                members.get_mut(&1).unwrap(),
+                now + Duration::from_millis(4249)
+            ),
+            None
+        );
+        assert_eq!(
+            red::request(
+                members.get_mut(&1).unwrap(),
+                now + Duration::from_millis(4250)
+            ),
+            Some(latest)
+        );
+        assert!(!red::accept_refresh_at(
+            &writer.room,
+            members.get_mut(&1).unwrap(),
+            6,
+            challenge,
+            now + Duration::from_millis(4251)
+        ));
+    }
+
+    #[tokio::test]
+    async fn missing_ready_expires_without_duplicate_proofs_extending_deadline() {
+        let (writer, _, _) = fixture().await;
+        let mut members = writer.room.members.write().await;
+        members.get_mut(&0).unwrap().packet_redundancy = true;
+        assert!(red::accept_boundary(
+            &writer.room,
+            members.get_mut(&1).unwrap(),
+            1
+        ));
+        assert!(red::accept_boundary(
+            &writer.room,
+            members.get_mut(&0).unwrap(),
+            1
+        ));
+        red::challenge_publishers(&mut members, 0);
+        let now = Instant::now();
+        let source = members.get_mut(&1).unwrap();
+        let challenge = red::request(source, now).unwrap();
+        assert!(red::accept_refresh_at(
+            &writer.room,
+            source,
+            2,
+            challenge,
+            now + Duration::from_secs(1)
+        ));
+        assert!(red::accept_refresh_at(
+            &writer.room,
+            source,
+            2,
+            challenge,
+            now + Duration::from_secs(5)
+        ));
+        assert!(!red::expire(
+            &writer.room,
+            source,
+            now + Duration::from_millis(5999)
+        ));
+        assert!(!red::ready(
+            source,
+            2,
+            challenge,
+            now + Duration::from_secs(6)
+        ));
+        assert!(red::expire(
+            &writer.room,
+            source,
+            now + Duration::from_secs(6)
+        ));
+    }
+
+    #[tokio::test]
+    async fn microphone_challenge_timeout_closes_only_unresponsive_source_and_removes_roster() {
+        let (writer, source, _) = fixture().await;
+        writer.room.microphone_epoch.store(7, Ordering::Relaxed);
+        let now = Instant::now();
+        {
+            let mut members = writer.room.members.write().await;
+            members.get_mut(&0).unwrap().packet_redundancy = true;
+            members.get_mut(&1).unwrap().active = Arc::new(AtomicBool::new(true));
+            assert!(red::accept_boundary(
+                &writer.room,
+                members.get_mut(&0).unwrap(),
+                1
+            ));
+            red::challenge_publishers(&mut members, 0);
+            assert!(red::accept_boundary(
+                &writer.room,
+                members.get_mut(&1).unwrap(),
+                1
+            ));
+            assert!(red::request(members.get_mut(&1).unwrap(), now).is_some());
+            assert!(!red::expire(
+                &writer.room,
+                &members[&1],
+                now + Duration::from_millis(4999)
+            ));
+            assert!(red::expire(
+                &writer.room,
+                &members[&1],
+                now + Duration::from_secs(5)
+            ));
+            assert!(!members[&1].active.load(Ordering::Acquire));
+            assert!(
+                members[&0].active.load(Ordering::Acquire),
+                "listener was disconnected by source timeout"
+            );
+            assert!(
+                !red::expire(&writer.room, &members[&1], now + Duration::from_secs(6)),
+                "timeout emitted twice"
+            );
+        }
+        // Production's terminal branch sends a clear Error and follows this
+        // same membership cleanup; unrelated membership remains in the room.
+        release_member(&writer.room, 1, source.id).await;
+        let members = writer.room.members.read().await;
+        assert_eq!(members.len(), 1);
+        assert!(members.contains_key(&0));
+        assert!(
+            !viewing::participants(&members)
+                .iter()
+                .any(|member| member.slot == 1)
+        );
+    }
+
+    #[tokio::test]
+    async fn microphone_startup_waits_for_first_full_boundary_before_challenge_deadline() {
+        let (writer, _, _) = fixture().await;
+        writer.room.microphone_epoch.store(7, Ordering::Relaxed);
+        let mut members = writer.room.members.write().await;
+        members.get_mut(&0).unwrap().packet_redundancy = true;
+        assert!(red::accept_boundary(
+            &writer.room,
+            members.get_mut(&0).unwrap(),
+            1
+        ));
+        red::challenge_publishers(&mut members, 0);
+        let later = Instant::now() + Duration::from_secs(8);
+        assert_eq!(red::request(members.get_mut(&1).unwrap(), later), None);
+        assert!(!red::expire(&writer.room, &members[&1], later));
+        assert!(members[&1].active.load(Ordering::Acquire));
+        assert!(red::accept_boundary(
+            &writer.room,
+            members.get_mut(&1).unwrap(),
+            1
+        ));
+        let challenge = red::request(members.get_mut(&1).unwrap(), later).unwrap();
+        assert!(!red::expire(
+            &writer.room,
+            &members[&1],
+            later + Duration::from_millis(4999)
+        ));
+        assert!(
+            red::accept_refresh(&writer.room, members.get_mut(&1).unwrap(), 2, challenge),
+            "startup/muted source can respond entirely over signaling"
+        );
+        assert!(red::ready(
+            members.get_mut(&1).unwrap(),
+            2,
+            challenge,
+            Instant::now()
+        ));
+        assert!(!red::expire(
+            &writer.room,
+            &members[&1],
+            later + Duration::from_secs(5)
+        ));
+    }
+
+    #[tokio::test]
+    async fn challenge_reply_at_timeout_boundary_fails_closed_without_epoch_or_generation_mutation()
+    {
+        for elapsed in [Duration::from_millis(4999), Duration::from_secs(5)] {
+            let (writer, _, _) = fixture().await;
+            writer.room.microphone_epoch.store(7, Ordering::Relaxed);
+            let mut members = writer.room.members.write().await;
+            members.get_mut(&0).unwrap().packet_redundancy = true;
+            assert!(red::accept_boundary(
+                &writer.room,
+                members.get_mut(&1).unwrap(),
+                1
+            ));
+            assert!(red::accept_boundary(
+                &writer.room,
+                members.get_mut(&0).unwrap(),
+                1
+            ));
+            red::challenge_publishers(&mut members, 0);
+            let now = Instant::now();
+            let source = members.get_mut(&1).unwrap();
+            let challenge = red::request(source, now).unwrap();
+            let previous = source.info.microphone_epoch;
+            let accepted =
+                red::accept_refresh_at(&writer.room, source, 2, challenge, now + elapsed);
+            assert_eq!(accepted, elapsed < Duration::from_secs(5));
+            if !accepted {
+                assert_eq!(source.info.microphone_epoch, previous);
+                assert_eq!(source.expected_sender_generation, Some(1));
+                assert_eq!(source.red.satisfied, 0);
+                assert!(red::expire(&writer.room, source, now + elapsed));
+            } else {
+                assert!(!red::expire(&writer.room, source, now + elapsed));
+            }
         }
     }
 
@@ -974,6 +1970,55 @@ mod tests {
                 writes.load(Ordering::Relaxed),
                 0,
                 "pending revoked media reached transport"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn pending_microphone_write_rechecks_source_and_listener_privacy() {
+        for changed_slot in [0, 1] {
+            let (writer, source, _) = fixture().await;
+            let room = writer.room.clone();
+            room.microphone_epoch.store(7, Ordering::Relaxed);
+            let active = writer.active.clone();
+            let (tx, rx) = channel(MediaKind::Microphone);
+            tx.try_send(delivery(MediaKind::Microphone, &source, 100))
+                .unwrap();
+            drop(tx);
+            let (entered, mut waiting) = mpsc::channel(1);
+            let resume = Arc::new(Notify::new());
+            let ready = resume.clone();
+            let writes = Arc::new(AtomicU64::new(0));
+            let sent = writes.clone();
+            let task = tokio::spawn(writer.run(MediaKind::Microphone, rx, move |_, _| {
+                let entered = entered.clone();
+                let ready = ready.clone();
+                let sent = sent.clone();
+                async move {
+                    entered.try_send(()).unwrap();
+                    ready.notified().await;
+                    sent.fetch_add(1, Ordering::Relaxed);
+                    Ok(())
+                }
+            }));
+            waiting.recv().await.unwrap();
+            {
+                let mut members = room.members.write().await;
+                let member = members.get_mut(&changed_slot).unwrap();
+                if changed_slot == 0 {
+                    member.packet_redundancy = true;
+                    assert!(red::accept_boundary(&room, member, 1));
+                } else {
+                    assert!(red::boundary(&room, member));
+                }
+            }
+            resume.notify_one();
+            task.await.unwrap();
+            assert!(active.load(Ordering::Acquire));
+            assert_eq!(
+                writes.load(Ordering::Relaxed),
+                0,
+                "pending packet crossed privacy boundary"
             );
         }
     }

@@ -13,6 +13,8 @@ use tower::ServiceExt;
 use uuid::Uuid;
 #[path = "voice/friends.rs"]
 mod friends;
+#[path = "voice/red.rs"]
+mod red;
 #[path = "voice/roster.rs"]
 mod roster;
 
@@ -235,6 +237,9 @@ struct Peer {
     packets: mpsc::Receiver<rtp::Packet>,
     slot: usize,
     sequence: u16,
+    microphone_generation: Option<u64>,
+    microphone_challenge: Option<u32>,
+    microphone_satisfied: u32,
     screen_tracks: [Arc<TrackLocalStaticRTP>; 3],
     screen_sequences: [u16; 3],
     views: Vec<thiscord_shared::screen::Subscription>,
@@ -243,7 +248,10 @@ impl Peer {
     async fn new(socket: Socket) -> Self {
         Self::with_packet_capacity(socket, 64).await
     }
-    async fn with_packet_capacity(mut socket: Socket, capacity: usize) -> Self {
+    async fn with_packet_capacity(socket: Socket, capacity: usize) -> Self {
+        Self::with_red(socket, capacity, false).await
+    }
+    async fn with_red(mut socket: Socket, capacity: usize, packet_redundancy: bool) -> Self {
         let ServerEvent::Offer {
             sdp,
             slot,
@@ -261,6 +269,23 @@ impl Peer {
         let gathered = Arc::new(Notify::new());
         let mut media = MediaEngine::default();
         media.register_default_codecs().unwrap();
+        if packet_redundancy {
+            media
+                .register_codec(
+                    RTCRtpCodecParameters {
+                        rtp_codec: RTCRtpCodec {
+                            mime_type: thiscord_shared::rtp_red::MIME.into(),
+                            clock_rate: 48_000,
+                            channels: 2,
+                            sdp_fmtp_line: thiscord_shared::rtp_red::FMTP.into(),
+                            ..Default::default()
+                        },
+                        payload_type: thiscord_shared::rtp_red::PAYLOAD_TYPE,
+                    },
+                    RtpCodecKind::Audio,
+                )
+                .unwrap();
+        }
         let pc: Arc<dyn PeerConnection> = Arc::new(
             PeerConnectionBuilder::new()
                 .with_media_engine(media)
@@ -337,6 +362,12 @@ impl Peer {
                 .unwrap();
         }
         let answer = pc.create_answer(None).await.unwrap();
+        if packet_redundancy {
+            assert!(
+                thiscord_shared::rtp_red::negotiated(&answer.sdp),
+                "RED fmtp missing from negotiated answer"
+            );
+        }
         pc.set_local_description(answer).await.unwrap();
         tokio::time::timeout(Duration::from_secs(5), gathered.notified())
             .await
@@ -344,6 +375,7 @@ impl Peer {
         send(
             &mut socket,
             ClientEvent::Answer {
+                packet_redundancy,
                 remote_audio: true,
                 screen_feedback: true,
                 screen_subscriptions: true,
@@ -351,6 +383,27 @@ impl Peer {
             },
         )
         .await;
+        let mut microphone_challenge = None;
+        if packet_redundancy {
+            send(
+                &mut socket,
+                ClientEvent::MicrophoneBoundary { generation: 1 },
+            )
+            .await;
+            loop {
+                match event(&mut socket).await {
+                    ServerEvent::MicrophoneBoundaryAccepted {
+                        generation: 1,
+                        accepted: true,
+                        ..
+                    } => break,
+                    ServerEvent::MicrophoneRefreshRequired { challenge } => {
+                        microphone_challenge = Some(challenge)
+                    }
+                    _ => {}
+                }
+            }
+        }
         Self {
             socket,
             resume_token: resume_token.expect("resume capability"),
@@ -359,6 +412,9 @@ impl Peer {
             packets: rx,
             slot,
             sequence: 0,
+            microphone_generation: packet_redundancy.then_some(1),
+            microphone_challenge,
+            microphone_satisfied: 0,
             screen_tracks,
             screen_sequences: [0; 3],
             views: vec![],
@@ -372,6 +428,10 @@ impl Peer {
                     version: 2,
                     payload_type: 111,
                     ssrc: 900,
+                    csrc: self
+                        .microphone_generation
+                        .map(|g| vec![(g >> 32) as u32, g as u32])
+                        .unwrap_or_default(),
                     sequence_number: self.sequence,
                     timestamp: self.sequence as u32 * 960,
                     ..Default::default()

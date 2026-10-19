@@ -93,6 +93,7 @@ struct Counters {
 pub struct Jitter {
     pub quality: std::sync::Arc<quality::Metrics>,
     packets: Vec<Packet>,
+    redundant: Vec<(u32, Instant, bytes::Bytes)>,
     cursor: Option<u32>,
     floor: Option<u32>,
     last_sequence: Option<u16>,
@@ -126,6 +127,7 @@ impl Default for Jitter {
         Self {
             quality: Default::default(),
             packets: Vec::with_capacity(PACKETS),
+            redundant: Vec::with_capacity(PACKETS * 2),
             cursor: None,
             floor: None,
             last_sequence: None,
@@ -295,9 +297,25 @@ impl Jitter {
         true
     }
 
+    /// Primary admission establishes the epoch/watermark. Recovery cannot move
+    /// that anchor, revive expired speech, or manufacture RTP sequence numbers.
+    pub fn redundant(&mut self, timestamp: u32, arrived: Instant, payload: bytes::Bytes) {
+        if self.cursor.is_some_and(|cursor| {
+            let distance = timestamp.wrapping_sub(cursor) as i32;
+            (0..WINDOW).contains(&distance)
+        }) && !self.redundant.iter().any(|(ts, _, _)| *ts == timestamp)
+            && self.redundant.len() < PACKETS * 2
+            && thiscord_shared::rtp_red::repeatable(&payload)
+        {
+            self.redundant.push((timestamp, arrived, payload));
+        }
+    }
+
     /// Call even when PCM is full. True requires a decoder and callback-ring
     /// reset before pop: a stalled output must not retain old decoded speech.
     pub fn maintain(&mut self, now: Instant) -> bool {
+        self.redundant
+            .retain(|(_, arrived, _)| now.saturating_duration_since(*arrived) < MAX_AGE);
         let before = self.packets.len();
         self.packets
             .retain(|p| now.saturating_duration_since(p.arrived) < MAX_AGE);
@@ -352,6 +370,7 @@ impl Jitter {
         if !self.reset_pending && before == self.packets.len() && !far && !lagging && !spread {
             return false;
         }
+        self.redundant.clear();
         self.counters.resets += 1;
         self.metrics.rebufferings += 1;
         self.metrics.discontinuities += 1;
@@ -436,6 +455,21 @@ impl Jitter {
             self.advance(FRAME);
             return Some(Playout::Packet(packet.payload));
         }
+        // RED has timestamp identity only. Never advance sequence/marker state
+        // from a recovered block or count it as another received RTP packet.
+        if let Some(index) = self.redundant.iter().position(|(ts, _, _)| *ts == cursor) {
+            let (_, _, payload) = self.redundant.swap_remove(index);
+            if self
+                .last_data
+                .is_some_and(|ts| cursor.wrapping_sub(ts) == FRAME as u32)
+            {
+                self.dtx = false;
+            }
+            self.last_data = Some(cursor);
+            self.missing = 0;
+            self.advance(FRAME);
+            return Some(Playout::Packet(payload));
+        }
         if self.dtx {
             // The next CN/talkspurt may already be queued when the silence cue
             // is decoded (batched delivery). Keep its media gap on the render
@@ -489,6 +523,8 @@ impl Jitter {
     fn advance(&mut self, samples: usize) {
         self.cursor = self.cursor.map(|v| v.wrapping_add(samples as u32));
         self.floor = self.cursor;
+        self.redundant
+            .retain(|(ts, _, _)| ts.wrapping_sub(self.cursor.unwrap()) as i32 >= 0);
         self.play_at = self.play_at.map(|at| at + sample_duration(samples));
         self.packets
             .retain(|p| p.timestamp.wrapping_sub(self.cursor.unwrap()) as i32 >= 0);
@@ -505,6 +541,7 @@ impl Jitter {
             self.last_sequence = Some(latest.sequence);
         }
         self.packets.clear();
+        self.redundant.clear();
         self.dtx = false;
         self.last_data = None;
         self.cursor = None;

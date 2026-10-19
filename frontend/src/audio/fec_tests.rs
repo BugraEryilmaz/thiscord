@@ -40,6 +40,8 @@ fn decoded(decoder: &mut opus::Decoder, packet: &[u8], fec: bool) -> [f32; FRAME
 }
 fn remote(now: Instant) -> Remote {
     Remote {
+        source_epoch: 0,
+        privacy_epoch: 0,
         since: now,
         deafened: false,
         decode_stats: Default::default(),

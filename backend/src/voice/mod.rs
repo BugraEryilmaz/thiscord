@@ -5,6 +5,7 @@ mod egress;
 mod ice;
 mod logging;
 mod membership;
+mod red;
 mod resumption;
 mod store;
 mod viewing;
@@ -54,6 +55,11 @@ struct Member {
     info: Participant,
     source_id: uuid::Uuid,
     screen_started: Instant,
+    microphone_started: Instant,
+    packet_redundancy: bool,
+    expected_sender_generation: Option<u64>,
+    restricted_sender_generation: Option<u64>,
+    red: red::Barrier,
     camera_started: Instant,
     outgoing: [egress::Sender; 4],
     keyframes: mpsc::Sender<(MediaKind, u32)>,
@@ -76,11 +82,23 @@ struct Delivery {
     packet: rtp::Packet,
     queued_at: Instant,
 }
-#[derive(Default)]
 struct Room {
     notification_target: Option<(GuildId, ChannelId)>,
     screen_epoch: AtomicU32,
+    microphone_epoch: AtomicU32,
+    changed: watch::Sender<()>,
     members: RwLock<HashMap<usize, Member>>,
+}
+impl Default for Room {
+    fn default() -> Self {
+        Self {
+            notification_target: None,
+            screen_epoch: AtomicU32::new(0),
+            microphone_epoch: AtomicU32::new(0),
+            changed: watch::channel(()).0,
+            members: RwLock::new(HashMap::new()),
+        }
+    }
 }
 struct VoiceAccess {
     access: Arc<access::Access>,
@@ -131,6 +149,9 @@ impl VoiceAccess {
             member.info.username = info.username;
             member.info.display_name = info.display_name;
             member.info.avatar_id = info.avatar_id;
+            if self.generation.load(Ordering::Acquire) != epoch && !red::boundary(room, member) {
+                return Err(Failure::Forbidden);
+            }
             self.generation.store(epoch, Ordering::Release);
             Ok(viewing::participants(&members))
         });
@@ -159,7 +180,7 @@ pub(crate) async fn roster(channels: Vec<ChannelId>) -> Vec<thiscord_shared::voi
                 if member.active.load(Ordering::Acquire)
                     && member.access.packet(epoch, epoch).is_some()
                 {
-                    members.push(member.info.clone());
+                    members.push(red::participant(member));
                 }
             }
         }
@@ -343,7 +364,11 @@ impl PeerConnectionEventHandler for Handler {
         } else {
             "audio/opus"
         };
-        if !codec.mime_type.eq_ignore_ascii_case(mime)
+        if !(codec.mime_type.eq_ignore_ascii_case(mime)
+            || (kind == MediaKind::Microphone
+                && codec
+                    .mime_type
+                    .eq_ignore_ascii_case(thiscord_shared::rtp_red::MIME)))
             || codec.clock_rate != kind.clock_rate()
             || self.track_seen[kind as usize].swap(true, Ordering::AcqRel)
         {
@@ -471,13 +496,16 @@ fn may_publish(info: &Participant, kind: MediaKind) -> bool {
 }
 fn may_relay(member: &Member, kind: MediaKind, arrived: Instant) -> bool {
     may_publish(&member.info, kind)
-        && (kind == MediaKind::Microphone
-            || arrived
+        && (if kind == MediaKind::Microphone {
+            arrived >= member.microphone_started
+        } else {
+            arrived
                 >= if kind == MediaKind::Camera {
                     member.camera_started
                 } else {
                     member.screen_started
-                })
+                }
+        })
 }
 async fn update_voice_state(
     room: &Room,
@@ -485,7 +513,7 @@ async fn update_voice_state(
     muted: bool,
     deafened: bool,
     owner: &AtomicBool,
-) {
+) -> bool {
     if let Some(member) = room
         .members
         .write()
@@ -493,6 +521,30 @@ async fn update_voice_state(
         .get_mut(&slot)
         .filter(|_| owner.load(Ordering::Acquire))
     {
+        let was_restricted = member.info.muted || member.info.deafened;
+        let restricted = muted || deafened;
+        if member.packet_redundancy
+            && was_restricted
+            && !restricted
+            && member.restricted_sender_generation.is_some_and(|previous| {
+                member
+                    .expected_sender_generation
+                    .is_none_or(|current| current <= previous)
+            })
+        {
+            return false;
+        }
+        if (member.info.muted != muted || member.info.deafened != deafened)
+            && !red::boundary(room, member)
+        {
+            return false;
+        }
+        if restricted && !was_restricted {
+            member.restricted_sender_generation = member.expected_sender_generation;
+        }
+        if member.info.deafened != deafened {
+            member.red.receiver_started = Instant::now();
+        }
         member.info.muted = muted;
         member.info.deafened = deafened;
         if deafened {
@@ -501,7 +553,9 @@ async fn update_voice_state(
             member.info.sharing_screen = false;
             member.info.sharing_audio = false;
         }
+        return true;
     }
+    false
 }
 async fn update_screen_state(
     room: &Room,
@@ -537,12 +591,90 @@ async fn handle_signal(
     owner: &AtomicBool,
 ) -> Result<(), &'static str> {
     match event {
+        Some(ClientEvent::MicrophoneBoundary { generation }) => {
+            let (source_epoch, microphone_epoch) = {
+                let mut members = room.members.write().await;
+                let member = members
+                    .get_mut(&slot)
+                    .ok_or("microphone_boundary_missing_member")?;
+                if !owner.load(Ordering::Acquire) || !red::accept_boundary(room, member, generation)
+                {
+                    return Err("microphone_boundary_rejected");
+                }
+                let epochs = (member.info.microphone_epoch, member.red.receiver_floor);
+                red::challenge_publishers(&mut members, slot);
+                epochs
+            };
+            send(
+                socket,
+                ServerEvent::MicrophoneBoundaryAccepted {
+                    generation,
+                    microphone_epoch,
+                    source_epoch,
+                    challenge: None,
+                    accepted: true,
+                },
+            )
+            .await
+            .map_err(|_| "microphone_boundary_ack_failed")
+        }
+        Some(ClientEvent::MicrophoneRefresh {
+            generation,
+            challenge,
+        }) => {
+            let (accepted, source_epoch, microphone_epoch) = {
+                let mut members = room.members.write().await;
+                let member = members
+                    .get_mut(&slot)
+                    .ok_or("microphone_refresh_missing_member")?;
+                if !owner.load(Ordering::Acquire) || !member.packet_redundancy {
+                    return Err("microphone_refresh_rejected");
+                }
+                let accepted = red::accept_refresh(room, member, generation, challenge);
+                (
+                    accepted,
+                    member.info.microphone_epoch,
+                    member.red.receiver_floor,
+                )
+            };
+            send(
+                socket,
+                ServerEvent::MicrophoneBoundaryAccepted {
+                    generation,
+                    microphone_epoch,
+                    source_epoch,
+                    challenge: Some(challenge),
+                    accepted,
+                },
+            )
+            .await
+            .map_err(|_| "microphone_refresh_ack_failed")
+        }
+        Some(ClientEvent::MicrophoneRefreshReady {
+            generation,
+            challenge,
+        }) => {
+            let mut members = room.members.write().await;
+            let member = members
+                .get_mut(&slot)
+                .ok_or("microphone_ready_missing_member")?;
+            if !owner.load(Ordering::Acquire) || !member.packet_redundancy {
+                return Err("microphone_ready_rejected");
+            }
+            // Stale readiness can race a newer full boundary; ignore it without
+            // granting service or extending the outstanding timeout.
+            red::ready(member, generation, challenge, Instant::now());
+            Ok(())
+        }
         Some(ClientEvent::Ping {}) => send(socket, ServerEvent::Pong {})
             .await
             .map_err(|_| "pong_send_failed"),
         Some(ClientEvent::State { muted, deafened }) => {
-            update_voice_state(room, slot, muted, deafened, owner).await;
-            Ok(())
+            if update_voice_state(room, slot, muted, deafened, owner).await {
+                Ok(())
+            } else {
+                Err("voice_state_generation_rejected")
+            }
         }
         Some(ClientEvent::Camera { active }) => {
             let mut members = room.members.write().await;
@@ -776,6 +908,13 @@ async fn serve(mut socket: logging::Socket, pool: DbPool, id: RequestId) {
         .screen_epoch
         .fetch_add(1, Ordering::Relaxed)
         .wrapping_add(1);
+    let Some((source_epoch, privacy_epoch)) = red::next_epoch(&room).zip(red::next_epoch(&room))
+    else {
+        fail(&mut socket, id, Failure::Unavailable).await;
+        return;
+    };
+    info.microphone_epoch = privacy_epoch;
+    info.microphone_source_epoch = source_epoch;
     let (replaced_tx, mut replaced) = watch::channel(false);
     let (resume_handle, mut resumes) = resumption::channel(guild_id);
     let resume_token = resume_handle.secret.clone();
@@ -790,6 +929,11 @@ async fn serve(mut socket: logging::Socket, pool: DbPool, id: RequestId) {
             info: info.clone(),
             source_id,
             screen_started: Instant::now(),
+            microphone_started: Instant::now(),
+            packet_redundancy: false,
+            expected_sender_generation: None,
+            restricted_sender_generation: None,
+            red: red::Barrier::default(),
             camera_started: Instant::now(),
             outgoing: [out_tx, video_tx, audio_tx, camera_tx],
             keyframes: keyframe_tx,
@@ -839,6 +983,7 @@ async fn serve(mut socket: logging::Socket, pool: DbPool, id: RequestId) {
         )
         .expect("valid screen codec");
     let _ = engine.register_default_codecs();
+    red::register(&mut engine);
     let registry = register_default_interceptors(Registry::new(), &mut engine)
         .expect("default RTP interceptors");
     socket.stage = "peer_build";
@@ -911,6 +1056,7 @@ async fn serve(mut socket: logging::Socket, pool: DbPool, id: RequestId) {
                 &mut socket,
                 ServerEvent::Offer {
                     remote_audio: true,
+                    packet_redundancy: true,
                     sdp,
                     slot,
                     can_speak: info.can_speak,
@@ -932,10 +1078,14 @@ async fn serve(mut socket: logging::Socket, pool: DbPool, id: RequestId) {
                 screen_feedback: enabled,
                 screen_subscriptions,
                 remote_audio: audio_enabled,
+                packet_redundancy,
             }) = parse(answer)
             else {
                 return Err(());
             };
+            let answer: RTCSessionDescription = serde_json::from_str(&sdp).map_err(|_| ())?;
+            let packet_redundancy =
+                packet_redundancy && thiscord_shared::rtp_red::negotiated(&answer.sdp);
             screen_feedback = enabled;
             remote_audio = audio_enabled;
             if let Some(member) = room
@@ -946,9 +1096,10 @@ async fn serve(mut socket: logging::Socket, pool: DbPool, id: RequestId) {
                 .filter(|m| m.source_id == source_id)
             {
                 member.feedback_enabled = enabled;
+                member.packet_redundancy = packet_redundancy;
                 member.subscriptions_enabled = screen_subscriptions;
+                room.changed.send_replace(());
             }
-            let answer: RTCSessionDescription = serde_json::from_str(&sdp).map_err(|_| ())?;
             if answer.sdp_type != RTCSdpType::Answer {
                 return Err(());
             }
@@ -996,13 +1147,26 @@ async fn serve(mut socket: logging::Socket, pool: DbPool, id: RequestId) {
                 if !may_relay(source, kind, arrived) {
                     continue;
                 }
+                if kind == MediaKind::Microphone
+                    && (!red::valid_ingress(&packet, source.packet_redundancy)
+                        || !red::sender_generation(&packet, source))
+                {
+                    continue;
+                }
                 packet.header = rtp::header::Header {
                     version: 2,
-                    payload_type: kind.payload_type(),
+                    payload_type: if kind == MediaKind::Microphone {
+                        packet.header.payload_type
+                    } else {
+                        kind.payload_type()
+                    },
                     ssrc: media_ssrc(kind.track_index(slot)),
                     marker: packet.header.marker,
                     csrc: if kind == MediaKind::Microphone {
-                        vec![]
+                        vec![
+                            source.info.microphone_source_epoch,
+                            source.info.microphone_epoch,
+                        ]
                     } else {
                         vec![source.info.video_epoch(kind)]
                     },
@@ -1066,6 +1230,13 @@ async fn serve(mut socket: logging::Socket, pool: DbPool, id: RequestId) {
                 async move { track.write_rtp(packet).await.map_err(|_| ()) }
             }));
         }
+        {
+            let mut members = room.members.write().await;
+            red::challenge_new_publisher(&mut members, slot);
+        }
+        let mut challenge_tick = tokio::time::interval(Duration::from_millis(250));
+        challenge_tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+        let mut room_changed = room.changed.subscribe();
         let mut tick = tokio::time::interval(Duration::from_secs(1));
         tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
         let access = VoiceAccess {
@@ -1181,6 +1352,35 @@ async fn serve(mut socket: logging::Socket, pool: DbPool, id: RequestId) {
                     }
                     if !route_logged { route_logged=log_selected_route(pc.as_ref(),id).await; }
                 if send(&mut socket,ServerEvent::Participants{members}).await.is_err(){break;}
+                },
+                _=challenge_tick.tick()=>{
+                    let (expired, challenge) = {
+                        let mut members = room.members.write().await;
+                        if let Some(member) = members.get_mut(&slot).filter(|member| member.source_id == source_id && member.active.load(Ordering::Acquire)) {
+                            let now = Instant::now();
+                            let expired = red::expire(&room, member, now);
+                            (expired, if expired { None } else { red::request(member, now) })
+                        } else { (false, None) }
+                    };
+                    if expired {
+                        socket.end("microphone_refresh_timeout");
+                        let _ = send(&mut socket, ServerEvent::Error { error: thiscord_shared::ApiError {
+                            code: thiscord_shared::ErrorCode::ServiceUnavailable,
+                            message: "Microphone privacy refresh timed out. Rejoin voice to retry.".into(),
+                            request_id: id, fields: vec![],
+                        }}).await;
+                        break;
+                    }
+                    if let Some(challenge) = challenge
+                        && send(&mut socket, ServerEvent::MicrophoneRefreshRequired { challenge }).await.is_err() { break; }
+                },
+                result=room_changed.changed()=>{
+                    if result.is_err(){socket.end("room_watcher_closed");break;}
+                    let members = match access.refresh(&room,slot,&mut changed).await {
+                        Ok(members)=>members,
+                        Err(error)=>{access_failed(&mut socket,id,error).await;break;}
+                    };
+                    if send(&mut socket,ServerEvent::Participants{members}).await.is_err(){break;}
                 }
             }
         }
@@ -1218,6 +1418,7 @@ async fn release_member(room: &Room, slot: usize, source_id: uuid::Uuid) {
         .is_some_and(|member| member.source_id == source_id)
         && let Some(member) = members.remove(&slot)
     {
+        room.changed.send_replace(());
         voice_notification(
             room,
             &members,
@@ -1403,6 +1604,8 @@ mod send_tests {
                         sharing_screen: slot == 1,
                         sharing_audio: false,
                         screen_epoch: 7,
+                        microphone_epoch: 7,
+                        microphone_source_epoch: 7,
                         camera_active: false,
                         camera_epoch: 0,
                         screen_viewers: vec![],
@@ -1410,6 +1613,11 @@ mod send_tests {
                     },
                     source_id: uuid::Uuid::new_v4(),
                     screen_started: Instant::now(),
+                    microphone_started: Instant::now(),
+                    packet_redundancy: false,
+                    expected_sender_generation: None,
+                    restricted_sender_generation: None,
+                    red: red::Barrier::default(),
                     camera_started: Instant::now(),
                     outgoing: [
                         egress::channel(MediaKind::Microphone).0,
