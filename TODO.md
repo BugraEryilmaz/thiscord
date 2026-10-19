@@ -53,7 +53,7 @@ media compatibility spike can happen before chat to expose platform constraints.
 - [x] Direct sidebar voice joins, brief connection hover diagnostics and backdrop dismissal for server/channel/screen-picker dialogs.
 - [x] Separate account/app and server settings modal views, focused sections, explicit save/reset controls, unsaved-edit dismissal guards, and collapsed advanced audio tools.
 - [x] Server/channel/participant context menus with permission-filtered management, personal persistent channel pins/mutes, mark-as-read, local participant volume and server settings in the header.
-- [ ] Validate the expanded account ribbon and screen picker on native Windows/macOS/Linux clients; camera remains unimplemented.
+- [ ] Validate the expanded account ribbon and screen picker on native Windows/macOS/Linux clients.
 
 - [x] Migrations for accounts, unique usernames/emails, credential identities and sessions.
 - [x] Registration, standard password login, logout and current-user API/UI.
@@ -340,6 +340,12 @@ speaker isolation and physical acoustic acceptance remain future work.
 - [ ] Live HDR/SDR capture acceptance across Intel/AMD/NVIDIA and mixed-HDR displays.
 - [ ] Measured end-to-end 30/60 fps, high-resolution performance and real WebView
   hardware-decoder verification on Windows/macOS/Linux.
+
+- [x] WebView webcam capture through a native H.264 bridge in guild/private calls.
+- [x] Simultaneous camera/screen grid, self previews, fullscreen, hide/restore and contextual audio controls.
+- [x] Camera epochs, viewer leases, permission fences and independent recovery/bitrate feedback.
+- [ ] Physical camera/WebView acceptance on Windows/macOS/Linux and measured eight-person mixed-media capacity.
+- [ ] In-app webcam selection (currently the system default).
 
 See [screen-sharing.md](docs/screen-sharing.md) for limits and remaining platform checks.
 

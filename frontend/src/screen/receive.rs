@@ -263,6 +263,17 @@ impl Inbox {
         s.frames.clear();
         s.synchronized = false;
     }
+    /// A new subscription may resume beyond RTP's half-range sequence window.
+    /// Forget ordering and partial frames, but preserve closure and stream identity.
+    pub fn restart_subscription(&self) {
+        let mut s = self.0.state.lock().unwrap();
+        *s = State {
+            closed: s.closed,
+            epoch: s.epoch,
+            requested: true,
+            ..Default::default()
+        };
+    }
     pub fn next(&self) -> Option<Frame> {
         let mut s = self.0.state.lock().unwrap();
         loop {
@@ -297,6 +308,28 @@ mod tests {
             packet.header.csrc = vec![1];
             sender.push(packet, at);
         }
+    }
+    #[test]
+    fn restored_subscription_accepts_large_sequence_gap_and_requires_keyframe() {
+        let (tx, rx) = Inbox::channel();
+        let mut seq = 0;
+        frame(&tx, &mut seq, true, Instant::now());
+        assert!(rx.next().unwrap().reset);
+        seq = seq.wrapping_add(40_000);
+        rx.restart_subscription();
+        assert_eq!(tx.keyframe_request(Instant::now()), Some(1));
+        frame(&tx, &mut seq, false, Instant::now());
+        assert!(rx.0.state.lock().unwrap().frames.is_empty());
+        frame(&tx, &mut seq, true, Instant::now());
+        assert_eq!(rx.0.state.lock().unwrap().frames.len(), 1);
+        assert!(rx.next().unwrap().reset);
+        rx.close();
+        rx.restart_subscription();
+        frame(&tx, &mut seq, true, Instant::now());
+        assert!(
+            rx.next().is_none(),
+            "restart must not reopen a closed inbox"
+        );
     }
     #[test]
     fn backlog_discards_dependencies_until_fresh_keyframe() {

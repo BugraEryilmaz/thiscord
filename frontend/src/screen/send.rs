@@ -12,10 +12,17 @@ use thiscord_shared::screen::Quality;
 use webrtc::media_stream::track_local::TrackLocal;
 use webrtc::media_stream::track_local::static_rtp::TrackLocalStaticRTP;
 
+pub struct LocalPreview {
+    pub sender: Arc<super::receive::Sender>,
+    pub epoch: Arc<AtomicU32>,
+    pub visible: Arc<AtomicBool>,
+}
 pub struct Sender {
+    pub local: Option<LocalPreview>,
     pub connection: Connection,
     pub video: Arc<TrackLocalStaticRTP>,
     pub demand: Arc<Demand>,
+    pub network_demand: Option<Arc<Demand>>,
     pub force_keyframe: Arc<AtomicBool>,
     pub sequence: Arc<AtomicU32>,
     pub metrics: Metrics,
@@ -100,6 +107,24 @@ impl Sender {
                 }
                 packet.header.sequence_number =
                     self.sequence.fetch_add(1, Ordering::Relaxed) as u16;
+                if let Some(local) = &self.local
+                    && local.visible.load(Ordering::Acquire)
+                {
+                    let mut preview = packet.clone();
+                    preview.header.csrc = vec![local.epoch.load(Ordering::Acquire)];
+                    local.sender.push(preview, Instant::now());
+                    if local.sender.keyframe_request(Instant::now()).is_some() {
+                        self.force_keyframe.store(true, Ordering::Release);
+                    }
+                }
+                if self
+                    .network_demand
+                    .as_ref()
+                    .is_some_and(|d| d.bitrate() == 0)
+                {
+                    frame.budget.sent(bytes);
+                    continue;
+                }
                 let write_started = Instant::now();
                 let result =
                     tokio::time::timeout(Duration::from_millis(100), self.video.write_rtp(packet))

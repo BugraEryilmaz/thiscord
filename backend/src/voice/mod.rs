@@ -54,12 +54,13 @@ struct Member {
     info: Participant,
     source_id: uuid::Uuid,
     screen_started: Instant,
-    outgoing: [egress::Sender; 3],
-    keyframes: mpsc::Sender<u32>,
-    last_keyframe: Option<Instant>,
+    camera_started: Instant,
+    outgoing: [egress::Sender; 4],
+    keyframes: mpsc::Sender<(MediaKind, u32)>,
+    last_keyframe: [Option<Instant>; 2],
     feedback_enabled: bool,
     subscriptions_enabled: bool,
-    views: [Option<viewing::View>; ROOM_CAPACITY],
+    views: [Option<viewing::View>; ROOM_CAPACITY * 2],
     generation: Arc<AtomicU64>,
     access: Arc<access::Access>,
     metrics: Arc<[AtomicU64; 5]>,
@@ -131,7 +132,7 @@ impl VoiceAccess {
             member.info.display_name = info.display_name;
             member.info.avatar_id = info.avatar_id;
             self.generation.store(epoch, Ordering::Release);
-            Ok(members.values().map(|m| m.info.clone()).collect())
+            Ok(viewing::participants(&members))
         });
         if result.is_err() {
             self.active.store(false, Ordering::Release);
@@ -307,7 +308,7 @@ struct Handler {
     media_packets: mpsc::Sender<Ingress>,
     active: Arc<AtomicBool>,
     generation: Arc<AtomicU64>,
-    track_seen: [AtomicBool; 3],
+    track_seen: [AtomicBool; 4],
 }
 #[async_trait::async_trait]
 impl PeerConnectionEventHandler for Handler {
@@ -337,7 +338,7 @@ impl PeerConnectionEventHandler for Handler {
             self.active.store(false, Ordering::Release);
             return;
         };
-        let mime = if kind == MediaKind::ScreenVideo {
+        let mime = if kind.is_video() {
             "video/H264"
         } else {
             "audio/opus"
@@ -374,14 +375,14 @@ impl PeerConnectionEventHandler for Handler {
                     count += 1;
                     bytes += packet.payload.len();
                     if count
-                        > (if kind == MediaKind::ScreenVideo {
+                        > (if kind.is_video() {
                             thiscord_shared::screen::MAX_PACKETS_PER_SECOND
                         } else {
                             100
                         })
                         || packet.payload.len() > 1500
                         || bytes
-                            > if kind == MediaKind::ScreenVideo {
+                            > if kind.is_video() {
                                 thiscord_shared::screen::MAX_BYTES_PER_SECOND
                             } else {
                                 150_000
@@ -390,7 +391,7 @@ impl PeerConnectionEventHandler for Handler {
                         active.store(false, Ordering::Release);
                         break;
                     }
-                    if kind == MediaKind::ScreenVideo {
+                    if kind.is_video() {
                         metrics[0].fetch_add(1, Ordering::Relaxed);
                     }
                     if tx
@@ -401,7 +402,7 @@ impl PeerConnectionEventHandler for Handler {
                             arrived: Instant::now(),
                         })
                         .is_err()
-                        && kind == MediaKind::ScreenVideo
+                        && kind.is_video()
                     {
                         metrics[1].fetch_add(1, Ordering::Relaxed);
                     }
@@ -423,7 +424,7 @@ fn local_bind() -> Result<String, String> {
 }
 fn local_track(slot: usize) -> Arc<TrackLocalStaticRTP> {
     let (kind, _) = MediaKind::from_track(slot).expect("negotiated track index");
-    let video = kind == MediaKind::ScreenVideo;
+    let video = kind.is_video();
     Arc::new(TrackLocalStaticRTP::new(MediaStreamTrack::new(
         format!("speaker-{slot}"),
         format!("speaker-{slot}"),
@@ -464,12 +465,19 @@ fn may_publish(info: &Participant, kind: MediaKind) -> bool {
         && match kind {
             MediaKind::Microphone => !info.muted,
             MediaKind::ScreenVideo => info.sharing_screen,
+            MediaKind::Camera => info.camera_active,
             MediaKind::SystemAudio => info.sharing_screen && info.sharing_audio,
         }
 }
 fn may_relay(member: &Member, kind: MediaKind, arrived: Instant) -> bool {
     may_publish(&member.info, kind)
-        && (kind == MediaKind::Microphone || arrived >= member.screen_started)
+        && (kind == MediaKind::Microphone
+            || arrived
+                >= if kind == MediaKind::Camera {
+                    member.camera_started
+                } else {
+                    member.screen_started
+                })
 }
 async fn update_voice_state(
     room: &Room,
@@ -488,7 +496,10 @@ async fn update_voice_state(
         member.info.muted = muted;
         member.info.deafened = deafened;
         if deafened {
-            member.views = [None; ROOM_CAPACITY];
+            member.views = [None; ROOM_CAPACITY * 2];
+            member.info.camera_active = false;
+            member.info.sharing_screen = false;
+            member.info.sharing_audio = false;
         }
     }
 }
@@ -533,6 +544,27 @@ async fn handle_signal(
             update_voice_state(room, slot, muted, deafened, owner).await;
             Ok(())
         }
+        Some(ClientEvent::Camera { active }) => {
+            let mut members = room.members.write().await;
+            let member = members.get_mut(&slot).ok_or("camera_missing_member")?;
+            if !owner.load(Ordering::Acquire)
+                || (active
+                    && (!member.info.can_speak
+                        || member.info.deafened
+                        || !member.subscriptions_enabled))
+            {
+                return Err("camera_state_rejected");
+            }
+            if active && !member.info.camera_active {
+                member.camera_started = Instant::now();
+                member.info.camera_epoch = room
+                    .screen_epoch
+                    .fetch_add(1, Ordering::Relaxed)
+                    .wrapping_add(1);
+            }
+            member.info.camera_active = active;
+            Ok(())
+        }
         Some(ClientEvent::Screen { active, audio }) => {
             update_screen_state(room, slot, active, audio, owner)
                 .await
@@ -546,10 +578,11 @@ async fn handle_signal(
             }
         }
         Some(ClientEvent::ScreenKeyframe {
+            kind,
             slot: publisher,
             epoch,
         }) => {
-            request_keyframe(room, slot, publisher, epoch, owner).await;
+            request_keyframe(room, slot, publisher, kind, epoch, owner).await;
             Ok(())
         }
         Some(ClientEvent::Leave {}) => Err("client_leave"),
@@ -561,11 +594,12 @@ async fn request_keyframe(
     room: &Room,
     viewer: usize,
     publisher: usize,
+    kind: MediaKind,
     epoch: u32,
     owner: &AtomicBool,
 ) {
     let mut members = room.members.write().await;
-    if !owner.load(Ordering::Acquire) {
+    if !kind.is_video() || !owner.load(Ordering::Acquire) {
         return;
     }
     let Some(viewer_epoch) = members
@@ -585,9 +619,9 @@ async fn request_keyframe(
         return;
     }
     if !members.get(&publisher).is_some_and(|source| {
-        members.get(&viewer).is_some_and(|receiver| {
-            viewing::receives(receiver, source, MediaKind::ScreenVideo, Instant::now())
-        })
+        members
+            .get(&viewer)
+            .is_some_and(|receiver| viewing::receives(receiver, source, kind, Instant::now()))
     }) {
         return;
     }
@@ -600,19 +634,18 @@ async fn request_keyframe(
     };
     if !source.feedback_enabled
         || !source.active.load(Ordering::Acquire)
-        || !may_publish(&source.info, MediaKind::ScreenVideo)
-        || source.info.screen_epoch != epoch
+        || !may_publish(&source.info, kind)
+        || source.info.video_epoch(kind) != epoch
     {
         return;
     }
-    if source
-        .last_keyframe
+    if source.last_keyframe[kind.view_index(0) / ROOM_CAPACITY]
         .is_some_and(|at| at.elapsed() < Duration::from_millis(250))
     {
         return;
     }
-    source.last_keyframe = Some(Instant::now());
-    let _ = source.keyframes.try_send(epoch);
+    source.last_keyframe[kind.view_index(0) / ROOM_CAPACITY] = Some(Instant::now());
+    let _ = source.keyframes.try_send((kind, epoch));
 }
 async fn log_selected_route(pc: &dyn PeerConnection, id: RequestId) -> bool {
     for sender in pc.get_senders().await {
@@ -734,8 +767,9 @@ async fn serve(mut socket: logging::Socket, pool: DbPool, id: RequestId) {
     let (out_tx, out_rx) = egress::channel(MediaKind::Microphone);
     let (video_tx, video_rx) = egress::channel(MediaKind::ScreenVideo);
     let (audio_tx, audio_rx) = egress::channel(MediaKind::SystemAudio);
+    let (camera_tx, camera_rx) = egress::channel(MediaKind::Camera);
     let metrics: Arc<[AtomicU64; 5]> = Arc::new(std::array::from_fn(|_| AtomicU64::new(0)));
-    let (keyframe_tx, mut keyframe_rx) = mpsc::channel(1);
+    let (keyframe_tx, mut keyframe_rx) = mpsc::channel(2);
     let source_id = uuid::Uuid::new_v4();
     let network = Arc::new(RwLock::new(Default::default()));
     info.screen_epoch = room
@@ -756,12 +790,13 @@ async fn serve(mut socket: logging::Socket, pool: DbPool, id: RequestId) {
             info: info.clone(),
             source_id,
             screen_started: Instant::now(),
-            outgoing: [out_tx, video_tx, audio_tx],
+            camera_started: Instant::now(),
+            outgoing: [out_tx, video_tx, audio_tx, camera_tx],
             keyframes: keyframe_tx,
-            last_keyframe: None,
+            last_keyframe: [None; 2],
             feedback_enabled: false,
             subscriptions_enabled: false,
-            views: [None; ROOM_CAPACITY],
+            views: [None; ROOM_CAPACITY * 2],
             generation: generation.clone(),
             access: connection_access.clone(),
             metrics: metrics.clone(),
@@ -880,6 +915,7 @@ async fn serve(mut socket: logging::Socket, pool: DbPool, id: RequestId) {
                     slot,
                     can_speak: info.can_speak,
                     screen_video: true,
+                    camera_video: true,
                     screen_feedback: true,
                     screen_subscriptions: true,
                     ice_servers,
@@ -968,7 +1004,7 @@ async fn serve(mut socket: logging::Socket, pool: DbPool, id: RequestId) {
                     csrc: if kind == MediaKind::Microphone {
                         vec![]
                     } else {
-                        vec![source.info.screen_epoch]
+                        vec![source.info.video_epoch(kind)]
                     },
                     sequence_number: packet.header.sequence_number,
                     timestamp: packet.header.timestamp,
@@ -994,17 +1030,17 @@ async fn serve(mut socket: logging::Socket, pool: DbPool, id: RequestId) {
                                 },
                             )
                             .is_err()
-                            && kind == MediaKind::ScreenVideo
+                            && kind.is_video()
                         {
                             m.metrics[2].fetch_add(1, Ordering::Relaxed);
-                            recovery.push((other, source.info.screen_epoch, m.active.clone()));
+                            recovery.push((other, source.info.video_epoch(kind), m.active.clone()));
                         }
                     }
                 }
                 drop(members);
                 drop(_permit);
                 for (viewer, epoch, viewer_active) in recovery {
-                    request_keyframe(&relay_room, viewer, slot, epoch, &viewer_active).await;
+                    request_keyframe(&relay_room, viewer, slot, kind, epoch, &viewer_active).await;
                 }
             }
         });
@@ -1014,6 +1050,7 @@ async fn serve(mut socket: logging::Socket, pool: DbPool, id: RequestId) {
             (MediaKind::Microphone, out_rx),
             (MediaKind::ScreenVideo, video_rx),
             (MediaKind::SystemAudio, audio_rx),
+            (MediaKind::Camera, camera_rx),
         ] {
             let writer = egress::Writer {
                 access: connection_access.clone(),
@@ -1083,11 +1120,11 @@ async fn serve(mut socket: logging::Socket, pool: DbPool, id: RequestId) {
                         break;
                     }
                 },
-                Some(epoch)=keyframe_rx.recv()=>{
+                Some((kind, epoch))=keyframe_rx.recv()=>{
                     // Revalidate the publisher and generation after queued feedback.
                     let allowed = connection_access.packet(access.generation.load(Ordering::Acquire), access.generation.load(Ordering::Acquire)).is_some()
-                        && room.members.read().await.get(&slot).is_some_and(|m| m.source_id == source_id && m.feedback_enabled && m.active.load(Ordering::Acquire) && m.info.sharing_screen && m.info.screen_epoch == epoch);
-                    if allowed && send(&mut socket, ServerEvent::ScreenKeyframe { epoch }).await.is_err() { break; }
+                        && room.members.read().await.get(&slot).is_some_and(|m| m.source_id == source_id && m.feedback_enabled && m.active.load(Ordering::Acquire) && m.info.video_active(kind) && m.info.video_epoch(kind) == epoch);
+                    if allowed && send(&mut socket, ServerEvent::ScreenKeyframe { kind, epoch }).await.is_err() { break; }
                 },
                 Some(call)=audio_requests.recv()=>{
                     if socket.detached() { call.reject(Failure::Unavailable); continue; }
@@ -1117,7 +1154,9 @@ async fn serve(mut socket: logging::Socket, pool: DbPool, id: RequestId) {
                         continue;
                     }
                     budget += 1;
-                    if budget > 30 { socket.end("signaling_rate_limit"); break; }
+                    // 14 video subscriptions can each request recovery twice/second,
+                    // alongside state, subscription, keepalive and publication changes.
+                    if budget > 64 { socket.end("signaling_rate_limit"); break; }
                     if let Err(reason)=handle_signal(&mut socket, &room, slot, event, &active).await { socket.end(reason); break; }
                 },
                 _=tick.tick()=>{
@@ -1136,8 +1175,10 @@ async fn serve(mut socket: logging::Socket, pool: DbPool, id: RequestId) {
                         Ok(members)=>members,
                         Err(error)=>{access_failed(&mut socket,id,error).await;break;}
                     };
-                    if let Some((epoch, bitrate)) = viewing::target(&room, slot).await
-                        && send(&mut socket, ServerEvent::ScreenTarget { epoch, bitrate }).await.is_err() { break; }
+                    for kind in [MediaKind::ScreenVideo, MediaKind::Camera] {
+                        if let Some((epoch, bitrate)) = viewing::target(&room, slot, kind).await
+                            && send(&mut socket, ServerEvent::ScreenTarget { kind, epoch, bitrate }).await.is_err() { active.store(false, Ordering::Release); break; }
+                    }
                     if !route_logged { route_logged=log_selected_route(pc.as_ref(),id).await; }
                 if send(&mut socket,ServerEvent::Participants{members}).await.is_err(){break;}
                 }
@@ -1362,19 +1403,25 @@ mod send_tests {
                         sharing_screen: slot == 1,
                         sharing_audio: false,
                         screen_epoch: 7,
+                        camera_active: false,
+                        camera_epoch: 0,
+                        screen_viewers: vec![],
+                        camera_viewers: vec![],
                     },
                     source_id: uuid::Uuid::new_v4(),
                     screen_started: Instant::now(),
+                    camera_started: Instant::now(),
                     outgoing: [
                         egress::channel(MediaKind::Microphone).0,
                         egress::channel(MediaKind::ScreenVideo).0,
                         egress::channel(MediaKind::SystemAudio).0,
+                        egress::channel(MediaKind::Camera).0,
                     ],
                     keyframes,
-                    last_keyframe: None,
+                    last_keyframe: [None; 2],
                     feedback_enabled: true,
                     subscriptions_enabled: true,
-                    views: [None; ROOM_CAPACITY],
+                    views: [None; ROOM_CAPACITY * 2],
                     generation: Arc::new(AtomicU64::new(epoch)),
                     access: connection_access.clone(),
                     active: Arc::new(AtomicBool::new(true)),
@@ -1388,6 +1435,7 @@ mod send_tests {
                 &room,
                 0,
                 vec![thiscord_shared::screen::Subscription {
+                    kind: thiscord_shared::voice::MediaKind::ScreenVideo,
                     slot: 1,
                     owner,
                     epoch: 7,
@@ -1402,6 +1450,7 @@ mod send_tests {
                 &room,
                 viewer,
                 publisher,
+                MediaKind::ScreenVideo,
                 stream_epoch,
                 &AtomicBool::new(true),
             )
@@ -1415,7 +1464,15 @@ mod send_tests {
             .unwrap()
             .info
             .deafened = true;
-        request_keyframe(&room, 0, 1, 7, &AtomicBool::new(true)).await;
+        request_keyframe(
+            &room,
+            0,
+            1,
+            MediaKind::ScreenVideo,
+            7,
+            &AtomicBool::new(true),
+        )
+        .await;
         assert!(receivers[1].try_recv().is_err());
         room.members
             .write()
@@ -1424,17 +1481,44 @@ mod send_tests {
             .unwrap()
             .info
             .deafened = false;
-        request_keyframe(&room, 0, 1, 7, &AtomicBool::new(true)).await;
-        assert_eq!(receivers[1].try_recv().unwrap(), 7);
-        request_keyframe(&room, 0, 1, 7, &AtomicBool::new(true)).await;
+        request_keyframe(
+            &room,
+            0,
+            1,
+            MediaKind::ScreenVideo,
+            7,
+            &AtomicBool::new(true),
+        )
+        .await;
+        assert_eq!(
+            receivers[1].try_recv().unwrap(),
+            (MediaKind::ScreenVideo, 7)
+        );
+        request_keyframe(
+            &room,
+            0,
+            1,
+            MediaKind::ScreenVideo,
+            7,
+            &AtomicBool::new(true),
+        )
+        .await;
         assert!(receivers[1].try_recv().is_err());
         {
             let mut members = room.members.write().await;
             let publisher = members.get_mut(&1).unwrap();
-            publisher.last_keyframe = None;
+            publisher.last_keyframe = [None; 2];
             publisher.info.can_speak = false;
         }
-        request_keyframe(&room, 0, 1, 7, &AtomicBool::new(true)).await;
+        request_keyframe(
+            &room,
+            0,
+            1,
+            MediaKind::ScreenVideo,
+            7,
+            &AtomicBool::new(true),
+        )
+        .await;
         assert!(receivers[1].try_recv().is_err());
     }
     #[tokio::test]

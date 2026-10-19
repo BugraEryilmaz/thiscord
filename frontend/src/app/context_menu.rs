@@ -84,7 +84,7 @@ fn preference_key(account: AccountId) -> String {
 }
 
 #[component]
-fn ParticipantVolume(
+pub(super) fn ParticipantVolume(
     ui: Ui,
     guild: GuildId,
     channel: ChannelId,
@@ -115,6 +115,7 @@ fn ParticipantVolume(
                 stream.map(|stream|view!{<super::audio::StreamVolume ui=ui stream=stream compact=true/>})
             }/>
         </Show>
+        <For each=move ||{ui.audio_status.get().map(|s|s.streams).unwrap_or_default().into_iter().filter(|s| connected() && s.target.is_some_and(|t|t.guild_id==guild && t.account_id==member && t.shared_audio)).collect::<Vec<_>>()} key=|s|(s.id.clone(),s.target) children=move |stream|view!{<super::audio::StreamVolume ui=ui stream=stream compact=true/>}/>
         <p class="volume-hint">"Only changes what you hear. 0% mutes."</p>
     </section>}
 }

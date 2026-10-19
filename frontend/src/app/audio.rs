@@ -19,6 +19,11 @@ pub(super) fn join(
     guild: thiscord_shared::permissions::Guild,
     channel: thiscord_shared::permissions::Channel,
 ) {
+    if ui.voice.get_untracked().channel_id == Some(channel.id) {
+        ui.selected_channel.set(Some(channel));
+        ui.page.set("servers");
+        return;
+    }
     super::friends::end_call(ui);
     join_location(
         ui,
@@ -274,7 +279,7 @@ pub(super) fn VoiceBar(ui: Ui) -> impl IntoView {
                 <button class="icon-button danger" aria-label="Disconnect voice" data-tip="Disconnect" disabled=move ||ui.voice_joining.get() on:click=move |_|leave(ui)><Icon kind=Glyph::Disconnect/></button>
             </div>
             <div class="mt-2 flex items-center gap-2">
-                <button class="icon-button voice-action" disabled aria-label="Camera — not available yet" data-tip="Camera — not available yet"><Icon kind=Glyph::CameraOff/></button>
+                <super::camera::CameraControls ui=ui/>
                 <super::screen::ScreenControls ui=ui/>
                 <button class="icon-button voice-action" aria-label="Audio settings" data-tip="Audio settings" on:click=move |_|ui.page.set("audio")><Icon kind=Glyph::Volume/></button>
                 <Show when=move||!ui.audio_control.is_remote() && ui.audio.get().mode==TransmitMode::PushToTalk><button class="icon-button voice-action touch-none select-none" aria-label="Hold to talk" data-tip="Hold to talk" on:pointerdown=move |_|pressed(true) on:pointerup=move |_|pressed(false) on:pointerleave=move |_|pressed(false) on:pointercancel=move |_|pressed(false) on:keydown=move|e|{if matches!(e.key().as_str()," "|"Enter"){e.prevent_default();pressed(true);}} on:keyup=move|_|pressed(false) on:blur=move |_|pressed(false)><Icon kind=Glyph::Mic/></button></Show>

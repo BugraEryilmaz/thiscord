@@ -59,6 +59,10 @@ pub(super) fn Host() -> impl IntoView {
         // in that layer too, while retaining one tooltip and one accessible ID.
         if let Some(dialog) = element.closest("dialog[open]").ok().flatten() {
             let _ = dialog.append_child(&node);
+        } else if let Some(fullscreen) = document().fullscreen_element()
+            && fullscreen.contains(Some(&element))
+        {
+            let _ = fullscreen.append_child(&node);
         } else if let Some(parent) = original_parent.get_value() {
             let _ = parent.append_child(&node);
         }
@@ -112,6 +116,7 @@ pub(super) fn Host() -> impl IntoView {
         }
     });
     let resize = window_event_listener(leptos::ev::resize, move |_| clear());
+    let fullscreen = window_event_listener(leptos::ev::fullscreenchange, move |_| clear());
     let wheel = window_event_listener(leptos::ev::wheel, move |_| clear());
     on_cleanup(move || {
         over.remove();
@@ -122,6 +127,7 @@ pub(super) fn Host() -> impl IntoView {
         context.remove();
         key.remove();
         resize.remove();
+        fullscreen.remove();
         wheel.remove();
     });
     view! { <div node_ref=tooltip id="thiscord-tooltip" role="tooltip" class="quick-tooltip"

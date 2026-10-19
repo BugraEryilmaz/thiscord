@@ -9,7 +9,7 @@ const VIDEO_AGE: Duration = Duration::from_millis(150);
 const SCREEN_BACKOFF: Duration = Duration::from_millis(20);
 
 fn max_age(kind: MediaKind) -> Duration {
-    if kind == MediaKind::ScreenVideo {
+    if kind.is_video() {
         VIDEO_AGE
     } else {
         AUDIO_AGE
@@ -30,7 +30,7 @@ pub(super) struct Queued {
 }
 
 pub(super) fn channel(kind: MediaKind) -> (Sender, mpsc::Receiver<Queued>) {
-    let (packets, bytes) = if kind == MediaKind::ScreenVideo {
+    let (packets, bytes) = if kind.is_video() {
         (512, 512 * 1024)
     } else {
         (32, 32 * 1024)
@@ -60,7 +60,8 @@ impl Sender {
             || delivery.epoch != source.generation.load(Ordering::Acquire)
             || delivery.receiver_epoch != receiver.generation.load(Ordering::Acquire)
             || (self.kind != MediaKind::Microphone
-                && delivery.packet.header.csrc.first().copied() != Some(source.info.screen_epoch))
+                && delivery.packet.header.csrc.first().copied()
+                    != Some(source.info.video_epoch(self.kind)))
             || !viewing::receives(receiver, source, self.kind, delivery.queued_at)
         {
             return Ok(());
@@ -166,11 +167,7 @@ impl Writer {
                         .wrapping_sub(packet.header.sequence_number),
                     last[source_slot]
                         .1
-                        .wrapping_add(if kind == MediaKind::ScreenVideo {
-                            9000
-                        } else {
-                            960
-                        })
+                        .wrapping_add(if kind.is_video() { 9000 } else { 960 })
                         .wrapping_sub(packet.header.timestamp),
                 );
             }
@@ -216,7 +213,7 @@ impl Writer {
                             && members.get(&source_slot).is_some_and(|m| {
                                 m.source_id == source
                                     && (kind == MediaKind::Microphone
-                                        || packet_epoch == Some(m.info.screen_epoch))
+                                        || packet_epoch == Some(m.info.video_epoch(kind)))
                                     && members.get(&self.receiver_slot).is_some_and(|receiver| {
                                         viewing::receives(receiver, m, kind, queued_at)
                                     })
@@ -247,25 +244,26 @@ impl Writer {
                 // Discard this source's backlog and briefly back off admission to
                 // the shared driver. Other sources and microphone keep running.
                 retry_after[source_slot] = Some(Instant::now() + SCREEN_BACKOFF);
-                if kind == MediaKind::ScreenVideo && delivered.is_err() {
+                if kind.is_video() && delivered.is_err() {
                     self.metrics[4].fetch_add(1, Ordering::Relaxed);
                 }
                 self.dropped(kind, source_slot, screen_epoch).await;
                 continue;
             }
-            if kind == MediaKind::ScreenVideo {
+            if kind.is_video() {
                 self.metrics[3].fetch_add(1, Ordering::Relaxed);
             }
         }
     }
 
     async fn dropped(&self, kind: MediaKind, source_slot: usize, epoch: u32) {
-        if kind == MediaKind::ScreenVideo {
+        if kind.is_video() {
             self.metrics[2].fetch_add(1, Ordering::Relaxed);
             request_keyframe(
                 &self.room,
                 self.receiver_slot,
                 source_slot,
+                kind,
                 epoch,
                 &self.active,
             )
@@ -292,6 +290,7 @@ mod tests {
                 room,
                 0,
                 vec![thiscord_shared::screen::Subscription {
+                    kind: thiscord_shared::voice::MediaKind::ScreenVideo,
                     slot: 1,
                     owner: publisher.account_id,
                     epoch: publisher.screen_epoch,
@@ -334,7 +333,11 @@ mod tests {
 
     #[tokio::test]
     async fn queue_admission_filters_unsubscribed_expired_and_restarted_views() {
-        for kind in MediaKind::ALL {
+        for kind in [
+            MediaKind::Microphone,
+            MediaKind::ScreenVideo,
+            MediaKind::SystemAudio,
+        ] {
             for change in [
                 ViewerChange::Unsubscribe,
                 ViewerChange::Expire,
@@ -376,7 +379,11 @@ mod tests {
 
     #[tokio::test]
     async fn each_writer_rechecks_viewer_and_share_after_waiting_for_room_access() {
-        for kind in MediaKind::ALL {
+        for kind in [
+            MediaKind::Microphone,
+            MediaKind::ScreenVideo,
+            MediaKind::SystemAudio,
+        ] {
             for change in [
                 ViewerChange::Unsubscribe,
                 ViewerChange::Expire,
@@ -414,7 +421,7 @@ mod tests {
                 // over a later writer, so it must observe this intervening change.
                 match change {
                     ViewerChange::Unsubscribe => {
-                        lock.get_mut(&0).unwrap().views = [None; ROOM_CAPACITY]
+                        lock.get_mut(&0).unwrap().views = [None; ROOM_CAPACITY * 2]
                     }
                     ViewerChange::Expire => {
                         lock.get_mut(&0).unwrap().views[1].as_mut().unwrap().renewed -=
@@ -515,7 +522,7 @@ mod tests {
         }
     }
 
-    async fn fixture() -> (Writer, Source, mpsc::Receiver<u32>) {
+    async fn fixture() -> (Writer, Source, mpsc::Receiver<(MediaKind, u32)>) {
         let room = Arc::new(Room::default());
         let source = source();
         let receiver = self::source();
@@ -545,15 +552,20 @@ mod tests {
                         sharing_screen: true,
                         sharing_audio: true,
                         screen_epoch: 7,
+                        camera_active: false,
+                        camera_epoch: 0,
+                        screen_viewers: vec![],
+                        camera_viewers: vec![],
                     },
                     source_id: endpoint.id,
                     screen_started: Instant::now(),
+                    camera_started: Instant::now(),
                     outgoing: MediaKind::ALL.map(|kind| channel(kind).0),
                     keyframes: keyframes.clone(),
-                    last_keyframe: None,
+                    last_keyframe: [None; 2],
                     feedback_enabled: true,
                     subscriptions_enabled: true,
-                    views: [None; ROOM_CAPACITY],
+                    views: [None; ROOM_CAPACITY * 2],
                     generation: endpoint.generation.clone(),
                     access: endpoint.access.clone(),
                     active: active.clone(),
@@ -567,6 +579,7 @@ mod tests {
                 &room,
                 0,
                 vec![thiscord_shared::screen::Subscription {
+                    kind: thiscord_shared::voice::MediaKind::ScreenVideo,
                     slot: 1,
                     owner,
                     epoch: 7,
@@ -686,7 +699,11 @@ mod tests {
 
     #[tokio::test]
     async fn screen_transport_errors_are_nonfatal_and_microphone_errors_still_disconnect() {
-        for kind in MediaKind::ALL {
+        for kind in [
+            MediaKind::Microphone,
+            MediaKind::ScreenVideo,
+            MediaKind::SystemAudio,
+        ] {
             let (writer, source, mut feedback) = fixture().await;
             let active = writer.active.clone();
             let (tx, rx) = channel(kind);
@@ -697,15 +714,19 @@ mod tests {
                 active.load(Ordering::Acquire),
                 kind != MediaKind::Microphone
             );
-            if kind == MediaKind::ScreenVideo {
-                assert_eq!(feedback.try_recv().unwrap(), 7);
+            if kind.is_video() {
+                assert_eq!(feedback.try_recv().unwrap(), (MediaKind::ScreenVideo, 7));
             }
         }
     }
 
     #[tokio::test]
     async fn byte_packet_and_age_budgets_release_on_drop_close_and_cancel() {
-        for kind in MediaKind::ALL {
+        for kind in [
+            MediaKind::Microphone,
+            MediaKind::ScreenVideo,
+            MediaKind::SystemAudio,
+        ] {
             let source = source();
             let (tx, mut rx) = channel(kind);
             let budget = tx.bytes.available_permits();
@@ -765,7 +786,7 @@ mod tests {
                 panic!("expired packet sent")
             })
             .await;
-        assert_eq!(feedback.try_recv().unwrap(), 7);
+        assert_eq!(feedback.try_recv().unwrap(), (MediaKind::ScreenVideo, 7));
         assert!(active.load(Ordering::Acquire));
     }
 
@@ -784,7 +805,7 @@ mod tests {
         tokio::time::sleep(VIDEO_AGE + Duration::from_millis(10)).await;
         drop(members);
         task.await.unwrap();
-        assert_eq!(feedback.try_recv().unwrap(), 7);
+        assert_eq!(feedback.try_recv().unwrap(), (MediaKind::ScreenVideo, 7));
     }
 
     #[tokio::test]
@@ -840,7 +861,11 @@ mod tests {
 
     #[tokio::test]
     async fn every_writer_rejects_either_endpoints_revoked_or_stale_queue() {
-        for kind in MediaKind::ALL {
+        for kind in [
+            MediaKind::Microphone,
+            MediaKind::ScreenVideo,
+            MediaKind::SystemAudio,
+        ] {
             for revoke_source in [true, false] {
                 for reauthorize in [false, true] {
                     let (writer, source, _) = fixture().await;
@@ -955,7 +980,11 @@ mod tests {
 
     #[tokio::test]
     async fn independent_writers_reject_revoked_deafened_stopped_and_replaced_sources() {
-        for kind in MediaKind::ALL {
+        for kind in [
+            MediaKind::Microphone,
+            MediaKind::ScreenVideo,
+            MediaKind::SystemAudio,
+        ] {
             for reason in 0..5 {
                 let (writer, source, _) = fixture().await;
                 let (tx, rx) = channel(kind);

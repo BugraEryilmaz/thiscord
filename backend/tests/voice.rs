@@ -235,8 +235,8 @@ struct Peer {
     packets: mpsc::Receiver<rtp::Packet>,
     slot: usize,
     sequence: u16,
-    screen_tracks: [Arc<TrackLocalStaticRTP>; 2],
-    screen_sequences: [u16; 2],
+    screen_tracks: [Arc<TrackLocalStaticRTP>; 3],
+    screen_sequences: [u16; 3],
     views: Vec<thiscord_shared::screen::Subscription>,
 }
 impl Peer {
@@ -300,7 +300,7 @@ impl Peer {
             .await
             .unwrap();
         let screen_tracks = std::array::from_fn(|index| {
-            let video = index == 0;
+            let video = index != 1;
             Arc::new(TrackLocalStaticRTP::new(MediaStreamTrack::new(
                 format!("screen-{index}"),
                 format!("screen-{index}"),
@@ -360,7 +360,7 @@ impl Peer {
             slot,
             sequence: 0,
             screen_tracks,
-            screen_sequences: [0; 2],
+            screen_sequences: [0; 3],
             views: vec![],
         }
     }
@@ -388,14 +388,14 @@ impl Peer {
             .write_rtp(rtp::Packet {
                 header: rtp::header::Header {
                     version: 2,
-                    payload_type: if kind == 0 { 125 } else { 111 },
+                    payload_type: if kind != 1 { 125 } else { 111 },
                     ssrc: 901 + kind as u32,
                     sequence_number: sequence,
-                    timestamp: sequence as u32 * if kind == 0 { 9000 } else { 960 },
+                    timestamp: sequence as u32 * if kind != 1 { 9000 } else { 960 },
                     marker: true,
                     ..Default::default()
                 },
-                payload: if kind == 0 {
+                payload: if kind != 1 {
                     vec![0x65, 1, 2, 3]
                 } else {
                     vec![0xf8, 0xff, 0xfe]
@@ -438,6 +438,7 @@ async fn watch_screen(source: &mut Peer, receiver: &mut Peer) {
         }
     };
     receiver.views = vec![thiscord_shared::screen::Subscription {
+        kind: thiscord_shared::voice::MediaKind::ScreenVideo,
         slot: member.slot,
         owner: member.account_id,
         epoch: member.screen_epoch,
@@ -463,6 +464,8 @@ async fn screen_forwarded(source: &mut Peer, receiver: &mut Peer, kind: usize) -
     while receiver.packets.try_recv().is_ok() {}
     let base = if kind == 0 {
         thiscord_shared::screen::SSRC_BASE
+    } else if kind == 2 {
+        voice::MediaKind::Camera.ssrc_base()
     } else {
         thiscord_shared::screen::AUDIO_SSRC_BASE
     };
@@ -1033,6 +1036,8 @@ async fn sfu_forwarding_permissions_isolation_and_cleanup() {
     let mut a = Peer::new(join(addr, &ot, guild.clone(), channel.clone()).await).await;
     let mut b = Peer::new(join(addr, &mt, guild.clone(), channel.clone()).await).await;
     let mut isolated = Peer::new(join(addr, &ot, guild.clone(), other).await).await;
+    camera_grid(&mut a, &mut b).await;
+    assert!(isolated.packets.try_recv().is_err());
     // Existing peers receive profile picture changes/removal without renegotiation.
     let mut picture = std::io::Cursor::new(Vec::new());
     image::DynamicImage::new_rgb8(8, 8)
@@ -1306,6 +1311,7 @@ async fn sfu_forwarding_permissions_isolation_and_cleanup() {
     send(
         &mut b.socket,
         ClientEvent::ScreenKeyframe {
+            kind: thiscord_shared::voice::MediaKind::ScreenVideo,
             slot: a.slot,
             epoch: video.header.csrc[0],
         },
@@ -1314,7 +1320,7 @@ async fn sfu_forwarding_permissions_isolation_and_cleanup() {
     tokio::time::timeout(Duration::from_secs(2), async {
         loop {
             match event(&mut a.socket).await {
-                ServerEvent::ScreenKeyframe { epoch } => {
+                ServerEvent::ScreenKeyframe { epoch, .. } => {
                     assert_eq!(epoch, video.header.csrc[0]);
                     break;
                 }
@@ -1806,4 +1812,147 @@ async fn sfu_forwarding_permissions_isolation_and_cleanup() {
     .unwrap();
     assert_eq!(state["guild"]["owner"], json!(owner));
     serving.abort();
+}
+
+// Synthetic encoded packets exercise the real encrypted SFU without a camera.
+async fn camera_roster(peer: &mut Peer) -> voice::Participant {
+    still_connected(&mut peer.socket).await;
+    loop {
+        if let ServerEvent::Participants { members } = event(&mut peer.socket).await
+            && let Some(m) = members
+                .into_iter()
+                .find(|m| m.slot == peer.slot && m.camera_active && m.sharing_screen)
+        {
+            return m;
+        }
+    }
+}
+async fn expect_viewers(
+    source: &mut Peer,
+    viewer: &mut Peer,
+    publisher: &voice::Participant,
+    watcher: &voice::Participant,
+    screen: bool,
+    camera: bool,
+) {
+    tokio::time::timeout(Duration::from_secs(8), async {
+        loop {
+            send(
+                &mut viewer.socket,
+                ClientEvent::ScreenViews {
+                    views: viewer.views.clone(),
+                },
+            )
+            .await;
+            if let ServerEvent::Participants { members } = event(&mut source.socket).await
+                && let Some(info) = members
+                    .iter()
+                    .find(|m| m.account_id == publisher.account_id)
+                && info.screen_viewers
+                    == if screen {
+                        vec![watcher.account_id]
+                    } else {
+                        vec![]
+                    }
+                && info.camera_viewers
+                    == if camera {
+                        vec![watcher.account_id]
+                    } else {
+                        vec![]
+                    }
+            {
+                break;
+            }
+        }
+    })
+    .await
+    .expect("Call participant snapshots must report current per-stream viewers");
+}
+async fn camera_grid(source: &mut Peer, viewer: &mut Peer) {
+    use voice::MediaKind;
+    for peer in [&mut *source, &mut *viewer] {
+        send(&mut peer.socket, ClientEvent::Camera { active: true }).await;
+        send(
+            &mut peer.socket,
+            ClientEvent::Screen {
+                active: true,
+                audio: true,
+            },
+        )
+        .await;
+    }
+    let a = camera_roster(source).await;
+    let b = camera_roster(viewer).await;
+    for (peer, publisher) in [(&mut *viewer, &a), (&mut *source, &b)] {
+        peer.views = [MediaKind::ScreenVideo, MediaKind::Camera]
+            .map(|kind| thiscord_shared::screen::Subscription {
+                kind,
+                slot: publisher.slot,
+                owner: publisher.account_id,
+                epoch: publisher.video_epoch(kind),
+                bitrate: 1_500_000,
+            })
+            .to_vec();
+    }
+    for kind in 0..3 {
+        let packet = screen_forwarded(source, viewer, kind).await;
+        assert_eq!(
+            packet.header.csrc,
+            vec![if kind == 2 {
+                a.camera_epoch
+            } else {
+                a.screen_epoch
+            }]
+        );
+        screen_forwarded(viewer, source, kind).await;
+    }
+    expect_viewers(source, viewer, &a, &b, true, true).await;
+    // Hiding a screen removes its audio, independently of the same owner's camera.
+    viewer.views.retain(|v| v.kind == MediaKind::Camera);
+    screen_forwarded(source, viewer, 2).await;
+    screen_blocked(source, viewer).await;
+    forwarded(source, viewer).await;
+    expect_viewers(source, viewer, &a, &b, false, true).await;
+    // A restarted camera cannot inherit an old subscription.
+    send(&mut source.socket, ClientEvent::Camera { active: false }).await;
+    send(&mut source.socket, ClientEvent::Camera { active: true }).await;
+    let restarted = camera_roster(source).await;
+    assert_ne!(restarted.camera_epoch, a.camera_epoch);
+    assert_eq!(restarted.screen_epoch, a.screen_epoch);
+    send(
+        &mut viewer.socket,
+        ClientEvent::ScreenViews {
+            views: viewer.views.clone(),
+        },
+    )
+    .await;
+    still_connected(&mut viewer.socket).await;
+    tokio::time::sleep(Duration::from_millis(200)).await;
+    while viewer.packets.try_recv().is_ok() {}
+    for _ in 0..5 {
+        source.publish_screen(2).await;
+        assert!(
+            tokio::time::timeout(Duration::from_millis(40), viewer.packets.recv())
+                .await
+                .is_err()
+        );
+    }
+    expect_viewers(source, viewer, &restarted, &b, false, false).await;
+    viewer.views[0].epoch = restarted.camera_epoch;
+    screen_forwarded(source, viewer, 2).await;
+    for peer in [source, viewer] {
+        send(&mut peer.socket, ClientEvent::Camera { active: false }).await;
+        send(
+            &mut peer.socket,
+            ClientEvent::Screen {
+                active: false,
+                audio: false,
+            },
+        )
+        .await;
+        peer.views.clear();
+        send(&mut peer.socket, ClientEvent::ScreenViews { views: vec![] }).await;
+        still_connected(&mut peer.socket).await;
+        while peer.packets.try_recv().is_ok() {}
+    }
 }

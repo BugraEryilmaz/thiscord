@@ -28,6 +28,7 @@ impl Demand {
 }
 
 pub struct Receiver {
+    maximum: u32,
     bitrate: u32,
     healthy: u8,
     samples: u8,
@@ -35,8 +36,15 @@ pub struct Receiver {
 }
 impl Default for Receiver {
     fn default() -> Self {
+        Self::with_maximum(INITIAL_VIEW_BITRATE)
+    }
+}
+impl Receiver {
+    pub fn with_maximum(maximum: u32) -> Self {
+        let maximum = maximum.clamp(MIN_VIEW_BITRATE, MAX_VIEW_BITRATE);
         Self {
-            bitrate: INITIAL_VIEW_BITRATE,
+            maximum,
+            bitrate: maximum,
             healthy: 0,
             samples: 0,
             idle: 0,
@@ -67,7 +75,7 @@ impl Receiver {
         } else {
             self.healthy += 1;
             if self.healthy >= 10 {
-                self.bitrate = (self.bitrate * 125 / 100).min(MAX_VIEW_BITRATE);
+                self.bitrate = (self.bitrate * 125 / 100).min(self.maximum);
                 self.healthy = 0;
             }
         }
@@ -77,6 +85,19 @@ impl Receiver {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn camera_budget_starts_at_encoder_limit_and_reacts_to_congestion() {
+        let mut receiver = Receiver::with_maximum(thiscord_shared::camera::MAX_BITRATE);
+        assert_eq!(receiver.bitrate(), 1_500_000);
+        for _ in 0..3 {
+            receiver.sample(true, true);
+        }
+        assert_eq!(receiver.bitrate(), 975_000);
+        for _ in 0..200 {
+            receiver.sample(false, true);
+        }
+        assert_eq!(receiver.bitrate(), 1_500_000);
+    }
     #[test]
     fn healthy_viewer_attempts_selected_4k60_immediately() {
         let quality = thiscord_shared::screen::Quality {

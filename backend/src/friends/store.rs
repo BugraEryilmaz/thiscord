@@ -312,6 +312,10 @@ pub(crate) fn voice(
             sharing_screen: false,
             sharing_audio: false,
             screen_epoch: 0,
+            camera_active: false,
+            camera_epoch: 0,
+            screen_viewers: vec![],
+            camera_viewers: vec![],
         },
         0,
     ))

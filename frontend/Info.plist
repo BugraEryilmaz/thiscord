@@ -3,4 +3,5 @@
 <plist version="1.0"><dict>
 <key>NSMicrophoneUsageDescription</key><string>Thiscord uses your microphone when you start an audio test or join voice chat.</string>
 <key>NSLocalNetworkUsageDescription</key><string>Thiscord connects to your voice server and exchanges real-time audio with devices on your local network.</string>
+<key>NSCameraUsageDescription</key><string>Thiscord uses your camera only when you turn it on in a call.</string>
 </dict></plist>
