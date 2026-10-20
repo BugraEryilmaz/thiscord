@@ -183,7 +183,9 @@ and single-process chat/media enforcement.
   callbacks while potentially blocked driver cleanup runs separately.
 - [ ] Physical microphone/headset, suspend and acoustic acceptance on all three OSes.
 - [ ] macOS runtime/permission spike; Wayland global shortcut portal integration.
-- [ ] Arbitrary sample-rate resampling and Bluetooth hands-free format support.
+- [x] Negotiate reported PCM formats from 8-384 kHz for capture/playback, with
+  bounded sample-rate conversion, continuous timing and post-conversion echo reference.
+- [ ] Automatic Bluetooth mode switching and headset hardware acceptance.
 - [x] Timestamp-aware adaptive receive playout, combined packet/PCM budgeting,
   bounded fractional clock correction, deadline FEC/PLC and deterministic traces;
   preserve exact capture gaps and acknowledged PCM flushes through rate correction.

@@ -148,7 +148,8 @@ on their respective OSes. This template targets all three; runtime verification,
 installer packaging, icons and signing remain roadmap work.
 Native audio also needs CMake and a C compiler for bundled libopus; Linux needs
 `libasound2-dev` and `pkg-config`. macOS uses CoreAudio and Windows uses WASAPI.
-The initial native path requires 48 kHz mono/stereo devices. Hardware acceptance,
+The native path accepts 8-384 kHz PCM devices with 1-32 channels and converts
+capture/playback to the internal 48 kHz pipeline. Hardware acceptance,
 macOS runtime and public STUN/TURN deployment remain open; see docs/audio.md.
 
 Install frontend tools on the desktop host:
