@@ -22,6 +22,7 @@ pub(crate) struct Session {
     commands: mpsc::Sender<ClientEvent>,
     pub events: mpsc::Receiver<Result<Message, Failure>>,
     recovering: Arc<AtomicBool>,
+    wake: Arc<tokio::sync::Notify>,
     stop: Option<oneshot::Sender<()>>,
     task: tokio::task::JoinHandle<()>,
 }
@@ -37,12 +38,15 @@ impl Session {
         let (stop, stopped) = oneshot::channel();
         let recovering = Arc::new(AtomicBool::new(false));
         let state = recovering.clone();
+        let wake = Arc::new(tokio::sync::Notify::new());
+        let worker_wake = wake.clone();
         let task = tokio::spawn(async move {
             let mut worker = Worker {
                 link: Some((send, receive)),
                 credentials,
                 connection,
                 recovering: state,
+                wake: worker_wake,
                 sequence: 0,
             };
             let result = tokio::select! { biased;
@@ -64,12 +68,19 @@ impl Session {
             commands,
             events: incoming,
             recovering,
+            wake,
             stop: Some(stop),
             task,
         }
     }
     pub fn recovering(&self) -> bool {
         self.recovering.load(Ordering::Acquire)
+    }
+    /// An unanswered privacy boundary detects a half-open socket before the
+    /// ordinary heartbeat. Resume the existing media session; never issue Join.
+    pub fn recover(&self) {
+        self.recovering.store(true, Ordering::Release);
+        self.wake.notify_one();
     }
     pub fn send(&self, event: ClientEvent) {
         // State is resent from the current UI snapshot after Resumed. Never
@@ -82,7 +93,7 @@ impl Session {
             Err(mpsc::error::TrySendError::Full(_))
         ) {
             // Backpressure repairs signaling, never tears down a healthy peer.
-            self.recovering.store(true, Ordering::Release);
+            self.recover();
         }
         // If the worker ended, its ordered terminal result is in events. A send
         // racing that result must not turn Replaced/Revoked into a fresh Join.
@@ -106,6 +117,7 @@ struct Worker {
     credentials: Credentials,
     connection: Connection,
     recovering: Arc<AtomicBool>,
+    wake: Arc<tokio::sync::Notify>,
     sequence: u64,
 }
 impl Worker {
@@ -118,10 +130,10 @@ impl Worker {
         loop {
             let (send, receive) = self.link.as_mut().expect("attached");
             let failure = if self.recovering.load(Ordering::Acquire) {
-                Failure::temporary("Voice signaling queue stalled")
-                    .with_reason("signaling_backpressure")
+                Failure::temporary("Voice signaling stalled").with_reason("signaling_stalled")
             } else {
                 tokio::select! {
+                    _ = self.wake.notified() => continue,
                     command = requests.recv() => {
                         let Some(command) = command else { return Failure::from("Voice signaling stopped"); };
                         match send_event(send, command, &self.connection).await { Ok(()) => continue, Err(error) => error }
@@ -292,6 +304,104 @@ mod tests {
         assert_eq!(sequence, expected);
         assert_eq!(resume_token, "test-media-capability");
         assert_eq!(token, "test-account-token");
+    }
+
+    #[tokio::test]
+    async fn unanswered_boundary_resumes_open_socket_and_requires_fresh_ack() {
+        use thiscord_frontend::audio::red::boundary::{Boundary, RequestError};
+
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let base = format!("http://{}", listener.local_addr().unwrap());
+        let (seen, wait) = oneshot::channel();
+        let server = tokio::spawn(async move {
+            // Keep the old socket open, simulating a proxy silently losing ACKs.
+            let mut old = accept(&listener).await;
+            assert!(matches!(
+                command(&mut old).await,
+                ClientEvent::MicrophoneBoundary { generation: 1 }
+            ));
+            seen.send(()).unwrap();
+            let mut resumed = accept(&listener).await;
+            assert_resume(command(&mut resumed).await, 1);
+            reply(&mut resumed, ServerEvent::Resumed {}).await;
+            assert!(matches!(
+                command(&mut resumed).await,
+                ClientEvent::MicrophoneBoundary { generation: 2 }
+            ));
+            reply(
+                &mut resumed,
+                ServerEvent::MicrophoneBoundaryAccepted {
+                    generation: 2,
+                    microphone_epoch: 3,
+                    source_epoch: 3,
+                    challenge: None,
+                    accepted: true,
+                },
+            )
+            .await;
+            assert!(matches!(command(&mut resumed).await, ClientEvent::Leave {}));
+        });
+        let (send, receive) = connect(&base).await.unwrap().split();
+        let mut session = Session::start(send, receive, credentials(base), Connection::default());
+        let now = std::time::Instant::now();
+        let mut boundary = Boundary::default();
+        boundary.control(1).unwrap();
+        let (generation, _) = boundary.request(now).unwrap().unwrap();
+        session.send(ClientEvent::MicrophoneBoundary { generation });
+        timeout(Duration::from_secs(2), wait)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            boundary.request(now + Duration::from_secs(5)),
+            Err(RequestError::AcknowledgmentTimeout)
+        );
+        session.recover();
+        assert!(session.recovering());
+        boundary.resume();
+        boundary.control(2).unwrap();
+        assert!(!boundary.acknowledge(1, None, true));
+        assert!(!boundary.ready());
+        let resumed = timeout(Duration::from_secs(2), session.events.recv())
+            .await
+            .unwrap()
+            .unwrap()
+            .unwrap();
+        assert!(matches!(
+            serde_json::from_str::<ServerFrame>(resumed.to_text().unwrap())
+                .unwrap()
+                .event,
+            ServerEvent::Resumed {}
+        ));
+        boundary.resume();
+        let (generation, _) = boundary
+            .request(now + Duration::from_secs(6))
+            .unwrap()
+            .unwrap();
+        session.send(ClientEvent::MicrophoneBoundary { generation });
+        let ack = timeout(Duration::from_secs(2), session.events.recv())
+            .await
+            .unwrap()
+            .unwrap()
+            .unwrap();
+        let ServerEvent::MicrophoneBoundaryAccepted {
+            generation,
+            challenge,
+            accepted,
+            ..
+        } = serde_json::from_str::<ServerFrame>(ack.to_text().unwrap())
+            .unwrap()
+            .event
+        else {
+            panic!("expected boundary ACK")
+        };
+        assert!(boundary.acknowledge(generation, challenge, accepted));
+        assert!(boundary.ready_control(2));
+        session.close().await;
+        timeout(Duration::from_secs(2), server)
+            .await
+            .unwrap()
+            .unwrap();
     }
 
     #[tokio::test]

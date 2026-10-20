@@ -867,7 +867,19 @@ async fn run(
             if signaling.recovering() {
                 boundary.resume();
                 transmit_control.pause_receive();
-            } else if let Some((generation, challenge)) = boundary.request(Instant::now())? {
+            } else if let Some((generation, challenge)) = match boundary.request(Instant::now()) {
+                Ok(request) => request,
+                Err(
+                    thiscord_frontend::audio::red::boundary::RequestError::AcknowledgmentTimeout,
+                ) => {
+                    signaling.recover();
+                    boundary.resume();
+                    transmit_control.pause_receive();
+                    red_sender.clear();
+                    continue;
+                }
+                Err(error) => return Err(<&'static str>::from(error).into()),
+            } {
                 signaling.send(match challenge {
                     Some(challenge) => ClientEvent::MicrophoneRefresh {
                         generation,
