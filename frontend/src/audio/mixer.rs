@@ -267,7 +267,39 @@ impl Mixer {
         channels: usize,
         now: Instant,
     ) {
-        let callback_samples = output.len().div_ceil(channels);
+        let count = output.len().div_ceil(channels);
+        let mut frames = output.chunks_mut(channels);
+        self.render_mono(count, now, |sample| {
+            let frame = frames.next().expect("one frame per sample");
+            // Voice occupies the first stereo pair; silence other channels.
+            frame.fill(T::from_sample(0.0));
+            for channel in frame.iter_mut().take(2) {
+                *channel = T::from_sample(sample);
+            }
+        });
+    }
+
+    pub(super) fn take_reference(&mut self) -> Option<frames::Writer> {
+        self.reference.take()
+    }
+
+    pub(super) fn reference_overflow(&self, dropped: u64) {
+        self.controls.counts.reference_overflow.add(dropped);
+        self.controls
+            .reference_dropped
+            .fetch_add(dropped, Ordering::Relaxed);
+    }
+
+    pub(super) fn privacy(&self) -> Privacy {
+        Privacy {
+            controls: self.controls.clone(),
+            streams: self.streams.iter().map(|s| s.control.clone()).collect(),
+            previous: None,
+        }
+    }
+
+    pub(super) fn render_mono(&mut self, count: usize, now: Instant, mut emit: impl FnMut(f32)) {
+        let callback_samples = count;
         let deadline = now.saturating_duration_since(self.controls.callback_origin)
             + frames::sample_duration(callback_samples.min(CAPACITY));
         self.controls.callback_deadline_ns.store(
@@ -289,7 +321,6 @@ impl Mixer {
         }
         self.cues
             .request(self.controls.cues.swap(0, Ordering::Relaxed), deafened);
-        let master = f32::from_bits(self.controls.master.load(Ordering::Relaxed));
         // Keep the legacy local-test trim, but never trim the larger cushion
         // needed by a device callback. Hard resets still discard the whole ring.
         for (index, stream) in self.streams.iter_mut().enumerate() {
@@ -326,7 +357,9 @@ impl Mixer {
         let mut starvation = [0u64; MAX_STREAMS];
         let mut unknown = [0u64; MAX_STREAMS];
         let mut silence = [0u64; MAX_STREAMS];
-        for frame in output.chunks_mut(channels) {
+        for _ in 0..count {
+            let deafened = self.controls.deafen.load(Ordering::Acquire);
+            let master = f32::from_bits(self.controls.master.load(Ordering::Relaxed));
             let mut mix = self.cues.next();
             for (index, stream) in self.streams.iter_mut().enumerate() {
                 // An urgent cutoff can arrive during this callback. Observe it
@@ -381,21 +414,12 @@ impl Mixer {
             } else {
                 (mix * master).clamp(-1.0, 1.0)
             };
-            // Device layouts may expose 5.1/7.1 or interface channels. Place
-            // voice in the first stereo pair (mono if one channel); leave the
-            // remaining channels, including any LFE channel, silent.
-            frame.fill(T::from_sample(0.0));
-            for channel in frame.iter_mut().take(2) {
-                *channel = T::from_sample(sample);
-            }
+            emit(sample);
             if let Some(reference) = &mut self.reference {
                 reference_dropped += reference.push(sample);
             }
         }
-        self.controls
-            .counts
-            .output_samples
-            .add(output.len().div_ceil(channels) as u64);
+        self.controls.counts.output_samples.add(count as u64);
         self.controls.counts.output_clipped.add(clipped);
         for (i, stream) in self.streams.iter().enumerate() {
             stream.control.counts.starvation.add(starvation[i]);
@@ -412,6 +436,38 @@ impl Mixer {
         self.controls
             .reference_dropped
             .fetch_add(reference_dropped, Ordering::Relaxed);
+    }
+}
+
+// Device filters hold delayed mixed audio. Flush it on access/generation, gain,
+// active-state or deafen changes, including when no new 48 kHz sample is needed.
+type PrivacyState = (bool, bool, u32, [(u64, bool, u32); MAX_STREAMS]);
+pub(super) struct Privacy {
+    controls: Arc<Controls>,
+    streams: Vec<Arc<StreamControl>>,
+    previous: Option<PrivacyState>,
+}
+impl Privacy {
+    pub fn changed(&mut self) -> bool {
+        let state = (
+            self.controls.deafen.load(Ordering::Acquire),
+            self.controls
+                .receive_guard
+                .get()
+                .is_none_or(|g| g.receive_allowed()),
+            self.controls.master.load(Ordering::Relaxed),
+            std::array::from_fn(|i| {
+                let stream = &self.streams[i];
+                (
+                    stream.generation.load(Ordering::Acquire),
+                    stream.active.load(Ordering::Acquire),
+                    stream.volume.load(Ordering::Relaxed),
+                )
+            }),
+        );
+        let changed = self.previous.is_some_and(|previous| previous != state);
+        self.previous = Some(state);
+        changed
     }
 }
 

@@ -262,15 +262,37 @@ acceptance; these software tests do not establish gapless device switching.
 ## Libraries and compatibility decision
 
 - [CPAL 0.18.2](https://github.com/RustAudio/cpal): native WASAPI/CoreAudio/ALSA.
-  Devices must support 48 kHz PCM with 1-32 channels. Integer PCM at 8/16/24/32/64
+  Capture and playback accept reported PCM formats from 8-384 kHz, with 1-32
+  channels. Integer PCM at 8/16/24/32/64
   bits (signed or unsigned) and f32/f64 samples are converted by native callbacks.
   Mono capture and stereo playback are preferred. Multichannel capture is averaged
   to mono; playback uses the first one/two channels and silences the rest. A
   compatible default format is also considered when enumerated formats are missing.
   Rejection messages identify input/output, device name, default format and a bounded
-  summary of reported formats; 48 kHz alone does not guarantee a compatible device.
-  This includes common desktop devices but not every Bluetooth hands-free configuration.
-  Arbitrary-rate resampling and Bluetooth mode switching remain pending.
+  summary of reported formats. Native 48 kHz is preferred, followed by a compatible
+  OS default and then the nearest supported rate. Selection intersects reported
+  ranges with the supported bounds; it never invents a device format. This covers
+  rates such as 8/16/24/32 kHz Bluetooth/voice, 44.1/48 kHz desktop audio and
+  88.2/96/176.4/192/352.8/384 kHz interfaces, as well as intermediate PCM rates.
+  Other rates, more than 32 channels and non-PCM/DSD formats are rejected explicitly.
+  Automatic Bluetooth profile switching, device permissions/exclusive access and
+  driver failures are separate from format compatibility; hardware acceptance
+  on Windows/macOS/Linux is still required.
+- Device-rate conversion uses a Blackman-windowed polyphase FIR, with an
+  anti-alias cutoff and tap count scaled for downsampling. Filter tables and
+  history are allocated before opening streams. Callbacks use bounded storage
+  and work, preserving an integer rational phase across arbitrary buffer sizes.
+  Native 48 kHz bypasses conversion. Capture becomes 48 kHz before its SPSC queue;
+  playback converts after mixing, independently of sender-clock correction.
+  Capture timestamps account for phase and filter delay. Echo/debug speaker
+  reference is reconstructed from the clamped device signal at 48 kHz and timed
+  to physical playback, accounting for the reference converter's delay. Filter
+  histories are cleared on interruptions or playback access/generation, active,
+  gain and deafen changes so delayed audio cannot cross a privacy cutoff. Clearing
+  a mixed filter can briefly interrupt other mixed sources too. DSP, recording,
+  queue budgets and Opus retain the 48 kHz media clock. Tests cover rate/format
+  selection, signal/alias rejection, sample counts, timing, callback boundaries,
+  echo-reference reconstruction and privacy cutoffs.
 - [ringbuf 0.5.2](https://docs.rs/ringbuf/0.5.2/ringbuf/): bounded SPSC queues.
 - [WebRTC-rs 0.21](https://github.com/webrtc-rs/webrtc): native ICE/DTLS/SRTP,
   RTP tracks and RTCP interceptors, with Tokio and Ring crypto. Its current
@@ -342,14 +364,15 @@ The post-mix AEC reference and its timestamps/tuning are unchanged; closing the
 automatic gate never resets echo adaptation.
 
 Capture is averaged to mono, processed at 48 kHz and encoded as 20 ms Opus frames
-at 32 kbit/s. Capture callbacks only convert/copy samples and update atomics.
+at 32 kbit/s. Capture callbacks only convert/downmix/resample samples and update atomics.
 Capture and post-mix reference callbacks assemble timestamped 10 ms blocks into
 preallocated 120 ms SPSC rings. Partial callbacks retain their samples. The worker
 drains complete capture packets instead of discarding audio from callbacks longer
 than 60 ms. Work per tick stays bounded, and stop/PTT release are checked while
 draining. Lost blocks carry a sequence gap that restarts DSP adaptation; playback
-reference overflows are counted too. No per-sample allocation or DSP runs on the
-device callback. The processor is constructed before starting either device.
+reference overflows are counted too. Callbacks allocate no memory; enhancement
+DSP and codecs run off the callbacks. Device-rate FIR conversion uses prepared
+coefficients and bounded history. The processor is constructed before starting either device.
 
 ### Microphone sender timeline and expiry
 
@@ -370,9 +393,9 @@ the continuity baseline backward and manufacture a hole when they catch up. This
 prevents repeated DSP/activation resets and inflated RTP timestamps when 10 ms
 capture buffers arrive with paired timestamps. Real forward holes and queue
 overflows still preserve missing sample positions and reset processing. A partial
-10 ms block crossing a hole is discarded. This is capture-only handling: post-mix
-AEC reference assembly, timestamps, delay calculation and echo configuration
-remain unchanged.
+10 ms block crossing a hole is discarded. Capture and reference rate conversion
+retain fractional phase between callbacks and compensate timestamps for their
+filter delay. The existing 48 kHz path retains its direct reference assembly.
 
 DSP preserves block timestamps and sample positions. It never combines two halves
 across a gap into one 20 ms Opus packet: the earlier half is discarded and the later

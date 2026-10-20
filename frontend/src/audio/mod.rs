@@ -3,6 +3,7 @@ pub mod adaptive_fec;
 mod codec;
 pub mod connection;
 mod cues;
+mod device_rate;
 mod device_users;
 pub mod diagnostics;
 mod dred;
@@ -108,6 +109,8 @@ where
 {
     let channels = config.channels as usize;
     let activity = health.clone();
+    let mut converter = (config.sample_rate != RATE)
+        .then(|| device_rate::Playback::new(config.sample_rate, &mut mixer));
     device
         .build_output_stream(
             *config,
@@ -117,8 +120,14 @@ where
                     return;
                 }
                 activity.callback(false);
-                mixer.reference_time(frames::playback_time(Instant::now(), info.timestamp()));
-                mixer.render(data, channels);
+                let now = Instant::now();
+                let playback = frames::playback_time(now, info.timestamp());
+                if let Some(converter) = &mut converter {
+                    converter.render(&mut mixer, data, channels, playback, now);
+                } else {
+                    mixer.reference_time(playback);
+                    mixer.render(data, channels);
+                }
             },
             move |error| {
                 health.report(false, error.kind());
@@ -141,6 +150,8 @@ where
     let channels = config.channels as usize;
     let activity = health.clone();
     let mut capture_clock = frames::CaptureClock::default();
+    let mut converter =
+        (config.sample_rate != RATE).then(|| device_rate::Converter::new(config.sample_rate, RATE));
     device
         .build_input_stream(
             *config,
@@ -149,7 +160,12 @@ where
                     return;
                 }
                 activity.callback(true);
-                writer.begin_capture(capture_clock.map(Instant::now(), info.timestamp()));
+                let capture_at = capture_clock.map(Instant::now(), info.timestamp());
+                if let Some(converter) = &mut converter {
+                    writer.begin_capture(converter.capture_time(capture_at, data.len() / channels));
+                } else {
+                    writer.begin_capture(capture_at);
+                }
                 let mut peak = 0.0_f32;
                 let mut dropped = 0;
                 let mut clipped = 0;
@@ -157,7 +173,14 @@ where
                     let mono = capture_mono(frame);
                     peak = peak.max(mono.abs());
                     clipped += u64::from(mono.abs() >= 0.999);
-                    dropped += writer.push(mono);
+                    if let Some(converter) = &mut converter {
+                        converter.push(mono);
+                        while let Some(sample) = converter.pop() {
+                            dropped += writer.push(sample);
+                        }
+                    } else {
+                        dropped += writer.push(mono);
+                    }
                 }
                 control
                     .counts

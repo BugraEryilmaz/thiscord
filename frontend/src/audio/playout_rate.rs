@@ -1,6 +1,6 @@
 //! The sole sender-clock -> local 48 kHz playout-rate conversion. This runs on
-//! the worker, before mixing. A future device-rate converter belongs AFTER the
-//! mix and must not run another sender-clock/occupancy correction loop.
+//! the worker, before mixing. The device-rate converter runs AFTER the mix,
+//! independently of this sender-clock/occupancy correction loop.
 use std::sync::OnceLock;
 
 use super::mixer::FRAME;
