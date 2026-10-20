@@ -141,6 +141,249 @@ async fn raw(peer: &mut Peer, sequence: u16, generation: u64, tag: u8) {
         .unwrap();
 }
 
+struct RecoveryRoom {
+    _db: Database,
+    owner: String,
+    listener: String,
+    guild: Value,
+    channel: Value,
+    addr: std::net::SocketAddr,
+    serving: tokio::task::JoinHandle<std::io::Result<()>>,
+}
+impl RecoveryRoom {
+    async fn new() -> Self {
+        let db = database();
+        let (_, owner) = user(&db, "recovery_owner");
+        let (_, listener) = user(&db, "recovery_listener");
+        permissions::bootstrap_owner(&db.pool, "recovery_owner").unwrap();
+        let app = api::router(
+            Some(db.pool.clone()),
+            vec!["http://localhost:1420".parse().unwrap()],
+        );
+        let mut state = command(
+            &app,
+            &owner,
+            json!({"action":"create_guild","name":"Recovery"}),
+            StatusCode::OK,
+        )
+        .await["state"]
+            .clone();
+        change(
+            &app,
+            &owner,
+            &mut state,
+            json!({"action":"add_member","username":"recovery_listener"}),
+            StatusCode::OK,
+        )
+        .await;
+        change(
+            &app,
+            &owner,
+            &mut state,
+            json!({"action":"create_channel","name":"voice","kind":"voice"}),
+            StatusCode::OK,
+        )
+        .await;
+        let guild = state["guild"]["id"].clone();
+        let channel = state["channels"][0]["id"].clone();
+        let tcp = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = tcp.local_addr().unwrap();
+        let serving = tokio::spawn(axum::serve(tcp, app).into_future());
+        Self {
+            _db: db,
+            owner,
+            listener,
+            guild,
+            channel,
+            addr,
+            serving,
+        }
+    }
+    async fn join(&self, token: &str) -> Socket {
+        join(self.addr, token, self.guild.clone(), self.channel.clone()).await
+    }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[ignore = "requires TEST_DATABASE_URL; CI runs with --include-ignored"]
+async fn pending_and_invalid_sdp_never_publish_legacy_replacement_rosters() {
+    let room = RecoveryRoom::new().await;
+    let source = Peer::with_red(room.join(&room.owner).await, 64, true).await;
+    let slot = source.slot;
+    let mut witness = Peer::new(room.join(&room.listener).await).await;
+    // Observe the protected slot before retiring it.
+    loop {
+        if let ServerEvent::Participants { members } = event(&mut witness.socket).await
+            && members
+                .iter()
+                .any(|m| m.slot == slot && m.microphone_source_epoch != 0)
+        {
+            break;
+        }
+    }
+    source.close().await;
+    loop {
+        if let ServerEvent::Participants { members } = event(&mut witness.socket).await
+            && members.iter().all(|m| m.slot != slot)
+        {
+            break;
+        }
+    }
+
+    let mut pending = room.join(&room.owner).await;
+    let ServerEvent::Offer { slot: reused, .. } = event(&mut pending).await else {
+        panic!("offer")
+    };
+    assert_eq!(reused, slot);
+    // The normal periodic roster must not classify a pending Answer as legacy.
+    loop {
+        if let ServerEvent::Participants { members } = event(&mut witness.socket).await {
+            assert!(members.iter().all(|m| m.slot != slot));
+            break;
+        }
+    }
+    send(
+        &mut pending,
+        ClientEvent::Answer {
+            sdp: json!({"type":"answer","sdp":"v=0\r\n"}).to_string(),
+            packet_redundancy: false,
+            remote_audio: false,
+            screen_feedback: false,
+            screen_subscriptions: false,
+        },
+    )
+    .await;
+    // Valid Answer JSON with unusable SDP must never publish negotiated state.
+    tokio::time::timeout(Duration::from_secs(3), async {
+        while let Some(Ok(frame)) = pending.next().await {
+            if matches!(frame, Message::Close(_)) {
+                break;
+            }
+        }
+    })
+    .await
+    .unwrap();
+    let replacement = Peer::with_red(room.join(&room.owner).await, 64, true).await;
+    assert_eq!(replacement.slot, slot);
+    loop {
+        if let ServerEvent::Participants { members } = event(&mut witness.socket).await
+            && let Some(member) = members.iter().find(|m| m.slot == slot)
+        {
+            assert_ne!(
+                member.microphone_source_epoch, 0,
+                "provisional legacy roster escaped"
+            );
+            assert_ne!(member.microphone_epoch, 0);
+            break;
+        }
+    }
+    still_connected(&mut witness.socket).await;
+    replacement.close().await;
+    witness.close().await;
+    room.serving.abort();
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[ignore = "requires TEST_DATABASE_URL; CI runs with --include-ignored"]
+async fn detached_signaling_recovers_pending_challenge_and_lost_ready() {
+    let room = RecoveryRoom::new().await;
+    let mut source = Peer::with_red(room.join(&room.owner).await, 64, true).await;
+    let mut listener = Peer::with_red(room.join(&room.listener).await, 64, true).await;
+    refresh(&mut source, 1).await;
+    refresh(&mut listener, 1).await;
+    forwarded(&mut source, &mut listener).await;
+    let (_, floor) = full(&mut listener).await;
+    let challenge = loop {
+        if let ServerEvent::MicrophoneRefreshRequired { challenge } =
+            event(&mut source.socket).await
+            && challenge >= floor
+        {
+            break challenge;
+        }
+    };
+    // Cut only TCP. Detached ticks must neither use the three retry attempts
+    // nor expire this publisher while its 30-second signaling grace is live.
+    drop(std::mem::replace(
+        &mut source.socket,
+        open_voice(room.addr).await,
+    ));
+    tokio::time::sleep(Duration::from_secs(6)).await;
+    let generation = source.microphone_generation.unwrap();
+    while listener.packets.try_recv().is_ok() {}
+    raw(&mut source, 100, generation, 90).await;
+    no_packet(&mut listener).await;
+    // Open the actual resume socket now; upgrades have their own five-second
+    // authentication deadline, independent of the media owner's recovery grace.
+    source.socket = open_voice(room.addr).await;
+    resume(
+        &mut source.socket,
+        &room.owner,
+        &room.guild,
+        &room.channel,
+        &source.resume_token,
+        1,
+    )
+    .await;
+    assert!(matches!(
+        event(&mut source.socket).await,
+        ServerEvent::Resumed {}
+    ));
+    assert!(
+        matches!(event(&mut source.socket).await, ServerEvent::MicrophoneRefreshRequired { challenge: c } if c == challenge)
+    );
+    send(
+        &mut source.socket,
+        ClientEvent::MicrophoneRefresh {
+            generation: generation + 1,
+            challenge,
+        },
+    )
+    .await;
+    ack_ready(&mut source, generation + 1, Some(challenge), true, false).await;
+
+    // ACK was processed, but Ready never reached the server. Recovery must
+    // reissue that same satisfied challenge, so the client can finish the proof.
+    drop(std::mem::replace(
+        &mut source.socket,
+        open_voice(room.addr).await,
+    ));
+    tokio::time::sleep(Duration::from_secs(6)).await;
+    source.socket = open_voice(room.addr).await;
+    resume(
+        &mut source.socket,
+        &room.owner,
+        &room.guild,
+        &room.channel,
+        &source.resume_token,
+        2,
+    )
+    .await;
+    assert!(matches!(
+        event(&mut source.socket).await,
+        ServerEvent::Resumed {}
+    ));
+    assert!(
+        matches!(event(&mut source.socket).await, ServerEvent::MicrophoneRefreshRequired { challenge: c } if c == challenge)
+    );
+    send(
+        &mut source.socket,
+        ClientEvent::MicrophoneRefresh {
+            generation: generation + 1,
+            challenge,
+        },
+    )
+    .await;
+    ack(&mut source, generation + 1, Some(challenge), true).await;
+    // Allow more than the ordinary Ready deadline, then require real RTP.
+    tokio::time::sleep(Duration::from_secs(5)).await;
+    source.sequence = 100;
+    forwarded(&mut source, &mut listener).await;
+    forwarded(&mut listener, &mut source).await;
+    source.close().await;
+    listener.close().await;
+    room.serving.abort();
+}
+
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 #[ignore = "requires TEST_DATABASE_URL; CI runs with --include-ignored"]
 async fn negotiated_red_crosses_encrypted_sfu_with_loss_reorder_and_legacy_fallback() {

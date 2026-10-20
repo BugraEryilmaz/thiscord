@@ -43,13 +43,40 @@ pub struct VoiceState {
 struct Handler {
     gathered: Arc<Notify>,
     engine: AudioEngine,
-    failed: Arc<AtomicBool>,
-    connected: Arc<AtomicBool>,
+    media_state: Arc<MediaState>,
     connection: Connection,
     closed: watch::Receiver<bool>,
     screen: crate::native_screen::ScreenState,
     camera: crate::native_screen::ScreenState,
     keyframes: mpsc::Sender<(MediaKind, usize, u32)>,
+}
+
+#[derive(Default)]
+struct MediaState {
+    connected: AtomicBool,
+    failed: AtomicBool,
+    changed: Notify,
+}
+impl MediaState {
+    fn observe(&self, state: RTCPeerConnectionState) {
+        self.connected.store(
+            state == RTCPeerConnectionState::Connected,
+            Ordering::Release,
+        );
+        if terminal_peer_state(state) {
+            self.failed.store(true, Ordering::Release);
+        }
+        self.changed.notify_one();
+    }
+
+    async fn tick(&self, periodic: &mut tokio::time::Interval) {
+        // Start audio as soon as DTLS/ICE connects instead of adding up to
+        // another half second. Retain periodic maintenance for stable calls.
+        tokio::select! {
+            _ = self.changed.notified() => {},
+            _ = periodic.tick() => {},
+        }
+    }
 }
 
 fn terminal_peer_state(state: RTCPeerConnectionState) -> bool {
@@ -70,13 +97,7 @@ impl PeerConnectionEventHandler for Handler {
             "voice_peer_state",
             serde_json::json!({"state":format!("{state:?}")}),
         );
-        self.connected.store(
-            state == RTCPeerConnectionState::Connected,
-            Ordering::Release,
-        );
-        if terminal_peer_state(state) {
-            self.failed.store(true, Ordering::Release);
-        }
+        self.media_state.observe(state);
     }
     async fn on_track(&self, track: Arc<dyn TrackRemote>) {
         let ssrc = track.ssrcs().await.first().copied().unwrap_or(0);
@@ -652,8 +673,7 @@ async fn run(
     };
     attempt.stage = "negotiate";
     let gathered = Arc::new(Notify::new());
-    let failed = Arc::new(AtomicBool::new(false));
-    let connected = Arc::new(AtomicBool::new(false));
+    let media_state = Arc::new(MediaState::default());
     let mut media = MediaEngine::default();
     media
         .register_codec(
@@ -702,8 +722,7 @@ async fn run(
             .with_handler(Arc::new(Handler {
                 gathered: gathered.clone(),
                 engine: engine.clone(),
-                failed: failed.clone(),
-                connected: connected.clone(),
+                media_state: media_state.clone(),
                 connection: attempt.connection.clone(),
                 closed: attempt.closed.subscribe(),
                 keyframes: keyframe_tx,
@@ -825,6 +844,7 @@ async fn run(
     let mut roster: Vec<Participant> = Vec::new();
     let mut roster_compatibility = thiscord_frontend::audio::red::RosterCompatibility::default();
     let mut ticker = tokio::time::interval(Duration::from_millis(500));
+    ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
     let start = Instant::now();
     let mut screen_state = Some((false, false));
     let mut camera_state = Some(false);
@@ -965,7 +985,7 @@ async fn run(
                         if status.lock().ok().is_some_and(|s| s.participants.iter().any(|m| m.slot == own_slot && m.screen_epoch == epoch && m.sharing_screen)) { force_keyframe.store(true, Ordering::Release); }
                     },
                     ServerEvent::Participants{members}=>{
-                        roster_compatibility.observe(&members)?;
+                        roster_compatibility.observe(&members).map_err(|error| Failure::from(error).with_reason("legacy_source_replacement"))?;
                         if members.len()>ROOM_CAPACITY||members.iter().any(|m|m.slot>=ROOM_CAPACITY){return Err("Invalid participant list".into());}
                         app.state::<crate::native_screen::ScreenState>().roster(if settings.lock().map_err(|_|"Settings unavailable")?.deafened { &[] } else { &members });
                         app.state::<crate::native_camera::CameraState>().views.roster(if settings.lock().map_err(|_|"Settings unavailable")?.deafened { &[] } else { &members });
@@ -976,7 +996,7 @@ async fn run(
                 }
             },
             Some(mut frame)=outgoing.recv()=>{
-                if !connected.load(Ordering::Acquire) {
+                if !media_state.connected.load(Ordering::Acquire) {
                     red_sender.clear();
                     frame.finish(thiscord_frontend::audio::quality::Count::OutgoingFailedPackets);
                     continue;
@@ -1026,7 +1046,7 @@ async fn run(
                     Err(reason) => { red_sender.clear(); transmit_control.dropped_frame(reason, &mut frame); },
                 }
             },
-            _=ticker.tick()=>{
+            _=media_state.tick(&mut ticker)=>{
                 if last_audio_stats.elapsed() >= Duration::from_secs(5) {
                     attempt.connection.event("voice_transmit", serde_json::json!({
                         "accepted_packets":accepted_packets,"accepted_payload_bytes":accepted_bytes,
@@ -1034,13 +1054,13 @@ async fn run(
                     }));
                     last_audio_stats = Instant::now();
                 }
-                if failed.load(Ordering::Acquire){
-                    attempt.connection.event("voice_connection_lost",serde_json::json!({"peer_failed":failed.load(Ordering::Acquire)}));
+                if media_state.failed.load(Ordering::Acquire){
+                    attempt.connection.event("voice_connection_lost",serde_json::json!({"peer_failed":true}));
                     return Err(Failure::temporary("Voice connection lost").with_reason("peer_failed"));
                 }
                 if !audio_started{
                     if start.elapsed()>Duration::from_secs(15){return Err(Failure::temporary("Media connection timed out").with_reason("media_connect_timeout"));}
-                    if connected.load(Ordering::Acquire){
+                    if media_state.connected.load(Ordering::Acquire){
                         attempt.stage="audio_start";
                         let configuration=settings.lock().map_err(|_|"Settings unavailable")?.clone();let audio_app=app.clone();let tx=tx.clone();let connection=attempt.connection.clone();
                         tauri::async_runtime::spawn_blocking(move||crate::native_audio::start_voice(&audio_app,guild_id,connection,configuration,tx,can_speak)).await.map_err(|_|"Audio task failed")??;
@@ -1074,7 +1094,7 @@ async fn run(
                     // until Failed/Closed; signaling has its own bounded recovery.
                     if signaling.recovering() && let Ok(mut s)=status.lock() {
                         s.message="Recovering voice signaling...".into();
-                    } else if !connected.load(Ordering::Acquire) && let Ok(mut s)=status.lock() {
+                    } else if !media_state.connected.load(Ordering::Acquire) && let Ok(mut s)=status.lock() {
                         s.message="Recovering voice connection...".into();
                     }
                 }
@@ -1110,6 +1130,33 @@ async fn run(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn peer_changes_wake_audio_without_waiting_for_the_status_interval() {
+        let media = MediaState::default();
+        let mut periodic = tokio::time::interval(Duration::from_secs(60));
+        periodic.tick().await;
+        for state in [
+            RTCPeerConnectionState::Connected,
+            RTCPeerConnectionState::Disconnected,
+            RTCPeerConnectionState::Connected,
+            RTCPeerConnectionState::Failed,
+        ] {
+            // Notification must survive a state change before the waiter starts.
+            media.observe(state);
+            tokio::time::timeout(Duration::from_millis(100), media.tick(&mut periodic))
+                .await
+                .expect("peer transition waited for the periodic status tick");
+            assert_eq!(
+                media.connected.load(Ordering::Acquire),
+                state == RTCPeerConnectionState::Connected
+            );
+            assert_eq!(
+                media.failed.load(Ordering::Acquire),
+                terminal_peer_state(state)
+            );
+        }
+    }
 
     #[tokio::test]
     async fn same_channel_join_reuses_the_whole_job_including_recovery_and_backoff() {

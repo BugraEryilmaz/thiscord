@@ -32,9 +32,13 @@ pub(super) fn open_stream(ui: Ui, guild: GuildId, channel: ChannelId, member: Pa
         epoch: member.screen_epoch,
     };
     leptos::task::spawn_local(async move {
-        if let Err(error) = super::servers::select(ui, guild).await {
-            ui.status.set(error);
-            return;
+        match super::servers::select(ui, guild).await {
+            Ok(true) => {}
+            Ok(false) => return,
+            Err(error) => {
+                ui.status.set(error);
+                return;
+            }
         }
         let Some(home) = ui.server.get_untracked().filter(|s| s.guild.id == guild) else {
             return;

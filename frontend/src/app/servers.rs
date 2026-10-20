@@ -1,9 +1,43 @@
 use super::icons::{Glyph, Icon};
 use super::{Field, Ui};
 use leptos::prelude::*;
+use thiscord_frontend::navigation::Selection;
 use thiscord_shared::{GuildId, permissions::*};
 
-fn update_home(ui: Ui, home: GuildHome) {
+pub(super) fn current(ui: Ui, selection: Selection) -> bool {
+    ui.navigation
+        .try_get_untracked()
+        .is_some_and(|navigation| navigation.accepts(selection))
+}
+
+pub(super) fn home(ui: Ui) {
+    ui.navigation.update(|navigation| {
+        navigation.begin(None);
+    });
+    ui.server_error.set(String::new());
+    ui.server.set(None);
+    ui.selected_channel.set(None);
+    ui.voice_roster.set(vec![]);
+    ui.page.set("servers");
+}
+
+pub(super) fn reset_session(ui: Ui) {
+    home(ui);
+    ui.server_refresh
+        .update(|generation| *generation = generation.wrapping_add(1));
+}
+
+fn update_home(ui: Ui, selection: Selection, home: GuildHome) {
+    if !current(ui, selection) || selection.guild != Some(home.guild.id) {
+        return;
+    }
+    if ui
+        .selected_channel
+        .get_untracked()
+        .is_some_and(|channel| !home.channels.iter().any(|allowed| allowed.id == channel.id))
+    {
+        ui.selected_channel.set(None);
+    }
     let unchanged = ui.server.with_untracked(|current| {
         current.as_ref().is_some_and(|old| {
             old.guild.id == home.guild.id
@@ -39,65 +73,145 @@ pub(super) async fn request(
     response
 }
 
+// Bound reads only: a timeout on a mutation would leave its commit outcome uncertain.
+async fn read(ui: Ui, command: PermissionRequest) -> Result<PermissionResponse, String> {
+    match futures_util::future::select(
+        Box::pin(request(ui, command)),
+        Box::pin(gloo_timers::future::TimeoutFuture::new(10_000)),
+    )
+    .await
+    {
+        futures_util::future::Either::Left((result, _)) => result,
+        _ => Err("Server request timed out. Please retry.".into()),
+    }
+}
+
 pub(super) async fn refresh(ui: Ui) {
-    match request(ui, PermissionRequest::ListGuilds {}).await {
+    let selection = ui.navigation.get_untracked().current();
+    let token = ui.token.get_untracked();
+    ui.server_refresh
+        .update(|generation| *generation = generation.wrapping_add(1));
+    let generation = ui.server_refresh.get_untracked();
+    let active =
+        || ui.token.get_untracked() == token && ui.server_refresh.get_untracked() == generation;
+    let result = read(ui, PermissionRequest::ListGuilds {}).await;
+    if !active() {
+        return;
+    }
+    match result {
         Ok(PermissionResponse::Guilds { guilds }) => {
-            if ui
-                .server
-                .get_untracked()
-                .is_some_and(|s| !guilds.iter().any(|g| g.id == s.guild.id))
+            ui.guilds.set(guilds.clone());
+            // Selection owns its ViewGuild response while loading. A list is not
+            // an access grant and must not restore the previous guild's content.
+            if current(ui, selection)
+                && !ui.navigation.get_untracked().pending
+                && let Some(id) = selection.guild
             {
-                ui.server.set(None);
-            }
-            ui.guilds.set(guilds);
-            if let Some(current) = ui.server.get_untracked() {
-                match request(
-                    ui,
-                    PermissionRequest::ViewGuild {
-                        guild_id: current.guild.id,
-                    },
-                )
-                .await
-                {
-                    Ok(PermissionResponse::Home { home }) => update_home(ui, home),
-                    _ => ui.server.set(None),
+                let result = if guilds.iter().any(|guild| guild.id == id) {
+                    read(ui, PermissionRequest::ViewGuild { guild_id: id }).await
+                } else {
+                    Err("This server is no longer available.".into())
+                };
+                if !active() || !current(ui, selection) {
+                    return;
+                }
+                match result {
+                    Ok(PermissionResponse::Home { home }) if home.guild.id == id => {
+                        ui.server_error.set(String::new());
+                        update_home(ui, selection, home);
+                    }
+                    result => {
+                        ui.server.set(None);
+                        ui.selected_channel.set(None);
+                        ui.voice_roster.set(vec![]);
+                        ui.server_error.set(
+                            result
+                                .err()
+                                .unwrap_or_else(|| "Unexpected server response".into()),
+                        );
+                    }
                 }
             }
         }
         Err(error) => ui.status.set(error),
         _ => {}
     }
-    if let Ok(PermissionResponse::Instance { access }) =
-        request(ui, PermissionRequest::Instance {}).await
+    let result = read(ui, PermissionRequest::Instance {}).await;
+    if !active() {
+        return;
+    }
+    ui.can_create_server.set(matches!(result,
+        Ok(PermissionResponse::Instance { access }) if access.role != InstanceRole::User
+            && ui.account.get_untracked().is_some_and(|a| a.email_verified)
+    ));
+}
+
+/// Returns false when superseded. Callers must not run navigation follow-up
+/// actions (open settings, select a channel, join a stream) after a stale result.
+pub(super) fn select(ui: Ui, id: GuildId) -> impl Future<Output = Result<bool, String>> {
+    ui.navigation.update(|navigation| {
+        navigation.begin(Some(id));
+    });
+    let selection = ui.navigation.get_untracked().current();
+    let token = ui.token.get_untracked();
+    ui.server_error.set(String::new());
+    // Context-menu settings also reauthorize the current guild. Keep its live
+    // conversation/draft mounted while that request is pending; switching to a
+    // different guild must still hide the old content immediately.
+    if ui
+        .server
+        .with_untracked(|home| home.as_ref().is_none_or(|home| home.guild.id != id))
     {
-        ui.can_create_server.set(
-            access.role != InstanceRole::User
-                && ui.account.get_untracked().is_some_and(|a| a.email_verified),
-        );
-    } else {
-        ui.can_create_server.set(false);
+        ui.server.set(None);
+        ui.selected_channel.set(None);
+        ui.voice_roster.set(vec![]);
+    }
+    ui.page.set("servers");
+    async move {
+        if !current(ui, selection) || ui.token.get_untracked() != token {
+            return Ok(false);
+        }
+        let result = read(ui, PermissionRequest::ViewGuild { guild_id: id }).await;
+        if !current(ui, selection) || ui.token.get_untracked() != token {
+            return Ok(false);
+        }
+        ui.navigation.update(|navigation| {
+            navigation.finish(selection);
+        });
+        match result {
+            Ok(PermissionResponse::Home { home }) if home.guild.id == id => {
+                update_home(ui, selection, home);
+                Ok(true)
+            }
+            result => {
+                let error = result
+                    .err()
+                    .unwrap_or_else(|| "Unexpected server response".into());
+                ui.server.set(None);
+                ui.selected_channel.set(None);
+                ui.voice_roster.set(vec![]);
+                ui.server_error.set(error.clone());
+                Err(error)
+            }
+        }
     }
 }
 
-pub(super) async fn select(ui: Ui, id: GuildId) -> Result<(), String> {
-    let PermissionResponse::Home { home } =
-        request(ui, PermissionRequest::ViewGuild { guild_id: id }).await?
-    else {
-        return Err("Unexpected server response".into());
-    };
-    if ui.server.get_untracked().is_none_or(|s| s.guild.id != id) {
-        ui.voice_roster.set(vec![]);
-    }
+fn navigate(ui: Ui, id: GuildId) {
+    // Clicking the open guild again should retain its conversation and draft.
     if ui
-        .selected_channel
+        .server
         .get_untracked()
-        .is_some_and(|c| !home.channels.iter().any(|v| v.id == c.id))
+        .is_some_and(|home| home.guild.id == id)
     {
-        ui.selected_channel.set(None);
+        return;
     }
-    update_home(ui, home);
-    ui.page.set("servers");
-    Ok(())
+    let selection = select(ui, id);
+    leptos::task::spawn_local(async move {
+        if let Err(error) = selection.await {
+            ui.status.set(error);
+        }
+    });
 }
 
 pub(super) fn open_voice(ui: Ui) {
@@ -114,15 +228,18 @@ pub(super) fn open_voice(ui: Ui) {
             .find(|c| c.voice_channel() == location.channel_id)
         {
             ui.friends.selected.set(Some(call.conversation_id));
-            ui.server.set(None);
-            ui.page.set("servers");
+            home(ui);
         }
         return;
     }
     leptos::task::spawn_local(async move {
-        if let Err(error) = select(ui, location.guild_id).await {
-            ui.status.set(error);
-            return;
+        match select(ui, location.guild_id).await {
+            Ok(true) => {}
+            Ok(false) => return,
+            Err(error) => {
+                ui.status.set(error);
+                return;
+            }
         }
         if ui.voice.get_untracked().channel_id == Some(location.channel_id) {
             ui.selected_channel.set(
@@ -145,8 +262,8 @@ fn GuildButton(ui: Ui, guild: Guild) -> impl IntoView {
         .collect::<String>()
         .to_uppercase();
     view! {
-        <button class="guild-button" data-context-server=id.to_string() aria-haspopup="menu" class:selected=move ||ui.server.get().is_some_and(|s|s.guild.id==id) aria-label=guild.name.clone() data-tip=guild.name disabled=move ||ui.busy.get()
-            on:click=move |_|{ui.busy.set(true);leptos::task::spawn_local(async move{if let Err(e)=select(ui,id).await{ui.status.set(e);refresh(ui).await;}ui.busy.set(false);});}>{initials}</button>
+        <button class="guild-button" data-context-server=id.to_string() aria-haspopup="menu" class:selected=move ||ui.navigation.get().current().guild==Some(id) aria-busy=move ||(ui.navigation.get().current().guild==Some(id) && ui.navigation.get().pending).to_string() aria-label=guild.name.clone() data-tip=guild.name
+            on:click=move |_|navigate(ui,id)>{initials}</button>
     }
 }
 
@@ -231,7 +348,14 @@ pub(super) fn ServerRail(ui: Ui) -> impl IntoView {
         error.set(String::new());
         ui.busy.set(true);
         leptos::task::spawn_local(async move {
-            match request(ui, command).await {
+            let selection = ui.navigation.get_untracked().current();
+            let token = ui.token.get_untracked();
+            let result = request(ui, command).await;
+            if !current(ui, selection) || ui.token.get_untracked() != token {
+                ui.busy.set(false);
+                return;
+            }
+            match result {
                 Ok(response) => {
                     let id = match response {
                         PermissionResponse::State { state } => Some(state.guild.id),
@@ -239,7 +363,9 @@ pub(super) fn ServerRail(ui: Ui) -> impl IntoView {
                         _ => None,
                     };
                     refresh(ui).await;
-                    if let Some(id) = id
+                    if current(ui, selection)
+                        && ui.token.get_untracked() == token
+                        && let Some(id) = id
                         && let Err(message) = select(ui, id).await
                     {
                         ui.status.set(message);
@@ -259,7 +385,7 @@ pub(super) fn ServerRail(ui: Ui) -> impl IntoView {
     };
     view! {
         <aside class="server-rail" aria-label="Servers">
-            <button class="mb-4 h-12 w-12 shrink-0 rounded-2xl bg-brand text-xl font-bold" data-tip="Thiscord home" aria-label="Thiscord home" on:click=move |_|{ui.voice_roster.set(vec![]);ui.friends.selected.set(None);ui.server.set(None);ui.page.set("servers");}>"T"</button>
+            <button class="mb-4 h-12 w-12 shrink-0 rounded-2xl bg-brand text-xl font-bold" data-tip="Thiscord home" aria-label="Thiscord home" on:click=move |_|{ui.friends.selected.set(None);home(ui);}>"T"</button>
             <nav class="flex min-h-0 w-full flex-1 flex-col items-center gap-3 overflow-y-auto py-2" aria-label="Joined servers">
                 {move ||ui.guilds.get().into_iter().map(move |guild|view!{<GuildButton ui=ui guild= guild/>}).collect_view()}
             </nav>
@@ -313,9 +439,14 @@ pub(super) fn ServerHome(ui: Ui) -> impl IntoView {
         error.set(String::new());
         ui.busy.set(true);
         leptos::task::spawn_local(async move {
+            let selection = ui.navigation.get_untracked().current();
+            let token = ui.token.get_untracked();
             let result = request(ui, command).await;
             // The user may have navigated away while the request was pending.
-            if target.try_get_untracked().is_none() {
+            if target.try_get_untracked().is_none()
+                || !current(ui, selection)
+                || ui.token.get_untracked() != token
+            {
                 ui.busy.set(false);
                 return;
             }
@@ -336,12 +467,19 @@ pub(super) fn ServerHome(ui: Ui) -> impl IntoView {
                             })
                             .cloned();
                         refresh(ui).await;
-                        if selected.try_get_untracked().is_some()
+                        if current(ui, selection)
+                            && ui.token.get_untracked() == token
+                            && selected.try_get_untracked().is_some()
                             && ui
                                 .server
                                 .get_untracked()
                                 .is_some_and(|s| s.guild.id == guild.id)
-                            && let Some(channel) = created.filter(|c| c.kind == ChannelKind::Text)
+                            && let Some(created) = created
+                            && let Some(channel) = ui.server.get_untracked().and_then(|home| {
+                                home.channels.into_iter().find(|channel| {
+                                    channel.id == created.id && channel.kind == ChannelKind::Text
+                                })
+                            })
                         {
                             selected.set(Some(channel));
                         }
@@ -354,7 +492,9 @@ pub(super) fn ServerHome(ui: Ui) -> impl IntoView {
                 Err(message) => {
                     error.set(message);
                     refresh(ui).await;
-                    if target.try_get_untracked().is_some()
+                    if current(ui, selection)
+                        && ui.token.get_untracked() == token
+                        && target.try_get_untracked().is_some()
                         && let Some(home) =
                             ui.server.get_untracked().filter(|s| s.guild.id == guild.id)
                     {
@@ -378,7 +518,17 @@ pub(super) fn ServerHome(ui: Ui) -> impl IntoView {
     });
     view! {
         <Show when=move ||ui.server.get().is_some() fallback=move ||view!{
-            <super::friends::Home ui=ui/>
+            <Show when=move ||ui.navigation.get().current().guild.is_some() fallback=move ||view!{<super::friends::Home ui=ui/>}>
+                <section class="flex h-full flex-col items-center justify-center gap-4 p-8 text-center" aria-busy=move ||ui.navigation.get().pending.to_string()>
+                    <h2 class="text-lg font-semibold">{move ||ui.guilds.get().into_iter().find(|guild|Some(guild.id)==ui.navigation.get().current().guild).map(|guild|guild.name).unwrap_or_else(||"Server".into())}</h2>
+                    <Show when=move ||ui.navigation.get().pending fallback=move ||view!{
+                        <p class="text-sm text-red-300" role="alert">{move ||ui.server_error.get()}</p>
+                        <button class="rounded-lg bg-brand px-4 py-2 font-semibold" on:click=move |_|if let Some(id)=ui.navigation.get_untracked().current().guild{navigate(ui,id);}>"Retry"</button>
+                    }>
+                        <p class="text-white/60" role="status" aria-live="polite">"Loading server…"</p>
+                    </Show>
+                </section>
+            </Show>
         }>
             {move ||ui.server.get().map(|home|view!{
                 <section class="server-layout">

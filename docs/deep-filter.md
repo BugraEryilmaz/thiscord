@@ -51,11 +51,19 @@ Sonora's filter-bank delay, before comparing SNR.
 On x86_64/ARM64, a scoped floating-point guard flushes subnormal values during DSP
 and restores the caller's control register. This avoids expensive CPU assists
 when recursive filters decay toward silence. No rounding mode is changed.
+The vendored normalization code floors finite state at `f32::MIN_POSITIVE`
+before division. Without this floor, sustained silence under flush-to-zero
+produced `0 / 0` and stopped capture at block 7,774 (77.74 seconds) in the Windows
+regression. Invalid values still propagate to the existing fail-closed checks;
+the fix adds no noise and does not reset recurrent history.
 
 ## Dependencies and reproducibility
 
 - Upstream [DeepFilterNet](https://github.com/Rikorose/DeepFilterNet) revision
   `d375b2d8309e0935d165700c91da9de862a99c31` (`deep_filter` 0.5.7-pre).
+  The required runtime modules and unchanged model are vendored with a narrow
+  normalization fix; see [provenance](../vendor/deep-filter/PROVENANCE.txt).
+  The dependency is excluded from workspace membership, preserving three packages.
 - Bundled `DeepFilterNet3_onnx.tar.gz`: 7,983,136 bytes, SHA-256
   `c94d91f70911001c946e0fabb4aa9adc37045f45a03b56008cb0c8244cb63616`.
 - Native Rust inference via tract **0.21.4**, pinned at all four entry points.
@@ -65,7 +73,7 @@ when recursive filters decay toward silence. No rounding mode is changed.
   remain enabled. tract-core uses release-style debug assertions because its
   optimizer creates duplicate `Conv.bias` display names that its debug graph-name
   checker rejects, even though release inference works. Dev and release paths
-  are both tested; no edits to Cargo caches or vendored fourth package are needed.
+  are both tested; no edits to Cargo caches are needed.
 - The model and runtime are from upstream's MIT/Apache distribution; selected MIT
   notice and model provenance ship in `frontend/THIRD_PARTY_AUDIO.txt` as a Tauri
   resource. No Python, Node, GPU, external service or native C++ ML runtime added.
@@ -98,6 +106,9 @@ Tests cover noise attenuation AND synthetic speech preservation (muting everythi
 cannot pass), repeated fresh-state resets, stale-audio removal after queue gaps,
 bit-exact bypass, re-enable, illegal hot swaps, independent gain/AEC composition,
 invalid samples/stage output, stage order and urgent controls under queue pressure.
+The silence regression runs 10,000 consecutive blocks (100 seconds), then checks
+speech recovery and privacy-reset equivalence. Both normalization layouts retain
+silence and propagate invalid state.
 Existing echo/double-talk, jitter, mixing and WebRTC regressions remain enabled.
 The three-OS CI runs the audio tests in release mode and publishes informational
 benchmark JSON artifacts. Shared runners do not enforce hard CPU timing gates.

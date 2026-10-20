@@ -77,7 +77,9 @@ preferences can disable sound or enable a banner; see [notifications.md](notific
 Bursts coalesce into bounded cues. During voice, sounds follow the selected output device, master
 volume and deafen, and are included in the echo reference/debug speaker track.
 They are not inserted into the outgoing microphone stream. PCM is synthesized
-before device startup; callback playback uses no allocation, locks or file I/O.
+once per process before device startup and shared across device rebuilds and calls;
+each player retains its own cursor, volume and pending cues. Callback playback
+uses no allocation, locks or file I/O.
 The Rust palette in `frontend/src/notification_sound.rs` also renders the browser
 and out-of-call desktop cues so the same event keeps the same sound everywhere.
 
@@ -141,6 +143,12 @@ Callbacks record atomic failure/activity counters; error formatting stays off th
 callbacks. Five seconds without expected input/output callbacks also enters recovery.
 
 ## Worker resilience and diagnostic logs
+
+Native audio startup wakes immediately when the media connection becomes ready;
+it does not wait for the next 500 ms maintenance tick. The WebView polls voice
+state independently of audio-worker status/settings, so slow audio initialization
+does not delay connection/disconnection presentation. Device opening, processing
+initialization and network negotiation still contribute to actual join time.
 
 Live voice uses a native, connection-scoped heartbeat with a 15-second expiry;
 background WebView polling no longer keeps the call alive. Local playback/microphone

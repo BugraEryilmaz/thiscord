@@ -1,6 +1,11 @@
 //! Server-selected notification earcons. Generate PCM before opening the device, then only
 //! read samples in the callback. A bounded bitset coalesces bursts of changes.
 use super::mixer::RATE;
+use std::sync::OnceLock;
+
+// Immutable PCM is shared between calls/device rebuilds. Initialization happens
+// in Player::new on the control worker, never in the playback callback.
+static SOUNDS: OnceLock<[Vec<f32>; 6]> = OnceLock::new();
 
 #[cfg(test)]
 pub(super) const JOIN: u8 = 1;
@@ -8,7 +13,7 @@ pub(super) const JOIN: u8 = 1;
 pub(super) const LEAVE: u8 = 2;
 
 pub(super) struct Player {
-    sounds: [Vec<f32>; 6],
+    sounds: &'static [Vec<f32>; 6],
     pub volumes: [u8; 6],
     pending: u8,
     active: Option<usize>,
@@ -18,8 +23,10 @@ pub(super) struct Player {
 impl Player {
     pub fn new() -> Self {
         Self {
-            sounds: crate::notification_sound::MIXER_KINDS
-                .map(|kind| crate::notification_sound::render(kind, RATE)),
+            sounds: SOUNDS.get_or_init(|| {
+                crate::notification_sound::MIXER_KINDS
+                    .map(|kind| crate::notification_sound::render(kind, RATE))
+            }),
             volumes: [100; 6],
             pending: 0,
             active: None,
@@ -65,7 +72,7 @@ mod tests {
     fn cues_are_short_bounded_distinct_and_deafen_cancels_backlog() {
         let mut player = Player::new();
         assert_ne!(player.sounds[0], player.sounds[1]);
-        for sound in &player.sounds {
+        for sound in player.sounds {
             assert!(sound.len() < RATE as usize * 2);
             assert!(sound.iter().all(|s| s.is_finite() && s.abs() <= 0.12));
             assert_eq!(sound[0], 0.0);
@@ -82,5 +89,27 @@ mod tests {
         player.request(LEAVE, true);
         player.request(0, false);
         assert!((0..RATE).all(|_| player.next() == 0.0));
+    }
+
+    #[test]
+    fn shared_cues_keep_playback_positions_volumes_and_deafen_independent() {
+        let mut first = Player::new();
+        let mut second = Player::new();
+        assert!(std::ptr::eq(first.sounds, second.sounds));
+        first.volumes[0] = 50;
+        first.request(JOIN, false);
+        second.request(JOIN, false);
+        for _ in 0..1000 {
+            assert!((first.next() - second.next() * 0.5).abs() < 1e-7);
+        }
+        first.request(0, true);
+        assert_eq!(first.next(), 0.0);
+        assert!((0..1000).any(|_| second.next() != 0.0));
+        let mut fresh = Player::new();
+        fresh.request(JOIN, false);
+        let sounds = fresh.sounds;
+        for expected in &sounds[0][..1000] {
+            assert!((fresh.next() - *expected).abs() < 1e-7);
+        }
     }
 }

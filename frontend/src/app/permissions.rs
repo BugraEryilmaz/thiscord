@@ -54,6 +54,7 @@ impl Editor {
             }
         );
         leptos::task::spawn_local(async move {
+            let selection = self.ui.navigation.get_untracked().current();
             let token = self.ui.token.get_untracked();
             let result = crate::account_client::api_request::<_, PermissionResponse>(
                 PERMISSIONS_PATH,
@@ -61,7 +62,10 @@ impl Editor {
                 token.as_deref(),
             )
             .await;
-            if self.ui.token.get_untracked() != token || self.state.is_disposed() {
+            if self.ui.token.get_untracked() != token
+                || self.state.is_disposed()
+                || !super::servers::current(self.ui, selection)
+            {
                 self.ui.busy.set(false);
                 return;
             }
@@ -107,6 +111,13 @@ impl Editor {
                     }
                     if mutation {
                         super::servers::refresh(self.ui).await;
+                    }
+                    if self.ui.token.get_untracked() != token
+                        || self.state.is_disposed()
+                        || !super::servers::current(self.ui, selection)
+                    {
+                        self.ui.busy.set(false);
+                        return;
                     }
                     if !self.state.is_disposed() {
                         self.guilds.set(self.ui.guilds.get_untracked());

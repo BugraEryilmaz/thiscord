@@ -66,8 +66,7 @@ pub(super) fn end_call(ui: Ui) {
 }
 pub(super) fn open(ui: Ui, id: ConversationId) {
     ui.friends.selected.set(Some(id));
-    ui.server.set(None);
-    ui.page.set("servers");
+    super::servers::home(ui);
 }
 fn available(ui: Ui) -> bool {
     account_client::desktop() || ui.audio_control.is_remote()

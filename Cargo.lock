@@ -1472,7 +1472,6 @@ dependencies = [
 [[package]]
 name = "deep_filter"
 version = "0.5.7-pre"
-source = "git+https://github.com/Rikorose/DeepFilterNet?rev=d375b2d8309e0935d165700c91da9de862a99c31#d375b2d8309e0935d165700c91da9de862a99c31"
 dependencies = [
  "anyhow",
  "crossbeam-channel",

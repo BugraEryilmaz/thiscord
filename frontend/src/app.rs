@@ -52,6 +52,9 @@ struct Ui {
     unread: RwSignal<Vec<thiscord_shared::chat::Unread>>,
     guilds: RwSignal<Vec<thiscord_shared::permissions::Guild>>,
     server: RwSignal<Option<thiscord_shared::permissions::GuildHome>>,
+    navigation: RwSignal<thiscord_frontend::navigation::Navigation>,
+    server_error: RwSignal<String>,
+    server_refresh: RwSignal<u64>,
     can_create_server: RwSignal<bool>,
     moderation_target: RwSignal<Option<thiscord_shared::AccountId>>,
     account: RwSignal<Option<Account>>,
@@ -69,6 +72,7 @@ async fn apply(ui: Ui, response: AccountResponse) {
     match response {
         AccountResponse::Session { session } => {
             let persistence = client::persist(Some(&session.token)).await;
+            servers::reset_session(ui);
             ui.token.set(Some(session.token));
             ui.account.set(Some(session.account));
             ui.page.set("servers");
@@ -93,9 +97,8 @@ async fn apply(ui: Ui, response: AccountResponse) {
     }
 }
 async fn clear_local(ui: Ui) {
+    servers::reset_session(ui);
     ui.guilds.set(vec![]);
-    ui.server.set(None);
-    ui.selected_channel.set(None);
     ui.voice_location.set(None);
     ui.active_stream.set(None);
     ui.can_create_server.set(false);
@@ -338,6 +341,9 @@ pub fn App() -> impl IntoView {
         unread: RwSignal::new(vec![]),
         guilds: RwSignal::new(vec![]),
         server: RwSignal::new(None),
+        navigation: RwSignal::new(Default::default()),
+        server_error: RwSignal::new(String::new()),
+        server_refresh: RwSignal::new(0),
         can_create_server: RwSignal::new(false),
         moderation_target: RwSignal::new(None),
         account: RwSignal::new(None),
