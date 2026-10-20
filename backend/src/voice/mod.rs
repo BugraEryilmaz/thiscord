@@ -56,6 +56,8 @@ struct Member {
     source_id: uuid::Uuid,
     screen_started: Instant,
     microphone_started: Instant,
+    // Admission reserves a slot before SDP succeeds; it is not a legacy peer.
+    negotiated: bool,
     packet_redundancy: bool,
     expected_sender_generation: Option<u64>,
     restricted_sender_generation: Option<u64>,
@@ -111,6 +113,15 @@ struct VoiceAccess {
     active: Arc<AtomicBool>,
 }
 impl VoiceAccess {
+    async fn current_roster(&self, room: &Room) -> Option<Vec<Participant>> {
+        let members = room.members.read().await;
+        let epoch = self.generation.load(Ordering::Acquire);
+        let _permit = self.access.packet(epoch, epoch)?;
+        self.active
+            .load(Ordering::Acquire)
+            .then(|| viewing::participants(&members))
+    }
+
     async fn refresh(
         &self,
         room: &Room,
@@ -177,7 +188,8 @@ pub(crate) async fn roster(channels: Vec<ChannelId>) -> Vec<thiscord_shared::voi
         if let Some(room) = room {
             for member in room.members.read().await.values() {
                 let epoch = member.generation.load(Ordering::Acquire);
-                if member.active.load(Ordering::Acquire)
+                if member.negotiated
+                    && member.active.load(Ordering::Acquire)
                     && member.access.packet(epoch, epoch).is_some()
                 {
                     members.push(red::participant(member));
@@ -930,6 +942,7 @@ async fn serve(mut socket: logging::Socket, pool: DbPool, id: RequestId) {
             source_id,
             screen_started: Instant::now(),
             microphone_started: Instant::now(),
+            negotiated: false,
             packet_redundancy: false,
             expected_sender_generation: None,
             restricted_sender_generation: None,
@@ -1088,6 +1101,11 @@ async fn serve(mut socket: logging::Socket, pool: DbPool, id: RequestId) {
                 packet_redundancy && thiscord_shared::rtp_red::negotiated(&answer.sdp);
             screen_feedback = enabled;
             remote_audio = audio_enabled;
+            if answer.sdp_type != RTCSdpType::Answer {
+                return Err(());
+            }
+            socket.stage = "remote_description";
+            pc.set_remote_description(answer).await.map_err(|_| ())?;
             if let Some(member) = room
                 .members
                 .write()
@@ -1098,13 +1116,9 @@ async fn serve(mut socket: logging::Socket, pool: DbPool, id: RequestId) {
                 member.feedback_enabled = enabled;
                 member.packet_redundancy = packet_redundancy;
                 member.subscriptions_enabled = screen_subscriptions;
+                member.negotiated = true;
                 room.changed.send_replace(());
             }
-            if answer.sdp_type != RTCSdpType::Answer {
-                return Err(());
-            }
-            socket.stage = "remote_description";
-            pc.set_remote_description(answer).await.map_err(|_| ())?;
             Ok(())
         })
         .await
@@ -1274,6 +1288,16 @@ async fn serve(mut socket: logging::Socket, pool: DbPool, id: RequestId) {
                         access_failed(&mut resume.socket, request_id, error).await;
                         break;
                     }
+                    if socket.recovery_expired() {
+                        let _ = send(&mut resume.socket, ServerEvent::ResumeUnavailable {}).await;
+                        break;
+                    }
+                    let challenge = {
+                        let mut members = room.members.write().await;
+                        members.get_mut(&slot)
+                            .filter(|member| member.source_id == source_id && member.active.load(Ordering::Acquire))
+                            .and_then(|member| member.red.resume(socket.detached_at(), Instant::now()))
+                    };
                     socket.end("signaling_reattached");
                     tracing::info!(request_id = %resume.socket.id, media_request_id = %id, sequence = resume.sequence, "voice signaling reattached");
                     socket = resume.socket;
@@ -1283,6 +1307,8 @@ async fn serve(mut socket: logging::Socket, pool: DbPool, id: RequestId) {
                     audio_reply_budget = 0;
                     if let Some(call) = audio_call.take() { call.reject(Failure::Unavailable); }
                     if send(&mut socket, ServerEvent::Resumed {}).await.is_err() { break; }
+                    if let Some(challenge) = challenge
+                        && send(&mut socket, ServerEvent::MicrophoneRefreshRequired { challenge }).await.is_err() { break; }
                 },
                 result=changed.changed()=>{
                     if result.is_err(){socket.end("access_watcher_closed");break;}
@@ -1354,6 +1380,9 @@ async fn serve(mut socket: logging::Socket, pool: DbPool, id: RequestId) {
                 if send(&mut socket,ServerEvent::Participants{members}).await.is_err(){break;}
                 },
                 _=challenge_tick.tick()=>{
+                    // Detached sends are intentionally discarded. Do not spend
+                    // proof attempts or expire Ready while no signaling exists.
+                    if socket.detached() { continue; }
                     let (expired, challenge) = {
                         let mut members = room.members.write().await;
                         if let Some(member) = members.get_mut(&slot).filter(|member| member.source_id == source_id && member.active.load(Ordering::Acquire)) {
@@ -1376,9 +1405,15 @@ async fn serve(mut socket: logging::Socket, pool: DbPool, id: RequestId) {
                 },
                 result=room_changed.changed()=>{
                     if result.is_err(){socket.end("room_watcher_closed");break;}
-                    let members = match access.refresh(&room,slot,&mut changed).await {
-                        Ok(members)=>members,
-                        Err(error)=>{access_failed(&mut socket,id,error).await;break;}
+                    // Roster/privacy changes do not alter authorization. Reuse only
+                    // the current access epoch; mutations close it before DB commit.
+                    // The independent watcher and periodic DB check remain authoritative.
+                    let members = match access.current_roster(&room).await {
+                        Some(members) => members,
+                        None => match access.refresh(&room,slot,&mut changed).await {
+                            Ok(members)=>members,
+                            Err(error)=>{access_failed(&mut socket,id,error).await;break;}
+                        }
                     };
                     if send(&mut socket,ServerEvent::Participants{members}).await.is_err(){break;}
                 }
@@ -1526,6 +1561,50 @@ where
 mod send_tests {
     use super::*;
 
+    #[tokio::test]
+    async fn roster_only_refresh_requires_current_authorization_without_database_checkout() {
+        let room = Room::default();
+        let identity = access::Identity {
+            account: thiscord_shared::AccountId::from_uuid(uuid::Uuid::new_v4()),
+            session: thiscord_shared::SessionId::from_uuid(uuid::Uuid::new_v4()),
+            guild: None,
+        };
+        let connection_access = access::register(identity);
+        // No connections or valid database URL: roster-only work must never
+        // acquire a connection. Authorization refresh retains its separate path.
+        let pool = diesel::r2d2::Pool::builder()
+            .max_size(1)
+            .min_idle(Some(0))
+            .build_unchecked(
+                diesel::r2d2::ConnectionManager::<diesel::PgConnection>::new("unused"),
+            );
+        let access = VoiceAccess {
+            access: connection_access.clone(),
+            pool,
+            token: String::new(),
+            guild: GuildId::from_uuid(uuid::Uuid::new_v4()),
+            channel: ChannelId::from_uuid(uuid::Uuid::new_v4()),
+            voice_revision: 0,
+            generation: Arc::new(AtomicU64::new(0)),
+            active: Arc::new(AtomicBool::new(true)),
+        };
+        assert_eq!(access.current_roster(&room).await, Some(vec![]));
+        assert_eq!(access.pool.state().connections, 0);
+        let mutation = access::pause(access::Scope::Session(identity.session));
+        assert!(access.current_roster(&room).await.is_none());
+        drop(mutation);
+        assert!(
+            access.current_roster(&room).await.is_none(),
+            "completed mutation still requires DB authorization"
+        );
+        access
+            .generation
+            .store(connection_access.snapshot().unwrap(), Ordering::Release);
+        assert!(access.current_roster(&room).await.is_some());
+        access.active.store(false, Ordering::Release);
+        assert!(access.current_roster(&room).await.is_none());
+    }
+
     #[test]
     fn queued_media_requires_current_epochs_for_both_endpoints() {
         let identity = || access::Identity {
@@ -1614,6 +1693,7 @@ mod send_tests {
                     source_id: uuid::Uuid::new_v4(),
                     screen_started: Instant::now(),
                     microphone_started: Instant::now(),
+                    negotiated: true,
                     packet_redundancy: false,
                     expected_sender_generation: None,
                     restricted_sender_generation: None,

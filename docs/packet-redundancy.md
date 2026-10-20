@@ -97,6 +97,12 @@ to reject stale rosters and preserve the separate effective RTP high-water mark
 when a restricted stream is recreated. An absent source cannot reappear with its retired source
 epoch; it must rejoin. New receiving sessions start with fresh fences.
 
+Slot admission reserves capacity before SDP negotiation finishes. Such pending
+members are omitted from participant rosters and media delivery until their
+answer has been applied successfully. They must not temporarily appear as
+epoch-zero legacy publishers: reusing a protected slot that way makes existing
+clients reject the roster before the joining client's capabilities are known.
+
 Mute/deafen, PTT edges, settings changes, device/delivery changes, replacement and
 permission invalidation clear retained encoded history. Observed receive fences
 clear jitter donors, decoder state, activity, rate correction and callback PCM.
@@ -127,6 +133,14 @@ sources remain eligible. A matching reply at the deadline is rejected. Muted and
 silent publishers answer over signaling without waiting for RTP. The initial
 challenge timer starts only after the client has established its audio session
 and announced its first local generation.
+While signaling is detached, the server neither consumes challenge transmissions
+nor counts detached time against the proof/Ready deadline. The existing bounded
+signaling grace still applies. Reattachment replays an outstanding challenge,
+including one whose proof was accepted but whose Ready was lost, without
+resetting its attached-time budget or releasing unproven media. Ordinary roster
+changes use the current authoritative access epoch instead of querying the
+database again for every boundary; access invalidation and periodic authorization
+checks remain in force.
 A source-only refresh changes publisher privacy and generation, while keeping its
 own receive floor unchanged; it cannot recursively trigger other publishers.
 Concurrent real local PTT/settings boundaries take priority. Only the current

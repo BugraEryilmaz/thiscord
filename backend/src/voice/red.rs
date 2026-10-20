@@ -36,6 +36,31 @@ impl Default for Barrier {
     }
 }
 impl Barrier {
+    /// Resume the same immutable proof, including an ACK whose Ready was lost.
+    /// Only detached time is excluded: repeated reattachments cannot renew the
+    /// five-second attached budget or the normal three-transmission retry budget.
+    /// The socket owner independently enforces the bounded signaling grace.
+    pub fn resume(&mut self, detached_at: Option<Instant>, now: Instant) -> Option<u32> {
+        if let Some(detached_at) = detached_at {
+            let paused = now.saturating_duration_since(detached_at);
+            self.opened_at += paused;
+            self.accepted_at = self.accepted_at.map(|at| at + paused);
+            self.ready_at = self.ready_at.map(|at| at + paused);
+            self.sent_at = self.sent_at.map(|at| at + paused);
+        }
+        if !self.expired(now)
+            && (self.issued > self.satisfied
+                || (self.accepted_at.is_some() && self.ready_at.is_none()))
+        {
+            // One explicit replay on the newly authenticated socket, even if
+            // ordinary retries were used on the lost connection.
+            self.sent_at = Some(now);
+            Some(self.issued)
+        } else {
+            None
+        }
+    }
+
     #[cfg(test)]
     pub fn with_receiver_started(receiver_started: Instant) -> Self {
         Self {
@@ -396,6 +421,51 @@ impl Floor {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn resume_replays_exhausted_proof_without_renewing_attached_budget() {
+        let now = Instant::now();
+        let mut barrier = Barrier::default();
+        barrier.challenge(10, now);
+        for millis in [0, 250, 500] {
+            assert_eq!(
+                barrier.request(now + Duration::from_millis(millis)),
+                Some(10)
+            );
+        }
+        let detached = now + Duration::from_secs(1);
+        let resumed = detached + Duration::from_secs(20);
+        assert_eq!(barrier.resume(Some(detached), resumed), Some(10));
+        assert_eq!(barrier.attempts, 3);
+        assert_eq!(barrier.request(resumed + Duration::from_millis(250)), None);
+        assert!(!barrier.expired(resumed + Duration::from_millis(3999)));
+        assert!(barrier.expired(resumed + Duration::from_secs(4)));
+        assert_eq!(barrier.resume(None, resumed + Duration::from_secs(4)), None);
+        assert_eq!(barrier.satisfied, 0);
+    }
+
+    #[test]
+    fn resume_preserves_ready_deadline_and_does_not_revive_expired_proofs() {
+        let now = Instant::now();
+        let mut barrier = Barrier::default();
+        barrier.challenge(10, now);
+        assert_eq!(barrier.request(now), Some(10));
+        barrier.satisfied = 10;
+        barrier.accepted_at = Some(now);
+        barrier.challenge(20, now);
+        let detached = now + Duration::from_secs(2);
+        let resumed = detached + Duration::from_secs(10);
+        assert_eq!(barrier.resume(Some(detached), resumed), Some(10));
+        assert_eq!(barrier.request(resumed), None, "Ready still required");
+        assert!(!barrier.expired(resumed + Duration::from_millis(2999)));
+        assert!(barrier.expired(resumed + Duration::from_secs(3)));
+        let detached = resumed + Duration::from_secs(3);
+        assert_eq!(
+            barrier.resume(Some(detached), detached + Duration::from_secs(10)),
+            None
+        );
+        assert!(barrier.expired(detached + Duration::from_secs(10)));
+    }
 
     #[test]
     fn refresh_requests_freeze_issued_budget_and_bound_cadence_under_listener_flood() {

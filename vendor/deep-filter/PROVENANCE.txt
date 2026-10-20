@@ -1,0 +1,56 @@
+DeepFilterNet runtime subset for Thiscord
+
+Upstream: https://github.com/Rikorose/DeepFilterNet
+Revision: d375b2d8309e0935d165700c91da9de862a99c31
+Package: libDF / deep_filter 0.5.7-pre (library name df)
+License: MIT OR Apache-2.0; MIT selected for Thiscord distribution.
+Unmodified upstream license texts are retained under libDF/.
+
+Copied from the exact revision, with no changes to the Cargo source cache:
+  libDF/src/{lib,transforms,tract,logging}.rs
+  libDF/{Cargo.toml,LICENSE,LICENSE-MIT,LICENSE-APACHE}
+  models/DeepFilterNet3_onnx.tar.gz
+
+Model: 7,983,136 bytes, byte-for-byte upstream archive; no repacking.
+SHA-256: c94d91f70911001c946e0fabb4aa9adc37045f45a03b56008cb0c8244cb63616
+The relative include_bytes! path in tract.rs is unchanged.
+
+Local changes:
+1. lib.rs: in band_unit_norm and band_unit_norm_t, after the recursive state
+   update and before sqrt/division, apply:
+       if s.is_finite() && *s < f32::MIN_POSITIVE {
+           *s = f32::MIN_POSITIVE;
+       }
+   With FTZ/DAZ, silence previously decayed the state to zero, giving 0/0 at
+   block 7774 with alpha=0.99 and the model's smallest initial state. The
+   smallest normal positive float prevents that underflow/division failure.
+   Comparisons retain NaNs; the finite guard also retains negative infinity
+   so its square root remains invalid. No max() NaN masking, FP-mode changes,
+   added audio, silence reset, model changes or inference bypass are used.
+   Finite negative states are floored too; valid energy states are nonnegative.
+2. Cargo.toml: limit this private vendor subset to the rlib and the supported
+   default-model, transforms, logging, timings and tract features. Retain the
+   exact upstream constraints/flags for every retained dependency. Remove CLI,
+   dataset/training, codecs, C API, WASM binding, allocator, alternate-model
+   features and their unused dependencies/packaging metadata. Default features
+   retain default-model only; Thiscord explicitly disables defaults and enables
+   tract + default-model, just as before vendoring. Frontend tract entry points
+   remain pinned to =0.21.4, and the lockfile preserves all resolved versions.
+3. lib.rs: remove module declarations for omitted features and the upstream
+   rand-based test module. transforms.rs: omit its upstream test module, which
+   requires dataset utilities, WAV helpers and external audio fixtures. The
+   frontend's optimized tests exercise this dependency, including long-silence
+   inference, both normalization layouts, invalid state and reset behavior.
+4. tract.rs: remove the alternate low-latency model branch and simplify the
+   default-model/capi cfg now that capi is omitted. The DFN3 branch and runtime
+   logic are unchanged. logging.rs is byte-for-byte upstream.
+
+This is intentionally not a full upstream development checkout. Other models,
+Python/training packages, datasets, command-line tools and fixtures are omitted;
+unsupported features are absent rather than exposed with missing files.
+The root Cargo.toml patches the pinned Git source to this path and excludes the
+vendored package from workspace membership, preserving the three app packages.
+
+To audit, compare the listed files against the pinned upstream revision. Model
+and license hashes must match upstream. Only the two state floors above change
+the runtime math; other source edits remove unavailable modules/tests/features.

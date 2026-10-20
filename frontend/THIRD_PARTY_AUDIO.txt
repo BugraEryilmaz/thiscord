@@ -3,6 +3,8 @@ Thiscord experimental neural audio processing
 DeepFilterNet3 runtime and bundled model
 https://github.com/Rikorose/DeepFilterNet
 Revision: d375b2d8309e0935d165700c91da9de862a99c31
+Local changes: runtime-only vendor subset and normalization floor for long silence.
+See vendor/deep-filter/PROVENANCE.txt. Model bytes are unchanged.
 Model: models/DeepFilterNet3_onnx.tar.gz
 SHA-256: c94d91f70911001c946e0fabb4aa9adc37045f45a03b56008cb0c8244cb63616
 Upstream distributes this work under MIT or Apache-2.0; MIT selected here.

@@ -88,7 +88,9 @@ pub(super) fn receives(
     kind: MediaKind,
     queued: Instant,
 ) -> bool {
-    if !source.active.load(Ordering::Acquire)
+    if !source.negotiated
+        || !receiver.negotiated
+        || !source.active.load(Ordering::Acquire)
         || !may_publish(&source.info, kind)
         || receiver.info.slot == source.info.slot
         || receiver.info.deafened
@@ -144,6 +146,7 @@ pub(super) fn participants(members: &HashMap<usize, Member>) -> Vec<Participant>
     let now = Instant::now();
     members
         .values()
+        .filter(|source| source.negotiated)
         .map(|source| {
             let viewers = |kind| {
                 let mut ids: Vec<_> = members
@@ -205,6 +208,7 @@ mod tests {
                     source_id: uuid::Uuid::new_v4(),
                     screen_started: Instant::now(),
                     microphone_started: Instant::now(),
+                    negotiated: true,
                     packet_redundancy: false,
                     expected_sender_generation: None,
                     restricted_sender_generation: None,

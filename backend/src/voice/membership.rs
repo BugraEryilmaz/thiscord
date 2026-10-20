@@ -84,6 +84,7 @@ mod tests {
             source_id: uuid::Uuid::new_v4(),
             screen_started: Instant::now(),
             microphone_started: Instant::now(),
+            negotiated: true,
             packet_redundancy: false,
             expected_sender_generation: None,
             restricted_sender_generation: None,
@@ -106,6 +107,53 @@ mod tests {
     }
     fn account() -> thiscord_shared::AccountId {
         thiscord_shared::AccountId::from_uuid(uuid::Uuid::new_v4())
+    }
+
+    #[tokio::test]
+    async fn reused_slot_is_not_advertised_as_legacy_during_negotiation() {
+        let room = Room::default();
+        let mut original = member(account(), id());
+        original.packet_redundancy = true;
+        let slot = admit(&room, original.clone(), false).await.unwrap();
+        let mut listener = member(account(), id());
+        listener.packet_redundancy = true;
+        admit(&room, listener.clone(), false).await.unwrap();
+        assert_eq!(
+            viewing::participants(&*room.members.read().await)[0].microphone_source_epoch,
+            1
+        );
+        release_member(&room, slot, original.source_id).await;
+
+        let mut pending = member(account(), id());
+        pending.negotiated = false;
+        let pending_id = pending.info.account_id;
+        assert_eq!(admit(&room, pending, false).await.unwrap(), slot);
+        let mut members = room.members.write().await;
+        let roster = viewing::participants(&members);
+        assert_eq!(roster.len(), 1);
+        assert_eq!(roster[0].account_id, listener.info.account_id);
+        assert!(!viewing::receives(
+            &listener,
+            &members[&slot],
+            MediaKind::Microphone,
+            Instant::now()
+        ));
+
+        let source = members.get_mut(&slot).unwrap();
+        source.packet_redundancy = true;
+        source.info.microphone_source_epoch = 2;
+        source.info.microphone_epoch = 3;
+        source.negotiated = true;
+        let roster = viewing::participants(&members);
+        let source = roster.iter().find(|m| m.account_id == pending_id).unwrap();
+        assert_eq!(source.microphone_source_epoch, 2);
+        assert_eq!(source.microphone_epoch, 3);
+        // A genuinely negotiated old peer must still use the epoch-zero wire shape.
+        members.get_mut(&slot).unwrap().packet_redundancy = false;
+        let roster = viewing::participants(&members);
+        let source = roster.iter().find(|m| m.account_id == pending_id).unwrap();
+        assert_eq!(source.microphone_source_epoch, 0);
+        assert_eq!(source.microphone_epoch, 0);
     }
 
     #[tokio::test]

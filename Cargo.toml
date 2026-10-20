@@ -1,6 +1,6 @@
 [workspace]
 members = ["frontend", "backend", "shared"]
-exclude = ["vendor/sonora", "vendor/sonora-aec3", "vendor/opus"]
+exclude = ["vendor/sonora", "vendor/sonora-aec3", "vendor/opus", "vendor/deep-filter/libDF"]
 default-members = ["shared"]
 resolver = "3"
 
@@ -8,6 +8,9 @@ resolver = "3"
 opus = { path = "vendor/opus" }
 sonora = { path = "vendor/sonora" }
 sonora-aec3 = { path = "vendor/sonora-aec3" }
+
+[patch."https://github.com/Rikorose/DeepFilterNet"]
+deep_filter = { path = "vendor/deep-filter/libDF" }
 
 [workspace.package]
 version = "0.1.37"

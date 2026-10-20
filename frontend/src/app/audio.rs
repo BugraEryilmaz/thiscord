@@ -175,44 +175,64 @@ pub(super) fn AudioHost(ui: Ui) -> impl IntoView {
         leptos::task::spawn_local(async move {
             let _ = futures_util::future::Abortable::new(
                 async move {
-                    match ui
-                        .audio_control
-                        .invoke::<AudioSettings>("audio_load", json!({}))
-                        .await
-                    {
-                        Ok(settings) => ui.audio.set(settings),
-                        Err(error) => ui.status.set(error),
-                    }
-                    loop {
-                        if let Ok(status) = ui
-                            .audio_control
-                            .invoke::<VoiceStatus>("voice_status", json!({}))
-                            .await
-                        {
-                            if ui.voice.get_untracked().channel_id.is_some()
-                                && status.channel_id.is_none()
+                    // Each loop awaits its own reply before scheduling another poll.
+                    // Do not time out and resubmit native invokes: dropping a JS
+                    // future does not cancel the queued audio-worker command.
+                    let voice = async move {
+                        loop {
+                            if let Ok(status) = ui
+                                .audio_control
+                                .invoke::<VoiceStatus>("voice_status", json!({}))
+                                .await
                             {
-                                ui.status.set(status.message.clone());
+                                if ui.voice.get_untracked().channel_id.is_some()
+                                    && status.channel_id.is_none()
+                                {
+                                    ui.status.set(status.message.clone());
+                                }
+                                ui.voice.set(status);
                             }
-                            ui.voice.set(status);
+                            gloo_timers::future::TimeoutFuture::new(500).await;
                         }
-                        if let Ok(status) = ui
+                    };
+                    let audio = async move {
+                        let revision = ui.audio_revision.get_untracked();
+                        match ui
                             .audio_control
-                            .invoke::<AudioStatus>("audio_status", json!({}))
+                            .invoke::<AudioSettings>("audio_load", json!({}))
                             .await
                         {
-                            ui.audio_status.set(Some(status));
+                            Ok(settings)
+                                if ui.audio_revision.get_untracked() == revision
+                                    && !ui.audio_saving.get_untracked() =>
+                            {
+                                ui.audio.set(settings)
+                            }
+                            Ok(_) => {}
+                            Err(error) => ui.status.set(error),
                         }
-                        if let Ok(settings) = ui
-                            .audio_control
-                            .invoke::<AudioSettings>("audio_current", json!({}))
-                            .await
-                            && !ui.audio_saving.get_untracked()
-                        {
-                            ui.audio.set(settings);
+                        loop {
+                            if let Ok(status) = ui
+                                .audio_control
+                                .invoke::<AudioStatus>("audio_status", json!({}))
+                                .await
+                            {
+                                ui.audio_status.set(Some(status));
+                            }
+                            let revision = ui.audio_revision.get_untracked();
+                            if let Ok(settings) = ui
+                                .audio_control
+                                .invoke::<AudioSettings>("audio_current", json!({}))
+                                .await
+                                && !ui.audio_saving.get_untracked()
+                                && ui.audio_revision.get_untracked() == revision
+                            {
+                                ui.audio.set(settings);
+                            }
+                            gloo_timers::future::TimeoutFuture::new(500).await;
                         }
-                        gloo_timers::future::TimeoutFuture::new(500).await;
-                    }
+                    };
+                    futures_util::future::join(voice, audio).await;
                 },
                 registration,
             )

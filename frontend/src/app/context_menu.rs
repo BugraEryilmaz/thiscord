@@ -452,7 +452,8 @@ fn execute(ui: Ui, action: Action) {
         }),
         Action::Page(guild, page, member) => leptos::task::spawn_local(async move {
             match super::servers::select(ui, guild).await {
-                Ok(()) => {
+                Ok(false) => (),
+                Ok(true) => {
                     ui.role_target.set(member.map(|m| (guild, m)));
                     ui.permission_channel.set(None);
                     ui.moderation_target.set(member);
@@ -463,7 +464,8 @@ fn execute(ui: Ui, action: Action) {
         }),
         Action::ChannelPermissions(guild, channel) => leptos::task::spawn_local(async move {
             match super::servers::select(ui, guild).await {
-                Ok(()) => {
+                Ok(false) => (),
+                Ok(true) => {
                     ui.role_target.set(None);
                     ui.permission_channel.set(Some((guild, channel)));
                     ui.page.set("permissions");
@@ -500,6 +502,8 @@ fn execute(ui: Ui, action: Action) {
             }
             ui.busy.set(true);
             leptos::task::spawn_local(async move {
+                let selection = ui.navigation.get_untracked().current();
+                let token = ui.token.get_untracked();
                 let result = super::servers::request(
                     ui,
                     PermissionRequest::Change {
@@ -509,6 +513,10 @@ fn execute(ui: Ui, action: Action) {
                     },
                 )
                 .await;
+                if !super::servers::current(ui, selection) || ui.token.get_untracked() != token {
+                    ui.busy.set(false);
+                    return;
+                }
                 ui.status.set(match result {
                     Ok(_) => "Action completed".into(),
                     Err(error) => {

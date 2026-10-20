@@ -658,6 +658,7 @@ mod tests {
                     source_id: endpoint.id,
                     screen_started: Instant::now(),
                     microphone_started: Instant::now() - Duration::from_secs(1),
+                    negotiated: true,
                     packet_redundancy: slot == 1,
                     expected_sender_generation: None,
                     restricted_sender_generation: None,

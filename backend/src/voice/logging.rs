@@ -55,6 +55,9 @@ impl Socket {
     pub fn detached(&self) -> bool {
         self.inner.is_none()
     }
+    pub fn detached_at(&self) -> Option<Instant> {
+        self.detached
+    }
     pub fn detach(&mut self) {
         if self.inner.take().is_some() {
             self.detached = Some(Instant::now());

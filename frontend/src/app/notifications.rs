@@ -335,9 +335,13 @@ fn interaction(ui: Ui, alert: Alert, action: BannerAction) {
                 guild_id,
                 channel_id,
             } => leptos::task::spawn_local(async move {
-                if let Err(error) = super::servers::select(ui, guild_id).await {
-                    ui.status.set(error);
-                    return;
+                match super::servers::select(ui, guild_id).await {
+                    Ok(true) => {}
+                    Ok(false) => return,
+                    Err(error) => {
+                        ui.status.set(error);
+                        return;
+                    }
                 }
                 ui.selected_channel.set(
                     ui.server
