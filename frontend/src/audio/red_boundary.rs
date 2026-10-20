@@ -3,6 +3,20 @@
 use crate::audio::{connection::Connection, outgoing::EncodedFrame};
 use std::time::{Duration, Instant};
 
+#[derive(Debug, PartialEq, Eq)]
+pub enum RequestError {
+    AcknowledgmentTimeout,
+    RefreshRejected,
+}
+impl From<RequestError> for &'static str {
+    fn from(error: RequestError) -> Self {
+        match error {
+            RequestError::AcknowledgmentTimeout => "Microphone boundary acknowledgment timed out",
+            RequestError::RefreshRejected => "Microphone refresh was rejected; rejoin voice",
+        }
+    }
+}
+
 #[derive(Default)]
 pub struct Boundary {
     control: Option<u64>,
@@ -62,18 +76,18 @@ impl Boundary {
         self.challenge = Some(self.required);
         Ok(())
     }
-    pub fn request(&mut self, now: Instant) -> Result<Option<(u64, Option<u32>)>, &'static str> {
+    pub fn request(&mut self, now: Instant) -> Result<Option<(u64, Option<u32>)>, RequestError> {
         if self
             .rejection_started
             .is_some_and(|at| now.saturating_duration_since(at) >= Duration::from_secs(5))
         {
-            return Err("Microphone refresh was rejected; rejoin voice");
+            return Err(RequestError::RefreshRejected);
         }
         if self
             .pending
             .is_some_and(|(_, at, _)| now.saturating_duration_since(at) >= Duration::from_secs(5))
         {
-            return Err("Microphone boundary acknowledgment timed out");
+            return Err(RequestError::AcknowledgmentTimeout);
         }
         if self.pending.is_none()
             && self.tag != 0
@@ -271,7 +285,10 @@ mod tests {
             assert!(!b.needs_refresh());
             assert_eq!(b.request(now).unwrap(), None);
         }
-        assert!(b.request(now + Duration::from_secs(6)).is_err());
+        assert_eq!(
+            b.request(now + Duration::from_secs(6)),
+            Err(RequestError::RefreshRejected)
+        );
         b.require_refresh(8);
         assert!(b.needs_refresh());
         b.start_refresh(3).unwrap();
@@ -303,7 +320,10 @@ mod tests {
         let mut b = Boundary::default();
         b.control(7).unwrap();
         b.request(now).unwrap();
-        assert!(b.request(now + Duration::from_secs(5)).is_err());
+        assert_eq!(
+            b.request(now + Duration::from_secs(5)),
+            Err(RequestError::AcknowledgmentTimeout)
+        );
         b.tag = u64::MAX;
         assert!(b.control(8).is_err());
         assert_eq!(b.tag, u64::MAX);

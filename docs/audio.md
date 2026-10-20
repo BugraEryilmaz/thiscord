@@ -993,6 +993,13 @@ It never sends Join. The same peer, RTP tracks, audio devices, native audio
 heartbeat, mute/deafen processing and screen capture continue running. The UI
 shows "Recovering voice signaling..." while keeping the room connected.
 
+A microphone privacy boundary unanswered for five seconds also triggers this
+signaling recovery, before the ordinary 20-second silence detector. Capture
+transmission and protected playback remain blocked until a fresh boundary ACK
+matches the current control generation on the resumed socket. The recovery
+deadline and terminal access/replacement failures still apply; a rejected refresh
+does not trigger recovery or bypass its deadline.
+
 The backend keeps detached media for up to 30 seconds after detecting transport
 loss (or after its 20-second signaling silence detector fires). Access refresh,
 revocation and publisher/receiver authorization continue during that grace period.
