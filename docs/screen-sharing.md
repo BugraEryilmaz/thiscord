@@ -177,7 +177,8 @@ the display stops capture; it never falls back to another window/display.
   and zeros packets marked silent. No codec/network work enters CPAL callbacks.
 - Eight microphone, eight screen-video and eight shared-audio tracks are negotiated.
   Microphone queues and writers are separate from screen traffic. Video and shared
-  audio require explicit viewer subscriptions. There is no simulcast; multi-share and
+  audio require explicit viewer subscriptions. Negotiated screen publishers can
+  supply two independently encoded qualities (see below); multi-share and
   constrained-network capacity remain unmeasured.
 
 Existing voice STUN/TURN, UDP addressing, certificates and per-hop DTLS-SRTP
@@ -223,7 +224,8 @@ under 150 seconds. A sampling gap over three seconds clears accumulated evidence
 and restarts setup grace without changing the retained budget; duplicate/subsecond
 polls cannot accelerate adaptation. Each viewer/stream owns independent state.
 
-The server takes the lowest live viewer budget. The publisher selects a
+Legacy publishers use the lowest live viewer budget; negotiated layers use the
+independent targets described below. The publisher selects a
 resolution/FPS/bitrate combination under its selected maximum, recreating the GPU
 encoder with an IDR when quality changes. Ordinary downgrades require two seconds
 of continuously lower targets; upgrades require six seconds at a stable target
@@ -237,13 +239,29 @@ the existing 20% transport overhead allowance. Byte backpressure sheds raw input
 before creating dependencies when nominal output exceeds that rate. This avoids
 independently snapping the sender to a lower ladder rung during a held mode.
 Zero/expired demand pauses immediately and clears pending transitions; renewed
-demand chooses its current target immediately. Capture FPS follows the committed
-encoder target, so a noisy budget cannot independently oscillate capture cadence.
+demand chooses its current target immediately. Capture FPS follows the highest
+committed encoder FPS across the active layers, so a noisy budget cannot
+independently oscillate capture cadence.
 Queued/in-flight frames share their encoder's admission rate; the sender also caps
 each packet's rate by fresh demand and preserves byte debt across rate changes.
 The bounded queues, expiry and recovery rules still apply, including when an
 already encoded burst cannot drain after a severe capacity collapse. Diagnostics expose
 actual `target_bitrate`, `target_fps`, `resolution` and `video_paused`.
+
+The paced sender also measures each encoded access unit's wire size against its
+live transport rate. A burst that needs more than 200 ms is rejected before its
+first packet, and its measured size requests a smaller encoder mode without the
+normal downgrade dwell/cooldown. This signal belongs only to that layer; upgrades
+still require ordinary stable headroom. During sending, new rate cuts and delays
+must leave projected completion within 230 ms. These limits leave 50 ms initially
+and at least 20 ms at the sender's last check for transport/scheduler variation
+inside the receiver's unchanged 250 ms assembly window; they cannot guarantee a
+network deadline. Partial bursts still require SPS/PPS/IDR recovery. The 200 ms
+sender queue age and 350 ms capture-to-send age also remain unchanged. This handles
+hardware that exceeds its 200 ms HRD hint without accelerating beyond live demand.
+`sender_burst_recovery` counts these drops. Sender-to-Inbox regressions cover the
+reachable five-severe-cut 3,712,930 bit/s held-1080p case, the low layer's equivalent
+trajectory, and successful recovery IDRs followed by dependent frames.
 `requested_height`, `requested_fps` and `viewer_bitrate_budget` distinguish the
 selected maximum from receiver-driven adaptation. A 4K preset does not upscale
 an ultrawide 3440x1440 source to 3840x2160.
@@ -267,10 +285,65 @@ controllers and demand expiry/resumption. Decoder tests cover CPU and hardware
 throughput overload, hysteresis, stats reset and suspension. These are controller
 regressions; they do not establish real network or GPU performance.
 
-This is an application feedback controller, not a bandwidth guarantee or per-viewer
-simulcast. One constrained viewer lowers the common stream; independent multi-share
-controllers do not allocate a shared link budget. Packet-loss, bandwidth-step and
-hardware reconfiguration trials with two desktop clients remain required.
+`screen_layers` is an opt-in offer/answer capability. Its default is false and
+false is omitted from answers to older servers. Negotiated publishers attach their
+selected `quality` to the screen start command. Targets additionally contain
+`layers: { primary, low }`; omitted fields retain the old single-encoder protocol.
+Layer zero uses SSRC 901 and layer one uses SSRC 904. Both carry the current share
+epoch and actual encoded-frame bitrate in two CSRCs, checked before forwarding;
+the SFU removes the bitrate before sending to receivers. Target changes cannot
+mislabel queued old-quality frames or briefly send the high layer to a weak viewer.
+Stale upstream packets cannot be retagged as a new share. Cameras and shared audio keep their existing contracts.
+
+The primary target comes from the highest live viewer budget, capped by the selected
+preset. Targets preserve the continuous budgets rather than rounding to a codec
+preset, so each encoder retains headroom evidence and demand-capped pacing.
+Only when a viewer budget is below the primary target does the SFU request the
+second encoder. Its budget is the weakest viewer budget, capped at 1.25 Mbit/s and
+25% of the selected preset bitrate; its maximum is 720p/15. Intermediate viewers
+receive the low layer if their budget cannot accommodate the primary. This is a
+bounded two-quality policy, not one encoder per viewer. The primary keeps its full
+preset when a 200 kbit/s viewer joins. Total target codec upload and pixel work are
+at most 125% of the selected preset (at most 33.25 Mbit/s codec upload); each pacer
+adds the existing 20% transport allowance. This is a ceiling, not an uplink capacity
+estimate. Multiple simultaneous shares still have no shared-link allocator.
+
+Windows uses one WGC session and fans out owned FP16 textures to two latest-frame
+mailboxes. Each encoder owns its MFT, NV12 processor, four-sample admission limit,
+200 ms frame queue and 100 ms unsent-byte budget. Capture owns seven bounded textures
+when layered (three for legacy capture), each processor at most six NV12 surfaces.
+Low-layer input has its own FPS admission and never blocks primary queue admission.
+No raw readback or software fallback is introduced. A zero/expired low target drops
+its MFT and processor; the worker remains idle until renewed demand. Hardware unable
+to create the second session fails the share explicitly. Stop, deafen, disconnection,
+source closure and worker failure stop and join both encoders and the audio worker.
+
+The SFU selects exactly one layer per viewer before egress admission, retaining the
+same relay SSRC and share epoch. A switch drops deltas until a contiguous SPS/PPS
+prefix and IDR start arrive; fragments later in that IDR use ordinary loss recovery.
+Prefix buffering is bounded to 4 MiB/4096 packets/350 ms and does not hold an entire
+large IDR for burst delivery. Layer switches and hide/reopen preserve outbound RTP
+sequence continuity; timestamps use the shared compositor clock and cannot move
+backward at a switch. Ordinary packet gaps stay visible for receiver loss detection.
+Old viewers can decode the selected SPS/PPS/IDR without any new receiver fields.
+Keyframe requests are authorized against live viewer leases and routed to the
+selected encoder; the existing publisher rate limit remains shared by both layers.
+Joins and target changes request an IDR and periodic recovery remains available.
+Both screen SSRCs share the original publisher ingress rate limit. Existing
+per-viewer egress byte/packet/age bounds and both-endpoint authorization checks apply
+unchanged. Expired/removed subscriptions discard buffered switch prefixes.
+
+This remains an application feedback controller, not a bandwidth guarantee.
+Packet-loss, bandwidth-step and hardware reconfiguration trials with two desktop
+clients remain required. The synthetic `screen_gpu_probe --layers` exercises two
+real hardware encoders on one FP16 surface, independently decodes both resolutions,
+and destroys/recreates the low encoder while the primary remains alive.
+On the local RTX 4070 Ti, this probe decoded 30 primary frames in each of four
+phases, plus ten 360p/5 and ten 720p/15 low frames in their active phases; all
+phases completed in 1.03–1.83 seconds. This establishes concurrent synthetic
+hardware encoding on that GPU, not full desktop/network acceptance on other
+adapters. Publisher diagnostics expose low-layer labels, counters and timings
+with a `low_` prefix; primary metrics retain their existing names.
 
 ## Authorization and lifecycle
 

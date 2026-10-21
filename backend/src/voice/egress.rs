@@ -78,6 +78,12 @@ impl Sender {
                 && (delivery.queued_at < receiver.red.receiver_started
                     || delivery.packet.header.csrc.first().copied()
                         != Some(source.info.microphone_source_epoch)))
+            || !viewing::within_budget(
+                receiver,
+                source,
+                self.kind,
+                delivery.packet.header.csrc.get(1).copied(),
+            )
             || !viewing::receives(receiver, source, self.kind, delivery.queued_at)
             || (self.kind == MediaKind::Microphone && !red::receives(source, receiver))
         {
@@ -173,6 +179,10 @@ impl Writer {
             }
             let (packet_kind, source_slot) = MediaKind::from_track(slot).expect("delivery track");
             debug_assert_eq!(kind, packet_kind);
+            let encoded_bitrate = packet.header.csrc.get(1).copied();
+            if kind == MediaKind::ScreenVideo {
+                packet.header.csrc.truncate(1);
+            }
             let source_epoch = packet.header.csrc.first().copied();
             let packet_epoch = packet
                 .header
@@ -290,6 +300,12 @@ impl Writer {
                                             || (receiver_microphone_epoch
                                                 == Some(receiver.red.receiver_floor)
                                                 && queued_at >= receiver.red.receiver_started))
+                                            && viewing::within_budget(
+                                                receiver,
+                                                m,
+                                                kind,
+                                                encoded_bitrate,
+                                            )
                                             && viewing::receives(receiver, m, kind, queued_at)
                                             && (kind != MediaKind::Microphone
                                                 || red::receives(m, receiver))
@@ -618,7 +634,7 @@ mod tests {
         }
     }
 
-    async fn fixture() -> (Writer, Source, mpsc::Receiver<(MediaKind, u32)>) {
+    async fn fixture() -> (Writer, Source, mpsc::Receiver<(MediaKind, u32, Option<u8>)>) {
         let room = Arc::new(Room::default());
         let source = source();
         let receiver = self::source();
@@ -671,6 +687,9 @@ mod tests {
                     last_keyframe: [None; 2],
                     feedback_enabled: true,
                     subscriptions_enabled: true,
+                    screen_layers: false,
+                    screen_quality: Default::default(),
+                    screen_routes: Default::default(),
                     views: [None; ROOM_CAPACITY * 2],
                     generation: endpoint.generation.clone(),
                     access: endpoint.access.clone(),
@@ -707,6 +726,30 @@ mod tests {
             source,
             rx,
         )
+    }
+
+    #[tokio::test]
+    async fn queued_old_quality_is_rejected_after_viewer_budget_changes() {
+        let (writer, source, _) = fixture().await;
+        let (tx, rx) = channel(MediaKind::ScreenVideo);
+        let mut packet = delivery(MediaKind::ScreenVideo, &source, 10);
+        packet.packet.header.csrc = vec![7, 2_500_000];
+        {
+            let mut members = writer.room.members.write().await;
+            members.get_mut(&1).unwrap().screen_layers = true;
+            tx.forward(&members[&1], &members[&0], packet).unwrap();
+            members.get_mut(&0).unwrap().views[1]
+                .as_mut()
+                .unwrap()
+                .subscription
+                .bitrate = 200_000;
+        }
+        drop(tx);
+        writer
+            .run(MediaKind::ScreenVideo, rx, |_, _| async {
+                panic!("old high-quality queue crossed a budget downgrade")
+            })
+            .await;
     }
 
     fn clone_writer(writer: &Writer) -> Writer {
@@ -1712,7 +1755,10 @@ mod tests {
                 kind != MediaKind::Microphone
             );
             if kind.is_video() {
-                assert_eq!(feedback.try_recv().unwrap(), (MediaKind::ScreenVideo, 7));
+                assert_eq!(
+                    feedback.try_recv().unwrap(),
+                    (MediaKind::ScreenVideo, 7, None)
+                );
             }
         }
     }
@@ -1783,7 +1829,10 @@ mod tests {
                 panic!("expired packet sent")
             })
             .await;
-        assert_eq!(feedback.try_recv().unwrap(), (MediaKind::ScreenVideo, 7));
+        assert_eq!(
+            feedback.try_recv().unwrap(),
+            (MediaKind::ScreenVideo, 7, None)
+        );
         assert!(active.load(Ordering::Acquire));
     }
 
@@ -1802,7 +1851,10 @@ mod tests {
         tokio::time::sleep(VIDEO_AGE + Duration::from_millis(10)).await;
         drop(members);
         task.await.unwrap();
-        assert_eq!(feedback.try_recv().unwrap(), (MediaKind::ScreenVideo, 7));
+        assert_eq!(
+            feedback.try_recv().unwrap(),
+            (MediaKind::ScreenVideo, 7, None)
+        );
     }
 
     #[tokio::test]

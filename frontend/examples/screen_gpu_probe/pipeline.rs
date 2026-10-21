@@ -221,6 +221,7 @@ pub async fn run() -> Result<(), Box<dyn std::error::Error>> {
     let stop = Arc::new(AtomicBool::new(false));
     let (tx, rx) = tokio::sync::mpsc::channel(screen::sender_queue_frames(quality.fps));
     let sender = screen::send::Sender {
+        source_epoch: None,
         local: None,
         network_demand: None,
         connection: connection.clone(),

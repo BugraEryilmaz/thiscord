@@ -30,6 +30,7 @@ use webrtc::media_stream::track_local::static_rtp::TrackLocalStaticRTP;
     )
 )]
 pub struct Binding {
+    pub layers: Option<LayerBinding>,
     pub connection: Connection,
     pub own_slot: usize,
     pub local_epoch: Arc<AtomicU32>,
@@ -47,8 +48,28 @@ pub struct Binding {
     pub network_demand: Arc<thiscord_frontend::screen::adaptation::Demand>,
     pub metrics: thiscord_frontend::screen::metrics::Metrics,
 }
+#[derive(Clone)]
+pub struct LayerBinding {
+    pub metrics: thiscord_frontend::screen::metrics::Metrics,
+    pub video: Arc<TrackLocalStaticRTP>,
+    pub demand: Arc<thiscord_frontend::screen::adaptation::Demand>,
+    pub force_keyframe: Arc<AtomicBool>,
+    pub sequence: Arc<AtomicU32>,
+}
+impl LayerBinding {
+    pub fn new(video: Arc<TrackLocalStaticRTP>) -> Self {
+        Self {
+            metrics: Default::default(),
+            video,
+            demand: Default::default(),
+            force_keyframe: Default::default(),
+            sequence: Default::default(),
+        }
+    }
+}
 #[derive(Default)]
 struct Inner {
+    quality: Quality,
     binding: Option<Binding>,
     local: Option<Arc<Sender>>,
     stop: Option<Arc<AtomicBool>>,
@@ -105,6 +126,33 @@ pub fn video_state(app: &tauri::AppHandle, kind: thiscord_shared::voice::MediaKi
     }
 }
 impl ScreenState {
+    pub fn quality(&self) -> Quality {
+        self.0.lock().map(|s| s.quality).unwrap_or_default()
+    }
+    pub fn layer_keyframe(&self) {
+        if let Ok(inner) = self.0.lock()
+            && let Some(layer) = inner.binding.as_ref().and_then(|b| b.layers.as_ref())
+        {
+            layer.force_keyframe.store(true, Ordering::Release);
+        }
+    }
+    pub fn layer_target(&self, bitrate: u32, layers: Option<LayerTargets>) {
+        let primary = if let Ok(inner) = self.0.lock()
+            && let Some(layer) = inner.binding.as_ref().and_then(|b| b.layers.as_ref())
+        {
+            let targets = layers.filter(|t| t.valid()).unwrap_or_default();
+            // Enforce both the protocol and the selected preset's upload budget.
+            let low = targets.low.min(inner.quality.bitrate() / 4);
+            if layer.demand.bitrate() == 0 && low > 0 {
+                layer.force_keyframe.store(true, Ordering::Release);
+            }
+            layer.demand.update(low);
+            targets.primary.min(inner.quality.bitrate())
+        } else {
+            bitrate
+        };
+        self.target(primary);
+    }
     pub fn target(&self, bitrate: u32) {
         if let Ok(inner) = self.0.lock()
             && let Some(binding) = &inner.binding
@@ -120,6 +168,8 @@ impl ScreenState {
             let budget = own_view.map_or(bitrate, |v| {
                 if bitrate == 0 {
                     v.feedback.receiver.bitrate()
+                } else if binding.layers.is_some() {
+                    bitrate
                 } else {
                     bitrate.min(v.feedback.receiver.bitrate())
                 }
@@ -602,6 +652,24 @@ pub fn screen_status(state: State<'_, ScreenState>) -> Result<Status, String> {
     let mut status = inner.status.clone();
     if let Some(binding) = &inner.binding {
         status.diagnostics = binding.metrics.snapshot();
+        if let Some(layer) = &binding.layers {
+            let low = layer.metrics.snapshot();
+            status.diagnostics.labels.extend(
+                low.labels
+                    .into_iter()
+                    .map(|(name, value)| (format!("low_{name}"), value)),
+            );
+            status.diagnostics.counters.extend(
+                low.counters
+                    .into_iter()
+                    .map(|(name, value)| (format!("low_{name}"), value)),
+            );
+            status.diagnostics.timings.extend(
+                low.timings
+                    .into_iter()
+                    .map(|(name, value)| (format!("low_{name}"), value)),
+            );
+        }
     }
     status.diagnostics.counters.extend(inner.server.clone());
     status.diagnostics.labels.extend(inner.network.clone());
@@ -659,8 +727,14 @@ pub async fn screen_start(
         .ok_or("Join voice with Speak permission before sharing.")?;
     binding.metrics = Default::default();
     binding.demand = Default::default();
+    if let Some(layer) = binding.layers.as_mut() {
+        layer.metrics = Default::default();
+        layer.demand = Default::default();
+        layer.force_keyframe = Default::default();
+    }
     binding.force_keyframe.store(true, Ordering::Release);
     inner.binding = Some(binding.clone());
+    inner.quality = quality;
     let stop = Arc::new(AtomicBool::new(false));
     inner.stop = Some(stop.clone());
     inner.audio = audio;
@@ -672,6 +746,7 @@ pub async fn screen_start(
     binding.metrics.label("sender_queue_budget_ms", 200);
     let (tx, rx) = mpsc::channel::<thiscord_frontend::screen::Outgoing>(queue_frames);
     let sender = thiscord_frontend::screen::send::Sender {
+        source_epoch: binding.layers.as_ref().map(|_| binding.local_epoch.clone()),
         local: inner
             .local
             .clone()
@@ -689,11 +764,43 @@ pub async fn screen_start(
         metrics: binding.metrics.clone(),
     };
     tauri::async_runtime::spawn(sender.run(stop.clone(), quality, rx));
+    let low_output = binding.layers.as_ref().map(|layer| {
+        let low_quality = LayerTargets::low_quality(quality);
+        let (tx, rx) = mpsc::channel(thiscord_frontend::screen::sender_queue_frames(
+            low_quality.fps,
+        ));
+        let sender = thiscord_frontend::screen::send::Sender {
+            local: None,
+            source_epoch: Some(binding.local_epoch.clone()),
+            connection: binding.connection.clone(),
+            video: layer.video.clone(),
+            demand: layer.demand.clone(),
+            network_demand: None,
+            force_keyframe: layer.force_keyframe.clone(),
+            sequence: layer.sequence.clone(),
+            metrics: layer.metrics.clone(),
+        };
+        tauri::async_runtime::spawn(sender.run(stop.clone(), low_quality, rx));
+        thiscord_frontend::screen::LayerOutput {
+            metrics: layer.metrics.clone(),
+            tx,
+            demand: layer.demand.clone(),
+            force_keyframe: layer.force_keyframe.clone(),
+        }
+    });
     inner.worker = Some(
         std::thread::Builder::new()
             .name("thiscord-screen-capture".into())
             .spawn(move || {
-                let result = capture(&state, &binding, &source, (audio, quality), &stop, tx);
+                let result = capture(
+                    &state,
+                    &binding,
+                    &source,
+                    (audio, quality),
+                    &stop,
+                    tx,
+                    low_output,
+                );
                 state.finish(&stop, result.err());
             })
             .map_err(|_| "Cannot start screen capture worker")?,
@@ -708,6 +815,7 @@ fn capture(
     options: (bool, Quality),
     stop: &Arc<AtomicBool>,
     tx: mpsc::Sender<thiscord_frontend::screen::Outgoing>,
+    low_output: Option<thiscord_frontend::screen::LayerOutput>,
 ) -> Result<(), String> {
     let (audio, quality) = options;
     let audio_job = if audio {
@@ -731,7 +839,7 @@ fn capture(
             if audio { " with system audio" } else { "" }
         );
     }
-    let result = thiscord_frontend::screen::capture::run(
+    let result = thiscord_frontend::screen::capture::run_layers(
         source,
         quality,
         stop.clone(),
@@ -741,6 +849,7 @@ fn capture(
         binding.metrics.clone(),
         binding.force_keyframe.clone(),
         binding.demand.clone(),
+        low_output,
         |encoder| {
             if let Ok(mut inner) = state.0.lock()
                 && inner.stop.as_ref().is_some_and(|s| Arc::ptr_eq(s, stop))
@@ -764,6 +873,7 @@ fn capture(
     _: (bool, Quality),
     _: &Arc<AtomicBool>,
     _: mpsc::Sender<thiscord_frontend::screen::Outgoing>,
+    _: Option<thiscord_frontend::screen::LayerOutput>,
 ) -> Result<(), String> {
     Err("Screen publishing is currently available on Windows.".into())
 }

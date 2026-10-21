@@ -1,6 +1,9 @@
 //! Per-viewer feedback and per-encoder quality selection. No media crosses IPC.
 use std::{
-    sync::Mutex,
+    sync::{
+        Mutex,
+        atomic::{AtomicU32, Ordering},
+    },
     time::{Duration, Instant},
 };
 use thiscord_shared::screen::{
@@ -8,7 +11,7 @@ use thiscord_shared::screen::{
 };
 
 #[derive(Default)]
-pub struct Demand(Mutex<Option<(u32, Instant)>>);
+pub struct Demand(Mutex<Option<(u32, Instant)>>, AtomicU32);
 impl Demand {
     pub fn update(&self, bitrate: u32) {
         let bitrate = if (MIN_VIEW_BITRATE..=MAX_VIEW_BITRATE).contains(&bitrate) {
@@ -17,6 +20,19 @@ impl Demand {
             0
         };
         *self.0.lock().unwrap() = Some((bitrate, Instant::now()));
+    }
+    /// A measured encoded burst cannot fit the receiver assembly deadline.
+    /// Keep this signal local to the affected encoder; it is not viewer feedback.
+    pub fn limit_encoder(&self, bitrate: u32) {
+        let bitrate = bitrate.max(MIN_VIEW_BITRATE);
+        let _ = self
+            .1
+            .fetch_update(Ordering::AcqRel, Ordering::Acquire, |old| {
+                Some(if old == 0 { bitrate } else { old.min(bitrate) })
+            });
+    }
+    pub fn take_encoder_limit(&self) -> u32 {
+        self.1.swap(0, Ordering::AcqRel)
     }
     pub fn bitrate(&self) -> u32 {
         self.0
@@ -148,6 +164,28 @@ impl QualityController {
             pending: None,
             changed: None,
         }
+    }
+
+    /// An actual oversized access unit bypasses dwell/cooldown only to lower
+    /// quality. Normal upgrades still require stable headroom after recovery.
+    pub fn update_with_recovery(
+        &mut self,
+        bitrate: u32,
+        encoder_limit: u32,
+        now: Instant,
+    ) -> Option<thiscord_shared::screen::Quality> {
+        if bitrate > 0 && encoder_limit > 0 {
+            let next = self
+                .maximum
+                .constrained(bitrate.min(encoder_limit).max(MIN_VIEW_BITRATE));
+            if self
+                .current
+                .is_some_and(|current| next.bitrate() < current.bitrate())
+            {
+                return Some(self.select(next, now));
+            }
+        }
+        self.update(bitrate, now)
     }
 
     pub fn update(
@@ -309,6 +347,87 @@ mod tests {
         let mut link = Link::new(5_000_000);
         link.run(6, false, false, true);
         assert_eq!(link.step(true, true, true), 3_250_000);
+    }
+
+    #[test]
+    fn layered_targets_preserve_independent_hysteresis_pacing_and_static_recovery() {
+        use crate::screen::{keyframe::KeyframePolicy, pacing::*};
+        use thiscord_shared::screen::LayerTargets;
+        let maximum = Quality::default();
+        let low_maximum = LayerTargets::low_quality(maximum);
+        let mut controllers = [
+            QualityController::new(maximum),
+            QualityController::new(low_maximum),
+        ];
+        let mut budgets = [SendBudget::new(1), SendBudget::new(1)];
+        let mut keys = [KeyframePolicy::default(), KeyframePolicy::default()];
+        let start = Instant::now();
+        let plan = LayerTargets::plan(maximum, [5_000_000, 1_250_000].into_iter());
+        for (i, demand) in [plan.primary, plan.low].into_iter().enumerate() {
+            let quality = controllers[i].update(demand, start).unwrap();
+            budgets[i].set_bitrate(transport_budget(quality.bitrate(), demand));
+            keys[i].submitted(start, true);
+        }
+        // Frames already queued must follow their own encoder's shared live rate.
+        let queued = [budgets[0].track(1000), budgets[1].track(1000)];
+        let plan = LayerTargets::plan(maximum, [4_750_000, 1_100_000].into_iter());
+        assert_eq!((plan.primary, plan.low), (4_750_000, 1_100_000));
+        for (i, demand) in [plan.primary, plan.low].into_iter().enumerate() {
+            let now = start + Duration::from_secs(1);
+            let held = controllers[i].update(demand, now).unwrap();
+            assert_eq!(held, [maximum, low_maximum][i]);
+            budgets[i].set_bitrate(transport_budget(held.bitrate(), demand));
+            assert_eq!(queued[i].pacing_bitrate(demand), transport_bitrate(demand));
+            assert!(keys[i].refresh_due(now, false));
+            assert!(!keys[i].periodic_due(now));
+            keys[i].submitted(now, false);
+            let reduced = controllers[i]
+                .update(demand, start + Duration::from_secs(5))
+                .unwrap();
+            assert!(reduced.bitrate() <= demand);
+        }
+        // Low-layer feedback never consumes the primary's recovery timer.
+        let now = start + Duration::from_millis(1200);
+        assert!(keys[1].feedback_ready(now));
+        keys[1].submitted(now, true);
+        assert!(keys[0].periodic_due(start + Duration::from_secs(10)));
+        assert!(!keys[1].periodic_due(start + Duration::from_secs(10)));
+        for (i, demand) in [5_000_000, 1_250_000].into_iter().enumerate() {
+            controllers[i].update(demand, start + Duration::from_secs(6));
+            assert_eq!(
+                controllers[i].update(demand, start + Duration::from_secs(12)),
+                Some([maximum, low_maximum][i])
+            );
+        }
+        assert_eq!(
+            controllers[1].update(0, start + Duration::from_secs(13)),
+            None
+        );
+        assert_eq!(
+            controllers[0].update(5_000_000, start + Duration::from_secs(13)),
+            Some(maximum)
+        );
+
+        // A returning weak static viewer recovers through the low layer and
+        // eventually switches to primary, without changing the fast viewer.
+        let mut slow = Link::new(5_000_000);
+        slow.run(60, true, true, true);
+        let mut selected = 1;
+        let mut switches = 0;
+        for second in 0..320 {
+            let receiving = second % 2 == 0;
+            let demand = slow.step(false, false, receiving);
+            let plan = LayerTargets::plan(maximum, [5_000_000, demand].into_iter());
+            let now = start + Duration::from_secs(20 + second);
+            assert_eq!(controllers[0].update(plan.primary, now), Some(maximum));
+            let low = controllers[1].update(plan.low, now);
+            assert_eq!(low.is_some(), plan.low > 0);
+            let next = plan.layer(demand);
+            switches += usize::from(next != selected);
+            selected = next;
+        }
+        assert_eq!(slow.receiver.bitrate(), 5_000_000);
+        assert_eq!((selected, switches), (0, 1));
     }
 
     #[test]

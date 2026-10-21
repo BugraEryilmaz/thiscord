@@ -13,6 +13,8 @@ use tower::ServiceExt;
 use uuid::Uuid;
 #[path = "voice/friends.rs"]
 mod friends;
+#[path = "voice/layers.rs"]
+mod layers;
 #[path = "voice/red.rs"]
 mod red;
 #[path = "voice/roster.rs"]
@@ -241,6 +243,7 @@ struct Peer {
     microphone_challenge: Option<u32>,
     microphone_satisfied: u32,
     screen_tracks: [Arc<TrackLocalStaticRTP>; 3],
+    low_track: Option<Arc<TrackLocalStaticRTP>>,
     screen_sequences: [u16; 3],
     views: Vec<thiscord_shared::screen::Subscription>,
 }
@@ -251,7 +254,15 @@ impl Peer {
     async fn with_packet_capacity(socket: Socket, capacity: usize) -> Self {
         Self::with_red(socket, capacity, false).await
     }
-    async fn with_red(mut socket: Socket, capacity: usize, packet_redundancy: bool) -> Self {
+    async fn with_red(socket: Socket, capacity: usize, packet_redundancy: bool) -> Self {
+        Self::with_layers(socket, capacity, packet_redundancy, false).await
+    }
+    async fn with_layers(
+        mut socket: Socket,
+        capacity: usize,
+        packet_redundancy: bool,
+        screen_layers: bool,
+    ) -> Self {
         let ServerEvent::Offer {
             sdp,
             slot,
@@ -361,6 +372,33 @@ impl Peer {
                 .await
                 .unwrap();
         }
+        let low_track = if screen_layers {
+            let track = Arc::new(TrackLocalStaticRTP::new(MediaStreamTrack::new(
+                "screen-low".into(),
+                "screen-low".into(),
+                "screen-low".into(),
+                RtpCodecKind::Video,
+                vec![RTCRtpEncodingParameters {
+                    rtp_coding_parameters: RTCRtpCodingParameters {
+                        ssrc: Some(thiscord_shared::screen::LOW_LAYER_SSRC),
+                        ..Default::default()
+                    },
+                    codec: RTCRtpCodec {
+                        mime_type: "video/H264".into(),
+                        clock_rate: 90_000,
+                        sdp_fmtp_line: thiscord_shared::screen::H264_FMTP.into(),
+                        ..Default::default()
+                    },
+                    ..Default::default()
+                }],
+            )));
+            pc.add_track(track.clone() as Arc<dyn TrackLocal>)
+                .await
+                .unwrap();
+            Some(track)
+        } else {
+            None
+        };
         let answer = pc.create_answer(None).await.unwrap();
         if packet_redundancy {
             assert!(
@@ -379,6 +417,7 @@ impl Peer {
                 remote_audio: true,
                 screen_feedback: true,
                 screen_subscriptions: true,
+                screen_layers,
                 sdp: serde_json::to_string(&pc.local_description().await.unwrap()).unwrap(),
             },
         )
@@ -416,6 +455,7 @@ impl Peer {
             microphone_challenge,
             microphone_satisfied: 0,
             screen_tracks,
+            low_track,
             screen_sequences: [0; 3],
             views: vec![],
         }
@@ -606,6 +646,7 @@ async fn sfu_sustains_4k60_transport_with_two_times_bitrate_headroom() {
     send(
         &mut a.socket,
         ClientEvent::Screen {
+            quality: None,
             active: true,
             audio: false,
         },
@@ -1355,6 +1396,7 @@ async fn sfu_forwarding_permissions_isolation_and_cleanup() {
     send(
         &mut a.socket,
         ClientEvent::Screen {
+            quality: None,
             active: true,
             audio: true,
         },
@@ -1436,6 +1478,7 @@ async fn sfu_forwarding_permissions_isolation_and_cleanup() {
     send(
         &mut a.socket,
         ClientEvent::Screen {
+            quality: None,
             active: false,
             audio: false,
         },
@@ -1446,6 +1489,7 @@ async fn sfu_forwarding_permissions_isolation_and_cleanup() {
     send(
         &mut a.socket,
         ClientEvent::Screen {
+            quality: None,
             active: true,
             audio: true,
         },
@@ -1463,6 +1507,7 @@ async fn sfu_forwarding_permissions_isolation_and_cleanup() {
     send(
         &mut a.socket,
         ClientEvent::Screen {
+            quality: None,
             active: false,
             audio: false,
         },
@@ -1481,6 +1526,7 @@ async fn sfu_forwarding_permissions_isolation_and_cleanup() {
     send(
         &mut a.socket,
         ClientEvent::Screen {
+            quality: None,
             active: true,
             audio: true,
         },
@@ -1530,6 +1576,7 @@ async fn sfu_forwarding_permissions_isolation_and_cleanup() {
     send(
         &mut a.socket,
         ClientEvent::Screen {
+            quality: None,
             active: false,
             audio: false,
         },
@@ -1587,6 +1634,7 @@ async fn sfu_forwarding_permissions_isolation_and_cleanup() {
     send(
         &mut b.socket,
         ClientEvent::Screen {
+            quality: None,
             active: true,
             audio: true,
         },
@@ -1598,6 +1646,7 @@ async fn sfu_forwarding_permissions_isolation_and_cleanup() {
     send(
         &mut a.socket,
         ClientEvent::Screen {
+            quality: None,
             active: true,
             audio: false,
         },
@@ -1612,6 +1661,7 @@ async fn sfu_forwarding_permissions_isolation_and_cleanup() {
     send(
         &mut a.socket,
         ClientEvent::Screen {
+            quality: None,
             active: false,
             audio: false,
         },
@@ -1935,6 +1985,7 @@ async fn camera_grid(source: &mut Peer, viewer: &mut Peer) {
         send(
             &mut peer.socket,
             ClientEvent::Screen {
+                quality: None,
                 active: true,
                 audio: true,
             },
@@ -2005,6 +2056,7 @@ async fn camera_grid(source: &mut Peer, viewer: &mut Peer) {
         send(
             &mut peer.socket,
             ClientEvent::Screen {
+                quality: None,
                 active: false,
                 audio: false,
             },

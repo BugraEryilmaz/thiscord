@@ -77,8 +77,33 @@ pub(super) async fn update(
             });
         }
     }
+    {
+        let mut routes = receiver.screen_routes.lock().unwrap();
+        for source in 0..ROOM_CAPACITY {
+            if next[source]
+                .is_none_or(|v| receiver.views[source].is_none_or(|old| old.since != v.since))
+            {
+                routes[source].clear();
+            }
+        }
+    }
     members.get_mut(&slot).unwrap().views = next;
     true
+}
+
+/// Used both before queue admission and on every transport poll, under the room lock.
+pub(super) fn within_budget(
+    receiver: &Member,
+    source: &Member,
+    kind: MediaKind,
+    bitrate: Option<u32>,
+) -> bool {
+    if kind != MediaKind::ScreenVideo || !source.screen_layers {
+        return true;
+    }
+    bitrate.is_some_and(|rate| {
+        receiver.views[source.info.slot].is_some_and(|v| rate <= v.subscription.bitrate)
+    })
 }
 
 /// Used both before queue admission and on every transport poll, under the room lock.
@@ -138,6 +163,60 @@ pub(super) async fn target(room: &Room, slot: usize, kind: MediaKind) -> Option<
         .min()
         .unwrap_or(0);
     Some((source.info.video_epoch(kind), bitrate))
+}
+
+pub(super) fn layer_plan(
+    members: &HashMap<usize, Member>,
+    source: &Member,
+) -> thiscord_shared::screen::LayerTargets {
+    thiscord_shared::screen::LayerTargets::plan(
+        source.screen_quality,
+        members
+            .values()
+            .filter(|receiver| receives(receiver, source, MediaKind::ScreenVideo, Instant::now()))
+            .filter_map(|receiver| {
+                receiver.views[source.info.slot].map(|v| v.subscription.bitrate)
+            }),
+    )
+}
+
+pub(super) async fn layer_target(
+    room: &Room,
+    slot: usize,
+    kind: MediaKind,
+) -> Option<thiscord_shared::screen::LayerTargets> {
+    if kind != MediaKind::ScreenVideo {
+        return None;
+    }
+    let members = room.members.read().await;
+    let source = members.get(&slot)?;
+    if !source.screen_layers {
+        return None;
+    }
+    for receiver in members.values() {
+        if !receives(receiver, source, kind, Instant::now()) {
+            receiver.screen_routes.lock().unwrap()[slot].clear();
+        }
+    }
+    Some(layer_plan(&members, source))
+}
+
+/// Cleanup also runs for receivers whose source has left or stopped publishing.
+pub(super) async fn prune_routes(room: &Room, slot: usize) {
+    let members = room.members.read().await;
+    let Some(receiver) = members.get(&slot) else {
+        return;
+    };
+    let mut routes = receiver.screen_routes.lock().unwrap();
+    for (slot, route) in routes.iter_mut().enumerate() {
+        if members.get(&slot).is_none_or(|source| {
+            !receives(receiver, source, MediaKind::ScreenVideo, Instant::now())
+        }) {
+            route.clear();
+        } else {
+            route.expire();
+        }
+    }
 }
 
 /// Derive viewer presence from the same live, authorized leases used for media delivery.
@@ -219,6 +298,9 @@ mod tests {
                     last_keyframe: [None; 2],
                     feedback_enabled: true,
                     subscriptions_enabled: true,
+                    screen_layers: false,
+                    screen_quality: Default::default(),
+                    screen_routes: Default::default(),
                     views: [None; ROOM_CAPACITY * 2],
                     generation: Arc::new(AtomicU64::new(0)),
                     access,
@@ -434,6 +516,91 @@ mod tests {
             !allowed(&room, 1, MediaKind::ScreenVideo, queued).await,
             "old queued packets cannot reach a new viewer"
         );
+    }
+    #[tokio::test]
+    async fn layered_demand_keeps_fast_quality_and_expires_with_authorized_leases() {
+        let room = room().await;
+        let view = subscription(&room).await;
+        let live = AtomicBool::new(true);
+        room.members
+            .write()
+            .await
+            .get_mut(&0)
+            .unwrap()
+            .screen_layers = true;
+        assert!(update(&room, 1, vec![view], &live).await);
+        assert!(
+            update(
+                &room,
+                2,
+                vec![Subscription {
+                    bitrate: 200_000,
+                    ..view
+                }],
+                &live
+            )
+            .await
+        );
+        let plan = layer_target(&room, 0, MediaKind::ScreenVideo)
+            .await
+            .unwrap();
+        assert_eq!(plan.primary, 5_000_000);
+        assert_eq!(plan.low, 200_000);
+        assert_eq!(plan.layer(view.bitrate), 0);
+        assert_eq!(plan.layer(200_000), 1);
+        // Legacy participants can receive either encoded layer without new wire fields.
+        assert!(!room.members.read().await[&2].screen_layers);
+        assert!(allowed(&room, 2, MediaKind::SystemAudio, Instant::now()).await);
+        assert_eq!(layer_target(&room, 0, MediaKind::Camera).await, None);
+        room.members.write().await.get_mut(&2).unwrap().views[0]
+            .as_mut()
+            .unwrap()
+            .renewed -= Duration::from_secs(VIEW_LEASE_SECS);
+        assert_eq!(
+            layer_target(&room, 0, MediaKind::ScreenVideo)
+                .await
+                .unwrap()
+                .low,
+            0
+        );
+        assert!(
+            update(
+                &room,
+                2,
+                vec![Subscription {
+                    bitrate: 200_000,
+                    ..view
+                }],
+                &live
+            )
+            .await
+        );
+        {
+            let members = room.members.read().await;
+            members[&2].active.store(false, Ordering::Release);
+        }
+        assert_eq!(
+            layer_target(&room, 0, MediaKind::ScreenVideo)
+                .await
+                .unwrap()
+                .low,
+            0
+        );
+        assert!(update(&room, 1, vec![], &live).await);
+        assert_eq!(
+            layer_target(&room, 0, MediaKind::ScreenVideo)
+                .await
+                .unwrap(),
+            Default::default()
+        );
+        // Nonnegotiated publishers retain the established minimum-budget behavior.
+        room.members
+            .write()
+            .await
+            .get_mut(&0)
+            .unwrap()
+            .screen_layers = false;
+        assert_eq!(layer_target(&room, 0, MediaKind::ScreenVideo).await, None);
     }
     #[tokio::test]
     async fn stale_leases_identity_epochs_deafen_and_access_fail_closed() {

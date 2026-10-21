@@ -341,6 +341,8 @@ speaker isolation and physical acoustic acceptance remain future work.
 - [ ] Two-client Windows capture/audio acceptance, mixed-DPI/protected windows and suspend/network checks.
 - [ ] macOS/Linux publishing and OS permission acceptance; portable receiving code is included.
 - [x] Explicit viewer subscriptions with lease expiry and receiver-driven bitrate/resolution/FPS adaptation; pause video with no viewers.
+- [x] Negotiated two-quality screen encoding with demand-driven low layer, per-viewer
+  IDR-gated SFU selection, RTP continuity and legacy single-layer fallback.
 - [ ] Stereo system audio, measured multi-share capacity and constrained-network/hardware acceptance for adaptive video.
 - [x] Continuous Windows Graphics Capture and WebRTC video-element presentation without JPEGs.
 - [x] GPU FP16 capture/copy, scaling, HDR-to-SDR tone mapping, NV12 conversion and

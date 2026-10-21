@@ -64,6 +64,8 @@ pub enum ClientEvent {
         screen_feedback: bool,
         #[serde(default, skip_serializing_if = "is_false")]
         screen_subscriptions: bool,
+        #[serde(default, skip_serializing_if = "is_false")]
+        screen_layers: bool,
     },
     State {
         muted: bool,
@@ -75,6 +77,8 @@ pub enum ClientEvent {
     Screen {
         active: bool,
         audio: bool,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        quality: Option<crate::screen::Quality>,
     },
     ScreenKeyframe {
         #[serde(default = "screen_kind", skip_serializing_if = "is_screen_kind")]
@@ -194,10 +198,14 @@ pub enum ServerEvent {
         #[serde(default = "screen_kind", skip_serializing_if = "is_screen_kind")]
         kind: MediaKind,
         epoch: u32,
-        /// Zero pauses video. Otherwise the lowest active receiver budget.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        layers: Option<crate::screen::LayerTargets>,
+        /// Zero pauses video. Legacy publishers use the lowest receiver budget.
         bitrate: u32,
     },
     ScreenKeyframe {
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        layer: Option<u8>,
         #[serde(default = "screen_kind", skip_serializing_if = "is_screen_kind")]
         kind: MediaKind,
         epoch: u32,
@@ -221,6 +229,8 @@ pub enum ServerEvent {
         screen_feedback: bool,
         #[serde(default)]
         screen_subscriptions: bool,
+        #[serde(default, skip_serializing_if = "is_false")]
+        screen_layers: bool,
         #[serde(default)]
         ice_servers: Vec<IceServer>,
         /// Secret capability bound to this media session; never persist or log it.

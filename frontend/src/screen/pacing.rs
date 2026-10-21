@@ -178,6 +178,7 @@ mod tests {
                     let packets = crate::screen::packetize(data, &mut sequence, captures).unwrap();
                     let bytes = packets.iter().map(|p| p.payload.len() + 64).sum();
                     queue.push_back(Outgoing {
+                        bitrate: quality.bitrate(),
                         captured_at: next_capture - Duration::from_millis(6),
                         enqueued_at: next_capture,
                         packets,
