@@ -1,5 +1,8 @@
 //! Synthetic FP16 input only. No desktop capture, accounts or network.
 #[cfg(windows)]
+#[path = "screen_gpu_probe/keyframes.rs"]
+mod keyframes;
+#[cfg(windows)]
 #[path = "screen_gpu_probe/quality.rs"]
 mod quality;
 #[cfg(windows)]
@@ -81,6 +84,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         }
         if std::env::args().any(|arg| arg == "--burst") {
             return burst_probe(&device, &context);
+        }
+        if std::env::args().any(|arg| arg == "--keyframes") {
+            return keyframes::run(&device, &context);
         }
         if std::env::args().any(|arg| arg == "--throughput") {
             return throughput::run(&device, &context);

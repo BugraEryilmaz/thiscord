@@ -7,6 +7,7 @@ pub mod capture;
 pub mod gpu;
 #[cfg(target_os = "windows")]
 pub mod hardware;
+pub mod keyframe;
 pub mod metrics;
 pub mod pacing;
 pub mod preview;

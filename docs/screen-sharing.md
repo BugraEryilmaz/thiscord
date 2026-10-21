@@ -82,19 +82,24 @@ the display stops capture; it never falls back to another window/display.
   also allow 360p and 5 fps, down to roughly 167 kbit/s. Preset maxima range from
   1.25 to 32 Mbit/s.
   Access units are bounded to 4 MiB. H.264 Baseline level 5.2 is advertised with a
-  90 kHz RTP clock. Keyframes are requested by elapsed time (one second), including
-  a refresh of the last captured frame for a static source. Overload no longer
-  stretches recovery to several seconds by counting nominal-fps frames. Hardware
-  input is capped at four outstanding samples with a 500 ms stall deadline.
-  Prompt recovery requests supplement periodic IDRs. CBR and mean-bitrate settings
-  must be accepted by the hardware encoder. The optional H.264 HRD buffer target
-  is 100 ms of codec output, in **bytes** (`bitrate / 8 / 10`), leaving headroom
-  below the sender deadline. The previous `bitrate / 4` supplied bits to a byte
-  property, allowing two seconds rather than the intended quarter-second.
-  Diagnostics expose buffer acceptance and readback; acceptance is not a hard
-  per-frame size guarantee. Smaller buffers can trade scene-change detail for latency.
-  Automatic GOP IDRs reset the elapsed recovery timer too, avoiding adjacent
-  automatic/forced keyframes. The optional quality/speed hint is 0 (fastest);
+  90 kHz RTP clock. Initial/reconfigured encoders start with an IDR. Join/loss
+  feedback can force another with a 200 ms minimum interval. The fallback IDR
+  interval is ten seconds by elapsed time; the hardware GOP target is also ten
+  seconds of nominal frames. This removes both former one-second IDR triggers.
+  Static sources still refresh their held image once per second, normally as a
+  delta, preserving viewer liveness without repeatedly discarding reference detail.
+  Feedback can refresh that held image before the heartbeat is due. Feedback is
+  retained while hardware or sender admission is busy. Automatic/scene-change
+  IDRs reset recovery spacing too. Drivers can insert earlier IDRs or reject/clamp
+  the optional GOP target; diagnostics expose setter acceptance and readback.
+  Hardware input remains capped at four outstanding samples with a 500 ms stall
+  deadline. CBR and mean-bitrate settings must be accepted by the encoder.
+  The optional H.264 HRD target is 200 ms of codec output, in **bytes**
+  (`bitrate / 8 / 5`), increased from 100 ms to give IDRs/scene changes more budget.
+  This is rate-control headroom, not added playout delay or a hard frame-size bound.
+  The sender's 100 ms byte admission, 200 ms queue-age and 350 ms in-flight limits
+  remain unchanged, including when the driver rejects/overruns the HRD target.
+  The optional quality/speed hint is 0 (fastest);
   it preserves selected dimensions, FPS and bitrate but can reduce coding fidelity.
   Diagnostics expose its readback; the measured quality tradeoff is listed below.
 - The network remains the Rust WebRTC client and single-process SFU; the SFU
@@ -201,6 +206,7 @@ first loses its three-second local viewer lease. Publisher shared-audio capture
 continues until Stop sharing; it is not forwarded to non-viewers.
 
 Receivers sample native packet-loss/frame-queue counters and sustained WebView
+<<<<<<< HEAD
 decoder overload once per second. Screen budgets start at 32 Mbit/s so the selected
 maximum is attempted immediately; cameras use the same controller capped at their
 1.5 Mbit/s encoder limit. Budgets remain bounded to 200 kbit/s�32 Mbit/s.
@@ -231,6 +237,18 @@ demand chooses its current target immediately. Capture FPS follows the committed
 encoder target, so a noisy budget cannot independently oscillate capture cadence.
 Byte admission and RTP pacing change with the committed target. Diagnostics expose
 actual `target_bitrate`, `target_fps`, `resolution` and `video_paused`.
+=======
+decoder overload once per second. Budgets start at 32 Mbit/s so the selected
+maximum is attempted immediately, decrease by
+35% on congestion, and increase by 25% after ten healthy samples, bounded to
+200 kbit/s–32 Mbit/s. Three initial samples allow setup; three consecutive empty
+samples detect stalls without treating a static source's one-second delta refresh
+as immediate loss. The server takes the lowest live viewer budget. The publisher
+selects a resolution/FPS/bitrate combination within that budget and its selected
+maximum, recreates the GPU encoder with an IDR when quality changes, and updates
+capture cadence, byte admission and RTP pacing together. Diagnostics expose actual
+`target_bitrate`, `target_fps`, `resolution` and `video_paused`.
+>>>>>>> 031cc44 (fix(screen): separate recovery keyframes from static refresh)
 `requested_height`, `requested_fps` and `viewer_bitrate_budget` distinguish the
 selected maximum from receiver-driven adaptation. A 4K preset does not upscale
 an ultrawide 3440x1440 source to 3840x2160.
@@ -404,6 +422,9 @@ are separated into `encode_queue_full`, `encode_stale`, `encode_dependent`,
 `encode_dropped` remains their aggregate. Large wake delays implicate scheduling;
 large write times implicate the WebRTC write path. Low times with large frames
 and growing queue wait implicate offered load versus the configured pacing rate.
+`encoder_gop_target_frames`, `encoder_gop_applied` and
+`encoder_gop_readback_frames` similarly expose the hardware GOP setting. Actual
+`keyframes` and `keyframe_feedback` counts distinguish driver IDRs from feedback.
 
 `cargo run -p thiscord-frontend --example screen_gpu_probe --features screen-share --profile ci --locked`
 uses synthetic FP16 textures, GPU scale/tone-map/NV12 conversion and GPU H.264,
@@ -415,13 +436,51 @@ HDR monitor reported 240-nit SDR white. Intel/AMD acceptance remains outstanding
 Add `-- --burst` to this probe command to encode/decode 180 frames of detailed
 synthetic scenes at 2560x1070, 18 Mbit/s and a 60 FPS input target, with repeated
 keyframes. This exercises rate control without desktop capture or network traffic.
-Local NVIDIA validation accepted/read back the 225,000-byte HRD target, decoded
+Historical NVIDIA validation with the former 100 ms buffer accepted/read back the
+225,000-byte HRD target, decoded
 all 180 frames and produced three IDRs around 170 KB (170,123-byte peak). This is
 synthetic evidence, not a before/after measurement of a user's shared content.
 The deterministic pacing regression replays 700 KB wire bursts and coarse timer
 wakeups: slot-only admission exceeds the sender age limit; byte admission avoids
 those queued-frame expirations at the same pacing rate by deferring raw input.
 Live two-client playback and representative scene-change quality still require acceptance.
+
+Add `-- --keyframes --adapter=0` for a paired synthetic fidelity/recovery probe:
+360 identical 1080p/60 input frames at 10 Mbit/s, comparing the former one-second
+GOP/100 ms HRD, ten-second GOP/100 ms HRD, and ten-second GOP/200 ms HRD. It reports
+GOP/HRD readback, IDR frame indices, peak bytes, overall/worst luma PSNR and the
+ten-frame windows before/after each second. Each arm forces recovery at frame 210
+and decodes that SPS/PPS/IDR with a new decoder to simulate a joined/lost viewer.
+The probe uses GPU NV12 readback and software decoding only for measurement;
+elapsed runtime is not encoder or network throughput. Its finite moving scene
+does not establish desktop text readability or subjective two-client quality.
+
+Local paired results (2026-10-21), in legacy / long-GOP-only / production order:
+
+- NVIDIA RTX 4070 Ti: aggregate luma PSNR **32.541 / 35.429 / 39.161 dB**,
+  worst-frame PSNR **24.291 / 24.857 / 30.489 dB**, peak access-unit sizes
+  **99,298 / 99,298 / 189,156 bytes**. Output rates were 7.078 / 8.283 / 9.248
+  Mbit/s at the unchanged 10 Mbit/s codec target. At the first three one-second
+  boundaries the legacy ten-frame mean fell by 9.1–9.6 dB; the production arm
+  had no corresponding drop (changes +0.06 to +0.15 dB).
+- Intel UHD 770: aggregate PSNR **26.915 / 29.300 / 29.506 dB**, worst-frame
+  **21.781 / 21.833 / 22.936 dB**, peak **84,612 / 69,586 / 89,647 bytes**.
+  Output rates were 10.107 / 10.075 / 10.003 Mbit/s. Its later scene interval
+  remained less faithful even with the new policy; removing periodic IDRs does
+  not eliminate all hardware rate-control quality variation.
+
+All six arms decoded 360/360 frames and recovered at the requested frame 210.
+Both drivers accepted/read back GOP 60 vs 600 and HRD 125,000 vs 250,000 bytes.
+Legacy IDRs occurred at 0/60/120/180/210/270/330; both long-GOP arms emitted only
+0/210. These are finite synthetic results, not perceived-quality guarantees.
+The larger HRD permits bigger frames; application pacing/expiry bounds remain
+authoritative. AMD and real two-client motion/text/network acceptance are pending.
+
+The same change passed `screen_pipeline_probe --seconds=30 --assert` on the
+NVIDIA adapter: 1,796 assembled 4K frames, 59.46 sustained FPS, four IDRs, zero
+encoded drops/receiver packet loss, and 163 ms maximum measured sender age.
+This exercises WGC through the production GPU encoder/pacer and encrypted local
+WebRTC receive queue, not the SFU, WAN or visible browser presentation.
 
 `screen_encode_probe` tests the legacy system-memory input encoder API with
 synthetic data; that API is not the production capture path. `screen_preview_probe`
@@ -516,6 +575,7 @@ network conditions and actual WebView hardware decode still require acceptance.
 HDR/device references: [Microsoft Advanced Color](https://learn.microsoft.com/en-us/windows/win32/direct3darticles/high-dynamic-range),
 [MF D3D device manager](https://learn.microsoft.com/en-us/windows/win32/medfound/mft-message-set-d3d-manager),
 [H.264 HRD buffer units](https://learn.microsoft.com/en-us/windows/win32/codecapi/avenccommonbuffersize-property),
+[hardware GOP semantics](https://learn.microsoft.com/en-us/windows/win32/codecapi/avencmpvgopsize-property),
 [encoder quality/speed](https://learn.microsoft.com/en-us/windows/win32/codecapi/avenccommonqualityvsspeed-property),
 [WGC compositor timestamps](https://learn.microsoft.com/en-us/uwp/api/windows.graphics.capture.direct3d11captureframe.systemrelativetime),
 [asynchronous MF events](https://learn.microsoft.com/en-us/windows/win32/api/mfobjects/nf-mfobjects-imfmediaeventgenerator-begingetevent),

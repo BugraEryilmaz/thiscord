@@ -1,7 +1,7 @@
 //! Windows Graphics Capture delivers compositor frames; no screenshot polling.
 //! The callback copies GPU textures only. A latest-frame mailbox decouples it
 //! from the encoder, so overload replaces raw frames without breaking H.264 refs.
-use super::{gpu, metrics::Metrics};
+use super::{gpu, keyframe::KeyframePolicy, metrics::Metrics};
 use crate::audio::connection::Connection;
 use std::{
     sync::{
@@ -329,7 +329,7 @@ fn encode(
     let mut pending_pixels = None;
     let mut sequence = 0;
     let mut waiting_for_keyframe = true;
-    let mut keyframe = Instant::now() - Duration::from_secs(1);
+    let mut keyframe = KeyframePolicy::default();
     let mut color_checked = Instant::now() - Duration::from_secs(2);
     let mut color = (1.0, false);
     let mut previous = Instant::now();
@@ -433,7 +433,7 @@ fn encode(
                 .poll()
                 .map_err(|e| format!("GPU encoder failed: {}", e.code()))?;
             if record_frames(&frames, started, metrics) {
-                keyframe = Instant::now();
+                keyframe.observed(Instant::now());
             }
             if !send_frames(
                 frames,
@@ -542,6 +542,16 @@ fn encode(
                 );
                 metrics.label("encoder_buffer_applied", hw.buffer_applied);
                 metrics.label(
+                    "encoder_gop_target_frames",
+                    super::keyframe::gop_frames(quality.fps),
+                );
+                metrics.label("encoder_gop_applied", hw.gop_applied);
+                metrics.label(
+                    "encoder_gop_readback_frames",
+                    hw.gop_readback_frames()
+                        .map_or_else(|| "unavailable".into(), |v| v.to_string()),
+                );
+                metrics.label(
                     "encoder_quality_vs_speed",
                     hw.quality_vs_speed()
                         .map_or_else(|| "unavailable".into(), |v| v.to_string()),
@@ -561,6 +571,7 @@ fn encode(
                 );
                 configured = Some((w, h));
                 last_texture = None;
+                keyframe = KeyframePolicy::default();
                 force_keyframe.store(true, Ordering::Release);
                 report(format!(
                     "GPU capture/scale/BT.709 NV12 -> {} (FP16 HDR-aware)",
@@ -586,10 +597,7 @@ fn encode(
                 continue;
             };
             last_texture = Some(texture);
-        } else if keyframe.elapsed() < Duration::from_secs(1)
-            && (!force_keyframe.load(Ordering::Acquire)
-                || keyframe.elapsed() < Duration::from_millis(200))
-        {
+        } else if !keyframe.refresh_due(Instant::now(), force_keyframe.load(Ordering::Acquire)) {
             continue;
         }
         let (Some(hw), Some(texture)) = (&mut hardware, &last_texture) else {
@@ -599,15 +607,16 @@ fn encode(
             continue;
         }
         // Coalesce local backpressure and remote requests to avoid an IDR storm.
-        let requested = keyframe.elapsed() >= Duration::from_millis(200)
-            && force_keyframe.swap(false, Ordering::AcqRel);
-        if requested || keyframe.elapsed() >= Duration::from_secs(1) {
+        let now = Instant::now();
+        let requested =
+            keyframe.feedback_ready(now) && force_keyframe.swap(false, Ordering::AcqRel);
+        let forced = requested || keyframe.periodic_due(now);
+        if forced {
             hw.force_keyframe()
                 .map_err(|_| "GPU keyframe request failed")?;
             if requested {
                 metrics.add("keyframe_feedback", 1);
             }
-            keyframe = Instant::now();
         }
         let micros = captured_at.saturating_duration_since(started).as_micros() as u64;
         // Empty polls, busy hardware and raw-input backpressure must not advance
@@ -617,8 +626,9 @@ fn encode(
         let frames = hw
             .encode_texture(texture.clone(), micros)
             .map_err(|e| format!("GPU encode failed: {}", e.code()))?;
+        keyframe.submitted(now, forced);
         if record_frames(&frames, started, metrics) {
-            keyframe = Instant::now();
+            keyframe.observed(Instant::now());
         }
         if !send_frames(
             frames,
