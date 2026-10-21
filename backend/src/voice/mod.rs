@@ -8,6 +8,7 @@ mod logging;
 mod membership;
 mod red;
 mod resumption;
+mod retransmission;
 mod store;
 mod viewing;
 use crate::{auth::Failure, db::DbPool};
@@ -1051,7 +1052,11 @@ async fn serve(mut socket: logging::Socket, pool: DbPool, id: RequestId) {
     let _ = engine.register_default_codecs();
     red::register(&mut engine);
     let registry = register_default_interceptors(Registry::new(), &mut engine)
-        .expect("default RTP interceptors");
+        .expect("default RTP interceptors")
+        .with(
+            rtc::interceptor::Slot::NackResponder,
+            retransmission::Responder::default(),
+        );
     socket.stage = "peer_build";
     let built = PeerConnectionBuilder::new()
         .with_configuration(ice::configuration(&ice_servers))
@@ -1267,27 +1272,33 @@ async fn serve(mut socket: logging::Socket, pool: DbPool, id: RequestId) {
                 for (&other, m) in members.iter() {
                     if other != slot {
                         let receiver_epoch = m.generation.load(Ordering::Acquire);
-                        let single = (!layered).then(|| (packet.clone(), arrived));
-                        let packets = if layered {
+                        let screen = kind == MediaKind::ScreenVideo;
+                        let single = (!screen).then(|| (packet.clone(), arrived));
+                        let packets = if screen {
                             let mut routes = m.screen_routes.lock().unwrap();
                             if !viewing::receives(m, source, kind, arrived) {
                                 routes[slot].clear();
                                 continue;
                             }
                             let view = m.views[kind.view_index(slot)].unwrap();
-                            let packets = routes[slot].push_at(
-                                (
-                                    source_id,
-                                    source.info.screen_epoch,
-                                    view.since,
-                                    epoch,
-                                    receiver_epoch,
-                                ),
-                                plan.layer(view.subscription.bitrate),
-                                layer,
-                                packet.clone(),
-                                arrived,
+                            let identity = (
+                                source_id,
+                                source.info.screen_epoch,
+                                view.since,
+                                epoch,
+                                receiver_epoch,
                             );
+                            let packets = if layered {
+                                routes[slot].push_at(
+                                    identity,
+                                    plan.layer(view.subscription.bitrate),
+                                    layer,
+                                    packet.clone(),
+                                    arrived,
+                                )
+                            } else {
+                                routes[slot].push_legacy_at(identity, packet.clone(), arrived)
+                            };
                             let queued_at = routes[slot].released_at.unwrap_or(arrived);
                             packets.into_iter().map(|p| (p, queued_at)).collect()
                         } else {

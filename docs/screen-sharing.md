@@ -373,17 +373,24 @@ large IDR for burst delivery. Layer switches and hide/reopen preserve outbound R
 sequence continuity. Each selection has an extended ingress sequence floor and a
 128-packet duplicate/reorder window; packets preceding its recovery prefix cannot
 reuse an earlier selection's outbound indexes. Forward jumps above 4096 packets
-are rejected instead of guessing a rollover. Ordinary packet gaps stay visible
+and older out-of-window sequences cannot advance the current mapping. A fresh,
+contiguous SPS/PPS/IDR prefix can resynchronize above the previous outbound high
+index without guessing the publisher's rollover. Invalid jumps/deltas leave the
+current selection usable. Legacy publishers use the same sequence routing and
+can recover on a fresh IDR with the decoder's cached parameter sets. Initial
+legacy forwarding remains compatible with peers lacking an SPS/PPS prefix.
+Ordinary packet gaps stay visible
 for receiver loss detection. A separate final transport window also fences queued
 duplicates, discontinuities and source/slot reuse, committing only successful
 atomic driver enqueues. Sequence state lasts for the receiving connection and is
 never reset by a subscription, share epoch, publisher identity or route clear.
-After locally measured throttling, fresh queue entries start a new mapping above
+After locally measured throttling or a final-writer sequence discontinuity,
+the upstream route is invalidated and fresh recovery entries start a new mapping above
 the last emitted index with one visible loss gap. This preserves recovery even
 when throttling discarded more than half a sequence space; it cannot reset or
 reuse the outbound index history.
-Pathological sequence discontinuities fail closed and can require the publisher
-to reconnect; they cannot reset the receiving SRTP nonce space.
+No discontinuity, IDR, source replacement or subscription reset can erase the
+receiving connection's outbound SRTP index history.
 
 Timestamp freshness is separate: normal switches on the same compositor clock
 reject older/equal IDRs, including across timestamp wrap. Subscription/share/access
@@ -391,6 +398,9 @@ epoch changes reset that clock comparison, and 60 seconds without forward media
 requires a fresh SPS/PPS/IDR and resets it as well. This avoids ambiguous signed
 timestamp comparisons after the roughly 6 h 38 min half range at 90 kHz. Ingress
 age and authorization fences still apply; timestamps are not proof of freshness.
+Recovered selections reject packets with timestamps preceding their recovery
+prefix; that floor slides behind forward media with a 60-second window so long
+uninterrupted calls do not strand timestamp comparisons.
 Old viewers can decode the selected SPS/PPS/IDR without any new receiver fields.
 Keyframe requests are authorized against live viewer leases and routed to the
 selected encoder; the existing publisher rate limit remains shared by both layers.
@@ -416,6 +426,20 @@ lower network layers are not separately metered. Budget downgrades cap existing
 credit immediately at the next poll; upgrades do not retroactively refill it.
 Renewals, unsubscribe/resubscribe, share epochs and source changes do not replenish
 credit. Each bucket has constant memory per slot.
+
+Screen video and system audio have no SFU NACK retransmission cache. The pinned
+WebRTC responder writes cached RTP below application authorization/lifecycle and
+byte accounting, without a callback that can safely reacquire those gates.
+A stream-specific wrapper excludes these SSRCs from cache binding (including
+negotiated RTX) and discards their authenticated NACKs before bitmap expansion
+or retransmit queueing. Screen NACKs cause no extra media or keyframe work.
+Microphone/camera retain the default responder; camera shares H.264 but has
+distinct SSRCs. RTCP reports, TWCC and upstream loss feedback remain enabled.
+Screen receivers recover dependency loss through the existing explicit,
+authorized, coalesced `ScreenKeyframe` command and periodic publisher IDRs.
+This intentionally trades packet-level screen repair for a bounded IDR recovery
+pause on lossy links. All recovery media takes the ordinary, measured egress path;
+a future retransmission cache must use those same live gates and byte budgets.
 
 Over-budget packets are dropped without waiting, invalidate that viewer's pending
 screen route/backlog and request a coalesced IDR. Layered delivery resumes at a
@@ -730,7 +754,17 @@ the remote VPS or emulate its network path.
 
 Tests cover sequence wrap, duplicates, bounded reordering deadlines, recoverable
 and overflowing backlogs, feedback throttling/permissions and compatible wire
-negotiation, plus existing codec/lease/permission tests. CI compiles diagnostics
+negotiation, plus existing codec/lease/permission tests. The production encrypted
+regressions in `backend/tests/voice/recovery.rs` measure nominated ICE-pair bytes
+under 100 authenticated NACKs, including expanded bitmaps, while live and after
+unsubscribe, lease expiry, source stop, a new share epoch and permission revocation.
+Wire counters detect duplicate ciphertext that SRTP replay protection would hide
+from the application. A camera positive control requires real retransmitted bytes.
+The same suite exercises IDR recovery after 4096 lost packets, larger gaps,
+wire wrap, duplicates/reordering and reopening for layered and legacy publishers.
+Unit tests additionally check both SRTP protection profiles, RTX exclusion, final
+queue loss, malformed prefixes and uninterrupted timestamp wrap.
+CI compiles diagnostics
 and runs portable tests on Windows/macOS/Linux. Linux needs a WebKitGTK build with
 working WebRTC/H.264. Live capture, HDR appearance, Intel/AMD drivers, multi-client
 network conditions and actual WebView hardware decode still require acceptance.

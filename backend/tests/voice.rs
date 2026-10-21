@@ -15,6 +15,8 @@ use uuid::Uuid;
 mod friends;
 #[path = "voice/layers.rs"]
 mod layers;
+#[path = "voice/recovery.rs"]
+mod recovery;
 #[path = "voice/red.rs"]
 mod red;
 #[path = "voice/roster.rs"]
@@ -71,6 +73,15 @@ fn user(db: &Database, name: &str) -> (AccountId, String) {
     (id, token)
 }
 async fn call(app: &Router, path: &str, token: &str, command: Value) -> (StatusCode, Value) {
+    // Isolated databases still share the production process-wide HTTP worker
+    // limit. Bound parallel fixture commands so adding transport regressions
+    // does not accidentally turn another fixture's setup into an overload test.
+    static COMMANDS: std::sync::OnceLock<tokio::sync::Semaphore> = std::sync::OnceLock::new();
+    let _command = COMMANDS
+        .get_or_init(|| tokio::sync::Semaphore::new(4))
+        .acquire()
+        .await
+        .unwrap();
     let response = app
         .clone()
         .oneshot(

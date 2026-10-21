@@ -316,6 +316,21 @@ impl Writer {
                     .accept(packet.header.sequence_number)
                     .is_none()
             {
+                if screen_sequence.discontinuity(packet.header.sequence_number) {
+                    // Queue expiry/driver backpressure can lose a large run even
+                    // without a bitrate rejection. Force the upstream route to
+                    // reacquire an IDR and map its fresh queue above emitted SRTP
+                    // indexes, using the same local-loss fence as throttling.
+                    let members = self.room.members.read().await;
+                    if let Some(receiver) = members.get(&self.receiver_slot) {
+                        receiver.outgoing[kind as usize]
+                            .screen_budget
+                            .lock()
+                            .unwrap()[source_slot]
+                            .rejected_at = Some(Instant::now());
+                        receiver.screen_routes.lock().unwrap()[source_slot].clear();
+                    }
+                }
                 self.dropped(kind, source_slot, screen_epoch).await;
                 continue;
             }
@@ -987,13 +1002,16 @@ mod tests {
             (101, false),
             (99, false),
             (30_000, false),
+            // The rejected discontinuity establishes a new local-loss floor.
+            (1100, true),
+            (1099, false),
         ];
-        for n in (1100_u32..70_000).step_by(1000) {
+        for n in (2100_u32..70_000).step_by(1000) {
             sequences.extend([(n as u16, true), ((n - 1) as u16, true), (n as u16, false)]);
         }
         let mut previous = None::<u64>;
         let mut indexes = std::collections::HashSet::new();
-        for phase in 0..3 {
+        for phase in 0..4 {
             let replace = phase == 1;
             if replace {
                 source.id = uuid::Uuid::new_v4();
@@ -1021,6 +1039,18 @@ mod tests {
                     (40_000, false),
                     (40_002, true),
                     (40_001, true),
+                ];
+            }
+            if phase == 3 {
+                // A large final-queue gap without ANY bitrate rejection used to
+                // wedge the window forever. Reject it, invalidate the route and
+                // accept the fresh recovery without forgetting outbound history.
+                sequences = vec![
+                    (10_000, false),
+                    (10_001, true),
+                    (10_001, false),
+                    (10_003, true),
+                    (10_002, true),
                 ];
             }
             for (seq, expected) in &sequences {
