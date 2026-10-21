@@ -206,16 +206,15 @@ first loses its three-second local viewer lease. Publisher shared-audio capture
 continues until Stop sharing; it is not forwarded to non-viewers.
 
 Receivers sample native packet-loss/frame-queue counters and sustained WebView
-<<<<<<< HEAD
 decoder overload once per second. Screen budgets start at 32 Mbit/s so the selected
 maximum is attempted immediately; cameras use the same controller capped at their
-1.5 Mbit/s encoder limit. Budgets remain bounded to 200 kbit/s�32 Mbit/s.
+1.5 Mbit/s encoder limit. Budgets remain bounded to 200 kbit/s–32 Mbit/s.
 Ordinary congestion requires three bad samples out of four and reduces the budget
 15%, at most once every three seconds. One or two transient samples do not reduce
 quality. Severe packet loss (at least ten packets and 15% of expected packets), or
 three consecutive samples without complete frames, reduces the budget 35%, at
 most once every two seconds. The first two seconds allow negotiation/IDR recovery.
-An alternating static-source refresh/gap does not count as a stall. Six consecutive
+The separate one-second static delta refresh prevents idle desktop content from counting as a stall. Six consecutive
 healthy samples start recovery with a 12% probe, followed by another probe every
 three healthy samples. Uninterrupted recovery from the floor to 32 Mbit/s takes
 under 150 seconds. A sampling gap over three seconds clears accumulated evidence
@@ -237,18 +236,6 @@ demand chooses its current target immediately. Capture FPS follows the committed
 encoder target, so a noisy budget cannot independently oscillate capture cadence.
 Byte admission and RTP pacing change with the committed target. Diagnostics expose
 actual `target_bitrate`, `target_fps`, `resolution` and `video_paused`.
-=======
-decoder overload once per second. Budgets start at 32 Mbit/s so the selected
-maximum is attempted immediately, decrease by
-35% on congestion, and increase by 25% after ten healthy samples, bounded to
-200 kbit/s–32 Mbit/s. Three initial samples allow setup; three consecutive empty
-samples detect stalls without treating a static source's one-second delta refresh
-as immediate loss. The server takes the lowest live viewer budget. The publisher
-selects a resolution/FPS/bitrate combination within that budget and its selected
-maximum, recreates the GPU encoder with an IDR when quality changes, and updates
-capture cadence, byte admission and RTP pacing together. Diagnostics expose actual
-`target_bitrate`, `target_fps`, `resolution` and `video_paused`.
->>>>>>> 031cc44 (fix(screen): separate recovery keyframes from static refresh)
 `requested_height`, `requested_fps` and `viewer_bitrate_budget` distinguish the
 selected maximum from receiver-driven adaptation. A 4K preset does not upscale
 an ultrawide 3440x1440 source to 3840x2160.
