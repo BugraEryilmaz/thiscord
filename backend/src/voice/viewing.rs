@@ -1,6 +1,64 @@
 use super::*;
 use thiscord_shared::screen::{Subscription, VIEW_LEASE_SECS};
 
+/// A receiver/source-slot token bucket, independent of publisher claims. Account
+/// for RTP + 64 bytes SRTP/UDP/IP; allow 20% overhead and 250 ms of burst credit
+/// (at least two MTUs). Never reset it on subscription, source or share changes.
+#[derive(Default)]
+pub(super) struct ByteBudget {
+    at: Option<Instant>,
+    rate: f64,
+    credit: f64,
+    pub rejected_at: Option<Instant>,
+}
+impl ByteBudget {
+    pub fn admit(&mut self, bitrate: u32, bytes: usize, now: Instant) -> bool {
+        let rate = f64::from(bitrate) * 1.2 / 8.0;
+        let burst = (rate * 0.25).max(3000.0);
+        self.credit = match self.at {
+            None => burst,
+            Some(at) => (self.credit
+                + now.saturating_duration_since(at).as_secs_f64() * self.rate.min(rate))
+            .min(burst),
+        };
+        self.at = Some(now);
+        self.rate = rate;
+        if bytes as f64 > self.credit {
+            self.rejected_at = Some(now);
+            return false;
+        }
+        self.credit -= bytes as f64;
+        true
+    }
+}
+
+#[cfg(test)]
+mod budget_tests {
+    use super::*;
+
+    #[test]
+    fn measured_bytes_bound_flood_burst_refill_and_budget_changes() {
+        let mut budget = ByteBudget::default();
+        let now = Instant::now();
+        let mut admitted = 0;
+        // 12 MB/s attempted against a 200 kbit/s subscription, for ten seconds.
+        for millisecond in 0..10_000 {
+            for _ in 0..10 {
+                if budget.admit(200_000, 1200, now + Duration::from_millis(millisecond)) {
+                    admitted += 1200;
+                }
+            }
+        }
+        assert!((299_000..=307_500).contains(&admitted), "{admitted}");
+        // Neither a downgrade nor rapid budget oscillation grants a fresh burst.
+        let at = now + Duration::from_secs(10);
+        assert!(!budget.admit(1_000_000, 7500, at));
+        assert!(!budget.admit(200_000, 7500, at));
+        assert!(budget.admit(200_000, 7500, at + Duration::from_secs(1)));
+        assert!(!budget.admit(200_000, 1, at + Duration::from_secs(1)));
+    }
+}
+
 #[derive(Clone, Copy)]
 pub(super) struct View {
     pub subscription: Subscription,
@@ -91,19 +149,24 @@ pub(super) async fn update(
     true
 }
 
-/// Used both before queue admission and on every transport poll, under the room lock.
-pub(super) fn within_budget(
+/// Queue entries retain the actual selected track. Re-evaluate demand under the
+/// room lock; nominal encoder bitrate is descriptive, never a delivery grant or
+/// a reason to freeze a held encoder mode. ByteBudget enforces actual traffic.
+pub(super) fn selected_layer(
+    members: &HashMap<usize, Member>,
     receiver: &Member,
     source: &Member,
     kind: MediaKind,
-    bitrate: Option<u32>,
+    layer: Option<usize>,
 ) -> bool {
-    if kind != MediaKind::ScreenVideo || !source.screen_layers {
+    if kind != MediaKind::ScreenVideo {
         return true;
     }
-    bitrate.is_some_and(|rate| {
-        receiver.views[source.info.slot].is_some_and(|v| rate <= v.subscription.bitrate)
-    })
+    if !source.screen_layers {
+        return layer.is_none();
+    }
+    receiver.views[source.info.slot]
+        .is_some_and(|v| layer == Some(layer_plan(members, source).layer(v.subscription.bitrate)))
 }
 
 /// Used both before queue admission and on every transport poll, under the room lock.

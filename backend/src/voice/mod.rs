@@ -86,6 +86,9 @@ struct Delivery {
     source: uuid::Uuid,
     source_active: Arc<AtomicBool>,
     packet: rtp::Packet,
+    // Server-observed ingress track, never publisher bitrate metadata. Retained
+    // through the queue so final delivery can re-evaluate current layer demand.
+    screen_layer: Option<usize>,
     queued_at: Instant,
 }
 struct Room {
@@ -1272,12 +1275,6 @@ async fn serve(mut socket: logging::Socket, pool: DbPool, id: RequestId) {
                                 continue;
                             }
                             let view = m.views[kind.view_index(slot)].unwrap();
-                            if layer_packet.unwrap().bitrate > view.subscription.bitrate {
-                                if plan.layer(view.subscription.bitrate) == layer {
-                                    routes[slot].clear();
-                                }
-                                continue;
-                            }
                             let packets = routes[slot].push_at(
                                 (
                                     source_id,
@@ -1310,6 +1307,7 @@ async fn serve(mut socket: logging::Socket, pool: DbPool, id: RequestId) {
                                         source: source_id,
                                         source_active: relay_active.clone(),
                                         packet: selected,
+                                        screen_layer: layered.then_some(layer),
                                         queued_at,
                                     },
                                 )

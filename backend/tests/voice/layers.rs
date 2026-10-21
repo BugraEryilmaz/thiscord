@@ -173,6 +173,31 @@ async fn encrypted_layers_isolate_fast_slow_and_legacy_viewers_and_route_recover
     assert_eq!(video(&mut fast, source.slot).await.payload.last(), Some(&0));
     let first = video(&mut slow, source.slot).await;
     assert_eq!(first.payload.last(), Some(&1));
+    // Hold the truthful 5 Mbit/s encoder mode across 5 -> 4.9 Mbit/s demand.
+    // Actual bytes fit the view's pacing envelope: a delta must pass immediately
+    // without clearing the selected route or waiting for another IDR. The weak
+    // viewer must still receive only its selected low encoder.
+    views(&mut fast, 4_900_000).await;
+    publish(&source, 0, 101, 12000, epoch, false).await;
+    assert_eq!(
+        video(&mut fast, source.slot).await.payload.as_ref(),
+        [0x41, 0]
+    );
+    assert!(
+        tokio::time::timeout(Duration::from_millis(80), slow.packets.recv())
+            .await
+            .is_err()
+    );
+    publish(&source, 1, 501, 12000, epoch, false).await;
+    assert_eq!(
+        video(&mut slow, source.slot).await.payload.as_ref(),
+        [0x41, 1]
+    );
+    assert!(
+        tokio::time::timeout(Duration::from_millis(80), fast.packets.recv())
+            .await
+            .is_err()
+    );
     // A weak viewer's loss requests the low encoder, not the fast viewer's encoder.
     send(
         &mut slow.socket,
@@ -201,7 +226,7 @@ async fn encrypted_layers_isolate_fast_slow_and_legacy_viewers_and_route_recover
     .unwrap();
     views(&mut slow, 5_000_000).await;
     views(&mut fast, 5_000_000).await;
-    publish(&source, 0, 101, 12000, epoch, false).await;
+    publish(&source, 0, 102, 15000, epoch, false).await;
     assert_eq!(
         video(&mut fast, source.slot).await.payload.as_ref(),
         [0x41, 0]
@@ -211,13 +236,13 @@ async fn encrypted_layers_isolate_fast_slow_and_legacy_viewers_and_route_recover
             .await
             .is_err()
     );
-    publish(&source, 0, 102, 15000, epoch, true).await;
+    publish(&source, 0, 103, 18000, epoch, true).await;
     video(&mut fast, source.slot).await;
     let upgraded = video(&mut slow, source.slot).await;
     assert_eq!(upgraded.payload.last(), Some(&0));
     assert_eq!(
         upgraded.header.sequence_number,
-        first.header.sequence_number.wrapping_add(1)
+        first.header.sequence_number.wrapping_add(2)
     );
     assert!(
         upgraded
@@ -230,22 +255,22 @@ async fn encrypted_layers_isolate_fast_slow_and_legacy_viewers_and_route_recover
     send(&mut slow.socket, ClientEvent::ScreenViews { views: vec![] }).await;
     still_connected(&mut slow.socket).await;
     views(&mut slow, MIN_VIEW_BITRATE).await;
-    publish(&source, 1, 501, 18000, epoch, true).await;
+    publish(&source, 1, 502, 21000, epoch, true).await;
     let resumed = video(&mut slow, source.slot).await;
     assert_eq!(
         resumed.header.sequence_number,
         upgraded.header.sequence_number.wrapping_add(1)
     );
     // Wrong source epoch and expired leases must not admit either layer.
-    publish(&source, 1, 502, 21000, epoch.wrapping_sub(1), true).await;
+    publish(&source, 1, 503, 24000, epoch.wrapping_sub(1), true).await;
     assert!(
         tokio::time::timeout(Duration::from_millis(80), slow.packets.recv())
             .await
             .is_err()
     );
     tokio::time::sleep(Duration::from_secs(VIEW_LEASE_SECS)).await;
-    publish(&source, 0, 103, 24000, epoch, true).await;
-    publish(&source, 1, 503, 24000, epoch, true).await;
+    publish(&source, 0, 104, 27000, epoch, true).await;
+    publish(&source, 1, 504, 27000, epoch, true).await;
     assert!(
         tokio::time::timeout(Duration::from_millis(80), slow.packets.recv())
             .await
@@ -256,16 +281,12 @@ async fn encrypted_layers_isolate_fast_slow_and_legacy_viewers_and_route_recover
             .await
             .is_err()
     );
-    // After the fast lease expires, the SFU asks the primary to downscale. Until
-    // that reconfiguration occurs, the old high-rate primary must not leak to
-    // the remaining low-budget viewer just because its selected index changed.
+    // With no fast viewer, primary is the selected encoder. Its nominal mode
+    // need not change synchronously: measured bytes enforce the weak budget.
+    // The shared encrypted flood test covers sustained over-budget rejection.
     views(&mut slow, MIN_VIEW_BITRATE).await;
-    publish(&source, 0, 104, 27000, epoch, true).await;
-    assert!(
-        tokio::time::timeout(Duration::from_millis(80), slow.packets.recv())
-            .await
-            .is_err()
-    );
+    publish(&source, 0, 105, 30000, epoch, true).await;
+    assert_eq!(video(&mut slow, source.slot).await.payload.last(), Some(&0));
     source.close().await;
     fast.close().await;
     slow.close().await;

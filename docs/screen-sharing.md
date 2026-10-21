@@ -290,10 +290,12 @@ false is omitted from answers to older servers. Negotiated publishers attach the
 selected `quality` to the screen start command. Targets additionally contain
 `layers: { primary, low }`; omitted fields retain the old single-encoder protocol.
 Layer zero uses SSRC 901 and layer one uses SSRC 904. Both carry the current share
-epoch and actual encoded-frame bitrate in two CSRCs, checked before forwarding;
-the SFU removes the bitrate before sending to receivers. Target changes cannot
-mislabel queued old-quality frames or briefly send the high layer to a weak viewer.
-Stale upstream packets cannot be retagged as a new share. Cameras and shared audio keep their existing contracts.
+epoch and nominal bitrate of the actual encoded mode in two CSRCs, validated for
+shape/range and the current epoch before forwarding. The SFU removes bitrate
+metadata before sending to receivers. A target change does not relabel queued
+frames: the server retains their ingress layer and enforces measured viewer
+budgets independently of nominal mode. Stale upstream packets cannot be retagged
+as a new share. Cameras and shared audio keep their existing contracts.
 
 The primary target comes from the highest live viewer budget, capped by the selected
 preset. Targets preserve the continuous budgets rather than rounding to a codec
@@ -323,15 +325,60 @@ same relay SSRC and share epoch. A switch drops deltas until a contiguous SPS/PP
 prefix and IDR start arrive; fragments later in that IDR use ordinary loss recovery.
 Prefix buffering is bounded to 4 MiB/4096 packets/350 ms and does not hold an entire
 large IDR for burst delivery. Layer switches and hide/reopen preserve outbound RTP
-sequence continuity; timestamps use the shared compositor clock and cannot move
-backward at a switch. Ordinary packet gaps stay visible for receiver loss detection.
+sequence continuity. Each selection has an extended ingress sequence floor and a
+128-packet duplicate/reorder window; packets preceding its recovery prefix cannot
+reuse an earlier selection's outbound indexes. Forward jumps above 4096 packets
+are rejected instead of guessing a rollover. Ordinary packet gaps stay visible
+for receiver loss detection. A separate final transport window also fences queued
+duplicates, discontinuities and source/slot reuse, committing only successful
+atomic driver enqueues. Sequence state lasts for the receiving connection and is
+never reset by a subscription, share epoch, publisher identity or route clear.
+After locally measured throttling, fresh queue entries start a new mapping above
+the last emitted index with one visible loss gap. This preserves recovery even
+when throttling discarded more than half a sequence space; it cannot reset or
+reuse the outbound index history.
+Pathological sequence discontinuities fail closed and can require the publisher
+to reconnect; they cannot reset the receiving SRTP nonce space.
+
+Timestamp freshness is separate: normal switches on the same compositor clock
+reject older/equal IDRs, including across timestamp wrap. Subscription/share/access
+epoch changes reset that clock comparison, and 60 seconds without forward media
+requires a fresh SPS/PPS/IDR and resets it as well. This avoids ambiguous signed
+timestamp comparisons after the roughly 6 h 38 min half range at 90 kHz. Ingress
+age and authorization fences still apply; timestamps are not proof of freshness.
 Old viewers can decode the selected SPS/PPS/IDR without any new receiver fields.
 Keyframe requests are authorized against live viewer leases and routed to the
 selected encoder; the existing publisher rate limit remains shared by both layers.
 Joins and target changes request an IDR and periodic recovery remains available.
-Both screen SSRCs share the original publisher ingress rate limit. Existing
-per-viewer egress byte/packet/age bounds and both-endpoint authorization checks apply
-unchanged. Expired/removed subscriptions discard buffered switch prefixes.
+Both screen SSRCs share the original publisher ingress rate limit. Publisher
+bitrate metadata describes the actual encoded mode; it neither grants bandwidth
+nor rejects an otherwise eligible held mode. A 5 Mbit/s nominal encoder may stay
+selected while demand/pacing falls to 4.9 Mbit/s. Layer choice still follows live,
+authorized demand: weak viewers use the low encoder when a higher primary is
+needed. Queue entries retain the server-observed layer index and recheck that
+selection at the final transport poll, so queued primary packets cannot cross a
+switch to low. If only a weak viewer remains, it can receive the selected primary
+while the publisher reconfigures, but only within its measured byte allowance.
+Epoch, subscription and access checks remain authoritative independently of mode.
+No publisher claim bypasses these limits. Every screen viewer/source slot
+(including legacy screen publishers)
+has measured token buckets before queue admission and at the final transport poll.
+They count serialized RTP plus 64 bytes for SRTP/UDP/IP, allowing 120% of the
+authorized subscription bitrate and a 250 ms burst (minimum 3000 bytes). A
+200 kbit/s view therefore permits at most 30,000 measured bytes/second plus
+7500 burst bytes, independent of the publisher's bitrate claim. TURN framing and
+lower network layers are not separately metered. Budget downgrades cap existing
+credit immediately at the next poll; upgrades do not retroactively refill it.
+Renewals, unsubscribe/resubscribe, share epochs and source changes do not replenish
+credit. Each bucket has constant memory per slot.
+
+Over-budget packets are dropped without waiting, invalidate that viewer's pending
+screen route/backlog and request a coalesced IDR. Layered delivery resumes at a
+fresh recovery prefix when credit permits; an encoder that continuously exceeds
+the budget may remain undecodable until it reduces output. Existing bounded
+512-packet/512-KiB queues, 150 ms video age limits and both-endpoint authorization
+checks remain in force. Camera, microphone and system-audio paths are unchanged.
+Expired/removed subscriptions discard buffered switch prefixes.
 
 This remains an application feedback controller, not a bandwidth guarantee.
 Packet-loss, bandwidth-step and hardware reconfiguration trials with two desktop
@@ -625,13 +672,16 @@ subjective text or video quality for every source. Re-test representative conten
 before changing the speed hint or claiming equivalent image quality.
 
 The ignored PostgreSQL test
-`sfu_sustains_4k60_transport_with_two_times_bitrate_headroom` exercises actual
+`sfu_sustains_authorized_4k60_and_limits_excess_egress` exercises actual encrypted,
 authenticated peers and the SFU at 32 and 64 Mbit/s with concurrent microphone
-traffic. Local WSL validation forwarded 28,800/28,800 and 57,600/57,600 video
-packets respectively, plus all 160 microphone packets in each eight-second
-phase. Payloads have video packet sizes but are not decoded images. This is
-separate SFU capacity evidence; the Windows pipeline probe does not itself
-traverse the remote VPS or emulate its network path.
+traffic. It requires full 32 Mbit/s payload delivery to a 32 Mbit/s view (within
+the overhead allowance), then bounds measured egress when the publisher sends
+64 Mbit/s to 32 Mbit/s and 200 kbit/s views. It also requires fresh encrypted
+delivery after the flood ends and continued microphone service throughout.
+The former expectation of unrestricted 64 Mbit/s delivery to a 32 Mbit/s view
+was incompatible with bandwidth enforcement. Payloads have video packet sizes
+but are not decoded images. The Windows pipeline probe does not itself traverse
+the remote VPS or emulate its network path.
 
 Tests cover sequence wrap, duplicates, bounded reordering deadlines, recoverable
 and overflowing backlogs, feedback throttling/permissions and compatible wire

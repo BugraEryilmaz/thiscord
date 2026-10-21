@@ -31,6 +31,61 @@ impl IngressBudget {
     }
 }
 
+// Never infer a wrap from an arbitrary publisher jump. Retain a fixed replay
+// window and an inclusive selection floor; holes within the window remain legal.
+const REORDER: u64 = 128;
+const MAX_ADVANCE: i64 = 4096;
+const CLOCK_IDLE: Duration = Duration::from_secs(60);
+
+#[derive(Clone, Default)]
+pub(super) struct SequenceWindow {
+    high: Option<u64>,
+    floor: u64,
+    seen: u128,
+}
+impl SequenceWindow {
+    /// Locally confirmed queue loss may span more than half a wire sequence
+    /// space. Start a fresh mapping above every reserved index, retaining one
+    /// visible loss gap. This is not a publisher-controlled replay-window reset.
+    pub fn after_loss(&mut self) -> Option<u16> {
+        let next = self.high?.checked_add(2)?;
+        if next >= (1_u64 << 48) {
+            return None;
+        }
+        self.floor = next;
+        Some(next as u16)
+    }
+
+    pub fn accept(&mut self, sequence: u16) -> Option<u64> {
+        let Some(high) = self.high else {
+            let index = u64::from(sequence);
+            self.high = Some(index);
+            self.floor = index;
+            self.seen = 1;
+            return Some(index);
+        };
+        let delta = i64::from(sequence.wrapping_sub(high as u16) as i16);
+        if delta > MAX_ADVANCE {
+            return None;
+        }
+        let index = high.checked_add_signed(delta)?;
+        if index < self.floor || index >= (1_u64 << 48) {
+            return None;
+        }
+        if delta > 0 {
+            self.seen = self.seen.checked_shl(delta as u32).unwrap_or(0) | 1;
+            self.high = Some(index);
+        } else {
+            let behind = high - index;
+            if behind >= REORDER || self.seen & (1 << behind) != 0 {
+                return None;
+            }
+            self.seen |= 1 << behind;
+        }
+        Some(index)
+    }
+}
+
 #[derive(Default)]
 pub(super) struct Route {
     identity: Option<(uuid::Uuid, u32, Instant, u64, u64)>,
@@ -42,8 +97,11 @@ pub(super) struct Route {
     started: Option<Instant>,
     nals: u8,
     fragmented: Option<u8>,
-    offset: u16,
-    last: Option<(u16, u32)>,
+    input: SequenceWindow,
+    input_base: u64,
+    output_base: u64,
+    output_high: Option<u64>,
+    clock: Option<(u32, Instant)>,
 }
 
 impl Route {
@@ -61,7 +119,7 @@ impl Route {
         // sequence space of this viewer's fixed relay SSRC.
         *self = Self {
             identity: self.identity,
-            last: self.last,
+            output_high: self.output_high,
             ..Self::default()
         };
     }
@@ -91,11 +149,16 @@ impl Route {
         arrived: Instant,
     ) -> Vec<rtp::Packet> {
         if self.identity != Some(identity) {
-            if self.identity.is_some_and(|old| old.0 != identity.0) {
-                self.last = None;
-            }
             self.clear();
             self.identity = Some(identity);
+        }
+        // RTP timestamps cannot order separate encoder/share clocks, or pauses
+        // approaching the 32-bit half range. Reacquire a fresh IDR after idle.
+        if self
+            .clock
+            .is_some_and(|(_, at)| arrived.saturating_duration_since(at) >= CLOCK_IDLE)
+        {
+            self.clear();
         }
         if self.desired != desired {
             self.desired = desired;
@@ -107,7 +170,7 @@ impl Route {
         }
         if self.selected == Some(layer) {
             self.released_at = Some(arrived);
-            return vec![self.rewrite(packet)];
+            return self.rewrite(packet, arrived).into_iter().collect();
         }
         if self
             .started
@@ -138,35 +201,40 @@ impl Route {
             }
             return vec![];
         }
-        self.offset = self.last.map_or(0, |last| {
-            last.0
-                .wrapping_add(1)
-                .wrapping_sub(self.pending[0].header.sequence_number)
-        });
         // Both encoders use one compositor clock. An old buffered IDR cannot
         // move that clock backwards at an upgrade/downgrade.
-        if self
-            .last
-            .is_some_and(|last| self.pending[0].header.timestamp.wrapping_sub(last.1) as i32 <= 0)
-        {
+        if self.clock.is_some_and(|(timestamp, _)| {
+            self.pending[0].header.timestamp.wrapping_sub(timestamp) as i32 <= 0
+        }) {
             self.discard();
             return vec![];
         }
         self.selected = Some(layer);
+        self.input = SequenceWindow::default();
+        self.input_base = u64::from(self.pending[0].header.sequence_number);
+        self.output_base = self.output_high.map_or(self.input_base, |last| last + 1);
         self.released_at = self.started;
         let packets = std::mem::take(&mut self.pending);
         self.discard();
-        packets.into_iter().map(|p| self.rewrite(p)).collect()
+        packets
+            .into_iter()
+            .filter_map(|p| self.rewrite(p, arrived))
+            .collect()
     }
-    fn rewrite(&mut self, mut packet: rtp::Packet) -> rtp::Packet {
-        packet.header.sequence_number = packet.header.sequence_number.wrapping_add(self.offset);
-        if self
-            .last
-            .is_none_or(|last| packet.header.sequence_number.wrapping_sub(last.0) as i16 > 0)
-        {
-            self.last = Some((packet.header.sequence_number, packet.header.timestamp));
+    fn rewrite(&mut self, mut packet: rtp::Packet, arrived: Instant) -> Option<rtp::Packet> {
+        let input = self.input.accept(packet.header.sequence_number)?;
+        let output = self
+            .output_base
+            .checked_add(input.checked_sub(self.input_base)?)?;
+        if output >= (1_u64 << 48) {
+            return None;
         }
-        packet
+        packet.header.sequence_number = output as u16;
+        if self.output_high.is_none_or(|last| output > last) {
+            self.output_high = Some(output);
+            self.clock = Some((packet.header.timestamp, arrived));
+        }
+        Some(packet)
     }
     fn nal(&mut self, kind: u8) -> bool {
         self.nals |= match kind {
@@ -223,6 +291,159 @@ impl Route {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use rtc::shared::marshal::Marshal;
+
+    fn idr(seq: u16, ts: u32) -> rtp::Packet {
+        packet(
+            seq,
+            ts,
+            &[24, 0, 2, 0x67, 1, 0, 2, 0x68, 1, 0, 2, 0x65, 1],
+            true,
+        )
+    }
+
+    #[test]
+    fn encrypted_switches_reordering_wrap_and_resets_never_reuse_packet_indexes() {
+        use rtc::srtp::{context::Context, protection_profile::ProtectionProfile};
+        let provider = rtc::crypto::default_provider().unwrap();
+        for profile in [
+            ProtectionProfile::AeadAes128Gcm,
+            ProtectionProfile::Aes128CmHmacSha1_80,
+        ] {
+            let context = || {
+                Context::new(
+                    &vec![3; profile.key_len()],
+                    &vec![4; profile.salt_len()],
+                    profile,
+                    None,
+                    None,
+                    provider.crypto(),
+                )
+                .unwrap()
+            };
+            let mut encrypt = context();
+            let mut decrypt = context();
+            let mut indexes = std::collections::HashSet::new();
+            let mut previous: Option<u64> = None;
+            let mut check = |packets: Vec<rtp::Packet>| {
+                for packet in packets {
+                    let seq = packet.header.sequence_number;
+                    // Independent SRTP packet-index oracle, relative to the last
+                    // encrypted packet (including reordered ones), not Route state.
+                    let index = previous.map_or(u64::from(seq), |last| {
+                        last.checked_add_signed(i64::from(seq.wrapping_sub(last as u16) as i16))
+                            .unwrap()
+                    });
+                    assert!(indexes.insert(index), "reused SRTP index {index}");
+                    previous = Some(index);
+                    let plain = packet.marshal().unwrap();
+                    let encrypted = encrypt.encrypt_rtp(&plain).unwrap();
+                    assert_eq!(
+                        decrypt.decrypt_rtp(&encrypted).unwrap().as_ref(),
+                        plain.as_ref()
+                    );
+                }
+            };
+            let mut route = Route::default();
+            let mut id = (uuid::Uuid::new_v4(), 9, Instant::now(), 0, 0);
+            check(route.push(id, 0, 0, idr(100, 9000)));
+            check(route.push(id, 1, 1, idr(500, 12000)));
+            // Reviewer's exact collision: low499 must not become primary100.
+            assert!(
+                route
+                    .push(id, 1, 1, packet(499, 12000, &[0x41, 99], true))
+                    .is_empty()
+            );
+            assert!(
+                route
+                    .push(id, 1, 1, packet(500, 12000, &[0x41, 98], true))
+                    .is_empty()
+            );
+            check(route.push(id, 1, 1, packet(502, 15000, &[0x41, 2], true)));
+            check(route.push(id, 1, 1, packet(501, 12000, &[0x41, 1], true)));
+            assert!(
+                route
+                    .push(id, 1, 1, packet(501, 12000, &[0x41, 97], true))
+                    .is_empty()
+            );
+            for seq in [40_000, 20_000, 499, 0] {
+                assert!(
+                    route
+                        .push(id, 1, 1, packet(seq, 18000, &[0x41, 96], true))
+                        .is_empty()
+                );
+            }
+            // Several output wraps, input wraps and legitimate hole filling.
+            for n in 503_u32..140_000 {
+                if n % 3 == 0 {
+                    continue;
+                }
+                check(route.push(id, 1, 1, packet(n as u16, n * 3000, &n.to_be_bytes(), true)));
+                if n % 3 == 1 && n > 503 {
+                    check(route.push(
+                        id,
+                        1,
+                        1,
+                        packet((n - 1) as u16, (n - 1) * 3000, &[0x41, 3], true),
+                    ));
+                }
+            }
+            for change in 0..5 {
+                route.clear();
+                match change {
+                    0 => id.0 = uuid::Uuid::new_v4(),
+                    1 => id.1 += 1,
+                    2 => id.2 = Instant::now(),
+                    3 => id.3 += 1,
+                    _ => id.4 += 1,
+                }
+                let output = route.push(id, change % 2, change % 2, idr(65535, 1));
+                assert_eq!(output.len(), 1);
+                check(output);
+                check(route.push(
+                    id,
+                    change % 2,
+                    change % 2,
+                    packet(0, 3001, &[0x41, 4], true),
+                ));
+                assert!(
+                    route
+                        .push(
+                            id,
+                            change % 2,
+                            change % 2,
+                            packet(65534, 1, &[0x41, 95], true)
+                        )
+                        .is_empty()
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn timestamp_epochs_idle_and_wrap_are_independent_of_sequence_continuity() {
+        let mut route = Route::default();
+        let mut id = (uuid::Uuid::new_v4(), 9, Instant::now(), 0, 0);
+        let now = Instant::now();
+        assert_eq!(
+            route
+                .push_at(id, 0, 0, idr(100, u32::MAX - 3000), now)
+                .len(),
+            1
+        );
+        assert_eq!(route.push_at(id, 1, 1, idr(500, 3000), now).len(), 1);
+        assert!(route.push_at(id, 0, 0, idr(101, 2000), now).is_empty());
+        assert_eq!(route.push_at(id, 0, 0, idr(102, 6000), now).len(), 1);
+        let later = now + Duration::from_secs(7 * 3600);
+        let output = route.push_at(id, 1, 1, idr(501, 6000 + 7 * 3600 * 90_000), later);
+        assert_eq!(output[0].header.sequence_number, 103);
+        id.1 += 1;
+        let output = route.push_at(id, 0, 0, idr(1, 1), later);
+        assert_eq!(output[0].header.sequence_number, 104);
+        route.clear();
+        let output = route.push_at(id, 0, 0, idr(2, 0), later);
+        assert_eq!(output[0].header.sequence_number, 105);
+    }
     #[test]
     fn buffered_prefix_keeps_ingress_age_and_cannot_cross_authorization_epochs() {
         let id = (uuid::Uuid::new_v4(), 9, Instant::now(), 4, 8);
@@ -388,8 +609,8 @@ mod tests {
         // Ordinary selected-layer packet loss must stay visible to the receiver.
         let output = route.push(id, 1, 1, packet(110, 24000, &[0x41, 1], true));
         assert_eq!(
-            output[0].header.sequence_number.wrapping_sub(route.offset),
-            110
+            output[0].header.sequence_number,
+            (route.output_base + 110 - route.input_base) as u16
         );
     }
     #[test]

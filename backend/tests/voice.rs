@@ -602,7 +602,7 @@ async fn screen_blocked(source: &mut Peer, receiver: &mut Peer) {
 /// H.264-sized payloads through the production SFU while microphone RTP continues.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 #[ignore = "requires TEST_DATABASE_URL; CI runs with --include-ignored"]
-async fn sfu_sustains_4k60_transport_with_two_times_bitrate_headroom() {
+async fn sfu_sustains_authorized_4k60_and_limits_excess_egress() {
     let db = database();
     let (_, ot) = user(&db, "load_owner");
     let (_, mt) = user(&db, "load_viewer");
@@ -657,9 +657,22 @@ async fn sfu_sustains_4k60_transport_with_two_times_bitrate_headroom() {
     screen_forwarded(&mut a, &mut b, 0).await;
     let mut sequence = a.screen_sequences[0];
     let mut microphone_sequence = a.sequence;
-    for fps in [60u32, 120] {
+    for (fps, seconds, bitrate) in [
+        (60_u32, 8_u32, thiscord_shared::screen::MAX_VIEW_BITRATE),
+        (120, 8, thiscord_shared::screen::MAX_VIEW_BITRATE),
+        (120, 2, thiscord_shared::screen::MIN_VIEW_BITRATE),
+    ] {
         while b.packets.try_recv().is_ok() {}
-        let frames = fps * 8;
+        b.views[0].bitrate = bitrate;
+        send(
+            &mut b.socket,
+            ClientEvent::ScreenViews {
+                views: b.views.clone(),
+            },
+        )
+        .await;
+        still_connected(&mut b.socket).await;
+        let frames = fps * seconds;
         let expected = frames as usize * 60;
         let video_ssrc = thiscord_shared::screen::SSRC_BASE + a.slot as u32;
         let audio_ssrc = voice::SSRC_BASE + a.slot as u32;
@@ -724,7 +737,7 @@ async fn sfu_sustains_4k60_transport_with_two_times_bitrate_headroom() {
         let mut received = 0;
         let mut audio = 0;
         let mut renew = tokio::time::interval(Duration::from_millis(500));
-        let deadline = started + Duration::from_secs(11);
+        let deadline = started + Duration::from_secs(u64::from(seconds) + 3);
         while received < expected {
             tokio::select! {
                 _ = tokio::time::sleep_until(deadline) => break,
@@ -753,18 +766,45 @@ async fn sfu_sustains_4k60_transport_with_two_times_bitrate_headroom() {
             "SFU load: fps={fps}, Mbps={:.2}, received={received}/{expected}, microphone={audio}",
             expected as f64 * 1112.0 * 8.0 / elapsed.as_secs_f64() / 1e6
         );
-        assert_eq!(
-            received, expected,
-            "SFU must forward the full video burst load"
-        );
+        if fps == 60 {
+            assert_eq!(
+                received, expected,
+                "authorized 4k60 must retain full delivery"
+            );
+        } else {
+            // The old test demanded unrestricted 64 Mbit/s egress from a
+            // 32 Mbit/s view. Encrypted transport must now enforce the actual
+            // subscription, including a legacy publisher claiming no bitrate.
+            let rate = f64::from(bitrate) * 1.2 / 8.0;
+            let burst = (rate * 0.25).max(3000.0);
+            // Payload + serialized relay RTP + accounted SRTP/UDP/IP overhead.
+            let measured = received * (1112 + 16 + 64);
+            assert!(received < expected / 4 * 3);
+            if bitrate == thiscord_shared::screen::MAX_VIEW_BITRATE {
+                assert!(received > 0);
+            }
+            assert!(
+                measured as f64 <= rate * (elapsed.as_secs_f64() + 0.15) + burst,
+                "{measured} measured bytes exceeded {bitrate} bit/s view"
+            );
+        }
         assert!(
-            audio >= 150,
+            audio >= (seconds * 18) as usize,
             "microphone delivery must continue under video load"
         );
         assert!(
-            elapsed < Duration::from_millis(8200),
+            elapsed < Duration::from_millis(u64::from(seconds) * 1000 + 200),
             "load generator did not sustain target rate"
         );
+        if fps == 120 {
+            // Deliberate over-budget bursts can drop whole frames. Once the
+            // publisher reduces output, fresh encrypted media must resume even
+            // if the locally dropped sequence gap exceeded the reorder window.
+            a.screen_sequences[0] = sequence;
+            tokio::time::sleep(Duration::from_millis(300)).await;
+            screen_forwarded(&mut a, &mut b, 0).await;
+            sequence = a.screen_sequences[0];
+        }
     }
     a.close().await;
     b.close().await;
