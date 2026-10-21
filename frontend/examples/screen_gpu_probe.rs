@@ -1,10 +1,19 @@
 //! Synthetic FP16 input only. No desktop capture, accounts or network.
 #[cfg(windows)]
+#[path = "screen_gpu_probe/keyframes.rs"]
+mod keyframes;
+#[cfg(windows)]
+#[path = "screen_gpu_probe/layers.rs"]
+mod layers;
+#[cfg(windows)]
 #[path = "screen_gpu_probe/quality.rs"]
 mod quality;
 #[cfg(windows)]
 #[path = "screen_gpu_probe/scene.rs"]
 mod scene;
+#[cfg(windows)]
+#[path = "screen_gpu_probe/sender.rs"]
+mod sender;
 #[cfg(windows)]
 #[path = "screen_gpu_probe/throughput.rs"]
 mod throughput;
@@ -82,6 +91,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         if std::env::args().any(|arg| arg == "--burst") {
             return burst_probe(&device, &context);
         }
+        if std::env::args().any(|arg| arg == "--keyframes") {
+            return keyframes::run(&device, &context);
+        }
         if std::env::args().any(|arg| arg == "--throughput") {
             return throughput::run(&device, &context);
         }
@@ -90,6 +102,12 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         }
         if std::env::args().any(|arg| arg == "--adaptive") {
             return adaptive_probe(&device, &context);
+        }
+        if std::env::args().any(|arg| arg == "--layers") {
+            return layers::run(&device, &context);
+        }
+        if std::env::args().any(|arg| arg == "--sender-recovery") {
+            return sender::run(&device, &context);
         }
         for (w, h, source_w, source_h, white, hdr, value, low, high) in [
             (1280, 720, 1280, 720, 1.0, false, 0x3800u16, 170.0, 195.0),

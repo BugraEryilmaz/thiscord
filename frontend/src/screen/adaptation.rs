@@ -1,4 +1,4 @@
-//! Receiver AIMD budget and expiring publisher demand. No media crosses IPC.
+//! Per-viewer feedback and per-encoder quality selection. No media crosses IPC.
 use std::{
     sync::Mutex,
     time::{Duration, Instant},
@@ -8,7 +8,24 @@ use thiscord_shared::screen::{
 };
 
 #[derive(Default)]
-pub struct Demand(Mutex<Option<(u32, Instant)>>);
+pub struct Demand(Mutex<Option<(u32, Instant)>>, Mutex<EncoderFeedback>);
+
+/// Local, per-layer sender evidence. A rejection wins over delivery in the same
+/// poll; consuming feedback never erases the controller's recovery history.
+#[derive(Default)]
+pub struct EncoderFeedback {
+    rejected: Option<(u32, bool)>,
+    delivered: Option<u32>,
+}
+#[cfg(test)]
+impl EncoderFeedback {
+    pub(super) fn is_empty(&self) -> bool {
+        self.rejected.is_none() && self.delivered.is_none()
+    }
+    pub(super) fn has_rejection(&self) -> bool {
+        self.rejected.is_some()
+    }
+}
 impl Demand {
     pub fn update(&self, bitrate: u32) {
         let bitrate = if (MIN_VIEW_BITRATE..=MAX_VIEW_BITRATE).contains(&bitrate) {
@@ -17,6 +34,21 @@ impl Demand {
             0
         };
         *self.0.lock().unwrap() = Some((bitrate, Instant::now()));
+    }
+    /// A measured encoded burst cannot fit the receiver assembly deadline.
+    /// Keep this signal local to the affected encoder; it is not viewer feedback.
+    pub fn reject_encoder_frame(&self, bitrate: u32, keyframe: bool) {
+        let mut feedback = self.1.lock().unwrap();
+        // Preserve a rejected IDR if a dependent frame follows before polling.
+        if feedback.rejected.is_none_or(|(_, key)| !key) {
+            feedback.rejected = Some((bitrate, keyframe));
+        }
+    }
+    pub fn delivered_encoder_frame(&self, bitrate: u32) {
+        self.1.lock().unwrap().delivered = Some(bitrate);
+    }
+    pub fn take_encoder_feedback(&self) -> EncoderFeedback {
+        std::mem::take(&mut *self.1.lock().unwrap())
     }
     pub fn bitrate(&self) -> u32 {
         self.0
@@ -27,11 +59,22 @@ impl Demand {
     }
 }
 
+/// One interval of receiver evidence, independent of stream kind or layer.
+#[derive(Clone, Copy, Default)]
+pub struct ReceiverSample {
+    pub congested: bool,
+    pub severe: bool,
+    pub receiving: bool,
+}
+
 pub struct Receiver {
     maximum: u32,
     bitrate: u32,
+    previous: Option<Instant>,
+    started: Option<Instant>,
+    changed: Option<Instant>,
+    bad: u8,
     healthy: u8,
-    samples: u8,
     idle: u8,
 }
 impl Default for Receiver {
@@ -45,119 +88,939 @@ impl Receiver {
         Self {
             maximum,
             bitrate: maximum,
+            previous: None,
+            started: None,
+            changed: None,
+            bad: 0,
             healthy: 0,
-            samples: 0,
             idle: 0,
         }
     }
-}
-impl Receiver {
+
     pub fn bitrate(&self) -> u32 {
         self.bitrate
     }
-    /// One sample per second; fast decrease, ten healthy seconds before probing up.
-    pub fn sample(&mut self, congested: bool, receiving: bool) {
-        self.samples = self.samples.saturating_add(1);
-        if self.samples < 3 {
-            return;
-        } // Allow initial negotiation/IDR recovery.
-        self.idle = if receiving {
+
+    /// Sample at most once per second. A stale interval clears evidence, retaining
+    /// the last budget; callers recreate the controller for a new stream/viewer.
+    pub fn sample_at(&mut self, sample: ReceiverSample, now: Instant) {
+        if let Some(previous) = self.previous {
+            let elapsed = now.saturating_duration_since(previous);
+            if elapsed < Duration::from_secs(1) {
+                return;
+            }
+            if elapsed > Duration::from_secs(3) {
+                self.bad = 0;
+                self.healthy = 0;
+                self.idle = 0;
+                self.started = Some(now);
+                self.previous = Some(now);
+                return;
+            }
+        }
+        self.previous = Some(now);
+        let started = *self.started.get_or_insert(now);
+        self.idle = if sample.receiving {
             0
         } else {
             self.idle.saturating_add(1)
         };
-        if !congested && !receiving && self.idle < 3 {
-            return;
-        }
-        if congested || self.idle >= 3 {
-            self.bitrate = (self.bitrate * 65 / 100).max(MIN_VIEW_BITRATE);
+        let severe = sample.severe || self.idle >= 3;
+        let bad = sample.congested || severe;
+        self.bad = ((self.bad << 1) | u8::from(bad)) & 0b1111;
+        if bad {
             self.healthy = 0;
-        } else {
-            self.healthy += 1;
-            if self.healthy >= 10 {
-                self.bitrate = (self.bitrate * 125 / 100).min(self.maximum);
-                self.healthy = 0;
+        } else if sample.receiving {
+            self.healthy = self.healthy.saturating_add(1);
+        } // Short idle gaps preserve evidence, but never prove spare capacity.
+        if now.saturating_duration_since(started) < Duration::from_secs(2) {
+            return; // Initial negotiation and IDR recovery.
+        }
+        let since_change = self.changed.map(|at| now.saturating_duration_since(at));
+        let ready =
+            |seconds| since_change.is_none_or(|elapsed| elapsed >= Duration::from_secs(seconds));
+        if severe && ready(2) {
+            self.decrease(65, now);
+        } else if bad && self.bad.count_ones() >= 3 && ready(3) {
+            self.decrease(85, now);
+        } else if sample.receiving && self.healthy >= 6 && ready(3) {
+            // Start probing after six receiving samples, then every three.
+            // A low budget recovers in bounded time without a 25% step each time.
+            let next = (self.bitrate * 112 / 100).min(self.maximum);
+            if next != self.bitrate {
+                self.bitrate = next;
+                self.changed = Some(now);
+            }
+            self.healthy = 3;
+        }
+    }
+
+    fn decrease(&mut self, percent: u32, now: Instant) {
+        self.bitrate = (self.bitrate * percent / 100).max(MIN_VIEW_BITRATE);
+        self.changed = Some(now);
+        self.healthy = 0;
+        self.bad = 0;
+    }
+}
+
+/// Stabilizes discrete resolution/FPS transitions that recreate an encoder.
+/// Keep one controller per independently encoded stream/layer. Zero demand resets
+/// all pending transitions immediately and never delays the publisher pause.
+pub struct QualityController {
+    maximum: thiscord_shared::screen::Quality,
+    current: Option<thiscord_shared::screen::Quality>,
+    pending: Option<(thiscord_shared::screen::Quality, Instant)>,
+    changed: Option<Instant>,
+    recovery: Option<EncoderRecovery>,
+    scale_percent: u32,
+    scale_failed_budget: u32,
+    // At most the twenty finite resolution/FPS modes. Keep failed-mode evidence
+    // across successful fallback delivery; stable demand must not retry a known
+    // unworkable mode every six seconds.
+    failed_modes: Vec<(thiscord_shared::screen::Quality, u32)>,
+}
+#[derive(Default)]
+struct EncoderRecovery {
+    rejected_keys: u8,
+    healthy_since: Option<Instant>,
+    last_delivery: Option<Instant>,
+}
+impl QualityController {
+    pub fn new(maximum: thiscord_shared::screen::Quality) -> Self {
+        Self {
+            maximum,
+            current: None,
+            pending: None,
+            changed: None,
+            recovery: None,
+            scale_percent: 100,
+            scale_failed_budget: 0,
+            failed_modes: Vec::new(),
+        }
+    }
+
+    /// Emergency spatial reduction only after repeated measured IDR failures at
+    /// the normal 360p/5 floor. Retain the codec bitrate and full demand pacing.
+    /// Scaling is bounded to 25%; capacity growth is required to undo it.
+    pub fn scale_percent(&self) -> u32 {
+        self.scale_percent
+    }
+
+    /// Retry a warm encoder before rebuilding: cold IDRs and IDRs at lower FPS
+    /// do not scale with nominal bitrate. Three rejected recovery IDRs step down
+    /// one mode. Even at the floor, failure blocks upgrades until actual delivery
+    /// proves six seconds of health. Demand alone is not evidence of recovery.
+    pub fn update_with_recovery(
+        &mut self,
+        bitrate: u32,
+        feedback: EncoderFeedback,
+        now: Instant,
+    ) -> Option<thiscord_shared::screen::Quality> {
+        if bitrate > 0
+            && let Some(current) = self.current
+        {
+            if let Some((rejected, keyframe)) = feedback.rejected
+                && rejected == current.bitrate()
+            {
+                let recovery = self.recovery.get_or_insert_with(Default::default);
+                recovery.healthy_since = None;
+                recovery.last_delivery = None;
+                recovery.rejected_keys = recovery.rejected_keys.saturating_add(u8::from(keyframe));
+                self.pending = None;
+                if recovery.rejected_keys >= 3 {
+                    let next = current.constrained(current.bitrate().saturating_sub(1));
+                    if next.bitrate() < current.bitrate() {
+                        if let Some((_, failed_budget)) =
+                            self.failed_modes.iter_mut().find(|(q, _)| *q == current)
+                        {
+                            *failed_budget = (*failed_budget).max(bitrate);
+                        } else {
+                            self.failed_modes.push((current, bitrate));
+                        }
+                        return Some(self.select(next, now));
+                    }
+                    let scale = (self.scale_percent * 80 / 100).max(25);
+                    if scale < self.scale_percent {
+                        self.scale_percent = scale;
+                        self.scale_failed_budget = bitrate;
+                        return Some(self.select(current, now));
+                    }
+                }
+            } else if feedback.delivered == Some(current.bitrate())
+                && let Some(recovery) = &mut self.recovery
+            {
+                if recovery
+                    .last_delivery
+                    .is_none_or(|at| now.saturating_duration_since(at) > Duration::from_secs(2))
+                {
+                    recovery.healthy_since = Some(now);
+                }
+                recovery.healthy_since.get_or_insert(now);
+                recovery.last_delivery = Some(now);
+                recovery.rejected_keys = 0;
             }
         }
+        self.update(bitrate, now)
+    }
+
+    pub fn update(
+        &mut self,
+        bitrate: u32,
+        now: Instant,
+    ) -> Option<thiscord_shared::screen::Quality> {
+        if bitrate == 0 {
+            self.current = None;
+            self.pending = None;
+            self.changed = None;
+            self.recovery = None;
+            self.scale_percent = 100;
+            self.scale_failed_budget = 0;
+            self.failed_modes.clear();
+            return None;
+        }
+        let bitrate = bitrate.clamp(MIN_VIEW_BITRATE, MAX_VIEW_BITRATE);
+        let candidate = self.candidate(bitrate, bitrate);
+        let Some(current) = self.current else {
+            return Some(self.select(candidate, now));
+        };
+        let healthy = self.recovery.as_ref().is_some_and(|recovery| {
+            recovery
+                .healthy_since
+                .is_some_and(|at| now.saturating_duration_since(at) >= Duration::from_secs(6))
+                && recovery
+                    .last_delivery
+                    .is_some_and(|at| now.saturating_duration_since(at) <= Duration::from_secs(2))
+        });
+        if self.scale_percent < 100
+            && candidate == current
+            && bitrate >= self.scale_failed_budget * 120 / 100
+            && healthy
+        {
+            self.scale_percent = 100;
+            return Some(self.select(current, now));
+        }
+        if candidate == current {
+            self.pending = None;
+            return Some(current);
+        }
+        let score =
+            |q: thiscord_shared::screen::Quality| u64::from(q.height).pow(2) * u64::from(q.fps);
+        let upgrading = score(candidate) > score(current);
+        if upgrading
+            && self.recovery.is_some()
+            && (!healthy
+                || (self.scale_percent < 100 && bitrate < self.scale_failed_budget * 120 / 100))
+        {
+            self.pending = None;
+            return Some(current);
+        }
+        if !upgrading && bitrate < current.bitrate() * 60 / 100 {
+            // A large capacity collapse must not wait for the rebuild cooldown.
+            return Some(self.select(candidate, now));
+        }
+        let next = if upgrading {
+            // Twenty percent headroom prevents repeated up/down transitions near
+            // a ladder boundary. The selected maximum remains reachable at its
+            // nominal budget (including the 32 Mbit/s wire ceiling).
+            let headroom = self.candidate(bitrate * 100 / 120, bitrate);
+            if bitrate >= self.maximum.bitrate() {
+                candidate
+            } else {
+                headroom
+            }
+        } else {
+            candidate
+        };
+        if score(next) <= score(current) && upgrading {
+            self.pending = None;
+            return Some(current);
+        }
+        let since = match self.pending {
+            Some((pending, since))
+                if pending == next || (!upgrading && score(pending) < score(current)) =>
+            {
+                since
+            }
+            _ => {
+                self.pending = Some((next, now));
+                now
+            }
+        };
+        let dwell = Duration::from_secs(if upgrading { 6 } else { 2 });
+        if now.saturating_duration_since(since) >= dwell
+            && self
+                .changed
+                .is_none_or(|at| now.saturating_duration_since(at) >= Duration::from_secs(5))
+        {
+            return Some(self.select(next, now));
+        }
+        Some(current)
+    }
+
+    fn candidate(&self, limit: u32, demand: u32) -> thiscord_shared::screen::Quality {
+        let mut quality = self.maximum.constrained(limit);
+        while self
+            .failed_modes
+            .iter()
+            .any(|(failed, budget)| *failed == quality && demand < budget * 120 / 100)
+        {
+            let lower = self
+                .maximum
+                .constrained(quality.bitrate().saturating_sub(1));
+            if lower == quality {
+                break;
+            }
+            quality = lower;
+        }
+        quality
+    }
+
+    fn select(
+        &mut self,
+        quality: thiscord_shared::screen::Quality,
+        now: Instant,
+    ) -> thiscord_shared::screen::Quality {
+        if self.current != Some(quality) {
+            self.scale_percent = 100;
+            self.scale_failed_budget = 0;
+        }
+        self.current = Some(quality);
+        self.pending = None;
+        self.changed = Some(now);
+        if self.recovery.is_some() {
+            self.recovery = Some(EncoderRecovery::default());
+        }
+        quality
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use thiscord_shared::screen::Quality;
+
     #[test]
-    fn camera_budget_starts_at_encoder_limit_and_reacts_to_congestion() {
-        let mut receiver = Receiver::with_maximum(thiscord_shared::camera::MAX_BITRATE);
-        assert_eq!(receiver.bitrate(), 1_500_000);
-        for _ in 0..3 {
-            receiver.sample(true, true);
+    fn failed_floor_never_upgrades_on_demand_alone_and_health_allows_recovery() {
+        let maximum = Quality {
+            height: 720,
+            fps: 15,
+        };
+        let floor = Quality {
+            height: 360,
+            fps: 5,
+        };
+        let mut controller = QualityController::new(maximum);
+        let start = Instant::now();
+        controller.update(MIN_VIEW_BITRATE, start);
+        for second in 1..30 {
+            let feedback = EncoderFeedback {
+                rejected: Some((floor.bitrate(), true)),
+                delivered: Some(floor.bitrate()),
+            };
+            assert_eq!(
+                controller.update_with_recovery(
+                    MIN_VIEW_BITRATE,
+                    feedback,
+                    start + Duration::from_secs(second)
+                ),
+                Some(floor)
+            );
         }
-        assert_eq!(receiver.bitrate(), 975_000);
-        for _ in 0..200 {
-            receiver.sample(false, true);
+        assert_eq!(controller.scale_percent(), 25);
+        // Silence and delayed output from a previous mode cannot prove health.
+        for second in 30..60 {
+            let feedback = EncoderFeedback {
+                delivered: Some(maximum.bitrate()),
+                ..Default::default()
+            };
+            assert_eq!(
+                controller.update_with_recovery(
+                    1_250_000,
+                    feedback,
+                    start + Duration::from_secs(second)
+                ),
+                Some(floor)
+            );
         }
-        assert_eq!(receiver.bitrate(), 1_500_000);
+        for second in 60..72 {
+            let feedback = EncoderFeedback {
+                delivered: Some(floor.bitrate()),
+                ..Default::default()
+            };
+            assert_eq!(
+                controller.update_with_recovery(
+                    1_250_000,
+                    feedback,
+                    start + Duration::from_secs(second)
+                ),
+                Some(floor)
+            );
+        }
+        assert_eq!(
+            controller.update_with_recovery(
+                1_250_000,
+                EncoderFeedback {
+                    delivered: Some(floor.bitrate()),
+                    ..Default::default()
+                },
+                start + Duration::from_secs(72)
+            ),
+            Some(maximum)
+        );
+        // Old floor failures cannot tear down the new encoder.
+        assert_eq!(
+            controller.update_with_recovery(
+                1_250_000,
+                EncoderFeedback {
+                    rejected: Some((floor.bitrate(), true)),
+                    ..Default::default()
+                },
+                start + Duration::from_secs(73)
+            ),
+            Some(maximum)
+        );
+        assert_eq!(controller.update(0, start + Duration::from_secs(74)), None);
+        assert!(controller.recovery.is_none());
+        assert_eq!(
+            controller.update(1_250_000, start + Duration::from_secs(75)),
+            Some(maximum)
+        );
     }
+
     #[test]
-    fn healthy_viewer_attempts_selected_4k60_immediately() {
-        let quality = thiscord_shared::screen::Quality {
+    fn recovery_delivery_gaps_and_rejections_restart_upgrade_evidence() {
+        let maximum = Quality {
+            height: 720,
+            fps: 15,
+        };
+        let floor = Quality {
+            height: 360,
+            fps: 5,
+        };
+        let demand = Demand::default();
+        let mut controller = QualityController::new(maximum);
+        let start = Instant::now();
+        controller.update(MIN_VIEW_BITRATE, start);
+        for second in 1..40 {
+            if second == 1 || second == 20 {
+                demand.reject_encoder_frame(floor.bitrate(), true);
+            } else if second < 8 || second >= 12 {
+                demand.delivered_encoder_frame(floor.bitrate());
+            }
+            let next = controller.update_with_recovery(
+                1_250_000,
+                demand.take_encoder_feedback(),
+                start + Duration::from_secs(second),
+            );
+            if second < 33 {
+                assert_eq!(next, Some(floor));
+            } else {
+                assert_eq!(next, Some(maximum));
+            }
+        }
+    }
+
+    #[test]
+    fn successful_fallback_does_not_erase_the_failed_modes_bandwidth_evidence() {
+        let maximum = Quality {
+            height: 720,
+            fps: 15,
+        };
+        let fallback = Quality {
+            height: 720,
+            fps: 5,
+        };
+        let start = Instant::now();
+        let mut controller = QualityController::new(maximum);
+        controller.update(1_250_000, start);
+        for tick in 1..=3 {
+            let next = controller.update_with_recovery(
+                1_250_000,
+                EncoderFeedback {
+                    rejected: Some((maximum.bitrate(), true)),
+                    ..Default::default()
+                },
+                start + Duration::from_millis(tick * 200),
+            );
+            assert_eq!(next, Some(if tick == 3 { fallback } else { maximum }));
+        }
+        for second in 1..60 {
+            assert_eq!(
+                controller.update_with_recovery(
+                    1_250_000,
+                    EncoderFeedback {
+                        delivered: Some(fallback.bitrate()),
+                        ..Default::default()
+                    },
+                    start + Duration::from_secs(second)
+                ),
+                Some(fallback)
+            );
+        }
+        for second in 60..66 {
+            assert_eq!(
+                controller.update_with_recovery(
+                    1_500_000,
+                    EncoderFeedback {
+                        delivered: Some(fallback.bitrate()),
+                        ..Default::default()
+                    },
+                    start + Duration::from_secs(second)
+                ),
+                Some(fallback)
+            );
+        }
+        assert_eq!(
+            controller.update_with_recovery(
+                1_500_000,
+                EncoderFeedback {
+                    delivered: Some(fallback.bitrate()),
+                    ..Default::default()
+                },
+                start + Duration::from_secs(66)
+            ),
+            Some(maximum)
+        );
+        controller.update(0, start + Duration::from_secs(67));
+        assert!(controller.failed_modes.is_empty());
+    }
+
+    struct Link {
+        receiver: Receiver,
+        start: Instant,
+        second: u64,
+    }
+    impl Link {
+        fn new(maximum: u32) -> Self {
+            Self {
+                receiver: Receiver::with_maximum(maximum),
+                start: Instant::now(),
+                second: 0,
+            }
+        }
+        fn step(&mut self, congested: bool, severe: bool, receiving: bool) -> u32 {
+            self.receiver.sample_at(
+                ReceiverSample {
+                    congested,
+                    severe,
+                    receiving,
+                },
+                self.start + Duration::from_secs(self.second),
+            );
+            self.second += 1;
+            self.receiver.bitrate()
+        }
+        fn run(&mut self, seconds: u64, congested: bool, severe: bool, receiving: bool) -> u32 {
+            for _ in 0..seconds {
+                self.step(congested, severe, receiving);
+            }
+            self.receiver.bitrate()
+        }
+    }
+
+    #[test]
+    fn isolated_spikes_and_alternating_threshold_noise_do_not_cut_budget() {
+        let mut link = Link::new(MAX_VIEW_BITRATE);
+        link.run(10, false, false, true);
+        for _ in 0..20 {
+            assert_eq!(link.step(true, false, true), MAX_VIEW_BITRATE);
+            assert_eq!(link.step(false, false, true), MAX_VIEW_BITRATE);
+        }
+        link.run(3, false, false, true);
+        link.run(2, true, false, true);
+        assert_eq!(link.run(10, false, false, true), MAX_VIEW_BITRATE);
+    }
+
+    #[test]
+    fn sustained_congestion_steps_down_without_a_per_second_collapse() {
+        let mut link = Link::new(5_000_000);
+        link.run(5, false, false, true);
+        assert_eq!(link.run(2, true, false, true), 5_000_000);
+        assert_eq!(link.step(true, false, true), 4_250_000);
+        assert_eq!(link.run(2, true, false, true), 4_250_000);
+        assert_eq!(link.step(true, false, true), 3_612_500);
+        assert_eq!(link.run(300, true, false, true), MIN_VIEW_BITRATE);
+    }
+
+    #[test]
+    fn severe_loss_and_missing_frames_have_a_faster_bounded_response() {
+        let mut link = Link::new(5_000_000);
+        assert_eq!(link.run(2, true, true, true), 5_000_000); // Setup grace.
+        assert_eq!(link.step(true, true, true), 3_250_000);
+        assert_eq!(link.step(true, true, true), 3_250_000);
+        assert_eq!(link.step(true, true, true), 2_112_500);
+        let mut stalled = Link::new(5_000_000);
+        stalled.run(5, false, false, true);
+        assert_eq!(stalled.run(2, false, false, false), 5_000_000);
+        assert_eq!(stalled.step(false, false, false), 3_250_000);
+        assert_eq!(stalled.run(60, false, false, false), MIN_VIEW_BITRATE);
+    }
+
+    #[test]
+    fn healthy_ceiling_does_not_delay_a_new_severe_event() {
+        let mut link = Link::new(5_000_000);
+        link.run(6, false, false, true);
+        assert_eq!(link.step(true, true, true), 3_250_000);
+    }
+
+    #[test]
+    fn layered_targets_preserve_independent_hysteresis_pacing_and_static_recovery() {
+        use crate::screen::{keyframe::KeyframePolicy, pacing::*};
+        use thiscord_shared::screen::LayerTargets;
+        let maximum = Quality::default();
+        let low_maximum = LayerTargets::low_quality(maximum);
+        let mut controllers = [
+            QualityController::new(maximum),
+            QualityController::new(low_maximum),
+        ];
+        let mut budgets = [SendBudget::new(1), SendBudget::new(1)];
+        let mut keys = [KeyframePolicy::default(), KeyframePolicy::default()];
+        let start = Instant::now();
+        let plan = LayerTargets::plan(maximum, [5_000_000, 1_250_000].into_iter());
+        for (i, demand) in [plan.primary, plan.low].into_iter().enumerate() {
+            let quality = controllers[i].update(demand, start).unwrap();
+            budgets[i].set_bitrate(transport_budget(quality.bitrate(), demand));
+            keys[i].submitted(start, true);
+        }
+        // Frames already queued must follow their own encoder's shared live rate.
+        let queued = [budgets[0].track(1000), budgets[1].track(1000)];
+        let plan = LayerTargets::plan(maximum, [4_750_000, 1_100_000].into_iter());
+        assert_eq!((plan.primary, plan.low), (4_750_000, 1_100_000));
+        for (i, demand) in [plan.primary, plan.low].into_iter().enumerate() {
+            let now = start + Duration::from_secs(1);
+            let held = controllers[i].update(demand, now).unwrap();
+            assert_eq!(held, [maximum, low_maximum][i]);
+            budgets[i].set_bitrate(transport_budget(held.bitrate(), demand));
+            assert_eq!(queued[i].pacing_bitrate(demand), transport_bitrate(demand));
+            assert!(keys[i].refresh_due(now, false));
+            assert!(!keys[i].periodic_due(now));
+            keys[i].submitted(now, false);
+            let reduced = controllers[i]
+                .update(demand, start + Duration::from_secs(5))
+                .unwrap();
+            assert!(reduced.bitrate() <= demand);
+        }
+        // Low-layer feedback never consumes the primary's recovery timer.
+        let now = start + Duration::from_millis(1200);
+        assert!(keys[1].feedback_ready(now));
+        keys[1].submitted(now, true);
+        assert!(keys[0].periodic_due(start + Duration::from_secs(10)));
+        assert!(!keys[1].periodic_due(start + Duration::from_secs(10)));
+        for (i, demand) in [5_000_000, 1_250_000].into_iter().enumerate() {
+            controllers[i].update(demand, start + Duration::from_secs(6));
+            assert_eq!(
+                controllers[i].update(demand, start + Duration::from_secs(12)),
+                Some([maximum, low_maximum][i])
+            );
+        }
+        assert_eq!(
+            controllers[1].update(0, start + Duration::from_secs(13)),
+            None
+        );
+        assert_eq!(
+            controllers[0].update(5_000_000, start + Duration::from_secs(13)),
+            Some(maximum)
+        );
+
+        // A returning weak static viewer recovers through the low layer and
+        // eventually switches to primary, without changing the fast viewer.
+        let mut slow = Link::new(5_000_000);
+        slow.run(60, true, true, true);
+        let mut selected = 1;
+        let mut switches = 0;
+        for second in 0..320 {
+            let receiving = second % 2 == 0;
+            let demand = slow.step(false, false, receiving);
+            let plan = LayerTargets::plan(maximum, [5_000_000, demand].into_iter());
+            let now = start + Duration::from_secs(20 + second);
+            assert_eq!(controllers[0].update(plan.primary, now), Some(maximum));
+            let low = controllers[1].update(plan.low, now);
+            assert_eq!(low.is_some(), plan.low > 0);
+            let next = plan.layer(demand);
+            switches += usize::from(next != selected);
+            selected = next;
+        }
+        assert_eq!(slow.receiver.bitrate(), 5_000_000);
+        assert_eq!((selected, switches), (0, 1));
+    }
+
+    #[test]
+    fn combined_budget_and_encoder_trajectory_recovers_without_rebuild_chatter() {
+        let maximum = Quality {
             height: 2160,
             fps: 60,
         };
-        let mut receiver = Receiver::default();
-        for _ in 0..120 {
-            assert_eq!(quality.constrained(receiver.bitrate()), quality);
-            receiver.sample(false, true);
+        let mut link = Link::new(MAX_VIEW_BITRATE);
+        let mut encoder = QualityController::new(maximum);
+        let mut changes = Vec::new();
+        let mut previous = None;
+        for second in 0..200 {
+            let budget = match second {
+                10 | 11 => link.step(true, false, true), // A two-second burst.
+                20..=31 => link.step(true, false, true),
+                32..=43 => link.step(true, true, true),
+                _ => link.step(false, false, true),
+            };
+            for tick in 0..10 {
+                let current = encoder.update(
+                    budget,
+                    link.start + Duration::from_millis(second * 1000 + tick * 100),
+                );
+                if current != previous {
+                    changes.push((second, current));
+                    previous = current;
+                }
+            }
+            if second < 20 {
+                assert_eq!(previous, Some(maximum));
+            }
+        }
+        assert_eq!(previous, Some(maximum));
+        assert_eq!(link.receiver.bitrate(), MAX_VIEW_BITRATE);
+        assert!(changes.len() > 5 && changes.len() < 25, "{changes:?}");
+        // Once recovery starts, all actual encoder upgrades respect cooldown.
+        let recovery: Vec<_> = changes.iter().filter(|(second, _)| *second > 44).collect();
+        assert!(recovery.windows(2).all(|pair| pair[1].0 - pair[0].0 >= 5));
+    }
+
+    #[test]
+    fn recovery_waits_for_health_then_reaches_screen_and_camera_maxima() {
+        for maximum in [MAX_VIEW_BITRATE, thiscord_shared::camera::MAX_BITRATE] {
+            let mut link = Link::new(maximum);
+            link.run(60, true, true, true);
+            assert_eq!(link.receiver.bitrate(), MIN_VIEW_BITRATE);
+            assert_eq!(link.run(5, false, false, true), MIN_VIEW_BITRATE);
+            assert_eq!(link.step(false, false, true), 224_000);
+            assert_eq!(link.run(2, false, false, true), 224_000);
+            assert_eq!(link.step(false, false, true), 250_880);
+            // 32 Mbit/s recovers from the floor within 150 healthy seconds.
+            assert_eq!(link.run(140, false, false, true), maximum);
+            assert_eq!(link.run(100, false, false, true), maximum);
         }
     }
+
     #[test]
-    fn congestion_reduces_budget_and_recovery_requires_sustained_health() {
-        let mut receiver = Receiver::default();
-        for _ in 0..3 {
-            receiver.sample(true, true);
+    fn static_cadence_and_duplicate_polls_are_not_congestion() {
+        let mut link = Link::new(MAX_VIEW_BITRATE);
+        for _ in 0..60 {
+            link.step(false, false, true);
+            assert_eq!(link.step(false, false, false), MAX_VIEW_BITRATE);
         }
-        assert_eq!(receiver.bitrate(), INITIAL_VIEW_BITRATE * 65 / 100);
-        let reduced = receiver.bitrate();
-        for _ in 0..9 {
-            receiver.sample(false, true);
-        }
-        assert_eq!(receiver.bitrate(), reduced);
-        receiver.sample(false, true);
-        assert!(receiver.bitrate() > reduced);
+        let at = link.start + Duration::from_secs(link.second);
         for _ in 0..100 {
-            receiver.sample(false, false);
+            link.receiver.sample_at(
+                ReceiverSample {
+                    congested: true,
+                    ..Default::default()
+                },
+                at,
+            );
         }
-        assert_eq!(receiver.bitrate(), MIN_VIEW_BITRATE);
-        for _ in 0..1000 {
-            receiver.sample(false, true);
-        }
-        assert_eq!(receiver.bitrate(), MAX_VIEW_BITRATE);
+        assert_eq!(link.receiver.bitrate(), MAX_VIEW_BITRATE);
     }
+
     #[test]
-    fn publisher_pauses_without_fresh_demand() {
+    fn sparse_receiving_samples_recover_below_the_ceiling_without_idle_probes() {
+        for maximum in [MAX_VIEW_BITRATE, thiscord_shared::camera::MAX_BITRATE] {
+            let mut link = Link::new(maximum);
+            link.run(5, false, false, true);
+            let cut = link.step(true, true, true);
+            assert!(cut < maximum);
+            for sample in 1..=60 {
+                let before = link.receiver.bitrate();
+                assert_eq!(link.step(false, false, false), before);
+                let after = link.step(false, false, true);
+                if sample < 6 {
+                    assert_eq!(after, cut);
+                }
+            }
+            assert_eq!(link.receiver.bitrate(), maximum);
+            link.run(60, true, true, true);
+            assert_eq!(link.receiver.bitrate(), MIN_VIEW_BITRATE);
+            // Recovery also completes from the floor, at half the sampling duty.
+            for _ in 0..150 {
+                let before = link.receiver.bitrate();
+                assert_eq!(link.step(false, false, false), before);
+                link.step(false, false, true);
+            }
+            assert_eq!(link.receiver.bitrate(), maximum);
+        }
+    }
+
+    #[test]
+    fn static_delta_heartbeats_recover_but_missing_submissions_still_cut_budget() {
+        use crate::screen::keyframe::KeyframePolicy;
+        let mut link = Link::new(MAX_VIEW_BITRATE);
+        link.run(5, false, false, true);
+        assert!(link.step(true, true, true) < MAX_VIEW_BITRATE);
+        let mut policy = KeyframePolicy::default();
+        let mut idrs = 0;
+        let mut deltas = 0;
+        for _ in 0..40 {
+            let now = link.start + Duration::from_secs(link.second);
+            assert!(policy.refresh_due(now, false));
+            let forced = policy.periodic_due(now);
+            policy.submitted(now, forced);
+            idrs += u32::from(forced);
+            deltas += u32::from(!forced);
+            link.step(false, false, true);
+        }
+        assert_eq!((idrs, deltas), (4, 36));
+        assert_eq!(link.receiver.bitrate(), MAX_VIEW_BITRATE);
+        // Busy/stopped capture does not submit the due heartbeat; no frame
+        // evidence is fabricated merely because refresh_due remains true.
+        for _ in 0..2 {
+            let now = link.start + Duration::from_secs(link.second);
+            assert!(policy.refresh_due(now, false));
+            assert_eq!(link.step(false, false, false), MAX_VIEW_BITRATE);
+        }
+        assert_eq!(link.step(false, false, false), MAX_VIEW_BITRATE * 65 / 100);
+    }
+
+    #[test]
+    fn stale_sampling_does_not_count_suspended_time_as_loss_or_recovery() {
+        let mut link = Link::new(5_000_000);
+        link.run(5, false, false, true);
+        link.run(2, true, false, true);
+        link.second += 20;
+        assert_eq!(link.step(true, true, false), 5_000_000);
+        assert_eq!(link.run(2, false, false, true), 5_000_000);
+        link.run(3, true, false, true);
+        let reduced = link.receiver.bitrate();
+        link.run(5, false, false, true);
+        link.second += 20;
+        assert_eq!(link.run(5, false, false, true), reduced);
+    }
+
+    #[test]
+    fn controllers_are_independent_and_new_viewers_start_fresh() {
+        let mut slow = Link::new(MAX_VIEW_BITRATE);
+        let mut fast = Link::new(MAX_VIEW_BITRATE);
+        slow.run(90, true, true, true);
+        assert_eq!(slow.receiver.bitrate(), MIN_VIEW_BITRATE);
+        assert_eq!(fast.run(90, false, false, true), MAX_VIEW_BITRATE);
+        assert_eq!(Receiver::default().bitrate(), MAX_VIEW_BITRATE);
+        assert_eq!(Receiver::with_maximum(0).bitrate(), MIN_VIEW_BITRATE);
+        assert_eq!(Receiver::with_maximum(u32::MAX).bitrate(), MAX_VIEW_BITRATE);
+    }
+
+    #[test]
+    fn publisher_pauses_on_expiry_and_resumes_without_stale_transition_state() {
         let demand = Demand::default();
-        assert_eq!(demand.bitrate(), 0);
+        let mut quality = QualityController::new(Quality::default());
+        let now = Instant::now();
+        assert_eq!(quality.update(demand.bitrate(), now), None);
         demand.update(INITIAL_VIEW_BITRATE);
-        assert_eq!(demand.bitrate(), INITIAL_VIEW_BITRATE);
+        assert_eq!(
+            quality.update(demand.bitrate(), now),
+            Some(Quality::default())
+        );
+        quality.update(4_000_000, now + Duration::from_secs(1));
         demand.0.lock().unwrap().as_mut().unwrap().1 -= Duration::from_secs(VIEW_LEASE_SECS);
-        assert_eq!(demand.bitrate(), 0);
-        demand.update(0);
-        assert_eq!(demand.bitrate(), 0);
-        demand.update(u32::MAX);
-        assert_eq!(demand.bitrate(), 0);
+        assert_eq!(
+            quality.update(demand.bitrate(), now + Duration::from_secs(2)),
+            None
+        );
+        demand.update(4_000_000);
+        assert_eq!(
+            quality.update(demand.bitrate(), now + Duration::from_secs(3)),
+            Some(Quality::default().constrained(4_000_000))
+        );
+        for invalid in [0, 1, u32::MAX] {
+            demand.update(invalid);
+            assert_eq!(demand.bitrate(), 0);
+        }
     }
+
     #[test]
-    fn static_source_gaps_do_not_force_quality_to_the_floor() {
-        let mut receiver = Receiver::default();
-        for _ in 0..30 {
-            receiver.sample(false, true);
-            receiver.sample(false, false);
+    fn quality_ignores_brief_budget_dips_and_boundary_oscillation() {
+        let maximum = Quality::default();
+        let mut controller = QualityController::new(maximum);
+        let start = Instant::now();
+        assert_eq!(controller.update(5_000_000, start), Some(maximum));
+        for second in 1..60 {
+            let budget = if second % 3 == 0 {
+                5_100_000
+            } else {
+                4_900_000
+            };
+            assert_eq!(
+                controller.update(budget, start + Duration::from_secs(second)),
+                Some(maximum)
+            );
         }
-        assert!(receiver.bitrate() >= INITIAL_VIEW_BITRATE);
-        let previous = receiver.bitrate();
-        for _ in 0..3 {
-            receiver.sample(false, false);
+        let reduced = maximum.constrained(4_900_000);
+        assert_eq!(
+            controller.update(4_900_000, start + Duration::from_secs(60)),
+            Some(reduced)
+        );
+    }
+
+    #[test]
+    fn quality_rebuilds_require_dwell_cooldown_and_recovery_headroom() {
+        let maximum = Quality {
+            height: 2160,
+            fps: 60,
+        };
+        let mut controller = QualityController::new(maximum);
+        let start = Instant::now();
+        let low = maximum.constrained(4_000_000);
+        assert_eq!(controller.update(4_000_000, start), Some(low));
+        // A budget just above the next threshold cannot oscillate the encoder.
+        for second in 1..20 {
+            assert_eq!(
+                controller.update(5_100_000, start + Duration::from_secs(second)),
+                Some(low)
+            );
         }
-        assert!(receiver.bitrate() < previous);
+        for second in 20..26 {
+            assert_eq!(
+                controller.update(6_000_000, start + Duration::from_secs(second)),
+                Some(low)
+            );
+        }
+        let upgraded = controller
+            .update(6_000_000, start + Duration::from_secs(26))
+            .unwrap();
+        assert!(upgraded.bitrate() > low.bitrate());
+        for second in 27..31 {
+            assert_eq!(
+                controller.update(4_000_000, start + Duration::from_secs(second)),
+                Some(upgraded)
+            );
+        }
+        assert_eq!(
+            controller.update(4_000_000, start + Duration::from_secs(31)),
+            Some(low)
+        );
+        for second in 32..38 {
+            assert_eq!(
+                controller.update(MAX_VIEW_BITRATE, start + Duration::from_secs(second)),
+                Some(low)
+            );
+        }
+        assert_eq!(
+            controller.update(MAX_VIEW_BITRATE, start + Duration::from_secs(38)),
+            Some(maximum)
+        );
+        // Severe collapse bypasses cooldown even immediately after an upgrade.
+        assert_eq!(
+            controller.update(MIN_VIEW_BITRATE, start + Duration::from_secs(39)),
+            Some(maximum.constrained(MIN_VIEW_BITRATE))
+        );
+    }
+
+    #[test]
+    fn moving_downward_targets_do_not_postpone_a_sustained_downgrade() {
+        let maximum = Quality::default();
+        let start = Instant::now();
+        let mut controller = QualityController::new(maximum);
+        controller.update(maximum.bitrate(), start);
+        controller.update(4_600_000, start + Duration::from_secs(10));
+        controller.update(3_600_000, start + Duration::from_secs(11));
+        assert_eq!(
+            controller.update(4_000_000, start + Duration::from_secs(12)),
+            Some(maximum.constrained(4_000_000))
+        );
     }
 }

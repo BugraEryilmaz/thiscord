@@ -1,0 +1,30 @@
+GPU adapter: NVIDIA GeForce RTX 4070 Ti
+Display metadata: HDR=true, SDR white=240 nits
+sender layer=1 demand=1250000 at_ms=98 mode=Quality { height: 720, fps: 15 } scale=100 dimensions=1280x720
+sender layer=0 demand=1250000 at_ms=176 mode=Quality { height: 720, fps: 15 } scale=100 dimensions=1280x720
+sender layer=1 demand=1250000 at_ms=213 idr=true bytes=40758 rejected=1
+sender layer=0 demand=1250000 at_ms=228 idr=true bytes=40758 rejected=1
+sender layer=1 demand=1250000 at_ms=586 idr=true bytes=24263 rejected=1
+sender layer=0 demand=1250000 at_ms=602 idr=true bytes=24263 rejected=1
+sender layer=1 demand=1250000 at_ms=802 idr=true bytes=24263 rejected=1
+sender layer=0 demand=1250000 at_ms=817 idr=true bytes=24263 rejected=1
+PASS sender layer=1 initial_demand=1250000 first_ms=584 decoded=21 rejected=1 configurations=1 assembly_max_us=154528
+PASS sender layer=0 initial_demand=1250000 first_ms=593 decoded=21 rejected=1 configurations=1 assembly_max_us=154543
+sender layer=0 demand=200000 at_ms=130 mode=Quality { height: 360, fps: 5 } scale=100 dimensions=640x360
+sender layer=1 demand=200000 at_ms=168 mode=Quality { height: 360, fps: 5 } scale=100 dimensions=640x360
+sender layer=0 demand=200000 at_ms=211 idr=true bytes=77899 rejected=1
+sender layer=1 demand=200000 at_ms=226 idr=true bytes=77899 rejected=1
+sender layer=0 demand=200000 at_ms=444 idr=true bytes=6287 rejected=2
+sender layer=1 demand=200000 at_ms=459 idr=true bytes=6287 rejected=2
+sender layer=0 demand=200000 at_ms=676 idr=true bytes=6287 rejected=3
+sender layer=1 demand=200000 at_ms=692 idr=true bytes=6287 rejected=3
+sender layer=0 demand=200000 at_ms=733 mode=Quality { height: 360, fps: 5 } scale=80 dimensions=512x288
+sender layer=1 demand=200000 at_ms=774 mode=Quality { height: 360, fps: 5 } scale=80 dimensions=512x288
+sender layer=0 demand=200000 at_ms=816 idr=true bytes=50165 rejected=4
+sender layer=1 demand=200000 at_ms=831 idr=true bytes=50165 rejected=4
+sender layer=0 demand=200000 at_ms=1048 idr=true bytes=6429 rejected=5
+sender layer=1 demand=200000 at_ms=1064 idr=true bytes=6429 rejected=5
+sender layer=0 demand=1500000 at_ms=26071 mode=Quality { height: 720, fps: 15 } scale=100 dimensions=1280x720
+sender layer=1 demand=1500000 at_ms=26128 mode=Quality { height: 720, fps: 15 } scale=100 dimensions=1280x720
+PASS sender layer=1 initial_demand=200000 first_ms=1423 decoded=34 rejected=5 configurations=3 assembly_max_us=187530
+PASS sender layer=0 initial_demand=200000 first_ms=1407 decoded=34 rejected=5 configurations=3 assembly_max_us=187686

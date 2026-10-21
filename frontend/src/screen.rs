@@ -7,6 +7,7 @@ pub mod capture;
 pub mod gpu;
 #[cfg(target_os = "windows")]
 pub mod hardware;
+pub mod keyframe;
 pub mod metrics;
 pub mod pacing;
 pub mod preview;
@@ -20,11 +21,20 @@ pub fn encoder_has_capacity(available: usize, pending: usize) -> bool {
     available > pending
 }
 pub struct Outgoing {
+    pub bitrate: u32,
     pub captured_at: std::time::Instant,
     pub enqueued_at: std::time::Instant,
     pub packets: Vec<rtc::rtp::Packet>,
     pub keyframe: bool,
     pub budget: pacing::PendingBytes,
+}
+
+/// One optional low encoder shares the capture surface with the primary path.
+pub struct LayerOutput {
+    pub metrics: metrics::Metrics,
+    pub tx: tokio::sync::mpsc::Sender<Outgoing>,
+    pub demand: std::sync::Arc<adaptation::Demand>,
+    pub force_keyframe: std::sync::Arc<std::sync::atomic::AtomicBool>,
 }
 
 pub fn recovery_frame(data: &[u8]) -> bool {

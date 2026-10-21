@@ -59,6 +59,7 @@ pub struct HardwareEncoder {
     fps: u32,
     pub name: String,
     pub buffer_applied: bool,
+    pub gop_applied: bool,
     sps: Vec<u8>,
     pps: Vec<u8>,
     _manager: Option<IMFDXGIDeviceManager>,
@@ -97,12 +98,14 @@ struct Configuration {
     output: u32,
     manager: Option<IMFDXGIDeviceManager>,
     buffer_applied: bool,
+    gop_applied: bool,
 }
-/// H.264 CODECAPI_AVEncCommonBufferSize is in bytes, not bits. Target 100 ms
-/// of codec output so a supported HRD setting fits below the 200 ms send queue
-/// deadline with room for encoding, packet overhead and scheduler jitter.
+/// H.264 HRD size is in bytes. Give IDRs/scene changes 200 ms of codec budget
+/// instead of compressing them into 100 ms. This is rate-control headroom, not
+/// a playback buffer or a per-frame cap. Sender byte/age admission stays separate.
+pub const BUFFER_MS: u32 = 200;
 pub fn buffer_bytes(bitrate: u32) -> u32 {
-    bitrate / 8 / 10
+    (u64::from(bitrate) * u64::from(BUFFER_MS) / 8 / 1000) as u32
 }
 
 pub struct Encoded {
@@ -116,7 +119,7 @@ fn fail() -> windows::core::Error {
 }
 impl HardwareEncoder {
     pub fn new(width: usize, height: usize, quality: Quality) -> Result<Self> {
-        Self::create(width, height, quality, None, Some(0))
+        Self::create(width, height, quality, None, Some(0), None)
     }
     pub fn new_gpu(
         width: usize,
@@ -124,7 +127,7 @@ impl HardwareEncoder {
         quality: Quality,
         device: &ID3D11Device,
     ) -> Result<Self> {
-        Self::create(width, height, quality, Some(device), Some(0))
+        Self::create(width, height, quality, Some(device), Some(0), None)
     }
     /// Diagnostic comparison at identical dimensions/rate. `None` leaves the
     /// driver's complexity default untouched; production uses the speed hint.
@@ -138,7 +141,33 @@ impl HardwareEncoder {
         if quality_speed.is_some_and(|v| v > 100) {
             return Err(fail());
         }
-        Self::create(width, height, quality, Some(device), quality_speed)
+        Self::create(width, height, quality, Some(device), quality_speed, None)
+    }
+    /// Diagnostic A/B of GOP and HRD targets only, at the production speed hint.
+    /// Bounds keep this probe API from selecting unbounded rate-control buffers.
+    pub fn new_gpu_with_recovery_targets(
+        width: usize,
+        height: usize,
+        quality: Quality,
+        device: &ID3D11Device,
+        gop_frames: u32,
+        buffer_ms: u32,
+    ) -> Result<Self> {
+        if !quality.encoding_valid()
+            || !(1..=super::keyframe::gop_frames(quality.fps)).contains(&gop_frames)
+            || !(1..=BUFFER_MS).contains(&buffer_ms)
+        {
+            return Err(fail());
+        }
+        let bytes = (u64::from(quality.bitrate()) * u64::from(buffer_ms) / 8 / 1000) as u32;
+        Self::create(
+            width,
+            height,
+            quality,
+            Some(device),
+            Some(0),
+            Some((gop_frames, bytes)),
+        )
     }
     fn create(
         width: usize,
@@ -146,6 +175,7 @@ impl HardwareEncoder {
         quality: Quality,
         device: Option<&ID3D11Device>,
         quality_speed: Option<u32>,
+        recovery_targets: Option<(u32, u32)>,
     ) -> Result<Self> {
         if !quality.encoding_valid()
             || width < 2
@@ -216,7 +246,15 @@ impl HardwareEncoder {
         for activation in activations {
             let transform: Result<IMFTransform> = unsafe { activation.ActivateObject() };
             if let Ok(transform) = transform {
-                match Self::configure(&transform, width, height, quality, device, quality_speed) {
+                match Self::configure(
+                    &transform,
+                    width,
+                    height,
+                    quality,
+                    device,
+                    quality_speed,
+                    recovery_targets,
+                ) {
                     Ok(config) => {
                         let name = unsafe {
                             let mut text = [0u16; 256];
@@ -247,6 +285,7 @@ impl HardwareEncoder {
                             fps: quality.fps,
                             name,
                             buffer_applied: config.buffer_applied,
+                            gop_applied: config.gop_applied,
                             sps: Vec::new(),
                             pps: Vec::new(),
                             _manager: config.manager,
@@ -269,6 +308,7 @@ impl HardwareEncoder {
         quality: Quality,
         device: Option<&ID3D11Device>,
         quality_speed: Option<u32>,
+        recovery_targets: Option<(u32, u32)>,
     ) -> Result<Configuration> {
         unsafe {
             let attributes = transform.GetAttributes()?;
@@ -306,13 +346,18 @@ impl HardwareEncoder {
                 &CODECAPI_AVEncCommonMeanBitRate,
                 &VARIANT::from(quality.bitrate()),
             )?;
-            let buffer_applied = codec
-                .SetValue(
-                    &CODECAPI_AVEncCommonBufferSize,
-                    &VARIANT::from(buffer_bytes(quality.bitrate())),
+            let (gop, buffer) = recovery_targets.unwrap_or_else(|| {
+                (
+                    super::keyframe::gop_frames(quality.fps),
+                    buffer_bytes(quality.bitrate()),
                 )
+            });
+            let buffer_applied = codec
+                .SetValue(&CODECAPI_AVEncCommonBufferSize, &VARIANT::from(buffer))
                 .is_ok();
-            let _ = codec.SetValue(&CODECAPI_AVEncMPVGOPSize, &VARIANT::from(quality.fps));
+            let gop_applied = codec
+                .SetValue(&CODECAPI_AVEncMPVGOPSize, &VARIANT::from(gop))
+                .is_ok();
             let (mut input, mut output) = ([0], [0]);
             if transform.GetStreamIDs(&mut input, &mut output).is_err() {
                 input[0] = 0;
@@ -355,11 +400,17 @@ impl HardwareEncoder {
                 output: output[0],
                 manager,
                 buffer_applied,
+                gop_applied,
             })
         }
     }
     pub fn buffer_readback_bytes(&self) -> Option<u32> {
         unsafe { self.codec.GetValue(&CODECAPI_AVEncCommonBufferSize) }
+            .ok()
+            .and_then(|value| u32::try_from(&value).ok())
+    }
+    pub fn gop_readback_frames(&self) -> Option<u32> {
+        unsafe { self.codec.GetValue(&CODECAPI_AVEncMPVGOPSize) }
             .ok()
             .and_then(|value| u32::try_from(&value).ok())
     }
@@ -671,14 +722,18 @@ mod tests {
     }
     #[test]
     fn h264_buffer_uses_bytes_and_leaves_sender_deadline_headroom() {
-        assert_eq!(super::buffer_bytes(18_000_000), 225_000);
-        for height in [720, 1080, 1440, 2160] {
-            for fps in [15, 30, 60] {
+        assert_eq!(super::buffer_bytes(18_000_000), 450_000);
+        for height in [360, 720, 1080, 1440, 2160] {
+            for fps in [5, 15, 30, 60] {
                 let bitrate = thiscord_shared::screen::Quality { height, fps }.bitrate();
                 let bytes = super::buffer_bytes(bitrate);
                 let drain_ms = u64::from(bytes) * 8 * 1000 / u64::from(bitrate);
-                assert!((99..=100).contains(&drain_ms));
-                assert!(u128::from(drain_ms) < crate::screen::SENDER_QUEUE_AGE.as_millis());
+                assert!((199..=200).contains(&drain_ms));
+                assert!((bytes as usize) < thiscord_shared::screen::MAX_FRAME_BYTES);
+                // HRD-sized frame + 100 ms admission backlog still leaves room
+                // under the existing 350 ms in-flight deadline. Actual drivers
+                // can exceed HRD targets; the sender still expires such frames.
+                assert!(drain_ms + u64::from(crate::screen::pacing::BACKLOG_BUDGET_MS) < 350);
             }
         }
     }

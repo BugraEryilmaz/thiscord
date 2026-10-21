@@ -250,6 +250,7 @@ async fn pending_and_invalid_sdp_never_publish_legacy_replacement_rosters() {
             remote_audio: false,
             screen_feedback: false,
             screen_subscriptions: false,
+            screen_layers: false,
         },
     )
     .await;

@@ -1,12 +1,12 @@
 //! Windows Graphics Capture delivers compositor frames; no screenshot polling.
 //! The callback copies GPU textures only. A latest-frame mailbox decouples it
 //! from the encoder, so overload replaces raw frames without breaking H.264 refs.
-use super::{gpu, metrics::Metrics};
+use super::{gpu, keyframe::KeyframePolicy, metrics::Metrics};
 use crate::audio::connection::Connection;
 use std::{
     sync::{
         Arc, Condvar, Mutex,
-        atomic::{AtomicBool, Ordering},
+        atomic::{AtomicBool, AtomicU32, Ordering},
     },
     time::{Duration, Instant},
 };
@@ -37,12 +37,11 @@ struct Mailbox {
 }
 #[derive(Clone)]
 struct Flags {
-    mailbox: Arc<(Mutex<Mailbox>, Condvar)>,
+    mailboxes: Vec<Arc<(Mutex<Mailbox>, Condvar)>>,
     stop: Arc<AtomicBool>,
     connection: Connection,
     period: Duration,
-    quality: Quality,
-    demand: Arc<super::adaptation::Demand>,
+    active_fps: Arc<[AtomicU32; 2]>,
     metrics: Metrics,
 }
 struct Capture {
@@ -85,12 +84,7 @@ impl GraphicsCaptureApiHandler for Capture {
             control.stop();
             return Ok(());
         }
-        let bitrate = self.flags.demand.bitrate();
-        let fps = if bitrate == 0 {
-            1
-        } else {
-            self.flags.quality.constrained(bitrate).fps
-        };
+        let fps = capture_fps(&self.flags.active_fps);
         let period = Duration::from_secs_f64(1.0 / f64::from(fps));
         if period != self.flags.period {
             self.flags.period = period;
@@ -129,7 +123,11 @@ impl GraphicsCaptureApiHandler for Capture {
             return Err("Screen source dimensions are unsupported".into());
         }
         if self.dimensions != (width, height) {
-            self.textures = (0..3)
+            self.textures = (0..(if self.flags.mailboxes.len() == 1 {
+                3
+            } else {
+                7
+            }))
                 .map(|_| {
                     gpu::texture(
                         frame.device(),
@@ -159,24 +157,28 @@ impl GraphicsCaptureApiHandler for Capture {
                 frame.device_context().Flush();
             }
         }
-        let mut mailbox = self.flags.mailbox.0.lock().unwrap();
-        if mailbox.latest.is_some() {
-            self.flags.metrics.add("raw_replaced", 1);
+        for target in &self.flags.mailboxes {
+            let mut mailbox = target.0.lock().unwrap();
+            if mailbox.latest.is_some() {
+                self.flags.metrics.add("raw_replaced", 1);
+            }
+            mailbox.latest = Some(Pixels {
+                texture: texture.clone(),
+                device: frame.device().clone(),
+                width,
+                height,
+                arrived: captured_at,
+            });
+            target.1.notify_one();
         }
-        mailbox.latest = Some(Pixels {
-            texture: texture.clone(),
-            device: frame.device().clone(),
-            width,
-            height,
-            arrived: captured_at,
-        });
         self.flags.metrics.time("capture_submit", now.elapsed());
-        self.flags.mailbox.1.notify_one();
         Ok(())
     }
     fn on_closed(&mut self) -> Result<(), String> {
-        self.flags.mailbox.0.lock().unwrap().closed = true;
-        self.flags.mailbox.1.notify_all();
+        for mailbox in &self.flags.mailboxes {
+            mailbox.0.lock().unwrap().closed = true;
+            mailbox.1.notify_all();
+        }
         Ok(())
     }
 }
@@ -205,6 +207,16 @@ pub fn sources() -> Result<Vec<Source>, String> {
     }
     sources.truncate(256);
     Ok(sources)
+}
+// Each worker publishes only its own committed cadence. A paused or slower
+// primary must not throttle a still-active low layer (and vice versa).
+fn capture_fps(active_fps: &[AtomicU32; 2]) -> u32 {
+    active_fps
+        .iter()
+        .map(|fps| fps.load(Ordering::Acquire))
+        .max()
+        .unwrap_or(0)
+        .max(1)
 }
 fn minimized(window: Window) -> bool {
     // Handle was obtained from enumeration. Query only; never capture a fallback.
@@ -241,16 +253,50 @@ pub fn run(
     metrics: Metrics,
     force_keyframe: Arc<AtomicBool>,
     demand: Arc<super::adaptation::Demand>,
+    report: impl FnMut(String),
+) -> Result<(), String> {
+    run_layers(
+        source,
+        quality,
+        stop,
+        connection,
+        started,
+        tx,
+        metrics,
+        force_keyframe,
+        demand,
+        None,
+        report,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+pub fn run_layers(
+    source: &SourceId,
+    quality: Quality,
+    stop: Arc<AtomicBool>,
+    connection: Connection,
+    started: Instant,
+    tx: tokio::sync::mpsc::Sender<super::Outgoing>,
+    metrics: Metrics,
+    force_keyframe: Arc<AtomicBool>,
+    demand: Arc<super::adaptation::Demand>,
+    low: Option<super::LayerOutput>,
     mut report: impl FnMut(String),
 ) -> Result<(), String> {
     let mailbox = Arc::new((Mutex::new(Mailbox::default()), Condvar::new()));
+    let active_fps = Arc::new(std::array::from_fn(|_| AtomicU32::new(0)));
+    let low_mailbox = low
+        .as_ref()
+        .map(|_| Arc::new((Mutex::new(Mailbox::default()), Condvar::new())));
+    let mut mailboxes = vec![mailbox.clone()];
+    mailboxes.extend(low_mailbox.iter().cloned());
     let flags = Flags {
-        mailbox: mailbox.clone(),
+        mailboxes,
         stop: stop.clone(),
         connection: connection.clone(),
         period: Duration::from_secs_f64(1.0 / quality.fps as f64),
-        quality,
-        demand: demand.clone(),
+        active_fps: active_fps.clone(),
         metrics: metrics.clone(),
     };
     let mut window = None;
@@ -274,21 +320,66 @@ pub fn run(
         }
     }
     .map_err(|_| "Cannot start Windows Graphics Capture. Check capture permissions.")?;
-    let result = encode(
-        &mailbox,
-        &capture,
-        window,
-        quality,
-        &stop,
-        &connection,
-        started,
-        tx,
-        &mut report,
-        source,
-        &metrics,
-        &force_keyframe,
-        &demand,
-    );
+    let result = std::thread::scope(|scope| {
+        let low_job = low.zip(low_mailbox).map(|(low, mailbox)| {
+            let stop = &stop;
+            let connection = &connection;
+            let active_fps = &active_fps;
+            scope.spawn(move || {
+                struct StopOnExit<'a>(&'a AtomicBool);
+                impl Drop for StopOnExit<'_> {
+                    fn drop(&mut self) {
+                        self.0.store(true, Ordering::Release);
+                    }
+                }
+                let _stop_on_exit = StopOnExit(stop);
+                let result = encode(
+                    &mailbox,
+                    None,
+                    window,
+                    thiscord_shared::screen::LayerTargets::low_quality(quality),
+                    stop,
+                    connection,
+                    started,
+                    low.tx,
+                    &mut |_| {},
+                    source,
+                    &low.metrics,
+                    &low.force_keyframe,
+                    &low.demand,
+                    active_fps,
+                    true,
+                );
+                if result.is_err() {
+                    stop.store(true, Ordering::Release);
+                }
+                result
+            })
+        });
+        let result = encode(
+            &mailbox,
+            Some(&capture),
+            window,
+            quality,
+            &stop,
+            &connection,
+            started,
+            tx,
+            &mut report,
+            source,
+            &metrics,
+            &force_keyframe,
+            &demand,
+            &active_fps,
+            false,
+        );
+        stop.store(true, Ordering::Release);
+        let secondary = low_job.map_or(Ok(()), |job| {
+            job.join()
+                .unwrap_or_else(|_| Err("Screen low encoder worker failed".into()))
+        });
+        result.and(secondary)
+    });
     // Stop also wakes/joins capture when the source is static (no callbacks).
     let stopped = capture
         .stop()
@@ -299,7 +390,7 @@ pub fn run(
 #[allow(clippy::too_many_arguments)]
 fn encode(
     mailbox: &Arc<(Mutex<Mailbox>, Condvar)>,
-    capture: &windows_capture::capture::CaptureControl<Capture, String>,
+    capture: Option<&windows_capture::capture::CaptureControl<Capture, String>>,
     window: Option<Window>,
     quality: Quality,
     stop: &AtomicBool,
@@ -311,13 +402,17 @@ fn encode(
     metrics: &Metrics,
     force_keyframe: &AtomicBool,
     demand: &super::adaptation::Demand,
+    active_fps: &[AtomicU32; 2],
+    secondary: bool,
 ) -> Result<(), String> {
     let requested = quality;
+    let mut adaptation = super::adaptation::QualityController::new(requested);
     let mut quality = requested.constrained(demand.bitrate());
     let mut paused = true;
     let mut reconfigure = true;
     let mut last_raw: Option<Pixels> = None;
     let mut refresh_after = Instant::now();
+    let mut input_after = Instant::now();
     let mut hardware: Option<super::hardware::HardwareEncoder> = None;
     let mut processor: Option<gpu::Processor> = None;
     let mut configured = None;
@@ -325,11 +420,12 @@ fn encode(
     let mut pending_pixels = None;
     let mut sequence = 0;
     let mut waiting_for_keyframe = true;
-    let mut keyframe = Instant::now() - Duration::from_secs(1);
+    let mut keyframe = KeyframePolicy::default();
     let mut color_checked = Instant::now() - Duration::from_secs(2);
     let mut color = (1.0, false);
     let mut previous = Instant::now();
     let mut previous_bitrate = None;
+    let mut recovery_scale = 100;
     let mut send_budget =
         super::pacing::SendBudget::new(super::pacing::transport_bitrate(quality.bitrate()));
     metrics.label("sender_backlog_budget_ms", super::pacing::BACKLOG_BUDGET_MS);
@@ -341,7 +437,10 @@ fn encode(
             return Err("Screen capture paused; start sharing again.".into());
         }
         previous = Instant::now();
-        if window.is_some_and(|w| !w.is_valid() || minimized(w)) || capture.is_finished() {
+        if window.is_some_and(|w| !w.is_valid() || minimized(w))
+            || mailbox.0.lock().unwrap().closed
+            || capture.is_some_and(|c| c.is_finished())
+        {
             return Err("The shared source closed or became unavailable; sharing stopped.".into());
         }
         let bitrate = demand.bitrate();
@@ -349,7 +448,13 @@ fn encode(
             metrics.label("viewer_bitrate_budget", bitrate);
             previous_bitrate = Some(bitrate);
         }
-        if bitrate == 0 {
+        let next = adaptation.update_with_recovery(
+            bitrate,
+            demand.take_encoder_feedback(),
+            Instant::now(),
+        );
+        if next.is_none() {
+            active_fps[usize::from(secondary)].store(0, Ordering::Release);
             if !paused {
                 hardware = None;
                 processor = None;
@@ -362,9 +467,11 @@ fn encode(
             std::thread::sleep(Duration::from_millis(20));
             continue;
         }
-        let next = requested.constrained(bitrate);
-        if paused || next != quality {
+        let next = next.expect("active demand has a quality target");
+        if paused || next != quality || recovery_scale != adaptation.scale_percent() {
             quality = next;
+            recovery_scale = adaptation.scale_percent();
+            active_fps[usize::from(secondary)].store(quality.fps, Ordering::Release);
             refresh_after = Instant::now();
             hardware = None;
             processor = None;
@@ -373,10 +480,14 @@ fn encode(
             waiting_for_keyframe = true;
             reconfigure = true;
             paused = false;
-            send_budget.set_bitrate(super::pacing::transport_bitrate(quality.bitrate()));
             force_keyframe.store(true, Ordering::Release);
             metrics.label("video_paused", false);
+            metrics.label("recovery_scale_percent", recovery_scale);
         }
+        // Share live demand with the sender, retaining burst capacity even after
+        // a recovery downgrade. Shed raw input at this rate before encoding more
+        // dependencies; a small budget dip must not halve the transport rate.
+        send_budget.set_bitrate(super::pacing::transport_budget(quality.bitrate(), bitrate));
         if color_checked.elapsed() >= Duration::from_secs(1) {
             let monitor = match source {
                 SourceId::Monitor(id) => HMONITOR(*id as *mut _),
@@ -426,7 +537,7 @@ fn encode(
                 .poll()
                 .map_err(|e| format!("GPU encoder failed: {}", e.code()))?;
             if record_frames(&frames, started, metrics) {
-                keyframe = Instant::now();
+                keyframe.observed(Instant::now());
             }
             if !send_frames(
                 frames,
@@ -436,6 +547,7 @@ fn encode(
                 &mut waiting_for_keyframe,
                 metrics,
                 &send_budget,
+                quality.bitrate(),
             )? {
                 force_keyframe.store(true, Ordering::Release);
                 metrics.event("encoded frame dropped before paced sender; requesting keyframe");
@@ -462,7 +574,9 @@ fn encode(
         // it again on worker wake time loses frames when a previous submission
         // was delayed, even though the encoder has ample throughput. The second
         // cadence only limits refresh/feedback submissions of the held image.
-        if pixels.is_none() && Instant::now() < refresh_after {
+        if (pixels.is_none() && Instant::now() < refresh_after)
+            || (capture_fps(active_fps) > quality.fps && Instant::now() < input_after)
+        {
             pending_pixels = pixels;
             continue;
         }
@@ -496,9 +610,14 @@ fn encode(
                 "source_resolution",
                 format!("{}x{}", pixels.width, pixels.height),
             );
-            let scale = (quality.width() as f64 / pixels.width as f64)
-                .min(quality.height as f64 / pixels.height as f64)
-                .min(1.0);
+            let scale =
+                (quality.width() as f64 * f64::from(recovery_scale) / 100.0 / pixels.width as f64)
+                    .min(
+                        quality.height as f64 * f64::from(recovery_scale)
+                            / 100.0
+                            / pixels.height as f64,
+                    )
+                    .min(1.0);
             let w = ((pixels.width as f64 * scale) as u32 & !1).max(2);
             let h = ((pixels.height as f64 * scale) as u32 & !1).max(2);
             if configured != Some((w, h)) {
@@ -535,6 +654,16 @@ fn encode(
                 );
                 metrics.label("encoder_buffer_applied", hw.buffer_applied);
                 metrics.label(
+                    "encoder_gop_target_frames",
+                    super::keyframe::gop_frames(quality.fps),
+                );
+                metrics.label("encoder_gop_applied", hw.gop_applied);
+                metrics.label(
+                    "encoder_gop_readback_frames",
+                    hw.gop_readback_frames()
+                        .map_or_else(|| "unavailable".into(), |v| v.to_string()),
+                );
+                metrics.label(
                     "encoder_quality_vs_speed",
                     hw.quality_vs_speed()
                         .map_or_else(|| "unavailable".into(), |v| v.to_string()),
@@ -554,6 +683,7 @@ fn encode(
                 );
                 configured = Some((w, h));
                 last_texture = None;
+                keyframe = KeyframePolicy::default();
                 force_keyframe.store(true, Ordering::Release);
                 report(format!(
                     "GPU capture/scale/BT.709 NV12 -> {} (FP16 HDR-aware)",
@@ -579,10 +709,7 @@ fn encode(
                 continue;
             };
             last_texture = Some(texture);
-        } else if keyframe.elapsed() < Duration::from_secs(1)
-            && (!force_keyframe.load(Ordering::Acquire)
-                || keyframe.elapsed() < Duration::from_millis(200))
-        {
+        } else if !keyframe.refresh_due(Instant::now(), force_keyframe.load(Ordering::Acquire)) {
             continue;
         }
         let (Some(hw), Some(texture)) = (&mut hardware, &last_texture) else {
@@ -592,26 +719,29 @@ fn encode(
             continue;
         }
         // Coalesce local backpressure and remote requests to avoid an IDR storm.
-        let requested = keyframe.elapsed() >= Duration::from_millis(200)
-            && force_keyframe.swap(false, Ordering::AcqRel);
-        if requested || keyframe.elapsed() >= Duration::from_secs(1) {
+        let now = Instant::now();
+        let requested =
+            keyframe.feedback_ready(now) && force_keyframe.swap(false, Ordering::AcqRel);
+        let forced = requested || keyframe.periodic_due(now);
+        if forced {
             hw.force_keyframe()
                 .map_err(|_| "GPU keyframe request failed")?;
             if requested {
                 metrics.add("keyframe_feedback", 1);
             }
-            keyframe = Instant::now();
         }
         let micros = captured_at.saturating_duration_since(started).as_micros() as u64;
         // Empty polls, busy hardware and raw-input backpressure must not advance
         // the encoder clock ahead of the separately throttled capture callback.
         refresh_after = Instant::now() + Duration::from_secs_f64(1.0 / f64::from(quality.fps));
+        input_after = refresh_after;
         metrics.time("encode_input_age", captured_at.elapsed());
         let frames = hw
             .encode_texture(texture.clone(), micros)
             .map_err(|e| format!("GPU encode failed: {}", e.code()))?;
+        keyframe.submitted(now, forced);
         if record_frames(&frames, started, metrics) {
-            keyframe = Instant::now();
+            keyframe.observed(Instant::now());
         }
         if !send_frames(
             frames,
@@ -621,6 +751,7 @@ fn encode(
             &mut waiting_for_keyframe,
             metrics,
             &send_budget,
+            quality.bitrate(),
         )? {
             force_keyframe.store(true, Ordering::Release);
         }
@@ -655,6 +786,7 @@ fn send_frames(
     waiting_for_keyframe: &mut bool,
     metrics: &Metrics,
     send_budget: &super::pacing::SendBudget,
+    bitrate: u32,
 ) -> Result<bool, String> {
     let mut complete = true;
     for frame in frames {
@@ -683,6 +815,7 @@ fn send_frames(
         metrics.peak("sender_peak_bytes", send_budget.bytes() as u64);
         if tx
             .try_send(super::Outgoing {
+                bitrate,
                 captured_at: at,
                 enqueued_at: Instant::now(),
                 packets,
@@ -705,6 +838,20 @@ fn send_frames(
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn capture_cadence_follows_both_committed_layers_through_pause_and_recovery() {
+        let fps = [AtomicU32::new(60), AtomicU32::new(15)];
+        assert_eq!(capture_fps(&fps), 60);
+        fps[0].store(5, Ordering::Release);
+        assert_eq!(capture_fps(&fps), 15);
+        fps[0].store(0, Ordering::Release);
+        assert_eq!(capture_fps(&fps), 15);
+        fps[1].store(0, Ordering::Release);
+        assert_eq!(capture_fps(&fps), 1);
+        fps[0].store(30, Ordering::Release);
+        assert_eq!(capture_fps(&fps), 30);
+    }
+
     #[test]
     fn encoded_backpressure_discards_pending_deltas_until_a_recovery_frame() {
         let (tx, mut rx) = tokio::sync::mpsc::channel(1);
@@ -731,6 +878,7 @@ mod tests {
                 &mut waiting,
                 &metrics,
                 &send_budget,
+                5_000_000,
             )
             .unwrap()
         );
@@ -743,6 +891,7 @@ mod tests {
                 &mut waiting,
                 &metrics,
                 &send_budget,
+                5_000_000,
             )
             .unwrap()
         );
@@ -756,6 +905,7 @@ mod tests {
                 &mut waiting,
                 &metrics,
                 &send_budget,
+                5_000_000,
             )
             .unwrap()
         );
@@ -772,6 +922,7 @@ mod tests {
                 &mut waiting,
                 &metrics,
                 &send_budget,
+                5_000_000,
             )
             .unwrap()
         );

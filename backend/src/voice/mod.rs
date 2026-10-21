@@ -3,10 +3,12 @@ use crate::access;
 mod diagnostics;
 mod egress;
 mod ice;
+mod layers;
 mod logging;
 mod membership;
 mod red;
 mod resumption;
+mod retransmission;
 mod store;
 mod viewing;
 use crate::{auth::Failure, db::DbPool};
@@ -64,10 +66,13 @@ struct Member {
     red: red::Barrier,
     camera_started: Instant,
     outgoing: [egress::Sender; 4],
-    keyframes: mpsc::Sender<(MediaKind, u32)>,
+    keyframes: mpsc::Sender<(MediaKind, u32, Option<u8>)>,
     last_keyframe: [Option<Instant>; 2],
     feedback_enabled: bool,
     subscriptions_enabled: bool,
+    screen_layers: bool,
+    screen_quality: thiscord_shared::screen::Quality,
+    screen_routes: Arc<std::sync::Mutex<[layers::Route; ROOM_CAPACITY]>>,
     views: [Option<viewing::View>; ROOM_CAPACITY * 2],
     generation: Arc<AtomicU64>,
     access: Arc<access::Access>,
@@ -82,6 +87,9 @@ struct Delivery {
     source: uuid::Uuid,
     source_active: Arc<AtomicBool>,
     packet: rtp::Packet,
+    // Server-observed ingress track, never publisher bitrate metadata. Retained
+    // through the queue so final delivery can re-evaluate current layer demand.
+    screen_layer: Option<usize>,
     queued_at: Instant,
 }
 struct Room {
@@ -341,7 +349,8 @@ struct Handler {
     media_packets: mpsc::Sender<Ingress>,
     active: Arc<AtomicBool>,
     generation: Arc<AtomicU64>,
-    track_seen: [AtomicBool; 4],
+    track_seen: [AtomicBool; 5],
+    screen_rate: Arc<std::sync::Mutex<layers::IngressBudget>>,
 }
 #[async_trait::async_trait]
 impl PeerConnectionEventHandler for Handler {
@@ -367,7 +376,12 @@ impl PeerConnectionEventHandler for Handler {
         let Some(codec) = track.codec(ssrc).await else {
             return;
         };
-        let Some(kind) = MediaKind::from_publisher_ssrc(ssrc) else {
+        let low_layer = ssrc == thiscord_shared::screen::LOW_LAYER_SSRC;
+        let Some(kind) = (if low_layer {
+            Some(MediaKind::ScreenVideo)
+        } else {
+            MediaKind::from_publisher_ssrc(ssrc)
+        }) else {
             self.active.store(false, Ordering::Release);
             return;
         };
@@ -382,7 +396,8 @@ impl PeerConnectionEventHandler for Handler {
                     .mime_type
                     .eq_ignore_ascii_case(thiscord_shared::rtp_red::MIME)))
             || codec.clock_rate != kind.clock_rate()
-            || self.track_seen[kind as usize].swap(true, Ordering::AcqRel)
+            || self.track_seen[if low_layer { 4 } else { kind as usize }]
+                .swap(true, Ordering::AcqRel)
         {
             self.active.store(false, Ordering::Release);
             return;
@@ -395,6 +410,7 @@ impl PeerConnectionEventHandler for Handler {
         let metrics = self.metrics.clone();
         let active = self.active.clone();
         let generation = self.generation.clone();
+        let screen_rate = self.screen_rate.clone();
         tokio::spawn(async move {
             let mut since = Instant::now();
             let mut count = 0;
@@ -404,6 +420,15 @@ impl PeerConnectionEventHandler for Handler {
                     break;
                 }
                 if let TrackRemoteEvent::OnRtpPacket(packet) = event {
+                    if packet.header.ssrc != ssrc {
+                        continue;
+                    }
+                    if kind == MediaKind::ScreenVideo
+                        && !screen_rate.lock().unwrap().admit(packet.payload.len())
+                    {
+                        active.store(false, Ordering::Release);
+                        break;
+                    }
                     if since.elapsed() > Duration::from_secs(1) {
                         since = Instant::now();
                         count = 0;
@@ -709,7 +734,22 @@ async fn handle_signal(
             member.info.camera_active = active;
             Ok(())
         }
-        Some(ClientEvent::Screen { active, audio }) => {
+        Some(ClientEvent::Screen {
+            active,
+            audio,
+            quality,
+        }) => {
+            if let Some(quality) = quality {
+                if !quality.valid() {
+                    return Err("screen_quality_rejected");
+                }
+                let mut members = room.members.write().await;
+                let member = members.get_mut(&slot).ok_or("screen_state_rejected")?;
+                if !owner.load(Ordering::Acquire) || !member.screen_layers {
+                    return Err("screen_quality_rejected");
+                }
+                member.screen_quality = quality;
+            }
             update_screen_state(room, slot, active, audio, owner)
                 .await
                 .map_err(|_| "screen_state_rejected")
@@ -769,6 +809,17 @@ async fn request_keyframe(
     }) {
         return;
     }
+    let layer = members
+        .get(&publisher)
+        .filter(|s| s.screen_layers && kind == MediaKind::ScreenVideo)
+        .map(|s| {
+            viewing::layer_plan(&members, s).layer(
+                members[&viewer].views[kind.view_index(publisher)]
+                    .unwrap()
+                    .subscription
+                    .bitrate,
+            ) as u8
+        });
     let Some(source) = members.get_mut(&publisher) else {
         return;
     };
@@ -789,7 +840,7 @@ async fn request_keyframe(
         return;
     }
     source.last_keyframe[kind.view_index(0) / ROOM_CAPACITY] = Some(Instant::now());
-    let _ = source.keyframes.try_send((kind, epoch));
+    let _ = source.keyframes.try_send((kind, epoch, layer));
 }
 async fn log_selected_route(pc: &dyn PeerConnection, id: RequestId) -> bool {
     for sender in pc.get_senders().await {
@@ -953,6 +1004,9 @@ async fn serve(mut socket: logging::Socket, pool: DbPool, id: RequestId) {
             last_keyframe: [None; 2],
             feedback_enabled: false,
             subscriptions_enabled: false,
+            screen_layers: false,
+            screen_quality: Default::default(),
+            screen_routes: Default::default(),
             views: [None; ROOM_CAPACITY * 2],
             generation: generation.clone(),
             access: connection_access.clone(),
@@ -998,7 +1052,11 @@ async fn serve(mut socket: logging::Socket, pool: DbPool, id: RequestId) {
     let _ = engine.register_default_codecs();
     red::register(&mut engine);
     let registry = register_default_interceptors(Registry::new(), &mut engine)
-        .expect("default RTP interceptors");
+        .expect("default RTP interceptors")
+        .with(
+            rtc::interceptor::Slot::NackResponder,
+            retransmission::Responder::default(),
+        );
     socket.stage = "peer_build";
     let built = PeerConnectionBuilder::new()
         .with_configuration(ice::configuration(&ice_servers))
@@ -1013,6 +1071,7 @@ async fn serve(mut socket: logging::Socket, pool: DbPool, id: RequestId) {
             active: active.clone(),
             generation: generation.clone(),
             track_seen: std::array::from_fn(|_| AtomicBool::new(false)),
+            screen_rate: Default::default(),
         }))
         .with_udp_addrs(vec![local_bind().unwrap_or_else(|_| "127.0.0.1:0".into())])
         .build()
@@ -1077,6 +1136,7 @@ async fn serve(mut socket: logging::Socket, pool: DbPool, id: RequestId) {
                     camera_video: true,
                     screen_feedback: true,
                     screen_subscriptions: true,
+                    screen_layers: true,
                     ice_servers,
                     resume_token: Some(resume_token),
                 },
@@ -1090,6 +1150,7 @@ async fn serve(mut socket: logging::Socket, pool: DbPool, id: RequestId) {
                 sdp,
                 screen_feedback: enabled,
                 screen_subscriptions,
+                screen_layers,
                 remote_audio: audio_enabled,
                 packet_redundancy,
             }) = parse(answer)
@@ -1116,6 +1177,7 @@ async fn serve(mut socket: logging::Socket, pool: DbPool, id: RequestId) {
                 member.feedback_enabled = enabled;
                 member.packet_redundancy = packet_redundancy;
                 member.subscriptions_enabled = screen_subscriptions;
+                member.screen_layers = screen_layers && screen_subscriptions && enabled;
                 member.negotiated = true;
                 room.changed.send_replace(());
             }
@@ -1167,6 +1229,16 @@ async fn serve(mut socket: logging::Socket, pool: DbPool, id: RequestId) {
                 {
                     continue;
                 }
+                let layer =
+                    usize::from(packet.header.ssrc == thiscord_shared::screen::LOW_LAYER_SSRC);
+                let layer_packet = thiscord_shared::screen::LayerPacket::parse(&packet.header.csrc);
+                if kind == MediaKind::ScreenVideo
+                    && ((layer == 1 && !source.screen_layers)
+                        || (source.screen_layers
+                            && layer_packet.is_none_or(|p| p.epoch != source.info.screen_epoch)))
+                {
+                    continue;
+                }
                 packet.header = rtp::header::Header {
                     version: 2,
                     payload_type: if kind == MediaKind::Microphone {
@@ -1181,6 +1253,8 @@ async fn serve(mut socket: logging::Socket, pool: DbPool, id: RequestId) {
                             source.info.microphone_source_epoch,
                             source.info.microphone_epoch,
                         ]
+                    } else if kind == MediaKind::ScreenVideo && source.screen_layers {
+                        layer_packet.unwrap().csrc()
                     } else {
                         vec![source.info.video_epoch(kind)]
                     },
@@ -1188,30 +1262,76 @@ async fn serve(mut socket: logging::Socket, pool: DbPool, id: RequestId) {
                     timestamp: packet.header.timestamp,
                     ..Default::default()
                 };
+                let layered = kind == MediaKind::ScreenVideo && source.screen_layers;
+                let plan = if layered {
+                    viewing::layer_plan(&members, source)
+                } else {
+                    Default::default()
+                };
                 let mut recovery = Vec::new();
                 for (&other, m) in members.iter() {
                     if other != slot {
+                        let receiver_epoch = m.generation.load(Ordering::Acquire);
+                        let screen = kind == MediaKind::ScreenVideo;
+                        let single = (!screen).then(|| (packet.clone(), arrived));
+                        let packets = if screen {
+                            let mut routes = m.screen_routes.lock().unwrap();
+                            if !viewing::receives(m, source, kind, arrived) {
+                                routes[slot].clear();
+                                continue;
+                            }
+                            let view = m.views[kind.view_index(slot)].unwrap();
+                            let identity = (
+                                source_id,
+                                source.info.screen_epoch,
+                                view.since,
+                                epoch,
+                                receiver_epoch,
+                            );
+                            let packets = if layered {
+                                routes[slot].push_at(
+                                    identity,
+                                    plan.layer(view.subscription.bitrate),
+                                    layer,
+                                    packet.clone(),
+                                    arrived,
+                                )
+                            } else {
+                                routes[slot].push_legacy_at(identity, packet.clone(), arrived)
+                            };
+                            let queued_at = routes[slot].released_at.unwrap_or(arrived);
+                            packets.into_iter().map(|p| (p, queued_at)).collect()
+                        } else {
+                            Vec::new()
+                        };
                         let tx = &m.outgoing[kind as usize];
-                        if tx
-                            .forward(
-                                source,
-                                m,
-                                Delivery {
-                                    epoch,
-                                    receiver_epoch: m.generation.load(Ordering::Acquire),
-                                    source_access: relay_access.clone(),
-                                    slot: kind.track_index(slot),
-                                    source: source_id,
-                                    source_active: relay_active.clone(),
-                                    packet: packet.clone(),
-                                    queued_at: arrived,
-                                },
-                            )
-                            .is_err()
-                            && kind.is_video()
-                        {
-                            m.metrics[2].fetch_add(1, Ordering::Relaxed);
-                            recovery.push((other, source.info.video_epoch(kind), m.active.clone()));
+                        for (selected, queued_at) in packets.into_iter().chain(single) {
+                            if tx
+                                .forward(
+                                    source,
+                                    m,
+                                    Delivery {
+                                        epoch,
+                                        receiver_epoch,
+                                        source_access: relay_access.clone(),
+                                        slot: kind.track_index(slot),
+                                        source: source_id,
+                                        source_active: relay_active.clone(),
+                                        packet: selected,
+                                        screen_layer: layered.then_some(layer),
+                                        queued_at,
+                                    },
+                                )
+                                .is_err()
+                                && kind.is_video()
+                            {
+                                m.metrics[2].fetch_add(1, Ordering::Relaxed);
+                                recovery.push((
+                                    other,
+                                    source.info.video_epoch(kind),
+                                    m.active.clone(),
+                                ));
+                            }
                         }
                     }
                 }
@@ -1317,11 +1437,11 @@ async fn serve(mut socket: logging::Socket, pool: DbPool, id: RequestId) {
                         break;
                     }
                 },
-                Some((kind, epoch))=keyframe_rx.recv()=>{
+                Some((kind, epoch, layer))=keyframe_rx.recv()=>{
                     // Revalidate the publisher and generation after queued feedback.
                     let allowed = connection_access.packet(access.generation.load(Ordering::Acquire), access.generation.load(Ordering::Acquire)).is_some()
                         && room.members.read().await.get(&slot).is_some_and(|m| m.source_id == source_id && m.feedback_enabled && m.active.load(Ordering::Acquire) && m.info.video_active(kind) && m.info.video_epoch(kind) == epoch);
-                    if allowed && send(&mut socket, ServerEvent::ScreenKeyframe { kind, epoch }).await.is_err() { break; }
+                    if allowed && send(&mut socket, ServerEvent::ScreenKeyframe { kind, epoch, layer }).await.is_err() { break; }
                 },
                 Some(call)=audio_requests.recv()=>{
                     if socket.detached() { call.reject(Failure::Unavailable); continue; }
@@ -1359,6 +1479,7 @@ async fn serve(mut socket: logging::Socket, pool: DbPool, id: RequestId) {
                 _=tick.tick()=>{
                     if audio_call.as_ref().is_some_and(|c| c.expired()) { audio_call = None; }
                     diagnostic_tick += 1;
+                    viewing::prune_routes(&room, slot).await;
                     if screen_feedback && diagnostic_tick % 5 == 0 {
                         let counters = ["sfu_video_ingress_packets", "sfu_video_ingress_dropped", "sfu_video_egress_dropped", "sfu_video_sent_packets", "sfu_video_send_timeouts"].into_iter().enumerate().map(|(i,n)| (n.to_owned(), metrics[i].load(Ordering::Relaxed))).collect();
                         if send(&mut socket, ServerEvent::MediaDiagnostics { counters }).await.is_err() { break; }
@@ -1374,7 +1495,7 @@ async fn serve(mut socket: logging::Socket, pool: DbPool, id: RequestId) {
                     };
                     for kind in [MediaKind::ScreenVideo, MediaKind::Camera] {
                         if let Some((epoch, bitrate)) = viewing::target(&room, slot, kind).await
-                            && send(&mut socket, ServerEvent::ScreenTarget { kind, epoch, bitrate }).await.is_err() { active.store(false, Ordering::Release); break; }
+                            && send(&mut socket, ServerEvent::ScreenTarget { kind, epoch, bitrate, layers: viewing::layer_target(&room, slot, kind).await }).await.is_err() { active.store(false, Ordering::Release); break; }
                     }
                     if !route_logged { route_logged=log_selected_route(pc.as_ref(),id).await; }
                 if send(&mut socket,ServerEvent::Participants{members}).await.is_err(){break;}
@@ -1709,6 +1830,9 @@ mod send_tests {
                     last_keyframe: [None; 2],
                     feedback_enabled: true,
                     subscriptions_enabled: true,
+                    screen_layers: false,
+                    screen_quality: Default::default(),
+                    screen_routes: Default::default(),
                     views: [None; ROOM_CAPACITY * 2],
                     generation: Arc::new(AtomicU64::new(epoch)),
                     access: connection_access.clone(),
@@ -1780,7 +1904,7 @@ mod send_tests {
         .await;
         assert_eq!(
             receivers[1].try_recv().unwrap(),
-            (MediaKind::ScreenVideo, 7)
+            (MediaKind::ScreenVideo, 7, None)
         );
         request_keyframe(
             &room,

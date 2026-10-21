@@ -638,6 +638,7 @@ async fn run(
         camera_video,
         screen_feedback,
         screen_subscriptions,
+        screen_layers,
         resume_token,
         remote_audio,
         packet_redundancy,
@@ -652,6 +653,7 @@ async fn run(
             camera_video,
             screen_feedback,
             screen_subscriptions,
+            screen_layers,
             resume_token,
             remote_audio,
         } if first.version == VOICE_VERSION && slot < ROOM_CAPACITY => (
@@ -663,6 +665,7 @@ async fn run(
             camera_video,
             screen_feedback,
             screen_subscriptions,
+            screen_layers,
             resume_token,
             remote_audio,
             packet_redundancy,
@@ -781,9 +784,15 @@ async fn run(
             .await
             .map_err(|_| "Cannot add camera track")?;
     }
+    let low_track = thiscord_frontend::screen::track(thiscord_shared::screen::LOW_LAYER_SSRC);
     let screen_track = thiscord_frontend::screen::track(MediaKind::ScreenVideo.publisher_ssrc());
     let system_track =
         thiscord_frontend::audio::transport::track(MediaKind::SystemAudio.publisher_ssrc());
+    if screen_layers {
+        pc.add_track(low_track.clone() as Arc<dyn TrackLocal>)
+            .await
+            .map_err(|_| "Cannot add screen quality track")?;
+    }
     if screen_video {
         pc.add_track(screen_track.clone() as Arc<dyn TrackLocal>)
             .await
@@ -812,6 +821,7 @@ async fn run(
             sdp,
             screen_feedback,
             screen_subscriptions,
+            screen_layers,
         },
         &attempt.connection,
     )
@@ -974,15 +984,16 @@ async fn run(
                             });
                         }
                     },
-                    ServerEvent::ScreenTarget { kind, epoch, bitrate } => {
+                    ServerEvent::ScreenTarget { kind, epoch, bitrate, layers } => {
                         if status.lock().ok().is_some_and(|s| s.participants.iter().any(|m| m.slot == own_slot && m.video_epoch(kind) == epoch && m.video_active(kind))) {
-                            if kind == MediaKind::Camera { app.state::<crate::native_camera::CameraState>().target(bitrate); } else { app.state::<crate::native_screen::ScreenState>().target(bitrate); }
+                            if kind == MediaKind::Camera { app.state::<crate::native_camera::CameraState>().target(bitrate); } else { app.state::<crate::native_screen::ScreenState>().layer_target(bitrate, layers); }
                         }
                     },
                     ServerEvent::MediaDiagnostics{counters}=>{ app.state::<crate::native_screen::ScreenState>().server_diagnostics(counters); },
-                    ServerEvent::ScreenKeyframe{kind, epoch}=>{
+                    ServerEvent::ScreenKeyframe{kind, epoch, layer}=>{
                         if kind == MediaKind::Camera { app.state::<crate::native_camera::CameraState>().keyframe(); continue; }
-                        if status.lock().ok().is_some_and(|s| s.participants.iter().any(|m| m.slot == own_slot && m.screen_epoch == epoch && m.sharing_screen)) { force_keyframe.store(true, Ordering::Release); }
+                        if status.lock().ok().is_some_and(|s| s.participants.iter().any(|m| m.slot == own_slot && m.screen_epoch == epoch && m.sharing_screen)) { if layer != Some(1) { force_keyframe.store(true, Ordering::Release); }
+                            if layer != Some(0) { app.state::<crate::native_screen::ScreenState>().layer_keyframe(); } }
                     },
                     ServerEvent::Participants{members}=>{
                         roster_compatibility.observe(&members).map_err(|error| Failure::from(error).with_reason("legacy_source_replacement"))?;
@@ -1070,13 +1081,14 @@ async fn run(
                             own_slot, local_epoch: Default::default(), local_visible: Default::default(),
                             connection: attempt.connection.clone(), video: screen_track.clone(), audio: system_track.clone(), can_publish: can_speak,
                             subscriptions: screen_subscriptions,
+                            layers: screen_layers.then(|| crate::native_screen::LayerBinding::new(low_track.clone())),
                             demand: Default::default(), network_demand: Default::default(),
                             force_keyframe: force_keyframe.clone(), metrics: Default::default(),
                             video_sequence: Default::default(), audio_sequence: Default::default(), audio_timestamp: Default::default(), started: Instant::now(),
                         }); }
                         if camera_video { app.state::<crate::native_camera::CameraState>().bind(crate::native_screen::Binding {
                             own_slot, local_epoch: Default::default(), local_visible: Default::default(),
-                            connection: attempt.connection.clone(), video: camera_track.clone(), audio: system_track.clone(), can_publish: can_speak, subscriptions: screen_subscriptions,
+                            connection: attempt.connection.clone(), video: camera_track.clone(), audio: system_track.clone(), can_publish: can_speak, subscriptions: screen_subscriptions, layers: None,
                             demand: Default::default(), network_demand: Default::default(), force_keyframe: Default::default(), metrics: Default::default(), video_sequence: Default::default(), audio_sequence: Default::default(), audio_timestamp: Default::default(), started: Instant::now(),
                         }); }
                         engine.notify_control(Command::Roster{connection:attempt.connection.clone(),members:roster.clone()})?;
@@ -1107,7 +1119,7 @@ async fn run(
                 }
                 let current_screen = app.state::<crate::native_screen::ScreenState>().sharing();
                 if Some(current_screen) != screen_state {
-                    signaling.send(ClientEvent::Screen { active: current_screen.0, audio: current_screen.1 });
+                    signaling.send(ClientEvent::Screen { active: current_screen.0, audio: current_screen.1, quality: screen_layers.then(|| app.state::<crate::native_screen::ScreenState>().quality()) });
                     screen_state = Some(current_screen);
                 }
                 if packet_redundancy && boundary.control(transmit_control.generation())? {

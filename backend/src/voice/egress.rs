@@ -21,6 +21,7 @@ pub(super) struct Sender {
     tx: mpsc::Sender<Queued>,
     bytes: Arc<Semaphore>,
     kind: MediaKind,
+    screen_budget: Arc<std::sync::Mutex<[viewing::ByteBudget; ROOM_CAPACITY]>>,
 }
 
 pub(super) struct Queued {
@@ -41,6 +42,7 @@ pub(super) fn channel(kind: MediaKind) -> (Sender, mpsc::Receiver<Queued>) {
             tx,
             bytes: Arc::new(Semaphore::new(bytes)),
             kind,
+            screen_budget: Default::default(),
         },
         rx,
     )
@@ -92,6 +94,20 @@ impl Sender {
         ) else {
             return Ok(());
         };
+        if self.kind == MediaKind::ScreenVideo {
+            let bitrate = receiver.views[source.info.slot]
+                .ok_or(())?
+                .subscription
+                .bitrate;
+            if !self.screen_budget.lock().unwrap()[source.info.slot].admit(
+                bitrate,
+                delivery.packet.marshal_size().saturating_add(64),
+                Instant::now(),
+            ) {
+                receiver.screen_routes.lock().unwrap()[source.info.slot].clear();
+                return Err(());
+            }
+        }
         self.try_send(delivery)
     }
 
@@ -157,6 +173,10 @@ impl Writer {
         let mut offsets = [(0_u16, 0_u32); ROOM_CAPACITY];
         let mut last = [(0_u16, 0_u32); ROOM_CAPACITY];
         let mut retry_after = [None; ROOM_CAPACITY];
+        let mut screen_sequences: [layers::SequenceWindow; ROOM_CAPACITY] = Default::default();
+        let mut screen_recovered_at = [None; ROOM_CAPACITY];
+        let screen_budgets: std::sync::Mutex<[viewing::ByteBudget; ROOM_CAPACITY]> =
+            Default::default();
         while let Some(Queued { delivery, _bytes }) = rx.recv().await {
             let Delivery {
                 epoch,
@@ -166,6 +186,7 @@ impl Writer {
                 source,
                 source_active,
                 mut packet,
+                screen_layer,
                 queued_at,
             } = delivery;
             if !self.active.load(Ordering::Acquire) {
@@ -173,6 +194,9 @@ impl Writer {
             }
             let (packet_kind, source_slot) = MediaKind::from_track(slot).expect("delivery track");
             debug_assert_eq!(kind, packet_kind);
+            if kind == MediaKind::ScreenVideo {
+                packet.header.csrc.truncate(1);
+            }
             let source_epoch = packet.header.csrc.first().copied();
             let packet_epoch = packet
                 .header
@@ -255,9 +279,64 @@ impl Writer {
                 .sequence_number
                 .wrapping_sub(last[source_slot].0) as i16
                 > 0
+                && kind != MediaKind::ScreenVideo
             {
                 last[source_slot] = (packet.header.sequence_number, packet.header.timestamp);
             }
+            // A final fence covers queue loss, source/slot reuse and legacy
+            // publishers too. Only successful atomic driver enqueues commit it;
+            // an unsuccessful single-poll write cannot have encrypted a packet.
+            let mut screen_sequence = screen_sequences[source_slot].clone();
+            let loss_at = if kind == MediaKind::ScreenVideo {
+                let members = self.room.members.read().await;
+                members.get(&self.receiver_slot).and_then(|receiver| {
+                    receiver.outgoing[kind as usize]
+                        .screen_budget
+                        .lock()
+                        .unwrap()[source_slot]
+                        .rejected_at
+                })
+            } else {
+                None
+            };
+            let mut recovery_offset = 0;
+            if kind == MediaKind::ScreenVideo
+                && loss_at.is_some_and(|at| {
+                    queued_at >= at && Some(at) != screen_recovered_at[source_slot]
+                })
+                && let Some(next) = screen_sequence.after_loss()
+            {
+                // A local throttle may discard arbitrarily many input indexes.
+                // Rebase above successful output, never infer a ROC from that gap.
+                recovery_offset = next.wrapping_sub(packet.header.sequence_number);
+                packet.header.sequence_number = next;
+            }
+            if kind == MediaKind::ScreenVideo
+                && screen_sequence
+                    .accept(packet.header.sequence_number)
+                    .is_none()
+            {
+                if screen_sequence.discontinuity(packet.header.sequence_number) {
+                    // Queue expiry/driver backpressure can lose a large run even
+                    // without a bitrate rejection. Force the upstream route to
+                    // reacquire an IDR and map its fresh queue above emitted SRTP
+                    // indexes, using the same local-loss fence as throttling.
+                    let members = self.room.members.read().await;
+                    if let Some(receiver) = members.get(&self.receiver_slot) {
+                        receiver.outgoing[kind as usize]
+                            .screen_budget
+                            .lock()
+                            .unwrap()[source_slot]
+                            .rejected_at = Some(Instant::now());
+                        receiver.screen_routes.lock().unwrap()[source_slot].clear();
+                    }
+                }
+                self.dropped(kind, source_slot, screen_epoch).await;
+                continue;
+            }
+            let sent_position = (packet.header.sequence_number, packet.header.timestamp);
+            let measured_bytes = packet.marshal_size().saturating_add(64);
+            let rate_rejected = AtomicBool::new(false);
             let delivered = tokio::time::timeout_at(
                 deadline.into(),
                 authorized_write(
@@ -290,9 +369,43 @@ impl Writer {
                                             || (receiver_microphone_epoch
                                                 == Some(receiver.red.receiver_floor)
                                                 && queued_at >= receiver.red.receiver_started))
+                                            && viewing::selected_layer(
+                                                members,
+                                                receiver,
+                                                m,
+                                                kind,
+                                                screen_layer,
+                                            )
                                             && viewing::receives(receiver, m, kind, queued_at)
                                             && (kind != MediaKind::Microphone
                                                 || red::receives(m, receiver))
+                                            && (kind != MediaKind::ScreenVideo || {
+                                                let budget =
+                                                    &receiver.outgoing[kind as usize].screen_budget;
+                                                let fresh = budget.lock().unwrap()[source_slot]
+                                                    .rejected_at
+                                                    .is_none_or(|at| queued_at >= at);
+                                                let bitrate = receiver.views[source_slot]
+                                                    .unwrap()
+                                                    .subscription
+                                                    .bitrate;
+                                                let admitted = fresh
+                                                    && screen_budgets.lock().unwrap()[source_slot]
+                                                        .admit(
+                                                            bitrate,
+                                                            measured_bytes,
+                                                            Instant::now(),
+                                                        );
+                                                if !admitted && fresh {
+                                                    rate_rejected.store(true, Ordering::Relaxed);
+                                                    budget.lock().unwrap()[source_slot]
+                                                        .rejected_at = Some(Instant::now());
+                                                    receiver.screen_routes.lock().unwrap()
+                                                        [source_slot]
+                                                        .clear();
+                                                }
+                                                admitted
+                                            })
                                     })
                             })
                     },
@@ -308,7 +421,7 @@ impl Writer {
                 continue;
             }
             if matches!(delivered, Ok(Err(()))) {
-                if Instant::now() >= deadline {
+                if Instant::now() >= deadline || rate_rejected.load(Ordering::Relaxed) {
                     self.dropped(kind, source_slot, screen_epoch).await;
                 }
                 continue;
@@ -328,6 +441,15 @@ impl Writer {
                 continue;
             }
             if kind.is_video() {
+                if kind == MediaKind::ScreenVideo {
+                    screen_sequences[source_slot] = screen_sequence;
+                    screen_recovered_at[source_slot] = loss_at;
+                    offsets[source_slot].0 = offsets[source_slot].0.wrapping_add(recovery_offset);
+                    // Reordered packets must not move the slot-reuse anchor back.
+                    if sent_position.0.wrapping_sub(last[source_slot].0) as i16 > 0 {
+                        last[source_slot] = sent_position;
+                    }
+                }
                 self.metrics[3].fetch_add(1, Ordering::Relaxed);
             }
         }
@@ -614,11 +736,12 @@ mod tests {
                 },
                 payload: vec![0; size].into(),
             },
+            screen_layer: None,
             queued_at: Instant::now(),
         }
     }
 
-    async fn fixture() -> (Writer, Source, mpsc::Receiver<(MediaKind, u32)>) {
+    async fn fixture() -> (Writer, Source, mpsc::Receiver<(MediaKind, u32, Option<u8>)>) {
         let room = Arc::new(Room::default());
         let source = source();
         let receiver = self::source();
@@ -671,6 +794,9 @@ mod tests {
                     last_keyframe: [None; 2],
                     feedback_enabled: true,
                     subscriptions_enabled: true,
+                    screen_layers: false,
+                    screen_quality: Default::default(),
+                    screen_routes: Default::default(),
                     views: [None; ROOM_CAPACITY * 2],
                     generation: endpoint.generation.clone(),
                     access: endpoint.access.clone(),
@@ -709,6 +835,34 @@ mod tests {
         )
     }
 
+    #[tokio::test]
+    async fn queued_primary_is_rejected_when_current_demand_selects_low_layer() {
+        let (writer, source, _) = fixture().await;
+        let (tx, rx) = channel(MediaKind::ScreenVideo);
+        let mut packet = delivery(MediaKind::ScreenVideo, &source, 10);
+        packet.packet.header.csrc = vec![7, 2_500_000];
+        packet.screen_layer = Some(0);
+        {
+            let mut members = writer.room.members.write().await;
+            members.get_mut(&1).unwrap().screen_layers = true;
+            let mut fast = members[&0].clone();
+            fast.info.slot = 2;
+            members.insert(2, fast);
+            tx.forward(&members[&1], &members[&0], packet).unwrap();
+            members.get_mut(&0).unwrap().views[1]
+                .as_mut()
+                .unwrap()
+                .subscription
+                .bitrate = 200_000;
+        }
+        drop(tx);
+        writer
+            .run(MediaKind::ScreenVideo, rx, |_, _| async {
+                panic!("queued primary crossed a switch to the low layer")
+            })
+            .await;
+    }
+
     fn clone_writer(writer: &Writer) -> Writer {
         Writer {
             access: writer.access.clone(),
@@ -718,6 +872,223 @@ mod tests {
             generation: writer.generation.clone(),
             metrics: writer.metrics.clone(),
         }
+    }
+
+    #[tokio::test]
+    async fn lying_bitrate_is_limited_before_queueing_and_route_requires_recovery() {
+        let (writer, source, _) = fixture().await;
+        let (tx, mut rx) = channel(MediaKind::ScreenVideo);
+        {
+            let mut members = writer.room.members.write().await;
+            members.get_mut(&1).unwrap().screen_layers = true;
+            let receiver = members.get_mut(&0).unwrap();
+            receiver.views[1].as_mut().unwrap().subscription.bitrate = 200_000;
+            receiver.outgoing[MediaKind::ScreenVideo as usize] = tx.clone();
+        }
+        let start = Instant::now();
+        let mut bytes = 0;
+        let mut rejected = 0;
+        for seq in 100..1100 {
+            let mut d = delivery(MediaKind::ScreenVideo, &source, 1200);
+            d.packet.header.csrc = vec![7, 166_666];
+            d.screen_layer = Some(0);
+            d.packet.header.sequence_number = seq;
+            let members = writer.room.members.read().await;
+            let receiver = &members[&0];
+            let identity = (source.id, 7, receiver.views[1].unwrap().since, 0, 0);
+            // Seed a selected route; an over-budget drop must invalidate it.
+            let mut key = d.packet.clone();
+            key.payload = vec![24, 0, 1, 0x67, 0, 1, 0x68, 0, 1, 0x65].into();
+            key.header.timestamp = u32::from(seq) * 3000;
+            receiver.screen_routes.lock().unwrap()[1].push(identity, 1, 1, key);
+            if tx.forward(&members[&1], receiver, d).is_err() {
+                rejected += 1;
+                let mut delta = delivery(MediaKind::ScreenVideo, &source, 2).packet;
+                delta.payload = vec![0x41, 1].into();
+                assert!(
+                    receiver.screen_routes.lock().unwrap()[1]
+                        .push(identity, 1, 1, delta)
+                        .is_empty()
+                );
+            }
+            if let Ok(queued) = rx.try_recv() {
+                bytes += queued.delivery.packet.marshal_size() + 64;
+            }
+        }
+        assert!(rejected > 900);
+        assert!(bytes as f64 <= 7500.0 + start.elapsed().as_secs_f64() * 30_000.0);
+        assert_eq!(tx.bytes.available_permits(), 512 * 1024);
+    }
+
+    #[tokio::test]
+    async fn transport_measures_lying_queue_after_downgrade_and_requests_idr() {
+        let (writer, source, mut feedback) = fixture().await;
+        let (tx, rx) = channel(MediaKind::ScreenVideo);
+        let mut members = writer.room.members.write().await;
+        members.get_mut(&1).unwrap().screen_layers = true;
+        members.get_mut(&0).unwrap().outgoing[MediaKind::ScreenVideo as usize] = tx.clone();
+        // Admit at 2.5 Mbit/s, then downgrade before any transport poll. Low
+        // forged metadata deliberately passes both metadata checks.
+        for seq in 100..150 {
+            let mut d = delivery(MediaKind::ScreenVideo, &source, 1200);
+            d.packet.header.csrc = vec![7, 166_666];
+            d.screen_layer = Some(0);
+            d.packet.header.sequence_number = seq;
+            tx.forward(&members[&1], &members[&0], d).unwrap();
+        }
+        members.get_mut(&0).unwrap().views[1]
+            .as_mut()
+            .unwrap()
+            .subscription
+            .bitrate = 200_000;
+        drop(members);
+        // Close only the test channel; production Member owns another sender.
+        let mut rx = rx;
+        rx.close();
+        let sent = Arc::new(AtomicU64::new(0));
+        let measured = sent.clone();
+        let start = Instant::now();
+        writer
+            .run(MediaKind::ScreenVideo, rx, move |_, packet| {
+                let measured = measured.clone();
+                async move {
+                    measured.fetch_add((packet.marshal_size() + 64) as u64, Ordering::Relaxed);
+                    Ok(())
+                }
+            })
+            .await;
+        let bytes = sent.load(Ordering::Relaxed);
+        assert!(bytes > 0);
+        assert!(bytes as f64 <= 7500.0 + start.elapsed().as_secs_f64() * 30_000.0);
+        assert!(feedback.try_recv().is_ok(), "throttle must request an IDR");
+    }
+
+    #[tokio::test]
+    async fn encrypted_writer_fences_duplicates_reorder_wrap_and_source_replacement() {
+        use rtc::{
+            shared::marshal::Marshal,
+            srtp::{context::Context, protection_profile::ProtectionProfile},
+        };
+        let provider = rtc::crypto::default_provider().unwrap();
+        let context = || {
+            Context::new(
+                &[3; 16],
+                &[4; 12],
+                ProtectionProfile::AeadAes128Gcm,
+                None,
+                None,
+                provider.crypto(),
+            )
+            .unwrap()
+        };
+        let mut encrypt = context();
+        let mut decrypt = context();
+        let (writer, mut source, _) = fixture().await;
+        let room = writer.room.clone();
+        let (tx, rx) = channel(MediaKind::ScreenVideo);
+        let (sent, mut received) = mpsc::unbounded_channel();
+        let mut run = std::pin::pin!(tokio::task::unconstrained(writer.run(
+            MediaKind::ScreenVideo,
+            rx,
+            move |_, packet| {
+                let sent = sent.clone();
+                async move { sent.send(packet).map_err(|_| ()) }
+            }
+        )));
+        let mut sequences = vec![
+            (100, true),
+            (102, true),
+            (101, true),
+            (101, false),
+            (99, false),
+            (30_000, false),
+            // The rejected discontinuity establishes a new local-loss floor.
+            (1100, true),
+            (1099, false),
+        ];
+        for n in (2100_u32..70_000).step_by(1000) {
+            sequences.extend([(n as u16, true), ((n - 1) as u16, true), (n as u16, false)]);
+        }
+        let mut previous = None::<u64>;
+        let mut indexes = std::collections::HashSet::new();
+        for phase in 0..4 {
+            let replace = phase == 1;
+            if replace {
+                source.id = uuid::Uuid::new_v4();
+                room.members.write().await.get_mut(&1).unwrap().source_id = source.id;
+                sequences = vec![
+                    (65535, true),
+                    (0, true),
+                    (65535, false),
+                    (65534, false),
+                    (2, true),
+                    (1, true),
+                ];
+            }
+            if phase == 2 {
+                // The relay itself discarded more than half a sequence space.
+                // Fresh traffic after that loss must recover without reusing a
+                // nonce or trying to infer the publisher's skipped rollover.
+                room.members.read().await[&0].outgoing[MediaKind::ScreenVideo as usize]
+                    .screen_budget
+                    .lock()
+                    .unwrap()[1]
+                    .rejected_at = Some(Instant::now());
+                sequences = vec![
+                    (40_000, true),
+                    (40_000, false),
+                    (40_002, true),
+                    (40_001, true),
+                ];
+            }
+            if phase == 3 {
+                // A large final-queue gap without ANY bitrate rejection used to
+                // wedge the window forever. Reject it, invalidate the route and
+                // accept the fresh recovery without forgetting outbound history.
+                sequences = vec![
+                    (10_000, false),
+                    (10_001, true),
+                    (10_001, false),
+                    (10_003, true),
+                    (10_002, true),
+                ];
+            }
+            for (seq, expected) in &sequences {
+                let mut d = delivery(MediaKind::ScreenVideo, &source, 3);
+                d.packet.header.sequence_number = *seq;
+                d.packet.header.ssrc = MediaKind::ScreenVideo.relay_ssrc(1);
+                d.packet.payload = vec![0x41, u8::from(*expected), u8::from(replace)].into();
+                tx.try_send(d).unwrap();
+                assert!(futures_util::poll!(run.as_mut()).is_pending());
+                let packet = received.try_recv();
+                assert_eq!(
+                    packet.is_ok(),
+                    *expected,
+                    "seq {seq}, replacement {replace}"
+                );
+                if let Ok(packet) = packet {
+                    let index = previous.map_or(u64::from(packet.header.sequence_number), |last| {
+                        last.checked_add_signed(i64::from(
+                            packet.header.sequence_number.wrapping_sub(last as u16) as i16,
+                        ))
+                        .unwrap()
+                    });
+                    assert!(indexes.insert(index), "transport reused index {index}");
+                    previous = Some(index);
+                    let plain = packet.marshal().unwrap();
+                    assert_eq!(
+                        decrypt
+                            .decrypt_rtp(&encrypt.encrypt_rtp(&plain).unwrap())
+                            .unwrap()
+                            .as_ref(),
+                        plain.as_ref()
+                    );
+                }
+            }
+        }
+        assert!(indexes.iter().any(|index| *index > 65535));
+        drop(tx);
+        run.await;
     }
 
     #[tokio::test]
@@ -1712,7 +2083,10 @@ mod tests {
                 kind != MediaKind::Microphone
             );
             if kind.is_video() {
-                assert_eq!(feedback.try_recv().unwrap(), (MediaKind::ScreenVideo, 7));
+                assert_eq!(
+                    feedback.try_recv().unwrap(),
+                    (MediaKind::ScreenVideo, 7, None)
+                );
             }
         }
     }
@@ -1783,7 +2157,10 @@ mod tests {
                 panic!("expired packet sent")
             })
             .await;
-        assert_eq!(feedback.try_recv().unwrap(), (MediaKind::ScreenVideo, 7));
+        assert_eq!(
+            feedback.try_recv().unwrap(),
+            (MediaKind::ScreenVideo, 7, None)
+        );
         assert!(active.load(Ordering::Acquire));
     }
 
@@ -1802,7 +2179,10 @@ mod tests {
         tokio::time::sleep(VIDEO_AGE + Duration::from_millis(10)).await;
         drop(members);
         task.await.unwrap();
-        assert_eq!(feedback.try_recv().unwrap(), (MediaKind::ScreenVideo, 7));
+        assert_eq!(
+            feedback.try_recv().unwrap(),
+            (MediaKind::ScreenVideo, 7, None)
+        );
     }
 
     #[tokio::test]

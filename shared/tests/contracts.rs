@@ -52,6 +52,7 @@ fn speaker_volume_targets_default_to_voice_and_distinguish_shared_audio() {
 fn screen_commands_are_explicit_and_older_rosters_default_to_no_share() {
     use thiscord_shared::voice::*;
     let event = ClientEvent::Screen {
+        quality: None,
         active: true,
         audio: true,
     };
@@ -354,6 +355,7 @@ fn screen_feedback_capabilities_are_opt_in_and_legacy_answers_stay_compatible() 
             remote_audio: false,
             screen_feedback: false,
             screen_subscriptions: false,
+            screen_layers: false,
             ..
         }
     ));
@@ -369,6 +371,7 @@ fn screen_feedback_capabilities_are_opt_in_and_legacy_answers_stay_compatible() 
             remote_audio: false,
             screen_feedback: false,
             screen_subscriptions: false,
+            screen_layers: false,
             ..
         }
     ));
@@ -404,6 +407,7 @@ fn screen_view_subscriptions_and_pause_targets_keep_stable_wire_shapes() {
     let pause = json!({"type":"screen_target","epoch":3,"bitrate":0});
     assert_eq!(
         to_value(ServerEvent::ScreenTarget {
+            layers: None,
             kind: MediaKind::ScreenVideo,
             epoch: 3,
             bitrate: 0
@@ -421,6 +425,58 @@ fn screen_view_subscriptions_and_pause_targets_keep_stable_wire_shapes() {
     for bitrate in [0, 199_999, 32_000_001, u32::MAX] {
         assert!(!Subscription { bitrate, ..view }.valid());
     }
+}
+
+#[test]
+fn layered_screen_contract_is_negotiated_and_legacy_target_defaults_remain_readable() {
+    use thiscord_shared::{screen::*, voice::*};
+    let answer: ClientEvent =
+        from_value(json!({"type":"answer","sdp":"test","screen_layers":true})).unwrap();
+    assert!(matches!(
+        answer,
+        ClientEvent::Answer {
+            screen_layers: true,
+            ..
+        }
+    ));
+    let old: ServerEvent =
+        from_value(json!({"type":"screen_target","epoch":4,"bitrate":500000})).unwrap();
+    assert!(matches!(
+        old,
+        ServerEvent::ScreenTarget { layers: None, .. }
+    ));
+    let event = ServerEvent::ScreenTarget {
+        kind: MediaKind::ScreenVideo,
+        epoch: 4,
+        bitrate: 200_000,
+        layers: Some(LayerTargets {
+            primary: 5_000_000,
+            low: 200_000,
+        }),
+    };
+    assert_eq!(
+        to_value(event).unwrap(),
+        json!({"type":"screen_target","epoch":4,"bitrate":200000,"layers":{"primary":5000000,"low":200000}})
+    );
+    let packet = LayerPacket {
+        epoch: 4,
+        bitrate: 166_666,
+    };
+    assert_eq!(LayerPacket::parse(&packet.csrc()), Some(packet));
+    for csrc in [
+        vec![],
+        vec![4],
+        vec![4, 0],
+        vec![4, u32::MAX],
+        vec![4, 200_000, 1],
+    ] {
+        assert_eq!(LayerPacket::parse(&csrc), None);
+    }
+    let old_key: ServerEvent = from_value(json!({"type":"screen_keyframe","epoch":4})).unwrap();
+    assert!(matches!(
+        old_key,
+        ServerEvent::ScreenKeyframe { layer: None, .. }
+    ));
 }
 
 #[test]

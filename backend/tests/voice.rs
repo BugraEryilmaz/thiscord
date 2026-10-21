@@ -13,6 +13,10 @@ use tower::ServiceExt;
 use uuid::Uuid;
 #[path = "voice/friends.rs"]
 mod friends;
+#[path = "voice/layers.rs"]
+mod layers;
+#[path = "voice/recovery.rs"]
+mod recovery;
 #[path = "voice/red.rs"]
 mod red;
 #[path = "voice/roster.rs"]
@@ -69,6 +73,15 @@ fn user(db: &Database, name: &str) -> (AccountId, String) {
     (id, token)
 }
 async fn call(app: &Router, path: &str, token: &str, command: Value) -> (StatusCode, Value) {
+    // Isolated databases still share the production process-wide HTTP worker
+    // limit. Bound parallel fixture commands so adding transport regressions
+    // does not accidentally turn another fixture's setup into an overload test.
+    static COMMANDS: std::sync::OnceLock<tokio::sync::Semaphore> = std::sync::OnceLock::new();
+    let _command = COMMANDS
+        .get_or_init(|| tokio::sync::Semaphore::new(4))
+        .acquire()
+        .await
+        .unwrap();
     let response = app
         .clone()
         .oneshot(
@@ -241,6 +254,7 @@ struct Peer {
     microphone_challenge: Option<u32>,
     microphone_satisfied: u32,
     screen_tracks: [Arc<TrackLocalStaticRTP>; 3],
+    low_track: Option<Arc<TrackLocalStaticRTP>>,
     screen_sequences: [u16; 3],
     views: Vec<thiscord_shared::screen::Subscription>,
 }
@@ -251,7 +265,15 @@ impl Peer {
     async fn with_packet_capacity(socket: Socket, capacity: usize) -> Self {
         Self::with_red(socket, capacity, false).await
     }
-    async fn with_red(mut socket: Socket, capacity: usize, packet_redundancy: bool) -> Self {
+    async fn with_red(socket: Socket, capacity: usize, packet_redundancy: bool) -> Self {
+        Self::with_layers(socket, capacity, packet_redundancy, false).await
+    }
+    async fn with_layers(
+        mut socket: Socket,
+        capacity: usize,
+        packet_redundancy: bool,
+        screen_layers: bool,
+    ) -> Self {
         let ServerEvent::Offer {
             sdp,
             slot,
@@ -361,6 +383,33 @@ impl Peer {
                 .await
                 .unwrap();
         }
+        let low_track = if screen_layers {
+            let track = Arc::new(TrackLocalStaticRTP::new(MediaStreamTrack::new(
+                "screen-low".into(),
+                "screen-low".into(),
+                "screen-low".into(),
+                RtpCodecKind::Video,
+                vec![RTCRtpEncodingParameters {
+                    rtp_coding_parameters: RTCRtpCodingParameters {
+                        ssrc: Some(thiscord_shared::screen::LOW_LAYER_SSRC),
+                        ..Default::default()
+                    },
+                    codec: RTCRtpCodec {
+                        mime_type: "video/H264".into(),
+                        clock_rate: 90_000,
+                        sdp_fmtp_line: thiscord_shared::screen::H264_FMTP.into(),
+                        ..Default::default()
+                    },
+                    ..Default::default()
+                }],
+            )));
+            pc.add_track(track.clone() as Arc<dyn TrackLocal>)
+                .await
+                .unwrap();
+            Some(track)
+        } else {
+            None
+        };
         let answer = pc.create_answer(None).await.unwrap();
         if packet_redundancy {
             assert!(
@@ -379,6 +428,7 @@ impl Peer {
                 remote_audio: true,
                 screen_feedback: true,
                 screen_subscriptions: true,
+                screen_layers,
                 sdp: serde_json::to_string(&pc.local_description().await.unwrap()).unwrap(),
             },
         )
@@ -416,6 +466,7 @@ impl Peer {
             microphone_challenge,
             microphone_satisfied: 0,
             screen_tracks,
+            low_track,
             screen_sequences: [0; 3],
             views: vec![],
         }
@@ -562,7 +613,7 @@ async fn screen_blocked(source: &mut Peer, receiver: &mut Peer) {
 /// H.264-sized payloads through the production SFU while microphone RTP continues.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 #[ignore = "requires TEST_DATABASE_URL; CI runs with --include-ignored"]
-async fn sfu_sustains_4k60_transport_with_two_times_bitrate_headroom() {
+async fn sfu_sustains_authorized_4k60_and_limits_excess_egress() {
     let db = database();
     let (_, ot) = user(&db, "load_owner");
     let (_, mt) = user(&db, "load_viewer");
@@ -606,6 +657,7 @@ async fn sfu_sustains_4k60_transport_with_two_times_bitrate_headroom() {
     send(
         &mut a.socket,
         ClientEvent::Screen {
+            quality: None,
             active: true,
             audio: false,
         },
@@ -616,9 +668,22 @@ async fn sfu_sustains_4k60_transport_with_two_times_bitrate_headroom() {
     screen_forwarded(&mut a, &mut b, 0).await;
     let mut sequence = a.screen_sequences[0];
     let mut microphone_sequence = a.sequence;
-    for fps in [60u32, 120] {
+    for (fps, seconds, bitrate) in [
+        (60_u32, 8_u32, thiscord_shared::screen::MAX_VIEW_BITRATE),
+        (120, 8, thiscord_shared::screen::MAX_VIEW_BITRATE),
+        (120, 2, thiscord_shared::screen::MIN_VIEW_BITRATE),
+    ] {
         while b.packets.try_recv().is_ok() {}
-        let frames = fps * 8;
+        b.views[0].bitrate = bitrate;
+        send(
+            &mut b.socket,
+            ClientEvent::ScreenViews {
+                views: b.views.clone(),
+            },
+        )
+        .await;
+        still_connected(&mut b.socket).await;
+        let frames = fps * seconds;
         let expected = frames as usize * 60;
         let video_ssrc = thiscord_shared::screen::SSRC_BASE + a.slot as u32;
         let audio_ssrc = voice::SSRC_BASE + a.slot as u32;
@@ -683,7 +748,7 @@ async fn sfu_sustains_4k60_transport_with_two_times_bitrate_headroom() {
         let mut received = 0;
         let mut audio = 0;
         let mut renew = tokio::time::interval(Duration::from_millis(500));
-        let deadline = started + Duration::from_secs(11);
+        let deadline = started + Duration::from_secs(u64::from(seconds) + 3);
         while received < expected {
             tokio::select! {
                 _ = tokio::time::sleep_until(deadline) => break,
@@ -712,18 +777,45 @@ async fn sfu_sustains_4k60_transport_with_two_times_bitrate_headroom() {
             "SFU load: fps={fps}, Mbps={:.2}, received={received}/{expected}, microphone={audio}",
             expected as f64 * 1112.0 * 8.0 / elapsed.as_secs_f64() / 1e6
         );
-        assert_eq!(
-            received, expected,
-            "SFU must forward the full video burst load"
-        );
+        if fps == 60 {
+            assert_eq!(
+                received, expected,
+                "authorized 4k60 must retain full delivery"
+            );
+        } else {
+            // The old test demanded unrestricted 64 Mbit/s egress from a
+            // 32 Mbit/s view. Encrypted transport must now enforce the actual
+            // subscription, including a legacy publisher claiming no bitrate.
+            let rate = f64::from(bitrate) * 1.2 / 8.0;
+            let burst = (rate * 0.25).max(3000.0);
+            // Payload + serialized relay RTP + accounted SRTP/UDP/IP overhead.
+            let measured = received * (1112 + 16 + 64);
+            assert!(received < expected / 4 * 3);
+            if bitrate == thiscord_shared::screen::MAX_VIEW_BITRATE {
+                assert!(received > 0);
+            }
+            assert!(
+                measured as f64 <= rate * (elapsed.as_secs_f64() + 0.15) + burst,
+                "{measured} measured bytes exceeded {bitrate} bit/s view"
+            );
+        }
         assert!(
-            audio >= 150,
+            audio >= (seconds * 18) as usize,
             "microphone delivery must continue under video load"
         );
         assert!(
-            elapsed < Duration::from_millis(8200),
+            elapsed < Duration::from_millis(u64::from(seconds) * 1000 + 200),
             "load generator did not sustain target rate"
         );
+        if fps == 120 {
+            // Deliberate over-budget bursts can drop whole frames. Once the
+            // publisher reduces output, fresh encrypted media must resume even
+            // if the locally dropped sequence gap exceeded the reorder window.
+            a.screen_sequences[0] = sequence;
+            tokio::time::sleep(Duration::from_millis(300)).await;
+            screen_forwarded(&mut a, &mut b, 0).await;
+            sequence = a.screen_sequences[0];
+        }
     }
     a.close().await;
     b.close().await;
@@ -1355,6 +1447,7 @@ async fn sfu_forwarding_permissions_isolation_and_cleanup() {
     send(
         &mut a.socket,
         ClientEvent::Screen {
+            quality: None,
             active: true,
             audio: true,
         },
@@ -1436,6 +1529,7 @@ async fn sfu_forwarding_permissions_isolation_and_cleanup() {
     send(
         &mut a.socket,
         ClientEvent::Screen {
+            quality: None,
             active: false,
             audio: false,
         },
@@ -1446,6 +1540,7 @@ async fn sfu_forwarding_permissions_isolation_and_cleanup() {
     send(
         &mut a.socket,
         ClientEvent::Screen {
+            quality: None,
             active: true,
             audio: true,
         },
@@ -1463,6 +1558,7 @@ async fn sfu_forwarding_permissions_isolation_and_cleanup() {
     send(
         &mut a.socket,
         ClientEvent::Screen {
+            quality: None,
             active: false,
             audio: false,
         },
@@ -1481,6 +1577,7 @@ async fn sfu_forwarding_permissions_isolation_and_cleanup() {
     send(
         &mut a.socket,
         ClientEvent::Screen {
+            quality: None,
             active: true,
             audio: true,
         },
@@ -1530,6 +1627,7 @@ async fn sfu_forwarding_permissions_isolation_and_cleanup() {
     send(
         &mut a.socket,
         ClientEvent::Screen {
+            quality: None,
             active: false,
             audio: false,
         },
@@ -1587,6 +1685,7 @@ async fn sfu_forwarding_permissions_isolation_and_cleanup() {
     send(
         &mut b.socket,
         ClientEvent::Screen {
+            quality: None,
             active: true,
             audio: true,
         },
@@ -1598,6 +1697,7 @@ async fn sfu_forwarding_permissions_isolation_and_cleanup() {
     send(
         &mut a.socket,
         ClientEvent::Screen {
+            quality: None,
             active: true,
             audio: false,
         },
@@ -1612,6 +1712,7 @@ async fn sfu_forwarding_permissions_isolation_and_cleanup() {
     send(
         &mut a.socket,
         ClientEvent::Screen {
+            quality: None,
             active: false,
             audio: false,
         },
@@ -1935,6 +2036,7 @@ async fn camera_grid(source: &mut Peer, viewer: &mut Peer) {
         send(
             &mut peer.socket,
             ClientEvent::Screen {
+                quality: None,
                 active: true,
                 audio: true,
             },
@@ -2005,6 +2107,7 @@ async fn camera_grid(source: &mut Peer, viewer: &mut Peer) {
         send(
             &mut peer.socket,
             ClientEvent::Screen {
+                quality: None,
                 active: false,
                 audio: false,
             },

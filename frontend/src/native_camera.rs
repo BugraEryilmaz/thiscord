@@ -823,6 +823,7 @@ mod tests {
         Binding {
             connection: Connection::default(),
             own_slot: 0,
+            layers: None,
             local_epoch: Default::default(),
             local_visible: Default::default(),
             video,

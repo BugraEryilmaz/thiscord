@@ -24,6 +24,7 @@ const COUNTERS: &[&str] = &[
     "encode_stale",
     "encode_dependent",
     "sender_stale",
+    "sender_burst_recovery",
     "sender_dependent",
     "send_timeouts",
     "send_errors",
