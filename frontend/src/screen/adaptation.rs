@@ -96,11 +96,11 @@ impl Receiver {
         let severe = sample.severe || self.idle >= 3;
         let bad = sample.congested || severe;
         self.bad = ((self.bad << 1) | u8::from(bad)) & 0b1111;
-        self.healthy = if !bad && sample.receiving {
-            self.healthy.saturating_add(1)
-        } else {
-            0
-        };
+        if bad {
+            self.healthy = 0;
+        } else if sample.receiving {
+            self.healthy = self.healthy.saturating_add(1);
+        } // Short idle gaps preserve evidence, but never prove spare capacity.
         if now.saturating_duration_since(started) < Duration::from_secs(2) {
             return; // Initial negotiation and IDR recovery.
         }
@@ -111,8 +111,8 @@ impl Receiver {
             self.decrease(65, now);
         } else if bad && self.bad.count_ones() >= 3 && ready(3) {
             self.decrease(85, now);
-        } else if self.healthy >= 6 && ready(3) {
-            // Start probing after six good seconds, then every three seconds.
+        } else if sample.receiving && self.healthy >= 6 && ready(3) {
+            // Start probing after six receiving samples, then every three.
             // A low budget recovers in bounded time without a 25% step each time.
             let next = (self.bitrate * 112 / 100).min(self.maximum);
             if next != self.bitrate {
@@ -384,6 +384,64 @@ mod tests {
             );
         }
         assert_eq!(link.receiver.bitrate(), MAX_VIEW_BITRATE);
+    }
+
+    #[test]
+    fn sparse_receiving_samples_recover_below_the_ceiling_without_idle_probes() {
+        for maximum in [MAX_VIEW_BITRATE, thiscord_shared::camera::MAX_BITRATE] {
+            let mut link = Link::new(maximum);
+            link.run(5, false, false, true);
+            let cut = link.step(true, true, true);
+            assert!(cut < maximum);
+            for sample in 1..=60 {
+                let before = link.receiver.bitrate();
+                assert_eq!(link.step(false, false, false), before);
+                let after = link.step(false, false, true);
+                if sample < 6 {
+                    assert_eq!(after, cut);
+                }
+            }
+            assert_eq!(link.receiver.bitrate(), maximum);
+            link.run(60, true, true, true);
+            assert_eq!(link.receiver.bitrate(), MIN_VIEW_BITRATE);
+            // Recovery also completes from the floor, at half the sampling duty.
+            for _ in 0..150 {
+                let before = link.receiver.bitrate();
+                assert_eq!(link.step(false, false, false), before);
+                link.step(false, false, true);
+            }
+            assert_eq!(link.receiver.bitrate(), maximum);
+        }
+    }
+
+    #[test]
+    fn static_delta_heartbeats_recover_but_missing_submissions_still_cut_budget() {
+        use crate::screen::keyframe::KeyframePolicy;
+        let mut link = Link::new(MAX_VIEW_BITRATE);
+        link.run(5, false, false, true);
+        assert!(link.step(true, true, true) < MAX_VIEW_BITRATE);
+        let mut policy = KeyframePolicy::default();
+        let mut idrs = 0;
+        let mut deltas = 0;
+        for _ in 0..40 {
+            let now = link.start + Duration::from_secs(link.second);
+            assert!(policy.refresh_due(now, false));
+            let forced = policy.periodic_due(now);
+            policy.submitted(now, forced);
+            idrs += u32::from(forced);
+            deltas += u32::from(!forced);
+            link.step(false, false, true);
+        }
+        assert_eq!((idrs, deltas), (4, 36));
+        assert_eq!(link.receiver.bitrate(), MAX_VIEW_BITRATE);
+        // Busy/stopped capture does not submit the due heartbeat; no frame
+        // evidence is fabricated merely because refresh_due remains true.
+        for _ in 0..2 {
+            let now = link.start + Duration::from_secs(link.second);
+            assert!(policy.refresh_due(now, false));
+            assert_eq!(link.step(false, false, false), MAX_VIEW_BITRATE);
+        }
+        assert_eq!(link.step(false, false, false), MAX_VIEW_BITRATE * 65 / 100);
     }
 
     #[test]

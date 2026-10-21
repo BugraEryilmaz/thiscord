@@ -214,9 +214,11 @@ Ordinary congestion requires three bad samples out of four and reduces the budge
 quality. Severe packet loss (at least ten packets and 15% of expected packets), or
 three consecutive samples without complete frames, reduces the budget 35%, at
 most once every two seconds. The first two seconds allow negotiation/IDR recovery.
-The separate one-second static delta refresh prevents idle desktop content from counting as a stall. Six consecutive
-healthy samples start recovery with a 12% probe, followed by another probe every
-three healthy samples. Uninterrupted recovery from the floor to 32 Mbit/s takes
+The separate one-second static delta refresh prevents idle desktop content from
+counting as a stall. Six healthy receiving samples start recovery with a 12% probe,
+followed by another probe every three healthy receiving samples. One or two idle
+samples preserve progress but cannot trigger a probe; congestion or a three-sample
+stall clears progress. Uninterrupted recovery from the floor to 32 Mbit/s takes
 under 150 seconds. A sampling gap over three seconds clears accumulated evidence
 and restarts setup grace without changing the retained budget; duplicate/subsecond
 polls cannot accelerate adaptation. Each viewer/stream owns independent state.
@@ -229,12 +231,18 @@ with 20% bitrate headroom. The selected maximum remains reachable at its nominal
 budget, including 4K/60 at the 32 Mbit/s ceiling. Rebuilds have a five-second
 cooldown; a budget below 60% of the current mode's nominal bitrate bypasses both
 dwell and cooldown for immediate downgrade. While a normal downgrade is pending,
-the existing encoder can temporarily exceed the newly requested budget (up to
-five seconds); the existing bounded queues, expiry and recovery rules still apply.
+the existing encoder retains its nominal bitrate (up to five seconds), while raw
+input admission and pacing use the smaller of that bitrate and live demand, plus
+the existing 20% transport overhead allowance. Byte backpressure sheds raw input
+before creating dependencies when nominal output exceeds that rate. This avoids
+independently snapping the sender to a lower ladder rung during a held mode.
 Zero/expired demand pauses immediately and clears pending transitions; renewed
 demand chooses its current target immediately. Capture FPS follows the committed
 encoder target, so a noisy budget cannot independently oscillate capture cadence.
-Byte admission and RTP pacing change with the committed target. Diagnostics expose
+Queued/in-flight frames share their encoder's admission rate; the sender also caps
+each packet's rate by fresh demand and preserves byte debt across rate changes.
+The bounded queues, expiry and recovery rules still apply, including when an
+already encoded burst cannot drain after a severe capacity collapse. Diagnostics expose
 actual `target_bitrate`, `target_fps`, `resolution` and `video_paused`.
 `requested_height`, `requested_fps` and `viewer_bitrate_budget` distinguish the
 selected maximum from receiver-driven adaptation. A 4K preset does not upscale

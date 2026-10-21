@@ -37,18 +37,11 @@ impl Sender {
         let mut pacer =
             super::pacing::Pacer::new(super::pacing::transport_bitrate(quality.bitrate()));
         let mut waiting = false;
-        let mut paced_quality = quality;
         'frames: while let Some(mut frame) = rx.recv().await {
             let budget = self.demand.bitrate();
             if budget == 0 {
                 waiting = true;
                 continue;
-            }
-            let current = quality.constrained(budget);
-            if current != paced_quality {
-                pacer =
-                    super::pacing::Pacer::new(super::pacing::transport_bitrate(current.bitrate()));
-                paced_quality = current;
             }
             let captured_at = frame.captured_at;
             self.metrics
@@ -77,7 +70,15 @@ impl Sender {
                 .peak("sender_peak_frame_packets", frame.packets.len() as u64);
             for mut packet in frame.packets {
                 let bytes = packet.payload.len() + 64;
-                let at = pacer.reserve(Instant::now(), bytes);
+                let demand = self.demand.bitrate();
+                if demand == 0 {
+                    waiting = true;
+                    self.force_keyframe.store(true, Ordering::Release);
+                    continue 'frames;
+                }
+                let now = Instant::now();
+                pacer.set_bitrate(frame.budget.pacing_bitrate(demand), now);
+                let at = pacer.reserve(now, bytes);
                 if at > Instant::now() {
                     let sleep_started = Instant::now();
                     self.metrics.add("pacing_sleeps", 1);

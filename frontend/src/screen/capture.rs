@@ -380,10 +380,13 @@ fn encode(
             waiting_for_keyframe = true;
             reconfigure = true;
             paused = false;
-            send_budget.set_bitrate(super::pacing::transport_bitrate(quality.bitrate()));
             force_keyframe.store(true, Ordering::Release);
             metrics.label("video_paused", false);
         }
+        // Share the committed mode's demand-capped rate with the sender. While
+        // a rebuild is pending, shed raw input at this rate before encoding more
+        // dependencies; a small budget dip must not halve the transport rate.
+        send_budget.set_bitrate(super::pacing::transport_budget(quality.bitrate(), bitrate));
         if color_checked.elapsed() >= Duration::from_secs(1) {
             let monitor = match source {
                 SourceId::Monitor(id) => HMONITOR(*id as *mut _),

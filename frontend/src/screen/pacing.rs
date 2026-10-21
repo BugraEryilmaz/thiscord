@@ -2,7 +2,7 @@
 use std::{
     sync::{
         Arc,
-        atomic::{AtomicUsize, Ordering},
+        atomic::{AtomicU32, AtomicUsize, Ordering},
     },
     time::{Duration, Instant},
 };
@@ -11,22 +11,31 @@ pub fn transport_bitrate(codec_bitrate: u32) -> u32 {
     codec_bitrate * 12 / 10
 }
 
+/// Preserve the committed encoder mode during hysteresis, but limit offered
+/// traffic to live demand. Never reselect a discrete quality rung in the sender.
+pub fn transport_budget(encoder_bitrate: u32, demand: u32) -> u32 {
+    transport_bitrate(encoder_bitrate.min(demand))
+}
+
 /// Count unsent wire bytes, including the frame currently being paced. Frame
 /// count alone cannot distinguish a small delta from a 500 KB scene change.
 /// This is raw-input admission, not an encoded-frame size/drop limit.
 pub const BACKLOG_BUDGET_MS: u32 = 100;
 pub struct SendBudget {
     outstanding: Arc<AtomicUsize>,
+    bitrate: Arc<AtomicU32>,
     limit: usize,
 }
 impl SendBudget {
     pub fn new(bitrate: u32) -> Self {
         Self {
             outstanding: Arc::default(),
+            bitrate: Arc::new(AtomicU32::new(bitrate)),
             limit: (u64::from(bitrate) * u64::from(BACKLOG_BUDGET_MS) / 8 / 1000).max(1) as usize,
         }
     }
     pub fn set_bitrate(&mut self, bitrate: u32) {
+        self.bitrate.store(bitrate, Ordering::Release);
         self.limit = (u64::from(bitrate) * u64::from(BACKLOG_BUDGET_MS) / 8 / 1000).max(1) as usize;
     }
     pub fn bytes(&self) -> usize {
@@ -39,6 +48,7 @@ impl SendBudget {
         self.outstanding.fetch_add(bytes, Ordering::AcqRel);
         PendingBytes {
             outstanding: self.outstanding.clone(),
+            bitrate: self.bitrate.clone(),
             remaining: bytes,
         }
     }
@@ -48,9 +58,18 @@ impl SendBudget {
 /// cancellation and receiver shutdown all release the remaining budget on drop.
 pub struct PendingBytes {
     outstanding: Arc<AtomicUsize>,
+    bitrate: Arc<AtomicU32>,
     remaining: usize,
 }
 impl PendingBytes {
+    /// Follow this encoder's admission rate even for queued/in-flight frames.
+    /// A fresh demand cut takes effect without waiting for the capture worker.
+    pub fn pacing_bitrate(&self, demand: u32) -> u32 {
+        self.bitrate
+            .load(Ordering::Acquire)
+            .min(transport_bitrate(demand))
+    }
+
     pub fn sent(&mut self, bytes: usize) {
         assert!(bytes <= self.remaining);
         self.remaining -= bytes;
@@ -72,6 +91,27 @@ impl Pacer {
             next: None,
             bytes_per_second: u64::from(bitrate) / 8,
         }
+    }
+    pub fn set_bitrate(&mut self, bitrate: u32, now: Instant) {
+        let rate = (u64::from(bitrate) / 8).max(1);
+        if rate == self.bytes_per_second {
+            return;
+        }
+        // Preserve byte debt/credit through rate changes instead of granting a
+        // fresh burst every time receiver feedback changes. reserve caps credit.
+        let scale = self.bytes_per_second as f64 / rate as f64;
+        self.next = self.next.map(|at| {
+            if at >= now {
+                now + at.duration_since(now).mul_f64(scale)
+            } else {
+                now - now
+                    .duration_since(at)
+                    .min(Duration::from_millis(16))
+                    .mul_f64(scale)
+                    .min(Duration::from_millis(16))
+            }
+        });
+        self.bytes_per_second = rate;
     }
     pub fn reserve(&mut self, now: Instant, bytes: usize) -> Instant {
         // Keep at most one 16 ms OS timer tick of credit. An 8 ms sleep can
@@ -101,6 +141,161 @@ impl Pacer {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::screen::{Outgoing, adaptation::QualityController};
+    use thiscord_shared::screen::Quality;
+
+    // Real packetization, byte ownership/admission and pacing, with deterministic
+    // capture and scheduler clocks. The first frame is a ~140 KB wire burst at
+    // 1080p30; later deltas offer the encoder's nominal bitrate during the hold.
+    fn replay_burst(quality: Quality, demand: u32, start: Instant) -> (Duration, usize) {
+        let rate = transport_budget(quality.bitrate(), demand);
+        let mut budget = SendBudget::new(transport_bitrate(quality.bitrate()));
+        let mut pacer = Pacer::new(transport_bitrate(quality.bitrate()));
+        let mut queue = std::collections::VecDeque::<Outgoing>::new();
+        let mut sequence = 0;
+        let mut next_capture = start;
+        let mut skipped = 0;
+        let mut now = start;
+        let mut first_age = None;
+        let mut captures = 0;
+        let mut capture = |now: Instant,
+                           queue: &mut std::collections::VecDeque<Outgoing>,
+                           budget: &SendBudget| {
+            while next_capture <= now && next_capture < start + Duration::from_millis(500) {
+                if budget.has_capacity()
+                    && crate::screen::encoder_has_capacity(
+                        crate::screen::sender_queue_frames(quality.fps).saturating_sub(queue.len()),
+                        0,
+                    )
+                {
+                    let size = if captures == 0 {
+                        (u64::from(quality.bitrate()) * 132_000 / 5_000_000) as usize
+                    } else {
+                        (quality.bitrate() / quality.fps / 8) as usize
+                    };
+                    let mut data = vec![1; size];
+                    data[..5].copy_from_slice(&[0, 0, 0, 1, 0x61]);
+                    let packets = crate::screen::packetize(data, &mut sequence, captures).unwrap();
+                    let bytes = packets.iter().map(|p| p.payload.len() + 64).sum();
+                    queue.push_back(Outgoing {
+                        captured_at: next_capture - Duration::from_millis(6),
+                        enqueued_at: next_capture,
+                        packets,
+                        keyframe: captures == 0,
+                        budget: budget.track(bytes),
+                    });
+                } else {
+                    skipped += 1;
+                }
+                captures += 1;
+                next_capture += Duration::from_secs_f64(1.0 / f64::from(quality.fps));
+            }
+            next_capture
+        };
+        loop {
+            let next_capture = capture(now, &mut queue, &budget);
+            // Change admission *after* tracking the first frame: in-flight
+            // ownership must see the new rate, not a stale per-frame snapshot.
+            budget.set_bitrate(rate);
+            let Some(mut frame) = queue.pop_front() else {
+                if next_capture >= start + Duration::from_millis(500) {
+                    break;
+                }
+                now = next_capture;
+                continue;
+            };
+            assert!(now.duration_since(frame.captured_at) <= crate::screen::SENDER_QUEUE_AGE);
+            for packet in frame.packets {
+                let bytes = packet.payload.len() + 64;
+                assert_eq!(frame.budget.pacing_bitrate(demand), rate);
+                pacer.set_bitrate(frame.budget.pacing_bitrate(demand), now);
+                let at = pacer.reserve(now, bytes);
+                if at > now {
+                    now = at + Duration::from_millis(8); // Coarse 16 ms wake.
+                }
+                capture(now, &mut queue, &budget);
+                frame.budget.sent(bytes);
+            }
+            let age = now.duration_since(frame.captured_at);
+            assert!(
+                age < Duration::from_millis(350),
+                "{quality:?} / {demand}: {age:?}"
+            );
+            first_age.get_or_insert(age);
+        }
+        assert_eq!(budget.bytes(), 0);
+        (first_age.unwrap(), skipped)
+    }
+
+    #[test]
+    fn controller_transitions_and_bursts_share_demand_capped_admission_and_pacing() {
+        let maximum = Quality::default();
+        let mut controller = QualityController::new(maximum);
+        let start = Instant::now();
+        let mut baseline = Duration::ZERO;
+        for (second, demand) in [
+            (0, 5_000_000),
+            (1, 4_900_000),
+            (2, 5_000_000),
+            (3, 4_900_000),
+            (4, 5_000_000),
+            (5, 4_900_000),
+            (6, 4_900_000),
+            (7, 4_900_000), // Sustained downgrade commits.
+            (8, 5_000_000),
+            (14, 5_000_000), // Recovery commits after dwell/headroom.
+            (15, 200_000),   // Severe cut bypasses cooldown.
+        ] {
+            let now = start + Duration::from_secs(second);
+            let quality = controller.update(demand, now).unwrap();
+            let (age, skipped) = replay_burst(quality, demand, now);
+            if second == 0 {
+                baseline = age;
+            }
+            if second < 7 {
+                assert_eq!(quality, maximum);
+                assert!(
+                    age <= baseline + Duration::from_millis(32),
+                    "{age:?} vs {baseline:?}"
+                );
+                assert!(skipped > 0, "admission must shed raw input during bursts");
+            } else if second < 14 {
+                assert_eq!(quality, maximum.constrained(4_900_000));
+            } else if second == 15 {
+                assert_eq!(quality, maximum.constrained(demand));
+            } else {
+                assert_eq!(quality, maximum);
+            }
+        }
+    }
+
+    #[test]
+    fn live_rate_cuts_bound_in_flight_traffic_without_erasing_pacer_debt() {
+        let start = Instant::now();
+        let maximum = Quality::default();
+        let mut controller = QualityController::new(maximum);
+        controller.update(5_000_000, start);
+        let mut budget = SendBudget::new(transport_bitrate(maximum.bitrate()));
+        let pending = budget.track(140_000);
+        let mut pacer = Pacer::new(pending.pacing_bitrate(5_000_000));
+        pacer.reserve(start, 75_000); // 100 ms of existing byte debt.
+        // The sender sees fresh feedback before capture commits a new mode.
+        assert_eq!(pending.pacing_bitrate(1_000_000), 1_200_000);
+        pacer.set_bitrate(pending.pacing_bitrate(1_000_000), start);
+        assert_eq!(
+            pacer.reserve(start, 1_000),
+            start + Duration::from_millis(504)
+        );
+        assert_eq!(pending.pacing_bitrate(0), 0); // Sender cancels, never paces zero.
+        assert_eq!(controller.update(0, start), None);
+        let resumed = controller.update(1_000_000, start).unwrap();
+        budget.set_bitrate(transport_budget(resumed.bitrate(), 1_000_000));
+        assert!(pending.pacing_bitrate(32_000_000) <= 1_200_000);
+        assert!(!budget.has_capacity());
+        drop(pending);
+        assert!(budget.has_capacity());
+    }
+
     #[test]
     fn reduced_rate_preserves_in_flight_byte_debt() {
         let mut budget = SendBudget::new(32_000_000);
