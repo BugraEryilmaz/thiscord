@@ -10,90 +10,199 @@ pub struct DecoderSample {
 #[derive(Default)]
 pub struct DecoderPressure {
     previous: Option<DecoderSample>,
-    bad_seconds: u8,
+    smoothed: Option<(f64, f64)>,
+    bad: u8,
+    healthy: u8,
+    pressured: bool,
 }
 impl DecoderPressure {
     pub fn sample(&mut self, current: DecoderSample) -> bool {
+        if !current.at_ms.is_finite() || !current.decode_seconds.is_finite() {
+            *self = Self::default();
+            return false;
+        }
         let Some(previous) = self.previous else {
             self.previous = Some(current);
             return false;
         };
         let elapsed = (current.at_ms - previous.at_ms) / 1000.0;
+        if elapsed < 0.0
+            || elapsed > 3.0
+            || current.received < previous.received
+            || current.decoded < previous.decoded
+            || current.decode_seconds < previous.decode_seconds
+        {
+            // A suspended stats loop or replacement decoder cannot carry old
+            // pressure into the next stream generation.
+            *self = Self {
+                previous: Some(current),
+                ..Self::default()
+            };
+            return false;
+        }
         if elapsed < 1.0 {
-            return self.bad_seconds >= 3;
+            return self.pressured;
         }
         self.previous = Some(current);
-        let received = current.received.saturating_sub(previous.received);
-        let decoded = current.decoded.saturating_sub(previous.decoded);
-        let work = (current.decode_seconds - previous.decode_seconds).max(0.0);
-        let overloaded = elapsed.is_finite()
-            && work.is_finite()
-            && elapsed <= 3.0
-            && received > 0
-            && (decoded == 0
-                || work / elapsed >= 0.8
-                // Hardware decoders can miss throughput without spending much
-                // CPU time in decode. Count sustained missing decoded output,
-                // never the separate HTML video presentation-drop counter.
-                || (decoded as f64 / received as f64) < 0.8);
-        self.bad_seconds = if overloaded {
-            self.bad_seconds.saturating_add(1)
+        let received = current.received - previous.received;
+        let decoded = current.decoded - previous.decoded;
+        if received == 0 {
+            *self = Self {
+                previous: Some(current),
+                ..Self::default()
+            };
+            return false; // Static input is not decoder overload.
+        }
+        let work = ((current.decode_seconds - previous.decode_seconds) / elapsed).clamp(0.0, 1.0);
+        let completion = (decoded as f64 / received as f64).min(1.0);
+        let (work, completion) =
+            self.smoothed
+                .map_or((work, completion), |(old_work, old_completion)| {
+                    ((old_work + work) / 2.0, (old_completion + completion) / 2.0)
+                });
+        self.smoothed = Some((work, completion));
+        let overloaded = decoded == 0 || work >= 0.8 || completion < 0.8;
+        self.bad = ((self.bad << 1) | u8::from(overloaded)) & 0b1111;
+        self.healthy = if work < 0.65 && completion >= 0.9 && decoded > 0 {
+            self.healthy.saturating_add(1)
         } else {
             0
         };
-        self.bad_seconds >= 3
+        if self.bad.count_ones() >= 3 {
+            self.pressured = true;
+        }
+        if self.healthy >= 2 {
+            self.pressured = false;
+            self.bad = 0;
+        }
+        self.pressured
     }
 }
+
 #[cfg(test)]
 mod tests {
     use super::*;
-    fn sample(second: u32, decoded: u64, work: f64) -> DecoderSample {
-        DecoderSample {
-            at_ms: f64::from(second) * 1000.0,
-            received: u64::from(second) * 60,
-            decoded,
-            decode_seconds: work,
+
+    struct Decoder {
+        pressure: DecoderPressure,
+        counters: DecoderSample,
+    }
+    impl Decoder {
+        fn new() -> Self {
+            let counters = DecoderSample {
+                at_ms: 0.0,
+                received: 0,
+                decoded: 0,
+                decode_seconds: 0.0,
+            };
+            let mut pressure = DecoderPressure::default();
+            pressure.sample(counters);
+            Self { pressure, counters }
+        }
+        fn step(&mut self, received: u64, decoded: u64, work: f64) -> bool {
+            self.counters.at_ms += 1000.0;
+            self.counters.received += received;
+            self.counters.decoded += decoded;
+            self.counters.decode_seconds += work;
+            self.pressure.sample(self.counters)
         }
     }
+
     #[test]
-    fn fast_4k_decoder_is_healthy_even_if_presenter_discards_frames() {
-        let mut feedback = DecoderPressure::default();
-        for second in 0..120 {
-            // ~1 ms per 4K frame. Presentation counters and PLI events must not
-            // turn this healthy decoder into a falling bitrate/FPS feedback loop.
-            assert!(!feedback.sample(sample(
-                second,
-                u64::from(second) * 60,
-                f64::from(second) * 0.06
-            )));
+    fn fast_4k_decoder_and_static_input_stay_healthy() {
+        let mut decoder = Decoder::new();
+        for _ in 0..120 {
+            assert!(!decoder.step(60, 60, 0.06));
+        }
+        for _ in 0..120 {
+            assert!(!decoder.step(0, 0, 0.0));
+            assert!(!decoder.step(1, 1, 0.001));
         }
     }
+
     #[test]
-    fn sustained_decoder_overload_reduces_quality_but_spikes_and_static_input_do_not() {
-        let mut feedback = DecoderPressure::default();
-        assert!(!feedback.sample(sample(0, 0, 0.0)));
-        assert!(!feedback.sample(sample(1, 40, 0.9)));
-        assert!(!feedback.sample(sample(2, 80, 1.8)));
-        assert!(feedback.sample(sample(3, 120, 2.7)));
-        assert!(!feedback.sample(sample(4, 180, 2.8)));
-        assert!(!feedback.sample(sample(5, 180, 2.8)));
-        assert!(!feedback.sample(sample(6, 180, 2.8)));
-        assert!(feedback.sample(sample(7, 180, 2.8)));
-        let mut static_frame = sample(8, 180, 2.8);
-        static_frame.received = 7 * 60;
-        assert!(!feedback.sample(static_frame));
-    }
-    #[test]
-    fn hardware_decode_throughput_loss_is_detected_even_with_low_cpu_time() {
-        let mut feedback = DecoderPressure::default();
-        for second in 0..3 {
-            assert!(!feedback.sample(sample(
-                second,
-                u64::from(second) * 30,
-                f64::from(second) * 0.03
-            )));
+    fn isolated_cpu_and_missing_output_spikes_are_smoothed() {
+        let mut decoder = Decoder::new();
+        for _ in 0..20 {
+            assert!(!decoder.step(60, 60, 0.06));
         }
-        assert!(feedback.sample(sample(3, 90, 0.09)));
-        assert!(!feedback.sample(sample(4, 150, 0.12)));
+        assert!(!decoder.step(60, 0, 0.95));
+        for _ in 0..20 {
+            assert!(!decoder.step(60, 60, 0.06));
+        }
+    }
+
+    #[test]
+    fn sustained_cpu_or_hardware_throughput_pressure_has_stable_recovery() {
+        for (decoded, work) in [(60, 0.95), (30, 0.03), (0, 0.0)] {
+            let mut decoder = Decoder::new();
+            for _ in 0..5 {
+                decoder.step(60, 60, 0.06);
+            }
+            for _ in 0..6 {
+                decoder.step(60, decoded, work);
+            }
+            assert!(decoder.pressure.pressured);
+            // One good interval does not release an established overload.
+            assert!(decoder.step(60, 60, 0.06));
+            for _ in 0..6 {
+                decoder.step(60, 60, 0.06);
+            }
+            assert!(!decoder.pressure.pressured);
+        }
+    }
+
+    #[test]
+    fn threshold_oscillation_does_not_chatter_pressure() {
+        let mut decoder = Decoder::new();
+        for _ in 0..6 {
+            decoder.step(60, 60, 0.95);
+        }
+        assert!(decoder.pressure.pressured);
+        for second in 0..60 {
+            assert!(decoder.step(60, 60, if second % 2 == 0 { 0.78 } else { 0.82 }));
+        }
+        for _ in 0..6 {
+            decoder.step(60, 60, 0.06);
+        }
+        assert!(!decoder.pressure.pressured);
+    }
+
+    #[test]
+    fn idle_gap_counter_reset_and_invalid_stats_discard_old_pressure() {
+        for reset in 0..6 {
+            let mut decoder = Decoder::new();
+            for _ in 0..6 {
+                decoder.step(60, 0, 0.0);
+            }
+            assert!(decoder.pressure.pressured);
+            let mut counters = decoder.counters;
+            match reset {
+                0 => counters.at_ms += 10_000.0,
+                1 => {
+                    counters.at_ms += 1000.0;
+                    counters.received = 0;
+                }
+                2 => counters.at_ms = f64::NAN,
+                3 => counters.decode_seconds = f64::INFINITY,
+                4 => counters.at_ms -= 1000.0,
+                _ => counters.at_ms += 1000.0, // Idle without arriving frames.
+            }
+            assert!(!decoder.pressure.sample(counters));
+            assert!(!decoder.pressure.pressured);
+        }
+    }
+
+    #[test]
+    fn duplicate_subsecond_stats_do_not_accumulate_overload_evidence() {
+        let mut decoder = Decoder::new();
+        assert!(!decoder.step(60, 0, 0.0));
+        for _ in 0..100 {
+            assert!(!decoder.pressure.sample(decoder.counters));
+        }
+        decoder.counters.at_ms += 100.0;
+        assert!(!decoder.pressure.sample(decoder.counters));
+        assert!(!decoder.step(60, 0, 0.0));
+        assert!(decoder.step(60, 0, 0.0));
     }
 }

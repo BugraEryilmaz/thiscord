@@ -6,7 +6,7 @@ use crate::audio::connection::Connection;
 use std::{
     sync::{
         Arc, Condvar, Mutex,
-        atomic::{AtomicBool, Ordering},
+        atomic::{AtomicBool, AtomicU32, Ordering},
     },
     time::{Duration, Instant},
 };
@@ -41,7 +41,7 @@ struct Flags {
     stop: Arc<AtomicBool>,
     connection: Connection,
     period: Duration,
-    quality: Quality,
+    active_fps: Arc<AtomicU32>,
     demand: Arc<super::adaptation::Demand>,
     metrics: Metrics,
 }
@@ -89,7 +89,7 @@ impl GraphicsCaptureApiHandler for Capture {
         let fps = if bitrate == 0 {
             1
         } else {
-            self.flags.quality.constrained(bitrate).fps
+            self.flags.active_fps.load(Ordering::Acquire).max(1)
         };
         let period = Duration::from_secs_f64(1.0 / f64::from(fps));
         if period != self.flags.period {
@@ -244,12 +244,13 @@ pub fn run(
     mut report: impl FnMut(String),
 ) -> Result<(), String> {
     let mailbox = Arc::new((Mutex::new(Mailbox::default()), Condvar::new()));
+    let active_fps = Arc::new(AtomicU32::new(quality.fps));
     let flags = Flags {
         mailbox: mailbox.clone(),
         stop: stop.clone(),
         connection: connection.clone(),
         period: Duration::from_secs_f64(1.0 / quality.fps as f64),
-        quality,
+        active_fps: active_fps.clone(),
         demand: demand.clone(),
         metrics: metrics.clone(),
     };
@@ -288,6 +289,7 @@ pub fn run(
         &metrics,
         &force_keyframe,
         &demand,
+        &active_fps,
     );
     // Stop also wakes/joins capture when the source is static (no callbacks).
     let stopped = capture
@@ -311,8 +313,10 @@ fn encode(
     metrics: &Metrics,
     force_keyframe: &AtomicBool,
     demand: &super::adaptation::Demand,
+    active_fps: &AtomicU32,
 ) -> Result<(), String> {
     let requested = quality;
+    let mut adaptation = super::adaptation::QualityController::new(requested);
     let mut quality = requested.constrained(demand.bitrate());
     let mut paused = true;
     let mut reconfigure = true;
@@ -349,7 +353,9 @@ fn encode(
             metrics.label("viewer_bitrate_budget", bitrate);
             previous_bitrate = Some(bitrate);
         }
-        if bitrate == 0 {
+        let next = adaptation.update(bitrate, Instant::now());
+        if next.is_none() {
+            active_fps.store(1, Ordering::Release);
             if !paused {
                 hardware = None;
                 processor = None;
@@ -362,9 +368,10 @@ fn encode(
             std::thread::sleep(Duration::from_millis(20));
             continue;
         }
-        let next = requested.constrained(bitrate);
+        let next = next.expect("active demand has a quality target");
         if paused || next != quality {
             quality = next;
+            active_fps.store(quality.fps, Ordering::Release);
             refresh_after = Instant::now();
             hardware = None;
             processor = None;

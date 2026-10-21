@@ -201,26 +201,58 @@ first loses its three-second local viewer lease. Publisher shared-audio capture
 continues until Stop sharing; it is not forwarded to non-viewers.
 
 Receivers sample native packet-loss/frame-queue counters and sustained WebView
-decoder overload once per second. Budgets start at 32 Mbit/s so the selected
-maximum is attempted immediately, decrease by
-35% on congestion, and increase by 25% after ten healthy samples, bounded to
-200 kbit/sâ€“32 Mbit/s. Three initial samples allow setup; three consecutive empty
-samples detect stalls without treating a static source's one-second IDR cadence
-as immediate loss. The server takes the lowest live viewer budget. The publisher
-selects a resolution/FPS/bitrate combination within that budget and its selected
-maximum, recreates the GPU encoder with an IDR when quality changes, and updates
-capture cadence, byte admission and RTP pacing together. Diagnostics expose actual
-`target_bitrate`, `target_fps`, `resolution` and `video_paused`.
+decoder overload once per second. Screen budgets start at 32 Mbit/s so the selected
+maximum is attempted immediately; cameras use the same controller capped at their
+1.5 Mbit/s encoder limit. Budgets remain bounded to 200 kbit/s–32 Mbit/s.
+Ordinary congestion requires three bad samples out of four and reduces the budget
+15%, at most once every three seconds. One or two transient samples do not reduce
+quality. Severe packet loss (at least ten packets and 15% of expected packets), or
+three consecutive samples without complete frames, reduces the budget 35%, at
+most once every two seconds. The first two seconds allow negotiation/IDR recovery.
+An alternating static-source refresh/gap does not count as a stall. Six consecutive
+healthy samples start recovery with a 12% probe, followed by another probe every
+three healthy samples. Uninterrupted recovery from the floor to 32 Mbit/s takes
+under 150 seconds. A sampling gap over three seconds clears accumulated evidence
+and restarts setup grace without changing the retained budget; duplicate/subsecond
+polls cannot accelerate adaptation. Each viewer/stream owns independent state.
+
+The server takes the lowest live viewer budget. The publisher selects a
+resolution/FPS/bitrate combination under its selected maximum, recreating the GPU
+encoder with an IDR when quality changes. Ordinary downgrades require two seconds
+of continuously lower targets; upgrades require six seconds at a stable target
+with 20% bitrate headroom. The selected maximum remains reachable at its nominal
+budget, including 4K/60 at the 32 Mbit/s ceiling. Rebuilds have a five-second
+cooldown; a budget below 60% of the current mode's nominal bitrate bypasses both
+dwell and cooldown for immediate downgrade. While a normal downgrade is pending,
+the existing encoder can temporarily exceed the newly requested budget (up to
+five seconds); the existing bounded queues, expiry and recovery rules still apply.
+Zero/expired demand pauses immediately and clears pending transitions; renewed
+demand chooses its current target immediately. Capture FPS follows the committed
+encoder target, so a noisy budget cannot independently oscillate capture cadence.
+Byte admission and RTP pacing change with the committed target. Diagnostics expose
+actual `target_bitrate`, `target_fps`, `resolution` and `video_paused`.
 `requested_height`, `requested_fps` and `viewer_bitrate_budget` distinguish the
 selected maximum from receiver-driven adaptation. A 4K preset does not upscale
 an ultrawide 3440x1440 source to 3840x2160.
+
 Presentation drops and PLI recovery requests are not themselves congestion.
-Decoder pressure requires three consecutive intervals with arriving frames and
-either no decoded output, at least 80% of elapsed time spent decoding, or decoded
-throughput below 80% of arriving complete frames. This also detects overloaded
-hardware decoders with low reported CPU decode time. Hidden presentation,
-different display refresh rates and an isolated recovery request
-therefore cannot drive a healthy decoder down to 5 FPS.
+Decoder load and complete-frame throughput use a half-weight moving average.
+Pressure requires three of four intervals with arriving frames and either no
+decoded output, at least 80% of elapsed time spent decoding, or smoothed decoded
+throughput below 80% of arriving complete frames. Pressure clears after two
+intervals below 65% decode work and at least 90% throughput, avoiding threshold
+chatter. Static input, a stats gap over three seconds, counter resets and invalid
+stats clear decoder evidence. This detects overloaded hardware decoders with low
+reported CPU decode time while keeping display refresh/presentation drops separate.
+The receiver then applies its own sustained-evidence rule to decoder pressure;
+this deliberately favors stability over immediate reaction to a brief decode spike.
+
+Deterministic trajectory tests cover isolated/two-sample spikes, sustained/severe
+congestion, no frames, camera/screen recovery, duplicate and stale samples, static
+refresh gaps, quality threshold oscillation, rebuild cooldown/headroom, independent
+controllers and demand expiry/resumption. Decoder tests cover CPU and hardware
+throughput overload, hysteresis, stats reset and suspension. These are controller
+regressions; they do not establish real network or GPU performance.
 
 This is an application feedback controller, not a bandwidth guarantee or per-viewer
 simulcast. One constrained viewer lowers the common stream; independent multi-share

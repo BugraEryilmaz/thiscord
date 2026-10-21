@@ -179,14 +179,21 @@ impl ScreenState {
                         .saturating_sub(feedback.previous.counters.get(name).copied().unwrap_or(0))
                 };
                 let lost = delta("lost_packets");
-                let congested = lost > 2 && lost * 100 > delta("received_packets").max(1)
+                let packets = delta("received_packets").saturating_add(lost).max(1);
+                let congested = lost > 2 && lost.saturating_mul(100) > packets
                     || delta("queue_resets") > 0
                     || delta("expired_frames") > 0
                     || delta("preview_errors") > 0
                     || feedback.decoder_pressure;
-                feedback
-                    .receiver
-                    .sample(congested, delta("received_frames") > 0);
+                feedback.receiver.sample_at(
+                    thiscord_frontend::screen::adaptation::ReceiverSample {
+                        congested,
+                        severe: lost >= 10
+                            && lost.saturating_mul(100) >= packets.saturating_mul(15),
+                        receiving: delta("received_frames") > 0,
+                    },
+                    Instant::now(),
+                );
                 feedback.decoder_pressure = false;
                 feedback.previous = stats;
                 feedback.sampled = Some(Instant::now());
