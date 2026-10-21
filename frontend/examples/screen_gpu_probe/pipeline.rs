@@ -281,7 +281,14 @@ pub async fn run() -> Result<(), Box<dyn std::error::Error>> {
                     .unwrap_or("pending")
             );
             let lost = receiver.counters["lost_packets"];
-            controller.sample(lost > previous_lost, frames > previous);
+            controller.sample_at(
+                screen::adaptation::ReceiverSample {
+                    congested: lost > previous_lost,
+                    receiving: frames > previous,
+                    ..Default::default()
+                },
+                Instant::now(),
+            );
             previous_lost = lost;
             previous = frames;
             previous_at = Instant::now();
