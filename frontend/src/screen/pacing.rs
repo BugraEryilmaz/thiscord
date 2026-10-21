@@ -11,10 +11,11 @@ pub fn transport_bitrate(codec_bitrate: u32) -> u32 {
     codec_bitrate * 12 / 10
 }
 
-/// Preserve the committed encoder mode during hysteresis, but limit offered
-/// traffic to live demand. Never reselect a discrete quality rung in the sender.
-pub fn transport_budget(encoder_bitrate: u32, demand: u32) -> u32 {
-    transport_bitrate(encoder_bitrate.min(demand))
+/// Pace at available demand, independently of nominal codec output. Intra bursts
+/// do not shrink proportionally with resolution/FPS: lowering a recovery mode
+/// must not also take away the bandwidth needed to deliver its IDR.
+pub fn transport_budget(_encoder_bitrate: u32, demand: u32) -> u32 {
+    transport_bitrate(demand)
 }
 
 /// Count unsent wire bytes, including the frame currently being paced. Frame

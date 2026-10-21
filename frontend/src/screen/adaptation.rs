@@ -1,9 +1,6 @@
 //! Per-viewer feedback and per-encoder quality selection. No media crosses IPC.
 use std::{
-    sync::{
-        Mutex,
-        atomic::{AtomicU32, Ordering},
-    },
+    sync::Mutex,
     time::{Duration, Instant},
 };
 use thiscord_shared::screen::{
@@ -11,7 +8,24 @@ use thiscord_shared::screen::{
 };
 
 #[derive(Default)]
-pub struct Demand(Mutex<Option<(u32, Instant)>>, AtomicU32);
+pub struct Demand(Mutex<Option<(u32, Instant)>>, Mutex<EncoderFeedback>);
+
+/// Local, per-layer sender evidence. A rejection wins over delivery in the same
+/// poll; consuming feedback never erases the controller's recovery history.
+#[derive(Default)]
+pub struct EncoderFeedback {
+    rejected: Option<(u32, bool)>,
+    delivered: Option<u32>,
+}
+#[cfg(test)]
+impl EncoderFeedback {
+    pub(super) fn is_empty(&self) -> bool {
+        self.rejected.is_none() && self.delivered.is_none()
+    }
+    pub(super) fn has_rejection(&self) -> bool {
+        self.rejected.is_some()
+    }
+}
 impl Demand {
     pub fn update(&self, bitrate: u32) {
         let bitrate = if (MIN_VIEW_BITRATE..=MAX_VIEW_BITRATE).contains(&bitrate) {
@@ -23,16 +37,18 @@ impl Demand {
     }
     /// A measured encoded burst cannot fit the receiver assembly deadline.
     /// Keep this signal local to the affected encoder; it is not viewer feedback.
-    pub fn limit_encoder(&self, bitrate: u32) {
-        let bitrate = bitrate.max(MIN_VIEW_BITRATE);
-        let _ = self
-            .1
-            .fetch_update(Ordering::AcqRel, Ordering::Acquire, |old| {
-                Some(if old == 0 { bitrate } else { old.min(bitrate) })
-            });
+    pub fn reject_encoder_frame(&self, bitrate: u32, keyframe: bool) {
+        let mut feedback = self.1.lock().unwrap();
+        // Preserve a rejected IDR if a dependent frame follows before polling.
+        if feedback.rejected.is_none_or(|(_, key)| !key) {
+            feedback.rejected = Some((bitrate, keyframe));
+        }
     }
-    pub fn take_encoder_limit(&self) -> u32 {
-        self.1.swap(0, Ordering::AcqRel)
+    pub fn delivered_encoder_frame(&self, bitrate: u32) {
+        self.1.lock().unwrap().delivered = Some(bitrate);
+    }
+    pub fn take_encoder_feedback(&self) -> EncoderFeedback {
+        std::mem::take(&mut *self.1.lock().unwrap())
     }
     pub fn bitrate(&self) -> u32 {
         self.0
@@ -155,6 +171,19 @@ pub struct QualityController {
     current: Option<thiscord_shared::screen::Quality>,
     pending: Option<(thiscord_shared::screen::Quality, Instant)>,
     changed: Option<Instant>,
+    recovery: Option<EncoderRecovery>,
+    scale_percent: u32,
+    scale_failed_budget: u32,
+    // At most the twenty finite resolution/FPS modes. Keep failed-mode evidence
+    // across successful fallback delivery; stable demand must not retry a known
+    // unworkable mode every six seconds.
+    failed_modes: Vec<(thiscord_shared::screen::Quality, u32)>,
+}
+#[derive(Default)]
+struct EncoderRecovery {
+    rejected_keys: u8,
+    healthy_since: Option<Instant>,
+    last_delivery: Option<Instant>,
 }
 impl QualityController {
     pub fn new(maximum: thiscord_shared::screen::Quality) -> Self {
@@ -163,26 +192,72 @@ impl QualityController {
             current: None,
             pending: None,
             changed: None,
+            recovery: None,
+            scale_percent: 100,
+            scale_failed_budget: 0,
+            failed_modes: Vec::new(),
         }
     }
 
-    /// An actual oversized access unit bypasses dwell/cooldown only to lower
-    /// quality. Normal upgrades still require stable headroom after recovery.
+    /// Emergency spatial reduction only after repeated measured IDR failures at
+    /// the normal 360p/5 floor. Retain the codec bitrate and full demand pacing.
+    /// Scaling is bounded to 25%; capacity growth is required to undo it.
+    pub fn scale_percent(&self) -> u32 {
+        self.scale_percent
+    }
+
+    /// Retry a warm encoder before rebuilding: cold IDRs and IDRs at lower FPS
+    /// do not scale with nominal bitrate. Three rejected recovery IDRs step down
+    /// one mode. Even at the floor, failure blocks upgrades until actual delivery
+    /// proves six seconds of health. Demand alone is not evidence of recovery.
     pub fn update_with_recovery(
         &mut self,
         bitrate: u32,
-        encoder_limit: u32,
+        feedback: EncoderFeedback,
         now: Instant,
     ) -> Option<thiscord_shared::screen::Quality> {
-        if bitrate > 0 && encoder_limit > 0 {
-            let next = self
-                .maximum
-                .constrained(bitrate.min(encoder_limit).max(MIN_VIEW_BITRATE));
-            if self
-                .current
-                .is_some_and(|current| next.bitrate() < current.bitrate())
+        if bitrate > 0
+            && let Some(current) = self.current
+        {
+            if let Some((rejected, keyframe)) = feedback.rejected
+                && rejected == current.bitrate()
             {
-                return Some(self.select(next, now));
+                let recovery = self.recovery.get_or_insert_with(Default::default);
+                recovery.healthy_since = None;
+                recovery.last_delivery = None;
+                recovery.rejected_keys = recovery.rejected_keys.saturating_add(u8::from(keyframe));
+                self.pending = None;
+                if recovery.rejected_keys >= 3 {
+                    let next = current.constrained(current.bitrate().saturating_sub(1));
+                    if next.bitrate() < current.bitrate() {
+                        if let Some((_, failed_budget)) =
+                            self.failed_modes.iter_mut().find(|(q, _)| *q == current)
+                        {
+                            *failed_budget = (*failed_budget).max(bitrate);
+                        } else {
+                            self.failed_modes.push((current, bitrate));
+                        }
+                        return Some(self.select(next, now));
+                    }
+                    let scale = (self.scale_percent * 80 / 100).max(25);
+                    if scale < self.scale_percent {
+                        self.scale_percent = scale;
+                        self.scale_failed_budget = bitrate;
+                        return Some(self.select(current, now));
+                    }
+                }
+            } else if feedback.delivered == Some(current.bitrate())
+                && let Some(recovery) = &mut self.recovery
+            {
+                if recovery
+                    .last_delivery
+                    .is_none_or(|at| now.saturating_duration_since(at) > Duration::from_secs(2))
+                {
+                    recovery.healthy_since = Some(now);
+                }
+                recovery.healthy_since.get_or_insert(now);
+                recovery.last_delivery = Some(now);
+                recovery.rejected_keys = 0;
             }
         }
         self.update(bitrate, now)
@@ -197,13 +272,33 @@ impl QualityController {
             self.current = None;
             self.pending = None;
             self.changed = None;
+            self.recovery = None;
+            self.scale_percent = 100;
+            self.scale_failed_budget = 0;
+            self.failed_modes.clear();
             return None;
         }
         let bitrate = bitrate.clamp(MIN_VIEW_BITRATE, MAX_VIEW_BITRATE);
-        let candidate = self.maximum.constrained(bitrate);
+        let candidate = self.candidate(bitrate, bitrate);
         let Some(current) = self.current else {
             return Some(self.select(candidate, now));
         };
+        let healthy = self.recovery.as_ref().is_some_and(|recovery| {
+            recovery
+                .healthy_since
+                .is_some_and(|at| now.saturating_duration_since(at) >= Duration::from_secs(6))
+                && recovery
+                    .last_delivery
+                    .is_some_and(|at| now.saturating_duration_since(at) <= Duration::from_secs(2))
+        });
+        if self.scale_percent < 100
+            && candidate == current
+            && bitrate >= self.scale_failed_budget * 120 / 100
+            && healthy
+        {
+            self.scale_percent = 100;
+            return Some(self.select(current, now));
+        }
         if candidate == current {
             self.pending = None;
             return Some(current);
@@ -211,6 +306,14 @@ impl QualityController {
         let score =
             |q: thiscord_shared::screen::Quality| u64::from(q.height).pow(2) * u64::from(q.fps);
         let upgrading = score(candidate) > score(current);
+        if upgrading
+            && self.recovery.is_some()
+            && (!healthy
+                || (self.scale_percent < 100 && bitrate < self.scale_failed_budget * 120 / 100))
+        {
+            self.pending = None;
+            return Some(current);
+        }
         if !upgrading && bitrate < current.bitrate() * 60 / 100 {
             // A large capacity collapse must not wait for the rebuild cooldown.
             return Some(self.select(candidate, now));
@@ -219,9 +322,9 @@ impl QualityController {
             // Twenty percent headroom prevents repeated up/down transitions near
             // a ladder boundary. The selected maximum remains reachable at its
             // nominal budget (including the 32 Mbit/s wire ceiling).
-            let headroom = self.maximum.constrained(bitrate * 100 / 120);
+            let headroom = self.candidate(bitrate * 100 / 120, bitrate);
             if bitrate >= self.maximum.bitrate() {
-                self.maximum
+                candidate
             } else {
                 headroom
             }
@@ -254,14 +357,39 @@ impl QualityController {
         Some(current)
     }
 
+    fn candidate(&self, limit: u32, demand: u32) -> thiscord_shared::screen::Quality {
+        let mut quality = self.maximum.constrained(limit);
+        while self
+            .failed_modes
+            .iter()
+            .any(|(failed, budget)| *failed == quality && demand < budget * 120 / 100)
+        {
+            let lower = self
+                .maximum
+                .constrained(quality.bitrate().saturating_sub(1));
+            if lower == quality {
+                break;
+            }
+            quality = lower;
+        }
+        quality
+    }
+
     fn select(
         &mut self,
         quality: thiscord_shared::screen::Quality,
         now: Instant,
     ) -> thiscord_shared::screen::Quality {
+        if self.current != Some(quality) {
+            self.scale_percent = 100;
+            self.scale_failed_budget = 0;
+        }
         self.current = Some(quality);
         self.pending = None;
         self.changed = Some(now);
+        if self.recovery.is_some() {
+            self.recovery = Some(EncoderRecovery::default());
+        }
         quality
     }
 }
@@ -270,6 +398,192 @@ impl QualityController {
 mod tests {
     use super::*;
     use thiscord_shared::screen::Quality;
+
+    #[test]
+    fn failed_floor_never_upgrades_on_demand_alone_and_health_allows_recovery() {
+        let maximum = Quality {
+            height: 720,
+            fps: 15,
+        };
+        let floor = Quality {
+            height: 360,
+            fps: 5,
+        };
+        let mut controller = QualityController::new(maximum);
+        let start = Instant::now();
+        controller.update(MIN_VIEW_BITRATE, start);
+        for second in 1..30 {
+            let feedback = EncoderFeedback {
+                rejected: Some((floor.bitrate(), true)),
+                delivered: Some(floor.bitrate()),
+            };
+            assert_eq!(
+                controller.update_with_recovery(
+                    MIN_VIEW_BITRATE,
+                    feedback,
+                    start + Duration::from_secs(second)
+                ),
+                Some(floor)
+            );
+        }
+        assert_eq!(controller.scale_percent(), 25);
+        // Silence and delayed output from a previous mode cannot prove health.
+        for second in 30..60 {
+            let feedback = EncoderFeedback {
+                delivered: Some(maximum.bitrate()),
+                ..Default::default()
+            };
+            assert_eq!(
+                controller.update_with_recovery(
+                    1_250_000,
+                    feedback,
+                    start + Duration::from_secs(second)
+                ),
+                Some(floor)
+            );
+        }
+        for second in 60..72 {
+            let feedback = EncoderFeedback {
+                delivered: Some(floor.bitrate()),
+                ..Default::default()
+            };
+            assert_eq!(
+                controller.update_with_recovery(
+                    1_250_000,
+                    feedback,
+                    start + Duration::from_secs(second)
+                ),
+                Some(floor)
+            );
+        }
+        assert_eq!(
+            controller.update_with_recovery(
+                1_250_000,
+                EncoderFeedback {
+                    delivered: Some(floor.bitrate()),
+                    ..Default::default()
+                },
+                start + Duration::from_secs(72)
+            ),
+            Some(maximum)
+        );
+        // Old floor failures cannot tear down the new encoder.
+        assert_eq!(
+            controller.update_with_recovery(
+                1_250_000,
+                EncoderFeedback {
+                    rejected: Some((floor.bitrate(), true)),
+                    ..Default::default()
+                },
+                start + Duration::from_secs(73)
+            ),
+            Some(maximum)
+        );
+        assert_eq!(controller.update(0, start + Duration::from_secs(74)), None);
+        assert!(controller.recovery.is_none());
+        assert_eq!(
+            controller.update(1_250_000, start + Duration::from_secs(75)),
+            Some(maximum)
+        );
+    }
+
+    #[test]
+    fn recovery_delivery_gaps_and_rejections_restart_upgrade_evidence() {
+        let maximum = Quality {
+            height: 720,
+            fps: 15,
+        };
+        let floor = Quality {
+            height: 360,
+            fps: 5,
+        };
+        let demand = Demand::default();
+        let mut controller = QualityController::new(maximum);
+        let start = Instant::now();
+        controller.update(MIN_VIEW_BITRATE, start);
+        for second in 1..40 {
+            if second == 1 || second == 20 {
+                demand.reject_encoder_frame(floor.bitrate(), true);
+            } else if second < 8 || second >= 12 {
+                demand.delivered_encoder_frame(floor.bitrate());
+            }
+            let next = controller.update_with_recovery(
+                1_250_000,
+                demand.take_encoder_feedback(),
+                start + Duration::from_secs(second),
+            );
+            if second < 33 {
+                assert_eq!(next, Some(floor));
+            } else {
+                assert_eq!(next, Some(maximum));
+            }
+        }
+    }
+
+    #[test]
+    fn successful_fallback_does_not_erase_the_failed_modes_bandwidth_evidence() {
+        let maximum = Quality {
+            height: 720,
+            fps: 15,
+        };
+        let fallback = Quality {
+            height: 720,
+            fps: 5,
+        };
+        let start = Instant::now();
+        let mut controller = QualityController::new(maximum);
+        controller.update(1_250_000, start);
+        for tick in 1..=3 {
+            let next = controller.update_with_recovery(
+                1_250_000,
+                EncoderFeedback {
+                    rejected: Some((maximum.bitrate(), true)),
+                    ..Default::default()
+                },
+                start + Duration::from_millis(tick * 200),
+            );
+            assert_eq!(next, Some(if tick == 3 { fallback } else { maximum }));
+        }
+        for second in 1..60 {
+            assert_eq!(
+                controller.update_with_recovery(
+                    1_250_000,
+                    EncoderFeedback {
+                        delivered: Some(fallback.bitrate()),
+                        ..Default::default()
+                    },
+                    start + Duration::from_secs(second)
+                ),
+                Some(fallback)
+            );
+        }
+        for second in 60..66 {
+            assert_eq!(
+                controller.update_with_recovery(
+                    1_500_000,
+                    EncoderFeedback {
+                        delivered: Some(fallback.bitrate()),
+                        ..Default::default()
+                    },
+                    start + Duration::from_secs(second)
+                ),
+                Some(fallback)
+            );
+        }
+        assert_eq!(
+            controller.update_with_recovery(
+                1_500_000,
+                EncoderFeedback {
+                    delivered: Some(fallback.bitrate()),
+                    ..Default::default()
+                },
+                start + Duration::from_secs(66)
+            ),
+            Some(maximum)
+        );
+        controller.update(0, start + Duration::from_secs(67));
+        assert!(controller.failed_modes.is_empty());
+    }
 
     struct Link {
         receiver: Receiver,

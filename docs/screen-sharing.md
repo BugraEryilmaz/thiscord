@@ -234,8 +234,9 @@ budget, including 4K/60 at the 32 Mbit/s ceiling. Rebuilds have a five-second
 cooldown; a budget below 60% of the current mode's nominal bitrate bypasses both
 dwell and cooldown for immediate downgrade. While a normal downgrade is pending,
 the existing encoder retains its nominal bitrate (up to five seconds), while raw
-input admission and pacing use the smaller of that bitrate and live demand, plus
-the existing 20% transport overhead allowance. Byte backpressure sheds raw input
+input admission and pacing use live demand plus the existing 20% transport
+overhead allowance. Lowering nominal codec output does not shrink the capacity
+available to a non-proportional IDR burst. Byte backpressure sheds raw input
 before creating dependencies when nominal output exceeds that rate. This avoids
 independently snapping the sender to a lower ladder rung during a held mode.
 Zero/expired demand pauses immediately and clears pending transitions; renewed
@@ -248,20 +249,64 @@ The bounded queues, expiry and recovery rules still apply, including when an
 already encoded burst cannot drain after a severe capacity collapse. Diagnostics expose
 actual `target_bitrate`, `target_fps`, `resolution` and `video_paused`.
 
-The paced sender also measures each encoded access unit's wire size against its
-live transport rate. A burst that needs more than 200 ms is rejected before its
-first packet, and its measured size requests a smaller encoder mode without the
-normal downgrade dwell/cooldown. This signal belongs only to that layer; upgrades
-still require ordinary stable headroom. During sending, new rate cuts and delays
-must leave projected completion within 230 ms. These limits leave 50 ms initially
-and at least 20 ms at the sender's last check for transport/scheduler variation
-inside the receiver's unchanged 250 ms assembly window; they cannot guarantee a
-network deadline. Partial bursts still require SPS/PPS/IDR recovery. The 200 ms
-sender queue age and 350 ms capture-to-send age also remain unchanged. This handles
-hardware that exceeds its 200 ms HRD hint without accelerating beyond live demand.
-`sender_burst_recovery` counts these drops. Sender-to-Inbox regressions cover the
-reachable five-severe-cut 3,712,930 bit/s held-1080p case, the low layer's equivalent
-trajectory, and successful recovery IDRs followed by dependent frames.
+The paced sender measures each encoded access unit's wire size against live demand.
+A burst needing more than 200 ms is rejected before its first packet. During sending,
+rate cuts and delays must leave projected completion within 230 ms. The receiver's
+250 ms assembly window, sender's 200 ms queue age and 350 ms capture age are unchanged.
+The initial 50 ms and in-flight 20 ms margins allow transport/scheduler variation;
+they cannot guarantee a network deadline. Partial bursts still require SPS/PPS/IDR.
+
+Recovery retries the existing, warmed encoder before changing mode. A cold IDR can
+be much larger than its next recovery IDR, and reducing FPS can make an IDR larger.
+Three rejected recovery IDRs step down one resolution/FPS mode, without increasing
+either dimension or FPS. The pacer retains the available demand instead of falling
+with nominal codec bitrate. Each layer retains its own failure evidence, including
+at the floor; consuming feedback or delivering a fallback frame does not erase it.
+Six seconds of actual complete-frame delivery (no gap over two seconds) are needed
+before normal upgrade dwell starts. A mode that failed three recovery IDRs requires
+20% more demand before it can be selected again. Silence cannot authorize upgrades.
+Zero demand resets recovery with the rest of the paused encoder state.
+
+If three recovery IDRs still fail at the normal 360p/5 floor, capture reduces actual
+width/height to 80% of the previous size, bounded to 25% of the original dimensions.
+This emergency scaling retains the configured 166666 bit/s codec target, truthful
+metadata and live demand pacing. Each step rebuilds once and gets the same bounded
+warm retry opportunity. Successful delivery stops the reduction. Restoring dimensions
+requires both healthy delivery and 20% more demand than the failed size had; stable
+floor demand therefore cannot cycle back to a known failing size. Diagnostics retain
+`recovery_scale_percent`, actual resolution, and the last rejected wire size, wire
+rate and encoder bitrate, alongside the cumulative `sender_burst_recovery` count.
+No quantization override, larger latency cap or software fallback is used.
+
+`screen_gpu_probe --adapter=0 --sender-recovery` exercises two simultaneous hardware
+encoders sharing one synthetic FP16 scene through the production Sender, Inbox and
+OpenH264 decoder. It checks twenty seconds at 1.25 Mbit/s, twenty seconds at the
+200 kbit/s floor, and fourteen seconds of restored 1.5 Mbit/s demand. On an NVIDIA
+GeForce RTX 4070 Ti, the original 3a273 reproduction rejected 100 frames and received
+zero in twenty seconds: 40758-byte cold 720p/15 IDRs led to 131017-byte 720p/5 and
+77899-byte cold / 6287-byte warm 360p/5 IDRs, followed by repeated upgrades. The fixed
+path retries 720p/15 and delivers its 24263-byte warm IDR without a quality change.
+At 200 kbit/s the measured 6287-byte floor IDR still cannot fit; 512x288 yields a
+4297-byte recovery IDR after warmup. Both hardware layers continue static heartbeats
+and ten-second IDRs and restore 720p/15 when capacity grows. Deterministic tests replay
+these non-proportional sizes, repeated floor rejection, retained failed-mode evidence,
+healthy and stale delivery, independent layers, and dependent frames after recovery.
+The retained [original failure trace](benchmarks/screen-sender-before-windows-2026-10-21.txt)
+and [fixed dual-encoder trace](benchmarks/screen-sender-windows-2026-10-21.txt) show
+first decoded delivery at 593/584 ms for 1.25 Mbit/s and 1407/1423 ms at the floor.
+Both 1.25 Mbit/s runs decoded 21 frames in twenty seconds with one rejected cold
+IDR and no mode changes. Both floor/growth runs decoded 34 frames with five
+rejections and three configurations; maximum assembly was 187686 microseconds.
+These are synthetic-image hardware results, not physical network acceptance.
+
+Integration requires the SFU to admit the selected layer using measured wire-byte
+policing, not reject truthful nominal bitrate metadata during publisher hysteresis.
+For example, a held 5 Mbit/s encoder paced at 4.9 Mbit/s must continue through the
+same route. The frontend's 120%-of-demand pacer and 200 ms access-unit admission
+fit the backend's 120% rate and 250 ms burst bucket; authentication, source/layer,
+epoch and per-viewer measured traffic limits remain authoritative. Local Inbox
+coverage alone does not establish this: the backend encrypted regression must also
+cover the 5 -> 4.9 Mbit/s hold and abusive/understated metadata traffic.
 `requested_height`, `requested_fps` and `viewer_bitrate_budget` distinguish the
 selected maximum from receiver-driven adaptation. A 4K preset does not upscale
 an ultrawide 3440x1440 source to 3840x2160.

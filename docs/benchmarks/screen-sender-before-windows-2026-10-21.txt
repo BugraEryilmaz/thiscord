@@ -1,0 +1,13 @@
+GPU NVIDIA GeForce RTX 4070 Ti
+tick200ms=0 limit=0 quality=Quality { height: 720, fps: 15 } idr_bytes=40758 rejected=1 received=0
+tick200ms=1 limit=1083163 quality=Quality { height: 720, fps: 5 } idr_bytes=131017 rejected=2 received=0
+tick200ms=2 limit=200000 quality=Quality { height: 360, fps: 5 } idr_bytes=77899 rejected=3 received=0
+tick200ms=3 limit=200000 quality=Quality { height: 360, fps: 5 } idr_bytes=6287 rejected=4 received=0
+tick200ms=33 limit=200000 quality=Quality { height: 720, fps: 15 } idr_bytes=40758 rejected=34 received=0
+tick200ms=34 limit=1083163 quality=Quality { height: 720, fps: 5 } idr_bytes=131017 rejected=35 received=0
+tick200ms=35 limit=200000 quality=Quality { height: 360, fps: 5 } idr_bytes=77899 rejected=36 received=0
+tick200ms=66 limit=200000 quality=Quality { height: 720, fps: 15 } idr_bytes=40758 rejected=67 received=0
+tick200ms=67 limit=1083163 quality=Quality { height: 720, fps: 5 } idr_bytes=131017 rejected=68 received=0
+tick200ms=68 limit=200000 quality=Quality { height: 360, fps: 5 } idr_bytes=77899 rejected=69 received=0
+tick200ms=99 limit=200000 quality=Quality { height: 720, fps: 15 } idr_bytes=40758 rejected=100 received=0
+FINAL rejected=100 received=0

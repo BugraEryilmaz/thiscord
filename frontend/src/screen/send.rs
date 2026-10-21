@@ -39,13 +39,12 @@ pub struct Sender {
     pub metrics: Metrics,
 }
 impl Sender {
-    fn recover_burst(&self, encoded_bitrate: u32, wire_bytes: usize, rate: u32) {
-        // Scale by measured wire size, including fragmentation overhead. This
-        // remains effective when hardware ignores the nominal 200 ms HRD hint.
-        let allowed = u64::from(rate) * BURST_BUDGET.as_millis() as u64 / 8 / 1000;
-        let limit = (u64::from(encoded_bitrate) * allowed / (wire_bytes as u64).max(1))
-            .min(u64::from(encoded_bitrate.saturating_sub(1))) as u32;
-        self.demand.limit_encoder(limit);
+    fn recover_burst(&self, encoded_bitrate: u32, keyframe: bool, wire_bytes: usize, rate: u32) {
+        self.demand.reject_encoder_frame(encoded_bitrate, keyframe);
+        self.metrics.label("rejected_burst_wire_bytes", wire_bytes);
+        self.metrics.label("rejected_burst_wire_bitrate", rate);
+        self.metrics
+            .label("rejected_burst_encoder_bitrate", encoded_bitrate);
         self.force_keyframe.store(true, Ordering::Release);
         self.metrics.add("encode_dropped", 1);
         self.metrics.add("sender_burst_recovery", 1);
@@ -66,8 +65,8 @@ impl Sender {
                 .map(|e| e.load(Ordering::Acquire));
             let budget = self.demand.bitrate();
             // A held encoder can temporarily exceed demand. Pace its frames with
-            // the shared admission rate; the SFU checks their actual bitrate
-            // against each viewer before forwarding negotiated layers.
+            // live demand. Nominal metadata remains truthful; the SFU must police
+            // measured wire bytes rather than reject a held encoder's metadata.
             if budget == 0 {
                 waiting = true;
                 self.force_keyframe.store(true, Ordering::Release);
@@ -98,7 +97,7 @@ impl Sender {
             let wire_bytes: usize = frame.packets.iter().map(|p| p.payload.len() + 64).sum();
             let rate = frame.budget.pacing_bitrate(budget);
             if burst_duration(wire_bytes, rate) > BURST_BUDGET {
-                self.recover_burst(frame.bitrate, wire_bytes, rate);
+                self.recover_burst(frame.bitrate, frame.keyframe, wire_bytes, rate);
                 waiting = true;
                 continue;
             }
@@ -117,7 +116,7 @@ impl Sender {
                 let now = Instant::now();
                 let rate = frame.budget.pacing_bitrate(demand);
                 if send_started.elapsed() + burst_duration(remaining, rate) > BURST_DEADLINE {
-                    self.recover_burst(frame.bitrate, wire_bytes, rate);
+                    self.recover_burst(frame.bitrate, frame.keyframe, wire_bytes, rate);
                     waiting = true;
                     continue 'frames;
                 }
@@ -149,6 +148,7 @@ impl Sender {
                 if send_started.elapsed() >= BURST_DEADLINE {
                     self.recover_burst(
                         frame.bitrate,
+                        frame.keyframe,
                         wire_bytes,
                         frame.budget.pacing_bitrate(self.demand.bitrate()),
                     );
@@ -219,6 +219,7 @@ impl Sender {
                 frame.budget.sent(bytes);
             }
             waiting = false;
+            self.demand.delivered_encoder_frame(frame.bitrate);
             self.metrics.time("frame_send", send_started.elapsed());
             self.metrics.add("sent_frames", 1);
             self.metrics.time("send_age", captured_at.elapsed());
@@ -255,123 +256,148 @@ mod tests {
         }
     }
 
+    // These sizes come from the NVIDIA cold/warm reproduction, deliberately
+    // without proportional scaling by nominal codec bitrate.
     #[tokio::test]
-    async fn severe_receiver_cuts_recover_both_layers_through_real_sender_and_inbox() {
-        use super::super::{
-            adaptation::{QualityController, Receiver, ReceiverSample},
-            pacing::*,
-            receive::Inbox,
-        };
+    async fn non_proportional_idrs_recover_both_layers_without_shrinking_wire_capacity() {
+        use super::super::{adaptation::QualityController, pacing::*, receive::Inbox};
         use thiscord_shared::screen::LayerTargets;
-        for (maximum, cuts) in [
-            (Quality::default(), 5),
-            (LayerTargets::low_quality(Quality::default()), 8),
+        for maximum in [
+            Quality::default(),
+            LayerTargets::low_quality(Quality::default()),
         ] {
-            let mut receiver = Receiver::default();
-            let mut controller = QualityController::new(maximum);
-            let start = Instant::now();
-            let mut held = maximum;
-            for second in 0..=cuts * 2 {
-                let now = start + Duration::from_secs(second);
-                receiver.sample_at(
-                    ReceiverSample {
-                        congested: true,
-                        severe: true,
-                        receiving: true,
+            for (rate, sizes, expected_rejected, expected_quality) in [
+                // The reachable five-severe-cut held-1080p case also retries
+                // non-proportional bursts before selecting a smaller mode.
+                (
+                    3_712_930,
+                    vec![140_042, 140_042, 140_042, 90_000],
+                    3,
+                    Quality {
+                        height: 1080,
+                        fps: 15,
                     },
-                    now,
+                ),
+                (
+                    1_250_000,
+                    vec![40_758, 24_263],
+                    1,
+                    Quality {
+                        height: 720,
+                        fps: 15,
+                    },
+                ),
+                // Two warm retries per mode, including a lower-FPS IDR that
+                // grows rather than shrinks. The final 6287-byte floor IDR must
+                // keep using 1.25 Mbit/s, not its nominal 166666 bit/s.
+                (
+                    1_250_000,
+                    vec![
+                        40_758, 40_758, 40_758, 131_017, 50_000, 40_000, 77_899, 6287,
+                    ],
+                    7,
+                    Quality {
+                        height: 360,
+                        fps: 5,
+                    },
+                ),
+                // At minimum demand even 6287 bytes cannot fit the unchanged
+                // deadline. Retry the warmed floor encoder instead of cycling up.
+                (
+                    200_000,
+                    vec![77_899, 6287, 6287, 50_165, 6429, 4297],
+                    5,
+                    Quality {
+                        height: 360,
+                        fps: 5,
+                    },
+                ),
+            ] {
+                if rate == 3_712_930 && maximum.height != 1080 {
+                    continue;
+                }
+                let demand = Arc::new(Demand::default());
+                let other_layer = Demand::default();
+                let metrics = Metrics::default();
+                let (preview, inbox) = Inbox::channel();
+                let sender = Sender {
+                    local: Some(LocalPreview {
+                        sender: Arc::new(preview),
+                        epoch: Arc::new(AtomicU32::new(7)),
+                        visible: Arc::new(AtomicBool::new(true)),
+                    }),
+                    source_epoch: Some(Arc::new(AtomicU32::new(7))),
+                    connection: Connection::default(),
+                    video: super::super::track(901),
+                    demand: demand.clone(),
+                    network_demand: Some(Arc::new(Demand::default())),
+                    force_keyframe: Arc::new(AtomicBool::new(false)),
+                    sequence: Default::default(),
+                    metrics: metrics.clone(),
+                };
+                let (tx, rx) = tokio::sync::mpsc::channel(4);
+                let job = tokio::spawn(sender.run(Arc::new(AtomicBool::new(false)), maximum, rx));
+                let mut controller = QualityController::new(maximum);
+                let mut budget = SendBudget::new(1);
+                let start = Instant::now();
+                let mut quality = maximum;
+                if rate == 3_712_930 {
+                    controller.update(maximum.bitrate(), start);
+                }
+                for (tick, size) in sizes.into_iter().enumerate() {
+                    demand.update(rate);
+                    quality = controller
+                        .update_with_recovery(
+                            rate,
+                            demand.take_encoder_feedback(),
+                            start + Duration::from_millis(tick as u64 * 200),
+                        )
+                        .unwrap();
+                    budget.set_bitrate(transport_budget(quality.bitrate(), rate));
+                    assert_eq!(
+                        budget.track(0).pacing_bitrate(rate),
+                        transport_bitrate(rate)
+                    );
+                    tx.send(outgoing(quality, size, true, &budget, tick as u32 * 18000))
+                        .await
+                        .unwrap();
+                    tokio::time::timeout(Duration::from_secs(1), async {
+                        while budget.bytes() != 0 {
+                            tokio::time::sleep(Duration::from_millis(1)).await;
+                        }
+                    })
+                    .await
+                    .unwrap();
+                }
+                assert_eq!(quality, expected_quality);
+                assert_eq!(
+                    controller.scale_percent(),
+                    if rate == 200_000 { 80 } else { 100 }
                 );
-                held = controller.update(receiver.bitrate(), now).unwrap();
+                assert_eq!(
+                    metrics.snapshot().counters["sender_burst_recovery"],
+                    expected_rejected
+                );
+                assert_eq!(inbox.metrics().snapshot().counters["received_frames"], 1);
+                assert!(inbox.next().unwrap().reset);
+                // A complete recovery preserves the dependent chain.
+                tx.send(outgoing(quality, 100, false, &budget, 900000))
+                    .await
+                    .unwrap();
+                drop(tx);
+                job.await.unwrap();
+                assert_eq!(inbox.metrics().snapshot().counters["received_frames"], 2);
+                assert_eq!(inbox.metrics().snapshot().counters["expired_frames"], 0);
+                assert!(!inbox.next().unwrap().reset);
+                assert_eq!(budget.bytes(), 0);
+                assert!(other_layer.take_encoder_feedback().is_empty());
+                assert!(
+                    metrics
+                        .snapshot()
+                        .labels
+                        .contains_key("rejected_burst_wire_bytes")
+                );
             }
-            if cuts == 5 {
-                assert_eq!(receiver.bitrate(), 3_712_930);
-            }
-            assert_eq!(
-                held, maximum,
-                "the reachable trajectory still holds the old mode"
-            );
-            assert!(held.bitrate() > receiver.bitrate());
-            let demand = Arc::new(Demand::default());
-            demand.update(receiver.bitrate());
-            let other_layer = Demand::default();
-            other_layer.update(32_000_000);
-            let metrics = Metrics::default();
-            let (preview, inbox) = Inbox::channel();
-            let preview = Arc::new(preview);
-            let sender = Sender {
-                local: Some(LocalPreview {
-                    sender: preview.clone(),
-                    epoch: Arc::new(AtomicU32::new(7)),
-                    visible: Arc::new(AtomicBool::new(true)),
-                }),
-                source_epoch: Some(Arc::new(AtomicU32::new(7))),
-                connection: Connection::default(),
-                video: super::super::track(901),
-                demand: demand.clone(),
-                network_demand: Some(Arc::new(Demand::default())),
-                force_keyframe: Arc::new(AtomicBool::new(false)),
-                sequence: Default::default(),
-                metrics: metrics.clone(),
-            };
-            let mut budget = SendBudget::new(transport_budget(held.bitrate(), receiver.bitrate()));
-            let (tx, rx) = tokio::sync::mpsc::channel(4);
-            let size = (140_042_u64 * u64::from(held.bitrate()) / 5_000_000) as usize;
-            tx.send(outgoing(held, size, true, &budget, 0))
-                .await
-                .unwrap();
-            let job = tokio::spawn(sender.run(Arc::new(AtomicBool::new(false)), maximum, rx));
-            tokio::time::timeout(Duration::from_secs(1), async {
-                while metrics.snapshot().counters["sender_burst_recovery"] == 0 {
-                    tokio::time::sleep(Duration::from_millis(1)).await;
-                }
-            })
-            .await
-            .unwrap();
-            assert_eq!(
-                inbox.metrics().snapshot().counters["received_packets"],
-                0,
-                "reject an impossible burst before corrupting the receiver chain"
-            );
-            let next = controller
-                .update_with_recovery(
-                    receiver.bitrate(),
-                    demand.take_encoder_limit(),
-                    start + Duration::from_secs(cuts * 2),
-                )
-                .unwrap();
-            assert!(
-                next.bitrate() < held.bitrate(),
-                "deadline recovery bypasses held-mode dwell"
-            );
-            assert_eq!(other_layer.take_encoder_limit(), 0);
-            budget.set_bitrate(transport_budget(next.bitrate(), receiver.bitrate()));
-            // The hardware's new SPS/PPS/IDR is followed by dependent output.
-            // Real pacing, RTP fragmentation, Inbox assembly and synchronization
-            // must all work, not merely satisfy the sender's 350 ms age check.
-            let size = (140_042_u64 * u64::from(next.bitrate()) / 5_000_000) as usize;
-            tx.send(outgoing(next, size, true, &budget, 9000))
-                .await
-                .unwrap();
-            tokio::time::timeout(Duration::from_secs(1), async {
-                while inbox.metrics().snapshot().counters["received_frames"] == 0 {
-                    tokio::time::sleep(Duration::from_millis(1)).await;
-                }
-            })
-            .await
-            .unwrap();
-            assert!(inbox.next().unwrap().reset);
-            tx.send(outgoing(next, 100, false, &budget, 12000))
-                .await
-                .unwrap();
-            drop(tx);
-            job.await.unwrap();
-            assert_eq!(inbox.metrics().snapshot().counters["received_frames"], 2);
-            assert_eq!(inbox.metrics().snapshot().counters["expired_frames"], 0);
-            assert!(
-                !inbox.next().unwrap().reset,
-                "delta remains decodable after recovery"
-            );
-            assert_eq!(budget.bytes(), 0);
         }
     }
 
@@ -413,7 +439,7 @@ mod tests {
         assert_eq!(metrics.snapshot().counters["sender_burst_recovery"], 0);
         assert_eq!(inbox.metrics().snapshot().counters["received_frames"], 1);
         assert!(inbox.next().unwrap().reset);
-        assert_eq!(demand.take_encoder_limit(), 0);
+        assert!(!demand.take_encoder_feedback().has_rejection());
         assert_eq!(budget.bytes(), 0);
     }
 }

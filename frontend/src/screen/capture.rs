@@ -425,6 +425,7 @@ fn encode(
     let mut color = (1.0, false);
     let mut previous = Instant::now();
     let mut previous_bitrate = None;
+    let mut recovery_scale = 100;
     let mut send_budget =
         super::pacing::SendBudget::new(super::pacing::transport_bitrate(quality.bitrate()));
     metrics.label("sender_backlog_budget_ms", super::pacing::BACKLOG_BUDGET_MS);
@@ -447,8 +448,11 @@ fn encode(
             metrics.label("viewer_bitrate_budget", bitrate);
             previous_bitrate = Some(bitrate);
         }
-        let next =
-            adaptation.update_with_recovery(bitrate, demand.take_encoder_limit(), Instant::now());
+        let next = adaptation.update_with_recovery(
+            bitrate,
+            demand.take_encoder_feedback(),
+            Instant::now(),
+        );
         if next.is_none() {
             active_fps[usize::from(secondary)].store(0, Ordering::Release);
             if !paused {
@@ -464,8 +468,9 @@ fn encode(
             continue;
         }
         let next = next.expect("active demand has a quality target");
-        if paused || next != quality {
+        if paused || next != quality || recovery_scale != adaptation.scale_percent() {
             quality = next;
+            recovery_scale = adaptation.scale_percent();
             active_fps[usize::from(secondary)].store(quality.fps, Ordering::Release);
             refresh_after = Instant::now();
             hardware = None;
@@ -477,9 +482,10 @@ fn encode(
             paused = false;
             force_keyframe.store(true, Ordering::Release);
             metrics.label("video_paused", false);
+            metrics.label("recovery_scale_percent", recovery_scale);
         }
-        // Share the committed mode's demand-capped rate with the sender. While
-        // a rebuild is pending, shed raw input at this rate before encoding more
+        // Share live demand with the sender, retaining burst capacity even after
+        // a recovery downgrade. Shed raw input at this rate before encoding more
         // dependencies; a small budget dip must not halve the transport rate.
         send_budget.set_bitrate(super::pacing::transport_budget(quality.bitrate(), bitrate));
         if color_checked.elapsed() >= Duration::from_secs(1) {
@@ -604,9 +610,14 @@ fn encode(
                 "source_resolution",
                 format!("{}x{}", pixels.width, pixels.height),
             );
-            let scale = (quality.width() as f64 / pixels.width as f64)
-                .min(quality.height as f64 / pixels.height as f64)
-                .min(1.0);
+            let scale =
+                (quality.width() as f64 * f64::from(recovery_scale) / 100.0 / pixels.width as f64)
+                    .min(
+                        quality.height as f64 * f64::from(recovery_scale)
+                            / 100.0
+                            / pixels.height as f64,
+                    )
+                    .min(1.0);
             let w = ((pixels.width as f64 * scale) as u32 & !1).max(2);
             let h = ((pixels.height as f64 * scale) as u32 & !1).max(2);
             if configured != Some((w, h)) {
