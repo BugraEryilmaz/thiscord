@@ -77,7 +77,8 @@ timeouts, kicks, bans and unbans, with server-side permission and hierarchy chec
 After verifying an account, run `./run-wsl.ps1 -BootstrapOwner YOUR_USERNAME`
 from `backend/`, then open your server’s **Server settings > Roles**. See [permission rules and setup](docs/permissions.md).
 Text chat includes persisted history, edits/deletes, unread mentions and authenticated
-live sockets. Drop images, videos or files onto a text channel, or use the attachment
+live sockets. Links in guild and private messages are clickable and open in the
+default browser on desktop. Drop images, videos or files onto a text channel, or use the attachment
 button, then send them with an optional message. Images and videos open in a
 full-window viewer; videos have a play overlay and playback controls. Files and the
 download buttons save attachments. Each message supports four files of up to 25 MiB

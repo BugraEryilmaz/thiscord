@@ -4,6 +4,7 @@ mod native_account;
 mod native_audio;
 mod native_camera;
 mod native_download;
+mod native_links;
 mod native_notifications;
 mod native_overlay;
 mod native_performance;
@@ -142,6 +143,7 @@ fn main() {
             native_account::prepare_google,
             native_account::open_google,
             native_account::cancel_google,
+            native_links::open_external_url,
             native_audio::audio_devices,
             native_audio::audio_load,
             native_audio::audio_current,

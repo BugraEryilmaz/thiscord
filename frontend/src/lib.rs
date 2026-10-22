@@ -3,6 +3,7 @@ pub mod attachments;
 pub mod audio;
 pub mod chat_history;
 pub mod localization;
+pub mod message_links;
 pub mod navigation;
 pub mod notification_queue;
 pub mod notification_sound;

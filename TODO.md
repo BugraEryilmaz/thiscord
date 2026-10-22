@@ -138,6 +138,7 @@ and single-process chat/media enforcement.
 - [x] Unread markers, mentions, typing indicators and online presence.
 - [ ] Measure unread fan-out with large backlogs; evaluate maintained sequence-bucket aggregates (see docs/unread-performance.md).
 - [x] Safe message rendering, bounded payloads and spam controls.
+- [x] Clickable web links in guild/private messages, opening in the default desktop browser.
 - [x] Reconnect, duplicate delivery, channel isolation and channel deletion tests.
 - [x] Access-controlled text-channel attachments, drag/drop and file picker, image/video viewer and downloads.
 - [ ] Verify attachment drag/drop, downloads and media codec playback interactively on Windows/macOS/Linux clients.

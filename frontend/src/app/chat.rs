@@ -704,7 +704,7 @@ fn MessageRow(
                     <time class="text-xs text-white/40">{move || message.with(|m| crate::i18n::datetime(m.created_at))}</time>
                     <Show when=move || message.with(|m| m.edited_at.is_some() && !m.deleted)><span class="text-xs text-white/40">{move ||crate::i18n::t("edited")}</span></Show>
                 </div>
-                <p class="whitespace-pre-wrap break-words text-white/85">{move || message.with(|m| if m.deleted { "Message deleted".into() } else { m.content.clone() })}</p>
+                <p class="whitespace-pre-wrap break-words text-white/85">{move || message.with(|m| super::message_content::render(if m.deleted { "Message deleted" } else { &m.content }, chat.ui))}</p>
                 <Show when=move || message.with(|m| !m.deleted)>
                     <For each=move || message.with(|m| m.attachments.clone()) key=|a| a.id children=move |attachment| view! { <attachments::Card chat message=id attachment/> }/>
                     <div class="flex gap-3 text-xs text-white/50">
@@ -943,7 +943,7 @@ pub(super) fn ChatPanel(ui: Ui, guild: GuildId, channel: ChannelId, name: String
                             let pending = Memo::new(move |_| chat.pending.with(|p| p.iter().find(|p| p.id == id).cloned()));
                             view! {
                                 <li class="whitespace-pre-wrap break-words text-white/50">
-                                    <p>{move || pending.with(|p| p.as_ref().map(|p| p.content.clone()).unwrap_or_default())}</p>
+                                    <p>{move || pending.with(|p| super::message_content::render(p.as_ref().map(|p| p.content.as_str()).unwrap_or_default(), chat.ui))}</p>
                                     <p class="text-xs">{move || pending.with(|p| p.as_ref().map(|p| p.filenames.join(", ")).unwrap_or_default())}</p>
                                     {move || if pending.with(|p| p.as_ref().is_some_and(|p| p.failed)) { crate::i18n::t("Failed to send") } else { crate::i18n::t("Sending…") }}
                                     <Show when=move || pending.with(|p| p.as_ref().is_some_and(|p| p.failed))>
