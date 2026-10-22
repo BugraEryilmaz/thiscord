@@ -95,6 +95,8 @@ Desktop clients have an opt-in **Settings > App behavior > Keep Thiscord running
 I close the window** preference, saved on this computer. Closing hides the window
 while calls and screen sharing continue. Use the Thiscord system tray icon
 (Windows/Linux) or menu-bar icon (macOS) to **Open Thiscord** or **Quit Thiscord**.
+Launching Thiscord again restores the running client, including when minimized or
+hidden in the tray, instead of opening a second instance.
 On macOS, clicking the Dock icon also restores the window. Linux minimizes to the
 taskbar as well, keeping a recovery path on desktops without a tray host. Tray creation failures
 disable the preference for that run. With the setting off, closing exits the app.

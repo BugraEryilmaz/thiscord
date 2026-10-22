@@ -42,6 +42,10 @@ fn main() {
         std::process::exit(code);
     }
     tauri::Builder::default()
+        // Register first so a second launch exits before initializing other plugins.
+        .plugin(tauri_plugin_single_instance::init(|app, _args, _cwd| {
+            native_window::restore(app);
+        }))
         .plugin(tauri_plugin_updater::Builder::new().build())
         .manage(native_update::UpdateState::default())
         .manage(native_notifications::NotificationState::default())
