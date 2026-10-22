@@ -26,7 +26,8 @@ fn visible() -> bool {
         .is_some_and(|d| !d.hidden())
 }
 async fn connect(video: HtmlVideoElement, watch: Watch) -> Result<Player, String> {
-    let pc = RtcPeerConnection::new().map_err(|_| "This WebView cannot play WebRTC video")?;
+    let pc = RtcPeerConnection::new()
+        .map_err(|_| crate::i18n::t("This WebView cannot play WebRTC video"))?;
     let target = video.clone();
     let track = Closure::<dyn FnMut(RtcTrackEvent)>::new(move |event: RtcTrackEvent| {
         // A 4K IDR can take ~100 ms to pace even on a healthy link. The local
@@ -56,11 +57,11 @@ async fn connect(video: HtmlVideoElement, watch: Watch) -> Result<Player, String
     player.pc.add_transceiver_with_str_and_init("video", &init);
     let offer = JsFuture::from(player.pc.create_offer())
         .await
-        .map_err(|_| "Cannot create video player")?;
+        .map_err(|_| crate::i18n::t("Cannot create video player"))?;
     let offer: RtcSessionDescriptionInit = offer.unchecked_into();
     JsFuture::from(player.pc.set_local_description(&offer))
         .await
-        .map_err(|_| "Cannot initialize video player")?;
+        .map_err(|_| crate::i18n::t("Cannot initialize video player"))?;
     // Only connection setup uses a timer; frames flow through WebRTC directly.
     for _ in 0..100 {
         if player.pc.ice_gathering_state() == RtcIceGatheringState::Complete {
@@ -74,7 +75,7 @@ async fn connect(video: HtmlVideoElement, watch: Watch) -> Result<Player, String
     let sdp = player
         .pc
         .local_description()
-        .ok_or("Missing video offer")?
+        .ok_or(crate::i18n::t("Missing video offer"))?
         .sdp();
     let answer: ViewAnswer = native(
         "screen_view_open",
@@ -85,7 +86,7 @@ async fn connect(video: HtmlVideoElement, watch: Watch) -> Result<Player, String
     remote.set_sdp(&answer.sdp);
     JsFuture::from(player.pc.set_remote_description(&remote))
         .await
-        .map_err(|_| "Cannot connect video player")?;
+        .map_err(|_| crate::i18n::t("Cannot connect video player"))?;
     Ok(player)
 }
 

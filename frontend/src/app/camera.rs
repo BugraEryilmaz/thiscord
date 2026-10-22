@@ -67,15 +67,15 @@ fn media_error(error: JsValue) -> String {
         .unwrap_or_default();
     match name.as_str() {
         "NotFoundError" | "DevicesNotFoundError" => {
-            "No camera found. Connect a webcam or enable a virtual camera."
+            crate::i18n::t("No camera found. Connect a webcam or enable a virtual camera.")
         }
-        "NotAllowedError" | "PermissionDeniedError" => {
-            "Camera access was denied. Allow camera access in your system privacy settings."
-        }
-        "NotReadableError" | "TrackStartError" => {
-            "The camera is busy or unavailable. Close other camera apps and try again."
-        }
-        _ => "Cannot start the camera on this WebView.",
+        "NotAllowedError" | "PermissionDeniedError" => crate::i18n::t(
+            "Camera access was denied. Allow camera access in your system privacy settings.",
+        ),
+        "NotReadableError" | "TrackStartError" => crate::i18n::t(
+            "The camera is busy or unavailable. Close other camera apps and try again.",
+        ),
+        _ => crate::i18n::t("Cannot start the camera on this WebView."),
     }
     .into()
 }
@@ -126,7 +126,7 @@ async fn connect(capture: &Capture) -> Result<(), String> {
         .get_video_tracks()
         .get(0)
         .dyn_into()
-        .map_err(|_| "No camera video track")?;
+        .map_err(|_| crate::i18n::t("No camera video track"))?;
     let init = RtcRtpTransceiverInit::new();
     init.set_direction(RtcRtpTransceiverDirection::Sendonly);
     init.set_send_encodings(&js_sys::Array::of1(&json_value(
@@ -137,11 +137,11 @@ async fn connect(capture: &Capture) -> Result<(), String> {
         .add_transceiver_with_media_stream_track_and_init(&track, &init);
     let offer: RtcSessionDescriptionInit = JsFuture::from(capture.pc.create_offer())
         .await
-        .map_err(|_| "Cannot create camera offer")?
+        .map_err(|_| crate::i18n::t("Cannot create camera offer"))?
         .unchecked_into();
     JsFuture::from(capture.pc.set_local_description(&offer))
         .await
-        .map_err(|_| "Cannot initialize camera")?;
+        .map_err(|_| crate::i18n::t("Cannot initialize camera"))?;
     for _ in 0..100 {
         if capture.pc.ice_gathering_state() == RtcIceGatheringState::Complete {
             break;
@@ -151,12 +151,12 @@ async fn connect(capture: &Capture) -> Result<(), String> {
     if capture.pc.ice_gathering_state() != RtcIceGatheringState::Complete {
         return Err("Camera connection timed out".into());
     }
-    let answer: thiscord_shared::screen::ViewAnswer = native("camera_open",json!({"session":capture.session,"sdp":capture.pc.local_description().ok_or("Missing camera offer")?.sdp()})).await?;
+    let answer: thiscord_shared::screen::ViewAnswer = native("camera_open",json!({"session":capture.session,"sdp":capture.pc.local_description().ok_or(crate::i18n::t("Missing camera offer"))?.sdp()})).await?;
     let description = RtcSessionDescriptionInit::new(RtcSdpType::Answer);
     description.set_sdp(&answer.sdp);
     JsFuture::from(capture.pc.set_remote_description(&description))
         .await
-        .map_err(|_| "Cannot connect camera")?;
+        .map_err(|_| crate::i18n::t("Cannot connect camera"))?;
     for _ in 0..20 {
         if capture.pc.connection_state() == RtcPeerConnectionState::Connected {
             return Ok(());
@@ -187,17 +187,17 @@ async fn budget(capture: &Capture, bitrate: u32) -> Result<(), String> {
                     &"active".into(),
                     &JsValue::from_bool(bitrate > 0),
                 )
-                .map_err(|_| "Cannot pause camera encoding")?;
+                .map_err(|_| crate::i18n::t("Cannot pause camera encoding"))?;
                 js_sys::Reflect::set(
                     &encoding,
                     &"maxBitrate".into(),
                     &JsValue::from_f64(f64::from(bitrate.max(200_000))),
                 )
-                .map_err(|_| "Cannot limit camera bitrate")?;
+                .map_err(|_| crate::i18n::t("Cannot limit camera bitrate"))?;
             }
             JsFuture::from(sender.set_parameters_with_parameters(&parameters))
                 .await
-                .map_err(|_| "Cannot apply camera bitrate limit")?;
+                .map_err(|_| crate::i18n::t("Cannot apply camera bitrate limit"))?;
         }
     }
     Ok(())
@@ -356,11 +356,11 @@ pub(super) fn CameraControls(ui: Ui) -> impl IntoView {
     };
     view! {
         <button class="icon-button" class:active=move ||active.get() disabled=move ||!crate::account_client::desktop() || !ui.voice.get().connected || ui.audio.get().deafened
-            aria-label=move ||if busy.get(){"Cancel camera"}else if active.get(){"Turn camera off"}else{"Turn camera on"}
-            data-tip=move ||if active.get(){"Turn camera off"}else{"Turn camera on"} aria-pressed=move ||active.get() on:click=toggle>
+            aria-label=move ||if busy.get(){crate::i18n::t("Cancel camera")}else if active.get(){crate::i18n::t("Turn camera off")}else{crate::i18n::t("Turn camera on")}
+            data-tip=move ||if active.get(){crate::i18n::t("Turn camera off")}else{crate::i18n::t("Turn camera on")} aria-pressed=move ||active.get() on:click=toggle>
             {move ||view!{<super::icons::Icon kind=if active.get(){super::icons::Glyph::Camera}else{super::icons::Glyph::CameraOff}/>}}
         </button>
-        <Show when=move ||!error.get().is_empty()><span class="max-w-64 text-xs text-red-300" role="alert">{move ||error.get()}</span></Show>
+        <Show when=move ||!error.get().is_empty()><span class="max-w-64 text-xs text-red-300" role="alert">{move ||crate::i18n::message(error.get())}</span></Show>
     }
 }
 #[component]
@@ -392,5 +392,5 @@ pub(super) fn LocalCamera() -> impl IntoView {
             })
         })
     });
-    view! {<div class="stream-player"><video node_ref=node autoplay muted playsinline aria-label="Your camera"/></div>}
+    view! {<div class="stream-player"><video node_ref=node autoplay muted playsinline aria-label=move || crate::i18n::t("Your camera")/></div>}
 }

@@ -55,23 +55,24 @@ pub(super) fn Login(ui: Ui, #[prop(default = false)] admin: bool) -> impl IntoVi
     view! {
         <main class="flex min-h-screen items-center justify-center px-5 py-10">
             <section class="w-full max-w-md space-y-6 rounded-2xl border border-white/10 bg-surface p-8 shadow-2xl" aria-labelledby="login-title">
+                <crate::i18n::LanguageSelector/>
                 <header class="space-y-2 text-center"><p class="text-sm font-semibold uppercase tracking-widest text-brand">"Thiscord"</p>
-                    <h1 id="login-title" class="text-3xl font-bold">{if admin { "Instance dashboard" } else { "Welcome back" }}</h1><p class="text-white/60">{if admin { "Sign in with an instance owner or admin account." } else { "Sign in to your account." }}</p>
+                    <h1 id="login-title" class="text-3xl font-bold">{move || if admin { crate::i18n::t("Instance dashboard") } else { crate::i18n::t("Welcome back") }}</h1><p class="text-white/60">{move || if admin { crate::i18n::t("Sign in with an instance owner or admin account.") } else { crate::i18n::t("Sign in to your account.") }}</p>
                 </header>
                 <form class="space-y-5" on:submit=sign_in>
                     <Field label="Username or email" value=login autocomplete="username"/>
                     <Field label="Password" value=password kind="password" autocomplete="current-password"/>
-                    <button type="submit" class="w-full rounded-md bg-brand px-5 py-3 font-semibold text-white disabled:opacity-50" disabled=move ||ui.busy.get()>"Sign in"</button>
+                    <button type="submit" class="w-full rounded-md bg-brand px-5 py-3 font-semibold text-white disabled:opacity-50" disabled=move ||ui.busy.get()>{move || crate::i18n::t("Sign in")}</button>
                 </form>
-                <button class="w-full rounded-md border border-white/20 px-4 py-3 disabled:opacity-50" disabled=move ||ui.busy.get() on:click=move |_|google(ui,GooglePurpose::Login)>"Continue with Google"</button>
+                <button class="w-full rounded-md border border-white/20 px-4 py-3 disabled:opacity-50" disabled=move ||ui.busy.get() on:click=move |_|google(ui,GooglePurpose::Login)>{move || crate::i18n::t("Continue with Google")}</button>
                 <div class="flex flex-wrap justify-between gap-3 text-sm">
-                    <button class="text-brand underline-offset-4 hover:underline focus-visible:underline disabled:opacity-50" disabled=move ||ui.busy.get() on:click=move |_|open("register")>"Sign up"</button>
-                    <button class="text-brand underline-offset-4 hover:underline focus-visible:underline disabled:opacity-50" disabled=move ||ui.busy.get() on:click=move |_|open("forgot")>"Forgot password?"</button>
+                    <button class="text-brand underline-offset-4 hover:underline focus-visible:underline disabled:opacity-50" disabled=move ||ui.busy.get() on:click=move |_|open("register")>{move || crate::i18n::t("Sign up")}</button>
+                    <button class="text-brand underline-offset-4 hover:underline focus-visible:underline disabled:opacity-50" disabled=move ||ui.busy.get() on:click=move |_|open("forgot")>{move || crate::i18n::t("Forgot password?")}</button>
                 </div>
-                <p class="text-sm text-white/70" role="status" aria-live="polite">{move ||ui.status.get()}</p>
+                <p class="text-sm text-white/70" role="status" aria-live="polite">{move ||crate::i18n::message(ui.status.get())}</p>
                 <Show when=move ||ui.ticket.get().is_some()>
-                    {move ||ui.authorization_url.get().map(|url|view!{<a class="block text-brand underline" href=url target="_blank" rel="noopener noreferrer">"Continue in Google"</a>})}
-                    <button class="text-sm underline" on:click=move |_|super::cancel_google(ui)>"Cancel Google sign-in"</button>
+                    {move ||ui.authorization_url.get().map(|url|view!{<a class="block text-brand underline" href=url target="_blank" rel="noopener noreferrer">{move || crate::i18n::t("Continue in Google")}</a>})}
+                    <button class="text-sm underline" on:click=move |_|super::cancel_google(ui)>{move || crate::i18n::t("Cancel Google sign-in")}</button>
                 </Show>
             </section>
             <dialog node_ref=dialog aria-labelledby="account-dialog-title"
@@ -83,20 +84,20 @@ pub(super) fn Login(ui: Ui, #[prop(default = false)] admin: bool) -> impl IntoVi
                     if x<bounds.left() || x>bounds.right() || y<bounds.top() || y>bounds.bottom() {dialog.close();}
                 }}>
                 <header class="mb-5 flex items-start justify-between gap-4">
-                    <h2 id="account-dialog-title" class="text-2xl font-semibold">{move ||match mode.get(){"register"=>"Create an account","reset"=>"Reset password",_=>"Forgot password?"}}</h2>
-                    <button type="button" aria-label="Close dialog" class="rounded px-2 py-1 text-white/70 hover:bg-white/10" on:click=move |_|if let Some(dialog)=dialog.get(){dialog.close();}>"✕"</button>
+                    <h2 id="account-dialog-title" class="text-2xl font-semibold">{move ||match mode.get(){"register"=>crate::i18n::t("Create an account"),"reset"=>crate::i18n::t("Reset password"),_=>crate::i18n::t("Forgot password?")}}</h2>
+                    <button type="button" aria-label=move || crate::i18n::t("Close dialog") class="rounded px-2 py-1 text-white/70 hover:bg-white/10" on:click=move |_|if let Some(dialog)=dialog.get(){dialog.close();}>"✕"</button>
                 </header>
-                <p class="mb-5 text-sm text-white/60">{move ||match mode.get(){"register"=>"We’ll email you a link to verify your address.","reset"=>"Enter your backup reset code and choose a new password.",_=>"We’ll email you a link to choose a new password in your browser, plus a backup code."}}</p>
+                <p class="mb-5 text-sm text-white/60">{move ||match mode.get(){"register"=>crate::i18n::t("We’ll email you a link to verify your address."),"reset"=>crate::i18n::t("Enter your backup reset code and choose a new password."),_=>crate::i18n::t("We’ll email you a link to choose a new password in your browser, plus a backup code.")}}</p>
                 <form class="space-y-4" on:submit=submit_modal>
                     <Show when=move ||mode.get()=="register"><Field label="Username" value=username autocomplete="username"/></Show>
                     <Show when=move ||mode.get()!="reset"><Field label="Email" value=email kind="email" autocomplete="email"/></Show>
                     <Show when=move ||mode.get()=="reset"><Field label="Password reset code" value=reset_code autocomplete="one-time-code"/></Show>
                     <Show when=move ||mode.get()!="forgot"><Field label="Password (at least 12 characters)" value=new_password kind="password" autocomplete="new-password"/></Show>
-                    <button type="submit" class="w-full rounded-md bg-brand px-5 py-3 font-semibold disabled:opacity-50" disabled=move ||ui.busy.get()>{move ||match mode.get(){"register"=>"Create account","reset"=>"Reset password",_=>"Send reset instructions"}}</button>
+                    <button type="submit" class="w-full rounded-md bg-brand px-5 py-3 font-semibold disabled:opacity-50" disabled=move ||ui.busy.get()>{move ||match mode.get(){"register"=>crate::i18n::t("Create account"),"reset"=>crate::i18n::t("Reset password"),_=>crate::i18n::t("Send reset instructions")}}</button>
                 </form>
-                <p class="mt-4 text-sm text-white/70" role="status" aria-live="polite">{move ||ui.status.get()}</p>
-                <Show when=move ||mode.get()=="forgot"><button class="mt-4 text-sm text-brand hover:underline" disabled=move ||ui.busy.get() on:click=move |_|mode.set("reset")>"I already have a reset code"</button></Show>
-                <Show when=move ||mode.get()=="reset"><button class="mt-4 text-sm text-brand hover:underline" disabled=move ||ui.busy.get() on:click=move |_|mode.set("forgot")>"Request another code"</button></Show>
+                <p class="mt-4 text-sm text-white/70" role="status" aria-live="polite">{move ||crate::i18n::message(ui.status.get())}</p>
+                <Show when=move ||mode.get()=="forgot"><button class="mt-4 text-sm text-brand hover:underline" disabled=move ||ui.busy.get() on:click=move |_|mode.set("reset")>{move || crate::i18n::t("I already have a reset code")}</button></Show>
+                <Show when=move ||mode.get()=="reset"><button class="mt-4 text-sm text-brand hover:underline" disabled=move ||ui.busy.get() on:click=move |_|mode.set("forgot")>{move || crate::i18n::t("Request another code")}</button></Show>
             </dialog>
         </main>
     }

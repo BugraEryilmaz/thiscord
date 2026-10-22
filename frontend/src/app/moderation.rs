@@ -52,7 +52,7 @@ impl Panel {
             if self.state.try_get_untracked().is_some() {
                 self.message.set(match result {
                     Ok(_) => "Action completed.".into(),
-                    Err(error) => format!("{error}. The member list has been refreshed; review it before trying again."),
+                    Err(error) => thiscord_frontend::localized_format!(crate::i18n::language(), "{error}. The member list has been refreshed; review it before trying again.", error = crate::i18n::message(error)),
                 });
                 self.load().await;
                 super::servers::refresh(self.ui).await;
@@ -99,43 +99,43 @@ fn ServerModeration(ui: Ui, guild: GuildId) -> impl IntoView {
     });
     view! {
         <section class="space-y-6">
-            <p class="settings-hint">"Manage members below your highest role. The owner and members at or above your role are protected."</p>
-            <p role="status" class="text-sm text-amber-200">{move ||panel.message.get()}</p>
+            <p class="settings-hint">{move || crate::i18n::t("Manage members below your highest role. The owner and members at or above your role are protected.")}</p>
+            <p role="status" class="text-sm text-amber-200">{move ||crate::i18n::message(panel.message.get())}</p>
             <button class="icon-button" disabled=move ||ui.busy.get() on:click=move |_|{
                 ui.busy.set(true);leptos::task::spawn_local(async move {panel.load().await;ui.busy.set(false);});
-            } aria-label="Refresh members" data-tip="Refresh members"><super::icons::Icon kind=super::icons::Glyph::Refresh/></button>
+            } aria-label=move || crate::i18n::t("Refresh members") data-tip=move || crate::i18n::t("Refresh members")><super::icons::Icon kind=super::icons::Glyph::Refresh/></button>
             <Show when=move ||panel.state.get().is_some()>
                 <fieldset class="settings-card disabled:opacity-50" disabled=move ||ui.busy.get()>
-                    <label class="block space-y-2"><span class="font-semibold">"Member"</span>
+                    <label class="block space-y-2"><span class="font-semibold">{move || crate::i18n::t("Member")}</span>
                         <select class="w-full rounded-lg bg-slate-900 p-3" prop:value=move ||selected.get().map(|id|id.to_string()).unwrap_or_default() on:change=move |ev|selected.set(event_target_value(&ev).parse::<AccountId>().ok())>
-                            <option value="">"Choose a member"</option>
+                            <option value="">{move || crate::i18n::t("Choose a member")}</option>
                             {move ||panel.state.get().map(|s|s.members.into_iter().map(|m|view! {<option value=m.account_id.to_string()>{m.display_name().to_owned()}</option>}).collect_view())}
                         </select>
                     </label>
                     <Show when=move ||member().is_some()>
-                        <p class="text-sm text-white/60">{move ||member().map(|m|match m.timeout_until {Some(until)=>format!("Timeout expiry: {} (UTC). Expired timeouts no longer restrict access.",until.format("%Y-%m-%d %H:%M:%S")),None=>"No timeout set.".into()})}</p>
-                        <Show when=move ||member().is_some_and(|m|m.actions.is_empty())><p class="text-sm text-white/60">"Your permissions or role hierarchy do not allow actions on this member."</p></Show>
+                        <p class="text-sm text-white/60">{move ||member().map(|m|match m.timeout_until {Some(until)=>thiscord_frontend::localized_format!(crate::i18n::language(), "Timeout expiry: {}. Expired timeouts no longer restrict access.",crate::i18n::datetime(until)),None=>crate::i18n::t("No timeout set.").into()})}</p>
+                        <Show when=move ||member().is_some_and(|m|m.actions.is_empty())><p class="text-sm text-white/60">{move || crate::i18n::t("Your permissions or role hierarchy do not allow actions on this member.")}</p></Show>
                         <Show when=move ||allowed(Permission::MoveMembers)>
-                            <button class="rounded-lg border border-white/20 px-4 py-2 hover:bg-white/10" on:click=move |_|if let Some(m)=member(){confirm(GuildChange::DisconnectVoice{account_id:m.account_id},format!("Disconnect {} from voice?",m.display_name().to_owned()),"Ends their current voice and screen-sharing connections in this server. They can join again manually.".into());}>"Disconnect from voice"</button>
+                            <button class="rounded-lg border border-white/20 px-4 py-2 hover:bg-white/10" on:click=move |_|if let Some(m)=member(){confirm(GuildChange::DisconnectVoice{account_id:m.account_id},thiscord_frontend::localized_format!(crate::i18n::language(), "Disconnect {} from voice?",m.display_name().to_owned()),"Ends their current voice and screen-sharing connections in this server. They can join again manually.".into());}>{move || crate::i18n::t("Disconnect from voice")}</button>
                         </Show>
                         <Show when=move ||allowed(Permission::ModerateMembers)>
-                            <div class="space-y-3 rounded-xl border border-white/10 p-4"><h3 class="font-semibold">"Timeout"</h3><p class="text-sm text-white/60">"Temporarily prevents messaging, moderation actions, and joining voice or sharing a screen. The member can still read channels they have access to."</p>
-                                <label class="flex flex-wrap items-center gap-3"><span>"Duration"</span><select class="rounded bg-slate-900 p-2" prop:value=move ||duration.get().to_string() on:change=move |ev|if let Ok(value)=event_target_value(&ev).parse(){duration.set(value);}>
-                                    <option value="60">"1 minute"</option><option value="600">"10 minutes"</option><option value="3600">"1 hour"</option><option value="86400">"1 day"</option><option value="604800">"1 week"</option><option value="2419200">"28 days"</option>
+                            <div class="space-y-3 rounded-xl border border-white/10 p-4"><h3 class="font-semibold">{move || crate::i18n::t("Timeout")}</h3><p class="text-sm text-white/60">{move || crate::i18n::t("Temporarily prevents messaging, moderation actions, and joining voice or sharing a screen. The member can still read channels they have access to.")}</p>
+                                <label class="flex flex-wrap items-center gap-3"><span>{move || crate::i18n::t("Duration")}</span><select class="rounded bg-slate-900 p-2" prop:value=move ||duration.get().to_string() on:change=move |ev|if let Ok(value)=event_target_value(&ev).parse(){duration.set(value);}>
+                                    <option value="60">{move || crate::i18n::t("1 minute")}</option><option value="600">{move || crate::i18n::t("10 minutes")}</option><option value="3600">{move || crate::i18n::t("1 hour")}</option><option value="86400">{move || crate::i18n::t("1 day")}</option><option value="604800">{move || crate::i18n::t("1 week")}</option><option value="2419200">{move || crate::i18n::t("28 days")}</option>
                                 </select></label>
-                                <div class="flex flex-wrap gap-3"><button class="rounded bg-amber-500/20 px-4 py-2 text-amber-200" on:click=move |_|if let Some(m)=member(){confirm(GuildChange::TimeoutMember{account_id:m.account_id,duration_seconds:Some(duration.get_untracked())},format!("Timeout {}?",m.display_name().to_owned()),format!("Restrict communication for {} minutes. Current voice and screen sharing will stop.",duration.get_untracked()/60));}>"Apply timeout"</button>
-                                <button class="rounded bg-white/10 px-4 py-2 disabled:opacity-40" disabled=move ||member().is_none_or(|m|m.timeout_until.is_none()) on:click=move |_|if let Some(m)=member(){panel.change(GuildChange::TimeoutMember{account_id:m.account_id,duration_seconds:None});}>"Remove timeout"</button></div>
+                                <div class="flex flex-wrap gap-3"><button class="rounded bg-amber-500/20 px-4 py-2 text-amber-200" on:click=move |_|if let Some(m)=member(){confirm(GuildChange::TimeoutMember{account_id:m.account_id,duration_seconds:Some(duration.get_untracked())},thiscord_frontend::localized_format!(crate::i18n::language(), "Timeout {}?",m.display_name().to_owned()),thiscord_frontend::localized_format!(crate::i18n::language(), "Restrict communication for {} minutes. Current voice and screen sharing will stop.",duration.get_untracked()/60));}>{move || crate::i18n::t("Apply timeout")}</button>
+                                <button class="rounded bg-white/10 px-4 py-2 disabled:opacity-40" disabled=move ||member().is_none_or(|m|m.timeout_until.is_none()) on:click=move |_|if let Some(m)=member(){panel.change(GuildChange::TimeoutMember{account_id:m.account_id,duration_seconds:None});}>{move || crate::i18n::t("Remove timeout")}</button></div>
                             </div>
                         </Show>
                         <div class="flex flex-wrap gap-3">
-                            <Show when=move ||allowed(Permission::KickMembers)><button class="rounded-lg border border-red-400/40 px-4 py-2 text-red-300" on:click=move |_|if let Some(m)=member(){confirm(GuildChange::RemoveMember{account_id:m.account_id},format!("Kick {} from this server?",m.display_name().to_owned()),"Removes their membership and roles, and disconnects voice. They can rejoin using the server's join credentials.".into());}>"Kick from server"</button></Show>
-                            <Show when=move ||allowed(Permission::BanMembers)><button class="rounded-lg bg-red-500/20 px-4 py-2 text-red-300" on:click=move |_|if let Some(m)=member(){confirm(GuildChange::BanMember{account_id:m.account_id},format!("Ban {} from this server?",m.display_name().to_owned()),"Removes their membership and roles, disconnects voice, and prevents rejoining until unbanned. Existing messages are retained.".into());}>"Ban from server"</button></Show>
+                            <Show when=move ||allowed(Permission::KickMembers)><button class="rounded-lg border border-red-400/40 px-4 py-2 text-red-300" on:click=move |_|if let Some(m)=member(){confirm(GuildChange::RemoveMember{account_id:m.account_id},thiscord_frontend::localized_format!(crate::i18n::language(), "Kick {} from this server?",m.display_name().to_owned()),"Removes their membership and roles, and disconnects voice. They can rejoin using the server's join credentials.".into());}>{move || crate::i18n::t("Kick from server")}</button></Show>
+                            <Show when=move ||allowed(Permission::BanMembers)><button class="rounded-lg bg-red-500/20 px-4 py-2 text-red-300" on:click=move |_|if let Some(m)=member(){confirm(GuildChange::BanMember{account_id:m.account_id},thiscord_frontend::localized_format!(crate::i18n::language(), "Ban {} from this server?",m.display_name().to_owned()),"Removes their membership and roles, disconnects voice, and prevents rejoining until unbanned. Existing messages are retained.".into());}>{move || crate::i18n::t("Ban from server")}</button></Show>
                         </div>
                     </Show>
                     <Show when=move ||panel.state.get().is_some_and(|s|s.can_unban)>
-                        <section class="space-y-3 border-t border-white/10 pt-5"><h3 class="text-lg font-semibold">"Banned members"</h3>
-                            <Show when=move ||panel.state.get().is_some_and(|s|s.bans.is_empty())><p class="text-sm text-white/60">"No banned members."</p></Show>
-                            <ul class="space-y-3">{move ||panel.state.get().map(|s|s.bans.into_iter().map(move |b|view! {<li class="flex items-center justify-between gap-3"><span>{b.display_name().to_owned()}</span><button class="rounded bg-white/10 px-4 py-2" on:click=move |_|confirm(GuildChange::UnbanMember{account_id:b.account_id},format!("Unban {}?",b.display_name().to_owned()),"Allows them to join again. Their previous membership and roles will not be restored.".into())>"Unban"</button></li>}).collect_view())}</ul>
+                        <section class="space-y-3 border-t border-white/10 pt-5"><h3 class="text-lg font-semibold">{move || crate::i18n::t("Banned members")}</h3>
+                            <Show when=move ||panel.state.get().is_some_and(|s|s.bans.is_empty())><p class="text-sm text-white/60">{move || crate::i18n::t("No banned members.")}</p></Show>
+                            <ul class="space-y-3">{move ||panel.state.get().map(|s|s.bans.into_iter().map(move |b|view! {<li class="flex items-center justify-between gap-3"><span>{b.display_name().to_owned()}</span><button class="rounded bg-white/10 px-4 py-2" on:click=move |_|confirm(GuildChange::UnbanMember{account_id:b.account_id},thiscord_frontend::localized_format!(crate::i18n::language(), "Unban {}?",b.display_name().to_owned()),"Allows them to join again. Their previous membership and roles will not be restored.".into())>{move || crate::i18n::t("Unban")}</button></li>}).collect_view())}</ul>
                         </section>
                     </Show>
                 </fieldset>
@@ -144,10 +144,10 @@ fn ServerModeration(ui: Ui, guild: GuildId) -> impl IntoView {
         <dialog node_ref=dialog on:click=move |e|super::dialog::dismiss_outside(e,dialog,ui.busy.get_untracked()) aria-labelledby="moderation-confirm-title" class="m-auto w-[calc(100%-2rem)] max-w-md space-y-5 rounded-2xl border border-white/15 bg-surface p-6 text-white shadow-2xl backdrop:bg-black/70" on:close=move |_|pending.set(None)>
             <h2 id="moderation-confirm-title" class="text-xl font-semibold">{move ||pending.get().map(|(_,title,_)|title)}</h2>
             <p class="text-sm text-white/70">{move ||pending.get().map(|(_,_,detail)|detail)}</p>
-            <div class="flex justify-end gap-3"><button class="rounded bg-white/10 px-4 py-2" on:click=move |_|if let Some(dialog)=dialog.get(){dialog.close();}>"Cancel"</button><button class="rounded bg-red-500/20 px-4 py-2 text-red-200" on:click=move |_|{
+            <div class="flex justify-end gap-3"><button class="rounded bg-white/10 px-4 py-2" on:click=move |_|if let Some(dialog)=dialog.get(){dialog.close();}>{move || crate::i18n::t("Cancel")}</button><button class="rounded bg-red-500/20 px-4 py-2 text-red-200" on:click=move |_|{
                 if let Some((change,_,_))=pending.get_untracked(){panel.change(change);}
                 if let Some(dialog)=dialog.get(){dialog.close();}
-            }>"Confirm"</button></div>
+            }>{move || crate::i18n::t("Confirm")}</button></div>
         </dialog>
     }
 }

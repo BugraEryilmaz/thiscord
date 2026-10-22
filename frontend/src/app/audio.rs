@@ -269,8 +269,8 @@ pub(super) fn toggle(ui: Ui, action: AudioToggle) {
 fn VoiceControls(ui: Ui) -> impl IntoView {
     let available = move || desktop() || ui.audio_control.is_remote();
     view! {<div class="flex shrink-0 items-center">
-        <button class="icon-button" disabled=move ||!available() aria-label=move ||if ui.audio.get().muted {"Unmute"}else{"Mute"} data-tip=move ||if !available(){"Microphone requires desktop"}else if ui.audio.get().muted{"Unmute"}else{"Mute"} aria-pressed=move || ui.audio.get().muted on:click=move |_|toggle(ui, AudioToggle::Mute)>{move||view!{<Icon kind=if ui.audio.get().muted{Glyph::MicOff}else{Glyph::Mic}/>}}</button>
-        <button class="icon-button" disabled=move ||!available() aria-label=move ||if ui.audio.get().deafened {"Undeafen"}else{"Deafen"} data-tip=move ||if !available(){"Audio requires desktop"}else if ui.audio.get().deafened{"Undeafen"}else{"Deafen"} aria-pressed=move || ui.audio.get().deafened on:click=move |_|toggle(ui, AudioToggle::Deafen)>{move||view!{<Icon kind=if ui.audio.get().deafened{Glyph::Deafen}else{Glyph::Headphones}/>}}</button>
+        <button class="icon-button" disabled=move ||!available() aria-label=move ||if ui.audio.get().muted {crate::i18n::t("Unmute")}else{crate::i18n::t("Mute")} data-tip=move ||if !available(){crate::i18n::t("Microphone requires desktop")}else if ui.audio.get().muted{crate::i18n::t("Unmute")}else{crate::i18n::t("Mute")} aria-pressed=move || ui.audio.get().muted on:click=move |_|toggle(ui, AudioToggle::Mute)>{move||view!{<Icon kind=if ui.audio.get().muted{Glyph::MicOff}else{Glyph::Mic}/>}}</button>
+        <button class="icon-button" disabled=move ||!available() aria-label=move ||if ui.audio.get().deafened {crate::i18n::t("Undeafen")}else{crate::i18n::t("Deafen")} data-tip=move ||if !available(){crate::i18n::t("Audio requires desktop")}else if ui.audio.get().deafened{crate::i18n::t("Undeafen")}else{crate::i18n::t("Deafen")} aria-pressed=move || ui.audio.get().deafened on:click=move |_|toggle(ui, AudioToggle::Deafen)>{move||view!{<Icon kind=if ui.audio.get().deafened{Glyph::Deafen}else{Glyph::Headphones}/>}}</button>
     </div>}
 }
 #[component]
@@ -291,32 +291,32 @@ pub(super) fn VoiceBar(ui: Ui) -> impl IntoView {
             })
             .unwrap_or_else(|| "Voice channel".into())
     };
-    view! {<aside class="user-dock" aria-label="Your account and voice controls">
+    view! {<aside class="user-dock" aria-label=move || crate::i18n::t("Your account and voice controls")>
         <Show when=move||ui.voice.get().channel_id.is_some()><div class="voice-dock">
             <div class="flex items-center gap-2">
                 <span class="text-emerald-400"><Icon kind=Glyph::Signal/></span>
-                <div class="min-w-0 flex-1"><button class="voice-health text-sm font-semibold" aria-label="Voice connection diagnostics" data-tip=move ||if ui.voice.get().connected {thiscord_frontend::audio_quality::brief(ui.audio_status.get().and_then(|s|s.quality).as_ref())}else{"Connecting · diagnostics pending".into()} class:text-emerald-400=move ||ui.voice.get().connected class:text-amber-300=move ||!ui.voice.get().connected role="status">{move ||if ui.voice.get().connected{"Voice connected"}else{"Connecting to voice…"}}</button><button class="block max-w-full truncate text-left text-xs text-white/55 hover:text-white" data-tip="Open call controls" aria-label="Open call controls" on:click=move |_|super::servers::open_voice(ui)>{location}</button></div>
-                <button class="icon-button danger" aria-label="Disconnect voice" data-tip="Disconnect" disabled=move ||ui.voice_joining.get() on:click=move |_|leave(ui)><Icon kind=Glyph::Disconnect/></button>
+                <div class="min-w-0 flex-1"><button class="voice-health text-sm font-semibold" aria-label=move || crate::i18n::t("Voice connection diagnostics") data-tip=move ||if ui.voice.get().connected {thiscord_frontend::audio_quality::brief(ui.audio_status.get().and_then(|s|s.quality).as_ref())}else{"Connecting · diagnostics pending".into()} class:text-emerald-400=move ||ui.voice.get().connected class:text-amber-300=move ||!ui.voice.get().connected role="status">{move ||if ui.voice.get().connected{crate::i18n::t("Voice connected")}else{crate::i18n::t("Connecting to voice…")}}</button><button class="block max-w-full truncate text-left text-xs text-white/55 hover:text-white" data-tip=move || crate::i18n::t("Open call controls") aria-label=move || crate::i18n::t("Open call controls") on:click=move |_|super::servers::open_voice(ui)>{location}</button></div>
+                <button class="icon-button danger" aria-label=move || crate::i18n::t("Disconnect voice") data-tip=move || crate::i18n::t("Disconnect") disabled=move ||ui.voice_joining.get() on:click=move |_|leave(ui)><Icon kind=Glyph::Disconnect/></button>
             </div>
             <div class="mt-2 flex items-center gap-2">
                 <super::camera::CameraControls ui=ui/>
                 <super::screen::ScreenControls ui=ui/>
-                <button class="icon-button voice-action" aria-label="Audio settings" data-tip="Audio settings" on:click=move |_|ui.page.set("audio")><Icon kind=Glyph::Volume/></button>
-                <Show when=move||!ui.audio_control.is_remote() && ui.audio.get().mode==TransmitMode::PushToTalk><button class="icon-button voice-action touch-none select-none" aria-label="Hold to talk" data-tip="Hold to talk" on:pointerdown=move |_|pressed(true) on:pointerup=move |_|pressed(false) on:pointerleave=move |_|pressed(false) on:pointercancel=move |_|pressed(false) on:keydown=move|e|{if matches!(e.key().as_str()," "|"Enter"){e.prevent_default();pressed(true);}} on:keyup=move|_|pressed(false) on:blur=move |_|pressed(false)><Icon kind=Glyph::Mic/></button></Show>
+                <button class="icon-button voice-action" aria-label=move || crate::i18n::t("Audio settings") data-tip=move || crate::i18n::t("Audio settings") on:click=move |_|ui.page.set("audio")><Icon kind=Glyph::Volume/></button>
+                <Show when=move||!ui.audio_control.is_remote() && ui.audio.get().mode==TransmitMode::PushToTalk><button class="icon-button voice-action touch-none select-none" aria-label=move || crate::i18n::t("Hold to talk") data-tip=move || crate::i18n::t("Hold to talk") on:pointerdown=move |_|pressed(true) on:pointerup=move |_|pressed(false) on:pointerleave=move |_|pressed(false) on:pointercancel=move |_|pressed(false) on:keydown=move|e|{if matches!(e.key().as_str()," "|"Enter"){e.prevent_default();pressed(true);}} on:keyup=move|_|pressed(false) on:blur=move |_|pressed(false)><Icon kind=Glyph::Mic/></button></Show>
             </div>
         <Show when=move||ui.audio_status.get().and_then(|s|s.recording).is_some_and(|r|r.active)>
             <button class="mt-2 rounded bg-red-700 px-3 py-1 text-xs text-white" on:click=move |_|debug_command(ui,"audio_debug_stop")>
-                {move||format!("● Recording {}s · Stop",ui.audio_status.get().and_then(|s|s.recording).map_or(0,|r|r.elapsed_ms/1000))}
+                {move||thiscord_frontend::localized_format!(crate::i18n::language(), "● Recording {}s · Stop",ui.audio_status.get().and_then(|s|s.recording).map_or(0,|r|r.elapsed_ms/1000))}
             </button>
         </Show>
         </div></Show>
         <div class="flex min-w-0 items-center gap-2 p-2">
-            <button class="flex min-w-0 flex-1 items-center gap-2 rounded-lg p-1 text-left hover:bg-white/5" aria-label="Your profile" data-tip=move ||ui.account.get().map(|a|format!("{} (@{})",a.display_name,a.username)).unwrap_or_default() on:click=move |_|ui.page.set("profile")>
+            <button class="flex min-w-0 flex-1 items-center gap-2 rounded-lg p-1 text-left hover:bg-white/5" aria-label=move || crate::i18n::t("Your profile") data-tip=move ||ui.account.get().map(|a|format!("{} (@{})",a.display_name,a.username)).unwrap_or_default() on:click=move |_|ui.page.set("profile")>
                 <span class="relative shrink-0"><crate::avatar::Avatar name=Signal::derive(move ||ui.account.get().map(|a|a.display_name).unwrap_or_default()) avatar_id=Signal::derive(move ||ui.account.get().and_then(|a|a.avatar_id))/><span class="connection-dot" class:connected=move ||ui.socket_status.get()==super::chat::ConnectionStatus::Connected class:connecting=move ||matches!(ui.socket_status.get(),super::chat::ConnectionStatus::Connecting|super::chat::ConnectionStatus::Reconnecting)></span></span>
                 <span class="min-w-0"><span class="block truncate text-sm font-semibold">{move ||ui.account.get().map(|a|if a.display_name.is_empty(){a.username}else{a.display_name})}</span><span class="block truncate text-xs text-white/55" role="status">{move ||ui.socket_status.get().label()}</span></span>
             </button>
             <VoiceControls ui=ui/>
-            <button class="icon-button shrink-0" aria-label="Settings" data-tip="Settings" on:click=move |_|ui.page.set("profile")><Icon kind=Glyph::Settings/></button>
+            <button class="icon-button shrink-0" aria-label=move || crate::i18n::t("Settings") data-tip=move || crate::i18n::t("Settings") on:click=move |_|ui.page.set("profile")><Icon kind=Glyph::Settings/></button>
         </div>
     </aside>}
 }
@@ -334,26 +334,26 @@ fn debug_command(ui: Ui, command: &'static str) {
 }
 #[component]
 fn DebugRecording(ui: Ui) -> impl IntoView {
-    view! {<section class="space-y-2 rounded-lg border border-white/15 p-4" aria-label="Echo debug recording">
-        <h3 class="font-semibold">"Echo debug recording"</h3>
-        <p class="text-sm text-white/70">"Save up to 60 seconds of speaker output, raw microphone, and outgoing audio for troubleshooting. Raw microphone is recorded even while muted. Tell the other participants before starting. Files stay on this computer until you choose to share them."</p>
+    view! {<section class="space-y-2 rounded-lg border border-white/15 p-4" aria-label=move || crate::i18n::t("Echo debug recording")>
+        <h3 class="font-semibold">{move || crate::i18n::t("Echo debug recording")}</h3>
+        <p class="text-sm text-white/70">{move || crate::i18n::t("Save up to 60 seconds of speaker output, raw microphone, and outgoing audio for troubleshooting. Raw microphone is recorded even while muted. Tell the other participants before starting. Files stay on this computer until you choose to share them.")}</p>
         <button class="rounded bg-brand px-3 py-2 text-sm disabled:opacity-50"
             disabled=move||ui.voice.get().channel_id.is_none() || ui.audio_status.get().is_none_or(|s|!s.running || s.recording.is_some_and(|r|r.active || r.saving))
-            on:click=move |_|debug_command(ui,"audio_debug_start")>"Start debug recording"</button>
+            on:click=move |_|debug_command(ui,"audio_debug_start")>{move || crate::i18n::t("Start debug recording")}</button>
         <Show when=move||ui.audio_status.get().and_then(|s|s.recording).is_some()>
             <p class="text-sm" role="status">{move||ui.audio_status.get().and_then(|s|s.recording).map(|r| {
                 if let Some(error)=r.error { error }
-                else if r.active { format!("● Recording — {} / 60 seconds",r.elapsed_ms/1000) }
+                else if r.active { thiscord_frontend::localized_format!(crate::i18n::language(), "● Recording — {} / 60 seconds",r.elapsed_ms/1000) }
                 else if r.saving { "Saving recording…".into() }
-                else { format!("Saved to {}. Share the entire folder, including timing metadata.",r.directory) }
+                else { thiscord_frontend::localized_format!(crate::i18n::language(), "Saved to {}. Share the entire folder, including timing metadata.",r.directory) }
             })}</p>
             <Show when=move||ui.audio_status.get().and_then(|s|s.recording).is_some_and(|r|r.active)>
-                <button class="rounded bg-red-700 px-3 py-2 text-sm" on:click=move |_|debug_command(ui,"audio_debug_stop")>"Stop and save"</button>
+                <button class="rounded bg-red-700 px-3 py-2 text-sm" on:click=move |_|debug_command(ui,"audio_debug_stop")>{move || crate::i18n::t("Stop and save")}</button>
             </Show>
             <button class="text-sm underline disabled:opacity-50" disabled=move||ui.audio_status.get().and_then(|s|s.recording).is_none_or(|r|r.active||r.saving)
-                on:click=move |_|leptos::task::spawn_local(async move {if let Err(error)=ui.audio_control.invoke::<()>("audio_debug_folder",json!({})).await{ui.status.set(error);}})>"Open recording folder"</button>
+                on:click=move |_|leptos::task::spawn_local(async move {if let Err(error)=ui.audio_control.invoke::<()>("audio_debug_folder",json!({})).await{ui.status.set(error);}})>{move || crate::i18n::t("Open recording folder")}</button>
         </Show>
-        <p class="text-xs text-white/60">"Join voice first. For a useful sample, have one person speak for 5–10 seconds, then talk at the same time. Delete the recording when it is no longer needed."</p>
+        <p class="text-xs text-white/60">{move || crate::i18n::t("Join voice first. For a useful sample, have one person speak for 5–10 seconds, then talk at the same time. Delete the recording when it is no longer needed.")}</p>
     </section>}
 }
 #[component]
@@ -425,8 +425,8 @@ pub(super) fn StreamVolume(
     view! {
         <div class="stream-volume" class:compact=compact>
             <label class="flex flex-wrap items-center gap-3">
-                <span class="volume-label">{if shared_audio { "Stream audio".to_owned() } else if compact {"Voice volume".to_owned()} else { stream.label }}</span>
-                <input aria-label=if shared_audio { "Screen share volume" } else { "Speaker volume" } type="range" min="0" max="200" step="1"
+                <span class="volume-label">{move || if shared_audio { crate::i18n::t("Stream audio").to_owned() } else if compact {crate::i18n::t("Voice volume").to_owned()} else { stream.label.clone() }}</span>
+                <input aria-label=move ||if shared_audio { crate::i18n::t("Screen share volume") } else { crate::i18n::t("Speaker volume") } type="range" min="0" max="200" step="1"
                     disabled=move || busy.get() prop:value=move || gain.get().to_string()
                     on:input=move |e| { if let Ok(value) = event_target_value(&e).parse::<f32>() { dragging.set(true);gain.set(value); } }
                     on:change=move |e| { if let Ok(value) = event_target_value(&e).parse::<f32>() { save(value / 100.0); } }/>
@@ -434,8 +434,8 @@ pub(super) fn StreamVolume(
             </label>
             {shared_audio.then(|| view! {
                 <button class="icon-button" disabled=move || busy.get()
-                    aria-label=move ||if gain.get()==0.0{"Unmute stream audio"}else{"Mute stream audio"}
-                    data-tip=move ||if gain.get()==0.0{"Unmute stream audio"}else{"Mute stream audio"}
+                    aria-label=move ||if gain.get()==0.0{crate::i18n::t("Unmute stream audio")}else{crate::i18n::t("Mute stream audio")}
+                    data-tip=move ||if gain.get()==0.0{crate::i18n::t("Unmute stream audio")}else{crate::i18n::t("Mute stream audio")}
                     aria-pressed=move || (gain.get() == 0.0).to_string()
                     on:click=move |_| {
                         if gain.get_untracked() > 0.0 {
@@ -444,7 +444,7 @@ pub(super) fn StreamVolume(
                         } else { save(restore.get_untracked()); }
                     }>{move ||view!{<Icon kind=if gain.get()==0.0{Glyph::VolumeOff}else{Glyph::Volume}/ >}}</button>
             })}
-            <Show when=move || !error.get().is_empty()><p class="w-full text-sm text-red-300" role="alert">{move || error.get()}</p></Show>
+            <Show when=move || !error.get().is_empty()><p class="w-full text-sm text-red-300" role="alert">{move || crate::i18n::message(error.get())}</p></Show>
         </div>
     }
 }
@@ -457,7 +457,7 @@ pub(super) fn VoiceChannel(
 ) -> impl IntoView {
     view! {<section class="voice-channel-view">
         <header class="voice-channel-header"><Icon kind=Glyph::Volume/><h2>{name}</h2></header>
-        <Show when=move ||desktop() || ui.audio_control.is_remote() fallback=||view!{<p class="voice-channel-empty">"Open the desktop app to use voice and watch streams."</p>}>
+        <Show when=move ||desktop() || ui.audio_control.is_remote() fallback=||view!{<p class="voice-channel-empty">{move || crate::i18n::t("Open the desktop app to use voice and watch streams.")}</p>}>
             <super::screen::ScreenViewer ui=ui guild=guild channel=channel/>
         </Show>
     </section>}
@@ -525,80 +525,79 @@ pub(super) fn AudioSettingsPanel(ui: Ui) -> impl IntoView {
             }
         });
     };
-    view! {<div class="space-y-5"><h2 class="settings-panel-title text-xl font-semibold">"Audio & voice"</h2>
+    view! {<div class="space-y-5"><h2 class="settings-panel-title text-xl font-semibold">{move || crate::i18n::t("Audio & voice")}</h2>
             <Show when=move ||ui.audio_control.is_remote()><ShortcutSettings control=ui.audio_control/><crate::overlay::OverlaySettings control=ui.audio_control/></Show>
-            <Show when=move ||desktop() || ui.audio_control.is_remote() fallback=||view!{<p>"Audio devices and voice are available in the desktop app."</p>}>
-                <section class="settings-card"><h3>"Devices & microphone"</h3><p class="settings-hint">"Changes save automatically and apply to your current call."</p>
+            <Show when=move ||desktop() || ui.audio_control.is_remote() fallback=||view!{<p>{move || crate::i18n::t("Audio devices and voice are available in the desktop app.")}</p>}>
+                <section class="settings-card"><h3>{move || crate::i18n::t("Devices & microphone")}</h3><p class="settings-hint">{move || crate::i18n::t("Changes save automatically and apply to your current call.")}</p>
                 {[(true,"Microphone"),(false,"Speakers / headphones")].into_iter().map(move|(input,label)|view!{
-                    <label class="block space-y-2"><span>{label}</span><select class="w-full rounded bg-slate-900 p-2 disabled:opacity-50" disabled=move||ui.audio_saving.get() prop:value=move||{let s=ui.audio.get();if input{s.input}else{s.output}.unwrap_or_default()} on:change=move|e|{let v=event_target_value(&e);ui.audio.update(|s|{let value=(!v.is_empty()).then_some(v);if input{s.input=value;}else{s.output=value;}});save(ui);}>
-                        <option value="">"System default"</option>{move||devices.get().into_iter().filter(|d|d.input==input).map(|d|view!{<option value=d.id>{d.name}</option>}).collect_view()}
+                    <label class="block space-y-2"><span>{move || crate::i18n::t(label)}</span><select class="w-full rounded bg-slate-900 p-2 disabled:opacity-50" disabled=move||ui.audio_saving.get() prop:value=move||{let s=ui.audio.get();if input{s.input}else{s.output}.unwrap_or_default()} on:change=move|e|{let v=event_target_value(&e);ui.audio.update(|s|{let value=(!v.is_empty()).then_some(v);if input{s.input=value;}else{s.output=value;}});save(ui);}>
+                        <option value="">{move || crate::i18n::t("System default")}</option>{move||devices.get().into_iter().filter(|d|d.input==input).map(|d|view!{<option value=d.id>{d.name}</option>}).collect_view()}
                     </select></label>
                 }).collect_view()}
-                <label class="flex flex-wrap gap-3"><span>"Output volume"</span><output class="text-xs text-white/60">{move ||format!("{}%",(ui.audio.get().output_volume*100.0).round())}</output><input type="range" min="0" max="200" prop:value=move||(ui.audio.get().output_volume*100.0).to_string() on:change=move|e|{if let Ok(v)=event_target_value(&e).parse::<f32>(){ui.audio.update(|s|s.output_volume=v/100.0);save(ui);}}/></label>
-                <label class="block space-y-2"><span>"Transmit mode"</span><select class="w-full rounded bg-slate-900 p-2" prop:value=move||if ui.audio.get().mode==TransmitMode::PushToTalk{"ptt"}else{"activity"} on:change=move|e|{ui.audio.update(|s|s.mode=if event_target_value(&e)=="ptt"{TransmitMode::PushToTalk}else{TransmitMode::VoiceActivity});save(ui);}><option value="activity">"Voice activation"</option><option value="ptt">"Push to talk"</option></select></label>
-                <label class="flex flex-wrap gap-3"><span>"Microphone boost"</span><output class="text-xs text-white/60">{move||format!("{:.1}×",ui.audio.get().input_gain)}</output><input type="range" min="1" max="10" step="0.1" disabled=move||ui.audio_saving.get() prop:value=move||ui.audio.get().input_gain.to_string() on:change=move|e|{if let Ok(v)=event_target_value(&e).parse::<f32>(){ui.audio.update(|s|s.input_gain=v);save(ui);}}/></label>
-                <p class="settings-hint">"Boosts your microphone before voice activation and automatic gain. Start at 2× for a quiet microphone; reduce it if your voice distorts or background noise activates it. 1× leaves the level unchanged."</p>
-                <label class="flex flex-wrap gap-3"><span>"Activation threshold"</span><input type="range" min="1" max="100" prop:value=move||(ui.audio.get().activation_threshold*1000.0).to_string() on:change=move|e|{if let Ok(v)=event_target_value(&e).parse::<f32>(){ui.audio.update(|s|s.activation_threshold=v/1000.0);save(ui);}}/></label>
-                <label class="flex items-center gap-3"><input type="checkbox" disabled=move||ui.audio_saving.get() prop:checked=move||ui.audio.get().global_push_to_talk on:change=move|e|{ui.audio.update(|s|s.global_push_to_talk=event_target_checked(&e));save(ui);}/>"Global push-to-talk: Ctrl+Shift+Space (Windows, macOS, Linux/X11)"</label>
-                <div class="settings-actions">                <button class="rounded bg-brand px-4 py-2 disabled:opacity-50" disabled=move||busy.get()||ui.voice.get().channel_id.is_some() on:click=move |_|test(false)>"Test playback (5 seconds)"</button>
-                    <button class="rounded bg-white/10 px-4 py-2 disabled:opacity-50" disabled=move||busy.get()||ui.voice.get().channel_id.is_some() on:click=move |_|test(true)>"Test microphone (60 seconds)"</button>
-    </div><p class="settings-hint">"Use headphones for the microphone test. Sound tests are available when you’re outside a call."</p>
+                <label class="flex flex-wrap gap-3"><span>{move || crate::i18n::t("Output volume")}</span><output class="text-xs text-white/60">{move ||format!("{}%",(ui.audio.get().output_volume*100.0).round())}</output><input type="range" min="0" max="200" prop:value=move||(ui.audio.get().output_volume*100.0).to_string() on:change=move|e|{if let Ok(v)=event_target_value(&e).parse::<f32>(){ui.audio.update(|s|s.output_volume=v/100.0);save(ui);}}/></label>
+                <label class="block space-y-2"><span>{move || crate::i18n::t("Transmit mode")}</span><select class="w-full rounded bg-slate-900 p-2" prop:value=move||if ui.audio.get().mode==TransmitMode::PushToTalk{"ptt"}else{"activity"} on:change=move|e|{ui.audio.update(|s|s.mode=if event_target_value(&e)=="ptt"{TransmitMode::PushToTalk}else{TransmitMode::VoiceActivity});save(ui);}><option value="activity">{move || crate::i18n::t("Voice activation")}</option><option value="ptt">{move || crate::i18n::t("Push to talk")}</option></select></label>
+                <label class="flex flex-wrap gap-3"><span>{move || crate::i18n::t("Microphone boost")}</span><output class="text-xs text-white/60">{move||format!("{:.1}×",ui.audio.get().input_gain)}</output><input type="range" min="1" max="10" step="0.1" disabled=move||ui.audio_saving.get() prop:value=move||ui.audio.get().input_gain.to_string() on:change=move|e|{if let Ok(v)=event_target_value(&e).parse::<f32>(){ui.audio.update(|s|s.input_gain=v);save(ui);}}/></label>
+                <p class="settings-hint">{move ||crate::i18n::t("Boosts your microphone before voice activation and automatic gain. Start at 2× for a quiet microphone; reduce it if your voice distorts or background noise activates it. 1× leaves the level unchanged.")}</p>
+                <label class="flex flex-wrap gap-3"><span>{move || crate::i18n::t("Activation threshold")}</span><input type="range" min="1" max="100" prop:value=move||(ui.audio.get().activation_threshold*1000.0).to_string() on:change=move|e|{if let Ok(v)=event_target_value(&e).parse::<f32>(){ui.audio.update(|s|s.activation_threshold=v/1000.0);save(ui);}}/></label>
+                <label class="flex items-center gap-3"><input type="checkbox" disabled=move||ui.audio_saving.get() prop:checked=move||ui.audio.get().global_push_to_talk on:change=move|e|{ui.audio.update(|s|s.global_push_to_talk=event_target_checked(&e));save(ui);}/>{move || crate::i18n::t("Global push-to-talk: Ctrl+Shift+Space (Windows, macOS, Linux/X11)")}</label>
+                <div class="settings-actions">                <button class="rounded bg-brand px-4 py-2 disabled:opacity-50" disabled=move||busy.get()||ui.voice.get().channel_id.is_some() on:click=move |_|test(false)>{move || crate::i18n::t("Test playback (5 seconds)")}</button>
+                    <button class="rounded bg-white/10 px-4 py-2 disabled:opacity-50" disabled=move||busy.get()||ui.voice.get().channel_id.is_some() on:click=move |_|test(true)>{move || crate::i18n::t("Test microphone (60 seconds)")}</button>
+    </div><p class="settings-hint">{move || crate::i18n::t("Use headphones for the microphone test. Sound tests are available when you’re outside a call.")}</p>
                 </section>
-                <section class="settings-card"><h3>"Voice processing"</h3>
-                    <label class="flex gap-3"><input type="checkbox" prop:checked=move||ui.audio.get().noise_suppression on:change=move|e|{ui.audio.update(|s|s.noise_suppression=event_target_checked(&e));save(ui);}/>"Noise suppression"</label>
-                    <details><summary>"Noise suppression model"</summary><label class="block space-y-2"><span>"Model"</span><select class="w-full rounded bg-slate-900 p-2 disabled:opacity-50" disabled=move||ui.audio_saving.get() prop:value=move||match ui.audio.get().noise_suppression_model { NoiseSuppressionModel::Sonora=>"sonora", NoiseSuppressionModel::DeepFilterNet3=>"deep_filter_net3" } on:change=move|e|{ui.audio.update(|s|s.noise_suppression_model=if event_target_value(&e)=="deep_filter_net3" {NoiseSuppressionModel::DeepFilterNet3}else{NoiseSuppressionModel::Sonora});save(ui);}>
-                        <option value="sonora">"Standard (Sonora)"</option><option value="deep_filter_net3">"DeepFilterNet3 (experimental)"</option>
+                <section class="settings-card"><h3>{move || crate::i18n::t("Voice processing")}</h3>
+                    <label class="flex gap-3"><input type="checkbox" prop:checked=move||ui.audio.get().noise_suppression on:change=move|e|{ui.audio.update(|s|s.noise_suppression=event_target_checked(&e));save(ui);}/>{move || crate::i18n::t("Noise suppression")}</label>
+                    <details><summary>{move || crate::i18n::t("Noise suppression model")}</summary><label class="block space-y-2"><span>{move || crate::i18n::t("Model")}</span><select class="w-full rounded bg-slate-900 p-2 disabled:opacity-50" disabled=move||ui.audio_saving.get() prop:value=move||match ui.audio.get().noise_suppression_model { NoiseSuppressionModel::Sonora=>"sonora", NoiseSuppressionModel::DeepFilterNet3=>"deep_filter_net3" } on:change=move|e|{ui.audio.update(|s|s.noise_suppression_model=if event_target_value(&e)=="deep_filter_net3" {NoiseSuppressionModel::DeepFilterNet3}else{NoiseSuppressionModel::Sonora});save(ui);}>
+                        <option value="sonora">{move || crate::i18n::t("Standard (Sonora)")}</option><option value="deep_filter_net3">{move || crate::i18n::t("DeepFilterNet3 (experimental)")}</option>
                     </select></label>
-                    <p class="text-sm text-white/60">"Models can be changed during a call. Echo cancellation needs time to adapt after a change. DeepFilterNet3 uses more CPU and adds buffering; test it with your microphone. It reduces noise but may preserve other people's voices."</p>
+                    <p class="text-sm text-white/60">{move ||crate::i18n::t("Models can be changed during a call. Echo cancellation needs time to adapt after a change. DeepFilterNet3 uses more CPU and adds buffering; test it with your microphone. It reduces noise but may preserve other people's voices.")}</p>
                     </details>
-                    <label class="flex gap-3"><input type="checkbox" prop:checked=move||ui.audio.get().automatic_gain on:change=move|e|{ui.audio.update(|s|s.automatic_gain=event_target_checked(&e));save(ui);}/>"Automatic microphone gain"</label>
-                    <label class="flex gap-3"><input type="checkbox" prop:checked=move||ui.audio.get().echo_cancellation on:change=move|e|{ui.audio.update(|s|s.echo_cancellation=event_target_checked(&e));save(ui);}/>"Echo cancellation"</label>
-                    <details><summary>"Experimental echo processing"</summary><label class="flex gap-3"><input type="checkbox" disabled=move||ui.audio_saving.get() prop:checked=move||ui.audio.get().neural_echo on:change=move|e|{ui.audio.update(|s|s.neural_echo=event_target_checked(&e));save(ui);}/>"Neural residual echo estimation (experimental)"</label>
+                    <label class="flex gap-3"><input type="checkbox" prop:checked=move||ui.audio.get().automatic_gain on:change=move|e|{ui.audio.update(|s|s.automatic_gain=event_target_checked(&e));save(ui);}/>{move || crate::i18n::t("Automatic microphone gain")}</label>
+                    <label class="flex gap-3"><input type="checkbox" prop:checked=move||ui.audio.get().echo_cancellation on:change=move|e|{ui.audio.update(|s|s.echo_cancellation=event_target_checked(&e));save(ui);}/>{move || crate::i18n::t("Echo cancellation")}</label>
+                    <details><summary>{move || crate::i18n::t("Experimental echo processing")}</summary><label class="flex gap-3"><input type="checkbox" disabled=move||ui.audio_saving.get() prop:checked=move||ui.audio.get().neural_echo on:change=move|e|{ui.audio.update(|s|s.neural_echo=event_target_checked(&e));save(ui);}/>{move || crate::i18n::t("Neural residual echo estimation (experimental)")}</label>
                     <Show when=move||ui.audio.get().neural_echo>
-                        <details><summary class="cursor-pointer text-sm text-white/60">"Advanced model settings"</summary><label class="mt-2 block space-y-2"><span>"Model file override (optional)"</span><input type="text" class="w-full rounded bg-slate-900 p-2 disabled:opacity-50" placeholder="Bundled REE v2 model" disabled=move||ui.audio_saving.get() prop:value=move||ui.audio.get().neural_echo_model.unwrap_or_default() on:change=move|e|{let value=event_target_value(&e);ui.audio.update(|s|s.neural_echo_model=(!value.trim().is_empty()).then_some(value));save(ui);}/></label></details>
-                        <p class="text-sm text-slate-400">"Uses the bundled model when the override is empty. Enable echo cancellation too. Changes apply without leaving voice."</p>
+                        <details><summary class="cursor-pointer text-sm text-white/60">{move || crate::i18n::t("Advanced model settings")}</summary><label class="mt-2 block space-y-2"><span>{move || crate::i18n::t("Model file override (optional)")}</span><input type="text" class="w-full rounded bg-slate-900 p-2 disabled:opacity-50" placeholder=move || crate::i18n::t("Bundled REE v2 model") disabled=move||ui.audio_saving.get() prop:value=move||ui.audio.get().neural_echo_model.unwrap_or_default() on:change=move|e|{let value=event_target_value(&e);ui.audio.update(|s|s.neural_echo_model=(!value.trim().is_empty()).then_some(value));save(ui);}/></label></details>
+                        <p class="text-sm text-slate-400">{move || crate::i18n::t("Uses the bundled model when the override is empty. Enable echo cancellation too. Changes apply without leaving voice.")}</p>
                     </Show>
                     </details>
                 </section>
-                <Show when=move||ui.audio_saving.get()><p class="text-sm text-white/60" role="status">"Applying audio settings..."</p></Show>
+                <Show when=move||ui.audio_saving.get()><p class="text-sm text-white/60" role="status">{move || crate::i18n::t("Applying audio settings...")}</p></Show>
                 <VoiceControls ui=ui/>
-                <details class="settings-card"><summary>"Advanced & troubleshooting"</summary><div class="space-y-5"><p class="settings-hint">"During calls, instance administrators can adjust audio settings and request technical diagnostics for support."</p>
-                <fieldset class="space-y-3"><legend class="text-sm font-semibold">"Packet loss protection"</legend>
-                <label class="flex gap-3"><input type="checkbox" disabled=move||ui.audio_saving.get() prop:checked=move||ui.audio.get().adaptive_fec on:change=move|e|{ui.audio.update(|s|s.adaptive_fec=event_target_checked(&e));save(ui);}/>"Adaptive Opus in-band FEC"</label>
-                <p class="settings-hint">"Adjusts microphone loss protection from server receiver reports during your call. Keeps the codec budget (32 kbit/s, or 40 with DRED); more protection can reduce speech detail. Adds no buffering delay. Uses a 5% minimum hint, raised to 20% with DRED, including absent or stale feedback; burst losses may remain audible."</p>
-                <Show when=move||ui.audio_control.is_remote() && ui.audio_status.get().is_some_and(|s|s.quality.is_none_or(|q|q.adaptive_fec.is_none()))><p class="settings-hint">"Adaptive FEC status is unavailable on this client. Update the remote desktop app if it does not support or retain this setting."</p></Show>
-                    <label class="flex gap-3"><input type="checkbox" disabled=move||ui.audio_saving.get() prop:checked=move||ui.audio.get().packet_redundancy on:change=move|e|{ui.audio.update(|s|s.packet_redundancy=event_target_checked(&e));save(ui);}/>"Microphone packet redundancy (RED)"</label>
-                    <p class="settings-hint">"Repeats two 20 ms frames: about 3× microphone payload bandwidth; recovery arrives 20–40 ms later. PTT/settings changes pause sending/listening for signaling and publisher refresh exchanges. Older peers use Opus fallback; a legacy replacement may require rejoining. Padded DRED and large frames are not repeated."</p>
-                    <label class="flex gap-3"><input type="checkbox" disabled=move||ui.audio_saving.get() prop:checked=move||ui.audio.get().deep_redundancy on:change=move|e|{ui.audio.update(|s|s.deep_redundancy=event_target_checked(&e));save(ui);}/>"Opus deep redundancy (experimental)"</label>
-                    <p class="settings-hint">"Native voice: protects up to 60 ms of lost speech when the next packet arrives before playback. Targets 40 instead of 32 kbit/s and raises the minimum receive buffer from 40 to 80 ms; adds CPU work. Applies during calls. Both sides must enable it; legacy sources use ordinary Opus without recovery. Requires current server/client privacy support. PTT/settings exchanges briefly pause microphone sending and listening. Browser voice is unsupported."</p>
+                <details class="settings-card"><summary>{move || crate::i18n::t("Advanced & troubleshooting")}</summary><div class="space-y-5"><p class="settings-hint">{move || crate::i18n::t("During calls, instance administrators can adjust audio settings and request technical diagnostics for support.")}</p>
+                <fieldset class="space-y-3"><legend class="text-sm font-semibold">{move || crate::i18n::t("Packet loss protection")}</legend>
+                <label class="flex gap-3"><input type="checkbox" disabled=move||ui.audio_saving.get() prop:checked=move||ui.audio.get().adaptive_fec on:change=move|e|{ui.audio.update(|s|s.adaptive_fec=event_target_checked(&e));save(ui);}/>{move || crate::i18n::t("Adaptive Opus in-band FEC")}</label>
+                <p class="settings-hint">{move ||crate::i18n::t("Adjusts microphone loss protection from server receiver reports during your call. Keeps the codec budget (32 kbit/s, or 40 with DRED); more protection can reduce speech detail. Adds no buffering delay. Uses a 5% minimum hint, raised to 20% with DRED, including absent or stale feedback; burst losses may remain audible.")}</p>
+                <Show when=move||ui.audio_control.is_remote() && ui.audio_status.get().is_some_and(|s|s.quality.is_none_or(|q|q.adaptive_fec.is_none()))><p class="settings-hint">{move || crate::i18n::t("Adaptive FEC status is unavailable on this client. Update the remote desktop app if it does not support or retain this setting.")}</p></Show>
+                    <label class="flex gap-3"><input type="checkbox" disabled=move||ui.audio_saving.get() prop:checked=move||ui.audio.get().packet_redundancy on:change=move|e|{ui.audio.update(|s|s.packet_redundancy=event_target_checked(&e));save(ui);}/>{move || crate::i18n::t("Microphone packet redundancy (RED)")}</label>
+                    <p class="settings-hint">{move ||crate::i18n::t("Repeats two 20 ms frames: about 3× microphone payload bandwidth; recovery arrives 20–40 ms later. PTT/settings changes pause sending/listening for signaling and publisher refresh exchanges. Older peers use Opus fallback; a legacy replacement may require rejoining. Padded DRED and large frames are not repeated.")}</p>
+                    <label class="flex gap-3"><input type="checkbox" disabled=move||ui.audio_saving.get() prop:checked=move||ui.audio.get().deep_redundancy on:change=move|e|{ui.audio.update(|s|s.deep_redundancy=event_target_checked(&e));save(ui);}/>{move || crate::i18n::t("Opus deep redundancy (experimental)")}</label>
+                    <p class="settings-hint">{move ||crate::i18n::t("Native voice: protects up to 60 ms of lost speech when the next packet arrives before playback. Targets 40 instead of 32 kbit/s and raises the minimum receive buffer from 40 to 80 ms; adds CPU work. Applies during calls. Both sides must enable it; legacy sources use ordinary Opus without recovery. Requires current server/client privacy support. PTT/settings exchanges briefly pause microphone sending and listening. Browser voice is unsupported.")}</p>
                 </fieldset>
                 <Show when=move || !ui.audio_control.is_remote()><DebugRecording ui=ui/></Show>
                 <super::diagnostics::DiagnosticsSettings control=ui.audio_control/>
-                <label class="block">"Raw microphone"<meter class="ml-3 w-48" min="0" max="1" value=move||ui.audio_status.get().map(|s|s.raw_input_level).unwrap_or(0.0) /></label>
-                <label class="block">"After noise / echo processing"<meter class="ml-3 w-48" min="0" max="1" value=move||ui.audio_status.get().map(|s|s.input_level).unwrap_or(0.0) /></label>
-                <p class="text-sm" role="status">{move||ui.audio_status.get().map(|s|format!("{} · processing resets {}",s.message,s.processing_resets))}</p>
+                <label class="block">{move || crate::i18n::t("Raw microphone")}<meter class="ml-3 w-48" min="0" max="1" value=move||ui.audio_status.get().map(|s|s.raw_input_level).unwrap_or(0.0) /></label>
+                <label class="block">{move || crate::i18n::t("After noise / echo processing")}<meter class="ml-3 w-48" min="0" max="1" value=move||ui.audio_status.get().map(|s|s.input_level).unwrap_or(0.0) /></label>
+                <p class="text-sm" role="status">{move||ui.audio_status.get().map(|s|thiscord_frontend::localized_format!(crate::i18n::language(), "{} · processing resets {}",s.message,s.processing_resets))}</p>
                 <p class="text-sm text-slate-300">{move||thiscord_frontend::audio_quality::summary(ui.audio_status.get().and_then(|s|s.quality).as_ref())}</p>
                 <details class="rounded border border-white/10 p-3 text-sm">
-                    <summary class="cursor-pointer">"Advanced voice quality diagnostics"</summary>
+                    <summary class="cursor-pointer">{move || crate::i18n::t("Advanced voice quality diagnostics")}</summary>
                     <pre class="mt-3 max-h-96 overflow-auto whitespace-pre-wrap text-xs text-slate-300">{move||thiscord_frontend::audio_quality::detail(ui.audio_status.get().and_then(|s|s.quality).as_ref())}</pre>
                 </details>
                 <details class="space-y-2 text-sm text-white/70">
-                    <summary class="cursor-pointer">"Echo diagnostics"</summary>
-                    <p>{move||ui.audio_status.get().and_then(|s|s.echo).map(|d|format!(
-                        "Playback reference: {:.1}% · Filter estimate: {} · Estimated delay: {} · Input clipping: {:.2}% · Automatic gain: {}",
+                    <summary class="cursor-pointer">{move || crate::i18n::t("Echo diagnostics")}</summary>
+                    <p>{move||ui.audio_status.get().and_then(|s|s.echo).map(|d|thiscord_frontend::localized_format!(crate::i18n::language(), "Playback reference: {:.1}% · Filter estimate: {} · Estimated delay: {} · Input clipping: {:.2}% · Automatic gain: {}",
                         d.reference_level*100.0,
                         d.filter_reduction_db.map(|v|format!("{v:.1} dB")).unwrap_or_else(||"warming up / no playback".into()),
                         d.estimated_delay_ms.map(|v|format!("{v} ms")).unwrap_or_else(||"unavailable".into()),
                         d.clipped_input_percent,if d.automatic_gain{"on"}else{"off"}
                     )).unwrap_or_else(||"Join voice and enable echo cancellation to view diagnostics.".into())}</p>
-                    <p>"The filter estimate is not a measurement of audible echo. Compare these values while only the other person speaks, then while both of you speak. Rising processing resets indicate lost audio blocks. Repeated input clipping suggests lowering microphone gain."</p>
+                    <p>{move || crate::i18n::t("The filter estimate is not a measurement of audible echo. Compare these values while only the other person speaks, then while both of you speak. Rising processing resets indicate lost audio blocks. Repeated input clipping suggests lowering microphone gain.")}</p>
                 </details>
-                <p class="text-sm text-white/60">"Allow microphone access in your OS privacy settings. Use headphones for the microphone test. Echo cancellation removes Thiscord playback from your microphone; it cannot remove sound from other apps. Allow a few seconds for it to adapt. Compare the meters while someone else speaks and you stay quiet."</p>
+                <p class="text-sm text-white/60">{move ||crate::i18n::t("Allow microphone access in your OS privacy settings. Use headphones for the microphone test. Echo cancellation removes Thiscord playback from your microphone; it cannot remove sound from other apps. Allow a few seconds for it to adapt. Compare the meters while someone else speaks and you stay quiet.")}</p>
                 <Show when=move || !ui.audio_control.is_remote()><div class="flex flex-wrap gap-3">
-                    <button class="underline" on:click=move |_|{leave(ui);leptos::task::spawn_local(async move{let _=ui.audio_control.invoke::<AudioStatus>("audio_stop",json!({})).await;});}>"Stop audio"</button>
-                    <button class="underline disabled:opacity-50" disabled=move||busy.get() on:click=move |_|{busy.set(true);message.set("Testing encrypted WebRTC forwarding…".into());leptos::task::spawn_local(async move{let result=ui.audio_control.invoke::<String>("audio_webrtc_probe",json!({})).await;if busy.try_get_untracked().is_some(){busy.set(false);message.set(result.unwrap_or_else(|e|e));}});}>"Test WebRTC"</button>
+                    <button class="underline" on:click=move |_|{leave(ui);leptos::task::spawn_local(async move{let _=ui.audio_control.invoke::<AudioStatus>("audio_stop",json!({})).await;});}>{move || crate::i18n::t("Stop audio")}</button>
+                    <button class="underline disabled:opacity-50" disabled=move||busy.get() on:click=move |_|{busy.set(true);message.set("Testing encrypted WebRTC forwarding…".into());leptos::task::spawn_local(async move{let result=ui.audio_control.invoke::<String>("audio_webrtc_probe",json!({})).await;if busy.try_get_untracked().is_some(){busy.set(false);message.set(result.unwrap_or_else(|e|e));}});}>{move || crate::i18n::t("Test WebRTC")}</button>
                 </div></Show>
-                <StreamVolumes ui=ui/><super::screen::ShareDiagnostics/><p role="status" class="text-sm text-white/70">{move||message.get()}</p></div></details>
+                <StreamVolumes ui=ui/><super::screen::ShareDiagnostics/><p role="status" class="text-sm text-white/70">{move||crate::i18n::message(message.get())}</p></div></details>
             </Show>
         </div>}
 }

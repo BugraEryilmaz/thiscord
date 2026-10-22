@@ -23,7 +23,7 @@ pub fn WindowSettings() -> impl IntoView {
     });
     view! {
         <div class="settings-card">
-            <h2 class="settings-panel-title text-xl font-semibold">"Desktop"</h2>
+            <h2 class="settings-panel-title text-xl font-semibold">{move || crate::i18n::t("Desktop")}</h2>
             <label class="flex items-center gap-3">
                 <input type="checkbox" prop:checked=move || enabled.get()
                     disabled=move || !loaded.get() || busy.get()
@@ -44,11 +44,11 @@ pub fn WindowSettings() -> impl IntoView {
                             busy.set(false);
                         });
                     }/>
-                "Keep Thiscord running when I close the window"
+                {move || crate::i18n::t("Keep Thiscord running when I close the window")}
             </label>
-            <p class="settings-hint">"Calls and screen sharing continue in the background. Reopen Thiscord from the tray, menu bar, or taskbar. Choose Quit Thiscord to exit."</p><p class="settings-hint">"Off by default. Changes save automatically on this computer."</p>
-            <Show when=move || busy.get()><p role="status">"Saving…"</p></Show>
-            <p role="status" class="text-red-300">{move || error.get()}</p>
+            <p class="settings-hint">{move || crate::i18n::t("Calls and screen sharing continue in the background. Reopen Thiscord from the tray, menu bar, or taskbar. Choose Quit Thiscord to exit.")}</p><p class="settings-hint">{move || crate::i18n::t("Off by default. Changes save automatically on this computer.")}</p>
+            <Show when=move || busy.get()><p role="status">{move || crate::i18n::t("Saving…")}</p></Show>
+            <p role="status" class="text-red-300">{move || crate::i18n::message(error.get())}</p>
         </div>
     }
 }

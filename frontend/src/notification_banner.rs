@@ -32,24 +32,24 @@ pub fn Banner(
     } else {
         alert.title.clone()
     };
-    view! {<section class="notification-card" class:notification-call=call aria-label="Notification">
+    view! {<section class="notification-card" class:notification-call=call aria-label=move || crate::i18n::t("Notification")>
         <div class="notification-heading">
             <button class="notification-open" title=alert.title on:click=move |_|action.run(BannerAction::Open)>
                 <span class="notification-icon"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d=icon/></svg></span>
-                <span class="notification-copy"><span class="notification-kind">{label}<span class="notification-app">" · Thiscord"</span></span><span class="notification-title">{title}</span></span>
+                <span class="notification-copy"><span class="notification-kind">{move || crate::i18n::t(label)}<span class="notification-app">" · Thiscord"</span></span><span class="notification-title">{title}</span></span>
             </button>
-            <button class="notification-dismiss" aria-label="Dismiss notification" on:click=move |_|action.run(BannerAction::Dismiss)><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" aria-hidden="true"><path d="m6 6 12 12M6 18 18 6"/></svg></button>
+            <button class="notification-dismiss" aria-label=move || crate::i18n::t("Dismiss notification") on:click=move |_|action.run(BannerAction::Dismiss)><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" aria-hidden="true"><path d="m6 6 12 12M6 18 18 6"/></svg></button>
         </div>
         <div class="notification-actions">
-            <Show when=move ||call fallback=move ||view!{<button class="notification-link" on:click=move |_|action.run(BannerAction::Open)>{if alert.kind==Kind::Update {"View update"} else {"Open"}}<span aria-hidden="true">" →"</span></button>}>
-                <button class="notification-accept" disabled=!can_accept on:click=move |_|action.run(BannerAction::Accept)>"Accept"</button>
-                <button class="notification-decline" on:click=move |_|action.run(BannerAction::Decline)>"Decline"</button>
+            <Show when=move ||call fallback=move ||view!{<button class="notification-link" on:click=move |_|action.run(BannerAction::Open)>{move || if alert.kind==Kind::Update {crate::i18n::t("View update")} else {crate::i18n::t("Open")}}<span aria-hidden="true">" →"</span></button>}>
+                <button class="notification-accept" disabled=!can_accept on:click=move |_|action.run(BannerAction::Accept)>{move || crate::i18n::t("Accept")}</button>
+                <button class="notification-decline" on:click=move |_|action.run(BannerAction::Decline)>{move || crate::i18n::t("Decline")}</button>
             </Show>
-            <select aria-label="Snooze this subscription" class="notification-snooze" on:change=move |e|{let value=event_target_value(&e); if let Ok(index)=value.parse::<usize>() && let Some((duration,_))=Snooze::OPTIONS.get(index) {action.run(BannerAction::Snooze {duration:*duration});}}>
-                <option value="">"Snooze…"</option>{Snooze::OPTIONS.into_iter().enumerate().skip(1).map(|(i,(_,label))|view!{<option value=i.to_string()>{label}</option>}).collect_view()}
+            <select aria-label=move || crate::i18n::t("Snooze this subscription") class="notification-snooze" on:change=move |e|{let value=event_target_value(&e); if let Ok(index)=value.parse::<usize>() && let Some((duration,_))=Snooze::OPTIONS.get(index) {action.run(BannerAction::Snooze {duration:*duration});}}>
+                <option value="">{move || crate::i18n::t("Snooze…")}</option>{Snooze::OPTIONS.into_iter().enumerate().skip(1).map(|(i,(_,label))|view!{<option value=i.to_string()>{move || crate::i18n::t(label)}</option>}).collect_view()}
             </select>
         </div>
-        <Show when=move ||call && !can_accept><p class="notification-hint">"Open the desktop app to accept this call."</p></Show>
+        <Show when=move ||call && !can_accept><p class="notification-hint">{move || crate::i18n::t("Open the desktop app to accept this call.")}</p></Show>
     </section>}
 }
 #[component]

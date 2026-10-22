@@ -41,15 +41,15 @@ pub(super) fn ShortcutSettings(
         }
     });
     view! {
-        <section class="space-y-3 rounded-lg border border-white/15 p-4" aria-label="Voice keyboard shortcuts">
-            <h3 class="font-semibold">"Keyboard shortcuts"</h3>
-            <p class="text-sm text-white/60">"Global desktop shortcuts work while other apps are focused. Enter a combination such as Control+Shift+M, Alt+M or F8. Use Super for the Command / Windows key. Clear a field to disable that shortcut. Ctrl+Shift+Space is reserved for push-to-talk. Requires Windows, macOS or Linux/X11."</p>
-            <label class="block space-y-2"><span>"Toggle mute"</span>
-                <input class="w-full rounded bg-slate-900 p-2" type="text" maxlength="128" spellcheck="false" placeholder="Disabled" disabled=move || busy.get()
+        <section class="space-y-3 rounded-lg border border-white/15 p-4" aria-label=move || crate::i18n::t("Voice keyboard shortcuts")>
+            <h3 class="font-semibold">{move || crate::i18n::t("Keyboard shortcuts")}</h3>
+            <p class="text-sm text-white/60">{move || crate::i18n::t("Global desktop shortcuts work while other apps are focused. Enter a combination such as Control+Shift+M, Alt+M or F8. Use Super for the Command / Windows key. Clear a field to disable that shortcut. Ctrl+Shift+Space is reserved for push-to-talk. Requires Windows, macOS or Linux/X11.")}</p>
+            <label class="block space-y-2"><span>{move || crate::i18n::t("Toggle mute")}</span>
+                <input class="w-full rounded bg-slate-900 p-2" type="text" maxlength="128" spellcheck="false" placeholder=move || crate::i18n::t("Disabled") disabled=move || busy.get()
                     prop:value=move || mute.get() on:input=move |ev| {dirty.set(true); mute.set(event_target_value(&ev));}/>
             </label>
-            <label class="block space-y-2"><span>"Toggle deafen"</span>
-                <input class="w-full rounded bg-slate-900 p-2" type="text" maxlength="128" spellcheck="false" placeholder="Disabled" disabled=move || busy.get()
+            <label class="block space-y-2"><span>{move || crate::i18n::t("Toggle deafen")}</span>
+                <input class="w-full rounded bg-slate-900 p-2" type="text" maxlength="128" spellcheck="false" placeholder=move || crate::i18n::t("Disabled") disabled=move || busy.get()
                     prop:value=move || deafen.get() on:input=move |ev| {dirty.set(true); deafen.set(event_target_value(&ev));}/>
             </label>
             <div class="flex gap-3">
@@ -65,12 +65,12 @@ pub(super) fn ShortcutSettings(
                         }
                         busy.set(false);
                     });
-                }>"Save shortcuts"</button>
+                }>{move || crate::i18n::t("Save shortcuts")}</button>
                 <button class="rounded bg-white/10 px-3 py-2 text-sm" disabled=move || busy.get() on:click=move |_| {
                     dirty.set(true); let defaults = AudioShortcuts::default(); mute.set(defaults.mute); deafen.set(defaults.deafen);
-                }>"Reset to defaults"</button>
+                }>{move || crate::i18n::t("Reset to defaults")}</button>
             </div>
-            <p class="text-sm text-white/70" role="status">{move || message.get()}</p>
+            <p class="text-sm text-white/70" role="status">{move || crate::i18n::message(message.get())}</p>
         </section>
     }
 }

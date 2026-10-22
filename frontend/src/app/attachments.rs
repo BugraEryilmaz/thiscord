@@ -47,7 +47,7 @@ fn finish_download(url: &str, success: Option<bool>) {
         {
             d.chat.status.set(
                 if success {
-                    "Saved to Downloads"
+                    crate::i18n::t("Saved to Downloads")
                 } else {
                     "Download failed; try again"
                 }
@@ -158,14 +158,15 @@ async fn transfer(
     limit: u64,
     mut progress: impl FnMut(u8) + 'static,
 ) -> Result<web_sys::Blob, String> {
-    let xhr = web_sys::XmlHttpRequest::new().map_err(|_| "Transfers are unavailable")?;
+    let xhr =
+        web_sys::XmlHttpRequest::new().map_err(|_| crate::i18n::t("Transfers are unavailable"))?;
     xhr.open(method, &format!("{}{path}", client::api_base()))
-        .map_err(|_| "Invalid transfer URL")?;
+        .map_err(|_| crate::i18n::t("Invalid transfer URL"))?;
     xhr.set_request_header("Authorization", &format!("Bearer {token}"))
-        .map_err(|_| "Cannot authenticate transfer")?;
+        .map_err(|_| crate::i18n::t("Cannot authenticate transfer"))?;
     if body.is_some() {
         xhr.set_request_header("Content-Type", "application/octet-stream")
-            .map_err(|_| "Cannot prepare upload")?;
+            .map_err(|_| crate::i18n::t("Cannot prepare upload"))?;
     }
     xhr.set_response_type(web_sys::XmlHttpRequestResponseType::Blob);
     xhr.set_timeout(120_000);
@@ -181,7 +182,9 @@ async fn transfer(
             }
         })
     };
-    let upload = xhr.upload().map_err(|_| "Transfers are unavailable")?;
+    let upload = xhr
+        .upload()
+        .map_err(|_| crate::i18n::t("Transfers are unavailable"))?;
     let is_upload = body.is_some();
     let check = xhr.clone();
     let progress =
@@ -219,7 +222,7 @@ async fn transfer(
     request
         .xhr
         .send_with_opt_blob(body)
-        .map_err(|_| "Cannot start transfer")?;
+        .map_err(|_| crate::i18n::t("Cannot start transfer"))?;
     futures_util::future::poll_fn(|cx| {
         if done.get() {
             Poll::Ready(())
@@ -239,9 +242,9 @@ async fn transfer(
     let blob: web_sys::Blob = request
         .xhr
         .response()
-        .map_err(|_| "Missing attachment response")?
+        .map_err(|_| crate::i18n::t("Missing attachment response"))?
         .dyn_into()
-        .map_err(|_| "Invalid attachment response")?;
+        .map_err(|_| crate::i18n::t("Invalid attachment response"))?;
     if !(200..300).contains(&status) {
         if blob.size() <= 32768.0 {
             let text = JsFuture::from(blob.text())
@@ -251,10 +254,14 @@ async fn transfer(
             if let Some(error) =
                 text.and_then(|t| serde_json::from_str::<thiscord_shared::ApiError>(&t).ok())
             {
-                return Err(format!("{} (request {})", error.message, error.request_id));
+                return Err(crate::i18n::api_error(&error));
             }
         }
-        return Err(format!("Attachment request failed ({status})"));
+        return Err(thiscord_frontend::localized_format!(
+            crate::i18n::language(),
+            "Attachment request failed ({status})",
+            status = status
+        ));
     }
     if blob.size() > limit as f64 {
         return Err("Attachment exceeds its size limit".into());
@@ -526,24 +533,24 @@ pub(super) fn Composer(
                 }/>
                 <button type="button" class="rounded bg-white/10 px-3 py-2 text-sm hover:bg-white/20 disabled:opacity-50"
                     disabled=move || { editing.get().is_some() || queue.count() >= MAX_MESSAGE_ATTACHMENTS || !queue.chat.permissions.with(|p| p.contains(&thiscord_shared::permissions::Permission::SendMessages)) }
-                    on:click=move |_| { if let Some(input) = input.get() { input.click(); } }>"Attach files"</button>
-                <span>"Drop files here · up to 4 files, 25 MiB each"</span>
+                    on:click=move |_| { if let Some(input) = input.get() { input.click(); } }>{move || crate::i18n::t("Attach files")}</button>
+                <span>{move || crate::i18n::t("Drop files here · up to 4 files, 25 MiB each")}</span>
             </div>
             <ul class="flex max-h-48 flex-wrap gap-2 overflow-y-auto">
                 <For each=move || queue.items.with(|v| v.iter().map(|i| i.key).collect::<Vec<_>>()) key=|key| *key children=move |key| {
                     let item = move || queue.items.with(|v| v.iter().find(|i| i.key == key).cloned());
                     view! { <li class="w-44 space-y-1 rounded-lg bg-black/20 p-2 text-xs">
                         {move || item().and_then(|i| i.preview.map(|url| {
-                            if preview_kind(&i.mime) == PreviewKind::Image { view! { <img class="h-16 w-full object-contain" src=url alt="Queued image"/> }.into_any() }
-                            else { view! { <video class="h-16 w-full object-contain" src=format!("{url}#t=0.1") muted preload="metadata" aria-label="Queued video"/> }.into_any() }
+                            if preview_kind(&i.mime) == PreviewKind::Image { view! { <img class="h-16 w-full object-contain" src=url alt=move ||crate::i18n::t("Queued image")/> }.into_any() }
+                            else { view! { <video class="h-16 w-full object-contain" src=format!("{url}#t=0.1") muted preload="metadata" aria-label=move || crate::i18n::t("Queued video")/> }.into_any() }
                         }))}
                         <p class="truncate" title=move || item().map(|i| i.filename).unwrap_or_default()>{move || item().map(|i| i.filename).unwrap_or_default()}</p>
                         <p>{move || item().map(|i| format!("{:.1} MiB", i.size as f64 / 1048576.0)).unwrap_or_default()}</p>
-                        <p role="status">{move || item().map(|i| if let Some(p) = i.progress { format!("Uploading {p}%") } else if i.attachment.is_some() { "Ready to send".into() } else if i.error.is_empty() { "Queued".into() } else { i.error }).unwrap_or_default()}</p>
+                        <p role="status">{move || item().map(|i| if let Some(p) = i.progress { thiscord_frontend::localized_format!(crate::i18n::language(), "Uploading {p}%", p=p) } else if i.attachment.is_some() { crate::i18n::t("Ready to send").into() } else if i.error.is_empty() { crate::i18n::t("Queued").into() } else { crate::i18n::message(i.error) }).unwrap_or_default()}</p>
                         <Show when=move || item().is_some_and(|i| !i.error.is_empty())><button type="button" class="mr-3 text-brand underline" on:click=move |_| {
                             queue.items.update(|v| { if let Some(i) = v.iter_mut().find(|i| i.key == key) { i.error.clear(); } }); queue.start_next();
-                        }>"Retry upload"</button></Show>
-                        <button type="button" class="text-white/70 underline" on:click=move |_| queue.remove(key)>"Remove"</button>
+                        }>{move || crate::i18n::t("Retry upload")}</button></Show>
+                        <button type="button" class="text-white/70 underline" on:click=move |_| queue.remove(key)>{move || crate::i18n::t("Remove")}</button>
                     </li> }
                 }/>
             </ul>
@@ -606,14 +613,16 @@ pub(super) fn Card(
         let result = (|| -> Result<(), String> {
             let link = document()
                 .create_element("a")
-                .map_err(|_| "Cannot create download")?
+                .map_err(|_| crate::i18n::t("Cannot create download"))?
                 .dyn_into::<web_sys::HtmlAnchorElement>()
-                .map_err(|_| "Cannot create download")?;
+                .map_err(|_| crate::i18n::t("Cannot create download"))?;
             link.set_href(&download_url);
             link.set_download(&download_name(&attachment.get_value().filename));
-            let body = document().body().ok_or("Cannot start download")?;
+            let body = document()
+                .body()
+                .ok_or(crate::i18n::t("Cannot start download"))?;
             body.append_child(&link)
-                .map_err(|_| "Cannot start download")?;
+                .map_err(|_| crate::i18n::t("Cannot start download"))?;
             download.set(Some(download_url.clone()));
             DOWNLOADS.with_borrow_mut(|v| {
                 v.insert(
@@ -752,7 +761,7 @@ pub(super) fn Card(
     view! {
         <div class="my-2 max-w-sm space-y-2 rounded-lg border border-white/10 bg-black/20 p-2">
             <Show when=move || kind != PreviewKind::File && url.get().is_some()>
-                <button type="button" class="relative block w-full rounded focus:ring-2 focus:ring-brand" aria-label=move || format!("Open {} fullscreen", attachment.get_value().filename)
+                <button type="button" class="relative block w-full rounded focus:ring-2 focus:ring-brand" aria-label=move || thiscord_frontend::localized_format!(crate::i18n::language(), "Open {} fullscreen", attachment.get_value().filename)
                     on:click=move |_| { if valid() { viewer.set(true); } }>
                     {move || url.get().map(|url| if kind == PreviewKind::Image {
                         view! { <img class="max-h-64 w-full rounded object-contain" src=url alt=attachment.get_value().filename on:error=move |_| error.set("Image preview unavailable; download the original file".into())/> }.into_any()
@@ -766,12 +775,12 @@ pub(super) fn Card(
                     on:click=move |_| { if valid() { if kind == PreviewKind::File { fetch(true); } else if url.get_untracked().is_some() { viewer.set(true); } else { fetch(false); } } }>
                     {attachment.get_value().filename}
                 </button>
-                <button type="button" class="shrink-0 rounded bg-white/10 px-2 py-1 hover:bg-white/20 disabled:opacity-50" aria-label="Download attachment"
-                    disabled=move || busy.get() || download.get().is_some() on:click=move |_| fetch(true)>"↓ Download"</button>
+                <button type="button" class="shrink-0 rounded bg-white/10 px-2 py-1 hover:bg-white/20 disabled:opacity-50" aria-label=move || crate::i18n::t("Download attachment")
+                    disabled=move || busy.get() || download.get().is_some() on:click=move |_| fetch(true)>{move || crate::i18n::t("↓ Download")}</button>
             </div>
             <p class="text-xs text-white/50">{format!("{:.1} MiB", attachment.get_value().size_bytes as f64 / 1048576.0)}</p>
-            <Show when=move || busy.get()><p class="text-xs" role="status">"Loading attachment…"</p></Show>
-            <Show when=move || !error.get().is_empty()><p class="text-xs text-amber-300" role="status">{move || error.get()}</p><button type="button" class="text-xs text-brand underline" on:click=move |_| { error.set(String::new()); fetch(kind == PreviewKind::File); }>"Retry"</button></Show>
+            <Show when=move || busy.get()><p class="text-xs" role="status">{move || crate::i18n::t("Loading attachment…")}</p></Show>
+            <Show when=move || !error.get().is_empty()><p class="text-xs text-amber-300" role="status">{move || crate::i18n::message(error.get())}</p><button type="button" class="text-xs text-brand underline" on:click=move |_| { error.set(String::new()); fetch(kind == PreviewKind::File); }>{move || crate::i18n::t("Retry")}</button></Show>
             <Show when=move || viewer.get() && url.get().is_some()>
                 <Viewer url=url.get_untracked().unwrap_or_default() kind filename=attachment.get_value().filename download=start_download close=move || viewer.set(false)/>
             </Show>
@@ -805,7 +814,7 @@ fn Thumbnail(url: String, error: RwSignal<String>) -> impl IntoView {
             on:seeked=move |_| ready.set(true) on:loadeddata=move |_| ready.set(true)
             on:error=move |_| { failed.set(true); error.set("Video preview unavailable; try playback or download".into()); }/>
         <span class="pointer-events-none absolute inset-0 flex items-center justify-center text-4xl text-white" aria-hidden="true">"▶"</span>
-        <Show when=move || failed.get()><span class="absolute bottom-2 left-2 rounded bg-black/80 px-2 text-xs">"Video · preview unavailable"</span></Show>
+        <Show when=move || failed.get()><span class="absolute bottom-2 left-2 rounded bg-black/80 px-2 text-xs">{move || crate::i18n::t("Video · preview unavailable")}</span></Show>
     }
 }
 
@@ -869,16 +878,16 @@ fn Viewer(
         });
     });
     view! {
-        <dialog node_ref=dialog class="fixed inset-0 m-0 h-dvh max-h-none w-dvw max-w-none bg-black/95 p-4 text-white backdrop:bg-black/80" aria-label=format!("Attachment: {filename}")
+        <dialog node_ref=dialog class="fixed inset-0 m-0 h-dvh max-h-none w-dvw max-w-none bg-black/95 p-4 text-white backdrop:bg-black/80" aria-label=thiscord_frontend::localized_format!(crate::i18n::language(), "Attachment: {filename}", filename=filename)
             on:cancel=move |e: leptos::ev::Event| { e.prevent_default(); close(); }>
             <div class="flex h-full flex-col gap-3">
-                <header class="flex items-center justify-between gap-4"><h2 class="min-w-0 flex-1 truncate">{filename.clone()}</h2><button type="button" class="rounded bg-white/20 px-4 py-2" on:click=move |_| download()>"Download"</button><button autofocus type="button" class="rounded bg-white/20 px-4 py-2 focus:ring-2 focus:ring-brand" on:click=move |_| close()>"Close (Esc)"</button></header>
+                <header class="flex items-center justify-between gap-4"><h2 class="min-w-0 flex-1 truncate">{filename.clone()}</h2><button type="button" class="rounded bg-white/20 px-4 py-2" on:click=move |_| download()>{move || crate::i18n::t("Download")}</button><button autofocus type="button" class="rounded bg-white/20 px-4 py-2 focus:ring-2 focus:ring-brand" on:click=move |_| close()>{move || crate::i18n::t("Close (Esc)")}</button></header>
                 {if kind == PreviewKind::Image {
-                    view! { <img class="min-h-0 flex-1 object-contain" src=url alt="Full-size attachment" on:error=move |_| error.set("Image could not be displayed".into())/> }.into_any()
+                    view! { <img class="min-h-0 flex-1 object-contain" src=url alt=move ||crate::i18n::t("Full-size attachment") on:error=move |_| error.set("Image could not be displayed".into())/> }.into_any()
                 } else {
                     view! { <video node_ref=video class="min-h-0 w-full flex-1 object-contain" src=url autoplay controls playsinline on:error=move |_| error.set("This video format could not be played. Download it to open in another player.".into())/> }.into_any()
                 }}
-                <Show when=move || !error.get().is_empty()><p role="status">{move || error.get()}</p><Show when=move || kind == PreviewKind::Video><button class="rounded bg-white/20 p-2" on:click=move |_| play()>"Play"</button></Show></Show>
+                <Show when=move || !error.get().is_empty()><p role="status">{move || crate::i18n::message(error.get())}</p><Show when=move || kind == PreviewKind::Video><button class="rounded bg-white/20 p-2" on:click=move |_| play()>{move || crate::i18n::t("Play")}</button></Show></Show>
             </div>
         </dialog>
     }

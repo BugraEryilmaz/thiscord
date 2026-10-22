@@ -44,7 +44,7 @@ pub fn VoiceOverlay() -> impl IntoView {
         });
     }
     view! {
-        <main class="voice-overlay" aria-label="Active voice chat">
+        <main class="voice-overlay" aria-label=move || crate::i18n::t("Active voice chat")>
             <For each=move || snapshot.get().participants
                 key=|p| p.account_id
                 children=move |p| {
@@ -52,9 +52,9 @@ pub fn VoiceOverlay() -> impl IntoView {
                 let person = Signal::derive(move || snapshot.with(|s| s.participants.iter().find(|p| p.account_id == id).cloned()).unwrap_or_else(|| p.clone()));
                 let accessible_name = move || {
                     let p = person.get();
-                    let state = if p.deafened { "Deafened" } else if p.muted { "Muted" }
-                        else if p.speaking { "Speaking" } else { "Listening" };
-                    format!("{}: {state}", p.name)
+                    let state = if p.deafened { crate::i18n::t("Deafened") } else if p.muted { crate::i18n::t("Muted") }
+                        else if p.speaking { crate::i18n::t("Speaking") } else { crate::i18n::t("Listening") };
+                    thiscord_frontend::localized_format!(crate::i18n::language(), "{}: {state}", p.name, state=state)
                 };
                 view! {
                     <div class="overlay-person" class:overlay-self=move || person.get().is_self class:overlay-speaking=move || person.get().speaking aria-label=accessible_name>
@@ -66,18 +66,18 @@ pub fn VoiceOverlay() -> impl IntoView {
                             <span class="overlay-actions">
                                 <button aria-pressed=move || person.get().muted disabled=move || busy.get()
                                     on:click=move |_| toggle(thiscord_shared::audio::AudioToggle::Mute)>
-                                    {move || if person.get().muted { "Unmute" } else { "Mute" }}
+                                    {move || if person.get().muted { crate::i18n::t("Unmute") } else { crate::i18n::t("Mute") }}
                                 </button>
                                 <button aria-pressed=move || person.get().deafened disabled=move || busy.get()
                                     on:click=move |_| toggle(thiscord_shared::audio::AudioToggle::Deafen)>
-                                    {move || if person.get().deafened { "Undeafen" } else { "Deafen" }}
+                                    {move || if person.get().deafened { crate::i18n::t("Undeafen") } else { crate::i18n::t("Deafen") }}
                                 </button>
                             </span>
                         </Show>
                     </div>
                 }
             }/>
-            <Show when=move || !error.get().is_empty()><p class="rounded bg-slate-900 p-2 text-sm text-red-300" role="status">{move || error.get()}</p></Show>
+            <Show when=move || !error.get().is_empty()><p class="rounded bg-slate-900 p-2 text-sm text-red-300" role="status">{move || crate::i18n::message(error.get())}</p></Show>
         </main>
     }
 }
@@ -106,7 +106,7 @@ pub fn OverlaySettings(
     });
     view! {
         <section class="space-y-2 rounded-lg border border-white/15 p-4">
-            <h3 class="font-semibold">"In-game voice overlay"</h3>
+            <h3 class="font-semibold">{move || crate::i18n::t("In-game voice overlay")}</h3>
             <label class="flex items-center gap-3">
                 <input type="checkbox" prop:checked=move || enabled.get() disabled=move || busy.get()
                     on:change=move |ev| {
@@ -122,10 +122,10 @@ pub fn OverlaySettings(
                             busy.set(false);
                         });
                     }/>
-                "Show voice participants when Thiscord is out of focus"
+                {move || crate::i18n::t("Show voice participants when Thiscord is out of focus")}
             </label>
-            <p class="text-sm text-white/60">"Hover over your own entry at the top left to mute or deafen. The rest of the roster passes clicks through. Green rings show who is talking. Use windowed or borderless games; exclusive fullscreen is not supported. Applies until you restart Thiscord."</p>
-            <p class="text-sm text-red-300" role="status">{move || error.get()}</p>
+            <p class="text-sm text-white/60">{move || crate::i18n::t("Hover over your own entry at the top left to mute or deafen. The rest of the roster passes clicks through. Green rings show who is talking. Use windowed or borderless games; exclusive fullscreen is not supported. Applies until you restart Thiscord.")}</p>
+            <p class="text-sm text-red-300" role="status">{move || crate::i18n::message(error.get())}</p>
         </section>
     }
 }

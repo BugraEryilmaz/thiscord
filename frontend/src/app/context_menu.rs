@@ -115,15 +115,15 @@ pub(super) fn ParticipantVolume(
             })
             .unwrap_or_default()
     });
-    view! {<section class="context-volume" role="group" aria-label="Participant volume">
-        <Show when=move ||connected() && !streams.get().is_empty() fallback=move ||view!{<label class="volume-placeholder">"Voice volume"<input type="range" min="0" max="200" value="100" disabled aria-label="Voice volume"/></label><p class="volume-hint">{move ||if connected(){"Waiting for voice audio…"}else{"Join this call to adjust volume."}}</p>}>
+    view! {<section class="context-volume" role="group" aria-label=move || crate::i18n::t("Participant volume")>
+        <Show when=move ||connected() && !streams.get().is_empty() fallback=move ||view!{<label class="volume-placeholder">{move || crate::i18n::t("Voice volume")}<input type="range" min="0" max="200" value="100" disabled aria-label=move || crate::i18n::t("Voice volume")/></label><p class="volume-hint">{move ||if connected(){crate::i18n::t("Waiting for voice audio…")}else{crate::i18n::t("Join this call to adjust volume.")}}</p>}>
             <For each=move ||streams.get() key=|id|id.clone() children=move |id|{
                 let stream=ui.audio_status.get_untracked().and_then(|s|s.streams.into_iter().find(|s|s.id==id && s.target==Some(target)));
                 stream.map(|stream|view!{<super::audio::StreamVolume ui=ui stream=stream compact=true/>})
             }/>
         </Show>
         <For each=move ||{ui.audio_status.get().map(|s|s.streams).unwrap_or_default().into_iter().filter(|s| connected() && s.target.is_some_and(|t|t.guild_id==guild && t.account_id==member && t.shared_audio)).collect::<Vec<_>>()} key=|s|(s.id.clone(),s.target) children=move |stream|view!{<super::audio::StreamVolume ui=ui stream=stream compact=true/>}/>
-        <p class="volume-hint">"Only changes what you hear. 0% mutes."</p>
+        <p class="volume-hint">{move || crate::i18n::t("Only changes what you hear. 0% mutes.")}</p>
     </section>}
 }
 fn save_preference(ui: Ui, channel: ChannelId, pin: bool) {
@@ -207,7 +207,9 @@ async fn items(ui: Ui, target: Target) -> Result<(String, Vec<Item>), String> {
     let guild = home.guild;
     let mut items = vec![];
     if let Some(member) = target.member {
-        let channel = target.channel.ok_or("Voice channel unavailable")?;
+        let channel = target
+            .channel
+            .ok_or(crate::i18n::t("Voice channel unavailable"))?;
         if !home.channels.iter().any(|c| c.id == channel) {
             return Err("Channel is no longer accessible".into());
         }
@@ -232,7 +234,7 @@ async fn items(ui: Ui, target: Target) -> Result<(String, Vec<Item>), String> {
             if matches!(super::servers::request(ui, PermissionRequest::Instance {}).await, Ok(PermissionResponse::Instance { access }) if access.role == InstanceRole::Owner)
             {
                 items.push(Item::new(
-                    "Test bot audio settings…",
+                    crate::i18n::t("Test bot audio settings…"),
                     Action::Bots(super::voice_bots::Target {
                         guild: guild.id,
                         channel,
@@ -249,7 +251,7 @@ async fn items(ui: Ui, target: Target) -> Result<(String, Vec<Item>), String> {
         }
         if own {
             items.push(Item::new(
-                "Your audio settings",
+                crate::i18n::t("Your audio settings"),
                 Action::Page(guild.id, "audio", None),
             ));
         } else {
@@ -263,7 +265,7 @@ async fn items(ui: Ui, target: Target) -> Result<(String, Vec<Item>), String> {
                     .is_some_and(|a| thiscord_frontend::sidebar::lower_member(&state, a.id, member))
             {
                 items.push(Item::new(
-                    "Change roles…",
+                    crate::i18n::t("Change roles…"),
                     Action::Page(guild.id, "permissions", Some(member)),
                 ));
             }
@@ -278,17 +280,17 @@ async fn items(ui: Ui, target: Target) -> Result<(String, Vec<Item>), String> {
                 for (permission, label, change) in [
                     (
                         Permission::MoveMembers,
-                        "Disconnect from voice",
+                        crate::i18n::t("Disconnect from voice"),
                         GuildChange::DisconnectVoice { account_id: member },
                     ),
                     (
                         Permission::KickMembers,
-                        "Kick from server",
+                        crate::i18n::t("Kick from server"),
                         GuildChange::RemoveMember { account_id: member },
                     ),
                     (
                         Permission::BanMembers,
-                        "Ban from server",
+                        crate::i18n::t("Ban from server"),
                         GuildChange::BanMember { account_id: member },
                     ),
                 ] {
@@ -300,7 +302,12 @@ async fn items(ui: Ui, target: Target) -> Result<(String, Vec<Item>), String> {
                                     guild.id,
                                     state.guild.revision,
                                     change,
-                                    format!("{label}: {}?", m.display_name()),
+                                    thiscord_frontend::localized_format!(
+                                        crate::i18n::language(),
+                                        "{label}: {}?",
+                                        m.display_name(),
+                                        label = label
+                                    ),
                                 ),
                             )
                             .danger(),
@@ -309,13 +316,16 @@ async fn items(ui: Ui, target: Target) -> Result<(String, Vec<Item>), String> {
                 }
                 if m.actions.contains(&Permission::ModerateMembers) {
                     items.push(Item::new(
-                        "Timeout / moderation…",
+                        crate::i18n::t("Timeout / moderation…"),
                         Action::Page(guild.id, "moderation", Some(member)),
                     ));
                 }
             }
         }
-        items.push(Item::new("Copy user ID", Action::Copy(member.to_string())));
+        items.push(Item::new(
+            crate::i18n::t("Copy user ID"),
+            Action::Copy(member.to_string()),
+        ));
         return Ok((label, items));
     }
     if let Some(id) = target.channel {
@@ -323,7 +333,7 @@ async fn items(ui: Ui, target: Target) -> Result<(String, Vec<Item>), String> {
             .channels
             .into_iter()
             .find(|c| c.id == id)
-            .ok_or("Channel is no longer accessible")?;
+            .ok_or(crate::i18n::t("Channel is no longer accessible"))?;
         let permissions = if let Some(account) = ui.account.get_untracked() {
             match super::servers::request(
                 ui,
@@ -342,7 +352,10 @@ async fn items(ui: Ui, target: Target) -> Result<(String, Vec<Item>), String> {
             Permissions::new()
         };
         if channel.kind == ChannelKind::Text && permissions.contains(&Permission::ReadHistory) {
-            items.push(Item::new("Mark as read", Action::Read(guild.id, id)));
+            items.push(Item::new(
+                crate::i18n::t("Mark as read"),
+                Action::Read(guild.id, id),
+            ));
         }
         if channel.kind == ChannelKind::Voice {
             if permissions.contains(&Permission::JoinVoice)
@@ -350,7 +363,7 @@ async fn items(ui: Ui, target: Target) -> Result<(String, Vec<Item>), String> {
                 && matches!(super::servers::request(ui, PermissionRequest::Instance {}).await, Ok(PermissionResponse::Instance { access }) if access.role == InstanceRole::Owner)
             {
                 items.push(Item::new(
-                    "Voice test bots…",
+                    crate::i18n::t("Voice test bots…"),
                     Action::Bots(super::voice_bots::Target {
                         guild: guild.id,
                         channel: id,
@@ -359,10 +372,10 @@ async fn items(ui: Ui, target: Target) -> Result<(String, Vec<Item>), String> {
                 ));
             }
             if ui.voice.get_untracked().channel_id == Some(id) {
-                items.push(Item::new("Disconnect", Action::Disconnect));
+                items.push(Item::new(crate::i18n::t("Disconnect"), Action::Disconnect));
             } else if permissions.contains(&Permission::JoinVoice) {
                 items.push(Item::new(
-                    "Join voice",
+                    crate::i18n::t("Join voice"),
                     Action::Join(guild.clone(), channel.clone()),
                 ));
             }
@@ -373,40 +386,44 @@ async fn items(ui: Ui, target: Target) -> Result<(String, Vec<Item>), String> {
             channel_id: id,
         };
         items.push(Item::new(
-            "Notification settings…",
+            crate::i18n::t("Notification settings…"),
             Action::Notifications(notification_target, channel.name.clone()),
         ));
         items.push(Item::Mute(notification_target));
         items.push(Item::new(
             if preferences.pinned.contains(&id) {
-                "Unpin from top"
+                crate::i18n::t("Unpin from top")
             } else {
-                "Pin to top"
+                crate::i18n::t("Pin to top")
             },
             Action::Preference(id, true),
         ));
-        items.push(Item::new("Copy channel ID", Action::Copy(id.to_string())));
+        items.push(Item::new(
+            crate::i18n::t("Copy channel ID"),
+            Action::Copy(id.to_string()),
+        ));
         if home.can_moderate {
             items.push(Item::new(
-                "Server moderation…",
+                crate::i18n::t("Server moderation…"),
                 Action::Page(guild.id, "moderation", None),
             ));
         }
         if home.can_manage_roles {
             items.push(Item::new(
-                "Channel permissions…",
+                crate::i18n::t("Channel permissions…"),
                 Action::ChannelPermissions(guild.id, id),
             ));
         }
         if home.can_manage_channels {
             items.push(
                 Item::new(
-                    "Delete channel…",
+                    crate::i18n::t("Delete channel…"),
                     Action::Change(
                         guild.id,
                         guild.revision,
                         GuildChange::DeleteChannel { channel_id: id },
-                        format!(
+                        thiscord_frontend::localized_format!(
+                            crate::i18n::language(),
                             "Delete #{}? This removes the channel and its messages.",
                             channel.name
                         ),
@@ -418,22 +435,22 @@ async fn items(ui: Ui, target: Target) -> Result<(String, Vec<Item>), String> {
         return Ok((channel.name, items));
     }
     items.push(Item::new(
-        "Copy server ID",
+        crate::i18n::t("Copy server ID"),
         Action::Copy(guild.id.to_string()),
     ));
     items.push(Item::new(
-        "Open server",
+        crate::i18n::t("Open server"),
         Action::Page(guild.id, "servers", None),
     ));
     if home.can_manage_roles {
         items.push(Item::new(
-            "Server settings…",
+            crate::i18n::t("Server settings…"),
             Action::Page(guild.id, "permissions", None),
         ));
     }
     if home.can_moderate {
         items.push(Item::new(
-            "Server moderation…",
+            crate::i18n::t("Server moderation…"),
             Action::Page(guild.id, "moderation", None),
         ));
     }
@@ -444,12 +461,13 @@ async fn items(ui: Ui, target: Target) -> Result<(String, Vec<Item>), String> {
     {
         items.push(
             Item::new(
-                "Leave server…",
+                crate::i18n::t("Leave server…"),
                 Action::Change(
                     guild.id,
                     guild.revision,
                     GuildChange::Leave {},
-                    format!(
+                    thiscord_frontend::localized_format!(
+                        crate::i18n::language(),
                         "Leave {}? You will need its join details to return.",
                         guild.name
                     ),
@@ -554,7 +572,11 @@ fn execute(ui: Ui, action: Action) {
                 ui.status.set(match result {
                     Ok(_) => "Action completed".into(),
                     Err(error) => {
-                        format!("{error}. Reopen the menu to refresh permissions before retrying.")
+                        thiscord_frontend::localized_format!(
+                            crate::i18n::language(),
+                            "{error}. Reopen the menu to refresh permissions before retrying.",
+                            error = crate::i18n::message(error)
+                        )
                     }
                 });
                 super::servers::refresh(ui).await;
@@ -590,7 +612,7 @@ fn conversation_menu(ui: Ui, event_target: Option<web_sys::EventTarget>, x: f64,
     };
     let title = friend.person.display_name;
     let mut items = vec![Item::new(
-        "Notification settings…",
+        crate::i18n::t("Notification settings…"),
         Action::Notifications(target, title.clone()),
     )];
     items.push(Item::Mute(target));
@@ -639,7 +661,10 @@ fn user_menu(ui: Ui, event_target: Option<web_sys::EventTarget>, x: f64, y: f64)
         title: element
             .get_attribute("data-context-name")
             .unwrap_or_else(|| "User".into()),
-        items: vec![Item::new("Copy user ID", Action::Copy(member.to_string()))],
+        items: vec![Item::new(
+            crate::i18n::t("Copy user ID"),
+            Action::Copy(member.to_string()),
+        )],
         note: String::new(),
         x,
         y,
@@ -659,7 +684,7 @@ fn FriendActions(ui: Ui, member: AccountId, run: Callback<Action>) -> impl IntoV
         let relationship = ui.friends.snapshot.with(|s|s.friends.iter().find(|f|f.person.id==member).map(|f|f.relationship));
         friend_actions(own, relationship).iter().copied().map(|action| {
             let disabled = !ui.friends.connected.get() || (action==FriendAction::Add && !account.as_ref().is_some_and(|a|a.email_verified));
-            view! {<button role="menuitem" class="context-item" class:context-danger=action==FriendAction::Unfriend disabled=disabled on:click=move |_|run.run(if action==FriendAction::Unfriend {Action::Unfriend(member)} else {Action::Friend(action.request(member))})>{action.label()}</button>}
+            view! {<button role="menuitem" class="context-item" class:context-danger=action==FriendAction::Unfriend disabled=disabled on:click=move |_|run.run(if action==FriendAction::Unfriend {Action::Unfriend(member)} else {Action::Friend(action.request(member))})>{move ||crate::i18n::t(action.label())}</button>}
         }).collect_view()
     }} }
 }
@@ -767,14 +792,14 @@ fn MuteSubmenu(
                 aria-haspopup="menu" aria-expanded=move ||open.get().to_string()
                 aria-controls="context-mute-options"
                 on:click=move |_|{focus_on_open.set(true);open.set(true);}>
-                <span>"Mute"</span><span aria-hidden="true">"›"</span>
+                <span>{move || crate::i18n::t("Mute")}</span><span aria-hidden="true">"›"</span>
             </button>
             <Show when=move ||open.get()>
-                <div node_ref=submenu id="context-mute-options" class="context-submenu" role="menu" aria-label="Mute duration"
+                <div node_ref=submenu id="context-mute-options" class="context-submenu" role="menu" aria-label=move || crate::i18n::t("Mute duration")
                     style:left=move ||format!("{}px",position.get().0)
                     style:top=move ||format!("{}px",position.get().1)>
                     {thiscord_shared::notifications::Snooze::OPTIONS.into_iter().map(|(duration,label)|view! {
-                        <button role="menuitem" class="context-item" on:click=move |_|run.run(Action::Snooze(target,duration))>{label}</button>
+                        <button role="menuitem" class="context-item" on:click=move |_|run.run(Action::Snooze(target,duration))>{move ||crate::i18n::snooze_label(duration,label)}</button>
                     }).collect_view()}
                 </div>
             </Show>
@@ -978,17 +1003,17 @@ pub(super) fn Host(ui: Ui) -> impl IntoView {
                 {move ||ui.context_menu.get().and_then(|m|m.member).map(|member|view!{<FriendActions ui=ui member=member run=Callback::new(run)/>})}
                 {move ||volume.get().map(|(guild,channel,member)|view!{<ParticipantVolume ui=ui guild=guild channel=channel member=member/>})}
                 {move ||ui.context_menu.get().map(|m|m.items.into_iter().map(|item|match item {
-                    Item::Command {label,action,danger} => view!{<button role="menuitem" class="context-item" class:context-danger=danger on:click=move |_|run(action.clone())>{label}</button>}.into_any(),
+                    Item::Command {label,action,danger} => view!{<button role="menuitem" class="context-item" class:context-danger=danger on:click=move |_|run(action.clone())>{move ||crate::i18n::t(&label).to_owned()}</button>}.into_any(),
                     Item::Mute(target) => view!{<MuteSubmenu target=target open=mute_open parent_position=position run=Callback::new(run)/>}.into_any(),
                 }).collect_view())}
                 <p class="px-2 text-xs text-white/60" role="status">{move ||ui.context_menu.get().map(|m|m.note)}</p>
             </div>
         </Show>
-        <dialog node_ref=confirm class="context-dialog" aria-label="Confirm action" on:click=move |e|super::dialog::dismiss_outside(e,confirm,ui.busy.get_untracked()) on:close=move |_|pending.set(None)>
+        <dialog node_ref=confirm class="context-dialog" aria-label=move || crate::i18n::t("Confirm action") on:click=move |e|super::dialog::dismiss_outside(e,confirm,ui.busy.get_untracked()) on:close=move |_|pending.set(None)>
             <h2 class="text-xl font-semibold">{move ||pending.get().and_then(|a|match a {Action::Change(_,_,_,title)=>Some(title),Action::Unfriend(_)=>Some("Remove this friend?".into()),_=>None})}</h2>
-            <Show when=move ||matches!(pending.get(),Some(Action::Unfriend(_)))><p class="mt-3 text-sm text-white/60">"Private messages and calls will be unavailable until you become friends again."</p></Show>
-            <div class="mt-6 flex justify-end gap-3"><button class="rounded bg-white/10 px-4 py-2" on:click=move |_|if let Some(d)=confirm.get(){d.close();}>"Cancel"</button><button class="rounded bg-red-500/20 px-4 py-2 text-red-200" disabled=move ||ui.busy.get() on:click=move |_|{if let Some(action)=pending.get_untracked(){execute(ui,action);}
-                if let Some(d)=confirm.get(){d.close();}}>"Confirm"</button></div>
+            <Show when=move ||matches!(pending.get(),Some(Action::Unfriend(_)))><p class="mt-3 text-sm text-white/60">{move || crate::i18n::t("Private messages and calls will be unavailable until you become friends again.")}</p></Show>
+            <div class="mt-6 flex justify-end gap-3"><button class="rounded bg-white/10 px-4 py-2" on:click=move |_|if let Some(d)=confirm.get(){d.close();}>{move || crate::i18n::t("Cancel")}</button><button class="rounded bg-red-500/20 px-4 py-2 text-red-200" disabled=move ||ui.busy.get() on:click=move |_|{if let Some(action)=pending.get_untracked(){execute(ui,action);}
+                if let Some(d)=confirm.get(){d.close();}}>{move || crate::i18n::t("Confirm")}</button></div>
         </dialog>
 
     }

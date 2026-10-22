@@ -104,7 +104,7 @@ pub async fn api_request<T: serde::Serialize, R: serde::de::DeserializeOwned>(
             .json::<ApiError>()
             .await
             .map_err(|_| "Server returned an invalid response")?;
-        return Err(format!("{} (request {})", error.message, error.request_id));
+        return Err(crate::i18n::api_error(&error));
     }
     response
         .json()
