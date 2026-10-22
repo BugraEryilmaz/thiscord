@@ -149,6 +149,12 @@ absolute executable path. Backend `run.sh` (also used by `run-wsl.ps1`) builds i
 automatically. Linux needs `libasound2-dev` to compile CPAL, although the companion
 never opens hardware. No display, Tauri WebView or audio server is required.
 
+The companion shares the backend's network namespace and uses direct host ICE
+from its loopback socket. It intentionally ignores the offer's public STUN/TURN
+configuration: gathering against a same-host TURN server can otherwise stall
+until the SFU's answer deadline expires. Desktop clients still use the configured
+public ICE servers. Bots retain the normal DTLS/SRTP encryption and SFU checks.
+
 ```sh
 cargo build -p thiscord-frontend --features voice-bot --bin thiscord-voice-bot --locked
 cargo build -p thiscord-backend --locked

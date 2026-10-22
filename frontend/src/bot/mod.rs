@@ -142,19 +142,12 @@ pub async fn run_stdio() -> Result<(), String> {
     Ok(())
 }
 
-fn configuration(servers: &[IceServer]) -> RTCConfiguration {
-    RTCConfigurationBuilder::new()
-        .with_ice_servers(
-            servers
-                .iter()
-                .map(|s| RTCIceServer {
-                    urls: s.urls.clone(),
-                    username: s.username.clone(),
-                    credential: s.credential.clone(),
-                })
-                .collect(),
-        )
-        .build()
+fn configuration(_servers: &[IceServer]) -> RTCConfiguration {
+    // The private stdio companion shares the backend's network namespace and
+    // binds loopback. Public STUN/TURN cannot be reached from that socket and
+    // can stall gathering beyond the SFU's answer deadline. Direct host ICE
+    // still negotiates the ordinary encrypted WebRTC transport to the SFU.
+    RTCConfiguration::default()
 }
 
 fn startup_failure(error: Failure) -> StartupFailure {
