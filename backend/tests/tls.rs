@@ -38,6 +38,7 @@ async fn https_validates_hostname_preserves_peer_and_survives_failed_reload() {
     let handle = axum_server::Handle::new();
     let server = axum_server::from_tcp_rustls(listener.into_std().unwrap(), tls.config.clone())
         .unwrap()
+        .map(|acceptor| acceptor.acceptor(axum_server::accept::NoDelayAcceptor::new()))
         .handle(handle.clone())
         .serve(app.into_make_service_with_connect_info::<SocketAddr>());
     let task = tokio::spawn(server);

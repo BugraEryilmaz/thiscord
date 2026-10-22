@@ -95,6 +95,9 @@ async fn main() -> Result<(), BoxError> {
         });
         tracing::info!(bind = %address, scheme = "https", "Thiscord backend listening");
         let result = axum_server::from_tcp_rustls(listener.into_std()?, config)?
+            // Small API/signaling writes must not wait for an ACK of a TLS
+            // record (including session tickets) before leaving the host.
+            .map(|acceptor| acceptor.acceptor(axum_server::accept::NoDelayAcceptor::new()))
             .handle(handle)
             .serve(app.into_make_service_with_connect_info::<SocketAddr>())
             .await;

@@ -39,6 +39,10 @@ sudo docker compose -f /opt/thiscord/compose.yml ps
 curl --fail https://thiscord.com.tr/api/v1/ready
 ```
 
+The [October 21 responsiveness investigation](performance-2026-10-21.md) records
+HTTP timings, voice deadline failures and historical resource measurements.
+Fast handler logs alone do not measure TLS/proxy delivery or desktop rendering.
+
 Coturn uses host networking on native Linux, avoiding the Docker Desktop NAT
 translation used by the old installation. Its pinned image and sandbox settings
 are in `infra/vps/compose.yml`. Coturn uses both public relay addresses.

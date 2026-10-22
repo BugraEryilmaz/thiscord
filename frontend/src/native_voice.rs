@@ -674,7 +674,14 @@ async fn run(
         ServerEvent::Error { error } => return Err(server_failure(&attempt.connection, error)),
         _ => return Err("Invalid voice offer".into()),
     };
+    attempt.connection.event(
+        "voice_offer_received",
+        serde_json::json!({
+            "elapsed_ms":attempt.started_at.elapsed().as_millis()
+        }),
+    );
     attempt.stage = "negotiate";
+    let negotiation_started = Instant::now();
     let gathered = Arc::new(Notify::new());
     let media_state = Arc::new(MediaState::default());
     let mut media = MediaEngine::default();
@@ -808,9 +815,18 @@ async fn run(
     pc.set_local_description(answer)
         .await
         .map_err(|_| "Cannot set answer")?;
+    attempt.connection.event(
+        "voice_answer_created",
+        serde_json::json!({
+            "elapsed_ms":attempt.started_at.elapsed().as_millis(),
+            "negotiation_ms":negotiation_started.elapsed().as_millis()
+        }),
+    );
+    let gathering_started = Instant::now();
     tokio::time::timeout(Duration::from_secs(8), gathered.notified())
         .await
         .map_err(|_| Failure::temporary("ICE gathering timed out"))?;
+    let gathering_wait = gathering_started.elapsed();
     let sdp = serde_json::to_string(&pc.local_description().await.ok_or("Missing answer")?)
         .map_err(|_| "Invalid answer")?;
     send_event(
@@ -826,6 +842,14 @@ async fn run(
         &attempt.connection,
     )
     .await?;
+    attempt.connection.event(
+        "voice_answer_sent",
+        serde_json::json!({
+            "elapsed_ms":attempt.started_at.elapsed().as_millis(),
+            "negotiation_ms":negotiation_started.elapsed().as_millis(),
+            "gathering_wait_ms":gathering_wait.as_millis()
+        }),
+    );
     attempt.recovery = Some(crate::native_signaling::recovery::Session::start(
         attempt.signaling.take().unwrap(),
         receive,
@@ -851,6 +875,7 @@ async fn run(
         transmit_control.disable_receive_protection();
     }
     let mut audio_started = false;
+    let mut audio_control = thiscord_frontend::audio::voice_control::VoiceControl::default();
     let mut roster: Vec<Participant> = Vec::new();
     let mut roster_compatibility = thiscord_frontend::audio::red::RosterCompatibility::default();
     let mut ticker = tokio::time::interval(Duration::from_millis(500));
@@ -920,6 +945,40 @@ async fn run(
             }
         }
         tokio::select! {
+            _ = boundary.wait_deadline(), if packet_redundancy && audio_started && !signaling.recovering() => {},
+            result = audio_control.completed() => {
+                let audio = result?;
+                if !audio_started {
+                        audio_started=true;attempt.connected_at=Some(Instant::now());attempt.stage="active";
+                        attempt.connection.event("voice_media_connected",serde_json::json!({}));
+                        if screen_video { app.state::<crate::native_screen::ScreenState>().bind(crate::native_screen::Binding {
+                            own_slot, local_epoch: Default::default(), local_visible: Default::default(),
+                            connection: attempt.connection.clone(), video: screen_track.clone(), audio: system_track.clone(), can_publish: can_speak,
+                            subscriptions: screen_subscriptions,
+                            layers: screen_layers.then(|| crate::native_screen::LayerBinding::new(low_track.clone())),
+                            demand: Default::default(), network_demand: Default::default(),
+                            force_keyframe: force_keyframe.clone(), metrics: Default::default(),
+                            video_sequence: Default::default(), audio_sequence: Default::default(), audio_timestamp: Default::default(), started: Instant::now(),
+                        }); }
+                        if camera_video { app.state::<crate::native_camera::CameraState>().bind(crate::native_screen::Binding {
+                            own_slot, local_epoch: Default::default(), local_visible: Default::default(),
+                            connection: attempt.connection.clone(), video: camera_track.clone(), audio: system_track.clone(), can_publish: can_speak, subscriptions: screen_subscriptions, layers: None,
+                            demand: Default::default(), network_demand: Default::default(), force_keyframe: Default::default(), metrics: Default::default(), video_sequence: Default::default(), audio_sequence: Default::default(), audio_timestamp: Default::default(), started: Instant::now(),
+                        }); }
+                        engine.notify_control(Command::Roster{connection:attempt.connection.clone(),members:roster.clone()})?;
+                        if let Ok(mut s)=status.lock(){s.connected=true;s.message="Connected".into();}
+                } else {
+                    if !audio.running {return Err(Failure::from(audio.message).with_reason("audio_stopped"));}
+                    if let Ok(mut s)=status.lock(){s.message=audio.message;}
+                    // Disconnected is recoverable by ICE itself. Keep this peer
+                    // until Failed/Closed; signaling has its own bounded recovery.
+                    if signaling.recovering() && let Ok(mut s)=status.lock() {
+                        s.message="Recovering voice signaling...".into();
+                    } else if !media_state.connected.load(Ordering::Acquire) && let Ok(mut s)=status.lock() {
+                        s.message="Recovering voice connection...".into();
+                    }
+                }
+            },
             _ = transmit_control.changed(), if packet_redundancy => { red_sender.clear(); },
             Some(result) = remote_jobs.join_next() => {
                 if let Ok((id, chunks)) = result {
@@ -1069,46 +1128,19 @@ async fn run(
                     attempt.connection.event("voice_connection_lost",serde_json::json!({"peer_failed":true}));
                     return Err(Failure::temporary("Voice connection lost").with_reason("peer_failed"));
                 }
-                if !audio_started{
+                if !audio_started && !audio_control.pending(){
                     if start.elapsed()>Duration::from_secs(15){return Err(Failure::temporary("Media connection timed out").with_reason("media_connect_timeout"));}
                     if media_state.connected.load(Ordering::Acquire){
                         attempt.stage="audio_start";
                         let configuration=settings.lock().map_err(|_|"Settings unavailable")?.clone();let audio_app=app.clone();let tx=tx.clone();let connection=attempt.connection.clone();
-                        tauri::async_runtime::spawn_blocking(move||crate::native_audio::start_voice(&audio_app,guild_id,connection,configuration,tx,can_speak)).await.map_err(|_|"Audio task failed")??;
-                        audio_started=true;attempt.connected_at=Some(Instant::now());attempt.stage="active";
-                        attempt.connection.event("voice_media_connected",serde_json::json!({}));
-                        if screen_video { app.state::<crate::native_screen::ScreenState>().bind(crate::native_screen::Binding {
-                            own_slot, local_epoch: Default::default(), local_visible: Default::default(),
-                            connection: attempt.connection.clone(), video: screen_track.clone(), audio: system_track.clone(), can_publish: can_speak,
-                            subscriptions: screen_subscriptions,
-                            layers: screen_layers.then(|| crate::native_screen::LayerBinding::new(low_track.clone())),
-                            demand: Default::default(), network_demand: Default::default(),
-                            force_keyframe: force_keyframe.clone(), metrics: Default::default(),
-                            video_sequence: Default::default(), audio_sequence: Default::default(), audio_timestamp: Default::default(), started: Instant::now(),
-                        }); }
-                        if camera_video { app.state::<crate::native_camera::CameraState>().bind(crate::native_screen::Binding {
-                            own_slot, local_epoch: Default::default(), local_visible: Default::default(),
-                            connection: attempt.connection.clone(), video: camera_track.clone(), audio: system_track.clone(), can_publish: can_speak, subscriptions: screen_subscriptions, layers: None,
-                            demand: Default::default(), network_demand: Default::default(), force_keyframe: Default::default(), metrics: Default::default(), video_sequence: Default::default(), audio_sequence: Default::default(), audio_timestamp: Default::default(), started: Instant::now(),
-                        }); }
-                        engine.notify_control(Command::Roster{connection:attempt.connection.clone(),members:roster.clone()})?;
-                        if let Ok(mut s)=status.lock(){s.connected=true;s.message="Connected".into();}
+                        audio_control.start(move||crate::native_audio::start_voice(&audio_app,guild_id,connection,configuration,tx,can_speak));
                     }
                 }
                 let configuration=settings.lock().map_err(|_|"Settings unavailable")?.clone();
-                if audio_started {
+                if audio_started && !audio_control.pending() {
                     let e=engine.clone();
                     let heartbeat_connection=attempt.connection.clone();
-                    let audio=tauri::async_runtime::spawn_blocking(move||e.command(Command::Keepalive(heartbeat_connection))).await.map_err(|_|"Audio worker failed")??;
-                    if !audio.running {return Err(Failure::from(audio.message).with_reason("audio_stopped"));}
-                    if let Ok(mut s)=status.lock(){s.message=audio.message;}
-                    // Disconnected is recoverable by ICE itself. Keep this peer
-                    // until Failed/Closed; signaling has its own bounded recovery.
-                    if signaling.recovering() && let Ok(mut s)=status.lock() {
-                        s.message="Recovering voice signaling...".into();
-                    } else if !media_state.connected.load(Ordering::Acquire) && let Ok(mut s)=status.lock() {
-                        s.message="Recovering voice connection...".into();
-                    }
+                    audio_control.start(move||e.command(Command::Keepalive(heartbeat_connection)));
                 }
                 if configuration.deafened { crate::native_screen::screen_stop(app.state::<crate::native_screen::ScreenState>()); }
                 let camera = app.state::<crate::native_camera::CameraState>();

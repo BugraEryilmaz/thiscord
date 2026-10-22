@@ -307,6 +307,132 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn delayed_privacy_ack_recovers_before_original_server_deadline() {
+        use thiscord_frontend::audio::red::boundary::{Boundary, RequestError};
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let base = format!("http://{}", listener.local_addr().unwrap());
+        let server = tokio::spawn(async move {
+            let mut old = accept(&listener).await;
+            assert!(matches!(
+                command(&mut old).await,
+                ClientEvent::MicrophoneBoundary { generation: 1 }
+            ));
+            reply(
+                &mut old,
+                ServerEvent::MicrophoneBoundaryAccepted {
+                    generation: 1,
+                    microphone_epoch: 1,
+                    source_epoch: 1,
+                    challenge: None,
+                    accepted: true,
+                },
+            )
+            .await;
+            let issued = tokio::time::Instant::now();
+            // Delay the challenge, then lose its ACK while the old TCP link
+            // remains open. The server's five-second budget is never renewed.
+            tokio::time::sleep(Duration::from_millis(200)).await;
+            reply(
+                &mut old,
+                ServerEvent::MicrophoneRefreshRequired { challenge: 7 },
+            )
+            .await;
+            assert!(matches!(
+                command(&mut old).await,
+                ClientEvent::MicrophoneRefresh {
+                    generation: 2,
+                    challenge: 7
+                }
+            ));
+            tokio::time::timeout_at(issued + Duration::from_secs(5), async {
+                let (tcp, _) = listener.accept().await.unwrap();
+                // Reproduce a slow upgrade/reconnect, not an immediate mock.
+                tokio::time::sleep(Duration::from_millis(2400)).await;
+                let mut resumed = tokio_tungstenite::accept_async(tcp).await.unwrap();
+                assert_resume(command(&mut resumed).await, 1);
+                reply(&mut resumed, ServerEvent::Resumed {}).await;
+                assert!(matches!(
+                    command(&mut resumed).await,
+                    ClientEvent::MicrophoneRefresh {
+                        generation: 2,
+                        challenge: 7
+                    }
+                ));
+                reply(
+                    &mut resumed,
+                    ServerEvent::MicrophoneBoundaryAccepted {
+                        generation: 2,
+                        microphone_epoch: 2,
+                        source_epoch: 1,
+                        challenge: Some(7),
+                        accepted: true,
+                    },
+                )
+                .await;
+                assert!(matches!(
+                    command(&mut resumed).await,
+                    ClientEvent::MicrophoneRefreshReady {
+                        generation: 2,
+                        challenge: 7
+                    }
+                ));
+                reply(&mut resumed, ServerEvent::Pong {}).await;
+                resumed
+            })
+            .await
+            .expect("recovery and Ready must beat the original server expiry")
+        });
+        let (send, receive) = connect(&base).await.unwrap().split();
+        let mut session = Session::start(send, receive, credentials(base), Connection::default());
+        let mut boundary = Boundary::default();
+        boundary.control(1).unwrap();
+        boundary.request(std::time::Instant::now()).unwrap();
+        session.send(ClientEvent::MicrophoneBoundary { generation: 1 });
+        let mut recovering = false;
+        loop {
+            tokio::select! {
+                _ = boundary.wait_deadline(), if !recovering => {
+                    assert_eq!(boundary.request(std::time::Instant::now()), Err(RequestError::AcknowledgmentTimeout));
+                    session.recover();
+                    boundary.resume();
+                    recovering = true;
+                },
+                message = session.events.recv() => {
+                    let message = message.unwrap().unwrap();
+                    let frame: ServerFrame = serde_json::from_str(message.to_text().unwrap()).unwrap();
+                    match frame.event {
+                        ServerEvent::MicrophoneBoundaryAccepted { generation, challenge, accepted, .. } => {
+                            assert!(boundary.acknowledge(generation, challenge, accepted));
+                            if let Some((generation, challenge)) = boundary.ready_notice() {
+                                session.send(ClientEvent::MicrophoneRefreshReady { generation, challenge });
+                            }
+                        },
+                        ServerEvent::MicrophoneRefreshRequired { challenge } => {
+                            boundary.require_refresh(challenge);
+                            boundary.start_refresh(2).unwrap();
+                            let (generation, _) = boundary.request(std::time::Instant::now()).unwrap().unwrap();
+                            session.send(ClientEvent::MicrophoneRefresh { generation, challenge });
+                        },
+                        ServerEvent::Resumed {} => {
+                            boundary.resume();
+                            assert!(!boundary.ready());
+                            let (generation, challenge) = boundary.request(std::time::Instant::now()).unwrap().unwrap();
+                            session.send(ClientEvent::MicrophoneRefresh { generation, challenge: challenge.unwrap() });
+                        },
+                        ServerEvent::Pong {} => break,
+                        _ => panic!("unexpected event"),
+                    }
+                }
+            }
+        }
+        assert!(recovering);
+        assert!(boundary.ready_control(2));
+        // Keep the resumed peer alive until the client has observed its proof.
+        let _peer = server.await.unwrap();
+        session.close().await;
+    }
+
+    #[tokio::test]
     async fn unanswered_boundary_resumes_open_socket_and_requires_fresh_ack() {
         use thiscord_frontend::audio::red::boundary::{Boundary, RequestError};
 

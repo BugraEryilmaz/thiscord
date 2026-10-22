@@ -40,6 +40,14 @@ and attaches it to the tracing span and error body. CORS exposes the header to
 allowed UI origins. Logs include method, path, status and duration; query strings,
 credentials, SQL errors and request bodies are not logged by the middleware.
 
+CORS preflight permissions have a 600-second maximum age, allowing browsers and
+desktop WebViews to reuse the allowed origin/method/header check instead of adding
+an OPTIONS round trip before repeated JSON/bearer requests. This caches no API
+responses or account/guild grants: authenticated responses remain `no-store` and
+every request rechecks current access. Removing a configured origin may leave its
+preflight permission in a client's cache for up to that lifetime; actual responses
+still use the current origin allowlist. CORS is not an authentication boundary.
+
 `ApiError` uses stable snake_case `ErrorCode` values and optional field details.
 Clients should branch on `code`, not human-readable `message`. Unknown routes
 and unsupported methods use the same envelope (404/405). Add typed extractor

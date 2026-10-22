@@ -59,6 +59,10 @@ fn routes(
                     axum::http::header::AUTHORIZATION,
                     axum::http::header::CONTENT_TYPE,
                 ])
+                // WebView/browser JSON + bearer requests require a preflight.
+                // Reuse only that origin/method/header permission, not API data
+                // or authorization: every POST still checks the current session.
+                .max_age(Duration::from_secs(600))
                 .expose_headers([HeaderName::from_static(REQUEST_ID_HEADER)]),
         )
         // Outermost: even CORS preflight, fallback and error responses get an ID.

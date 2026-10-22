@@ -1105,6 +1105,7 @@ async fn serve(mut socket: logging::Socket, pool: DbPool, id: RequestId) {
     let mut tracks = Vec::new();
     let mut screen_feedback = false;
     let mut remote_audio = false;
+    let negotiation_started = Instant::now();
     let negotiated = async {
         tokio::time::timeout(Duration::from_secs(15), async {
             socket.stage = "add_tracks";
@@ -1142,10 +1143,12 @@ async fn serve(mut socket: logging::Socket, pool: DbPool, id: RequestId) {
                 },
             )
             .await?;
+            tracing::info!(request_id = %id, elapsed_ms = negotiation_started.elapsed().as_millis(), "voice offer sent");
             socket.stage = "answer";
             let Some(Ok(answer)) = socket.recv().await else {
                 return Err(());
             };
+            tracing::info!(request_id = %id, elapsed_ms = negotiation_started.elapsed().as_millis(), "voice answer received");
             let Some(ClientEvent::Answer {
                 sdp,
                 screen_feedback: enabled,
