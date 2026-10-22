@@ -64,6 +64,8 @@ if grep -q 'not found' "$source_dir/voice-bot-libraries.txt"; then
 fi
 (cd frontend && trunk build --release --locked --public-url /admin/ --dist dist-admin)
 [[ -s frontend/dist-admin/index.html ]] || { echo 'Admin bundle is missing; refusing to activate an API-only release.' >&2; exit 1; }
+(cd frontend && trunk build welcome/index.html --release --locked --public-url /welcome/ --dist dist-welcome)
+[[ -s frontend/dist-welcome/index.html ]] || { echo 'Welcome bundle is missing; deployment aborted.' >&2; exit 1; }
 if [[ $build_only == true ]]; then
     echo "Build verified: $commit. No production service or database changes."
     exit 0
@@ -80,6 +82,11 @@ sudo -n cp -R frontend/dist-admin/. "$release/admin/"
 sudo -n chown -R root:root "$release/admin"
 sudo -n find "$release/admin" -type d -exec chmod 0755 {} +
 sudo -n find "$release/admin" -type f -exec chmod 0644 {} +
+sudo -n install -d -o root -g root -m 0755 "$release/welcome"
+sudo -n cp -R frontend/dist-welcome/. "$release/welcome/"
+sudo -n chown -R root:root "$release/welcome"
+sudo -n find "$release/welcome" -type d -exec chmod 0755 {} +
+sudo -n find "$release/welcome" -type f -exec chmod 0644 {} +
 echo "Stopping backend and backing up PostgreSQL before activation: $release"
 stopped=true
 sudo -n systemctl stop thiscord

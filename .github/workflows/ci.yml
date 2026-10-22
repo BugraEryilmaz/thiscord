@@ -123,6 +123,7 @@ jobs:
         with:
           key: wasm
       - run: cargo clippy -p thiscord-frontend --bin thiscord-ui --target wasm32-unknown-unknown --locked -- -D warnings
+      - run: cargo clippy -p thiscord-frontend --bin thiscord-ui --features welcome --target wasm32-unknown-unknown --locked -- -D warnings
       - name: Chat history and frontend state regression tests
         run: cargo test -p thiscord-frontend --lib --locked
       - uses: ./.github/actions/cargo-tool
@@ -149,6 +150,16 @@ jobs:
         with:
           name: admin-assets
           path: frontend/dist-admin/
+          if-no-files-found: error
+      - name: Build public welcome page
+        working-directory: frontend
+        env:
+          BINARYEN_CORES: "1"
+        run: trunk build welcome/index.html --release --locked --public-url /welcome/ --dist dist-welcome
+      - uses: actions/upload-artifact@v4
+        with:
+          name: welcome-assets
+          path: frontend/dist-welcome/
           if-no-files-found: error
       - name: Report Cargo storage
         if: always() && env.CARGO_TARGET_DIR != ''

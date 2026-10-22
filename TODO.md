@@ -396,6 +396,8 @@ See [screen-sharing.md](docs/screen-sharing.md) for limits and remaining platfor
 
 ## 9. Hosting and releases
 
+- [x] Public welcome page with responsive design, latest GitHub installer links,
+  failure fallback, and a separate web bundle integrated into CI/VPS deployment.
 
 - [x] Direct backend HTTPS/WSS using Let's Encrypt PEM files, TLS tests and SIGHUP reload.
 - [ ] Finalize public hostname/DNS, browser hosting and certificate renewal automation.
