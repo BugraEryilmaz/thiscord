@@ -130,7 +130,9 @@ and single-process chat/media enforcement.
 - [ ] Measure unread fan-out with large backlogs; evaluate maintained sequence-bucket aggregates (see docs/unread-performance.md).
 - [x] Safe message rendering, bounded payloads and spam controls.
 - [x] Reconnect, duplicate delivery, channel isolation and channel deletion tests.
-- [ ] Later: access-controlled attachments/quotas and search.
+- [x] Access-controlled text-channel attachments, drag/drop and file picker, image/video viewer and downloads.
+- [ ] Verify attachment drag/drop, downloads and media codec playback interactively on Windows/macOS/Linux clients.
+- [ ] Later: message search and configurable attachment storage quotas.
 
 ## 5. Frontend audio and media feasibility
 

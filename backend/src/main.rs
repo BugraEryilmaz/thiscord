@@ -69,6 +69,7 @@ async fn main() -> Result<(), BoxError> {
     let tls = thiscord_backend::tls::Tls::from_env().await?;
     if let Some(pool) = pool.as_ref() {
         thiscord_backend::auth::mail::start(pool.clone());
+        thiscord_backend::chat::start_attachment_cleanup(pool.clone());
     }
     let mut app = api::router(pool, origins);
     // Production bundles live beside the executable. An explicit path must exist.

@@ -10,6 +10,33 @@ use uuid::Uuid;
 const ID: &str = "f8f72890-fbae-4e56-9e7b-8038b5c3a094";
 
 #[test]
+fn attachments_are_additive_and_empty_sends_remain_legacy_compatible() {
+    use thiscord_shared::chat::*;
+    let legacy =
+        json!({"action":"send","guild_id":ID,"channel_id":ID,"client_id":ID,"content":"hello"});
+    let request: ChatRequest = from_value(legacy.clone()).unwrap();
+    assert_eq!(to_value(request).unwrap(), legacy);
+    let attached = json!({"action":"send","guild_id":ID,"channel_id":ID,"client_id":ID,"content":"","attachment_ids":[ID]});
+    assert_eq!(
+        to_value(from_value::<ChatRequest>(attached.clone()).unwrap()).unwrap(),
+        attached
+    );
+    let legacy_message = json!({"id":ID,"client_id":ID,"guild_id":ID,"channel_id":ID,"author_id":ID,"username":"test","content":"hello","mentions":[],"created_at":"2026-10-22T12:00:00Z","edited_at":null,"deleted":false,"revision":0,"sequence":1});
+    let mut message: ChatMessage = from_value(legacy_message).unwrap();
+    assert!(message.attachments.is_empty());
+    message.attachments.push(ChatAttachment {
+        id: ID.parse().unwrap(),
+        filename: "test.png".into(),
+        content_type: "image/png".into(),
+        size_bytes: 12,
+    });
+    let roundtrip: ChatMessage = from_value(to_value(&message).unwrap()).unwrap();
+    assert!(roundtrip.attachments == message.attachments);
+    assert_eq!(MAX_ATTACHMENT_BYTES, 25 * 1024 * 1024);
+    assert_eq!(MAX_MESSAGE_ATTACHMENTS, 4);
+}
+
+#[test]
 fn diagnostics_distinguish_missing_measurements_from_zero() {
     use thiscord_shared::admin::NetworkMetrics;
     let missing = to_value(NetworkMetrics::default()).unwrap();

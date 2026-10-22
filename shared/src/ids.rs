@@ -47,6 +47,7 @@ uuid_id!(GuildId);
 uuid_id!(RoleId);
 uuid_id!(ChannelId);
 uuid_id!(MessageId);
+uuid_id!(AttachmentId);
 uuid_id!(ClientMessageId);
 uuid_id!(ConversationId);
 uuid_id!(CallId);
