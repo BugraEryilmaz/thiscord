@@ -80,10 +80,14 @@ fn Panel(ui: Ui, target: Target) -> impl IntoView {
             <header class="mb-4 flex items-center justify-between gap-4"><h2 class="text-xl font-semibold">{move || thiscord_frontend::localized_format!(crate::i18n::language(), "Voice test bots · {}",target.name)}</h2><button autofocus class="rounded bg-slate-800 px-4 py-2" on:click=move |_|ui.bot_target.set(None)>{move || crate::i18n::t("Close")}</button></header>
             <p class="mb-4 text-sm text-slate-400">{move || crate::i18n::t("Bots join as separate voice participants and play a repeating microphone loop. They use channel slots and leave after one hour, when your session ends, or when access is revoked.")}</p>
             <p role="status" class="my-3 text-amber-300">{move ||crate::i18n::message(error.get())}</p>
-            <div class="mb-4 flex items-center gap-3"><button class="rounded bg-slate-800 px-4 py-2 disabled:opacity-50" disabled=move ||busy.get() on:click=move |_|command.run(Command::List {})>{move || crate::i18n::t("Refresh")}</button><span role="status" class="text-sm text-slate-400">{move ||if busy.get(){"Working…".into()}else{thiscord_frontend::localized_format!(crate::i18n::language(), "{} test bots",bots.get().len())}}</span></div>
+            <div class="mb-4 flex items-center gap-3"><button class="rounded bg-slate-800 px-4 py-2 disabled:opacity-50" disabled=move ||busy.get() on:click=move |_|command.run(Command::List {})>{move || crate::i18n::t("Refresh")}</button><span role="status" class="text-sm text-slate-400">{move ||if busy.get(){crate::i18n::t("Working…").into()}else{thiscord_frontend::localized_format!(crate::i18n::language(), "{} test bots",bots.get().len())}}</span></div>
             <fieldset disabled=move ||busy.get() || !loaded.get() class="space-y-4 disabled:opacity-50">
                 <section class="rounded-lg border border-slate-700 p-4"><h3 class="mb-3 font-semibold">{move || crate::i18n::t("Add a test bot")}</h3><Options settings=draft/>
-                    <button class="mt-4 rounded bg-indigo-600 px-4 py-2 disabled:opacity-50" disabled=move ||bots.get().len()>=thiscord_shared::voice::ROOM_CAPACITY on:click=move |_|command.run(Command::Add {settings:draft.get_untracked()})>{move || crate::i18n::t("Add bot to this channel")}</button>
+                    <button
+                        class="mt-4 rounded bg-indigo-600 px-4 py-2 disabled:opacity-50"
+                        disabled={move || bots.get().len() >= thiscord_shared::voice::ROOM_CAPACITY}
+                        on:click={move |_| command.run(Command::Add { settings: draft.get_untracked() })}
+                    >{move || crate::i18n::t("Add bot to this channel")}</button>
                 </section>
                 <For each=move ||bots.get() key=|bot|(bot.id,bot.revision) children=move |bot|view!{<BotEditor bot=bot bots=bots command=command/>}/>
             </fieldset>

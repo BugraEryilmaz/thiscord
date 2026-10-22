@@ -35,6 +35,45 @@ impl State {
             joined: RwSignal::new(None),
         }
     }
+
+    pub fn pending_count(self) -> u32 {
+        self.snapshot.with(|s| {
+            s.friends
+                .iter()
+                .filter(|f| f.relationship == Relationship::Incoming)
+                .count() as u32
+        })
+    }
+
+    pub fn unread_count(self) -> u32 {
+        self.snapshot.with(|s| {
+            s.friends
+                .iter()
+                .filter(|f| f.relationship == Relationship::Friend)
+                .map(|f| f.unread_count)
+                .sum()
+        })
+    }
+}
+
+pub(super) fn count_text(count: u32) -> String {
+    if count > 99 {
+        "99+".into()
+    } else {
+        count.to_string()
+    }
+}
+
+#[component]
+pub(super) fn CountBubble(count: Signal<u32>, label: &'static str) -> impl IntoView {
+    view! {
+        <Show when=move ||{count.get()>0}>
+            <span class="inline-flex h-5 min-w-5 shrink-0 items-center justify-center rounded-full bg-red-500 px-1.5 text-[11px] font-bold leading-none text-white tabular-nums"
+                aria-label=move ||format!("{} {}", count_text(count.get()), crate::i18n::t(label))>
+                {move ||count_text(count.get())}
+            </span>
+        </Show>
+    }
 }
 async fn request(ui: Ui, command: &Request) -> Result<Response, String> {
     let token = ui.token.get_untracked();
@@ -300,18 +339,20 @@ pub(super) fn Home(ui: Ui) -> impl IntoView {
     view! {<section class="flex h-full min-h-0 flex-col pb-[var(--dock-height)] lg:pb-0">
         <header class="flex flex-wrap items-center gap-4 border-b border-white/10 px-6 py-4">
             <button class="flex items-center gap-2 text-lg font-bold" on:click=move |_|ui.friends.selected.set(None)><Icon kind=Glyph::Person/>{move || crate::i18n::t("Friends")}</button>
-            <nav class="flex gap-2" aria-label=move || crate::i18n::t("Friend filters")>
-                {[("online","Online"),("all","All"),("pending","Requests")].into_iter().map(|(value,label)|view!{<button class="rounded-lg px-3 py-2 text-sm hover:bg-white/10" class:bg-brand=move ||filter.get()==value && ui.friends.selected.get().is_none() aria-pressed=move ||filter.get()==value && ui.friends.selected.get().is_none() on:click=move |_|{filter.set(value);ui.friends.selected.set(None);}>{move ||crate::i18n::t(label)}</button>}).collect_view()}
+            <nav class="flex flex-wrap gap-2" aria-label=move || crate::i18n::t("Friend filters")>
+                {[("online","Online"),("all","All"),("pending","Requests"),("messages","Messages")].into_iter().map(|(value,label)|view!{<button class="flex items-center gap-2 rounded-lg px-3 py-2 text-sm hover:bg-white/10" class:bg-brand=move ||filter.get()==value && ui.friends.selected.get().is_none() aria-pressed=move ||filter.get()==value && ui.friends.selected.get().is_none() on:click=move |_|{filter.set(value);ui.friends.selected.set(None);}>{move || crate::i18n::t(label)}
+                    <CountBubble count=Signal::derive(move ||match value {"pending"=>ui.friends.pending_count(),"messages"=>ui.friends.unread_count(),_=>0}) label=if value=="pending" {"incoming requests"}else{"unread messages"}/>
+                </button>}).collect_view()}
             </nav>
             <div class="ml-auto"><AddFriend ui=ui/></div>
         </header>
         <div class="flex min-h-0 flex-1">
             <aside class="hidden w-[var(--sidebar-width)] shrink-0 overflow-y-auto border-r border-white/10 bg-sidebar p-4 pb-[var(--dock-height)] lg:block" aria-label=move || crate::i18n::t("Direct messages")>
-                <h3 class="mb-3 text-xs font-semibold uppercase tracking-wider text-white/40">{move || crate::i18n::t("Direct messages")}</h3>
+                <h3 class="mb-3 flex items-center gap-2 text-xs font-semibold uppercase tracking-wider text-white/40">{move || crate::i18n::t("Direct messages")}<CountBubble count=Signal::derive(move ||ui.friends.unread_count()) label="unread messages"/></h3>
                 <For each=move ||{ui.friends.snapshot.get().friends.into_iter().filter(|f|f.relationship==Relationship::Friend).collect::<Vec<_>>()} key=|f|f.conversation_id children=move |f| {
                     let id=f.conversation_id;
                     let friend=Signal::derive(move ||{let _timing=crate::performance::start(0);ui.friends.snapshot.get().friends.into_iter().find(|f|f.conversation_id==id).unwrap_or_else(||f.clone())});
-                    view!{<button data-context-conversation=id.to_string() class="mb-1 flex w-full items-center gap-2 rounded-lg p-2 text-left hover:bg-white/5" class=("bg-white/10",move ||ui.friends.selected.get()==Some(id)) on:click=move |_|open(ui,id)><span class="size-2 shrink-0 rounded-full" class:bg-emerald-400=move ||friend.get().online class=("bg-white/30",move ||!friend.get().online)></span><span class="truncate">{move ||friend.get().person.display_name}</span><Show when=move ||super::notifications::muted(ui,thiscord_shared::notifications::Target::Conversation {conversation_id:id})><span aria-label=move || crate::i18n::t("Notifications muted")><Icon kind=Glyph::BellOff/></span></Show></button>}
+                    view!{<button data-context-conversation=id.to_string() class="mb-1 flex w-full items-center gap-2 rounded-lg p-2 text-left hover:bg-white/5" class=("bg-white/10",move ||ui.friends.selected.get()==Some(id)) on:click=move |_|open(ui,id)><span class="size-2 shrink-0 rounded-full" class:bg-emerald-400=move ||friend.get().online class=("bg-white/30",move ||!friend.get().online)></span><span class="min-w-0 flex-1 truncate">{move ||friend.get().person.display_name}</span><Show when=move ||super::notifications::muted(ui,thiscord_shared::notifications::Target::Conversation {conversation_id:id})><span aria-label=move || crate::i18n::t("Notifications muted")><Icon kind=Glyph::BellOff/></span></Show><CountBubble count=Signal::derive(move ||friend.get().unread_count) label="unread messages"/></button>}
                 }/>
             </aside>
             <div class="min-h-0 min-w-0 flex-1">
@@ -332,13 +373,13 @@ fn FriendList(ui: Ui, filter: RwSignal<&'static str>) -> impl IntoView {
             .into_iter()
             .filter(|f| match filter.get() {
                 "online" => f.relationship == Relationship::Friend && f.online,
-                "all" => f.relationship == Relationship::Friend,
+                "all" | "messages" => f.relationship == Relationship::Friend,
                 _ => f.relationship != Relationship::Friend,
             })
             .collect::<Vec<_>>()
     });
     view! {<div class="h-full overflow-y-auto p-6">
-        <p class="mb-5 text-xs font-semibold uppercase tracking-wider text-white/45">{move ||format!("{} — {}",if filter.get()=="pending"{crate::i18n::t("Requests")}else if filter.get()=="online"{crate::i18n::t("Online friends")}else{crate::i18n::t("All friends")},friends.get().len())}</p>
+        <p class="mb-5 text-xs font-semibold uppercase tracking-wider text-white/45">{move ||format!("{} — {}",if filter.get()=="pending"{crate::i18n::t("Requests")}else if filter.get()=="online"{crate::i18n::t("Online friends")}else if filter.get()=="messages"{crate::i18n::t("Direct messages")}else{crate::i18n::t("All friends")},friends.get().len())}</p>
         <Show when=move ||!ui.friends.connected.get()><p role="status" class="mb-4 text-sm text-amber-200">{move || crate::i18n::t("Connecting to friends…")}</p></Show>
         <Show when=move ||friends.get().is_empty()><div class="flex min-h-60 flex-col items-center justify-center gap-3 text-center"><span class="rounded-full bg-brand/10 p-5 text-brand"><Icon kind=Glyph::Person/></span><h2 class="text-xl font-semibold">{move ||if filter.get()=="pending"{crate::i18n::t("No pending requests")}else if filter.get()=="online"{crate::i18n::t("No friends online right now")}else{crate::i18n::t("Make yourself at home")}}</h2><p class="max-w-sm text-sm text-white/50">{move || crate::i18n::t("Use Add friend to find someone by display name or username. Your conversations will appear here.")}</p></div></Show>
         <For each=move ||friends.get() key=|f|f.conversation_id children=move |initial| {
@@ -348,6 +389,7 @@ fn FriendList(ui: Ui, filter: RwSignal<&'static str>) -> impl IntoView {
                 <crate::avatar::Avatar class="size-10 text-sm" name=Signal::derive(move ||f.get().person.display_name) avatar_id=Signal::derive(move ||f.get().person.avatar_id)/>
                 <div class="min-w-0 flex-1"><p class="truncate font-semibold">{move ||f.get().person.display_name}<span class="ml-2 text-sm font-normal text-white/40">{move ||format!("@{}",f.get().person.username)}</span></p><p class="text-xs text-white/50">{move ||match f.get().relationship {Relationship::Incoming=>crate::i18n::t("Incoming request"),Relationship::Outgoing=>crate::i18n::t("Request sent"),Relationship::Friend if f.get().online=>crate::i18n::t("Online"),Relationship::Friend=>crate::i18n::t("Offline")}}</p></div>
                 <Show when=move ||f.get().relationship==Relationship::Friend>
+                    <CountBubble count=Signal::derive(move ||f.get().unread_count) label="unread messages"/>
                     <button class="icon-button" aria-label=move || crate::i18n::t("Message friend") data-tip=move || crate::i18n::t("Message") on:click=move |_|open(ui,id)><Icon kind=Glyph::Send/></button>
                     <button class="icon-button disabled:opacity-40" aria-label=move || crate::i18n::t("Call friend") data-tip=move || crate::i18n::t("Voice call (desktop)") disabled=move ||!available(ui) || !ui.friends.connected.get() || !ui.friends.snapshot.get().calls.is_empty() on:click=move |_|action(ui,Request::StartCall {conversation_id:id})><Icon kind=Glyph::Headphones/></button>
                 </Show>
@@ -428,6 +470,57 @@ fn Conversation(ui: Ui, id: ConversationId) -> impl IntoView {
     let list = NodeRef::<leptos::html::Div>::new();
     let bottom = RwSignal::new(true);
     let past = RwSignal::new(false);
+    let acknowledged = StoredValue::new(None);
+    let reading = StoredValue::new(false);
+    let session = ui.token.get_untracked();
+    // Poll focus as well as content: returning to a visible conversation must
+    // acknowledge it even if its latest snapshot has not changed.
+    let read_timer = gloo_timers::callback::Interval::new(1000, move || {
+        if reading.get_value()
+            || !bottom.get_untracked()
+            || past.get_untracked()
+            || !ui.friends.connected.get_untracked()
+            || !ui.friends.snapshot.with_untracked(|s| {
+                s.friends
+                    .iter()
+                    .any(|f| f.conversation_id == id && f.unread_count > 0)
+            })
+            || ui.friends.selected.get_untracked() != Some(id)
+            || ui.navigation.get_untracked().current().guild.is_some()
+            || ui.page.get_untracked() != "servers"
+            || ui.token.get_untracked() != session
+            || document().hidden()
+            || !document().has_focus().unwrap_or(false)
+        {
+            return;
+        }
+        let Some(through) = messages.with_untracked(|m| m.last().map(|m| m.id)) else {
+            return;
+        };
+        if acknowledged.get_value() == Some(through) {
+            return;
+        }
+        reading.set_value(true);
+        leptos::task::spawn_local(async move {
+            let result = request(
+                ui,
+                &Request::Read {
+                    conversation_id: id,
+                    through,
+                },
+            )
+            .await;
+            if reading.is_disposed() {
+                return;
+            }
+            reading.set_value(false);
+            if result.is_ok() {
+                acknowledged.set_value(Some(through));
+            }
+        });
+    });
+    // The owner drops this browser-local timer when the conversation unmounts.
+    StoredValue::new_local(read_timer);
     let friend = Signal::derive(move || {
         ui.friends
             .snapshot
