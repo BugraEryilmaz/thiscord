@@ -93,6 +93,12 @@ additional package is needed.
 
 ## Remote audio support
 
+Instance owners can also click a **Test bot** participant to edit its connection
+profile, loop, microphone gain, output volume and mute/deafen state, or remove it.
+Bot controls are owner-only and require channel voice access. These settings last
+for the bot's session and apply to its virtual microphone/silent output. See
+[voice test bots](voice-bots.md) for creation, network simulation and limits.
+
 Click any participant name to open **Audio settings**. Updated desktop clients in
 an active voice connection expose their actual devices, saved preferences, meters,
 echo/quality diagnostics and speaker gains. The dialog renders the same

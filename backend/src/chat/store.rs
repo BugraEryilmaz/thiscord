@@ -91,8 +91,8 @@ pub(super) fn visible_voice_channels(
 fn message(c: &mut PgConnection, id: MessageId) -> Result<ChatMessage, Failure> {
     query(c,"SELECT to_jsonb(m)||jsonb_build_object('username',COALESCE(a.username,'Deleted account'),'display_name',COALESCE(NULLIF(a.display_name,''),a.username,'Deleted account')) AS data FROM messages m LEFT JOIN accounts a ON a.id=m.author_id WHERE m.id=$1::uuid", &[&id.to_string()])?.pop().ok_or(Failure::Forbidden)
 }
-fn text(value: &str) -> Result<(), Failure> {
-    if value.trim().is_empty()
+fn text(value: &str, has_attachments: bool) -> Result<(), Failure> {
+    if (!has_attachments && value.trim().is_empty())
         || value.chars().count() > MAX_MESSAGE_CHARS
         || value
             .chars()
@@ -263,15 +263,28 @@ pub(super) fn dispatch(
                     channel_id,
                     client_id,
                     content,
+                    attachment_ids,
                     ..
                 } => {
-                    text(&content)?;
+                    text(&content, !attachment_ids.is_empty())?;
+                    super::attachments::validate_ids(&attachment_ids)?;
                     let existing: Vec<serde_json::Value> = query(
                         c,
                         "SELECT jsonb_build_object('id',id,'guild_id',guild_id,'channel_id',channel_id,'request_hash',request_hash) AS data FROM messages WHERE author_id=$1::uuid AND client_id=$2::uuid",
                         &[&actor.to_string(), &client_id.to_string()],
                     )?;
-                    let hash = auth::digest(&content);
+                    // Preserve legacy text-only hashes across deployment upgrades.
+                    let hash = if attachment_ids.is_empty() {
+                        auth::digest(&content)
+                    } else {
+                        format!(
+                            "attachments:{}",
+                            auth::digest(
+                                &serde_json::to_string(&(&content, &attachment_ids))
+                                    .map_err(|_| Failure::Unavailable)?
+                            )
+                        )
+                    };
                     if let Some(old) = existing.first() {
                         if old["guild_id"] != guild.to_string()
                             || old["channel_id"] != channel_id.to_string()
@@ -307,6 +320,7 @@ pub(super) fn dispatch(
                         // channel lock. The unique author/client key chooses one winner.
                         return Err(Failure::Conflict);
                     }
+                    super::attachments::attach(c, actor, guild, channel_id, id, &attachment_ids)?;
                     event(c, guild, channel_id, id)?;
                     notification_recipients = crate::notifications::guild_recipients(c, guild)?;
                     change = Some(super::notifications::Change::Message(guild, channel_id));
@@ -329,7 +343,7 @@ pub(super) fn dispatch(
                     {
                         return Err(Failure::Forbidden);
                     }
-                    text(&content)?;
+                    text(&content, !old.attachments.is_empty())?;
                     if old.content == content {
                         return Ok(ChatResponse::Message { message: old });
                     }
@@ -362,7 +376,12 @@ pub(super) fn dispatch(
                     }
                     execute(
                         c,
-                        "UPDATE messages SET deleted=TRUE,content='',mentions='[]',edited_at=clock_timestamp(),revision=revision+1 WHERE id=$1::uuid",
+                        "UPDATE messages SET deleted=TRUE,content='',mentions='[]',attachments='[]',edited_at=clock_timestamp(),revision=revision+1 WHERE id=$1::uuid",
+                        &[&message_id.to_string()],
+                    )?;
+                    execute(
+                        c,
+                        "DELETE FROM attachments WHERE message_id=$1::uuid",
                         &[&message_id.to_string()],
                     )?;
                     event(c, guild, channel_id, message_id)?;

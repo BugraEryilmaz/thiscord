@@ -16,8 +16,10 @@ pub mod performance;
 pub mod permissions;
 pub mod screen;
 pub mod validation;
+pub mod voice_bots;
 
 pub use error::{ApiError, ErrorCode};
+pub use ids::AttachmentId;
 pub use ids::AvatarId;
 pub use ids::{AccountId, ChannelId, GuildId, InstanceId, RequestId, RoleId, SessionId};
 pub use ids::{ClientMessageId, MessageId};

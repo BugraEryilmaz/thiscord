@@ -15,18 +15,18 @@ use thiscord_shared::{
 };
 use wasm_bindgen::{JsCast, closure::Closure};
 
+#[path = "attachments.rs"]
+mod attachments;
+use thiscord_frontend::attachments::{PendingSend as Pending, can_send};
+
 const PENDING_LIMIT: usize = 20;
 
-#[derive(Clone, PartialEq)]
-struct Pending {
-    id: ClientMessageId,
-    content: String,
-    failed: bool,
-}
 #[derive(Clone, Copy)]
 pub(super) struct Chat {
     ui: Ui,
     epoch: u64,
+    attachment_generation: RwSignal<u64>,
+    access_generation: RwSignal<u64>,
     guild: GuildId,
     channel: ChannelId,
     messages: RwSignal<MessageCache<ArcRwSignal<ChatMessage>>>,
@@ -135,6 +135,11 @@ impl Chat {
         // Capture the visual anchor before changing heights/order. All work in a
         // history page shares one cache mutation and one deferred scroll pass.
         self.scroll();
+        for message in &messages {
+            if message.deleted {
+                attachments::revoke_message(self, message.id);
+            }
+        }
         let delivered: HashSet<_> = messages.iter().map(|m| m.client_id).collect();
         self.pending
             .update(|p| p.retain(|p| !delivered.contains(&p.id)));
@@ -154,6 +159,11 @@ impl Chat {
         );
     }
     fn reset(self) {
+        attachments::clear_downloads(self);
+        self.attachment_generation.update(|g| *g += 1);
+        // An interrupted request may have committed; retries keep its exact IDs.
+        self.pending
+            .update(|items| items.iter_mut().for_each(|item| item.failed = true));
         self.history_generation
             .update(|generation| *generation += 1);
         self.history_loading.set(false);
@@ -241,6 +251,12 @@ impl Chat {
         });
     }
     fn send(self, pending: Pending) {
+        if !self
+            .permissions
+            .with_untracked(|p| p.contains(&Permission::SendMessages))
+        {
+            return;
+        }
         if self
             .pending
             .with_untracked(|p| p.len() >= PENDING_LIMIT && !p.iter().any(|p| p.id == pending.id))
@@ -257,16 +273,12 @@ impl Chat {
             }
         });
         self.latest();
+        let generation = self.access_generation.get_untracked();
         leptos::task::spawn_local(async move {
             let response = self
-                .request(&ChatRequest::Send {
-                    guild_id: self.guild,
-                    channel_id: self.channel,
-                    client_id: pending.id,
-                    content: pending.content,
-                })
+                .request(&pending.request(self.guild, self.channel))
                 .await;
-            if !self.alive() {
+            if !self.alive() || self.access_generation.get_untracked() != generation {
                 return;
             }
             match response {
@@ -443,7 +455,14 @@ async fn connected(ui: Ui, token: &str) -> Result<(), String> {
                     }
                     return Err("Access changed".into());
                 }
-                ServerEvent::Error { error } => return Err(error.message),
+                ServerEvent::Error { error } => {
+                    // Authoritative socket errors (including a session revoked
+                    // while offline) must invalidate assets before reconnecting.
+                    if let Some(chat) = ui.active_chat.get_untracked() {
+                        return deliver(chat, ServerEvent::Error { error });
+                    }
+                    return Err(error.message);
+                }
                 ServerEvent::Subscribed {
                     subscription,
                     history,
@@ -460,6 +479,15 @@ async fn connected(ui: Ui, token: &str) -> Result<(), String> {
                         .get_untracked()
                         .filter(|c| Some(c.channel) == desired(ui).channel)
                     {
+                        if chat.permissions.with_untracked(|p| {
+                            p.contains(&Permission::SendMessages)
+                                && !permissions.contains(&Permission::SendMessages)
+                        }) {
+                            // Reconnect can reveal permission changes without a
+                            // Revoked event having reached this client.
+                            chat.access_generation.update(|g| *g += 1);
+                            chat.pending.set(vec![]);
+                        }
                         chat.permissions.set(permissions);
                         if let Some(history) = history {
                             deliver(chat, ServerEvent::Ready { history })?;
@@ -578,12 +606,16 @@ fn deliver(chat: Chat, event: ServerEvent) -> Result<(), String> {
         ServerEvent::Presence { members } => chat.online.set(members),
         ServerEvent::Pong {} => {}
         ServerEvent::Revoked {} => {
+            chat.access_generation.update(|g| *g += 1);
+            chat.pending.set(vec![]);
             chat.reset();
             chat.online.set(vec![]);
             chat.permissions.set(Permissions::new());
             return Err("Access changed; reconnecting".into());
         }
         ServerEvent::Error { error } => {
+            chat.access_generation.update(|g| *g += 1);
+            chat.pending.set(vec![]);
             chat.reset();
             chat.permissions.set(Permissions::new());
             return Err(error.message);
@@ -654,6 +686,7 @@ fn MessageRow(
                 </div>
                 <p class="whitespace-pre-wrap break-words text-white/85">{move || message.with(|m| if m.deleted { "Message deleted".into() } else { m.content.clone() })}</p>
                 <Show when=move || message.with(|m| !m.deleted)>
+                    <For each=move || message.with(|m| m.attachments.clone()) key=|a| a.id children=move |attachment| view! { <attachments::Card chat message=id attachment/> }/>
                     <div class="flex gap-3 text-xs text-white/50">
                         <Show when=move || own() && chat.permissions.with(|p| p.contains(&Permission::EditOwnMessages))>
                             <button class="icon-button" aria-label="Edit message" data-tip="Edit" on:click=move |_| {
@@ -665,11 +698,12 @@ fn MessageRow(
                             <button class="icon-button danger" aria-label="Delete message" data-tip="Delete" on:click=move |_| {
                                 if !window().confirm_with_message("Delete this message?").unwrap_or(false) { return; }
                                 let revision = message.with_untracked(|m| m.revision);
+                                let generation = chat.access_generation.get_untracked();
                                 leptos::task::spawn_local(async move {
                                     let result = chat.request(&ChatRequest::Delete {
                                         guild_id: chat.guild, channel_id: chat.channel, message_id: id, revision,
                                     }).await;
-                                    if !chat.alive() { return; }
+                                    if !chat.alive() || chat.access_generation.get_untracked() != generation { return; }
                                     match result {
                                         Ok(ChatResponse::Message { message }) => chat.merge(message),
                                         Err(error) => chat.status.set(error),
@@ -692,6 +726,8 @@ pub(super) fn ChatPanel(ui: Ui, guild: GuildId, channel: ChannelId, name: String
     let chat = Chat {
         ui,
         epoch,
+        attachment_generation: RwSignal::new(0),
+        access_generation: RwSignal::new(0),
         guild,
         channel,
         messages: RwSignal::new(MessageCache::default()),
@@ -716,6 +752,13 @@ pub(super) fn ChatPanel(ui: Ui, guild: GuildId, channel: ChannelId, name: String
     let draft = RwSignal::new(String::new());
     let editing = RwSignal::new(None::<MessageId>);
     let loading = RwSignal::new(false);
+    let queue = attachments::Queue::new(chat);
+    Effect::new(move |_| {
+        ui.token.track();
+        chat.access_generation.update(|g| *g += 1);
+        attachments::clear_downloads(chat);
+        chat.attachment_generation.update(|g| *g += 1);
+    });
     let visible = Memo::new(move |_| {
         let (top, height) = chat.viewport.get();
         chat.messages.with(|m| m.window(top, height))
@@ -738,6 +781,18 @@ pub(super) fn ChatPanel(ui: Ui, guild: GuildId, channel: ChannelId, name: String
             ui.chat_epoch.update(|e| *e += 1);
         }
     });
+    let composer_ready = move || {
+        if let Some(id) = editing.get() {
+            let count = chat.messages.with(|m| {
+                m.get(id)
+                    .map(|m| m.with(|m| m.attachments.len()))
+                    .unwrap_or(0)
+            });
+            draft.with(|content| can_send(content, count))
+        } else {
+            queue.ready() && draft.with(|content| can_send(content, queue.count()))
+        }
+    };
     let send = move || {
         if loading.get_untracked()
             || !chat
@@ -747,7 +802,7 @@ pub(super) fn ChatPanel(ui: Ui, guild: GuildId, channel: ChannelId, name: String
             return;
         }
         let content = draft.get_untracked();
-        if content.trim().is_empty() || content.chars().count() > MAX_MESSAGE_CHARS {
+        if !composer_ready() || content.chars().count() > MAX_MESSAGE_CHARS {
             return;
         }
         if let Some(id) = editing.get_untracked() {
@@ -760,6 +815,7 @@ pub(super) fn ChatPanel(ui: Ui, guild: GuildId, channel: ChannelId, name: String
                 return;
             };
             loading.set(true);
+            let generation = chat.access_generation.get_untracked();
             leptos::task::spawn_local(async move {
                 let result = chat
                     .request(&ChatRequest::Edit {
@@ -774,6 +830,9 @@ pub(super) fn ChatPanel(ui: Ui, guild: GuildId, channel: ChannelId, name: String
                     return;
                 }
                 loading.set(false);
+                if chat.access_generation.get_untracked() != generation {
+                    return;
+                }
                 match result {
                     Ok(ChatResponse::Message { message }) => {
                         chat.merge(message);
@@ -795,7 +854,10 @@ pub(super) fn ChatPanel(ui: Ui, guild: GuildId, channel: ChannelId, name: String
                 .ok()
                 .and_then(|c| c.random_uuid().parse::<ClientMessageId>().ok());
             if let Some(id) = id {
+                let attachments = queue.take();
                 chat.send(Pending {
+                    attachment_ids: attachments.iter().map(|a| a.id).collect(),
+                    filenames: attachments.into_iter().map(|a| a.filename).collect(),
                     id,
                     content,
                     failed: false,
@@ -821,7 +883,10 @@ pub(super) fn ChatPanel(ui: Ui, guild: GuildId, channel: ChannelId, name: String
         }
     };
     view! {
-        <section class="flex h-full min-h-0 min-w-0 flex-col overflow-hidden rounded-xl border border-white/10 bg-white/5" aria-label="Text chat">
+        <section class="flex h-full min-h-0 min-w-0 flex-col overflow-hidden rounded-xl border border-white/10 bg-white/5" aria-label="Text chat"
+            on:dragover=move |ev: leptos::ev::DragEvent| { ev.prevent_default(); if let Some(data) = ev.data_transfer() { data.set_drop_effect(if editing.get_untracked().is_some() { "none" } else { "copy" }); } }
+            on:drop=move |ev: leptos::ev::DragEvent| { ev.prevent_default(); if editing.get_untracked().is_none() && let Some(files) = ev.data_transfer().and_then(|d| d.files()) { queue.add(files); } }>
+            <attachments::DownloadHost chat/>
             <header class="shrink-0 border-b border-white/10 p-4"><h2 class="truncate text-lg font-semibold">{format!("# {name}")}</h2><p class="break-words text-xs text-white/60" role="status">{move||chat.status.get()}</p></header>
             <div node_ref=chat.list class="min-h-0 flex-1 overflow-x-hidden overflow-y-auto overscroll-contain p-4" style="overflow-anchor: none" on:scroll=move |_| {
                 chat.update_viewport();
@@ -859,6 +924,7 @@ pub(super) fn ChatPanel(ui: Ui, guild: GuildId, channel: ChannelId, name: String
                             view! {
                                 <li class="whitespace-pre-wrap break-words text-white/50">
                                     <p>{move || pending.with(|p| p.as_ref().map(|p| p.content.clone()).unwrap_or_default())}</p>
+                                    <p class="text-xs">{move || pending.with(|p| p.as_ref().map(|p| p.filenames.join(", ")).unwrap_or_default())}</p>
                                     {move || if pending.with(|p| p.as_ref().is_some_and(|p| p.failed)) { "Failed to send" } else { "Sending…" }}
                                     <Show when=move || pending.with(|p| p.as_ref().is_some_and(|p| p.failed))>
                                         <button class="icon-button" aria-label="Retry message" data-tip="Retry" on:click=move |_| {
@@ -879,7 +945,8 @@ pub(super) fn ChatPanel(ui: Ui, guild: GuildId, channel: ChannelId, name: String
                 <p class="text-xs text-white/50">{move||format!("Online here: {}",chat.online.with(|members| members.iter().map(|m|m.display_name()).collect::<Vec<_>>().join(", ")))}</p>
                 <p class="min-h-4 text-xs text-white/60" aria-live="polite">{move||{let names=chat.online.with(|members| members.iter().filter(|m|m.typing&&ui.account.with(|a|a.as_ref().is_none_or(|a|a.id!=m.account_id))).map(|m|m.display_name().to_owned()).collect::<Vec<_>>());if names.is_empty(){String::new()}else{format!("{} typing…",names.join(", "))}}}</p>
                 <Show when=move||editing.get().is_some()><button class="text-sm text-brand underline" on:click=move |_|{editing.set(None);draft.set(String::new());}>"Cancel edit"</button></Show>
-                <form class="flex gap-3" on:submit=submit><label class="min-w-0 flex-1"><span class="sr-only">"Message"</span><textarea class="w-full resize-none rounded-lg bg-black/20 p-3 outline-none focus:ring-2 focus:ring-brand" on:keydown=keydown rows="2" maxlength="4000" placeholder="Message this channel · @username to mention" prop:value=move||draft.get() disabled=move||!chat.permissions.with(|p|p.contains(&Permission::SendMessages)) on:input=move|ev|{draft.set(event_target_value(&ev));chat.typing.set(true);}/></label><button class="icon-button self-end bg-brand" aria-label=move ||if editing.get().is_some(){"Save message"}else{"Send message"} data-tip=move ||if editing.get().is_some(){"Save"}else{"Send"} disabled=move||loading.get()||draft.with(|d|d.trim().is_empty())||!chat.permissions.with(|p|p.contains(&Permission::SendMessages))><Icon kind=Glyph::Send/></button></form>
+                <attachments::Composer queue editing/>
+                <form class="flex gap-3" on:submit=submit><label class="min-w-0 flex-1"><span class="sr-only">"Message"</span><textarea class="w-full resize-none rounded-lg bg-black/20 p-3 outline-none focus:ring-2 focus:ring-brand" on:keydown=keydown rows="2" maxlength="4000" placeholder="Message this channel · @username to mention" prop:value=move||draft.get() disabled=move||!chat.permissions.with(|p|p.contains(&Permission::SendMessages)) on:input=move|ev|{draft.set(event_target_value(&ev));chat.typing.set(true);}/></label><button class="icon-button self-end bg-brand" aria-label=move ||if editing.get().is_some(){"Save message"}else{"Send message"} data-tip=move ||if editing.get().is_some(){"Save"}else{"Send"} disabled=move||loading.get()||!composer_ready()||!chat.permissions.with(|p|p.contains(&Permission::SendMessages))><Icon kind=Glyph::Send/></button></form>
             </footer>
         </section>
     }

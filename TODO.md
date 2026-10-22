@@ -132,7 +132,9 @@ and single-process chat/media enforcement.
 - [ ] Measure unread fan-out with large backlogs; evaluate maintained sequence-bucket aggregates (see docs/unread-performance.md).
 - [x] Safe message rendering, bounded payloads and spam controls.
 - [x] Reconnect, duplicate delivery, channel isolation and channel deletion tests.
-- [ ] Later: access-controlled attachments/quotas and search.
+- [x] Access-controlled text-channel attachments, drag/drop and file picker, image/video viewer and downloads.
+- [ ] Verify attachment drag/drop, downloads and media codec playback interactively on Windows/macOS/Linux clients.
+- [ ] Later: message search and configurable attachment storage quotas.
 
 ## 5. Frontend audio and media feasibility
 
@@ -307,6 +309,10 @@ speaker isolation and physical acoustic acceptance remain future work.
 - [ ] Production metrics and coordinated graceful room draining on shutdown.
 
 ## 8. Voice channels end to end
+
+- [x] Instance-owner voice test bots from channel context menus, distinct Opus loops,
+  multiple real WebRTC peers, connection profiles, admin audio controls and revocation tests.
+- [ ] Physically listen to bot profiles and verify menus/admin edits on Windows/macOS/Linux.
 
 - [x] Join/leave and move yourself between voice channels; live participant list.
 - [x] Connect native capture/playback to SFU streams with per-speaker volume sliders.

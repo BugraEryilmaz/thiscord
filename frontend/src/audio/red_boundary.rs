@@ -3,6 +3,10 @@
 use crate::audio::{connection::Connection, outgoing::EncodedFrame};
 use std::time::{Duration, Instant};
 
+// The SFU expires an attached proof/Ready exchange after five seconds. Waiting
+// that long here starts recovery only when the server is already ending the call.
+const ACK_RECOVERY_AFTER: Duration = Duration::from_secs(2);
+
 #[derive(Debug, PartialEq, Eq)]
 pub enum RequestError {
     AcknowledgmentTimeout,
@@ -85,7 +89,7 @@ impl Boundary {
         }
         if self
             .pending
-            .is_some_and(|(_, at, _)| now.saturating_duration_since(at) >= Duration::from_secs(5))
+            .is_some_and(|(_, at, _)| now.saturating_duration_since(at) >= ACK_RECOVERY_AFTER)
         {
             return Err(RequestError::AcknowledgmentTimeout);
         }
@@ -98,6 +102,20 @@ impl Boundary {
             return Ok(Some((self.tag, self.challenge)));
         }
         Ok(None)
+    }
+    /// Wake the signaling loop at the recovery deadline itself. Its ordinary
+    /// 500 ms audio tick would otherwise consume part of the reconnect margin.
+    pub async fn wait_deadline(&self) {
+        let pending = self.pending.map(|(_, at, _)| at + ACK_RECOVERY_AFTER);
+        let rejected = self.rejection_started.map(|at| at + Duration::from_secs(5));
+        let deadline = match (pending, rejected) {
+            (Some(a), Some(b)) => Some(a.min(b)),
+            (a, b) => a.or(b),
+        };
+        match deadline {
+            Some(at) => tokio::time::sleep_until(at.into()).await,
+            None => std::future::pending().await,
+        }
     }
     pub fn acknowledge(&mut self, tag: u64, challenge: Option<u32>, accepted: bool) -> bool {
         if self
@@ -328,5 +346,44 @@ mod tests {
         assert!(b.control(8).is_err());
         assert_eq!(b.tag, u64::MAX);
         assert!(!b.ready());
+    }
+
+    #[test]
+    fn lost_refresh_ack_starts_recovery_before_server_expiry_and_stays_fenced() {
+        let now = Instant::now();
+        let mut b = Boundary::default();
+        b.control(1).unwrap();
+        b.request(now).unwrap();
+        assert!(b.acknowledge(1, None, true));
+        b.require_refresh(7);
+        b.start_refresh(2).unwrap();
+        assert_eq!(b.request(now).unwrap(), Some((2, Some(7))));
+        assert_eq!(b.request(now + Duration::from_millis(1999)), Ok(None));
+        assert_eq!(
+            b.request(now + Duration::from_secs(2)),
+            Err(RequestError::AcknowledgmentTimeout)
+        );
+        assert!(!b.ready());
+        assert_eq!(b.ready_notice(), None);
+        // A resume within the remaining server budget must reprove the current
+        // control. Neither the late ACK nor a new local action can bypass it.
+        b.resume();
+        assert!(!b.acknowledge(2, Some(7), true));
+        b.control(3).unwrap();
+        assert_eq!(
+            b.request(now + Duration::from_secs(3)).unwrap(),
+            Some((3, None))
+        );
+        assert!(!b.acknowledge(2, Some(7), true));
+        assert!(b.acknowledge(3, None, true));
+        assert_eq!(b.ready_notice(), None);
+        assert!(b.needs_refresh());
+        b.start_refresh(4).unwrap();
+        assert_eq!(
+            b.request(now + Duration::from_secs(3)).unwrap(),
+            Some((4, Some(7)))
+        );
+        assert!(b.acknowledge(4, Some(7), true));
+        assert_eq!(b.ready_notice(), Some((4, 7)));
     }
 }

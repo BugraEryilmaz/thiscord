@@ -6,6 +6,19 @@ with normal traffic, then compare idle, busy-chat and multi-person video periods
 Keep hardware, build profile and approximate concurrency comparable. No user
 recordings, exports, message content or manually installed profilers are needed.
 
+Reconciled with `main` through `22451b8`: the [October 21 incident investigation](performance-2026-10-21.md)
+found low host/API load and addressed signaling recovery, audio-startup waits,
+TCP_NODELAY, preflight caching and repeated navigation. Those fixes are retained;
+the ranking below concerns remaining scaling costs, not an alternative attribution
+of that incident. Notification expiry now uses the database's remaining lifetime
+anchored to a monotonic clock; worker timing preserves that behavior. New attachment
+upload/download throughput is outside this audit's measurements, while chat merge
+and row geometry counters include updates to attachment-bearing messages.
+
+The owner's [voice test bots](voice-bots.md) can generate controlled SFU load
+without user recordings. Their admin controls remain separate from desktop audio
+support: bots have no WebView and therefore do not supply UI measurements.
+
 ## Findings, highest expected impact first
 
 1. **Recurring friends and voice-roster database work.**

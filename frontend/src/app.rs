@@ -22,10 +22,12 @@ mod settings;
 mod shortcuts;
 mod tooltip;
 mod updates;
+mod voice_bots;
 mod window;
 
 #[derive(Clone, Copy)]
 struct Ui {
+    bot_target: RwSignal<Option<voice_bots::Target>>,
     notifications: notifications::State,
     friends: friends::State,
     audio_control: crate::audio_control::AudioControl,
@@ -315,6 +317,7 @@ fn StatusNotice(ui: Ui) -> impl IntoView {
 #[component]
 pub fn App() -> impl IntoView {
     let ui = Ui {
+        bot_target: RwSignal::new(None),
         friends: friends::State::new(),
         notifications: notifications::State::new(),
         audio_control: Default::default(),
@@ -359,7 +362,7 @@ pub fn App() -> impl IntoView {
     };
     if crate::account_client::admin_page() {
         return view! {
-            <tooltip::Host/><context_menu::Host ui=ui/>
+            <tooltip::Host/><context_menu::Host ui=ui/><voice_bots::Host ui=ui/>
             <Show when=move ||ui.account.get().is_some() fallback=move ||view!{<login::Login ui=ui admin=true/>}>
                 <admin::Dashboard ui=ui/>
             </Show>
@@ -394,7 +397,7 @@ pub fn App() -> impl IntoView {
         }
     });
     view! {
-        <tooltip::Host/><context_menu::Host ui=ui/>
+        <tooltip::Host/><context_menu::Host ui=ui/><voice_bots::Host ui=ui/>
         <updates::Host ui=ui/>
         <notifications::Host ui=ui/>
         <Show when=move ||ui.account.get().is_some() fallback=move ||view!{<login::Login ui=ui/>}>

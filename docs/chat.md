@@ -27,6 +27,52 @@ requests. Only the selected channel has a resident cache.
 Read acknowledgements require focus and the bottom of the view. Jump to latest
 marks the channel read.
 
+## Attachments
+
+Drop images, videos or other files onto an open text channel, or choose them with
+the composer's attachment button. Review/remove queued files before sending;
+message text is optional when files are attached. A message accepts up to four
+files, each at most 25 MiB. Sending still requires the channel's SendMessages
+permission. Attachments are currently for guild text channels, not private messages.
+
+Supported pictures render as previews. Videos have a thumbnail with a play button;
+opening one starts playback in a full-window viewer with native playback controls.
+Pictures use the same viewer. Close it with Escape or its close button. Generic
+files download when clicked, and media has a separate download control. Playback
+depends on the browser/native WebView's installed codecs; unsupported media can
+still be downloaded.
+
+Desktop downloads go to the OS Downloads folder with a unique `thiscord-` prefix
+to avoid overwriting existing files; the UI reports the native completion result.
+Browser downloads use the browser's configured destination. Native download support
+requires macOS 11.3 or newer. Desktop WebView drag interception is disabled for the
+main window so external file drops reach the Rust/WASM composer.
+
+`POST /api/v1/attachments` accepts a raw binary body and an `AttachmentUpload`
+query containing `guild_id`, `channel_id`, `filename` and `content_type`. It returns
+`ChatAttachment` metadata. The backend determines the stored media type; the client
+hint does not permit HTML or SVG rendering. Uploads require bearer authentication
+and bind the returned attachment ID to its uploader and channel. Send commands
+carry `attachment_ids`; message/history/socket payloads carry `attachments`
+metadata. Existing text-only sends omit the empty ID list. Deploy the backend
+before the new client.
+
+`GET /api/v1/attachments/{id}` requires bearer authentication and current channel
+access to an undeleted message. There are no public attachment URLs or tokens in
+URLs. The frontend fetches authorized bytes into temporary Blob URLs for viewing
+and downloads; these are released when their UI owner closes or loses access.
+Responses disable caching and content sniffing and use an attachment disposition.
+Revocation prevents future downloads; bytes a recipient already downloaded cannot
+be recalled.
+
+Files and metadata live in PostgreSQL so ordinary database backups include them.
+Removing a message removes its attachment data; channel/guild deletion also
+cascades. Editing text preserves the attached files. Send deduplication includes
+attachment IDs, so retrying a message does not attach the same files to a second
+message. Abandoned staged uploads expire after one hour, with at most 16 staged
+files / 100 MiB per account. This bounded, buffered implementation is intended for
+the personal deployment; it does not transcode videos or provide resumable uploads.
+
 ## Contracts and persistence
 
 `POST /api/v1/chat` takes `ChatRequest` and returns `ChatResponse` from
@@ -143,7 +189,8 @@ Multiple devices are combined per user.
 Compatibility: existing installed clients can still begin with `authenticate`
 (token/guild/channel). That legacy path retains its per-channel socket and 750 ms
 backend polling until those clients are upgraded. Deploy the updated backend before
-the new frontend. This change does not alter the HTTP message contracts.
+the new frontend. Legacy text-only HTTP commands remain accepted; attachment
+fields and upload/download routes are described above.
 
 Guild-wide permission changes and channel deletion invalidate sockets subscribed to
 that guild. Member changes invalidate only that account's subscriptions in that
@@ -172,7 +219,8 @@ need shared invalidation and are not supported.
 
 - 4000 Unicode characters, excluding control codes other than newline/tab. Leptos
   inserts text nodes, never inner HTML.
-- HTTP bodies: 32 KiB. Socket frames/messages: 16 KiB.
+- Chat JSON bodies: 32 KiB; binary attachment uploads: 25 MiB each. Socket
+  input frames/messages: 16 KiB. Attachment bytes never pass through the socket.
 - Admission precedes database work and lock waits: 8 chat, 8 permission and 4
   local account operations per process. Google discovery has a separate 4-request
   budget and holds no access barrier during provider I/O. Excess requests return 429.
@@ -193,7 +241,7 @@ Each socket refresh shares one session/guild authorization transaction between
 unread counts and channel events. Commit notifications are scoped to the subscribed
 guild, channel and account.
 Event-log compaction, cross-process fanout, full-guild presence and load tests are
-future work. Attachments and search remain pending. Customizable alert subscriptions
+future work. Search remains pending. Customizable alert subscriptions
 and desktop banners are described in [notifications.md](notifications.md).
 Native voice uses a separate signaling socket and media admission/drain mechanism;
 see [audio.md](audio.md).

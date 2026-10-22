@@ -18,6 +18,12 @@ impl Navigation {
         self.current
     }
 
+    /// Ordinary rail clicks reuse the pending selection or already open view.
+    /// Explicit refresh/settings actions still begin a fresh authorization read.
+    pub fn needs_navigation(&self, guild: GuildId, loaded: Option<GuildId>) -> bool {
+        loaded != Some(guild) && !(self.pending && self.current.guild == Some(guild))
+    }
+
     /// Home and session changes also advance the generation, including A → Home → A.
     pub fn begin(&mut self, guild: Option<GuildId>) -> Selection {
         self.current = Selection {
@@ -107,5 +113,44 @@ mod tests {
         assert!(!navigation.finish(timed_out));
         assert!(navigation.pending);
         assert!(navigation.finish(retry));
+    }
+
+    #[test]
+    fn repeated_pending_click_keeps_original_request_and_allows_retry_after_failure() {
+        let mut navigation = Navigation::default();
+        let target = guild(1);
+        assert!(navigation.needs_navigation(target, None));
+        let first = navigation.begin(Some(target));
+        // Repeated clicks must not supersede a useful in-flight response.
+        for _ in 0..3 {
+            assert!(!navigation.needs_navigation(target, None));
+            assert!(navigation.accepts(first));
+        }
+        assert!(navigation.finish(first));
+        // No view was loaded (error/timeout), so the same rail button can retry.
+        assert!(navigation.needs_navigation(target, None));
+        let retry = navigation.begin(Some(target));
+        assert!(!navigation.accepts(first));
+        assert!(navigation.finish(retry));
+        assert!(!navigation.needs_navigation(target, Some(target)));
+        // Settings/refresh can still force reauthorization of the open guild.
+        let refresh = navigation.begin(Some(target));
+        assert!(!navigation.accepts(retry));
+        assert!(navigation.finish(refresh));
+    }
+
+    #[test]
+    fn pending_click_deduplication_does_not_block_switching_or_revisiting() {
+        let mut navigation = Navigation::default();
+        let first = navigation.begin(Some(guild(1)));
+        assert!(navigation.needs_navigation(guild(2), None));
+        navigation.begin(Some(guild(2)));
+        assert!(navigation.needs_navigation(guild(1), None));
+        let revisit = navigation.begin(Some(guild(1)));
+        assert!(!navigation.finish(first));
+        assert!(!navigation.needs_navigation(guild(1), None));
+        assert!(navigation.finish(revisit));
+        navigation.begin(None);
+        assert!(navigation.needs_navigation(guild(1), None));
     }
 }

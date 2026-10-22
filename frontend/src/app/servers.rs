@@ -198,12 +198,12 @@ pub(super) fn select(ui: Ui, id: GuildId) -> impl Future<Output = Result<bool, S
 }
 
 fn navigate(ui: Ui, id: GuildId) {
-    // Clicking the open guild again should retain its conversation and draft.
-    if ui
+    // Keep the open conversation/draft and don't restart a pending selection.
+    // A failed selection has no loaded view and remains retryable.
+    let loaded = ui
         .server
-        .get_untracked()
-        .is_some_and(|home| home.guild.id == id)
-    {
+        .with_untracked(|home| home.as_ref().map(|home| home.guild.id));
+    if !ui.navigation.get_untracked().needs_navigation(id, loaded) {
         return;
     }
     let selection = select(ui, id);

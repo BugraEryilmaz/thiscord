@@ -402,10 +402,11 @@ pub fn start_voice(
     let mut settings = settings;
     settings.muted = current.muted;
     settings.deafened = current.deafened;
-    *app.state::<crate::native_voice::VoiceState>()
-        .settings
-        .lock()
-        .map_err(|_| "Voice settings unavailable")? = settings.clone();
+    audio::voice_control::publish_start_settings(
+        &connection,
+        &app.state::<crate::native_voice::VoiceState>().settings,
+        &settings,
+    )?;
     let path = app
         .path()
         .app_config_dir()

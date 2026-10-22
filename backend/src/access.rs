@@ -12,6 +12,7 @@ use std::sync::{
 use tokio::sync::watch;
 
 pub(crate) struct Access {
+    authority: Option<crate::chat::access::Snapshot>,
     epoch: AtomicU64,
     mutations: AtomicUsize,
     packets: AtomicUsize,
@@ -21,8 +22,13 @@ pub(crate) struct Access {
     revoked: watch::Sender<u64>,
 }
 impl Access {
+    #[cfg(test)]
     pub(crate) fn new() -> Arc<Self> {
+        Self::with_authority(None)
+    }
+    fn with_authority(authority: Option<crate::chat::access::Snapshot>) -> Arc<Self> {
         Arc::new(Self {
+            authority,
             epoch: AtomicU64::new(0),
             mutations: AtomicUsize::new(0),
             packets: AtomicUsize::new(0),
@@ -55,8 +61,12 @@ impl Access {
         if queued != authorized || !self.current(authorized) {
             return None;
         }
+        let authority = match &self.authority {
+            Some(snapshot) => snapshot.clone().deliver()?,
+            None => Vec::new(),
+        };
         self.packets.fetch_add(1, SeqCst);
-        let permit = Packet(self.clone());
+        let permit = Packet(self.clone(), authority);
         self.current(authorized).then_some(permit)
     }
 
@@ -108,7 +118,10 @@ impl Access {
     }
 }
 
-pub(crate) struct Packet(Arc<Access>);
+pub(crate) struct Packet(
+    Arc<Access>,
+    #[allow(dead_code)] Vec<crate::chat::access::Delivery>,
+);
 impl Drop for Packet {
     fn drop(&mut self) {
         if self.0.packets.fetch_sub(1, SeqCst) == 1 && self.0.mutations.load(SeqCst) != 0 {
@@ -192,7 +205,13 @@ pub(crate) async fn identify(
 /// Register before the authoritative DB check. Admission inherits every overlapping
 /// mutation, including ones already draining, so joining cannot miss revocation.
 pub(crate) fn register(identity: Identity) -> Arc<Access> {
-    let access = Access::new();
+    register_guarded(identity, None)
+}
+pub(crate) fn register_guarded(
+    identity: Identity,
+    authority: Option<crate::chat::access::Snapshot>,
+) -> Arc<Access> {
+    let access = Access::with_authority(authority);
     let mut registry = registry().lock().unwrap();
     registry
         .connections
@@ -288,6 +307,22 @@ pub(crate) fn complete<T, E>(result: Result<T, E>, mutations: &mut [Mutation]) -
 mod tests {
     use super::*;
     use std::time::Duration;
+
+    #[test]
+    fn bot_authority_revocation_closes_packets_without_leaking_a_drain() {
+        let identity = identity();
+        let role = crate::chat::access::instance_role(identity.account);
+        let authority = crate::chat::access::snapshot(&role, None).unwrap();
+        let bot = register_guarded(identity, Some(authority));
+        let human = register(identity);
+        assert!(bot.packet(0, 0).is_some());
+        role.pause().finish(true);
+        assert!(bot.packet(0, 0).is_none());
+        assert_eq!(bot.packets.load(SeqCst), 0);
+        assert!(human.packet(0, 0).is_some());
+        // This must finish even after rejected packets, never hang in drain().
+        drop(pause(Scope::Session(identity.session)));
+    }
 
     fn identity() -> Identity {
         Identity {

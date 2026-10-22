@@ -38,6 +38,7 @@ mod recovery;
 mod selection;
 pub mod transmit;
 pub mod transport;
+pub mod voice_control;
 pub mod volumes;
 mod worker_health;
 use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};

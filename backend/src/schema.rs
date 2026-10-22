@@ -30,6 +30,21 @@ diesel::table! {
 }
 
 diesel::table! {
+    attachments (id) {
+        id -> Uuid,
+        guild_id -> Uuid,
+        channel_id -> Uuid,
+        owner_id -> Nullable<Uuid>,
+        message_id -> Nullable<Uuid>,
+        filename -> Text,
+        content_type -> Text,
+        size_bytes -> Int8,
+        data -> Bytea,
+        expires_at -> Timestamptz,
+    }
+}
+
+diesel::table! {
     auth_limits (key) {
         key -> Text,
         window_start -> Timestamptz,
@@ -220,6 +235,7 @@ diesel::table! {
         deleted -> Bool,
         revision -> Int4,
         sequence -> Int8,
+        attachments -> Jsonb,
     }
 }
 
@@ -277,6 +293,8 @@ diesel::table! {
 
 diesel::joinable!(account_avatars -> accounts (account_id));
 diesel::joinable!(account_codes -> accounts (account_id));
+diesel::joinable!(attachments -> accounts (owner_id));
+diesel::joinable!(attachments -> messages (message_id));
 diesel::joinable!(channels -> guilds (guild_id));
 diesel::joinable!(direct_messages -> accounts (author_id));
 diesel::joinable!(direct_messages -> friendships (conversation_id));
@@ -302,6 +320,7 @@ diesel::allow_tables_to_appear_in_same_query!(
     account_avatars,
     account_codes,
     accounts,
+    attachments,
     auth_limits,
     channel_overrides,
     channel_reads,

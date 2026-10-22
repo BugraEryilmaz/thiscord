@@ -1,5 +1,5 @@
 use crate::{
-    AccountId, ApiError, ChannelId, ClientMessageId, GuildId, MessageId, Timestamp,
+    AccountId, ApiError, AttachmentId, ChannelId, ClientMessageId, GuildId, MessageId, Timestamp,
     pagination::{PageCursor, PageSize},
 };
 use serde::{Deserialize, Serialize};
@@ -7,6 +7,39 @@ pub const CHAT_PATH: &str = "/api/v1/chat";
 pub const SOCKET_PATH: &str = "/api/v1/socket";
 pub const SOCKET_VERSION: u8 = 1;
 pub const MAX_MESSAGE_CHARS: usize = 4000;
+pub const ATTACHMENTS_PATH: &str = "/api/v1/attachments";
+pub const MAX_ATTACHMENT_BYTES: usize = 25 * 1024 * 1024;
+pub const MAX_MESSAGE_ATTACHMENTS: usize = 4;
+pub const MAX_ATTACHMENT_FILENAME_BYTES: usize = 255;
+pub const MAX_STAGED_ATTACHMENT_BYTES: usize = 100 * 1024 * 1024;
+pub const MAX_STAGED_ATTACHMENTS: usize = 16;
+pub const ATTACHMENT_STAGE_TTL_SECONDS: u64 = 3600;
+
+/// Native WebView download completion, delivered only to its owning window.
+pub const CHAT_DOWNLOAD_EVENT: &str = "thiscord-download-finished";
+#[derive(Clone, Serialize, Deserialize)]
+pub struct ChatDownload {
+    pub url: String,
+    pub success: bool,
+}
+
+#[derive(Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct ChatAttachment {
+    pub id: AttachmentId,
+    pub filename: String,
+    pub content_type: String,
+    pub size_bytes: u64,
+}
+
+/// Raw binary POST query. The server classifies content independently of this hint.
+#[derive(Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct AttachmentUpload {
+    pub guild_id: GuildId,
+    pub channel_id: ChannelId,
+    pub filename: String,
+    pub content_type: String,
+}
 #[derive(Clone, Serialize, Deserialize)]
 pub struct ChatMessage {
     pub id: MessageId,
@@ -18,6 +51,8 @@ pub struct ChatMessage {
     #[serde(default)]
     pub display_name: String,
     pub content: String,
+    #[serde(default)]
+    pub attachments: Vec<ChatAttachment>,
     pub mentions: Vec<AccountId>,
     pub created_at: Timestamp,
     pub edited_at: Option<Timestamp>,
@@ -81,6 +116,8 @@ pub enum ChatRequest {
         channel_id: ChannelId,
         client_id: ClientMessageId,
         content: String,
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        attachment_ids: Vec<AttachmentId>,
     },
     Edit {
         guild_id: GuildId,

@@ -144,7 +144,7 @@ pub(super) fn Dashboard(ui: Ui) -> impl IntoView {
                                 view!{{move || {
                                     let query=filter.get().to_lowercase();
                                     let visible:Vec<_>=rooms.iter().filter(|r|format!("{} {} {}",r.guild_name,r.channel_name,r.participants.iter().map(|p|format!("{} {}",p.participant.username,p.participant.display_name)).collect::<Vec<_>>().join(" ")).to_lowercase().contains(&query)).cloned().collect();
-                                    if visible.is_empty() {view!{<p class="py-8 text-slate-400">"No rooms match your search."</p>}.into_any()} else {visible.into_iter().map(|room|view!{<Room room=room sampled_at=d.sampled_at selected=selected/>}).collect_view().into_any()}
+                                    if visible.is_empty() {view!{<p class="py-8 text-slate-400">"No rooms match your search."</p>}.into_any()} else {visible.into_iter().map(|room|view!{<Room room=room sampled_at=d.sampled_at selected=selected ui=ui owner=d.role==thiscord_shared::permissions::InstanceRole::Owner/>}).collect_view().into_any()}
                                 }}}.into_any()
                             }}
                         </section>
@@ -175,16 +175,25 @@ fn Room(
     room: RoomDiagnostics,
     sampled_at: thiscord_shared::Timestamp,
     selected: RwSignal<Option<Selection>>,
+    ui: Ui,
+    owner: bool,
 ) -> impl IntoView {
+    let bot_target = super::voice_bots::Target {
+        guild: room.guild_id,
+        channel: room.channel_id,
+        name: room.channel_name.clone(),
+    };
     view! {
         <article class="mb-4 overflow-hidden rounded-xl border border-slate-800 bg-slate-900/60">
             <header class="flex flex-wrap items-center justify-between gap-3 border-b border-slate-800 px-5 py-4"><div><h3 class="font-semibold">{room.channel_name}</h3><p class="mt-1 text-xs text-slate-400">{room.guild_name}</p></div><span class="rounded-full bg-indigo-500/10 px-3 py-1 text-xs text-indigo-300">{format!("{} people",room.participants.len())}</span></header>
             <div class="overflow-x-auto"><table class="w-full whitespace-nowrap text-left text-sm"><thead class="text-xs text-slate-400"><tr><th class="px-5 py-3">"Participant"</th><th class="px-5 py-3">"State"</th><th class="px-5 py-3">"Latency (RTT)"</th><th class="px-5 py-3">"Mic jitter"</th><th class="px-5 py-3">"Mic received / lost"</th><th class="px-5 py-3">"Video drops in / out"</th><th class="px-5 py-3">"Video sent / timeouts"</th></tr></thead><tbody>
             {room.participants.into_iter().map(move |p| {
+                let bot_target = bot_target.clone();
+                let is_bot = p.participant.test_bot;
                 let selection = Selection { connection: p.audio_connection_id, name: p.participant.display_name().to_owned() };
                 let fresh=p.network.sampled_at.is_some_and(|at|(sampled_at-at).num_seconds()<=15);
                 let state=if p.participant.deafened {"Deafened"} else if p.participant.muted {"Muted"} else {"Listening / speaking"};
-                view!{<tr class="border-t border-slate-800"><td class="px-5 py-4"><button class="font-medium text-indigo-300 underline decoration-indigo-500/40 underline-offset-4 hover:text-indigo-100" on:click=move |_| selected.set(Some(selection.clone()))>{p.participant.display_name().to_string()}</button><p class="mt-1 text-xs text-slate-500">{format!("@{}",p.participant.username)}</p></td><td class="px-5 py-4 text-slate-400">{state}{if p.participant.sharing_screen {" · Sharing screen"} else {""}}</td><td class="px-5 py-4 font-mono">{ms(p.network.round_trip_ms.filter(|_|fresh))}</td><td class="px-5 py-4 font-mono">{ms(p.network.microphone_jitter_ms.filter(|_|fresh))}</td><td class="px-5 py-4 font-mono">{if fresh {p.network.microphone_packets_received.zip(p.network.microphone_packets_lost).map(|(r,l)|format!("{r} / {l}")).unwrap_or_else(||"—".into())} else {"—".into()}}</td><td class="px-5 py-4 font-mono" title="Cumulative SFU queue drops for this connection">{format!("{} / {}",p.video_counters[1],p.video_counters[2])}</td><td class="px-5 py-4 font-mono" title="Cumulative SFU sent packets and send timeouts for this connection">{format!("{} / {}",p.video_counters[3],p.video_counters[4])}</td></tr>}
+                view!{<tr class="border-t border-slate-800"><td class="px-5 py-4"><button class="font-medium text-indigo-300 underline decoration-indigo-500/40 underline-offset-4 hover:text-indigo-100" disabled=is_bot && !owner on:click=move |_| {if is_bot {ui.bot_target.set(Some(bot_target.clone()));} else {selected.set(Some(selection.clone()));}}>{p.participant.display_name().to_string()}</button><p class="mt-1 text-xs text-slate-500">{format!("@{}",p.participant.username)}</p></td><td class="px-5 py-4 text-slate-400">{state}{if p.participant.sharing_screen {" · Sharing screen"} else {""}}</td><td class="px-5 py-4 font-mono">{ms(p.network.round_trip_ms.filter(|_|fresh))}</td><td class="px-5 py-4 font-mono">{ms(p.network.microphone_jitter_ms.filter(|_|fresh))}</td><td class="px-5 py-4 font-mono">{if fresh {p.network.microphone_packets_received.zip(p.network.microphone_packets_lost).map(|(r,l)|format!("{r} / {l}")).unwrap_or_else(||"—".into())} else {"—".into()}}</td><td class="px-5 py-4 font-mono" title="Cumulative SFU queue drops for this connection">{format!("{} / {}",p.video_counters[1],p.video_counters[2])}</td><td class="px-5 py-4 font-mono" title="Cumulative SFU sent packets and send timeouts for this connection">{format!("{} / {}",p.video_counters[3],p.video_counters[4])}</td></tr>}
             }).collect_view()}
             </tbody></table></div>
         </article>

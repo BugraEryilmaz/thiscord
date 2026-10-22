@@ -1,4 +1,6 @@
 pub(crate) mod access;
+mod attachments;
+pub use attachments::start_cleanup as start_attachment_cleanup;
 mod notifications;
 mod session;
 mod store;
@@ -32,6 +34,7 @@ pub fn router(origins: Vec<HeaderValue>) -> Router<Option<DbPool>> {
         .route(SOCKET_PATH, get(upgrade))
         .layer(Extension(Arc::new(origins)))
         .layer(DefaultBodyLimit::max(32 * 1024))
+        .merge(attachments::router())
 }
 async fn handle(
     State(pool): State<Option<DbPool>>,

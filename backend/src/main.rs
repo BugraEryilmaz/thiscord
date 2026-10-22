@@ -69,6 +69,7 @@ async fn main() -> Result<(), BoxError> {
     let tls = thiscord_backend::tls::Tls::from_env().await?;
     if let Some(pool) = pool.as_ref() {
         thiscord_backend::auth::mail::start(pool.clone());
+        thiscord_backend::chat::start_attachment_cleanup(pool.clone());
     }
     let mut app = api::router(pool, origins);
     // Production bundles live beside the executable. An explicit path must exist.
@@ -95,6 +96,9 @@ async fn main() -> Result<(), BoxError> {
         });
         tracing::info!(bind = %address, scheme = "https", "Thiscord backend listening");
         let result = axum_server::from_tcp_rustls(listener.into_std()?, config)?
+            // Small API/signaling writes must not wait for an ACK of a TLS
+            // record (including session tickets) before leaving the host.
+            .map(|acceptor| acceptor.acceptor(axum_server::accept::NoDelayAcceptor::new()))
             .handle(handle)
             .serve(app.into_make_service_with_connect_info::<SocketAddr>())
             .await;
