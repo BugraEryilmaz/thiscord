@@ -79,7 +79,11 @@ fn Panel(ui: Ui, target: Target) -> impl IntoView {
             <div class="mb-4 flex items-center gap-3"><button class="rounded bg-slate-800 px-4 py-2 disabled:opacity-50" disabled=move ||busy.get() on:click=move |_|command.run(Command::List {})>"Refresh"</button><span role="status" class="text-sm text-slate-400">{move ||if busy.get(){"Working…".into()}else{format!("{} test bots",bots.get().len())}}</span></div>
             <fieldset disabled=move ||busy.get() || !loaded.get() class="space-y-4 disabled:opacity-50">
                 <section class="rounded-lg border border-slate-700 p-4"><h3 class="mb-3 font-semibold">"Add a test bot"</h3><Options settings=draft/>
-                    <button class="mt-4 rounded bg-indigo-600 px-4 py-2 disabled:opacity-50" disabled=move ||bots.get().len()>=thiscord_shared::voice::ROOM_CAPACITY on:click=move |_|command.run(Command::Add {settings:draft.get_untracked()})>"Add bot to this channel"</button>
+                    <button
+                        class="mt-4 rounded bg-indigo-600 px-4 py-2 disabled:opacity-50"
+                        disabled={move || bots.get().len() >= thiscord_shared::voice::ROOM_CAPACITY}
+                        on:click={move |_| command.run(Command::Add { settings: draft.get_untracked() })}
+                    >"Add bot to this channel"</button>
                 </section>
                 <For each=move ||bots.get() key=|bot|(bot.id,bot.revision) children=move |bot|view!{<BotEditor bot=bot bots=bots command=command/>}/>
             </fieldset>
