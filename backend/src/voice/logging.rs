@@ -8,6 +8,11 @@ use std::{
 use thiscord_shared::RequestId;
 
 pub(super) struct Socket {
+    pub bot: Option<super::bots::Context>,
+    internal: Option<(
+        tokio::sync::mpsc::Receiver<Message>,
+        tokio::sync::mpsc::Sender<Message>,
+    )>,
     inner: Option<WebSocket>,
     pub permit: Option<tokio::sync::OwnedSemaphorePermit>,
     pub recoverable: bool,
@@ -28,6 +33,8 @@ impl Socket {
     pub fn new(inner: WebSocket, id: RequestId) -> Self {
         tracing::info!(request_id = %id, "voice connection started");
         Self {
+            bot: None,
+            internal: None,
             inner: Some(inner),
             permit: None,
             recoverable: false,
@@ -45,6 +52,40 @@ impl Socket {
             reason: None,
         }
     }
+    pub fn internal(
+        id: RequestId,
+        bot: super::bots::Context,
+    ) -> (
+        Self,
+        tokio::sync::mpsc::Sender<Message>,
+        tokio::sync::mpsc::Receiver<Message>,
+    ) {
+        let (tx, incoming) = tokio::sync::mpsc::channel(16);
+        let (outgoing, rx) = tokio::sync::mpsc::channel(16);
+        (
+            Self {
+                bot: Some(bot),
+                internal: Some((incoming, outgoing)),
+                inner: None,
+                permit: None,
+                recoverable: false,
+                detached: None,
+                id,
+                stage: "join",
+                started: Instant::now(),
+                last_received: None,
+                received: 0,
+                sent: 0,
+                pings: 0,
+                pongs: 0,
+                control_window: Instant::now(),
+                control_frames: 0,
+                reason: None,
+            },
+            tx,
+            rx,
+        )
+    }
     /// Retain the first failure; cleanup must not mask it with a send error.
     pub fn end(&mut self, reason: &'static str) {
         self.reason.get_or_insert(reason);
@@ -53,7 +94,7 @@ impl Socket {
         self.last_received.unwrap_or(self.started).elapsed()
     }
     pub fn detached(&self) -> bool {
-        self.inner.is_none()
+        self.inner.is_none() && self.internal.is_none()
     }
     pub fn detached_at(&self) -> Option<Instant> {
         self.detached
@@ -71,6 +112,12 @@ impl Socket {
     }
 
     pub async fn recv(&mut self) -> Option<Result<Message, axum::Error>> {
+        if let Some((incoming, _)) = &mut self.internal {
+            let message = incoming.recv().await?;
+            self.last_received = Some(Instant::now());
+            self.received += 1;
+            return Some(Ok(message));
+        }
         loop {
             let Some(inner) = self.inner.as_mut() else {
                 return std::future::pending().await;
@@ -122,6 +169,9 @@ impl Socket {
         }
     }
     pub async fn send(&mut self, message: Message) -> Result<(), axum::Error> {
+        if let Some((_, outgoing)) = &self.internal {
+            return outgoing.send(message).await.map_err(axum::Error::new);
+        }
         let Some(inner) = self.inner.as_mut() else {
             return Ok(());
         };

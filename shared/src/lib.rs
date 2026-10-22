@@ -15,6 +15,7 @@ pub mod pagination;
 pub mod permissions;
 pub mod screen;
 pub mod validation;
+pub mod voice_bots;
 
 pub use error::{ApiError, ErrorCode};
 pub use ids::AvatarId;

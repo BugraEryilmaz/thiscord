@@ -55,6 +55,7 @@ pub(super) fn authorize(
         }
         let revision = query::<i64>(c,"SELECT to_jsonb(voice_revision) AS data FROM guild_moderation WHERE guild_id=$1::uuid AND account_id=$2::uuid", &[&guild.to_string(), &session.account_id.to_string()])?.pop().unwrap_or(0);
         Ok((Participant {
+            test_bot: false,
             account_id: session.account_id,
             username: member.username.clone(),
             display_name: member.display_name.clone(),
