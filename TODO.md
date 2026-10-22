@@ -347,6 +347,10 @@ speaker isolation and physical acoustic acceptance remain future work.
 
 ## 8a. Screen sharing (Windows first)
 
+- [ ] Resolve the October 22 Windows 0.1.42 native crash during screen sharing
+  with test bots; the saved dump points toward the NVIDIA Media Foundation path
+  but does not yet establish its cause. See the incident notes in docs/screen-sharing.md.
+
 - [x] Native Windows screen/window capture, explicit source picker and persistent stop control.
 - [x] Selectable 720p/1080p/1440p/4K and 15/30/60 fps targets, default 1080p/30.
 - [x] Windows system-audio loopback excluding Thiscord, separate from microphone mute/PTT.

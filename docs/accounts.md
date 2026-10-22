@@ -198,6 +198,14 @@ Sign into the existing account, reauthenticate, then explicitly link Google.
 - A consumed token cannot be reused; replay revokes that device's session, including
   its replacement token. Rotation is serialized. A lost rotation response requires
   signing in again. Do not reuse one device token across independent app instances.
+- Voice permission refreshes revalidate the token already accepted at join/resume
+  ingress. A rotated retained token closes the old voice connection and its bots
+  without revoking the replacement session. HTTP requests and new socket
+  handshakes still enforce replay revocation.
+- If chat authentication fails and a bounded HTTP account check confirms 401,
+  the client clears that session and returns to sign-in instead of retrying it
+  forever. Network failures, rate limits and service failures remain retryable;
+  a stale socket response cannot clear a newer login.
 - Up to 20 active devices. New logins evict the oldest when that limit is reached.
 - Windows Credential Manager, macOS Keychain and Linux Secret Service store desktop
   tokens using Rust [`keyring`](https://docs.rs/keyring/3.6.3/keyring/). Linux requires

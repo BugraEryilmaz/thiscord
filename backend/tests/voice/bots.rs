@@ -1,6 +1,106 @@
 use super::*;
 use thiscord_shared::voice_bots::{PATH, Settings};
 
+#[tokio::test]
+#[ignore = "requires TEST_DATABASE_URL; CI runs with --include-ignored"]
+async fn owner_bots_rotation_closes_old_voice_without_revoking_restored_session() {
+    let db = database();
+    let (_, owner) = user(&db, "rotation_owner");
+    permissions::bootstrap_owner(&db.pool, "rotation_owner").unwrap();
+    let app = api::router(
+        Some(db.pool.clone()),
+        vec!["http://localhost:1420".parse().unwrap()],
+    );
+    let mut state = command(
+        &app,
+        &owner,
+        json!({"action":"create_guild","name":"Rotation"}),
+        StatusCode::OK,
+    )
+    .await["state"]
+        .clone();
+    let guild = state["guild"]["id"].clone();
+    change(
+        &app,
+        &owner,
+        &mut state,
+        json!({"action":"create_channel","name":"voice","kind":"voice"}),
+        StatusCode::OK,
+    )
+    .await;
+    let channel = state["channels"][0]["id"].clone();
+    bots(
+        &app,
+        &owner,
+        &guild,
+        &channel,
+        json!({"action":"add","settings":Settings::default()}),
+        StatusCode::OK,
+    )
+    .await;
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    let serving = tokio::spawn(axum::serve(listener, app.clone()).into_future());
+    let mut peer = Peer::new(join(addr, &owner, guild.clone(), channel.clone()).await).await;
+    roster(&mut peer, 1).await;
+
+    let (status, rotated) = call(&app, ACCOUNT_PATH, &owner, json!({"action":"rotate"})).await;
+    assert_eq!(status, StatusCode::OK);
+    // Rotation must close the old human connection, just as startup after a
+    // crash invalidates its detached voice session. The retained token is not
+    // a newly presented credential and must not revoke the replacement token.
+    loop {
+        if matches!(
+            event(&mut peer.socket).await,
+            ServerEvent::Revoked {} | ServerEvent::Error { .. }
+        ) {
+            break;
+        }
+    }
+    let restored = rotated["session"]["token"].as_str().unwrap();
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
+    loop {
+        let listed = bots(
+            &app,
+            restored,
+            &guild,
+            &channel,
+            json!({"action":"list"}),
+            StatusCode::OK,
+        )
+        .await;
+        if listed["bots"].as_array().unwrap().is_empty() {
+            break;
+        }
+        assert!(
+            tokio::time::Instant::now() < deadline,
+            "old bot survived rotation"
+        );
+        tokio::time::sleep(Duration::from_millis(25)).await;
+    }
+    assert_eq!(
+        call(&app, ACCOUNT_PATH, restored, json!({"action":"current"}))
+            .await
+            .0,
+        StatusCode::OK
+    );
+    // A new voice handshake presenting that same token is an external replay;
+    // ingress must still revoke the session, including its replacement token.
+    let mut replay = join(addr, &owner, guild, channel).await;
+    assert!(
+        matches!(event(&mut replay).await, ServerEvent::Error { error }
+        if error.code == thiscord_shared::ErrorCode::Unauthorized)
+    );
+    assert_eq!(
+        call(&app, ACCOUNT_PATH, restored, json!({"action":"current"}))
+            .await
+            .0,
+        StatusCode::UNAUTHORIZED
+    );
+    peer.pc.close().await.unwrap();
+    serving.abort();
+}
+
 async fn bots(
     app: &Router,
     token: &str,

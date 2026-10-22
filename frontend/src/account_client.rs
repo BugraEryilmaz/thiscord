@@ -122,3 +122,28 @@ pub async fn persist(token: Option<&str>) -> Result<(), String> {
         Ok(())
     }
 }
+
+/// Confirm a socket authentication failure with HTTP. Older servers can report
+/// socket rate limits/service failures as Unauthorized; those remain retryable.
+pub async fn session_rejected(token: &str) -> bool {
+    let check = async {
+        let Ok(request) = Request::post(&format!("{}{ACCOUNT_PATH}", api_base()))
+            .header("Authorization", &format!("Bearer {token}"))
+            .json(&AccountRequest::Current)
+        else {
+            return false;
+        };
+        request
+            .send()
+            .await
+            .is_ok_and(|response| response.status() == 401)
+    };
+    matches!(
+        futures_util::future::select(
+            Box::pin(check),
+            Box::pin(gloo_timers::future::TimeoutFuture::new(10_000)),
+        )
+        .await,
+        futures_util::future::Either::Left((true, _))
+    )
+}

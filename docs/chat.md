@@ -179,6 +179,11 @@ and reloads a fresh snapshot, recovering missed sends, edits and deletions.
 
 Heartbeats use the socket every ten seconds; clients abandon silent connections
 after 25 seconds and reconnect with exponential backoff plus jitter (1-30 seconds).
+An Unauthorized socket error triggers a bounded HTTP account check. Only a
+confirmed HTTP 401 clears that session and returns to sign-in; transient failures
+keep retrying. The check is tied to the socket's token so an old response cannot
+clear a replacement login. Native credential/voice cleanup runs independently of
+the socket task, which is cancelled when the token is cleared.
 The server closes clients silent for 35 seconds. Ten-second maintenance checks
 session/access expiry and refreshes/reaps presence leases, not message history or
 unread counts. Maintenance also detects grants restored by timeout expiry and

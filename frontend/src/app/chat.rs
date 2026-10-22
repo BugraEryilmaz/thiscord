@@ -460,6 +460,22 @@ async fn connected(ui: Ui, token: &str) -> Result<(), String> {
                     return Err("Access changed".into());
                 }
                 ServerEvent::Error { error } => {
+                    if error.code == thiscord_shared::ErrorCode::Unauthorized
+                        && crate::account_client::session_rejected(token).await
+                    {
+                        // Clearing the token aborts this socket task. Finish native
+                        // credential/voice cleanup on an independent task, and never
+                        // clear a replacement login because of an old socket reply.
+                        let token = token.to_owned();
+                        leptos::task::spawn_local(async move {
+                            if ui.token.get_untracked().as_ref() == Some(&token) {
+                                super::clear_local(ui).await;
+                                if ui.token.get_untracked().is_none() {
+                                    ui.status.set("Please sign in again.".into());
+                                }
+                            }
+                        });
+                    }
                     // Authoritative socket errors (including a session revoked
                     // while offline) must invalidate assets before reconnecting.
                     if let Some(chat) = ui.active_chat.get_untracked() {
