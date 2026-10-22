@@ -17,6 +17,8 @@ only on loopback.
 
 - `/home/ubuntu/thiscord`: source checkout; build as `ubuntu`, not root.
 - `/opt/thiscord/releases/<commit>/thiscord-backend`: deployed native binary.
+- `/opt/thiscord/releases/<commit>/thiscord-voice-bot`: matching headless voice
+  client, required for owner test bots. Deploy both binaries from the same commit.
 - `/opt/thiscord/releases/<commit>/admin`: browser bundle installed by new deployments;
   see [admin build and access](admin.md). The build host requires Trunk 0.21.14.
 - `/opt/thiscord/current`: symlink to the selected release directory.
@@ -113,6 +115,22 @@ It fetches Git, builds an isolated archive of the selected revision (default
 `origin/main`) using its pinned Rust toolchain, and reuses the VPS Cargo cache.
 It uses two build jobs with release LTO disabled for the 4 GiB machine. Local
 checkout changes and `.env` files are not included in the build archive.
+
+The build host needs `libasound2-dev` (install once with
+`sudo apt-get install libasound2-dev`). The deployment script builds both the
+backend and the `frontend` package's `voice-bot` binary, checks the companion's
+runtime libraries and installs them together before activation. Bots use virtual
+audio devices; the server needs no sound hardware or audio daemon. Updating Git
+alone does not update `/usr/local/bin/thiscord-deploy`: install the reviewed script
+there with `sudo install -o root -g root -m 0755 infra/vps/deploy-backend.sh /usr/local/bin/thiscord-deploy`.
+
+An immediate 503 when adding a bot can mean the companion is absent. Check
+`test -x /opt/thiscord/current/thiscord-voice-bot` and
+`ldd /opt/thiscord/current/thiscord-voice-bot`; correlate the response request ID
+with the service journal. The bot endpoint reports companion failures separately
+from account authentication errors. Installing a missing companion from the
+**exact deployed commit** does not require restarting the backend; it launches
+the executable on each bot addition.
 
 After a successful build it installs a new release directory, stops the backend,
 runs the database backup service, atomically switches `/opt/thiscord/current`,

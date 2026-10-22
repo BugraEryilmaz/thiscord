@@ -140,6 +140,7 @@ async fn handle(
                     request.channel_id,
                     settings,
                     authority.clone(),
+                    id,
                 )
                 .await?;
             }
@@ -189,11 +190,28 @@ async fn handle(
         Ok::<_, Failure>(Json(thiscord_shared::voice_bots::Response { bots }).into_response())
     }
     .await;
-    let mut response = result.unwrap_or_else(|e| e.response(id));
+    let mut response = result.unwrap_or_else(|e| failure_response(e, id));
     response
         .headers_mut()
         .insert("cache-control", "no-store".parse().unwrap());
     response
+}
+
+fn failure_response(error: Failure, request_id: RequestId) -> Response {
+    if matches!(error, Failure::Unavailable) {
+        tracing::warn!(%request_id, "Voice test bot operation unavailable; check companion installation and startup logs");
+        (
+            axum::http::StatusCode::SERVICE_UNAVAILABLE,
+            Json(thiscord_shared::ApiError {
+                code: thiscord_shared::ErrorCode::ServiceUnavailable,
+                message: "Voice test bot service is unavailable. Check that the matching bot companion is installed".into(),
+                request_id,
+                fields: vec![],
+            }),
+        ).into_response()
+    } else {
+        error.response(request_id)
+    }
 }
 fn scoped(
     entries: &HashMap<AccountId, Entry>,
@@ -214,6 +232,7 @@ async fn add(
     channel: ChannelId,
     settings: Settings,
     authority: delivery::Snapshot,
+    request_id: RequestId,
 ) -> Result<(), Failure> {
     let id = AccountId::from_uuid(uuid::Uuid::new_v4());
     let context = Context {
@@ -278,6 +297,7 @@ async fn add(
             stop_rx,
             bot,
             ready_tx,
+            request_id,
         );
         tokio::join!(server, client);
         drop(registration);
@@ -293,5 +313,31 @@ async fn add(
             stop_tx.send_replace(true);
             Err(Failure::Unavailable)
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    #[tokio::test]
+    async fn bot_unavailable_response_identifies_companion_and_keeps_request_id() {
+        let id = RequestId::from_uuid(uuid::Uuid::new_v4());
+        let response = failure_response(Failure::Unavailable, id);
+        assert_eq!(
+            response.status(),
+            axum::http::StatusCode::SERVICE_UNAVAILABLE
+        );
+        let body = axum::body::to_bytes(response.into_body(), 4096)
+            .await
+            .unwrap();
+        let error: thiscord_shared::ApiError = serde_json::from_slice(&body).unwrap();
+        assert_eq!(error.request_id, id);
+        assert_eq!(error.code, thiscord_shared::ErrorCode::ServiceUnavailable);
+        assert!(error.message.contains("matching bot companion"));
+        assert!(!error.message.contains("Account"));
+        assert_eq!(
+            failure_response(Failure::Forbidden, id).status(),
+            axum::http::StatusCode::FORBIDDEN
+        );
     }
 }

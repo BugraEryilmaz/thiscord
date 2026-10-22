@@ -558,6 +558,59 @@ fn receive(
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[tokio::test]
+    async fn loopback_companion_gathers_without_waiting_for_public_stun_or_turn() {
+        // A reachable socket that never answers models coturn rejecting a
+        // loopback peer on the same server. An unroutable IP fails immediately
+        // and would not reproduce the production gathering timeout.
+        let blackhole = std::net::UdpSocket::bind("127.0.0.1:0").unwrap();
+        let address = blackhole.local_addr().unwrap();
+        let gathered = Arc::new(Notify::new());
+        let (incoming, _) = mpsc::channel(1);
+        let (video, _) = mpsc::channel(1);
+        let (_stop, stop) = watch::channel(false);
+        let mut media = MediaEngine::default();
+        media.register_default_codecs().unwrap();
+        let pc = PeerConnectionBuilder::new()
+            .with_configuration(configuration(&[
+                IceServer {
+                    urls: vec![format!("stun:{address}")],
+                    username: String::new(),
+                    credential: String::new(),
+                },
+                IceServer {
+                    urls: vec![format!("turn:{address}?transport=udp")],
+                    username: "synthetic".into(),
+                    credential: "synthetic".into(),
+                },
+            ]))
+            .with_media_engine(media)
+            .with_handler(Arc::new(Handler {
+                gathered: gathered.clone(),
+                connected: Arc::new(false.into()),
+                incoming,
+                video,
+                stop,
+            }))
+            .with_udp_addrs(vec!["127.0.0.1:0".to_owned()])
+            .build()
+            .await
+            .unwrap();
+        pc.add_track(audio::transport::track(
+            MediaKind::Microphone.publisher_ssrc(),
+        ))
+        .await
+        .unwrap();
+        pc.set_local_description(pc.create_offer(None).await.unwrap())
+            .await
+            .unwrap();
+        let completed = tokio::time::timeout(Duration::from_secs(3), gathered.notified()).await;
+        pc.close().await.unwrap();
+        assert!(
+            completed.is_ok(),
+            "local bots must not wait for external ICE gathering"
+        );
+    }
     #[test]
     fn profiles_drop_packets_and_bound_delayed_work() {
         for profile in ConnectionProfile::ALL {
