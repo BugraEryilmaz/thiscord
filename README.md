@@ -58,7 +58,11 @@ timeouts, kicks, bans and unbans, with server-side permission and hierarchy chec
 After verifying an account, run `./run-wsl.ps1 -BootstrapOwner YOUR_USERNAME`
 from `backend/`, then open your server’s **Server settings > Roles**. See [permission rules and setup](docs/permissions.md).
 Text chat includes persisted history, edits/deletes, unread mentions and authenticated
-live sockets. See [chat protocol and limits](docs/chat.md). Desktop voice channels
+live sockets. Drop images, videos or files onto a text channel, or use the attachment
+button, then send them with an optional message. Images and videos open in a
+full-window viewer; videos have a play overlay and playback controls. Files and the
+download buttons save attachments. Each message supports four files of up to 25 MiB
+each. See [chat protocol and limits](docs/chat.md). Desktop voice channels
 use native Rust audio, independent speaker volume controls and a Rust WebRTC SFU.
 Open **Settings > Voice & audio** to select devices and test audio, then join a
 voice channel. See [audio setup, networking and remaining checks](docs/audio.md).
@@ -143,7 +147,8 @@ on Windows. If Trunk rejects an inherited `NO_COLOR=1`, unset it or use
 
 Install [Tauri platform prerequisites](https://v2.tauri.app/start/prerequisites/)
 on each desktop host: MSVC C++ tools and WebView2 on Windows, Xcode tools on
-macOS, and WebKitGTK/GTK development libraries on Linux. Build desktop releases
+macOS, and WebKitGTK/GTK development libraries on Linux. Native attachment downloads
+require macOS 11.3 or newer. Build desktop releases
 on their respective OSes. This template targets all three; runtime verification,
 installer packaging, icons and signing remain roadmap work.
 Native audio also needs CMake and a C compiler for bundled libopus; Linux needs

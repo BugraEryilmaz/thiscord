@@ -3,6 +3,7 @@
 mod native_account;
 mod native_audio;
 mod native_camera;
+mod native_download;
 mod native_notifications;
 mod native_overlay;
 mod native_remote_audio;
@@ -46,6 +47,7 @@ fn main() {
         .manage(native_shortcuts::ShortcutStateStore::default())
         .setup(|app| {
             use tauri::Manager;
+            native_download::create_main_window(app)?;
             #[cfg(target_os = "macos")]
             if let Some(window) = app.get_webview_window("main") {
                 app.state::<native_camera::CameraState>().attach(window);

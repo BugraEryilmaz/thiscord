@@ -112,6 +112,13 @@ applying. Never edit an already-deployed migration; add another one. Startup
 migrations share the pool's bounded statement/lock timeouts; review them before
 introducing longer-running data migrations.
 
+Chat attachments are stored as bounded PostgreSQL `bytea` rows, alongside message
+metadata. Include them in normal database backups and capacity planning; there is
+no separate public upload directory. Abandoned uploads expire after one hour and
+the backend reclaims them periodically. Reverting the attachment migration
+permanently removes file bytes and attachment metadata; retained message text is
+unaffected. Attachment-only messages have no text to retain after that rollback.
+
 ## Integration tests
 
 ```sh

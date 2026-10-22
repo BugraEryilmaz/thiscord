@@ -203,6 +203,7 @@ mod tests {
             display_name: String::new(),
             content: format!("message {sequence}"),
             mentions: vec![],
+            attachments: vec![],
             created_at: Timestamp::from_timestamp(sequence, 0).unwrap(),
             edited_at: None,
             deleted: false,
