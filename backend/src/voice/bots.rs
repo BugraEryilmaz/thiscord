@@ -1,6 +1,5 @@
-//! Owner-controlled ephemeral peers. Signaling is in-process; media uses WebRTC.
+//! Owner-controlled ephemeral peers. Private companion signaling; media uses WebRTC.
 mod peer;
-mod video;
 use super::*;
 use crate::{
     auth::{self, store as auth_store},
@@ -147,7 +146,7 @@ async fn handle(
             Command::Update {
                 bot_id,
                 revision,
-                settings,
+                mut settings,
             } => {
                 settings.validate().map_err(Failure::Invalid)?;
                 let entries = registry().lock().unwrap();
@@ -157,6 +156,7 @@ async fn handle(
                 if bot.revision != revision {
                     return Err(Failure::Conflict);
                 }
+                settings.audio = bot.settings.audio.clone();
                 bot.revision += 1;
                 bot.settings = settings.clone();
                 entry.settings.send_replace(settings);
@@ -230,6 +230,7 @@ async fn add(
     let bot = Arc::new(StdMutex::new(Bot {
         id,
         name: context.name.clone(),
+        connection_id: None,
         revision: 0,
         settings: settings.clone(),
         sent_packets: 0,
@@ -264,6 +265,7 @@ async fn add(
     tokio::spawn(async move {
         let registration = Registration(id);
         let connection_id = RequestId::from_uuid(uuid::Uuid::new_v4());
+        bot.lock().unwrap().connection_id = Some(connection_id);
         let (socket, tx, rx) = logging::Socket::internal(connection_id, context);
         let server = serve(socket, pool, connection_id);
         let client = peer::run(

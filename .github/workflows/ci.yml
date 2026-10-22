@@ -54,13 +54,18 @@ jobs:
           echo "DATABASE_URL=postgres://thiscord:ci-test-only@localhost:${POSTGRES_PORT}/thiscord_test?connect_timeout=3" >> "$GITHUB_ENV"
           echo "TEST_DATABASE_URL=postgres://thiscord:ci-test-only@localhost:${POSTGRES_PORT}/thiscord_test?connect_timeout=3" >> "$GITHUB_ENV"
       - name: PostgreSQL and TLS build dependencies
-        run: sudo apt-get update && sudo apt-get install -y libpq-dev pkg-config cmake
+        run: sudo apt-get update && sudo apt-get install -y libpq-dev libasound2-dev pkg-config cmake
       - name: Install pinned toolchain
         run: rustup show
       - uses: ./.github/actions/cargo-cache
         with:
           key: backend
       - run: cargo clippy -p thiscord-shared -p thiscord-backend --all-targets --features thiscord-backend/load-test --locked -- -D warnings
+      - name: Build and lint the headless voice client
+        run: |
+          cargo clippy -p thiscord-frontend --features voice-bot --bin thiscord-voice-bot --locked -- -D warnings
+          cargo build -p thiscord-frontend --features voice-bot --bin thiscord-voice-bot --locked
+          echo "THISCORD_VOICE_BOT_PATH=${CARGO_TARGET_DIR:-target}/debug/thiscord-voice-bot" >> "$GITHUB_ENV"
       - name: Unit, wire-contract and PostgreSQL integration tests
         run: cargo test -p thiscord-shared -p thiscord-backend --locked -- --include-ignored
       - name: Voice load generator tests and real-peer smoke checks
@@ -232,6 +237,11 @@ jobs:
         with:
           key: audio-${{ matrix.os }}
           local-group: native
+      - name: Headless native audio and video client
+        run: |
+          cargo clippy -p thiscord-frontend --lib --bin thiscord-voice-bot --features voice-bot --locked -- -D warnings
+          cargo test -p thiscord-frontend --lib --features voice-bot --locked bot::
+          cargo test -p thiscord-frontend --lib --features voice-bot --locked virtual_devices::
       - name: Native audio mixer, DSP, jitter and encrypted WebRTC probe
         run: cargo test -p thiscord-frontend --lib --example audio_replay --features deep-filter,neural-echo-probe --profile ci --locked
       - name: Lint audio stages, regressions and benchmarks

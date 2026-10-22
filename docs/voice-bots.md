@@ -9,38 +9,81 @@ Instance admins and guild owners alone cannot use these controls.
 Join the channel with the desktop client to listen. Bots appear in the ordinary
 voice roster, overlay, notifications and per-speaker volume controls. Right-click
 a bot for its test audio settings, or click its name in the browser `/admin`
-participant table as the instance owner. Save changes to microphone gain, output
-volume, mute/deafen, loop or connection profile without reconnecting. Output
-volume affects the bot's silent decoded output and its numeric peak meter; the
-ordinary participant volume slider controls what **you** hear. Refresh retrieves
-current settings and counters, including received shared audio and per-camera/screen
-resolution, decoded frames, discarded/missing packets, decode errors, keyframe
-requests and requested bitrate. Video counters reset when the viewed stream set
-or connection profile changes. Concurrent edits return a conflict; refresh before
-retrying. Remove stops the peer and releases its channel slot.
+participant table as the instance owner. Open **Voice settings and diagnostics**
+for the same Audio & voice panel used by real users. Changes save automatically:
+voice activation/PTT, threshold, gain, volume, mute/deafen, Sonora/DeepFilterNet3,
+automatic gain, echo cancellation, bundled neural echo processing, adaptive Opus
+FEC, RED, DRED and per-speaker volume all run through the desktop `AudioEngine`.
+The bot's volume affects its silent speakers; your participant slider controls
+what **you** hear. Physical devices are replaced with virtual devices. Keyboard
+shortcuts, overlays and arbitrary model-file overrides are unavailable on bots.
 
-The three original synthesized loops are chimes, a low pulse and a melody, each
-three seconds long with a quiet gap. They contain no recordings or downloaded
-audio. The add form cycles through loop choices after each addition. Multiple
-bots may use the same loop; each has a separate identity, media clock and codec.
+Use **Apply test conditions** separately to change connection profile, microphone
+loop, acoustic scenario or the held virtual PTT key. Conditions do not overwrite
+voice-panel edits. Choose among **twelve synthetic speech loops**, six English and
+six Turkish: quiet room, desk fan, keyboard, café conversation, street traffic
+and rain in each language. Every choice has a distinct spoken passage. English
+uses three installed TTS voices; Turkish uses Tolga with varied speaking rates.
+These are bundled assets for offline playback, not recordings of real people.
+The default is English in a quiet room; subsequent additions alternate languages
+and environments. Legacy Speech, chimes, low pulse and melody remain available.
+
+Speech includes a one-second foreground pause. Backgrounds continue through it,
+including overlapping same-language speech in the café loops. Noise enters before
+DSP, so the ordinary noise suppression, activation, gain and codec settings process
+it. Choose a quiet-room loop with the Clean microphone scenario for a clean
+reference; scenarios apply to the entire selected source. The backgrounds are
+deterministic approximations rather than field recordings. Asset scripts, voices
+and generation instructions are in [the speech library](../frontend/assets/voice-bots/README.md).
+Tones have a quiet gap in their three-second cycle. Each bot has its own clock,
+engine and settings.
+Virtual capture and RTP timing follow sample counts rather than thread wake-up
+times, so ordinary scheduling jitter does not invent missing audio. Catch-up is
+bounded to 40 ms; longer stalls remain real capture gaps in diagnostics. Tone
+endings fade out before each phase reset and quiet gap to avoid source clicks.
+Clean, quiet (8% source level), noise, silence, speaker echo and double-talk
+scenarios are deterministic. Echo returns the bot's actual speaker mix to its
+microphone at 50% level after 80 ms. The normal render-reference/AEC path receives
+the same mix. Another speaking bot or user supplies the far end for echo tests.
+
+For quick loss comparisons, use the **Opus baseline**, **RED**, **DRED**, or
+**RED + DRED** buttons, then select the same loss profile on each trial. These
+buttons change only the two redundancy switches. DRED recovery requires enabling
+DRED on both endpoints; a listening bot can use the Silence scenario. Advanced
+voice diagnostics show RED history frames selected for playout, DRED attempts and
+output frames, FEC attempts, PLC, buffering, processing deadlines, and clipping.
+These same counters are available for human clients. Opus FEC calls can contain
+PLC, so they are not reported as verified recovery. Diagnostic JSON downloads
+contain technical data, never recorded media. Logs are opt-in and separate for
+each companion, with fixed-size rotation; normal exits remove its temporary logs.
+
+Refresh the manager for media counters and camera/screen resolution, decoded
+frames, discarded/missing packets, decode errors, keyframe requests and requested
+bitrate. Audio packet counters count received transport packets; native diagnostics
+report decoding and recovery. Video counters reset when subscriptions or profiles
+change. Conflicting condition revisions or voice-settings snapshots reject stale
+edits. Remove stops the companion and releases its slot.
 
 Connection presets apply independently to the microphone uplink and the aggregate
 incoming audio downlink. A separate aggregate video downlink uses the same
 delay/jitter/loss, with these budgets:
 
-- Good: 96 kbit/s media-link budget, 20 ms one-way delay, no injected loss; 32 Mbit/s video.
-- Low bandwidth: 24 kbit/s, 120–150 ms delay, 16 kbit/s Opus encoding; 500 kbit/s video.
-- High packet loss: 96 kbit/s, 60–80 ms delay, 25% deterministic packet loss; 32 Mbit/s video.
+- Good: 1000 kbit/s media-link budget, 20 ms one-way delay, no injected loss; 32 Mbit/s video.
+- Low bandwidth: 24 kbit/s, 120–150 ms delay; 500 kbit/s video.
+- High packet loss: 1000 kbit/s, 60–80 ms delay, 25% deterministic packet loss; 32 Mbit/s video.
 - Unstable: 48 kbit/s, 100–200 ms delay, 10% deterministic packet loss; 2 Mbit/s video.
 
-Other presets encode at 32 kbit/s. Budgets charge payload plus 60 bytes per packet
+All presets use the normal encoder: 32 kbit/s, or 40 kbit/s with DRED. RED adds
+its normal history overhead; good/high-loss budgets accommodate multiple sources.
+Low bandwidth deliberately competes with the encoder budget and adds drops. Budgets charge payload plus 60 bytes per packet
 and permit at most 100 ms of burst credit; bandwidth exhaustion adds loss. Delay
 queues hold at most 20 audio or 512 video packets (each at most 1500 payload
 bytes). Variable delays can reorder packets. This is a
 media-packet simulator around a real local WebRTC connection, not an OS network
 emulator. ICE/DTLS/RTCP and signaling are not impaired. Admin ICE RTT therefore
 describes the local transport, not the configured media delay. This does not
-test physical microphones, NAT, TURN reachability, an ISP or native desktop DSP.
+test physical microphones, NAT, TURN reachability or an ISP. It does exercise
+the real native capture-processing, encoding, jitter, recovery and playback paths.
 
 The bot sends valid mono 48 kHz Opus over DTLS-SRTP through the existing SFU and
 receives/decrypts/decodes other speakers and stereo shared audio into a silent
@@ -67,11 +110,12 @@ the profile's aggregate video allowance (with the protocol's 200 kbit/s minimum)
 Shared-audio packets remain under the aggregate audio budget.
 
 Bots exercise the real receiving protocol but are headless: they do not exercise
-the native WebView/GPU renderer, physical devices or acoustic echo processing.
+the native WebView/GPU renderer or physical devices/rooms. Echo is a synthetic
+acoustic path through the real echo processor.
 They do not publish cameras/screens, send text, manage friendships or have login
-accounts. Video decoding consumes backend CPU and memory; multiple high-resolution
+accounts. Companions consume server CPU and memory; multiple high-resolution
 streams and bots can be expensive. Normal voice permission, mute/deafen, viewer
-lease and forwarding fences still apply. The backend now compiles the same pinned
+lease and forwarding fences still apply. The companion compiles the same pinned
 OpenH264 0.9.8 source dependency as the desktop client, requiring a C++ toolchain;
 NASM enables x86 optimizations and is optional (the crate has a C++ fallback).
 
@@ -79,9 +123,12 @@ NASM enables x86 optimizations and is optional (the crate has a C++ fallback).
 error/request-ID envelope. Each command reauthenticates and checks current
 instance ownership and channel access. Settings updates carry the displayed
 revision. Bot IDs are scoped to a guild/channel; they cannot be used to control
-another room. Signaling uses bounded in-process queues, with a private synthetic
-identity attached by the owner endpoint; clients cannot request that identity
-through public WebSocket commands. No bot password, token or database row exists.
+another room. Voice settings use the existing `/api/v1/admin/audio` relay, with
+an additional owner-only restriction for bot connections. Signaling bridges the
+SFU internal socket to private length-prefixed stdio (256 KiB frames, 32 queued
+messages), with a synthetic identity attached by the owner endpoint; clients cannot request that identity
+through public WebSocket commands. No bot password, independent login token or database row exists. The creator
+session is passed privately through stdin, never command arguments or log output.
 
 Bots inherit the creator's account/session and guild permission lifetime. Media
 also holds the creator's instance-ownership delivery fence, so ownership transfer
@@ -93,21 +140,43 @@ ephemeral. The process admits at most 16 bots and four simultaneous management
 requests. Bots count toward the existing eight-participant room limit, so one
 human can test with seven bots. Normal public voice connection limits are unchanged.
 
-Verification covers decodable distinct loops, bounded deterministic impairment,
-owner/admin/member authorization, empty-channel admission, real encrypted delivery,
-downlink decoding, isolation, capacity, stale edits, invalid levels, mute/unmute,
-removal, ownership transfer, Speak revocation and logout. Video tests cover real
-camera/screen/shared-audio delivery to simultaneous good/slow/lossy bots, viewer
-lease renewal, bitrate reduction, keyframe feedback, deafen, stream restart,
-logout, stale owner/epoch rejection, reorder/wrap/loss recovery, malformed SPS
-and bounded queues. Run:
+## Build and run
+
+The headless client is a second native binary in the existing **frontend** package;
+there are still exactly three packages and the backend never imports frontend code.
+Build/install it beside `thiscord-backend`, or set `THISCORD_VOICE_BOT_PATH` to its
+absolute executable path. Backend `run.sh` (also used by `run-wsl.ps1`) builds it
+automatically. Linux needs `libasound2-dev` to compile CPAL, although the companion
+never opens hardware. No display, Tauri WebView or audio server is required.
+
+```sh
+cargo build -p thiscord-frontend --features voice-bot --bin thiscord-voice-bot --locked
+cargo build -p thiscord-backend --locked
+```
+
+Use `--release` on both commands for a production installation. Keep both binaries
+at the same revision; private IPC is not an independently versioned public API.
+A missing/crashed companion fails bot admission; there is no simplified fallback.
+Companions stop on parent EOF, removal, expiry or revocation; the parent kills a
+stuck process after a bounded shutdown wait. Abrupt process termination can leave
+the bot's bounded technical-log directory in the server temp folder.
+
+Verification includes owner-only controls, empty-channel admission, encrypted
+media, isolation, capacity, revision conflicts, mute/deafen, per-speaker volume,
+virtual device swaps, neural DSP settings, real RED and DRED recovery between bots,
+PTT release, cameras/screens/shared audio, leases, keyframes, stream replacement,
+removal, ownership transfer, Speak revocation and logout. CI builds the companion
+before database tests and compiles/tests it on the native platform matrix.
 
 ```sh
 cargo test -p thiscord-shared --locked voice_bots
-cargo test -p thiscord-backend --lib --locked voice::bots
-cargo test -p thiscord-backend --test voice --locked owner_bots -- --include-ignored
+cargo test -p thiscord-frontend --lib --features voice-bot --locked bot::
+cargo test -p thiscord-frontend --lib --features voice-bot --locked virtual_devices::
+THISCORD_VOICE_BOT_PATH="$PWD/target/debug/thiscord-voice-bot" \
+  cargo test -p thiscord-backend --test voice --locked owner_bots -- --include-ignored
 ```
 
-Physical listening and native UI acceptance on Windows, macOS and Linux remain
-manual checks. PostgreSQL tests use a disposable schema as described in
+Use your configured `CARGO_TARGET_DIR` in the companion path when it differs from
+`target`. Physical listening and native UI acceptance on Windows, macOS and Linux
+remain manual checks. PostgreSQL tests use disposable schemas as described in
 [database.md](database.md).

@@ -30,6 +30,8 @@ pub mod quality;
 mod receive_tests;
 pub mod red;
 mod red_lifecycle;
+#[cfg(feature = "voice-bot")]
+pub mod virtual_devices;
 use quality::{Count, Stage};
 mod reconfigure;
 pub mod reconnect;
@@ -58,6 +60,10 @@ use std::{
 use thiscord_shared::audio::*;
 
 pub fn devices() -> Result<Vec<AudioDevice>, String> {
+    #[cfg(feature = "voice-bot")]
+    if virtual_devices::enabled() {
+        return Ok(virtual_devices::devices());
+    }
     let host = cpal::default_host();
     let mut result = vec![];
     for input in [true, false] {
@@ -714,6 +720,10 @@ impl Devices {
     }
     fn prepare(settings: &AudioSettings, microphone: bool) -> Result<Self, String> {
         settings.validate()?;
+        #[cfg(feature = "voice-bot")]
+        if virtual_devices::enabled() {
+            return virtual_devices::prepare(settings, microphone);
+        }
         let permit = lifecycle::acquire()?;
         diagnostics::event(
             "device_open_begin",
@@ -1352,6 +1362,9 @@ impl Session {
                             buffered_playout_ms: r.jitter.metrics().packets as f64 * 20.0
                                 + pcm_samples as f64 / 48.0,
                             verified_fec_packets: None,
+                            red_recovered_frames: r.jitter.metrics().red_recovered_frames,
+                            dred_attempts: r.decode_stats.dred_attempts,
+                            dred_output_frames: r.decode_stats.dred_output_frames,
                         }
                     })
                 })

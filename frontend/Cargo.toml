@@ -8,6 +8,7 @@ default-run = "thiscord-desktop"
 
 [features]
 default = []
+voice-bot = ["native-audio", "deep-filter", "neural-echo", "dep:openh264", "tokio/rt-multi-thread", "tokio/io-std"]
 desktop = ["dep:objc2", "dep:objc2-web-kit", "dep:block2", "screen-share", "dep:tauri", "dep:tauri-build", "dep:keyring", "dep:open", "dep:tokio", "dep:rand", "dep:base64", "dep:url", "native-audio", "deep-filter", "neural-echo", "dep:tauri-plugin-global-shortcut", "dep:tauri-plugin-updater", "dep:tokio-tungstenite", "dep:futures-util"]
 screen-share = ["native-audio", "dep:windows-capture", "dep:windows", "dep:windows-core", "dep:openh264", "dep:wasapi"]
 native-audio = ["dep:cpal", "dep:ringbuf", "dep:opus", "dep:webrtc", "dep:tokio", "dep:bytes", "dep:rtc", "dep:async-trait", "dep:sonora", "dep:hound", "dep:windows", "dep:socket2"]
@@ -25,6 +26,11 @@ path = "src/main.rs"
 name = "thiscord-desktop"
 path = "src/desktop.rs"
 required-features = ["desktop"]
+
+[[bin]]
+name = "thiscord-voice-bot"
+path = "src/voice_bot.rs"
+required-features = ["voice-bot"]
 
 [[example]]
 name = "verify_update"

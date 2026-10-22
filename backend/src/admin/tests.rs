@@ -259,7 +259,7 @@ async fn remote_audio_rechecks_instance_privileges_and_never_retargets_connectio
     crate::permissions::bootstrap_owner(&db.pool, "remote_owner").unwrap();
     let app = crate::api::router(Some(db.pool.clone()), vec![]);
     let connection = RequestId::from_uuid(Uuid::new_v4());
-    let (registration, mut requests) = super::audio::register(connection);
+    let (registration, mut requests) = super::audio::register(connection, false);
     let path = thiscord_shared::remote_audio::PATH;
     let request = json!({"connection_id":connection,"command":{"command":"audio_current"}});
     command(
@@ -345,6 +345,6 @@ async fn remote_audio_rechecks_instance_privileges_and_never_retargets_connectio
     assert_response(response.await.unwrap(), StatusCode::CONFLICT).await;
     assert!(!super::audio::available(connection));
     let (_replacement, _replacement_requests) =
-        super::audio::register(RequestId::from_uuid(Uuid::new_v4()));
+        super::audio::register(RequestId::from_uuid(Uuid::new_v4()), false);
     command(&app, &owner, path, request, StatusCode::CONFLICT).await;
 }

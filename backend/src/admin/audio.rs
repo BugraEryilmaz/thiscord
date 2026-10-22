@@ -20,7 +20,7 @@ use std::{
 use thiscord_shared::{RequestId, permissions::InstanceRole, remote_audio::*};
 use tokio::sync::{Semaphore, mpsc, oneshot};
 
-type Registry = Mutex<HashMap<RequestId, mpsc::Sender<Call>>>;
+type Registry = Mutex<HashMap<RequestId, (mpsc::Sender<Call>, bool)>>;
 fn registry() -> &'static Registry {
     static REGISTRY: OnceLock<Registry> = OnceLock::new();
     REGISTRY.get_or_init(Default::default)
@@ -31,9 +31,9 @@ impl Drop for Registration {
         registry().lock().unwrap().remove(&self.0);
     }
 }
-pub(crate) fn register(id: RequestId) -> (Registration, mpsc::Receiver<Call>) {
+pub(crate) fn register(id: RequestId, owner_only: bool) -> (Registration, mpsc::Receiver<Call>) {
     let (tx, rx) = mpsc::channel(1);
-    registry().lock().unwrap().insert(id, tx);
+    registry().lock().unwrap().insert(id, (tx, owner_only));
     (Registration(id), rx)
 }
 pub(crate) fn available(id: RequestId) -> bool {
@@ -77,7 +77,7 @@ async fn authorize(
     pool: DbPool,
     token: String,
     permit: Arc<tokio::sync::OwnedSemaphorePermit>,
-) -> Result<access::Snapshot, Failure> {
+) -> Result<(access::Snapshot, InstanceRole), Failure> {
     tokio::task::spawn_blocking(move || {
         let _permit = permit;
         let mut c = store::connection(&pool)?;
@@ -89,17 +89,15 @@ async fn authorize(
         .and_then(|s| s.including(&access::session(identity.id)))
         .ok_or(Failure::Forbidden)?;
         let session = store::authenticate(&mut c, &token)?;
-        c.transaction::<_, Failure, _>(|c| {
+        let role = c.transaction::<_, Failure, _>(|c| {
             store::read_session(c, &token, &session)?;
-            if !matches!(
-                crate::permissions::store::instance(c, session.account_id)?.role,
-                InstanceRole::Owner | InstanceRole::Admin
-            ) {
+            let role = crate::permissions::store::instance(c, session.account_id)?.role;
+            if !matches!(role, InstanceRole::Owner | InstanceRole::Admin) {
                 return Err(Failure::Forbidden);
             }
-            Ok(())
+            Ok(role)
         })?;
-        Ok(authorized)
+        Ok((authorized, role))
     })
     .await
     .map_err(|_| Failure::Unavailable)?
@@ -120,7 +118,7 @@ async fn handle(
                 .try_acquire_owned()
                 .map_err(|_| Failure::Limited)?,
         );
-        let authorized = authorize(
+        let (authorized, role) = authorize(
             pool.ok_or(Failure::Unavailable)?,
             auth::bearer(&headers),
             permit.clone(),
@@ -128,12 +126,15 @@ async fn handle(
         .await?;
         let Json(request) = body.map_err(|_| Failure::Invalid("Invalid remote audio request"))?;
         request.command.validate().map_err(Failure::Invalid)?;
-        let sender = registry()
+        let (sender, owner_only) = registry()
             .lock()
             .unwrap()
             .get(&request.connection_id)
             .cloned()
             .ok_or(Failure::Conflict)?;
+        if owner_only && role != InstanceRole::Owner {
+            return Err(Failure::Forbidden);
+        }
         let (reply, response) = oneshot::channel();
         sender
             .try_send(Call {

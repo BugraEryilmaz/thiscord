@@ -414,6 +414,10 @@ pub struct StreamQuality {
     pub pcm_samples: usize,
     pub buffered_playout_ms: f64,
     pub verified_fec_packets: Option<u64>,
+    /// RED history blocks selected for playout (not a claim about audible quality).
+    pub red_recovered_frames: u64,
+    pub dred_attempts: u64,
+    pub dred_output_frames: u64,
 }
 /// Numeric sender-only diagnostics, with no media or participant identifiers.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]

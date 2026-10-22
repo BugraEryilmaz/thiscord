@@ -1,0 +1,14 @@
+[
+  {"id":"english_clean","voice":"Microsoft Zira Desktop","rate":0,"text":"Hello everyone. Can you hear the beginning of each sentence clearly? I will pause, then continue speaking at a comfortable pace."},
+  {"id":"english_fan","voice":"Microsoft David Desktop","rate":-1,"text":"The fan beside my desk is running. Please check whether my voice stays clear when I speak softly and finish the sentence."},
+  {"id":"english_keyboard","voice":"Microsoft Hazel Desktop","rate":1,"text":"I am typing the meeting notes while we talk. We need three tickets, two spare cables, and a quick sound check before lunch."},
+  {"id":"english_cafe","voice":"Microsoft Zira Desktop","rate":1,"text":"We found a small table near the cafe window. People are talking behind me. Shall we meet here tomorrow at half past ten?"},
+  {"id":"english_street","voice":"Microsoft David Desktop","rate":0,"text":"I am waiting outside the station. A bus is passing now. Turn left at the crossing and I will meet you by the entrance."},
+  {"id":"english_rain","voice":"Microsoft Hazel Desktop","rate":-1,"text":"Rain is falling against the window tonight. Let us read the last message slowly, take a short break, and try the connection again."},
+  {"id":"turkish_clean","voice":"Microsoft Tolga","rate":0,"text":"Herkese merhaba. Cümlelerin başını ve sonunu net duyabiliyor musunuz? Biraz durup normal konuşma hızında devam edeceğim. Şimdi sesimi tekrar kontrol edelim."},
+  {"id":"turkish_fan","voice":"Microsoft Tolga","rate":-1,"text":"Masamın yanındaki vantilatör çalışıyor. Daha yavaş ve alçak sesle konuşurken kelimeler anlaşılıyor mu? Lütfen cümlenin sonuna kadar dikkatle dinleyin."},
+  {"id":"turkish_keyboard","voice":"Microsoft Tolga","rate":1,"text":"Konuşurken toplantı notlarını yazıyorum. Öğleden önce üç bilet, iki yedek kablo ve kısa bir ses denemesi gerekiyor. Hazır olunca bana haber ver."},
+  {"id":"turkish_cafe","voice":"Microsoft Tolga","rate":0,"text":"Kafenin pencere kenarında küçük bir masa bulduk. Arkamda birkaç kişi sohbet ediyor. Yarın saat on buçukta burada buluşmak ister misin?"},
+  {"id":"turkish_street","voice":"Microsoft Tolga","rate":1,"text":"İstasyonun önünde seni bekliyorum. Şu anda bir otobüs geçiyor. Yaya geçidinden sonra sola dön, giriş kapısının yanında buluşalım. Acele etmene gerek yok."},
+  {"id":"turkish_rain","voice":"Microsoft Tolga","rate":-1,"text":"Bu akşam yağmur damlaları pencereye vuruyor. Son mesajı yavaşça okuyalım, kısa bir ara verelim ve bağlantıyı yeniden deneyelim. Sesim hâlâ net geliyor mu?"}
+]
