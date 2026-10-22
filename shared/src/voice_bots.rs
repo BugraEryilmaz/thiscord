@@ -52,20 +52,61 @@ impl ConnectionProfile {
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum MicrophoneLoop {
-    #[default]
     Chimes,
     Pulse,
     Melody,
     Speech,
+    #[default]
+    EnglishClean,
+    EnglishFan,
+    EnglishKeyboard,
+    EnglishCafe,
+    EnglishStreet,
+    EnglishRain,
+    TurkishClean,
+    TurkishFan,
+    TurkishKeyboard,
+    TurkishCafe,
+    TurkishStreet,
+    TurkishRain,
 }
 impl MicrophoneLoop {
-    pub const ALL: [Self; 4] = [Self::Speech, Self::Chimes, Self::Pulse, Self::Melody];
+    pub const ALL: [Self; 16] = [
+        Self::EnglishClean,
+        Self::TurkishClean,
+        Self::EnglishFan,
+        Self::TurkishFan,
+        Self::EnglishKeyboard,
+        Self::TurkishKeyboard,
+        Self::EnglishCafe,
+        Self::TurkishCafe,
+        Self::EnglishStreet,
+        Self::TurkishStreet,
+        Self::EnglishRain,
+        Self::TurkishRain,
+        Self::Speech,
+        Self::Chimes,
+        Self::Pulse,
+        Self::Melody,
+    ];
     pub fn label(self) -> &'static str {
         match self {
             Self::Chimes => "Chimes",
             Self::Pulse => "Low pulse",
             Self::Melody => "Melody",
             Self::Speech => "Speech",
+            Self::EnglishClean => "English · Quiet room",
+            Self::EnglishFan => "English · Desk fan",
+            Self::EnglishKeyboard => "English · Keyboard",
+            Self::EnglishCafe => "English · Café conversation",
+            Self::EnglishStreet => "English · Street traffic",
+            Self::EnglishRain => "English · Rain",
+            Self::TurkishClean => "Turkish · Quiet room",
+            Self::TurkishFan => "Turkish · Desk fan",
+            Self::TurkishKeyboard => "Turkish · Keyboard",
+            Self::TurkishCafe => "Turkish · Café conversation",
+            Self::TurkishStreet => "Turkish · Street traffic",
+            Self::TurkishRain => "Turkish · Rain",
         }
     }
 }
@@ -118,7 +159,7 @@ impl Default for Settings {
     fn default() -> Self {
         Self {
             profile: Default::default(),
-            microphone_loop: MicrophoneLoop::Speech,
+            microphone_loop: MicrophoneLoop::EnglishClean,
             audio: Default::default(),
             scenario: Default::default(),
             talking: false,
@@ -250,6 +291,33 @@ pub struct Response {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn speech_catalog_has_stable_unique_wire_names_and_keeps_legacy_loops() {
+        let mut names = std::collections::HashSet::new();
+        for kind in MicrophoneLoop::ALL {
+            let name = serde_json::to_value(kind).unwrap();
+            assert!(names.insert(name.as_str().unwrap().to_owned()));
+            assert_eq!(
+                serde_json::from_value::<MicrophoneLoop>(name).unwrap(),
+                kind
+            );
+        }
+        for legacy in ["speech", "chimes", "pulse", "melody"] {
+            assert!(names.contains(legacy));
+        }
+        assert_eq!(
+            names.iter().filter(|s| s.starts_with("english_")).count(),
+            6
+        );
+        assert_eq!(
+            names.iter().filter(|s| s.starts_with("turkish_")).count(),
+            6
+        );
+        assert_eq!(
+            Settings::default().microphone_loop,
+            MicrophoneLoop::EnglishClean
+        );
+    }
     #[test]
     fn normal_voice_settings_round_trip_and_bot_devices_are_bounded() {
         let mut settings = Settings::default();

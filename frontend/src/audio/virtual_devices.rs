@@ -2,6 +2,7 @@
 use super::*;
 use std::sync::{OnceLock, atomic::AtomicU32};
 use thiscord_shared::voice_bots::{MicrophoneLoop, Scenario, Settings};
+mod speech;
 
 static SOURCE: OnceLock<Source> = OnceLock::new();
 struct Source {
@@ -110,14 +111,7 @@ pub(super) fn prepare(settings: &AudioSettings, microphone: bool) -> Result<Devi
         control.clone(),
         health.clone(),
     );
-    let speech = hound::WavReader::new(std::io::Cursor::new(include_bytes!(
-        "../../tests/fixtures/speech.wav"
-    )))
-    .map_err(|_| "Invalid speech fixture")?
-    .samples::<i16>()
-    .map(|s| s.map(|s| s as f32 / 32768.0))
-    .collect::<Result<Vec<_>, _>>()
-    .map_err(|_| "Invalid speech fixture")?;
+    let speech = speech::Library::load()?;
     let thread = thread::Builder::new()
         .name("thiscord-virtual-audio".into())
         .spawn(move || {
@@ -155,7 +149,9 @@ pub(super) fn prepare(settings: &AudioSettings, microphone: bool) -> Result<Devi
                         for rendered in rendered {
                             let mut sample = match scenario {
                                 Scenario::Echo | Scenario::Silence => 0.0,
-                                _ => loop_sample(kind, position, &speech),
+                                _ => speech
+                                    .sample(kind, position)
+                                    .unwrap_or_else(|| loop_sample(kind, position)),
                             };
                             if scenario == Scenario::Quiet {
                                 sample *= 0.08;
@@ -202,13 +198,7 @@ pub(super) fn prepare(settings: &AudioSettings, microphone: bool) -> Result<Devi
     })
 }
 
-fn loop_sample(kind: MicrophoneLoop, sample: u64, speech: &[f32]) -> f32 {
-    if kind == MicrophoneLoop::Speech {
-        return speech
-            .get(sample as usize % (speech.len() + 48_000))
-            .copied()
-            .unwrap_or(0.0);
-    }
+fn loop_sample(kind: MicrophoneLoop, sample: u64) -> f32 {
     let position = sample % 144_000;
     if position >= 115_200 {
         return 0.0;
@@ -249,7 +239,7 @@ mod tests {
             writer.begin_capture(captured);
             for n in 0..480 {
                 assert_eq!(
-                    writer.push(loop_sample(MicrophoneLoop::Chimes, block * 480 + n, &[])),
+                    writer.push(loop_sample(MicrophoneLoop::Chimes, block * 480 + n)),
                     0
                 );
             }
@@ -294,9 +284,9 @@ mod tests {
             MicrophoneLoop::Melody,
         ] {
             for boundary in (12_000..115_200).step_by(12_000).chain([115_200, 144_000]) {
-                assert!(loop_sample(kind, boundary - 1, &[]).abs() < 0.0001);
-                assert_eq!(loop_sample(kind, boundary, &[]), 0.0);
-                assert!(loop_sample(kind, boundary + 1, &[]).abs() < 0.0001);
+                assert!(loop_sample(kind, boundary - 1).abs() < 0.0001);
+                assert_eq!(loop_sample(kind, boundary), 0.0);
+                assert!(loop_sample(kind, boundary + 1).abs() < 0.0001);
             }
         }
     }
@@ -308,16 +298,12 @@ mod tests {
             MicrophoneLoop::Pulse,
             MicrophoneLoop::Melody,
         ] {
-            let samples: Vec<_> = (0..960).map(|n| loop_sample(kind, n, &[])).collect();
+            let samples: Vec<_> = (0..960).map(|n| loop_sample(kind, n)).collect();
             assert_ne!(samples, previous);
             assert!(samples.iter().any(|s| s.abs() > 0.01));
             assert!(samples.iter().all(|s| s.abs() <= 0.12));
-            assert_eq!(loop_sample(kind, 130_000, &[]), 0.0);
+            assert_eq!(loop_sample(kind, 130_000), 0.0);
             previous = samples;
         }
-        let speech = [0.1, -0.2, 0.3];
-        assert_eq!(loop_sample(MicrophoneLoop::Speech, 1, &speech), -0.2);
-        assert_eq!(loop_sample(MicrophoneLoop::Speech, 3, &speech), 0.0);
-        assert_eq!(loop_sample(MicrophoneLoop::Speech, 48_003, &speech), 0.1);
     }
 }

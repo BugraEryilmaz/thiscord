@@ -383,7 +383,8 @@ right-click a voice channel and choose **Voice test bots…**. Add multiple bots
 with distinct microphone loops and good, low-bandwidth, lossy or unstable media
 profiles; edit the normal voice settings by clicking them in `/admin`. Bots run
 the desktop audio engine, including RED/DRED, noise/echo processing and diagnostics,
-with repeatable speech/noise/echo scenarios and virtual PTT. Backend `run.sh` builds
+with twelve English/Turkish speech loops (quiet room, fan, keyboard, café, traffic
+and rain), repeatable noise/echo scenarios and virtual PTT. Backend `run.sh` builds
 the headless companion automatically. Bots also watch
 cameras and screen shares (including shared audio), decode video, and report
 receiver feedback and counters.

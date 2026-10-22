@@ -20,9 +20,23 @@ shortcuts, overlays and arbitrary model-file overrides are unavailable on bots.
 
 Use **Apply test conditions** separately to change connection profile, microphone
 loop, acoustic scenario or the held virtual PTT key. Conditions do not overwrite
-voice-panel edits. Choose speech (the existing synthetic DSP fixture), chimes,
-a low pulse or melody. Speech includes a one-second quiet gap; tones have a quiet
-gap in their three-second cycle. Each bot has its own clock, engine and settings.
+voice-panel edits. Choose among **twelve synthetic speech loops**, six English and
+six Turkish: quiet room, desk fan, keyboard, café conversation, street traffic
+and rain in each language. Every choice has a distinct spoken passage. English
+uses three installed TTS voices; Turkish uses Tolga with varied speaking rates.
+These are bundled assets for offline playback, not recordings of real people.
+The default is English in a quiet room; subsequent additions alternate languages
+and environments. Legacy Speech, chimes, low pulse and melody remain available.
+
+Speech includes a one-second foreground pause. Backgrounds continue through it,
+including overlapping same-language speech in the café loops. Noise enters before
+DSP, so the ordinary noise suppression, activation, gain and codec settings process
+it. Choose a quiet-room loop with the Clean microphone scenario for a clean
+reference; scenarios apply to the entire selected source. The backgrounds are
+deterministic approximations rather than field recordings. Asset scripts, voices
+and generation instructions are in [the speech library](../frontend/assets/voice-bots/README.md).
+Tones have a quiet gap in their three-second cycle. Each bot has its own clock,
+engine and settings.
 Virtual capture and RTP timing follow sample counts rather than thread wake-up
 times, so ordinary scheduling jitter does not invent missing audio. Catch-up is
 bounded to 40 ms; longer stalls remain real capture gaps in diagnostics. Tone

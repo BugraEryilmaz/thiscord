@@ -323,6 +323,8 @@ speaker isolation and physical acoustic acceptance remain future work.
   normal viewer leases, recovery/bitrate feedback and owner diagnostics.
 - [x] Bot native AudioEngine parity, shared voice settings panel, RED/DRED recovery
   diagnostics, virtual devices/PTT and repeatable speech/noise/echo scenarios.
+- [x] Bundle twelve distinct English/Turkish speech passages with quiet-room,
+  fan, keyboard, café, traffic and rain backgrounds for owner voice test bots.
 - [ ] Physically listen to bot profiles and verify menus/admin edits on Windows/macOS/Linux.
 
 - [x] Join/leave and move yourself between voice channels; live participant list.
