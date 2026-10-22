@@ -58,6 +58,27 @@ struct Streams {
     stop: Arc<AtomicBool>,
     thread: Option<thread::JoinHandle<()>>,
 }
+
+/// Virtual hardware runs on a sample clock, not on thread wake-up timestamps.
+/// Permit bounded catch-up after ordinary scheduler jitter. A longer stall is a
+/// real capture interruption and must still reach the engine's gap handling.
+struct DeviceClock {
+    next: Instant,
+}
+impl DeviceClock {
+    fn tick(&mut self, now: Instant) -> (Instant, u64) {
+        let late = now.saturating_duration_since(self.next);
+        let skipped = if late > Duration::from_millis(40) {
+            self.next = now;
+            outgoing::samples(late)
+        } else {
+            0
+        };
+        let captured = self.next;
+        self.next += Duration::from_millis(10);
+        (captured, skipped)
+    }
+}
 impl DeviceStreams for Streams {
     fn play(&self) -> Result<(), String> {
         self.playing.store(true, Ordering::Release);
@@ -106,15 +127,18 @@ pub(super) fn prepare(settings: &AudioSettings, microphone: bool) -> Result<Devi
             let mut rendered = [0.0f32; 480];
             let mut echo = [0.0f32; 3840]; // 80 ms acoustic delay, independent of the network.
             let mut cursor = 0;
-            let mut next = Instant::now();
+            let mut clock = DeviceClock {
+                next: Instant::now(),
+            };
             while !stopping.load(Ordering::Acquire) && !activity.disabled() {
+                let (captured, skipped) = clock.tick(Instant::now());
                 if active.load(Ordering::Acquire) {
-                    let now = Instant::now();
+                    position += skipped;
                     let configuration = source.configuration.load(Ordering::Acquire);
                     let kind = MicrophoneLoop::ALL[(configuration & 255) as usize];
                     let scenario = Scenario::ALL[(configuration >> 8) as usize];
                     activity.callback(false);
-                    mix.reference_time(now);
+                    mix.reference_time(captured);
                     mix.render(&mut rendered, 1);
                     source.peak.store(
                         rendered
@@ -126,7 +150,7 @@ pub(super) fn prepare(settings: &AudioSettings, microphone: bool) -> Result<Devi
                     );
                     if microphone {
                         activity.callback(true);
-                        capture_writer.begin_capture(now);
+                        capture_writer.begin_capture(captured);
                         let (mut peak, mut dropped, mut clipped) = (0.0f32, 0, 0);
                         for rendered in rendered {
                             let mut sample = match scenario {
@@ -159,12 +183,7 @@ pub(super) fn prepare(settings: &AudioSettings, microphone: bool) -> Result<Devi
                         counters.dropped.fetch_add(dropped, Ordering::Relaxed);
                     }
                 }
-                next += Duration::from_millis(10);
-                let now = Instant::now();
-                if next < now {
-                    next = now;
-                } // Do not invent captured audio after a scheduling stall.
-                thread::sleep(next.saturating_duration_since(now));
+                thread::sleep(clock.next.saturating_duration_since(Instant::now()));
             }
         })
         .map_err(|_| "Cannot start virtual audio devices")?;
@@ -190,8 +209,8 @@ fn loop_sample(kind: MicrophoneLoop, sample: u64, speech: &[f32]) -> f32 {
             .copied()
             .unwrap_or(0.0);
     }
-    let time = (sample % 144_000) as f32 / 48_000.0;
-    if time > 2.4 {
+    let position = sample % 144_000;
+    if position >= 115_200 {
         return 0.0;
     }
     let frequencies = match kind {
@@ -199,16 +218,88 @@ fn loop_sample(kind: MicrophoneLoop, sample: u64, speech: &[f32]) -> f32 {
         MicrophoneLoop::Pulse => [130.81, 130.81, 196.0, 164.81],
         _ => [392.0, 493.88, 587.33, 493.88],
     };
-    let local = time % 0.25;
-    (std::f32::consts::TAU * frequencies[(time * 4.0) as usize % 4] * local).sin()
+    let note_sample = position % 12_000;
+    let local = note_sample as f32 / 48_000.0;
+    // Fade to zero before every phase reset and before the loop's quiet gap.
+    let remaining = (12_000 - note_sample).min(115_200 - position);
+    let release = (remaining as f32 / 480.0).min(1.0);
+    (std::f32::consts::TAU * frequencies[(position / 12_000) as usize % 4] * local).sin()
         * (local * 100.0).min(1.0)
         * (-local * 14.0).exp()
+        * release
         * 0.12
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn scheduler_jitter_preserves_capture_and_rtp_sample_spacing() {
+        let start = Instant::now();
+        let mut clock = DeviceClock { next: start };
+        let (mut writer, mut reader) = frames::queue();
+        let mut media = outgoing::MediaClock::default();
+        let mut rtp = outgoing::RtpClock::default();
+        // Alternating early/late deliveries previously invented capture holes
+        // exceeding the engine's 2 ms device-discontinuity threshold.
+        for block in 0..600u64 {
+            let delay = [0, 6, 3, 8, 1, 0][block as usize % 6];
+            let (captured, skipped) = clock.tick(start + Duration::from_millis(block * 10 + delay));
+            assert_eq!(skipped, 0);
+            writer.begin_capture(captured);
+            for n in 0..480 {
+                assert_eq!(
+                    writer.push(loop_sample(MicrophoneLoop::Chimes, block * 480 + n, &[])),
+                    0
+                );
+            }
+            let (frame, gap) = reader.pop().unwrap();
+            assert!(!gap, "scheduler jitter must not become missing PCM");
+            assert_eq!(frame.position, block * 480);
+            if block % 2 == 0 {
+                assert_eq!(
+                    rtp.next(media.position(frame.at, frame.position)),
+                    (block as u16 / 2 + 1, block as u32 * 480)
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn long_scheduler_stalls_remain_real_capture_gaps_without_unbounded_catchup() {
+        let start = Instant::now();
+        let mut clock = DeviceClock { next: start };
+        let (mut writer, mut reader) = frames::queue();
+        for elapsed in [0, 200, 210] {
+            let now = start + Duration::from_millis(elapsed);
+            let (captured, skipped) = clock.tick(now);
+            assert_eq!(captured, now);
+            assert_eq!(clock.next, now + Duration::from_millis(10));
+            assert_eq!(skipped, if elapsed == 200 { 9120 } else { 0 });
+            writer.begin_capture(captured);
+            for _ in 0..480 {
+                writer.push(0.0);
+            }
+            let (frame, gap) = reader.pop().unwrap();
+            assert_eq!(frame.position, elapsed * 48);
+            assert_eq!(gap, elapsed == 200);
+        }
+    }
+
+    #[test]
+    fn tone_boundaries_fade_to_silence_instead_of_clicking() {
+        for kind in [
+            MicrophoneLoop::Chimes,
+            MicrophoneLoop::Pulse,
+            MicrophoneLoop::Melody,
+        ] {
+            for boundary in (12_000..115_200).step_by(12_000).chain([115_200, 144_000]) {
+                assert!(loop_sample(kind, boundary - 1, &[]).abs() < 0.0001);
+                assert_eq!(loop_sample(kind, boundary, &[]), 0.0);
+                assert!(loop_sample(kind, boundary + 1, &[]).abs() < 0.0001);
+            }
+        }
+    }
     #[test]
     fn predetermined_loops_have_quiet_gaps_and_distinct_bounded_audio() {
         let mut previous = Vec::new();

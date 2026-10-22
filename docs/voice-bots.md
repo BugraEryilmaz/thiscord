@@ -23,6 +23,10 @@ loop, acoustic scenario or the held virtual PTT key. Conditions do not overwrite
 voice-panel edits. Choose speech (the existing synthetic DSP fixture), chimes,
 a low pulse or melody. Speech includes a one-second quiet gap; tones have a quiet
 gap in their three-second cycle. Each bot has its own clock, engine and settings.
+Virtual capture and RTP timing follow sample counts rather than thread wake-up
+times, so ordinary scheduling jitter does not invent missing audio. Catch-up is
+bounded to 40 ms; longer stalls remain real capture gaps in diagnostics. Tone
+endings fade out before each phase reset and quiet gap to avoid source clicks.
 Clean, quiet (8% source level), noise, silence, speaker echo and double-talk
 scenarios are deterministic. Echo returns the bot's actual speaker mix to its
 microphone at 50% level after 80 ms. The normal render-reference/AEC path receives
