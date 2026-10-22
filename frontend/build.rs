@@ -1,7 +1,13 @@
 fn main() {
     translations();
     #[cfg(feature = "desktop")]
-    tauri_build::build();
+    {
+        // Rebuild native resources and generated window/tray images on icon-only changes.
+        for icon in ["icons/icon.png", "icons/icon.ico", "icons/icon.icns"] {
+            println!("cargo:rerun-if-changed={icon}");
+        }
+        tauri_build::build();
+    }
 }
 
 // English source text is the catalog key and fallback. Generate ordinary Rust

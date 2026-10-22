@@ -1,5 +1,9 @@
 # Thiscord
 
+The public welcome page provides Windows, macOS Apple Silicon and Linux downloads
+from the latest GitHub client release, with a responsive introduction and an
+illustrative voice room. See [welcome page build and hosting](docs/welcome.md).
+
 English and Turkish are available from the language selector on the login screen
 and **Settings → Language** (also in the browser admin dashboard). The first launch
 uses the first supported system language, falling back to English. The choice is

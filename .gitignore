@@ -1,6 +1,7 @@
 /target/
 /frontend/dist/
 /frontend/dist-admin/
+/frontend/dist-welcome/
 /frontend/.stage/
 /frontend/gen/
 .env

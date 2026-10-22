@@ -3,6 +3,7 @@
 /* Paths are relative to this stylesheet, including nested Leptos components. */
 @source "./src/**/*.rs";
 @source "./index.html";
+@source "./welcome/index.html";
 
 @theme {
   --color-surface: #202127;
@@ -11,6 +12,12 @@
   --color-rail: #121318;
   --color-sidebar: #191a21;
   --color-dock: #292a32;
+  --color-welcome-cloud: #edf3ff;
+  --color-welcome-cobalt: #2449d8;
+  --color-welcome-ink: #17264a;
+  --color-welcome-lavender: #c9bcf4;
+  --color-welcome-peach: #ffc9ad;
+  --font-welcome: "Bricolage Grotesque", "Trebuchet MS", sans-serif;
 }
 
 /* The account ribbon spans the rail and channel list; content keeps its height. */
@@ -383,3 +390,159 @@ button.stream-live-badge:hover { background: #ef466540; }
 .stream-watcher { display: inline-flex; position: relative; border: 2px solid #202127; border-radius: 50%; background: #30313c; outline-offset: 2px; }
 .stream-watcher + .stream-watcher { margin-left: -6px; }
 .stream-watcher:hover, .stream-watcher:focus-visible { z-index: 1; outline: 2px solid #a4adff; }
+
+/* The public page is scoped so desktop/admin surfaces retain their own theme. */
+@font-face { font-family: "Bricolage Grotesque"; src: url("./welcome-assets/bricolage-grotesque.ttf") format("truetype"); font-weight: 200 800; font-style: normal; font-display: swap; }
+html:has(.welcome-page) { scroll-behavior: smooth; scroll-padding-top: 28px; background: var(--color-welcome-cloud); }
+.welcome-page { background: var(--color-welcome-cloud); color: var(--color-welcome-ink); font-family: "Segoe UI", "Helvetica Neue", sans-serif; font-size: 16px; line-height: 1.6; overflow: clip; }
+.welcome-page h1, .welcome-page h2, .welcome-page h3, .welcome-logo { font-family: var(--font-welcome); }
+.welcome-page a, .welcome-page button { -webkit-tap-highlight-color: transparent; }
+.welcome-page a:focus-visible, .welcome-page button:focus-visible { outline: 3px solid var(--color-welcome-cobalt); outline-offset: 5px; }
+.welcome-wrap { width: min(1200px, calc(100% - 112px)); margin-inline: auto; }
+.welcome-icon { flex-shrink: 0; }
+.welcome-nav { min-height: 108px; }
+.welcome-logo { font-size: 28px; font-weight: 800; letter-spacing: -1.4px; color: var(--color-welcome-cobalt); line-height: 1; }
+.welcome-brand-mark { display: block; width: 35px; height: 35px; flex-shrink: 0; background: url("./welcome-assets/thiscord-mark.png") center / contain no-repeat; }
+.welcome-nav nav { font-size: 14px; font-weight: 600; }
+.welcome-nav nav a, .welcome-footer > a:last-child { display: inline-flex; align-items: center; gap: 7px; }
+.welcome-nav nav a:hover, .welcome-footer > a:last-child:hover { color: var(--color-welcome-cobalt); }
+.welcome-nav .welcome-icon, .welcome-text-link .welcome-icon, .welcome-footer .welcome-icon { width: 16px; height: 16px; }
+.welcome-nav-download { border: 1px solid #2449d838; padding: 10px 17px; border-radius: 10px; }
+.welcome-skip { position: absolute; left: 20px; top: -100px; z-index: 50; padding: 10px 16px; background: white; border-radius: 8px; }
+.welcome-skip:focus { top: 16px; }
+.welcome-hero { display: grid; grid-template-columns: 1fr 1fr; gap: 26px; align-items: center; padding-block: 76px 100px; }
+.welcome-intro { position: relative; z-index: 2; }
+.welcome-intro h1 { font-size: clamp(64px, 6.2vw, 88px); font-weight: 750; letter-spacing: -.05em; line-height: 1.02; color: var(--color-welcome-cobalt); }
+.welcome-lead { font-size: 18px; line-height: 1.75; max-width: 380px; margin-top: 28px; color: #4b5d7c; }
+.welcome-hero-actions { margin-top: 33px; }
+.welcome-primary { display: inline-flex; gap: 12px; align-items: center; justify-content: center; background: var(--color-welcome-cobalt); color: white; border-radius: 12px; padding: 16px 22px; font-size: 15px; font-weight: 650; box-shadow: 0 5px 0 #1836ae; }
+.welcome-primary:hover { background: #1b3dc1; }
+.welcome-primary .welcome-icon { width: 20px; height: 20px; }
+.welcome-text-link { display: inline-flex; align-items: center; gap: 6px; color: var(--color-welcome-cobalt); font-size: 14px; font-weight: 600; text-decoration: underline; text-underline-offset: 5px; text-decoration-color: #2449d84d; }
+.welcome-text-link:hover { text-decoration-color: currentColor; }
+.welcome-platform-note { color: #596987; font-size: 12px; margin-top: 21px; }
+.welcome-room-scene { position: relative; min-width: 0; padding: 24px 0 28px 18px; }
+.welcome-orbit { position: absolute; border: 1px solid #b0bfe9; border-radius: 50%; pointer-events: none; }
+.welcome-orbit-one { inset: -35px -20px 0 -15px; transform: rotate(-24deg); }
+.welcome-orbit-two { inset: -8px -36px -24px 2px; transform: rotate(24deg); }
+.welcome-spark-one { position: absolute; right: -14px; top: -13px; color: var(--color-welcome-cobalt); background: var(--color-welcome-cloud); padding: 8px; transform: rotate(12deg); }
+.welcome-spark-one .welcome-icon { width: 35px; height: 35px; }
+.welcome-room { position: relative; border-radius: 19px; background: white; box-shadow: 0 18px 55px #2449d812, 0 0 0 1px #c6d2ef; transform: rotate(-3deg); overflow: hidden; }
+.welcome-room-header { font-size: 14px; font-weight: 650; padding: 18px 22px; border-bottom: 1px solid #e8edf9; }
+.welcome-room-header > span { display: flex; align-items: center; gap: 9px; }
+.welcome-room-header > .welcome-icon { color: #8b99b6; width: 19px; height: 19px; }
+.welcome-live-dot { display: inline-block; width: 7px; height: 7px; border-radius: 50%; background: #318565; }
+.welcome-room-tabs { padding: 15px 19px 0; }
+.welcome-room-tabs button { flex: 1; padding: 8px 4px; border-radius: 7px; font-size: 12px; color: #586a8b; cursor: pointer; white-space: nowrap; }
+.welcome-room-tabs button[aria-pressed="true"] { color: #2449d8; background: #edf1ff; font-weight: 650; }
+.welcome-room-tabs button:focus-visible { outline-offset: 0; }
+.welcome-room-title { display: flex; align-items: center; gap: 9px; margin: 21px 23px 18px; }
+.welcome-room-title .welcome-icon { width: 19px; height: 19px; color: #5e7094; }
+.welcome-room-title h3 { font-size: 19px; font-weight: 700; letter-spacing: -.5px; }
+.welcome-room-title > span { margin-left: auto; font-size: 11px; color: #607392; }
+.welcome-friends { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 12px; padding: 0 23px 23px; }
+.welcome-avatar { border-radius: 22px; aspect-ratio: 1; overflow: hidden; }
+.welcome-avatar svg { width: 100%; height: 100%; }
+.welcome-avatar-peach { background: var(--color-welcome-peach); border-radius: 48% 48% 22px 22px; }
+.welcome-avatar-lilac { background: var(--color-welcome-lavender); outline: 2px solid #318565; outline-offset: 4px; }
+.welcome-avatar-blue { background: #b8d8f8; border-radius: 48% 48% 22px 22px; }
+.welcome-friend > span { display: flex; align-items: center; justify-content: center; gap: 5px; font-size: 12px; font-weight: 600; padding-top: 11px; }
+.welcome-speaking { color: #257551; font-weight: 800; }
+.welcome-room-controls { padding: 13px 23px; background: #f5f8fe; font-size: 11px; border-top: 1px solid #e8edf9; }
+.welcome-room-controls > span { display: flex; align-items: center; gap: 7px; color: #277252; }
+.welcome-room-controls button { display: flex; align-items: center; gap: 6px; padding: 5px 9px; border: 1px solid #d9e1f0; border-radius: 7px; cursor: pointer; }
+.welcome-room-controls button[aria-pressed="true"] { background: #ffe4db; color: #94351e; }
+.welcome-room-controls .welcome-icon { width: 14px; height: 14px; }
+.welcome-message { position: relative; display: flex; align-items: center; gap: 11px; background: white; margin: 12px 15px 0 -23px; padding: 17px; border-radius: 13px; border: 1px solid #d6def0; box-shadow: 0 10px 30px #2449d80c; transform: rotate(2deg); }
+.welcome-message-avatar { display: grid; place-items: center; align-self: flex-start; flex: 0 0 35px; height: 35px; border-radius: 12px; background: #ffc9ad; color: #943c25; font-weight: 750; font-family: var(--font-welcome); }
+.welcome-message-name { display: flex; align-items: center; gap: 10px; font-size: 12px; font-weight: 650; }
+.welcome-message-name > span { font-size: 10px; font-weight: 400; color: #697c99; }
+.welcome-message p { font-size: 14px; margin-top: 2px; }
+.welcome-message-reaction { margin-left: auto; border-radius: 8px; background: #f0ecff; border: 1px solid #dcd2ff; padding: 2px 7px; color: #7154b6; font-size: 13px; white-space: nowrap; }
+.welcome-room-scene figcaption { position: relative; text-align: center; font-size: 11px; color: #637492; margin-top: 24px; }
+.welcome-about { display: grid; grid-template-columns: 1fr 1fr; gap: 72px; padding-block: 69px 77px; border-top: 1px solid #cbd6ef; }
+.welcome-about-heading h2 { font-size: clamp(32px, 3vw, 42px); font-weight: 700; line-height: 1.13; letter-spacing: -1.6px; margin: 15px 0 18px; }
+.welcome-about-heading > p { max-width: 325px; color: #596987; font-size: 15px; }
+.welcome-small-mark { display: inline-flex; color: #2449d8; }
+.welcome-small-mark .welcome-icon { width: 28px; height: 28px; }
+.welcome-features { display: flex; flex-direction: column; gap: 30px; padding-top: 7px; }
+.welcome-features article { display: flex; gap: 19px; align-items: flex-start; }
+.welcome-features article > .welcome-icon { margin-top: 4px; color: #2449d8; }
+.welcome-features h3 { font-size: 20px; font-weight: 700; letter-spacing: -.4px; }
+.welcome-features p { font-size: 14px; line-height: 1.7; color: #596987; max-width: 400px; margin-top: 6px; }
+.welcome-download-section { background: white; padding-block: 77px 70px; }
+.welcome-download-layout { display: grid; grid-template-columns: 1fr 1.15fr; gap: 84px; }
+.welcome-download-intro h2 { font-size: clamp(36px, 3.3vw, 46px); letter-spacing: -2px; font-weight: 750; line-height: 1.15; }
+.welcome-download-intro > p { color: #596987; margin-top: 16px; }
+.welcome-release-status { color: #596987; font-size: 13px; max-width: 330px; margin: 35px 0 13px; }
+.welcome-retry { color: #2449d8; font-size: 14px; text-decoration: underline; text-underline-offset: 4px; cursor: pointer; }
+.welcome-download-row { display: flex; align-items: center; gap: 16px; min-height: 88px; padding-block: 19px; border-bottom: 1px solid #e3e8f4; }
+.welcome-download-row:first-child { padding-top: 0; min-height: 69px; }
+.welcome-platform-icon { display: grid; place-items: center; flex: 0 0 38px; height: 38px; color: #2449d8; }
+.welcome-download-copy h3 { font-size: 20px; font-weight: 700; letter-spacing: -.5px; line-height: 1.3; }
+.welcome-download-copy p { color: #657592; font-size: 12px; margin-top: 3px; }
+.welcome-download-action { margin-left: auto; text-align: right; }
+.welcome-download-action a { display: inline-flex; gap: 8px; align-items: center; color: #2449d8; font-size: 13px; font-weight: 600; border-radius: 8px; padding: 8px 11px; background: #edf3ff; }
+.welcome-download-action a:hover { background: #e0e8ff; }
+.welcome-download-action .welcome-icon { width: 17px; height: 17px; }
+.welcome-download-pending { font-size: 12px; color: #657592; }
+.welcome-requirements { font-size: 11px; color: #657592; margin-top: 18px; max-width: 440px; line-height: 1.7; }
+.welcome-footer { padding-block: 35px; }
+.welcome-footer .welcome-logo { font-size: 23px; }
+.welcome-footer .welcome-brand-mark { width: 28px; height: 28px; }
+.welcome-footer p { color: #596987; font-size: 13px; }
+.welcome-footer > a:last-child { font-size: 12px; font-weight: 600; }
+@media (min-width: 1450px) { .welcome-hero { gap: 85px; } }
+@media (max-width: 1050px) {
+  .welcome-wrap { width: calc(100% - 64px); }
+  .welcome-hero { gap: 30px; padding-block: 58px 85px; }
+  .welcome-intro h1 { font-size: 67px; }
+  .welcome-lead { font-size: 16px; max-width: 340px; }
+  .welcome-primary { font-size: 13px; padding: 14px 17px; }
+  .welcome-hero-actions { gap: 17px; }
+  .welcome-room-scene { padding-left: 0; }
+  .welcome-friends { gap: 10px; padding-inline: 18px; }
+  .welcome-room-tabs { padding-inline: 10px; }
+  .welcome-room-tabs button { font-size: 10px; }
+  .welcome-message { margin-left: -13px; }
+  .welcome-about, .welcome-download-layout { gap: 40px; }
+}
+@media (max-width: 760px) {
+  .welcome-wrap { width: calc(100% - 40px); }
+  .welcome-nav { min-height: 83px; }
+  .welcome-logo { font-size: 25px; }
+  .welcome-nav nav { gap: 18px; font-size: 12px; }
+  .welcome-nav .welcome-about-link { display: none; }
+  .welcome-nav-download { padding: 8px 11px; }
+  .welcome-nav-download .welcome-icon { display: none; }
+  .welcome-hero { grid-template-columns: 1fr; gap: 60px; padding-block: 40px 55px; }
+  .welcome-intro h1 { font-size: clamp(60px, 11vw, 82px); }
+  .welcome-lead { max-width: 420px; margin-top: 22px; }
+  .welcome-hero-actions { margin-top: 25px; }
+  .welcome-room-scene { width: min(460px, calc(100% - 22px)); margin-inline: auto; padding-top: 10px; }
+  .welcome-room-tabs button { font-size: 12px; }
+  .welcome-room { transform: rotate(-2deg); }
+  .welcome-about { grid-template-columns: 1fr; gap: 31px; padding-block: 42px 48px; }
+  .welcome-about-heading > p { max-width: 400px; }
+  .welcome-about-heading h2 { font-size: 36px; }
+  .welcome-features { gap: 24px; }
+  .welcome-download-section { padding-block: 47px; }
+  .welcome-download-layout { grid-template-columns: 1fr; gap: 35px; }
+  .welcome-release-status { margin-top: 21px; }
+  .welcome-download-row { gap: 11px; }
+  .welcome-download-copy h3 { font-size: 19px; }
+  .welcome-download-action a { font-size: 12px; padding: 8px; }
+  .welcome-footer { gap: 17px; padding-block: 28px; }
+  .welcome-footer p { order: 3; flex-basis: 100%; }
+}
+@media (max-width: 380px) {
+  .welcome-wrap { width: calc(100% - 32px); }
+  .welcome-nav nav { gap: 12px; }
+  .welcome-nav nav > a:nth-child(2) .welcome-icon { display: none; }
+  .welcome-intro h1 { font-size: 56px; }
+  .welcome-room-tabs button { font-size: 10px; }
+  .welcome-download-action a > span { display: none; }
+  .welcome-message { padding: 13px 10px; gap: 8px; }
+  .welcome-message p { font-size: 12px; }
+}
+@media (prefers-reduced-motion: reduce) { html:has(.welcome-page) { scroll-behavior: auto; } }

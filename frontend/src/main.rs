@@ -1,21 +1,29 @@
-#[cfg(target_arch = "wasm32")]
+#[cfg(all(target_arch = "wasm32", not(feature = "welcome")))]
 mod account_client;
-#[cfg(target_arch = "wasm32")]
+#[cfg(all(target_arch = "wasm32", not(feature = "welcome")))]
 mod app;
-#[cfg(target_arch = "wasm32")]
+#[cfg(all(target_arch = "wasm32", not(feature = "welcome")))]
 mod audio_control;
-#[cfg(target_arch = "wasm32")]
+#[cfg(all(target_arch = "wasm32", not(feature = "welcome")))]
 mod avatar;
-#[cfg(target_arch = "wasm32")]
+#[cfg(all(target_arch = "wasm32", not(feature = "welcome")))]
 mod i18n;
-#[cfg(target_arch = "wasm32")]
+#[cfg(all(target_arch = "wasm32", not(feature = "welcome")))]
 mod notification_banner;
-#[cfg(target_arch = "wasm32")]
+#[cfg(all(target_arch = "wasm32", not(feature = "welcome")))]
 mod overlay;
-#[cfg(target_arch = "wasm32")]
+#[cfg(all(target_arch = "wasm32", not(feature = "welcome")))]
 mod performance;
+#[cfg(all(target_arch = "wasm32", feature = "welcome"))]
+mod welcome;
 
-#[cfg(target_arch = "wasm32")]
+#[cfg(all(target_arch = "wasm32", feature = "welcome"))]
+fn main() {
+    console_error_panic_hook::set_once();
+    leptos::mount::mount_to_body(welcome::Welcome);
+}
+
+#[cfg(all(target_arch = "wasm32", not(feature = "welcome")))]
 fn main() {
     console_error_panic_hook::set_once();
     if web_sys::window()
