@@ -29,6 +29,10 @@ pub struct Friend {
     pub person: Person,
     pub relationship: Relationship,
     pub online: bool,
+    /// Incoming unread messages, capped at 100 (display as 99+).
+    /// Defaults to zero when connected to an older server.
+    #[serde(default)]
+    pub unread_count: u32,
 }
 #[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct DirectMessage {
@@ -104,6 +108,11 @@ pub enum Request {
         client_id: ClientMessageId,
         content: String,
     },
+    /// Acknowledge only messages through an actually displayed message.
+    Read {
+        conversation_id: ConversationId,
+        through: MessageId,
+    },
     StartCall {
         conversation_id: ConversationId,
     },
@@ -158,6 +167,30 @@ pub enum ServerEvent {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn unread_counts_are_additive_and_read_commands_are_typed() {
+        let id = "00000000-0000-0000-0000-000000000001";
+        let mut legacy = serde_json::json!({
+            "conversation_id": id,
+            "person": {"id": id, "username": "friend", "display_name": "Friend", "avatar_id": null},
+            "relationship": "friend", "online": false
+        });
+        let friend: Friend = serde_json::from_value(legacy.clone()).unwrap();
+        assert_eq!(friend.unread_count, 0);
+        legacy["unread_count"] = serde_json::json!(100);
+        let friend: Friend = serde_json::from_value(legacy).unwrap();
+        assert_eq!(serde_json::to_value(friend).unwrap()["unread_count"], 100);
+        let wire = serde_json::json!({"action":"read", "conversation_id":id, "through":id});
+        let command: Request = serde_json::from_value(wire.clone()).unwrap();
+        assert_eq!(serde_json::to_value(command).unwrap(), wire);
+        assert!(
+            serde_json::from_value::<Request>(serde_json::json!({
+                "action":"read", "conversation_id":id, "through":"tomorrow"
+            }))
+            .is_err()
+        );
+    }
+
     #[test]
     fn rejects_unbounded_history_and_unknown_fields() {
         let id = "00000000-0000-0000-0000-000000000001";
