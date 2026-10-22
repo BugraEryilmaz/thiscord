@@ -122,6 +122,22 @@ pub(crate) fn token_session(c: &mut PgConnection, token: &str) -> Result<Session
 }
 
 pub(crate) fn authenticate(c: &mut PgConnection, token: &str) -> Result<Session, Failure> {
+    authenticate_token(c, token, true)
+}
+
+/// Recheck a credential already accepted at connection ingress. Rotation must
+/// reject its retained old token, without treating our own background work as
+/// an external replay and revoking the replacement token. New HTTP/socket
+/// credentials must still use `authenticate` (including voice join/resume).
+pub(crate) fn authenticate_retained(c: &mut PgConnection, token: &str) -> Result<Session, Failure> {
+    authenticate_token(c, token, false)
+}
+
+fn authenticate_token(
+    c: &mut PgConnection,
+    token: &str,
+    revoke_replay: bool,
+) -> Result<Session, Failure> {
     if token.len() != 43 {
         return Err(Failure::Unauthorized);
     }
@@ -141,8 +157,10 @@ pub(crate) fn authenticate(c: &mut PgConnection, token: &str) -> Result<Session,
         let Some(session) = sessions.into_iter().next() else { return Ok(None); };
         let active: Vec<bool> = query(c, "SELECT to_jsonb(active) AS data FROM session_tokens WHERE token_hash=$1", &[&hash])?;
         if active != [true] {
-            execute(c, "UPDATE sessions SET revoked=TRUE WHERE id=$1::uuid", &[&session.id.to_string()])?;
-            revocation = Some(access::pause(Scope::Session(session.id)));
+            if revoke_replay {
+                execute(c, "UPDATE sessions SET revoked=TRUE WHERE id=$1::uuid", &[&session.id.to_string()])?;
+                revocation = Some(access::pause(Scope::Session(session.id)));
+            }
             return Ok(None);
         }
         execute(c, "UPDATE sessions SET last_seen_at=now() WHERE id=$1::uuid AND last_seen_at<=now()-interval '5 minutes'", &[&session.id.to_string()])?;

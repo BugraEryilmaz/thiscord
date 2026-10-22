@@ -53,7 +53,7 @@ pub(super) fn authorize(
         {
             return Err(Failure::Forbidden);
         }
-        owner(pool, token)?;
+        owner_check(pool, token, true)?;
     }
     let (mut participant, revision) = store::authorize(pool, token, guild, channel)?;
     if let Some(bot) = bot {
@@ -70,6 +70,10 @@ pub(super) fn authorize(
 }
 
 fn owner(pool: &DbPool, token: &str) -> Result<delivery::Snapshot, Failure> {
+    owner_check(pool, token, false)
+}
+
+fn owner_check(pool: &DbPool, token: &str, retained: bool) -> Result<delivery::Snapshot, Failure> {
     let mut c = auth_store::connection(pool)?;
     let identity = auth_store::token_session(&mut c, token)?;
     let snapshot = delivery::snapshot(
@@ -78,7 +82,11 @@ fn owner(pool: &DbPool, token: &str) -> Result<delivery::Snapshot, Failure> {
     )
     .and_then(|s| s.including(&delivery::session(identity.id)))
     .ok_or(Failure::Forbidden)?;
-    let session = auth_store::authenticate(&mut c, token)?;
+    let session = if retained {
+        auth_store::authenticate_retained(&mut c, token)?
+    } else {
+        auth_store::authenticate(&mut c, token)?
+    };
     c.transaction::<_, Failure, _>(|c| {
         auth_store::read_session(c, token, &session)?;
         if crate::permissions::store::instance(c, session.account_id)?.role != InstanceRole::Owner {

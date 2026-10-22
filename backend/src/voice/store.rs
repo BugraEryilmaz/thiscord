@@ -19,7 +19,10 @@ pub(super) fn authorize(
     channel: ChannelId,
 ) -> Result<(Participant, i64), Failure> {
     let mut c = connection(pool)?;
-    let session = auth::authenticate(&mut c, token)?;
+    // Join/resume ingress authenticates in access::identify; bot HTTP ingress
+    // authenticates in bots::owner. This also runs on access-change wakeups,
+    // which must reject a rotated token without revoking its replacement.
+    let session = auth::authenticate_retained(&mut c, token)?;
     c.transaction(|c| {
         auth::read_session(c, token, &session)?;
         // Direct calls use a dedicated equal scope/room UUID pair. Authorization

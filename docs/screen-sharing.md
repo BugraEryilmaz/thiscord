@@ -777,3 +777,27 @@ HDR/device references: [Microsoft Advanced Color](https://learn.microsoft.com/en
 [WGC compositor timestamps](https://learn.microsoft.com/en-us/uwp/api/windows.graphics.capture.direct3d11captureframe.systemrelativetime),
 [asynchronous MF events](https://learn.microsoft.com/en-us/windows/win32/api/mfobjects/nf-mfobjects-imfmediaeventgenerator-begingetevent),
 [WebRTC statistics](https://www.w3.org/TR/webrtc-stats/).
+
+## October 22, 2026 crash and reconnect investigation
+
+Windows recorded an access violation in desktop 0.1.42 at 18:19 local time
+(16:19 UTC) during screen sharing with test bots. The local dump is
+`%LOCALAPPDATA%/CrashDumps/thiscord-desktop.exe.36300.dmp`; retain it locally,
+outside the repository. Its exception record reports a write to address `0x24`
+at `ntdll.dll+0x1a12d`. Scanning the faulting thread's stack memory found code
+addresses in `RTWorkQ.dll` and NVIDIA's `nvEncMFTH264x.dll`. This suggests the
+Media Foundation hardware encoder path, but a stack-memory scan is not a
+symbolized unwind and does not establish a driver or application teardown bug.
+No encoder fix or native crash reproduction is claimed by this investigation.
+
+The subsequent reconnect failure was reproduced independently in a PostgreSQL
+and real WebRTC regression. Startup rotated the stored session token while old
+voice connections remained on the backend. Their permission-refresh path
+treated its retained old credential as a new replay, revoking the replacement
+token. Existing voice checks now reject stale tokens without replay side effects;
+new HTTP and voice handshakes still enforce replay revocation. The regression
+covers old human/bot shutdown, replacement-token usability, and external replay.
+The client also returns to sign-in after an HTTP-confirmed session rejection.
+Signing out and back in restored the affected installed client. These source
+changes require a backend deployment and client release; neither was performed
+as part of the investigation.
