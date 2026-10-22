@@ -24,7 +24,7 @@ pub fn DiagnosticsSettings(
     });
     view! {
         <section class="space-y-2 rounded-lg border border-white/15 p-4 text-sm text-white/70">
-            <h3 class="font-semibold text-white">"Diagnostic logging"</h3>
+            <h3 class="font-semibold text-white">{move || crate::i18n::t("Diagnostic logging")}</h3>
             <label class="flex items-center gap-3">
                 <input type="checkbox" prop:checked=move || enabled.get()
                     disabled=move || !loaded.get() || busy.get()
@@ -45,18 +45,18 @@ pub fn DiagnosticsSettings(
                             busy.set(false);
                         });
                     }/>
-                "Enable diagnostic logging"
+                {move || crate::i18n::t("Enable diagnostic logging")}
             </label>
-            <p>"Off by default. Saves technical events and device names on the selected computer, up to 6 MiB. No voice recordings, messages or credentials. Your choice is remembered across restarts."</p>
-            <p>"Enable before reproducing a voice issue, then share the audio-diagnostics files if needed. Turning logging off keeps existing files. Instance admins can request these logs from the admin panel while you are connected to voice."</p>
+            <p>{move || crate::i18n::t("Off by default. Saves technical events and device names on the selected computer, up to 6 MiB. No voice recordings, messages or credentials. Your choice is remembered across restarts.")}</p>
+            <p>{move || crate::i18n::t("Enable before reproducing a voice issue, then share the audio-diagnostics files if needed. Turning logging off keeps existing files. Instance admins can request these logs from the admin panel while you are connected to voice.")}</p>
             <Show when=move || !control.is_remote()><button class="underline" on:click=move |_| leptos::task::spawn_local(async move {
                 let result = control.invoke::<()>("audio_diagnostics_folder", json!({})).await;
                 if error.try_get_untracked().is_some() {
                     error.set(result.err().unwrap_or_default());
                 }
-            })>"Open diagnostic logs"</button></Show>
-            <Show when=move || busy.get()><p role="status">"Saving…"</p></Show>
-            <p role="status" class="text-red-300">{move || error.get()}</p>
+            })>{move || crate::i18n::t("Open diagnostic logs")}</button></Show>
+            <Show when=move || busy.get()><p role="status">{move || crate::i18n::t("Saving…")}</p></Show>
+            <p role="status" class="text-red-300">{move || crate::i18n::message(error.get())}</p>
         </section>
     }
 }

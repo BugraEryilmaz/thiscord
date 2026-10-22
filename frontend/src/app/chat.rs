@@ -311,10 +311,10 @@ pub(super) enum ConnectionStatus {
 impl ConnectionStatus {
     pub(super) fn label(self) -> &'static str {
         match self {
-            Self::Connecting => "Connecting…",
-            Self::Connected => "Connected",
-            Self::Reconnecting => "Reconnecting…",
-            Self::Offline => "Offline",
+            Self::Connecting => crate::i18n::t("Connecting…"),
+            Self::Connected => crate::i18n::t("Connected"),
+            Self::Reconnecting => crate::i18n::t("Reconnecting…"),
+            Self::Offline => crate::i18n::t("Offline"),
         }
     }
 }
@@ -386,7 +386,11 @@ pub(super) fn ChatHost(ui: Ui) -> impl IntoView {
                         ui.unread.set(vec![]);
                         if let Some(chat) = ui.active_chat.get_untracked() {
                             chat.online.set(vec![]);
-                            chat.status.set(format!("{error}. Retrying..."));
+                            chat.status.set(thiscord_frontend::localized_format!(
+                                crate::i18n::language(),
+                                "{error}. Retrying...",
+                                error = crate::i18n::message(error)
+                            ));
                         }
                         if js_sys::Date::now() - started > 10000.0 {
                             delay = 1000;
@@ -411,7 +415,7 @@ async fn connected(ui: Ui, token: &str) -> Result<(), String> {
         .unwrap_or("http://localhost:3000")
         .trim_end_matches('/');
     let socket = WebSocket::open(&format!("{}{SOCKET_PATH}", base.replacen("http", "ws", 1)))
-        .map_err(|_| "Cannot open chat connection")?;
+        .map_err(|_| crate::i18n::t("Cannot open chat connection"))?;
     let (mut sink, mut stream) = socket.split();
     sink.send(Message::Text(
         serde_json::to_string(&ClientFrame {
@@ -420,10 +424,10 @@ async fn connected(ui: Ui, token: &str) -> Result<(), String> {
                 token: token.into(),
             },
         })
-        .map_err(|_| "Invalid socket request")?,
+        .map_err(|_| crate::i18n::t("Invalid socket request"))?,
     ))
     .await
-    .map_err(|_| "Connection failed")?;
+    .map_err(|_| crate::i18n::t("Connection failed"))?;
     let authenticated = Rc::new(Cell::new(false));
     let sent = Rc::new(Cell::new(None::<(u64, Subscription)>));
     let reader = async {
@@ -437,8 +441,8 @@ async fn connected(ui: Ui, token: &str) -> Result<(), String> {
                 futures_util::future::Either::Left((Some(Ok(Message::Text(text))), _)) => text,
                 _ => return Err("Connection interrupted".to_string()),
             };
-            let frame: ServerFrame =
-                serde_json::from_str(&text).map_err(|_| "Invalid socket response")?;
+            let frame: ServerFrame = serde_json::from_str(&text)
+                .map_err(|_| crate::i18n::t("Invalid socket response"))?;
             if frame.version != SOCKET_VERSION {
                 return Err("Unsupported socket version".into());
             }
@@ -461,7 +465,7 @@ async fn connected(ui: Ui, token: &str) -> Result<(), String> {
                     if let Some(chat) = ui.active_chat.get_untracked() {
                         return deliver(chat, ServerEvent::Error { error });
                     }
-                    return Err(error.message);
+                    return Err(crate::i18n::api_error(&error));
                 }
                 ServerEvent::Subscribed {
                     subscription,
@@ -575,7 +579,7 @@ async fn connected(ui: Ui, token: &str) -> Result<(), String> {
                             version: SOCKET_VERSION,
                             event,
                         })
-                        .map_err(|_| "Invalid socket request")?,
+                        .map_err(|_| crate::i18n::t("Invalid socket request"))?,
                     ))
                     .await
                     .is_err()
@@ -618,7 +622,7 @@ fn deliver(chat: Chat, event: ServerEvent) -> Result<(), String> {
             chat.pending.set(vec![]);
             chat.reset();
             chat.permissions.set(Permissions::new());
-            return Err(error.message);
+            return Err(crate::i18n::api_error(&error));
         }
         _ => {}
     }
@@ -681,22 +685,22 @@ fn MessageRow(
             } else { "rounded-lg px-3 py-2" }>
                 <div class="flex flex-wrap items-center gap-3">
                     <button class="font-semibold hover:underline" aria-haspopup="menu" data-context-user=move ||message.with(|m|m.author_id.map(|id|id.to_string())) data-context-name=move ||message.with(|m|m.display_name().to_owned())>{move || message.with(|m| m.display_name().to_owned())}</button>
-                    <time class="text-xs text-white/40">{move || message.with(|m| m.created_at.format("%Y-%m-%d %H:%M").to_string())}</time>
-                    <Show when=move || message.with(|m| m.edited_at.is_some() && !m.deleted)><span class="text-xs text-white/40">"edited"</span></Show>
+                    <time class="text-xs text-white/40">{move || message.with(|m| crate::i18n::datetime(m.created_at))}</time>
+                    <Show when=move || message.with(|m| m.edited_at.is_some() && !m.deleted)><span class="text-xs text-white/40">{move ||crate::i18n::t("edited")}</span></Show>
                 </div>
                 <p class="whitespace-pre-wrap break-words text-white/85">{move || message.with(|m| if m.deleted { "Message deleted".into() } else { m.content.clone() })}</p>
                 <Show when=move || message.with(|m| !m.deleted)>
                     <For each=move || message.with(|m| m.attachments.clone()) key=|a| a.id children=move |attachment| view! { <attachments::Card chat message=id attachment/> }/>
                     <div class="flex gap-3 text-xs text-white/50">
                         <Show when=move || own() && chat.permissions.with(|p| p.contains(&Permission::EditOwnMessages))>
-                            <button class="icon-button" aria-label="Edit message" data-tip="Edit" on:click=move |_| {
+                            <button class="icon-button" aria-label=move || crate::i18n::t("Edit message") data-tip=move || crate::i18n::t("Edit") on:click=move |_| {
                                 editing.set(Some(id));
                                 draft.set(message.with_untracked(|m| m.content.clone()));
                             }><Icon kind=Glyph::Edit/></button>
                         </Show>
                         <Show when=move || chat.permissions.with(|p| p.contains(&Permission::ManageMessages) || (own() && p.contains(&Permission::DeleteOwnMessages)))>
-                            <button class="icon-button danger" aria-label="Delete message" data-tip="Delete" on:click=move |_| {
-                                if !window().confirm_with_message("Delete this message?").unwrap_or(false) { return; }
+                            <button class="icon-button danger" aria-label=move || crate::i18n::t("Delete message") data-tip=move || crate::i18n::t("Delete") on:click=move |_| {
+                                if !window().confirm_with_message(crate::i18n::t("Delete this message?")).unwrap_or(false) { return; }
                                 let revision = message.with_untracked(|m| m.revision);
                                 let generation = chat.access_generation.get_untracked();
                                 leptos::task::spawn_local(async move {
@@ -883,11 +887,11 @@ pub(super) fn ChatPanel(ui: Ui, guild: GuildId, channel: ChannelId, name: String
         }
     };
     view! {
-        <section class="flex h-full min-h-0 min-w-0 flex-col overflow-hidden rounded-xl border border-white/10 bg-white/5" aria-label="Text chat"
+        <section class="flex h-full min-h-0 min-w-0 flex-col overflow-hidden rounded-xl border border-white/10 bg-white/5" aria-label=move || crate::i18n::t("Text chat")
             on:dragover=move |ev: leptos::ev::DragEvent| { ev.prevent_default(); if let Some(data) = ev.data_transfer() { data.set_drop_effect(if editing.get_untracked().is_some() { "none" } else { "copy" }); } }
             on:drop=move |ev: leptos::ev::DragEvent| { ev.prevent_default(); if editing.get_untracked().is_none() && let Some(files) = ev.data_transfer().and_then(|d| d.files()) { queue.add(files); } }>
             <attachments::DownloadHost chat/>
-            <header class="shrink-0 border-b border-white/10 p-4"><h2 class="truncate text-lg font-semibold">{format!("# {name}")}</h2><p class="break-words text-xs text-white/60" role="status">{move||chat.status.get()}</p></header>
+            <header class="shrink-0 border-b border-white/10 p-4"><h2 class="truncate text-lg font-semibold">{format!("# {name}")}</h2><p class="break-words text-xs text-white/60" role="status">{move||crate::i18n::message(chat.status.get())}</p></header>
             <div node_ref=chat.list class="min-h-0 flex-1 overflow-x-hidden overflow-y-auto overscroll-contain p-4" style="overflow-anchor: none" on:scroll=move |_| {
                 chat.update_viewport();
                 if !chat.layout_pending.get_untracked() && let Some(node) = chat.list.get_untracked() {
@@ -901,7 +905,7 @@ pub(super) fn ChatPanel(ui: Ui, guild: GuildId, channel: ChannelId, name: String
                 <div class="h-10">
                     <Show when=move || chat.messages.with(|m| m.older.is_some())>
                         <button class="text-sm text-brand underline" disabled=move || chat.history_loading.get()
-                            on:click=move |_| chat.load_older()>"Load older messages"</button>
+                            on:click=move |_| chat.load_older()>{move || crate::i18n::t("Load older messages")}</button>
                     </Show>
                 </div>
                 <ul node_ref=chat.rows>
@@ -925,12 +929,12 @@ pub(super) fn ChatPanel(ui: Ui, guild: GuildId, channel: ChannelId, name: String
                                 <li class="whitespace-pre-wrap break-words text-white/50">
                                     <p>{move || pending.with(|p| p.as_ref().map(|p| p.content.clone()).unwrap_or_default())}</p>
                                     <p class="text-xs">{move || pending.with(|p| p.as_ref().map(|p| p.filenames.join(", ")).unwrap_or_default())}</p>
-                                    {move || if pending.with(|p| p.as_ref().is_some_and(|p| p.failed)) { "Failed to send" } else { "Sending…" }}
+                                    {move || if pending.with(|p| p.as_ref().is_some_and(|p| p.failed)) { crate::i18n::t("Failed to send") } else { crate::i18n::t("Sending…") }}
                                     <Show when=move || pending.with(|p| p.as_ref().is_some_and(|p| p.failed))>
-                                        <button class="icon-button" aria-label="Retry message" data-tip="Retry" on:click=move |_| {
+                                        <button class="icon-button" aria-label=move || crate::i18n::t("Retry message") data-tip=move || crate::i18n::t("Retry") on:click=move |_| {
                                             if let Some(p) = chat.pending.with_untracked(|p| p.iter().find(|p| p.id == id).cloned()) { chat.send(p); }
                                         }><Icon kind=Glyph::Refresh/></button>
-                                        <button class="icon-button" aria-label="Discard message" data-tip="Discard" on:click=move |_| chat.pending.update(|p| p.retain(|p| p.id != id))><Icon kind=Glyph::Trash/></button>
+                                        <button class="icon-button" aria-label=move || crate::i18n::t("Discard message") data-tip=move || crate::i18n::t("Discard") on:click=move |_| chat.pending.update(|p| p.retain(|p| p.id != id))><Icon kind=Glyph::Trash/></button>
                                     </Show>
                                 </li>
                             }
@@ -939,14 +943,14 @@ pub(super) fn ChatPanel(ui: Ui, guild: GuildId, channel: ChannelId, name: String
                 </ul>
             </div>
             <Show when=move || !chat.bottom.get() || chat.messages.with(|m| m.newer)>
-                <button class="bg-brand/20 py-2 text-sm" on:click=move |_| chat.latest()>"Jump to latest / mark read"</button>
+                <button class="bg-brand/20 py-2 text-sm" on:click=move |_| chat.latest()>{move || crate::i18n::t("Jump to latest / mark read")}</button>
             </Show>
             <footer class="shrink-0 space-y-2 border-t border-white/10 p-3">
-                <p class="text-xs text-white/50">{move||format!("Online here: {}",chat.online.with(|members| members.iter().map(|m|m.display_name()).collect::<Vec<_>>().join(", ")))}</p>
-                <p class="min-h-4 text-xs text-white/60" aria-live="polite">{move||{let names=chat.online.with(|members| members.iter().filter(|m|m.typing&&ui.account.with(|a|a.as_ref().is_none_or(|a|a.id!=m.account_id))).map(|m|m.display_name().to_owned()).collect::<Vec<_>>());if names.is_empty(){String::new()}else{format!("{} typing…",names.join(", "))}}}</p>
-                <Show when=move||editing.get().is_some()><button class="text-sm text-brand underline" on:click=move |_|{editing.set(None);draft.set(String::new());}>"Cancel edit"</button></Show>
+                <p class="text-xs text-white/50">{move||thiscord_frontend::localized_format!(crate::i18n::language(), "Online here: {}",chat.online.with(|members| members.iter().map(|m|m.display_name()).collect::<Vec<_>>().join(", ")))}</p>
+                <p class="min-h-4 text-xs text-white/60" aria-live="polite">{move||{let names=chat.online.with(|members| members.iter().filter(|m|m.typing&&ui.account.with(|a|a.as_ref().is_none_or(|a|a.id!=m.account_id))).map(|m|m.display_name().to_owned()).collect::<Vec<_>>());if names.is_empty(){String::new()}else{thiscord_frontend::localized_format!(crate::i18n::language(), "{} typing…",names.join(", "))}}}</p>
+                <Show when=move||editing.get().is_some()><button class="text-sm text-brand underline" on:click=move |_|{editing.set(None);draft.set(String::new());}>{move || crate::i18n::t("Cancel edit")}</button></Show>
                 <attachments::Composer queue editing/>
-                <form class="flex gap-3" on:submit=submit><label class="min-w-0 flex-1"><span class="sr-only">"Message"</span><textarea class="w-full resize-none rounded-lg bg-black/20 p-3 outline-none focus:ring-2 focus:ring-brand" on:keydown=keydown rows="2" maxlength="4000" placeholder="Message this channel · @username to mention" prop:value=move||draft.get() disabled=move||!chat.permissions.with(|p|p.contains(&Permission::SendMessages)) on:input=move|ev|{draft.set(event_target_value(&ev));chat.typing.set(true);}/></label><button class="icon-button self-end bg-brand" aria-label=move ||if editing.get().is_some(){"Save message"}else{"Send message"} data-tip=move ||if editing.get().is_some(){"Save"}else{"Send"} disabled=move||loading.get()||!composer_ready()||!chat.permissions.with(|p|p.contains(&Permission::SendMessages))><Icon kind=Glyph::Send/></button></form>
+                <form class="flex gap-3" on:submit=submit><label class="min-w-0 flex-1"><span class="sr-only">{move || crate::i18n::t("Message")}</span><textarea class="w-full resize-none rounded-lg bg-black/20 p-3 outline-none focus:ring-2 focus:ring-brand" on:keydown=keydown rows="2" maxlength="4000" placeholder=move || crate::i18n::t("Message this channel · @username to mention") prop:value=move||draft.get() disabled=move||!chat.permissions.with(|p|p.contains(&Permission::SendMessages)) on:input=move|ev|{draft.set(event_target_value(&ev));chat.typing.set(true);}/></label><button class="icon-button self-end bg-brand" aria-label=move ||if editing.get().is_some(){crate::i18n::t("Save message")}else{crate::i18n::t("Send message")} data-tip=move ||if editing.get().is_some(){crate::i18n::t("Save")}else{crate::i18n::t("Send")} disabled=move||loading.get()||!composer_ready()||!chat.permissions.with(|p|p.contains(&Permission::SendMessages))><Icon kind=Glyph::Send/></button></form>
             </footer>
         </section>
     }

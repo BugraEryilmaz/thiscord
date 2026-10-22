@@ -81,7 +81,13 @@ async fn apply(ui: Ui, response: AccountResponse) {
             ui.status.set(
                 persistence
                     .err()
-                    .map(|e| format!("Signed in for this window, but {e}"))
+                    .map(|e| {
+                        thiscord_frontend::localized_format!(
+                            crate::i18n::language(),
+                            "Signed in for this window, but {e}",
+                            e = e
+                        )
+                    })
                     .unwrap_or_else(|| "Signed in".into()),
             );
         }
@@ -151,8 +157,10 @@ fn run(ui: Ui, command: AccountRequest) {
                 ui.status.set(error.clone());
                 if matches!(command, AccountRequest::Logout) {
                     clear_local(ui).await;
-                    ui.status.set(format!(
-                        "Cleared this window's session. Server logout was not confirmed: {error}"
+                    ui.status.set(thiscord_frontend::localized_format!(
+                        crate::i18n::language(),
+                        "Cleared this window's session. Server logout was not confirmed: {error}",
+                        error = crate::i18n::message(error)
                     ));
                 }
             }
@@ -164,9 +172,9 @@ fn device_name() -> &'static str {
     if client::desktop() {
         "Thiscord desktop"
     } else if client::admin_page() {
-        "Thiscord admin browser"
+        crate::i18n::t("Thiscord admin browser")
     } else {
-        "Browser preview"
+        crate::i18n::t("Browser preview")
     }
 }
 fn cancel_google(ui: Ui) {
@@ -284,7 +292,7 @@ fn Field(
     #[prop(default = "text")] kind: &'static str,
     #[prop(default = "off")] autocomplete: &'static str,
 ) -> impl IntoView {
-    view! { <label class="block space-y-2 text-sm font-medium"><span>{label}</span>
+    view! { <label class="block space-y-2 text-sm font-medium"><span>{move || crate::i18n::t(label)}</span>
         <input class="w-full rounded-md border border-white/20 bg-black/20 px-3 py-2 text-white focus:border-brand focus:outline-none"
             type=kind autocomplete=autocomplete prop:value=move ||value.get() on:input=move |event|value.set(event_target_value(&event)) />
     </label> }
@@ -308,8 +316,8 @@ fn StatusNotice(ui: Ui) -> impl IntoView {
     view! {
         <Show when=move || visible.get()>
             <div class="fixed bottom-5 right-5 z-50 flex max-w-sm items-start gap-4 rounded-lg border border-white/10 bg-slate-900 p-4 shadow-lg">
-                <p class="text-sm" role="status" aria-live="polite">{move || ui.status.get()}</p>
-                <button class="text-white/60 hover:text-white" aria-label="Dismiss notification" on:click=move |_| visible.set(false)>"×"</button>
+                <p class="text-sm" role="status" aria-live="polite">{move || crate::i18n::message(ui.status.get())}</p>
+                <button class="text-white/60 hover:text-white" aria-label=move || crate::i18n::t("Dismiss notification") on:click=move |_| visible.set(false)>"×"</button>
             </div>
         </Show>
     }
@@ -375,8 +383,10 @@ pub fn App() -> impl IntoView {
                 Ok(Some(token)) => {
                     match client::request(&AccountRequest::Rotate, Some(&token)).await {
                         Ok(response) => apply(ui, response).await,
-                        Err(error) => ui.status.set(format!(
-                            "Could not restore session: {error}. Sign in to continue"
+                        Err(error) => ui.status.set(thiscord_frontend::localized_format!(
+                            crate::i18n::language(),
+                            "Could not restore session: {error}. Sign in to continue",
+                            error = crate::i18n::message(error)
                         )),
                     }
                 }

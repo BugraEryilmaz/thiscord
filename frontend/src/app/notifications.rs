@@ -581,28 +581,28 @@ fn Controls(
     #[prop(default = false)] mentions: bool,
 ) -> impl IntoView {
     view! {<div class="flex flex-wrap items-center gap-4">
-        <label>"Receive "<select class="rounded bg-surface p-2" prop:value=move ||match delivery.get().mode { Mode::All=>"all",Mode::Mentions=>"mentions",Mode::Off=>"off" } disabled=move ||disabled.get() on:change=move |e|change.run(Delivery { mode:match event_target_value(&e).as_str(){"mentions"=>Mode::Mentions,"off"=>Mode::Off,_=>Mode::All},..delivery.get_untracked() })><option value="all">"All activity"</option><Show when=move ||mentions><option value="mentions">"Mentions only"</option></Show><option value="off">"Nothing"</option></select></label>
-        <label class="flex items-center gap-2"><input type="checkbox" prop:checked=move ||delivery.get().sound disabled=move ||disabled.get() on:change=move |e|change.run(Delivery {sound:event_target_checked(&e),..delivery.get_untracked()})/>"Sound"</label>
-        <label class="flex items-center gap-2"><input type="checkbox" prop:checked=move ||delivery.get().banner disabled=move ||disabled.get() on:change=move |e|change.run(Delivery {banner:event_target_checked(&e),..delivery.get_untracked()})/>"Banner"</label>
-        <label class="flex items-center gap-2">"Volume"<input aria-label="Notification volume" type="range" min="0" max="100" prop:value=move ||delivery.get().volume disabled=move ||disabled.get() on:change=move |e|if let Ok(volume)=event_target_value(&e).parse(){change.run(Delivery {volume,..delivery.get_untracked()});}/><span>{move ||format!("{}%",delivery.get().volume)}</span></label>
+        <label>{move || crate::i18n::t("Receive ")}<select class="rounded bg-surface p-2" prop:value=move ||match delivery.get().mode { Mode::All=>"all",Mode::Mentions=>"mentions",Mode::Off=>"off" } disabled=move ||disabled.get() on:change=move |e|change.run(Delivery { mode:match event_target_value(&e).as_str(){"mentions"=>Mode::Mentions,"off"=>Mode::Off,_=>Mode::All},..delivery.get_untracked() })><option value="all">{move || crate::i18n::t("All activity")}</option><Show when=move ||mentions><option value="mentions">{move || crate::i18n::t("Mentions only")}</option></Show><option value="off">{move || crate::i18n::t("Nothing")}</option></select></label>
+        <label class="flex items-center gap-2"><input type="checkbox" prop:checked=move ||delivery.get().sound disabled=move ||disabled.get() on:change=move |e|change.run(Delivery {sound:event_target_checked(&e),..delivery.get_untracked()})/>{move || crate::i18n::t("Sound")}</label>
+        <label class="flex items-center gap-2"><input type="checkbox" prop:checked=move ||delivery.get().banner disabled=move ||disabled.get() on:change=move |e|change.run(Delivery {banner:event_target_checked(&e),..delivery.get_untracked()})/>{move || crate::i18n::t("Banner")}</label>
+        <label class="flex items-center gap-2">{move || crate::i18n::t("Volume")}<input aria-label=move || crate::i18n::t("Notification volume") type="range" min="0" max="100" prop:value=move ||delivery.get().volume disabled=move ||disabled.get() on:change=move |e|if let Ok(volume)=event_target_value(&e).parse(){change.run(Delivery {volume,..delivery.get_untracked()});}/><span>{move ||format!("{}%",delivery.get().volume)}</span></label>
     </div>}
 }
 #[component]
 pub(super) fn Panel(ui: Ui) -> impl IntoView {
     view! {<div class="space-y-4">
-        <div class="settings-card"><p>"Choose what reaches you, and how. Changes are saved to your account and apply to every connected device."</p><p class="text-sm text-white/60">"Right-click a channel or conversation to mute it or choose its own settings. Mentions only is available for server messages."</p><p role="status">{move ||if ui.notifications.connected.get(){"Notifications connected"}else{"Reconnecting notifications…"}}</p><p role="alert" class="text-red-200">{move ||ui.notifications.error.get()}</p></div>
+        <div class="settings-card"><p>{move || crate::i18n::t("Choose what reaches you, and how. Changes are saved to your account and apply to every connected device.")}</p><p class="text-sm text-white/60">{move || crate::i18n::t("Right-click a channel or conversation to mute it or choose its own settings. Mentions only is available for server messages.")}</p><p role="status">{move ||if ui.notifications.connected.get(){crate::i18n::t("Notifications connected")}else{crate::i18n::t("Reconnecting notifications…")}}</p><p role="alert" class="text-red-200">{move ||crate::i18n::message(ui.notifications.error.get())}</p></div>
         {Kind::ALL.into_iter().map(|kind| {
             let delivery=Signal::derive(move ||ui.notifications.preferences.get().defaults.iter().find(|r|r.kind==kind).map_or_else(||Delivery::default_for(kind),|r|r.delivery));
-            view!{<section class="settings-card"><h3 class="mb-3 font-semibold">{kind.label()}</h3><p class="mb-3 text-sm text-white/60">{thiscord_frontend::notification_sound::description(kind)}</p><Controls delivery=delivery mentions=matches!(kind,Kind::GuildMessage) disabled=Signal::derive(move ||ui.notifications.saving.get()||!ui.notifications.connected.get()) change=Callback::new(move |delivery|request(ui,Request::SetDefault {revision:ui.notifications.preferences.get_untracked().revision,kind,delivery}))/><button class="mt-3 text-sm text-brand" on:click=move |_|sound(ui,kind,delivery.get_untracked().volume)>"Preview sound"</button></section>}
+            view!{<section class="settings-card"><h3 class="mb-3 font-semibold">{move ||crate::i18n::t(kind.label())}</h3><p class="mb-3 text-sm text-white/60">{move ||crate::i18n::t(thiscord_frontend::notification_sound::description(kind))}</p><Controls delivery=delivery mentions=matches!(kind,Kind::GuildMessage) disabled=Signal::derive(move ||ui.notifications.saving.get()||!ui.notifications.connected.get()) change=Callback::new(move |delivery|request(ui,Request::SetDefault {revision:ui.notifications.preferences.get_untracked().revision,kind,delivery}))/><button class="mt-3 text-sm text-brand" on:click=move |_|sound(ui,kind,delivery.get_untracked().volume)>{move || crate::i18n::t("Preview sound")}</button></section>}
         }).collect_view()}
-        <section class="settings-card"><h3 class="font-semibold">"Custom subscriptions"</h3><For each=move ||ui.notifications.preferences.get().subscriptions key=|s|format!("{:?}",s.target) children=move |s| {
-            let target=s.target; view!{<button class="mt-2 block text-sm text-brand" on:click=move |_|edit(ui,target,target_name(ui,target))>{target_name(ui,target)}</button>}
+        <section class="settings-card"><h3 class="font-semibold">{move || crate::i18n::t("Custom subscriptions")}</h3><For each=move ||ui.notifications.preferences.get().subscriptions key=|s|format!("{:?}",s.target) children=move |s| {
+            let target=s.target; view!{<button class="mt-2 block text-sm text-brand" on:click=move |_|edit(ui,target,target_name(ui,target))>{move ||target_name(ui,target)}</button>}
         }/></section>
     </div>}
 }
 fn target_name(ui: Ui, target: Target) -> String {
     match target {
-        Target::Updates => "Application updates".into(),
+        Target::Updates => crate::i18n::t("Application updates").into(),
         Target::Conversation { conversation_id } => ui
             .friends
             .snapshot
@@ -611,13 +611,19 @@ fn target_name(ui: Ui, target: Target) -> String {
             .into_iter()
             .find(|f| f.conversation_id == conversation_id)
             .map(|f| f.person.display_name)
-            .unwrap_or_else(|| "Direct conversation".into()),
+            .unwrap_or_else(|| crate::i18n::t("Direct conversation").into()),
         Target::Channel { channel_id, .. } => ui
             .server
             .get_untracked()
             .and_then(|s| s.channels.into_iter().find(|c| c.id == channel_id))
             .map(|c| c.name)
-            .unwrap_or_else(|| format!("Channel {channel_id}")),
+            .unwrap_or_else(|| {
+                thiscord_frontend::localized_format!(
+                    crate::i18n::language(),
+                    "Channel {channel_id}",
+                    channel_id = channel_id
+                )
+            }),
     }
 }
 #[component]
@@ -633,18 +639,18 @@ fn Editor(ui: Ui) -> impl IntoView {
             }
         }
     });
-    view! {<dialog node_ref=dialog class="context-dialog max-w-xl space-y-4" aria-label="Subscription notifications" on:close=move |_|ui.notifications.editor.set(None) on:click=move |e|super::dialog::dismiss_outside(e,dialog,false)>
-        <h2 class="text-xl font-semibold">{move ||ui.notifications.editor.get().map(|(_,name)|format!("Notifications · {name}"))}</h2>
+    view! {<dialog node_ref=dialog class="context-dialog max-w-xl space-y-4" aria-label=move || crate::i18n::t("Subscription notifications") on:close=move |_|ui.notifications.editor.set(None) on:click=move |e|super::dialog::dismiss_outside(e,dialog,false)>
+        <h2 class="text-xl font-semibold">{move ||ui.notifications.editor.get().map(|(_,name)|thiscord_frontend::localized_format!(crate::i18n::language(), "Notifications · {name}", name=name))}</h2>
         {move ||ui.notifications.editor.get().map(|(target,_)| {
             let kind=match target {Target::Conversation {..}=>Kind::DirectMessage,Target::Updates=>Kind::Update,Target::Channel {channel_id,..}=>if ui.server.get_untracked().is_some_and(|s|s.channels.iter().any(|c|c.id==channel_id && c.kind==thiscord_shared::permissions::ChannelKind::Voice)){Kind::VoiceJoin}else{Kind::GuildMessage}};
             let delivery=Signal::derive(move ||{let p=ui.notifications.preferences.get();p.subscriptions.iter().find(|s|s.target==target).and_then(|s|s.delivery).unwrap_or_else(||p.defaults.iter().find(|r|r.kind==kind).map_or_else(||Delivery::default_for(kind),|r|r.delivery))});
-            view!{<p class="text-sm text-white/60">"This override applies to all notifications from this source. Use defaults to keep separate message, call and voice preferences."</p><Controls delivery=delivery mentions=matches!(kind,Kind::GuildMessage) disabled=Signal::derive(move ||ui.notifications.saving.get()||!ui.notifications.connected.get()) change=Callback::new(move |delivery|request(ui,Request::SetSubscription {revision:ui.notifications.preferences.get_untracked().revision,target,delivery:Some(delivery)}))/>
-                <button class="text-brand" disabled=move ||ui.notifications.saving.get() on:click=move |_|request(ui,Request::SetSubscription {revision:ui.notifications.preferences.get_untracked().revision,target,delivery:None})>"Use event defaults"</button>
-                <button class="block text-brand" disabled=move ||ui.notifications.saving.get() on:click=move |_|request(ui,Request::RemoveSubscription {revision:ui.notifications.preferences.get_untracked().revision,target})>"Remove saved settings and mute"</button>
-                <p>{move ||if muted(ui,target){"This subscription is muted."}else{"This subscription is not muted."}}</p>
-                <div class="flex flex-wrap gap-2">{Snooze::OPTIONS.into_iter().map(|(duration,label)|view!{<button class="rounded bg-white/10 px-3 py-2 text-sm" disabled=move ||ui.notifications.saving.get() on:click=move |_|snooze(ui,target,duration)>{label}</button>}).collect_view()}</div>
+            view!{<p class="text-sm text-white/60">{move || crate::i18n::t("This override applies to all notifications from this source. Use defaults to keep separate message, call and voice preferences.")}</p><Controls delivery=delivery mentions=matches!(kind,Kind::GuildMessage) disabled=Signal::derive(move ||ui.notifications.saving.get()||!ui.notifications.connected.get()) change=Callback::new(move |delivery|request(ui,Request::SetSubscription {revision:ui.notifications.preferences.get_untracked().revision,target,delivery:Some(delivery)}))/>
+                <button class="text-brand" disabled=move ||ui.notifications.saving.get() on:click=move |_|request(ui,Request::SetSubscription {revision:ui.notifications.preferences.get_untracked().revision,target,delivery:None})>{move || crate::i18n::t("Use event defaults")}</button>
+                <button class="block text-brand" disabled=move ||ui.notifications.saving.get() on:click=move |_|request(ui,Request::RemoveSubscription {revision:ui.notifications.preferences.get_untracked().revision,target})>{move || crate::i18n::t("Remove saved settings and mute")}</button>
+                <p>{move ||if muted(ui,target){crate::i18n::t("This subscription is muted.")}else{crate::i18n::t("This subscription is not muted.")}}</p>
+                <div class="flex flex-wrap gap-2">{Snooze::OPTIONS.into_iter().map(|(duration,label)|view!{<button class="rounded bg-white/10 px-3 py-2 text-sm" disabled=move ||ui.notifications.saving.get() on:click=move |_|snooze(ui,target,duration)>{move || crate::i18n::snooze_label(duration,label)}</button>}).collect_view()}</div>
             }
         })}
-        <p role="alert" class="text-sm text-red-200">{move ||ui.notifications.error.get()}</p><button class="rounded bg-brand px-4 py-2" on:click=move |_|ui.notifications.editor.set(None)>"Done"</button>
+        <p role="alert" class="text-sm text-red-200">{move ||crate::i18n::message(ui.notifications.error.get())}</p><button class="rounded bg-brand px-4 py-2" on:click=move |_|ui.notifications.editor.set(None)>{move || crate::i18n::t("Done")}</button>
     </dialog>}
 }

@@ -20,9 +20,9 @@ async fn save(ui: Ui, token: String, image_base64: Option<String>) {
                 });
                 ui.status.set(
                     if removing {
-                        "Profile picture removed"
+                        crate::i18n::t("Profile picture removed")
                     } else {
-                        "Profile picture saved"
+                        crate::i18n::t("Profile picture saved")
                     }
                     .into(),
                 );
@@ -72,15 +72,15 @@ pub(super) fn ProfilePicture(ui: Ui) -> impl IntoView {
         });
     };
     view! {
-        <section class="settings-card" aria-label="Profile picture">
-            <h3 class="font-semibold">"Profile picture"</h3>
+        <section class="settings-card" aria-label=move || crate::i18n::t("Profile picture")>
+            <h3 class="font-semibold">{move || crate::i18n::t("Profile picture")}</h3>
             <div class="flex flex-wrap items-center gap-4">
                 <Avatar class="size-20 text-2xl"
                     name=Signal::derive(move || ui.account.get().map(|a| a.display_name).unwrap_or_default())
                     avatar_id=Signal::derive(move || ui.account.get().and_then(|a| a.avatar_id))/>
                 <div class="space-y-2">
                     <label class="block space-y-2 text-sm">
-                        <span class="settings-secondary">"Change picture"</span>
+                        <span class="settings-secondary">{move || crate::i18n::t("Change picture")}</span>
                         <input class="sr-only"
                             type="file" accept="image/png,image/jpeg,image/webp" disabled=move || ui.busy.get()
                             on:change=choose/>
@@ -94,10 +94,10 @@ pub(super) fn ProfilePicture(ui: Ui) -> impl IntoView {
                                 ui.status.set("Removing profile picture…".into());
                                 leptos::task::spawn_local(save(ui, token, None));
                             }
-                        }>"Remove picture"</button>
+                        }>{move || crate::i18n::t("Remove picture")}</button>
                 </div>
             </div>
-            <p class="text-sm text-white/60">"PNG, JPEG or WebP, up to 2 MiB. Pictures are cropped to a square and save immediately."</p>
+            <p class="text-sm text-white/60">{move || crate::i18n::t("PNG, JPEG or WebP, up to 2 MiB. Pictures are cropped to a square and save immediately.")}</p>
         </section>
     }
 }

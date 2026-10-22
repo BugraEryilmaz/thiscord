@@ -1,5 +1,22 @@
 # Thiscord
 
+English and Turkish are available from the language selector on the login screen
+and **Settings → Language** (also in the browser admin dashboard). The first launch
+uses the first supported system language, falling back to English. The choice is
+saved on this device, survives sign-out/restarts, and updates the UI without a
+reload. Overlay and notification windows follow the choice through storage events.
+If local storage is unavailable, switching still works for the current window.
+
+Translations live in `frontend/locales/tr.json`, keyed by English source text.
+The frontend build generates Rust lookups and checked formatting macros, with
+English fallback for unknown text. Use reactive `i18n::t` calls for labels and
+`localized_format!` for text with arguments; keep placeholders intact and pass
+named arguments explicitly. Shared wire codes, user messages/names, credentials,
+and machine-readable diagnostics are never translated. Dates display in the
+selected locale with an explicit UTC zone. Unrecognized server errors use their
+stable wire error code in Turkish and retain the request ID. External provider
+pages, account emails/recovery web pages, and native OS/tray text remain English.
+
 The home screen includes friends, online presence, friend requests, private text
 conversations and one-to-one desktop voice calls. Use **Add friend** in the top
 right to search by part of a display name or username. See [friends and private conversations](docs/friends.md)

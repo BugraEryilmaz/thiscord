@@ -4,6 +4,13 @@ Foundation and account-management code are implemented; provider/platform accept
 checks are tracked below. Work roughly in order; the early
 media compatibility spike can happen before chat to expose platform constraints.
 
+## Languages
+
+- [x] English/Turkish selectors on login, settings and browser administration, system-language detection and device-local persistence.
+- [x] Reactive UI translations, translated wire errors with request IDs, localized UTC dates and catalog/format compatibility tests.
+- [ ] Native Windows/macOS/Linux acceptance of persisted language and overlay/notification-window synchronization during active voice.
+- [ ] Localize account emails/recovery web pages and native tray/OS text.
+
 ## Friends and private conversations
 
 - [x] Friends homepage with online/all/request filters and partial display name/username search.
