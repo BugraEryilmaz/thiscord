@@ -126,6 +126,8 @@ diesel::table! {
         state -> Text,
         created_at -> Timestamptz,
         last_message_at -> Timestamptz,
+        low_read_at -> Nullable<Timestamptz>,
+        high_read_at -> Nullable<Timestamptz>,
     }
 }
 

@@ -1,6 +1,6 @@
 # Friends, private messages and calls
 
-The home button opens Friends, with Online, All and Requests tabs. Add friend in
+The home button opens Friends, with Online, All, Requests and Messages tabs. Add friend in
 the top right searches anywhere within display names and usernames, ignoring case
 (2–64 Unicode characters after trimming, no control characters, up to 20 results).
 Spaces, accents and punctuation are accepted; `%` and `_` match literally.
@@ -12,6 +12,11 @@ a verified email. The recipient explicitly accepts; crossing requests do not
 silently establish a friendship. Requests can be declined or cancelled, and either
 friend can remove the relationship. Each account can have at most 200 accepted or
 pending relationships, enforced while locking both accounts in UUID order.
+The Home bubble totals incoming requests and unread direct messages. Requests
+shows incoming requests only (outgoing requests still appear in the list).
+Messages, the direct-message sidebar and individual conversations show unread
+message bubbles. Zero counts are hidden; counts above 99 display `99+`.
+Muting sounds/banners does not hide unread counts.
 Right-click a voice participant, a message author's name, or a person in the home
 friend list to add or unfriend them. Pending requests offer Accept/Decline or
 Cancel instead; removing a friend requires confirmation. These actions follow
@@ -29,7 +34,7 @@ connections are closed after 35 seconds. This remains a single-backend-process d
 `shared/src/friends.rs` owns the request/response and version-1 socket contracts.
 `POST /api/v1/friends` uses bearer authentication and the usual request-correlated
 error envelope. Commands cover search, add, accept, remove, history, send, start
-call, accept call and end call. Input bodies are limited to 32 KiB. Blocking workers
+call, accept call, end call and read acknowledgements. Input bodies are limited to 32 KiB. Blocking workers
 are bounded at eight; per-account HTTP budgets are 180 requests and 30 writes per
 minute. Every action revalidates the session inside its transaction.
 
@@ -48,6 +53,20 @@ lock. History uses the shared reverse `(created_at,id)` keyset cursor, defaults 
 50-message snapshot, and pages older history separately. Jump to latest restores
 the current snapshot. Failed sends retain their UUID and content for explicit retry;
 drafts and retries are in memory for the open conversation.
+Each friendship stores separate read timestamps for its two participants. The
+client acknowledges a displayed message ID only while the conversation is focused,
+at the bottom of its latest history, and settings are closed. Merely selecting a
+conversation on the socket or fetching history does not mark it read. The server
+checks accepted membership, resolves that ID within the conversation and advances
+only the caller's position under the relationship lock. Delayed/repeated reads
+cannot move the position backward or consume newer messages. Read acknowledgements
+use the ordinary HTTP request budget, not the message-send write budget.
+Snapshots count incoming messages after that position using an indexed range
+limited to 100 rows per conversation. Own messages and pending relationships never
+contribute. Read state persists across devices/reconnects and follows the existing
+one-second snapshot refresh. Older servers default to zero counts on new clients.
+The read-state migration treats retained messages as unread until viewed; rollback
+discards read positions and the new index while retaining messages/friendships.
 Enter sends the draft; Shift+Enter inserts a newline. IME confirmation and held-key
 repeats do not send messages, and sending waits until the friends socket is connected.
 
@@ -120,6 +139,6 @@ these ignored database tests with `--include-ignored`, plus WASM and native buil
 
 Physical microphone/speaker acceptance on Windows/macOS/Linux remains necessary.
 Direct-message and incoming-call alerts use the separate server subscription
-stream; see [notifications.md](notifications.md). Unread DM badges, typing
+stream; see [notifications.md](notifications.md). Typing
 indicators, message editing/deletion, blocking/reporting and cross-process
 presence/fanout are not implemented.

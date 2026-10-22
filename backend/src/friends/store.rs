@@ -69,7 +69,11 @@ pub(super) fn dispatch(pool: &DbPool, token: &str, request: Request) -> Result<R
     let session = auth::authenticate(&mut c, token)?;
     let actor = session.account_id;
     drop(c);
-    let write = !matches!(request, Request::Search { .. } | Request::History { .. });
+    // Read acknowledgements use the ordinary request budget, not the send budget.
+    let write = !matches!(
+        request,
+        Request::Search { .. } | Request::History { .. } | Request::Read { .. }
+    );
     auth::rate_limit(pool, &format!("friends:{actor}"), None, write)?;
     let mut c = connection(pool)?;
     let mut guards = vec![];
@@ -125,6 +129,14 @@ pub(super) fn dispatch(pool: &DbPool, token: &str, request: Request) -> Result<R
             Request::History {conversation_id,before,limit} => {
                 pair(c,conversation_id,actor,false)?;
                 Ok(Response::History {history:history(c,conversation_id,before,limit)?})
+            }
+            Request::Read {conversation_id,through} => {
+                pair(c,conversation_id,actor,true)?;
+                // Resolve the position on the server. A foreign ID cannot advance
+                // the cursor, and delayed acknowledgements never move it back.
+                let at: thiscord_shared::Timestamp = query(c,"SELECT to_jsonb(created_at) AS data FROM direct_messages WHERE conversation_id=$1::uuid AND id=$2::uuid", &[&conversation_id.to_string(),&through.to_string()])?.pop().ok_or(Failure::Invalid("Message does not belong to this conversation"))?;
+                execute(c,"UPDATE friendships SET low_read_at=CASE WHEN low_id=$2::uuid THEN GREATEST(low_read_at,$3::timestamptz) ELSE low_read_at END,high_read_at=CASE WHEN high_id=$2::uuid THEN GREATEST(high_read_at,$3::timestamptz) ELSE high_read_at END WHERE id=$1::uuid", &[&conversation_id.to_string(),&actor.to_string(),&at.to_rfc3339()])?;
+                Ok(Response::Done)
             }
             Request::Send {conversation_id,client_id,content} => {
                 let p = pair(c,conversation_id,actor,true)?;
@@ -269,7 +281,7 @@ pub(super) fn snapshot(
         let actor=session.account_id;
         // Lock relationships once, then load public profiles in one batch.
         execute(c,"SELECT id FROM friendships WHERE $1::uuid IN (low_id,high_id) AND state<>'removed' ORDER BY id FOR SHARE", &[&actor.to_string()])?;
-        let mut friends:Vec<Friend>=query(c,"SELECT jsonb_build_object('conversation_id',f.id,'person',jsonb_build_object('id',a.id,'username',a.username,'display_name',a.display_name,'avatar_id',v.id),'relationship',CASE WHEN f.state='accepted' THEN 'friend' WHEN f.requester=$1::uuid THEN 'outgoing' ELSE 'incoming' END,'online',false) AS data FROM friendships f JOIN accounts a ON a.id=CASE WHEN f.low_id=$1::uuid THEN f.high_id ELSE f.low_id END LEFT JOIN account_avatars v ON v.account_id=a.id WHERE $1::uuid IN (f.low_id,f.high_id) AND f.state<>'removed' ORDER BY a.username,a.id", &[&actor.to_string()])?;
+        let mut friends:Vec<Friend>=query(c,"SELECT jsonb_build_object('conversation_id',f.id,'person',jsonb_build_object('id',a.id,'username',a.username,'display_name',a.display_name,'avatar_id',v.id),'relationship',CASE WHEN f.state='accepted' THEN 'friend' WHEN f.requester=$1::uuid THEN 'outgoing' ELSE 'incoming' END,'online',false,'unread_count',CASE WHEN f.state='accepted' THEN (SELECT count(*) FROM (SELECT 1 FROM direct_messages m WHERE m.conversation_id=f.id AND m.author_id=a.id AND m.created_at>COALESCE(CASE WHEN f.low_id=$1::uuid THEN f.low_read_at ELSE f.high_read_at END,'-infinity'::timestamptz) LIMIT 100) unread) ELSE 0 END) AS data FROM friendships f JOIN accounts a ON a.id=CASE WHEN f.low_id=$1::uuid THEN f.high_id ELSE f.low_id END LEFT JOIN account_avatars v ON v.account_id=a.id WHERE $1::uuid IN (f.low_id,f.high_id) AND f.state<>'removed' ORDER BY a.username,a.id", &[&actor.to_string()])?;
         for friend in &mut friends { friend.online=friend.relationship==Relationship::Friend && super::online(friend.person.id); }
         let selected=selected.filter(|id|friends.iter().any(|f|f.conversation_id==*id && f.relationship==Relationship::Friend));
         let history=selected.map(|id|history(c,id,None,Default::default())).transpose()?;

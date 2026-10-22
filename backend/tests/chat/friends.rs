@@ -179,6 +179,182 @@ async fn snapshot(socket: &mut Socket, predicate: impl Fn(&Value) -> bool) -> Va
     .await
     .expect("expected private snapshot")
 }
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[ignore = "requires TEST_DATABASE_URL"]
+async fn unread_messages_persist_and_reads_are_scoped_monotonic_and_bounded() {
+    let _lock = TEST_LOCK.lock().await;
+    let db = database();
+    let (alice_id, alice) = user(&db, "unread_alice");
+    let (bob_id, bob) = user(&db, "unread_bob");
+    let (_, outsider) = user(&db, "unread_outsider");
+    let app = api::router(
+        Some(db.pool.clone()),
+        vec!["http://localhost:1420".parse().unwrap()],
+    );
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let address = listener.local_addr().unwrap();
+    let service = app.clone();
+    let server = tokio::spawn(async move { axum::serve(listener, service).await.unwrap() });
+    social(
+        &app,
+        &alice,
+        json!({"action":"add","account_id":bob_id}),
+        StatusCode::OK,
+    )
+    .await;
+    let mut b = socket(address, &bob).await;
+    let pending = snapshot(&mut b, |_| true).await;
+    let conversation = pending["friends"][0]["conversation_id"].clone();
+    assert_eq!(pending["friends"][0]["unread_count"], 0);
+    social(
+        &app,
+        &bob,
+        json!({"action":"read","conversation_id":conversation,"through":Uuid::new_v4()}),
+        StatusCode::FORBIDDEN,
+    )
+    .await;
+    social(
+        &app,
+        &bob,
+        json!({"action":"accept","account_id":alice_id}),
+        StatusCode::OK,
+    )
+    .await;
+    let send = json!({"action":"send","conversation_id":conversation,"client_id":Uuid::new_v4(),"content":"First unread"});
+    let first = social(&app, &alice, send.clone(), StatusCode::OK).await["message"]["id"].clone();
+    social(&app, &alice, send, StatusCode::OK).await; // Deduplicated sends count once.
+    let second = social(&app, &alice, json!({"action":"send","conversation_id":conversation,"client_id":Uuid::new_v4(),"content":"Second unread"}), StatusCode::OK).await["message"]["id"].clone();
+    snapshot(&mut b, |s| s["friends"][0]["unread_count"] == 2).await;
+    let mut a = socket(address, &alice).await;
+    assert_eq!(
+        snapshot(&mut a, |_| true).await["friends"][0]["unread_count"],
+        0
+    );
+    let mut other_device = socket(address, &bob).await;
+    assert_eq!(
+        snapshot(&mut other_device, |_| true).await["friends"][0]["unread_count"],
+        2
+    );
+
+    // History and socket selection do not acknowledge messages on their own.
+    social(
+        &app,
+        &bob,
+        json!({"action":"history","conversation_id":conversation}),
+        StatusCode::OK,
+    )
+    .await;
+    event(
+        &mut b,
+        json!({"type":"select","conversation_id":conversation}),
+    )
+    .await;
+    assert_eq!(
+        snapshot(&mut b, |s| s["conversation_id"] == conversation).await["friends"][0]["unread_count"],
+        2
+    );
+    let read_first = json!({"action":"read","conversation_id":conversation,"through":first});
+    social(&app, &outsider, read_first.clone(), StatusCode::FORBIDDEN).await;
+    social(
+        &app,
+        &bob,
+        json!({"action":"read","conversation_id":conversation,"through":Uuid::new_v4()}),
+        StatusCode::BAD_REQUEST,
+    )
+    .await;
+    social(&app, &bob, read_first.clone(), StatusCode::OK).await;
+    snapshot(&mut b, |s| s["friends"][0]["unread_count"] == 1).await;
+    snapshot(&mut other_device, |s| s["friends"][0]["unread_count"] == 1).await;
+    let read_second = json!({"action":"read","conversation_id":conversation,"through":second});
+    social(&app, &bob, read_second.clone(), StatusCode::OK).await;
+    social(&app, &bob, read_first, StatusCode::OK).await; // Delayed older read cannot regress.
+    snapshot(&mut b, |s| s["friends"][0]["unread_count"] == 0).await;
+    b.close(None).await.unwrap();
+    let mut b = socket(address, &bob).await;
+    assert_eq!(
+        snapshot(&mut b, |_| true).await["friends"][0]["unread_count"],
+        0
+    );
+    let own = social(&app, &bob, json!({"action":"send","conversation_id":conversation,"client_id":Uuid::new_v4(),"content":"Reply"}), StatusCode::OK).await["message"]["id"].clone();
+    snapshot(&mut a, |s| s["friends"][0]["unread_count"] == 1).await;
+    social(
+        &app,
+        &alice,
+        json!({"action":"read","conversation_id":conversation,"through":own}),
+        StatusCode::OK,
+    )
+    .await;
+    snapshot(&mut a, |s| s["friends"][0]["unread_count"] == 0).await;
+
+    // Seed a large backlog without exceeding the send-rate budget.
+    diesel::sql_query("INSERT INTO direct_messages(id,conversation_id,author_id,client_id,content,created_at) SELECT gen_random_uuid(),$1::uuid,$2::uuid,gen_random_uuid(),'Backlog',clock_timestamp()+n*interval '1 microsecond' FROM generate_series(1,105) n")
+        .bind::<Text,_>(conversation.as_str().unwrap()).bind::<Text,_>(alice_id.to_string())
+        .execute(&mut db.pool.get().unwrap()).unwrap();
+    snapshot(&mut b, |s| s["friends"][0]["unread_count"] == 100).await;
+    social(&app, &bob, read_second.clone(), StatusCode::OK).await;
+    let history = social(
+        &app,
+        &bob,
+        json!({"action":"history","conversation_id":conversation}),
+        StatusCode::OK,
+    )
+    .await;
+    let latest = history["history"]["messages"]
+        .as_array()
+        .unwrap()
+        .last()
+        .unwrap()["id"]
+        .clone();
+    social(
+        &app,
+        &bob,
+        json!({"action":"read","conversation_id":conversation,"through":latest}),
+        StatusCode::OK,
+    )
+    .await;
+    snapshot(&mut b, |s| s["friends"][0]["unread_count"] == 0).await;
+
+    social(
+        &app,
+        &alice,
+        json!({"action":"remove","account_id":bob_id}),
+        StatusCode::OK,
+    )
+    .await;
+    social(&app, &bob, read_second, StatusCode::FORBIDDEN).await;
+    social(
+        &app,
+        &alice,
+        json!({"action":"add","account_id":bob_id}),
+        StatusCode::OK,
+    )
+    .await;
+    let mut pending_again = socket(address, &bob).await;
+    assert_eq!(
+        snapshot(&mut pending_again, |_| true).await["friends"][0]["unread_count"],
+        0
+    );
+    social(
+        &app,
+        &bob,
+        json!({"action":"accept","account_id":alice_id}),
+        StatusCode::OK,
+    )
+    .await;
+    assert_eq!(
+        snapshot(&mut pending_again, |s| s["friends"][0]["relationship"]
+            == "friend")
+        .await["friends"][0]["unread_count"],
+        0
+    );
+    pending_again.close(None).await.unwrap();
+    other_device.close(None).await.ok();
+    a.close(None).await.ok();
+    b.close(None).await.ok();
+    server.abort();
+}
+
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 #[ignore = "requires TEST_DATABASE_URL"]
 async fn requests_private_history_calls_presence_and_revocation() {
