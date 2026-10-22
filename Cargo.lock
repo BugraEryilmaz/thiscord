@@ -7783,6 +7783,7 @@ dependencies = [
  "image",
  "lettre",
  "openidconnect",
+ "opus",
  "rand 0.8.8",
  "rcgen",
  "reqwest 0.12.28",

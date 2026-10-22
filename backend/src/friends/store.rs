@@ -301,6 +301,7 @@ pub(crate) fn voice(
     let p:Person=query(c,"SELECT jsonb_build_object('id',a.id,'username',a.username,'display_name',a.display_name,'avatar_id',v.id) AS data FROM accounts a LEFT JOIN account_avatars v ON v.account_id=a.id WHERE a.id=$1::uuid", &[&actor.to_string()])?.pop().ok_or(Failure::Forbidden)?;
     Ok((
         Participant {
+            test_bot: false,
             account_id: actor,
             username: p.username,
             display_name: p.display_name,

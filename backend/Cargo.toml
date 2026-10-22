@@ -43,6 +43,7 @@ tungstenite = { version = "0.29", default-features = false, features = ["handsha
 webrtc = "0.21.0"
 rtc = "0.21.0"
 async-trait = "0.1"
+opus = "0.4.0"
 hmac = "0.12"
 sha1 = "0.10"
 
