@@ -7782,6 +7782,7 @@ dependencies = [
  "hmac",
  "image",
  "lettre",
+ "openh264",
  "openidconnect",
  "opus",
  "rand 0.8.8",

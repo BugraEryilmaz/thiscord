@@ -45,6 +45,7 @@ rtc = "0.21.0"
 async-trait = "0.1"
 futures-util = { version = "0.3", features = ["sink"] }
 opus = "0.4.0"
+openh264 = "=0.9.8"
 hmac = "0.12"
 sha1 = "0.10"
 

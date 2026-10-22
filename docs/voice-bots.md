@@ -13,7 +13,10 @@ participant table as the instance owner. Save changes to microphone gain, output
 volume, mute/deafen, loop or connection profile without reconnecting. Output
 volume affects the bot's silent decoded output and its numeric peak meter; the
 ordinary participant volume slider controls what **you** hear. Refresh retrieves
-current settings and counters. Concurrent edits return a conflict; refresh before
+current settings and counters, including received shared audio and per-camera/screen
+resolution, decoded frames, discarded/missing packets, decode errors, keyframe
+requests and requested bitrate. Video counters reset when the viewed stream set
+or connection profile changes. Concurrent edits return a conflict; refresh before
 retrying. Remove stops the peer and releases its channel slot.
 
 The three original synthesized loops are chimes, a low pulse and a melody, each
@@ -22,27 +25,55 @@ audio. The add form cycles through loop choices after each addition. Multiple
 bots may use the same loop; each has a separate identity, media clock and codec.
 
 Connection presets apply independently to the microphone uplink and the aggregate
-incoming audio downlink:
+incoming audio downlink. A separate aggregate video downlink uses the same
+delay/jitter/loss, with these budgets:
 
-- Good: 96 kbit/s media-link budget, 20 ms one-way delay, no injected loss.
-- Low bandwidth: 24 kbit/s, 120–150 ms delay, 16 kbit/s Opus encoding.
-- High packet loss: 96 kbit/s, 60–80 ms delay, 25% deterministic packet loss.
-- Unstable: 48 kbit/s, 100–200 ms delay, 10% deterministic packet loss.
+- Good: 96 kbit/s media-link budget, 20 ms one-way delay, no injected loss; 32 Mbit/s video.
+- Low bandwidth: 24 kbit/s, 120–150 ms delay, 16 kbit/s Opus encoding; 500 kbit/s video.
+- High packet loss: 96 kbit/s, 60–80 ms delay, 25% deterministic packet loss; 32 Mbit/s video.
+- Unstable: 48 kbit/s, 100–200 ms delay, 10% deterministic packet loss; 2 Mbit/s video.
 
 Other presets encode at 32 kbit/s. Budgets charge payload plus 60 bytes per packet
 and permit at most 100 ms of burst credit; bandwidth exhaustion adds loss. Delay
-queues hold at most 20 packets. Variable delays can reorder packets. This is a
+queues hold at most 20 audio or 512 video packets (each at most 1500 payload
+bytes). Variable delays can reorder packets. This is a
 media-packet simulator around a real local WebRTC connection, not an OS network
 emulator. ICE/DTLS/RTCP and signaling are not impaired. Admin ICE RTT therefore
 describes the local transport, not the configured media delay. This does not
 test physical microphones, NAT, TURN reachability, an ISP or native desktop DSP.
 
 The bot sends valid mono 48 kHz Opus over DTLS-SRTP through the existing SFU and
-receives/decrypts/decodes other speakers into a silent output. Codec work runs on
-a bounded per-bot blocking worker; PCM never enters HTTP or signaling. Bots have
-no hardware devices, acoustic echo processing, camera, screen publisher, text
-chat, friendship or login account. Only implemented audio controls are shown.
-They use the ordinary voice permission, mute/deafen and forwarding fences.
+receives/decrypts/decodes other speakers and stereo shared audio into a silent
+output. Every bot automatically watches all active remote cameras and screen
+shares through the normal SFU viewer subscriptions. It appears in the publisher's
+viewer list and renews leases every 500 ms. It receives H.264 over DTLS-SRTP,
+reassembles and software-decodes complete video frames with OpenH264, then discards
+the pixels. Nothing is recorded or sent through HTTP/signaling except counters.
+Deafen ends viewing and shared-audio reception; un-deafen resumes current streams.
+Mute only stops the bot's microphone.
+
+Video receive work uses a separate bounded worker per bot so it cannot block the
+audio codec. Input and decode queues hold at most 1024 and 512 RTP packets.
+Per-stream reordering holds at most 256 packets for 40 ms; incomplete, malformed
+or stale frames are discarded, with a 250 ms assembly/decode-queue age limit.
+The desktop and bot receivers share the same portable 4 MiB frame bound, baseline
+SPS dimension/reference-memory checks and bitrate controller. Each decoder is
+scoped to a publisher, slot and stream epoch. Changing subscriptions discards
+queued work and releases previous decoders, including when a share stops or a
+participant leaves. Failed recovery requests a fresh keyframe at most every
+500 ms per stream. Loss, stalled decoding and CPU pressure lower viewer bitrate;
+sustained healthy reception lets it recover. Initial per-stream budgets divide
+the profile's aggregate video allowance (with the protocol's 200 kbit/s minimum).
+Shared-audio packets remain under the aggregate audio budget.
+
+Bots exercise the real receiving protocol but are headless: they do not exercise
+the native WebView/GPU renderer, physical devices or acoustic echo processing.
+They do not publish cameras/screens, send text, manage friendships or have login
+accounts. Video decoding consumes backend CPU and memory; multiple high-resolution
+streams and bots can be expensive. Normal voice permission, mute/deafen, viewer
+lease and forwarding fences still apply. The backend now compiles the same pinned
+OpenH264 0.9.8 source dependency as the desktop client, requiring a C++ toolchain;
+NASM enables x86 optimizations and is optional (the crate has a C++ fallback).
 
 `POST /api/v1/voice/bots` uses the shared `voice_bots` commands and normal API
 error/request-ID envelope. Each command reauthenticates and checks current
@@ -65,7 +96,11 @@ human can test with seven bots. Normal public voice connection limits are unchan
 Verification covers decodable distinct loops, bounded deterministic impairment,
 owner/admin/member authorization, empty-channel admission, real encrypted delivery,
 downlink decoding, isolation, capacity, stale edits, invalid levels, mute/unmute,
-removal, ownership transfer, Speak revocation and logout. Run:
+removal, ownership transfer, Speak revocation and logout. Video tests cover real
+camera/screen/shared-audio delivery to simultaneous good/slow/lossy bots, viewer
+lease renewal, bitrate reduction, keyframe feedback, deafen, stream restart,
+logout, stale owner/epoch rejection, reorder/wrap/loss recovery, malformed SPS
+and bounded queues. Run:
 
 ```sh
 cargo test -p thiscord-shared --locked voice_bots

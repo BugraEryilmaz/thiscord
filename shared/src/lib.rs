@@ -8,6 +8,7 @@ pub mod camera;
 pub mod chat;
 pub mod error;
 pub mod friends;
+pub mod h264;
 pub mod ids;
 pub mod notifications;
 pub mod overlay;
@@ -16,6 +17,7 @@ pub mod performance;
 pub mod permissions;
 pub mod screen;
 pub mod validation;
+pub mod video_feedback;
 pub mod voice_bots;
 
 pub use error::{ApiError, ErrorCode};

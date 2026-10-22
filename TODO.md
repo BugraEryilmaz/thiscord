@@ -319,6 +319,8 @@ speaker isolation and physical acoustic acceptance remain future work.
 
 - [x] Instance-owner voice test bots from channel context menus, distinct Opus loops,
   multiple real WebRTC peers, connection profiles, admin audio controls and revocation tests.
+- [x] Headless bot camera/screen/shared-audio reception, bounded H.264 decoding,
+  normal viewer leases, recovery/bitrate feedback and owner diagnostics.
 - [ ] Physically listen to bot profiles and verify menus/admin edits on Windows/macOS/Linux.
 
 - [x] Join/leave and move yourself between voice channels; live participant list.

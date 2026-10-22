@@ -1,4 +1,10 @@
 {
+  "Camera": "Kamera",
+  "Screen share": "Ekran paylaşımı",
+  "Audio {} kbit/s · video {} kbit/s · {}–{} ms one way · {}% loss": "Ses {} kbit/sn · video {} kbit/sn · tek yön {}–{} ms · %{} kayıp",
+  "Connection profiles simulate media bandwidth, delay, jitter and packet loss in both directions. Bots automatically watch cameras and screen shares, including shared audio. Refresh to see decoded video frames. They decode media without speakers or a display.": "Bağlantı profilleri her iki yönde medya bant genişliğini, gecikmeyi, gecikme değişkenliğini ve paket kaybını simüle eder. Botlar, paylaşılan ses dahil kameraları ve ekran paylaşımlarını otomatik olarak izler. Çözülen video karelerini görmek için yenileyin. Medyayı hoparlör veya ekran kullanmadan çözerler.",
+  "Shared audio: {} decoded packets": "Paylaşılan ses: {} paket çözüldü",
+  "{} · slot {} · {}×{} · {} decoded frames · {} dropped / {} missing packets · {} decode errors · {} keyframe requests · {} kbit/s": "{} · yuva {} · {}×{} · {} kare çözüldü · {} atılan / {} eksik paket · {} çözme hatası · {} anahtar kare isteği · {} kbit/sn",
   " Deafen": " Sağırlaştır",
   " Mute microphone": " Mikrofonu sustur",
   " · Owner": " · Sahip",
