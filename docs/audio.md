@@ -1039,13 +1039,21 @@ Missing/revoked/replaced sessions and exhausted recovery end the call and requir
 an explicit join. In particular, an unavailable session must not automatically
 rejoin: a moderator may have disconnected it while signaling was lost.
 
-ICE/media-write failures still use full reconnection with fresh authorization,
+ICE/media-write failures and legacy-source slot compatibility transitions use
+full reconnection with fresh authorization,
 offers and ICE/TURN configuration. The old media and devices close before a new
 peer starts. A recoverable ICE Disconnected state retains the existing peer.
 Full retries use 1/2/4/8/16/30-second backoff plus up to 500 ms jitter; 30 seconds
 of connected audio resets the backoff. Authentication, policy/protocol errors and
 replacement notifications are terminal. Older servers without a resume capability
 retain the previous full-reconnection behavior. Deploy the backend first.
+
+When an older-protocol participant reuses a slot previously occupied by a modern
+source, updated desktops recover automatically instead of requiring a manual join.
+This briefly interrupts audio and stops local screen/camera sharing. Live source
+fences are retained until the old transport closes; the fresh session restores
+legacy Opus playback. It does not relax permission checks or automatically retry
+moderator disconnects. See [packet redundancy](packet-redundancy.md#wire-profile-and-fallback).
 
 Explicit Disconnect/logout closes signaling with Leave and a bounded close
 handshake. A new authorized Join for the same account and channel still replaces
@@ -1144,6 +1152,11 @@ library error strings can contain model paths or other private data.
 At backend log level `info`, each upgraded voice socket records start/end events,
 stage, reason, message counts and last-receive age, plus peer state changes and
 membership release. The first failure survives subsequent cleanup errors. Reasons
+for desktop compatibility recovery include `legacy_source_replacement` in
+`voice_attempt_finished` and `voice_retry_wait`. Backend `voice source negotiated`
+events record the slot, negotiated `packet_redundancy` capability and allocated
+source epoch for request-ID correlation; the capability is independent of the
+user's RED preference and false identifies legacy protocol fallback. Other reasons
 distinguish client leave/close, invalid frames, rate limits, heartbeat/negotiation
 timeouts, authorization failures and transport failures. Connection replacements
 include the previous connection's request ID and active flag. Abrupt process termination

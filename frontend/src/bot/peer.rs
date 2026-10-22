@@ -263,7 +263,7 @@ pub(super) async fn run(
                 .collect(),
         })?;
         let mut roster = red::RosterCompatibility::default();
-        roster.observe(&members)?;
+        roster.observe(&members).map_err(|error| error.message)?;
         if let Some(ready) = ready.take() {
             let _ = ready.send(Ok(()));
         }
@@ -328,7 +328,7 @@ pub(super) async fn run(
                 server = event(&mut rx) => match server {
                     Ok(ServerEvent::Participants { members: next }) => {
                         members = next;
-                        roster.observe(&members)?;
+                        roster.observe(&members).map_err(|error| error.message)?;
                         engine.notify_control(Command::Roster { connection: connection.clone(), members: members.iter().filter(|m| m.account_id != id).cloned().collect() })?;
                         if video.update(&members, id, &current) { video_link.clear(); }
                     },

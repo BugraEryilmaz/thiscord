@@ -5,9 +5,9 @@ use super::outgoing::EncodedFrame;
 use std::time::Instant;
 use thiscord_shared::rtp_red::{self as wire, Block};
 
-/// Epoch-zero legacy membership has no ordered source identity. Rejoining is
-/// required when it replaces a protected slot, rather than dropping its media
-/// forever or discarding the modern source tombstone and admitting stale rosters.
+/// Epoch-zero legacy membership has no ordered source identity. Request a fresh
+/// connection when it replaces a protected slot. The supervisor retries with
+/// backoff; never clear a live session's tombstones to accept the downgrade.
 #[derive(Default)]
 pub struct RosterCompatibility {
     protected: [bool; thiscord_shared::voice::ROOM_CAPACITY],
@@ -16,15 +16,16 @@ impl RosterCompatibility {
     pub fn observe(
         &mut self,
         members: &[thiscord_shared::voice::Participant],
-    ) -> Result<(), &'static str> {
+    ) -> Result<(), super::reconnect::Failure> {
         for member in members {
             let Some(protected) = self.protected.get_mut(member.slot) else {
                 continue;
             };
             if member.microphone_source_epoch == 0 && *protected {
-                return Err(
-                    "A legacy participant replaced a protected voice source. Rejoin voice to restore compatible playback.",
-                );
+                return Err(super::reconnect::Failure::temporary(
+                    "Refreshing voice compatibility for a participant",
+                )
+                .with_reason("legacy_source_replacement"));
             }
             *protected |= member.microphone_source_epoch != 0;
         }
@@ -307,7 +308,7 @@ mod tests {
     }
 
     #[test]
-    fn legacy_replacement_requires_visible_rejoin_without_forgetting_tombstones() {
+    fn legacy_replacement_requests_recovery_without_forgetting_tombstones() {
         let legacy: thiscord_shared::voice::Participant =
             serde_json::from_value(serde_json::json!({
                 "account_id":"00000000-0000-0000-0000-000000000001", "username":"fixture", "slot":0,
@@ -321,9 +322,84 @@ mod tests {
         assert!(roster.observe(std::slice::from_ref(&legacy)).is_ok());
         assert!(roster.observe(&[modern]).is_ok());
         assert!(roster.observe(&[]).is_ok());
+        let error = roster.observe(std::slice::from_ref(&legacy)).unwrap_err();
+        assert!(error.retryable);
+        assert_eq!(error.diagnostic_reason(), "legacy_source_replacement");
         assert!(roster.observe(std::slice::from_ref(&legacy)).is_err());
         let mut next_connection = RosterCompatibility::default();
         assert!(next_connection.observe(&[legacy]).is_ok());
+    }
+
+    #[tokio::test]
+    async fn legacy_join_recovers_once_and_disconnect_cancels_recovery() {
+        use crate::audio::reconnect::{Connector, Failure, supervise};
+        struct Call {
+            attempts: usize,
+            waits: usize,
+            rejoins: usize,
+            cancel_in_backoff: bool,
+            stop: Option<tokio::sync::oneshot::Sender<()>>,
+        }
+        impl Connector for Call {
+            async fn attempt(&mut self) -> (Failure, bool) {
+                self.attempts += 1;
+                // As in run(), each full transport attempt owns fresh roster
+                // history. Signaling-only recovery must not reset this history.
+                let mut roster = RosterCompatibility::default();
+                let legacy: thiscord_shared::voice::Participant =
+                    serde_json::from_value(serde_json::json!({
+                        "account_id":"00000000-0000-0000-0000-000000000001",
+                        "username":"fixture", "slot":0,
+                        "muted":false,"deafened":false,"can_speak":true
+                    }))
+                    .unwrap();
+                if self.attempts == 1 {
+                    let mut modern = legacy.clone();
+                    modern.microphone_source_epoch = 5;
+                    modern.microphone_epoch = 6;
+                    roster.observe(&[modern]).unwrap();
+                    roster.observe(&[]).unwrap();
+                    return (roster.observe(&[legacy]).unwrap_err(), true);
+                }
+                // The original incident was followed by repeated leave/join
+                // attempts. They must not cause another recovery on the fresh call.
+                for _ in 0..5 {
+                    roster.observe(std::slice::from_ref(&legacy)).unwrap();
+                    roster.observe(&[]).unwrap();
+                    self.rejoins += 1;
+                }
+                self.stop.take().unwrap().send(()).unwrap();
+                std::future::pending().await
+            }
+            fn waiting(&mut self, error: &Failure, delay: Duration) {
+                assert_eq!(error.diagnostic_reason(), "legacy_source_replacement");
+                assert_eq!(delay, Duration::from_millis(1250));
+                self.waits += 1;
+                if self.cancel_in_backoff {
+                    self.stop.take().unwrap().send(()).unwrap();
+                }
+            }
+        }
+        for cancel_in_backoff in [false, true] {
+            let (stop, stopped) = tokio::sync::oneshot::channel();
+            let mut call = Call {
+                attempts: 0,
+                waits: 0,
+                rejoins: 0,
+                cancel_in_backoff,
+                stop: Some(stop),
+            };
+            let result = tokio::time::timeout(
+                Duration::from_secs(4),
+                supervise(&mut call, stopped, || 250),
+            )
+            .await
+            .unwrap();
+            assert!(result.is_none(), "compatibility must not end the call");
+            assert_eq!(call.waits, 1);
+            assert_eq!(call.attempts, if cancel_in_backoff { 1 } else { 2 });
+            assert_eq!(call.rejoins, if cancel_in_backoff { 0 } else { 5 });
+        }
     }
     #[test]
     fn isolated_and_burst_losses_recover_exact_packets_without_sequence_invention() {

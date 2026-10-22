@@ -1055,8 +1055,8 @@ async fn run(
                             if layer != Some(0) { app.state::<crate::native_screen::ScreenState>().layer_keyframe(); } }
                     },
                     ServerEvent::Participants{members}=>{
-                        roster_compatibility.observe(&members).map_err(|error| Failure::from(error).with_reason("legacy_source_replacement"))?;
                         if members.len()>ROOM_CAPACITY||members.iter().any(|m|m.slot>=ROOM_CAPACITY){return Err("Invalid participant list".into());}
+                        roster_compatibility.observe(&members)?;
                         app.state::<crate::native_screen::ScreenState>().roster(if settings.lock().map_err(|_|"Settings unavailable")?.deafened { &[] } else { &members });
                         app.state::<crate::native_camera::CameraState>().views.roster(if settings.lock().map_err(|_|"Settings unavailable")?.deafened { &[] } else { &members });
                         roster = members.iter().filter(|m|m.slot!=own_slot).cloned().collect();
