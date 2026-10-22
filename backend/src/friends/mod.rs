@@ -45,7 +45,7 @@ async fn handle(
             .clone()
             .try_acquire_owned()
             .map_err(|_| Failure::Limited)?;
-        tokio::task::spawn_blocking(move || {
+        crate::performance::blocking(move || {
             let _permit = permit;
             store::dispatch(&pool, &token, command)
         })
@@ -149,7 +149,7 @@ async fn serve(mut socket: WebSocket, pool: DbPool) {
     };
     let p = pool.clone();
     let t = token.clone();
-    let Ok(Ok(session)) = tokio::task::spawn_blocking(move || {
+    let Ok(Ok(session)) = crate::performance::blocking(move || {
         let session = auth::store::authenticate(&mut *auth::store::connection(&p)?, &t)?;
         auth::store::rate_limit(
             &p,
@@ -194,11 +194,12 @@ async fn serve(mut socket: WebSocket, pool: DbPool) {
             _=tick.tick()=>{
                 if last_seen.elapsed()>Duration::from_secs(35) {break;}
                 static READERS:OnceLock<Arc<Semaphore>>=OnceLock::new();
-                let Ok(permit)=READERS.get_or_init(||Arc::new(Semaphore::new(8))).clone().try_acquire_owned() else {continue;};
+                let Ok(permit)=READERS.get_or_init(||Arc::new(Semaphore::new(8))).clone().try_acquire_owned() else {crate::performance::FRIENDS_SKIPPED.fetch_add(1, std::sync::atomic::Ordering::Relaxed);continue;};
                 let Some(epoch)=crate::chat::access::snapshot(&account,Some(&session_scope)) else {break;};
                 let p=pool.clone();let t=token.clone();
-                let Ok(Ok(snapshot))=tokio::task::spawn_blocking(move ||{let _permit=permit;store::snapshot(&p,&t,selected)}).await else {break;};
+                let Ok(Ok(snapshot))=crate::performance::blocking(move ||{let _permit=permit;store::snapshot(&p,&t,selected)}).await else {break;};
                 let Some(_delivery)=epoch.deliver() else {break;};
+                if last.as_ref()==Some(&snapshot) { crate::performance::FRIENDS_UNCHANGED.fetch_add(1, std::sync::atomic::Ordering::Relaxed); }
                 if last.as_ref()!=Some(&snapshot) || last_sent.elapsed()>=Duration::from_secs(10) {
                     last_sent=Instant::now();
                     last=Some(snapshot.clone());

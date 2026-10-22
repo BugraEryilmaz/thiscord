@@ -30,6 +30,8 @@ media compatibility spike can happen before chat to expose platform constraints.
 - [x] Remote audio settings and diagnostic JSON downloads for connected desktop participants, with instance authorization and stale-edit checks.
 - [ ] Verify remote hardware changes, shortcut/overlay behavior and downloads with real Windows/macOS/Linux desktop clients.
 - [x] Browser `/admin` dashboard with current instance-owner/admin authorization, host metrics and live voice diagnostics.
+- [x] Prioritized performance audit with bounded backend timings and automatic desktop UI counters accessible through `/admin` (docs/performance-audit.md).
+- [ ] Confirm performance audit priorities under production load before changing polling, pool sizing or frontend snapshot updates.
 - [ ] Deploy the admin bundle to the VPS and verify production password/Google login and real-client telemetry.
 
 - [x] Three-package workspace with shared Serde communication contracts.

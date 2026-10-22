@@ -178,6 +178,8 @@ pub struct EchoDiagnostics {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct AudioStatus {
     #[serde(default)]
+    pub ui_performance: Option<crate::performance::UiPerformanceReport>,
+    #[serde(default)]
     pub quality: Option<AudioQuality>,
     /// Local diagnostic recording state only; audio bytes never cross IPC.
     #[serde(default)]

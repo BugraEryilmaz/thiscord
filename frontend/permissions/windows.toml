@@ -2,6 +2,7 @@
 identifier = "main-commands"
 description = "Account, media and settings commands for the main window only."
 commands.allow = [
+  "performance_report",
   "notification_show",
   "notification_clear",
   "notification_remove",

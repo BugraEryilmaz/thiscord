@@ -15,6 +15,8 @@ pub struct Diagnostics {
     pub database_connections: u32,
     pub database_idle_connections: u32,
     pub rooms: Vec<RoomDiagnostics>,
+    #[serde(default)]
+    pub performance: crate::performance::BackendPerformance,
 }
 
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]

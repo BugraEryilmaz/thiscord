@@ -5,6 +5,12 @@ use thiscord_shared::{ApiError, account::AccountRequest, admin::*};
 #[component]
 pub(super) fn Dashboard(ui: Ui) -> impl IntoView {
     let data = RwSignal::new(None::<Diagnostics>);
+    let previous = RwSignal::new(
+        None::<(
+            thiscord_shared::Timestamp,
+            thiscord_shared::performance::BackendPerformance,
+        )>,
+    );
     let selected = RwSignal::new(None::<Selection>);
     let error = RwSignal::new(String::new());
     let busy = RwSignal::new(false);
@@ -66,10 +72,16 @@ pub(super) fn Dashboard(ui: Ui) -> impl IntoView {
             }
             match result {
                 Ok(value) => {
+                    previous.set(data.with_untracked(|d| {
+                        d.as_ref()
+                            .filter(|d| value.uptime_seconds >= d.uptime_seconds)
+                            .map(|d| (d.sampled_at, d.performance.clone()))
+                    }));
                     data.set(Some(value));
                     error.set(String::new());
                 }
                 Err(message) => {
+                    previous.set(None);
                     data.set(None);
                     selected.set(None);
                     error.set(message);
@@ -122,6 +134,8 @@ pub(super) fn Dashboard(ui: Ui) -> impl IntoView {
                             <div><p class="text-slate-400">"Database pool"</p><p class="mt-2 font-mono">{format!("{} open / {} idle",d.database_connections,d.database_idle_connections)}</p></div>
                             <div><p class="text-slate-400">"Load average · 1 / 5 / 15 min"</p><p class="mt-2 font-mono">{d.host.load_average.map(|v|format!("{:.2} / {:.2} / {:.2}",v[0],v[1],v[2])).unwrap_or_else(||"—".into())}</p></div>
                         </section>
+                        <BackendPerformance current=d.performance previous=previous.get_untracked() sampled_at=d.sampled_at/>
+                        <details class="rounded-xl border border-slate-800 p-5"><summary class="cursor-pointer text-sm">"This admin browser's UI measurements"</summary><UiPerformance measurements=crate::performance::snapshot()/></details>
                         <section class="space-y-4" aria-labelledby="rooms-title">
                             <h2 id="rooms-title" class="text-xl font-semibold">"Active rooms"</h2>
                             <p class="max-w-4xl text-sm leading-relaxed text-slate-400">"Latency is the user ↔ server transport round trip. Jitter is microphone packet arrival variation at the server. Values are milliseconds; — means no recent measurement. Muted users may have no microphone samples."</p>
@@ -172,14 +186,14 @@ fn Room(
     view! {
         <article class="mb-4 overflow-hidden rounded-xl border border-slate-800 bg-slate-900/60">
             <header class="flex flex-wrap items-center justify-between gap-3 border-b border-slate-800 px-5 py-4"><div><h3 class="font-semibold">{room.channel_name}</h3><p class="mt-1 text-xs text-slate-400">{room.guild_name}</p></div><span class="rounded-full bg-indigo-500/10 px-3 py-1 text-xs text-indigo-300">{format!("{} people",room.participants.len())}</span></header>
-            <div class="overflow-x-auto"><table class="w-full whitespace-nowrap text-left text-sm"><thead class="text-xs text-slate-400"><tr><th class="px-5 py-3">"Participant"</th><th class="px-5 py-3">"State"</th><th class="px-5 py-3">"Latency (RTT)"</th><th class="px-5 py-3">"Mic jitter"</th><th class="px-5 py-3">"Mic received / lost"</th><th class="px-5 py-3">"Video drops in / out"</th></tr></thead><tbody>
+            <div class="overflow-x-auto"><table class="w-full whitespace-nowrap text-left text-sm"><thead class="text-xs text-slate-400"><tr><th class="px-5 py-3">"Participant"</th><th class="px-5 py-3">"State"</th><th class="px-5 py-3">"Latency (RTT)"</th><th class="px-5 py-3">"Mic jitter"</th><th class="px-5 py-3">"Mic received / lost"</th><th class="px-5 py-3">"Video drops in / out"</th><th class="px-5 py-3">"Video sent / timeouts"</th></tr></thead><tbody>
             {room.participants.into_iter().map(move |p| {
                 let bot_target = bot_target.clone();
                 let is_bot = p.participant.test_bot;
                 let selection = Selection { connection: p.audio_connection_id, name: p.participant.display_name().to_owned() };
                 let fresh=p.network.sampled_at.is_some_and(|at|(sampled_at-at).num_seconds()<=15);
                 let state=if p.participant.deafened {"Deafened"} else if p.participant.muted {"Muted"} else {"Listening / speaking"};
-                view!{<tr class="border-t border-slate-800"><td class="px-5 py-4"><button class="font-medium text-indigo-300 underline decoration-indigo-500/40 underline-offset-4 hover:text-indigo-100" disabled=is_bot && !owner on:click=move |_| {if is_bot {ui.bot_target.set(Some(bot_target.clone()));} else {selected.set(Some(selection.clone()));}}>{p.participant.display_name().to_string()}</button><p class="mt-1 text-xs text-slate-500">{format!("@{}",p.participant.username)}</p></td><td class="px-5 py-4 text-slate-400">{state}{if p.participant.sharing_screen {" · Sharing screen"} else {""}}</td><td class="px-5 py-4 font-mono">{ms(p.network.round_trip_ms.filter(|_|fresh))}</td><td class="px-5 py-4 font-mono">{ms(p.network.microphone_jitter_ms.filter(|_|fresh))}</td><td class="px-5 py-4 font-mono">{if fresh {p.network.microphone_packets_received.zip(p.network.microphone_packets_lost).map(|(r,l)|format!("{r} / {l}")).unwrap_or_else(||"—".into())} else {"—".into()}}</td><td class="px-5 py-4 font-mono" title="Cumulative SFU queue drops for this connection">{format!("{} / {}",p.video_counters[1],p.video_counters[2])}</td></tr>}
+                view!{<tr class="border-t border-slate-800"><td class="px-5 py-4"><button class="font-medium text-indigo-300 underline decoration-indigo-500/40 underline-offset-4 hover:text-indigo-100" disabled=is_bot && !owner on:click=move |_| {if is_bot {ui.bot_target.set(Some(bot_target.clone()));} else {selected.set(Some(selection.clone()));}}>{p.participant.display_name().to_string()}</button><p class="mt-1 text-xs text-slate-500">{format!("@{}",p.participant.username)}</p></td><td class="px-5 py-4 text-slate-400">{state}{if p.participant.sharing_screen {" · Sharing screen"} else {""}}</td><td class="px-5 py-4 font-mono">{ms(p.network.round_trip_ms.filter(|_|fresh))}</td><td class="px-5 py-4 font-mono">{ms(p.network.microphone_jitter_ms.filter(|_|fresh))}</td><td class="px-5 py-4 font-mono">{if fresh {p.network.microphone_packets_received.zip(p.network.microphone_packets_lost).map(|(r,l)|format!("{r} / {l}")).unwrap_or_else(||"—".into())} else {"—".into()}}</td><td class="px-5 py-4 font-mono" title="Cumulative SFU queue drops for this connection">{format!("{} / {}",p.video_counters[1],p.video_counters[2])}</td><td class="px-5 py-4 font-mono" title="Cumulative SFU sent packets and send timeouts for this connection">{format!("{} / {}",p.video_counters[3],p.video_counters[4])}</td></tr>}
             }).collect_view()}
             </tbody></table></div>
         </article>
@@ -244,6 +258,16 @@ fn RemoteAudioPanel(ui: Ui, selection: Selection, close: Callback<()>) -> impl I
                 });
             }>{move || if downloading.get() {"Preparing diagnostics…"} else {"Download diagnostics"}}</button>
             <p role="status" class="my-3 text-amber-300">{move || ui.status.get()}</p>
+            <section class="my-4 rounded-xl border border-slate-800 p-4">
+                <h3 class="font-semibold">"Desktop UI performance"</h3>
+                {move || ui.audio_status.get().and_then(|s| s.ui_performance).map(|report| {
+                    if report.age_ms > 30_000 {
+                        view! {<p class="mt-2 text-sm text-amber-300">{format!("Snapshot is stale ({} seconds old). The WebView may be hidden, suspended or stalled.", report.age_ms/1000)}</p>}.into_any()
+                    } else {
+                        view! {<p class="mt-2 text-xs text-slate-400">{format!("Automatic numeric sample · {} seconds old · since this WebView loaded", report.age_ms/1000)}</p><UiPerformance measurements=report.measurements/>}.into_any()
+                    }
+                }).unwrap_or_else(|| view! {<p class="mt-2 text-sm text-slate-400">"Waiting for UI counters; older desktops do not report them. Allow 10 seconds after opening the app."</p>}.into_any())}
+            </section>
             <Show when=move || !loaded.get()><p class="my-3 text-slate-400">"Waiting for the connected desktop…"</p></Show>
             <fieldset disabled=move || !loaded.get() || ui.audio_saving.get() class="mt-5 disabled:opacity-50"><super::audio::AudioSettingsPanel ui=ui/></fieldset>
         }.into_any()
@@ -254,4 +278,83 @@ fn RemoteAudioPanel(ui: Ui, selection: Selection, close: Callback<()>) -> impl I
             {content.unwrap_or_else(|| view! {<p>"Remote audio is unavailable for this connection. Update the user's desktop app and reconnect to voice."</p>}.into_any())}
         </dialog>
     }
+}
+
+#[component]
+fn BackendPerformance(
+    current: thiscord_shared::performance::BackendPerformance,
+    previous: Option<(
+        thiscord_shared::Timestamp,
+        thiscord_shared::performance::BackendPerformance,
+    )>,
+    sampled_at: thiscord_shared::Timestamp,
+) -> impl IntoView {
+    if current.timings.is_empty() {
+        return view! {<p class="text-sm text-slate-400">"Performance counters unavailable; update the backend to collect them."</p>}.into_any();
+    }
+    let seconds = previous
+        .as_ref()
+        .map(|(at, _)| (sampled_at - *at).num_milliseconds() as f64 / 1000.0)
+        .filter(|s| *s > 0.0);
+    let rows = current
+        .timings
+        .into_iter()
+        .map(|m| {
+            let old = previous
+                .as_ref()
+                .and_then(|(_, p)| p.timings.iter().find(|p| p.name == m.name));
+            let recent = old
+                .zip(seconds)
+                .filter(|(p, _)| {
+                    m.timing.calls >= p.timing.calls && m.timing.total_us >= p.timing.total_us
+                })
+                .map(|(p, s)| {
+                    let calls = m.timing.calls - p.timing.calls;
+                    let work = m.timing.total_us - p.timing.total_us;
+                    format!(
+                        "{:.1}/s · {:.1} ms/s · {} slow",
+                        calls as f64 / s,
+                        work as f64 / 1000.0 / s,
+                        m.timing.over_budget.saturating_sub(p.timing.over_budget)
+                    )
+                })
+                .unwrap_or_else(|| "Waiting for next sample".into());
+            (m, recent)
+        })
+        .collect::<Vec<_>>();
+    view! {
+        <section class="space-y-4 rounded-xl border border-slate-800 bg-slate-900/60 p-5" aria-label="Performance monitors">
+            <h2 class="text-xl font-semibold">"Performance monitors"</h2>
+            <p class="text-sm text-slate-400">"Automatic backend measurements. Recent rates cover the last successful refresh; totals and maximums reset on backend restart. Slow means above the investigation budget, not a confirmed fault. Timings overlap; ms/s is elapsed work across concurrent operations, not CPU use."</p>
+            <p class="text-sm text-slate-300">{format!("Pool checkout failures: {} · Unchanged roster polls: {} · Unchanged friends polls: {} · Friends polls skipped at capacity: {}",current.pool_failures,current.roster_unchanged,current.friends_unchanged,current.friends_admission_skipped)}</p>
+            <TimingTable rows=rows/>
+            <p class="text-xs text-slate-400">"SFU rows sample one in 64 ingress packets per connection. Audio DSP, capture/render deadlines and buffering faults: open a participant's Audio settings and advanced diagnostics below."</p>
+        </section>
+    }.into_any()
+}
+
+#[component]
+fn UiPerformance(measurements: thiscord_shared::performance::UiPerformance) -> impl IntoView {
+    let rows = thiscord_shared::performance::UI_TIMINGS
+        .into_iter()
+        .zip(measurements.timings)
+        .map(|((name, budget_us), timing)| {
+            (
+                thiscord_shared::performance::Measurement {
+                    name: name.into(),
+                    budget_us,
+                    timing,
+                },
+                "—".into(),
+            )
+        })
+        .collect();
+    view! {<p class="my-3 text-xs text-slate-400">"Cumulative numeric counters; no content collected. Timer lateness excludes hidden/visibility-transition intervals; scheduling, OS sleep and main-thread work can all cause lateness. Layout measures synchronous geometry work, not paint time."</p><TimingTable rows=rows/>}
+}
+
+#[component]
+fn TimingTable(rows: Vec<(thiscord_shared::performance::Measurement, String)>) -> impl IntoView {
+    view! {<div class="mt-3 overflow-x-auto"><table class="w-full whitespace-nowrap text-left text-xs"><thead class="text-slate-400"><tr><th class="p-2">"Operation"</th><th class="p-2">"Calls"</th><th class="p-2">"Total ms"</th><th class="p-2">"Mean / max ms"</th><th class="p-2">"Slow / budget ms"</th><th class="p-2">"Since last refresh"</th></tr></thead><tbody>
+        {rows.into_iter().map(|(m,recent)|view! {<tr class="border-t border-slate-800"><td class="p-2">{m.name}</td><td class="p-2 font-mono">{m.timing.calls}</td><td class="p-2 font-mono">{format!("{:.1}",m.timing.total_us as f64/1000.0)}</td><td class="p-2 font-mono">{if m.timing.calls==0 {"—".into()} else {format!("{:.3} / {:.3}",m.timing.total_us as f64/m.timing.calls as f64/1000.0,m.timing.max_us as f64/1000.0)}}</td><td class="p-2 font-mono">{format!("{} / {:.1}",m.timing.over_budget,m.budget_us as f64/1000.0)}</td><td class="p-2">{recent}</td></tr>}).collect_view()}
+    </tbody></table></div>}
 }

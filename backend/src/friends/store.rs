@@ -261,6 +261,7 @@ pub(super) fn snapshot(
     token: &str,
     selected: Option<ConversationId>,
 ) -> Result<Snapshot, Failure> {
+    let _timing = crate::performance::FRIENDS.start();
     let mut c = connection(pool)?;
     let session = auth::authenticate(&mut c, token)?;
     c.transaction(|c| {

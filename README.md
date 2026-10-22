@@ -16,6 +16,8 @@ backend health, active voice rooms and per-participant network diagnostics.
 Click a participant to adjust their connected desktop's audio settings using the
 same controls as the desktop app, or download their technical diagnostic logs.
 See [admin build, access and deployment](docs/admin.md).
+Automatic backend and desktop UI counters support the prioritized
+[performance audit](docs/performance-audit.md), without collecting user content.
 
 A personal Discord-style application built with Rust: Leptos/WASM inside Tauri,
 an Axum backend running in WSL, and locally hosted PostgreSQL managed by Diesel.

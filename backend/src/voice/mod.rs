@@ -1212,6 +1212,7 @@ async fn serve(mut socket: logging::Socket, pool: DbPool, id: RequestId) {
         let relay_generation = generation.clone();
         let relay_access = connection_access.clone();
         let relay = tokio::spawn(async move {
+            let mut performance_sample = 0_u64;
             while let Some(Ingress {
                 epoch,
                 kind,
@@ -1227,7 +1228,15 @@ async fn serve(mut socket: logging::Socket, pool: DbPool, id: RequestId) {
                 else {
                     continue;
                 };
+                performance_sample = performance_sample.wrapping_add(1);
+                let sampled = performance_sample.is_multiple_of(64);
+                if sampled {
+                    crate::performance::SFU_QUEUE.observe(arrived.elapsed());
+                }
+                let lock_timing = sampled.then(|| crate::performance::SFU_LOCK.start());
                 let members = relay_room.members.read().await;
+                drop(lock_timing);
+                let fanout_timing = sampled.then(|| crate::performance::SFU_FANOUT.start());
                 let Some(source) = members.get(&slot) else {
                     break;
                 };
@@ -1350,6 +1359,7 @@ async fn serve(mut socket: logging::Socket, pool: DbPool, id: RequestId) {
                     }
                 }
                 drop(members);
+                drop(fanout_timing);
                 drop(_permit);
                 for (viewer, epoch, viewer_active) in recovery {
                     request_keyframe(&relay_room, viewer, slot, kind, epoch, &viewer_active).await;

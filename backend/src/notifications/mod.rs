@@ -163,7 +163,7 @@ async fn handle(
         let permit = workers()
             .try_acquire_owned()
             .map_err(|_| Failure::Limited)?;
-        tokio::task::spawn_blocking(move || {
+        crate::performance::blocking(move || {
             let _permit = permit;
             store::dispatch(&pool, &token, command)
         })
@@ -266,7 +266,7 @@ async fn serve(mut socket: WebSocket, pool: DbPool) {
     };
     let p = pool.clone();
     let t = token.clone();
-    let Ok(Ok(session)) = tokio::task::spawn_blocking(move || {
+    let Ok(Ok(session)) = crate::performance::blocking(move || {
         let _permit = permit;
         let session = auth::store::authenticate(&mut *auth::store::connection(&p)?, &t)?;
         auth::store::rate_limit(
@@ -337,7 +337,7 @@ async fn serve(mut socket: WebSocket, pool: DbPool) {
                 let Some(epoch) = access::snapshot(&account, Some(&session_scope)).and_then(|e| e.including(&preference_scope)).and_then(|e| e.including(&call_scope)) else { refresh = true; tokio::task::yield_now().await; continue; };
                 let Ok(permit) = worker(&mut revoked, &mut ended).await else { break; };
                 let p = pool.clone(); let t = token.clone();
-                let Ok(Ok(state)) = tokio::task::spawn_blocking(move || { let _permit = permit; store::initial(&p, &t) }).await else { break; };
+                let Ok(Ok(state)) = crate::performance::blocking(move || { let _permit = permit; store::initial(&p, &t) }).await else { break; };
                 // Anchor after the DB result: query/return latency can delay
                 // expiry, but cannot wake early or depend on application UTC.
                 let received_at = tokio::time::Instant::now();
@@ -377,7 +377,7 @@ async fn serve(mut socket: WebSocket, pool: DbPool) {
                 }
                 let Ok(permit) = worker(&mut revoked, &mut ended).await else { break; };
                 let p = pool.clone(); let t = token.clone();
-                let Ok(Ok(alert)) = tokio::task::spawn_blocking(move || { let _permit = permit; store::alert(&p, &t, candidate) }).await else { break; };
+                let Ok(Ok(alert)) = crate::performance::blocking(move || { let _permit = permit; store::alert(&p, &t, candidate) }).await else { break; };
                 let Some(_delivery) = epoch.deliver() else { continue; };
                 if let Some(alert) = alert {
                     if send(&mut socket, ServerEvent::Alert { alert }).await.is_err() { break; }
@@ -388,7 +388,7 @@ async fn serve(mut socket: WebSocket, pool: DbPool) {
                 if last_seen.elapsed() > Duration::from_secs(35) { break; }
                 let Ok(permit) = worker(&mut revoked, &mut ended).await else { break; };
                 let p = pool.clone(); let t = token.clone();
-                if !matches!(tokio::task::spawn_blocking(move || { let _permit = permit; auth::store::authenticate(&mut *auth::store::connection(&p)?, &t) }).await, Ok(Ok(_))) { break; }
+                if !matches!(crate::performance::blocking(move || { let _permit = permit; auth::store::authenticate(&mut *auth::store::connection(&p)?, &t) }).await, Ok(Ok(_))) { break; }
             }
         }
     }

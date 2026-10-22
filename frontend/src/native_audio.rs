@@ -334,7 +334,8 @@ pub async fn audio_status(
     app: tauri::AppHandle,
     state: State<'_, AudioState>,
 ) -> Result<AudioStatus, String> {
-    let result = command(state.engine.clone(), Command::Status).await?;
+    let mut result = command(state.engine.clone(), Command::Status).await?;
+    result.ui_performance = crate::native_performance::snapshot();
     if !result.running
         && crate::native_voice::voice_status(app.state()).is_ok_and(|s| s.channel_id.is_none())
     {

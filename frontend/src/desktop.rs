@@ -6,6 +6,7 @@ mod native_camera;
 mod native_download;
 mod native_notifications;
 mod native_overlay;
+mod native_performance;
 mod native_remote_audio;
 mod native_screen;
 mod native_shortcuts;
@@ -128,6 +129,7 @@ fn main() {
         })
         .manage(native_account::CallbackState::default())
         .invoke_handler(tauri::generate_handler![
+            native_performance::performance_report,
             native_window::window_close_to_tray,
             native_window::window_set_close_to_tray,
             native_account::load_session,
