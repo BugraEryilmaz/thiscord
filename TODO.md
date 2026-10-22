@@ -308,6 +308,10 @@ speaker isolation and physical acoustic acceptance remain future work.
 
 ## 8. Voice channels end to end
 
+- [x] Instance-owner voice test bots from channel context menus, distinct Opus loops,
+  multiple real WebRTC peers, connection profiles, admin audio controls and revocation tests.
+- [ ] Physically listen to bot profiles and verify menus/admin edits on Windows/macOS/Linux.
+
 - [x] Join/leave and move yourself between voice channels; live participant list.
 - [x] Connect native capture/playback to SFU streams with per-speaker volume sliders.
 - [x] User mute/deafen enforced locally and by the server; persistent voice controls.

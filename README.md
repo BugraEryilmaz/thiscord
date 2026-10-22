@@ -359,6 +359,12 @@ replaced by these two files.
 
 ### Command-line checks
 
+For interactive voice testing without other people, the instance owner can
+right-click a voice channel and choose **Voice test bots…**. Add multiple bots
+with distinct microphone loops and good, low-bandwidth, lossy or unstable media
+profiles; edit their sound controls by clicking them in `/admin`.
+See [voice test bots](docs/voice-bots.md) for permissions and simulation limits.
+
 For desktop/Pi voice capacity measurements from another machine, use the
 [Rust voice load generator](docs/voice-load.md). It includes a disposable test
 server and Mac instructions; measured capacity on real hardware remains pending.

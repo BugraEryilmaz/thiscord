@@ -1,5 +1,6 @@
 //! Bounded, single-process audio SFU. One WebRTC transport per participant.
 use crate::access;
+mod bots;
 mod diagnostics;
 mod egress;
 mod ice;
@@ -111,6 +112,7 @@ impl Default for Room {
     }
 }
 struct VoiceAccess {
+    bot: Option<bots::Context>,
     access: Arc<access::Access>,
     pool: DbPool,
     token: String,
@@ -142,9 +144,10 @@ impl VoiceAccess {
                 let pool = self.pool.clone();
                 let token = self.token.clone();
                 let (guild, channel) = (self.guild, self.channel);
+                let bot = self.bot.clone();
                 async move {
                     tokio::task::spawn_blocking(move || {
-                        store::authorize(&pool, &token, guild, channel)
+                        bots::authorize(&pool, &token, guild, channel, bot.as_ref())
                     })
                     .await
                     .unwrap_or(Err(Failure::Unavailable))
@@ -239,6 +242,7 @@ pub(crate) fn router_with_limit(
 ) -> Router<Option<DbPool>> {
     Router::new()
         .route(VOICE_PATH, get(upgrade))
+        .merge(bots::router())
         .layer(Extension(Arc::new(origins)))
         .layer(Extension(Arc::new(Semaphore::new(connections))))
 }
@@ -861,6 +865,7 @@ async fn log_selected_route(pc: &dyn PeerConnection, id: RequestId) -> bool {
     false
 }
 async fn serve(mut socket: logging::Socket, pool: DbPool, id: RequestId) {
+    let bot = socket.bot.clone();
     let Ok(Some(Ok(first))) = tokio::time::timeout(Duration::from_secs(5), socket.recv()).await
     else {
         socket.end("join_timeout");
@@ -904,7 +909,10 @@ async fn serve(mut socket: logging::Socket, pool: DbPool, id: RequestId) {
     };
     socket.stage = "authorize";
     let connection_access = match access::identify(&pool, &token, Some(guild_id)).await {
-        Ok((_, access)) => access,
+        Ok((identity, access)) => match &bot {
+            Some(bot) => access::register_guarded(identity, Some(bot.authority.clone())),
+            None => access,
+        },
         Err(error) => {
             fail(&mut socket, id, error).await;
             return;
@@ -915,10 +923,13 @@ async fn serve(mut socket: logging::Socket, pool: DbPool, id: RequestId) {
         .authorize(&mut changed, || {
             let p = pool.clone();
             let t = token.clone();
+            let bot = bot.clone();
             async move {
-                tokio::task::spawn_blocking(move || store::authorize(&p, &t, guild_id, channel_id))
-                    .await
-                    .unwrap_or(Err(Failure::Unavailable))
+                tokio::task::spawn_blocking(move || {
+                    bots::authorize(&p, &t, guild_id, channel_id, bot.as_ref())
+                })
+                .await
+                .unwrap_or(Err(Failure::Unavailable))
             }
         })
         .await;
@@ -1374,6 +1385,7 @@ async fn serve(mut socket: logging::Socket, pool: DbPool, id: RequestId) {
         let mut tick = tokio::time::interval(Duration::from_secs(1));
         tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
         let access = VoiceAccess {
+            bot,
             access: connection_access.clone(),
             pool,
             token,
@@ -1700,6 +1712,7 @@ mod send_tests {
                 diesel::r2d2::ConnectionManager::<diesel::PgConnection>::new("unused"),
             );
         let access = VoiceAccess {
+            bot: None,
             access: connection_access.clone(),
             pool,
             token: String::new(),
@@ -1793,6 +1806,7 @@ mod send_tests {
                     replaced: watch::channel(false).0,
                     network: Arc::new(RwLock::new(Default::default())),
                     info: Participant {
+                        test_bot: false,
                         account_id: uuid::Uuid::new_v4().to_string().parse().unwrap(),
                         username: "test".into(),
                         display_name: String::new(),

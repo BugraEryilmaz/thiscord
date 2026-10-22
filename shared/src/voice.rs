@@ -100,6 +100,9 @@ fn is_false(value: &bool) -> bool {
 }
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Participant {
+    /// A synthetic voice participant with no account credentials or profile.
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub test_bot: bool,
     pub account_id: AccountId,
     pub username: String,
     #[serde(default)]

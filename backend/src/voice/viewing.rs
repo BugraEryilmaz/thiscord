@@ -329,6 +329,7 @@ mod tests {
                     replaced: watch::channel(false).0,
                     network: Arc::new(RwLock::new(Default::default())),
                     info: Participant {
+                        test_bot: false,
                         account_id: account,
                         username: "viewer".into(),
                         display_name: String::new(),

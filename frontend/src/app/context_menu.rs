@@ -7,6 +7,7 @@ use wasm_bindgen::JsCast;
 
 #[derive(Clone)]
 enum Action {
+    Bots(super::voice_bots::Target),
     Copy(String),
     Page(GuildId, &'static str, Option<AccountId>),
     ChannelPermissions(GuildId, ChannelId),
@@ -227,6 +228,25 @@ async fn items(ui: Ui, target: Target) -> Result<(String, Vec<Item>), String> {
             })
             .unwrap_or_else(|| "Voice participant".into());
         let own = ui.account.get_untracked().is_some_and(|a| a.id == member);
+        if is_bot(ui, member) {
+            if matches!(super::servers::request(ui, PermissionRequest::Instance {}).await, Ok(PermissionResponse::Instance { access }) if access.role == InstanceRole::Owner)
+            {
+                items.push(Item::new(
+                    "Test bot audio settings…",
+                    Action::Bots(super::voice_bots::Target {
+                        guild: guild.id,
+                        channel,
+                        name: home
+                            .channels
+                            .iter()
+                            .find(|c| c.id == channel)
+                            .map(|c| c.name.clone())
+                            .unwrap_or_default(),
+                    }),
+                ));
+            }
+            return Ok((label, items));
+        }
         if own {
             items.push(Item::new(
                 "Your audio settings",
@@ -325,6 +345,19 @@ async fn items(ui: Ui, target: Target) -> Result<(String, Vec<Item>), String> {
             items.push(Item::new("Mark as read", Action::Read(guild.id, id)));
         }
         if channel.kind == ChannelKind::Voice {
+            if permissions.contains(&Permission::JoinVoice)
+                && permissions.contains(&Permission::Speak)
+                && matches!(super::servers::request(ui, PermissionRequest::Instance {}).await, Ok(PermissionResponse::Instance { access }) if access.role == InstanceRole::Owner)
+            {
+                items.push(Item::new(
+                    "Voice test bots…",
+                    Action::Bots(super::voice_bots::Target {
+                        guild: guild.id,
+                        channel: id,
+                        name: channel.name.clone(),
+                    }),
+                ));
+            }
             if ui.voice.get_untracked().channel_id == Some(id) {
                 items.push(Item::new("Disconnect", Action::Disconnect));
             } else if permissions.contains(&Permission::JoinVoice) {
@@ -430,6 +463,7 @@ async fn items(ui: Ui, target: Target) -> Result<(String, Vec<Item>), String> {
 
 fn execute(ui: Ui, action: Action) {
     match action {
+        Action::Bots(target) => ui.bot_target.set(Some(target)),
         Action::Friend(command) => super::friends::action(ui, command),
         Action::Unfriend(account_id) => {
             super::friends::action(ui, thiscord_shared::friends::Request::Remove { account_id })
@@ -619,6 +653,7 @@ fn user_menu(ui: Ui, event_target: Option<web_sys::EventTarget>, x: f64, y: f64)
 fn FriendActions(ui: Ui, member: AccountId, run: Callback<Action>) -> impl IntoView {
     use thiscord_frontend::sidebar::{FriendAction, friend_actions};
     view! { {move || {
+        if is_bot(ui, member) { return Vec::new(); }
         let account = ui.account.get();
         let own = account.as_ref().is_none_or(|a|a.id == member);
         let relationship = ui.friends.snapshot.with(|s|s.friends.iter().find(|f|f.person.id==member).map(|f|f.relationship));
@@ -627,6 +662,20 @@ fn FriendActions(ui: Ui, member: AccountId, run: Callback<Action>) -> impl IntoV
             view! {<button role="menuitem" class="context-item" class:context-danger=action==FriendAction::Unfriend disabled=disabled on:click=move |_|run.run(if action==FriendAction::Unfriend {Action::Unfriend(member)} else {Action::Friend(action.request(member))})>{action.label()}</button>}
         }).collect_view()
     }} }
+}
+
+fn is_bot(ui: Ui, member: AccountId) -> bool {
+    ui.voice.with(|v| {
+        v.participants
+            .iter()
+            .any(|p| p.account_id == member && p.test_bot)
+    }) || ui.voice_roster.with(|rooms| {
+        rooms.iter().any(|r| {
+            r.members
+                .iter()
+                .any(|p| p.account_id == member && p.test_bot)
+        })
+    })
 }
 
 #[component]
