@@ -76,7 +76,8 @@ pub async fn execute(app: tauri::AppHandle, connection: Connection, command: Com
             };
             Ok(tauri::async_runtime::spawn_blocking(move || {
                 let files = diagnostics::export()?;
-                Ok::<_, String>(serde_json::json!({"version":env!("CARGO_PKG_VERSION"),"settings":settings,"status":status,"status_error":status_error,"files":files}))
+                let ui_performance = crate::native_performance::snapshot();
+                Ok::<_, String>(serde_json::json!({"version":env!("CARGO_PKG_VERSION"),"settings":settings,"status":status,"status_error":status_error,"ui_performance":ui_performance,"files":files}))
             }).await.map_err(|_| "Diagnostic export failed")??)
         }
     };

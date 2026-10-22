@@ -55,6 +55,7 @@ async fn respond(
         let token = auth::bearer(&headers);
         static WORKERS: OnceLock<Arc<Semaphore>> = OnceLock::new();
         let permit = Arc::new(WORKERS.get_or_init(|| Arc::new(Semaphore::new(2))).clone().try_acquire_owned().map_err(|_| Failure::Limited)?);
+        let _timing = crate::performance::ADMIN.start();
         let worker_permit = permit.clone();
         let p = pool.clone();
         let (role, names, host, authorized) = tokio::task::spawn_blocking(move || {
@@ -86,7 +87,7 @@ async fn respond(
         // Serialize while admitted, just as socket delivery does. A logout or
         // demotion must either drain this response or invalidate its snapshot.
         let _delivery = authorized.deliver().ok_or(Failure::Forbidden)?;
-        Ok::<_, Failure>(Json(Diagnostics { sampled_at: chrono::Utc::now(), role, version: env!("CARGO_PKG_VERSION").into(), uptime_seconds: start.elapsed().as_secs(), host, database_connections: state.connections, database_idle_connections: state.idle_connections, rooms }).into_response())
+        Ok::<_, Failure>(Json(Diagnostics { sampled_at: chrono::Utc::now(), role, version: env!("CARGO_PKG_VERSION").into(), uptime_seconds: start.elapsed().as_secs(), host, database_connections: state.connections, database_idle_connections: state.idle_connections, performance: crate::performance::snapshot(), rooms }).into_response())
     }.await;
     let mut response = match result {
         Ok(response) => response,

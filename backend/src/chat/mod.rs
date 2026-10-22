@@ -49,7 +49,7 @@ async fn handle(
             .clone()
             .try_acquire_owned()
             .map_err(|_| Failure::Limited)?;
-        tokio::task::spawn_blocking(move || {
+        crate::performance::blocking(move || {
             let _permit = permit;
             let (response, change) = store::dispatch(&pool, &token, command)?;
             // A started blocking worker survives cancellation of the HTTP future.
@@ -137,7 +137,7 @@ fn frame(message: Message) -> Option<ClientEvent> {
 async fn socket_access(pool: &DbPool, token: &str) -> Result<access::SocketAccess, Failure> {
     let p = pool.clone();
     let t = token.to_owned();
-    let session = tokio::task::spawn_blocking(move || {
+    let session = crate::performance::blocking(move || {
         auth::store::token_session(&mut *auth::store::connection(&p)?, &t)
     })
     .await
@@ -202,7 +202,7 @@ async fn serve(mut socket: WebSocket, pool: DbPool, id: RequestId) {
         }
         let p = pool.clone();
         let t = token.clone();
-        let ready = tokio::task::spawn_blocking(move || {
+        let ready = crate::performance::blocking(move || {
             let session = auth::store::authenticate(&mut *auth::store::connection(&p)?, &t)?;
             auth::store::rate_limit(&p, &format!("socket:{}", session.account_id), None, true)?;
             store::checked(
@@ -268,7 +268,7 @@ async fn serve(mut socket: WebSocket, pool: DbPool, id: RequestId) {
                 let Some(snapshot) = account_access.snapshot(Some(&guild_access), Some(&member_access)) else { let _=send(&mut socket,ServerEvent::Revoked{}).await;break; };
                 if changed.has_changed().unwrap_or(true){let _=send(&mut socket,ServerEvent::Revoked{}).await;break;}
                 let p=pool.clone();let t=token.clone();let active=typing.take();
-                let result=tokio::task::spawn_blocking(move||store::poll(&p,&t,guild_id,channel_id,cursor,connection_id,active)).await;
+                let result=crate::performance::blocking(move||store::poll(&p,&t,guild_id,channel_id,cursor,connection_id,active)).await;
                 let Ok(Ok(poll))=result else{let _=send(&mut socket,ServerEvent::Revoked{}).await;break;};
                 let Some(_delivery) = snapshot.deliver() else { let _=send(&mut socket,ServerEvent::Revoked{}).await;break; };
                 let delivery=async {
@@ -281,5 +281,5 @@ async fn serve(mut socket: WebSocket, pool: DbPool, id: RequestId) {
         }
     }
     let _ = tokio::time::timeout(Duration::from_secs(1), socket.send(Message::Close(None))).await;
-    let _ = tokio::task::spawn_blocking(move || store::cleanup(&pool, connection_id)).await;
+    let _ = crate::performance::blocking(move || store::cleanup(&pool, connection_id)).await;
 }

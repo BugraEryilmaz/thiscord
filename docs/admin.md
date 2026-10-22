@@ -26,6 +26,13 @@ requests; desktop and ordinary browser preview retain compile-time `THISCORD_API
 
 ## Measurements
 
+The **Performance monitors** section adds automatic backend operation timings,
+recent rates, database waits, unchanged polling counts and sampled SFU work.
+Selecting a participant also shows automatically collected desktop UI timings;
+audio deadline/queue metrics remain under advanced diagnostics. No user action
+or file logging is required. See the prioritized [performance audit](performance-audit.md)
+for exact scopes, budgets, limitations and how to confirm each suspected issue.
+
 - Host CPU: Linux `/proc/stat` deltas across all cores, normalized to 0–100%.
   I/O wait is idle; guest time is not double counted. The first sample has no CPU
   value. Host readings are cached for four seconds.

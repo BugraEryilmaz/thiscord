@@ -10,6 +10,7 @@ pub(crate) fn load(
     accounts: &[AccountId],
     channel: Option<ChannelId>,
 ) -> Result<GuildState, Failure> {
+    let _timing = crate::performance::AUTHORIZATION.start();
     let guild = guild.to_string();
     let accounts = serde_json::to_string(accounts).map_err(|_| Failure::Unavailable)?;
     let channel = channel.map(|id| id.to_string()).unwrap_or_default();

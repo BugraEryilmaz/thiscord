@@ -69,6 +69,7 @@ async fn assert_response(response: Response, status: StatusCode) -> Value {
     if !status.is_success() {
         assert!(value.get("rooms").is_none());
         assert!(value.get("host").is_none());
+        assert!(value.get("performance").is_none());
         assert!(value["request_id"].is_string());
     }
     value
@@ -141,6 +142,18 @@ async fn diagnostics_rejects_revocations_during_collection_without_blocking_muta
     let (other_id, other) = user(&db, "other");
     crate::permissions::bootstrap_owner(&db.pool, "owner").unwrap();
     let app = crate::api::router(Some(db.pool.clone()), vec![]);
+    get(&app, &other, StatusCode::FORBIDDEN).await;
+    let diagnostics = get(&app, &owner, StatusCode::OK).await;
+    let measurements: thiscord_shared::performance::BackendPerformance =
+        serde_json::from_value(diagnostics["performance"].clone()).unwrap();
+    assert_eq!(measurements.timings.len(), 13);
+    let pool_metric = measurements
+        .timings
+        .iter()
+        .find(|m| m.name == "Database pool checkout")
+        .unwrap();
+    assert!(pool_metric.timing.calls > 0);
+    assert_eq!(pool_metric.budget_us, 10_000);
     command(
         &app,
         &owner,

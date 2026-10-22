@@ -12,6 +12,7 @@ pub mod ids;
 pub mod notifications;
 pub mod overlay;
 pub mod pagination;
+pub mod performance;
 pub mod permissions;
 pub mod screen;
 pub mod validation;

@@ -75,6 +75,7 @@ pub(super) fn visible_voice_channels(
     token: &str,
     guild: GuildId,
 ) -> Result<Vec<ChannelId>, Failure> {
+    let _timing = crate::performance::ROSTER.start();
     checked(pool, token, guild, None, None, |_, actor, state| {
         Ok(state
             .channels
@@ -543,6 +544,7 @@ pub(super) fn refresh(
     cursor: i64,
     work: Refresh,
 ) -> Result<(Option<Vec<Unread>>, Option<Poll>), Failure> {
+    let _timing = crate::performance::REFRESH.start();
     // Guild-wide grants are needed only for unread counts.
     let scope = if work.unread { None } else { channel };
     checked(
@@ -698,6 +700,7 @@ pub(super) fn unread(
     actor: AccountId,
     state: &GuildState,
 ) -> Result<Vec<Unread>, Failure> {
+    let _timing = crate::performance::UNREAD.start();
     // Authorize before touching message history, using the state loaded under
     // the guild lock by checked(). Never scan inaccessible channels.
     let channels: Vec<_> = state

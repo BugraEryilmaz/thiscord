@@ -1365,6 +1365,7 @@ impl Session {
     }
     fn status(&self) -> AudioStatus {
         AudioStatus {
+            ui_performance: None,
             quality: Some(self.quality()),
             recording: None,
             running: true,
@@ -1446,6 +1447,7 @@ fn apply(c: &Controls, s: &AudioSettings) {
 }
 fn stopped(message: String) -> AudioStatus {
     AudioStatus {
+        ui_performance: None,
         quality: None,
         recording: None,
         running: false,

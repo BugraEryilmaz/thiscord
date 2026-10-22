@@ -119,6 +119,7 @@ impl Chat {
         }
     }
     fn update_viewport(self) {
+        let _timing = crate::performance::start(2);
         if let Some(node) = self.list.get_untracked() {
             let viewport = (
                 f64::from(node.scroll_top()) - self.rows_offset(),
@@ -130,6 +131,7 @@ impl Chat {
         }
     }
     fn merge_batch(self, messages: Vec<ChatMessage>, mode: Merge) {
+        let _timing = crate::performance::start(1);
         // Capture the visual anchor before changing heights/order. All work in a
         // history page shares one cache mutation and one deferred scroll pass.
         self.scroll();
@@ -630,6 +632,7 @@ fn MessageRow(
                     return;
                 };
                 chat.scroll();
+                let _timing = crate::performance::start(2);
                 let changed = chat
                     .messages
                     .update_untracked(|m| m.measure(id, node.get_bounding_client_rect().height()));

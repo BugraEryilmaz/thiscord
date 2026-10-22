@@ -10,6 +10,8 @@ mod avatar;
 mod notification_banner;
 #[cfg(target_arch = "wasm32")]
 mod overlay;
+#[cfg(target_arch = "wasm32")]
+mod performance;
 
 #[cfg(target_arch = "wasm32")]
 fn main() {
@@ -24,6 +26,8 @@ fn main() {
         leptos::mount::mount_to_body(notification_banner::DesktopBanners);
     } else {
         leptos::mount::mount_to_body(app::App);
+        // mount_to_body initializes Leptos's local task executor.
+        performance::install();
     }
 }
 

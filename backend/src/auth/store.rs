@@ -27,6 +27,7 @@ pub(crate) fn query<T: DeserializeOwned>(
     sql: &str,
     params: &[&str],
 ) -> Result<Vec<T>, Failure> {
+    let _timing = crate::performance::QUERY.start();
     let mut q = diesel::sql_query(sql).into_boxed::<Pg>();
     for p in params {
         q = q.bind::<Text, _>(*p);
@@ -37,6 +38,7 @@ pub(crate) fn query<T: DeserializeOwned>(
         .collect()
 }
 pub(crate) fn execute(c: &mut PgConnection, sql: &str, params: &[&str]) -> Result<usize, Failure> {
+    let _timing = crate::performance::EXECUTE.start();
     let mut q = diesel::sql_query(sql).into_boxed::<Pg>();
     for p in params {
         q = q.bind::<Text, _>(*p);
@@ -55,7 +57,11 @@ pub(crate) fn connection(
     pool: &DbPool,
 ) -> Result<diesel::r2d2::PooledConnection<diesel::r2d2::ConnectionManager<PgConnection>>, Failure>
 {
-    pool.get().map_err(|_| Failure::Unavailable)
+    let _timing = crate::performance::POOL.start();
+    pool.get().map_err(|_| {
+        crate::performance::POOL_FAILURES.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        Failure::Unavailable
+    })
 }
 fn password_hash(password: &str) -> Result<String, Failure> {
     validate_password(password)?;

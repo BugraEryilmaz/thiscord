@@ -5,6 +5,7 @@ pub mod chat;
 pub mod db;
 pub mod friends;
 pub mod notifications;
+mod performance;
 pub mod permissions;
 pub mod schema;
 

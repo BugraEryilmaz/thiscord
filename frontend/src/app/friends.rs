@@ -310,7 +310,7 @@ pub(super) fn Home(ui: Ui) -> impl IntoView {
                 <h3 class="mb-3 text-xs font-semibold uppercase tracking-wider text-white/40">"Direct messages"</h3>
                 <For each=move ||{ui.friends.snapshot.get().friends.into_iter().filter(|f|f.relationship==Relationship::Friend).collect::<Vec<_>>()} key=|f|f.conversation_id children=move |f| {
                     let id=f.conversation_id;
-                    let friend=Signal::derive(move ||ui.friends.snapshot.get().friends.into_iter().find(|f|f.conversation_id==id).unwrap_or_else(||f.clone()));
+                    let friend=Signal::derive(move ||{let _timing=crate::performance::start(0);ui.friends.snapshot.get().friends.into_iter().find(|f|f.conversation_id==id).unwrap_or_else(||f.clone())});
                     view!{<button data-context-conversation=id.to_string() class="mb-1 flex w-full items-center gap-2 rounded-lg p-2 text-left hover:bg-white/5" class=("bg-white/10",move ||ui.friends.selected.get()==Some(id)) on:click=move |_|open(ui,id)><span class="size-2 shrink-0 rounded-full" class:bg-emerald-400=move ||friend.get().online class=("bg-white/30",move ||!friend.get().online)></span><span class="truncate">{move ||friend.get().person.display_name}</span><Show when=move ||super::notifications::muted(ui,thiscord_shared::notifications::Target::Conversation {conversation_id:id})><span aria-label="Notifications muted"><Icon kind=Glyph::BellOff/></span></Show></button>}
                 }/>
             </aside>
@@ -343,7 +343,7 @@ fn FriendList(ui: Ui, filter: RwSignal<&'static str>) -> impl IntoView {
         <Show when=move ||friends.get().is_empty()><div class="flex min-h-60 flex-col items-center justify-center gap-3 text-center"><span class="rounded-full bg-brand/10 p-5 text-brand"><Icon kind=Glyph::Person/></span><h2 class="text-xl font-semibold">{move ||if filter.get()=="pending"{"No pending requests"}else if filter.get()=="online"{"No friends online right now"}else{"Make yourself at home"}}</h2><p class="max-w-sm text-sm text-white/50">"Use Add friend to find someone by display name or username. Your conversations will appear here."</p></div></Show>
         <For each=move ||friends.get() key=|f|f.conversation_id children=move |initial| {
             let id=initial.conversation_id;let person=initial.person.id;
-            let f=Signal::derive(move ||ui.friends.snapshot.get().friends.into_iter().find(|f|f.conversation_id==id).unwrap_or_else(||initial.clone()));
+            let f=Signal::derive(move ||{let _timing=crate::performance::start(0);ui.friends.snapshot.get().friends.into_iter().find(|f|f.conversation_id==id).unwrap_or_else(||initial.clone())});
             view!{<div data-context-conversation=id.to_string() tabindex="0" aria-haspopup="menu" class="flex flex-wrap items-center gap-4 border-t border-white/10 py-4">
                 <crate::avatar::Avatar class="size-10 text-sm" name=Signal::derive(move ||f.get().person.display_name) avatar_id=Signal::derive(move ||f.get().person.avatar_id)/>
                 <div class="min-w-0 flex-1"><p class="truncate font-semibold">{move ||f.get().person.display_name}<span class="ml-2 text-sm font-normal text-white/40">{move ||format!("@{}",f.get().person.username)}</span></p><p class="text-xs text-white/50">{move ||match f.get().relationship {Relationship::Incoming=>"Incoming request",Relationship::Outgoing=>"Request sent",Relationship::Friend if f.get().online=>"Online",Relationship::Friend=>"Offline"}}</p></div>
