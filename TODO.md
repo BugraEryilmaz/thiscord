@@ -345,6 +345,8 @@ speaker isolation and physical acoustic acceptance remain future work.
 - [ ] Overlay runtime acceptance in games, mixed-DPI monitors, macOS Spaces and Linux compositors.
 - [x] Automatic media transport reconnection after failure; signaling recovery
   preserves existing media, while expired/missing sessions require an explicit join.
+- [x] Automatic desktop recovery for legacy voice source slot transitions, with
+  fresh-session audio fences, cancellable backoff and negotiated-source diagnostics.
 - [ ] Validate real network switching/server outages across native hosts; support
   explicit local device suspend/resume recovery without unexpected capture.
 - [ ] Multi-user acceptance on Windows/macOS/Linux with real microphones.

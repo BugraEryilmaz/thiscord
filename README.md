@@ -109,6 +109,8 @@ persists on this computer; disabling logging keeps existing files. Logs contain
 technical events, not voice recordings or credentials, and are never auto-uploaded.
 Voice failures include safe transport error categories, audio processing stages and
 request IDs for correlation with backend logs; see [disconnect diagnostics](docs/audio.md#native-voice-connection-diagnostics).
+If an older voice client triggers a slot compatibility transition, updated desktops
+automatically reconnect after a brief interruption instead of requiring a manual join.
 Desktop calls and voice rooms show simultaneous webcams and screen shares in a
 grid, with local previews, click-to-fullscreen and right-click hide/restore.
 The camera button uses the system default webcam (up to 720p/30); right-click a

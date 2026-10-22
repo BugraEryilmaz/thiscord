@@ -655,7 +655,8 @@ mod tests {
             roster(&mut old, vec![], at);
             assert!(old.receive_fences[0].is_some());
             let error = observer.observe(std::slice::from_ref(&legacy)).unwrap_err();
-            assert!(error.contains("Rejoin voice"));
+            assert!(error.retryable);
+            assert_eq!(error.diagnostic_reason(), "legacy_source_replacement");
             // Even if an old worker command remains queued, preserve the source
             // tombstone. Compatibility is restored by a new attempt, not reset.
             roster(&mut old, vec![legacy.clone()], at);
@@ -663,7 +664,7 @@ mod tests {
             let connection = old.connection.clone().unwrap();
             connection.close();
             // Scope exit models native attempt cleanup, dropping Session and
-            // all per-attempt signaling/roster state before the explicit rejoin.
+            // all per-attempt signaling/roster state before the automatic retry.
             (old_packet, pending, connection, 1_usize)
         };
         assert!(!old_connection.active());

@@ -1193,6 +1193,9 @@ async fn serve(mut socket: logging::Socket, pool: DbPool, id: RequestId) {
                 member.subscriptions_enabled = screen_subscriptions;
                 member.screen_layers = screen_layers && screen_subscriptions && enabled;
                 member.negotiated = true;
+                tracing::info!(request_id = %id, slot, packet_redundancy,
+                    microphone_source_epoch = member.info.microphone_source_epoch,
+                    "voice source negotiated");
                 room.changed.send_replace(());
             }
             Ok(())

@@ -25,8 +25,14 @@ valid), with `a=fmtp:112 111/111/111`. Both RED and Opus 111 must appear on ever
 negotiated audio m-line. The server advertises the capability; a new client answers
 only when supported. Older servers receive the unchanged answer shape and raw Opus.
 If a legacy source replaces a previously protected slot in an active call, the
-client reports that rejoining is required. Rejoining clears the old session
-tombstones and restores ordinary Opus fallback without weakening source ordering.
+desktop automatically reconnects with fresh authorization and the existing
+1–30 second backoff plus jitter. Audio briefly pauses; users do not need to join
+manually. Only a new transport/session clears the old tombstones and restores
+ordinary Opus fallback without weakening source ordering. Repeated legacy rejoins
+on that fresh session do not trigger recovery unless a modern source has since
+occupied the slot. Disconnect cancels recovery; access denial or a replacement
+call remains terminal. Synthetic test bots retain their existing stop-on-error
+behavior. This requires an updated desktop; older clients still require rejoining.
 The server unwraps RED to the primary Opus payload for older listeners, retaining
 the primary RTP sequence, timestamp and marker. System audio/video use their
 existing formats. No decoding occurs on the SFU.
