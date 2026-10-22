@@ -1409,7 +1409,7 @@ async fn serve(mut socket: logging::Socket, pool: DbPool, id: RequestId) {
             active: active.clone(),
         };
         let (_audio_registration, mut audio_requests) = if remote_audio {
-            let (guard, receiver) = crate::admin::audio::register(id);
+            let (guard, receiver) = crate::admin::audio::register(id, access.bot.is_some());
             (Some(guard), receiver)
         } else {
             (None, mpsc::channel(1).1)

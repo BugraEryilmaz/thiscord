@@ -286,6 +286,11 @@ pub fn detail(value: Option<&AudioQuality>) -> String {
         counts(&mut out, &s.metrics, true);
         let _ = writeln!(
             out,
+            "RED history frames played: {}; DRED attempts / output frames: {} / {}",
+            s.red_recovered_frames, s.dred_attempts, s.dred_output_frames
+        );
+        let _ = writeln!(
+            out,
             "Verified FEC recoveries: {}",
             s.verified_fec_packets
                 .map(|v| v.to_string())

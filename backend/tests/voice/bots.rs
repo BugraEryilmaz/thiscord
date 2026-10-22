@@ -19,6 +19,29 @@ async fn bots(
     assert_eq!(status, expected, "{body}");
     body
 }
+async fn audio(app: &Router, token: &str, connection: &Value, command: Value) -> Value {
+    let (status, body) = call(
+        app,
+        thiscord_shared::remote_audio::PATH,
+        token,
+        json!({"connection_id":connection,"command":command}),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert!(body.get("Err").is_none(), "{body}");
+    body["Ok"].clone()
+}
+async fn save_audio(app: &Router, token: &str, connection: &Value, settings: Value) {
+    let expected = audio(app, token, connection, json!({"command":"audio_current"})).await;
+    audio(
+        app,
+        token,
+        connection,
+        json!({"command":"audio_save","settings":settings,"expected":expected}),
+    )
+    .await;
+}
+
 async fn roster(peer: &mut Peer, count: usize) -> Vec<voice::Participant> {
     tokio::time::timeout(Duration::from_secs(8), async {
         loop {
@@ -302,7 +325,9 @@ async fn owner_bots_watch_cameras_screens_audio_and_renew_revoke_viewers() {
     );
     let old_epoch = good_bot["video"][0]["epoch"].clone();
     let mut deaf = defaults.clone();
-    deaf["deafened"] = json!(true);
+    deaf["audio"]["deafened"] = json!(true);
+    let connection = good_bot["connection_id"].clone();
+    save_audio(&app, &owner, &connection, deaf["audio"].clone()).await;
     bots(
         &app,
         &owner,
@@ -349,6 +374,7 @@ async fn owner_bots_watch_cameras_screens_audio_and_renew_revoke_viewers() {
             .unwrap()["received_system_audio_packets"],
         audio_before
     );
+    save_audio(&app, &owner, &connection, defaults["audio"].clone()).await;
     bots(
         &app,
         &owner,
@@ -571,9 +597,37 @@ async fn owner_bots_real_audio_controls_capacity_isolation_and_revocation() {
         StatusCode::OK,
     )
     .await;
-    assert!(listed["bots"][0]["received_packets"].as_u64().unwrap() > 0);
+    let status = audio(
+        &app,
+        &owner,
+        &first["connection_id"],
+        json!({"command":"audio_status"}),
+    )
+    .await;
+    assert!(status["running"].as_bool().unwrap());
+    assert!(!status["streams"].as_array().unwrap().is_empty());
+    let _ = listed;
+    let (status, _) = call(
+        &app,
+        thiscord_shared::remote_audio::PATH,
+        &admin,
+        json!({"connection_id":first["connection_id"],"command":{"command":"audio_current"}}),
+    )
+    .await;
+    assert_eq!(
+        status,
+        StatusCode::FORBIDDEN,
+        "instance admins cannot control test bots"
+    );
     let mut muted = defaults.clone();
-    muted["muted"] = json!(true);
+    muted["audio"]["muted"] = json!(true);
+    save_audio(
+        &app,
+        &owner,
+        &first["connection_id"],
+        muted["audio"].clone(),
+    )
+    .await;
     bots(
         &app,
         &owner,
@@ -622,7 +676,7 @@ async fn owner_bots_real_audio_controls_capacity_isolation_and_revocation() {
             .is_err()
     );
     let mut bad = defaults.clone();
-    bad["input_gain"] = json!(99);
+    bad["audio"]["input_gain"] = json!(99);
     bots(
         &app,
         &owner,
@@ -630,6 +684,13 @@ async fn owner_bots_real_audio_controls_capacity_isolation_and_revocation() {
         &voice,
         json!({"action":"update","bot_id":first["id"],"revision":1,"settings":bad}),
         StatusCode::BAD_REQUEST,
+    )
+    .await;
+    save_audio(
+        &app,
+        &owner,
+        &first["connection_id"],
+        defaults["audio"].clone(),
     )
     .await;
     bots(
@@ -710,16 +771,26 @@ async fn owner_bots_real_audio_controls_capacity_isolation_and_revocation() {
         StatusCode::FORBIDDEN,
     )
     .await;
-    let empty = bots(
-        &app,
-        &admin,
-        &guild,
-        &voice,
-        json!({"action":"list"}),
-        StatusCode::OK,
-    )
-    .await;
-    assert!(empty["bots"].as_array().unwrap().is_empty());
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
+    loop {
+        let empty = bots(
+            &app,
+            &admin,
+            &guild,
+            &voice,
+            json!({"action":"list"}),
+            StatusCode::OK,
+        )
+        .await;
+        if empty["bots"].as_array().unwrap().is_empty() {
+            break;
+        }
+        assert!(
+            tokio::time::Instant::now() < deadline,
+            "revoked companions were not reaped"
+        );
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
     bots(
         &app,
         &admin,
@@ -759,4 +830,200 @@ async fn owner_bots_real_audio_controls_capacity_isolation_and_revocation() {
     receiver.close().await;
     separate.close().await;
     serving.abort();
+}
+
+#[tokio::test]
+#[ignore = "requires TEST_DATABASE_URL and the voice-bot companion"]
+async fn owner_bots_use_native_recovery_dsp_devices_and_ptt() {
+    let db = database();
+    let (_, owner) = user(&db, "native_bot_owner");
+    permissions::bootstrap_owner(&db.pool, "native_bot_owner").unwrap();
+    let app = api::router(
+        Some(db.pool.clone()),
+        vec!["http://localhost:1420".parse().unwrap()],
+    );
+    let mut state = command(
+        &app,
+        &owner,
+        json!({"action":"create_guild","name":"Native bot audio"}),
+        StatusCode::OK,
+    )
+    .await["state"]
+        .clone();
+    let guild = state["guild"]["id"].clone();
+    change(
+        &app,
+        &owner,
+        &mut state,
+        json!({"action":"create_channel","name":"audio","kind":"voice"}),
+        StatusCode::OK,
+    )
+    .await;
+    let channel = state["channels"][0]["id"].clone();
+    let mut settings = serde_json::to_value(Settings::default()).unwrap();
+    settings["profile"] = json!("high_loss");
+    settings["talking"] = json!(true);
+    settings["audio"]["mode"] = json!("push_to_talk");
+    settings["audio"]["packet_redundancy"] = json!(true);
+    settings["audio"]["adaptive_fec"] = json!(true);
+    let source = bots(
+        &app,
+        &owner,
+        &guild,
+        &channel,
+        json!({"action":"add","settings":settings}),
+        StatusCode::OK,
+    )
+    .await["bots"][0]
+        .clone();
+    let mut silent = serde_json::to_value(Settings::default()).unwrap();
+    silent["scenario"] = json!("silence");
+    let list = bots(
+        &app,
+        &owner,
+        &guild,
+        &channel,
+        json!({"action":"add","settings":silent}),
+        StatusCode::OK,
+    )
+    .await;
+    let receiver = list["bots"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|b| b["id"] != source["id"])
+        .unwrap()
+        .clone();
+    async fn recovered(app: &Router, owner: &str, connection: &Value, field: &str) -> Value {
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(15);
+        loop {
+            let status = audio(app, owner, connection, json!({"command":"audio_status"})).await;
+            if status["quality"]["streams"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|s| s[field].as_u64().unwrap_or(0) > 0)
+            {
+                return status;
+            }
+            assert!(
+                tokio::time::Instant::now() < deadline,
+                "No {field} from native receiver: {status}"
+            );
+            tokio::time::sleep(Duration::from_millis(250)).await;
+        }
+    }
+    let status = recovered(
+        &app,
+        &owner,
+        &receiver["connection_id"],
+        "red_recovered_frames",
+    )
+    .await;
+    let stream = &status["streams"][0];
+    audio(&app, &owner, &receiver["connection_id"], json!({"command":"audio_volume","stream":stream["id"].as_str().unwrap().parse::<usize>().unwrap(),"target":stream["target"],"gain":0.25})).await;
+    let devices = audio(
+        &app,
+        &owner,
+        &receiver["connection_id"],
+        json!({"command":"audio_devices"}),
+    )
+    .await;
+    assert_eq!(devices.as_array().unwrap().len(), 2);
+    // Both endpoints use the production DRED encoder/decoder; no RED fallback here.
+    settings["audio"]["packet_redundancy"] = json!(false);
+    settings["audio"]["deep_redundancy"] = json!(true);
+    silent["audio"]["deep_redundancy"] = json!(true);
+    save_audio(
+        &app,
+        &owner,
+        &receiver["connection_id"],
+        silent["audio"].clone(),
+    )
+    .await;
+    save_audio(
+        &app,
+        &owner,
+        &source["connection_id"],
+        settings["audio"].clone(),
+    )
+    .await;
+    recovered(
+        &app,
+        &owner,
+        &receiver["connection_id"],
+        "dred_output_frames",
+    )
+    .await;
+    let fec = audio(
+        &app,
+        &owner,
+        &source["connection_id"],
+        json!({"command":"audio_status"}),
+    )
+    .await;
+    assert_eq!(fec["quality"]["adaptive_fec"]["enabled"], true);
+    // Exercise a real device swap, neural DSP preparation and normal settings round trip.
+    let mut processing = silent["audio"].clone();
+    processing["input"] = json!("virtual-microphone");
+    processing["output"] = json!("virtual-speakers");
+    processing["noise_suppression"] = json!(true);
+    processing["noise_suppression_model"] = json!("deep_filter_net3");
+    processing["automatic_gain"] = json!(true);
+    processing["echo_cancellation"] = json!(true);
+    processing["neural_echo"] = json!(true);
+    processing["input_gain"] = json!(2.0);
+    processing["output_volume"] = json!(0.5);
+    processing["activation_threshold"] = json!(0.02);
+    save_audio(&app, &owner, &receiver["connection_id"], processing.clone()).await;
+    let observed: thiscord_shared::audio::AudioSettings = serde_json::from_value(
+        audio(
+            &app,
+            &owner,
+            &receiver["connection_id"],
+            json!({"command":"audio_current"}),
+        )
+        .await,
+    )
+    .unwrap();
+    assert_eq!(observed, serde_json::from_value(processing).unwrap());
+    let status = audio(
+        &app,
+        &owner,
+        &receiver["connection_id"],
+        json!({"command":"audio_status"}),
+    )
+    .await;
+    assert_eq!(status["running"], true);
+    assert_eq!(status["echo"]["automatic_gain"], true);
+    settings["talking"] = json!(false);
+    bots(
+        &app,
+        &owner,
+        &guild,
+        &channel,
+        json!({"action":"update","bot_id":source["id"],"revision":0,"settings":settings}),
+        StatusCode::OK,
+    )
+    .await;
+    tokio::time::sleep(Duration::from_millis(400)).await;
+    let stopped = audio(
+        &app,
+        &owner,
+        &source["connection_id"],
+        json!({"command":"audio_status"}),
+    )
+    .await;
+    assert_eq!(stopped["transmitting"], false);
+    for bot in [&source, &receiver] {
+        bots(
+            &app,
+            &owner,
+            &guild,
+            &channel,
+            json!({"action":"remove","bot_id":bot["id"]}),
+            StatusCode::OK,
+        )
+        .await;
+    }
 }

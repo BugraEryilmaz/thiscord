@@ -321,6 +321,8 @@ speaker isolation and physical acoustic acceptance remain future work.
   multiple real WebRTC peers, connection profiles, admin audio controls and revocation tests.
 - [x] Headless bot camera/screen/shared-audio reception, bounded H.264 decoding,
   normal viewer leases, recovery/bitrate feedback and owner diagnostics.
+- [x] Bot native AudioEngine parity, shared voice settings panel, RED/DRED recovery
+  diagnostics, virtual devices/PTT and repeatable speech/noise/echo scenarios.
 - [ ] Physically listen to bot profiles and verify menus/admin edits on Windows/macOS/Linux.
 
 - [x] Join/leave and move yourself between voice channels; live participant list.

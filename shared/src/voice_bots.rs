@@ -41,9 +41,9 @@ impl ConnectionProfile {
     /// Simulated one-way media delay, jitter, loss percent and wire budget.
     pub fn parameters(self) -> (u64, u64, u32, u32) {
         match self {
-            Self::Good => (20, 0, 0, 96_000),
+            Self::Good => (20, 0, 0, 1_000_000),
             Self::LowBandwidth => (120, 30, 0, 24_000),
-            Self::HighLoss => (60, 20, 25, 96_000),
+            Self::HighLoss => (60, 20, 25, 1_000_000),
             Self::Unstable => (100, 100, 10, 48_000),
         }
     }
@@ -56,14 +56,16 @@ pub enum MicrophoneLoop {
     Chimes,
     Pulse,
     Melody,
+    Speech,
 }
 impl MicrophoneLoop {
-    pub const ALL: [Self; 3] = [Self::Chimes, Self::Pulse, Self::Melody];
+    pub const ALL: [Self; 4] = [Self::Speech, Self::Chimes, Self::Pulse, Self::Melody];
     pub fn label(self) -> &'static str {
         match self {
             Self::Chimes => "Chimes",
             Self::Pulse => "Low pulse",
             Self::Melody => "Melody",
+            Self::Speech => "Speech",
         }
     }
 }
@@ -73,35 +75,115 @@ impl MicrophoneLoop {
 pub struct Settings {
     pub profile: ConnectionProfile,
     pub microphone_loop: MicrophoneLoop,
-    pub input_gain: f32,
-    pub output_volume: f32,
-    pub muted: bool,
-    pub deafened: bool,
+    #[serde(default)]
+    pub audio: crate::audio::AudioSettings,
+    #[serde(default)]
+    pub scenario: Scenario,
+    /// A held virtual PTT key. Released automatically when the helper exits.
+    #[serde(default)]
+    pub talking: bool,
+}
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum Scenario {
+    #[default]
+    Clean,
+    Quiet,
+    Noise,
+    Echo,
+    DoubleTalk,
+    Silence,
+}
+impl Scenario {
+    pub const ALL: [Self; 6] = [
+        Self::Clean,
+        Self::Quiet,
+        Self::Noise,
+        Self::Echo,
+        Self::DoubleTalk,
+        Self::Silence,
+    ];
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::Clean => "Clean microphone",
+            Self::Quiet => "Quiet microphone",
+            Self::Noise => "Background noise",
+            Self::Echo => "Speaker echo only",
+            Self::DoubleTalk => "Microphone and speaker echo",
+            Self::Silence => "Silence",
+        }
+    }
 }
 impl Default for Settings {
     fn default() -> Self {
         Self {
             profile: Default::default(),
-            microphone_loop: Default::default(),
-            input_gain: 1.0,
-            output_volume: 1.0,
-            muted: false,
-            deafened: false,
+            microphone_loop: MicrophoneLoop::Speech,
+            audio: Default::default(),
+            scenario: Default::default(),
+            talking: false,
         }
+    }
+}
+impl std::ops::Deref for Settings {
+    type Target = crate::audio::AudioSettings;
+    fn deref(&self) -> &Self::Target {
+        &self.audio
+    }
+}
+impl std::ops::DerefMut for Settings {
+    fn deref_mut(&mut self) -> &mut Self::Target {
+        &mut self.audio
     }
 }
 impl Settings {
     pub fn validate(&self) -> Result<(), &'static str> {
-        if !self.input_gain.is_finite()
-            || !(1.0..=10.0).contains(&self.input_gain)
-            || !self.output_volume.is_finite()
-            || !(0.0..=2.0).contains(&self.output_volume)
-        {
-            return Err("Invalid bot audio levels");
-        }
-        Ok(())
+        self.audio
+            .validate()
+            .map_err(|_| "Invalid bot voice settings")?;
+        validate_audio(&self.audio)
     }
 }
+pub fn validate_audio(audio: &crate::audio::AudioSettings) -> Result<(), &'static str> {
+    if audio
+        .input
+        .as_deref()
+        .is_some_and(|s| s != "virtual-microphone")
+        || audio
+            .output
+            .as_deref()
+            .is_some_and(|s| s != "virtual-speakers")
+        || audio.neural_echo_model.is_some()
+    {
+        return Err("Bots use virtual devices and bundled processing models");
+    }
+    Ok(())
+}
+/// Private, bounded parent/companion protocol. Never exposed as a public socket.
+#[derive(Serialize, Deserialize)]
+pub enum HostMessage {
+    Start {
+        token: String,
+        guild: GuildId,
+        channel: ChannelId,
+        bot: Bot,
+    },
+    Signal(String),
+    Settings(Settings),
+}
+#[derive(Serialize, Deserialize)]
+pub enum PeerMessage {
+    Signal(String),
+    Ready(Result<(), StartupFailure>),
+    Snapshot(Box<Bot>),
+}
+#[derive(Serialize, Deserialize)]
+pub enum StartupFailure {
+    Unavailable,
+    Forbidden,
+    Limited,
+}
+pub const IPC_LIMIT: usize = 256 * 1024;
 
 #[derive(Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -130,6 +212,8 @@ pub enum Command {
 pub struct Bot {
     pub id: AccountId,
     pub name: String,
+    #[serde(default)]
+    pub connection_id: Option<crate::RequestId>,
     pub revision: u64,
     pub settings: Settings,
     pub sent_packets: u64,
@@ -167,6 +251,33 @@ pub struct Response {
 mod tests {
     use super::*;
     #[test]
+    fn normal_voice_settings_round_trip_and_bot_devices_are_bounded() {
+        let mut settings = Settings::default();
+        settings.audio.noise_suppression = true;
+        settings.audio.noise_suppression_model =
+            crate::audio::NoiseSuppressionModel::DeepFilterNet3;
+        settings.audio.automatic_gain = true;
+        settings.audio.echo_cancellation = true;
+        settings.audio.neural_echo = true;
+        settings.audio.packet_redundancy = true;
+        settings.audio.deep_redundancy = true;
+        settings.audio.adaptive_fec = true;
+        settings.audio.mode = crate::audio::TransmitMode::PushToTalk;
+        settings.audio.input = Some("virtual-microphone".into());
+        settings.audio.output = Some("virtual-speakers".into());
+        settings.talking = true;
+        settings.scenario = Scenario::DoubleTalk;
+        settings.validate().unwrap();
+        let restored: Settings =
+            serde_json::from_value(serde_json::to_value(&settings).unwrap()).unwrap();
+        assert_eq!(settings, restored);
+        settings.audio.neural_echo_model = Some("/server/private/model".into());
+        assert!(settings.validate().is_err());
+        settings.audio.neural_echo_model = None;
+        settings.audio.input = Some("physical-device".into());
+        assert!(settings.validate().is_err());
+    }
+    #[test]
     fn wire_names_and_bounds() {
         let value = serde_json::to_value(Command::Add {
             settings: Settings::default(),
@@ -182,7 +293,10 @@ mod tests {
         );
         assert!(
             Settings {
-                input_gain: f32::NAN,
+                audio: crate::audio::AudioSettings {
+                    input_gain: f32::NAN,
+                    ..Default::default()
+                },
                 ..Default::default()
             }
             .validate()
@@ -190,7 +304,10 @@ mod tests {
         );
         assert!(
             Settings {
-                output_volume: 2.1,
+                audio: crate::audio::AudioSettings {
+                    output_volume: 2.1,
+                    ..Default::default()
+                },
                 ..Default::default()
             }
             .validate()

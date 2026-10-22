@@ -499,8 +499,8 @@ mod tests {
 
     #[tokio::test]
     async fn subscriptions_fence_epochs_owners_deafen_and_roster_order() {
-        let id = AccountId::from_uuid(uuid::Uuid::new_v4());
-        let owner = AccountId::from_uuid(uuid::Uuid::new_v4());
+        let id: AccountId = "00000000-0000-0000-0000-000000000001".parse().unwrap();
+        let owner: AccountId = "00000000-0000-0000-0000-000000000002".parse().unwrap();
         let mut member: Participant = serde_json::from_value(serde_json::json!({
             "account_id": owner, "username":"source", "slot":0, "muted":false,
             "deafened":false,"can_speak":true,"sharing_screen":true,"screen_epoch":1
@@ -526,7 +526,7 @@ mod tests {
         );
         assert!(!receiver.update(&[member.clone()], id, &settings));
         member.screen_epoch = 2;
-        member.account_id = AccountId::from_uuid(uuid::Uuid::new_v4());
+        member.account_id = "00000000-0000-0000-0000-000000000003".parse().unwrap();
         assert!(receiver.update(&[member.clone()], id, &settings));
         receiver.received(&packet, false);
         assert_eq!(
@@ -543,7 +543,10 @@ mod tests {
             &[member],
             id,
             &Settings {
-                deafened: true,
+                audio: thiscord_shared::audio::AudioSettings {
+                    deafened: true,
+                    ..Default::default()
+                },
                 ..settings
             },
         );

@@ -63,6 +63,7 @@ pub struct Metrics {
     pub stale_discards: u64,
     pub concealments: u64,
     pub fec_attempts: u64,
+    pub red_recovered_frames: u64,
     pub decode_errors: u64,
     pub inactive: bool,
     pub dtx: bool,
@@ -468,6 +469,7 @@ impl Jitter {
         // from a recovered block or count it as another received RTP packet.
         if let Some(index) = self.redundant.iter().position(|(ts, _, _)| *ts == cursor) {
             let (_, _, payload) = self.redundant.swap_remove(index);
+            self.metrics.red_recovered_frames += 1;
             if self
                 .last_data
                 .is_some_and(|ts| cursor.wrapping_sub(ts) == FRAME as u32)

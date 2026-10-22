@@ -8,6 +8,7 @@ use thiscord_shared::{ApiError, RequestId, audio::AudioSettings, remote_audio};
 #[derive(Clone, Copy, Default)]
 pub struct AudioControl {
     remote: Option<Remote>,
+    bot: bool,
 }
 #[derive(Clone, Copy)]
 struct Remote {
@@ -19,6 +20,7 @@ struct Remote {
 impl AudioControl {
     pub fn remote(connection: RequestId, token: RwSignal<Option<String>>) -> Self {
         Self {
+            bot: false,
             remote: Some(Remote {
                 connection,
                 token,
@@ -26,6 +28,13 @@ impl AudioControl {
                 serial: StoredValue::new(Arc::new(futures_util::lock::Mutex::new(()))),
             }),
         }
+    }
+    pub fn for_bot(mut self) -> Self {
+        self.bot = true;
+        self
+    }
+    pub fn is_bot(self) -> bool {
+        self.bot
     }
     pub fn is_remote(self) -> bool {
         self.remote.is_some()
