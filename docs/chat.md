@@ -1,9 +1,14 @@
 # Text chat and sockets
 
-Select a text channel from a server's channel list. Messages render as plain text;
-HTML, links and Markdown are not executed. Use `@username` to mention a guild
-member. Server views show profile display names; usernames remain the handles for
-mentions and member lookup. Older server responses fall back to usernames.
+Select a text channel from a server's channel list. Guild and private messages
+automatically turn HTTP/HTTPS URLs and bare domains (using HTTPS) into clickable
+links. Desktop links open in the default system browser; browser-preview links
+open in a new tab. Surrounding punctuation stays outside the link. Other content
+remains escaped text; HTML and Markdown are not interpreted. Non-web schemes and
+URLs containing credentials are not linked or accepted by the desktop opener.
+Use `@username` to mention a guild member. Server views show profile display names;
+usernames remain the handles for mentions and member lookup. Older server
+responses fall back to usernames.
 Mentioned messages are highlighted; channel badges show unread counts and
 an `@` for unread mentions. Online/typing indicators describe people viewing the
 same channel, not deployment-wide availability. Voice uses its separate media transport.

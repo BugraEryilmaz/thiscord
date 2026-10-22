@@ -1,4 +1,7 @@
 {
+  "Invalid web URL": "Geçersiz web adresi",
+  "Could not open the system browser": "Sistem tarayıcısı açılamadı",
+  "Browser task failed": "Tarayıcı işlemi başarısız oldu",
   "Voice test bot service is unavailable. Check that the matching bot companion is installed": "Ses test botu hizmeti kullanılamıyor. Sunucuyla aynı sürümdeki bot yardımcı programının kurulu olduğunu kontrol edin",
   "English · Quiet room": "İngilizce · Sessiz oda",
   "English · Desk fan": "İngilizce · Masa vantilatörü",

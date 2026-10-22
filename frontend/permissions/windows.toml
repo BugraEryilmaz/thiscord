@@ -1,6 +1,6 @@
 [[permission]]
 identifier = "main-commands"
-description = "Account, media and settings commands for the main window only."
+description = "Account, media, links and settings commands for the main window only."
 commands.allow = [
   "performance_report",
   "notification_show",
@@ -17,6 +17,7 @@ commands.allow = [
   "prepare_google",
   "open_google",
   "cancel_google",
+  "open_external_url",
   "audio_devices",
   "audio_load",
   "audio_current",

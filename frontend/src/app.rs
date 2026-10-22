@@ -11,6 +11,7 @@ mod dialog;
 mod friends;
 mod icons;
 mod login;
+mod message_content;
 mod moderation;
 mod notifications;
 mod permissions;
