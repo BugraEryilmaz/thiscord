@@ -14,6 +14,7 @@ pub(super) async fn run(
     mut stop: watch::Receiver<bool>,
     bot: Arc<StdMutex<Bot>>,
     ready: tokio::sync::oneshot::Sender<Result<(), Failure>>,
+    request_id: RequestId,
 ) {
     let mut ready = Some(ready);
     let work = async {
@@ -37,7 +38,11 @@ pub(super) async fn run(
             .kill_on_drop(true);
         #[cfg(windows)]
         process.creation_flags(0x08000000); // CREATE_NO_WINDOW
-        let mut child = process.spawn().map_err(|_| Failure::Unavailable)?;
+        let mut child = process.spawn().map_err(|error| {
+            // Error text can include server paths; log only the safe OS category.
+            tracing::error!(%request_id, error_kind = ?error.kind(), os_error = error.raw_os_error(), "Cannot start voice test bot companion; install the matching thiscord-voice-bot beside the backend or configure THISCORD_VOICE_BOT_PATH");
+            Failure::Unavailable
+        })?;
         let mut input = child.stdin.take().ok_or(Failure::Unavailable)?;
         let mut output = child.stdout.take().ok_or(Failure::Unavailable)?;
         let (writer, mut writes) = mpsc::channel::<HostMessage>(32);
@@ -123,6 +128,7 @@ pub(super) async fn run(
         _ = tokio::time::sleep(Duration::from_secs(LIFETIME_SECS)) => Ok(()),
     };
     if let Some(ready) = ready {
+        tracing::warn!(%request_id, "Voice test bot companion stopped before startup completed");
         let _ = ready.send(result.and(Err(Failure::Unavailable)));
     }
 }

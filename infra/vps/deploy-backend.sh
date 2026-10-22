@@ -51,9 +51,19 @@ git -C "$repo" archive "$commit" | tar -x -C "$source_dir"
 cd "$source_dir"
 export CARGO_TARGET_DIR="$repo/target"
 export CARGO_BUILD_JOBS=2 CARGO_PROFILE_RELEASE_LTO=false CARGO_PROFILE_RELEASE_CODEGEN_UNITS=8
-cargo build -p thiscord-backend --bin thiscord-backend --release --locked
 [[ $(trunk --version) == 'trunk 0.21.14' ]] || { echo 'Install trunk 0.21.14 with cargo install trunk --version 0.21.14 --locked.' >&2; exit 1; }
+pkg-config --exists alsa || { echo 'Install libasound2-dev for the native voice-bot companion before deploying.' >&2; exit 1; }
+cargo build -p thiscord-backend --bin thiscord-backend --release --locked
+cargo build -p thiscord-frontend --features voice-bot --bin thiscord-voice-bot --release --locked
+# Validate the companion before touching the running release. CPAL links ALSA
+# even though the bot uses virtual devices and never opens sound hardware.
+ldd "$CARGO_TARGET_DIR/release/thiscord-voice-bot" > "$source_dir/voice-bot-libraries.txt"
+if grep -q 'not found' "$source_dir/voice-bot-libraries.txt"; then
+    echo 'Voice-bot companion has missing runtime libraries; deployment aborted.' >&2
+    exit 1
+fi
 (cd frontend && trunk build --release --locked --public-url /admin/ --dist dist-admin)
+[[ -s frontend/dist-admin/index.html ]] || { echo 'Admin bundle is missing; refusing to activate an API-only release.' >&2; exit 1; }
 if [[ $build_only == true ]]; then
     echo "Build verified: $commit. No production service or database changes."
     exit 0
@@ -64,6 +74,7 @@ previous=$(sudo -n readlink -f /opt/thiscord/current)
 release=$(sudo -n mktemp -d "/opt/thiscord/releases/${commit:0:12}-$(date -u +%Y%m%dT%H%M%SZ).XXXXXXXX")
 sudo -n chmod 0755 "$release"
 sudo -n install -o root -g root -m 0755 "$CARGO_TARGET_DIR/release/thiscord-backend" "$release/thiscord-backend"
+sudo -n install -o root -g root -m 0755 "$CARGO_TARGET_DIR/release/thiscord-voice-bot" "$release/thiscord-voice-bot"
 sudo -n install -d -o root -g root -m 0755 "$release/admin"
 sudo -n cp -R frontend/dist-admin/. "$release/admin/"
 sudo -n chown -R root:root "$release/admin"
@@ -93,8 +104,18 @@ done
 [[ $ready == true ]] || { echo 'Origin readiness check failed.' >&2; exit 1; }
 stopped=false
 echo "Deployed $commit. Origin HTTPS and database readiness passed."
+if ! curl --noproxy '*' --silent --show-error --fail --max-time 10 \
+    --resolve thiscord.com.tr:443:127.0.0.1 \
+    https://thiscord.com.tr/admin >/dev/null; then
+    echo 'Admin route check failed; healthy API left running. Check the installed bundle and ADMIN_DIST_DIR.' >&2
+    exit 1
+fi
 if ! curl --silent --show-error --fail --max-time 20 https://thiscord.com.tr/api/v1/ready; then
     echo 'Public access check failed; healthy origin left running. Check DNS/Cloudflare.' >&2
+    exit 1
+fi
+if ! curl --silent --show-error --fail --max-time 20 https://thiscord.com.tr/admin >/dev/null; then
+    echo 'Public admin check failed; healthy origin left running. Check Cloudflare routing.' >&2
     exit 1
 fi
 echo
