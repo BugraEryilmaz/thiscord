@@ -330,6 +330,64 @@ async fn notifications_fanout_keeps_sixteen_subscribers_connected() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 #[ignore = "requires TEST_DATABASE_URL"]
+async fn notifications_exclude_calls_expired_while_authorization_waited() {
+    let _lock = TEST_LOCK.lock().await;
+    let mut db = database();
+    prepare_blocking_test(&mut db);
+    let (alice_id, alice) = user(&db, "expiry_alice");
+    let (bob_id, bob) = user(&db, "expiry_bob");
+    let conversation = Uuid::new_v4();
+    diesel::sql_query("INSERT INTO friendships(id,low_id,high_id,requester,state) VALUES($1::uuid,LEAST($2::uuid,$3::uuid),GREATEST($2::uuid,$3::uuid),$2::uuid,'accepted')").bind::<Text,_>(conversation.to_string()).bind::<Text,_>(alice_id.to_string()).bind::<Text,_>(bob_id.to_string()).execute(&mut db.pool.get().unwrap()).unwrap();
+    let app = api::router(
+        Some(db.pool.clone()),
+        vec!["http://localhost:1420".parse().unwrap()],
+    );
+    let (status, started) = call(
+        &app,
+        thiscord_shared::friends::FRIENDS_PATH,
+        &alice,
+        json!({"action":"start_call","conversation_id":conversation}),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    let (address, server) = server(&app).await;
+    db.connection.batch_execute("BEGIN").unwrap();
+    diesel::sql_query("SELECT id FROM accounts WHERE id=$1::uuid FOR NO KEY UPDATE")
+        .bind::<Text, _>(bob_id.to_string())
+        .execute(&mut db.connection)
+        .unwrap();
+    let mut request = format!("ws://{address}{SOCKET_PATH}")
+        .into_client_request()
+        .unwrap();
+    request
+        .headers_mut()
+        .insert("origin", "http://localhost:1420".parse().unwrap());
+    let (mut socket, _) = connect_async(request).await.unwrap();
+    event(
+        &mut socket,
+        json!({"type":"connect","token":bob,"kinds":["incoming_call"]}),
+    )
+    .await;
+    // The notification transaction has started but its authorization read is
+    // blocked. Expire the call after that transaction's now(), without sleeps.
+    wait_for_blocked(&mut db.connection, 1).await;
+    diesel::sql_query("UPDATE friend_calls SET expires_at=clock_timestamp() WHERE id=$1::uuid")
+        .bind::<Text, _>(started["call"]["id"].as_str().unwrap())
+        .execute(&mut db.connection)
+        .unwrap();
+    db.connection.batch_execute("COMMIT").unwrap();
+    assert_eq!(next_frame(&mut socket).await["type"], "ready");
+    assert_eq!(
+        next_frame(&mut socket).await,
+        json!({"type":"calls","ringing":[]})
+    );
+    quiet(&mut socket).await;
+    socket.close(None).await.unwrap();
+    server.abort();
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[ignore = "requires TEST_DATABASE_URL"]
 async fn notifications_recover_and_clear_calls_without_friends_polling() {
     let _lock = TEST_LOCK.lock().await;
     let db = database();

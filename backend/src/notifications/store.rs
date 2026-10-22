@@ -184,7 +184,7 @@ pub(super) struct Invitation {
     pub id: thiscord_shared::ids::CallId,
     pub conversation_id: thiscord_shared::ids::ConversationId,
     pub caller: AccountId,
-    pub expires_at: thiscord_shared::Timestamp,
+    pub remaining_ms: u64,
 }
 impl Invitation {
     pub fn candidate(&self, callee: AccountId) -> Candidate {
@@ -215,7 +215,9 @@ pub(super) fn initial(pool: &DbPool, token: &str) -> Result<Initial, Failure> {
                 &[],
             )?
             .pop(),
-            calls: query(c, "SELECT to_jsonb(v) AS data FROM friend_calls v JOIN friendships f ON f.id=v.conversation_id WHERE v.callee=$1::uuid AND v.state='ringing' AND v.expires_at>now() AND f.state='accepted' ORDER BY v.expires_at LIMIT 1", &[&session.account_id.to_string()])?,
+            // Authorization may wait on locks after the transaction starts. Use
+            // statement time for both eligibility and the rounded-up duration.
+            calls: query(c, "SELECT to_jsonb(v) || jsonb_build_object('remaining_ms', CEIL(EXTRACT(EPOCH FROM (v.expires_at-statement_timestamp()))*1000)::bigint) AS data FROM friend_calls v JOIN friendships f ON f.id=v.conversation_id WHERE v.callee=$1::uuid AND v.state='ringing' AND v.expires_at>statement_timestamp() AND f.state='accepted' ORDER BY v.expires_at LIMIT 1", &[&session.account_id.to_string()])?,
         })
     })
 }

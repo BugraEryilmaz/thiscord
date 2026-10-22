@@ -72,7 +72,11 @@ Queued calls also require an unexpired ringing invitation addressed to the
 recipient. Initial synchronization recovers still-ringing incoming calls. A `calls`
 state frame clears accepted/ended invitations on all devices, independently of
 notification preferences or selected kinds. A one-shot expiry deadline also clears
-expired calls. No friends-snapshot polling drives banner cleanup. Replayed calls
+expired calls. PostgreSQL computes the remaining lifetime at statement time after
+authorization, rounded up to milliseconds; the socket anchors that duration to its
+monotonic clock after receiving the result. Lock waits and application/database
+wall-clock differences cannot cause an early expiry refresh. No friends-snapshot
+polling drives banner cleanup. Replayed calls
 restore actionable banners without repeating sound. Call-state epochs fence
 ringing delivery across acceptance/cancellation.
 Account/session/guild/member epochs fence delivery across access

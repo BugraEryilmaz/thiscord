@@ -338,6 +338,9 @@ async fn serve(mut socket: WebSocket, pool: DbPool) {
                 let Ok(permit) = worker(&mut revoked, &mut ended).await else { break; };
                 let p = pool.clone(); let t = token.clone();
                 let Ok(Ok(state)) = tokio::task::spawn_blocking(move || { let _permit = permit; store::initial(&p, &t) }).await else { break; };
+                // Anchor after the DB result: query/return latency can delay
+                // expiry, but cannot wake early or depend on application UTC.
+                let received_at = tokio::time::Instant::now();
                 let Some(_delivery) = epoch.deliver() else { refresh = true; continue; };
                 if refresh_preferences {
                     if send(&mut socket, ServerEvent::Ready { preferences: state.preferences }).await.is_err() { break; }
@@ -347,7 +350,7 @@ async fn serve(mut socket: WebSocket, pool: DbPool) {
                 delivered_calls.retain(|id| ringing.contains(id));
                 pending.retain(|c: &Candidate| c.call_id.is_none());
                 call_deadline = state.calls.iter().map(|c| {
-                    tokio::time::Instant::now() + (c.expires_at - chrono::Utc::now()).to_std().unwrap_or_default()
+                    received_at + Duration::from_millis(c.remaining_ms)
                 }).min();
                 if send(&mut socket, ServerEvent::Calls { ringing }).await.is_err() { break; }
                 for call in state.calls {

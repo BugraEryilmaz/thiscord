@@ -1001,12 +1001,21 @@ It never sends Join. The same peer, RTP tracks, audio devices, native audio
 heartbeat, mute/deafen processing and screen capture continue running. The UI
 shows "Recovering voice signaling..." while keeping the room connected.
 
-A microphone privacy boundary unanswered for five seconds also triggers this
-signaling recovery, before the ordinary 20-second silence detector. Capture
+A microphone privacy boundary unanswered for two seconds also triggers this
+signaling recovery, before the ordinary 20-second silence detector. This leaves
+reconnection time before the server's unchanged five-second proof/Ready deadline;
+it cannot guarantee recovery if network delay consumes that budget. Capture
 transmission and protected playback remain blocked until a fresh boundary ACK
 matches the current control generation on the resumed socket. The recovery
 deadline and terminal access/replacement failures still apply; a rejected refresh
 does not trigger recovery or bypass its deadline.
+
+Audio startup and keepalive commands have at most one outstanding worker request
+per call. The native call loop polls its completion alongside signaling instead
+of waiting inside a timer branch, so slow device/DSP work does not prevent it
+from reading privacy messages or processing call cancellation. Closing the call
+fences late worker completion; an unfinished blocking command is not assumed to
+have stopped merely because its task handle was dropped.
 
 The backend keeps detached media for up to 30 seconds after detecting transport
 loss (or after its 20-second signaling silence detector fires). Access refresh,
