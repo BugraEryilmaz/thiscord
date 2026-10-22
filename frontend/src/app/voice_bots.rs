@@ -91,7 +91,7 @@ fn Panel(ui: Ui, target: Target) -> impl IntoView {
                 </section>
                 <For each=move ||bots.get() key=|bot|(bot.id,bot.revision) children=move |bot|view!{<BotEditor bot=bot bots=bots command=command/>}/>
             </fieldset>
-            <p class="mt-5 text-xs text-slate-400">{move || crate::i18n::t("Connection profiles simulate media bandwidth, delay, jitter and packet loss in both directions. Bots receive and decode voice into a silent output. They have no physical devices, camera or desktop audio processing.")}</p>
+            <p class="mt-5 text-xs text-slate-400">{move || crate::i18n::t("Connection profiles simulate media bandwidth, delay, jitter and packet loss in both directions. Bots automatically watch cameras and screen shares, including shared audio. Refresh to see decoded video frames. They decode media without speakers or a display.")}</p>
         </dialog>
     }
 }
@@ -101,7 +101,7 @@ fn Options(settings: RwSignal<Settings>) -> impl IntoView {
     view! {<div class="grid gap-4 sm:grid-cols-2">
         <label class="text-sm">{move || crate::i18n::t("Connection profile")}<select class="mt-1 block w-full rounded bg-slate-800 p-2" prop:value=move ||ConnectionProfile::ALL.iter().position(|p|*p==settings.get().profile).unwrap_or(0).to_string() on:change=move |event|{if let Ok(index)=event_target_value(&event).parse::<usize>() && let Some(profile)=ConnectionProfile::ALL.get(index){settings.update(|s|s.profile = *profile);}}>
             {ConnectionProfile::ALL.into_iter().enumerate().map(|(i,p)|view!{<option value=i.to_string()>{move ||crate::i18n::t(p.label())}</option>}).collect_view()}
-        </select><span class="mt-1 block text-xs text-slate-400">{move ||{let (delay,jitter,loss,bits)=settings.get().profile.parameters();thiscord_frontend::localized_format!(crate::i18n::language(), "{} kbit/s · {}–{} ms one way · {}% loss",bits/1000,delay,delay+jitter,loss)}}</span></label>
+        </select><span class="mt-1 block text-xs text-slate-400">{move ||{let (delay,jitter,loss,bits)=settings.get().profile.parameters();thiscord_frontend::localized_format!(crate::i18n::language(), "Audio {} kbit/s · video {} kbit/s · {}–{} ms one way · {}% loss",bits/1000,settings.get().profile.video_bits()/1000,delay,delay+jitter,loss)}}</span></label>
         <label class="text-sm">{move || crate::i18n::t("Microphone loop")}<select class="mt-1 block w-full rounded bg-slate-800 p-2" prop:value=move ||MicrophoneLoop::ALL.iter().position(|p|*p==settings.get().microphone_loop).unwrap_or(0).to_string() on:change=move |event|{if let Ok(index)=event_target_value(&event).parse::<usize>() && let Some(value)=MicrophoneLoop::ALL.get(index){settings.update(|s|s.microphone_loop = *value);}}>
             {MicrophoneLoop::ALL.into_iter().enumerate().map(|(i,p)|view!{<option value=i.to_string()>{move ||crate::i18n::t(p.label())}</option>}).collect_view()}
         </select></label>
@@ -116,6 +116,13 @@ fn BotEditor(bot: Bot, bots: RwSignal<Vec<Bot>>, command: Callback<Command>) -> 
         .map(|b| thiscord_frontend::localized_format!(crate::i18n::language(), "Sent {} · uplink dropped {} · decoded {} · output peak {:.0}% (at last refresh)", b.sent_packets, b.dropped_packets, b.received_packets, b.output_peak * 100.0))
         .unwrap_or_default())
     };
+    let video_metrics = move || {
+        bots.with(|entries| entries.iter().find(|b| b.id == bot.id).map(|b| {
+        let mut lines = vec![thiscord_frontend::localized_format!(crate::i18n::language(), "Shared audio: {} decoded packets", b.received_system_audio_packets)];
+        lines.extend(b.video.iter().map(|v| thiscord_frontend::localized_format!(crate::i18n::language(), "{} · slot {} · {}×{} · {} decoded frames · {} dropped / {} missing packets · {} decode errors · {} keyframe requests · {} kbit/s", if v.kind == thiscord_shared::voice::MediaKind::Camera { crate::i18n::t("Camera") } else { crate::i18n::t("Screen share") }, v.slot + 1, v.width, v.height, v.decoded_frames, v.dropped_packets, v.missing_packets, v.decode_errors, v.keyframe_requests, v.bitrate / 1000)));
+        lines.join("\n")
+    }).unwrap_or_default())
+    };
     view! {<section class="rounded-lg border border-slate-700 p-4">
         <h3 class="mb-3 font-semibold">{bot.name}</h3><Options settings=settings/>
         <div class="my-4 grid gap-4 sm:grid-cols-2">
@@ -123,7 +130,8 @@ fn BotEditor(bot: Bot, bots: RwSignal<Vec<Bot>>, command: Callback<Command>) -> 
             <label class="text-sm">{move ||thiscord_frontend::localized_format!(crate::i18n::language(), "Output volume · {:.0}%",settings.get().output_volume*100.0)}<input class="mt-2 block w-full" type="range" min="0" max="2" step="0.01" prop:value=move ||settings.get().output_volume on:input=move |event|if let Ok(value)=event_target_value(&event).parse(){settings.update(|s|s.output_volume=value);}/></label>
         </div>
         <div class="my-4 flex gap-6 text-sm"><label><input type="checkbox" prop:checked=move ||settings.get().muted on:change=move |event|settings.update(|s|s.muted=event_target_checked(&event))/>{move || crate::i18n::t(" Mute microphone")}</label><label><input type="checkbox" prop:checked=move ||settings.get().deafened on:change=move |event|settings.update(|s|s.deafened=event_target_checked(&event))/>{move || crate::i18n::t(" Deafen")}</label></div>
-        <p class="mb-4 text-xs text-slate-400">{metrics}</p>
+        <p class="mb-2 text-xs text-slate-400">{metrics}</p>
+        <p class="mb-4 whitespace-pre-line text-xs text-slate-400">{video_metrics}</p>
         <div class="flex gap-3"><button class="rounded bg-indigo-600 px-4 py-2 disabled:opacity-50" disabled=move ||settings.get()==original.get_value() on:click=move |_|command.run(Command::Update {bot_id:bot.id,revision:bot.revision,settings:settings.get_untracked()})>{move || crate::i18n::t("Save audio settings")}</button><button class="rounded bg-slate-800 px-4 py-2" on:click=move |_|settings.set(original.get_value())>{move || crate::i18n::t("Reset")}</button><button class="ml-auto rounded bg-red-500/20 px-4 py-2 text-red-200" on:click=move |_|command.run(Command::Remove {bot_id:bot.id})>{move || crate::i18n::t("Remove bot")}</button></div>
     </section>}
 }

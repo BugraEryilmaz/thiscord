@@ -59,23 +59,11 @@ impl Demand {
     }
 }
 
-/// One interval of receiver evidence, independent of stream kind or layer.
-#[derive(Clone, Copy, Default)]
-pub struct ReceiverSample {
-    pub congested: bool,
-    pub severe: bool,
-    pub receiving: bool,
-}
+pub use thiscord_shared::video_feedback::ReceiverSample;
 
 pub struct Receiver {
-    maximum: u32,
-    bitrate: u32,
-    previous: Option<Instant>,
-    started: Option<Instant>,
-    changed: Option<Instant>,
-    bad: u8,
-    healthy: u8,
-    idle: u8,
+    inner: thiscord_shared::video_feedback::Receiver,
+    origin: Instant,
 }
 impl Default for Receiver {
     fn default() -> Self {
@@ -84,82 +72,17 @@ impl Default for Receiver {
 }
 impl Receiver {
     pub fn with_maximum(maximum: u32) -> Self {
-        let maximum = maximum.clamp(MIN_VIEW_BITRATE, MAX_VIEW_BITRATE);
         Self {
-            maximum,
-            bitrate: maximum,
-            previous: None,
-            started: None,
-            changed: None,
-            bad: 0,
-            healthy: 0,
-            idle: 0,
+            inner: thiscord_shared::video_feedback::Receiver::with_maximum(maximum),
+            origin: Instant::now(),
         }
     }
-
     pub fn bitrate(&self) -> u32 {
-        self.bitrate
+        self.inner.bitrate()
     }
-
-    /// Sample at most once per second. A stale interval clears evidence, retaining
-    /// the last budget; callers recreate the controller for a new stream/viewer.
     pub fn sample_at(&mut self, sample: ReceiverSample, now: Instant) {
-        if let Some(previous) = self.previous {
-            let elapsed = now.saturating_duration_since(previous);
-            if elapsed < Duration::from_secs(1) {
-                return;
-            }
-            if elapsed > Duration::from_secs(3) {
-                self.bad = 0;
-                self.healthy = 0;
-                self.idle = 0;
-                self.started = Some(now);
-                self.previous = Some(now);
-                return;
-            }
-        }
-        self.previous = Some(now);
-        let started = *self.started.get_or_insert(now);
-        self.idle = if sample.receiving {
-            0
-        } else {
-            self.idle.saturating_add(1)
-        };
-        let severe = sample.severe || self.idle >= 3;
-        let bad = sample.congested || severe;
-        self.bad = ((self.bad << 1) | u8::from(bad)) & 0b1111;
-        if bad {
-            self.healthy = 0;
-        } else if sample.receiving {
-            self.healthy = self.healthy.saturating_add(1);
-        } // Short idle gaps preserve evidence, but never prove spare capacity.
-        if now.saturating_duration_since(started) < Duration::from_secs(2) {
-            return; // Initial negotiation and IDR recovery.
-        }
-        let since_change = self.changed.map(|at| now.saturating_duration_since(at));
-        let ready =
-            |seconds| since_change.is_none_or(|elapsed| elapsed >= Duration::from_secs(seconds));
-        if severe && ready(2) {
-            self.decrease(65, now);
-        } else if bad && self.bad.count_ones() >= 3 && ready(3) {
-            self.decrease(85, now);
-        } else if sample.receiving && self.healthy >= 6 && ready(3) {
-            // Start probing after six receiving samples, then every three.
-            // A low budget recovers in bounded time without a 25% step each time.
-            let next = (self.bitrate * 112 / 100).min(self.maximum);
-            if next != self.bitrate {
-                self.bitrate = next;
-                self.changed = Some(now);
-            }
-            self.healthy = 3;
-        }
-    }
-
-    fn decrease(&mut self, percent: u32, now: Instant) {
-        self.bitrate = (self.bitrate * percent / 100).max(MIN_VIEW_BITRATE);
-        self.changed = Some(now);
-        self.healthy = 0;
-        self.bad = 0;
+        self.inner
+            .sample_at(sample, now.saturating_duration_since(self.origin));
     }
 }
 

@@ -96,7 +96,10 @@ additional package is needed.
 Instance owners can also click a **Test bot** participant to edit its connection
 profile, loop, microphone gain, output volume and mute/deafen state, or remove it.
 Bot controls are owner-only and require channel voice access. These settings last
-for the bot's session and apply to its virtual microphone/silent output. See
+for the bot's session and apply to its virtual microphone/silent output. Bots
+automatically watch active cameras and screen shares, including shared audio.
+Refresh their panel to inspect per-stream decoded frames, dimensions, packet
+loss/discards, keyframe requests and requested bitrate. See
 [voice test bots](voice-bots.md) for creation, network simulation and limits.
 
 Click any participant name to open **Audio settings**. Updated desktop clients in

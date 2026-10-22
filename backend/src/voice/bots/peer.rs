@@ -8,6 +8,7 @@ const PERIOD: Duration = Duration::from_millis(20);
 struct Handler {
     gathered: Arc<Notify>,
     incoming: mpsc::Sender<rtp::Packet>,
+    video: mpsc::Sender<(rtp::Packet, Instant)>,
     stop: watch::Receiver<bool>,
 }
 #[async_trait::async_trait]
@@ -19,13 +20,22 @@ impl PeerConnectionEventHandler for Handler {
     }
     async fn on_track(&self, track: Arc<dyn TrackRemote>) {
         let incoming = self.incoming.clone();
+        let video = self.video.clone();
         let mut stop = self.stop.clone();
         tokio::spawn(async move {
             loop {
                 tokio::select! {
                     _ = stop.changed() => break,
                     event = track.poll() => match event {
-                        Some(TrackRemoteEvent::OnRtpPacket(packet)) => { let _ = incoming.try_send(packet); },
+                        Some(TrackRemoteEvent::OnRtpPacket(packet)) => {
+                            if packet.payload.len() <= 1500 && let Some((kind, _)) = MediaKind::from_relay_ssrc(packet.header.ssrc) {
+                                if kind.is_video() {
+                                    let _ = video.try_send((packet, Instant::now()));
+                                } else {
+                                    let _ = incoming.try_send(packet);
+                                }
+                            }
+                        },
                         None => break,
                         _ => {},
                     }
@@ -108,7 +118,22 @@ pub(super) async fn run(
         };
         let gathered = Arc::new(Notify::new());
         let (incoming_tx, mut incoming) = mpsc::channel(64);
+        let (video_tx, mut video_incoming) = mpsc::channel(1024);
         let mut media = MediaEngine::default();
+        media
+            .register_codec(
+                RTCRtpCodecParameters {
+                    rtp_codec: RTCRtpCodec {
+                        mime_type: "video/H264".into(),
+                        clock_rate: 90_000,
+                        sdp_fmtp_line: thiscord_shared::screen::H264_FMTP.into(),
+                        ..Default::default()
+                    },
+                    payload_type: MediaKind::ScreenVideo.payload_type(),
+                },
+                RtpCodecKind::Video,
+            )
+            .map_err(|_| Failure::Unavailable)?;
         media
             .register_default_codecs()
             .map_err(|_| Failure::Unavailable)?;
@@ -122,6 +147,7 @@ pub(super) async fn run(
                 .with_handler(Arc::new(Handler {
                     gathered: gathered.clone(),
                     incoming: incoming_tx,
+                    video: video_tx,
                     stop: tracks_rx,
                 }))
                 .with_udp_addrs(vec![local_bind().unwrap_or_else(|_| "127.0.0.1:0".into())])
@@ -173,22 +199,22 @@ pub(super) async fn run(
                 .map_err(|_| Failure::Unavailable)?,
                 packet_redundancy: false,
                 remote_audio: false,
-                screen_feedback: false,
+                screen_feedback: true,
                 screen_subscriptions: true,
                 screen_layers: false,
             },
         )
         .await?;
         // Admission is complete only after the server accepts the answer.
-        loop {
+        let mut members = loop {
             match event(&mut rx).await? {
-                ServerEvent::Participants { .. } => break,
+                ServerEvent::Participants { members } => break members,
                 ServerEvent::Error { .. } | ServerEvent::Revoked {} => {
                     return Err(Failure::Forbidden);
                 }
                 _ => {}
             }
-        }
+        };
         let mut current = settings.borrow_and_update().clone();
         send(
             &tx,
@@ -209,6 +235,10 @@ pub(super) async fn run(
         let mut epoch = 0u64;
         let mut uplink = Network::new(17);
         let mut downlink = Network::new(91);
+        let mut video_link = Network::new(211);
+        let mut video = super::video::Receiver::new();
+        let id = bot.lock().unwrap().id;
+        video.update(&members, id, &current);
         let mut ticks = 0u32;
         let result = loop {
             tokio::select! { biased;
@@ -217,24 +247,29 @@ pub(super) async fn run(
                     current = settings.borrow_and_update().clone();
                     epoch = epoch.wrapping_add(1);
                     uplink.clear(); downlink.clear();
+                    if video.update(&members, id, &current) { video_link.clear(); }
                     if send(&tx, ClientEvent::State { muted: current.muted, deafened: current.deafened }).await.is_err() { break Err(Failure::Unavailable); }
                 },
                 server = event(&mut rx) => match server {
+                    Ok(ServerEvent::Participants { members: next }) => {
+                        members = next;
+                        if video.update(&members, id, &current) { video_link.clear(); }
+                    },
                     Ok(ServerEvent::Error { .. } | ServerEvent::Revoked {} | ServerEvent::Replaced {}) | Err(_) => break Err(Failure::Forbidden),
                     _ => {},
-                },
-                outgoing = encoded.recv() => {
-                    let Some((generation, packet)) = outgoing else { break Err(Failure::Unavailable); };
-                    if epoch == generation && !current.muted && !current.deafened && !uplink.push(packet, current.profile, Instant::now()) {
-                        bot.lock().unwrap().dropped_packets += 1;
-                    }
-                },
-                Some(packet) = incoming.recv() => {
-                    if !current.deafened { downlink.push(packet, current.profile, Instant::now()); }
                 },
                 _ = tick.tick() => {
                     let now = Instant::now();
                     ticks += 1;
+                    if ticks % 25 == 1 {
+                        let (views, requests) = video.feedback(&bot);
+                        if send(&tx, ClientEvent::ScreenViews { views }).await.is_err() { break Err(Failure::Unavailable); }
+                        for request in requests { send(&tx, request).await?; }
+                    }
+                    while let Some(packet) = video_link.pop(now) {
+                        if settings.has_changed().unwrap_or(true) { break; }
+                        video.push(packet);
+                    }
                     if ticks.is_multiple_of(250) && send(&tx, ClientEvent::Ping {}).await.is_err() { break Err(Failure::Unavailable); }
                     sequence = sequence.wrapping_add(1);
                     let sample = (started.elapsed().as_secs_f64() * 48_000.0) as u64;
@@ -251,6 +286,22 @@ pub(super) async fn run(
                     while let Some(packet) = downlink.pop(now) {
                         if settings.has_changed().unwrap_or(true) { break; }
                         let _ = jobs.try_send(Job::Decode(packet, current.output_volume));
+                    }
+                },
+                outgoing = encoded.recv() => {
+                    let Some((generation, packet)) = outgoing else { break Err(Failure::Unavailable); };
+                    if epoch == generation && !current.muted && !current.deafened && !uplink.push(packet, current.profile, Instant::now()) {
+                        bot.lock().unwrap().dropped_packets += 1;
+                    }
+                },
+                Some(packet) = incoming.recv() => {
+                    if !current.deafened { downlink.push(packet, current.profile, Instant::now()); }
+                },
+                Some((packet, received)) = video_incoming.recv() => {
+                    if !current.deafened {
+                        let accepted = received.elapsed() <= super::video::MAX_AGE
+                            && video_link.push_video(packet.clone(), current.profile, Instant::now());
+                        video.received(&packet, !accepted);
                     }
                 }
             }
@@ -293,14 +344,32 @@ impl Network {
         self.last = Instant::now();
     }
     fn push(&mut self, packet: rtp::Packet, profile: ConnectionProfile, now: Instant) -> bool {
-        let (delay, jitter, loss, bits) = profile.parameters();
+        self.push_with(packet, profile, now, profile.parameters().3, 20)
+    }
+    fn push_video(
+        &mut self,
+        packet: rtp::Packet,
+        profile: ConnectionProfile,
+        now: Instant,
+    ) -> bool {
+        self.push_with(packet, profile, now, profile.video_bits(), 512)
+    }
+    fn push_with(
+        &mut self,
+        packet: rtp::Packet,
+        profile: ConnectionProfile,
+        now: Instant,
+        bits: u32,
+        capacity: usize,
+    ) -> bool {
+        let (delay, jitter, loss, _) = profile.parameters();
         self.random = self.random.wrapping_mul(1664525).wrapping_add(1013904223);
         let rate = bits as f64 / 8.0;
         self.credit =
             (self.credit + now.duration_since(self.last).as_secs_f64() * rate).min(rate * 0.1);
         self.last = now;
         let bytes = (packet.payload.len() + 60) as f64;
-        if self.random % 100 < loss || self.credit < bytes || self.pending.len() >= 20 {
+        if self.random % 100 < loss || self.credit < bytes || self.pending.len() >= capacity {
             return false;
         }
         self.credit -= bytes;
@@ -350,7 +419,7 @@ fn codec(
         let mut encoder_epoch = None;
         let mut pcm = [0.0f32; FRAME];
         let mut bytes = [0u8; 1500];
-        let mut decoded = [0.0f32; 5760];
+        let mut decoded = [0.0f32; 5760 * 2];
         while let Some(job) = jobs.blocking_recv() {
             match job {
                 Job::Encode {
@@ -396,9 +465,23 @@ fn codec(
                         decoders.clear();
                         continue;
                     }
+                    let Some((kind, _)) = MediaKind::from_relay_ssrc(packet.header.ssrc) else {
+                        continue;
+                    };
+                    if kind.is_video() {
+                        continue;
+                    }
+                    let stereo = kind == MediaKind::SystemAudio;
                     if !decoders.contains_key(&packet.header.ssrc)
                         && decoders.len() < ROOM_CAPACITY * 2
-                        && let Ok(decoder) = opus::Decoder::new(48_000, opus::Channels::Mono)
+                        && let Ok(decoder) = opus::Decoder::new(
+                            48_000,
+                            if stereo {
+                                opus::Channels::Stereo
+                            } else {
+                                opus::Channels::Mono
+                            },
+                        )
                     {
                         decoders.insert(packet.header.ssrc, decoder);
                     }
@@ -406,8 +489,12 @@ fn codec(
                         && let Ok(size) = decoder.decode_float(&packet.payload, &mut decoded, false)
                     {
                         let mut bot = bot.lock().unwrap();
+                        if bot.settings.deafened {
+                            continue;
+                        }
                         bot.received_packets += 1;
-                        bot.output_peak = decoded[..size]
+                        bot.received_system_audio_packets += u64::from(stereo);
+                        bot.output_peak = decoded[..size * if stereo { 2 } else { 1 }]
                             .iter()
                             .map(|v| (v * gain).abs().min(1.0))
                             .fold(0.0, f32::max);

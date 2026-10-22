@@ -1,5 +1,6 @@
 //! Owner-controlled ephemeral peers. Signaling is in-process; media uses WebRTC.
 mod peer;
+mod video;
 use super::*;
 use crate::{
     auth::{self, store as auth_store},
@@ -235,6 +236,8 @@ async fn add(
         dropped_packets: 0,
         received_packets: 0,
         output_peak: 0.0,
+        video: Vec::new(),
+        received_system_audio_packets: 0,
     }));
     let (settings_tx, settings_rx) = watch::channel(settings);
     let (stop_tx, stop_rx) = watch::channel(false);

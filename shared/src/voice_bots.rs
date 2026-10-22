@@ -30,6 +30,14 @@ impl ConnectionProfile {
             Self::Unstable => "Unstable connection",
         }
     }
+    /// Aggregate video downlink budget, separate from audio to preserve voice traffic.
+    pub fn video_bits(self) -> u32 {
+        match self {
+            Self::Good | Self::HighLoss => 32_000_000,
+            Self::LowBandwidth => 500_000,
+            Self::Unstable => 2_000_000,
+        }
+    }
     /// Simulated one-way media delay, jitter, loss percent and wire budget.
     pub fn parameters(self) -> (u64, u64, u32, u32) {
         match self {
@@ -128,6 +136,27 @@ pub struct Bot {
     pub dropped_packets: u64,
     pub received_packets: u64,
     pub output_peak: f32,
+    #[serde(default)]
+    pub video: Vec<VideoReceiver>,
+    #[serde(default)]
+    pub received_system_audio_packets: u64,
+}
+/// Current camera/screen reception, scoped to an owner and stream incarnation.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct VideoReceiver {
+    pub kind: crate::voice::MediaKind,
+    pub slot: usize,
+    pub owner: AccountId,
+    pub epoch: u32,
+    pub bitrate: u32,
+    pub received_packets: u64,
+    pub dropped_packets: u64,
+    pub missing_packets: u64,
+    pub decoded_frames: u64,
+    pub decode_errors: u64,
+    pub keyframe_requests: u64,
+    pub width: usize,
+    pub height: usize,
 }
 #[derive(Clone, Serialize, Deserialize)]
 pub struct Response {

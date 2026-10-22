@@ -33,6 +33,383 @@ async fn roster(peer: &mut Peer, count: usize) -> Vec<voice::Participant> {
     .expect("bot roster converges")
 }
 
+async fn wait_for_no_video(app: &Router, token: &str, guild: &Value, channel: &Value) {
+    // Server roster snapshots and bot metrics refresh on separate clocks.
+    // Wait for observed convergence rather than assuming a one-second sleep.
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
+    loop {
+        let listed = bots(
+            app,
+            token,
+            guild,
+            channel,
+            json!({"action":"list"}),
+            StatusCode::OK,
+        )
+        .await;
+        if listed["bots"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .all(|b| b["video"].as_array().unwrap().is_empty())
+        {
+            return;
+        }
+        assert!(
+            tokio::time::Instant::now() < deadline,
+            "video subscriptions did not close: {listed}"
+        );
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
+}
+
+fn video_frame() -> Vec<u8> {
+    use openh264::{
+        encoder::{Encoder, EncoderConfig, Profile},
+        formats::{RgbSliceU8, YUVBuffer},
+    };
+    let rgb = vec![120; 320 * 180 * 3];
+    let yuv = YUVBuffer::from_rgb_source(RgbSliceU8::new(&rgb, (320, 180)));
+    Encoder::with_api_config(
+        openh264::OpenH264API::from_source(),
+        EncoderConfig::new().profile(Profile::Baseline),
+    )
+    .unwrap()
+    .encode(&yuv)
+    .unwrap()
+    .to_vec()
+}
+async fn publish_video(peer: &mut Peer, frame: &[u8]) {
+    use rtp::packetizer::Payloader;
+    for kind in [0, 2] {
+        let payloads = rtp::codec::h264::H264Payloader::default()
+            .payload(1100, &frame.to_vec().into())
+            .unwrap();
+        let count = payloads.len();
+        let timestamp = peer.screen_sequences[kind] as u32 * 9000;
+        for (i, payload) in payloads.into_iter().enumerate() {
+            peer.screen_sequences[kind] = peer.screen_sequences[kind].wrapping_add(1);
+            peer.screen_tracks[kind]
+                .write_rtp(rtp::Packet {
+                    header: rtp::header::Header {
+                        version: 2,
+                        payload_type: 125,
+                        ssrc: 901 + kind as u32,
+                        sequence_number: peer.screen_sequences[kind],
+                        timestamp,
+                        marker: i + 1 == count,
+                        ..Default::default()
+                    },
+                    payload,
+                })
+                .await
+                .unwrap();
+        }
+    }
+    peer.publish_screen(1).await;
+    peer.publish().await;
+}
+
+async fn pump_video(peer: &mut Peer, frame: &[u8], duration: Duration) -> (bool, usize) {
+    let until = tokio::time::Instant::now() + duration;
+    let mut keyframe = false;
+    let mut viewers = 0;
+    while tokio::time::Instant::now() < until {
+        publish_video(peer, frame).await;
+        let end = tokio::time::Instant::now() + Duration::from_millis(100);
+        while let Ok(event) = tokio::time::timeout_at(end, event(&mut peer.socket)).await {
+            match event {
+                ServerEvent::ScreenKeyframe { .. } => keyframe = true,
+                ServerEvent::Participants { members } => {
+                    if let Some(source) = members.iter().find(|m| m.slot == peer.slot) {
+                        viewers = viewers
+                            .max(source.screen_viewers.len().min(source.camera_viewers.len()));
+                    }
+                }
+                ServerEvent::Error { .. } | ServerEvent::Revoked {} => {
+                    panic!("publisher lost access")
+                }
+                _ => {}
+            }
+        }
+    }
+    (keyframe, viewers)
+}
+
+#[tokio::test]
+#[ignore = "requires TEST_DATABASE_URL; CI runs with --include-ignored"]
+async fn owner_bots_watch_cameras_screens_audio_and_renew_revoke_viewers() {
+    let db = database();
+    let (_, owner) = user(&db, "video_bot_owner");
+    let (_, member) = user(&db, "video_bot_member");
+    permissions::bootstrap_owner(&db.pool, "video_bot_owner").unwrap();
+    let app = api::router(
+        Some(db.pool.clone()),
+        vec!["http://localhost:1420".parse().unwrap()],
+    );
+    let mut state = command(
+        &app,
+        &owner,
+        json!({"action":"create_guild","name":"Bot video"}),
+        StatusCode::OK,
+    )
+    .await["state"]
+        .clone();
+    let guild = state["guild"]["id"].clone();
+    change(
+        &app,
+        &owner,
+        &mut state,
+        json!({"action":"add_member","username":"video_bot_member"}),
+        StatusCode::OK,
+    )
+    .await;
+    change(
+        &app,
+        &owner,
+        &mut state,
+        json!({"action":"create_channel","name":"video","kind":"voice"}),
+        StatusCode::OK,
+    )
+    .await;
+    let channel = state["channels"][0]["id"].clone();
+    let defaults = serde_json::to_value(Settings::default()).unwrap();
+    let good = bots(
+        &app,
+        &owner,
+        &guild,
+        &channel,
+        json!({"action":"add","settings":defaults}),
+        StatusCode::OK,
+    )
+    .await["bots"][0]["id"]
+        .clone();
+    let mut weak = defaults.clone();
+    weak["profile"] = json!("low_bandwidth");
+    bots(
+        &app,
+        &owner,
+        &guild,
+        &channel,
+        json!({"action":"add","settings":weak}),
+        StatusCode::OK,
+    )
+    .await;
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    let serving = tokio::spawn(axum::serve(listener, app.clone()).into_future());
+    let mut publisher = Peer::new(join(addr, &member, guild.clone(), channel.clone()).await).await;
+    let mut lossy = defaults.clone();
+    lossy["profile"] = json!("high_loss");
+    bots(
+        &app,
+        &owner,
+        &guild,
+        &channel,
+        json!({"action":"add","settings":lossy}),
+        StatusCode::OK,
+    )
+    .await;
+    roster(&mut publisher, 3).await;
+    send(
+        &mut publisher.socket,
+        ClientEvent::Screen {
+            active: true,
+            audio: true,
+            quality: None,
+        },
+    )
+    .await;
+    send(&mut publisher.socket, ClientEvent::Camera { active: true }).await;
+    let frame = video_frame();
+    let (keyframe, viewers) = pump_video(&mut publisher, &frame, Duration::from_secs(5)).await;
+    assert!(
+        keyframe,
+        "bots request initial video recovery over signaling"
+    );
+    assert_eq!(
+        viewers, 3,
+        "all bots must appear as screen and camera viewers"
+    );
+    let listed = bots(
+        &app,
+        &owner,
+        &guild,
+        &channel,
+        json!({"action":"list"}),
+        StatusCode::OK,
+    )
+    .await;
+    for bot in listed["bots"].as_array().unwrap() {
+        assert!(
+            bot["received_system_audio_packets"].as_u64().unwrap() > 0,
+            "{bot}"
+        );
+        let streams = bot["video"].as_array().unwrap();
+        assert_eq!(streams.len(), 2, "{bot}");
+        for stream in streams {
+            assert!(stream["decoded_frames"].as_u64().unwrap() > 0, "{stream}");
+            assert_eq!(stream["width"], 320);
+            assert_eq!(stream["height"], 180);
+        }
+    }
+    let before = listed["bots"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|b| b["id"] == good)
+        .unwrap()["video"][0]["decoded_frames"]
+        .as_u64()
+        .unwrap();
+    // Receiving continues well beyond the three-second view lease.
+    pump_video(&mut publisher, &frame, Duration::from_secs(4)).await;
+    let listed = bots(
+        &app,
+        &owner,
+        &guild,
+        &channel,
+        json!({"action":"list"}),
+        StatusCode::OK,
+    )
+    .await;
+    let good_bot = listed["bots"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|b| b["id"] == good)
+        .unwrap();
+    assert!(good_bot["video"][0]["decoded_frames"].as_u64().unwrap() > before);
+    let lossy_bot = listed["bots"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|b| b["settings"]["profile"] == "high_loss")
+        .unwrap();
+    assert!(
+        lossy_bot["video"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|s| s["dropped_packets"].as_u64().unwrap() > 0)
+    );
+    assert!(
+        lossy_bot["video"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|s| s["bitrate"].as_u64().unwrap() < 16_000_000),
+        "loss feedback must reduce viewer demand: {lossy_bot}"
+    );
+    let old_epoch = good_bot["video"][0]["epoch"].clone();
+    let mut deaf = defaults.clone();
+    deaf["deafened"] = json!(true);
+    bots(
+        &app,
+        &owner,
+        &guild,
+        &channel,
+        json!({"action":"update","bot_id":good,"revision":0,"settings":deaf}),
+        StatusCode::OK,
+    )
+    .await;
+    pump_video(&mut publisher, &frame, Duration::from_secs(1)).await;
+    let listed = bots(
+        &app,
+        &owner,
+        &guild,
+        &channel,
+        json!({"action":"list"}),
+        StatusCode::OK,
+    )
+    .await;
+    let good_bot = listed["bots"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|b| b["id"] == good)
+        .unwrap();
+    assert!(good_bot["video"].as_array().unwrap().is_empty());
+    let audio_before = good_bot["received_system_audio_packets"].clone();
+    pump_video(&mut publisher, &frame, Duration::from_secs(1)).await;
+    let listed = bots(
+        &app,
+        &owner,
+        &guild,
+        &channel,
+        json!({"action":"list"}),
+        StatusCode::OK,
+    )
+    .await;
+    assert_eq!(
+        listed["bots"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|b| b["id"] == good)
+            .unwrap()["received_system_audio_packets"],
+        audio_before
+    );
+    bots(
+        &app,
+        &owner,
+        &guild,
+        &channel,
+        json!({"action":"update","bot_id":good,"revision":1,"settings":defaults}),
+        StatusCode::OK,
+    )
+    .await;
+    send(
+        &mut publisher.socket,
+        ClientEvent::Screen {
+            active: false,
+            audio: false,
+            quality: None,
+        },
+    )
+    .await;
+    send(&mut publisher.socket, ClientEvent::Camera { active: false }).await;
+    pump_video(&mut publisher, &frame, Duration::from_secs(1)).await;
+    wait_for_no_video(&app, &owner, &guild, &channel).await;
+    send(
+        &mut publisher.socket,
+        ClientEvent::Screen {
+            active: true,
+            audio: true,
+            quality: None,
+        },
+    )
+    .await;
+    send(&mut publisher.socket, ClientEvent::Camera { active: true }).await;
+    pump_video(&mut publisher, &frame, Duration::from_secs(3)).await;
+    let listed = bots(
+        &app,
+        &owner,
+        &guild,
+        &channel,
+        json!({"action":"list"}),
+        StatusCode::OK,
+    )
+    .await;
+    let stream = &listed["bots"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|b| b["id"] == good)
+        .unwrap()["video"][0];
+    assert_ne!(stream["epoch"], old_epoch);
+    assert!(stream["decoded_frames"].as_u64().unwrap() > 0);
+    let (status, _) = call(&app, ACCOUNT_PATH, &owner, json!({"action":"logout"})).await;
+    assert_eq!(status, StatusCode::OK);
+    let members = roster(&mut publisher, 0).await;
+    assert!(
+        members
+            .iter()
+            .all(|m| m.screen_viewers.is_empty() && m.camera_viewers.is_empty())
+    );
+    publisher.close().await;
+    serving.abort();
+}
+
 #[tokio::test]
 #[ignore = "requires TEST_DATABASE_URL; CI runs with --include-ignored"]
 async fn owner_bots_real_audio_controls_capacity_isolation_and_revocation() {
