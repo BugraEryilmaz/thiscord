@@ -297,6 +297,13 @@ Replies reference an existing undeleted message in the same channel. They requir
 ReadHistory as well as SendMessages. The 160-character preview is read from the
 current target; deleted targets expose no content. Clicking a preview loads a
 bounded context window and highlights the original within the virtual list.
+Each preview carries the target's `target_revision`, independently of the reply's
+own revision. Clients compare these revisions across HTTP and socket snapshots,
+including when the target is outside retained history. Missing legacy revisions
+deserialize as unknown and cannot replace a known revision; two unknown revisions
+retain the existing preview because their freshness cannot be established.
+Unavailable previews remain hidden until the chat state resets. Responses to
+recipients without ReadHistory omit the target revision as well as its content.
 Reply IDs are frozen into pending sends and included in deduplication hashes.
 Existing sends without replies retain their original hash scheme.
 

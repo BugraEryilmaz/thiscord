@@ -29,7 +29,7 @@ pub(super) fn hydrate(
         r#"
         SELECT jsonb_build_array(m.id,
           CASE WHEN m.deleted OR m.reply_to IS NULL THEN NULL ELSE
-            jsonb_build_object('id',m.reply_to,'preview',CASE WHEN t.id IS NULL OR t.deleted THEN NULL ELSE left(t.content,160) END) END,
+            jsonb_build_object('id',m.reply_to,'preview',CASE WHEN t.id IS NULL OR t.deleted THEN NULL ELSE left(t.content,160) END,'target_revision',t.revision) END,
           CASE WHEN m.deleted THEN '[]'::jsonb ELSE COALESCE((
             SELECT jsonb_agg(r ORDER BY r.emoji) FROM (
               SELECT emoji,count(*) AS count,bool_or(account_id=$2::uuid) AS mine
