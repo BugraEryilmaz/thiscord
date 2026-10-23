@@ -166,6 +166,17 @@ impl Fixture {
         self.voice.as_ref().unwrap()
     }
 
+    async fn hold_commands(&self) {
+        self.voice().0.hold_commands.store(1, Ordering::Release);
+        timeout(Duration::from_secs(3), async {
+            while self.voice().0.hold_commands.load(Ordering::Acquire) != 2 {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("session must acknowledge the command dequeue barrier");
+    }
+
     async fn packet(&mut self) -> rtp::Packet {
         timeout(Duration::from_secs(5), self.peer.packets.recv())
             .await
@@ -305,6 +316,161 @@ enum PlaybackPhase {
     Active,
     AwaitingUnmute,
     PendingFence,
+}
+
+#[tokio::test]
+#[ignore = "requires Linux procfs and ffmpeg on PATH"]
+async fn ffmpeg_moderation_invalidates_buffered_and_blocked_play_before_release_dequeue() {
+    timeout(Duration::from_secs(35), async {
+        let first = Wav::new(false);
+        let stale = Wav::new(true);
+        for restriction in ["mute", "deafen", "coalesced"] {
+            let mut fixture = Fixture::join().await;
+            let (old_pid, _) = fixture.playing(&first).await;
+            let voice = fixture.voice().clone();
+            let mut publication = voice.0.publication.clone();
+            let before = *publication.borrow_and_update();
+            fixture.hold_commands().await;
+
+            // Poll the actual public API to enqueue, but keep its reply pending.
+            // The session still consumes moderation/release and reaps FFmpeg.
+            let mut queued = Box::pin(voice.play_file(&stale.0));
+            assert!(futures_util::poll!(&mut queued).is_pending());
+            let mut stop = Box::pin(voice.stop());
+            assert!(futures_util::poll!(&mut stop).is_pending());
+
+            let mut restricted = member();
+            match restriction {
+                "mute" => restricted.server_muted = true,
+                "deafen" => restricted.server_deafened = true,
+                "coalesced" => restricted.publication_revision = 2,
+                _ => unreachable!(),
+            }
+            fixture
+                .signals
+                .send(ServerEvent::Participants {
+                    members: vec![restricted.clone()],
+                })
+                .await
+                .unwrap();
+            publication
+                .wait_for(|state| state.generation > before.generation)
+                .await
+                .unwrap();
+            let during = *publication.borrow();
+            let mut status = voice.status();
+            status
+                .wait_for(|event| *event == PlaybackEvent::Stopped)
+                .await
+                .unwrap();
+            reaped(old_pid).await;
+
+            // Fill the bounded queue with real requests issued while restricted.
+            // For the coalesced snapshot, all old stamps predate the revision.
+            let mut restricted_plays = Vec::new();
+            let mut old_replies = Vec::new();
+            for _ in 0..6 {
+                if restriction != "coalesced" {
+                    let mut play = Box::pin(voice.play_file(&stale.0));
+                    assert!(futures_util::poll!(&mut play).is_pending());
+                    restricted_plays.push(play);
+                } else {
+                    let (reply, result) = oneshot::channel();
+                    voice
+                        .0
+                        .commands
+                        .try_send(Command::Play(
+                            media::Source::File(stale.0.clone()),
+                            before,
+                            reply,
+                        ))
+                        .unwrap_or_else(|_| panic!("queue has room"));
+                    old_replies.push(result);
+                }
+            }
+            assert_eq!(voice.0.commands.capacity(), 0);
+            assert!(
+                voice.play_file(&stale.0).await.is_err(),
+                "public overload stays bounded"
+            );
+
+            // Simulate a sender preempted after issuance, including a blocked
+            // channel send. Draining only the present queue cannot revoke it.
+            let (reply, delayed_reply) = oneshot::channel();
+            let mut delayed_send = Box::pin(voice.0.commands.send(Command::Play(
+                media::Source::File(stale.0.clone()),
+                before,
+                reply,
+            )));
+            assert!(futures_util::poll!(&mut delayed_send).is_pending());
+
+            if restriction != "coalesced" {
+                restricted.server_muted = false;
+                restricted.server_deafened = false;
+                restricted.muted = true;
+                restricted.deafened = true;
+                fixture
+                    .signals
+                    .send(ServerEvent::Participants {
+                        members: vec![restricted],
+                    })
+                    .await
+                    .unwrap();
+                publication
+                    .wait_for(|state| !state.restricted)
+                    .await
+                    .unwrap();
+            }
+            // Release (or the coalesced boundary) was definitely consumed first;
+            // every stale Play is still buffered or blocked at this point.
+            assert_eq!(voice.0.commands.capacity(), 0);
+            voice.0.hold_commands.store(0, Ordering::Release);
+            assert!(queued.await.is_err());
+            stop.await.unwrap();
+            for play in restricted_plays {
+                assert!(play.await.is_err());
+            }
+            for reply in old_replies {
+                assert!(reply.await.unwrap().is_err());
+            }
+            delayed_send
+                .await
+                .unwrap_or_else(|_| panic!("session stays open"));
+            assert!(delayed_reply.await.unwrap().is_err());
+            fixture.silence().await;
+            assert!(find_decoder(&stale.0).is_none());
+            assert_eq!(*status.borrow(), PlaybackEvent::Stopped);
+
+            let (fresh_pid, _) = fixture.playing(&first).await;
+            // A late restricted request must also leave a newer valid Play alone.
+            let (reply, result) = oneshot::channel();
+            let old = if restriction == "coalesced" {
+                before
+            } else {
+                during
+            };
+            voice
+                .0
+                .commands
+                .send(Command::Play(
+                    media::Source::File(stale.0.clone()),
+                    old,
+                    reply,
+                ))
+                .await
+                .unwrap_or_else(|_| panic!("session stays open"));
+            assert!(result.await.unwrap().is_err());
+            assert_eq!(*status.borrow(), PlaybackEvent::Playing);
+            fixture.packet().await;
+            assert!(find_decoder(&stale.0).is_none());
+            voice.stop().await.unwrap();
+            reaped(fresh_pid).await;
+            fixture.silence().await;
+            voice.leave().await.unwrap();
+        }
+    })
+    .await
+    .expect("buffered Play moderation lifecycle timed out");
 }
 
 async fn moderation_cancels_playback(phase: PlaybackPhase) {

@@ -51,6 +51,9 @@ pub struct Voice(Arc<Inner>);
 
 struct Inner {
     commands: mpsc::Sender<Command>,
+    publication: watch::Receiver<Publication>,
+    #[cfg(all(test, target_os = "linux"))]
+    hold_commands: Arc<std::sync::atomic::AtomicU8>,
     cancel: watch::Sender<bool>,
     status: watch::Receiver<PlaybackEvent>,
     closed: watch::Receiver<bool>,
@@ -61,8 +64,20 @@ impl Drop for Inner {
     }
 }
 enum Command {
-    Play(media::Source, oneshot::Sender<Result<(), Error>>),
+    Play(
+        media::Source,
+        Publication,
+        oneshot::Sender<Result<(), Error>>,
+    ),
     Stop(oneshot::Sender<Result<(), Error>>),
+}
+
+/// Issuance snapshot, retained even if the caller is delayed before enqueueing.
+/// Only the session advances it; ordinary self-mute acknowledgements do not.
+#[derive(Clone, Copy, PartialEq, Eq)]
+struct Publication {
+    generation: u64,
+    restricted: bool,
 }
 
 impl Voice {
@@ -80,12 +95,21 @@ impl Voice {
         .await
         .map_err(|_| Error::message("Voice connection timed out"))??;
         let (commands, rx) = mpsc::channel(8);
+        let (publication_tx, publication) = watch::channel(Publication {
+            generation: 0,
+            restricted: true,
+        });
+        #[cfg(all(test, target_os = "linux"))]
+        let hold_commands = Arc::new(std::sync::atomic::AtomicU8::new(0));
         let (cancel, cancellation) = watch::channel(false);
         let (status_tx, status) = watch::channel(PlaybackEvent::Idle);
         let (closed_tx, closed) = watch::channel(false);
         let (ready_tx, ready) = oneshot::channel();
         let voice = Self(Arc::new(Inner {
             commands,
+            publication,
+            #[cfg(all(test, target_os = "linux"))]
+            hold_commands: hold_commands.clone(),
             cancel,
             status,
             closed,
@@ -97,6 +121,9 @@ impl Voice {
             guild,
             channel,
             rx,
+            publication_tx,
+            #[cfg(all(test, target_os = "linux"))]
+            hold_commands,
             cancellation,
             status_tx,
             closed_tx,
@@ -126,7 +153,9 @@ impl Voice {
 
     async fn play(&self, source: media::Source) -> Result<(), Error> {
         let (tx, rx) = oneshot::channel();
-        self.command(Command::Play(source, tx), rx).await
+        let publication = *self.0.publication.borrow();
+        self.command(Command::Play(source, publication, tx), rx)
+            .await
     }
 
     /// Stop and reap the current media processes, preserving the voice connection.
@@ -232,6 +261,8 @@ async fn session(
     guild: GuildId,
     channel: ChannelId,
     mut commands: mpsc::Receiver<Command>,
+    publication: watch::Sender<Publication>,
+    #[cfg(all(test, target_os = "linux"))] hold_commands: Arc<std::sync::atomic::AtomicU8>,
     mut cancel: watch::Receiver<bool>,
     status: watch::Sender<PlaybackEvent>,
     closed: watch::Sender<bool>,
@@ -280,6 +311,10 @@ async fn session(
     let mut player: Option<media::Player> = None;
     let result = match joined {
         Ok(admitted) => {
+            publication.send_replace(Publication {
+                generation: 0,
+                restricted: admitted.server_muted || admitted.server_deafened,
+            });
             let _ = ready.send(Ok(()));
             let mut shutdown = cancel.clone();
             tokio::select! { biased;
@@ -289,6 +324,9 @@ async fn session(
                 peer.as_ref().expect("joined peer"),
                 admitted,
                 &mut commands,
+                &publication,
+                #[cfg(all(test, target_os = "linux"))]
+                &hold_commands,
                 &mut cancel,
                 &status,
                 &mut player,
@@ -328,6 +366,8 @@ async fn run(
     peer: &peer::Peer,
     admitted: Participant,
     commands: &mut mpsc::Receiver<Command>,
+    publication: &watch::Sender<Publication>,
+    #[cfg(all(test, target_os = "linux"))] hold_commands: &std::sync::atomic::AtomicU8,
     cancel: &mut watch::Receiver<bool>,
     status: &watch::Sender<PlaybackEvent>,
     player: &mut Option<media::Player>,
@@ -346,12 +386,24 @@ async fn run(
     let mut restriction_known = true;
     let slot = admitted.slot;
     let mut publication_revision = admitted.publication_revision;
-    let mut moderator_restricted = admitted.server_muted || admitted.server_deafened;
     let mut pings_sent = 0_u64;
     let mut pongs_received = 0_u64;
     let mut first = true;
     let mut peer_state = peer.state.clone();
     loop {
+        // Tests can hold only command consumption while delivering real roster
+        // events, making release-before-dequeue deterministic.
+        #[cfg(all(test, target_os = "linux"))]
+        let commands_enabled = {
+            use std::sync::atomic::Ordering;
+            // 0 = running, 1 = hold requested, 2 = hold acknowledged.
+            match hold_commands.compare_exchange(1, 2, Ordering::AcqRel, Ordering::Acquire) {
+                Ok(_) => false,
+                Err(state) => state == 0,
+            }
+        };
+        #[cfg(not(all(test, target_os = "linux")))]
+        let commands_enabled = true;
         // Fair polling prevents a busy command producer from starving permission
         // events or heartbeats. The outer session select prioritizes shutdown.
         tokio::select! {
@@ -361,8 +413,21 @@ async fn run(
                     return Err(Error::message("Voice media disconnected"));
                 }
             },
-            command = commands.recv() => {
+            command = commands.recv(), if commands_enabled => {
                 let Some(command) = command else { return Ok(()); };
+                let command = match command {
+                    Command::Play(_, issued, reply)
+                        if issued.restricted || issued != *publication.borrow() =>
+                    {
+                        // A stale request cannot replace fresh playback either.
+                        if pending_start.is_none() && player.is_none() {
+                            status.send_replace(PlaybackEvent::Stopped);
+                        }
+                        let _ = reply.send(Err(Error::message("Voice publication restricted")));
+                        continue;
+                    },
+                    command => command,
+                };
                 allowed = false;
                 starting = None;
                 pending_start = None;
@@ -373,14 +438,9 @@ async fn run(
                         status.send_replace(PlaybackEvent::Stopped);
                         let _ = reply.send(Ok(()));
                     },
-                    Command::Play(source, reply) => {
+                    Command::Play(source, _, reply) => {
                         // Closed callers cannot accidentally start queued playback.
                         if reply.is_closed() { continue; }
-                        if moderator_restricted {
-                            status.send_replace(PlaybackEvent::Stopped);
-                            let _ = reply.send(Err(Error::message("Voice publication restricted")));
-                            continue;
-                        }
                         // A Participants snapshot has no request ID and may be
                         // stale. The server handles socket signals serially, so
                         // this Pong fences every snapshot queued before mute.
@@ -406,7 +466,7 @@ async fn run(
                 ServerEvent::Participants { members } => {
                     let member = own(&members, slot)?;
                     restriction_known = member.muted && member.deafened;
-                    moderator_restricted = member.server_muted || member.server_deafened;
+                    let moderator_restricted = member.server_muted || member.server_deafened;
                     let publication_changed = member.publication_revision > publication_revision;
                     publication_revision = publication_revision.max(member.publication_revision);
                     // Moderation can arrive before the mute fence, while the
@@ -415,6 +475,15 @@ async fn run(
                     if moderator_restricted || publication_changed
                         || allowed && (member.muted || member.deafened)
                     {
+                        // Publish invalidation before decoder cleanup can yield
+                        // to concurrent callers. Never drain the command queue:
+                        // a delayed sender must retain its old issuance stamp.
+                        let generation = publication.borrow().generation.checked_add(1)
+                            .ok_or_else(|| Error::message("Voice publication generation exhausted"))?;
+                        publication.send_replace(Publication {
+                            generation,
+                            restricted: moderator_restricted,
+                        });
                         let had_playback = pending_start.is_some() || player.is_some();
                         allowed = false;
                         starting = None;
@@ -428,6 +497,9 @@ async fn run(
                         allowed = true;
                         starting = None;
                     }
+                    // Requests issued during a restriction retain restricted=true
+                    // even when this release is consumed before their dequeue.
+                    publication.send_modify(|state| state.restricted = moderator_restricted);
                 },
                 ServerEvent::MicrophoneRefreshRequired { .. } |
                 ServerEvent::MicrophoneBoundaryAccepted { .. } => {
