@@ -835,7 +835,12 @@ fn MessageRow(
 }
 
 #[component]
-pub(super) fn ChatPanel(ui: Ui, guild: GuildId, channel: ChannelId, name: String) -> impl IntoView {
+pub(super) fn ChatPanel(
+    ui: Ui,
+    guild: GuildId,
+    channel: ChannelId,
+    name: Signal<String>,
+) -> impl IntoView {
     ui.chat_epoch.update(|e| *e += 1);
     let epoch = ui.chat_epoch.get_untracked();
     let chat = Chat {
@@ -1021,7 +1026,7 @@ pub(super) fn ChatPanel(ui: Ui, guild: GuildId, channel: ChannelId, name: String
             on:dragover=move |ev: leptos::ev::DragEvent| { ev.prevent_default(); if let Some(data) = ev.data_transfer() { data.set_drop_effect(if editing.get_untracked().is_some() { "none" } else { "copy" }); } }
             on:drop=move |ev: leptos::ev::DragEvent| { ev.prevent_default(); if editing.get_untracked().is_none() && let Some(files) = ev.data_transfer().and_then(|d| d.files()) { queue.add(files); } }>
             <attachments::DownloadHost chat/>
-            <header class="shrink-0 border-b border-white/10 p-4"><h2 class="truncate text-lg font-semibold">{format!("# {name}")}</h2><rich::Pins chat/><super::search::Launcher ui scope=thiscord_shared::search::Scope::Guild { guild_id: guild, channel_id: None }/><p class="break-words text-xs text-white/60" role="status">{move||crate::i18n::message(chat.status.get())}</p></header>
+            <header class="shrink-0 border-b border-white/10 p-4"><h2 class="truncate text-lg font-semibold">{move ||format!("# {}",name.get())}</h2><rich::Pins chat/><super::search::Launcher ui scope=thiscord_shared::search::Scope::Guild { guild_id: guild, channel_id: None }/><p class="break-words text-xs text-white/60" role="status">{move||crate::i18n::message(chat.status.get())}</p></header>
             <div node_ref=chat.list class="min-h-0 flex-1 overflow-x-hidden overflow-y-auto overscroll-contain p-4" style="overflow-anchor: none" on:scroll=move |_| {
                 chat.update_viewport();
                 if !chat.layout_pending.get_untracked() && let Some(node) = chat.list.get_untracked() {

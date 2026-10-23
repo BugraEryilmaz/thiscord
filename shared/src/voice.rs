@@ -377,6 +377,22 @@ pub const fn screen_kind() -> MediaKind {
 mod media_tests {
     use super::*;
     #[test]
+    fn moderation_revision_defaults_for_older_rosters_and_round_trips() {
+        let mut participant: Participant = serde_json::from_value(serde_json::json!({
+            "account_id":"00000000-0000-0000-0000-000000000001", "username":"member", "slot":0,
+            "muted":true, "deafened":false, "can_speak":true
+        }))
+        .unwrap();
+        assert_eq!(participant.publication_revision, 0);
+        participant.publication_revision = 2;
+        participant.server_deafened = true;
+        let decoded: Participant =
+            serde_json::from_str(&serde_json::to_string(&participant).unwrap()).unwrap();
+        assert_eq!(decoded.publication_revision, 2);
+        assert!(decoded.is_deafened() && decoded.muted && !decoded.deafened);
+    }
+
+    #[test]
     fn resume_contract_and_legacy_offer_remain_compatible() {
         let wire = serde_json::json!({"version":1,"event":{
             "type":"resume", "token":"test-session", "resume_token":"test-capability", "sequence":2,

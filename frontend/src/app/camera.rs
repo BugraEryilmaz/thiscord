@@ -236,7 +236,7 @@ pub(super) fn CameraControls(ui: Ui) -> impl IntoView {
     on_cleanup(move || cleanup.with_value(|f| f()));
     let end = stop.clone();
     Effect::new(move |_| {
-        if !ui.voice.get().connected || ui.audio.get().deafened {
+        if !super::audio::media_publish_allowed(ui) {
             end();
         }
     });
@@ -355,7 +355,7 @@ pub(super) fn CameraControls(ui: Ui) -> impl IntoView {
         });
     };
     view! {
-        <button class="icon-button" class:active=move ||active.get() disabled=move ||!crate::account_client::desktop() || !ui.voice.get().connected || ui.audio.get().deafened
+        <button class="icon-button" class:active=move ||active.get() disabled=move ||!crate::account_client::desktop() || !super::audio::media_publish_allowed(ui)
             aria-label=move ||if busy.get(){crate::i18n::t("Cancel camera")}else if active.get(){crate::i18n::t("Turn camera off")}else{crate::i18n::t("Turn camera on")}
             data-tip=move ||if active.get(){crate::i18n::t("Turn camera off")}else{crate::i18n::t("Turn camera on")} aria-pressed=move ||active.get() on:click=toggle>
             {move ||view!{<super::icons::Icon kind=if active.get(){super::icons::Glyph::Camera}else{super::icons::Glyph::CameraOff}/>}}

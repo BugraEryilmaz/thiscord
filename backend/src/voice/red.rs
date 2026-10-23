@@ -7,6 +7,7 @@ use thiscord_shared::rtp_red as wire;
 #[derive(Clone)]
 pub(super) struct Barrier {
     pub receiver_floor: u32,
+    publication_floor: u32,
     pub receiver_started: Instant,
     pub satisfied: u32,
     pub pending: u32,
@@ -22,6 +23,7 @@ impl Default for Barrier {
     fn default() -> Self {
         Self {
             receiver_floor: 0,
+            publication_floor: 0,
             receiver_started: Instant::now(),
             satisfied: 0,
             pending: 0,
@@ -230,6 +232,24 @@ pub(super) fn boundary(room: &Room, member: &mut Member) -> bool {
     true
 }
 
+/// A server moderation edge fences both retained receive history and the
+/// publisher's encoder/queued UDP. A newer full boundary alone is not proof of
+/// observing this edge: require its authenticated challenge response as well.
+pub(super) fn moderation_boundary(room: &Room, member: &mut Member) -> bool {
+    if !boundary(room, member) {
+        return false;
+    }
+    member.red.receiver_floor = member.info.microphone_epoch;
+    member.red.receiver_started = member.microphone_started;
+    if member.packet_redundancy {
+        member.red.publication_floor = member.info.microphone_epoch;
+        member
+            .red
+            .challenge(member.info.microphone_epoch, Instant::now());
+    }
+    true
+}
+
 pub(super) fn next_epoch(room: &Room) -> Option<u32> {
     room.microphone_epoch
         .fetch_update(Ordering::AcqRel, Ordering::Acquire, |value| {
@@ -336,7 +356,8 @@ pub(super) fn sender_generation(packet: &rtp::Packet, member: &Member) -> bool {
     let [hi, lo] = packet.header.csrc.as_slice() else {
         return false;
     };
-    member.expected_sender_generation == Some((u64::from(*hi) << 32) | u64::from(*lo))
+    member.red.satisfied >= member.red.publication_floor
+        && member.expected_sender_generation == Some((u64::from(*hi) << 32) | u64::from(*lo))
 }
 
 pub(super) fn valid_ingress(packet: &rtp::Packet, negotiated: bool) -> bool {

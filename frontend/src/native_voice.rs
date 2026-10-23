@@ -53,6 +53,31 @@ struct Handler {
     keyframes: mpsc::Sender<(MediaKind, usize, u32)>,
 }
 
+/// Kept separately from AudioSettings: moderation never changes self controls.
+#[derive(Default)]
+struct Moderation {
+    own: Option<(u64, bool, bool)>,
+}
+impl Moderation {
+    fn observe(&mut self, own: &Participant) -> bool {
+        let next = (
+            own.publication_revision,
+            own.server_muted,
+            own.server_deafened,
+        );
+        let boundary = self.own.is_some_and(|old| old != next);
+        self.own = Some(next);
+        boundary
+    }
+    fn can_publish(&self) -> bool {
+        self.own
+            .is_some_and(|(_, muted, deafened)| !muted && !deafened)
+    }
+    fn deafened(&self) -> bool {
+        self.own.is_none_or(|(_, _, deafened)| deafened)
+    }
+}
+
 #[derive(Default)]
 struct MediaState {
     connected: AtomicBool,
@@ -899,6 +924,9 @@ async fn run(
         thiscord_frontend::audio::outgoing::QUEUE_CAPACITY,
     );
     let transmit_control = engine.outgoing_control();
+    // Await our authoritative participant before admitting capture or playback.
+    transmit_control.server_restrictions(true, true, true);
+    let mut moderation = Moderation::default();
     if packet_redundancy {
         transmit_control.enable_receive_protection();
         transmit_control.pause_receive();
@@ -984,7 +1012,7 @@ async fn run(
                         attempt.connection.event("voice_media_connected",serde_json::json!({}));
                         if screen_video { app.state::<crate::native_screen::ScreenState>().bind(crate::native_screen::Binding {
                             own_slot, local_epoch: Default::default(), local_visible: Default::default(),
-                            connection: attempt.connection.clone(), video: screen_track.clone(), audio: system_track.clone(), can_publish: can_speak,
+                            connection: attempt.connection.clone(), video: screen_track.clone(), audio: system_track.clone(), can_publish: can_speak && moderation.can_publish() && !settings.lock().map_err(|_|"Settings unavailable")?.deafened,
                             subscriptions: screen_subscriptions,
                             layers: screen_layers.then(|| crate::native_screen::LayerBinding::new(low_track.clone())),
                             demand: Default::default(), network_demand: Default::default(),
@@ -993,7 +1021,7 @@ async fn run(
                         }); }
                         if camera_video { app.state::<crate::native_camera::CameraState>().bind(crate::native_screen::Binding {
                             own_slot, local_epoch: Default::default(), local_visible: Default::default(),
-                            connection: attempt.connection.clone(), video: camera_track.clone(), audio: system_track.clone(), can_publish: can_speak, subscriptions: screen_subscriptions, layers: None,
+                            connection: attempt.connection.clone(), video: camera_track.clone(), audio: system_track.clone(), can_publish: can_speak && moderation.can_publish() && !settings.lock().map_err(|_|"Settings unavailable")?.deafened, subscriptions: screen_subscriptions, layers: None,
                             demand: Default::default(), network_demand: Default::default(), force_keyframe: Default::default(), metrics: Default::default(), video_sequence: Default::default(), audio_sequence: Default::default(), audio_timestamp: Default::default(), started: Instant::now(),
                         }); }
                         engine.notify_control(Command::Roster{connection:attempt.connection.clone(),members:roster.clone()})?;
@@ -1093,8 +1121,17 @@ async fn run(
                     ServerEvent::Participants{members}=>{
                         if members.len()>ROOM_CAPACITY||members.iter().any(|m|m.slot>=ROOM_CAPACITY){return Err("Invalid participant list".into());}
                         roster_compatibility.observe(&members)?;
-                        app.state::<crate::native_screen::ScreenState>().roster(if settings.lock().map_err(|_|"Settings unavailable")?.deafened { &[] } else { &members });
-                        app.state::<crate::native_camera::CameraState>().views.roster(if settings.lock().map_err(|_|"Settings unavailable")?.deafened { &[] } else { &members });
+                        let own = members.iter().find(|m| m.slot == own_slot).ok_or("Missing own participant")?;
+                        let changed = moderation.observe(own);
+                        transmit_control.server_restrictions(own.server_muted, own.server_deafened, changed);
+                        let deafened = settings.lock().map_err(|_|"Settings unavailable")?.deafened || moderation.deafened();
+                        let allowed = can_speak && moderation.can_publish() && !deafened;
+                        let screen = app.state::<crate::native_screen::ScreenState>();
+                        let camera = app.state::<crate::native_camera::CameraState>();
+                        screen.publication(allowed, changed);
+                        camera.publication(allowed, changed);
+                        screen.roster(if deafened { &[] } else { &members });
+                        camera.views.roster(if deafened { &[] } else { &members });
                         roster = members.iter().filter(|m|m.slot!=own_slot).cloned().collect();
                         engine.notify_control(Command::Roster{connection:attempt.connection.clone(),members:roster.clone()})?;
                         if let Ok(mut s)=status.lock(){s.participants=members;s.own_slot=Some(own_slot);}
@@ -1178,9 +1215,11 @@ async fn run(
                     let heartbeat_connection=attempt.connection.clone();
                     audio_control.start(move||e.command(Command::Keepalive(heartbeat_connection)));
                 }
-                if configuration.deafened { crate::native_screen::screen_stop(app.state::<crate::native_screen::ScreenState>()); }
+                let deafened = configuration.deafened || moderation.deafened();
+                let allowed = can_speak && moderation.can_publish() && !deafened;
+                app.state::<crate::native_screen::ScreenState>().publication(allowed, false);
                 let camera = app.state::<crate::native_camera::CameraState>();
-                if configuration.deafened { camera.stop(None); }
+                camera.publication(allowed, false);
                 if camera_video {
                     let active = camera.active();
                     if camera_state != Some(active) { signaling.send(ClientEvent::Camera { active }); camera_state = Some(active); }
@@ -1198,8 +1237,8 @@ async fn run(
                     signaling.send(ClientEvent::State{muted:configuration.muted,deafened:configuration.deafened});
                 }
                 if screen_subscriptions {
-                    let mut views = if configuration.deafened { vec![] } else { app.state::<crate::native_screen::ScreenState>().subscriptions() };
-                    if !configuration.deafened { views.extend(camera.views.subscriptions()); }
+                    let mut views = if deafened { vec![] } else { app.state::<crate::native_screen::ScreenState>().subscriptions() };
+                    if !deafened { views.extend(camera.views.subscriptions()); }
                     signaling.send(ClientEvent::ScreenViews { views });
                 }
             }
@@ -1265,6 +1304,37 @@ mod tests {
         job.task.abort();
         let _ = (&mut job.task).await;
         assert!(!job.owns(guild, channel));
+    }
+
+    #[test]
+    fn moderation_revision_survives_missed_rosters_and_preserves_self_controls() {
+        let mut own: Participant = serde_json::from_value(serde_json::json!({
+            "account_id":"00000000-0000-0000-0000-000000000001", "username":"fixture",
+            "slot":0, "muted":true,"deafened":false,"can_speak":true
+        }))
+        .unwrap();
+        let mut state = Moderation::default();
+        let control = thiscord_frontend::audio::outgoing::Control::default();
+        assert!(!state.can_publish());
+        assert!(!state.observe(&own));
+        assert!(
+            state.can_publish(),
+            "self microphone mute does not restrict video"
+        );
+        let previous = control.generation();
+        own.publication_revision = 2; // Intermediate restricted roster was lost.
+        let boundary = state.observe(&own);
+        assert!(boundary);
+        control.server_restrictions(own.server_muted, own.server_deafened, boundary);
+        assert!(control.generation() > previous);
+        assert!(own.muted && !own.deafened);
+        assert!(
+            !state.observe(&own),
+            "periodic rosters must not retire new capture"
+        );
+        own.server_deafened = true;
+        assert!(state.observe(&own));
+        assert!(!state.can_publish() && state.deafened());
     }
 
     #[test]

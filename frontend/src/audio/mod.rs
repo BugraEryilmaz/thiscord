@@ -441,6 +441,9 @@ impl AudioEngine {
             Command::Settings(settings)
             | Command::Start { settings, .. }
             | Command::VoiceStart { settings, .. } => {
+                if matches!(command, Command::Start { .. }) {
+                    self.probe.outgoing.server_restrictions(false, false, true);
+                }
                 self.probe.outgoing.invalidate();
                 self.inhibit
                     .store(settings.muted || settings.deafened, Ordering::Release);
@@ -1071,7 +1074,8 @@ impl Session {
                 if let Some(remote) = remote {
                     remote.set_deafened(
                         writer,
-                        self.devices.control.deafen.load(Ordering::Acquire),
+                        self.devices.control.deafen.load(Ordering::Acquire)
+                            || self.transmit_control.server_deafened(),
                         Instant::now(),
                     );
                     remote.refill(writer, Instant::now());
@@ -1155,6 +1159,7 @@ impl Session {
             self.clear_gate();
         }
         let allowed = !inhibit.load(Ordering::Acquire)
+            && self.transmit_control.publish_allowed()
             && generation == self.capture_epoch
             && self
                 .transmit_control
@@ -1712,7 +1717,8 @@ fn run(
                                     if let Some(remote) = remote {
                                         remote.set_deafened(
                                             writer,
-                                            settings.deafened,
+                                            settings.deafened
+                                                || s.transmit_control.server_deafened(),
                                             Instant::now(),
                                         );
                                     }

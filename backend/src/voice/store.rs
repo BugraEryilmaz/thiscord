@@ -60,7 +60,7 @@ pub(super) fn authorize(
             return Err(Failure::Forbidden);
         }
         let revision = query::<i64>(c,"SELECT to_jsonb(voice_revision) AS data FROM guild_moderation WHERE guild_id=$1::uuid AND account_id=$2::uuid", &[&guild.to_string(), &session.account_id.to_string()])?.pop().unwrap_or(0);
-        let flags: (bool,bool)=query(c,"SELECT jsonb_build_array(server_muted,server_deafened) AS data FROM guild_moderation WHERE guild_id=$1::uuid AND account_id=$2::uuid", &[&guild.to_string(),&session.account_id.to_string()])?.pop().unwrap_or_default();
+        let flags: (bool,bool,u64)=query(c,"SELECT jsonb_build_array(server_muted,server_deafened,publication_revision) AS data FROM guild_moderation WHERE guild_id=$1::uuid AND account_id=$2::uuid", &[&guild.to_string(),&session.account_id.to_string()])?.pop().unwrap_or_default();
         Ok((Participant {
             test_bot: false,
             account_id: session.account_id,
@@ -68,7 +68,7 @@ pub(super) fn authorize(
             display_name: member.display_name.clone(),
             avatar_id: query(c, "SELECT to_jsonb(id) AS data FROM account_avatars WHERE account_id=$1::uuid", &[&session.account_id.to_string()])?.pop(),
             slot: 0,
-            server_muted:flags.0, server_deafened:flags.1,
+            server_muted:flags.0, server_deafened:flags.1, publication_revision:flags.2,
             muted: false,
             deafened: false,
             can_speak: permissions.contains(&Permission::Speak),

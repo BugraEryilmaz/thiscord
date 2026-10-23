@@ -398,6 +398,7 @@ pub(crate) fn voice(
         Participant {
             server_muted: false,
             server_deafened: false,
+            publication_revision: 0,
             test_bot: false,
             account_id: actor,
             username: p.username,

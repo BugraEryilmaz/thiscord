@@ -142,6 +142,9 @@ async fn raw(peer: &mut Peer, sequence: u16, generation: u64, tag: u8) {
 }
 
 struct RecoveryRoom {
+    app: Router,
+    state: Value,
+    listener_id: AccountId,
     _db: Database,
     owner: String,
     listener: String,
@@ -154,7 +157,7 @@ impl RecoveryRoom {
     async fn new() -> Self {
         let db = database();
         let (_, owner) = user(&db, "recovery_owner");
-        let (_, listener) = user(&db, "recovery_listener");
+        let (listener_id, listener) = user(&db, "recovery_listener");
         permissions::bootstrap_owner(&db.pool, "recovery_owner").unwrap();
         let app = api::router(
             Some(db.pool.clone()),
@@ -188,8 +191,11 @@ impl RecoveryRoom {
         let channel = state["channels"][0]["id"].clone();
         let tcp = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let addr = tcp.local_addr().unwrap();
-        let serving = tokio::spawn(axum::serve(tcp, app).into_future());
+        let serving = tokio::spawn(axum::serve(tcp, app.clone()).into_future());
         Self {
+            app,
+            state,
+            listener_id,
             _db: db,
             owner,
             listener,
@@ -705,4 +711,271 @@ async fn negotiated_red_crosses_encrypted_sfu_with_loss_reorder_and_legacy_fallb
     modern.close().await;
     legacy.close().await;
     serving.abort();
+}
+
+// Real Opus, including embedded DRED history, over the production encrypted SFU.
+fn tone(encoder: &mut opus::Encoder, index: usize) -> Vec<u8> {
+    let pcm: [f32; 960] = std::array::from_fn(|i| {
+        ((index * 960 + i) as f32 * std::f32::consts::TAU * 440.0 / 48000.0).sin() * 0.2
+    });
+    let mut bytes = [0; 1100];
+    let len = encoder.encode_float(&pcm, &mut bytes).unwrap();
+    bytes[..len].to_vec()
+}
+async fn audio(peer: &mut Peer, generation: u64, primary: &[u8], history: &[u8], red: bool) {
+    peer.sequence = peer.sequence.wrapping_add(1);
+    let history = if history.is_empty() {
+        vec![]
+    } else {
+        vec![wire::Block {
+            offset: 960,
+            payload: history,
+        }]
+    };
+    peer.track
+        .write_rtp(rtp::Packet {
+            header: rtp::header::Header {
+                version: 2,
+                ssrc: 900,
+                payload_type: if red { wire::PAYLOAD_TYPE } else { 111 },
+                csrc: vec![(generation >> 32) as u32, generation as u32],
+                sequence_number: peer.sequence,
+                timestamp: u32::from(peer.sequence) * 960,
+                ..Default::default()
+            },
+            payload: if red {
+                wire::encode(primary, &history).unwrap()
+            } else {
+                primary.to_vec()
+            }
+            .into(),
+        })
+        .await
+        .unwrap();
+}
+async fn moderation_roster(peer: &mut Peer, revision: u64) -> voice::Participant {
+    tokio::time::timeout(Duration::from_secs(4), async {
+        loop {
+            match event(&mut peer.socket).await {
+                ServerEvent::Participants { members } => {
+                    if let Some(own) = members
+                        .into_iter()
+                        .find(|m| m.slot == peer.slot && m.publication_revision >= revision)
+                    {
+                        return own;
+                    }
+                }
+                ServerEvent::MicrophoneRefreshRequired { challenge } => {
+                    peer.microphone_challenge =
+                        Some(peer.microphone_challenge.unwrap_or(0).max(challenge))
+                }
+                ServerEvent::Revoked {} | ServerEvent::Error { .. } => {
+                    panic!("moderation must retain the connection")
+                }
+                _ => {}
+            }
+        }
+    })
+    .await
+    .unwrap()
+}
+#[tokio::test]
+#[ignore = "requires TEST_DATABASE_URL; CI runs with --include-ignored"]
+async fn moderator_boundaries_reject_encrypted_restricted_red_and_dred_history() {
+    for (red_enabled, dred) in [(true, false), (false, true), (true, true)] {
+        let mut room = RecoveryRoom::new().await;
+        let mut source = Peer::with_red(room.join(&room.owner).await, 64, true).await;
+        let mut target = Peer::with_red(room.join(&room.listener).await, 64, true).await;
+        refresh(&mut source, 1).await;
+        refresh(&mut target, 1).await;
+        forwarded(&mut source, &mut target).await;
+        forwarded(&mut target, &mut source).await;
+        let mut encoder =
+            opus::Encoder::new(48000, opus::Channels::Mono, opus::Application::Voip).unwrap();
+        encoder
+            .set_bitrate(opus::Bitrate::Bits(if dred { 40_000 } else { 32_000 }))
+            .unwrap();
+        encoder.set_vbr(dred).unwrap();
+        encoder.set_inband_fec(true).unwrap();
+        encoder.set_signal(opus::Signal::Voice).unwrap();
+        encoder
+            .set_packet_loss_perc(if dred { 20 } else { 5 })
+            .unwrap();
+        encoder.set_dred_duration(if dred { 6 } else { 0 }).unwrap();
+        for action in ["set_server_mute", "set_server_deafen"] {
+            let key = if action == "set_server_mute" {
+                "muted"
+            } else {
+                "deafened"
+            };
+            change(
+                &room.app,
+                &room.owner,
+                &mut room.state,
+                json!({"action":action,"account_id":room.listener_id,key:true}),
+                StatusCode::OK,
+            )
+            .await;
+            let revision = if action == "set_server_mute" { 1 } else { 3 };
+            let own = moderation_roster(&mut target, revision).await;
+            refresh(&mut source, own.microphone_epoch).await;
+            refresh(&mut target, own.microphone_epoch).await;
+            let mut restricted = None;
+            for n in 0..80 {
+                // Match the native encoder's per-frame DRED policy after resets.
+                encoder.set_dred_duration(if dred { 6 } else { 0 }).unwrap();
+                let packet = tone(&mut encoder, n);
+                // Opus may omit DRED on individual packets despite the CTL.
+                // Require actual embedded history, not merely an enabled setting.
+                if !dred || opus::Dred::parse(&packet, 2880, 48000).unwrap().is_some() {
+                    restricted = Some(packet);
+                }
+            }
+            let restricted = restricted.expect("restricted audio must contain real redundancy");
+            let history = if dred { &[][..] } else { restricted.as_slice() };
+            tokio::time::sleep(Duration::from_millis(100)).await;
+            while target.packets.try_recv().is_ok() {}
+            while source.packets.try_recv().is_ok() {}
+            let old_source = source.microphone_generation.unwrap();
+            let old_target = target.microphone_generation.unwrap();
+            audio(&mut target, old_target, &restricted, history, red_enabled).await;
+            no_packet(&mut source).await;
+            if action == "set_server_deafen" {
+                audio(&mut source, old_source, &restricted, history, red_enabled).await;
+                no_packet(&mut target).await;
+            }
+            change(
+                &room.app,
+                &room.owner,
+                &mut room.state,
+                json!({"action":action,"account_id":room.listener_id,key:false}),
+                StatusCode::OK,
+            )
+            .await;
+            let own = moderation_roster(&mut target, revision + 1).await;
+            // Fresh outer RTP timestamps still contain history from restriction.
+            // Neither direction may open before the matching refresh proof.
+            audio(&mut source, old_source, &restricted, history, red_enabled).await;
+            audio(&mut target, old_target, &restricted, history, red_enabled).await;
+            no_packet(&mut target).await;
+            no_packet(&mut source).await;
+            refresh(&mut source, own.microphone_epoch).await;
+            refresh(&mut target, own.microphone_epoch).await;
+            // Delayed old-tag UDP cannot acquire the newly admitted floor.
+            audio(&mut source, old_source, &restricted, history, red_enabled).await;
+            audio(&mut target, old_target, &restricted, history, red_enabled).await;
+            no_packet(&mut target).await;
+            no_packet(&mut source).await;
+            encoder.reset_state().unwrap();
+            let fresh = tone(&mut encoder, 101);
+            assert_ne!(fresh, restricted);
+            let sg = source.microphone_generation.unwrap();
+            let tg = target.microphone_generation.unwrap();
+            audio(&mut source, sg, &fresh, history, red_enabled).await;
+            audio(&mut target, tg, &fresh, history, red_enabled).await;
+            for packet in [
+                collect(&mut source, 1).await.remove(0),
+                collect(&mut target, 1).await.remove(0),
+            ] {
+                let primary = if red_enabled {
+                    let parsed = wire::parse(&packet.payload).unwrap();
+                    assert!(
+                        parsed.history.is_empty(),
+                        "restricted RED history crossed a moderation floor"
+                    );
+                    parsed.primary
+                } else {
+                    packet.payload.as_ref()
+                };
+                assert_eq!(primary, fresh);
+                assert_ne!(primary, restricted);
+            }
+        }
+        source.close().await;
+        target.close().await;
+        room.serving.abort();
+    }
+}
+
+#[tokio::test]
+#[ignore = "requires TEST_DATABASE_URL; CI runs with --include-ignored"]
+async fn coalesced_committed_moderation_retires_screen_and_camera_until_explicit_restart() {
+    let mut room = RecoveryRoom::new().await;
+    let mut target = Peer::new(room.join(&room.listener).await).await;
+    send(
+        &mut target.socket,
+        ClientEvent::Screen {
+            active: true,
+            audio: true,
+            quality: None,
+        },
+    )
+    .await;
+    send(&mut target.socket, ClientEvent::Camera { active: true }).await;
+    loop {
+        if let ServerEvent::Participants { members } = event(&mut target.socket).await
+            && members
+                .iter()
+                .any(|m| m.slot == target.slot && m.sharing_screen && m.camera_active)
+        {
+            break;
+        }
+    }
+    // No await on this current-thread runtime: two separate committed changes
+    // precede any socket revalidation. The final HTTP no-op wakes access checks.
+    let mut c = room._db.pool.get().unwrap();
+    for restricted in [true, false] {
+        c.transaction::<_,diesel::result::Error,_>(|c| {
+            diesel::sql_query("SELECT id FROM guilds WHERE id=$1::uuid FOR UPDATE").bind::<Text,_>(room.guild.as_str().unwrap()).execute(c)?;
+            diesel::sql_query("INSERT INTO guild_moderation(guild_id,account_id,server_deafened) VALUES($1::uuid,$2::uuid,$3::boolean) ON CONFLICT(guild_id,account_id) DO UPDATE SET server_deafened=EXCLUDED.server_deafened")
+                .bind::<Text,_>(room.guild.as_str().unwrap()).bind::<Text,_>(room.listener_id.to_string()).bind::<Text,_>(restricted.to_string()).execute(c)?;
+            Ok(())
+        }).unwrap();
+    }
+    drop(c);
+    change(
+        &room.app,
+        &room.owner,
+        &mut room.state,
+        json!({"action":"set_server_deafen","account_id":room.listener_id,"deafened":false}),
+        StatusCode::OK,
+    )
+    .await;
+    let own = moderation_roster(&mut target, 2).await;
+    assert_eq!(
+        own.publication_revision, 2,
+        "no-op must not create another edge"
+    );
+    assert!(!own.server_deafened && !own.server_muted);
+    assert!(!own.sharing_screen && !own.sharing_audio && !own.camera_active);
+    send(
+        &mut target.socket,
+        ClientEvent::State {
+            muted: false,
+            deafened: false,
+        },
+    )
+    .await;
+    still_connected(&mut target.socket).await;
+    let still = moderation_roster(&mut target, 2).await;
+    assert!(!still.sharing_screen && !still.camera_active);
+    send(
+        &mut target.socket,
+        ClientEvent::Screen {
+            active: true,
+            audio: true,
+            quality: None,
+        },
+    )
+    .await;
+    send(&mut target.socket, ClientEvent::Camera { active: true }).await;
+    loop {
+        let next = moderation_roster(&mut target, 2).await;
+        if next.sharing_screen && next.camera_active {
+            assert!(next.screen_epoch > own.screen_epoch && next.camera_epoch > own.camera_epoch);
+            break;
+        }
+    }
+    target.close().await;
+    room.serving.abort();
 }

@@ -186,33 +186,39 @@ impl VoiceAccess {
             {
                 return Err(Failure::Forbidden);
             }
-            if member.info.server_muted != info.server_muted
-                || member.info.server_deafened != info.server_deafened
-            {
-                if !red::boundary(room, member) {
+            let moderation_changed = member.info.publication_revision != info.publication_revision
+                || member.info.server_muted != info.server_muted
+                || member.info.server_deafened != info.server_deafened;
+            if moderation_changed {
+                if !red::moderation_boundary(room, member) {
                     return Err(Failure::Forbidden);
                 }
-                member.red.receiver_started = Instant::now();
-                member.microphone_started = Instant::now();
                 member.screen_started = Instant::now();
                 member.camera_started = Instant::now();
                 member.info.server_muted = info.server_muted;
                 member.info.server_deafened = info.server_deafened;
-                if info.server_deafened || info.server_muted {
-                    member.views = [None; ROOM_CAPACITY * 2];
-                    member.info.sharing_screen = false;
-                    member.info.sharing_audio = false;
-                    member.info.camera_active = false;
-                }
+                member.info.publication_revision = info.publication_revision;
+                // Even a restrict/release pair unseen by this connection retires
+                // existing publications. Release requires an explicit new start.
+                member.views = [None; ROOM_CAPACITY * 2];
+                member.info.sharing_screen = false;
+                member.info.sharing_audio = false;
+                member.info.camera_active = false;
                 room.changed.send_replace(());
             }
             member.info.username = info.username;
             member.info.display_name = info.display_name;
             member.info.avatar_id = info.avatar_id;
-            if self.generation.load(Ordering::Acquire) != epoch && !red::boundary(room, member) {
+            if self.generation.load(Ordering::Acquire) != epoch
+                && !moderation_changed
+                && !red::boundary(room, member)
+            {
                 return Err(Failure::Forbidden);
             }
             self.generation.store(epoch, Ordering::Release);
+            if moderation_changed {
+                red::challenge_publishers(&mut members, slot);
+            }
             Ok(viewing::participants(&members))
         });
         if result.is_err() {
@@ -1871,6 +1877,7 @@ mod send_tests {
                     info: Participant {
                         server_muted: false,
                         server_deafened: false,
+                        publication_revision: 0,
                         test_bot: false,
                         account_id: uuid::Uuid::new_v4().to_string().parse().unwrap(),
                         username: "test".into(),

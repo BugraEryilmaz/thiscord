@@ -123,7 +123,7 @@ pub(super) fn ScreenControls(ui: Ui) -> impl IntoView {
     view! {
         <div class="screen-control" aria-label=move || crate::i18n::t("Screen sharing")>
             <Show when=move ||status.get().sharing fallback=move ||view!{
-                <button class="icon-button voice-action" aria-label=move || crate::i18n::t("Share screen") data-tip=move ||if ui.audio.get().deafened{crate::i18n::t("Undeafen to share")}else if !status.get().available{crate::i18n::t("Screen sharing unavailable")}else{crate::i18n::t("Share screen")} disabled=move ||!status.get().available||ui.audio.get().deafened||busy.get() on:click=choose><Icon kind=Glyph::Screen/></button>
+                <button class="icon-button voice-action" aria-label=move || crate::i18n::t("Share screen") data-tip=move ||if !super::audio::media_publish_allowed(ui){crate::i18n::t("Undeafen to share")}else if !status.get().available{crate::i18n::t("Screen sharing unavailable")}else{crate::i18n::t("Share screen")} disabled=move ||!status.get().available||!super::audio::media_publish_allowed(ui)||busy.get() on:click=choose><Icon kind=Glyph::Screen/></button>
             }>
                 <button class="icon-button voice-action share-stop" aria-label=move || crate::i18n::t("Stop sharing") data-tip=move || crate::i18n::t("Stop sharing") disabled=move ||busy.get() on:click=move |_|{
                     busy.set(true);error.set(String::new());
@@ -158,7 +158,7 @@ pub(super) fn ScreenControls(ui: Ui) -> impl IntoView {
                         <p class="share-picker-note">{move || crate::i18n::t("Quality adapts to the connection. Microphone mute doesn’t mute shared system audio.")}</p>
                         <p class="share-picker-error" role="alert">{move ||crate::i18n::message(error.get())}</p>
                     </div>
-                    <footer class="share-picker-footer"><p>{move || crate::i18n::t("Your selected source is visible to everyone watching in this call.")}</p><button class="settings-secondary" disabled=move ||busy.get() on:click=move |_|picking.set(false)>{move || crate::i18n::t("Cancel")}</button><button class="settings-primary" disabled=move ||busy.get()||selected.get().is_none()||ui.audio.get().deafened on:click=move |_|{
+                    <footer class="share-picker-footer"><p>{move || crate::i18n::t("Your selected source is visible to everyone watching in this call.")}</p><button class="settings-secondary" disabled=move ||busy.get() on:click=move |_|picking.set(false)>{move || crate::i18n::t("Cancel")}</button><button class="settings-primary" disabled=move ||busy.get()||selected.get().is_none()||!super::audio::media_publish_allowed(ui) on:click=move |_|{
                         let Some(source)=selected.get_untracked().and_then(|i|sources.get_untracked().get(i).cloned()) else{return;};
                         busy.set(true);error.set(String::new());let quality=quality.get_untracked();let audio=audio.get_untracked();
                         leptos::task::spawn_local(async move {
@@ -297,7 +297,7 @@ pub(super) fn ScreenViewer(ui: Ui, guild: GuildId, channel: ChannelId) -> impl I
                     <button class="icon-button" aria-label=move || crate::i18n::t("Toggle fullscreen") on:click=move |_|full()><Icon kind=Glyph::Expand/></button>
                 </figcaption>
                 <div class="media-tile-content" role="button" tabindex="0" aria-label=move || crate::i18n::t("View fullscreen") on:click=move |_|full() on:keydown=move |e|{if e.key()=="Enter" || e.key()==" "{e.prevent_default();full();}}>
-                    <Show when=move ||!ui.audio.get().deafened fallback=||view!{<div class="stream-placeholder">{move || crate::i18n::t("Undeafen to view media")}</div>}>
+                    <Show when=move ||!super::audio::media_deafened(ui) fallback=||view!{<div class="stream-placeholder">{move || crate::i18n::t("Undeafen to view media")}</div>}>
                         {move || if own && kind==MediaKind::Camera {view!{<super::camera::LocalCamera/>}.into_any()}
 
                         else {view!{<ScreenVideo watch=watch/>}.into_any()}}
