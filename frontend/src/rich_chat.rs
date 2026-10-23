@@ -144,12 +144,18 @@ impl RichChat {
         if status == SnapshotStatus::Ready {
             // Include newly pinned messages absent from the HTTP snapshot, plus
             // unpins/deletes which must suppress rows present in that snapshot.
-            messages.extend(
-                self.recent
-                    .values()
-                    .filter(|(clock, _)| *clock > token.since)
-                    .map(|(_, message)| message.clone()),
-            );
+            let updates: Vec<_> = self
+                .recent
+                .values()
+                .filter(|(clock, message)| {
+                    *clock > token.since && !messages.iter().any(|m| m.id == message.id)
+                })
+                .map(|(_, message)| message.clone())
+                .collect();
+            // Reconcile already compares snapshot rows with recent revisions.
+            // Appending duplicate rows would overwrite a fresh equal-revision
+            // preview with an intervening preview-only update from the cache.
+            messages.extend(updates);
             let messages = self.reconcile(messages, resident);
             self.pins = messages
                 .into_iter()
@@ -248,17 +254,28 @@ impl RichChat {
         // reply is outside the resident window. Otherwise a pin or recent copy
         // could restore its preview after the target's bounded record expires.
         let targets: HashMap<_, _> = messages.iter().map(|m| (m.id, preview(m))).collect();
-        for retained in self
+        let updated_replies: Vec<_> = self
             .recent
-            .values_mut()
+            .values()
             .map(|(_, m)| m)
-            .chain(self.pins.iter_mut())
-        {
-            if let Some(reply) = &mut retained.reply
-                && reply.preview.is_some()
-                && let Some(preview) = targets.get(&reply.id)
-            {
-                reply.preview = preview.clone();
+            .chain(self.pins.iter())
+            .filter_map(|retained| {
+                let reply = retained.reply.as_ref()?;
+                let preview = targets.get(&reply.id)?;
+                if reply.preview.is_none() || reply.preview == *preview {
+                    return None;
+                }
+                let mut updated = retained.clone();
+                updated.reply.as_mut().expect("retained reply").preview = preview.clone();
+                Some(updated)
+            })
+            .collect();
+        for updated in updated_replies {
+            // Propagation is an update too, including to pins whose recent
+            // record expired. Retain it before the pins panel can be closed.
+            self.remember(&updated);
+            if let Some(pin) = self.pins.iter_mut().find(|m| m.id == updated.id) {
+                pin.reply = updated.reply;
             }
         }
         if self.pins_open {
@@ -274,18 +291,27 @@ impl RichChat {
     }
 
     fn remember(&mut self, message: &ChatMessage) {
-        if let Some((_, known)) = self.recent.get_mut(&message.id)
+        let message = if let Some((_, known)) = self.recent.get(&message.id)
             && known.revision >= message.revision
         {
-            // Keep normalized previews without recording a duplicate as an event.
-            known.reply = message.reply.clone();
-            return;
-        }
+            if known.reply.as_ref().map(|r| (r.id, &r.preview))
+                == message.reply.as_ref().map(|r| (r.id, &r.preview))
+            {
+                return;
+            }
+            // A target preview can change without the reply's revision moving.
+            // Refresh its clock and eviction position just like a body update,
+            // preserving the retained recipient-specific message payload.
+            let mut updated = known.clone();
+            updated.reply = message.reply.clone();
+            updated
+        } else {
+            message.clone()
+        };
         self.clock += 1;
         self.order.retain(|id| *id != message.id);
         self.order.push_back(message.id);
-        self.recent
-            .insert(message.id, (self.clock, message.clone()));
+        self.recent.insert(message.id, (self.clock, message));
         if self.order.len() > RESIDENT_LIMIT {
             let id = self.order.pop_front().expect("nonempty updates");
             let (clock, _) = self.recent.remove(&id).expect("indexed update");
@@ -354,6 +380,113 @@ mod tests {
 
     fn cache_merge(cache: &mut MessageCache<ChatMessage>, messages: Vec<ChatMessage>, mode: Merge) {
         cache.merge(messages, mode, |m| m, |old, m| *old = m);
+    }
+
+    #[test]
+    fn pins_preview_change_survives_close_and_guards_delayed_history_after_eviction() {
+        let mut state = RichChat::default();
+        let mut reply = pinned(2, 3);
+        reply.reply = Some(ReplyPreview {
+            id: message(1, 1).id,
+            preview: Some("old private text".into()),
+        });
+        let pins = state.begin_pins();
+        assert_eq!(
+            state.finish_pins(pins, vec![reply.clone()], |_| None),
+            SnapshotStatus::Ready
+        );
+        for id in 3..=501 {
+            state.reconcile(vec![message(id, 1)], |_| None);
+        }
+        assert_eq!(state.recent.len(), RESIDENT_LIMIT);
+        assert_eq!(state.order.front(), Some(&reply.id));
+        let history = state.begin_response();
+        let later_history = state.begin_response();
+        let pins = state.begin_pins();
+        let mut fresh = reply.clone();
+        fresh.reply.as_mut().unwrap().preview = None;
+        // Only the HTTP read knows the target was deleted; no target event or
+        // resident row can rescue the preview when the extra pin evicts a row.
+        assert_eq!(
+            state.finish_pins(pins, vec![fresh, pinned(502, 1)], |_| None),
+            SnapshotStatus::Ready
+        );
+        state.close_pins();
+        assert_eq!(state.response_status(history), SnapshotStatus::Ready);
+        let clock = state.clock;
+        let delivered = state.reconcile(vec![reply.clone()], |_| None);
+        assert_eq!(delivered[0].reply.as_ref().unwrap().preview, None);
+        assert_eq!(state.clock, clock);
+        // A second pending copy must be rejected once the refreshed record is
+        // evicted too. Stop before the new pin is evicted so that only the
+        // preview change can advance the eviction watermark past the request.
+        for id in 503..=1001 {
+            state.reconcile(vec![message(id, 1)], |_| None);
+        }
+        assert!(!state.recent.contains_key(&reply.id));
+        assert!(state.recent.contains_key(&message(502, 1).id));
+        assert_eq!(
+            state.response_status(later_history),
+            SnapshotStatus::Overflow
+        );
+        assert_eq!(state.recent.len(), RESIDENT_LIMIT);
+        assert_eq!(state.order.len(), RESIDENT_LIMIT);
+    }
+
+    #[test]
+    fn propagated_preview_refreshes_recent_and_pins_only_replies() {
+        for pins_only in [false, true] {
+            let mut state = RichChat::default();
+            let target = message(1, 2);
+            let mut reply = pinned(2, 3);
+            reply.reply = Some(ReplyPreview {
+                id: target.id,
+                preview: Some("old preview".into()),
+            });
+            reaction(&mut reply, true);
+            let pins = state.begin_pins();
+            state.finish_pins(pins, vec![reply.clone()], |_| None);
+            for id in 3..=if pins_only { 502 } else { 500 } {
+                state.reconcile(vec![message(id, 1)], |_| None);
+            }
+            assert_eq!(state.recent.contains_key(&reply.id), !pins_only);
+            let history = state.begin_response();
+            state.reconcile(vec![target.clone()], |_| None);
+            state.close_pins();
+            assert_eq!(state.response_status(history), SnapshotStatus::Ready);
+            let (clock, retained) = &state.recent[&reply.id];
+            assert!(*clock > history.since);
+            assert_eq!(retained.reply.as_ref().unwrap().preview, preview(&target));
+            assert_eq!(retained.revision, reply.revision);
+            assert!(retained.reactions[0].mine);
+            // Identical payloads must not extend the clock/retention lifetime.
+            let clock = state.clock;
+            state.reconcile(vec![target], |_| None);
+            assert_eq!(state.clock, clock);
+        }
+    }
+
+    #[test]
+    fn fresh_pins_preview_wins_over_intervening_equal_revision_preview_update() {
+        let mut state = RichChat::default();
+        let mut reply = pinned(2, 3);
+        reply.reply = Some(ReplyPreview {
+            id: message(1, 1).id,
+            preview: Some("old preview".into()),
+        });
+        state.reconcile(vec![reply.clone()], |_| None);
+        let pins = state.begin_pins();
+        reply.reply.as_mut().unwrap().preview = Some("intervening preview".into());
+        state.reconcile(vec![reply.clone()], |_| None);
+        reply.reply.as_mut().unwrap().preview = Some("fresh server preview".into());
+        assert_eq!(
+            state.finish_pins(pins, vec![reply], |_| None),
+            SnapshotStatus::Ready
+        );
+        assert_eq!(
+            state.pins()[0].reply.as_ref().unwrap().preview.as_deref(),
+            Some("fresh server preview")
+        );
     }
 
     #[test]
