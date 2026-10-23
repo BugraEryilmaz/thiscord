@@ -11,6 +11,7 @@ mod dialog;
 mod direct_attachments;
 mod friends;
 mod icons;
+mod invites;
 mod login;
 mod message_content;
 mod moderation;
@@ -31,6 +32,7 @@ mod window;
 
 #[derive(Clone, Copy)]
 struct Ui {
+    invites: invites::State,
     bot_target: RwSignal<Option<voice_bots::Target>>,
     notifications: notifications::State,
     friends: friends::State,
@@ -332,6 +334,7 @@ fn StatusNotice(ui: Ui) -> impl IntoView {
 #[component]
 pub fn App() -> impl IntoView {
     let ui = Ui {
+        invites: invites::State::new(),
         bot_target: RwSignal::new(None),
         friends: friends::State::new(),
         notifications: notifications::State::new(),
@@ -417,6 +420,7 @@ pub fn App() -> impl IntoView {
     });
     view! {
         <tooltip::Host/><context_menu::Host ui=ui/><voice_bots::Host ui=ui/>
+        <invites::Host ui=ui/>
         <updates::Host ui=ui/>
         <notifications::Host ui=ui/>
         <Show when=move ||ui.account.get().is_some() fallback=move ||view!{<login::Login ui=ui/>}>

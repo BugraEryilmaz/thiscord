@@ -7630,6 +7630,27 @@ dependencies = [
 ]
 
 [[package]]
+name = "tauri-plugin-deep-link"
+version = "2.6.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "84d6b3bf88f2ec8b97c852c2fa1464dc13c0ba3fbfb24af4144f23fbd54c0f14"
+dependencies = [
+ "dunce",
+ "plist",
+ "rust-ini",
+ "serde",
+ "serde_json",
+ "tauri",
+ "tauri-plugin",
+ "tauri-utils",
+ "thiserror 2.0.21",
+ "tracing",
+ "url",
+ "windows-registry",
+ "windows-result",
+]
+
+[[package]]
 name = "tauri-plugin-global-shortcut"
 version = "2.4.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -7646,13 +7667,14 @@ dependencies = [
 
 [[package]]
 name = "tauri-plugin-single-instance"
-version = "2.5.4"
+version = "2.5.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "561cd99484561bc39c954768e7b41a66cebbe1ac3d9d081c34361f740c489e2c"
+checksum = "91baf4f5db4b008fc2bcada0f7d3a49b45d911f94575ac236f225ed67554f5c0"
 dependencies = [
  "serde",
  "serde_json",
  "tauri",
+ "tauri-plugin-deep-link",
  "thiserror 2.0.21",
  "tokio",
  "tracing",
@@ -7898,6 +7920,7 @@ dependencies = [
  "sonora",
  "tauri",
  "tauri-build",
+ "tauri-plugin-deep-link",
  "tauri-plugin-global-shortcut",
  "tauri-plugin-single-instance",
  "tauri-plugin-updater",

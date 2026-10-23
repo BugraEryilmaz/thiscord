@@ -22,6 +22,7 @@ pub(super) fn home(ui: Ui) {
 }
 
 pub(super) fn reset_session(ui: Ui) {
+    ui.invites.clear_links();
     home(ui);
     ui.server_refresh
         .update(|generation| *generation = generation.wrapping_add(1));
@@ -44,6 +45,7 @@ fn update_home(ui: Ui, selection: Selection, home: GuildHome) {
                 && old.guild.owner == home.guild.owner
                 && old.can_manage_roles == home.can_manage_roles
                 && old.can_manage_channels == home.can_manage_channels
+                && old.can_manage_invites == home.can_manage_invites
                 && old.can_moderate == home.can_moderate
                 && old
                     .channels
@@ -331,6 +333,21 @@ pub(super) fn ServerRail(ui: Ui) -> impl IntoView {
             let _ = dialog.show_modal();
         }
     };
+    Effect::new(move |_| {
+        let ready = ui.account.get().is_some_and(|a| a.email_verified) && !ui.busy.get();
+        if let Some(code) = ui.invites.pending.get()
+            && ready
+            && let Some(dialog) = dialog.get()
+        {
+            creating.set(false);
+            server_id.set(code);
+            password.set(String::new());
+            error.set(String::new());
+            if dialog.show_modal().is_ok() {
+                ui.invites.pending.set(None);
+            }
+        }
+    });
     let submit = move |ev: leptos::ev::SubmitEvent| {
         ev.prevent_default();
         if ui.busy.get_untracked() {
@@ -350,26 +367,13 @@ pub(super) fn ServerRail(ui: Ui) -> impl IntoView {
             && server_id.get_untracked().trim().parse::<GuildId>().is_err()
         {
             let supplied = server_id.get_untracked();
-            let code = if let Ok(link) = url::Url::parse(supplied.trim()) {
-                let base = if crate::account_client::api_base().is_empty() {
-                    window().location().origin().unwrap_or_default()
-                } else {
-                    crate::account_client::api_base().to_owned()
-                };
-                let same = url::Url::parse(&base)
-                    .ok()
-                    .is_some_and(|base| base.origin() == link.origin());
-                if !same
-                    || link.path() != "/invite"
-                    || !link.username().is_empty()
-                    || link.password().is_some()
-                {
-                    error.set("Use an invite from this Thiscord installation.".into());
-                    return;
-                }
-                link.fragment().unwrap_or_default().to_owned()
-            } else {
-                supplied.trim().to_owned()
+            let Some(code) =
+                thiscord_frontend::invites::input_code(&supplied, &super::invites::base())
+            else {
+                error.set(
+                    "Use a complete invite link or code from this Thiscord installation.".into(),
+                );
+                return;
             };
             PermissionRequest::AcceptInvite { code }
         } else {
@@ -417,7 +421,7 @@ pub(super) fn ServerRail(ui: Ui) -> impl IntoView {
                 } else {
                     thiscord_frontend::localized_format!(
                         crate::i18n::language(),
-                        "{message}. Check the server ID and password and verify your email.",
+                        "{message}. Check the invite or server ID and verify your email.",
                         message = crate::i18n::message(message)
                     )
                 }),
@@ -448,8 +452,8 @@ pub(super) fn ServerRail(ui: Ui) -> impl IntoView {
                     <button type="button" class="settings-secondary" disabled=move ||ui.busy.get() on:click=move |_|{ui.busy.set(true);leptos::task::spawn_local(async move{refresh(ui).await;ui.busy.set(false);});}>{move ||crate::i18n::t("Refresh limits")}</button>
                 </Show>
                 <Show when=move ||creating.get() fallback=move ||view!{<Field label="Server ID, invite code or invite link" value=server_id/>}><Field label="Server name" value=name/></Show>
-                <Field label="Server password (optional)" value=password kind="password" autocomplete="off"/>
-                <p class="text-sm text-white/60">{move ||if creating.get(){crate::i18n::t("Leave the password empty to let verified accounts join using your server ID.")}else{crate::i18n::t("Ask the server owner for its ID and password, if it has one.")}}</p>
+                <Show when=move ||{creating.get() || server_id.get().trim().parse::<GuildId>().is_ok()}><Field label="Server password (optional)" value=password kind="password" autocomplete="off"/></Show>
+                <p class="text-sm text-white/60">{move ||if creating.get(){crate::i18n::t("Leave the password empty to let verified accounts join using your server ID.")}else{crate::i18n::t("Paste an invite link to join. No server password is needed for an invite.")}}</p>
                 <p class="text-sm text-red-300" role="alert">{move ||crate::i18n::message(error.get())}</p>
                 <button class="w-full rounded-lg bg-brand px-5 py-3 font-semibold disabled:opacity-50" disabled=move ||ui.busy.get()||(creating.get()&&quota_reached())>{move ||if ui.busy.get(){crate::i18n::t("Please wait…")}else if creating.get(){crate::i18n::t("Create server")}else{crate::i18n::t("Join server")}}</button>
             </form>
@@ -592,13 +596,7 @@ pub(super) fn ServerHome(ui: Ui) -> impl IntoView {
                     <nav class="channel-sidebar" aria-label=move || crate::i18n::t("Server channels")>
                         <div class="flex items-center gap-2" data-context-server=home.guild.id.to_string()><h2 class="min-w-0 flex-1 break-words text-lg font-bold">{home.guild.name.clone()}</h2>
                             <Show when=move ||home.can_manage_roles || home.can_manage_channels || home.can_manage_invites || home.can_moderate><button class="icon-button shrink-0" aria-label=move || crate::i18n::t("Server roles and settings") data-tip=move || crate::i18n::t("Server settings") on:click=move |_|{ui.role_target.set(None);ui.permission_channel.set(None);ui.page.set(if home.can_manage_roles{"permissions"}else if home.can_manage_channels{"server_organization"}else if home.can_manage_invites{"server_invites"}else{"moderation"});}><Icon kind=Glyph::Settings/></button></Show>
-                            <button class="shrink-0 rounded p-1 text-white/50 hover:bg-white/10 hover:text-white" data-tip=move || crate::i18n::t("Copy server ID") aria-label=move || crate::i18n::t("Copy server ID") on:click=move |_| {
-                                let id = home.guild.id.to_string();
-                                leptos::task::spawn_local(async move {
-                                    let result = wasm_bindgen_futures::JsFuture::from(window().navigator().clipboard().write_text(&id)).await;
-                                    ui.status.set(if result.is_ok() {"Server ID copied".into()} else {"Could not copy server ID".into()});
-                                });
-                            }><svg viewBox="0 0 24 24" class="h-4 w-4" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true"><rect x="8" y="8" width="12" height="12" rx="2"/><path d="M16 8V4a1 1 0 0 0-1-1H4a1 1 0 0 0-1 1v11a1 1 0 0 0 1 1h4"/></svg></button>
+                            <Show when=move ||home.can_manage_invites><button class="shrink-0 rounded p-1 text-white/50 hover:bg-white/10 hover:text-white disabled:opacity-50" data-tip=move || crate::i18n::t("Copy invite link") aria-label=move || crate::i18n::t("Copy invite link") disabled=move ||ui.busy.get() on:click=move |_|super::invites::copy(ui,home.guild.id)><Icon kind=Glyph::Link/></button></Show>
                         </div>
                         <div class="flex items-center justify-between"><h3 class="text-xs font-semibold uppercase tracking-widest text-white/50">{move || crate::i18n::t("Channels")}</h3>
                             <Show when=move ||home.can_manage_channels><button class="rounded px-2 text-xl text-white/60 hover:bg-white/10 hover:text-white" data-tip=move || crate::i18n::t("Create channel") aria-label=move || crate::i18n::t("Create channel") disabled=move ||ui.busy.get() on:click=move |_| {

@@ -15,6 +15,88 @@ async fn invite(app: &Router, token: &str, state: &mut Value, uses: u32) -> Valu
     state["guild"] = response["guild"].clone();
     response
 }
+
+#[tokio::test]
+#[ignore = "requires TEST_DATABASE_URL; CI runs with --include-ignored"]
+async fn unlimited_invites_permissions_cleanup_revocation_and_rollback() {
+    let db = database();
+    let (_, owner) = user(&db, "unlimited_owner");
+    let (_, member) = user(&db, "unlimited_member");
+    let (_, stranger) = user(&db, "unlimited_stranger");
+    let app = api::router(Some(db.pool.clone()), vec![]);
+    let mut state = command(
+        &app,
+        &owner,
+        json!({"action":"create_guild","name":"Unlimited","password":"private"}),
+        StatusCode::OK,
+    )
+    .await["state"]
+        .clone();
+    let guild = state["guild"]["id"].clone();
+    let create = json!({"action":"create_invite","guild_id":guild,"revision":state["guild"]["revision"],"duration_seconds":0,"max_uses":0});
+    command(&app, &stranger, create.clone(), StatusCode::FORBIDDEN).await;
+    let invite = command(&app, &owner, create.clone(), StatusCode::OK).await;
+    assert!(invite["invite"]["expires_at"].is_null());
+    assert_eq!(invite["invite"]["max_uses"], 0);
+    command(&app, &owner, create, StatusCode::CONFLICT).await;
+    let id = invite["invite"]["id"].as_str().unwrap();
+    diesel::sql_query("UPDATE guild_invites SET uses=501 WHERE id=$1::uuid")
+        .bind::<Text, _>(id)
+        .execute(&mut db.pool.get().unwrap())
+        .unwrap();
+    let accept = json!({"action":"accept_invite","code":invite["code"]});
+    command(&app, &member, accept.clone(), StatusCode::OK).await;
+    command(&app, &member, accept.clone(), StatusCode::OK).await;
+    state = snapshot(&app, &owner, &guild).await;
+    // Creating another invite must not prune a non-expiring, unlimited invite.
+    let limited = self::invite(&app, &owner, &mut state, 1).await;
+    let list = command(
+        &app,
+        &owner,
+        json!({"action":"list_invites","guild_id":guild}),
+        StatusCode::OK,
+    )
+    .await;
+    let retained = list["invites"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|i| i["id"] == id)
+        .unwrap();
+    assert_eq!(retained["uses"], 502);
+    assert!(!list.to_string().contains(invite["code"].as_str().unwrap()));
+    command(&app, &member, json!({"action":"create_invite","guild_id":guild,"revision":state["guild"]["revision"],"duration_seconds":0,"max_uses":0}), StatusCode::FORBIDDEN).await;
+    command(&app, &owner, json!({"action":"revoke_invite","guild_id":guild,"revision":state["guild"]["revision"],"invite_id":id}), StatusCode::OK).await;
+    command(&app, &stranger, accept.clone(), StatusCode::FORBIDDEN).await;
+    command(&app, &member, accept, StatusCode::FORBIDDEN).await;
+    state = snapshot(&app, &owner, &guild).await;
+    let active = command(&app, &owner, json!({"action":"create_invite","guild_id":guild,"revision":state["guild"]["revision"],"duration_seconds":0,"max_uses":1}), StatusCode::OK).await;
+    // Rollback preserves ordinary links and revokes any unrepresentable links.
+    let mut c = db.pool.get().unwrap();
+    c.batch_execute(include_str!(
+        "../../migrations/20261023170000_unlimited_invites/down.sql"
+    ))
+    .unwrap();
+    c.batch_execute(include_str!(
+        "../../migrations/20261023170000_unlimited_invites/up.sql"
+    ))
+    .unwrap();
+    drop(c);
+    command(
+        &app,
+        &stranger,
+        json!({"action":"accept_invite","code":active["code"]}),
+        StatusCode::FORBIDDEN,
+    )
+    .await;
+    command(
+        &app,
+        &stranger,
+        json!({"action":"accept_invite","code":limited["code"]}),
+        StatusCode::OK,
+    )
+    .await;
+}
 #[tokio::test]
 #[ignore = "requires TEST_DATABASE_URL; CI runs with --include-ignored"]
 async fn invites_atomic_use_quota_verification_bans_and_timeout_retention() {

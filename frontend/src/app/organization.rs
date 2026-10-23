@@ -76,6 +76,7 @@ impl Panel {
             return;
         }
         self.ui.busy.set(true);
+        let revoking = matches!(command, PermissionRequest::RevokeInvite { .. });
         leptos::task::spawn_local(async move {
             let result = super::super::servers::request(self.ui, command).await;
             if !self.loaded.is_disposed() {
@@ -92,7 +93,12 @@ impl Panel {
                                 .into(),
                         );
                     }
-                    Ok(_) => self.message.set("Saved.".into()),
+                    Ok(_) => {
+                        if revoking {
+                            self.link.set(String::new());
+                        }
+                        self.message.set("Saved.".into());
+                    }
                     Err(e) => self.message.set(thiscord_frontend::localized_format!(
                         crate::i18n::language(),
                         "{error}. Refreshed; review before trying again.",
@@ -217,11 +223,11 @@ fn Invites(ui: Ui, guild: GuildId) -> impl IntoView {
         <p class="settings-hint" role="status">{move ||crate::i18n::message(panel.message.get())}</p>
         <button class="settings-secondary" disabled=move ||ui.busy.get() on:click=move |_|leptos::task::spawn_local(async move {panel.load().await;})>{move || crate::i18n::t("Refresh invites")}</button>
         <fieldset class="settings-card" disabled=move ||ui.busy.get() || !panel.loaded.get()><h3>{move || crate::i18n::t("Create invite")}</h3>
-            <label class="settings-field"><span>{move || crate::i18n::t("Expires after")}</span><select on:change=move |e|if let Ok(n)=event_target_value(&e).parse(){duration.set(n);} prop:value=move ||duration.get().to_string()><option value="3600">{move || crate::i18n::t("1 hour")}</option><option value="86400">{move || crate::i18n::t("1 day")}</option><option value="604800">{move || crate::i18n::t("7 days")}</option><option value="2419200">{move || crate::i18n::t("28 days")}</option></select></label>
-            <Field label="Maximum uses (1–500)" value=uses kind="number"/>
+            <label class="settings-field"><span>{move || crate::i18n::t("Expires after")}</span><select on:change=move |e|if let Ok(n)=event_target_value(&e).parse(){duration.set(n);} prop:value=move ||duration.get().to_string()><option value="3600">{move || crate::i18n::t("1 hour")}</option><option value="86400">{move || crate::i18n::t("1 day")}</option><option value="604800">{move || crate::i18n::t("7 days")}</option><option value="2419200">{move || crate::i18n::t("28 days")}</option><option value="0">{move ||crate::i18n::t("Never")}</option></select></label>
+            <Field label="Maximum uses (0 = unlimited, 1–500)" value=uses kind="number"/>
             <button class="settings-primary" on:click=move |_|if let Some(max_uses)=panel.number(uses.get_untracked(),"maximum uses"){panel.request(PermissionRequest::CreateInvite {guild_id:guild,revision:panel.revision.get_untracked(),duration_seconds:duration.get_untracked(),max_uses});}>{move || crate::i18n::t("Create invite")}</button>
             <Show when=move ||!panel.link.get().is_empty()><label class="settings-field"><span>{move || crate::i18n::t("New invite link (shown once)")}</span><input readonly prop:value=move ||panel.link.get()/></label><button class="settings-secondary" on:click=move |_|leptos::task::spawn_local(async move {let link=panel.link.get_untracked();let result=wasm_bindgen_futures::JsFuture::from(window().navigator().clipboard().write_text(&link)).await;if !panel.message.is_disposed(){panel.message.set(if result.is_ok(){"Invite copied"}else{"Copy the invite from the field"}.into());}})>{move || crate::i18n::t("Copy link")}</button></Show>
         </fieldset>
-        <section class="settings-card"><h3>{move || crate::i18n::t("Invites")}</h3><ul class="space-y-4">{move ||panel.invites.get().into_iter().map(move |invite|view!{<li class="space-y-2"><p class="text-sm">{thiscord_frontend::localized_format!(crate::i18n::language(), "{} · {}/{} uses · expires {}{}",invite.id,invite.uses,invite.max_uses,crate::i18n::datetime(invite.expires_at),if invite.revoked{crate::i18n::t(" · revoked")}else{""})}</p><Show when=move ||!invite.revoked><super::super::settings::ConfirmButton ui=ui label="Revoke invite" title="Revoke this invite?" detail="The link will no longer allow anyone to join. Existing members stay." on_confirm=Callback::new(move |()|panel.request(PermissionRequest::RevokeInvite {guild_id:guild,revision:panel.revision.get_untracked(),invite_id:invite.id}))/></Show></li>}).collect_view()}</ul></section>
+        <section class="settings-card"><h3>{move || crate::i18n::t("Invites")}</h3><ul class="space-y-4">{move ||panel.invites.get().into_iter().map(move |invite|view!{<li class="space-y-2"><p class="text-sm">{thiscord_frontend::localized_format!(crate::i18n::language(), "Created {} · {}/{} uses · {}{}",crate::i18n::datetime(invite.created_at),invite.uses,if invite.max_uses==0{crate::i18n::t("Unlimited").to_owned()}else{invite.max_uses.to_string()},invite.expires_at.map(crate::i18n::datetime).unwrap_or_else(||crate::i18n::t("Never expires").into()),if invite.revoked{crate::i18n::t(" · revoked")}else{""})}</p><Show when=move ||!invite.revoked><super::super::settings::ConfirmButton ui=ui label="Revoke invite" title="Revoke this invite?" detail="The link will no longer allow anyone to join. Existing members stay." on_confirm=Callback::new(move |()|panel.request(PermissionRequest::RevokeInvite {guild_id:guild,revision:panel.revision.get_untracked(),invite_id:invite.id}))/></Show></li>}).collect_view()}</ul></section>
     }
 }

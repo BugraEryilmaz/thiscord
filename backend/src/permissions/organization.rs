@@ -38,12 +38,12 @@ pub(super) fn accept(
     let state = load(c, guild)?;
     not_banned(c, guild, actor)?;
     // The code is still checked for existing members; replays do not spend a use.
-    let invite: thiscord_shared::InviteId = query(c,"SELECT to_jsonb(id) AS data FROM guild_invites WHERE guild_id=$1::uuid AND token_hash=$2 AND NOT revoked AND expires_at>clock_timestamp()", &[&guild.to_string(),&hash(code)])?.pop().ok_or(Failure::Forbidden)?;
+    let invite: thiscord_shared::InviteId = query(c,"SELECT to_jsonb(id) AS data FROM guild_invites WHERE guild_id=$1::uuid AND token_hash=$2 AND NOT revoked AND (expires_at IS NULL OR expires_at>clock_timestamp())", &[&guild.to_string(),&hash(code)])?.pop().ok_or(Failure::Forbidden)?;
     if !state.members.iter().any(|m| m.account_id == actor) {
         require(
             query::<bool>(
                 c,
-                "SELECT to_jsonb(uses<max_uses) AS data FROM guild_invites WHERE id=$1::uuid",
+                "SELECT to_jsonb(max_uses=0 OR uses<max_uses) AS data FROM guild_invites WHERE id=$1::uuid",
                 &[&invite.to_string()],
             )? == [true],
         )?;
@@ -58,7 +58,7 @@ pub(super) fn accept(
         )?;
         execute(
             c,
-            "UPDATE guild_invites SET uses=uses+1 WHERE id=$1::uuid",
+            "UPDATE guild_invites SET uses=LEAST(uses::bigint+1,2147483647)::integer WHERE id=$1::uuid",
             &[&invite.to_string()],
         )?;
         execute(
@@ -145,14 +145,16 @@ pub(super) fn request(
             if revision != state.guild.revision {
                 return Err(Failure::Conflict);
             }
-            if !(60..=2_419_200).contains(&duration_seconds) || !(1..=500).contains(&max_uses) {
+            if (duration_seconds != 0 && !(60..=2_419_200).contains(&duration_seconds))
+                || max_uses > 500
+            {
                 return Err(Failure::Invalid(
-                    "Invites require 1 minute to 28 days and 1 to 500 uses",
+                    "Invites require 1 minute to 28 days and 1 to 500 uses, or zero for unlimited",
                 ));
             }
             execute(
                 c,
-                "DELETE FROM guild_invites WHERE guild_id=$1::uuid AND (revoked OR expires_at<=clock_timestamp() OR uses>=max_uses)",
+                "DELETE FROM guild_invites WHERE guild_id=$1::uuid AND (revoked OR expires_at<=clock_timestamp() OR (max_uses>0 AND uses>=max_uses))",
                 &[&guild],
             )?;
             allocation(
@@ -165,7 +167,7 @@ pub(super) fn request(
             let id = thiscord_shared::InviteId::from_uuid(Uuid::new_v4());
             execute(
                 c,
-                "INSERT INTO guild_invites(id,guild_id,token_hash,created_by,expires_at,max_uses) VALUES($1::uuid,$2::uuid,$3,$4::uuid,clock_timestamp()+($5||' seconds')::interval,$6::integer)",
+                "INSERT INTO guild_invites(id,guild_id,token_hash,created_by,expires_at,max_uses) VALUES($1::uuid,$2::uuid,$3,$4::uuid,CASE WHEN $5::integer=0 THEN NULL ELSE clock_timestamp()+($5||' seconds')::interval END,$6::integer)",
                 &[
                     &id.to_string(),
                     &guild,

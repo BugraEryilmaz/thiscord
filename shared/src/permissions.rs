@@ -221,7 +221,9 @@ pub struct GuildInvite {
     pub id: InviteId,
     pub created_by: Option<AccountId>,
     pub created_at: crate::Timestamp,
-    pub expires_at: crate::Timestamp,
+    /// None means no expiry.
+    pub expires_at: Option<crate::Timestamp>,
+    /// Zero means unlimited uses.
     pub max_uses: u32,
     pub uses: u32,
     pub revoked: bool,
@@ -274,7 +276,9 @@ pub enum PermissionRequest {
     CreateInvite {
         guild_id: GuildId,
         revision: i64,
+        /// Zero means no expiry; otherwise 60..=2_419_200.
         duration_seconds: u32,
+        /// Zero means unlimited; otherwise 1..=500.
         max_uses: u32,
     },
     RevokeInvite {
@@ -526,6 +530,19 @@ pub struct GuildHome {
 mod tests {
     use super::*;
     use serde_json::json;
+
+    #[test]
+    fn finite_and_unlimited_invites_round_trip() {
+        let id = "00000000-0000-0000-0000-000000000001";
+        for (expiry, max_uses) in [(json!("2026-10-24T00:00:00Z"), 10), (json!(null), 0)] {
+            let wire = json!({"id":id,"created_by":id,"created_at":"2026-10-23T00:00:00Z","expires_at":expiry,"max_uses":max_uses,"uses":0,"revoked":false});
+            let invite: GuildInvite = serde_json::from_value(wire.clone()).unwrap();
+            assert_eq!(serde_json::to_value(invite).unwrap(), wire);
+        }
+        let wire = json!({"action":"create_invite","guild_id":id,"revision":1,"duration_seconds":0,"max_uses":0});
+        let command: PermissionRequest = serde_json::from_value(wire.clone()).unwrap();
+        assert_eq!(serde_json::to_value(command).unwrap(), wire);
+    }
 
     #[test]
     fn organization_defaults_and_moderation_reason_are_wire_compatible() {

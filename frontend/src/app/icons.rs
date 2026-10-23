@@ -9,6 +9,7 @@ pub(super) enum Glyph {
     Settings,
     Refresh,
     Plus,
+    Link,
     Compass,
     Pin,
     BellOff,
@@ -51,6 +52,9 @@ pub(super) fn Icon(kind: Glyph) -> impl IntoView {
             "m10 2-.6 3-2 .9-2.6-1.5-2 3.4L5 10v3l-2.2 2.2 2 3.4 2.6-1.5 2 .9.6 3h4l.6-3 2-.9 2.6 1.5 2-3.4L19 13v-3l2.2-2.2-2-3.4-2.6 1.5-2-.9L14 2h-4ZM15 11.5a3 3 0 1 1-6 0 3 3 0 0 1 6 0Z"
         }
         Glyph::Refresh => "M20 7v5h-5M20 12a8 8 0 1 0-2.3 5.7",
+        Glyph::Link => {
+            "m10 13 4-4M8 16l-1 1a4 4 0 0 1-6-6l4-4a4 4 0 0 1 6 0M16 8l1-1a4 4 0 0 1 6 6l-4 4a4 4 0 0 1-6 0"
+        }
         Glyph::Plus => "M12 5v14M5 12h14",
         Glyph::Pin => "M9 3h6l-1 7 4 4v2H6v-2l4-4-1-7ZM12 16v6",
         Glyph::BellOff => "m3 3 18 18M9 4a6 6 0 0 1 9 5v4M6 6v6l-3 5h14M10 21h4",

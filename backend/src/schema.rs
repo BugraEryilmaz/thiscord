@@ -191,7 +191,7 @@ diesel::table! {
         token_hash -> Text,
         created_by -> Nullable<Uuid>,
         created_at -> Timestamptz,
-        expires_at -> Timestamptz,
+        expires_at -> Nullable<Timestamptz>,
         max_uses -> Int4,
         uses -> Int4,
         revoked -> Bool,

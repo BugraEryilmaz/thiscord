@@ -38,6 +38,10 @@ fn refresh(downloads: RwSignal<Downloads>) {
 
 #[component]
 pub fn Welcome() -> impl IntoView {
+    if web_sys::window().is_some_and(|w| w.location().pathname().ok().as_deref() == Some("/invite"))
+    {
+        return view! { <Invitation/> }.into_any();
+    }
     let downloads = RwSignal::new(Downloads::Loading);
     let suggested = web_sys::window()
         .and_then(|w| w.navigator().user_agent().ok())
@@ -128,6 +132,82 @@ pub fn Welcome() -> impl IntoView {
                 <p>"A little closer, wherever you are."</p>
                 <a href={REPOSITORY}>"Built in the open"<Icon kind="external"/></a>
             </footer>
+        </div>
+    }.into_any()
+}
+
+#[component]
+fn Invitation() -> impl IntoView {
+    document().set_title("Thiscord server invitation");
+    let downloads = RwSignal::new(Downloads::Loading);
+    refresh(downloads);
+    window_event_listener(leptos::ev::hashchange, move |_| {
+        let _ = window().location().reload();
+    });
+    let location = window().location();
+    let base = location.origin().unwrap_or_default();
+    let code = location
+        .hash()
+        .unwrap_or_default()
+        .trim_start_matches('#')
+        .to_owned();
+    let link = thiscord_frontend::invites::desktop_link(&base, &code);
+    let valid = link.is_some();
+    let link = link.unwrap_or_default();
+    let automatic = link.clone();
+    let browser_link = StoredValue::new(format!("{base}/invite#{code}"));
+    let link = StoredValue::new(link);
+    let status = RwSignal::new(String::new());
+    if valid {
+        leptos::task::spawn_local(async move {
+            gloo_timers::future::TimeoutFuture::new(300).await;
+            let _ = window().location().set_href(&automatic);
+        });
+    }
+    view! {
+        <div class="welcome-page invite-page">
+            <header class="welcome-nav welcome-wrap flex items-center justify-between gap-6">
+                <a class="welcome-logo flex items-center gap-2" href="/"><Logo/>"thiscord"</a>
+                <button class="welcome-text-link" on:click=move |_|{if let Some(section)=document().get_element_by_id("downloads"){section.scroll_into_view();}}>"Get the app"</button>
+            </header>
+            <main id="main" class="invite-main">
+                <section class="invite-card" aria-labelledby="invite-title">
+                    <div class="invite-symbol" aria-hidden="true"><Icon kind="chat"/></div>
+                    <h1 id="invite-title">{if valid { "Your people are waiting." } else { "This invite is incomplete." }}</h1>
+                    <p class="invite-lead">{if valid { "Open Thiscord to join the server. Your invitation will be ready in the app." } else { "Ask for a new invite link, then open the complete link you receive." }}</p>
+                    <Show when=move ||valid>
+                        <a class="welcome-primary invite-open" href=link.get_value()>"Open Thiscord"<Icon kind="external"/></a>
+                        <p class="invite-note">"Allow your browser to open the app if it asks. Already running? We’ll bring it to the front."</p>
+                        <details class="invite-fallback"><summary>"App didn’t open?"</summary>
+                            <p>"Install or update Thiscord below, then choose Open Thiscord again. You can also paste this link into Join a server in the app."</p>
+                            <label>"Invitation link"<input readonly value=browser_link.get_value()/></label>
+                            <button class="welcome-text-link" on:click=move |_| {
+                                let value = browser_link.get_value();
+                                leptos::task::spawn_local(async move {
+                                    let copied = wasm_bindgen_futures::JsFuture::from(window().navigator().clipboard().write_text(&value)).await.is_ok();
+                                    status.set(if copied { "Invite copied" } else { "Select and copy the link above." }.into());
+                                });
+                            }>"Copy invite link"</button>
+                            <p role="status">{move ||status.get()}</p>
+                        </details>
+                    </Show>
+                </section>
+                <section id="downloads" class="invite-downloads" aria-labelledby="invite-download-title">
+                    <h2 id="invite-download-title">"New here? Get Thiscord."</h2>
+                    <p>"Install the app, then come back to this invitation."</p>
+                    <div class="welcome-release-status" role="status">{move ||match downloads.get() {
+                        Downloads::Loading => "Finding the latest installers…".to_owned(),
+                        Downloads::Ready(release) => format!("Latest release: {}", release.version().unwrap_or_default()),
+                        Downloads::Unavailable => "Couldn’t load installers. Try again or download from GitHub.".into(),
+                    }}</div>
+                    <div class="welcome-download-list">
+                        {[Platform::Windows, Platform::Mac, Platform::Linux, Platform::Debian].into_iter().map(|platform|view!{<DownloadRow platform downloads/>}).collect_view()}
+                    </div>
+                    <p class="welcome-requirements">"macOS: Apple Silicon, 11.3 or newer. Linux: built on Ubuntu 24.04; compatible system libraries required."</p>
+                    <Show when=move ||matches!(downloads.get(), Downloads::Unavailable)><button class="welcome-retry" on:click=move |_|refresh(downloads)>"Try again"</button></Show>
+                    <a class="welcome-text-link" href=LATEST_PAGE>"All releases on GitHub"<Icon kind="external"/></a>
+                </section>
+            </main>
         </div>
     }
 }
