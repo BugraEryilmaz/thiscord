@@ -266,7 +266,9 @@ mod tests {
                 })).unwrap();
                 let frame = ServerFrame {
                     version: SOCKET_VERSION,
-                    event: ServerEvent::Mention { message },
+                    event: ServerEvent::Mention {
+                        message: Box::new(message),
+                    },
                 };
                 socket
                     .send(Message::Text(serde_json::to_string(&frame).unwrap().into()))

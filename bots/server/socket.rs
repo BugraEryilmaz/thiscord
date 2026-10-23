@@ -221,7 +221,7 @@ async fn serve(mut socket: WebSocket, pool: DbPool, id: RequestId) {
                 let p=pool.clone(); let t=token.clone(); let ch=message.channel_id;
                 if !matches!(crate::performance::blocking(move || store::checked(&p,&t,gid,&[ch])).await,Ok(Ok(()))) { break; }
                 let Some(_delivery) = permit.deliver() else { break; };
-                if send(&mut socket,ServerEvent::Mention { message }).await.is_err() { return; }
+                if send(&mut socket,ServerEvent::Mention { message: Box::new(message) }).await.is_err() { return; }
             }
             _ = tick.tick() => {
                 if last_seen.elapsed()>Duration::from_secs(35) { return; }

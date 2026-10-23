@@ -13,8 +13,8 @@ pub mod message_links;
 pub mod navigation;
 pub mod notification_queue;
 pub mod notification_sound;
-pub mod safety;
 pub mod rich_chat;
+pub mod safety;
 #[cfg(all(not(target_arch = "wasm32"), feature = "screen-share"))]
 pub mod screen;
 pub mod video_feedback;
