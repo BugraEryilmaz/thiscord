@@ -18,6 +18,7 @@ mod permissions;
 mod profile;
 mod screen;
 mod screen_player;
+mod search;
 mod servers;
 mod settings;
 mod shortcuts;
@@ -52,6 +53,7 @@ struct Ui {
     socket_status: RwSignal<chat::ConnectionStatus>,
     chat_epoch: RwSignal<u64>,
     active_chat: RwSignal<Option<chat::Chat>>,
+    chat_jump: RwSignal<Option<(thiscord_shared::ChannelId, thiscord_shared::MessageId)>>,
     unread: RwSignal<Vec<thiscord_shared::chat::Unread>>,
     guilds: RwSignal<Vec<thiscord_shared::permissions::Guild>>,
     server: RwSignal<Option<thiscord_shared::permissions::GuildHome>>,
@@ -352,6 +354,7 @@ pub fn App() -> impl IntoView {
         socket_status: RwSignal::new(chat::ConnectionStatus::Offline),
         chat_epoch: RwSignal::new(0),
         active_chat: RwSignal::new(None),
+        chat_jump: RwSignal::new(None),
         unread: RwSignal::new(vec![]),
         guilds: RwSignal::new(vec![]),
         server: RwSignal::new(None),

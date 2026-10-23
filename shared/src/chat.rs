@@ -7,6 +7,23 @@ pub const CHAT_PATH: &str = "/api/v1/chat";
 pub const SOCKET_PATH: &str = "/api/v1/socket";
 pub const SOCKET_VERSION: u8 = 1;
 pub const MAX_MESSAGE_CHARS: usize = 4000;
+/// A bounded, interoperable reaction palette. No custom image or shortcode URLs.
+pub const REACTION_EMOJI: &[&str] = &["👍", "👎", "❤️", "😂", "🎉", "😮", "😢", "🔥", "✅", "👀"];
+pub const MAX_CHANNEL_PINS: usize = 50;
+
+#[derive(Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct Reaction {
+    pub emoji: String,
+    pub count: i64,
+    pub mine: bool,
+}
+
+#[derive(Clone, Serialize, Deserialize)]
+pub struct ReplyPreview {
+    pub id: MessageId,
+    /// None means deleted/unavailable; no author or content is retained.
+    pub preview: Option<String>,
+}
 pub const ATTACHMENTS_PATH: &str = "/api/v1/attachments";
 pub const MAX_ATTACHMENT_BYTES: usize = 25 * 1024 * 1024;
 pub const MAX_MESSAGE_ATTACHMENTS: usize = 4;
@@ -59,6 +76,12 @@ pub struct ChatMessage {
     pub deleted: bool,
     pub revision: i32,
     pub sequence: i64,
+    #[serde(default)]
+    pub reply: Option<ReplyPreview>,
+    #[serde(default)]
+    pub reactions: Vec<Reaction>,
+    #[serde(default)]
+    pub pinned: bool,
 }
 impl ChatMessage {
     /// Profile label, falling back to the username for older servers.
@@ -118,6 +141,8 @@ pub enum ChatRequest {
         content: String,
         #[serde(default, skip_serializing_if = "Vec::is_empty")]
         attachment_ids: Vec<AttachmentId>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        reply_to: Option<MessageId>,
     },
     Edit {
         guild_id: GuildId,
@@ -140,13 +165,37 @@ pub enum ChatRequest {
     Unread {
         guild_id: GuildId,
     },
+    React {
+        guild_id: GuildId,
+        channel_id: ChannelId,
+        message_id: MessageId,
+        emoji: String,
+        present: bool,
+    },
+    Pin {
+        guild_id: GuildId,
+        channel_id: ChannelId,
+        message_id: MessageId,
+        revision: i32,
+        pinned: bool,
+    },
+    Pins {
+        guild_id: GuildId,
+        channel_id: ChannelId,
+    },
+    Context {
+        guild_id: GuildId,
+        channel_id: ChannelId,
+        message_id: MessageId,
+    },
 }
 #[derive(Clone, Serialize, Deserialize)]
 #[serde(tag = "result", rename_all = "snake_case")]
 pub enum ChatResponse {
     History { history: History },
-    Message { message: ChatMessage },
+    Message { message: Box<ChatMessage> },
     Unread { channels: Vec<Unread> },
+    Pins { messages: Vec<ChatMessage> },
     Done,
 }
 // Never Debug: the first frame carries a bearer token.
@@ -208,7 +257,7 @@ pub enum ServerEvent {
         history: History,
     },
     Message {
-        message: ChatMessage,
+        message: Box<ChatMessage>,
         cursor: i64,
     },
     Presence {
@@ -225,6 +274,24 @@ pub enum ServerEvent {
 mod tests {
     use super::*;
     use serde_json::json;
+
+    #[test]
+    fn legacy_send_omits_reply_and_old_messages_default_rich_fields() {
+        let id = "00000000-0000-0000-0000-000000000001";
+        let request: ChatRequest = serde_json::from_value(
+            json!({"action":"send","guild_id":id,"channel_id":id,"client_id":id,"content":"hello"}),
+        )
+        .unwrap();
+        assert!(matches!(request, ChatRequest::Send { reply_to: None, .. }));
+        assert!(
+            serde_json::to_value(&request)
+                .unwrap()
+                .get("reply_to")
+                .is_none()
+        );
+        let message:ChatMessage=serde_json::from_value(json!({"id":id,"client_id":id,"guild_id":id,"channel_id":id,"author_id":null,"username":"old","content":"hello","mentions":[],"created_at":"2026-01-01T00:00:00Z","edited_at":null,"deleted":false,"revision":0,"sequence":1})).unwrap();
+        assert!(message.reply.is_none() && message.reactions.is_empty() && !message.pinned);
+    }
 
     #[test]
     fn profile_names_preserve_handles_and_accept_legacy_presence() {

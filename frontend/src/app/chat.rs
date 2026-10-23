@@ -17,6 +17,8 @@ use wasm_bindgen::{JsCast, closure::Closure};
 
 #[path = "attachments.rs"]
 mod attachments;
+#[path = "rich_chat.rs"]
+mod rich;
 use thiscord_frontend::attachments::{PendingSend as Pending, can_send};
 
 const PENDING_LIMIT: usize = 20;
@@ -47,6 +49,9 @@ pub(super) struct Chat {
     bottom: RwSignal<bool>,
     typing: RwSignal<bool>,
     last_read: RwSignal<i64>,
+    reply_to: RwSignal<Option<MessageId>>,
+    rich_updates: RwSignal<Vec<ChatMessage>>,
+    highlight: RwSignal<Option<MessageId>>,
 }
 impl Chat {
     fn alive(self) -> bool {
@@ -137,13 +142,34 @@ impl Chat {
         self.scroll();
         for message in &messages {
             if message.deleted {
+                if self.reply_to.get_untracked() == Some(message.id) {
+                    self.reply_to.set(None);
+                }
                 attachments::revoke_message(self, message.id);
             }
         }
+        self.rich_updates.set(messages.clone());
         let delivered: HashSet<_> = messages.iter().map(|m| m.client_id).collect();
         self.pending
             .update(|p| p.retain(|p| !delivered.contains(&p.id)));
         self.messages.update(|cache| {
+            for row in cache.values() {
+                let update = row.with_untracked(|current| {
+                    current.reply.as_ref().and_then(|reply| {
+                        messages.iter().find(|m| m.id == reply.id).map(|target| {
+                            (!target.deleted)
+                                .then(|| target.content.chars().take(160).collect::<String>())
+                        })
+                    })
+                });
+                if let Some(preview) = update {
+                    row.update(|current| {
+                        if let Some(reply) = &mut current.reply {
+                            reply.preview = preview;
+                        }
+                    });
+                }
+            }
             cache.merge(messages, mode, ArcRwSignal::new, |row, message| {
                 row.set(message)
             })
@@ -159,6 +185,9 @@ impl Chat {
         );
     }
     fn reset(self) {
+        self.rich_updates.set(vec![]);
+        self.reply_to.set(None);
+        self.highlight.set(None);
         attachments::clear_downloads(self);
         self.attachment_generation.update(|g| *g += 1);
         // An interrupted request may have committed; retries keep its exact IDs.
@@ -284,7 +313,7 @@ impl Chat {
             match response {
                 Ok(ChatResponse::Message { message }) => {
                     self.status.set("Message sent".into());
-                    self.merge(message);
+                    self.merge(*message);
                     self.read();
                 }
                 Err(error) => {
@@ -620,7 +649,7 @@ fn deliver(chat: Chat, event: ServerEvent) -> Result<(), String> {
             chat.read();
         }
         ServerEvent::Message { message, .. } => {
-            chat.merge(message);
+            chat.merge(*message);
             chat.read();
         }
         ServerEvent::Presence { members } => chat.online.set(members),
@@ -695,7 +724,7 @@ fn MessageRow(
         }
     });
     view! {
-        <li node_ref=row class="min-h-20 pb-4" data-message-id=id.to_string()>
+        <li node_ref=row class="min-h-20 pb-4" class:ring-2=move || chat.highlight.get()==Some(id) class:ring-brand=move || chat.highlight.get()==Some(id) data-message-id=id.to_string()>
             <div class=move || if message.with(|m| chat.ui.account.with(|a| a.as_ref().is_some_and(|a| m.mentions.contains(&a.id)))) {
                 "rounded-lg bg-brand/10 px-3 py-2"
             } else { "rounded-lg px-3 py-2" }>
@@ -704,9 +733,11 @@ fn MessageRow(
                     <time class="text-xs text-white/40">{move || message.with(|m| crate::i18n::datetime(m.created_at))}</time>
                     <Show when=move || message.with(|m| m.edited_at.is_some() && !m.deleted)><span class="text-xs text-white/40">{move ||crate::i18n::t("edited")}</span></Show>
                 </div>
-                <p class="whitespace-pre-wrap break-words text-white/85">{move || message.with(|m| super::message_content::render(if m.deleted { "Message deleted" } else { &m.content }, chat.ui))}</p>
+                <rich::Reply chat message/>
+                <div class="whitespace-pre-wrap break-words text-white/85">{move || message.with(|m| super::message_content::render(if m.deleted { "Message deleted" } else { &m.content }, chat.ui))}</div>
                 <Show when=move || message.with(|m| !m.deleted)>
                     <For each=move || message.with(|m| m.attachments.clone()) key=|a| a.id children=move |attachment| view! { <attachments::Card chat message=id attachment/> }/>
+                    <rich::Actions chat message/>
                     <div class="flex gap-3 text-xs text-white/50">
                         <Show when=move || own() && chat.permissions.with(|p| p.contains(&Permission::EditOwnMessages))>
                             <button class="icon-button" aria-label=move || crate::i18n::t("Edit message") data-tip=move || crate::i18n::t("Edit") on:click=move |_| {
@@ -725,7 +756,7 @@ fn MessageRow(
                                     }).await;
                                     if !chat.alive() || chat.access_generation.get_untracked() != generation { return; }
                                     match result {
-                                        Ok(ChatResponse::Message { message }) => chat.merge(message),
+                                        Ok(ChatResponse::Message { message }) => chat.merge(*message),
                                         Err(error) => chat.status.set(error),
                                         _ => {}
                                     }
@@ -768,6 +799,9 @@ pub(super) fn ChatPanel(ui: Ui, guild: GuildId, channel: ChannelId, name: String
         bottom: RwSignal::new(true),
         typing: RwSignal::new(false),
         last_read: RwSignal::new(0),
+        reply_to: RwSignal::new(None),
+        rich_updates: RwSignal::new(vec![]),
+        highlight: RwSignal::new(None),
     };
     let draft = RwSignal::new(String::new());
     let editing = RwSignal::new(None::<MessageId>);
@@ -795,6 +829,15 @@ pub(super) fn ChatPanel(ui: Ui, guild: GuildId, channel: ChannelId, name: String
         }
     });
     ui.active_chat.set(Some(chat));
+    Effect::new(move |_| {
+        if chat.ready.get()
+            && let Some((channel_id, message_id)) = ui.chat_jump.get()
+            && channel_id == channel
+        {
+            ui.chat_jump.set(None);
+            chat.jump(message_id);
+        }
+    });
     on_cleanup(move || {
         if chat.alive() {
             ui.active_chat.set(None);
@@ -855,7 +898,7 @@ pub(super) fn ChatPanel(ui: Ui, guild: GuildId, channel: ChannelId, name: String
                 }
                 match result {
                     Ok(ChatResponse::Message { message }) => {
-                        chat.merge(message);
+                        chat.merge(*message);
                         editing.set(None);
                         draft.set(String::new());
                     }
@@ -881,8 +924,10 @@ pub(super) fn ChatPanel(ui: Ui, guild: GuildId, channel: ChannelId, name: String
                     id,
                     content,
                     failed: false,
+                    reply_to: chat.reply_to.get_untracked(),
                 });
                 draft.set(String::new());
+                chat.reply_to.set(None);
             } else {
                 chat.status
                     .set("Secure random IDs are unavailable; use HTTPS or localhost".into());
@@ -907,7 +952,7 @@ pub(super) fn ChatPanel(ui: Ui, guild: GuildId, channel: ChannelId, name: String
             on:dragover=move |ev: leptos::ev::DragEvent| { ev.prevent_default(); if let Some(data) = ev.data_transfer() { data.set_drop_effect(if editing.get_untracked().is_some() { "none" } else { "copy" }); } }
             on:drop=move |ev: leptos::ev::DragEvent| { ev.prevent_default(); if editing.get_untracked().is_none() && let Some(files) = ev.data_transfer().and_then(|d| d.files()) { queue.add(files); } }>
             <attachments::DownloadHost chat/>
-            <header class="shrink-0 border-b border-white/10 p-4"><h2 class="truncate text-lg font-semibold">{format!("# {name}")}</h2><p class="break-words text-xs text-white/60" role="status">{move||crate::i18n::message(chat.status.get())}</p></header>
+            <header class="shrink-0 border-b border-white/10 p-4"><h2 class="truncate text-lg font-semibold">{format!("# {name}")}</h2><rich::Pins chat/><super::search::Launcher ui scope=thiscord_shared::search::Scope::Guild { guild_id: guild, channel_id: None }/><p class="break-words text-xs text-white/60" role="status">{move||crate::i18n::message(chat.status.get())}</p></header>
             <div node_ref=chat.list class="min-h-0 flex-1 overflow-x-hidden overflow-y-auto overscroll-contain p-4" style="overflow-anchor: none" on:scroll=move |_| {
                 chat.update_viewport();
                 if !chat.layout_pending.get_untracked() && let Some(node) = chat.list.get_untracked() {
@@ -943,7 +988,7 @@ pub(super) fn ChatPanel(ui: Ui, guild: GuildId, channel: ChannelId, name: String
                             let pending = Memo::new(move |_| chat.pending.with(|p| p.iter().find(|p| p.id == id).cloned()));
                             view! {
                                 <li class="whitespace-pre-wrap break-words text-white/50">
-                                    <p>{move || pending.with(|p| super::message_content::render(p.as_ref().map(|p| p.content.as_str()).unwrap_or_default(), chat.ui))}</p>
+                                    <div>{move || pending.with(|p| super::message_content::render(p.as_ref().map(|p| p.content.as_str()).unwrap_or_default(), chat.ui))}</div>
                                     <p class="text-xs">{move || pending.with(|p| p.as_ref().map(|p| p.filenames.join(", ")).unwrap_or_default())}</p>
                                     {move || if pending.with(|p| p.as_ref().is_some_and(|p| p.failed)) { crate::i18n::t("Failed to send") } else { crate::i18n::t("Sending…") }}
                                     <Show when=move || pending.with(|p| p.as_ref().is_some_and(|p| p.failed))>
@@ -965,6 +1010,7 @@ pub(super) fn ChatPanel(ui: Ui, guild: GuildId, channel: ChannelId, name: String
                 <p class="text-xs text-white/50">{move||thiscord_frontend::localized_format!(crate::i18n::language(), "Online here: {}",chat.online.with(|members| members.iter().map(|m|m.display_name()).collect::<Vec<_>>().join(", ")))}</p>
                 <p class="min-h-4 text-xs text-white/60" aria-live="polite">{move||{let names=chat.online.with(|members| members.iter().filter(|m|m.typing&&ui.account.with(|a|a.as_ref().is_none_or(|a|a.id!=m.account_id))).map(|m|m.display_name().to_owned()).collect::<Vec<_>>());if names.is_empty(){String::new()}else{thiscord_frontend::localized_format!(crate::i18n::language(), "{} typing…",names.join(", "))}}}</p>
                 <Show when=move||editing.get().is_some()><button class="text-sm text-brand underline" on:click=move |_|{editing.set(None);draft.set(String::new());}>{move || crate::i18n::t("Cancel edit")}</button></Show>
+                <Show when=move ||chat.reply_to.get().is_some()><div class="flex gap-3 text-sm text-sky-300"><span class="max-w-80 truncate">{move || chat.reply_to.get().map(|id|chat.messages.with(|cache|cache.get(id).map(|m|m.with(|m|thiscord_frontend::localized_format!(crate::i18n::language(), "Reply to {}: {}",m.display_name(),m.content.chars().take(80).collect::<String>()))).unwrap_or_else(||crate::i18n::t("Reply selected").into())))}</span><button on:click=move |_|chat.reply_to.set(None)>{move ||crate::i18n::t("Cancel reply")}</button></div></Show>
                 <attachments::Composer queue editing/>
                 <form class="flex gap-3" on:submit=submit><label class="min-w-0 flex-1"><span class="sr-only">{move || crate::i18n::t("Message")}</span><textarea class="w-full resize-none rounded-lg bg-black/20 p-3 outline-none focus:ring-2 focus:ring-brand" on:keydown=keydown rows="2" maxlength="4000" placeholder=move || crate::i18n::t("Message this channel · @username to mention") prop:value=move||draft.get() disabled=move||!chat.permissions.with(|p|p.contains(&Permission::SendMessages)) on:input=move|ev|{draft.set(event_target_value(&ev));chat.typing.set(true);}/></label><button class="icon-button self-end bg-brand" aria-label=move ||if editing.get().is_some(){crate::i18n::t("Save message")}else{crate::i18n::t("Send message")} data-tip=move ||if editing.get().is_some(){crate::i18n::t("Save")}else{crate::i18n::t("Send")} disabled=move||loading.get()||!composer_ready()||!chat.permissions.with(|p|p.contains(&Permission::SendMessages))><Icon kind=Glyph::Send/></button></form>
             </footer>

@@ -74,6 +74,53 @@ mod tests {
     use super::*;
 
     #[test]
+    fn rich_chat_and_search_controls_have_turkish_translations() {
+        for source in [
+            "Search messages",
+            "Close search",
+            "Words",
+            "Person (@username)",
+            "All accessible channels",
+            "From (UTC)",
+            "Before (UTC)",
+            "Searching…",
+            "Search complete",
+            "No messages found",
+            "Search timed out",
+            "Invalid date",
+            "View original and context",
+            "Open channel",
+            "Original message and nearby history",
+            "Reply",
+            "Reply selected",
+            "Reply to {}: {}",
+            "Cancel reply",
+            "Attachment message",
+            "Original message unavailable",
+            "React {}",
+            "Pin",
+            "Unpin",
+            "Pinned messages",
+            "Pinned messages (up to 50)",
+            "No pinned messages",
+            "Invalid search request",
+            "Search needs 1 to 200 characters",
+            "Use an exact username for the person filter",
+            "Search start must be before its end",
+            "Select a conversation to narrow this search",
+            "Unsupported reaction",
+            "A channel can have at most 50 pinned messages",
+        ] {
+            assert_ne!(
+                translate(Language::Turkish, source),
+                source,
+                "missing Turkish: {source}"
+            );
+            assert_eq!(translate(Language::English, source), source);
+        }
+    }
+
+    #[test]
     fn preference_and_system_language_negotiation() {
         let system = ["de-CH".into(), "tr-TR".into(), "en-US".into()];
         assert_eq!(Language::resolve(Some("en"), &system), Language::English);

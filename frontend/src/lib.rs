@@ -19,3 +19,5 @@ pub mod stream_ui;
 
 #[cfg(all(not(target_arch = "wasm32"), feature = "voice-bot"))]
 pub mod bot;
+
+pub mod markdown;

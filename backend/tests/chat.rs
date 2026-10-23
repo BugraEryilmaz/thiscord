@@ -20,6 +20,8 @@ mod attachments;
 mod friends;
 #[path = "chat/notifications.rs"]
 mod notifications;
+#[path = "chat/rich.rs"]
+mod rich;
 #[path = "chat/unread.rs"]
 mod unread;
 

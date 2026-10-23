@@ -414,11 +414,15 @@ async fn custom_admin_authority_and_migration_rollback_preserve_legacy_grants() 
     )
     .await["state"]["guild"]["id"]
         .clone();
-    db.pool
-        .get()
-        .unwrap()
-        .revert_last_migration(db::MIGRATIONS)
-        .unwrap();
+    // Later feature migrations must not change which rollback is being exercised.
+    let mut connection = db.pool.get().unwrap();
+    loop {
+        let reverted = connection.revert_last_migration(db::MIGRATIONS).unwrap();
+        if reverted.to_string() == "20261023000000" {
+            break;
+        }
+    }
+    drop(connection);
     db.pool
         .get()
         .unwrap()

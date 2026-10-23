@@ -81,6 +81,7 @@ thiscord-shared.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 linkify = "0.11"
+pulldown-cmark = { version = "0.13", default-features = false }
 url = "2"
 
 [target.'cfg(target_arch = "wasm32")'.dependencies]

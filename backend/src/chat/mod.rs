@@ -2,8 +2,9 @@ pub(crate) mod access;
 mod attachments;
 pub use attachments::start_cleanup as start_attachment_cleanup;
 mod notifications;
+mod rich;
 mod session;
-mod store;
+pub(crate) mod store;
 use crate::{
     auth::{self, Failure},
     db::DbPool,
@@ -214,7 +215,9 @@ async fn serve(mut socket: WebSocket, pool: DbPool, id: RequestId) {
                 guild_id,
                 Some(channel_id),
                 Some(Permission::ReadHistory),
-                |c, _, _| store::history(c, guild_id, channel_id, None, Default::default()),
+                |c, actor, _| {
+                    store::history(c, guild_id, channel_id, None, Default::default(), actor)
+                },
             )
         })
         .await;
@@ -275,7 +278,7 @@ async fn serve(mut socket: WebSocket, pool: DbPool, id: RequestId) {
                 let Ok(Ok(poll))=result else{let _=send(&mut socket,ServerEvent::Revoked{}).await;break;};
                 let Some(_delivery) = snapshot.deliver() else { let _=send(&mut socket,ServerEvent::Revoked{}).await;break; };
                 let delivery=async {
-                    for (seq,message) in poll.events{send(&mut socket,ServerEvent::Message{message,cursor:seq}).await?;cursor=seq;}
+                    for (seq,message) in poll.events{send(&mut socket,ServerEvent::Message{message:Box::new(message),cursor:seq}).await?;cursor=seq;}
                     if poll.members!=last_members{last_members=poll.members.clone();send(&mut socket,ServerEvent::Presence{members:poll.members}).await?;}
                     Ok::<(),()>(())
                 };
