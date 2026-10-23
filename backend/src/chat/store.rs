@@ -209,7 +209,12 @@ pub(super) fn dispatch(
             channel_id,
             ..
         } => (*guild_id, Some(*channel_id), Some(Permission::ReadHistory)),
-        ChatRequest::Send {
+        ChatRequest::MentionSuggestions {
+            guild_id,
+            channel_id,
+            ..
+        }
+        | ChatRequest::Send {
             guild_id,
             channel_id,
             ..
@@ -251,6 +256,25 @@ pub(super) fn dispatch(
                 )?;
             }
             match command {
+                ChatRequest::MentionSuggestions { query: search, .. } => {
+                    if search.chars().count() > MAX_MENTION_QUERY_CHARS
+                        || search.chars().any(char::is_control)
+                    {
+                        return Err(Failure::Invalid("Invalid mention search"));
+                    }
+                    // Literal substring matching (including % and _), scoped to
+                    // membership. The requester passed current channel checks above.
+                    let members = query(
+                        c,
+                        "SELECT jsonb_build_object('account_id',a.id,'username',a.username,'display_name',COALESCE(NULLIF(a.display_name,''),a.username)) AS data FROM accounts a JOIN guild_members m ON m.account_id=a.id WHERE m.guild_id=$1::uuid AND (strpos(lower(a.display_name),lower($2))>0 OR strpos(a.username,lower($2))>0) ORDER BY (strpos(lower(a.display_name),lower($2))=1 OR strpos(a.username,lower($2))=1) DESC, lower(COALESCE(NULLIF(a.display_name,''),a.username)), a.username, a.id LIMIT $3::integer",
+                        &[
+                            &guild.to_string(),
+                            search.trim(),
+                            &MENTION_SUGGESTION_LIMIT.to_string(),
+                        ],
+                    )?;
+                    Ok(ChatResponse::MentionSuggestions { members })
+                }
                 ChatRequest::History {
                     channel_id,
                     before,

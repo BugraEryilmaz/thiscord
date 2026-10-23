@@ -18,6 +18,8 @@ static TEST_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
 mod attachments;
 #[path = "chat/friends.rs"]
 mod friends;
+#[path = "chat/mentions.rs"]
+mod mentions;
 #[path = "chat/notifications.rs"]
 mod notifications;
 #[path = "chat/unread.rs"]
