@@ -189,8 +189,10 @@ chunks. Bytes already received or saved to disk cannot be recalled.
 Each file is 1 byte–25 MiB, with at most 16 unclaimed files / 100 MiB per uploader
 across conversations. Four shared upload/download slots bound buffers; uploads
 expire after 30 seconds and download buffers after 60 seconds. Staged files expire
-after one hour and cleanup deletes up to 64 rows per minute and per upload. Block
-also deletes that pair's unclaimed files. Published files remain until message or
+after one hour and cleanup deletes up to 64 rows per minute and per upload. Cleanup
+rechecks that each row is still unclaimed and expired after waiting for concurrent
+sends, preserving files claimed before expiry even if the send commits afterward.
+Block also deletes that pair's unclaimed files. Published files remain until message or
 account deletion; removing a friendship hides them while retaining the history.
 Bytes are PostgreSQL `bytea`, included in DB backups. Download MIME is classified
 from bytes: PNG/JPEG/GIF/WebP and MP4/WebM can be previewed, everything else is a

@@ -210,9 +210,11 @@ impl futures_util::Stream for PrivateStream {
     }
 }
 fn cleanup(c: &mut PgConnection) -> Result<(), Failure> {
+    // Recheck eligibility after a concurrent send releases its row lock. The
+    // bounded subquery can still see the old, unclaimed version of that row.
     execute(
         c,
-        "DELETE FROM direct_attachments WHERE id IN (SELECT id FROM direct_attachments WHERE message_id IS NULL AND expires_at<=now() ORDER BY expires_at LIMIT 64)",
+        "DELETE FROM direct_attachments WHERE message_id IS NULL AND expires_at<=now() AND id IN (SELECT id FROM direct_attachments WHERE message_id IS NULL AND expires_at<=now() ORDER BY expires_at LIMIT 64)",
         &[],
     )?;
     Ok(())
@@ -228,3 +230,6 @@ pub fn start_cleanup(pool: DbPool) {
         }
     });
 }
+
+#[cfg(test)]
+mod tests;
