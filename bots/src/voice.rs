@@ -275,6 +275,7 @@ async fn session(
             send(&mut socket, ClientEvent::Join { token, guild_id: guild, channel_id: channel, attempt: None }).await?;
             let (sdp, servers, slot) = match receive(&mut socket).await? {
                 ServerEvent::Offer { sdp, ice_servers, slot, can_speak: true, .. } => (sdp, ice_servers, slot),
+                ServerEvent::Offer { can_speak: false, .. } => return Err(Error::message("The bot needs Speak permission in the voice channel")),
                 ServerEvent::Error { error } => return Err(Error::api(error)),
                 _ => return Err(Error::message("Voice join denied")),
             };
@@ -289,6 +290,7 @@ async fn session(
                 match receive(&mut socket).await? {
                     ServerEvent::Participants { members } => { own(&members, slot)?; break; },
                     ServerEvent::Pong {} => {},
+                    ServerEvent::Error { error } => return Err(Error::api(error)),
                     _ => return Err(Error::message("Voice admission denied")),
                 }
             }
@@ -301,6 +303,7 @@ async fn session(
                         if member.muted && member.deafened { break member.clone(); }
                     },
                     ServerEvent::Pong {} => {},
+                    ServerEvent::Error { error } => return Err(Error::api(error)),
                     _ => return Err(Error::message("Voice admission denied")),
                 }
             };

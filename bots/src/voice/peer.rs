@@ -126,15 +126,27 @@ impl Peer {
             .set_local_description(answer)
             .await
             .map_err(|_| Error::message("Voice answer failed"))?;
-        self.gathered.notified().await;
-        serde_json::to_string(
-            &self
-                .pc
-                .local_description()
-                .await
-                .ok_or_else(|| Error::message("Missing voice answer"))?,
-        )
-        .map_err(|_| Error::message("Voice answer encoding failed"))
+        // The SFU allows 15 seconds for negotiation. A STUN/TURN request from
+        // an unreachable interface (notably loopback) can take longer than
+        // that, even after usable host or relay candidates have been gathered.
+        // Send the candidates available within our budget instead of holding
+        // the entire answer hostage to the slowest ICE server/interface.
+        let _ = timeout(Duration::from_secs(8), self.gathered.notified()).await;
+        let answer = self
+            .pc
+            .local_description()
+            .await
+            .ok_or_else(|| Error::message("Missing voice answer"))?;
+        if !answer
+            .sdp
+            .lines()
+            .any(|line| line.starts_with("a=candidate:"))
+        {
+            return Err(Error::message(
+                "No voice network candidates; check the bot host network and STUN/TURN configuration",
+            ));
+        }
+        serde_json::to_string(&answer).map_err(|_| Error::message("Voice answer encoding failed"))
     }
 
     pub(super) async fn connected(&self) -> Result<(), Error> {

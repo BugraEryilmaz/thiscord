@@ -86,6 +86,44 @@ struct ReceiverPeer {
     packets: mpsc::Receiver<rtp::Packet>,
     stop: watch::Sender<bool>,
 }
+
+#[tokio::test]
+async fn unreachable_ice_server_does_not_block_direct_voice_answer() {
+    // A bound socket that never replies models STUN/TURN being unreachable
+    // from one of the bot's interfaces, including its loopback candidate.
+    let blackhole = std::net::UdpSocket::bind("127.0.0.1:0").unwrap();
+    let address = blackhole.local_addr().unwrap();
+    let mut bot = peer::Peer::new(&[thiscord_shared::voice::IceServer {
+        urls: vec![
+            format!("stun:{address}"),
+            format!("turn:{address}?transport=udp"),
+        ],
+        username: "fixture".into(),
+        credential: "fixture".into(),
+    }])
+    .await
+    .unwrap();
+    let receiver = ReceiverPeer::new().await;
+    receiver
+        .pc
+        .add_track(peer::track() as Arc<dyn TrackLocal>)
+        .await
+        .unwrap();
+    let offer = serde_json::to_string(&receiver.offer().await).unwrap();
+    let result = timeout(Duration::from_secs(12), async {
+        let answer = bot.answer(&offer).await?;
+        let answer: RTCSessionDescription = serde_json::from_str(&answer).unwrap();
+        assert!(answer.sdp.contains("a=candidate:"));
+        receiver.pc.set_remote_description(answer).await.unwrap();
+        bot.connected().await
+    })
+    .await;
+    bot.close().await;
+    receiver.close().await;
+    result
+        .expect("bot must answer before the SFU negotiation deadline")
+        .unwrap();
+}
 impl ReceiverPeer {
     async fn new() -> Self {
         let gathered = Arc::new(Notify::new());

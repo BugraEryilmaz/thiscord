@@ -48,6 +48,16 @@ instance-owner diagnostic [voice test bots](../docs/voice-bots.md) are separate.
    Send `@jukebox /play https://youtu.be/VIDEO_ID`, then `@jukebox /stop` or
    `@jukebox /leave`. `/help` lists the available commands.
 
+If `/play` fails and `/status` says `Not connected`, voice admission or network
+negotiation failed before the YouTube downloader started. Command failures report
+the SDK error and, for server rejections, its code and request ID. Check the bot's
+voice permissions for a rejection; check network/STUN/TURN reachability for a
+connection timeout. Remote error bodies and credentials are never included.
+The bot gathers ICE candidates for up to eight seconds, then sends the available
+candidates before the server's negotiation deadline. This lets a directly
+reachable bot connect even if an external STUN/TURN request does not finish;
+a host that requires a relay still needs a working TURN server.
+
 On macOS/Linux, use `export THISCORD_BOT_NAME="jukebox"` and the same form for
 the other variables. Channel values are **names**, not IDs: names match exactly
 ignoring case and surrounding input whitespace, within the requested text/voice
