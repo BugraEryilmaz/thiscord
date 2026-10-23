@@ -152,7 +152,7 @@ and single-process chat/media enforcement.
 - [x] Access-controlled text-channel attachments, drag/drop and file picker, image/video viewer and downloads.
 - [ ] Verify attachment drag/drop, downloads and media codec playback interactively on Windows/macOS/Linux clients.
 - [x] Guild replies, emoji reactions, safe Markdown/code blocks and moderator message pins.
-- [x] Authorized guild/private search with filters, keyset pages and original/context navigation.
+- [x] Authorized guild/private search API with filters; inline Ctrl+F conversation search, keyset result pages and jumps to original messages in channel/DM history.
 - [x] Integrate private search with DM deletion/blocking and pair_access; validate combined block/unblock, renewed consent, deletion and revocation behavior (docs/search.md).
 - [ ] Later: configurable attachment storage quotas.
 

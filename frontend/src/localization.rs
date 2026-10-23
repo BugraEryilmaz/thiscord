@@ -77,6 +77,12 @@ mod tests {
     fn rich_chat_and_search_controls_have_turkish_translations() {
         for source in [
             "Search messages",
+            "Search messages (Ctrl+F / ⌘F)",
+            "Search this conversation",
+            "Enter words to search this conversation",
+            "Select a message to jump to it",
+            "Search results",
+            "That message is no longer available",
             "Close search",
             "Words",
             "Person (@username)",
@@ -101,6 +107,9 @@ mod tests {
             "Pin",
             "Unpin",
             "Pinned messages",
+            "Loading pinned messages…",
+            "Retry pinned messages",
+            "Jump to pinned message",
             "Pinned messages (up to 50)",
             "No pinned messages",
             "Invalid search request",
