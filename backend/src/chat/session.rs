@@ -19,7 +19,9 @@ fn snapshot(pool: &DbPool, token: &str, sub: Subscription) -> Result<Snapshot, F
         Ok(Snapshot {
             history: sub
                 .channel
-                .map(|channel| store::history(c, sub.guild, channel, None, Default::default()))
+                .map(|channel| {
+                    store::history(c, sub.guild, channel, None, Default::default(), actor)
+                })
                 .transpose()?,
             permissions,
             unread: store::unread(c, sub.guild, actor, state)?,
@@ -205,7 +207,7 @@ pub(super) async fn serve(mut socket: WebSocket, pool: DbPool, id: RequestId, to
                     if let Some(poll) = poll {
                         messages_dirty = poll.events.len() == 100;
                         for (sequence, message) in poll.events {
-                            update(&mut socket, sub, ServerEvent::Message { message, cursor: sequence }).await?;
+                            update(&mut socket, sub, ServerEvent::Message { message: Box::new(message), cursor: sequence }).await?;
                             cursor = sequence;
                         }
                         if read_presence && poll.members != last_members {

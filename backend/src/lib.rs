@@ -16,3 +16,5 @@ pub mod admin;
 pub mod tls;
 pub mod voice;
 pub mod welcome;
+
+pub mod search;

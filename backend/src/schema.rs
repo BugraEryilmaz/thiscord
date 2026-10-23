@@ -289,6 +289,14 @@ diesel::table! {
 }
 
 diesel::table! {
+    message_reactions (message_id, account_id, emoji) {
+        message_id -> Uuid,
+        account_id -> Uuid,
+        emoji -> Text,
+    }
+}
+
+diesel::table! {
     messages (id) {
         id -> Uuid,
         guild_id -> Uuid,
@@ -304,6 +312,8 @@ diesel::table! {
         revision -> Int4,
         sequence -> Int8,
         attachments -> Jsonb,
+        reply_to -> Nullable<Uuid>,
+        pinned -> Bool,
     }
 }
 
@@ -392,6 +402,8 @@ diesel::joinable!(instance_role_assignments -> accounts (account_id));
 diesel::joinable!(instance_role_assignments -> instance_role_limits (role_id));
 diesel::joinable!(mail_outbox -> accounts (account_id));
 diesel::joinable!(message_events -> messages (message_id));
+diesel::joinable!(message_reactions -> accounts (account_id));
+diesel::joinable!(message_reactions -> messages (message_id));
 diesel::joinable!(messages -> accounts (author_id));
 diesel::joinable!(notification_preferences -> accounts (account_id));
 diesel::joinable!(oauth_attempts -> accounts (account_id));
@@ -428,6 +440,7 @@ diesel::allow_tables_to_appear_in_same_query!(
     instance_role_limits,
     mail_outbox,
     message_events,
+    message_reactions,
     messages,
     notification_preferences,
     notification_release,

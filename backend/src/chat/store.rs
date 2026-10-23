@@ -57,7 +57,7 @@ fn checked_session<T>(
         f(c, session.account_id, &state)
     })
 }
-pub(super) fn check_channel(
+pub(crate) fn check_channel(
     state: &GuildState,
     actor: AccountId,
     channel: Option<ChannelId>,
@@ -97,7 +97,7 @@ pub(super) fn visible_voice_channels(
             .collect())
     })
 }
-fn message(c: &mut PgConnection, id: MessageId) -> Result<ChatMessage, Failure> {
+pub(super) fn message(c: &mut PgConnection, id: MessageId) -> Result<ChatMessage, Failure> {
     query(c,"SELECT to_jsonb(m)||jsonb_build_object('username',COALESCE(a.username,'Deleted account'),'display_name',COALESCE(NULLIF(a.display_name,''),a.username,'Deleted account')) AS data FROM messages m LEFT JOIN accounts a ON a.id=m.author_id WHERE m.id=$1::uuid", &[&id.to_string()])?.pop().ok_or(Failure::Forbidden)
 }
 fn text(value: &str, has_attachments: bool) -> Result<(), Failure> {
@@ -148,6 +148,7 @@ pub(super) fn history(
     channel: ChannelId,
     before: Option<PageCursor>,
     limit: PageSize,
+    actor: AccountId,
 ) -> Result<History, Failure> {
     // Keep history and its event cursor consistent with same-channel commits.
     execute(
@@ -172,6 +173,7 @@ pub(super) fn history(
             &(limit.get() + 1).to_string(),
         ],
     )?;
+    super::rich::hydrate(c, actor, &mut messages)?;
     let more = messages.len() > usize::from(limit.get());
     messages.truncate(usize::from(limit.get()));
     messages.reverse();
@@ -203,11 +205,34 @@ pub(super) fn dispatch(
         None,
         matches!(
             command,
-            ChatRequest::Send { .. } | ChatRequest::Edit { .. } | ChatRequest::Delete { .. }
+            ChatRequest::Send { .. }
+                | ChatRequest::Edit { .. }
+                | ChatRequest::Delete { .. }
+                | ChatRequest::React { .. }
+                | ChatRequest::Pin { .. }
         ),
     )?;
     let (guild, channel, need) = match &command {
         ChatRequest::Unread { guild_id } => (*guild_id, None, None),
+        ChatRequest::Pins {
+            guild_id,
+            channel_id,
+        }
+        | ChatRequest::Context {
+            guild_id,
+            channel_id,
+            ..
+        }
+        | ChatRequest::React {
+            guild_id,
+            channel_id,
+            ..
+        }
+        | ChatRequest::Pin {
+            guild_id,
+            channel_id,
+            ..
+        } => (*guild_id, Some(*channel_id), Some(Permission::ReadHistory)),
         ChatRequest::History {
             guild_id,
             channel_id,
@@ -253,7 +278,11 @@ pub(super) fn dispatch(
         |c, actor, state| {
             if matches!(
                 command,
-                ChatRequest::Send { .. } | ChatRequest::Edit { .. } | ChatRequest::Delete { .. }
+                ChatRequest::Send { .. }
+                    | ChatRequest::Edit { .. }
+                    | ChatRequest::Delete { .. }
+                    | ChatRequest::React { .. }
+                    | ChatRequest::Pin { .. }
             ) {
                 execute(
                     c,
@@ -264,7 +293,7 @@ pub(super) fn dispatch(
                     ],
                 )?;
             }
-            match command {
+            let mut response = match command {
                 ChatRequest::MentionSuggestions { query: search, .. } => {
                     if search.chars().count() > MAX_MENTION_QUERY_CHARS
                         || search.chars().any(char::is_control)
@@ -289,16 +318,25 @@ pub(super) fn dispatch(
                     before,
                     limit,
                     ..
-                } => Ok(ChatResponse::History {
-                    history: history(c, guild, channel_id, before, limit)?,
+                } => Ok::<_, Failure>(ChatResponse::History {
+                    history: history(c, guild, channel_id, before, limit, actor)?,
                 }),
                 ChatRequest::Send {
                     channel_id,
                     client_id,
                     content,
                     attachment_ids,
+                    reply_to,
                     ..
                 } => {
+                    if reply_to.is_some() {
+                        check_channel(
+                            state,
+                            actor,
+                            Some(channel_id),
+                            Some(Permission::ReadHistory),
+                        )?;
+                    }
                     text(&content, !attachment_ids.is_empty())?;
                     super::attachments::validate_ids(&attachment_ids)?;
                     let existing: Vec<serde_json::Value> = query(
@@ -307,7 +345,15 @@ pub(super) fn dispatch(
                         &[&actor.to_string(), &client_id.to_string()],
                     )?;
                     // Preserve legacy text-only hashes across deployment upgrades.
-                    let hash = if attachment_ids.is_empty() {
+                    let hash = if reply_to.is_some() {
+                        format!(
+                            "reply:{}",
+                            auth::digest(
+                                &serde_json::to_string(&(&content, &attachment_ids, reply_to))
+                                    .map_err(|_| Failure::Unavailable)?
+                            )
+                        )
+                    } else if attachment_ids.is_empty() {
                         auth::digest(&content)
                     } else {
                         format!(
@@ -327,9 +373,25 @@ pub(super) fn dispatch(
                         }
                         let id = serde_json::from_value(old["id"].clone())
                             .map_err(|_| Failure::Unavailable)?;
+                        let existing = message(c, id)?;
                         return Ok(ChatResponse::Message {
-                            message: message(c, id)?,
+                            message: Box::new(super::rich::one(c, actor, existing)?),
                         });
+                    }
+                    if let Some(target) = reply_to {
+                        check_channel(
+                            state,
+                            actor,
+                            Some(channel_id),
+                            Some(Permission::ReadHistory),
+                        )?;
+                        let target = message(c, target)?;
+                        if target.guild_id != guild
+                            || target.channel_id != channel_id
+                            || target.deleted
+                        {
+                            return Err(Failure::Forbidden);
+                        }
                     }
                     let id = MessageId::from_uuid(Uuid::new_v4());
                     // Channel writes share the channel lock. Make timestamp ordering monotonic even if the clock steps back.
@@ -353,12 +415,19 @@ pub(super) fn dispatch(
                         // channel lock. The unique author/client key chooses one winner.
                         return Err(Failure::Conflict);
                     }
+                    if let Some(target) = reply_to {
+                        execute(
+                            c,
+                            "UPDATE messages SET reply_to=$2::uuid WHERE id=$1::uuid",
+                            &[&id.to_string(), &target.to_string()],
+                        )?;
+                    }
                     super::attachments::attach(c, actor, guild, channel_id, id, &attachment_ids)?;
                     event(c, guild, channel_id, id)?;
                     notification_recipients = crate::notifications::guild_recipients(c, guild)?;
                     change = Some(super::notifications::Change::Message(guild, channel_id));
                     Ok(ChatResponse::Message {
-                        message: message(c, id)?,
+                        message: Box::new(message(c, id)?),
                     })
                 }
                 ChatRequest::Edit {
@@ -378,7 +447,9 @@ pub(super) fn dispatch(
                     }
                     text(&content, !old.attachments.is_empty())?;
                     if old.content == content {
-                        return Ok(ChatResponse::Message { message: old });
+                        return Ok(ChatResponse::Message {
+                            message: Box::new(response_message(c, actor, state, old)?),
+                        });
                     }
                     let mentions = mentions(c, guild, &content)?;
                     execute(
@@ -389,7 +460,7 @@ pub(super) fn dispatch(
                     event(c, guild, channel_id, message_id)?;
                     change = Some(super::notifications::Change::Message(guild, channel_id));
                     Ok(ChatResponse::Message {
-                        message: message(c, message_id)?,
+                        message: Box::new(message(c, message_id)?),
                     })
                 }
                 ChatRequest::Delete {
@@ -409,7 +480,7 @@ pub(super) fn dispatch(
                     }
                     execute(
                         c,
-                        "UPDATE messages SET deleted=TRUE,content='',mentions='[]',attachments='[]',edited_at=clock_timestamp(),revision=revision+1 WHERE id=$1::uuid",
+                        "UPDATE messages SET deleted=TRUE,pinned=FALSE,reply_to=NULL,content='',mentions='[]',attachments='[]',edited_at=clock_timestamp(),revision=revision+1 WHERE id=$1::uuid",
                         &[&message_id.to_string()],
                     )?;
                     execute(
@@ -420,9 +491,65 @@ pub(super) fn dispatch(
                     event(c, guild, channel_id, message_id)?;
                     change = Some(super::notifications::Change::Message(guild, channel_id));
                     Ok(ChatResponse::Message {
-                        message: message(c, message_id)?,
+                        message: Box::new(message(c, message_id)?),
                     })
                 }
+                ChatRequest::React {
+                    channel_id,
+                    message_id,
+                    emoji,
+                    present,
+                    ..
+                } => {
+                    check_channel(
+                        state,
+                        actor,
+                        Some(channel_id),
+                        Some(Permission::SendMessages),
+                    )?;
+                    if super::rich::react(c, actor, guild, channel_id, message_id, &emoji, present)?
+                    {
+                        event(c, guild, channel_id, message_id)?;
+                        change = Some(super::notifications::Change::Message(guild, channel_id));
+                    }
+                    Ok(ChatResponse::Message {
+                        message: Box::new(message(c, message_id)?),
+                    })
+                }
+                ChatRequest::Pin {
+                    channel_id,
+                    message_id,
+                    revision,
+                    pinned,
+                    ..
+                } => {
+                    check_channel(
+                        state,
+                        actor,
+                        Some(channel_id),
+                        Some(Permission::ManageMessages),
+                    )?;
+                    let old = message(c, message_id)?;
+                    scope(&old, guild, channel_id, revision)?;
+                    if old.pinned != pinned {
+                        super::rich::pin(c, guild, channel_id, message_id, pinned)?;
+                        event(c, guild, channel_id, message_id)?;
+                        change = Some(super::notifications::Change::Message(guild, channel_id));
+                    }
+                    Ok(ChatResponse::Message {
+                        message: Box::new(message(c, message_id)?),
+                    })
+                }
+                ChatRequest::Pins { channel_id, .. } => Ok(ChatResponse::Pins {
+                    messages: super::rich::pins(c, actor, guild, channel_id)?,
+                }),
+                ChatRequest::Context {
+                    channel_id,
+                    message_id,
+                    ..
+                } => Ok(ChatResponse::History {
+                    history: super::rich::context(c, actor, guild, channel_id, message_id)?,
+                }),
                 ChatRequest::Read {
                     channel_id,
                     through,
@@ -449,7 +576,11 @@ pub(super) fn dispatch(
                 ChatRequest::Unread { .. } => Ok(ChatResponse::Unread {
                     channels: unread(c, guild, actor, state)?,
                 }),
+            }?;
+            if let ChatResponse::Message { message } = &mut response {
+                **message = response_message(c, actor, state, (**message).clone())?;
             }
+            Ok(response)
         },
     )?;
     if is_send
@@ -471,10 +602,25 @@ pub(super) fn dispatch(
         event.recipients = Some(notification_recipients);
         crate::notifications::publish(event);
         if session.bot_guild.is_none() {
-            crate::bots::publish(message.clone());
+            crate::bots::publish((**message).clone());
         }
     }
     Ok((response, change))
+}
+
+fn response_message(
+    c: &mut PgConnection,
+    actor: AccountId,
+    state: &GuildState,
+    message: ChatMessage,
+) -> Result<ChatMessage, Failure> {
+    let mut message = super::rich::one(c, actor, message)?;
+    if !effective(state, actor, Some(message.channel_id)).contains(&Permission::ReadHistory)
+        && let Some(reply) = &mut message.reply
+    {
+        reply.preview = None;
+    }
+    Ok(message)
 }
 
 fn scope(
@@ -545,7 +691,7 @@ fn poll_checked(
 ) -> Result<Poll, Failure> {
     let guild = state.guild.id;
     check_channel(state, actor, Some(channel), Some(Permission::ReadHistory))?;
-    let events: Vec<(i64, ChatMessage)> = if messages {
+    let mut events: Vec<(i64, ChatMessage)> = if messages {
         query(
             c,
             "SELECT jsonb_build_array(e.sequence,to_jsonb(m)||jsonb_build_object('username',COALESCE(a.username,'Deleted account'),'display_name',COALESCE(NULLIF(a.display_name,''),a.username,'Deleted account'))) AS data FROM message_events e JOIN messages m ON m.id=e.message_id LEFT JOIN accounts a ON a.id=m.author_id WHERE e.guild_id=$1::uuid AND e.channel_id=$2::uuid AND e.sequence>$3::bigint ORDER BY e.sequence LIMIT 100",
@@ -558,6 +704,11 @@ fn poll_checked(
     } else {
         Vec::new()
     };
+    let mut hydrated: Vec<_> = events.iter().map(|(_, m)| m.clone()).collect();
+    super::rich::hydrate(c, actor, &mut hydrated)?;
+    for ((_, message), rich) in events.iter_mut().zip(hydrated) {
+        *message = rich;
+    }
     let members = if presence {
         members(c, guild, channel)?
     } else {

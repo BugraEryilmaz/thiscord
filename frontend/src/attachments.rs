@@ -36,6 +36,7 @@ pub fn validate_file(size: u64, count: usize) -> Result<(), &'static str> {
 #[derive(Clone, PartialEq)]
 pub struct PendingSend {
     pub id: ClientMessageId,
+    pub reply_to: Option<thiscord_shared::MessageId>,
     pub content: String,
     pub attachment_ids: Vec<AttachmentId>,
     pub filenames: Vec<String>,
@@ -47,6 +48,7 @@ impl PendingSend {
             guild_id,
             channel_id,
             client_id: self.id,
+            reply_to: self.reply_to,
             content: self.content.clone(),
             attachment_ids: self.attachment_ids.clone(),
         }
@@ -150,6 +152,7 @@ mod tests {
         let id = "00000000-0000-0000-0000-000000000001";
         let mut pending = PendingSend {
             id: id.parse().unwrap(),
+            reply_to: Some(id.parse().unwrap()),
             content: String::new(),
             attachment_ids: vec![id.parse().unwrap()],
             filenames: vec!["photo.png".into()],

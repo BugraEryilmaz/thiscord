@@ -460,3 +460,10 @@ References: [Leptos CSR](https://book.leptos.dev/getting_started/index.html),
 [Tauri + Leptos](https://v2.tauri.app/start/frontend/leptos/),
 [Axum](https://docs.rs/axum/latest/axum/),
 [Diesel](https://diesel.rs/guides/getting-started).
+
+
+Guild chat supports reply previews and original-message navigation, ten emoji
+reactions, moderator message pins, and safe Markdown with code blocks. Search
+messages in guild channels or private history with channel/person/date filters and
+bounded context views. See [chat](docs/chat.md) and [search](docs/search.md), including
+the private safety branch integration checks still required for this P1 batch.

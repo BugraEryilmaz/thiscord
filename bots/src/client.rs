@@ -107,11 +107,12 @@ impl Client {
                     client_id,
                     content: content.into(),
                     attachment_ids: vec![],
+                    reply_to: None,
                 },
             )
             .await?
         {
-            ChatResponse::Message { message } => Ok(message),
+            ChatResponse::Message { message } => Ok(*message),
             _ => Err(Error::message("Unexpected send response")),
         }
     }
