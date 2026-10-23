@@ -5,6 +5,7 @@ mod native_audio;
 mod native_bots;
 mod native_camera;
 mod native_download;
+mod native_invites;
 mod native_links;
 mod native_notifications;
 mod native_overlay;
@@ -47,6 +48,8 @@ fn main() {
         .plugin(tauri_plugin_single_instance::init(|app, _args, _cwd| {
             native_window::restore(app);
         }))
+        .plugin(tauri_plugin_deep_link::init())
+        .manage(native_invites::InviteState::default())
         .plugin(tauri_plugin_updater::Builder::new().build())
         .manage(native_update::UpdateState::default())
         .manage(native_notifications::NotificationState::default())
@@ -55,6 +58,9 @@ fn main() {
         .setup(|app| {
             use tauri::Manager;
             native_download::create_main_window(app)?;
+            if native_invites::start(app.handle()).is_err() {
+                eprintln!("Desktop invite links are unavailable");
+            }
             #[cfg(target_os = "macos")]
             if let Some(window) = app.get_webview_window("main") {
                 app.state::<native_camera::CameraState>().attach(window);
@@ -138,6 +144,7 @@ fn main() {
             native_performance::performance_report,
             native_window::window_close_to_tray,
             native_window::window_set_close_to_tray,
+            native_invites::take_pending_invite,
             native_account::load_session,
             native_account::save_session,
             native_bots::save_bot_credential,

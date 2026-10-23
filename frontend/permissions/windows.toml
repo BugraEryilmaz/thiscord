@@ -11,6 +11,7 @@ commands.allow = [
   "notification_sound",
   "window_close_to_tray",
   "window_set_close_to_tray",
+  "take_pending_invite",
   "load_session",
   "save_session",
   "save_bot_credential",

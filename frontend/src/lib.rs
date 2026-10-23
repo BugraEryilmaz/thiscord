@@ -13,6 +13,7 @@ pub mod bots;
 pub mod chat_history;
 pub mod direct_history;
 pub mod downloads;
+pub mod invites;
 pub mod localization;
 pub mod mentions;
 pub mod message_links;

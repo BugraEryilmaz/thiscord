@@ -9,6 +9,7 @@ use wasm_bindgen::JsCast;
 enum Action {
     Bots(super::voice_bots::Target),
     Copy(String),
+    Invite(GuildId),
     Page(GuildId, &'static str, Option<AccountId>),
     ChannelPermissions(GuildId, ChannelId),
     Read(GuildId, ChannelId),
@@ -436,10 +437,12 @@ async fn items(ui: Ui, target: Target) -> Result<(String, Vec<Item>), String> {
         }
         return Ok((channel.name, items));
     }
-    items.push(Item::new(
-        crate::i18n::t("Copy server ID"),
-        Action::Copy(guild.id.to_string()),
-    ));
+    if home.can_manage_invites {
+        items.push(Item::new(
+            crate::i18n::t("Copy invite link"),
+            Action::Invite(guild.id),
+        ));
+    }
     items.push(Item::new(
         crate::i18n::t("Open server"),
         Action::Page(guild.id, "servers", None),
@@ -510,6 +513,7 @@ fn execute_reason(ui: Ui, action: Action, reason: String) {
         Action::Preference(channel, pin) => save_preference(ui, channel, pin),
         Action::Join(guild, channel) => super::audio::join(ui, guild, channel),
         Action::Disconnect => super::audio::leave(ui),
+        Action::Invite(guild) => super::invites::copy(ui, guild),
         Action::Copy(value) => leptos::task::spawn_local(async move {
             let result = wasm_bindgen_futures::JsFuture::from(
                 window().navigator().clipboard().write_text(&value),

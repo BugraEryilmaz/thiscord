@@ -123,7 +123,9 @@ and single-process chat/media enforcement.
 - [x] Create/edit/delete guild HTTP commands, list memberships, join by ID/password and leave.
 - [x] Joined-server rail with circular initials avatars, names on hover, create/join dialogs.
 - [ ] Custom server images and password-change settings UI.
-- [x] Invite links with expiry/use limits, revocation and join validation.
+- [x] Invite links with optional expiry/use limits, revocation and join validation.
+- [x] Browser invite landing with desktop handoff, installer links and unlimited invite copying.
+- [ ] Validate installed invite activation on Windows, macOS and Linux (cold start, running/tray and signed out).
 - [x] Ownership transfer, kick/ban/unban and per-server moderation controls.
 - [x] Timeouts with expiry/removal, chat/voice enforcement and join-bypass protection.
 - [x] Guild moderation audit events and reasons (1000-row retention, authorized keyset history).

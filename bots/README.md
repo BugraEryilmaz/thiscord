@@ -201,6 +201,25 @@ HTTPS YouTube video links are accepted, with no cookies or account login. Live
 streams and arbitrary remote URLs are unsupported. Use media you have permission
 to share. The example does not launch a browser or capture system audio.
 
+If `/status` reports that `yt-dlp` or `ffmpeg` could not start, check the tools
+**on the machine running `bot_music`**, using the same account and environment:
+
+```sh
+yt-dlp --ignore-config --version
+ffmpeg -version
+```
+
+Both must be executable through the bot process's `PATH`. Installing them in WSL
+does not make them available to a native Windows bot, or vice versa. After adding
+their executable directories to `PATH`, restart the terminal/service that launches
+the bot and then restart the bot. A permission-denied error means the bot's account
+cannot execute the tool; other launch errors can indicate an incompatible binary
+or missing runtime dependency. These launch errors happen before downloading the
+video. `Playback requested` only acknowledges the queued request; `/status` reports
+whether playback actually started. The bot deliberately disables external
+JavaScript challenge helpers, so videos requiring those helpers remain unsupported
+even with both tools installed.
+
 Audio is decoded to 48 kHz stereo PCM through bounded pipes, encoded as 20 ms
 Opus frames, and paced into the existing SFU. No microphone, echo cancellation,
 noise suppression, audio device or receive pipeline is created. The send-only

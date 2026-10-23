@@ -89,11 +89,15 @@ Participant voice settings adjust local playback volume (0% mutes that person).
 Each server has a **Moderation** panel for voice disconnects, server mute/deafen,
 moves, timeouts, kicks, bans and unbans, with reasons, audit history and server-side
 permission and hierarchy checks.
-Server settings include **Invite links** (expiring/use-limited codes with revocation
-and paste-to-join) and **Channel organization** (rename/order, categories and channel
-placement without changing permissions). Invite browser landing pages explain app
-acceptance without requiring a custom URL handler. See [guild permissions and
-workflows](docs/permissions.md). Physical three-platform acceptance remains manual.
+The server header and context menu offer **Copy invite link** to members with
+invite permission: unlimited uses, no expiry, and revocation in **Server settings >
+Invite links**. Settings also offer bounded invites. Invitation pages open or focus
+the installed desktop app, preserve the invitation through sign-in, and offer the
+same installers as the welcome page. A browser may require an explicit **Open
+Thiscord** click. **Channel organization** supports rename/order, categories and
+channel placement without changing permissions. See [guild permissions and
+workflows](docs/permissions.md). Installed Windows/macOS/Linux link activation
+remains a manual release check.
 Verified Free accounts can own one server with two text and two voice channels.
 In **Settings > Instance access**, the instance owner can create named tiers,
 assign accounts and configure owned-server, channel, member and role limits.

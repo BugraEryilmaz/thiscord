@@ -1222,5 +1222,19 @@
   "Bots inherit Everyone permissions. Use member roles and channel permissions to grant text access or Join voice and Speak. Managers must outrank a bot and cannot issue permissions they do not have.": "Botlar Herkes izinlerini devralır. Yazılı erişim veya Sesliye katıl ve Konuş izinleri vermek için üye rollerini ve kanal izinlerini kullanın. Yöneticiler bottan daha üst sırada olmalı ve sahip olmadıkları izinleri veremez.",
   "Run your bot": "Botunuzu çalıştırın",
   "Set THISCORD_BOT_SERVER and THISCORD_BOT_NAME on the bot host. Choose channels by name with THISCORD_BOT_TEXT_CHANNEL and THISCORD_BOT_VOICE_CHANNEL. The examples default to general and Music.": "Botun çalıştığı bilgisayarda THISCORD_BOT_SERVER ve THISCORD_BOT_NAME değişkenlerini ayarlayın. THISCORD_BOT_TEXT_CHANNEL ve THISCORD_BOT_VOICE_CHANNEL ile kanalları adlarına göre seçin. Örneklerin varsayılanları general ve Music kanallarıdır.",
-  "Bot setup and examples": "Bot kurulumu ve örnekleri"
+  "Bot setup and examples": "Bot kurulumu ve örnekleri",
+  "Copy invite link": "Davet bağlantısını kopyala",
+  "Invite link": "Davet bağlantısı",
+  "Never": "Asla",
+  "Unlimited": "Sınırsız",
+  "Never expires": "Süresi dolmaz",
+  "Maximum uses (0 = unlimited, 1–500)": "Kullanım sınırı (0 = sınırsız, 1–500)",
+  "Created {} · {}/{} uses · {}{}": "Oluşturulma {} · {}/{} kullanım · {}{}",
+  "{message}. Check the invite or server ID and verify your email.": "{message}. Daveti veya sunucu kimliğini kontrol edin ve e-postanızı doğrulayın.",
+  "Use a complete invite link or code from this Thiscord installation.": "Bu Thiscord kurulumuna ait tam bir davet bağlantısı veya kod kullanın.",
+  "Paste an invite link to join. No server password is needed for an invite.": "Katılmak için bir davet bağlantısı yapıştırın. Davet ile sunucu şifresi gerekmez.",
+  "Invite link copied. Revoke it in Server Settings → Invite links.": "Davet bağlantısı kopyalandı. Sunucu Ayarları → Davet bağlantıları bölümünden iptal edebilirsiniz.",
+  "Invitation ready. Sign in and verify your email to continue.": "Davet hazır. Devam etmek için giriş yapın ve e-postanızı doğrulayın.",
+  "Unlimited uses. Never expires. Revoke in Server Settings → Invite links.": "Sınırsız kullanım. Süresi dolmaz. Sunucu Ayarları → Davet bağlantıları bölümünden iptal edin.",
+  "Use Copy invite link beside the server name to invite people. Manage and revoke links in Invite links.": "Davet etmek için sunucu adının yanındaki Davet bağlantısını kopyala düğmesini kullanın. Davet bağlantıları bölümünden bağlantıları yönetin ve iptal edin."
 }

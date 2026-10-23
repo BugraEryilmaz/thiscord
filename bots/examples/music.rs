@@ -1,6 +1,7 @@
 //! A single-guild music bot. The operator fixes the voice destination and an
 //! optional local file; chat input can never select arbitrary local files.
 use std::sync::Arc;
+use thiscord_frontend::bots::voice::PlaybackEvent;
 use thiscord_frontend::bots::{Bot, Credentials, Error, Voice};
 use tokio::sync::Mutex;
 
@@ -73,7 +74,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 let player = status.clone();
                 async move {
                     let description = match player.lock().await.as_ref() {
-                        Some(voice) => format!("{:?}", *voice.status().borrow()),
+                        Some(voice) => match &*voice.status().borrow() {
+                            PlaybackEvent::Error(message) => format!("Playback failed: {message}"),
+                            event => format!("{event:?}"),
+                        },
                         None => "Not connected".into(),
                     };
                     ctx.reply(description).await?;

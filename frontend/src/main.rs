@@ -6,6 +6,8 @@ mod app;
 mod audio_control;
 #[cfg(all(target_arch = "wasm32", not(feature = "welcome")))]
 mod avatar;
+#[cfg(target_arch = "wasm32")]
+mod brand;
 #[cfg(all(target_arch = "wasm32", not(feature = "welcome")))]
 mod i18n;
 #[cfg(all(target_arch = "wasm32", not(feature = "welcome")))]

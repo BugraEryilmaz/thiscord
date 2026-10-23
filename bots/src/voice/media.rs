@@ -120,6 +120,40 @@ struct Processes {
     downloader: Option<Child>,
 }
 
+#[derive(Clone, Copy)]
+enum MediaTool {
+    YoutubeDownloader,
+    Decoder,
+}
+
+impl MediaTool {
+    fn spawn_error(self, error: std::io::Error) -> &'static str {
+        use std::io::ErrorKind;
+        // Never expose OS error text: it can contain private paths. Keep enough
+        // information for the operator to fix the bot host's installation.
+        match (self, error.kind()) {
+            (Self::YoutubeDownloader, ErrorKind::NotFound) => {
+                "yt-dlp was not found. Install it on the bot host, add it to PATH, and restart the bot."
+            }
+            (Self::Decoder, ErrorKind::NotFound) => {
+                "ffmpeg was not found. Install it on the bot host, add it to PATH, and restart the bot."
+            }
+            (Self::YoutubeDownloader, ErrorKind::PermissionDenied) => {
+                "Permission denied starting yt-dlp. Check executable permissions on the bot host."
+            }
+            (Self::Decoder, ErrorKind::PermissionDenied) => {
+                "Permission denied starting ffmpeg. Check executable permissions on the bot host."
+            }
+            (Self::YoutubeDownloader, _) => {
+                "Could not start yt-dlp. Check that its installation runs on the bot host."
+            }
+            (Self::Decoder, _) => {
+                "Could not start ffmpeg. Check that its installation runs on the bot host."
+            }
+        }
+    }
+}
+
 fn command(program: &str) -> Command {
     let mut command = Command::new(program);
     command.env_clear();
@@ -208,7 +242,11 @@ impl Processes {
                     "--",
                     &url,
                 ]);
-                self.downloader = Some(downloader.spawn().map_err(|_| "Could not start yt-dlp")?);
+                self.downloader = Some(
+                    downloader
+                        .spawn()
+                        .map_err(|error| MediaTool::YoutubeDownloader.spawn_error(error))?,
+                );
                 ffmpeg
                     .stdin(Stdio::piped())
                     .args(["-protocol_whitelist", "pipe", "-i", "pipe:0"]);
@@ -232,7 +270,11 @@ impl Processes {
             "pcm_s16le",
             "pipe:1",
         ]);
-        self.decoder = Some(ffmpeg.spawn().map_err(|_| "Could not start ffmpeg")?);
+        self.decoder = Some(
+            ffmpeg
+                .spawn()
+                .map_err(|error| MediaTool::Decoder.spawn_error(error))?,
+        );
         let output = self
             .decoder
             .as_mut()
@@ -369,6 +411,54 @@ pub(super) async fn encode(
 #[cfg(test)]
 pub(super) mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn missing_executables_report_how_to_fix_the_bot_host() {
+        // Use an absolute missing path so this is independent of installed tools
+        // and PATH, and exercise the real subprocess error on each platform.
+        let missing = std::env::temp_dir()
+            .join(format!("thiscord-missing-tool-{}", uuid::Uuid::new_v4()))
+            .join("missing-executable");
+        for (tool, name) in [
+            (MediaTool::YoutubeDownloader, "yt-dlp"),
+            (MediaTool::Decoder, "ffmpeg"),
+        ] {
+            let error = Command::new(&missing).spawn().unwrap_err();
+            let message = tool.spawn_error(error);
+            assert_eq!(
+                message,
+                format!(
+                    "{name} was not found. Install it on the bot host, add it to PATH, and restart the bot."
+                )
+            );
+        }
+    }
+
+    #[test]
+    fn launch_errors_distinguish_permissions_without_exposing_os_details() {
+        for (tool, name) in [
+            (MediaTool::YoutubeDownloader, "yt-dlp"),
+            (MediaTool::Decoder, "ffmpeg"),
+        ] {
+            let error = std::io::Error::new(
+                std::io::ErrorKind::PermissionDenied,
+                "private installation path and environment details",
+            );
+            assert_eq!(
+                tool.spawn_error(error),
+                format!(
+                    "Permission denied starting {name}. Check executable permissions on the bot host."
+                )
+            );
+            let error = std::io::Error::other("private OS diagnostic");
+            assert_eq!(
+                tool.spawn_error(error),
+                format!(
+                    "Could not start {name}. Check that its installation runs on the bot host."
+                )
+            );
+        }
+    }
 
     fn stdin_decoder() -> Child {
         command("ffmpeg")
