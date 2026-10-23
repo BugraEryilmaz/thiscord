@@ -315,9 +315,16 @@ The fixed shared palette bounds reaction groups to ten per message.
 
 Message pins are shared channel data, distinct from personal sidebar channel pins.
 Pin changes require ReadHistory, ManageMessages and the current message revision.
-A channel holds at most 50 pins. The list omits deleted messages and navigates to
-the original. Pin/reaction changes increment message revision and publish existing
-message events after commit; they do not change message timestamps or unread positions.
+A channel holds at most 50 pins. Pins load automatically with the channel and stay
+fixed above the scrolling history, showing authors, timestamps, Markdown bodies
+and attachment filenames. Multiple pins share a height-limited area so history
+remains usable. Jump controls navigate to the original without dismissing pins;
+moderators can unpin directly there. Empty channels show no pinned area. Search
+temporarily hides the area so its history space contains only matching messages.
+Edits, unpins and deletions update the fixed area through normal socket events;
+reconnects reload it and access resets discard it. Pin/reaction changes increment
+message revision and publish existing message events after commit; they do not
+change message timestamps or unread positions.
 Deleting a message clears its pin, reply and visible reactions. Migration rollback
 removes all reply references, reactions and message pins, retaining message text.
 

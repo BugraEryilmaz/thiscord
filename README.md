@@ -468,6 +468,6 @@ References: [Leptos CSR](https://book.leptos.dev/getting_started/index.html),
 
 Guild chat supports reply previews and original-message navigation, ten emoji
 reactions, moderator message pins, and safe Markdown with code blocks. Search
-messages in guild channels or private history with channel/person/date filters and
-bounded context views. See [chat](docs/chat.md) and [search](docs/search.md), including
+the current channel or DM inline with Ctrl+F (Cmd+F on macOS), then click a match
+to jump to its original in history. See [chat](docs/chat.md) and [search](docs/search.md), including
 the private safety branch integration checks still required for this P1 batch.

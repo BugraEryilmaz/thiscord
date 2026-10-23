@@ -77,7 +77,15 @@ impl Chat {
         });
     }
 
-    fn load_pins(self) {
+    pub(super) fn load_pins(self) {
+        if !self.ready.get_untracked()
+            || !self
+                .permissions
+                .with_untracked(|p| p.contains(&Permission::ReadHistory))
+            || self.rich.with_untracked(RichChat::pins_loading)
+        {
+            return;
+        }
         let ticket = self
             .rich
             .try_update(RichChat::begin_pins)
@@ -151,15 +159,51 @@ pub(super) fn Actions(chat: Chat, message: RwSignal<ChatMessage>) -> impl IntoVi
 }
 #[component]
 pub(super) fn Pins(chat: Chat) -> impl IntoView {
-    Effect::new(move |_| {
-        chat.access_generation.track();
-        chat.rich.update(RichChat::close_pins);
+    view! {
+        <Show when=move || !chat.searching.get() && chat.ready.get()
+            && chat.permissions.with(|p|p.contains(&Permission::ReadHistory))
+            && chat.rich.with(|r|!r.pins_open() || !r.pins().is_empty())>
+            <section class="max-h-[30vh] shrink-0 overflow-y-auto overscroll-contain border-b border-white/10 bg-surface"
+                aria-label=move ||crate::i18n::t("Pinned messages")>
+                <Show when=move ||chat.rich.with(RichChat::pins_loading)>
+                    <p class="px-4 py-2 text-xs text-white/50" role="status">{move ||crate::i18n::t("Loading pinned messages…")}</p>
+                </Show>
+                <Show when=move ||chat.rich.with(|r|!r.pins_open() && !r.pins_loading())>
+                    <button class="m-3 rounded px-3 py-2 text-sm text-sky-300 hover:bg-white/5" on:click=move |_|chat.load_pins()>{move ||crate::i18n::t("Retry pinned messages")}</button>
+                </Show>
+                <For each=move ||chat.rich.with(|r|r.pins().iter().map(|m|m.id).collect::<Vec<_>>()) key=|id|*id
+                    children=move |id|view!{<PinnedMessage chat id/>}/>
+            </section>
+        </Show>
+    }.into_any()
+}
+
+#[component]
+fn PinnedMessage(chat: Chat, id: MessageId) -> impl IntoView {
+    let message = Signal::derive(move || {
+        chat.rich
+            .with(|r| r.pins().iter().find(|m| m.id == id).cloned())
     });
-    view! {<button class="mr-4 text-sm text-sky-300 underline" disabled=move ||chat.rich.with(RichChat::pins_loading) on:click=move |_|{
-        if chat.rich.with_untracked(RichChat::pins_open){chat.rich.update(RichChat::close_pins);return;}
-        chat.load_pins();
-    }>{move ||crate::i18n::t("Pinned messages")}</button>
-    <Show when=move ||chat.rich.with(RichChat::pins_open)><div class="max-h-64 overflow-auto border-y border-white/10 p-2"><p>{move ||crate::i18n::t("Pinned messages (up to 50)")}</p><Show when=move ||chat.rich.with(|r|r.pins().is_empty())><p>{move ||crate::i18n::t("No pinned messages")}</p></Show>
-        <For each=move ||chat.rich.with(|r|r.pins().to_vec()) key=|m|(m.id,m.revision) children=move |m|view!{<button class="block w-full truncate p-2 text-left text-sm hover:bg-white/10" on:click=move |_|{chat.rich.update(RichChat::close_pins);chat.jump(m.id);}>{format!("{}: {}",m.display_name(),m.content.chars().take(160).collect::<String>())}</button>}/>
-    </div></Show>}
+    view! {
+        <article class="border-b border-white/5 px-4 py-3 last:border-b-0" data-pinned-message=id.to_string()>
+            <div class="mb-1 flex items-center gap-2">
+                <span class="text-brand" aria-label=move ||crate::i18n::t("Pinned")><Icon kind=Glyph::Pin/></span>
+                <button class="flex min-w-0 flex-1 flex-wrap items-baseline gap-x-3 text-left hover:underline"
+                    title=move ||crate::i18n::t("Jump to pinned message") on:click=move |_|chat.jump(id)>
+                    <span class="truncate text-sm font-semibold">{move ||message.with(|m|m.as_ref().map(|m|m.display_name().to_owned()))}</span>
+                    <time class="text-xs text-white/45">{move ||message.with(|m|m.as_ref().map(|m|crate::i18n::datetime(m.created_at)))}</time>
+                </button>
+                <button class="icon-button shrink-0" aria-label=move ||crate::i18n::t("Jump to pinned message") title=move ||crate::i18n::t("Jump to pinned message") on:click=move |_|chat.jump(id)><Icon kind=Glyph::Join/></button>
+                <Show when=move ||chat.permissions.with(|p|p.contains(&Permission::ManageMessages))>
+                    <button class="icon-button shrink-0" aria-label=move ||crate::i18n::t("Unpin") title=move ||crate::i18n::t("Unpin") on:click=move |_|{
+                        if let Some(message)=message.get_untracked(){chat.action(ChatRequest::Pin{guild_id:chat.guild,channel_id:chat.channel,message_id:id,revision:message.revision,pinned:false});}
+                    }><Icon kind=Glyph::Close/></button>
+                </Show>
+            </div>
+            <div class="pl-7 text-sm text-content">{move ||message.with(|m|super::super::message_content::render(m.as_ref().map(|m|m.content.as_str()).unwrap_or_default(),chat.ui))}</div>
+            <For each=move ||message.with(|m|m.as_ref().map(|m|m.attachments.clone()).unwrap_or_default()) key=|a|a.id children=move |attachment|view!{
+                <button class="ml-7 mt-2 block max-w-full truncate text-sm text-sky-300 hover:underline" title=move ||crate::i18n::t("Jump to pinned message") on:click=move |_|chat.jump(id)>{attachment.filename}</button>
+            }/>
+        </article>
+    }.into_any()
 }

@@ -56,6 +56,7 @@ pub(super) struct Chat {
     reply_to: RwSignal<Option<MessageId>>,
     rich: RwSignal<RichChat>,
     highlight: RwSignal<Option<MessageId>>,
+    searching: RwSignal<bool>,
 }
 impl Chat {
     fn alive(self) -> bool {
@@ -98,7 +99,7 @@ impl Chat {
         result
     }
     fn scroll(self) {
-        if self.layout_pending.get_untracked() {
+        if self.searching.get_untracked() || self.layout_pending.get_untracked() {
             return;
         }
         self.layout_pending.set(true);
@@ -121,6 +122,9 @@ impl Chat {
                 return;
             }
             self.layout_pending.set(false);
+            if self.searching.get_untracked() {
+                return;
+            }
             if let Some(node) = self.list.get_untracked() {
                 if self.bottom.get_untracked() {
                     node.set_scroll_top(node.scroll_height());
@@ -148,6 +152,9 @@ impl Chat {
         }
     }
     fn update_viewport(self) {
+        if self.searching.get_untracked() {
+            return;
+        }
         let _timing = crate::performance::start(2);
         if let Some(node) = self.list.get_untracked() {
             let viewport = (
@@ -301,7 +308,8 @@ impl Chat {
         });
     }
     fn read(self) {
-        if !self.ready.get_untracked()
+        if self.searching.get_untracked()
+            || !self.ready.get_untracked()
             || !self.bottom.get_untracked()
             || self.messages.with_untracked(|m| m.newer)
             || !document().has_focus().unwrap_or(false)
@@ -693,6 +701,7 @@ fn deliver(chat: Chat, event: ServerEvent) -> Result<(), String> {
             chat.messages.update_untracked(|m| m.older = history.older);
             chat.merge_batch(history.messages, Merge::Older);
             chat.ready.set(true);
+            chat.load_pins();
             chat.status.set("Connected".into());
             chat.scroll();
             chat.read();
@@ -828,6 +837,13 @@ pub(super) fn ChatPanel(
     name: Signal<String>,
 ) -> impl IntoView {
     ui.chat_epoch.update(|e| *e += 1);
+    let search = super::search::State::new(
+        ui,
+        thiscord_shared::search::Scope::Guild {
+            guild_id: guild,
+            channel_id: Some(channel),
+        },
+    );
     let epoch = ui.chat_epoch.get_untracked();
     let chat = Chat {
         ui,
@@ -857,7 +873,13 @@ pub(super) fn ChatPanel(
         reply_to: RwSignal::new(None),
         rich: RwSignal::new(RichChat::default()),
         highlight: RwSignal::new(None),
+        searching: search.active,
     };
+    Effect::new(move |_| {
+        if !search.active.get() {
+            chat.scroll();
+        }
+    });
     let draft = RwSignal::new(String::new());
     let mentions = mentions::Picker::new(chat, draft);
     let editing = RwSignal::new(None::<MessageId>);
@@ -1012,8 +1034,14 @@ pub(super) fn ChatPanel(
             on:dragover=move |ev: leptos::ev::DragEvent| { ev.prevent_default(); if let Some(data) = ev.data_transfer() { data.set_drop_effect(if editing.get_untracked().is_some() { "none" } else { "copy" }); } }
             on:drop=move |ev: leptos::ev::DragEvent| { ev.prevent_default(); if editing.get_untracked().is_none() && let Some(files) = ev.data_transfer().and_then(|d| d.files()) { queue.add(files); } }>
             <attachments::DownloadHost chat/>
-            <header class="shrink-0 border-b border-white/10 p-4"><h2 class="truncate text-lg font-semibold">{move ||format!("# {}",name.get())}</h2><rich::Pins chat/><super::search::Launcher ui scope=thiscord_shared::search::Scope::Guild { guild_id: guild, channel_id: None }/><p class="break-words text-xs text-white/60" role="status">{move||crate::i18n::message(chat.status.get())}</p></header>
-            <div node_ref=chat.list class="min-h-0 flex-1 overflow-x-hidden overflow-y-auto overscroll-contain p-4" style="overflow-anchor: none" on:scroll=move |_| {
+            <header class="shrink-0 border-b border-white/10 p-4"><div class="flex items-center gap-3"><h2 class="min-w-0 flex-1 truncate text-lg font-semibold">{move ||format!("# {}",name.get())}</h2><super::search::Launcher state=search/></div><p class="break-words text-xs text-white/60" role="status">{move||crate::i18n::message(chat.status.get())}</p></header>
+            <rich::Pins chat/>
+            <super::search::Bar state=search/>
+            <super::search::Results state=search on_jump=Callback::new(move |hit: thiscord_shared::search::Hit| {
+                ui.chat_jump.set(Some((channel, hit.id)));
+            })/>
+            <div node_ref=chat.list class="min-h-0 flex-1 overflow-x-hidden overflow-y-auto overscroll-contain p-4" style="overflow-anchor: none" style:display=move ||if search.active.get(){"none"}else{""} on:scroll=move |_| {
+                if search.active.get_untracked() { return; }
                 chat.update_viewport();
                 if !chat.layout_pending.get_untracked() && let Some(node) = chat.list.get_untracked() {
                     if chat.programmatic_top.get_untracked() == Some(node.scroll_top()) { return; }
@@ -1063,10 +1091,10 @@ pub(super) fn ChatPanel(
                     />
                 </ul>
             </div>
-            <Show when=move || !chat.bottom.get() || chat.messages.with(|m| m.newer)>
+            <Show when=move || !search.active.get() && (!chat.bottom.get() || chat.messages.with(|m| m.newer))>
                 <button class="bg-brand/20 py-2 text-sm" on:click=move |_| chat.latest()>{move || crate::i18n::t("Jump to latest / mark read")}</button>
             </Show>
-            <footer class="shrink-0 space-y-2 border-t border-white/10 p-3">
+            <footer class="shrink-0 space-y-2 border-t border-white/10 p-3" style:display=move ||if search.active.get(){"none"}else{""}>
                 <p class="text-xs text-white/50">{move||thiscord_frontend::localized_format!(crate::i18n::language(), "Online here: {}",chat.online.with(|members| members.iter().map(|m|m.display_name()).collect::<Vec<_>>().join(", ")))}</p>
                 <p class="min-h-4 text-xs text-white/60" aria-live="polite">{move||{let names=chat.online.with(|members| members.iter().filter(|m|m.typing&&ui.account.with(|a|a.as_ref().is_none_or(|a|a.id!=m.account_id))).map(|m|m.display_name().to_owned()).collect::<Vec<_>>());if names.is_empty(){String::new()}else{thiscord_frontend::localized_format!(crate::i18n::language(), "{} typing…",names.join(", "))}}}</p>
                 <Show when=move||editing.get().is_some()><button class="text-sm text-brand underline" on:click=move |_|{editing.set(None);draft.set(String::new());}>{move || crate::i18n::t("Cancel edit")}</button></Show>

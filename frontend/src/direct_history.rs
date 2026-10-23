@@ -1,5 +1,19 @@
 //! HTTP pages and live snapshots may complete in either order.
 use thiscord_shared::friends::DirectMessage;
+use thiscord_shared::{MessageId, Timestamp, pagination::PageCursor};
+
+/// History's upper bound is exclusive. Its immediate successor includes exactly
+/// this message, even when many messages share a PostgreSQL timestamp.
+pub fn before_including(at: Timestamp, id: MessageId) -> Option<PageCursor> {
+    let (at, next) = match id.as_uuid().as_u128().checked_add(1) {
+        Some(next) => (at, next),
+        None => (
+            Timestamp::from_timestamp_micros(at.timestamp_micros().checked_add(1)?)?,
+            0,
+        ),
+    };
+    Some(PageCursor::new(at, format!("{next:032x}").parse().ok()?))
+}
 
 pub fn preserve_revisions(incoming: &mut [DirectMessage], current: &[DirectMessage]) {
     for message in incoming {
@@ -16,6 +30,27 @@ pub fn preserve_revisions(incoming: &mut [DirectMessage], current: &[DirectMessa
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn jump_cursor_includes_target_without_later_timestamp_ties() {
+        let at = Timestamp::from_timestamp_micros(123456).unwrap();
+        for value in [
+            "00000000-0000-4000-8000-000000000001",
+            "00000000-0000-4000-8000-0000000000ff",
+            "ffffffff-ffff-ffff-ffff-ffffffffffff",
+        ] {
+            let id: MessageId = value.parse().unwrap();
+            let (next_at, next_id) = before_including(at, id).unwrap().position();
+            assert!((at, id.as_uuid()) < (next_at, next_id));
+            if let Some(next) = id.as_uuid().as_u128().checked_add(1) {
+                assert_eq!(next_at, at);
+                assert_eq!(next_id.as_u128(), next);
+            } else {
+                assert_eq!(next_at.timestamp_micros(), at.timestamp_micros() + 1);
+                assert_eq!(next_id.as_u128(), 0);
+            }
+        }
+    }
 
     #[test]
     fn late_history_cannot_resurrect_live_tombstone_or_undo_edit() {

@@ -1,19 +1,27 @@
 # Message search
 
-Use Search messages in a guild channel header, the friends sidebar, or a private
-conversation. Guild search spans the current guild's authorized text channels;
-choose a channel to narrow it. Private search spans accepted conversations, or
-only the open conversation. There is no cross-instance search.
+Press Ctrl+F (Cmd+F on macOS), or use the search button in the conversation header.
+Search stays inline in the current text channel or DM: enter words and press Enter
+to replace the history area with matching messages. No dialog opens. Escape or the
+close button restores history and the unsent draft. Switching conversations resets
+search. There is no cross-instance search.
 
 Search matches whole words with PostgreSQL's `simple` full-text dictionary (all
 query words must match), case-insensitively and without language stemming. Enter
-1–200 characters. Filters accept an exact @username and UTC dates: From is
-inclusive, Before is exclusive. Results are newest first with stable timestamp/UUID
+1–200 characters. Results are newest first with stable timestamp/UUID
 keyset pagination. One page contains at most 100 messages (default 50); the UI
-replaces pages rather than accumulating history. View original and context loads
-up to 20 earlier and 20 later messages, highlights the original and rechecks access.
-Open channel jumps to a guild original; private Open channel opens the conversation,
-while the context view provides the exact private original and nearby history.
+replaces pages rather than accumulating history. Next page reaches older matches.
+Click a result to leave search and highlight the original in normal history.
+Guild jumps use the existing authorized context window; DM jumps select the normal
+socket history page ending at the original, with a timestamp/UUID bound that
+includes it even when timestamps tie. Older messages and Jump to latest continue
+to work, and socket updates still reconcile edits/deletions. Search results do not
+mark hidden history as read. Pending searches are discarded on close, query changes,
+reconnect, session changes and access changes.
+
+The search API still supports broader authorized guild/private scopes, exact
+@username and UTC date filters (From inclusive, Before exclusive), and bounded
+context requests; the conversation UI always submits its own channel or DM scope.
 
 `POST /api/v1/search` uses `shared/src/search.rs`; the backend module and frontend
 component are independent of the message composer. Results never include tombstones,
