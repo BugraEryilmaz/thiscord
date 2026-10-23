@@ -46,14 +46,42 @@ fn pair(
     } else {
         "SELECT to_jsonb(f) AS data FROM friendships f WHERE id=$1::uuid AND state='accepted' AND $2::uuid IN (low_id,high_id) FOR SHARE"
     };
-    query(c, sql, &[&id.to_string(), &actor.to_string()])?
+    let pair: Pair = query(c, sql, &[&id.to_string(), &actor.to_string()])?
         .pop()
-        .ok_or(Failure::Forbidden)
+        .ok_or(Failure::Forbidden)?;
+    if crate::safety::store::blocked(c, actor, pair.other(actor)?)? {
+        return Err(Failure::Forbidden);
+    }
+    Ok(pair)
+}
+/// Caller must retain its transaction and session/account locks through the read.
+pub(crate) fn pair_access(
+    c: &mut PgConnection,
+    id: ConversationId,
+    actor: AccountId,
+    write: bool,
+) -> Result<(), Failure> {
+    pair(c, id, actor, write).map(|_| ())
+}
+pub(super) fn checked<T>(
+    pool: &DbPool,
+    token: &str,
+    id: ConversationId,
+    write: bool,
+    f: impl FnOnce(&mut PgConnection, AccountId) -> Result<T, Failure>,
+) -> Result<T, Failure> {
+    let mut c = connection(pool)?;
+    let session = auth::authenticate(&mut c, token)?;
+    c.transaction(|c| {
+        auth::read_session(c, token, &session)?;
+        pair_access(c, id, session.account_id, write)?;
+        f(c, session.account_id)
+    })
 }
 fn call(c: &mut PgConnection, id: CallId, actor: AccountId) -> Result<Call, Failure> {
     query(c, "SELECT to_jsonb(v) AS data FROM friend_calls v WHERE id=$1::uuid AND $2::uuid IN (caller,callee) AND state IN ('ringing','active') AND expires_at>now()", &[&id.to_string(), &actor.to_string()])?.pop().ok_or(Failure::Forbidden)
 }
-fn lock_people(c: &mut PgConnection, a: AccountId, b: AccountId) -> Result<(), Failure> {
+pub(crate) fn lock_people(c: &mut PgConnection, a: AccountId, b: AccountId) -> Result<(), Failure> {
     let ids: Vec<AccountId> = query(
         c,
         "SELECT to_jsonb(id) AS data FROM accounts WHERE id IN ($1::uuid,$2::uuid) ORDER BY id FOR NO KEY UPDATE",
@@ -105,6 +133,7 @@ pub(super) fn dispatch(pool: &DbPool, token: &str, request: Request) -> Result<R
                 Ok(Response::People {people})
             }
             Request::Add {account_id: other} => {
+                if crate::safety::store::blocked(c,actor,other)? {return Err(Failure::Forbidden);}
                 if query::<bool>(c,"SELECT to_jsonb(email_verified) AS data FROM accounts WHERE id=$1::uuid", &[&actor.to_string()])? != [true] {return Err(Failure::Forbidden);}
                 let existing: Option<Pair> = query(c,"SELECT to_jsonb(f) AS data FROM friendships f WHERE low_id=LEAST($1::uuid,$2::uuid) AND high_id=GREATEST($1::uuid,$2::uuid) FOR UPDATE", &[&actor.to_string(),&other.to_string()])?.pop();
                 if let Some(p)=&existing && p.state!="removed" { return Ok(Response::Done); }
@@ -114,6 +143,7 @@ pub(super) fn dispatch(pool: &DbPool, token: &str, request: Request) -> Result<R
                 Ok(Response::Done)
             }
             Request::Accept {account_id: other} => {
+                if crate::safety::store::blocked(c,actor,other)? {return Err(Failure::Forbidden);}
                 if execute(c,"UPDATE friendships SET state='accepted' WHERE low_id=LEAST($1::uuid,$2::uuid) AND high_id=GREATEST($1::uuid,$2::uuid) AND requester=$2::uuid AND state='pending'", &[&actor.to_string(),&other.to_string()])?!=1 {return Err(Failure::Conflict);}
                 Ok(Response::Done)
             }
@@ -138,15 +168,40 @@ pub(super) fn dispatch(pool: &DbPool, token: &str, request: Request) -> Result<R
                 execute(c,"UPDATE friendships SET low_read_at=CASE WHEN low_id=$2::uuid THEN GREATEST(low_read_at,$3::timestamptz) ELSE low_read_at END,high_read_at=CASE WHEN high_id=$2::uuid THEN GREATEST(high_read_at,$3::timestamptz) ELSE high_read_at END WHERE id=$1::uuid", &[&conversation_id.to_string(),&actor.to_string(),&at.to_rfc3339()])?;
                 Ok(Response::Done)
             }
-            Request::Send {conversation_id,client_id,content} => {
+            Request::Send {conversation_id,client_id,content,attachments} => {
                 let p = pair(c,conversation_id,actor,true)?;
                 let duplicate = !query::<bool>(c,"SELECT to_jsonb(TRUE) AS data FROM direct_messages WHERE author_id=$1::uuid AND client_id=$2::uuid", &[&actor.to_string(), &client_id.to_string()])?.is_empty();
-                let message = send(c,actor,conversation_id,client_id,content)?;
+                let message = send(c,actor,conversation_id,client_id,content,attachments)?;
                 if !duplicate {
                     let mut event = crate::notifications::Candidate::new(thiscord_shared::notifications::Target::Conversation { conversation_id }, thiscord_shared::notifications::Kind::DirectMessage, "New direct message".into(), Some(actor));
                     event.id = message.id.to_string(); event.recipients = Some(vec![p.other(actor)?]); notification = Some(event);
                 }
                 Ok(Response::Message { message })
+            }
+            Request::Edit {conversation_id,message_id,revision,content} => {
+                pair_access(c,conversation_id,actor,true)?;
+                let old=message(c,conversation_id,message_id)?;
+                if old.author_id!=actor {return Err(Failure::Forbidden);}
+                text(&content,!old.attachments.is_empty())?;
+                if old.deleted {return Err(Failure::Conflict);}
+                if old.content==content && (old.revision==revision || old.revision==revision.saturating_add(1)) {return Ok(Response::Message {message:old});}
+                if old.revision!=revision {return Err(Failure::Conflict);}
+                // Backfill the legacy send fingerprint before changing its content.
+                preserve_request(c,&old)?;
+                execute(c,"UPDATE direct_messages SET content=$2,revision=revision+1,edited_at=clock_timestamp() WHERE id=$1::uuid", &[&message_id.to_string(),&content])?;
+                Ok(Response::Message {message:message(c,conversation_id,message_id)?})
+            }
+            Request::Delete {conversation_id,message_id,revision} => {
+                pair_access(c,conversation_id,actor,true)?;
+                let old=message(c,conversation_id,message_id)?;
+                if old.author_id!=actor {return Err(Failure::Forbidden);}
+                if old.deleted && (old.revision==revision || old.revision==revision.saturating_add(1)) {return Ok(Response::Message {message:old});}
+                if old.deleted || old.revision!=revision {return Err(Failure::Conflict);}
+                preserve_request(c,&old)?;
+                execute(c,"UPDATE direct_messages SET content='',attachments='[]',deleted=true,revision=revision+1,edited_at=clock_timestamp() WHERE id=$1::uuid", &[&message_id.to_string()])?;
+                execute(c,"DELETE FROM direct_attachments WHERE message_id=$1::uuid", &[&message_id.to_string()])?;
+                call_guards.push(crate::chat::access::direct_message(message_id).pause());
+                Ok(Response::Message {message:message(c,conversation_id,message_id)?})
             }
             Request::StartCall {conversation_id} => {
                 let p=pair(c,conversation_id,actor,true)?;
@@ -193,48 +248,72 @@ pub(super) fn dispatch(pool: &DbPool, token: &str, request: Request) -> Result<R
     }
     result
 }
-fn send(
+/// Requires a current session and a locked, authorized pair in the same transaction.
+pub(crate) fn message(
     c: &mut PgConnection,
-    actor: AccountId,
     conversation: ConversationId,
-    client: ClientMessageId,
-    content: String,
+    id: MessageId,
 ) -> Result<DirectMessage, Failure> {
-    if content.trim().is_empty()
+    query(c,"SELECT to_jsonb(m) AS data FROM direct_messages m WHERE conversation_id=$1::uuid AND id=$2::uuid", &[&conversation.to_string(),&id.to_string()])?.pop().ok_or(Failure::Forbidden)
+}
+fn text(content: &str, attachments: bool) -> Result<(), Failure> {
+    if (!attachments && content.trim().is_empty())
         || content.chars().count() > 4000
         || content
             .chars()
             .any(|c| c.is_control() && c != '\n' && c != '\t')
     {
         return Err(Failure::Invalid(
-            "Message must contain 1–4000 characters without control codes",
+            "Message must contain 1–4000 characters or an attachment, without control codes",
         ));
     }
-    if let Some(old)=query::<DirectMessage>(c,"SELECT to_jsonb(m) AS data FROM direct_messages m WHERE author_id=$1::uuid AND client_id=$2::uuid", &[&actor.to_string(),&client.to_string()])?.pop() {
-        return if old.conversation_id==conversation && old.content==content {Ok(old)} else {Err(Failure::Conflict)};
-    }
-    let at: thiscord_shared::Timestamp=query(c,"UPDATE friendships SET last_message_at=GREATEST(clock_timestamp(),last_message_at+interval '1 microsecond') WHERE id=$1::uuid RETURNING to_jsonb(last_message_at) AS data", &[&conversation.to_string()])?.pop().ok_or(Failure::Forbidden)?;
-    let message = DirectMessage {
-        id: MessageId::from_uuid(Uuid::new_v4()),
-        conversation_id: conversation,
-        client_id: client,
-        author_id: actor,
-        content,
-        created_at: at,
-    };
+    Ok(())
+}
+fn fingerprint(content: &str, attachments: &[thiscord_shared::AttachmentId]) -> String {
+    auth::digest(&serde_json::to_string(&(content, attachments)).expect("serializable send"))
+}
+fn preserve_request(c: &mut PgConnection, m: &DirectMessage) -> Result<(), Failure> {
+    let ids: Vec<_> = m.attachments.iter().map(|a| a.id).collect();
     execute(
         c,
-        "INSERT INTO direct_messages(id,conversation_id,author_id,client_id,content,created_at) VALUES($1::uuid,$2::uuid,$3::uuid,$4::uuid,$5,$6::timestamptz)",
+        "UPDATE direct_messages SET request_hash=COALESCE(request_hash,$2) WHERE id=$1::uuid",
+        &[&m.id.to_string(), &fingerprint(&m.content, &ids)],
+    )?;
+    Ok(())
+}
+fn send(
+    c: &mut PgConnection,
+    actor: AccountId,
+    conversation: ConversationId,
+    client: ClientMessageId,
+    content: String,
+    attachments: Vec<thiscord_shared::AttachmentId>,
+) -> Result<DirectMessage, Failure> {
+    text(&content, !attachments.is_empty())?;
+    super::attachments::validate_ids(&attachments)?;
+    let hash = fingerprint(&content, &attachments);
+    if let Some(old)=query::<DirectMessage>(c,"SELECT to_jsonb(m) AS data FROM direct_messages m WHERE author_id=$1::uuid AND client_id=$2::uuid", &[&actor.to_string(),&client.to_string()])?.pop() {
+        let saved:Option<String>=query(c,"SELECT COALESCE(to_jsonb(request_hash),'null'::jsonb) AS data FROM direct_messages WHERE id=$1::uuid", &[&old.id.to_string()])?.pop().ok_or(Failure::Unavailable)?;
+        let saved=saved.unwrap_or_else(||fingerprint(&old.content,&old.attachments.iter().map(|a|a.id).collect::<Vec<_>>()));
+        return if old.conversation_id==conversation && saved==hash {Ok(old)} else {Err(Failure::Conflict)};
+    }
+    let at:thiscord_shared::Timestamp=query(c,"UPDATE friendships SET last_message_at=GREATEST(clock_timestamp(),last_message_at+interval '1 microsecond') WHERE id=$1::uuid RETURNING to_jsonb(last_message_at) AS data", &[&conversation.to_string()])?.pop().ok_or(Failure::Forbidden)?;
+    let id = MessageId::from_uuid(Uuid::new_v4());
+    execute(
+        c,
+        "INSERT INTO direct_messages(id,conversation_id,author_id,client_id,content,created_at,request_hash) VALUES($1::uuid,$2::uuid,$3::uuid,$4::uuid,$5,$6::timestamptz,$7)",
         &[
-            &message.id.to_string(),
+            &id.to_string(),
             &conversation.to_string(),
             &actor.to_string(),
             &client.to_string(),
-            &message.content,
+            &content,
             &at.to_rfc3339(),
+            &hash,
         ],
     )?;
-    Ok(message)
+    super::attachments::attach(c, actor, conversation, id, &attachments)?;
+    message(c, conversation, id)
 }
 fn history(
     c: &mut PgConnection,
@@ -272,6 +351,7 @@ pub(super) fn snapshot(
     pool: &DbPool,
     token: &str,
     selected: Option<ConversationId>,
+    before: Option<PageCursor>,
 ) -> Result<Snapshot, Failure> {
     let _timing = crate::performance::FRIENDS.start();
     let mut c = connection(pool)?;
@@ -281,12 +361,13 @@ pub(super) fn snapshot(
         let actor=session.account_id;
         // Lock relationships once, then load public profiles in one batch.
         execute(c,"SELECT id FROM friendships WHERE $1::uuid IN (low_id,high_id) AND state<>'removed' ORDER BY id FOR SHARE", &[&actor.to_string()])?;
-        let mut friends:Vec<Friend>=query(c,"SELECT jsonb_build_object('conversation_id',f.id,'person',jsonb_build_object('id',a.id,'username',a.username,'display_name',a.display_name,'avatar_id',v.id),'relationship',CASE WHEN f.state='accepted' THEN 'friend' WHEN f.requester=$1::uuid THEN 'outgoing' ELSE 'incoming' END,'online',false,'unread_count',CASE WHEN f.state='accepted' THEN (SELECT count(*) FROM (SELECT 1 FROM direct_messages m WHERE m.conversation_id=f.id AND m.author_id=a.id AND m.created_at>COALESCE(CASE WHEN f.low_id=$1::uuid THEN f.low_read_at ELSE f.high_read_at END,'-infinity'::timestamptz) LIMIT 100) unread) ELSE 0 END) AS data FROM friendships f JOIN accounts a ON a.id=CASE WHEN f.low_id=$1::uuid THEN f.high_id ELSE f.low_id END LEFT JOIN account_avatars v ON v.account_id=a.id WHERE $1::uuid IN (f.low_id,f.high_id) AND f.state<>'removed' ORDER BY a.username,a.id", &[&actor.to_string()])?;
+        let mut friends:Vec<Friend>=query(c,"SELECT jsonb_build_object('conversation_id',f.id,'person',jsonb_build_object('id',a.id,'username',a.username,'display_name',a.display_name,'avatar_id',v.id),'relationship',CASE WHEN f.state='accepted' THEN 'friend' WHEN f.requester=$1::uuid THEN 'outgoing' ELSE 'incoming' END,'online',false,'unread_count',CASE WHEN f.state='accepted' THEN (SELECT count(*) FROM (SELECT 1 FROM direct_messages m WHERE m.conversation_id=f.id AND m.author_id=a.id AND NOT m.deleted AND m.created_at>COALESCE(CASE WHEN f.low_id=$1::uuid THEN f.low_read_at ELSE f.high_read_at END,'-infinity'::timestamptz) LIMIT 100) unread) ELSE 0 END) AS data FROM friendships f JOIN accounts a ON a.id=CASE WHEN f.low_id=$1::uuid THEN f.high_id ELSE f.low_id END LEFT JOIN account_avatars v ON v.account_id=a.id WHERE $1::uuid IN (f.low_id,f.high_id) AND f.state<>'removed' AND NOT EXISTS(SELECT 1 FROM account_blocks b WHERE (b.blocker_id=f.low_id AND b.blocked_id=f.high_id) OR (b.blocker_id=f.high_id AND b.blocked_id=f.low_id)) ORDER BY a.username,a.id", &[&actor.to_string()])?;
         for friend in &mut friends { friend.online=friend.relationship==Relationship::Friend && super::online(friend.person.id); }
         let selected=selected.filter(|id|friends.iter().any(|f|f.conversation_id==*id && f.relationship==Relationship::Friend));
-        let history=selected.map(|id|history(c,id,None,Default::default())).transpose()?;
-        let calls=query(c,"SELECT to_jsonb(v) AS data FROM friend_calls v JOIN friendships f ON f.id=v.conversation_id WHERE $1::uuid IN (v.caller,v.callee) AND v.state IN ('ringing','active') AND v.expires_at>now() AND f.state='accepted' ORDER BY v.id", &[&actor.to_string()])?;
-        Ok(Snapshot {friends,calls,conversation_id:selected,history})
+        let history=selected.map(|id|history(c,id,before.clone(),Default::default())).transpose()?;
+        let calls=query(c,"SELECT to_jsonb(v) AS data FROM friend_calls v JOIN friendships f ON f.id=v.conversation_id WHERE $1::uuid IN (v.caller,v.callee) AND v.state IN ('ringing','active') AND v.expires_at>now() AND f.state='accepted' AND NOT EXISTS(SELECT 1 FROM account_blocks b WHERE (b.blocker_id=f.low_id AND b.blocked_id=f.high_id) OR (b.blocker_id=f.high_id AND b.blocked_id=f.low_id)) ORDER BY v.id", &[&actor.to_string()])?;
+        let typing=selected.map(|id|super::typing::read(id,actor)).unwrap_or_default();
+        Ok(Snapshot {friends,calls,conversation_id:selected,history,before,typing})
     })
 }
 

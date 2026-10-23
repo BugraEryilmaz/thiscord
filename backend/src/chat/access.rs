@@ -21,6 +21,7 @@ enum Key {
     InstanceRole(AccountId),
     Notifications(AccountId),
     NotificationCalls(AccountId),
+    DirectMessage(thiscord_shared::MessageId),
 }
 
 fn scope(key: Key) -> Arc<Access> {
@@ -51,6 +52,9 @@ pub(crate) fn notification_preferences(id: AccountId) -> Arc<Access> {
 }
 pub(crate) fn notification_calls(id: AccountId) -> Arc<Access> {
     scope(Key::NotificationCalls(id))
+}
+pub(crate) fn direct_message(id: thiscord_shared::MessageId) -> Arc<Access> {
+    scope(Key::DirectMessage(id))
 }
 // Instance privilege affects diagnostics, never guild/chat access.
 pub(crate) fn instance_role(id: AccountId) -> Arc<Access> {

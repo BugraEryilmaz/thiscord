@@ -34,7 +34,7 @@ connections are closed after 35 seconds. This remains a single-backend-process d
 `shared/src/friends.rs` owns the request/response and version-1 socket contracts.
 `POST /api/v1/friends` uses bearer authentication and the usual request-correlated
 error envelope. Commands cover search, add, accept, remove, history, send, start
-call, accept call, end call and read acknowledgements. Input bodies are limited to 32 KiB. Blocking workers
+call, accept call, end call, edit, delete and read acknowledgements. Input bodies are limited to 32 KiB. Blocking workers
 are bounded at eight; per-account HTTP budgets are 180 requests and 30 writes per
 minute. Every action revalidates the session inside its transaction.
 
@@ -44,12 +44,12 @@ serialize message ordering and authoritative membership checks. A pending or rem
 relationship cannot read/send messages, retry a previously committed send, or join
 a call. Instance/guild administrators have no implicit access to these operations.
 
-`direct_messages` persists plain text (1–4000 Unicode characters; no controls except
-newline/tab), server IDs and UTC timestamps. Client message UUIDs are unique per
-author: an exact retry returns the original message, while reuse for different text
+`direct_messages` persists text (up to 4000 Unicode characters; no controls except
+newline/tab; nonblank unless attachments are present), server IDs and UTC timestamps. Client message UUIDs are unique per
+author: an exact retry returns the current revision (including a tombstone), while reuse for different text
 or a different conversation conflicts. Timestamps increase under the relationship
 lock. History uses the shared reverse `(created_at,id)` keyset cursor, defaults to
-50 messages and caps pages at 100. The frontend renders text nodes, keeps a live
+50 messages and caps pages at 100. The frontend uses the shared safe message renderer, keeps a live
 50-message snapshot, and pages older history separately. Jump to latest restores
 the current snapshot. Failed sends retain their UUID and content for explicit retry;
 drafts and retries are in memory for the open conversation.
@@ -140,5 +140,71 @@ these ignored database tests with `--include-ignored`, plus WASM and native buil
 Physical microphone/speaker acceptance on Windows/macOS/Linux remains necessary.
 Direct-message and incoming-call alerts use the separate server subscription
 stream; see [notifications.md](notifications.md). Typing
-indicators, message editing/deletion, blocking/reporting and cross-process
-presence/fanout are not implemented.
+expiry, revision conflicts and retry-after-edit/delete are covered by private socket/database tests.
+Cross-process presence/fanout remains unimplemented.
+
+
+## Editing, deletion and typing
+
+Only a message's author can edit/delete it, while both parties still consent to
+private access. Commands submit the current `revision` (initially 1) and run under
+the relationship write lock. Changed content increments revision and `edited_at`;
+a stale different edit conflicts. An exact repeat of the immediately preceding
+edit/delete is idempotent. The immutable internal `request_hash` fingerprints the
+original text and attachment IDs, so a lost send response can be retried after
+later edits/deletion without recreating content. Legacy messages acquire their
+fingerprint before their first edit. Reusing the UUID for another payload conflicts.
+
+Deletion persists an empty tombstone at the original history position and removes
+private attachment bytes. Tombstones do not count as unread. The frontend refreshes
+both latest and selected older pages over the existing bounded snapshot socket,
+keys rows by message ID, applies revisions reactively without dropping edit drafts,
+and ignores older revisions. No edit history API
+is exposed. Reconnect reloads the selected page, including missed deletions.
+
+`select` optionally includes a `before` history cursor; older clients can omit it.
+`typing { active }` is scoped to the socket's authorized selection. Each socket
+owns a four-second in-memory lease; devices are combined per account. Changing
+selection, disconnecting or stopping clears its own lease. The frontend refreshes
+at most every two seconds while input is active, stops on send/blur/inactivity,
+and clears typing on reconnect. Typing uses the same eight-worker socket DB budget.
+Backend-first deployment is required for the new commands and select fields.
+
+## Private attachments
+
+`POST /api/v1/direct-attachments?conversation_id=…&filename=…&content_type=…`
+accepts a binary body after accepted-friend/session authorization, then rechecks
+those permissions before storing bytes. Stages belong to one account and one
+conversation. Sending claims up to four distinct staged IDs atomically with the
+message. Only the uploader can claim them; staged files cannot be downloaded.
+The ordinary guild attachment API is unchanged.
+
+`GET /api/v1/direct-attachments/{id}` requires a current accepted friendship, no
+block in either direction, and an undeleted message. Knowing an ID, being an
+instance admin, or having shared guild permissions does not grant private access.
+Downloads capture account/session and message-deletion epochs and check every
+64 KiB chunk. Block, unfriend, session revocation and deletion reject queued stale
+chunks. Bytes already received or saved to disk cannot be recalled.
+
+Each file is 1 byte–25 MiB, with at most 16 unclaimed files / 100 MiB per uploader
+across conversations. Four shared upload/download slots bound buffers; uploads
+expire after 30 seconds and download buffers after 60 seconds. Staged files expire
+after one hour and cleanup deletes up to 64 rows per minute and per upload. Block
+also deletes that pair's unclaimed files. Published files remain until message or
+account deletion; removing a friendship hides them while retaining the history.
+Bytes are PostgreSQL `bytea`, included in DB backups. Download MIME is classified
+from bytes: PNG/JPEG/GIF/WebP and MP4/WebM can be previewed, everything else is a
+file download. Responses are `no-store`, `nosniff` and attachment disposition.
+
+The private composer supports file selection, removing staged attachments,
+attachment-only sends and retrying frozen text/file IDs. View/Download fetch through
+authenticated bounded browser transport (no token-bearing URLs). Images/video use
+Blob URLs; each explicit View/Download reauthorizes. Closing, switching conversations,
+deletion, logout or loss of the friends socket clears previews and aborts transfers.
+Download Blob retention is capped at 60 seconds; saved copies are outside app control.
+Physical codec playback/download acceptance on all three platforms remains pending.
+
+## Blocking and reports
+
+See [Safety and reports](safety.md) for persistent block semantics, report consent,
+review authority and retention. Shared guild membership/permissions do not change.

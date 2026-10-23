@@ -24,7 +24,11 @@ pages, account emails/recovery web pages, and native OS/tray text remain English
 The home screen includes friends, online presence, friend requests, private text
 conversations and one-to-one desktop voice calls. Use **Add friend** in the top
 right to search by part of a display name or username. See [friends and private conversations](docs/friends.md)
-for behavior, access rules and current limitations.
+for behavior, access rules and current limitations. Private conversations include
+revision-checked editing/deletion, typing and private file/image/video attachments.
+User menus and Friends offer block/report actions; **Settings → Safety & reports**
+contains blocked accounts, submitted reports and authorized review inboxes.
+See [safety and reports](docs/safety.md) for consent and evidence boundaries.
 
 **Settings → Notifications** controls sounds, banners, volume and event filters.
 Right-click channels or conversations for per-source settings and quick mute;

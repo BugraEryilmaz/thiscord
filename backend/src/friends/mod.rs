@@ -1,8 +1,11 @@
+mod attachments;
 pub(crate) mod store;
+mod typing;
 use crate::{
     auth::{self, Failure},
     db::DbPool,
 };
+pub use attachments::start_cleanup as start_attachment_cleanup;
 use axum::{
     Extension, Json, Router,
     extract::{
@@ -28,6 +31,7 @@ pub fn router(origins: Vec<HeaderValue>) -> Router<Option<DbPool>> {
         .route(FRIENDS_SOCKET_PATH, get(upgrade))
         .layer(Extension(Arc::new(origins)))
         .layer(DefaultBodyLimit::max(32 * 1024))
+        .merge(attachments::router())
 }
 async fn handle(
     State(pool): State<Option<DbPool>>,
@@ -169,11 +173,15 @@ async fn serve(mut socket: WebSocket, pool: DbPool) {
     let mut revoked = session_scope.subscribe();
     let _presence = Connected::new(session.account_id);
     let mut selected = None;
+    let mut before = None;
+    let typing = typing::LeaseOwner::new();
     let mut last = None;
     let mut last_sent = Instant::now();
     let mut last_seen = Instant::now();
     let mut window = Instant::now();
     let mut count = 0;
+    static READERS: OnceLock<Arc<Semaphore>> = OnceLock::new();
+    let readers = READERS.get_or_init(|| Arc::new(Semaphore::new(8)));
     let mut tick = tokio::time::interval(Duration::from_secs(1));
     tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
     loop {
@@ -187,17 +195,24 @@ async fn serve(mut socket: WebSocket, pool: DbPool) {
                 last_seen=Instant::now();
                 match frame(message) {
                     Some(ClientEvent::Ping {})=>{if send(&mut socket,ServerEvent::Pong {}).await.is_err() {break;}}
-                    Some(ClientEvent::Select {conversation_id})=>{selected=conversation_id;last=None;tick.reset_immediately();}
+                    Some(ClientEvent::Select {conversation_id,before:page})=>{typing.clear();selected=conversation_id;before=page;last=None;tick.reset_immediately();}
+                    Some(ClientEvent::Typing {active})=>{
+                        let Some(id)=selected else {continue;};
+                        let Ok(permit)=readers.clone().try_acquire_owned() else {continue;};
+                        let p=pool.clone();let t=token.clone();
+                        if crate::performance::blocking(move ||{let _permit=permit;store::checked(&p,&t,id,false,|_,_|Ok(()))}).await.is_ok_and(|r|r.is_ok()) {
+                            typing.set(id,session.account_id,active);
+                        } else {break;}
+                    }
                     _=>break,
                 }
             }
             _=tick.tick()=>{
                 if last_seen.elapsed()>Duration::from_secs(35) {break;}
-                static READERS:OnceLock<Arc<Semaphore>>=OnceLock::new();
-                let Ok(permit)=READERS.get_or_init(||Arc::new(Semaphore::new(8))).clone().try_acquire_owned() else {crate::performance::FRIENDS_SKIPPED.fetch_add(1, std::sync::atomic::Ordering::Relaxed);continue;};
+                let Ok(permit)=readers.clone().try_acquire_owned() else {crate::performance::FRIENDS_SKIPPED.fetch_add(1, std::sync::atomic::Ordering::Relaxed);continue;};
                 let Some(epoch)=crate::chat::access::snapshot(&account,Some(&session_scope)) else {break;};
-                let p=pool.clone();let t=token.clone();
-                let Ok(Ok(snapshot))=crate::performance::blocking(move ||{let _permit=permit;store::snapshot(&p,&t,selected)}).await else {break;};
+                let p=pool.clone();let t=token.clone();let page=before.clone();
+                let Ok(Ok(snapshot))=crate::performance::blocking(move ||{let _permit=permit;store::snapshot(&p,&t,selected,page)}).await else {break;};
                 let Some(_delivery)=epoch.deliver() else {break;};
                 if last.as_ref()==Some(&snapshot) { crate::performance::FRIENDS_UNCHANGED.fetch_add(1, std::sync::atomic::Ordering::Relaxed); }
                 if last.as_ref()!=Some(&snapshot) || last_sent.elapsed()>=Duration::from_secs(10) {

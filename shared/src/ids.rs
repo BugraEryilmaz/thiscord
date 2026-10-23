@@ -52,3 +52,4 @@ uuid_id!(AttachmentId);
 uuid_id!(ClientMessageId);
 uuid_id!(ConversationId);
 uuid_id!(CallId);
+uuid_id!(ReportId);

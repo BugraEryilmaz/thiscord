@@ -19,6 +19,9 @@ use thiscord_shared::{
 pub(super) struct State {
     pub snapshot: RwSignal<Snapshot>,
     pub selected: RwSignal<Option<ConversationId>>,
+    pub before: RwSignal<Option<thiscord_shared::pagination::PageCursor>>,
+    pub typing_at: RwSignal<f64>,
+    pub report_target: RwSignal<Option<thiscord_shared::safety::ReportTarget>>,
     pub(super) connected: RwSignal<bool>,
     intent: RwSignal<Option<CallId>>,
     intent_at: RwSignal<f64>,
@@ -29,6 +32,9 @@ impl State {
         Self {
             snapshot: RwSignal::new(Default::default()),
             selected: RwSignal::new(None),
+            before: RwSignal::new(None),
+            typing_at: RwSignal::new(0.0),
+            report_target: RwSignal::new(None),
             connected: RwSignal::new(false),
             intent: RwSignal::new(None),
             intent_at: RwSignal::new(0.0),
@@ -104,6 +110,7 @@ pub(super) fn end_call(ui: Ui) {
     }
 }
 pub(super) fn open(ui: Ui, id: ConversationId) {
+    ui.friends.before.set(None);
     ui.friends.selected.set(Some(id));
     super::servers::home(ui);
 }
@@ -125,6 +132,9 @@ pub(super) fn Host(ui: Ui) -> impl IntoView {
             a.abort();
         }
         ui.friends.snapshot.set(Default::default());
+        ui.friends.before.set(None);
+        ui.friends.typing_at.set(0.0);
+        ui.friends.report_target.set(None);
         ui.friends.selected.set(None);
         ui.friends.connected.set(false);
         ui.friends.intent.set(None);
@@ -142,7 +152,9 @@ pub(super) fn Host(ui: Ui) -> impl IntoView {
                         let started = js_sys::Date::now();
                         let _ = connected(ui, &token).await;
                         ui.friends.connected.set(false);
+                        ui.friends.typing_at.set(0.0);
                         ui.friends.snapshot.update(|s| {
+                            s.typing.clear();
                             for f in &mut s.friends {
                                 f.online = false;
                             }
@@ -162,7 +174,7 @@ pub(super) fn Host(ui: Ui) -> impl IntoView {
             .await;
         });
     });
-    view! {<div class="fixed right-6 top-14 z-40 max-w-sm space-y-2" aria-live="polite">
+    view! {<super::safety::ReportHost ui/><div class="fixed right-6 top-14 z-40 max-w-sm space-y-2" aria-live="polite">
         <For each=move ||{
             let voice_channel = ui.voice.get().channel_id;
             let account = ui.account.get().map(|a|a.id);
@@ -297,6 +309,8 @@ async fn connected(ui: Ui, token: &str) -> Result<(), ()> {
     let writer = async {
         let mut selected = None;
         let mut ticks = 0u32;
+        let mut sent_typing = false;
+        let mut typing_tick = 0u32;
         loop {
             gloo_timers::future::TimeoutFuture::new(100).await;
             ticks = ticks.wrapping_add(1);
@@ -305,11 +319,22 @@ async fn connected(ui: Ui, token: &str) -> Result<(), ()> {
             } else {
                 None
             };
-            let event = if selected != Some(desired) {
-                selected = Some(desired);
+            let before = ui.friends.before.get_untracked();
+            let active = desired.is_some()
+                && !document().hidden()
+                && document().has_focus().unwrap_or(false)
+                && js_sys::Date::now() - ui.friends.typing_at.get_untracked() < 2500.0;
+            let event = if selected != Some((desired, before.clone())) {
+                selected = Some((desired, before.clone()));
+                sent_typing = false;
                 Some(ClientEvent::Select {
                     conversation_id: desired,
+                    before,
                 })
+            } else if sent_typing != active || (active && ticks.wrapping_sub(typing_tick) >= 20) {
+                sent_typing = active;
+                typing_tick = ticks;
+                Some(ClientEvent::Typing { active })
             } else if ticks.is_multiple_of(100) {
                 Some(ClientEvent::Ping {})
             } else {
@@ -394,6 +419,7 @@ fn FriendList(ui: Ui, filter: RwSignal<&'static str>) -> impl IntoView {
                     <button class="icon-button disabled:opacity-40" aria-label=move || crate::i18n::t("Call friend") data-tip=move || crate::i18n::t("Voice call (desktop)") disabled=move ||!available(ui) || !ui.friends.connected.get() || !ui.friends.snapshot.get().calls.is_empty() on:click=move |_|action(ui,Request::StartCall {conversation_id:id})><Icon kind=Glyph::Headphones/></button>
                 </Show>
                 <Show when=move ||f.get().relationship==Relationship::Incoming><button class="rounded-lg bg-emerald-600 px-3 py-2 text-sm" on:click=move |_|action(ui,Request::Accept {account_id:person})>{move || crate::i18n::t("Accept")}</button></Show>
+                <super::safety::PersonActions ui account_id=person/>
                 <button class="rounded-lg px-3 py-2 text-sm text-white/50 hover:bg-red-500/10 hover:text-red-200" on:click=move |_|{
                     if f.get_untracked().relationship!=Relationship::Friend || window().confirm_with_message(crate::i18n::t("Remove this friend? Private messages and calls will be unavailable until you become friends again.")).unwrap_or(false) {action(ui,Request::Remove {account_id:person});}
                 }>{move ||match f.get().relationship {Relationship::Incoming=>crate::i18n::t("Decline"),Relationship::Outgoing=>crate::i18n::t("Cancel"),Relationship::Friend=>crate::i18n::t("Remove")}}</button>
@@ -452,7 +478,7 @@ fn AddFriend(ui: Ui) -> impl IntoView {
                 let relation=move ||ui.friends.snapshot.get().friends.into_iter().find(|f|f.person.id==id).map(|f|f.relationship);
                 view!{<li class="flex items-center gap-3 rounded-lg bg-white/5 p-3"><div class="min-w-0 flex-1"><p class="truncate font-semibold">{person.display_name}</p><p class="text-xs text-white/40">{format!("@{}",person.username)}</p></div><button class="rounded-lg bg-brand px-3 py-2 text-sm disabled:bg-white/10 disabled:text-white/50" disabled=move ||sending.get() || sent.get() || relation().is_some() || !ui.account.get().is_some_and(|a|a.email_verified) on:click=move |_|{
                     sending.set(true);leptos::task::spawn_local(async move{let result=request(ui,&Request::Add {account_id:id}).await;if sending.is_disposed(){return;}sending.set(false);match result {Ok(_)=>sent.set(true),Err(e)=>error.set(e)}});
-                }>{move ||match relation(){Some(Relationship::Friend)=>crate::i18n::t("Friends"),Some(Relationship::Incoming)=>crate::i18n::t("Incoming request"),Some(Relationship::Outgoing)=>crate::i18n::t("Request sent"),None if sent.get()=>crate::i18n::t("Request sent"),None if sending.get()=>crate::i18n::t("Sending…"),None=>crate::i18n::t("Add friend")}}</button></li>}
+                }>{move ||match relation(){Some(Relationship::Friend)=>crate::i18n::t("Friends"),Some(Relationship::Incoming)=>crate::i18n::t("Incoming request"),Some(Relationship::Outgoing)=>crate::i18n::t("Request sent"),None if sent.get()=>crate::i18n::t("Request sent"),None if sending.get()=>crate::i18n::t("Sending…"),None=>crate::i18n::t("Add friend")}}</button><super::safety::PersonActions ui account_id=id/></li>}
             }/></ul>
         </dialog>
     }
@@ -466,7 +492,12 @@ fn Conversation(ui: Ui, id: ConversationId) -> impl IntoView {
     let error = RwSignal::new(String::new());
     let busy = RwSignal::new(false);
     let loading = RwSignal::new(false);
-    let retry = RwSignal::new(None::<(ClientMessageId, String)>);
+    let retry =
+        RwSignal::new(None::<(ClientMessageId, String, Vec<thiscord_shared::AttachmentId>)>);
+    let uploads = super::direct_attachments::Uploads::new(ui, id);
+    on_cleanup(move || {
+        ui.friends.typing_at.set(0.0);
+    });
     let list = NodeRef::<leptos::html::Div>::new();
     let bottom = RwSignal::new(true);
     let past = RwSignal::new(false);
@@ -531,10 +562,16 @@ fn Conversation(ui: Ui, id: ConversationId) -> impl IntoView {
     });
     Effect::new(move |_| {
         let snapshot = ui.friends.snapshot.get();
-        if past.get() || snapshot.conversation_id != Some(id) {
+        if snapshot.conversation_id != Some(id) || snapshot.before != ui.friends.before.get() {
             return;
         }
-        if let Some(history) = snapshot.history {
+        if let Some(mut history) = snapshot.history {
+            messages.with_untracked(|current| {
+                thiscord_frontend::direct_history::preserve_revisions(
+                    &mut history.messages,
+                    current,
+                );
+            });
             let changed = messages.with_untracked(|m| *m != history.messages);
             older.set(history.older);
             if changed {
@@ -552,7 +589,10 @@ fn Conversation(ui: Ui, id: ConversationId) -> impl IntoView {
         }
     });
     let send = move || {
-        if busy.get_untracked() || !ui.friends.connected.get_untracked() {
+        if busy.get_untracked()
+            || uploads.busy.get_untracked()
+            || !ui.friends.connected.get_untracked()
+        {
             return;
         }
         let payload = retry.get_untracked().or_else(|| {
@@ -562,18 +602,25 @@ fn Conversation(ui: Ui, id: ConversationId) -> impl IntoView {
                 .random_uuid()
                 .parse()
                 .ok()
-                .map(|id| (id, draft.get_untracked()))
+                .map(|id| {
+                    (
+                        id,
+                        draft.get_untracked(),
+                        uploads.files.get_untracked().iter().map(|a| a.id).collect(),
+                    )
+                })
         });
-        let Some((client_id, content)) = payload else {
+        let Some((client_id, content, attachments)) = payload else {
             error.set("Could not create a message ID".into());
             return;
         };
-        if content.trim().is_empty() {
+        if content.trim().is_empty() && attachments.is_empty() {
             return;
         }
         busy.set(true);
         error.set(String::new());
-        retry.set(Some((client_id, content.clone())));
+        retry.set(Some((client_id, content.clone(), attachments.clone())));
+        ui.friends.typing_at.set(0.0);
         leptos::task::spawn_local(async move {
             let result = request(
                 ui,
@@ -581,6 +628,7 @@ fn Conversation(ui: Ui, id: ConversationId) -> impl IntoView {
                     conversation_id: id,
                     client_id,
                     content,
+                    attachments,
                 },
             )
             .await;
@@ -597,6 +645,8 @@ fn Conversation(ui: Ui, id: ConversationId) -> impl IntoView {
                         }
                     });
                     past.set(false);
+                    ui.friends.before.set(None);
+                    uploads.files.set(vec![]);
                     draft.set(String::new());
                     retry.set(None);
                     bottom.set(true);
@@ -630,22 +680,121 @@ fn Conversation(ui: Ui, id: ConversationId) -> impl IntoView {
         }/>
         <div node_ref=list class="private-messages min-h-0 flex-1 overflow-y-auto px-6 py-4" on:scroll=move |_|if let Some(node)=list.get(){bottom.set(node.scroll_height()-node.scroll_top()-node.client_height()<80);}>
             <Show when=move ||older.get().is_some()><button class="mb-4 text-sm text-brand disabled:opacity-50" disabled=move ||loading.get() on:click=move |_| {
-                let before=older.get_untracked();if loading.get_untracked(){return;}loading.set(true);
+                let before=older.get_untracked();if loading.get_untracked(){return;}loading.set(true);past.set(true);ui.friends.before.set(before.clone());
 
-                leptos::task::spawn_local(async move {let result=request(ui,&Request::History {conversation_id:id,before,limit:Default::default()}).await;if loading.is_disposed(){return;}loading.set(false);match result {Ok(Response::History {history})=>{past.set(true);older.set(history.older);messages.set(history.messages);request_animation_frame(move ||if let Some(n)=list.get_untracked(){n.set_scroll_top(0);});},Err(e)=>error.set(e),_=>{}}});
+                leptos::task::spawn_local(async move {let result=request(ui,&Request::History {conversation_id:id,before:before.clone(),limit:Default::default()}).await;if loading.is_disposed(){return;}loading.set(false);if ui.friends.before.get_untracked()!=before{return;}match result {Ok(Response::History {mut history})=>{messages.with_untracked(|current|thiscord_frontend::direct_history::preserve_revisions(&mut history.messages,current));past.set(true);older.set(history.older);messages.set(history.messages);request_animation_frame(move ||if let Some(n)=list.get_untracked(){n.set_scroll_top(0);});},Err(e)=>error.set(e),_=>{}}});
             }>{move ||if loading.get(){crate::i18n::t("Loading…")}else{crate::i18n::t("Older messages")}}</button></Show>
-            <Show when=move ||past.get()><button class="mb-4 ml-4 text-sm text-brand" on:click=move |_|{bottom.set(true);past.set(false);}>{move || crate::i18n::t("Jump to latest")}</button></Show>
+            <Show when=move ||past.get()><button class="mb-4 ml-4 text-sm text-brand" on:click=move |_|{bottom.set(true);past.set(false);ui.friends.before.set(None);}>{move || crate::i18n::t("Jump to latest")}</button></Show>
             <Show when=move ||messages.get().is_empty()><div class="private-empty py-12 text-center"><h3 class="text-xl font-semibold">{move || crate::i18n::t("Start a conversation")}</h3><p class="mt-2 text-sm text-white/45">{move || crate::i18n::t("Only you and your friend can access this conversation.")}</p></div></Show>
-            <ol class="space-y-5" aria-label=move || crate::i18n::t("Private messages")><For each=move ||messages.get() key=|m|m.id children=move |m| {
-                let own=ui.account.get_untracked().is_some_and(|a|a.id==m.author_id);
-                view!{<li><div class="flex items-baseline gap-3"><button class="text-sm font-semibold hover:underline" aria-haspopup="menu" data-context-user=m.author_id.to_string() data-context-name=if own {crate::i18n::t("You").into()}else{friend.get_untracked().map(|f|f.person.display_name).unwrap_or_else(||crate::i18n::t("Friend").into())}>{move || if own {crate::i18n::t("You").into()}else{friend.get_untracked().map(|f|f.person.display_name).unwrap_or_else(||crate::i18n::t("Friend").into())}}</button><time class="text-xs text-white/35" datetime=m.created_at.to_rfc3339()>{move ||crate::i18n::datetime(m.created_at)}</time></div><p class="mt-1 whitespace-pre-wrap break-words text-white/85">{super::message_content::render(&m.content, ui)}</p></li>}
-            }/></ol>
+            <ol class="space-y-5" aria-label=move ||crate::i18n::t("Private messages")><For each=move ||messages.get() key=|m|m.id children=move |m|view!{<DirectRow ui id message=m messages friend/>}/></ol>
         </div>
+        <p class="px-6 text-xs text-white/50" role="status">{move ||if ui.friends.connected.get() && ui.friends.snapshot.with(|s|s.conversation_id==Some(id) && !s.typing.is_empty()) {crate::i18n::t("Typing…")}else{""}}</p>
         <form class="shrink-0 border-t border-white/10 p-4" on:submit=move |ev|{ev.prevent_default();send();}>
             <p role="alert" class="mb-2 text-sm text-red-200">{move ||crate::i18n::message(error.get())}</p>
-            <div class="flex items-end gap-3 rounded-xl bg-white/5 p-3"><textarea class="max-h-40 min-h-12 flex-1 resize-y bg-transparent p-2 outline-none read-only:opacity-50" aria-label=move || crate::i18n::t("Private message") aria-describedby="private-message-hint" placeholder=move || crate::i18n::t("Message your friend…") maxlength="4000" prop:value=move ||draft.get() readonly=move ||busy.get() || retry.get().is_some() on:keydown=keydown on:input=move |ev|draft.set(event_target_value(&ev))></textarea><button class="rounded-lg bg-brand p-3 disabled:opacity-40" aria-label=move || crate::i18n::t("Send private message") disabled=move ||busy.get() || !ui.friends.connected.get() || draft.get().trim().is_empty()>{move ||if busy.get(){crate::i18n::t("Sending…")}else if retry.get().is_some(){crate::i18n::t("Retry")}else{crate::i18n::t("Send")}}</button></div>
+            <super::direct_attachments::Composer uploads locked=Signal::derive(move ||busy.get()||retry.get().is_some())/>
+            <div class="flex items-end gap-3 rounded-xl bg-white/5 p-3"><textarea class="max-h-40 min-h-12 flex-1 resize-y bg-transparent p-2 outline-none read-only:opacity-50" aria-label=move || crate::i18n::t("Private message") aria-describedby="private-message-hint" placeholder=move || crate::i18n::t("Message your friend…") maxlength="4000" prop:value=move ||draft.get() readonly=move ||busy.get() || retry.get().is_some() on:keydown=keydown on:input=move |ev|{let text=event_target_value(&ev);ui.friends.typing_at.set(if text.trim().is_empty(){0.0}else{js_sys::Date::now()});draft.set(text);}></textarea><button class="rounded-lg bg-brand p-3 disabled:opacity-40" aria-label=move || crate::i18n::t("Send private message") disabled=move ||busy.get() || uploads.busy.get() || !ui.friends.connected.get() || (draft.get().trim().is_empty() && uploads.files.get().is_empty())>{move ||if busy.get(){crate::i18n::t("Sending…")}else if retry.get().is_some(){crate::i18n::t("Retry")}else{crate::i18n::t("Send")}}</button></div>
             <p id="private-message-hint" class="mt-2 text-xs text-white/40">{move || crate::i18n::t("Enter to send · Shift+Enter for a new line")}</p>
             <Show when=move ||retry.get().is_some() && !busy.get()><button type="button" class="mt-2 text-xs text-white/50" on:click=move |_|{retry.set(None);error.set(String::new());}>{move || crate::i18n::t("Discard retry and edit draft")}</button></Show>
         </form>
     </section>}
+}
+
+#[component]
+fn DirectRow(
+    ui: Ui,
+    id: ConversationId,
+    message: DirectMessage,
+    messages: RwSignal<Vec<DirectMessage>>,
+    friend: Signal<Option<Friend>>,
+) -> impl IntoView {
+    let initial = StoredValue::new(message);
+    let message = Signal::derive(move || {
+        messages
+            .with(|rows| {
+                rows.iter()
+                    .find(|m| m.id == initial.get_value().id)
+                    .cloned()
+            })
+            .unwrap_or_else(|| initial.get_value())
+    });
+    let own = ui
+        .account
+        .get_untracked()
+        .is_some_and(|a| a.id == message.get().author_id);
+    let editing = RwSignal::new(false);
+    let edit_revision = StoredValue::new(message.get_untracked().revision);
+    Effect::new(move |_| {
+        if message.get().deleted {
+            editing.set(false);
+        }
+    });
+    let draft = RwSignal::new(message.get().content);
+    let busy = RwSignal::new(false);
+    let error = RwSignal::new(String::new());
+    let apply = move |delete: bool| {
+        if busy.get_untracked() {
+            return;
+        }
+        if delete
+            && !window()
+                .confirm_with_message(crate::i18n::t(
+                    "Delete this private message and its attachments?",
+                ))
+                .unwrap_or(false)
+        {
+            return;
+        }
+        let m = message.get();
+        let command = if delete {
+            Request::Delete {
+                conversation_id: id,
+                message_id: m.id,
+                revision: m.revision,
+            }
+        } else {
+            Request::Edit {
+                conversation_id: id,
+                message_id: m.id,
+                revision: edit_revision.get_value(),
+                content: draft.get_untracked(),
+            }
+        };
+        busy.set(true);
+        error.set(String::new());
+        leptos::task::spawn_local(async move {
+            let result = request(ui, &command).await;
+            if busy.is_disposed() {
+                return;
+            }
+            busy.set(false);
+            match result {
+                Ok(Response::Message { message }) => {
+                    editing.set(false);
+                    messages.update(|rows| {
+                        if let Some(old) = rows.iter_mut().find(|old| old.id == message.id)
+                            && old.revision <= message.revision
+                        {
+                            *old = message;
+                        }
+                    });
+                }
+                Err(e) => error.set(e),
+                _ => {}
+            }
+        });
+    };
+    view! {<li class="space-y-1">
+        <div class="flex items-baseline gap-3"><button class="text-sm font-semibold hover:underline" aria-haspopup="menu" data-context-user=message.get().author_id.to_string() data-context-name=if own {crate::i18n::t("You").into()}else{friend.get_untracked().map(|f|f.person.display_name).unwrap_or_default()}>{move ||if own {crate::i18n::t("You").into()}else{friend.get().map(|f|f.person.display_name).unwrap_or_default()}}</button>
+        <time class="text-xs text-white/35" datetime=message.get().created_at.to_rfc3339()>{move ||crate::i18n::datetime(message.get().created_at)}</time>
+        <Show when=move ||message.get().edited_at.is_some()&&!message.get().deleted><span class="text-xs text-white/40">{move ||crate::i18n::t("edited")}</span></Show></div>
+        <Show when=move ||!editing.get() fallback=move ||view!{<form class="space-y-2" on:submit=move |ev|{ev.prevent_default();apply(false);}>
+            <textarea class="w-full rounded bg-white/10 p-2" aria-label=move ||crate::i18n::t("Edit private message") maxlength="4000" prop:value=move ||draft.get() on:input=move |ev|draft.set(event_target_value(&ev))/>
+            <button class="mr-3 text-brand" disabled=move ||busy.get()>{move ||crate::i18n::t("Save")}</button><button type="button" disabled=move ||busy.get() on:click=move |_|editing.set(false)>{move ||crate::i18n::t("Cancel")}</button>
+        </form>}><p class="whitespace-pre-wrap break-words text-white/85">{move ||{let m=message.get();super::message_content::render(if m.deleted {crate::i18n::t("Message deleted")}else{&m.content},ui)}}</p></Show>
+        <Show when=move ||!message.get().deleted>
+            <For each=move ||message.get().attachments key=|a|a.id children=move |attachment|view!{<super::direct_attachments::Card ui id attachment/>}/>
+            <div class="flex gap-3 text-xs text-white/50"><Show when=move ||own><button disabled=move ||busy.get() on:click=move |_|{let m=message.get_untracked();draft.set(m.content);edit_revision.set_value(m.revision);editing.set(true);}>{move ||crate::i18n::t("Edit")}</button><button disabled=move ||busy.get() on:click=move |_|apply(true)>{move ||crate::i18n::t("Delete")}</button></Show>
+            <Show when=move ||!own><super::safety::ReportButton ui target=thiscord_shared::safety::ReportTarget::DirectMessage {conversation_id:id,message_id:message.get().id}/></Show></div>
+        </Show><p role="alert" class="text-xs text-red-200">{move ||crate::i18n::message(error.get())}</p>
+    </li>}
 }
