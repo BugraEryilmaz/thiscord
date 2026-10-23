@@ -98,11 +98,7 @@ impl Chat {
         }
         result
     }
-    fn scroll(self) {
-        if self.searching.get_untracked() || self.layout_pending.get_untracked() {
-            return;
-        }
-        self.layout_pending.set(true);
+    fn remember_anchor(self) {
         if self.bottom.get_untracked() {
             self.anchor.set(None);
         } else if self.anchor.get_untracked().is_none() {
@@ -114,10 +110,17 @@ impl Chat {
                     .with_untracked(|messages| messages.anchor(self.viewport.get_untracked().0)),
             );
         }
+    }
+    fn scroll(self) {
+        if self.searching.get_untracked() || self.layout_pending.get_untracked() {
+            return;
+        }
+        self.remember_anchor();
+        self.layout_pending.set(true);
         leptos::task::spawn_local(async move {
-            // Coalesce bursts and ResizeObserver deliveries at frame cadence.
-            // A timer also settles state in a hidden/minimized native WebView.
-            gloo_timers::future::TimeoutFuture::new(16).await;
+            // Let the reactive rows/spacers update, then correct before painting.
+            // A wall-clock delay paints the wrong window and can fight scrolling.
+            leptos::task::tick().await;
             if !self.alive() {
                 return;
             }
@@ -126,21 +129,52 @@ impl Chat {
                 return;
             }
             if let Some(node) = self.list.get_untracked() {
-                if self.bottom.get_untracked() {
-                    node.set_scroll_top(node.scroll_height());
-                } else if let Some(anchor) = self.anchor.get_untracked() {
-                    let top = self.messages.with_untracked(|m| m.anchor_top(anchor));
-                    if top.is_none() {
-                        self.anchor.set(None);
-                    }
-                    // WebView geometry can be fractional at non-default scale.
-                    // Truncation would accumulate a pixel of drift on every pass.
-                    node.set_scroll_top((top.unwrap_or(0.0) + self.rows_offset()).round() as i32);
+                let target = if self.bottom.get_untracked() {
+                    Some(node.scroll_height())
+                } else {
+                    self.anchor.get_untracked().and_then(|anchor| {
+                        let position = self.messages.with_untracked(|m| {
+                            let anchor = m.normalize_anchor(anchor)?;
+                            Some((anchor, m.anchor_top(anchor)?))
+                        });
+                        position.map(|(anchor, top)| {
+                            self.anchor.set(Some(anchor));
+                            (top + self.rows_offset()).round() as i32
+                        })
+                    })
+                };
+                if let Some(top) = target {
+                    node.set_scroll_top(top);
+                    self.programmatic_top.set(Some(node.scroll_top()));
+                } else {
+                    // User input superseded this correction, or its row was
+                    // evicted. Keep the current position rather than jumping to 0.
+                    self.anchor.set(None);
                 }
-                self.programmatic_top.set(Some(node.scroll_top()));
                 self.update_viewport();
             }
         });
+    }
+    fn scrolled(self) {
+        if self.searching.get_untracked() {
+            return;
+        }
+        if let Some(node) = self.list.get_untracked() {
+            if self.programmatic_top.get_untracked() != Some(node.scroll_top()) {
+                // Process user scrolling even during a pending layout. Reset its
+                // old anchor before changing the virtual window or mounting rows.
+                self.programmatic_top.set(None);
+                self.anchor.set(None);
+                // Allow pixel rounding, but do not pull a deliberate small scroll
+                // back to the live edge when rows or the composer resize.
+                self.bottom
+                    .set(node.scroll_height() - node.scroll_top() - node.client_height() <= 2);
+                self.update_viewport();
+                self.read();
+            } else {
+                self.update_viewport();
+            }
+        }
     }
     fn rows_offset(self) -> f64 {
         match (self.list.get_untracked(), self.rows.get_untracked()) {
@@ -754,35 +788,29 @@ fn MessageRow(
     // retains only the Arc; evicted rows release both state and measurements.
     let message = RwSignal::from(message);
     let row = NodeRef::<leptos::html::Li>::new();
-    let own = move || {
-        message.with(|m| {
-            chat.ui
-                .account
-                .with(|a| a.as_ref().is_some_and(|a| m.author_id == Some(a.id)))
-        })
-    };
     Effect::new(move |_| {
         if let Some(node) = row.get() {
             observe_size(node.unchecked_ref(), move || {
-                if !chat.alive() {
+                if !chat.alive() || chat.searching.get_untracked() {
                     return;
                 }
                 let Some(node) = row.get_untracked() else {
                     return;
                 };
-                chat.scroll();
+                chat.remember_anchor();
                 let _timing = crate::performance::start(2);
                 let changed = chat
                     .messages
                     .update_untracked(|m| m.measure(id, node.get_bounding_client_rect().height()));
                 if changed {
+                    chat.scroll();
                     chat.messages.notify();
                 }
             });
         }
     });
     view! {
-        <li node_ref=row class="min-h-20 pb-4" class:ring-2=move || chat.highlight.get()==Some(id) class:ring-brand=move || chat.highlight.get()==Some(id) data-message-id=id.to_string()>
+        <li node_ref=row class="message-row min-h-20 pb-4" class:ring-2=move || chat.highlight.get()==Some(id) class:ring-brand=move || chat.highlight.get()==Some(id) data-message-id=id.to_string()>
             <div class=move || if message.with(|m| chat.ui.account.with(|a| a.as_ref().is_some_and(|a| m.mentions.contains(&a.id)))) {
                 "rounded-lg bg-brand/10 px-3 py-2"
             } else { "rounded-lg px-3 py-2" }>
@@ -795,37 +823,53 @@ fn MessageRow(
                 <div class="whitespace-pre-wrap break-words text-white/85">{move || message.with(|m| super::message_content::render(if m.deleted { "Message deleted" } else { &m.content }, chat.ui))}</div>
                 <Show when=move || message.with(|m| !m.deleted)>
                     <For each=move || message.with(|m| m.attachments.clone()) key=|a| a.id children=move |attachment| view! { <attachments::Card chat message=id attachment/> }/>
-                    <rich::Actions chat message/>
-                    <div class="flex gap-3 text-xs text-white/50">
-                        <Show when=move ||!own()><super::safety::ReportButton ui=chat.ui target=thiscord_shared::safety::ReportTarget::GuildMessage {guild_id:chat.guild,channel_id:chat.channel,message_id:id}/></Show>
-                        <Show when=move || own() && chat.permissions.with(|p| p.contains(&Permission::EditOwnMessages))>
-                            <button class="icon-button" aria-label=move || crate::i18n::t("Edit message") data-tip=move || crate::i18n::t("Edit") on:click=move |_| {
-                                editing.set(Some(id));
-                                draft.set(message.with_untracked(|m| m.content.clone()));
-                            }><Icon kind=Glyph::Edit/></button>
-                        </Show>
-                        <Show when=move || chat.permissions.with(|p| p.contains(&Permission::ManageMessages) || (own() && p.contains(&Permission::DeleteOwnMessages)))>
-                            <button class="icon-button danger" aria-label=move || crate::i18n::t("Delete message") data-tip=move || crate::i18n::t("Delete") on:click=move |_| {
-                                if !window().confirm_with_message(crate::i18n::t("Delete this message?")).unwrap_or(false) { return; }
-                                let revision = message.with_untracked(|m| m.revision);
-                                let generation = chat.access_generation.get_untracked();
-                                leptos::task::spawn_local(async move {
-                                    let result = chat.request(&ChatRequest::Delete {
-                                        guild_id: chat.guild, channel_id: chat.channel, message_id: id, revision,
-                                    }).await;
-                                    if !chat.alive() || chat.access_generation.get_untracked() != generation { return; }
-                                    match result {
-                                        Ok(ChatResponse::Message { message }) => chat.merge(*message),
-                                        Err(error) => chat.status.set(error),
-                                        _ => {}
-                                    }
-                                });
-                            }><Icon kind=Glyph::Trash/></button>
-                        </Show>
-                    </div>
+                    <rich::Actions chat message editing draft/>
                 </Show>
             </div>
         </li>
+    }
+}
+
+/// Keep presence in the header, using the same overlapping bubbles and root
+/// tooltip as stream viewers. The presence contract supplies names, not photos.
+#[component]
+fn OnlineMembers(chat: Chat) -> impl IntoView {
+    const VISIBLE: usize = 4;
+    let names = Memo::new(move |_| {
+        thiscord_frontend::localized_format!(
+            crate::i18n::language(),
+            "Online here: {}",
+            chat.online.with(|members| members
+                .iter()
+                .map(|m| m.display_name())
+                .collect::<Vec<_>>()
+                .join(", "))
+        )
+    });
+    view! {
+        <Show when=move ||!chat.online.with(Vec::is_empty)>
+            <div class="chat-online" role="group" aria-label=move ||names.get()>
+                <For each=move ||chat.online.with(|members|members.iter().take(VISIBLE).cloned().collect::<Vec<_>>())
+                    key=|member|member.account_id children=move |initial| {
+                        let id = initial.account_id;
+                        let name = Signal::derive(move ||chat.online.with(|members|members.iter().find(|m|m.account_id==id)
+                            .map(|m|m.display_name().to_owned()).unwrap_or_else(||initial.display_name().to_owned())));
+                        view! {
+                            <span class="stream-watcher" tabindex="0" role="img" data-tip=move ||names.get()
+                                aria-label=move ||thiscord_frontend::localized_format!(crate::i18n::language(), "Online here: {}", name.get())>
+                                <crate::avatar::Avatar class="size-6 text-[10px]" name avatar_id=Signal::derive(||None)/>
+                            </span>
+                        }
+                    }/>
+                <Show when=move ||chat.online.with(|members| members.len() > VISIBLE)>
+                    <span class="stream-watcher" tabindex="0" role="img" data-tip=move ||names.get() aria-label=move ||names.get()>
+                        <span class="inline-grid size-6 place-items-center rounded-full text-[10px] font-semibold" aria-hidden="true">
+                            {move ||format!("+{}",chat.online.with(Vec::len).saturating_sub(VISIBLE))}
+                        </span>
+                    </span>
+                </Show>
+            </div>
+        </Show>
     }
 }
 
@@ -1017,6 +1061,29 @@ pub(super) fn ChatPanel(
         ev.prevent_default();
         send();
     };
+    let typing_notice = Memo::new(move |_| {
+        let names = chat.online.with(|members| {
+            members
+                .iter()
+                .filter(|m| {
+                    m.typing
+                        && ui
+                            .account
+                            .with(|a| a.as_ref().is_none_or(|a| a.id != m.account_id))
+                })
+                .map(|m| m.display_name().to_owned())
+                .collect::<Vec<_>>()
+        });
+        if names.is_empty() {
+            String::new()
+        } else {
+            thiscord_frontend::localized_format!(
+                crate::i18n::language(),
+                "{} typing…",
+                names.join(", ")
+            )
+        }
+    });
     let keydown = move |ev: leptos::ev::KeyboardEvent| {
         if mentions.keydown(&ev) {
             return;
@@ -1034,23 +1101,20 @@ pub(super) fn ChatPanel(
             on:dragover=move |ev: leptos::ev::DragEvent| { ev.prevent_default(); if let Some(data) = ev.data_transfer() { data.set_drop_effect(if editing.get_untracked().is_some() { "none" } else { "copy" }); } }
             on:drop=move |ev: leptos::ev::DragEvent| { ev.prevent_default(); if editing.get_untracked().is_none() && let Some(files) = ev.data_transfer().and_then(|d| d.files()) { queue.add(files); } }>
             <attachments::DownloadHost chat/>
-            <header class="shrink-0 border-b border-white/10 p-4"><div class="flex items-center gap-3"><h2 class="min-w-0 flex-1 truncate text-lg font-semibold">{move ||format!("# {}",name.get())}</h2><super::search::Launcher state=search/></div><p class="break-words text-xs text-white/60" role="status">{move||crate::i18n::message(chat.status.get())}</p></header>
+            <header class="shrink-0 border-b border-white/10 p-4">
+                <div class="flex min-w-0 items-center gap-3">
+                    <h2 class="min-w-0 flex-1 truncate text-lg font-semibold">{move ||format!("# {}",name.get())}</h2>
+                    <OnlineMembers chat/>
+                    <super::search::Launcher state=search/>
+                </div>
+                <p class="break-words text-xs text-white/60" role="status">{move||crate::i18n::message(chat.status.get())}</p>
+            </header>
             <rich::Pins chat/>
             <super::search::Bar state=search/>
             <super::search::Results state=search on_jump=Callback::new(move |hit: thiscord_shared::search::Hit| {
                 ui.chat_jump.set(Some((channel, hit.id)));
             })/>
-            <div node_ref=chat.list class="min-h-0 flex-1 overflow-x-hidden overflow-y-auto overscroll-contain p-4" style="overflow-anchor: none" style:display=move ||if search.active.get(){"none"}else{""} on:scroll=move |_| {
-                if search.active.get_untracked() { return; }
-                chat.update_viewport();
-                if !chat.layout_pending.get_untracked() && let Some(node) = chat.list.get_untracked() {
-                    if chat.programmatic_top.get_untracked() == Some(node.scroll_top()) { return; }
-                    chat.programmatic_top.set(None);
-                    chat.anchor.set(None);
-                    chat.bottom.set(node.scroll_height() - node.scroll_top() - node.client_height() < 80);
-                    chat.read();
-                }
-            }>
+            <div node_ref=chat.list class="min-h-0 flex-1 overflow-x-hidden overflow-y-auto overscroll-contain p-4" style="overflow-anchor: none" style:display=move ||if search.active.get(){"none"}else{""} on:scroll=move |_|chat.scrolled()>
                 <div class="h-10">
                     <Show when=move || chat.messages.with(|m| m.older.is_some())>
                         <button class="text-sm text-brand underline" disabled=move || chat.history_loading.get()
@@ -1094,17 +1158,16 @@ pub(super) fn ChatPanel(
             <Show when=move || !search.active.get() && (!chat.bottom.get() || chat.messages.with(|m| m.newer))>
                 <button class="bg-brand/20 py-2 text-sm" on:click=move |_| chat.latest()>{move || crate::i18n::t("Jump to latest / mark read")}</button>
             </Show>
-            <footer class="shrink-0 space-y-2 border-t border-white/10 p-3" style:display=move ||if search.active.get(){"none"}else{""}>
-                <p class="text-xs text-white/50">{move||thiscord_frontend::localized_format!(crate::i18n::language(), "Online here: {}",chat.online.with(|members| members.iter().map(|m|m.display_name()).collect::<Vec<_>>().join(", ")))}</p>
-                <p class="min-h-4 text-xs text-white/60" aria-live="polite">{move||{let names=chat.online.with(|members| members.iter().filter(|m|m.typing&&ui.account.with(|a|a.as_ref().is_none_or(|a|a.id!=m.account_id))).map(|m|m.display_name().to_owned()).collect::<Vec<_>>());if names.is_empty(){String::new()}else{thiscord_frontend::localized_format!(crate::i18n::language(), "{} typing…",names.join(", "))}}}</p>
+            <footer class="flex shrink-0 flex-col gap-2 border-t border-white/10 p-3" style:display=move ||if search.active.get(){"none"}else{""}>
+                <p class="text-xs text-white/60" hidden=move ||typing_notice.with(String::is_empty) aria-live="polite">{move ||typing_notice.get()}</p>
                 <Show when=move||editing.get().is_some()><button class="text-sm text-brand underline" on:click=move |_|{editing.set(None);draft.set(String::new());}>{move || crate::i18n::t("Cancel edit")}</button></Show>
                 <Show when=move ||chat.reply_to.get().is_some()><div class="flex gap-3 text-sm text-sky-300"><span class="max-w-80 truncate">{move || chat.reply_to.get().map(|id|chat.messages.with(|cache|cache.get(id).map(|m|m.with(|m|thiscord_frontend::localized_format!(crate::i18n::language(), "Reply to {}: {}",m.display_name(),m.content.chars().take(80).collect::<String>()))).unwrap_or_else(||crate::i18n::t("Reply selected").into())))}</span><button on:click=move |_|chat.reply_to.set(None)>{move ||crate::i18n::t("Cancel reply")}</button></div></Show>
-                <attachments::Composer queue editing/>
-                <form class="flex gap-3" on:submit=submit>
+                <attachments::QueuedFiles queue/>
+                <form class="flex items-center gap-2" on:submit=submit>
                     <div class="relative min-w-0 flex-1">
                         <mentions::Suggestions picker=mentions/>
-                        <label><span class="sr-only">{move || crate::i18n::t("Message")}</span>
-                            <textarea node_ref=mentions.input class="w-full resize-none rounded-lg bg-black/20 p-3 outline-none focus:ring-2 focus:ring-brand"
+                        <label class="block"><span class="sr-only">{move || crate::i18n::t("Message")}</span>
+                            <textarea node_ref=mentions.input class="block w-full resize-none rounded-lg bg-black/20 p-3 outline-none focus:ring-2 focus:ring-brand"
                                 aria-autocomplete="list" aria-controls="mention-suggestions" aria-expanded=move || mentions.expanded().to_string()
                                 aria-activedescendant=move || mentions.active_descendant()
                                 on:keydown=keydown on:click=move |_| mentions.refresh() on:select=move |_| mentions.refresh()
@@ -1116,7 +1179,10 @@ pub(super) fn ChatPanel(
                                 on:input=move|ev|{draft.set(event_target_value(&ev));chat.typing.set(true);mentions.input();}/>
                         </label>
                     </div>
-                    <button class="icon-button self-end bg-brand" aria-label=move ||if editing.get().is_some(){crate::i18n::t("Save message")}else{crate::i18n::t("Send message")} data-tip=move ||if editing.get().is_some(){crate::i18n::t("Save")}else{crate::i18n::t("Send")} disabled=move||loading.get()||!composer_ready()||!chat.permissions.with(|p|p.contains(&Permission::SendMessages))><Icon kind=Glyph::Send/></button>
+                    <div class="flex shrink-0 items-center gap-1">
+                        <attachments::Picker queue editing/>
+                        <button class="icon-button bg-brand" aria-label=move ||if editing.get().is_some(){crate::i18n::t("Save message")}else{crate::i18n::t("Send message")} data-tip=move ||if editing.get().is_some(){crate::i18n::t("Save")}else{crate::i18n::t("Send")} disabled=move||loading.get()||!composer_ready()||!chat.permissions.with(|p|p.contains(&Permission::SendMessages))><Icon kind=Glyph::Send/></button>
+                    </div>
                 </form>
             </footer>
         </section>

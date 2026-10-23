@@ -132,30 +132,236 @@ pub(super) fn Reply(chat: Chat, message: RwSignal<ChatMessage>) -> impl IntoView
         }>{move ||message.with(|m|m.reply.as_ref().map(|r|r.preview.clone().filter(|s|!s.is_empty()).unwrap_or_else(||if r.preview.is_some(){crate::i18n::t("Attachment message").into()}else{crate::i18n::t("Original message unavailable").into()})).unwrap_or_default())}</button>
     </Show>}
 }
+/// A small button panel with the same surface as the app's context menus.
+/// Listeners exist only while open and are released with the virtualized row.
 #[component]
-pub(super) fn Actions(chat: Chat, message: RwSignal<ChatMessage>) -> impl IntoView {
-    let busy = RwSignal::new(false);
-    view! {<div class="my-1 flex flex-wrap items-center gap-2 text-xs">
-        <Show when=move ||chat.permissions.with(|p|p.contains(&Permission::SendMessages))>
-            <button class="rounded px-2 py-1 text-sky-300 hover:bg-white/10" on:click=move |_|chat.reply_to.set(Some(message.with_untracked(|m|m.id)))>{move ||crate::i18n::t("Reply")}</button>
-        </Show>
-        <Show when=move ||chat.permissions.with(|p|p.contains(&Permission::ManageMessages))>
-            <button class="rounded px-2 py-1 hover:bg-white/10" on:click=move |_|message.with_untracked(|m|chat.action(ChatRequest::Pin{guild_id:chat.guild,channel_id:chat.channel,message_id:m.id,revision:m.revision,pinned:!m.pinned}))>{move ||message.with(|m|if m.pinned {crate::i18n::t("Unpin")}else{crate::i18n::t("Pin")})}</button>
-        </Show>
-        <For each=move || {REACTION_EMOJI.iter().map(|s|s.to_string()).collect::<Vec<_>>()} key=|e|e.clone() children=move |emoji|{
-            let emoji=StoredValue::new(emoji);
-            let reaction=Memo::new(move |_|message.with(|m|m.reactions.iter().find(|r|r.emoji==emoji.get_value()).cloned()));
-            view!{<button class="rounded border border-white/10 px-2 py-1 hover:bg-white/10" class=("bg-brand/30",move ||reaction.with(|r|r.as_ref().is_some_and(|r|r.mine))) aria-pressed=move ||reaction.with(|r|r.as_ref().is_some_and(|r|r.mine)).to_string() aria-label=move ||thiscord_frontend::localized_format!(crate::i18n::language(), "React {}",emoji.get_value()) disabled=move ||busy.get() || !chat.permissions.with(|p|p.contains(&Permission::SendMessages)) on:click=move |_|{
-                busy.set(true);let id=message.with_untracked(|m|m.id);let present=!reaction.with_untracked(|r|r.as_ref().is_some_and(|r|r.mine));let generation=chat.access_generation.get_untracked();
-                leptos::task::spawn_local(async move {
-                    let result=chat.request(&ChatRequest::React{guild_id:chat.guild,channel_id:chat.channel,message_id:id,emoji:emoji.get_value(),present}).await;
-                    if !chat.alive() || chat.access_generation.get_untracked()!=generation {return;}
-                    busy.try_set(false);
-                    match result {Ok(ChatResponse::Message{message})=>chat.merge(*message),Err(e)=>chat.status.set(e),_=>{}}
+fn ActionPopover(
+    chat: Chat,
+    label: &'static str,
+    icon: Glyph,
+    children: Children,
+) -> impl IntoView {
+    let open = RwSignal::new(false);
+    let group = NodeRef::<leptos::html::Div>::new();
+    let trigger = NodeRef::<leptos::html::Button>::new();
+    let panel = NodeRef::<leptos::html::Div>::new();
+    let position = RwSignal::new((8.0, 8.0));
+    let dismiss = move || {
+        if let Some(button) = trigger.get_untracked() {
+            let _ = button.focus();
+        }
+        open.set(false);
+    };
+    Effect::new(move |_| {
+        chat.viewport.track();
+        chat.access_generation.track();
+        open.set(false);
+    });
+    Effect::new(move |_| {
+        if !open.get() {
+            return;
+        }
+        if let (Some(button), Some(panel)) = (trigger.get(), panel.get()) {
+            // Reveal before measuring: the reactive hidden attribute can update
+            // after this effect, otherwise the first open measures a zero box.
+            panel.set_hidden(false);
+            let anchor = button.get_bounding_client_rect();
+            let size = panel.get_bounding_client_rect();
+            let w = window()
+                .inner_width()
+                .ok()
+                .and_then(|v| v.as_f64())
+                .unwrap_or(800.0);
+            let h = window()
+                .inner_height()
+                .ok()
+                .and_then(|v| v.as_f64())
+                .unwrap_or(600.0);
+            let y = if anchor.bottom() + 6.0 + size.height() <= h - 8.0 {
+                anchor.bottom() + 6.0
+            } else {
+                anchor.top() - size.height() - 6.0
+            };
+            position.set((
+                (anchor.right() - size.width()).clamp(8.0, (w - size.width() - 8.0).max(8.0)),
+                y.clamp(8.0, (h - size.height() - 8.0).max(8.0)),
+            ));
+            if let Ok(Some(first)) = panel.query_selector("button:not(:disabled)")
+                && let Ok(first) = first.dyn_into::<web_sys::HtmlElement>()
+            {
+                let _ = first.focus();
+            }
+        }
+        let outside = window_event_listener(leptos::ev::pointerdown, move |e| {
+            let inside = e
+                .target()
+                .and_then(|t| t.dyn_into::<web_sys::Node>().ok())
+                .is_some_and(|target| {
+                    group
+                        .get_untracked()
+                        .is_some_and(|group| group.contains(Some(&target)))
                 });
-            }>{emoji.get_value()}" "{move ||reaction.with(|r|r.as_ref().map(|r|r.count.to_string()).unwrap_or_default())}</button>}
-        }/>
-    </div>}
+            if !inside {
+                open.set(false);
+            }
+        });
+        let resize = window_event_listener(leptos::ev::resize, move |_| open.set(false));
+        on_cleanup(move || {
+            outside.remove();
+            resize.remove();
+        });
+    });
+    view! {
+        <div node_ref=group
+            on:focusout=move |e| {
+                let inside = e.related_target().and_then(|t| t.dyn_into::<web_sys::Node>().ok())
+                    .is_some_and(|target| group.get_untracked().is_some_and(|group| group.contains(Some(&target))));
+                if !inside { open.set(false); }
+            }
+            on:keydown=move |e| {
+                if e.key() == "Escape" && open.get_untracked() {
+                    e.prevent_default(); e.stop_propagation(); dismiss();
+                }
+            }>
+            <button node_ref=trigger type="button" class="icon-button" aria-label=move ||crate::i18n::t(label)
+                data-tip=move ||crate::i18n::t(label) aria-expanded=move ||open.get().to_string()
+                on:click=move |_|open.update(|value| *value = !*value)><Icon kind=icon/></button>
+            <div node_ref=panel class="message-popover" hidden=move ||!open.get() role="group" aria-label=move ||crate::i18n::t(label)
+                style:left=move ||format!("{}px",position.get().0) style:top=move ||format!("{}px",position.get().1)
+                on:click=move |e| {
+                    if e.target().and_then(|t| t.dyn_into::<web_sys::Element>().ok())
+                        .and_then(|e| e.closest("button").ok().flatten()).is_some() { dismiss(); }
+                }>
+                {children()}
+            </div>
+        </div>
+    }
+}
+
+#[component]
+fn ReactionButton(
+    chat: Chat,
+    message: RwSignal<ChatMessage>,
+    busy: RwSignal<bool>,
+    emoji: String,
+    #[prop(default = false)] count: bool,
+) -> impl IntoView {
+    let emoji = StoredValue::new(emoji);
+    let reaction = Memo::new(move |_| {
+        message.with(|m| {
+            m.reactions
+                .iter()
+                .find(|r| r.emoji == emoji.get_value())
+                .cloned()
+        })
+    });
+    view! {
+        <button type="button" aria-pressed=move ||reaction.with(|r|r.as_ref().is_some_and(|r|r.mine)).to_string()
+            aria-label=move ||thiscord_frontend::localized_format!(crate::i18n::language(), "React {}", emoji.get_value())
+            disabled=move ||busy.get() || !chat.permissions.with(|p|p.contains(&Permission::SendMessages))
+            on:click=move |_| {
+                busy.set(true);
+                let id = message.with_untracked(|m|m.id);
+                let present = !reaction.with_untracked(|r|r.as_ref().is_some_and(|r|r.mine));
+                let generation = chat.access_generation.get_untracked();
+                leptos::task::spawn_local(async move {
+                    let result = chat.request(&ChatRequest::React { guild_id:chat.guild, channel_id:chat.channel, message_id:id, emoji:emoji.get_value(), present }).await;
+                    if !chat.alive() || chat.access_generation.get_untracked()!=generation { return; }
+                    busy.try_set(false);
+                    match result { Ok(ChatResponse::Message { message }) => chat.merge(*message), Err(e) => chat.status.set(e), _ => {} }
+                });
+            }>
+            <span>{emoji.get_value()}</span>
+            {count.then(||view! {<span>{move ||reaction.with(|r|r.as_ref().map(|r|r.count.to_string()).unwrap_or_default())}</span>})}
+        </button>
+    }
+}
+
+#[component]
+pub(super) fn Actions(
+    chat: Chat,
+    message: RwSignal<ChatMessage>,
+    editing: RwSignal<Option<MessageId>>,
+    draft: RwSignal<String>,
+) -> impl IntoView {
+    let busy = RwSignal::new(false);
+    let own = move || {
+        message.with(|m| {
+            chat.ui
+                .account
+                .with(|a| a.as_ref().is_some_and(|a| m.author_id == Some(a.id)))
+        })
+    };
+    let can_send = move || {
+        chat.permissions
+            .with(|p| p.contains(&Permission::SendMessages))
+    };
+    let can_edit = move || {
+        own()
+            && chat
+                .permissions
+                .with(|p| p.contains(&Permission::EditOwnMessages))
+    };
+    let can_delete = move || {
+        chat.permissions.with(|p| {
+            p.contains(&Permission::ManageMessages)
+                || (own() && p.contains(&Permission::DeleteOwnMessages))
+        })
+    };
+    let can_pin = move || {
+        chat.permissions
+            .with(|p| p.contains(&Permission::ManageMessages))
+    };
+    let has_more = move || !own() || can_edit() || can_delete() || can_pin();
+    view! {
+        <Show when=move ||can_send() || has_more()>
+            <div class="message-actions" role="group" aria-label=move ||crate::i18n::t("Message actions")>
+                <Show when=can_send>
+                    <button type="button" class="icon-button" aria-label=move ||crate::i18n::t("Reply") data-tip=move ||crate::i18n::t("Reply")
+                        on:click=move |_|chat.reply_to.set(Some(message.with_untracked(|m|m.id)))><Icon kind=Glyph::Reply/></button>
+                    <ActionPopover chat label="Add reaction" icon=Glyph::Reaction>
+                        <div class="message-reaction-picker">
+                            {REACTION_EMOJI.iter().map(|emoji| view! {<ReactionButton chat message busy emoji=emoji.to_string()/>}).collect_view()}
+                        </div>
+                    </ActionPopover>
+                </Show>
+                <Show when=has_more>
+                    <ActionPopover chat label="More message options" icon=Glyph::More>
+                        <div class="message-options">
+                            <Show when=can_pin>
+                                <button type="button" class="context-item" on:click=move |_|message.with_untracked(|m|chat.action(ChatRequest::Pin {guild_id:chat.guild,channel_id:chat.channel,message_id:m.id,revision:m.revision,pinned:!m.pinned}))>
+                                    <Icon kind=Glyph::Pin/>{move ||message.with(|m|if m.pinned {crate::i18n::t("Unpin")}else{crate::i18n::t("Pin")})}
+                                </button>
+                            </Show>
+                            <Show when=can_edit>
+                                <button type="button" class="context-item" on:click=move |_| {
+                                    editing.set(Some(message.with_untracked(|m|m.id)));
+                                    draft.set(message.with_untracked(|m|m.content.clone()));
+                                }><Icon kind=Glyph::Edit/>{move ||crate::i18n::t("Edit message")}</button>
+                            </Show>
+                            <Show when=move ||!own()>
+                                <button type="button" class="context-item" on:click=move |_|chat.ui.friends.report_target.set(Some(thiscord_shared::safety::ReportTarget::GuildMessage {guild_id:chat.guild,channel_id:chat.channel,message_id:message.with_untracked(|m|m.id)}))>
+                                    <Icon kind=Glyph::Flag/>{move ||crate::i18n::t("Report")}
+                                </button>
+                            </Show>
+                            <Show when=can_delete>
+                                <button type="button" class="context-item context-danger" on:click=move |_| {
+                                    if !window().confirm_with_message(crate::i18n::t("Delete this message?")).unwrap_or(false) { return; }
+                                    message.with_untracked(|m|chat.action(ChatRequest::Delete {guild_id:chat.guild,channel_id:chat.channel,message_id:m.id,revision:m.revision}));
+                                }><Icon kind=Glyph::Trash/>{move ||crate::i18n::t("Delete message")}</button>
+                            </Show>
+                        </div>
+                    </ActionPopover>
+                </Show>
+            </div>
+        </Show>
+        <Show when=move ||message.with(|m|!m.reactions.is_empty())>
+            <div class="message-reactions">
+                <For each=move ||message.with(|m|m.reactions.iter().filter(|r|r.count > 0).map(|r|r.emoji.clone()).collect::<Vec<_>>()) key=|emoji|emoji.clone()
+                    children=move |emoji|view! {<ReactionButton chat message busy emoji count=true/>}/>
+            </div>
+        </Show>
+    }
 }
 #[component]
 pub(super) fn Pins(chat: Chat) -> impl IntoView {

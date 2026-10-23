@@ -2,13 +2,26 @@ use super::Ui;
 use crate::account_client;
 use leptos::{either::Either, prelude::*};
 
+fn highlighted_mentions(text: &str) -> impl IntoView + use<> {
+    use thiscord_frontend::mentions::Span;
+    thiscord_frontend::mentions::spans(text)
+        .into_iter()
+        .map(|span| match span {
+            Span::Text(text) => Either::Left(text.to_owned()),
+            Span::Mention(text) => Either::Right(view! {
+                <span class="rounded bg-brand/20 px-1 font-medium text-[#c7ccff]">{text.to_owned()}</span>
+            }),
+        })
+        .collect_view()
+}
+
 fn plain(text: &str, ui: Ui) -> impl IntoView + use<> {
     thiscord_frontend::message_links::spans(text)
         .into_iter()
         .map(|span| {
             let text = span.text.to_owned();
             match span.href {
-                None => Either::Left(text),
+                None => Either::Left(highlighted_mentions(&text)),
                 Some(href) => {
                     let url = href.clone();
                     Either::Right(view! {

@@ -519,23 +519,37 @@ impl Queue {
 }
 
 #[component]
-pub(super) fn Composer(
+pub(super) fn Picker(
     queue: Queue,
     editing: RwSignal<Option<thiscord_shared::MessageId>>,
 ) -> impl IntoView {
     let input = NodeRef::<leptos::html::Input>::new();
+    let disabled = move || {
+        editing.get().is_some()
+            || queue.count() >= MAX_MESSAGE_ATTACHMENTS
+            || !queue
+                .chat
+                .permissions
+                .with(|p| p.contains(&thiscord_shared::permissions::Permission::SendMessages))
+    };
     view! {
-        <div class="space-y-2">
-            <div class="flex items-center gap-3 text-xs text-white/60">
-                <input node_ref=input type="file" multiple class="hidden" on:change=move |ev| {
-                    let input = event_target::<web_sys::HtmlInputElement>(&ev);
-                    if let Some(files) = input.files() { queue.add(files); } input.set_value("");
-                }/>
-                <button type="button" class="rounded bg-white/10 px-3 py-2 text-sm hover:bg-white/20 disabled:opacity-50"
-                    disabled=move || { editing.get().is_some() || queue.count() >= MAX_MESSAGE_ATTACHMENTS || !queue.chat.permissions.with(|p| p.contains(&thiscord_shared::permissions::Permission::SendMessages)) }
-                    on:click=move |_| { if let Some(input) = input.get() { input.click(); } }>{move || crate::i18n::t("Attach files")}</button>
-                <span>{move || crate::i18n::t("Drop files here · up to 4 files, 25 MiB each")}</span>
-            </div>
+        <input node_ref=input type="file" multiple class="hidden" disabled=disabled on:change=move |ev| {
+            let input = event_target::<web_sys::HtmlInputElement>(&ev);
+            if !disabled() && let Some(files) = input.files() { queue.add(files); }
+            input.set_value("");
+        }/>
+        <button type="button" class="icon-button" aria-label=move ||crate::i18n::t("Attach files")
+            data-tip=move ||format!("{}\n{}",crate::i18n::t("Attach files"),crate::i18n::t("Drop files here · up to 4 files, 25 MiB each"))
+            disabled=disabled on:click=move |_| { if let Some(input) = input.get() { input.click(); } }>
+            <super::Icon kind=super::Glyph::Paperclip/>
+        </button>
+    }
+}
+
+#[component]
+pub(super) fn QueuedFiles(queue: Queue) -> impl IntoView {
+    view! {
+        <Show when=move ||{queue.count() > 0}>
             <ul class="flex max-h-48 flex-wrap gap-2 overflow-y-auto">
                 <For each=move || queue.items.with(|v| v.iter().map(|i| i.key).collect::<Vec<_>>()) key=|key| *key children=move |key| {
                     let item = move || queue.items.with(|v| v.iter().find(|i| i.key == key).cloned());
@@ -554,7 +568,7 @@ pub(super) fn Composer(
                     </li> }
                 }/>
             </ul>
-        </div>
+        </Show>
     }
 }
 

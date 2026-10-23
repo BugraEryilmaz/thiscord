@@ -173,6 +173,13 @@ impl<T> MessageCache<T> {
         None
     }
 
+    /// A measured row can be shorter than its estimated anchor offset. Keep the
+    /// same pixel position, but attach it to the row that now contains it so a
+    /// later edit/resize of the preceding row cannot pull the viewport backward.
+    pub fn normalize_anchor(&self, anchor: Anchor) -> Option<Anchor> {
+        self.anchor(self.anchor_top(anchor)?)
+    }
+
     pub fn window(&self, top: f64, viewport: f64) -> Window {
         let mut result = Window::default();
         let mut y = 0.0;
@@ -361,6 +368,45 @@ mod tests {
         // Shrinking the long row (e.g. deletion) restores the original anchor offset.
         cache.measure(message(49).id, ESTIMATED_HEIGHT);
         assert_eq!(cache.anchor_top(anchor), Some(top));
+    }
+
+    #[test]
+    fn measured_anchor_tracks_the_visible_row_after_an_estimate_shrinks() {
+        let mut cache = MessageCache::default();
+        merge(&mut cache, (1..=10).map(message).collect(), Merge::Older);
+        let estimated = cache.anchor(100.0).unwrap();
+        cache.measure(message(1).id, 80.0);
+        let measured = cache.normalize_anchor(estimated).unwrap();
+        assert_eq!(measured.id, message(2).id);
+        assert_eq!(measured.offset, 20.0);
+        assert_eq!(cache.anchor_top(measured), Some(100.0));
+
+        // An edit or a narrow window makes the preceding row taller. Retaining
+        // the estimated anchor would incorrectly put message 1 back on screen.
+        cache.measure(message(1).id, 240.0);
+        assert_eq!(cache.anchor_top(measured), Some(260.0));
+        assert_eq!(cache.normalize_anchor(measured), Some(measured));
+    }
+
+    #[test]
+    fn normalized_anchor_handles_large_shrinks_and_history_control_offsets() {
+        let mut cache = MessageCache::default();
+        merge(&mut cache, (1..=10).map(message).collect(), Merge::Older);
+        let above = cache.anchor(-56.0).unwrap();
+        assert_eq!(cache.normalize_anchor(above), Some(above));
+        cache.measure(message(1).id, 600.0);
+        let tall = cache.anchor(550.0).unwrap();
+        cache.measure(message(1).id, 80.0);
+        let visible = cache.normalize_anchor(tall).unwrap();
+        assert_ne!(visible.id, tall.id);
+        assert_eq!(cache.anchor_top(visible), Some(550.0));
+        cache.measure(message(1).id, 600.0);
+        assert_eq!(cache.anchor_top(visible), Some(1070.0));
+        assert!(
+            cache
+                .normalize_anchor(cache.target_anchor(message(11).id))
+                .is_none()
+        );
     }
 
     #[test]

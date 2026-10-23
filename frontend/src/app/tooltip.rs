@@ -46,59 +46,65 @@ pub(super) fn Host() -> impl IntoView {
     };
     Effect::new(move |_| {
         text.track();
-        let Some(node) = tooltip.get() else {
-            return;
-        };
-        let Some(element) = active.get_value() else {
-            return;
-        };
-        if original_parent.get_value().is_none() {
-            original_parent.set_value(node.parent_node());
-        }
-        // Native modal dialogs occupy the browser's top layer. Keep their hints
-        // in that layer too, while retaining one tooltip and one accessible ID.
-        if let Some(dialog) = element.closest("dialog[open]").ok().flatten() {
-            let _ = dialog.append_child(&node);
-        } else if let Some(fullscreen) = document().fullscreen_element()
-            && fullscreen.contains(Some(&element))
-        {
-            let _ = fullscreen.append_child(&node);
-        } else if let Some(parent) = original_parent.get_value() {
-            let _ = parent.append_child(&node);
-        }
-        let rect = element.get_bounding_client_rect();
-        let size = node.get_bounding_client_rect();
-        let width = window()
-            .inner_width()
-            .ok()
-            .and_then(|v| v.as_f64())
-            .unwrap_or(800.0);
-        let height = window()
-            .inner_height()
-            .ok()
-            .and_then(|v| v.as_f64())
-            .unwrap_or(600.0);
-        let right = element.closest(".server-rail").ok().flatten().is_some();
-        let (x, y) = if right {
-            (
-                rect.right() + 12.0,
-                rect.top() + (rect.height() - size.height()) / 2.0,
-            )
-        } else {
-            (
-                rect.left() + (rect.width() - size.width()) / 2.0,
-                if rect.top() >= size.height() + 16.0 {
-                    rect.top() - size.height() - 8.0
-                } else {
-                    rect.bottom() + 8.0
-                },
-            )
-        };
-        position.set((
-            x.clamp(8.0, (width - size.width() - 8.0).max(8.0)),
-            y.clamp(8.0, (height - size.height() - 8.0).max(8.0)),
-        ));
-        visible.set(true);
+        tooltip.track();
+        leptos::task::spawn_local(async move {
+            // Measure the current label after its reactive text reaches the DOM.
+            // The first hover (or a longer label) otherwise clamps the old width.
+            leptos::task::tick().await;
+            let Some(node) = tooltip.try_get_untracked().flatten() else {
+                return;
+            };
+            let Some(element) = active.get_value() else {
+                return;
+            };
+            if original_parent.get_value().is_none() {
+                original_parent.set_value(node.parent_node());
+            }
+            // Native modal dialogs occupy the browser's top layer. Keep their hints
+            // in that layer too, while retaining one tooltip and one accessible ID.
+            if let Some(dialog) = element.closest("dialog[open]").ok().flatten() {
+                let _ = dialog.append_child(&node);
+            } else if let Some(fullscreen) = document().fullscreen_element()
+                && fullscreen.contains(Some(&element))
+            {
+                let _ = fullscreen.append_child(&node);
+            } else if let Some(parent) = original_parent.get_value() {
+                let _ = parent.append_child(&node);
+            }
+            let rect = element.get_bounding_client_rect();
+            let size = node.get_bounding_client_rect();
+            let width = window()
+                .inner_width()
+                .ok()
+                .and_then(|v| v.as_f64())
+                .unwrap_or(800.0);
+            let height = window()
+                .inner_height()
+                .ok()
+                .and_then(|v| v.as_f64())
+                .unwrap_or(600.0);
+            let right = element.closest(".server-rail").ok().flatten().is_some();
+            let (x, y) = if right {
+                (
+                    rect.right() + 12.0,
+                    rect.top() + (rect.height() - size.height()) / 2.0,
+                )
+            } else {
+                (
+                    rect.left() + (rect.width() - size.width()) / 2.0,
+                    if rect.top() >= size.height() + 16.0 {
+                        rect.top() - size.height() - 8.0
+                    } else {
+                        rect.bottom() + 8.0
+                    },
+                )
+            };
+            position.set((
+                x.clamp(8.0, (width - size.width() - 8.0).max(8.0)),
+                y.clamp(8.0, (height - size.height() - 8.0).max(8.0)),
+            ));
+            visible.set(true);
+        });
     });
     let over = window_event_listener(leptos::ev::mouseover, move |e| show(trigger(e.target())));
     let focus = window_event_listener(leptos::ev::focusin, move |e| show(trigger(e.target())));
