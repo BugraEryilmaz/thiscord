@@ -164,6 +164,26 @@ pub(crate) async fn send_frame(
 mod tests {
     use super::*;
     #[test]
+    fn command_errors_keep_correlation_without_remote_text() {
+        let request_id = "00000000-0000-0000-0000-000000000001".parse().unwrap();
+        let error = Error::api(thiscord_shared::ApiError {
+            code: thiscord_shared::ErrorCode::Forbidden,
+            message: "untrusted remote text with a secret".into(),
+            request_id,
+            fields: vec![],
+        });
+        let reply = format!("Command failed: {error}");
+        assert!(reply.contains("Forbidden"));
+        assert!(reply.contains(&request_id.to_string()));
+        assert!(!reply.contains("secret"));
+        assert!(!reply.contains("untrusted"));
+        assert_eq!(
+            Error::message("Voice connection timed out").to_string(),
+            "Voice connection timed out"
+        );
+    }
+
+    #[test]
     fn credentials_require_secure_origin_and_no_embedded_secrets() {
         for bad in [
             "http://example.com",

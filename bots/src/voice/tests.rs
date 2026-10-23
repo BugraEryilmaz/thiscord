@@ -86,12 +86,59 @@ struct ReceiverPeer {
     packets: mpsc::Receiver<rtp::Packet>,
     stop: watch::Sender<bool>,
 }
+
+#[tokio::test]
+async fn unreachable_ice_server_does_not_block_direct_voice_answer() {
+    // A bound socket that never replies models STUN/TURN being unreachable
+    // from one of the bot's interfaces, including its loopback candidate.
+    let blackhole = std::net::UdpSocket::bind("127.0.0.1:0").unwrap();
+    let address = blackhole.local_addr().unwrap();
+    let mut bot = peer::Peer::new(&[thiscord_shared::voice::IceServer {
+        urls: vec![
+            format!("stun:{address}"),
+            format!("turn:{address}?transport=udp"),
+        ],
+        username: "fixture".into(),
+        credential: "fixture".into(),
+    }])
+    .await
+    .unwrap();
+    let receiver = ReceiverPeer::new().await;
+    receiver
+        .pc
+        .add_track(peer::track() as Arc<dyn TrackLocal>)
+        .await
+        .unwrap();
+    let offer = serde_json::to_string(&receiver.offer().await).unwrap();
+    let result = timeout(Duration::from_secs(12), async {
+        let answer = bot.answer(&offer).await?;
+        let answer: RTCSessionDescription = serde_json::from_str(&answer).unwrap();
+        assert!(answer.sdp.contains("a=candidate:"));
+        receiver.pc.set_remote_description(answer).await.unwrap();
+        bot.connected().await
+    })
+    .await;
+    bot.close().await;
+    receiver.close().await;
+    result
+        .expect("bot must answer before the SFU negotiation deadline")
+        .unwrap();
+}
 impl ReceiverPeer {
     async fn new() -> Self {
         let gathered = Arc::new(Notify::new());
         let (packets, rx) = mpsc::channel(8);
         let (stop, cancellation) = watch::channel(false);
         let mut engine = MediaEngine::default();
+        engine
+            .register_codec(
+                rtc::rtp_transceiver::rtp_sender::RTCRtpCodecParameters {
+                    rtp_codec: peer::codec(thiscord_shared::voice::MediaKind::ScreenVideo),
+                    payload_type: thiscord_shared::voice::MediaKind::ScreenVideo.payload_type(),
+                },
+                rtc::rtp_transceiver::rtp_sender::RtpCodecKind::Video,
+            )
+            .unwrap();
         engine.register_default_codecs().unwrap();
         let pc = PeerConnectionBuilder::new()
             .with_media_engine(engine)
@@ -132,6 +179,38 @@ impl Drop for ReceiverPeer {
             let _ = timeout(IO_TIMEOUT, pc.close()).await;
         });
     }
+}
+
+#[tokio::test]
+async fn video_answer_negotiates_three_sendonly_tracks() {
+    use thiscord_shared::voice::MediaKind;
+    timeout(Duration::from_secs(10), async {
+        let mut bot = peer::Peer::new(&[]).await.unwrap();
+        let receiver = ReceiverPeer::new().await;
+        for kind in [
+            MediaKind::Microphone,
+            MediaKind::ScreenVideo,
+            MediaKind::SystemAudio,
+        ] {
+            receiver
+                .pc
+                .add_track(peer::media_track(kind))
+                .await
+                .unwrap();
+        }
+        let offer = serde_json::to_string(&receiver.offer().await).unwrap();
+        let answer = bot.answer_with_screen(&offer, true).await.unwrap();
+        let answer: RTCSessionDescription = serde_json::from_str(&answer).unwrap();
+        assert_eq!(answer.sdp.matches("a=sendonly").count(), 3);
+        assert!(!answer.sdp.contains("a=recvonly") && !answer.sdp.contains("a=sendrecv"));
+        assert!(answer.sdp.contains("H264/90000"));
+        receiver.pc.set_remote_description(answer).await.unwrap();
+        bot.connected().await.unwrap();
+        bot.close().await;
+        receiver.close().await;
+    })
+    .await
+    .unwrap();
 }
 
 /// Real Opus and two real encrypted WebRTC hops. The middle peer forwards the
@@ -334,6 +413,9 @@ async fn signaling_joins_restricted_and_refresh_closes_legacy_session() {
             "00000000-0000-0000-0000-000000000002".parse().unwrap(),
             "00000000-0000-0000-0000-000000000003".parse().unwrap(),
         ).await.unwrap();
+        assert_eq!(*voice.status().borrow(), PlaybackEvent::Idle);
+        let error = voice.play_youtube_video("https://youtu.be/Iq0R9Lmc26c").await.unwrap_err();
+        assert!(error.to_string().contains("does not support bot screen sharing"));
         assert_eq!(*voice.status().borrow(), PlaybackEvent::Idle);
         refresh.send(()).await.unwrap();
         let mut status = voice.status();

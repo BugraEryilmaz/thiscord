@@ -34,6 +34,8 @@ impl PeerConnectionEventHandler for Handler {
 pub(super) struct Peer {
     pub(super) pc: Arc<dyn PeerConnection>,
     pub(super) track: Arc<TrackLocalStaticRTP>,
+    pub(super) video: Arc<TrackLocalStaticRTP>,
+    pub(super) stream_audio: Arc<TrackLocalStaticRTP>,
     pub(super) state: watch::Receiver<RTCPeerConnectionState>,
     gathered: Arc<Notify>,
     closed: bool,
@@ -53,6 +55,15 @@ impl Peer {
         let gathered = Arc::new(Notify::new());
         let (state_tx, state) = watch::channel(RTCPeerConnectionState::New);
         let mut engine = MediaEngine::default();
+        engine
+            .register_codec(
+                rtc::rtp_transceiver::rtp_sender::RTCRtpCodecParameters {
+                    rtp_codec: codec(MediaKind::ScreenVideo),
+                    payload_type: MediaKind::ScreenVideo.payload_type(),
+                },
+                RtpCodecKind::Video,
+            )
+            .map_err(|_| Error::message("Video codec setup failed"))?;
         engine
             .register_default_codecs()
             .map_err(|_| Error::message("Voice codec setup failed"))?;
@@ -84,13 +95,24 @@ impl Peer {
         Ok(Self {
             pc: Arc::new(pc),
             track: track(),
+            video: media_track(MediaKind::ScreenVideo),
+            stream_audio: media_track(MediaKind::SystemAudio),
             gathered,
             state,
             closed: false,
         })
     }
 
+    #[cfg(test)]
     pub(super) async fn answer(&self, sdp: &str) -> Result<String, Error> {
+        self.answer_with_screen(sdp, false).await
+    }
+
+    pub(super) async fn answer_with_screen(
+        &self,
+        sdp: &str,
+        screen: bool,
+    ) -> Result<String, Error> {
         self.pc
             .set_remote_description(
                 serde_json::from_str(sdp).map_err(|_| Error::message("Invalid voice offer"))?,
@@ -102,12 +124,24 @@ impl Peer {
             .add_track(self.track.clone() as Arc<dyn TrackLocal>)
             .await
             .map_err(|_| Error::message("Voice track setup failed"))?;
+        let mut senders = vec![sender.id()];
+        if screen {
+            for track in [&self.video, &self.stream_audio] {
+                senders.push(
+                    self.pc
+                        .add_track(track.clone() as Arc<dyn TrackLocal>)
+                        .await
+                        .map_err(|_| Error::message("Screen-share track setup failed"))?
+                        .id(),
+                );
+            }
+        }
         for transceiver in self.pc.get_transceivers().await {
             let ours = transceiver
                 .sender()
                 .await
                 .map_err(|_| Error::message("Voice direction setup failed"))?
-                .is_some_and(|candidate| candidate.id() == sender.id());
+                .is_some_and(|candidate| senders.contains(&candidate.id()));
             transceiver
                 .set_direction(if ours {
                     RTCRtpTransceiverDirection::Sendonly
@@ -126,15 +160,27 @@ impl Peer {
             .set_local_description(answer)
             .await
             .map_err(|_| Error::message("Voice answer failed"))?;
-        self.gathered.notified().await;
-        serde_json::to_string(
-            &self
-                .pc
-                .local_description()
-                .await
-                .ok_or_else(|| Error::message("Missing voice answer"))?,
-        )
-        .map_err(|_| Error::message("Voice answer encoding failed"))
+        // The SFU allows 15 seconds for negotiation. A STUN/TURN request from
+        // an unreachable interface (notably loopback) can take longer than
+        // that, even after usable host or relay candidates have been gathered.
+        // Send the candidates available within our budget instead of holding
+        // the entire answer hostage to the slowest ICE server/interface.
+        let _ = timeout(Duration::from_secs(8), self.gathered.notified()).await;
+        let answer = self
+            .pc
+            .local_description()
+            .await
+            .ok_or_else(|| Error::message("Missing voice answer"))?;
+        if !answer
+            .sdp
+            .lines()
+            .any(|line| line.starts_with("a=candidate:"))
+        {
+            return Err(Error::message(
+                "No voice network candidates; check the bot host network and STUN/TURN configuration",
+            ));
+        }
+        serde_json::to_string(&answer).map_err(|_| Error::message("Voice answer encoding failed"))
     }
 
     pub(super) async fn connected(&self) -> Result<(), Error> {
@@ -168,23 +214,45 @@ impl Drop for Peer {
 }
 
 pub(super) fn track() -> Arc<TrackLocalStaticRTP> {
+    media_track(MediaKind::Microphone)
+}
+
+pub(super) fn codec(kind: MediaKind) -> RTCRtpCodec {
+    RTCRtpCodec {
+        mime_type: if kind.is_video() {
+            "video/H264"
+        } else {
+            "audio/opus"
+        }
+        .into(),
+        clock_rate: kind.clock_rate(),
+        channels: if kind.is_video() { 0 } else { 2 },
+        sdp_fmtp_line: if kind.is_video() {
+            thiscord_shared::screen::H264_FMTP
+        } else {
+            "minptime=10;useinbandfec=1"
+        }
+        .into(),
+        ..Default::default()
+    }
+}
+
+pub(super) fn media_track(kind: MediaKind) -> Arc<TrackLocalStaticRTP> {
     Arc::new(TrackLocalStaticRTP::new(MediaStreamTrack::new(
-        "bot-audio".into(),
-        "bot-microphone".into(),
-        "bot-audio".into(),
-        RtpCodecKind::Audio,
+        format!("bot-{kind:?}"),
+        format!("bot-{kind:?}"),
+        "bot-media".into(),
+        if kind.is_video() {
+            RtpCodecKind::Video
+        } else {
+            RtpCodecKind::Audio
+        },
         vec![RTCRtpEncodingParameters {
             rtp_coding_parameters: RTCRtpCodingParameters {
-                ssrc: Some(MediaKind::Microphone.publisher_ssrc()),
+                ssrc: Some(kind.publisher_ssrc()),
                 ..Default::default()
             },
-            codec: RTCRtpCodec {
-                mime_type: "audio/opus".into(),
-                clock_rate: 48_000,
-                channels: 2,
-                sdp_fmtp_line: "minptime=10;useinbandfec=1".into(),
-                ..Default::default()
-            },
+            codec: codec(kind),
             ..Default::default()
         }],
     )))

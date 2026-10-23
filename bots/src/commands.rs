@@ -155,10 +155,8 @@ impl Bot {
                 let reply = context.clone();
                 match tokio::time::timeout(Duration::from_secs(30), handler(context, args)).await {
                     Ok(Ok(())) => {}
-                    Ok(Err(_)) => {
-                        reply
-                            .reply("Command failed. Check the bot configuration or permissions.")
-                            .await?;
+                    Ok(Err(error)) => {
+                        reply.reply(format!("Command failed: {error}")).await?;
                     }
                     Err(_) => {
                         reply.reply("Command timed out.").await?;

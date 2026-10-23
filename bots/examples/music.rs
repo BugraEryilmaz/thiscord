@@ -16,6 +16,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let file = std::env::var("THISCORD_BOT_AUDIO_FILE").ok();
     let player = Arc::new(Mutex::new(None::<Voice>));
     let play = player.clone();
+    let video = player.clone();
     let local = player.clone();
     let stop = player.clone();
     let leave = player.clone();
@@ -34,6 +35,22 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                     state.as_ref().unwrap().play_youtube(args.trim()).await?;
                     ctx.reply("Playback requested. Use /stop to stop or /leave to disconnect.")
                         .await?;
+                    Ok(())
+                }
+            },
+        )?
+        .command(
+            "video",
+            "Share one YouTube video with its audio",
+            move |ctx, args| {
+                let player = video.clone();
+                async move {
+                    let mut state = player.lock().await;
+                    if state.is_none() {
+                        *state = Some(ctx.join_voice(voice_channel).await?);
+                    }
+                    state.as_ref().unwrap().play_youtube_video(args.trim()).await?;
+                    ctx.reply("Video requested. Open my screen-share tile in the voice channel. Use /status for errors or /stop to stop.").await?;
                     Ok(())
                 }
             },

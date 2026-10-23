@@ -1,4 +1,4 @@
-//! Outgoing-only native voice, without audio devices or desktop dependencies.
+//! Outgoing-only native voice and video, without audio devices or desktop dependencies.
 //!
 //! Playback is streamed through `ffmpeg` (and `yt-dlp` for YouTube). Install these
 //! executables on PATH. No media files are downloaded to disk. `play_*` accepts a
@@ -27,6 +27,7 @@ mod media;
 mod peer;
 #[cfg(test)]
 mod tests;
+mod video;
 
 const IO_TIMEOUT: Duration = Duration::from_secs(2);
 const JOIN_TIMEOUT: Duration = Duration::from_secs(25);
@@ -38,6 +39,7 @@ pub enum PlaybackEvent {
     Idle,
     Starting,
     Playing,
+    SharingVideo,
     Finished,
     Stopped,
     Error(&'static str),
@@ -64,12 +66,36 @@ impl Drop for Inner {
     }
 }
 enum Command {
-    Play(
-        media::Source,
-        Publication,
-        oneshot::Sender<Result<(), Error>>,
-    ),
+    Play(Source, Publication, oneshot::Sender<Result<(), Error>>),
     Stop(oneshot::Sender<Result<(), Error>>),
+}
+
+enum Source {
+    Audio(media::Source),
+    Video(media::Source),
+}
+impl From<media::Source> for Source {
+    fn from(source: media::Source) -> Self {
+        Self::Audio(source)
+    }
+}
+enum Player {
+    Audio(media::Player),
+    Video(video::Player),
+}
+impl Player {
+    async fn stop(&mut self) {
+        match self {
+            Self::Audio(p) => p.stop().await,
+            Self::Video(p) => p.stop().await,
+        }
+    }
+    async fn finish(&mut self) -> Result<(), &'static str> {
+        match self {
+            Self::Audio(p) => p.finish().await,
+            Self::Video(p) => p.finish().await,
+        }
+    }
 }
 
 /// Issuance snapshot, retained even if the caller is delayed before enqueueing.
@@ -138,7 +164,7 @@ impl Voice {
 
     /// Accept a local file for streaming. Starting another file replaces playback.
     pub async fn play_file(&self, path: impl AsRef<Path>) -> Result<(), Error> {
-        self.play(media::Source::File(path.as_ref().to_owned()))
+        self.play(Source::Audio(media::Source::File(path.as_ref().to_owned())))
             .await
     }
 
@@ -147,11 +173,27 @@ impl Voice {
     /// Uses direct HTTPS formats without external JavaScript challenge helpers;
     /// videos requiring those helpers fail through the status watch.
     pub async fn play_youtube(&self, url: &str) -> Result<(), Error> {
-        self.play(media::Source::Youtube(media::youtube_url(url)?))
+        self.play(Source::Audio(media::Source::Youtube(media::youtube_url(
+            url,
+        )?)))
+        .await
+    }
+
+    /// Share a YouTube video and its audio on the channel's screen-share tile.
+    pub async fn play_youtube_video(&self, url: &str) -> Result<(), Error> {
+        self.play(Source::Video(media::Source::Youtube(media::youtube_url(
+            url,
+        )?)))
+        .await
+    }
+
+    /// Share an operator-selected local video with audio. Never pass chat input here.
+    pub async fn play_video_file(&self, path: impl AsRef<Path>) -> Result<(), Error> {
+        self.play(Source::Video(media::Source::File(path.as_ref().to_owned())))
             .await
     }
 
-    async fn play(&self, source: media::Source) -> Result<(), Error> {
+    async fn play(&self, source: Source) -> Result<(), Error> {
         let (tx, rx) = oneshot::channel();
         let publication = *self.0.publication.borrow();
         self.command(Command::Play(source, publication, tx), rx)
@@ -269,26 +311,32 @@ async fn session(
     ready: oneshot::Sender<Result<(), Error>>,
 ) {
     let mut peer = None;
+    let mut screen_supported = false;
     let joined = tokio::select! { biased;
         _ = async { let _ = cancel.wait_for(|value| *value).await; } => Err(Error::message("Voice join cancelled")),
         result = timeout(JOIN_TIMEOUT, async {
             send(&mut socket, ClientEvent::Join { token, guild_id: guild, channel_id: channel, attempt: None }).await?;
             let (sdp, servers, slot) = match receive(&mut socket).await? {
-                ServerEvent::Offer { sdp, ice_servers, slot, can_speak: true, .. } => (sdp, ice_servers, slot),
+                ServerEvent::Offer { sdp, ice_servers, slot, can_speak: true, screen_video, screen_subscriptions, .. } => {
+                    screen_supported = screen_video && screen_subscriptions;
+                    (sdp, ice_servers, slot)
+                },
+                ServerEvent::Offer { can_speak: false, .. } => return Err(Error::message("The bot needs Speak permission in the voice channel")),
                 ServerEvent::Error { error } => return Err(Error::api(error)),
                 _ => return Err(Error::message("Voice join denied")),
             };
             peer = Some(peer::Peer::new(&servers).await?);
             let p = peer.as_ref().expect("peer created");
-            let sdp = p.answer(&sdp).await?;
+            let sdp = p.answer_with_screen(&sdp, screen_supported).await?;
             send(&mut socket, ClientEvent::Answer {
                 sdp, packet_redundancy: false, remote_audio: false,
-                screen_feedback: false, screen_subscriptions: false, screen_layers: false,
+                screen_feedback: false, screen_subscriptions: screen_supported, screen_layers: false,
             }).await?;
             loop {
                 match receive(&mut socket).await? {
                     ServerEvent::Participants { members } => { own(&members, slot)?; break; },
                     ServerEvent::Pong {} => {},
+                    ServerEvent::Error { error } => return Err(Error::api(error)),
                     _ => return Err(Error::message("Voice admission denied")),
                 }
             }
@@ -301,6 +349,7 @@ async fn session(
                         if member.muted && member.deafened { break member.clone(); }
                     },
                     ServerEvent::Pong {} => {},
+                    ServerEvent::Error { error } => return Err(Error::api(error)),
                     _ => return Err(Error::message("Voice admission denied")),
                 }
             };
@@ -308,7 +357,7 @@ async fn session(
             Ok(admitted)
         }) => result.unwrap_or_else(|_| Err(Error::message("Voice join timed out"))),
     };
-    let mut player: Option<media::Player> = None;
+    let mut player: Option<Player> = None;
     let result = match joined {
         Ok(admitted) => {
             publication.send_replace(Publication {
@@ -323,6 +372,7 @@ async fn session(
                 &mut socket,
                 peer.as_ref().expect("joined peer"),
                 admitted,
+                screen_supported,
                 &mut commands,
                 &publication,
                 #[cfg(all(test, target_os = "linux"))]
@@ -365,14 +415,21 @@ async fn run(
     socket: &mut Socket,
     peer: &peer::Peer,
     admitted: Participant,
+    screen_supported: bool,
     commands: &mut mpsc::Receiver<Command>,
     publication: &watch::Sender<Publication>,
     #[cfg(all(test, target_os = "linux"))] hold_commands: &std::sync::atomic::AtomicU8,
     cancel: &mut watch::Receiver<bool>,
     status: &watch::Sender<PlaybackEvent>,
-    player: &mut Option<media::Player>,
+    player: &mut Option<Player>,
 ) -> Result<(), Error> {
     let mut clock = peer::RtpClock::new();
+    let mut video_clock = video::Clock::new();
+    let mut stream_clock = video::Clock::new();
+    let mut waiting_video = None;
+    let mut screen_epoch = None;
+    let mut video_tick = tokio::time::interval(Duration::from_millis(4));
+    video_tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
     let mut tick = tokio::time::interval(Duration::from_millis(20));
     tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
     let mut heartbeat = tokio::time::interval(Duration::from_secs(15));
@@ -380,7 +437,7 @@ async fn run(
     let mut pong = Instant::now();
     let mut allowed = false;
     let mut starting = None;
-    let mut pending_start: Option<(media::Source, u64)> = None;
+    let mut pending_start: Option<(Source, u64)> = None;
     // Join already observed the restricted roster. Track subsequent snapshots,
     // including stop/natural completion, rather than treating each as a reply.
     let mut restriction_known = true;
@@ -426,11 +483,17 @@ async fn run(
                         let _ = reply.send(Err(Error::message("Voice publication restricted")));
                         continue;
                     },
+                    Command::Play(Source::Video(_), _, reply) if !screen_supported => {
+                        let _ = reply.send(Err(Error::message("The server does not support bot screen sharing")));
+                        continue;
+                    },
                     command => command,
                 };
                 allowed = false;
                 starting = None;
                 pending_start = None;
+                waiting_video = None;
+                screen_epoch = None;
                 if let Some(mut previous) = player.take() { previous.stop().await; }
                 restricted(socket, true).await?;
                 match command {
@@ -474,6 +537,7 @@ async fn run(
                     // Every such boundary consumes the Play request permanently.
                     if moderator_restricted || publication_changed
                         || allowed && (member.muted || member.deafened)
+                        || screen_epoch.is_some_and(|epoch| !member.sharing_screen || !member.sharing_audio || member.screen_epoch != epoch)
                     {
                         // Publish invalidation before decoder cleanup can yield
                         // to concurrent callers. Never drain the command queue:
@@ -484,15 +548,26 @@ async fn run(
                             generation,
                             restricted: moderator_restricted,
                         });
-                        let had_playback = pending_start.is_some() || player.is_some();
+                        let had_playback = pending_start.is_some() || player.is_some() || waiting_video.is_some();
                         allowed = false;
                         starting = None;
                         pending_start = None;
+                        waiting_video = None;
+                        screen_epoch = None;
                         if let Some(mut previous) = player.take() { previous.stop().await; }
                         if had_playback {
                             restricted(socket, true).await?;
                             status.send_replace(PlaybackEvent::Stopped);
                         }
+                    } else if waiting_video.is_some() && member.sharing_screen && member.sharing_audio
+                        && !member.is_muted() && !member.is_deafened() {
+                        let source = waiting_video.take().expect("waiting video");
+                        screen_epoch = Some(member.screen_epoch);
+                        video_clock.restart();
+                        stream_clock.restart();
+                        *player = Some(Player::Video(video::Player::start(source)));
+                        allowed = true;
+                        starting = None;
                     } else if player.is_some() && !member.is_muted() && !member.is_deafened() {
                         allowed = true;
                         starting = None;
@@ -518,12 +593,45 @@ async fn run(
                 send(socket, ClientEvent::Ping {}).await?;
                 pings_sent += 1;
             },
+            _ = video_tick.tick(), if matches!(player, Some(Player::Video(_))) && allowed => {
+                // Bound work per tick so heartbeats, revocations and stop remain responsive.
+                for _ in 0..16 {
+                    let Some(Player::Video(current)) = player.as_mut() else { break; };
+                    match current.packets.try_recv() {
+                        Ok(packet) => {
+                            if packet.arrived.elapsed() > Duration::from_millis(250) {
+                                return Err(Error::message("Video sender fell behind"));
+                            }
+                            let (track, clock) = if packet.kind == thiscord_shared::voice::MediaKind::ScreenVideo {
+                                (&peer.video, &mut video_clock)
+                            } else { (&peer.stream_audio, &mut stream_clock) };
+                            timeout(Duration::from_millis(50), track.write_rtp(clock.packet(packet.rtp, packet.kind))).await
+                                .map_err(|_| Error::message("Video media write timed out"))?
+                                .map_err(|_| Error::message("Video media write failed"))?;
+                            if first { status.send_replace(PlaybackEvent::SharingVideo); first = false; }
+                        },
+                        Err(mpsc::error::TryRecvError::Empty) => break,
+                        Err(mpsc::error::TryRecvError::Disconnected) => {
+                            allowed = false;
+                            screen_epoch = None;
+                            let mut finished = player.take().expect("active video");
+                            let result = finished.finish().await;
+                            restricted(socket, true).await?;
+                            status.send_replace(match result {
+                                Ok(()) => PlaybackEvent::Finished,
+                                Err(message) => PlaybackEvent::Error(message),
+                            });
+                            break;
+                        },
+                    }
+                }
+            },
             _ = tick.tick() => {
                 if starting.is_some_and(|at: Instant| at.elapsed() >= STATE_TIMEOUT) {
                     return Err(Error::message("Voice state acknowledgement timed out"));
                 }
                 if !allowed { continue; }
-                let Some(current) = player.as_mut() else { continue; };
+                let Some(Player::Audio(current)) = player.as_mut() else { continue; };
                 match current.frames.try_recv() {
                     Ok(payload) => {
                         let packet = clock.packet(payload, first);
@@ -556,7 +664,24 @@ async fn run(
             // Only a restricted roster plus the ordered Pong permits this step.
             restricted(socket, false).await?;
             restriction_known = false;
-            *player = Some(media::Player::start(source));
+            match source {
+                Source::Audio(source) => {
+                    *player = Some(Player::Audio(media::Player::start(source)))
+                }
+                Source::Video(source) => {
+                    send(
+                        socket,
+                        ClientEvent::Screen {
+                            active: true,
+                            audio: true,
+                            // Only the negotiated layered protocol accepts quality metadata.
+                            quality: None,
+                        },
+                    )
+                    .await?;
+                    waiting_video = Some(source);
+                }
+            }
         }
     }
 }
