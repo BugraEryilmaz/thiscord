@@ -459,8 +459,8 @@ diesel::joinable!(messages -> accounts (author_id));
 diesel::joinable!(notification_preferences -> accounts (account_id));
 diesel::joinable!(oauth_attempts -> accounts (account_id));
 diesel::joinable!(oauth_attempts -> sessions (session_id));
-diesel::joinable!(scripting_bots -> guilds (guild_id));
 diesel::joinable!(safety_reports -> guilds (guild_id));
+diesel::joinable!(scripting_bots -> guilds (guild_id));
 diesel::joinable!(session_tokens -> sessions (session_id));
 diesel::joinable!(sessions -> accounts (account_id));
 
@@ -499,8 +499,8 @@ diesel::allow_tables_to_appear_in_same_query!(
     notification_preferences,
     notification_release,
     oauth_attempts,
-    scripting_bots,
     safety_reports,
+    scripting_bots,
     session_tokens,
     sessions,
 );
