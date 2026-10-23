@@ -157,6 +157,16 @@ pub(crate) fn bearer(headers: &HeaderMap) -> String {
         .to_owned()
 }
 
+pub(crate) fn actor_bearer(headers: &HeaderMap) -> String {
+    headers
+        .get("authorization")
+        .and_then(|h| h.to_str().ok())
+        .and_then(|s| s.strip_prefix("Bearer "))
+        .filter(|s| s.len() == 43 || (s.len() == 47 && s.starts_with("bot_")))
+        .unwrap_or("")
+        .to_owned()
+}
+
 // Keep admission ahead of all database work, including rate-limit queries.
 fn admit(command: &AccountRequest) -> Result<Arc<tokio::sync::OwnedSemaphorePermit>, Failure> {
     // Provider discovery has its own budget so it cannot exhaust local workers.

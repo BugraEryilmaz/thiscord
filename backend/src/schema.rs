@@ -26,6 +26,7 @@ diesel::table! {
         display_name -> Text,
         bio -> Text,
         created_at -> Timestamptz,
+        is_bot -> Bool,
     }
 }
 
@@ -295,6 +296,15 @@ diesel::table! {
 }
 
 diesel::table! {
+    scripting_bots (account_id) {
+        account_id -> Uuid,
+        guild_id -> Uuid,
+        creator_id -> Nullable<Uuid>,
+        created_at -> Timestamptz,
+    }
+}
+
+diesel::table! {
     session_tokens (token_hash) {
         token_hash -> Text,
         session_id -> Uuid,
@@ -339,6 +349,7 @@ diesel::joinable!(messages -> accounts (author_id));
 diesel::joinable!(notification_preferences -> accounts (account_id));
 diesel::joinable!(oauth_attempts -> accounts (account_id));
 diesel::joinable!(oauth_attempts -> sessions (session_id));
+diesel::joinable!(scripting_bots -> guilds (guild_id));
 diesel::joinable!(session_tokens -> sessions (session_id));
 diesel::joinable!(sessions -> accounts (account_id));
 
@@ -371,6 +382,7 @@ diesel::allow_tables_to_appear_in_same_query!(
     notification_preferences,
     notification_release,
     oauth_attempts,
+    scripting_bots,
     session_tokens,
     sessions,
 );

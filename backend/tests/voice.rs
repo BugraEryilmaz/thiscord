@@ -23,6 +23,8 @@ mod recovery;
 mod red;
 #[path = "voice/roster.rs"]
 mod roster;
+#[path = "voice/scripting_bots.rs"]
+mod scripting_bots;
 
 struct Database {
     connection: PgConnection,

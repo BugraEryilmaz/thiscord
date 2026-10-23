@@ -45,7 +45,7 @@ pub(crate) fn execute(c: &mut PgConnection, sql: &str, params: &[&str]) -> Resul
     }
     Ok(q.execute(c)?)
 }
-pub(super) fn secret() -> String {
+pub(crate) fn secret() -> String {
     let mut b = [0u8; 32];
     OsRng.fill_bytes(&mut b);
     URL_SAFE_NO_PAD.encode(b)
@@ -88,7 +88,11 @@ fn validate_password(password: &str) -> Result<(), Failure> {
 }
 pub(super) fn email(value: &str) -> Result<String, Failure> {
     let value = value.trim().to_ascii_lowercase();
-    if value.len() > 254 || !value.is_ascii() || value.parse::<lettre::Address>().is_err() {
+    if value.len() > 254
+        || !value.is_ascii()
+        || value.ends_with("@bots.invalid")
+        || value.parse::<lettre::Address>().is_err()
+    {
         return Err(Failure::Invalid("Enter a valid email address"));
     }
     Ok(value)
@@ -110,6 +114,38 @@ pub(crate) struct Session {
     pub id: SessionId,
     pub account_id: AccountId,
     pub reauthenticated_at: Option<DateTime<Utc>>,
+    #[serde(default)]
+    pub bot_guild: Option<thiscord_shared::GuildId>,
+}
+
+impl Session {
+    pub(crate) fn require_guild(&self, guild: thiscord_shared::GuildId) -> Result<(), Failure> {
+        if self.bot_guild.is_some_and(|installed| installed != guild) {
+            Err(Failure::Forbidden)
+        } else {
+            Ok(())
+        }
+    }
+}
+
+/// Only chat, voice and dedicated bot ingress may accept nonhuman credentials.
+pub(crate) fn authenticate_actor(c: &mut PgConnection, token: &str) -> Result<Session, Failure> {
+    if token.starts_with("bot_") {
+        crate::bots::authenticate(c, token)
+    } else {
+        authenticate(c, token)
+    }
+}
+
+pub(crate) fn authenticate_actor_retained(
+    c: &mut PgConnection,
+    token: &str,
+) -> Result<Session, Failure> {
+    if token.starts_with("bot_") {
+        crate::bots::authenticate(c, token)
+    } else {
+        authenticate_retained(c, token)
+    }
 }
 
 /// Resolve a barrier key only; callers must still authenticate after capturing its epoch.
@@ -117,7 +153,7 @@ pub(crate) fn token_session(c: &mut PgConnection, token: &str) -> Result<Session
     if token.len() != 43 {
         return Err(Failure::Unauthorized);
     }
-    query(c, "SELECT to_jsonb(s) AS data FROM sessions s JOIN session_tokens t ON t.session_id=s.id WHERE t.token_hash=$1", &[&digest(token)])?
+    query(c, "SELECT to_jsonb(s) AS data FROM sessions s JOIN session_tokens t ON t.session_id=s.id JOIN accounts a ON a.id=s.account_id WHERE t.token_hash=$1 AND NOT a.is_bot", &[&digest(token)])?
         .pop().ok_or(Failure::Unauthorized)
 }
 
@@ -145,7 +181,7 @@ fn authenticate_token(
     // Ordinary checks neither lock exclusively nor write activity. Actions recheck
     // under read_session/lock_session; replay and activity refresh take the slow path.
     if let Some(session) = query(c,
-        "SELECT to_jsonb(s) AS data FROM sessions s JOIN session_tokens t ON t.session_id=s.id WHERE t.token_hash=$1 AND t.active AND NOT s.revoked AND s.expires_at>now() AND s.last_seen_at>now()-interval '5 minutes'",
+        "SELECT to_jsonb(s) AS data FROM sessions s JOIN session_tokens t ON t.session_id=s.id JOIN accounts a ON a.id=s.account_id WHERE t.token_hash=$1 AND NOT a.is_bot AND t.active AND NOT s.revoked AND s.expires_at>now() AND s.last_seen_at>now()-interval '5 minutes'",
         &[&hash],
     )?.pop() {
         return Ok(session);
@@ -153,7 +189,7 @@ fn authenticate_token(
     // Commit replay revocation even though authentication itself fails.
     let mut revocation = None;
     let session=c.transaction::<_, Failure, _>(|c| {
-        let sessions: Vec<Session> = query(c, "SELECT to_jsonb(s) AS data FROM sessions s JOIN session_tokens t ON t.session_id=s.id WHERE t.token_hash=$1 AND NOT s.revoked AND s.expires_at>now() AND s.last_seen_at>now()-interval '7 days' FOR UPDATE OF s", &[&hash])?;
+        let sessions: Vec<Session> = query(c, "SELECT to_jsonb(s) AS data FROM sessions s JOIN session_tokens t ON t.session_id=s.id JOIN accounts a ON a.id=s.account_id WHERE t.token_hash=$1 AND NOT a.is_bot AND NOT s.revoked AND s.expires_at>now() AND s.last_seen_at>now()-interval '7 days' FOR UPDATE OF s", &[&hash])?;
         let Some(session) = sessions.into_iter().next() else { return Ok(None); };
         let active: Vec<bool> = query(c, "SELECT to_jsonb(active) AS data FROM session_tokens WHERE token_hash=$1", &[&hash])?;
         if active != [true] {
@@ -211,8 +247,12 @@ pub(crate) fn read_session(
     // snapshot so a rotation that we waited for cannot leave an old active token.
     let valid: Vec<bool> = query(
         c,
-        "SELECT to_jsonb(TRUE) AS data FROM sessions WHERE id=$1::uuid AND account_id=$2::uuid AND NOT revoked AND expires_at>now() AND last_seen_at>now()-interval '7 days' FOR SHARE",
-        &[&session.id.to_string(), &session.account_id.to_string()],
+        "SELECT to_jsonb(TRUE) AS data FROM sessions WHERE id=$1::uuid AND account_id=$2::uuid AND NOT revoked AND expires_at>now() AND (last_seen_at>now()-interval '7 days' OR $3::boolean) FOR SHARE",
+        &[
+            &session.id.to_string(),
+            &session.account_id.to_string(),
+            &session.bot_guild.is_some().to_string(),
+        ],
     )?;
     if valid.is_empty()
         || query::<bool>(

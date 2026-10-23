@@ -56,7 +56,7 @@ fn call(c: &mut PgConnection, id: CallId, actor: AccountId) -> Result<Call, Fail
 fn lock_people(c: &mut PgConnection, a: AccountId, b: AccountId) -> Result<(), Failure> {
     let ids: Vec<AccountId> = query(
         c,
-        "SELECT to_jsonb(id) AS data FROM accounts WHERE id IN ($1::uuid,$2::uuid) ORDER BY id FOR NO KEY UPDATE",
+        "SELECT to_jsonb(id) AS data FROM accounts WHERE id IN ($1::uuid,$2::uuid) AND NOT is_bot ORDER BY id FOR NO KEY UPDATE",
         &[&a.to_string(), &b.to_string()],
     )?;
     if a == b || ids.len() != 2 {
@@ -101,10 +101,11 @@ pub(super) fn dispatch(pool: &DbPool, token: &str, request: Request) -> Result<R
                 if !(2..=64).contains(&text.chars().count()) || text.chars().any(char::is_control) {
                     return Err(Failure::Invalid("Search with 2–64 display name or username characters, without control characters"));
                 }
-                let people=query(c,"SELECT jsonb_build_object('id',a.id,'username',a.username,'display_name',a.display_name,'avatar_id',v.id) AS data FROM accounts a LEFT JOIN account_avatars v ON v.account_id=a.id WHERE a.id<>$1::uuid AND (strpos(lower(a.username),lower($2))>0 OR strpos(lower(a.display_name),lower($2))>0) ORDER BY a.username,a.id LIMIT 20", &[&actor.to_string(), text])?;
+                let people=query(c,"SELECT jsonb_build_object('id',a.id,'username',a.username,'display_name',a.display_name,'avatar_id',v.id) AS data FROM accounts a LEFT JOIN account_avatars v ON v.account_id=a.id WHERE NOT a.is_bot AND a.id<>$1::uuid AND (strpos(lower(a.username),lower($2))>0 OR strpos(lower(a.display_name),lower($2))>0) ORDER BY a.username,a.id LIMIT 20", &[&actor.to_string(), text])?;
                 Ok(Response::People {people})
             }
             Request::Add {account_id: other} => {
+                if query::<bool>(c,"SELECT to_jsonb(is_bot) AS data FROM accounts WHERE id=$1::uuid", &[&other.to_string()])? != [false] { return Err(Failure::Forbidden); }
                 if query::<bool>(c,"SELECT to_jsonb(email_verified) AS data FROM accounts WHERE id=$1::uuid", &[&actor.to_string()])? != [true] {return Err(Failure::Forbidden);}
                 let existing: Option<Pair> = query(c,"SELECT to_jsonb(f) AS data FROM friendships f WHERE low_id=LEAST($1::uuid,$2::uuid) AND high_id=GREATEST($1::uuid,$2::uuid) FOR UPDATE", &[&actor.to_string(),&other.to_string()])?.pop();
                 if let Some(p)=&existing && p.state!="removed" { return Ok(Response::Done); }

@@ -191,7 +191,7 @@ pub(crate) async fn identify(
     let pool = pool.clone();
     let token = token.to_owned();
     let session = tokio::task::spawn_blocking(move || {
-        crate::auth::store::authenticate(&mut *crate::auth::store::connection(&pool)?, &token)
+        crate::auth::store::authenticate_actor(&mut *crate::auth::store::connection(&pool)?, &token)
     })
     .await
     .map_err(|_| crate::auth::Failure::Unavailable)??;

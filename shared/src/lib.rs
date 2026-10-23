@@ -4,6 +4,8 @@
 use serde::{Deserialize, Serialize};
 
 pub mod account;
+#[path = "../../bots/contracts.rs"]
+pub mod bots;
 pub mod camera;
 pub mod chat;
 pub mod error;
