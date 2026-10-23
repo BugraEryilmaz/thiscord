@@ -111,7 +111,7 @@ pub(crate) fn instance(
         role,
     })
 }
-fn capacity(c: &mut PgConnection, owner: AccountId) -> Result<GuildCapacity, Failure> {
+pub(crate) fn capacity(c: &mut PgConnection, owner: AccountId) -> Result<GuildCapacity, Failure> {
     let access = instance(c, owner)?;
     let policy = access
         .policies

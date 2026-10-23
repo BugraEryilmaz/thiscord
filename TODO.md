@@ -396,6 +396,13 @@ speaker isolation and physical acoustic acceptance remain future work.
 
 See [screen-sharing.md](docs/screen-sharing.md) for limits and remaining platform checks.
 
+## 8b. Scripting bots
+
+- [x] Rust command registration, live mentioned-message subscriptions and text actions under `bots/`.
+- [x] Guild-scoped bot credentials, provisioning/rotation/revocation and authoritative channel permissions.
+- [x] Lightweight outgoing Opus/WebRTC playback without microphone/DSP; echo and music examples.
+- [ ] Live YouTube extraction, OS credential-store and audible playback acceptance on Windows/macOS/Linux.
+
 ## 9. Hosting and releases
 
 - [x] Public welcome page with responsive design, latest GitHub installer links,

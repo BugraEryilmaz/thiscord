@@ -15,7 +15,7 @@ use thiscord_shared::{
 };
 use uuid::Uuid;
 
-pub(super) fn checked<T>(
+pub(crate) fn checked<T>(
     pool: &DbPool,
     token: &str,
     guild: GuildId,
@@ -24,7 +24,7 @@ pub(super) fn checked<T>(
     f: impl FnOnce(&mut PgConnection, AccountId, &GuildState) -> Result<T, Failure>,
 ) -> Result<T, Failure> {
     let mut c = connection(pool)?;
-    let session = auth::authenticate(&mut c, token)?;
+    let session = auth::authenticate_actor(&mut c, token)?;
     checked_session(&mut c, token, &session, guild, channel, permission, f)
 }
 fn checked_session<T>(
@@ -36,13 +36,22 @@ fn checked_session<T>(
     permission: Option<Permission>,
     f: impl FnOnce(&mut PgConnection, AccountId, &GuildState) -> Result<T, Failure>,
 ) -> Result<T, Failure> {
+    session.require_guild(guild)?;
     c.transaction(|c| {
-        auth::read_session(c, token, session)?;
+        // Bot accounts are owned by the guild and deleted with it. Lock their
+        // guild before their account/session so cascade deletion cannot invert
+        // the ordinary human account -> guild lock order.
+        if session.bot_guild.is_none() {
+            auth::read_session(c, token, session)?;
+        }
         execute(
             c,
             "SELECT id FROM guilds WHERE id=$1::uuid FOR SHARE",
             &[&guild.to_string()],
         )?;
+        if session.bot_guild.is_some() {
+            auth::read_session(c, token, session)?;
+        }
         let state = load(c, guild, &[session.account_id], channel)?;
         check_channel(&state, session.account_id, channel, permission)?;
         f(c, session.account_id, &state)
@@ -186,7 +195,7 @@ pub(super) fn dispatch(
     command: ChatRequest,
 ) -> Result<(ChatResponse, Option<super::notifications::Change>), Failure> {
     let mut c = connection(pool)?;
-    let session = auth::authenticate(&mut c, token)?;
+    let session = auth::authenticate_actor(&mut c, token)?;
     drop(c);
     auth::rate_limit(
         pool,
@@ -437,6 +446,9 @@ pub(super) fn dispatch(
         event.mentions = message.mentions.clone();
         event.recipients = Some(notification_recipients);
         crate::notifications::publish(event);
+        if session.bot_guild.is_none() {
+            crate::bots::publish(message.clone());
+        }
     }
     Ok((response, change))
 }
