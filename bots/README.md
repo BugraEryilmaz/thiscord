@@ -237,6 +237,12 @@ whether playback actually started. The bot deliberately disables external
 JavaScript challenge helpers, so videos requiring those helpers remain unsupported
 even with both tools installed.
 
+`YouTube requires sign-in or bot verification from this host` means extraction
+was rejected before audio/video was available. It is not a silent video or a
+voice permission failure. Downloader failures take precedence over the decoder's
+empty-input error. The SDK drains stderr through a bounded classifier and reports
+only static categories; raw tool output, signed URLs and paths are never exposed.
+
 Audio is decoded to 48 kHz stereo PCM through bounded pipes, encoded as 20 ms
 Opus frames, and paced into the existing SFU. No microphone, echo cancellation,
 noise suppression, audio device or receive pipeline is created. The send-only

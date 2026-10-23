@@ -32,6 +32,7 @@ impl Player {
                     result.unwrap_or(Err("Video exceeded the six-hour limit"))
                 },
             };
+            let result = processes.prefer_download_error(result).await;
             processes.stop().await;
             result
         });
@@ -105,11 +106,7 @@ async fn run(
                 .arg(path);
         }
         Source::Youtube(url) => {
-            processes.downloader = Some(
-                media::downloader(&url, true)
-                    .spawn()
-                    .map_err(|e| MediaTool::YoutubeDownloader.spawn_error(e))?,
-            );
+            processes.start_downloader(&url, true)?;
             ffmpeg
                 .stdin(Stdio::piped())
                 .args(["-protocol_whitelist", "pipe", "-i", "pipe:0"]);

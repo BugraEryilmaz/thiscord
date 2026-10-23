@@ -76,6 +76,7 @@ impl Player {
                     result.unwrap_or(Err("Playback exceeded the six-hour limit"))
                 },
             };
+            let result = processes.prefer_download_error(result).await;
             processes.stop().await;
             result
         });
@@ -118,6 +119,53 @@ impl Drop for Player {
 pub(super) struct Processes {
     pub(super) decoder: Option<Child>,
     pub(super) downloader: Option<Child>,
+    downloader_log: Option<DownloadLog>,
+}
+
+const DOWNLOAD_FAILED: &str =
+    "yt-dlp could not retrieve media; check whether the video is accessible from this bot host";
+const SIGN_IN_REQUIRED: &str = "YouTube requires sign-in or bot verification from this host. Anonymous playback is unavailable";
+
+struct DownloadLog(JoinHandle<Option<&'static str>>);
+impl Drop for DownloadLog {
+    fn drop(&mut self) {
+        self.0.abort();
+    }
+}
+
+/// Drain stderr without retaining or exposing arbitrary tool output (which may
+/// contain signed URLs or private paths). Keep only a bounded matching window
+/// and a static classification; continue draining after a match to avoid stalls.
+async fn download_diagnostic(mut input: impl AsyncRead + Unpin) -> Option<&'static str> {
+    let mut chunk = [0_u8; 1024];
+    let mut window = Vec::with_capacity(1280);
+    let mut diagnostic = None;
+    loop {
+        let count = input.read(&mut chunk).await.ok()?;
+        if count == 0 {
+            return diagnostic;
+        }
+        window.extend_from_slice(&chunk[..count]);
+        let text = String::from_utf8_lossy(&window).to_ascii_lowercase();
+        if text.contains("sign in to confirm")
+            || text.contains("confirm you're not a bot")
+            || text.contains("confirm you’re not a bot")
+        {
+            diagnostic = Some(SIGN_IN_REQUIRED);
+        } else if diagnostic.is_none() {
+            diagnostic = if text.contains("requested format is not available") {
+                Some("YouTube has no supported direct media format for this video")
+            } else if text.contains("private video") || text.contains("video unavailable") {
+                Some("This YouTube video is private or unavailable from the bot host")
+            } else {
+                None
+            };
+        }
+        let keep = window.len().min(256);
+        let start = window.len() - keep;
+        window.copy_within(start.., 0);
+        window.truncate(keep);
+    }
 }
 
 #[derive(Clone, Copy)]
@@ -221,6 +269,44 @@ pub(super) fn downloader(url: &str, video: bool) -> Command {
 }
 
 impl Processes {
+    pub(super) fn start_downloader(&mut self, url: &str, video: bool) -> Result<()> {
+        let mut child = downloader(url, video)
+            .stderr(Stdio::piped())
+            .spawn()
+            .map_err(|error| MediaTool::YoutubeDownloader.spawn_error(error))?;
+        if let Some(stderr) = child.stderr.take() {
+            self.downloader_log = Some(DownloadLog(tokio::spawn(download_diagnostic(stderr))));
+        }
+        self.downloader = Some(child);
+        Ok(())
+    }
+
+    pub(super) async fn prefer_download_error(&mut self, result: Result<()>) -> Result<()> {
+        if result.is_ok() {
+            return result;
+        }
+        let Some(child) = self.downloader.as_mut() else {
+            return result;
+        };
+        // Decoder EOF can win the race with downloader exit notification. Bound
+        // this wait so an independent decoder failure cannot block cancellation.
+        if let Ok(Ok(status)) = timeout(Duration::from_millis(500), child.wait()).await
+            && !status.success()
+        {
+            let message = if let Some(log) = self.downloader_log.as_mut() {
+                timeout(Duration::from_millis(100), &mut log.0)
+                    .await
+                    .ok()
+                    .and_then(|r| r.ok())
+                    .flatten()
+            } else {
+                None
+            };
+            return Err(message.unwrap_or(DOWNLOAD_FAILED));
+        }
+        result
+    }
+
     async fn run(&mut self, source: Source, frames: mpsc::Sender<Bytes>) -> Result<()> {
         let mut ffmpeg = command("ffmpeg");
         ffmpeg.args([
@@ -250,12 +336,7 @@ impl Processes {
                     .arg(path);
             }
             Source::Youtube(url) => {
-                let mut downloader = downloader(&url, false);
-                self.downloader = Some(
-                    downloader
-                        .spawn()
-                        .map_err(|error| MediaTool::YoutubeDownloader.spawn_error(error))?,
-                );
+                self.start_downloader(&url, false)?;
                 ffmpeg
                     .stdin(Stdio::piped())
                     .args(["-protocol_whitelist", "pipe", "-i", "pipe:0"]);
@@ -331,6 +412,7 @@ impl Processes {
         }
         let (decoder, downloader) =
             tokio::join!(reap(&mut self.decoder), reap(&mut self.downloader));
+        self.downloader_log.take();
         decoder && downloader
     }
 }
@@ -689,6 +771,11 @@ pub(super) mod tests {
             return;
         }
         use std::io::Write;
+        if std::env::var("THISCORD_VOICE_PROCESS_FIXTURE").as_deref() == Ok("reject") {
+            std::io::stderr().write_all(b"ERROR: Sign in to confirm you're not a bot. https://example.invalid/private?secret=fixture\n").unwrap();
+            std::io::stderr().flush().unwrap();
+            std::process::exit(1);
+        }
         // Synchronize startup so the test cannot pass by killing a process that
         // never ran. No shells, platform-specific sleep executables or ffmpeg.
         std::io::stdout().write_all(b"ready\n").unwrap();
@@ -724,6 +811,7 @@ pub(super) mod tests {
         let mut processes = Processes {
             decoder: Some(fixture().await),
             downloader: Some(fixture().await),
+            ..Default::default()
         };
         assert!(
             timeout(Duration::from_secs(3), processes.stop())
@@ -731,6 +819,52 @@ pub(super) mod tests {
                 .unwrap()
         );
         assert!(processes.decoder.is_none() && processes.downloader.is_none());
+    }
+
+    #[tokio::test]
+    async fn downloader_rejection_takes_precedence_over_empty_decoder_output() {
+        let mut child = command(std::env::current_exe().unwrap().to_str().unwrap())
+            .args(["subprocess_fixture", "--ignored", "--nocapture"])
+            .env("THISCORD_VOICE_PROCESS_FIXTURE", "reject")
+            .stderr(Stdio::piped())
+            .spawn()
+            .unwrap();
+        let stderr = child.stderr.take().unwrap();
+        let mut processes = Processes {
+            downloader: Some(child),
+            downloader_log: Some(DownloadLog(tokio::spawn(download_diagnostic(stderr)))),
+            ..Default::default()
+        };
+        let error = processes
+            .prefer_download_error(Err("Media contained no audio"))
+            .await;
+        assert_eq!(error, Err(SIGN_IN_REQUIRED));
+        assert!(processes.stop().await);
+    }
+
+    #[tokio::test]
+    async fn downloader_diagnostics_drain_large_output_and_never_return_remote_text() {
+        let (mut writer, reader) = tokio::io::duplex(8);
+        let output = tokio::spawn(async move {
+            writer.write_all(&vec![b'x'; 20_000]).await.unwrap();
+            writer
+                .write_all(
+                    b"Sign in to confirm you're not a bot https://private.invalid?secret=hidden",
+                )
+                .await
+                .unwrap();
+            writer.write_all(&vec![b'y'; 20_000]).await.unwrap();
+        });
+        assert_eq!(download_diagnostic(reader).await, Some(SIGN_IN_REQUIRED));
+        output.await.unwrap();
+        assert_eq!(
+            download_diagnostic(&b"private path and arbitrary remote error"[..]).await,
+            None
+        );
+        assert_eq!(
+            download_diagnostic(&b"Requested format is not available"[..]).await,
+            Some("YouTube has no supported direct media format for this video")
+        );
     }
 
     #[test]
