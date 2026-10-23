@@ -9,6 +9,12 @@ then verify and publish. That workflow does not rerun the PR test suite; only ta
 a commit whose checks have passed. Signed artifacts and the complete platform feed
 are verified before publication.
 
+Backend integration tests run with `--include-ignored --test-threads=4`. Each voice
+fixture owns a five-connection pool and a schema-management connection; unrestricted
+test parallelism can exhaust PostgreSQL's connection limit as the suite grows. Use
+the same bound for local combined database/media runs. Separate concurrent Cargo
+test processes still share the database's connection budget.
+
 ## Linux web optimizer workaround
 
 The Linux CI standard/admin web steps and the Linux release asset step set

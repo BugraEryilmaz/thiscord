@@ -67,7 +67,9 @@ jobs:
           cargo build -p thiscord-frontend --features voice-bot --bin thiscord-voice-bot --locked
           echo "THISCORD_VOICE_BOT_PATH=${CARGO_TARGET_DIR:-target}/debug/thiscord-voice-bot" >> "$GITHUB_ENV"
       - name: Unit, wire-contract and PostgreSQL integration tests
-        run: cargo test -p thiscord-shared -p thiscord-backend --locked -- --include-ignored
+        # Each media fixture owns a five-connection pool plus schema management.
+        # Bound concurrent fixtures as the integration suite grows.
+        run: cargo test -p thiscord-shared -p thiscord-backend --locked -- --include-ignored --test-threads=4
       - name: Voice load generator tests and real-peer smoke checks
         shell: bash
         run: |
