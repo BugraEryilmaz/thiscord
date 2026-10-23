@@ -9,6 +9,14 @@ diesel::table! {
 }
 
 diesel::table! {
+    account_blocks (blocker_id, blocked_id) {
+        blocker_id -> Uuid,
+        blocked_id -> Uuid,
+        created_at -> Timestamptz,
+    }
+}
+
+diesel::table! {
     account_codes (token_hash) {
         token_hash -> Text,
         account_id -> Uuid,
@@ -106,6 +114,21 @@ diesel::table! {
 }
 
 diesel::table! {
+    direct_attachments (id) {
+        id -> Uuid,
+        conversation_id -> Uuid,
+        owner_id -> Uuid,
+        message_id -> Nullable<Uuid>,
+        filename -> Text,
+        content_type -> Text,
+        size_bytes -> Int8,
+        data -> Bytea,
+        created_at -> Timestamptz,
+        expires_at -> Timestamptz,
+    }
+}
+
+diesel::table! {
     direct_messages (id) {
         id -> Uuid,
         conversation_id -> Uuid,
@@ -113,6 +136,11 @@ diesel::table! {
         client_id -> Uuid,
         content -> Text,
         created_at -> Timestamptz,
+        revision -> Int4,
+        deleted -> Bool,
+        edited_at -> Nullable<Timestamptz>,
+        attachments -> Jsonb,
+        request_hash -> Nullable<Text>,
     }
 }
 
@@ -349,6 +377,25 @@ diesel::table! {
 }
 
 diesel::table! {
+    safety_reports (id) {
+        id -> Uuid,
+        reporter_id -> Nullable<Uuid>,
+        subject_id -> Nullable<Uuid>,
+        guild_id -> Nullable<Uuid>,
+        channel_id -> Nullable<Uuid>,
+        target -> Jsonb,
+        reason -> Text,
+        evidence -> Nullable<Jsonb>,
+        state -> Text,
+        resolution -> Text,
+        revision -> Int4,
+        created_at -> Timestamptz,
+        resolved_at -> Nullable<Timestamptz>,
+        reviewer_id -> Nullable<Uuid>,
+    }
+}
+
+diesel::table! {
     scripting_bots (account_id) {
         account_id -> Uuid,
         guild_id -> Uuid,
@@ -384,6 +431,9 @@ diesel::joinable!(attachments -> accounts (owner_id));
 diesel::joinable!(attachments -> messages (message_id));
 diesel::joinable!(channel_categories -> guilds (guild_id));
 diesel::joinable!(channels -> guilds (guild_id));
+diesel::joinable!(direct_attachments -> accounts (owner_id));
+diesel::joinable!(direct_attachments -> direct_messages (message_id));
+diesel::joinable!(direct_attachments -> friendships (conversation_id));
 diesel::joinable!(direct_messages -> accounts (author_id));
 diesel::joinable!(direct_messages -> friendships (conversation_id));
 diesel::joinable!(friend_calls -> friendships (conversation_id));
@@ -409,11 +459,13 @@ diesel::joinable!(notification_preferences -> accounts (account_id));
 diesel::joinable!(oauth_attempts -> accounts (account_id));
 diesel::joinable!(oauth_attempts -> sessions (session_id));
 diesel::joinable!(scripting_bots -> guilds (guild_id));
+diesel::joinable!(safety_reports -> guilds (guild_id));
 diesel::joinable!(session_tokens -> sessions (session_id));
 diesel::joinable!(sessions -> accounts (account_id));
 
 diesel::allow_tables_to_appear_in_same_query!(
     account_avatars,
+    account_blocks,
     account_codes,
     accounts,
     attachments,
@@ -423,6 +475,7 @@ diesel::allow_tables_to_appear_in_same_query!(
     channel_reads,
     channels,
     chat_presence,
+    direct_attachments,
     direct_messages,
     friend_calls,
     friendships,
@@ -446,6 +499,7 @@ diesel::allow_tables_to_appear_in_same_query!(
     notification_release,
     oauth_attempts,
     scripting_bots,
+    safety_reports,
     session_tokens,
     sessions,
 );

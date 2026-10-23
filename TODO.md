@@ -19,7 +19,11 @@ media compatibility spike can happen before chat to expose platform constraints.
 - [x] Private voice invitations, acceptance, decline/hang-up, native audio reuse and media revocation.
 - [x] PostgreSQL/socket and loopback WebRTC tests for private access and lifecycle.
 - [ ] Validate physical private calls and incoming-call controls on Windows/macOS/Linux.
-- [ ] DM unread badges, typing, edit/delete and blocking/reporting.
+- [x] DM unread badges, expiring typing, revision-checked edit/delete and tombstone-safe retries.
+- [x] Private attachment upload/view/download with ownership/consent checks, bounded storage and cleanup.
+- [x] Persistent blocking/unblocking, private access revocation and explicit new friendship consent.
+- [x] User/message reporting, scoped immutable evidence, instance/channel review and revision-checked resolution.
+- [ ] Validate private attachment codecs/downloads and safety UI interactively on Windows/macOS/Linux.
 
 ## Notifications
 

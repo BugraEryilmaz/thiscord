@@ -24,6 +24,8 @@ mod friends;
 mod mentions;
 #[path = "chat/notifications.rs"]
 mod notifications;
+#[path = "chat/private_safety.rs"]
+mod private_safety;
 #[path = "chat/rich.rs"]
 mod rich;
 #[path = "chat/unread.rs"]

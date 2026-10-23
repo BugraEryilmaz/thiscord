@@ -39,6 +39,7 @@ fn title(page: &str) -> &'static str {
         "administration" => crate::i18n::t("Instance access"),
         "server_organization" => crate::i18n::t("Channel organization"),
         "server_invites" => crate::i18n::t("Invite links"),
+        "safety" => crate::i18n::t("Safety & reports"),
         "server_roles" => crate::i18n::t("Roles"),
         "server_members" => crate::i18n::t("Members"),
         "server_channels" => crate::i18n::t("Channels & permissions"),
@@ -63,6 +64,7 @@ fn subtitle(page: &str) -> &'static str {
         "updates" => crate::i18n::t("Keep Thiscord up to date, on your schedule."),
         "notifications" => crate::i18n::t("Choose your sounds, banners and subscriptions."),
         "administration" => crate::i18n::t("Manage administrators for this Thiscord installation."),
+        "safety" => crate::i18n::t("Manage blocked accounts and review reports."),
         "server_roles" => crate::i18n::t("Give people the right access with clear, named roles."),
         "server_members" => crate::i18n::t("Invite members and manage their roles."),
         "server_channels" => {
@@ -146,6 +148,7 @@ pub(super) fn Host(ui: Ui) -> impl IntoView {
                             <Show when=client::desktop><NavItem ui=ui page="shortcuts" label="Shortcuts & overlay" icon=Glyph::Keyboard/><NavItem ui=ui page="desktop" label="App behavior" icon=Glyph::Screen/></Show>
                             <NavItem ui=ui page="updates" label="Updates" icon=Glyph::Refresh/>
                             <NavItem ui=ui page="notifications" label="Notifications" icon=Glyph::Volume/>
+                            <NavItem ui=ui page="safety" label="Safety & reports" icon=Glyph::Shield/>
                             <NavItem ui=ui page="administration" label="Instance access" icon=Glyph::Shield/>
                         </nav>
                         <button class="settings-signout" disabled=move ||ui.busy.get() || ui.settings_dirty.get() on:click=move |_|super::run(ui,AccountRequest::Logout)><Icon kind=Glyph::Join/>{move || crate::i18n::t("Sign out")}</button>
@@ -179,6 +182,7 @@ pub(super) fn Host(ui: Ui) -> impl IntoView {
                         <Show when=move ||ui.page.get()=="shortcuts"><super::shortcuts::ShortcutSettings control=ui.audio_control on_dirty=Callback::new(move |dirty|ui.settings_dirty.set(dirty))/><crate::overlay::OverlaySettings control=ui.audio_control/></Show>
                         <Show when=move ||ui.page.get()=="desktop"><super::window::WindowSettings/></Show>
                         <Show when=move ||ui.page.get()=="updates"><super::updates::Panel ui=ui/></Show>
+                        <Show when=move ||ui.page.get()=="safety"><super::safety::Panel ui/></Show>
                         <Show when=move ||ui.page.get()=="administration"><super::permissions::InstanceSettings ui=ui/></Show>
                         <Show when=move ||server_page(ui.page.get()) && !matches!(ui.page.get(),"moderation"|"server_organization"|"server_invites")><super::permissions::PermissionEditor ui=ui/></Show>
                         <Show when=move ||ui.page.get()=="moderation"><super::moderation::ModerationPanel ui=ui/></Show>

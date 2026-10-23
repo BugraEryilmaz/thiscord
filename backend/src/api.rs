@@ -46,6 +46,7 @@ fn routes(
         .merge(crate::bots::router(origins.clone()))
         .merge(crate::search::router())
         .merge(crate::friends::router(origins.clone()))
+        .merge(crate::safety::router())
         .merge(crate::notifications::router(origins.clone()))
         .merge(voice)
         .merge(crate::auth::router())

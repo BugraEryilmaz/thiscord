@@ -5,6 +5,7 @@ pub mod audio;
 #[path = "../../bots/src/lib.rs"]
 pub mod bots;
 pub mod chat_history;
+pub mod direct_history;
 pub mod downloads;
 pub mod localization;
 pub mod mentions;
@@ -12,6 +13,7 @@ pub mod message_links;
 pub mod navigation;
 pub mod notification_queue;
 pub mod notification_sound;
+pub mod safety;
 #[cfg(all(not(target_arch = "wasm32"), feature = "screen-share"))]
 pub mod screen;
 pub mod video_feedback;

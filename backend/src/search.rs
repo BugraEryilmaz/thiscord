@@ -123,9 +123,8 @@ fn dispatch(
         }
     }
 }
-/// Integration seam: replace with friends::store::pair_access after the DM safety branch
-/// lands. That helper must be called in this transaction for every selected pair.
-/// Baseline feaae9a has no blocks/deletion columns; accepted consent is locked here.
+/// Retain the session and ordered friendship locks through the query, then apply
+/// the same current consent and blocking rules as private history and downloads.
 fn private_access(
     c: &mut PgConnection,
     actor: AccountId,
@@ -147,6 +146,9 @@ fn private_access(
     if selected.is_some() && ids.is_empty() {
         return Err(Failure::Forbidden);
     }
+    for id in &ids {
+        crate::friends::store::pair_access(c, *id, actor, false)?;
+    }
     Ok(ids)
 }
 fn run(
@@ -160,7 +162,7 @@ fn run(
         (
             "direct_messages",
             "conversation_id",
-            "COALESCE((to_jsonb(m)->>'deleted')::boolean,false)",
+            "m.deleted",
             "jsonb_build_object('kind','private','conversation_id',m.conversation_id)",
         )
     } else {

@@ -17,6 +17,7 @@ pub mod overlay;
 pub mod pagination;
 pub mod performance;
 pub mod permissions;
+pub mod safety;
 pub mod screen;
 pub mod search;
 pub mod validation;

@@ -22,6 +22,8 @@ enum Action {
     Disconnect,
     Friend(thiscord_shared::friends::Request),
     Unfriend(AccountId),
+    Block(AccountId),
+    ReportUser(AccountId),
     Change(GuildId, i64, GuildChange, String),
 }
 #[derive(Clone)]
@@ -484,6 +486,14 @@ fn execute(ui: Ui, action: Action) {
 }
 fn execute_reason(ui: Ui, action: Action, reason: String) {
     match action {
+        Action::Block(id) => super::safety::block(ui, id),
+        Action::ReportUser(account_id) => {
+            ui.friends
+                .report_target
+                .set(Some(thiscord_shared::safety::ReportTarget::User {
+                    account_id,
+                }))
+        }
         Action::Bots(target) => ui.bot_target.set(Some(target)),
         Action::Friend(command) => super::friends::action(ui, command),
         Action::Unfriend(account_id) => {
@@ -703,7 +713,11 @@ fn FriendActions(ui: Ui, member: AccountId, run: Callback<Action>) -> impl IntoV
             let disabled = !ui.friends.connected.get() || (action==FriendAction::Add && !account.as_ref().is_some_and(|a|a.email_verified));
             view! {<button role="menuitem" class="context-item" class:context-danger=action==FriendAction::Unfriend disabled=disabled on:click=move |_|run.run(if action==FriendAction::Unfriend {Action::Unfriend(member)} else {Action::Friend(action.request(member))})>{move ||crate::i18n::t(action.label())}</button>}
         }).collect_view()
-    }} }
+    }}
+    <Show when=move ||!is_bot(ui,member) && ui.account.get().is_some_and(|a|a.id!=member)>
+        <button role="menuitem" class="context-item context-danger" on:click=move |_|run.run(Action::Block(member))>{move ||crate::i18n::t("Block account")}</button>
+        <button role="menuitem" class="context-item" on:click=move |_|run.run(Action::ReportUser(member))>{move ||crate::i18n::t("Report account")}</button>
+    </Show> }
 }
 
 fn is_bot(ui: Ui, member: AccountId) -> bool {

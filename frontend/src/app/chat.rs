@@ -21,6 +21,7 @@ mod attachments;
 mod mentions;
 #[path = "rich_chat.rs"]
 mod rich;
+pub(super) use attachments::{Permit as AttachmentPermit, transfer as attachment_transfer};
 use thiscord_frontend::attachments::{PendingSend as Pending, can_send};
 
 const PENDING_LIMIT: usize = 20;
@@ -741,6 +742,7 @@ fn MessageRow(
                     <For each=move || message.with(|m| m.attachments.clone()) key=|a| a.id children=move |attachment| view! { <attachments::Card chat message=id attachment/> }/>
                     <rich::Actions chat message/>
                     <div class="flex gap-3 text-xs text-white/50">
+                        <Show when=move ||!own()><super::safety::ReportButton ui=chat.ui target=thiscord_shared::safety::ReportTarget::GuildMessage {guild_id:chat.guild,channel_id:chat.channel,message_id:id}/></Show>
                         <Show when=move || own() && chat.permissions.with(|p| p.contains(&Permission::EditOwnMessages))>
                             <button class="icon-button" aria-label=move || crate::i18n::t("Edit message") data-tip=move || crate::i18n::t("Edit") on:click=move |_| {
                                 editing.set(Some(id));
