@@ -791,7 +791,7 @@ fn MessageRow(
     Effect::new(move |_| {
         if let Some(node) = row.get() {
             observe_size(node.unchecked_ref(), move || {
-                if !chat.alive() {
+                if !chat.alive() || chat.searching.get_untracked() {
                     return;
                 }
                 let Some(node) = row.get_untracked() else {
