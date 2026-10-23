@@ -30,15 +30,25 @@ pub fn router(directory: &Path) -> Result<Router, crate::BoxError> {
             "/",
             get_service(ServeFile::new(directory.join("index.html"))),
         )
+        .route(
+            "/invite",
+            get_service(ServeFile::new(directory.join("index.html"))),
+        )
         .nest_service("/welcome", ServeDir::new(directory))
         .layer(middleware::from_fn(
             move |request: Request, next: middleware::Next| {
                 let csp = csp.clone();
+                let invite = request.uri().path() == "/invite";
                 async move {
                     let mut response = next.run(request).await;
                     let h = response.headers_mut();
                     h.insert("content-security-policy", csp);
-                    h.insert("cache-control", "no-cache".parse().unwrap());
+                    h.insert(
+                        "cache-control",
+                        if invite { "no-store" } else { "no-cache" }
+                            .parse()
+                            .unwrap(),
+                    );
                     h.insert("x-content-type-options", "nosniff".parse().unwrap());
                     h.insert("referrer-policy", "no-referrer".parse().unwrap());
                     response
@@ -65,13 +75,22 @@ mod tests {
         .unwrap();
         std::fs::write(directory.join("style.css"), "body{}").unwrap();
         let app = crate::api::router(None, vec![]).merge(router(&directory).unwrap());
-        for path in ["/", "/welcome/style.css"] {
+        for path in ["/", "/invite", "/welcome/style.css"] {
             let response = app
                 .clone()
                 .oneshot(Request::builder().uri(path).body(Body::empty()).unwrap())
                 .await
                 .unwrap();
             assert_eq!(response.status(), StatusCode::OK);
+            assert_eq!(response.headers()["referrer-policy"], "no-referrer");
+            assert_eq!(
+                response.headers()["cache-control"],
+                if path == "/invite" {
+                    "no-store"
+                } else {
+                    "no-cache"
+                }
+            );
             let csp = response.headers()["content-security-policy"]
                 .to_str()
                 .unwrap();

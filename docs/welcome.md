@@ -23,7 +23,9 @@ Open `http://127.0.0.1:1430`. For the backend's production paths:
 trunk build welcome/index.html --release --locked --public-url /welcome/ --dist dist-welcome
 ```
 
-The backend serves the HTML at `/` and the bundle at `/welcome/`. Set
+The backend serves the HTML at `/` and `/invite`, and the bundle at `/welcome/`.
+The invitation route selects a compact Rust/Leptos landing page with app opening,
+installer choices and copy/paste fallback; see [invite workflows](permissions.md). Set
 `WELCOME_DIST_DIR` to the absolute build directory during local backend testing,
 or place the bundle in `welcome/` beside the executable. An explicitly configured
 missing/invalid directory fails startup; without either directory the backend

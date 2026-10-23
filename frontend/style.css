@@ -396,6 +396,25 @@ button.stream-live-badge:hover { background: #ef466540; }
 
 /* The public page is scoped so desktop/admin surfaces retain their own theme. */
 @font-face { font-family: "Bricolage Grotesque"; src: url("./welcome-assets/bricolage-grotesque.ttf") format("truetype"); font-weight: 200 800; font-style: normal; font-display: swap; }
+.invite-page { min-height: 100dvh; }
+.invite-main { width: min(620px, calc(100% - 40px)); margin: 24px auto 80px; }
+.invite-card { background: white; padding: clamp(24px, 5vw, 48px); border-radius: 24px; text-align: center; box-shadow: 0 12px 40px #17264a0a; }
+.invite-symbol { display: grid; place-items: center; width: 64px; height: 64px; margin: 0 auto 24px; border-radius: 20px; background: var(--color-welcome-lavender); color: var(--color-welcome-ink); }
+.invite-symbol svg { width: 32px; height: 32px; }
+.invite-card h1 { font-size: clamp(32px, 6vw, 44px); font-weight: 750; line-height: 1.1; letter-spacing: -1.5px; }
+.invite-lead { margin: 20px auto 28px; max-width: 38ch; }
+.invite-open { width: 100%; justify-content: center; }
+.invite-note { font-size: 14px; margin: 20px auto 0; max-width: 42ch; color: #52607c; }
+.invite-fallback { margin-top: 24px; text-align: left; font-size: 14px; }
+.invite-fallback summary { cursor: pointer; text-align: center; color: var(--color-welcome-cobalt); font-weight: 600; }
+.invite-fallback p, .invite-fallback label { display: block; margin-top: 16px; }
+.invite-fallback input { display: block; width: 100%; padding: 10px; margin: 8px 0 16px; border: 1px solid #9ba8c4; border-radius: 6px; }
+.invite-downloads { padding: 36px 8px 0; }
+.invite-downloads h2 { font-size: 26px; font-weight: 700; letter-spacing: -.6px; }
+.invite-downloads .welcome-release-status { margin: 14px 0; }
+.invite-downloads .welcome-download-list { margin-bottom: 18px; }
+.invite-downloads .welcome-requirements { margin-bottom: 18px; }
+.invite-downloads .welcome-retry { margin-right: 20px; }
 html:has(.welcome-page) { scroll-behavior: smooth; scroll-padding-top: 28px; background: var(--color-welcome-cloud); }
 .welcome-page { background: var(--color-welcome-cloud); color: var(--color-welcome-ink); font-family: "Segoe UI", "Helvetica Neue", sans-serif; font-size: 16px; line-height: 1.6; overflow: clip; }
 .welcome-page h1, .welcome-page h2, .welcome-page h3, .welcome-logo { font-family: var(--font-welcome); }

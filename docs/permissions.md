@@ -105,7 +105,7 @@ Each guild has exactly one owner who is also a member. Ownership transfer requir
 recent reauthentication and an existing verified member. The former owner keeps
 their ordinary membership and previously assigned roles, losing the owner bypass.
 A member with ManageInvites may add an existing verified username directly or
-create a shareable invite with a bounded lifetime and use count (see below).
+create a shareable invite with optional lifetime and use limits (see below).
 
 The main screen has a left server rail with initials avatars and immediate server
 names on hover or keyboard focus, with accessible labels. Select a server to see
@@ -319,20 +319,51 @@ Three-platform interactive moderation acceptance remains a manual check.
 
 ## Invite links and channel organization
 
-**Server settings > Invite links** requires ManageInvites. Create an invitation
-lasting 1 minute to 28 days with 1–500 uses (the UI offers 1 hour, 1 day, 7 days,
-and 28 days). At most 100 active invitations exist per guild; creating one removes
-expired, spent and revoked records. List/revoke requests never return the code.
-The cryptographically random 256-bit code is returned once on creation; only its
-SHA-256 hash is persisted. Creation and revocation submit the viewed guild revision.
+**Server settings > Invite links** requires ManageInvites. Invitations can last
+1 minute to 28 days (the UI offers 1 hour, 1 day, 7 days, and 28 days), or never
+expire, with 1–500 uses or unlimited uses. The existing command's numeric fields
+use zero for no expiry/unlimited uses; `GuildInvite.expires_at` is nullable and
+`max_uses: 0` means unlimited. Existing finite invite responses remain readable by
+new clients. Older clients cannot decode a null expiry; deploy the desktop update
+alongside this backend change. The usage counter saturates at PostgreSQL integer
+maximum rather than rejecting otherwise valid unlimited joins.
+
+The header/context-menu **Copy invite link** action creates a non-expiring,
+unlimited invite. Repeated copies in the same signed-in app session reuse it only
+after a fresh ListInvites permission/revocation check. The client keeps the code
+in memory, clears it on session changes, and creates a new link after restart or
+revocation. No bearer capability is persisted in client storage. At most 100 active
+invitations exist per guild; creation removes expired, spent and revoked records.
+List/revoke responses never return a code. Random 256-bit codes are returned once
+on creation; the database stores only SHA-256 hashes. Creation/revocation use the
+current guild revision under the existing guild transaction lock. Revocation
+prevents future joins without removing current members.
 
 Links use the configured API origin and `/invite#CODE`. The fragment is not sent
-in HTTP requests or server access logs. `/invite` is a static, script-free landing
-page explaining how to sign in, verify email, choose **Join a server**, and paste
-the complete link or code. It sets no-referrer and no-store. No DNS/deployment or
-custom desktop URL registration is assumed. Clients reject links from another
-installation; codes are accepted for the current configured installation. Browser
-preview can also paste/redeem after login. Treat the link as a bearer capability.
+in HTTP requests or access logs. The public welcome WASM bundle serves `/invite`
+without login or a database and uses no-referrer/no-store headers. It tries
+`thiscord://invite?origin=ENCODED_ORIGIN#CODE` once and keeps an explicit **Open
+Thiscord** action for browser consent, installer links and a copy/paste fallback.
+The downloads jump preserves the fragment. API-only installs without the welcome
+bundle do not serve this page.
+
+The desktop deep-link plugin registers the scheme in Windows/macOS installers;
+Linux registers at startup for AppImages. Single-instance integration forwards
+subsequent launches and restores the main window. A native in-memory pending slot
+plus subscribe-before-read in the UI handles startup and already-open delivery.
+Only the main window can consume it. The validated invitation stays pending
+through login/email verification, then prefills **Join a server** for confirmation.
+Nothing joins automatically. The native launcher checks the exact scheme/route,
+code format and configured API origin; a link can never change the backend.
+Browser preview still accepts pasted links/codes. Treat links as bearer capabilities.
+
+The `20261023170000_unlimited_invites` rollback revokes and bounds unlimited or
+non-expiring invites before restoring old constraints; finite invites survive.
+Installed-app acceptance checks on each platform must cover a closed app, an open
+app, a tray-hidden app, a signed-out user, browser launch consent, wrong-origin
+links, repeated copying, revocation, and a fresh installer. macOS registration
+requires an installed bundle; Linux AppImages must first be run from their intended
+location. Development builds do not replace Windows' installed protocol handler.
 
 Redemption bypasses the guild password, but requires a verified session and no
 guild ban. It preserves existing timeouts and moderator voice restrictions, even

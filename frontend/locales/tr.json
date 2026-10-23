@@ -1188,5 +1188,19 @@
   "Uploading…": "Yükleniyor…",
   "Manage blocked accounts and review reports.": "Engellenen hesapları yönetin ve bildirimleri inceleyin.",
   "Chat changed while the request was pending. It may have succeeded; reload the message before trying again": "İstek beklerken sohbet değişti. İşlem başarılı olmuş olabilir; yeniden denemeden önce mesajı tekrar yükleyin",
-  "Chat reconnected; reload the message to check the result": "Sohbet yeniden bağlandı; sonucu kontrol etmek için mesajı tekrar yükleyin"
+  "Chat reconnected; reload the message to check the result": "Sohbet yeniden bağlandı; sonucu kontrol etmek için mesajı tekrar yükleyin",
+  "Copy invite link": "Davet bağlantısını kopyala",
+  "Invite link": "Davet bağlantısı",
+  "Never": "Asla",
+  "Unlimited": "Sınırsız",
+  "Never expires": "Süresi dolmaz",
+  "Maximum uses (0 = unlimited, 1–500)": "Kullanım sınırı (0 = sınırsız, 1–500)",
+  "Created {} · {}/{} uses · {}{}": "Oluşturulma {} · {}/{} kullanım · {}{}",
+  "{message}. Check the invite or server ID and verify your email.": "{message}. Daveti veya sunucu kimliğini kontrol edin ve e-postanızı doğrulayın.",
+  "Use a complete invite link or code from this Thiscord installation.": "Bu Thiscord kurulumuna ait tam bir davet bağlantısı veya kod kullanın.",
+  "Paste an invite link to join. No server password is needed for an invite.": "Katılmak için bir davet bağlantısı yapıştırın. Davet ile sunucu şifresi gerekmez.",
+  "Invite link copied. Revoke it in Server Settings → Invite links.": "Davet bağlantısı kopyalandı. Sunucu Ayarları → Davet bağlantıları bölümünden iptal edebilirsiniz.",
+  "Invitation ready. Sign in and verify your email to continue.": "Davet hazır. Devam etmek için giriş yapın ve e-postanızı doğrulayın.",
+  "Unlimited uses. Never expires. Revoke in Server Settings → Invite links.": "Sınırsız kullanım. Süresi dolmaz. Sunucu Ayarları → Davet bağlantıları bölümünden iptal edin.",
+  "Use Copy invite link beside the server name to invite people. Manage and revoke links in Invite links.": "Davet etmek için sunucu adının yanındaki Davet bağlantısını kopyala düğmesini kullanın. Davet bağlantıları bölümünden bağlantıları yönetin ve iptal edin."
 }
