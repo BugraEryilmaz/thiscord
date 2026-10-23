@@ -1,5 +1,39 @@
-//! Caret-aware mention completion. Browser selections use UTF-16 code units.
+//! Mention highlighting and caret-aware completion. Browser selections use UTF-16.
 use thiscord_shared::chat::{MAX_MENTION_QUERY_CHARS, MAX_MESSAGE_CHARS};
+
+#[derive(Debug, PartialEq, Eq)]
+pub enum Span<'a> {
+    Text(&'a str),
+    Mention(&'a str),
+}
+
+/// Presentation only: account resolution and notifications remain server-owned.
+/// Match the server's whitespace-delimited, ASCII @username syntax.
+pub fn spans(text: &str) -> Vec<Span<'_>> {
+    let mut spans = Vec::new();
+    let mut cursor = 0;
+    let mut boundary = true;
+    for (start, ch) in text.char_indices() {
+        if ch == '@' && boundary {
+            let name_len = text[start + 1..]
+                .bytes()
+                .take_while(|ch| ch.is_ascii_alphanumeric() || *ch == b'_')
+                .count();
+            if name_len > 0 {
+                if cursor < start {
+                    spans.push(Span::Text(&text[cursor..start]));
+                }
+                cursor = start + 1 + name_len;
+                spans.push(Span::Mention(&text[start..cursor]));
+            }
+        }
+        boundary = ch.is_whitespace();
+    }
+    if cursor < text.len() {
+        spans.push(Span::Text(&text[cursor..]));
+    }
+    spans
+}
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Query {
@@ -66,6 +100,50 @@ pub fn insert(text: &str, query: &Query, username: &str) -> Option<(String, u32)
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn highlighting_preserves_text_and_separates_tag_punctuation() {
+        let text = "🎮 @jukebox /status\nHi @User_12, thanks!\u{2003}@other.";
+        let parts = spans(text);
+        assert_eq!(
+            parts
+                .iter()
+                .map(|span| match span {
+                    Span::Text(text) | Span::Mention(text) => *text,
+                })
+                .collect::<String>(),
+            text
+        );
+        assert_eq!(
+            parts
+                .iter()
+                .filter_map(|span| match span {
+                    Span::Mention(text) => Some(*text),
+                    Span::Text(_) => None,
+                })
+                .collect::<Vec<_>>(),
+            ["@jukebox", "@User_12", "@other"]
+        );
+        assert_eq!(spans("@jukebox"), [Span::Mention("@jukebox")]);
+    }
+
+    #[test]
+    fn highlighting_does_not_treat_emails_urls_or_bare_at_signs_as_tags() {
+        for text in [
+            "hello@example.com",
+            "https://example.com/@jukebox",
+            "word@jukebox",
+            "@@jukebox",
+            "@ /status",
+            "@",
+            "",
+        ] {
+            assert!(
+                spans(text).iter().all(|span| matches!(span, Span::Text(_))),
+                "{text}"
+            );
+        }
+    }
+
     #[test]
     fn searches_profile_names_with_spaces_unicode_and_handles() {
         for text in ["@", "Hi @Ada Lov", "🎮 @Büğra", "@user_12", "line\n@name"] {

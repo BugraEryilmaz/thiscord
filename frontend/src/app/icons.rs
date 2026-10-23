@@ -25,6 +25,11 @@ pub(super) enum Glyph {
     Edit,
     Trash,
     Send,
+    Paperclip,
+    Reply,
+    Reaction,
+    More,
+    Flag,
     Close,
     Expand,
     Person,
@@ -72,6 +77,15 @@ pub(super) fn Icon(kind: Glyph) -> impl IntoView {
         Glyph::VolumeOff => "M3 9h4l5-4v14l-5-4H3V9Zm13 0 6 6M16 15l6-6",
         Glyph::Edit => "m4 16 12-12 4 4L8 20H4v-4ZM13 7l4 4",
         Glyph::Trash => "M3 6h18M9 6V3h6v3M5 6l1 15h12l1-15M10 10v7M14 10v7",
+        Glyph::Reply => "m9 5-6 6 6 6M3 11h10a7 7 0 0 1 7 7",
+        Glyph::Reaction => {
+            "M20 13a8 8 0 1 1-9-9M8 10h.01M14 10h.01M8 14a4 4 0 0 0 6 0M19 2v6M16 5h6"
+        }
+        Glyph::More => "M5 12h.01M12 12h.01M19 12h.01",
+        Glyph::Flag => "M5 21V3m0 1c5-4 9 4 14 0v10c-5 4-9-4-14 0",
+        Glyph::Paperclip => {
+            "m21 11-9 9a6 6 0 0 1-8.5-8.5l10-10a4 4 0 0 1 5.7 5.7l-10 10a2 2 0 0 1-2.8-2.8l9-9"
+        }
         Glyph::Send => "m3 3 19 9-19 9 4-9-4-9ZM7 12h15",
         Glyph::Close => "m6 6 12 12M6 18 18 6",
         Glyph::Expand => "M8 3H3v5M16 3h5v5M21 16v5h-5M8 21H3v-5",

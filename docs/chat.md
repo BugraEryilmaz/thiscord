@@ -30,12 +30,18 @@ so a response lost after commit cannot create a duplicate. Drafts and pending se
 are held in memory for the open channel, not across channel changes/app restarts.
 Edit/delete controls reflect current permissions; the backend checks them again.
 Deletion requires confirmation and leaves a content-free tombstone. Loading older
-history preserves scroll position; incoming messages follow only near the bottom.
+history preserves scroll position; incoming messages follow while at the bottom
+(with two pixels of rounding tolerance). Scrolling upward pauses following until
+you return to the bottom or choose Jump to latest.
 The open channel retains at most 500 server messages in an ID-indexed, ordered
 cache. The list renders keyed reactive rows for the viewport plus 400 pixels of
 overscan on each side. Row heights are measured for wrapping, edits and resizing;
 spacers represent unmounted rows, and history prepends preserve a message anchor.
-Pages merge once and share deferred scroll work. Edits update existing row state.
+Pages merge once and share scroll work after reactive DOM updates. User scrolling
+supersedes a pending correction, and unchanged row measurements do not schedule
+another one. Measured anchors are normalized to the row actually on screen so
+later edits/resizing cannot restore an outdated estimated position.
+Edits update existing row state.
 Following live chat evicts the oldest rows and preserves a cursor to reload them.
 Paging back evicts the newest rows; when a full window is being read, newer live
 messages also wait outside that window. Jump to latest obtains a fresh socket
