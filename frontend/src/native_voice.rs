@@ -78,6 +78,54 @@ impl Moderation {
     }
 }
 
+struct ShareSignaling {
+    screen: Option<(bool, bool)>,
+    camera: Option<bool>,
+}
+impl ShareSignaling {
+    fn invalidate(&mut self) {
+        self.screen = None;
+        self.camera = None;
+    }
+    fn publication(
+        &mut self,
+        screen: &crate::native_screen::ScreenState,
+        camera: &crate::native_camera::CameraState,
+        allowed: bool,
+        changed: bool,
+    ) {
+        screen.publication(allowed, changed);
+        camera.publication(allowed, changed);
+        if changed {
+            // The server retired the old publications. An explicit restart can
+            // precede the next tick and have exactly the same signaling shape.
+            self.invalidate();
+        }
+    }
+    fn send_changes(
+        &mut self,
+        screen: (bool, bool),
+        camera: Option<bool>,
+        quality: impl FnOnce() -> Option<thiscord_shared::screen::Quality>,
+        mut send: impl FnMut(ClientEvent),
+    ) {
+        if let Some(active) = camera
+            && self.camera != Some(active)
+        {
+            send(ClientEvent::Camera { active });
+            self.camera = Some(active);
+        }
+        if self.screen != Some(screen) {
+            send(ClientEvent::Screen {
+                active: screen.0,
+                audio: screen.1,
+                quality: quality(),
+            });
+            self.screen = Some(screen);
+        }
+    }
+}
+
 #[derive(Default)]
 struct MediaState {
     connected: AtomicBool,
@@ -940,8 +988,10 @@ async fn run(
     let mut ticker = tokio::time::interval(Duration::from_millis(500));
     ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
     let start = Instant::now();
-    let mut screen_state = Some((false, false));
-    let mut camera_state = Some(false);
+    let mut shares = ShareSignaling {
+        screen: Some((false, false)),
+        camera: Some(false),
+    };
     let mut rtp_clock = thiscord_frontend::audio::outgoing::RtpClock::default();
     let mut boundary = thiscord_frontend::audio::red::boundary::Boundary::default();
     let mut red_sender = thiscord_frontend::audio::red::Sender::default();
@@ -1082,8 +1132,7 @@ async fn run(
                         boundary.resume();
                         red_sender.clear();
                         if packet_redundancy { engine.notify_control(Command::ReceiveBoundary { connection: attempt.connection.clone(), generation: transmit_control.generation(), epoch: None })?; }
-                        screen_state = None;
-                        camera_state = None;
+                        shares.invalidate();
                         // An interrupted chunked admin reply cannot be replayed
                         // safely. The server rejects that request on reattachment.
                         remote_jobs.abort_all();
@@ -1128,8 +1177,7 @@ async fn run(
                         let allowed = can_speak && moderation.can_publish() && !deafened;
                         let screen = app.state::<crate::native_screen::ScreenState>();
                         let camera = app.state::<crate::native_camera::CameraState>();
-                        screen.publication(allowed, changed);
-                        camera.publication(allowed, changed);
+                        shares.publication(&screen, &camera, allowed, changed);
                         screen.roster(if deafened { &[] } else { &members });
                         camera.views.roster(if deafened { &[] } else { &members });
                         roster = members.iter().filter(|m|m.slot!=own_slot).cloned().collect();
@@ -1217,18 +1265,10 @@ async fn run(
                 }
                 let deafened = configuration.deafened || moderation.deafened();
                 let allowed = can_speak && moderation.can_publish() && !deafened;
-                app.state::<crate::native_screen::ScreenState>().publication(allowed, false);
+                let screen = app.state::<crate::native_screen::ScreenState>();
                 let camera = app.state::<crate::native_camera::CameraState>();
-                camera.publication(allowed, false);
-                if camera_video {
-                    let active = camera.active();
-                    if camera_state != Some(active) { signaling.send(ClientEvent::Camera { active }); camera_state = Some(active); }
-                }
-                let current_screen = app.state::<crate::native_screen::ScreenState>().sharing();
-                if Some(current_screen) != screen_state {
-                    signaling.send(ClientEvent::Screen { active: current_screen.0, audio: current_screen.1, quality: screen_layers.then(|| app.state::<crate::native_screen::ScreenState>().quality()) });
-                    screen_state = Some(current_screen);
-                }
+                shares.publication(&screen, &camera, allowed, false);
+                shares.send_changes(screen.sharing(), camera_video.then(|| camera.active()), || screen_layers.then(|| screen.quality()), |event| signaling.send(event));
                 if packet_redundancy && boundary.control(transmit_control.generation())? {
                     red_sender.clear();
                     engine.notify_control(Command::ReceiveBoundary { connection: attempt.connection.clone(), generation: transmit_control.generation(), epoch: None })?;
@@ -1335,6 +1375,92 @@ mod tests {
         own.server_deafened = true;
         assert!(state.observe(&own));
         assert!(!state.can_publish() && state.deafened());
+    }
+
+    #[test]
+    fn moderation_boundary_resignals_explicit_restart_before_next_tick() {
+        for coalesced in [false, true] {
+            for audio in [false, true] {
+                for quality in [None, Some(thiscord_shared::screen::Quality::default())] {
+                    for restart in [false, true] {
+                        let screen = crate::native_screen::ScreenState::default();
+                        let camera = crate::native_camera::CameraState::default();
+                        let mut shares = ShareSignaling {
+                            screen: Some((false, false)),
+                            camera: Some(false),
+                        };
+                        let mut moderation = Moderation::default();
+                        let mut own: Participant = serde_json::from_value(serde_json::json!({
+                            "account_id":"00000000-0000-0000-0000-000000000001",
+                            "username":"fixture", "slot":0, "muted":false,
+                            "deafened":false, "can_speak":true
+                        }))
+                        .unwrap();
+                        assert!(!moderation.observe(&own));
+                        let mut events = Vec::new();
+                        // The previous publication used this same audio/layer shape.
+                        shares.send_changes(
+                            (true, audio),
+                            Some(true),
+                            || quality,
+                            |e| events.push(e),
+                        );
+                        assert_eq!(events.len(), 2);
+                        events.clear();
+                        if !coalesced {
+                            own.server_muted = true;
+                            own.publication_revision = 1;
+                            let changed = moderation.observe(&own);
+                            assert!(changed);
+                            shares.publication(&screen, &camera, moderation.can_publish(), changed);
+                        }
+                        own.server_muted = false;
+                        own.publication_revision = 2;
+                        let changed = moderation.observe(&own);
+                        assert!(changed);
+                        shares.publication(&screen, &camera, moderation.can_publish(), changed);
+                        assert!(events.is_empty(), "a boundary does not start a publication");
+                        assert_eq!(screen.sharing(), (false, false));
+                        assert!(!camera.active());
+
+                        // Explicit restart supplies fresh capture snapshots BEFORE
+                        // any 500 ms tick observes the stopped publication. Without
+                        // restart, read the stopped state; release must not revive it.
+                        let current_screen = if restart {
+                            (true, audio)
+                        } else {
+                            screen.sharing()
+                        };
+                        let current_camera = if restart { true } else { camera.active() };
+                        let changed = moderation.observe(&own);
+                        assert!(!changed, "a repeated roster is not a new boundary");
+                        shares.publication(&screen, &camera, moderation.can_publish(), changed);
+                        shares.send_changes(
+                            current_screen,
+                            Some(current_camera),
+                            || quality,
+                            |e| events.push(e),
+                        );
+                        assert_eq!(events.len(), 2);
+                        assert!(
+                            matches!(events[0], ClientEvent::Camera { active } if active == restart)
+                        );
+                        assert!(
+                            matches!(events[1], ClientEvent::Screen { active, audio: sent_audio, quality: sent_quality }
+                            if active == restart && sent_audio == (restart && audio) && sent_quality == quality)
+                        );
+                        events.clear();
+                        shares.send_changes(
+                            current_screen,
+                            Some(current_camera),
+                            || quality,
+                            |e| events.push(e),
+                        );
+                        assert!(events.is_empty(), "unchanged ticks still coalesce");
+                    }
+                }
+            }
+        }
     }
 
     #[test]
