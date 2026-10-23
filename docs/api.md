@@ -101,6 +101,17 @@ changes include the last viewed revision; stale revisions return `409 Conflict`.
 See [permissions.md](permissions.md) for bootstrap, hierarchy, override precedence
 and media enforcement still needed when those handlers are added.
 
+Instance role definitions use `InstanceRoleId` UUIDs, separate from guild role IDs.
+The `create_instance_role`, `set_instance_role_limits`, `delete_instance_role` and
+`set_instance_role` commands require current instance ownership and recent
+reauthentication. Updates/deletes include a policy revision. `instance` returns
+only the caller's assigned policy for standard users, or all policies for the owner
+and administrators. Owner-only `list_instance_role_members` accepts a `page`
+(`PageRequest`) and returns `page: Page<InstanceRoleMember>`, including implicit
+built-in assignments. Every page rechecks current authorization.
+Allocation failures use HTTP 409 with `limit_exceeded`, distinct from stale-write
+`conflict`. Server capacities follow their owner's role, never the acting member's.
+
 ## Chat
 
 Friends and private conversations use `POST /api/v1/friends` and

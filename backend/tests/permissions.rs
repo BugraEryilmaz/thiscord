@@ -12,6 +12,9 @@ use thiscord_shared::{AccountId, ChannelId, GuildId, RoleId, permissions::*};
 use tower::ServiceExt;
 use uuid::Uuid;
 
+#[path = "permissions/limits.rs"]
+mod limits;
+
 struct Database {
     connection: PgConnection,
     schema: String,
@@ -61,6 +64,14 @@ fn user(db: &Database, name: &str) -> (AccountId, String) {
     (id, token)
 }
 async fn call(app: &Router, path: &str, token: &str, command: Value) -> (StatusCode, Value) {
+    // Isolated schemas share the process-wide HTTP worker budget. Preserve
+    // concurrent quota races without turning unrelated fixture setup into overload.
+    static COMMANDS: std::sync::OnceLock<tokio::sync::Semaphore> = std::sync::OnceLock::new();
+    let _command = COMMANDS
+        .get_or_init(|| tokio::sync::Semaphore::new(4))
+        .acquire()
+        .await
+        .unwrap();
     let response = app
         .clone()
         .oneshot(
@@ -618,13 +629,6 @@ async fn ownership_hierarchy_isolation_stale_access_and_concurrency() {
     let (member, ut) = user(&db, "member");
     let (_, outsider) = user(&db, "outsider");
     let app = api::router(Some(db.pool.clone()), vec![]);
-    command(
-        &app,
-        &ot,
-        json!({"action":"create_guild","name":"Alpha"}),
-        StatusCode::FORBIDDEN,
-    )
-    .await;
     let before = command(&app, &ot, json!({"action":"instance"}), StatusCode::OK).await;
     assert_eq!(before["access"]["role"], "user");
     let p1 = db.pool.clone();
@@ -1052,6 +1056,7 @@ fn combined_roles_overrides_and_admin_behavior() {
     let b = role(1, Permissions::new());
     let channel = ChannelId::from_uuid(Uuid::new_v4());
     let mut state = GuildState {
+        capacity: None,
         guild: Guild {
             id: GuildId::from_uuid(Uuid::new_v4()),
             owner,
@@ -1150,8 +1155,8 @@ async fn password_protected_join_and_member_channel_visibility() {
     command(
         &app,
         &guest,
-        json!({"action":"create_guild","name":"Denied","password":"secret"}),
-        StatusCode::FORBIDDEN,
+        json!({"action":"create_guild","name":"Free server","password":"secret"}),
+        StatusCode::OK,
     )
     .await;
     let response = command(
@@ -1275,7 +1280,7 @@ async fn password_protected_join_and_member_channel_visibility() {
         StatusCode::OK,
     )
     .await;
-    assert_eq!(listed["guilds"].as_array().unwrap().len(), 2);
+    assert_eq!(listed["guilds"].as_array().unwrap().len(), 3);
     assert!(!listed.to_string().contains("password"));
     command(
         &app,

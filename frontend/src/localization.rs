@@ -53,6 +53,9 @@ pub fn api_error(language: Language, error: &thiscord_shared::ApiError) -> Strin
                 ErrorCode::Unauthorized => "Please sign in again.",
                 ErrorCode::Forbidden => "You do not have permission to do that.",
                 ErrorCode::Conflict => "Something changed. Refresh and try again.",
+                ErrorCode::LimitExceeded => {
+                    "A role limit has been reached. Review your server limits."
+                }
                 ErrorCode::RateLimited => "Too many requests. Please wait and try again.",
                 ErrorCode::NotFound => "The requested item was not found.",
                 ErrorCode::MethodNotAllowed => "This action is not supported.",

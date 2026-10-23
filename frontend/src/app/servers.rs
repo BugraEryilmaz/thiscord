@@ -140,10 +140,13 @@ pub(super) async fn refresh(ui: Ui) {
     if !active() {
         return;
     }
-    ui.can_create_server.set(matches!(result,
-        Ok(PermissionResponse::Instance { access }) if access.role != InstanceRole::User
-            && ui.account.get_untracked().is_some_and(|a| a.email_verified)
-    ));
+    let access = match result {
+        Ok(PermissionResponse::Instance { access }) => Some(access),
+        _ => None,
+    };
+    ui.can_create_server
+        .set(ui.account.get_untracked().is_some_and(|a| a.email_verified));
+    ui.instance_access.set(access);
 }
 
 /// Returns false when superseded. Callers must not run navigation follow-up
@@ -309,6 +312,14 @@ pub(super) fn ServerRail(ui: Ui) -> impl IntoView {
     let server_id = RwSignal::new(String::new());
     let password = RwSignal::new(String::new());
     let error = RwSignal::new(String::new());
+    let quota_reached = move || {
+        ui.instance_access.get().is_some_and(|a| {
+            a.policies
+                .iter()
+                .find(|p| Some(p.id) == a.policy_id)
+                .is_some_and(|p| a.owned_guilds >= p.limits.owned_guilds)
+        })
+    };
     leptos::task::spawn_local(async move {
         refresh(ui).await;
     });
@@ -325,6 +336,9 @@ pub(super) fn ServerRail(ui: Ui) -> impl IntoView {
     let submit = move |ev: leptos::ev::SubmitEvent| {
         ev.prevent_default();
         if ui.busy.get_untracked() {
+            return;
+        }
+        if creating.get_untracked() && quota_reached() {
             return;
         }
         let supplied = password.get_untracked();
@@ -404,11 +418,15 @@ pub(super) fn ServerRail(ui: Ui) -> impl IntoView {
         <dialog node_ref=dialog on:click=move |e|super::dialog::dismiss_outside(e,dialog,ui.busy.get_untracked()) aria-labelledby="server-dialog-title" class="m-auto max-h-[85vh] w-[calc(100%-2rem)] max-w-md overflow-y-auto rounded-2xl border border-white/15 bg-surface p-7 text-white shadow-2xl backdrop:bg-black/70 backdrop:backdrop-blur-sm" on:close=move |_|password.set(String::new()) on:cancel=move |ev: web_sys::Event|{if ui.busy.get_untracked(){ev.prevent_default();}}>
             <header class="mb-6 flex items-center justify-between"><h2 id="server-dialog-title" class="text-2xl font-semibold">{move ||if creating.get(){crate::i18n::t("Create a server")}else{crate::i18n::t("Join a server")}}</h2><button aria-label=move || crate::i18n::t("Close dialog") class="px-2 text-xl" disabled=move ||ui.busy.get() on:click=move |_|if let Some(dialog)=dialog.get(){dialog.close();}>"×"</button></header>
             <form class="space-y-5" on:submit=submit>
+                <Show when=move ||creating.get()><p class="settings-hint">{move ||ui.instance_access.get().map(|a|super::permissions::allocation_summary(&a))}</p>
+                    <Show when=quota_reached><p class="settings-hint text-amber-300">{move ||crate::i18n::t("Owned server limit reached; transfer or delete a server, or ask the instance owner to review your limits")}</p></Show>
+                    <button type="button" class="settings-secondary" disabled=move ||ui.busy.get() on:click=move |_|{ui.busy.set(true);leptos::task::spawn_local(async move{refresh(ui).await;ui.busy.set(false);});}>{move ||crate::i18n::t("Refresh limits")}</button>
+                </Show>
                 <Show when=move ||creating.get() fallback=move ||view!{<Field label="Server ID" value=server_id/>}><Field label="Server name" value=name/></Show>
                 <Field label="Server password (optional)" value=password kind="password" autocomplete="off"/>
                 <p class="text-sm text-white/60">{move ||if creating.get(){crate::i18n::t("Leave the password empty to let verified accounts join using your server ID.")}else{crate::i18n::t("Ask the server owner for its ID and password, if it has one.")}}</p>
                 <p class="text-sm text-red-300" role="alert">{move ||crate::i18n::message(error.get())}</p>
-                <button class="w-full rounded-lg bg-brand px-5 py-3 font-semibold disabled:opacity-50" disabled=move ||ui.busy.get()>{move ||if ui.busy.get(){crate::i18n::t("Please wait…")}else if creating.get(){crate::i18n::t("Create server")}else{crate::i18n::t("Join server")}}</button>
+                <button class="w-full rounded-lg bg-brand px-5 py-3 font-semibold disabled:opacity-50" disabled=move ||ui.busy.get()||(creating.get()&&quota_reached())>{move ||if ui.busy.get(){crate::i18n::t("Please wait…")}else if creating.get(){crate::i18n::t("Create server")}else{crate::i18n::t("Join server")}}</button>
             </form>
         </dialog>
     }

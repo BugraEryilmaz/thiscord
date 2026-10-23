@@ -9,7 +9,7 @@ use crate::{
 use argon2::{Argon2, PasswordHash, PasswordHasher, PasswordVerifier, password_hash::SaltString};
 use diesel::{Connection, PgConnection};
 use rand::rngs::OsRng;
-use thiscord_shared::{AccountId, GuildId, RoleId, permissions::*};
+use thiscord_shared::{AccountId, GuildId, InstanceRoleId, RoleId, permissions::*};
 use uuid::Uuid;
 
 fn guild_password(password: Option<&str>) -> Result<Option<&str>, Failure> {
@@ -65,16 +65,93 @@ pub(crate) fn instance(
         &[&account.to_string()],
     )?
     .is_empty();
+    let policies: Vec<InstanceRolePolicy> = query(
+        c,
+        "SELECT jsonb_build_object('id',id,'name',name,'builtin',builtin,'role',role,'revision',revision,'limits',jsonb_build_object('owned_guilds',owned_guilds,'text_channels',text_channels,'voice_channels',voice_channels,'members',members,'roles',roles)) AS data FROM instance_role_limits ORDER BY builtin DESC,name,id",
+        &[],
+    )?;
+    let role = if owner == Some(account) {
+        InstanceRole::Owner
+    } else if admin {
+        InstanceRole::Admin
+    } else {
+        InstanceRole::User
+    };
+    let assigned: Option<InstanceRoleId> = query(
+        c,
+        "SELECT to_jsonb(role_id) AS data FROM instance_role_assignments WHERE account_id=$1::uuid",
+        &[&account.to_string()],
+    )?
+    .pop();
+    // Ownership always overrides assignments; legacy admin rows select the
+    // built-in Administrator policy until explicitly assigned another role.
+    let policy_id = policies
+        .iter()
+        .find(|p| {
+            p.role == role
+                && if role == InstanceRole::Owner || assigned.is_none() {
+                    p.builtin
+                } else {
+                    Some(p.id) == assigned
+                }
+        })
+        .ok_or(Failure::Unavailable)?
+        .id;
     Ok(InstanceAccess {
         owner,
-        role: if owner == Some(account) {
-            InstanceRole::Owner
-        } else if admin {
-            InstanceRole::Admin
-        } else {
-            InstanceRole::User
-        },
+        policies,
+        policy_id: Some(policy_id),
+        owned_guilds: query(
+            c,
+            "SELECT to_jsonb(count(*)) AS data FROM guilds WHERE owner=$1::uuid",
+            &[&account.to_string()],
+        )?
+        .pop()
+        .ok_or(Failure::Unavailable)?,
+        role,
     })
+}
+fn capacity(c: &mut PgConnection, owner: AccountId) -> Result<GuildCapacity, Failure> {
+    let access = instance(c, owner)?;
+    let policy = access
+        .policies
+        .iter()
+        .find(|p| Some(p.id) == access.policy_id)
+        .ok_or(Failure::Unavailable)?;
+    Ok(GuildCapacity {
+        owner_role: access.role,
+        role_name: policy.name.clone(),
+        builtin: policy.builtin,
+        limits: policy.limits,
+    })
+}
+fn public_instance(c: &mut PgConnection, account: AccountId) -> Result<InstanceAccess, Failure> {
+    let mut access = instance(c, account)?;
+    if access.role == InstanceRole::User {
+        access.policies.retain(|p| Some(p.id) == access.policy_id);
+    }
+    Ok(access)
+}
+fn allocation(allowed: bool, message: &'static str) -> Result<(), Failure> {
+    if allowed {
+        Ok(())
+    } else {
+        Err(Failure::Capacity(message))
+    }
+}
+fn owned_slot(c: &mut PgConnection, account: AccountId) -> Result<RoleLimits, Failure> {
+    let access = instance(c, account)?;
+    let limits = access
+        .policies
+        .iter()
+        .find(|p| Some(p.id) == access.policy_id)
+        .ok_or(Failure::Unavailable)?
+        .limits;
+    allocation(
+        access.owned_guilds < limits.owned_guilds,
+        "Owned server limit reached; transfer or delete a server, or ask the instance owner to review your limits",
+    )?;
+    Ok(limits)
 }
 pub(super) fn bootstrap(pool: &DbPool, username: &str) -> Result<(), Failure> {
     connection(pool)?.transaction(|c| {
@@ -99,7 +176,7 @@ pub(super) fn bootstrap(pool: &DbPool, username: &str) -> Result<(), Failure> {
 }
 pub(crate) fn load(c: &mut PgConnection, id: GuildId) -> Result<GuildState, Failure> {
     let id = id.to_string();
-    let guild = query(
+    let guild: Guild = query(
         c,
         "SELECT to_jsonb(g) AS data FROM guilds g WHERE id=$1::uuid",
         &[&id],
@@ -127,6 +204,7 @@ pub(crate) fn load(c: &mut PgConnection, id: GuildId) -> Result<GuildState, Fail
         &[&id],
     )?;
     Ok(GuildState {
+        capacity: Some(capacity(c, guild.owner)?),
         guild,
         roles,
         members,
@@ -200,7 +278,8 @@ pub(super) fn dispatch(
     };
     let mut mutations = Vec::new();
     let scopes = match &command {
-        PermissionRequest::SetInstanceAdmin { account_id, .. } => {
+        PermissionRequest::SetInstanceAdmin { account_id, .. }
+        | PermissionRequest::SetInstanceRole { account_id, .. } => {
             vec![crate::chat::access::instance_role(*account_id)]
         }
         PermissionRequest::TransferInstance { account_id } => vec![
@@ -213,17 +292,102 @@ pub(super) fn dispatch(
     let result = c.transaction(|c| {
         let result = (|| {
         auth::read_session(c,token,&session)?;
+        // Order: session/account -> instance -> guild. Shared instance locks
+        // stabilize owner roles/policies; exclusive locks serialize ownership
+        // counts, transfers and policy updates. Never upgrade after locking a guild.
+        let exclusive = matches!(&command,
+            PermissionRequest::CreateGuild { .. }
+            | PermissionRequest::SetInstanceAdmin { .. }
+            | PermissionRequest::TransferInstance { .. }
+            | PermissionRequest::SetInstanceRoleLimits { .. }
+            | PermissionRequest::CreateInstanceRole { .. }
+            | PermissionRequest::DeleteInstanceRole { .. }
+            | PermissionRequest::SetInstanceRole { .. }
+            | PermissionRequest::Change { change: GuildChange::TransferOwner { .. }, .. });
+        execute(c, if exclusive { "SELECT singleton FROM instance FOR UPDATE" }
+            else { "SELECT singleton FROM instance FOR SHARE" }, &[])?;
         let actor = session.account_id;
         match command {
-            PermissionRequest::Instance {} => Ok(PermissionResponse::Instance { access: instance(c,actor)? }),
+            PermissionRequest::Instance {} => Ok(PermissionResponse::Instance { access: public_instance(c,actor)? }),
+            PermissionRequest::ListInstanceRoleMembers { role_id, page } => {
+                let access = instance(c,actor)?;
+                require(access.role == InstanceRole::Owner)?;
+                require(access.policies.iter().any(|p|p.id==role_id))?;
+                #[derive(serde::Deserialize)]
+                struct Entry {
+                    account_id: AccountId,
+                    username: String,
+                    created_at: thiscord_shared::Timestamp,
+                }
+                let (time, id) = page.after.as_ref().map(|cursor| {
+                    let (time,id)=cursor.position(); (time.to_rfc3339(),id.to_string())
+                }).unwrap_or_default();
+                let mut rows: Vec<Entry> = query(c,
+                    "SELECT jsonb_build_object('account_id',a.id,'username',a.username,'created_at',a.created_at) AS data FROM accounts a CROSS JOIN instance i LEFT JOIN instance_role_assignments r ON r.account_id=a.id LEFT JOIN instance_admins adm ON adm.account_id=a.id WHERE (CASE WHEN a.id=i.owner_account_id THEN (SELECT id FROM instance_role_limits WHERE builtin AND role='owner') WHEN r.role_id IS NOT NULL THEN r.role_id ELSE (SELECT id FROM instance_role_limits WHERE builtin AND role=CASE WHEN adm.account_id IS NOT NULL THEN 'admin' ELSE 'user' END) END)=$1::uuid AND ($2='' OR (a.created_at,a.id)>(NULLIF($2,'')::timestamptz,NULLIF($3,'')::uuid)) ORDER BY a.created_at,a.id LIMIT $4::integer",
+                    &[&role_id.to_string(),&time,&id,&(u32::from(page.limit.get())+1).to_string()])?;
+                let next_cursor = if rows.len()>usize::from(page.limit.get()) {
+                    rows.truncate(usize::from(page.limit.get()));
+                    rows.last().map(|m|thiscord_shared::pagination::PageCursor::new(m.created_at,m.account_id.as_uuid()))
+                } else { None };
+                let items=rows.into_iter().map(|r|InstanceRoleMember{account_id:r.account_id,username:r.username}).collect();
+                Ok(PermissionResponse::InstanceRoleMembers { role_id, page:thiscord_shared::pagination::Page{items,next_cursor} })
+            }
+            PermissionRequest::SetInstanceRoleLimits { role_id, name: value, revision, limits } => {
+                auth::recent(&session)?;
+                let access = instance(c,actor)?;
+                require(access.role == InstanceRole::Owner)?;
+                if !limits.valid() { return Err(Failure::Invalid("Limits must be positive: at most 100 owned servers, 100 channels of each kind, 500 members and 100 roles")); }
+                let policy = access.policies.iter().find(|p|p.id==role_id).ok_or(Failure::Conflict)?;
+                let name = name(&value)?;
+                require(!policy.builtin || name == policy.name)?;
+                let changed = execute(c, "UPDATE instance_role_limits SET owned_guilds=$3::integer,text_channels=$4::integer,voice_channels=$5::integer,members=$6::integer,roles=$7::integer,name=$8,revision=revision+1 WHERE id=$1::uuid AND revision=$2::bigint",
+                    &[&role_id.to_string(),&revision.to_string(),&limits.owned_guilds.to_string(),&limits.text_channels.to_string(),&limits.voice_channels.to_string(),&limits.members.to_string(),&limits.roles.to_string(),name])?;
+                if changed != 1 { return Err(Failure::Conflict); }
+                Ok(PermissionResponse::Instance { access: public_instance(c,actor)? })
+            }
+            PermissionRequest::CreateInstanceRole { name: value, role, limits } => {
+                auth::recent(&session)?;
+                let access=instance(c,actor)?;
+                require(access.role == InstanceRole::Owner && role != InstanceRole::Owner)?;
+                allocation(access.policies.len() < 32,"Instance role capacity reached (32 roles)")?;
+                if !limits.valid() { return Err(Failure::Invalid("Invalid role limits")); }
+                execute(c,"INSERT INTO instance_role_limits(name,role,owned_guilds,text_channels,voice_channels,members,roles) VALUES($1,$2::jsonb#>>'{}',$3::integer,$4::integer,$5::integer,$6::integer,$7::integer)",
+                    &[name(&value)?,&json(&role)?,&limits.owned_guilds.to_string(),&limits.text_channels.to_string(),&limits.voice_channels.to_string(),&limits.members.to_string(),&limits.roles.to_string()])?;
+                Ok(PermissionResponse::Instance { access: public_instance(c,actor)? })
+            }
+            PermissionRequest::DeleteInstanceRole { role_id, revision } => {
+                auth::recent(&session)?;
+                let access=instance(c,actor)?;
+                require(access.role == InstanceRole::Owner)?;
+                let policy=access.policies.iter().find(|p|p.id==role_id).ok_or(Failure::Conflict)?;
+                require(!policy.builtin)?;
+                if policy.revision != revision { return Err(Failure::Conflict); }
+                let assigned: bool=query(c,"SELECT to_jsonb(EXISTS(SELECT 1 FROM instance_role_assignments WHERE role_id=$1::uuid)) AS data",&[&role_id.to_string()])?.pop().ok_or(Failure::Unavailable)?;
+                if assigned { return Err(Failure::Invalid("Reassign all accounts before deleting this instance role")); }
+                execute(c,"DELETE FROM instance_role_limits WHERE id=$1::uuid",&[&role_id.to_string()])?;
+                Ok(PermissionResponse::Instance { access: public_instance(c,actor)? })
+            }
+            PermissionRequest::SetInstanceRole { account_id, role_id } => {
+                auth::recent(&session)?;
+                let access=instance(c,actor)?;
+                require(access.role == InstanceRole::Owner && account_id != actor)?;
+                verified(c,account_id)?;
+                let policy=access.policies.iter().find(|p|p.id==role_id).ok_or(Failure::Conflict)?;
+                require(policy.role != InstanceRole::Owner)?;
+                execute(c,"INSERT INTO instance_role_assignments(account_id,role_id) VALUES($1::uuid,$2::uuid) ON CONFLICT(account_id) DO UPDATE SET role_id=EXCLUDED.role_id",&[&account_id.to_string(),&role_id.to_string()])?;
+                if policy.role == InstanceRole::Admin { execute(c,"INSERT INTO instance_admins(account_id) VALUES($1::uuid) ON CONFLICT DO NOTHING",&[&account_id.to_string()])?; }
+                else { execute(c,"DELETE FROM instance_admins WHERE account_id=$1::uuid",&[&account_id.to_string()])?; }
+                Ok(PermissionResponse::Instance { access: public_instance(c,actor)? })
+            }
             PermissionRequest::SetInstanceAdmin { account_id, admin } => {
                 auth::recent(&session)?;
                 execute(c,"SELECT singleton FROM instance FOR UPDATE", &[])?;
                 require(instance(c,actor)?.role == InstanceRole::Owner && account_id!=actor)?;
                 verified(c,account_id)?;
+                execute(c,"DELETE FROM instance_role_assignments WHERE account_id=$1::uuid", &[&account_id.to_string()])?;
                 if admin { execute(c,"INSERT INTO instance_admins(account_id) VALUES($1::uuid) ON CONFLICT DO NOTHING", &[&account_id.to_string()])?; }
                 else { execute(c,"DELETE FROM instance_admins WHERE account_id=$1::uuid", &[&account_id.to_string()])?; }
-                Ok(PermissionResponse::Instance { access: instance(c,actor)? })
+                Ok(PermissionResponse::Instance { access: public_instance(c,actor)? })
             }
             PermissionRequest::TransferInstance { account_id } => {
                 auth::recent(&session)?;
@@ -232,7 +396,8 @@ pub(super) fn dispatch(
                 verified(c,account_id)?;
                 execute(c,"UPDATE instance SET owner_account_id=$1::uuid", &[&account_id.to_string()])?;
                 execute(c,"DELETE FROM instance_admins WHERE account_id=$1::uuid OR account_id=$2::uuid", &[&actor.to_string(),&account_id.to_string()])?;
-                Ok(PermissionResponse::Instance { access: instance(c,actor)? })
+                execute(c,"DELETE FROM instance_role_assignments WHERE account_id=$1::uuid OR account_id=$2::uuid", &[&actor.to_string(),&account_id.to_string()])?;
+                Ok(PermissionResponse::Instance { access: public_instance(c,actor)? })
             }
             PermissionRequest::ListGuilds {} => Ok(PermissionResponse::Guilds { guilds: query(c,"SELECT to_jsonb(g) AS data FROM guilds g JOIN guild_members m ON m.guild_id=g.id WHERE m.account_id=$1::uuid ORDER BY g.id", &[&actor.to_string()])? }),
             PermissionRequest::CreateGuild { name: value, password } => {
@@ -240,9 +405,9 @@ pub(super) fn dispatch(
                 let name=name(&value)?;
                 // Lock instance to serialize capacity checks and ownership administration.
                 execute(c,"SELECT singleton FROM instance FOR UPDATE", &[])?;
-                require(instance(c,actor)?.role != InstanceRole::User)?;
+                owned_slot(c,actor)?;
                 let count: i64 = query(c,"SELECT to_jsonb(count(*)) AS data FROM guilds", &[])?.pop().unwrap_or(0);
-                require(count<100)?;
+                allocation(count<100,"Installation server capacity reached; contact the instance owner")?;
                 let hash=guild_password(password.as_deref())?.map(|p|Argon2::default().hash_password(p.as_bytes(),&SaltString::generate(&mut OsRng)).map(|h|h.to_string()).map_err(|_|Failure::Unavailable)).transpose()?;
                 let id = GuildId::from_uuid(Uuid::new_v4());
                 execute(c,"INSERT INTO guilds(id,name,owner,password_hash) VALUES($1::uuid,$2,$3::uuid,NULLIF($4,''))", &[&id.to_string(),name,&actor.to_string(),hash.as_deref().unwrap_or("")])?;
@@ -260,7 +425,8 @@ pub(super) fn dispatch(
                 if !state.members.iter().any(|m|m.account_id==actor) {
                     let hash: Option<String>=query(c,"SELECT COALESCE(to_jsonb(password_hash),'null'::jsonb) AS data FROM guilds WHERE id=$1::uuid", &[&guild_id.to_string()])?.pop().ok_or(Failure::Forbidden)?;
                     if let Some(hash)=hash {require(PasswordHash::new(&hash).ok().is_some_and(|h|Argon2::default().verify_password(password.as_bytes(),&h).is_ok()))?;}
-                    require(state.members.len()<500)?;
+                    let limits=capacity(c,state.guild.owner)?.limits;
+                    allocation(state.members.len() < limits.members as usize,"Server member limit reached for its owner's instance role")?;
                     execute(c,"INSERT INTO guild_members(guild_id,account_id) VALUES($1::uuid,$2::uuid)", &[&guild_id.to_string(),&actor.to_string()])?;
                     execute(c,"UPDATE guilds SET revision=revision+1 WHERE id=$1::uuid", &[&guild_id.to_string()])?;
                 }
@@ -355,7 +521,11 @@ fn change_guild(
         }
         GuildChange::AddMember { username } => {
             need(Permission::ManageInvites)?;
-            require(state.members.len() < 500)?;
+            let limits = capacity(c, state.guild.owner)?.limits;
+            allocation(
+                state.members.len() < limits.members as usize,
+                "Server member limit reached for its owner's instance role",
+            )?;
             let id: AccountId = query(
                 c,
                 "SELECT to_jsonb(id) AS data FROM accounts WHERE username=$1 AND email_verified",
@@ -451,6 +621,24 @@ fn change_guild(
             require(actor == state.guild.owner && actor != account_id)?;
             member(state, account_id)?;
             verified(c, account_id)?;
+            let limits = owned_slot(c, account_id)?;
+            allocation(
+                state.members.len() <= limits.members as usize
+                    && state.roles.len() <= limits.roles as usize
+                    && state
+                        .channels
+                        .iter()
+                        .filter(|ch| ch.kind == ChannelKind::Text)
+                        .count()
+                        <= limits.text_channels as usize
+                    && state
+                        .channels
+                        .iter()
+                        .filter(|ch| ch.kind == ChannelKind::Voice)
+                        .count()
+                        <= limits.voice_channels as usize,
+                "Server exceeds the new owner's limits; reduce its channels, members or roles before transferring",
+            )?;
             execute(
                 c,
                 "UPDATE guilds SET owner=$2::uuid WHERE id=$1::uuid",
@@ -463,7 +651,10 @@ fn change_guild(
             permissions: grants,
         } => {
             need(Permission::ManageRoles)?;
-            require(state.roles.len() < 100)?;
+            allocation(
+                state.roles.len() < capacity(c, state.guild.owner)?.limits.roles as usize,
+                "Server role limit reached for its owner's instance role (including Everyone)",
+            )?;
             require(position > 0 && position <= 10000 && position < actor_rank)?;
             grantable(state, actor, &grants)?;
             execute(
@@ -550,7 +741,22 @@ fn change_guild(
         }
         GuildChange::CreateChannel { name: value, kind } => {
             need(Permission::ManageChannels)?;
-            require(state.channels.len() < 200)?;
+            let limits = capacity(c, state.guild.owner)?.limits;
+            let maximum = match kind {
+                ChannelKind::Text => limits.text_channels,
+                ChannelKind::Voice => limits.voice_channels,
+            };
+            allocation(
+                state.channels.iter().filter(|ch| ch.kind == kind).count() < maximum as usize,
+                match kind {
+                    ChannelKind::Text => {
+                        "Text channel limit reached for the server owner's instance role"
+                    }
+                    ChannelKind::Voice => {
+                        "Voice channel limit reached for the server owner's instance role"
+                    }
+                },
+            )?;
             execute(
                 c,
                 "INSERT INTO channels(guild_id,name,kind) VALUES($1::uuid,$2,$3)",

@@ -23,7 +23,9 @@ pub mod voice_bots;
 pub use error::{ApiError, ErrorCode};
 pub use ids::AttachmentId;
 pub use ids::AvatarId;
-pub use ids::{AccountId, ChannelId, GuildId, InstanceId, RequestId, RoleId, SessionId};
+pub use ids::{
+    AccountId, ChannelId, GuildId, InstanceId, InstanceRoleId, RequestId, RoleId, SessionId,
+};
 pub use ids::{ClientMessageId, MessageId};
 
 /// RFC 3339 on the wire, normalized to UTC. No OS clock is needed in shared code.

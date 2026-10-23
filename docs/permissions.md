@@ -18,9 +18,82 @@ when two processes race. Protect server shell access and `backend/.env`.
 An instance has exactly one owner after bootstrap. The owner can appoint/remove
 instance admins and transfer ownership to another verified account after recent
 reauthentication. A transfer makes the former owner a regular instance user.
-Admins and the owner may create guilds; regular users join existing guilds.
+All verified users may create guilds within their current instance role's limits.
 Instance administration **does not grant membership or guild permissions**. Future
-deployment-wide moderation, limits and configuration need explicit instance checks.
+deployment-wide moderation and configuration need explicit instance checks.
+
+## Extensible instance roles and owner-based limits
+
+**Settings > Instance access** shows each account's assigned role, owned-server
+usage and per-server allowances. The instance owner can create named roles such
+as Supporter or Partner, edit their names/limits, assign verified accounts, and
+delete unused custom roles. The owner can page through a role's assigned accounts
+and select an account for reassignment, including after inheriting ownership.
+Administrators can inspect role policies; standard-user API responses contain
+only their assigned policy. Every policy/assignment mutation requires current
+instance ownership and recent reauthentication. Policy edits and deletions submit
+the viewed policy revision; stale writes return 409 without automatic retry.
+
+Each account has one instance role. Role definitions have UUID identities, names,
+quotas and an immutable **standard user** or **administrator** access level. A
+larger allocation does not confer administrative authority. Custom administrator
+roles grant the existing instance diagnostics/audio administration access, never
+guild access or role-policy administration. To change authority, assign a different
+role. Ownership is a protected built-in role and can only be acquired through
+bootstrap or the explicit ownership-transfer command. Built-in roles cannot be
+deleted or renamed; their limits can be configured. Up to 32 definitions, including
+the three built-ins, are supported so management responses remain bounded.
+
+Defaults (all configurable by the instance owner):
+
+| Instance role | Owned servers | Text/server | Voice/server | Members/server | Roles/server |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| Free | 1 | 2 | 2 | 25 | 10 |
+| Administrator | 10 | 25 | 25 | 250 | 50 |
+| Instance owner | 100 | 100 | 100 | 500 | 100 |
+
+Limits are positive integers, capped at 100 owned servers, 100 channels of each
+kind, 500 members and 100 guild roles. Members include the owner; roles include
+Everyone. Joined servers do not consume owned-server allowance. The installation
+also retains its aggregate 100-server safety ceiling. Storage, bandwidth, billing,
+expiring subscriptions and voice concurrency are not part of these allocations.
+
+Every guild derives its limits from its **current owner's** current instance role,
+including when another member creates a channel, adds members or creates guild
+roles. Server settings display usage and limits. Both join-by-ID and direct member
+addition enforce capacity, while existing members may rejoin/open at capacity.
+Exceeding an allocation returns HTTP 409 with `limit_exceeded`, a specific safe
+message and the standard request ID.
+
+Downgrades, lower policy limits and instance ownership transfers preserve existing
+servers, channels, memberships and roles. Growth in an already-full category is
+blocked; reading, editing, removing content, moderation and leaving remain governed
+by normal guild permissions. There is no automatic content deletion or eviction.
+A guild ownership transfer requires a free owned-server slot and sufficient room
+for **all** current channels, members and roles under the recipient's role. The
+former instance owner becomes Free when instance ownership is transferred; both
+participants' previous explicit assignments are cleared.
+
+Existing instance admins retain the built-in Administrator allocation on upgrade;
+other non-owners default to Free. The legacy `set_instance_admin` command still
+works and resets the target to the corresponding built-in allocation. Ordinary
+assignments use `set_instance_role`. Deleting an assigned role is rejected until
+its accounts have been explicitly reassigned. The migration rollback removes role
+definitions/assignments while preserving guild content and legacy admin grants.
+
+Allocation transactions lock the instance before the guild. Shared instance locks
+stabilize role assignments/policies during guild writes; exclusive instance locks
+serialize role configuration, ownership transfers and owned-server creation.
+Guild permission/revision checks stay under the same guild lock as the write.
+Quota changes do not revoke media/chat access because they only restrict future
+allocation; changing administrator authority invalidates instance diagnostics access.
+
+`list_instance_role_members` is owner-only and accepts the shared `PageRequest`
+(50 accounts by default, maximum 100). It returns usernames and account IDs using
+`Page`, ordered by `(created_at, id)` with an exclusive versioned keyset cursor.
+It includes implicit built-in assignments and the
+current instance owner. Each page rechecks authority and assignments; it is not a
+frozen account snapshot. It exposes no email addresses or account credentials.
 
 Owner deletion is blocked by foreign keys as well as friendly API validation.
 Transfer instance ownership before deleting that account. A guild owner must
@@ -55,7 +128,7 @@ server-side cursor clamp prevents future messages from being marked read.
 Voice participant rosters require membership and ViewChannel, but not JoinVoice;
 they expose no hidden channels and grant no media or signaling access.
 
-Verified instance owners/admins see **+** to create a server in a dialog with its
+Verified accounts see **+** to create a server in a dialog showing their allowance, with its
 name and optional password. The **Join a server** icon opens a dialog for a server UUID and optional
 password. Verified accounts can join unprotected servers by ID; protected servers
 require the password. Existing members can reopen/join their server without
@@ -68,7 +141,7 @@ Server passwords are salted Argon2id hashes on the backend, never returned in DT
 or logged. Empty passwords mean no protection; passwords are bounded to 1024 bytes.
 Join attempts are limited to six per account per minute, including failures, and
 hashing/verification runs on bounded blocking workers. Membership creation, the
-500-member capacity check and revision increment share the guild transaction lock.
+owner-based member capacity check and revision increment share the guild transaction lock.
 `ViewGuild` returns only channels where the current member has ViewChannel.
 Changing an existing server password is not yet exposed.
 
