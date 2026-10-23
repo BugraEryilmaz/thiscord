@@ -112,6 +112,14 @@ async fn scripting_bots_isolate_credentials_and_deliver_only_live_human_mentions
             (ACCOUNT_PATH, json!({"action":"current"})),
             (PERMISSIONS_PATH, json!({"action":"instance"})),
             (
+                thiscord_shared::safety::SAFETY_PATH,
+                json!({"action":"blocks"}),
+            ),
+            (
+                thiscord_shared::search::SEARCH_PATH,
+                json!({"action":"search","filters":{"scope":{"kind":"guild","guild_id":guild,"channel_id":channel},"query":"needle"}}),
+            ),
+            (
                 thiscord_shared::friends::FRIENDS_PATH,
                 json!({"action":"search","query":"owner"}),
             ),

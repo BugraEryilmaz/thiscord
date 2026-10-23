@@ -792,7 +792,7 @@ fn DirectRow(
         <Show when=move ||!editing.get() fallback=move ||view!{<form class="space-y-2" on:submit=move |ev|{ev.prevent_default();apply(false);}>
             <textarea class="w-full rounded bg-white/10 p-2" aria-label=move ||crate::i18n::t("Edit private message") maxlength="4000" prop:value=move ||draft.get() on:input=move |ev|draft.set(event_target_value(&ev))/>
             <button class="mr-3 text-brand" disabled=move ||busy.get()>{move ||crate::i18n::t("Save")}</button><button type="button" disabled=move ||busy.get() on:click=move |_|editing.set(false)>{move ||crate::i18n::t("Cancel")}</button>
-        </form>}><p class="whitespace-pre-wrap break-words text-white/85">{move ||{let m=message.get();super::message_content::render(if m.deleted {crate::i18n::t("Message deleted")}else{&m.content},ui)}}</p></Show>
+        </form>}><div class="whitespace-pre-wrap break-words text-white/85">{move ||{let m=message.get();super::message_content::render(if m.deleted {crate::i18n::t("Message deleted")}else{&m.content},ui)}}</div></Show>
         <Show when=move ||!message.get().deleted>
             <For each=move ||message.get().attachments key=|a|a.id children=move |attachment|view!{<super::direct_attachments::Card ui id attachment/>}/>
             <div class="flex gap-3 text-xs text-white/50"><Show when=move ||own><button disabled=move ||busy.get() on:click=move |_|{let m=message.get_untracked();draft.set(m.content);edit_revision.set_value(m.revision);editing.set(true);}>{move ||crate::i18n::t("Edit")}</button><button disabled=move ||busy.get() on:click=move |_|apply(true)>{move ||crate::i18n::t("Delete")}</button></Show>

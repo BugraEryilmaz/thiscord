@@ -13,6 +13,108 @@ async fn safety(app: &Router, token: &str, value: Value, status: StatusCode) -> 
     assert_eq!(got, status, "{body}");
     body
 }
+
+#[tokio::test]
+#[ignore = "requires TEST_DATABASE_URL"]
+async fn private_search_tracks_blocking_restored_consent_and_deletion() {
+    let _lock = TEST_LOCK.lock().await;
+    let db = database();
+    let (aid, a) = user(&db, "search_safety_a");
+    let (bid, b) = user(&db, "search_safety_b");
+    let (cid, c) = user(&db, "search_safety_c");
+    let conversation = pair(&db, aid, bid);
+    let unrelated = pair(&db, aid, cid);
+    let app = api::router(Some(db.pool.clone()), vec![]);
+    let message = social(&app, &b, json!({"action":"send","conversation_id":conversation,"client_id":Uuid::new_v4(),"content":"needle retained history"}), StatusCode::OK).await["message"].clone();
+    social(&app, &c, json!({"action":"send","conversation_id":unrelated,"client_id":Uuid::new_v4(),"content":"needle other friend"}), StatusCode::OK).await;
+    let path = thiscord_shared::search::SEARCH_PATH;
+    let scope = json!({"kind":"private","conversation_id":conversation});
+    let search = json!({"action":"search","filters":{"scope":scope,"query":"needle","person":null,"after":null,"before":null}});
+    let context = json!({"action":"context","scope":scope,"message_id":message["id"]});
+    let mut broad = search.clone();
+    broad["filters"]["scope"]["conversation_id"] = Value::Null;
+    for token in [&a, &b] {
+        assert_eq!(
+            call(&app, path, token, search.clone()).await.1["messages"][0]["id"],
+            message["id"]
+        );
+        assert_eq!(
+            call(&app, path, token, context.clone()).await.0,
+            StatusCode::OK
+        );
+    }
+    safety(
+        &app,
+        &a,
+        json!({"action":"block","account_id":bid}),
+        StatusCode::OK,
+    )
+    .await;
+    for token in [&a, &b] {
+        assert_eq!(
+            call(&app, path, token, search.clone()).await.0,
+            StatusCode::FORBIDDEN
+        );
+        assert_eq!(
+            call(&app, path, token, context.clone()).await.0,
+            StatusCode::FORBIDDEN
+        );
+    }
+    let (status, visible) = call(&app, path, &a, broad).await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(visible["messages"].as_array().unwrap().len(), 1);
+    assert_eq!(
+        visible["messages"][0]["scope"]["conversation_id"],
+        json!(unrelated)
+    );
+    safety(
+        &app,
+        &a,
+        json!({"action":"unblock","account_id":bid}),
+        StatusCode::OK,
+    )
+    .await;
+    assert_eq!(
+        call(&app, path, &a, search.clone()).await.0,
+        StatusCode::FORBIDDEN
+    );
+    assert_eq!(
+        call(&app, path, &b, context.clone()).await.0,
+        StatusCode::FORBIDDEN
+    );
+    social(
+        &app,
+        &a,
+        json!({"action":"add","account_id":bid}),
+        StatusCode::OK,
+    )
+    .await;
+    assert_eq!(
+        call(&app, path, &a, search.clone()).await.0,
+        StatusCode::FORBIDDEN
+    );
+    social(
+        &app,
+        &b,
+        json!({"action":"accept","account_id":aid}),
+        StatusCode::OK,
+    )
+    .await;
+    assert_eq!(
+        call(&app, path, &a, search.clone()).await.1["messages"][0]["id"],
+        message["id"]
+    );
+    social(&app, &b, json!({"action":"delete","conversation_id":conversation,"message_id":message["id"],"revision":message["revision"]}), StatusCode::OK).await;
+    for token in [&a, &b] {
+        let (status, result) = call(&app, path, token, search.clone()).await;
+        assert_eq!(status, StatusCode::OK);
+        assert!(result["messages"].as_array().unwrap().is_empty());
+        assert_eq!(
+            call(&app, path, token, context.clone()).await.0,
+            StatusCode::FORBIDDEN
+        );
+    }
+}
 async fn serve(app: &Router) -> (std::net::SocketAddr, tokio::task::JoinHandle<()>) {
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let address = listener.local_addr().unwrap();

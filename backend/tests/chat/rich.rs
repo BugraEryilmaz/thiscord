@@ -301,9 +301,8 @@ async fn rich_private_search_requires_locked_current_consent() {
             .unwrap()
             .is_empty()
     );
-    // Exercise the upcoming typed deletion column in this isolated baseline schema too.
+    // The combined private-message migration supplies the typed deletion column.
     let mut c = db.pool.get().unwrap();
-    c.batch_execute("ALTER TABLE direct_messages ADD COLUMN IF NOT EXISTS deleted BOOLEAN NOT NULL DEFAULT false").unwrap();
     diesel::sql_query("UPDATE direct_messages SET deleted=true WHERE id=$1::uuid")
         .bind::<Text, _>(message.to_string())
         .execute(&mut c)

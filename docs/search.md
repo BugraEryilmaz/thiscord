@@ -26,19 +26,19 @@ No-store responses, four-worker admission, per-account throttling, query/lock de
 most 501 relationships and require narrowing if more than 500 match. GIN indexes
 support content lookup; no attachment bytes enter search results.
 
-## P1 integration dependency
+## Private access and deletion
 
-This isolated branch starts at feaae9a, before private edit/delete/blocking. Its
-private access seam in `backend/src/search.rs` must be replaced with
-`friends::store::pair_access(c, id, actor, false)` for every selected conversation,
-inside the existing transaction. Replace the temporary JSON-based deleted predicate
-with the final typed `NOT m.deleted` column. The sibling's helper checks both block
-directions; unblocking does not restore friendship consent. Final acceptance must
-exercise block, unblock, removal, deleted messages, and concurrent revocation for
-both search and context against the combined migrations. The baseline branch tests
-accepted consent, stranger isolation, deletion filtering with an isolated test column,
-removal, and waiting behind a removal commit;
-it does not claim combined DM safety acceptance.
+Every selected conversation passes `friends::store::pair_access` inside the
+retained session transaction. This shares the history/download rules for accepted
+friendship and blocks in either direction. Queries use the typed `NOT m.deleted`
+predicate. Blocking removes search and context access for both people; unblocking
+alone does not restore consent. A new accepted request restores retained history,
+while deleted messages remain excluded.
+
+Combined database regressions cover block/unblock, pending and restored consent,
+unrelated conversations, deletion, stranger isolation, removal, and a context
+request waiting behind a removal commit. Bot credentials cannot access search or
+private safety endpoints.
 
 Guild rich-chat migration rollback removes both search indexes. Existing content
 remains; reapply restores indexes. Search does not claim scale measurements for

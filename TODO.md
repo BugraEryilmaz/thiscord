@@ -151,7 +151,7 @@ and single-process chat/media enforcement.
 - [ ] Verify attachment drag/drop, downloads and media codec playback interactively on Windows/macOS/Linux clients.
 - [x] Guild replies, emoji reactions, safe Markdown/code blocks and moderator message pins.
 - [x] Authorized guild/private search with filters, keyset pages and original/context navigation.
-- [ ] Integrate private search with final DM deletion/blocking schema and pair_access; validate combined block/unblock/deletion/revocation behavior (docs/search.md).
+- [x] Integrate private search with DM deletion/blocking and pair_access; validate combined block/unblock, renewed consent, deletion and revocation behavior (docs/search.md).
 - [ ] Later: configurable attachment storage quotas.
 
 ## 5. Frontend audio and media feasibility
