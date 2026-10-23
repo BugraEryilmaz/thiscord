@@ -13,7 +13,7 @@ sonora-aec3 = { path = "vendor/sonora-aec3" }
 deep_filter = { path = "vendor/deep-filter/libDF" }
 
 [workspace.package]
-version = "0.1.46"
+version = "0.1.47"
 edition = "2024"
 rust-version = "1.98"
 publish = false
