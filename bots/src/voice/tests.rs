@@ -16,8 +16,15 @@ fn final_handle_drop_requests_shutdown() {
     let (cancel, cancelled) = watch::channel(false);
     let (_, status) = watch::channel(PlaybackEvent::Idle);
     let (_, closed) = watch::channel(false);
+    let (_, publication) = watch::channel(Publication {
+        generation: 0,
+        restricted: false,
+    });
     let voice = Voice(Arc::new(Inner {
         commands,
+        publication,
+        #[cfg(target_os = "linux")]
+        hold_commands: Arc::new(std::sync::atomic::AtomicU8::new(0)),
         cancel,
         status,
         closed,
