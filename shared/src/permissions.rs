@@ -1,5 +1,5 @@
 //! Stable, explicit permission names; unknown permissions fail deserialization.
-use crate::{AccountId, ChannelId, GuildId, RoleId};
+use crate::{AccountId, ChannelId, GuildId, InstanceRoleId, RoleId};
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeSet;
 
@@ -58,10 +58,58 @@ pub enum InstanceRole {
     Admin,
     User,
 }
+/// Allocation limits are independent of guild permissions. `user` remains the
+/// stable wire name for the Free tier. Members include the owner; roles include Everyone.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct RoleLimits {
+    pub owned_guilds: u32,
+    pub text_channels: u32,
+    pub voice_channels: u32,
+    pub members: u32,
+    pub roles: u32,
+}
+impl RoleLimits {
+    pub fn valid(self) -> bool {
+        (1..=100).contains(&self.owned_guilds)
+            && (1..=100).contains(&self.text_channels)
+            && (1..=100).contains(&self.voice_channels)
+            && (1..=500).contains(&self.members)
+            && (1..=100).contains(&self.roles)
+    }
+}
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct InstanceRolePolicy {
+    pub id: InstanceRoleId,
+    pub name: String,
+    pub builtin: bool,
+    /// Immutable authority level; custom roles may be Admin or User, never Owner.
+    pub role: InstanceRole,
+    pub limits: RoleLimits,
+    pub revision: i64,
+}
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct GuildCapacity {
+    pub owner_role: InstanceRole,
+    pub role_name: String,
+    pub builtin: bool,
+    pub limits: RoleLimits,
+}
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct InstanceRoleMember {
+    pub account_id: AccountId,
+    pub username: String,
+}
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct InstanceAccess {
     pub role: InstanceRole,
     pub owner: Option<AccountId>,
+    #[serde(default)]
+    pub policies: Vec<InstanceRolePolicy>,
+    #[serde(default)]
+    pub owned_guilds: u32,
+    #[serde(default)]
+    pub policy_id: Option<InstanceRoleId>,
 }
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Guild {
@@ -170,6 +218,8 @@ pub struct ChannelOverride {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct GuildState {
     pub guild: Guild,
+    #[serde(default)]
+    pub capacity: Option<GuildCapacity>,
     pub roles: Vec<Role>,
     pub members: Vec<Member>,
     pub channels: Vec<Channel>,
@@ -180,6 +230,30 @@ pub struct GuildState {
 #[serde(tag = "action", rename_all = "snake_case", deny_unknown_fields)]
 pub enum PermissionRequest {
     Instance {},
+    ListInstanceRoleMembers {
+        role_id: InstanceRoleId,
+        #[serde(default)]
+        page: crate::pagination::PageRequest,
+    },
+    SetInstanceRoleLimits {
+        role_id: InstanceRoleId,
+        name: String,
+        revision: i64,
+        limits: RoleLimits,
+    },
+    CreateInstanceRole {
+        name: String,
+        role: InstanceRole,
+        limits: RoleLimits,
+    },
+    DeleteInstanceRole {
+        role_id: InstanceRoleId,
+        revision: i64,
+    },
+    SetInstanceRole {
+        account_id: AccountId,
+        role_id: InstanceRoleId,
+    },
     SetInstanceAdmin {
         account_id: AccountId,
         admin: bool,
@@ -289,6 +363,10 @@ pub enum GuildChange {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "result", rename_all = "snake_case")]
 pub enum PermissionResponse {
+    InstanceRoleMembers {
+        role_id: InstanceRoleId,
+        page: crate::pagination::Page<InstanceRoleMember>,
+    },
     Moderation {
         state: ModerationState,
     },
@@ -329,6 +407,57 @@ pub struct GuildHome {
 mod tests {
     use super::*;
     use serde_json::json;
+
+    #[test]
+    fn extensible_instance_role_commands_are_explicit_and_bounded() {
+        let limits = RoleLimits {
+            owned_guilds: 1,
+            text_channels: 2,
+            voice_channels: 2,
+            members: 25,
+            roles: 10,
+        };
+        assert!(limits.valid());
+        assert!(
+            !RoleLimits {
+                owned_guilds: 0,
+                ..limits
+            }
+            .valid()
+        );
+        assert!(
+            !RoleLimits {
+                voice_channels: 101,
+                ..limits
+            }
+            .valid()
+        );
+        assert!(
+            !RoleLimits {
+                members: 501,
+                ..limits
+            }
+            .valid()
+        );
+        assert!(
+            !RoleLimits {
+                roles: 101,
+                ..limits
+            }
+            .valid()
+        );
+        let wire = json!({"action":"create_instance_role","name":"Supporter","role":"user","limits":limits});
+        let command: PermissionRequest = serde_json::from_value(wire.clone()).unwrap();
+        assert_eq!(serde_json::to_value(command).unwrap(), wire);
+        assert_eq!(serde_json::to_value(InstanceRole::User).unwrap(), "user");
+        assert_eq!(
+            serde_json::to_value(crate::ErrorCode::LimitExceeded).unwrap(),
+            "limit_exceeded"
+        );
+        let mut unknown = wire;
+        unknown["administrator"] = json!(true);
+        assert!(serde_json::from_value::<PermissionRequest>(unknown).is_err());
+    }
 
     #[test]
     fn moderation_commands_and_legacy_members_keep_stable_wire_formats() {

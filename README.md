@@ -78,6 +78,11 @@ and mention badges without marking messages as read or changing voice playback.
 Participant voice settings adjust local playback volume (0% mutes that person).
 Each server has a **Moderation** panel for voice disconnects,
 timeouts, kicks, bans and unbans, with server-side permission and hierarchy checks.
+Verified Free accounts can own one server with two text and two voice channels.
+In **Settings > Instance access**, the instance owner can create named tiers,
+assign accounts and configure owned-server, channel, member and role limits.
+Each server inherits its current owner's limits; larger tiers need not grant
+administrator access. Downgrades preserve existing content and restrict new growth.
 After verifying an account, run `./run-wsl.ps1 -BootstrapOwner YOUR_USERNAME`
 from `backend/`, then open your server’s **Server settings > Roles**. See [permission rules and setup](docs/permissions.md).
 Text chat includes persisted history, edits/deletes, unread mentions and authenticated

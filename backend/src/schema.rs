@@ -204,6 +204,28 @@ diesel::table! {
 }
 
 diesel::table! {
+    instance_role_assignments (account_id) {
+        account_id -> Uuid,
+        role_id -> Uuid,
+    }
+}
+
+diesel::table! {
+    instance_role_limits (id) {
+        id -> Uuid,
+        name -> Text,
+        role -> Text,
+        builtin -> Bool,
+        owned_guilds -> Int4,
+        text_channels -> Int4,
+        voice_channels -> Int4,
+        members -> Int4,
+        roles -> Int4,
+        revision -> Int8,
+    }
+}
+
+diesel::table! {
     mail_outbox (id) {
         id -> Uuid,
         account_id -> Uuid,
@@ -309,6 +331,8 @@ diesel::joinable!(guilds -> accounts (owner));
 diesel::joinable!(identities -> accounts (account_id));
 diesel::joinable!(instance -> accounts (owner_account_id));
 diesel::joinable!(instance_admins -> accounts (account_id));
+diesel::joinable!(instance_role_assignments -> accounts (account_id));
+diesel::joinable!(instance_role_assignments -> instance_role_limits (role_id));
 diesel::joinable!(mail_outbox -> accounts (account_id));
 diesel::joinable!(message_events -> messages (message_id));
 diesel::joinable!(messages -> accounts (author_id));
@@ -339,6 +363,8 @@ diesel::allow_tables_to_appear_in_same_query!(
     identities,
     instance,
     instance_admins,
+    instance_role_assignments,
+    instance_role_limits,
     mail_outbox,
     message_events,
     messages,

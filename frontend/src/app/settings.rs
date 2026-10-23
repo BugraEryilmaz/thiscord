@@ -36,7 +36,7 @@ fn title(page: &str) -> &'static str {
         "desktop" => crate::i18n::t("App behavior"),
         "updates" => crate::i18n::t("Updates"),
         "notifications" => crate::i18n::t("Notifications"),
-        "administration" => crate::i18n::t("Instance administration"),
+        "administration" => crate::i18n::t("Instance access"),
         "server_roles" => crate::i18n::t("Roles"),
         "server_members" => crate::i18n::t("Members"),
         "server_channels" => crate::i18n::t("Channels & permissions"),
@@ -144,7 +144,7 @@ pub(super) fn Host(ui: Ui) -> impl IntoView {
                             <Show when=client::desktop><NavItem ui=ui page="shortcuts" label="Shortcuts & overlay" icon=Glyph::Keyboard/><NavItem ui=ui page="desktop" label="App behavior" icon=Glyph::Screen/></Show>
                             <NavItem ui=ui page="updates" label="Updates" icon=Glyph::Refresh/>
                             <NavItem ui=ui page="notifications" label="Notifications" icon=Glyph::Volume/>
-                            <Show when=move ||ui.can_create_server.get()><p class="settings-nav-label">{move || crate::i18n::t("Administration")}</p><NavItem ui=ui page="administration" label="Instance access" icon=Glyph::Shield/></Show>
+                            <NavItem ui=ui page="administration" label="Instance access" icon=Glyph::Shield/>
                         </nav>
                         <button class="settings-signout" disabled=move ||ui.busy.get() || ui.settings_dirty.get() on:click=move |_|super::run(ui,AccountRequest::Logout)><Icon kind=Glyph::Join/>{move || crate::i18n::t("Sign out")}</button>
                     }>
@@ -237,6 +237,7 @@ fn Security(ui: Ui) -> impl IntoView {
             <form class="space-y-4" on:submit=move |e:leptos::ev::SubmitEvent|{e.prevent_default();let value=current.get_untracked();current.set(String::new());super::run(ui,AccountRequest::Reauthenticate{password:value});}><Field label="Current password" value=current kind="password" autocomplete="current-password"/><button class="settings-primary" disabled=move ||ui.busy.get()||current.get().is_empty()>{move || crate::i18n::t("Confirm identity")}</button></form>
             <Show when=move ||ui.account.get().is_some_and(|a|a.identities.contains(&IdentityProvider::Google))><button class="settings-secondary" disabled=move ||ui.busy.get() on:click=move |_|super::google(ui,GooglePurpose::Reauthenticate)>{move || crate::i18n::t("Confirm with Google")}</button></Show>
             <Show when=move ||ui.server.get().is_some_and(|s|ui.account.get().is_some_and(|a|a.id==s.guild.owner))><button class="settings-link" on:click=move |_|navigate(ui,"server_danger")>{move || crate::i18n::t("Return to server ownership settings")}</button></Show>
+            <Show when=move ||ui.page.get()=="reauthenticate"><button class="settings-link" on:click=move |_|navigate(ui,"administration")>{move ||crate::i18n::t("Return to instance access")}</button></Show>
         </section>
         <section class="settings-card"><h3>{move || crate::i18n::t("Change password")}</h3><p class="settings-hint">{move || crate::i18n::t("Use at least 12 characters. Saving signs you out on every device.")}</p><form class="space-y-4" on:submit=move |e:leptos::ev::SubmitEvent|{e.prevent_default();let value=password.get_untracked();password.set(String::new());super::run(ui,AccountRequest::ChangePassword{password:value});}><Field label="New password" value=password kind="password" autocomplete="new-password"/><button class="settings-primary" disabled=move ||ui.busy.get()||password.get().chars().count()<12>{move || crate::i18n::t("Save new password")}</button></form></section>
         <details class="settings-card settings-danger-zone"><summary>{move || crate::i18n::t("Delete account")}</summary><p class="settings-hint">{move || crate::i18n::t("Permanently deletes your profile, credentials and sessions. Transfer or delete any servers you own first. Confirm your identity above before continuing.")}</p><Field label="Type your username to confirm" value=confirmation/><ConfirmButton ui=ui label="Delete my account" title="Permanently delete your account?" detail="This cannot be undone. Your profile, credentials and sessions will be deleted." disabled=Signal::derive(move ||ui.account.get().is_none_or(|a|confirmation.get()!=a.username)) on_confirm=Callback::new(move |()|super::run(ui,AccountRequest::DeleteAccount{confirmation:confirmation.get_untracked()}))/></details>

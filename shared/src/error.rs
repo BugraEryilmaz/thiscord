@@ -9,6 +9,7 @@ pub enum ErrorCode {
     Unauthorized,
     Forbidden,
     Conflict,
+    LimitExceeded,
     RateLimited,
     ValidationFailed,
     NotFound,

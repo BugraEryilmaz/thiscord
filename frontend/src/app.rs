@@ -59,6 +59,7 @@ struct Ui {
     server_error: RwSignal<String>,
     server_refresh: RwSignal<u64>,
     can_create_server: RwSignal<bool>,
+    instance_access: RwSignal<Option<thiscord_shared::permissions::InstanceAccess>>,
     moderation_target: RwSignal<Option<thiscord_shared::AccountId>>,
     account: RwSignal<Option<Account>>,
     token: RwSignal<Option<String>>,
@@ -111,6 +112,7 @@ async fn clear_local(ui: Ui) {
     ui.voice_location.set(None);
     ui.active_stream.set(None);
     ui.can_create_server.set(false);
+    ui.instance_access.set(None);
     ui.token.set(None);
     ui.account.set(None);
     ui.sessions.set(vec![]);
@@ -357,6 +359,7 @@ pub fn App() -> impl IntoView {
         server_error: RwSignal::new(String::new()),
         server_refresh: RwSignal::new(0),
         can_create_server: RwSignal::new(false),
+        instance_access: RwSignal::new(None),
         moderation_target: RwSignal::new(None),
         account: RwSignal::new(None),
         token: RwSignal::new(None),

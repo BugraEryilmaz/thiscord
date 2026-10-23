@@ -26,6 +26,7 @@ pub(super) enum Failure {
     NotFound,
     Invalid(&'static str),
     Conflict,
+    Capacity(&'static str),
     Forbidden,
     Limited,
     Unavailable,
@@ -67,6 +68,7 @@ impl Failure {
                 "Invalid credentials, code or expired session",
             ),
             Self::Invalid(m) => (StatusCode::BAD_REQUEST, ErrorCode::ValidationFailed, m),
+            Self::Capacity(m) => (StatusCode::CONFLICT, ErrorCode::LimitExceeded, m),
             Self::Conflict => (
                 StatusCode::CONFLICT,
                 ErrorCode::Conflict,

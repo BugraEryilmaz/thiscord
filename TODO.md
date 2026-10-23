@@ -93,6 +93,8 @@ A main/instance role administers the deployment. Each guild has independent
 roles assigned to its memberships; a user can have different roles in each guild.
 
 - [x] Instance owner/admin/user permissions and secure first-owner bootstrap.
+- [x] Extensible instance roles with separate authority and configurable owner-based
+  server/channel/member/role quotas, assignment UI and transactional enforcement.
 - [x] Guild ownership, memberships, role definitions and membership-role assignments.
 - [x] Everyone/default role, multiple-role composition and owner/admin behavior.
 - [x] Role hierarchy, grant/edit restrictions and privilege-escalation prevention.
