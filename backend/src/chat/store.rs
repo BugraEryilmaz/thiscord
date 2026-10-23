@@ -619,6 +619,7 @@ fn response_message(
         && let Some(reply) = &mut message.reply
     {
         reply.preview = None;
+        reply.target_revision = None;
     }
     Ok(message)
 }

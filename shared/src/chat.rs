@@ -20,11 +20,15 @@ pub struct Reaction {
     pub mine: bool,
 }
 
-#[derive(Clone, Serialize, Deserialize)]
+#[derive(Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct ReplyPreview {
     pub id: MessageId,
     /// None means deleted/unavailable; no author or content is retained.
     pub preview: Option<String>,
+    /// Revision of the target, independent of the containing reply's revision.
+    /// Missing on legacy servers or when the recipient cannot read the target.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub target_revision: Option<i32>,
 }
 pub const ATTACHMENTS_PATH: &str = "/api/v1/attachments";
 pub const MAX_ATTACHMENT_BYTES: usize = 25 * 1024 * 1024;
@@ -302,6 +306,21 @@ mod tests {
         }]});
         let parsed: ChatResponse = serde_json::from_value(response.clone()).unwrap();
         assert_eq!(serde_json::to_value(parsed).unwrap(), response);
+    }
+
+    #[test]
+    fn reply_target_revision_is_additive_and_independent() {
+        let legacy = json!({"id":"00000000-0000-0000-0000-000000000001","preview":"old"});
+        let mut preview: ReplyPreview = serde_json::from_value(legacy.clone()).unwrap();
+        assert_eq!(preview.target_revision, None);
+        assert_eq!(serde_json::to_value(&preview).unwrap(), legacy);
+        for revision in [0, 42] {
+            preview.target_revision = Some(revision);
+            let wire = serde_json::to_value(&preview).unwrap();
+            assert_eq!(wire["target_revision"], revision);
+            let decoded: ReplyPreview = serde_json::from_value(wire).unwrap();
+            assert!(decoded == preview);
+        }
     }
 
     #[test]

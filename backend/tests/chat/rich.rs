@@ -18,6 +18,70 @@ async fn search(
 }
 #[tokio::test]
 #[ignore = "requires TEST_DATABASE_URL"]
+async fn rich_preview_revision_tracks_target_across_all_hydration_paths() {
+    let _guard = TEST_LOCK.lock().await;
+    let db = database();
+    let (app, owner, guest, _, state, channel) = setup(&db).await;
+    let guild = state["guild"]["id"].clone();
+    let mut target = send_text(&app, &owner, &guild, &channel, "original target").await;
+    let send = json!({"action":"send","guild_id":guild,"channel_id":channel,"client_id":Uuid::new_v4(),"content":"reply","reply_to":target["id"]});
+    let reply = chat(&app, &guest, send.clone(), StatusCode::OK).await["message"].clone();
+    let pinned = chat(&app,&owner,json!({"action":"pin","guild_id":guild,"channel_id":channel,"message_id":reply["id"],"revision":reply["revision"],"pinned":true}),StatusCode::OK).await["message"].clone();
+    for text in ["first edit", "second edit"] {
+        target = chat(&app,&owner,json!({"action":"edit","guild_id":guild,"channel_id":channel,"message_id":target["id"],"revision":target["revision"],"content":text}),StatusCode::OK).await["message"].clone();
+    }
+    assert_ne!(target["revision"], pinned["revision"]);
+    let check = |message: &Value| {
+        assert_eq!(message["reply"]["id"], target["id"]);
+        assert_eq!(message["reply"]["preview"], target["content"]);
+        assert_eq!(message["reply"]["target_revision"], target["revision"]);
+    };
+    // Exact send retries and unchanged edits also use recipient hydration.
+    let retry = chat(&app, &guest, send, StatusCode::OK).await;
+    check(&retry["message"]);
+    let unchanged = chat(&app,&guest,json!({"action":"edit","guild_id":guild,"channel_id":channel,"message_id":reply["id"],"revision":pinned["revision"],"content":"reply"}),StatusCode::OK).await;
+    check(&unchanged["message"]);
+    for action in ["history", "context", "pins"] {
+        let mut request = json!({"action":action,"guild_id":guild,"channel_id":channel});
+        if action == "context" {
+            request["message_id"] = reply["id"].clone();
+        }
+        let response = chat(&app, &guest, request, StatusCode::OK).await;
+        let messages = if action == "pins" {
+            &response["messages"]
+        } else {
+            &response["history"]["messages"]
+        };
+        let current = messages
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|m| m["id"] == reply["id"])
+            .unwrap();
+        check(current);
+        assert_eq!(current["revision"], pinned["revision"]);
+    }
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let address = listener.local_addr().unwrap();
+    let router = app.clone();
+    let server = tokio::spawn(async move {
+        axum::serve(listener, router).await.unwrap();
+    });
+    let mut socket = open_socket(address, &owner, &guild, &channel).await;
+    event(&mut socket, "ready").await;
+    let reacted = chat(&app,&guest,json!({"action":"react","guild_id":guild,"channel_id":channel,"message_id":reply["id"],"emoji":"👍","present":true}),StatusCode::OK).await;
+    check(&reacted["message"]);
+    assert_eq!(reacted["message"]["reactions"][0]["mine"], true);
+    let pushed = event(&mut socket, "message").await;
+    check(&pushed["message"]);
+    assert_eq!(pushed["message"]["reactions"][0]["mine"], false);
+    socket.close(None).await.unwrap();
+    server.abort();
+    let _ = server.await;
+}
+
+#[tokio::test]
+#[ignore = "requires TEST_DATABASE_URL"]
 async fn rich_replies_reactions_pins_and_socket_updates() {
     let _guard = TEST_LOCK.lock().await;
     let db = database();
@@ -36,6 +100,10 @@ async fn rich_replies_reactions_pins_and_socket_updates() {
     let retry = chat(&app, &guest, request.clone(), StatusCode::OK).await;
     assert_eq!(first["message"]["id"], retry["message"]["id"]);
     assert_eq!(first["message"]["reply"]["preview"], target["content"]);
+    assert_eq!(
+        first["message"]["reply"]["target_revision"],
+        target["revision"]
+    );
     let mut changed = request.clone();
     changed["reply_to"] = Value::Null;
     chat(&app, &guest, changed, StatusCode::CONFLICT).await;
@@ -141,6 +209,7 @@ async fn rich_replies_reactions_pins_and_socket_updates() {
         .unwrap();
     assert_eq!(deleted["reactions"], json!([]));
     assert_eq!(deleted["pinned"], false);
+    assert_eq!(reply["reply"]["target_revision"], deleted["revision"]);
     chat(&app, &guest, reaction, StatusCode::FORBIDDEN).await;
     chat(&app,&guest,json!({"action":"context","guild_id":guild,"channel_id":other,"message_id":first["message"]["id"]}),StatusCode::FORBIDDEN).await;
     let mut deleted_reply = request;
@@ -361,6 +430,7 @@ async fn rich_reply_permissions_and_pin_capacity_are_authoritative() {
     for content in ["my reply", "edited reply"] {
         let result=chat(&app,&guest,json!({"action":"edit","guild_id":guild,"channel_id":channel,"message_id":reply["id"],"revision":0,"content":content}),StatusCode::OK).await;
         assert_eq!(result["message"]["reply"]["preview"], Value::Null);
+        assert!(result["message"]["reply"].get("target_revision").is_none());
     }
     chat(&app,&guest,json!({"action":"react","guild_id":guild,"channel_id":channel,"message_id":target["id"],"emoji":"👍","present":true}),StatusCode::FORBIDDEN).await;
     let mut c = db.pool.get().unwrap();

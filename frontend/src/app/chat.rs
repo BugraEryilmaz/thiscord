@@ -197,27 +197,13 @@ impl Chat {
                 row.set(message)
             });
             for row in cache.values() {
+                // MessageCache updates bodies only on revision advances; target
+                // previews carry their own independently compared revision.
                 let update = row.with_untracked(|current| {
-                    // Equal message revisions can carry a fresher reply preview.
-                    // MessageCache intentionally updates message bodies only on
-                    // revision advances, so apply the reconciled preview here.
-                    if let Some(message) = messages.iter().find(|m| m.id == current.id) {
-                        return message.reply.as_ref().map(|reply| reply.preview.clone());
-                    }
-                    current.reply.as_ref().and_then(|reply| {
-                        reply.preview.as_ref()?;
-                        messages
-                            .iter()
-                            .find(|m| m.id == reply.id)
-                            .map(thiscord_frontend::rich_chat::preview)
-                    })
+                    thiscord_frontend::rich_chat::updated_reply(current, &messages)
                 });
-                if let Some(preview) = update {
-                    row.update(|current| {
-                        if let Some(reply) = &mut current.reply {
-                            reply.preview = preview;
-                        }
-                    });
+                if let Some(reply) = update {
+                    row.update(|current| current.reply = Some(reply));
                 }
             }
         });
