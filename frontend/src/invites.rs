@@ -40,7 +40,9 @@ pub fn desktop_code(link: &str, base: &str) -> Option<String> {
     let link = Url::parse(link).ok()?;
     if link.scheme() != "thiscord"
         || link.host_str() != Some("invite")
-        || !link.path().is_empty()
+        // Windows URI handling may canonicalize an empty authority path to `/`.
+        // Both identify the invite host; no other paths are accepted.
+        || !matches!(link.path(), "" | "/")
         || link.port().is_some()
         || !link.username().is_empty()
         || link.password().is_some()
@@ -83,6 +85,17 @@ pub fn input_code(input: &str, base: &str) -> Option<String> {
 mod tests {
     use super::*;
     const CODE: &str = "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQ";
+    #[test]
+    fn accepts_windows_canonicalized_desktop_invites() {
+        let base = "https://thiscord.com.tr";
+        let link = format!("thiscord://invite/?origin=https%3A%2F%2Fthiscord.com.tr#{CODE}");
+        assert_eq!(desktop_code(&link, base), Some(CODE.into()));
+        assert_eq!(input_code(&link, base), Some(CODE.into()));
+        assert!(desktop_code(&link, "https://other.example").is_none());
+        for path in ["//", "/other", "/invite"] {
+            assert!(desktop_code(&link.replace("/?", &format!("{path}?")), base).is_none());
+        }
+    }
     #[test]
     fn handoff_round_trip_and_origin_isolation() {
         let link = desktop_link("https://thiscord.com.tr", CODE).unwrap();
