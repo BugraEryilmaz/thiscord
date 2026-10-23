@@ -82,10 +82,13 @@ pub(super) fn destination(
     use crate::auth::store::{self as auth, connection, execute, query};
     use diesel::Connection;
     let mut c = connection(pool).ok()?;
-    let session = auth::authenticate_retained(&mut c, token).ok()?;
+    let session = auth::authenticate_actor_retained(&mut c, token).ok()?;
+    session.require_guild(guild).ok()?;
     c.transaction::<_,Failure,_>(|c|{
-        auth::read_session(c,token,&session)?;
+        if session.bot_guild.is_none() { auth::read_session(c,token,&session)?; }
         execute(c,"SELECT id FROM guilds WHERE id=$1::uuid FOR SHARE", &[&guild.to_string()])?;
+        // Bot deletion locks its guild before deleting the backing account.
+        if session.bot_guild.is_some() { auth::read_session(c,token,&session)?; }
         let destination:ChannelId=query(c,"SELECT to_jsonb(move_destination) AS data FROM guild_moderation WHERE guild_id=$1::uuid AND account_id=$2::uuid AND move_source=$3::uuid AND move_revision=voice_revision AND voice_revision=$4::bigint+1 AND NOT banned", &[&guild.to_string(),&session.account_id.to_string(),&source.to_string(),&revision.to_string()])?.pop().ok_or(Failure::Forbidden)?;
         let state=crate::permissions::authorization::load(c,guild,&[session.account_id],Some(destination))?;
         let permissions=crate::permissions::evaluator::effective(&state,session.account_id,Some(destination));
