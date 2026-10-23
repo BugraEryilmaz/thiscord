@@ -120,6 +120,9 @@ pub struct Participant {
     pub server_muted: bool,
     #[serde(default)]
     pub server_deafened: bool,
+    /// Monotonic moderation boundary, including changes coalesced between rosters.
+    #[serde(default)]
+    pub publication_revision: u64,
     pub can_speak: bool,
     #[serde(default)]
     pub sharing_screen: bool,

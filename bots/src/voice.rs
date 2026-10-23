@@ -263,23 +263,23 @@ async fn session(
             }
             restricted(&mut socket, true).await?;
             // Admission means both the state and the DTLS connection are ready.
-            loop {
+            let admitted = loop {
                 match receive(&mut socket).await? {
                     ServerEvent::Participants { members } => {
                         let member = own(&members, slot)?;
-                        if member.muted && member.deafened { break; }
+                        if member.muted && member.deafened { break member.clone(); }
                     },
                     ServerEvent::Pong {} => {},
                     _ => return Err(Error::message("Voice admission denied")),
                 }
-            }
+            };
             p.connected().await?;
-            Ok(slot)
+            Ok(admitted)
         }) => result.unwrap_or_else(|_| Err(Error::message("Voice join timed out"))),
     };
     let mut player: Option<media::Player> = None;
     let result = match joined {
-        Ok(slot) => {
+        Ok(admitted) => {
             let _ = ready.send(Ok(()));
             let mut shutdown = cancel.clone();
             tokio::select! { biased;
@@ -287,7 +287,7 @@ async fn session(
                 result = run(
                 &mut socket,
                 peer.as_ref().expect("joined peer"),
-                slot,
+                admitted,
                 &mut commands,
                 &mut cancel,
                 &status,
@@ -326,7 +326,7 @@ async fn session(
 async fn run(
     socket: &mut Socket,
     peer: &peer::Peer,
-    slot: usize,
+    admitted: Participant,
     commands: &mut mpsc::Receiver<Command>,
     cancel: &mut watch::Receiver<bool>,
     status: &watch::Sender<PlaybackEvent>,
@@ -344,6 +344,9 @@ async fn run(
     // Join already observed the restricted roster. Track subsequent snapshots,
     // including stop/natural completion, rather than treating each as a reply.
     let mut restriction_known = true;
+    let slot = admitted.slot;
+    let mut publication_revision = admitted.publication_revision;
+    let mut moderator_restricted = admitted.server_muted || admitted.server_deafened;
     let mut pings_sent = 0_u64;
     let mut pongs_received = 0_u64;
     let mut first = true;
@@ -373,6 +376,11 @@ async fn run(
                     Command::Play(source, reply) => {
                         // Closed callers cannot accidentally start queued playback.
                         if reply.is_closed() { continue; }
+                        if moderator_restricted {
+                            status.send_replace(PlaybackEvent::Stopped);
+                            let _ = reply.send(Err(Error::message("Voice publication restricted")));
+                            continue;
+                        }
                         // A Participants snapshot has no request ID and may be
                         // stale. The server handles socket signals serially, so
                         // this Pong fences every snapshot queued before mute.
@@ -398,17 +406,27 @@ async fn run(
                 ServerEvent::Participants { members } => {
                     let member = own(&members, slot)?;
                     restriction_known = member.muted && member.deafened;
-                    if player.is_some() {
-                        if !member.muted && !member.deafened {
-                            allowed = true;
-                            starting = None;
-                        } else if allowed {
-                            // A state restriction never auto-resumes old PCM.
-                            allowed = false;
-                            if let Some(mut previous) = player.take() { previous.stop().await; }
+                    moderator_restricted = member.server_muted || member.server_deafened;
+                    let publication_changed = member.publication_revision > publication_revision;
+                    publication_revision = publication_revision.max(member.publication_revision);
+                    // Moderation can arrive before the mute fence, while the
+                    // decoder awaits unmute, or as a coalesced restrict/release.
+                    // Every such boundary consumes the Play request permanently.
+                    if moderator_restricted || publication_changed
+                        || allowed && (member.muted || member.deafened)
+                    {
+                        let had_playback = pending_start.is_some() || player.is_some();
+                        allowed = false;
+                        starting = None;
+                        pending_start = None;
+                        if let Some(mut previous) = player.take() { previous.stop().await; }
+                        if had_playback {
                             restricted(socket, true).await?;
                             status.send_replace(PlaybackEvent::Stopped);
                         }
+                    } else if player.is_some() && !member.is_muted() && !member.is_deafened() {
+                        allowed = true;
+                        starting = None;
                     }
                 },
                 ServerEvent::MicrophoneRefreshRequired { .. } |

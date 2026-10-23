@@ -37,6 +37,7 @@ fn roster_restriction_checks_current_own_slot() {
         "slot":2,"muted":true,"deafened":true,"can_speak":true
     }))
     .unwrap();
+    assert_eq!(member.publication_revision, 0);
     assert!(own(&[member.clone()], 2).is_ok());
     assert!(own(&[member.clone()], 1).is_err());
     member.can_speak = false;
