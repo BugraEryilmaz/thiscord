@@ -453,6 +453,12 @@ async fn items(ui: Ui, target: Target) -> Result<(String, Vec<Item>), String> {
             Action::Page(guild.id, "permissions", None),
         ));
     }
+    if home.can_manage_bots {
+        items.push(Item::new(
+            crate::i18n::t("Bots"),
+            Action::Page(guild.id, "server_bots", None),
+        ));
+    }
     if home.can_moderate {
         items.push(Item::new(
             crate::i18n::t("Server moderation…"),

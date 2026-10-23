@@ -14,6 +14,7 @@ commands.allow = [
   "take_pending_invite",
   "load_session",
   "save_session",
+  "save_bot_credential",
   "clear_session",
   "prepare_google",
   "open_google",

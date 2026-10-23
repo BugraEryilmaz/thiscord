@@ -14,9 +14,10 @@ async fn echo(ctx: Context, args: String) -> Result<(), Error> {
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let server = std::env::var("THISCORD_BOT_SERVER")?;
     let token = Credentials::from_env()?;
-    let channel = std::env::var("THISCORD_BOT_TEXT_CHANNEL")?.parse()?;
+    let channel = std::env::var("THISCORD_BOT_TEXT_CHANNEL").unwrap_or_else(|_| "general".into());
     let mut bot = Bot::new(&server, token)?
-        .channel(channel)
+        .text_channel(&channel)
+        .await?
         .command("echo", "Repeat the argument string", echo)?
         .command(
             "ping",

@@ -54,6 +54,108 @@ async fn no_mentions(socket: &mut Socket) {
 
 #[tokio::test]
 #[ignore = "requires TEST_DATABASE_URL; CI runs with --include-ignored"]
+async fn bot_channel_discovery_is_scoped_filtered_and_revocable() {
+    use thiscord_shared::bots::CHANNELS_PATH;
+    let _guard = TEST_LOCK.lock().await;
+    let db = database();
+    let (app, owner, guest, _, mut state, text) = setup(&db).await;
+    let guild = state["guild"]["id"].clone();
+    change(
+        &app,
+        &owner,
+        &mut state,
+        json!({"action":"create_channel","name":"Music","kind":"voice"}),
+        StatusCode::OK,
+    )
+    .await;
+    let voice = state["channels"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|c| c["kind"] == "voice")
+        .unwrap()["id"]
+        .clone();
+    let mut other = command(
+        &app,
+        &owner,
+        json!({"action":"create_guild","name":"other"}),
+        StatusCode::OK,
+    )
+    .await["state"]
+        .clone();
+    change(
+        &app,
+        &owner,
+        &mut other,
+        json!({"action":"create_channel","name":"private","kind":"text"}),
+        StatusCode::OK,
+    )
+    .await;
+    let issued = manage(&app, &owner, json!({"action":"create","guild_id":guild,"revision":state["guild"]["revision"],"name":"finder_bot"}), StatusCode::OK).await;
+    let token = issued["token"].as_str().unwrap();
+    let bot = issued["bot"]["account_id"].clone();
+    state["guild"]["revision"] = issued["revision"].clone();
+    for credential in [&owner, &guest, &token[4..], ""] {
+        assert_eq!(
+            call(&app, CHANNELS_PATH, credential, json!({})).await.0,
+            StatusCode::UNAUTHORIZED
+        );
+    }
+    let (status, visible) = call(&app, CHANNELS_PATH, token, json!({})).await;
+    assert_eq!(status, StatusCode::OK);
+    let channels = visible["channels"].as_array().unwrap();
+    assert_eq!(channels.len(), 2);
+    assert!(
+        channels
+            .iter()
+            .any(|c| c["id"] == text && c["kind"] == "text")
+    );
+    assert!(
+        channels
+            .iter()
+            .any(|c| c["id"] == voice && c["name"] == "Music")
+    );
+    let (status, error) = call(
+        &app,
+        CHANNELS_PATH,
+        token,
+        json!({"guild_id":other["guild"]["id"]}),
+    )
+    .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+    assert!(error["request_id"].is_string());
+    change(&app, &owner, &mut state, json!({"action":"set_override","channel_id":text,"target":{"kind":"member","id":bot},"allow":[],"deny":["view_channel"]}), StatusCode::OK).await;
+    let (status, visible) = call(&app, CHANNELS_PATH, token, json!({})).await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(visible["channels"].as_array().unwrap().len(), 1);
+    assert_eq!(visible["channels"][0]["id"], voice);
+    let rotated = manage(&app, &owner, json!({"action":"rotate","guild_id":guild,"revision":state["guild"]["revision"],"account_id":bot}), StatusCode::OK).await;
+    assert_eq!(
+        call(&app, CHANNELS_PATH, token, json!({})).await.0,
+        StatusCode::UNAUTHORIZED
+    );
+    let token = rotated["token"].as_str().unwrap();
+    assert_eq!(
+        call(&app, CHANNELS_PATH, token, json!({})).await.0,
+        StatusCode::OK
+    );
+    state["guild"]["revision"] = rotated["revision"].clone();
+    change(
+        &app,
+        &owner,
+        &mut state,
+        json!({"action":"remove_member","account_id":bot}),
+        StatusCode::OK,
+    )
+    .await;
+    assert_eq!(
+        call(&app, CHANNELS_PATH, token, json!({})).await.0,
+        StatusCode::UNAUTHORIZED
+    );
+}
+
+#[tokio::test]
+#[ignore = "requires TEST_DATABASE_URL; CI runs with --include-ignored"]
 async fn scripting_bots_isolate_credentials_and_deliver_only_live_human_mentions() {
     let _guard = TEST_LOCK.lock().await;
     let db = database();
@@ -236,6 +338,15 @@ async fn scripting_bots_creator_deletion_guild_cleanup_and_member_capacity() {
         StatusCode::OK,
     )
     .await;
+    let home = command(
+        &app,
+        &guest,
+        json!({"action":"view_guild","guild_id":guild}),
+        StatusCode::OK,
+    )
+    .await;
+    assert_eq!(home["home"]["can_manage_bots"], true);
+    assert_eq!(home["home"]["can_manage_roles"], false);
     let issued=manage(&app,&guest,json!({"action":"create","guild_id":guild,"revision":state["guild"]["revision"],"name":"persistent_bot"}),StatusCode::OK).await;
     let token = issued["token"].as_str().unwrap();
     let (status, _) = call(

@@ -1,6 +1,12 @@
 pub mod attachments;
 #[cfg(all(not(target_arch = "wasm32"), feature = "native-audio"))]
 pub mod audio;
+#[cfg(all(
+    not(target_arch = "wasm32"),
+    any(feature = "desktop", feature = "scripting-bot")
+))]
+#[path = "../../bots/src/credentials.rs"]
+pub mod bot_credentials;
 #[cfg(all(not(target_arch = "wasm32"), feature = "scripting-bot"))]
 #[path = "../../bots/src/lib.rs"]
 pub mod bots;

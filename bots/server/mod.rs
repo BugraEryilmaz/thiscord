@@ -20,6 +20,7 @@ use tokio::sync::{Semaphore, broadcast};
 pub fn router(origins: Vec<HeaderValue>) -> Router<Option<DbPool>> {
     Router::new()
         .route(BOTS_PATH, post(handle))
+        .route(CHANNELS_PATH, post(channels))
         .route(SOCKET_PATH, get(socket::upgrade))
         .layer(Extension(Arc::new(origins)))
         .layer(DefaultBodyLimit::max(16 * 1024))
@@ -64,6 +65,40 @@ async fn handle(
         crate::performance::blocking(move || {
             let _permit = permit;
             store::dispatch(&pool, &token, command)
+        })
+        .await
+        .map_err(|_| Failure::Unavailable)?
+    }
+    .await;
+    let mut response = match result {
+        Ok(body) => Json(body).into_response(),
+        Err(error) => error.response(id),
+    };
+    response
+        .headers_mut()
+        .insert("cache-control", "no-store".parse().unwrap());
+    response
+}
+
+async fn channels(
+    State(pool): State<Option<DbPool>>,
+    Extension(id): Extension<RequestId>,
+    headers: HeaderMap,
+    body: Result<Json<ChannelsRequest>, JsonRejection>,
+) -> Response {
+    let result = async {
+        let Json(_) = body.map_err(|_| Failure::Invalid("Invalid channel request"))?;
+        let pool = pool.ok_or(Failure::Unavailable)?;
+        let token = auth::actor_bearer(&headers);
+        static WORKERS: OnceLock<Arc<Semaphore>> = OnceLock::new();
+        let permit = WORKERS
+            .get_or_init(|| Arc::new(Semaphore::new(4)))
+            .clone()
+            .try_acquire_owned()
+            .map_err(|_| Failure::Limited)?;
+        crate::performance::blocking(move || {
+            let _permit = permit;
+            store::channels(&pool, &token)
         })
         .await
         .map_err(|_| Failure::Unavailable)?

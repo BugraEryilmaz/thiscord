@@ -2,6 +2,7 @@
 
 mod native_account;
 mod native_audio;
+mod native_bots;
 mod native_camera;
 mod native_download;
 mod native_invites;
@@ -146,6 +147,7 @@ fn main() {
             native_invites::take_pending_invite,
             native_account::load_session,
             native_account::save_session,
+            native_bots::save_bot_credential,
             native_account::clear_session,
             native_account::prepare_google,
             native_account::open_google,

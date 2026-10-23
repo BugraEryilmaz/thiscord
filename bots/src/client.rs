@@ -2,7 +2,7 @@ use super::*;
 use serde::{Serialize, de::DeserializeOwned};
 use std::sync::Arc;
 use thiscord_shared::{
-    bots::{BOTS_PATH, BotRequest, BotResponse},
+    bots::{BOTS_PATH, BotRequest, BotResponse, CHANNELS_PATH, ChannelsRequest, ChannelsResponse},
     chat::{CHAT_PATH, ChatRequest, ChatResponse},
 };
 
@@ -14,6 +14,18 @@ pub(crate) struct Transport {
     http: reqwest::Client,
 }
 impl Transport {
+    pub async fn channels(&self) -> Result<Vec<Channel>, Error> {
+        let response: ChannelsResponse = self.post(CHANNELS_PATH, &ChannelsRequest {}).await?;
+        Ok(response.channels)
+    }
+
+    pub async fn find_channel(
+        &self,
+        name_or_id: &str,
+        kind: ChannelKind,
+    ) -> Result<ChannelId, Error> {
+        resolve_channel(&self.channels().await?, name_or_id, kind)
+    }
     pub fn new(base: &str, token: String) -> Result<Self, Error> {
         let base = endpoint(base)?;
         if token.is_empty() || token.len() > 128 || token.chars().any(char::is_control) {
@@ -75,6 +87,19 @@ pub struct Client {
     pub(crate) bot: BotInfo,
 }
 impl Client {
+    /// Fetch the bot's currently visible guild channels; hidden channels are excluded.
+    pub async fn channels(&self) -> Result<Vec<Channel>, Error> {
+        self.transport.channels().await
+    }
+    /// Resolve an exact name (case-insensitive) or UUID within one channel kind.
+    /// Duplicate names are errors; pass a UUID to disambiguate.
+    pub async fn find_channel(
+        &self,
+        name_or_id: &str,
+        kind: ChannelKind,
+    ) -> Result<ChannelId, Error> {
+        self.transport.find_channel(name_or_id, kind).await
+    }
     pub fn info(&self) -> &BotInfo {
         &self.bot
     }
@@ -128,6 +153,35 @@ impl Client {
     }
 }
 
+fn resolve_channel(
+    channels: &[Channel],
+    name_or_id: &str,
+    kind: ChannelKind,
+) -> Result<ChannelId, Error> {
+    let name = name_or_id.trim();
+    if name.is_empty() {
+        return Err(Error::message("Enter a channel name or UUID"));
+    }
+    let id = name.parse::<ChannelId>().ok();
+    let name = name.to_lowercase();
+    let mut matches = channels.iter().filter(|channel| {
+        channel.kind == kind
+            && match id {
+                Some(id) => channel.id == id,
+                None => channel.name.to_lowercase() == name,
+            }
+    });
+    let channel = matches.next().ok_or_else(|| Error::message(
+        "No visible channel matches that name or UUID and type; check the name and ViewChannel permission"
+    ))?;
+    if matches.next().is_some() {
+        return Err(Error::message(
+            "Multiple visible channels have that name and type; rename one or use its UUID",
+        ));
+    }
+    Ok(channel.id)
+}
+
 /// Provision and revoke bots with a human session. Tokens are returned once and
 /// deliberately have no Debug implementation. Never include them in logs.
 pub struct Manager(Transport);
@@ -179,5 +233,49 @@ impl Manager {
             account_id: account,
         })
         .await
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn names_and_ids_resolve_by_kind_without_guessing() {
+        let channel = |id, name: &str, kind| Channel {
+            id: ChannelId::from_uuid(uuid::Uuid::from_u128(id)),
+            name: name.into(),
+            kind,
+            category_id: None,
+            position: 0,
+        };
+        let mut channels = vec![
+            channel(1, "Music", ChannelKind::Text),
+            channel(2, "Music", ChannelKind::Voice),
+        ];
+        assert_eq!(
+            resolve_channel(&channels, " music ", ChannelKind::Text).unwrap(),
+            channels[0].id
+        );
+        assert_eq!(
+            resolve_channel(&channels, "MUSIC", ChannelKind::Voice).unwrap(),
+            channels[1].id
+        );
+        assert!(
+            resolve_channel(&channels, &channels[0].id.to_string(), ChannelKind::Voice).is_err()
+        );
+        assert!(resolve_channel(&channels, "missing", ChannelKind::Text).is_err());
+        assert!(resolve_channel(&channels, " ", ChannelKind::Text).is_err());
+        channels.push(channel(3, "music", ChannelKind::Text));
+        assert!(resolve_channel(&channels, "music", ChannelKind::Text).is_err());
+        assert_eq!(
+            resolve_channel(&channels, &channels[0].id.to_string(), ChannelKind::Text).unwrap(),
+            channels[0].id
+        );
+        channels.push(channel(4, "Müzik Odası", ChannelKind::Voice));
+        assert_eq!(
+            resolve_channel(&channels, "müzik odası", ChannelKind::Voice).unwrap(),
+            channels[3].id
+        );
     }
 }

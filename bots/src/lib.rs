@@ -9,6 +9,7 @@ pub mod voice;
 pub use client::{Client, Manager};
 pub use commands::{Bot, Context, parse_command};
 pub use subscription::Subscription;
+pub use thiscord_shared::permissions::{Channel, ChannelKind};
 pub use thiscord_shared::{AccountId, ChannelId, ClientMessageId, GuildId, MessageId};
 pub use thiscord_shared::{bots::BotInfo, chat::ChatMessage};
 pub use voice::Voice;
@@ -18,21 +19,9 @@ pub use voice::Voice;
 pub struct Credentials;
 impl Credentials {
     fn entry(server: &str, name: &str) -> Result<keyring::Entry, Error> {
-        if name.is_empty()
-            || name.len() > 32
-            || !name
-                .bytes()
-                .all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'_')
-        {
-            return Err(Error::message("Invalid bot credential name"));
-        }
-        let key = format!(
-            "{}|{name}",
-            endpoint(server)?.origin().ascii_serialization()
-        );
-        keyring::Entry::new("thiscord-scripting-bots", &key)
-            .map_err(|_| Error::message("OS credential store unavailable"))
+        crate::bot_credentials::entry(server, name).map_err(Error::message)
     }
+
     pub fn store(server: &str, name: &str, token: &str) -> Result<(), Error> {
         Self::entry(server, name)?.set_password(token).map_err(|_| {
             Error::message(

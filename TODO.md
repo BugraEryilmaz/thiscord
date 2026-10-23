@@ -411,6 +411,7 @@ See [screen-sharing.md](docs/screen-sharing.md) for limits and remaining platfor
 
 - [x] Rust command registration, live mentioned-message subscriptions and text actions under `bots/`.
 - [x] Guild-scoped bot credentials, provisioning/rotation/revocation and authoritative channel permissions.
+- [x] Server settings bot management, desktop credential storage and permission-filtered text/voice channel lookup by name.
 - [x] Lightweight outgoing Opus/WebRTC playback without microphone/DSP; echo and music examples.
 - [ ] Live YouTube extraction, OS credential-store and audible playback acceptance on Windows/macOS/Linux.
 

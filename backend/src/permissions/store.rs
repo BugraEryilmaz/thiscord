@@ -499,7 +499,7 @@ pub(super) fn dispatch(
                     PermissionRequest::ViewGuild {..} => {
                         let channels: Vec<Channel>=state.channels.iter().filter(|ch|effective(&state,actor,Some(ch.id)).contains(&Permission::ViewChannel)).cloned().collect();
                         let categories=state.categories.iter().filter(|cat|channels.iter().any(|ch|ch.category_id==Some(cat.id))).cloned().collect();
-                        Ok(PermissionResponse::Home {home:GuildHome {categories,can_manage_invites:effective(&state,actor,None).contains(&Permission::ManageInvites),can_moderate:can_moderate(&state,actor),can_manage_roles:effective(&state,actor,None).contains(&Permission::ManageRoles),can_manage_channels:effective(&state,actor,None).contains(&Permission::ManageChannels),guild:state.guild,channels}})
+                        Ok(PermissionResponse::Home {home:GuildHome {categories,can_manage_invites:effective(&state,actor,None).contains(&Permission::ManageInvites),can_moderate:can_moderate(&state,actor),can_manage_bots:effective(&state,actor,None).contains(&Permission::ManageGuild),can_manage_roles:effective(&state,actor,None).contains(&Permission::ManageRoles),can_manage_channels:effective(&state,actor,None).contains(&Permission::ManageChannels),guild:state.guild,channels}})
                     }
                     command @ (PermissionRequest::ListInvites { .. } | PermissionRequest::CreateInvite { .. } | PermissionRequest::RevokeInvite { .. } | PermissionRequest::InspectOrganization { .. } | PermissionRequest::AuditLog { .. }) => organization::request(c,&state,actor,command),
                     PermissionRequest::InspectModeration {..} => Ok(PermissionResponse::Moderation {state:moderation(c,&state,actor)?}),

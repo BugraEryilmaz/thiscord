@@ -21,6 +21,7 @@ mod profile;
 mod safety;
 mod screen;
 mod screen_player;
+mod scripting_bots;
 mod search;
 mod servers;
 mod settings;

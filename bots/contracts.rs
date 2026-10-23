@@ -3,10 +3,21 @@ use crate::{AccountId, ApiError, ChannelId, GuildId, chat::ChatMessage};
 use serde::{Deserialize, Serialize};
 
 pub const BOTS_PATH: &str = "/api/v1/bots";
+pub const CHANNELS_PATH: &str = "/api/v1/bots/channels";
 pub const SOCKET_PATH: &str = "/api/v1/bots/socket";
 pub const SOCKET_VERSION: u8 = 1;
 pub const MAX_CHANNELS: usize = 32;
 pub const MAX_BOTS_PER_GUILD: usize = 10;
+
+#[derive(Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ChannelsRequest {}
+
+/// Only channels visible to the authenticated bot, in its own guild.
+#[derive(Serialize, Deserialize)]
+pub struct ChannelsResponse {
+    pub channels: Vec<crate::permissions::Channel>,
+}
 
 #[derive(Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct BotInfo {

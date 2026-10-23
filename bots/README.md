@@ -6,10 +6,58 @@ dispatches `play(context, args)`, with the argument text as a `String`.
 No Tauri window, audio device, microphone processing, or knowledge of WebRTC is
 needed. This is a Rust SDK, not an in-app interpreter or an untrusted-code sandbox.
 
-All bot-specific source lives here: `contracts.rs` is compiled by `shared`,
+The SDK and server source live here: `contracts.rs` is compiled by `shared`,
 `server/` by `backend`, and `src/` plus `examples/` by `frontend` with its
-`scripting-bot` feature. There are still exactly three Cargo packages. Existing
+`scripting-bot` feature. The management UI and native credential command live in
+`frontend/src`; desktop and SDK share `src/credentials.rs`. There are still
+exactly three Cargo packages. Existing
 instance-owner diagnostic [voice test bots](../docs/voice-bots.md) are separate.
+
+## Quick start
+
+1. In the app, open your server's **Settings → Bots** and create `jukebox`.
+   You need **Manage server** permission. On desktop, the token is automatically
+   saved in your OS credential store for the examples on that computer. In a
+   browser, copy the one-time token to your bot host's secret manager and inject
+   it as `THISCORD_BOT_TOKEN`.
+2. Give the bot access to a text channel such as `general` and a voice channel
+   such as `Music`. **Manage roles** opens the bot's member settings; use
+   **Channels & permissions** for overrides. It needs View channel, Read message
+   history and Send messages for text, and View channel, Join voice and Speak
+   for music.
+3. From this repository, run the echo example first. PowerShell:
+
+   ```powershell
+   $env:THISCORD_BOT_SERVER = "https://thiscord.com.tr"
+   $env:THISCORD_BOT_NAME = "jukebox"
+   $env:THISCORD_BOT_TEXT_CHANNEL = "general"
+   cargo run -p thiscord-frontend --features scripting-bot --example bot_echo
+   ```
+
+   Use your actual backend origin (for local development, usually
+   `http://localhost:3000`). If its socket allowlist only includes Trunk, also set
+   `$env:THISCORD_BOT_ORIGIN = "http://localhost:1420"`.
+   In `general`, send `@jukebox /ping` or `@jukebox /echo hello`.
+4. For music, install FFmpeg and yt-dlp on the bot host, stop the echo example,
+   set `$env:THISCORD_BOT_VOICE_CHANNEL = "Music"`, and run:
+
+   ```powershell
+   cargo run -p thiscord-frontend --features scripting-bot --example bot_music
+   ```
+
+   Send `@jukebox /play https://youtu.be/VIDEO_ID`, then `@jukebox /stop` or
+   `@jukebox /leave`. `/help` lists the available commands.
+
+On macOS/Linux, use `export THISCORD_BOT_NAME="jukebox"` and the same form for
+the other variables. Channel values are **names**, not IDs: names match exactly
+ignoring case and surrounding input whitespace, within the requested text/voice
+type. Only channels visible to the bot are searched. Duplicate names within the
+same type produce an error; rename one or use its UUID to disambiguate. UUIDs
+remain supported. The default names are `general` for text and `Music` for voice.
+
+The app creates the bot's identity; the Rust program must stay running to respond.
+Use **Rotate token** to replace a lost credential (and restart the program), or
+**Delete bot** to revoke it permanently. Browser tokens are never persisted.
 
 ## Register commands
 
@@ -25,7 +73,7 @@ async fn echo(ctx: Context, args: String) -> Result<(), Error> {
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let server = "https://thiscord.com.tr";
     let bot = Bot::new(server, Credentials::load(server, "mybot")?)?
-        .channel("00000000-0000-0000-0000-000000000001".parse()?)
+        .text_channel("general").await?
         .command("echo", "Repeat your text", echo)?;
     bot.run().await?;
     Ok(())
@@ -59,7 +107,7 @@ Rust version and native Opus build prerequisites apply. Linux also needs
 `pkg-config` and `libdbus-1-dev` for OS credential integration. This feature does not
 enable CPAL, noise suppression, Tauri or the desktop audio pipeline.
 
-## Provision and run
+## Command-line provisioning (optional)
 
 Deploy the backend migration first. A human guild member with **ManageGuild** can
 create a bot. The guild owner can manage all bots; other managers must outrank a
@@ -92,8 +140,8 @@ guild installation; create another bot for another guild.
 Set these nonsecret variables for the runnable examples:
 
 - `THISCORD_BOT_NAME`: the saved credential name (for example `jukebox`).
-- `THISCORD_BOT_TEXT_CHANNEL`: a text-channel UUID to subscribe to.
-- `THISCORD_BOT_VOICE_CHANNEL`: the music example's fixed voice-channel UUID.
+- `THISCORD_BOT_TEXT_CHANNEL`: a text-channel name or UUID (default `general`).
+- `THISCORD_BOT_VOICE_CHANNEL`: a voice-channel name or UUID (default `Music`).
 - `THISCORD_BOT_ORIGIN`: optional origin from the backend's allowlist, needed when
   the API origin is not itself allowed (for example the local Trunk origin).
 - `THISCORD_BOT_AUDIO_FILE`: optional operator-selected local audio file.
@@ -114,6 +162,16 @@ token cannot edit roles, manage accounts, send private messages or administer th
 instance. Give a bot only the channel permissions its functions need.
 
 ## Text and voice actions
+
+`Bot::text_channel("general").await?` resolves a text channel before subscribing.
+`bot.voice_channel("Music").await?` resolves a voice destination before registering
+handlers. `bot.channels().await?` and `ctx.client.channels().await?` list the bot's
+currently visible channels, with names, kinds and IDs. For example, an existing
+handler can resolve another destination with
+`ctx.client.find_channel("Music", ChannelKind::Voice).await?`.
+Names are resolved to stable IDs; renaming a channel does not retarget an already
+running example. Visibility does not grant send/join permission: each action is
+still authorized by the backend. Hidden channels are never returned.
 
 `ctx.reply(text)` replies in the invoking text channel.
 `ctx.client.send(channel_id, text)` sends to another authorized text channel in
@@ -199,6 +257,9 @@ single-backend-process invalidation model. Bots are credential-bearing service
 principals in the account/member tables, with no human login identity. The
 prefixed, hashed bot token is rejected by human-only APIs, including when stripped
 of its prefix. Bot management holds the guild lock and checks the current revision.
+Channel discovery posts `{}` to `/api/v1/bots/channels` with a bot token; the
+server derives the guild from that token and filters by current ViewChannel
+permission under the guild lock. A request cannot select another guild.
 
 ## Checks
 
