@@ -48,6 +48,24 @@ impl Bot {
         }
         self
     }
+    /// Subscribe by a visible text channel's name or UUID. Names must be unique
+    /// among visible text channels. Resolution happens now, before subscribing.
+    pub async fn text_channel(self, name_or_id: &str) -> Result<Self, Error> {
+        let channel = self
+            .transport
+            .find_channel(name_or_id, ChannelKind::Text)
+            .await?;
+        Ok(self.channel(channel))
+    }
+    /// Resolve a visible voice destination before registering command handlers.
+    pub async fn voice_channel(&self, name_or_id: &str) -> Result<ChannelId, Error> {
+        self.transport
+            .find_channel(name_or_id, ChannelKind::Voice)
+            .await
+    }
+    pub async fn channels(&self) -> Result<Vec<Channel>, Error> {
+        self.transport.channels().await
+    }
     pub fn command<F, Fut>(
         mut self,
         name: &str,

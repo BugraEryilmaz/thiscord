@@ -2,6 +2,7 @@
 
 mod native_account;
 mod native_audio;
+mod native_bots;
 mod native_camera;
 mod native_download;
 mod native_links;
@@ -139,6 +140,7 @@ fn main() {
             native_window::window_set_close_to_tray,
             native_account::load_session,
             native_account::save_session,
+            native_bots::save_bot_credential,
             native_account::clear_session,
             native_account::prepare_google,
             native_account::open_google,

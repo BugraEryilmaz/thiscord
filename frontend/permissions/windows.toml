@@ -13,6 +13,7 @@ commands.allow = [
   "window_set_close_to_tray",
   "load_session",
   "save_session",
+  "save_bot_credential",
   "clear_session",
   "prepare_google",
   "open_google",

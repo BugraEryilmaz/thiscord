@@ -8,8 +8,10 @@ use tokio::sync::Mutex;
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let server = std::env::var("THISCORD_BOT_SERVER")?;
     let token = Credentials::from_env()?;
-    let text = std::env::var("THISCORD_BOT_TEXT_CHANNEL")?.parse()?;
-    let voice_channel = std::env::var("THISCORD_BOT_VOICE_CHANNEL")?.parse()?;
+    let text = std::env::var("THISCORD_BOT_TEXT_CHANNEL").unwrap_or_else(|_| "general".into());
+    let voice = std::env::var("THISCORD_BOT_VOICE_CHANNEL").unwrap_or_else(|_| "Music".into());
+    let bot = Bot::new(&server, token)?.text_channel(&text).await?;
+    let voice_channel = bot.voice_channel(&voice).await?;
     let file = std::env::var("THISCORD_BOT_AUDIO_FILE").ok();
     let player = Arc::new(Mutex::new(None::<Voice>));
     let play = player.clone();
@@ -17,8 +19,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let stop = player.clone();
     let leave = player.clone();
     let status = player.clone();
-    let mut bot = Bot::new(&server, token)?
-        .channel(text)
+    let mut bot = bot
         .command(
             "play",
             "Play one HTTPS YouTube video URL",

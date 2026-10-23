@@ -171,3 +171,30 @@ pub(super) fn checked(
     }
     Ok(())
 }
+
+pub(super) fn channels(pool: &DbPool, token: &str) -> Result<ChannelsResponse, Failure> {
+    let session = {
+        let mut c = connection(pool)?;
+        super::authenticate(&mut c, token)?
+    };
+    let guild = session.bot_guild.ok_or(Failure::Unauthorized)?;
+    auth::rate_limit(
+        pool,
+        &format!("bot-channels:{}", session.account_id),
+        None,
+        false,
+    )?;
+    // Reauthenticate under the guild lock, including membership and token revocation.
+    crate::chat::store::checked(pool, token, guild, None, None, |_, actor, state| {
+        Ok(ChannelsResponse {
+            channels: state
+                .channels
+                .iter()
+                .filter(|channel| {
+                    effective(state, actor, Some(channel.id)).contains(&Permission::ViewChannel)
+                })
+                .cloned()
+                .collect(),
+        })
+    })
+}
