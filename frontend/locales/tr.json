@@ -1186,5 +1186,7 @@
   "Report {} · Subject {}": "Bildirim {} · Hesap {}",
   "Submitted message {} · revision {}": "Gönderilen mesaj {} · sürüm {}",
   "Uploading…": "Yükleniyor…",
-  "Manage blocked accounts and review reports.": "Engellenen hesapları yönetin ve bildirimleri inceleyin."
+  "Manage blocked accounts and review reports.": "Engellenen hesapları yönetin ve bildirimleri inceleyin.",
+  "Chat changed while the request was pending. It may have succeeded; reload the message before trying again": "İstek beklerken sohbet değişti. İşlem başarılı olmuş olabilir; yeniden denemeden önce mesajı tekrar yükleyin",
+  "Chat reconnected; reload the message to check the result": "Sohbet yeniden bağlandı; sonucu kontrol etmek için mesajı tekrar yükleyin"
 }
