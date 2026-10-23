@@ -31,13 +31,11 @@ fn update_home(ui: Ui, selection: Selection, home: GuildHome) {
     if !current(ui, selection) || selection.guild != Some(home.guild.id) {
         return;
     }
-    if ui
-        .selected_channel
-        .get_untracked()
-        .is_some_and(|channel| !home.channels.iter().any(|allowed| allowed.id == channel.id))
-    {
-        ui.selected_channel.set(None);
-    }
+    let refreshed = thiscord_frontend::navigation::refresh_channel(
+        ui.selected_channel.get_untracked().as_ref(),
+        &home.channels,
+    );
+    ui.selected_channel.set(refreshed);
     let unchanged = ui.server.with_untracked(|current| {
         current.as_ref().is_some_and(|old| {
             old.guild.id == home.guild.id
@@ -461,6 +459,14 @@ pub(super) fn ServerRail(ui: Ui) -> impl IntoView {
 #[component]
 pub(super) fn ServerHome(ui: Ui) -> impl IntoView {
     let selected = ui.selected_channel;
+    // Only identity changes remount a panel. Metadata refreshes keep its owner,
+    // draft, history requests and voice controls alive.
+    let panel = Memo::new(move |_| {
+        thiscord_frontend::navigation::channel_identity(
+            ui.server.get().map(|home| home.guild.id),
+            selected.get().as_ref(),
+        )
+    });
     let dialog = NodeRef::<leptos::html::Dialog>::new();
     let target = RwSignal::new(None::<Guild>);
     let name = RwSignal::new(String::new());
@@ -580,8 +586,8 @@ pub(super) fn ServerHome(ui: Ui) -> impl IntoView {
                 </section>
             </Show>
         }>
-            {move ||ui.server.get().map(|home|view!{
-                <section class="server-layout">
+            <section class="server-layout">
+                {move ||ui.server.get().map(|home|view!{
                     <nav class="channel-sidebar" aria-label=move || crate::i18n::t("Server channels")>
                         <div class="flex items-center gap-2" data-context-server=home.guild.id.to_string()><h2 class="min-w-0 flex-1 break-words text-lg font-bold">{home.guild.name.clone()}</h2>
                             <Show when=move ||home.can_manage_roles || home.can_manage_channels || home.can_manage_invites || home.can_moderate><button class="icon-button shrink-0" aria-label=move || crate::i18n::t("Server roles and settings") data-tip=move || crate::i18n::t("Server settings") on:click=move |_|{ui.role_target.set(None);ui.permission_channel.set(None);ui.page.set(if home.can_manage_roles{"permissions"}else if home.can_manage_channels{"server_organization"}else if home.can_manage_invites{"server_invites"}else{"moderation"});}><Icon kind=Glyph::Settings/></button></Show>
@@ -611,11 +617,15 @@ pub(super) fn ServerHome(ui: Ui) -> impl IntoView {
                             </button>{is_voice.then(||view!{<VoiceRoster ui=ui guild=guild_id channel=id/>})}</li>}
                         }).collect_view()}}</ul>
                     </nav>
+                })}
                     <Show when=move||selected.get().is_some() fallback=move||view!{<div class="flex items-center justify-center rounded-xl border border-white/10 p-8 text-white/60">{move || crate::i18n::t("Choose a channel to get started.")}</div>}>
-                        {move||selected.get().map(|ch|if ch.kind==ChannelKind::Voice {view!{<super::audio::VoiceChannel ui=ui guild=home.guild.id channel=ch.id name=ch.name/>}.into_any()}else{view!{<super::chat::ChatPanel ui=ui guild=home.guild.id channel=ch.id name=ch.name/>}.into_any()})}
+                        <For each={move ||panel.get().into_iter().collect::<Vec<_>>()} key=|(guild, channel, _)|(*guild, *channel) children=move |(guild, channel, kind)| {
+                            let name = Signal::derive(move || selected.get().filter(|ch|ch.id==channel).map(|ch|ch.name).unwrap_or_default());
+                            if kind==ChannelKind::Voice {view!{<super::audio::VoiceChannel ui=ui guild=guild channel=channel name=name/>}.into_any()}else{view!{<super::chat::ChatPanel ui=ui guild=guild channel=channel name=name/>}.into_any()}
+                        }/>
+
                     </Show>
-                </section>
-            })}
+            </section>
         </Show>
         <dialog node_ref=dialog on:click=move |e|super::dialog::dismiss_outside(e,dialog,ui.busy.get_untracked()) aria-labelledby="channel-dialog-title" class="m-auto max-h-[85vh] w-[calc(100%-2rem)] max-w-md overflow-y-auto rounded-2xl border border-white/15 bg-surface p-6 text-white shadow-2xl backdrop:bg-black/70" on:cancel=move |ev: web_sys::Event|{if ui.busy.get_untracked(){ev.prevent_default();}}>
             <header class="mb-5 flex items-center justify-between"><h2 id="channel-dialog-title" class="text-xl font-semibold">{move || crate::i18n::t("Create channel")}</h2><button aria-label=move || crate::i18n::t("Close dialog") disabled=move ||ui.busy.get() on:click=move |_|if let Some(dialog)=dialog.get(){dialog.close();}>"×"</button></header>

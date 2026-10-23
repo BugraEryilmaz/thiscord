@@ -198,6 +198,7 @@ diesel::table! {
         move_source -> Nullable<Uuid>,
         move_destination -> Nullable<Uuid>,
         move_revision -> Nullable<Int8>,
+        publication_revision -> Int8,
     }
 }
 

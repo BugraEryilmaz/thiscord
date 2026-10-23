@@ -762,6 +762,7 @@ mod tests {
                     info: Participant {
                         server_muted: false,
                         server_deafened: false,
+                        publication_revision: 0,
                         test_bot: false,
                         account_id: endpoint.identity.account,
                         username: "test".into(),

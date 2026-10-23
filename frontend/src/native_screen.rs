@@ -314,6 +314,22 @@ impl ScreenState {
             inner.binding = Some(binding);
         }
     }
+    pub fn publication(&self, allowed: bool, boundary: bool) {
+        if let Ok(mut inner) = self.0.lock() {
+            if let Some(binding) = &mut inner.binding {
+                binding.can_publish = allowed;
+                inner.status.available =
+                    allowed && binding.subscriptions && cfg!(target_os = "windows");
+            }
+            if !allowed || boundary {
+                if let Some(stop) = &inner.stop {
+                    stop.store(true, Ordering::Release);
+                }
+                inner.status.sharing = false;
+                inner.status.message = "Screen sharing stopped".into();
+            }
+        }
+    }
     pub fn clear(&self) {
         if let Ok(mut inner) = self.0.lock() {
             if let Some(stop) = inner.stop.take() {
@@ -933,6 +949,38 @@ mod tests {
         state.roster(&[]);
         assert!(!replacement.active());
     }
+    #[test]
+    fn moderation_stops_capture_worker_and_release_never_revives_it() {
+        let state = ScreenState::default();
+        let stop = Arc::new(AtomicBool::new(false));
+        {
+            let mut inner = state.0.lock().unwrap();
+            inner.stop = Some(stop.clone());
+            inner.status.sharing = true;
+            inner.audio = true;
+        }
+        state.publication(false, true);
+        assert!(stop.load(Ordering::Acquire));
+        assert_eq!(state.sharing(), (false, false));
+        state.publication(true, true);
+        assert!(stop.load(Ordering::Acquire));
+        assert_eq!(state.sharing(), (false, false));
+        let next = Arc::new(AtomicBool::new(false));
+        {
+            let mut inner = state.0.lock().unwrap();
+            inner.stop = Some(next.clone());
+            inner.status.sharing = true;
+        }
+        state.publication(true, false);
+        assert!(!next.load(Ordering::Acquire));
+        // A coalesced false -> true -> false restriction still stops this share.
+        state.publication(true, true);
+        assert!(next.load(Ordering::Acquire));
+        assert_eq!(state.sharing(), (false, false));
+        state.finish(&stop, None);
+        assert!(next.load(Ordering::Acquire));
+    }
+
     #[test]
     fn late_capture_worker_cannot_stop_or_revive_replacement_share() {
         let state = ScreenState::default();

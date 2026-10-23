@@ -461,6 +461,31 @@ mod tests {
     }
 
     #[test]
+    fn server_deafen_clears_system_audio_resampler_while_microphone_is_already_paused() {
+        let controls = Arc::new(mixer::Controls::default());
+        let guard = Arc::new(outgoing::Control::default());
+        guard.enable_receive_protection(); // Microphone receive is already paused.
+        controls.receive_guard.set(guard.clone()).ok();
+        let (mut writers, mut mix) = mixer::mixer(controls.clone());
+        let writer = &mut writers[thiscord_shared::voice::ROOM_CAPACITY];
+        writer.control.active.store(true, Ordering::Release);
+        writer.write(&[0.5; 4800]);
+        let mut playback = Playback::new(192_000, &mut mix);
+        let at = Instant::now();
+        let mut warmup = [0.0_f32; 1001];
+        playback.render(&mut mix, &mut warmup, 1, at, at);
+        assert!(warmup[1000] > 0.1);
+        guard.server_restrictions(false, true, true);
+        let mut after = [1.0_f32; 257];
+        playback.render(&mut mix, &mut after, 1, at + Duration::from_millis(6), at);
+        assert!(after.iter().all(|s| *s == 0.0));
+        guard.server_restrictions(false, false, true);
+        playback.render(&mut mix, &mut after, 1, at + Duration::from_millis(8), at);
+        assert!(after.iter().all(|s| *s == 0.0));
+        assert!(!controls.deafen.load(Ordering::Acquire));
+    }
+
+    #[test]
     fn playback_cutoffs_remove_delayed_audio_even_between_source_samples() {
         for cutoff in 0..5 {
             let controls = Arc::new(mixer::Controls::default());

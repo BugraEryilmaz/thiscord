@@ -367,7 +367,13 @@ blocks all media publication, including screen/system audio/camera to prevent a
 publication bypass; reception remains available. Server deafen blocks both
 publication and reception. Persistent server flags are separate from self flags:
 a client cannot clear a server restriction, and a moderator release does not clear
-self mute/deafen or restart stopped shares. Media generations fence both ingress
+self mute/deafen or restart stopped shares. A persistent monotonic publication
+revision records each server mute/deafen edge, including ownership-transfer
+releases. SFU refresh and native capture consume that revision even when both
+restriction and release commit before they observe a roster. Existing screen and
+camera sessions are retired; release allows only an explicit new start. Native
+microphone admission and playback also consume server restrictions independently
+of saved self controls. Media generations fence both ingress
 and queued egress across the commit. Sidebar and overlay use the combined flags.
 Ownership transfer releases any prior server mute/deafen on the new owner and
 audits those releases, since no member may moderate the owner.

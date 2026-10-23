@@ -449,7 +449,13 @@ async fn scripting_bots_scope_roles_quotas_and_rollback() {
     assert_eq!(full["code"], "limit_exceeded");
     // Rollback removes bot accounts and sessions while retaining human accounts.
     let mut c = db.pool.get().unwrap();
-    c.revert_last_migration(db::MIGRATIONS).unwrap();
+    // Newer feature migrations must not turn this into a different rollback test.
+    loop {
+        let reverted = c.revert_last_migration(db::MIGRATIONS).unwrap();
+        if reverted.to_string() == "20261023010000" {
+            break;
+        }
+    }
     #[derive(QueryableByName)]
     struct Count {
         #[diesel(sql_type=diesel::sql_types::BigInt)]

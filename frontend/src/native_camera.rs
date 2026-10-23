@@ -256,6 +256,25 @@ impl CameraState {
             inner.binding = Some(binding);
         }
     }
+    pub fn publication(&self, allowed: bool, boundary: bool) {
+        self.views.publication(allowed, boundary);
+        let release = if let Ok(mut inner) = self.inner.lock() {
+            if let Some(binding) = &mut inner.binding {
+                binding.can_publish = allowed;
+            }
+            if !allowed || boundary {
+                inner.session = None; // Drop closes the lease used by live forwarding.
+                inner.capture.take().is_some()
+            } else {
+                false
+            }
+        } else {
+            false
+        };
+        if release {
+            self.release_capture();
+        }
+    }
     pub fn clear(&self) {
         self.views.clear();
         let release = if let Ok(mut inner) = self.inner.lock() {
@@ -296,7 +315,7 @@ impl CameraState {
         if inner
             .binding
             .as_ref()
-            .is_none_or(|b| !b.connection.active())
+            .is_none_or(|b| !b.connection.active() || !b.can_publish)
             || inner.session.as_ref().is_some_and(|s| {
                 !s.lease.active()
                     || s.touched.elapsed() > Duration::from_secs(if s.ready { 3 } else { 10 })
@@ -969,6 +988,45 @@ mod tests {
         assert!(!state.active());
         assert!(!lease.active());
         assert!(state.inner.lock().unwrap().capture.is_none());
+    }
+
+    #[tokio::test]
+    async fn moderation_cancels_capture_and_pending_permission_without_auto_resume() {
+        let state = CameraState::default();
+        state.bind(binding(thiscord_frontend::screen::track(903)));
+        state.prepare(1).await.unwrap();
+        let lease = Connection::default();
+        state.inner.lock().unwrap().session = Some(Session {
+            id: 1,
+            lease: lease.clone(),
+            touched: Instant::now(),
+            peer: None,
+            force: Default::default(),
+            ready: true,
+            connected: Arc::new(AtomicBool::new(true)),
+        });
+        assert!(state.active());
+        state.publication(false, true);
+        assert!(
+            !lease.active(),
+            "live bridge must stop forwarding immediately"
+        );
+        assert!(!state.active());
+        assert!(state.prepare(2).await.is_err());
+        state.publication(true, true);
+        assert!(!state.active(), "release is not a capture start");
+        state.prepare(3).await.unwrap();
+        // Both moderation edges were missed, but the revision still changed.
+        state.publication(true, true);
+        assert!(state.inner.lock().unwrap().capture.is_none());
+        assert!(open(&state, 3, String::new()).await.is_err());
+        state.prepare(4).await.unwrap();
+        state.publication(true, false);
+        assert_eq!(
+            state.inner.lock().unwrap().capture.unwrap().0,
+            4,
+            "unchanged roster must not cancel a new explicit start"
+        );
     }
 
     #[tokio::test]

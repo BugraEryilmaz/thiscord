@@ -6,6 +6,24 @@ use leptos::prelude::*;
 use serde_json::json;
 use thiscord_shared::{ChannelId, GuildId, audio::*, voice::VoiceStatus};
 
+pub(super) fn media_publish_allowed(ui: Ui) -> bool {
+    let voice = ui.voice.get();
+    voice.connected
+        && !ui.audio.get().deafened
+        && voice.participants.iter().any(|m| {
+            Some(m.slot) == voice.own_slot && m.can_speak && !m.server_muted && !m.is_deafened()
+        })
+}
+pub(super) fn media_deafened(ui: Ui) -> bool {
+    ui.audio.get().deafened
+        || ui.voice.with(|voice| {
+            voice
+                .participants
+                .iter()
+                .any(|m| Some(m.slot) == voice.own_slot && m.server_deafened)
+        })
+}
+
 #[derive(Clone)]
 pub(super) struct VoiceLocation {
     pub guild_id: GuildId,
@@ -475,10 +493,10 @@ pub(super) fn VoiceChannel(
     ui: Ui,
     guild: GuildId,
     channel: ChannelId,
-    name: String,
+    name: Signal<String>,
 ) -> impl IntoView {
     view! {<section class="voice-channel-view">
-        <header class="voice-channel-header"><Icon kind=Glyph::Volume/><h2>{name}</h2></header>
+        <header class="voice-channel-header"><Icon kind=Glyph::Volume/><h2>{move ||name.get()}</h2></header>
         <Show when=move ||desktop() || ui.audio_control.is_remote() fallback=||view!{<p class="voice-channel-empty">{move || crate::i18n::t("Open the desktop app to use voice and watch streams.")}</p>}>
             <super::screen::ScreenViewer ui=ui guild=guild channel=channel/>
         </Show>
