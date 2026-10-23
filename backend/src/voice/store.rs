@@ -22,13 +22,15 @@ pub(super) fn authorize(
     // Join/resume ingress authenticates in access::identify; bot HTTP ingress
     // authenticates in bots::owner. This also runs on access-change wakeups,
     // which must reject a rotated token without revoking its replacement.
-    let session = auth::authenticate_retained(&mut c, token)?;
+    let session = auth::authenticate_actor_retained(&mut c, token)?;
+    session.require_guild(guild)?;
     c.transaction(|c| {
-        auth::read_session(c, token, &session)?;
+        if session.bot_guild.is_none() { auth::read_session(c, token, &session)?; }
         // Direct calls use a dedicated equal scope/room UUID pair. Authorization
         // always consults the accepted friendship and active invitation; no guild
         // role (including instance administration) grants private-call access.
         if guild.as_uuid() == channel.as_uuid() {
+            if session.bot_guild.is_some() { return Err(Failure::Forbidden); }
             return crate::friends::store::voice(c, session.account_id, channel);
         }
         execute(
@@ -37,6 +39,7 @@ pub(super) fn authorize(
             "SELECT id FROM guilds WHERE id=$1::uuid FOR SHARE",
             &[&guild.to_string()],
         )?;
+        if session.bot_guild.is_some() { auth::read_session(c, token, &session)?; }
         let state = load(c, guild, &[session.account_id], Some(channel))?;
         let member = state
             .members

@@ -9,6 +9,7 @@ default-run = "thiscord-desktop"
 [features]
 default = []
 welcome = []
+scripting-bot = ["dep:reqwest", "dep:keyring", "dep:uuid", "dep:tokio", "tokio/rt-multi-thread", "tokio/process", "tokio/signal", "dep:tokio-tungstenite", "dep:futures-util", "dep:webrtc", "dep:rtc", "dep:bytes", "dep:opus", "dep:async-trait", "dep:rand"]
 voice-bot = ["native-audio", "deep-filter", "neural-echo", "dep:openh264", "tokio/rt-multi-thread", "tokio/io-std"]
 desktop = ["dep:objc2", "dep:objc2-web-kit", "dep:block2", "screen-share", "dep:tauri", "dep:tauri-build", "dep:keyring", "dep:open", "dep:tokio", "dep:rand", "dep:base64", "native-audio", "deep-filter", "neural-echo", "dep:tauri-plugin-global-shortcut", "dep:tauri-plugin-updater", "dep:tauri-plugin-single-instance", "dep:tokio-tungstenite", "dep:futures-util"]
 screen-share = ["native-audio", "dep:windows-capture", "dep:windows", "dep:windows-core", "dep:openh264", "dep:wasapi"]
@@ -32,6 +33,21 @@ required-features = ["desktop"]
 name = "thiscord-voice-bot"
 path = "src/voice_bot.rs"
 required-features = ["voice-bot"]
+
+[[example]]
+name = "bot_echo"
+path = "../bots/examples/echo.rs"
+required-features = ["scripting-bot"]
+
+[[example]]
+name = "bot_music"
+path = "../bots/examples/music.rs"
+required-features = ["scripting-bot"]
+
+[[example]]
+name = "bot_manage"
+path = "../bots/examples/manage.rs"
+required-features = ["scripting-bot"]
 
 [[example]]
 name = "verify_update"
@@ -97,6 +113,8 @@ web-sys = { version = "0.3", features = ["Performance", "DragEvent", "DataTransf
 gloo-timers = { version = "0.3", features = ["futures"] }
 
 [target.'cfg(not(target_arch = "wasm32"))'.dependencies]
+reqwest = { version = "0.12", default-features = false, features = ["rustls-tls", "json"], optional = true }
+uuid = { workspace = true, features = ["v4"], optional = true }
 openh264 = { version = "=0.9.8", optional = true }
 hound = { version = "3.5", optional = true }
 tauri = { version = "2", optional = true , features = ["macos-private-api", "tray-icon"] }

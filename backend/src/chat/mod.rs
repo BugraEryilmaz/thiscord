@@ -3,7 +3,7 @@ mod attachments;
 pub use attachments::start_cleanup as start_attachment_cleanup;
 mod notifications;
 mod session;
-mod store;
+pub(crate) mod store;
 use crate::{
     auth::{self, Failure},
     db::DbPool,
@@ -45,7 +45,7 @@ async fn handle(
     let result = async {
         let Json(command) = body.map_err(|_| Failure::Invalid("Invalid chat request"))?;
         let pool = pool.ok_or(Failure::Unavailable)?;
-        let token = auth::bearer(&headers);
+        let token = auth::actor_bearer(&headers);
         static WORKERS: OnceLock<Arc<Semaphore>> = OnceLock::new();
         let permit = WORKERS
             .get_or_init(|| Arc::new(Semaphore::new(8)))
