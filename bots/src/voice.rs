@@ -674,10 +674,8 @@ async fn run(
                         ClientEvent::Screen {
                             active: true,
                             audio: true,
-                            quality: Some(thiscord_shared::screen::Quality {
-                                height: 720,
-                                fps: 30,
-                            }),
+                            // Only the negotiated layered protocol accepts quality metadata.
+                            quality: None,
                         },
                     )
                     .await?;

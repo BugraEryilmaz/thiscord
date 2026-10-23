@@ -119,8 +119,9 @@ impl Fixture {
                                 } else if !changed || !muted && hold.load(Ordering::Acquire) { None }
                                 else { Some(ServerEvent::Participants { members: vec![member.clone()] }) }
                             },
-                            ClientEvent::Screen { active, audio, .. } => {
+                            ClientEvent::Screen { active, audio, quality } => {
                                 assert!(screen && !member.deafened);
+                                assert!(quality.is_none(), "single-layer shares cannot send layered quality metadata");
                                 if active && !member.sharing_screen { member.screen_epoch += 1; }
                                 member.sharing_screen = active;
                                 member.sharing_audio = active && audio;
