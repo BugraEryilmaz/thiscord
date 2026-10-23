@@ -17,6 +17,8 @@ use wasm_bindgen::{JsCast, closure::Closure};
 
 #[path = "attachments.rs"]
 mod attachments;
+#[path = "mentions.rs"]
+mod mentions;
 use thiscord_frontend::attachments::{PendingSend as Pending, can_send};
 
 const PENDING_LIMIT: usize = 20;
@@ -770,6 +772,7 @@ pub(super) fn ChatPanel(ui: Ui, guild: GuildId, channel: ChannelId, name: String
         last_read: RwSignal::new(0),
     };
     let draft = RwSignal::new(String::new());
+    let mentions = mentions::Picker::new(chat, draft);
     let editing = RwSignal::new(None::<MessageId>);
     let loading = RwSignal::new(false);
     let queue = attachments::Queue::new(chat);
@@ -894,6 +897,9 @@ pub(super) fn ChatPanel(ui: Ui, guild: GuildId, channel: ChannelId, name: String
         send();
     };
     let keydown = move |ev: leptos::ev::KeyboardEvent| {
+        if mentions.keydown(&ev) {
+            return;
+        }
         // Leave Enter available for IME candidate selection and Shift+Enter newlines.
         if ev.key() == "Enter" && !ev.shift_key() && !ev.is_composing() && ev.key_code() != 229 {
             ev.prevent_default();
@@ -966,7 +972,24 @@ pub(super) fn ChatPanel(ui: Ui, guild: GuildId, channel: ChannelId, name: String
                 <p class="min-h-4 text-xs text-white/60" aria-live="polite">{move||{let names=chat.online.with(|members| members.iter().filter(|m|m.typing&&ui.account.with(|a|a.as_ref().is_none_or(|a|a.id!=m.account_id))).map(|m|m.display_name().to_owned()).collect::<Vec<_>>());if names.is_empty(){String::new()}else{thiscord_frontend::localized_format!(crate::i18n::language(), "{} typing…",names.join(", "))}}}</p>
                 <Show when=move||editing.get().is_some()><button class="text-sm text-brand underline" on:click=move |_|{editing.set(None);draft.set(String::new());}>{move || crate::i18n::t("Cancel edit")}</button></Show>
                 <attachments::Composer queue editing/>
-                <form class="flex gap-3" on:submit=submit><label class="min-w-0 flex-1"><span class="sr-only">{move || crate::i18n::t("Message")}</span><textarea class="w-full resize-none rounded-lg bg-black/20 p-3 outline-none focus:ring-2 focus:ring-brand" on:keydown=keydown rows="2" maxlength="4000" placeholder=move || crate::i18n::t("Message this channel · @username to mention") prop:value=move||draft.get() disabled=move||!chat.permissions.with(|p|p.contains(&Permission::SendMessages)) on:input=move|ev|{draft.set(event_target_value(&ev));chat.typing.set(true);}/></label><button class="icon-button self-end bg-brand" aria-label=move ||if editing.get().is_some(){crate::i18n::t("Save message")}else{crate::i18n::t("Send message")} data-tip=move ||if editing.get().is_some(){crate::i18n::t("Save")}else{crate::i18n::t("Send")} disabled=move||loading.get()||!composer_ready()||!chat.permissions.with(|p|p.contains(&Permission::SendMessages))><Icon kind=Glyph::Send/></button></form>
+                <form class="flex gap-3" on:submit=submit>
+                    <div class="relative min-w-0 flex-1">
+                        <mentions::Suggestions picker=mentions/>
+                        <label><span class="sr-only">{move || crate::i18n::t("Message")}</span>
+                            <textarea node_ref=mentions.input class="w-full resize-none rounded-lg bg-black/20 p-3 outline-none focus:ring-2 focus:ring-brand"
+                                aria-autocomplete="list" aria-controls="mention-suggestions" aria-expanded=move || mentions.expanded().to_string()
+                                aria-activedescendant=move || mentions.active_descendant()
+                                on:keydown=keydown on:click=move |_| mentions.refresh() on:select=move |_| mentions.refresh()
+                                on:keyup=move |ev| if matches!(ev.key().as_str(), "ArrowLeft" | "ArrowRight" | "Home" | "End") { mentions.refresh(); }
+                                on:blur=move |_| mentions.dismiss()
+                                on:compositionstart=move |_| mentions.composition(true) on:compositionend=move |_| mentions.composition(false)
+                                rows="2" maxlength="4000" placeholder=move || crate::i18n::t("Message this channel · @ to mention") prop:value=move||draft.get()
+                                disabled=move||!chat.permissions.with(|p|p.contains(&Permission::SendMessages))
+                                on:input=move|ev|{draft.set(event_target_value(&ev));chat.typing.set(true);mentions.input();}/>
+                        </label>
+                    </div>
+                    <button class="icon-button self-end bg-brand" aria-label=move ||if editing.get().is_some(){crate::i18n::t("Save message")}else{crate::i18n::t("Send message")} data-tip=move ||if editing.get().is_some(){crate::i18n::t("Save")}else{crate::i18n::t("Send")} disabled=move||loading.get()||!composer_ready()||!chat.permissions.with(|p|p.contains(&Permission::SendMessages))><Icon kind=Glyph::Send/></button>
+                </form>
             </footer>
         </section>
     }

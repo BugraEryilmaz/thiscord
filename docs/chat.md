@@ -6,9 +6,20 @@ links. Desktop links open in the default system browser; browser-preview links
 open in a new tab. Surrounding punctuation stays outside the link. Other content
 remains escaped text; HTML and Markdown are not interpreted. Non-web schemes and
 URLs containing credentials are not linked or accepted by the desktop opener.
-Use `@username` to mention a guild member. Server views show profile display names;
-usernames remain the handles for mentions and member lookup. Older server
-responses fall back to usernames.
+Type `@` in the guild chat composer to search members by public profile name or
+username, including offline members. Suggestions show both the profile name and
+unique `@username`; selecting one inserts the username used by existing mentions.
+Use Up/Down and Enter/Tab, or click a suggestion; Escape dismisses the picker.
+Shift+Enter still inserts a newline. Completion also works when editing messages
+and at the caret in the middle of a draft. Server views show profile display names;
+older server responses fall back to usernames.
+
+The `mention_suggestions` chat action takes `guild_id`, `channel_id` and `query`
+(at most 64 characters). It requires current guild membership and channel view/send
+permissions. It returns at most eight public identities, matching literal,
+case-insensitive substrings of profile names or usernames, with prefix matches
+first. Queries are debounced and stale responses are discarded on draft, channel,
+session or access changes. Deploy the backend before the new client.
 Mentioned messages are highlighted; channel badges show unread counts and
 an `@` for unread mentions. Online/typing indicators describe people viewing the
 same channel, not deployment-wide availability. Voice uses its separate media transport.

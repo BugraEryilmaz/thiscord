@@ -7,6 +7,8 @@ pub const CHAT_PATH: &str = "/api/v1/chat";
 pub const SOCKET_PATH: &str = "/api/v1/socket";
 pub const SOCKET_VERSION: u8 = 1;
 pub const MAX_MESSAGE_CHARS: usize = 4000;
+pub const MAX_MENTION_QUERY_CHARS: usize = 64;
+pub const MENTION_SUGGESTION_LIMIT: usize = 8;
 pub const ATTACHMENTS_PATH: &str = "/api/v1/attachments";
 pub const MAX_ATTACHMENT_BYTES: usize = 25 * 1024 * 1024;
 pub const MAX_MESSAGE_ATTACHMENTS: usize = 4;
@@ -103,6 +105,11 @@ impl OnlineMember {
 #[derive(Clone, Serialize, Deserialize)]
 #[serde(tag = "action", rename_all = "snake_case", deny_unknown_fields)]
 pub enum ChatRequest {
+    MentionSuggestions {
+        guild_id: GuildId,
+        channel_id: ChannelId,
+        query: String,
+    },
     History {
         guild_id: GuildId,
         channel_id: ChannelId,
@@ -144,10 +151,19 @@ pub enum ChatRequest {
 #[derive(Clone, Serialize, Deserialize)]
 #[serde(tag = "result", rename_all = "snake_case")]
 pub enum ChatResponse {
+    MentionSuggestions { members: Vec<MentionMember> },
     History { history: History },
     Message { message: ChatMessage },
     Unread { channels: Vec<Unread> },
     Done,
+}
+
+/// Public identity only; candidates include offline members of the current guild.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct MentionMember {
+    pub account_id: AccountId,
+    pub username: String,
+    pub display_name: String,
 }
 // Never Debug: the first frame carries a bearer token.
 #[derive(Serialize, Deserialize)]
@@ -225,6 +241,19 @@ pub enum ServerEvent {
 mod tests {
     use super::*;
     use serde_json::json;
+
+    #[test]
+    fn mention_suggestions_use_public_identity_and_stable_tags() {
+        let id = "00000000-0000-0000-0000-000000000001";
+        let wire = json!({"action":"mention_suggestions", "guild_id":id, "channel_id":id, "query":"Ada Lov"});
+        let request: ChatRequest = serde_json::from_value(wire.clone()).unwrap();
+        assert_eq!(serde_json::to_value(request).unwrap(), wire);
+        let response = json!({"result":"mention_suggestions", "members":[{
+            "account_id":id, "username":"ada_2", "display_name":"Ada Lovelace"
+        }]});
+        let parsed: ChatResponse = serde_json::from_value(response.clone()).unwrap();
+        assert_eq!(serde_json::to_value(parsed).unwrap(), response);
+    }
 
     #[test]
     fn profile_names_preserve_handles_and_accept_legacy_presence() {
