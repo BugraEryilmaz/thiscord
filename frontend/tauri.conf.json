@@ -53,7 +53,8 @@
     "shortDescription": "Private communities, text chat and voice.",
     "windows": {
       "nsis": {
-        "installMode": "currentUser"
+        "installMode": "currentUser",
+        "installerHooks": "windows/installer-hooks.nsh"
       }
     },
     "macOS": {

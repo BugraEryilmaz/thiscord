@@ -1,7 +1,11 @@
-# Thiscord welcome mark
+# Thiscord brand mark
 
-`assets/thiscord-mark.png` is the transparent cobalt gathering-knot mark used in
-the welcome page header and footer. `assets/favicon.png` is its browser favicon.
+`frontend/assets/brand/thiscord-mark.png` is the transparent cobalt gathering-knot
+mark shared by the app's home button and the welcome page header and footer.
+`frontend/assets/brand/favicon.png` is the browser favicon for both entry points.
+Both Trunk builds copy the same brand directory to `brand-assets`. The shared
+`BrandMark` component uses its silhouette as a CSS mask: white on the app's home
+button and cobalt on the welcome page, with accessible names on their containers.
 Generated with the built-in image generation tool; the original is retained at
 `brand/thiscord-mark-original.png`. Transparent web-sized copies (128px and 32px)
 were exported with `cargo tauri icon`. The source is outside the copied assets

@@ -133,6 +133,24 @@ clients. There is no Node/npm build step and no fourth Rust package.
 | macOS Apple Silicon | `.dmg` | `.app.tar.gz` |
 | Linux x64 | `.AppImage` or `.deb` | `.AppImage` only |
 
+Windows installers include `frontend/windows/installer-hooks.nsh` through Tauri's
+[`installerHooks`](https://v2.tauri.app/distribute/windows-installer/#extending-the-installer)
+configuration. After a successful installation, including a passive `/UPDATE`,
+the hook calls
+[`SHChangeNotify`](https://learn.microsoft.com/en-us/windows/win32/api/shlobj_core/nf-shlobj_core-shchangenotify)
+with `SHCNE_ASSOCCHANGED` and `SHCNF_FLUSH` to invalidate cached Shell icons.
+This lets existing desktop, Start menu and pinned shortcuts reload the updated
+executable's icon even though its path has not changed. Shortcut preferences and
+properties are preserved; the hook does not recreate deleted shortcuts, delete
+Windows cache files or restart Explorer. The same signed installer carries this
+behavior to every Windows user who installs the release containing it.
+
+When changing branding, verify an upgrade from the old icon in a disposable
+Windows profile or VM, using both the interactive installer and passive updater.
+Check existing desktop/Start menu/pinned icons and confirm that a deliberately
+deleted desktop shortcut stays absent during an in-app update. Building the
+installer alone does not verify Explorer's visible refresh behavior.
+
 An older executable without updater support must be replaced once by installing
 the first updater-enabled release manually. Keep Linux AppImages in a user-writable
 location. Debian packages require manual/package-manager updates; no apt repository
