@@ -138,6 +138,7 @@ and single-process chat/media enforcement.
 - [x] Bounded message cache, ID lookup, batched history merges and measured keyed virtual chat rows.
 - [x] History/composer UI with pending/failed/retry states and scroll behavior.
 - [x] Unread markers, mentions, typing indicators and online presence.
+- [x] Guild mention autocomplete by public profile name or username, showing both names with keyboard and pointer selection.
 - [ ] Measure unread fan-out with large backlogs; evaluate maintained sequence-bucket aggregates (see docs/unread-performance.md).
 - [x] Safe message rendering, bounded payloads and spam controls.
 - [x] Clickable web links in guild/private messages, opening in the default desktop browser.

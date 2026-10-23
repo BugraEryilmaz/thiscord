@@ -4,6 +4,7 @@ pub mod audio;
 pub mod chat_history;
 pub mod downloads;
 pub mod localization;
+pub mod mentions;
 pub mod message_links;
 pub mod navigation;
 pub mod notification_queue;

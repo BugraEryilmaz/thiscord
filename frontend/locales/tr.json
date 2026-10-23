@@ -1,4 +1,11 @@
 {
+  "Message this channel · @ to mention": "Bu kanala mesaj yaz · bahsetmek için @",
+  "Mention a member · ↑↓ to navigate · Enter or Tab to select": "Bir üyeden bahset · gezinmek için ↑↓ · seçmek için Enter veya Tab",
+  "Mention suggestions": "Bahsetme önerileri",
+  "Could not load members. Keep typing or try again.": "Üyeler yüklenemedi. Yazmaya devam edin veya tekrar deneyin.",
+  "Searching members…": "Üyeler aranıyor…",
+  "No matching members": "Eşleşen üye yok",
+  "Invalid mention search": "Geçersiz üye araması",
   "Invalid web URL": "Geçersiz web adresi",
   "Could not open the system browser": "Sistem tarayıcısı açılamadı",
   "Browser task failed": "Tarayıcı işlemi başarısız oldu",
