@@ -25,13 +25,15 @@ use webrtc::{
 
 struct Job {
     guild_id: GuildId,
-    channel_id: ChannelId,
+    channel_id: Arc<Mutex<ChannelId>>,
     stop: oneshot::Sender<()>,
     task: tokio::task::JoinHandle<()>,
 }
 impl Job {
     fn owns(&self, guild: GuildId, channel: ChannelId) -> bool {
-        self.guild_id == guild && self.channel_id == channel && !self.task.is_finished()
+        self.guild_id == guild
+            && self.channel_id.lock().ok().is_some_and(|id| *id == channel)
+            && !self.task.is_finished()
     }
 }
 #[derive(Default)]
@@ -258,9 +260,13 @@ pub async fn voice_join(
     let status = state.status.clone();
     let configuration = state.settings.clone();
     let (stop, stopped) = oneshot::channel();
+    let current_channel = Arc::new(Mutex::new(channel_id));
+    let task_channel = current_channel.clone();
     let task = tokio::spawn(async move {
         let mut runtime = Runtime {
             app: app.clone(),
+            current_channel: task_channel,
+            capture_limit: true,
             token,
             guild_id,
             channel_id,
@@ -283,13 +289,15 @@ pub async fn voice_join(
     });
     *job = Some(Job {
         guild_id,
-        channel_id,
+        channel_id: current_channel,
         stop,
         task,
     });
     Ok(())
 }
 struct Attempt {
+    moved_to: Option<ChannelId>,
+    capture_allowed: bool,
     call_id: Option<thiscord_shared::RequestId>,
     signaling: Option<crate::native_signaling::Sender>,
     recovery: Option<crate::native_signaling::recovery::Session>,
@@ -306,6 +314,8 @@ struct Attempt {
 impl Default for Attempt {
     fn default() -> Self {
         Self {
+            moved_to: None,
+            capture_allowed: false,
             call_id: None,
             signaling: None,
             recovery: None,
@@ -373,6 +383,8 @@ impl Drop for Attempt {
     }
 }
 struct Runtime {
+    current_channel: Arc<Mutex<ChannelId>>,
+    capture_limit: bool,
     app: tauri::AppHandle,
     token: String,
     guild_id: GuildId,
@@ -410,6 +422,7 @@ impl Connector for Runtime {
         let call_id = self.attempt.call_id;
         self.attempt = Attempt::default();
         self.attempt.call_id = call_id;
+        self.attempt.capture_allowed = self.capture_limit;
         self.attempt.stage = "setup";
         self.attempt
             .connection
@@ -456,7 +469,23 @@ impl Connector for Runtime {
             status.connected = false;
             status.participants.clear();
         }
+        let moved_to = self.attempt.moved_to;
         self.close().await;
+        if let Some(destination) = moved_to {
+            self.capture_limit &= self.attempt.capture_allowed;
+            self.channel_id = destination;
+            if let Ok(mut current) = self.current_channel.lock() {
+                *current = destination;
+            }
+            self.attempt.call_id = None;
+            return (
+                Failure::temporary(
+                    "Moved by a moderator. Reconnecting with your existing mute/deafen settings.",
+                )
+                .with_reason("moderator_move"),
+                true,
+            );
+        }
         (
             result
                 .err()
@@ -674,6 +703,8 @@ async fn run(
         ServerEvent::Error { error } => return Err(server_failure(&attempt.connection, error)),
         _ => return Err("Invalid voice offer".into()),
     };
+    let can_speak = can_speak && attempt.capture_allowed;
+    attempt.capture_allowed = can_speak;
     attempt.connection.event(
         "voice_offer_received",
         serde_json::json!({
@@ -966,7 +997,7 @@ async fn run(
                             demand: Default::default(), network_demand: Default::default(), force_keyframe: Default::default(), metrics: Default::default(), video_sequence: Default::default(), audio_sequence: Default::default(), audio_timestamp: Default::default(), started: Instant::now(),
                         }); }
                         engine.notify_control(Command::Roster{connection:attempt.connection.clone(),members:roster.clone()})?;
-                        if let Ok(mut s)=status.lock(){s.connected=true;s.message="Connected".into();}
+                        if let Ok(mut s)=status.lock(){s.connected=true;s.message=if can_speak{"Connected"}else{"Connected as listener. Leave and join again to enable newly granted microphone access."}.into();}
                 } else {
                     if !audio.running {return Err(Failure::from(audio.message).with_reason("audio_stopped"));}
                     if let Ok(mut s)=status.lock(){s.message=audio.message;}
@@ -1053,6 +1084,11 @@ async fn run(
                         if kind == MediaKind::Camera { app.state::<crate::native_camera::CameraState>().keyframe(); continue; }
                         if status.lock().ok().is_some_and(|s| s.participants.iter().any(|m| m.slot == own_slot && m.screen_epoch == epoch && m.sharing_screen)) { if layer != Some(1) { force_keyframe.store(true, Ordering::Release); }
                             if layer != Some(0) { app.state::<crate::native_screen::ScreenState>().layer_keyframe(); } }
+                    },
+                    ServerEvent::Moved {channel_id:destination}=>{
+                        if destination==channel_id {return Err("Invalid move destination".into());}
+                        attempt.moved_to=Some(destination);
+                        return Err(Failure::from("Moved by a moderator").with_reason("moderator_move"));
                     },
                     ServerEvent::Participants{members}=>{
                         if members.len()>ROOM_CAPACITY||members.iter().any(|m|m.slot>=ROOM_CAPACITY){return Err("Invalid participant list".into());}
@@ -1210,7 +1246,7 @@ mod tests {
         let (stop, stopped) = oneshot::channel();
         let mut job = Job {
             guild_id: guild,
-            channel_id: channel,
+            channel_id: Arc::new(Mutex::new(channel)),
             stop,
             task: tokio::spawn(async {
                 let _ = stopped.await;
@@ -1223,6 +1259,9 @@ mod tests {
             assert!(job.owns(guild, channel));
             assert!(!job.owns(guild, other));
         }
+        *job.channel_id.lock().unwrap() = other;
+        assert!(job.owns(guild, other));
+        assert!(!job.owns(guild, channel));
         job.task.abort();
         let _ = (&mut job.task).await;
         assert!(!job.owns(guild, channel));

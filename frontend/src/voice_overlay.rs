@@ -50,9 +50,13 @@ pub fn snapshot(voice: &VoiceStatus, audio: &AudioStatus) -> OverlaySnapshot {
                     account_id: p.account_id,
                     name: p.display_name().to_owned(),
                     avatar_id: p.avatar_id,
-                    speaking: audio.running && activity && p.can_speak && !p.muted && !p.deafened,
-                    muted: p.muted || !p.can_speak,
-                    deafened: p.deafened,
+                    speaking: audio.running
+                        && activity
+                        && p.can_speak
+                        && !p.is_muted()
+                        && !p.is_deafened(),
+                    muted: p.is_muted() || !p.can_speak,
+                    deafened: p.is_deafened(),
                 }
             })
             .collect(),

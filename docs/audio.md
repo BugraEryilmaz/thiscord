@@ -1253,4 +1253,20 @@ ends that member's current transports in the server; an explicit rejoin is allow
 Timeouts deny JoinVoice/Speak until expiry or removal, and bans deny membership.
 All three stop screen media as well as microphone audio. They share media epoch
 revocation and enforce guild roles/hierarchy; see [permissions.md](permissions.md#server-moderation).
-Moderator mute, deafen and move-to-channel controls remain pending.
+### Guild moderator controls
+
+Server mute/deafen are persisted independently of the user's self settings and
+revalidated through the same access generation as other guild changes. Server mute
+blocks all outgoing media; server deafen also blocks all reception. Queued media
+cannot cross the restriction boundary, and releasing either flag does not unmute
+or undeafen a user who chose those settings. Shares stopped by moderation need
+an explicit restart. Combined flags appear in the sidebar and overlay.
+
+Moderator moves fence and close the old transport. The desktop reconnects to the
+notified channel with fresh authorization and capacity checks, preserves self
+mute/deafen and releases PTT. Screen and camera sharing stop. A move never starts
+an offline/disconnected user, or opens a microphone for a source that was listen-only.
+A listen-only user must explicitly leave/rejoin to use newly granted microphone
+access. Concurrent destination admission/revocation can make
+the new join fail safely. Old clients and signaling-loss cases may need a manual
+rejoin. See [permissions.md](permissions.md) for hierarchy, reasons and audit logs.

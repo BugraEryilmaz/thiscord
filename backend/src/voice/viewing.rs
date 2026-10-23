@@ -103,7 +103,7 @@ pub(super) async fn update(
     let now = Instant::now();
     let mut next = [None; ROOM_CAPACITY * 2];
     let mut source_permits = Vec::new();
-    if receiver.active.load(Ordering::Acquire) && !receiver.info.deafened {
+    if receiver.active.load(Ordering::Acquire) && !receiver.info.is_deafened() {
         for subscription in views {
             let Some(source) = members.get(&subscription.slot) else {
                 continue;
@@ -181,7 +181,7 @@ pub(super) fn receives(
         || !source.active.load(Ordering::Acquire)
         || !may_publish(&source.info, kind)
         || receiver.info.slot == source.info.slot
-        || receiver.info.deafened
+        || receiver.info.is_deafened()
         || !receiver.active.load(Ordering::Acquire)
         || !receiver
             .access
@@ -329,6 +329,8 @@ mod tests {
                     replaced: watch::channel(false).0,
                     network: Arc::new(RwLock::new(Default::default())),
                     info: Participant {
+                        server_muted: false,
+                        server_deafened: false,
                         test_bot: false,
                         account_id: account,
                         username: "viewer".into(),

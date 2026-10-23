@@ -45,6 +45,7 @@ pub(super) async fn admit(
             thiscord_shared::notifications::Kind::VoiceJoin,
         );
     }
+    moderation::register(room, &member);
     members.insert(slot, member);
     room.changed.send_replace(());
     Ok(slot)
@@ -63,6 +64,8 @@ mod tests {
             replaced: watch::channel(false).0,
             network: Default::default(),
             info: Participant {
+                server_muted: false,
+                server_deafened: false,
                 test_bot: false,
                 account_id: account,
                 username: "test".into(),

@@ -116,6 +116,10 @@ pub struct Participant {
     pub microphone_source_epoch: u32,
     pub muted: bool,
     pub deafened: bool,
+    #[serde(default)]
+    pub server_muted: bool,
+    #[serde(default)]
+    pub server_deafened: bool,
     pub can_speak: bool,
     #[serde(default)]
     pub sharing_screen: bool,
@@ -141,6 +145,12 @@ pub struct ChannelRoster {
     pub members: Vec<Participant>,
 }
 impl Participant {
+    pub fn is_muted(&self) -> bool {
+        self.muted || self.server_muted
+    }
+    pub fn is_deafened(&self) -> bool {
+        self.deafened || self.server_deafened
+    }
     pub fn video_epoch(&self, kind: MediaKind) -> u32 {
         if kind == MediaKind::Camera {
             self.camera_epoch
@@ -179,6 +189,11 @@ pub struct ServerFrame {
 #[derive(Clone, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum ServerEvent {
+    /// Ends this transport. A current client may reconnect after fresh admission,
+    /// preserving self mute/deafen and stopping all screen/camera publishing.
+    Moved {
+        channel_id: ChannelId,
+    },
     MicrophoneRefreshRequired {
         challenge: u32,
     },

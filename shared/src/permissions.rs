@@ -1,5 +1,5 @@
 //! Stable, explicit permission names; unknown permissions fail deserialization.
-use crate::{AccountId, ChannelId, GuildId, InstanceRoleId, RoleId};
+use crate::{AccountId, AuditId, CategoryId, ChannelId, GuildId, InstanceRoleId, InviteId, RoleId};
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeSet;
 
@@ -155,6 +155,10 @@ pub struct ModerationMember {
     pub display_name: String,
     pub timeout_until: Option<crate::Timestamp>,
     pub actions: Permissions,
+    #[serde(default)]
+    pub server_muted: bool,
+    #[serde(default)]
+    pub server_deafened: bool,
 }
 impl ModerationMember {
     /// Profile label, falling back to the username for older servers.
@@ -201,6 +205,36 @@ pub struct Channel {
     pub id: ChannelId,
     pub name: String,
     pub kind: ChannelKind,
+    #[serde(default)]
+    pub category_id: Option<CategoryId>,
+    #[serde(default)]
+    pub position: i32,
+}
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Category {
+    pub id: CategoryId,
+    pub name: String,
+    pub position: i32,
+}
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct GuildInvite {
+    pub id: InviteId,
+    pub created_by: Option<AccountId>,
+    pub created_at: crate::Timestamp,
+    pub expires_at: crate::Timestamp,
+    pub max_uses: u32,
+    pub uses: u32,
+    pub revoked: bool,
+}
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct AuditEntry {
+    pub id: AuditId,
+    pub created_at: crate::Timestamp,
+    pub actor: Option<AccountId>,
+    pub target: Option<AccountId>,
+    pub action: String,
+    pub reason: String,
+    pub details: String,
 }
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "kind", content = "id", rename_all = "snake_case")]
@@ -223,12 +257,45 @@ pub struct GuildState {
     pub roles: Vec<Role>,
     pub members: Vec<Member>,
     pub channels: Vec<Channel>,
+    #[serde(default)]
+    pub categories: Vec<Category>,
     pub overrides: Vec<ChannelOverride>,
 }
 // Contains server passwords; deliberately does not implement Debug.
 #[derive(Clone, Serialize, Deserialize)]
 #[serde(tag = "action", rename_all = "snake_case", deny_unknown_fields)]
 pub enum PermissionRequest {
+    AcceptInvite {
+        code: String,
+    },
+    ListInvites {
+        guild_id: GuildId,
+    },
+    CreateInvite {
+        guild_id: GuildId,
+        revision: i64,
+        duration_seconds: u32,
+        max_uses: u32,
+    },
+    RevokeInvite {
+        guild_id: GuildId,
+        revision: i64,
+        invite_id: InviteId,
+    },
+    InspectOrganization {
+        guild_id: GuildId,
+    },
+    AuditLog {
+        guild_id: GuildId,
+        #[serde(default)]
+        page: crate::pagination::PageRequest,
+    },
+    Moderate {
+        guild_id: GuildId,
+        revision: i64,
+        change: GuildChange,
+        reason: String,
+    },
     Instance {},
     ListInstanceRoleMembers {
         role_id: InstanceRoleId,
@@ -295,6 +362,36 @@ pub enum PermissionRequest {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "action", rename_all = "snake_case", deny_unknown_fields)]
 pub enum GuildChange {
+    SetServerMute {
+        account_id: AccountId,
+        muted: bool,
+    },
+    SetServerDeafen {
+        account_id: AccountId,
+        deafened: bool,
+    },
+    MoveVoice {
+        account_id: AccountId,
+        source_channel_id: ChannelId,
+        channel_id: ChannelId,
+    },
+    EditChannel {
+        channel_id: ChannelId,
+        name: String,
+        category_id: Option<CategoryId>,
+        position: i32,
+    },
+    CreateCategory {
+        name: String,
+    },
+    EditCategory {
+        category_id: CategoryId,
+        name: String,
+        position: i32,
+    },
+    DeleteCategory {
+        category_id: CategoryId,
+    },
     Rename {
         name: String,
     },
@@ -360,9 +457,27 @@ pub enum GuildChange {
         target: OverrideTarget,
     },
 }
-#[derive(Debug, Clone, Serialize, Deserialize)]
+// Invite creation returns a bearer capability once; never derive Debug.
+#[derive(Clone, Serialize, Deserialize)]
 #[serde(tag = "result", rename_all = "snake_case")]
 pub enum PermissionResponse {
+    Invites {
+        guild: Guild,
+        invites: Vec<GuildInvite>,
+    },
+    InviteCreated {
+        guild: Guild,
+        invite: GuildInvite,
+        code: String,
+    },
+    Organization {
+        guild: Guild,
+        channels: Vec<Channel>,
+        categories: Vec<Category>,
+    },
+    AuditLog {
+        page: crate::pagination::Page<AuditEntry>,
+    },
     InstanceRoleMembers {
         role_id: InstanceRoleId,
         page: crate::pagination::Page<InstanceRoleMember>,
@@ -396,6 +511,10 @@ pub enum PermissionResponse {
 pub struct GuildHome {
     pub guild: Guild,
     pub channels: Vec<Channel>,
+    #[serde(default)]
+    pub categories: Vec<Category>,
+    #[serde(default)]
+    pub can_manage_invites: bool,
     pub can_manage_roles: bool,
     #[serde(default)]
     pub can_manage_channels: bool,
@@ -407,6 +526,19 @@ pub struct GuildHome {
 mod tests {
     use super::*;
     use serde_json::json;
+
+    #[test]
+    fn organization_defaults_and_moderation_reason_are_wire_compatible() {
+        let id = "00000000-0000-0000-0000-000000000001";
+        let channel: Channel =
+            serde_json::from_value(json!({"id":id,"name":"old","kind":"voice"})).unwrap();
+        assert!(channel.category_id.is_none());
+        assert_eq!(channel.position, 0);
+        let command = json!({"action":"moderate","guild_id":id,"revision":3,"reason":"Repeated noise","change":{"action":"set_server_mute","account_id":id,"muted":true}});
+        let parsed: PermissionRequest = serde_json::from_value(command.clone()).unwrap();
+        assert_eq!(serde_json::to_value(parsed).unwrap(), command);
+        assert!(serde_json::from_value::<PermissionRequest>(json!({"action":"create_invite","guild_id":id,"revision":0,"duration_seconds":3600,"max_uses":-1})).is_err());
+    }
 
     #[test]
     fn extensible_instance_role_commands_are_explicit_and_bounded() {
