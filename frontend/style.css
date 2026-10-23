@@ -20,6 +20,9 @@
   --font-welcome: "Bricolage Grotesque", "Trebuchet MS", sans-serif;
 }
 
+/* One silhouette for the app and website; currentColor preserves contrast. */
+.brand-mark { display: block; flex-shrink: 0; background-color: currentColor; mask: url("./brand-assets/thiscord-mark.png") center / contain no-repeat; -webkit-mask: url("./brand-assets/thiscord-mark.png") center / contain no-repeat; }
+
 /* The account ribbon spans the rail and channel list; content keeps its height. */
 .app-shell { --sidebar-width: 248px; --dock-height: 84px; height: 100dvh; }
 .app-shell.in-voice { --dock-height: 186px; }
@@ -402,7 +405,7 @@ html:has(.welcome-page) { scroll-behavior: smooth; scroll-padding-top: 28px; bac
 .welcome-icon { flex-shrink: 0; }
 .welcome-nav { min-height: 108px; }
 .welcome-logo { font-size: 28px; font-weight: 800; letter-spacing: -1.4px; color: var(--color-welcome-cobalt); line-height: 1; }
-.welcome-brand-mark { display: block; width: 35px; height: 35px; flex-shrink: 0; background: url("./welcome-assets/thiscord-mark.png") center / contain no-repeat; }
+.welcome-brand-mark { width: 35px; height: 35px; }
 .welcome-nav nav { font-size: 14px; font-weight: 600; }
 .welcome-nav nav a, .welcome-footer > a:last-child { display: inline-flex; align-items: center; gap: 7px; }
 .welcome-nav nav a:hover, .welcome-footer > a:last-child:hover { color: var(--color-welcome-cobalt); }

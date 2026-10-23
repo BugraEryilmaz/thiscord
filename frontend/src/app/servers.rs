@@ -427,7 +427,8 @@ pub(super) fn ServerRail(ui: Ui) -> impl IntoView {
     };
     view! {
         <aside class="server-rail" aria-label=move || crate::i18n::t("Servers")>
-            <button class="relative mb-4 h-12 w-12 shrink-0 rounded-2xl bg-brand text-xl font-bold" data-tip=move || crate::i18n::t("Thiscord home") aria-label=move ||thiscord_frontend::localized_format!(crate::i18n::language(), "Thiscord home, {} incoming requests, {} unread messages",ui.friends.pending_count(),super::friends::count_text(ui.friends.unread_count())) on:click=move |_|{ui.friends.selected.set(None);home(ui);}>"T"
+            <button class="relative mb-4 flex h-12 w-12 shrink-0 items-center justify-center rounded-2xl bg-brand text-white" data-tip=move || crate::i18n::t("Thiscord home") aria-label=move ||thiscord_frontend::localized_format!(crate::i18n::language(), "Thiscord home, {} incoming requests, {} unread messages",ui.friends.pending_count(),super::friends::count_text(ui.friends.unread_count())) on:click=move |_|{ui.friends.selected.set(None);home(ui);}>
+                <crate::brand::BrandMark class="h-8 w-8"/>
                 <span class="absolute -bottom-1 -right-1"><super::friends::CountBubble count=Signal::derive(move ||ui.friends.pending_count()+ui.friends.unread_count()) label="pending requests and unread messages"/></span>
             </button>
             <nav class="flex min-h-0 w-full flex-1 flex-col items-center gap-3 overflow-y-auto py-2" aria-label=move || crate::i18n::t("Joined servers")>

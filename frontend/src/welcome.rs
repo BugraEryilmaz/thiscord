@@ -190,7 +190,7 @@ fn Room() -> impl IntoView {
 
 #[component]
 fn Logo() -> impl IntoView {
-    view! { <span class="welcome-brand-mark" aria-hidden="true"></span> }
+    view! { <crate::brand::BrandMark class="welcome-brand-mark"/> }
 }
 
 #[component]
