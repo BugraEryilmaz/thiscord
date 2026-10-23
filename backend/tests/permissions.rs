@@ -14,6 +14,8 @@ use uuid::Uuid;
 
 #[path = "permissions/limits.rs"]
 mod limits;
+#[path = "permissions/organization.rs"]
+mod organization;
 
 struct Database {
     connection: PgConnection,
@@ -1056,6 +1058,7 @@ fn combined_roles_overrides_and_admin_behavior() {
     let b = role(1, Permissions::new());
     let channel = ChannelId::from_uuid(Uuid::new_v4());
     let mut state = GuildState {
+        categories: vec![],
         capacity: None,
         guild: Guild {
             id: GuildId::from_uuid(Uuid::new_v4()),
@@ -1080,6 +1083,8 @@ fn combined_roles_overrides_and_admin_behavior() {
             },
         ],
         channels: vec![Channel {
+            category_id: None,
+            position: 0,
             id: channel,
             name: "channel".into(),
             kind: ChannelKind::Voice,

@@ -119,11 +119,11 @@ and single-process chat/media enforcement.
 - [x] Create/edit/delete guild HTTP commands, list memberships, join by ID/password and leave.
 - [x] Joined-server rail with circular initials avatars, names on hover, create/join dialogs.
 - [ ] Custom server images and password-change settings UI.
-- [ ] Invite links with expiry/use limits, revocation and join validation.
+- [x] Invite links with expiry/use limits, revocation and join validation.
 - [x] Ownership transfer, kick/ban/unban and per-server moderation controls.
 - [x] Timeouts with expiry/removal, chat/voice enforcement and join-bypass protection.
-- [ ] Administrative audit events and moderation reasons.
-- [ ] Create/edit/delete/reorder text and voice channels and categories.
+- [x] Guild moderation audit events and reasons (1000-row retention, authorized keyset history).
+- [x] Create/edit/delete/reorder text and voice channels and organizational categories.
 - [ ] Guild navigation, channel/member lists and settings views.
 - [ ] Cascade/archive behavior and confirmation UX for destructive operations.
 - [ ] Transaction and authorization tests for management operations.
@@ -340,7 +340,8 @@ speaker isolation and physical acoustic acceptance remain future work.
   transient network/ICE/signaling failures
   reconnect with bounded backoff, fresh authorization and cancellable media leases.
 - [x] Moderator voice disconnect with hierarchy enforcement and targeted transport revocation.
-- [ ] Moderator mute/deafen/move-to-channel controls with hierarchy enforcement.
+- [x] Moderator mute/deafen/move-to-channel controls with hierarchy enforcement.
+- [ ] Physical Windows/macOS/Linux acceptance of moderator moves, capture shutdown and self-state preservation.
 - [x] Desktop voice overlay with participant roster, speaking activity and focus visibility.
 - [x] Customizable global mute/deafen shortcuts and clickable self controls on overlay hover.
 - [x] Compact connection-quality UI with local failure attribution and unavailable values.

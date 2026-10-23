@@ -760,6 +760,8 @@ mod tests {
                     replaced: watch::channel(false).0,
                     network: Arc::new(RwLock::new(Default::default())),
                     info: Participant {
+                        server_muted: false,
+                        server_deafened: false,
                         test_bot: false,
                         account_id: endpoint.identity.account,
                         username: "test".into(),
@@ -2412,7 +2414,7 @@ mod tests {
             MediaKind::ScreenVideo,
             MediaKind::SystemAudio,
         ] {
-            for reason in 0..5 {
+            for reason in 0..8 {
                 let (writer, source, _) = fixture().await;
                 let (tx, rx) = channel(kind);
                 let mut packet = delivery(kind, &source, 100);
@@ -2423,6 +2425,9 @@ mod tests {
                         1 => members.get_mut(&1).unwrap().info.can_speak = false,
                         2 => members.get_mut(&1).unwrap().source_id = uuid::Uuid::new_v4(),
                         3 => packet.epoch = packet.epoch.wrapping_add(1),
+                        4 => members.get_mut(&0).unwrap().info.server_deafened = true,
+                        5 => members.get_mut(&1).unwrap().info.server_deafened = true,
+                        6 => members.get_mut(&1).unwrap().info.server_muted = true,
                         _ => packet.source_active.store(false, Ordering::Release),
                     }
                 }

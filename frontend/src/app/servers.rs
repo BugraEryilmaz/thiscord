@@ -296,8 +296,8 @@ fn VoiceRoster(ui: Ui, guild: GuildId, channel: thiscord_shared::ChannelId) -> i
                 <span class="voice-avatar"><crate::avatar::Avatar class="size-6 text-xs" name=Signal::derive(move ||member.get().display_name().to_owned()) avatar_id=Signal::derive(move ||member.get().avatar_id)/></span>
                 <span class="min-w-0 flex-1 truncate">{move ||member.get().display_name().to_owned()}</span>
                 </button><Show when=move ||speaking.get().contains(&id)><span class="sr-only">{move || crate::i18n::t("Speaking")}</span></Show>
-                <Show when=move ||member.get().deafened><span aria-label=move || crate::i18n::t("Deafened")><Icon kind=Glyph::Deafen/></span></Show>
-                <Show when=move ||!member.get().deafened && (member.get().muted || !member.get().can_speak)><span aria-label=move || crate::i18n::t("Muted")><Icon kind=Glyph::MicOff/></span></Show>
+                <Show when=move ||member.get().is_deafened()><span aria-label=move || crate::i18n::t("Deafened")><Icon kind=Glyph::Deafen/></span></Show>
+                <Show when=move ||!member.get().is_deafened() && (member.get().is_muted() || !member.get().can_speak)><span aria-label=move || crate::i18n::t("Muted")><Icon kind=Glyph::MicOff/></span></Show>
                 <Show when=move ||member.get().sharing_screen || member.get().camera_active><button class="stream-live-badge" aria-label=move ||thiscord_frontend::localized_format!(crate::i18n::language(), "Watch {}’s stream",member.get().display_name()) data-tip=move || crate::i18n::t("Watch stream") on:click=move |_|super::screen::open_stream(ui,guild,channel,member.get_untracked())>{move || crate::i18n::t("LIVE")}</button></Show>
             </li>}
         }/>
@@ -348,6 +348,32 @@ pub(super) fn ServerRail(ui: Ui) -> impl IntoView {
                 name: name.get_untracked(),
                 password: supplied,
             }
+        } else if !server_id.get_untracked().trim().is_empty()
+            && server_id.get_untracked().trim().parse::<GuildId>().is_err()
+        {
+            let supplied = server_id.get_untracked();
+            let code = if let Ok(link) = url::Url::parse(supplied.trim()) {
+                let base = if crate::account_client::api_base().is_empty() {
+                    window().location().origin().unwrap_or_default()
+                } else {
+                    crate::account_client::api_base().to_owned()
+                };
+                let same = url::Url::parse(&base)
+                    .ok()
+                    .is_some_and(|base| base.origin() == link.origin());
+                if !same
+                    || link.path() != "/invite"
+                    || !link.username().is_empty()
+                    || link.password().is_some()
+                {
+                    error.set("Use an invite from this Thiscord installation.".into());
+                    return;
+                }
+                link.fragment().unwrap_or_default().to_owned()
+            } else {
+                supplied.trim().to_owned()
+            };
+            PermissionRequest::AcceptInvite { code }
         } else {
             let Ok(guild_id) = server_id.get_untracked().trim().parse() else {
                 error.set("Enter a valid server ID".into());
@@ -422,7 +448,7 @@ pub(super) fn ServerRail(ui: Ui) -> impl IntoView {
                     <Show when=quota_reached><p class="settings-hint text-amber-300">{move ||crate::i18n::t("Owned server limit reached; transfer or delete a server, or ask the instance owner to review your limits")}</p></Show>
                     <button type="button" class="settings-secondary" disabled=move ||ui.busy.get() on:click=move |_|{ui.busy.set(true);leptos::task::spawn_local(async move{refresh(ui).await;ui.busy.set(false);});}>{move ||crate::i18n::t("Refresh limits")}</button>
                 </Show>
-                <Show when=move ||creating.get() fallback=move ||view!{<Field label="Server ID" value=server_id/>}><Field label="Server name" value=name/></Show>
+                <Show when=move ||creating.get() fallback=move ||view!{<Field label="Server ID, invite code or invite link" value=server_id/>}><Field label="Server name" value=name/></Show>
                 <Field label="Server password (optional)" value=password kind="password" autocomplete="off"/>
                 <p class="text-sm text-white/60">{move ||if creating.get(){crate::i18n::t("Leave the password empty to let verified accounts join using your server ID.")}else{crate::i18n::t("Ask the server owner for its ID and password, if it has one.")}}</p>
                 <p class="text-sm text-red-300" role="alert">{move ||crate::i18n::message(error.get())}</p>
@@ -558,7 +584,7 @@ pub(super) fn ServerHome(ui: Ui) -> impl IntoView {
                 <section class="server-layout">
                     <nav class="channel-sidebar" aria-label=move || crate::i18n::t("Server channels")>
                         <div class="flex items-center gap-2" data-context-server=home.guild.id.to_string()><h2 class="min-w-0 flex-1 break-words text-lg font-bold">{home.guild.name.clone()}</h2>
-                            <Show when=move ||home.can_manage_roles><button class="icon-button shrink-0" aria-label=move || crate::i18n::t("Server roles and settings") data-tip=move || crate::i18n::t("Server settings") on:click=move |_|{ui.role_target.set(None);ui.permission_channel.set(None);ui.page.set("permissions");}><Icon kind=Glyph::Settings/></button></Show>
+                            <Show when=move ||home.can_manage_roles || home.can_manage_channels || home.can_manage_invites || home.can_moderate><button class="icon-button shrink-0" aria-label=move || crate::i18n::t("Server roles and settings") data-tip=move || crate::i18n::t("Server settings") on:click=move |_|{ui.role_target.set(None);ui.permission_channel.set(None);ui.page.set(if home.can_manage_roles{"permissions"}else if home.can_manage_channels{"server_organization"}else if home.can_manage_invites{"server_invites"}else{"moderation"});}><Icon kind=Glyph::Settings/></button></Show>
                             <button class="shrink-0 rounded p-1 text-white/50 hover:bg-white/10 hover:text-white" data-tip=move || crate::i18n::t("Copy server ID") aria-label=move || crate::i18n::t("Copy server ID") on:click=move |_| {
                                 let id = home.guild.id.to_string();
                                 leptos::task::spawn_local(async move {
@@ -573,9 +599,10 @@ pub(super) fn ServerHome(ui: Ui) -> impl IntoView {
                                 if let Some(dialog)=dialog.get(){let _=dialog.show_modal();}
                             }>"+"</button></Show>
                         </div>
-                        <ul class="min-h-0 flex-1 space-y-1 overflow-y-auto text-white/70">{let channel_guild=home.guild.clone();let channels=home.channels;move ||{let mut channels=channels.clone();channels.sort_by_key(|c|!ui.sidebar_preferences.get().pinned.contains(&c.id));let channel_guild=channel_guild.clone();channels.into_iter().map(move |ch|{
+                        <ul class="min-h-0 flex-1 space-y-1 overflow-y-auto text-white/70">{let channel_guild=home.guild.clone();let channels=home.channels;let categories=home.categories;move ||{let mut channels=channels.clone();channels.sort_by_key(|c|(c.category_id.and_then(|id|categories.iter().find(|cat|cat.id==id).map(|cat|(cat.position,cat.id))),!ui.sidebar_preferences.get().pinned.contains(&c.id),c.position,c.id));let mut previous=None;let categories=categories.clone();let channel_guild=channel_guild.clone();channels.into_iter().map(move |ch|{
                             let id=ch.id; let is_voice=ch.kind==ChannelKind::Voice; let name=ch.name.clone();let guild=channel_guild.clone();let guild_id=guild.id;
-                            view!{<li><button data-context-server=guild_id.to_string() data-context-channel=id.to_string() aria-haspopup="menu" class="flex w-full items-center gap-2 rounded-md px-2 py-2 text-left hover:bg-white/10" class:channel-selected=move ||selected.get().is_some_and(|c|c.id==id) class:voice-active=move ||ui.voice.get().channel_id==Some(id) aria-label=name.clone() data-tip=name.clone() disabled=move ||is_voice && ui.voice_joining.get() on:click=move |_|if is_voice {super::audio::join(ui,guild.clone(),ch.clone());}else{selected.set(Some(ch.clone()));}>
+                            let heading=if previous!=Some(ch.category_id){previous=Some(ch.category_id);Some(ch.category_id.and_then(|id|categories.iter().find(|cat|cat.id==id).map(|cat|cat.name.clone())).unwrap_or_else(||crate::i18n::t("No category").into()))}else{None};
+                            view!{<li>{heading.map(|title|view!{<h4 class="px-2 pb-1 pt-4 text-xs font-semibold uppercase text-white/50">{title}</h4>})}<button data-context-server=guild_id.to_string() data-context-channel=id.to_string() aria-haspopup="menu" class="flex w-full items-center gap-2 rounded-md px-2 py-2 text-left hover:bg-white/10" class:channel-selected=move ||selected.get().is_some_and(|c|c.id==id) class:voice-active=move ||ui.voice.get().channel_id==Some(id) aria-label=name.clone() data-tip=name.clone() disabled=move ||is_voice && ui.voice_joining.get() on:click=move |_|if is_voice {super::audio::join(ui,guild.clone(),ch.clone());}else{selected.set(Some(ch.clone()));}>
                                 {move || if is_voice {view!{<Icon kind=Glyph::Volume/>}.into_any()}else{view!{<span class="w-5 text-center text-xl text-white/40">"#"</span>}.into_any()}}
                                 <span class="min-w-0 flex-1 truncate text-sm">{name.clone()}</span>
                                 <Show when=move ||ui.sidebar_preferences.get().pinned.contains(&id)><span aria-label=move || crate::i18n::t("Pinned") class="channel-indicator"><Icon kind=Glyph::Pin/></span></Show>

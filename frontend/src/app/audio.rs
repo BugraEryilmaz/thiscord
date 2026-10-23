@@ -190,6 +190,28 @@ pub(super) fn AudioHost(ui: Ui) -> impl IntoView {
                                 {
                                     ui.status.set(status.message.clone());
                                 }
+                                if let Some(channel_id) = status.channel_id {
+                                    ui.voice_location.update(|location| {
+                                        if let Some(location) = location.as_mut()
+                                            && location.channel_id != channel_id
+                                        {
+                                            location.channel_id = channel_id;
+                                            location.channel_name = ui
+                                                .server
+                                                .get_untracked()
+                                                .filter(|s| s.guild.id == location.guild_id)
+                                                .and_then(|s| {
+                                                    s.channels
+                                                        .into_iter()
+                                                        .find(|c| c.id == channel_id)
+                                                        .map(|c| c.name)
+                                                })
+                                                .unwrap_or_else(|| {
+                                                    crate::i18n::t("Moved voice channel").into()
+                                                });
+                                        }
+                                    });
+                                }
                                 ui.voice.set(status);
                             }
                             gloo_timers::future::TimeoutFuture::new(500).await;

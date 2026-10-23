@@ -26,6 +26,7 @@ pub use ids::AvatarId;
 pub use ids::{
     AccountId, ChannelId, GuildId, InstanceId, InstanceRoleId, RequestId, RoleId, SessionId,
 };
+pub use ids::{AuditId, CategoryId, InviteId};
 pub use ids::{ClientMessageId, MessageId};
 
 /// RFC 3339 on the wire, normalized to UTC. No OS clock is needed in shared code.

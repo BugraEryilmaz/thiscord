@@ -37,7 +37,8 @@ pub(crate) fn load(
                 'timeout_until', (SELECT timeout_until FROM guild_moderation WHERE guild_id=$1::uuid AND account_id=a.id),
                 'roles', COALESCE((SELECT jsonb_agg(role_id) FROM guild_member_roles WHERE guild_id=$1::uuid AND account_id=a.id), '[]')
             )) FROM accounts a WHERE a.id IN (SELECT account_id FROM selected_members)), '[]'),
-            'channels', COALESCE((SELECT jsonb_agg(to_jsonb(ch) ORDER BY ch.id) FROM channels ch
+            'categories', COALESCE((SELECT jsonb_agg(to_jsonb(cat) ORDER BY cat.position,cat.id) FROM channel_categories cat WHERE cat.guild_id=$1::uuid), '[]'),
+            'channels', COALESCE((SELECT jsonb_agg(to_jsonb(ch) ORDER BY ch.position,ch.id) FROM channels ch
                 WHERE ch.guild_id=$1::uuid AND ($3='' OR ch.id=NULLIF($3,'')::uuid)), '[]'),
             'overrides', COALESCE((SELECT jsonb_agg(jsonb_build_object(
                 'channel_id', channel_id,

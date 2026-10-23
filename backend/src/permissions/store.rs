@@ -1,3 +1,5 @@
+#[path = "organization.rs"]
+mod organization;
 use super::evaluator::{effective, rank};
 use crate::{
     auth::{
@@ -195,7 +197,7 @@ pub(crate) fn load(c: &mut PgConnection, id: GuildId) -> Result<GuildState, Fail
     )?;
     let channels = query(
         c,
-        "SELECT to_jsonb(ch) AS data FROM channels ch WHERE guild_id=$1::uuid ORDER BY id",
+        "SELECT to_jsonb(ch) AS data FROM channels ch WHERE guild_id=$1::uuid ORDER BY position,id",
         &[&id],
     )?;
     let overrides = query(
@@ -209,6 +211,11 @@ pub(crate) fn load(c: &mut PgConnection, id: GuildId) -> Result<GuildState, Fail
         roles,
         members,
         channels,
+        categories: query(
+            c,
+            "SELECT to_jsonb(cat) AS data FROM channel_categories cat WHERE guild_id=$1::uuid ORDER BY position,id",
+            &[&id],
+        )?,
         overrides,
     })
 }
@@ -238,6 +245,32 @@ pub(super) fn dispatch(
     token: &str,
     command: PermissionRequest,
 ) -> Result<PermissionResponse, Failure> {
+    let (command, reason) = match command {
+        PermissionRequest::Moderate {
+            guild_id,
+            revision,
+            change,
+            reason,
+        } => {
+            if organization::moderation_target(&change).is_none() {
+                return Err(Failure::Invalid("Not a moderation action"));
+            }
+            if reason.chars().count() > 500 || reason.chars().any(char::is_control) {
+                return Err(Failure::Invalid(
+                    "Reason must be at most 500 characters without control characters",
+                ));
+            }
+            (
+                PermissionRequest::Change {
+                    guild_id,
+                    revision,
+                    change,
+                },
+                reason,
+            )
+        }
+        other => (other, String::new()),
+    };
     let mut c = connection(pool)?;
     // Authentication runs outside the action transaction so replay revocation commits.
     let session = auth::authenticate(&mut c, token)?;
@@ -246,14 +279,19 @@ pub(super) fn dispatch(
     auth::rate_limit(
         pool,
         &format!("permission:{}", session.account_id),
-        if matches!(command, PermissionRequest::JoinGuild { .. }) {
+        if matches!(
+            command,
+            PermissionRequest::JoinGuild { .. } | PermissionRequest::AcceptInvite { .. }
+        ) {
             Some(&account_key)
         } else {
             None
         },
         matches!(
             command,
-            PermissionRequest::JoinGuild { .. } | PermissionRequest::CreateGuild { .. }
+            PermissionRequest::JoinGuild { .. }
+                | PermissionRequest::AcceptInvite { .. }
+                | PermissionRequest::CreateGuild { .. }
         ),
     )?;
     let mut c = connection(pool)?;
@@ -266,11 +304,18 @@ pub(super) fn dispatch(
             | GuildChange::UnbanMember { account_id }
             | GuildChange::TimeoutMember { account_id, .. }
             | GuildChange::DisconnectVoice { account_id }
+            | GuildChange::SetServerMute { account_id, .. }
+            | GuildChange::SetServerDeafen { account_id, .. }
+            | GuildChange::MoveVoice { account_id, .. }
             | GuildChange::AssignRole { account_id, .. } => {
                 crate::access::Scope::Member(*guild_id, *account_id)
             }
             _ => crate::access::Scope::Guild(*guild_id),
         }),
+        PermissionRequest::AcceptInvite { code } => Some(crate::access::Scope::Member(
+            organization::invite_guild(&mut c, code)?,
+            session.account_id,
+        )),
         PermissionRequest::JoinGuild { guild_id, .. } => {
             Some(crate::access::Scope::Member(*guild_id, session.account_id))
         }
@@ -399,6 +444,7 @@ pub(super) fn dispatch(
                 execute(c,"DELETE FROM instance_role_assignments WHERE account_id=$1::uuid OR account_id=$2::uuid", &[&actor.to_string(),&account_id.to_string()])?;
                 Ok(PermissionResponse::Instance { access: public_instance(c,actor)? })
             }
+            PermissionRequest::AcceptInvite { code } => organization::accept(c,actor,&code),
             PermissionRequest::ListGuilds {} => Ok(PermissionResponse::Guilds { guilds: query(c,"SELECT to_jsonb(g) AS data FROM guilds g JOIN guild_members m ON m.guild_id=g.id WHERE m.account_id=$1::uuid ORDER BY g.id", &[&actor.to_string()])? }),
             PermissionRequest::CreateGuild { name: value, password } => {
                 verified(c,actor)?;
@@ -434,10 +480,10 @@ pub(super) fn dispatch(
                 Ok(PermissionResponse::Joined {guild})
             }
             command => {
-                let guild_id=match &command { PermissionRequest::ViewGuild{guild_id} | PermissionRequest::InspectModeration{guild_id} | PermissionRequest::Inspect{guild_id} | PermissionRequest::Change{guild_id,..} | PermissionRequest::Preview{guild_id,..} => *guild_id, _=>unreachable!() };
+                let guild_id=match &command { PermissionRequest::ListInvites{guild_id} | PermissionRequest::CreateInvite{guild_id,..} | PermissionRequest::RevokeInvite{guild_id,..} | PermissionRequest::InspectOrganization{guild_id} | PermissionRequest::AuditLog{guild_id,..} | PermissionRequest::ViewGuild{guild_id} | PermissionRequest::InspectModeration{guild_id} | PermissionRequest::Inspect{guild_id} | PermissionRequest::Change{guild_id,..} | PermissionRequest::Preview{guild_id,..} => *guild_id, _=>unreachable!() };
                 // Writes retain exclusive serialization and revision checks. Readers
                 // protect their permission snapshot with compatible shared locks.
-                let lock = if matches!(command, PermissionRequest::Change { .. }) {
+                let lock = if matches!(command, PermissionRequest::Change { .. } | PermissionRequest::CreateInvite { .. } | PermissionRequest::RevokeInvite { .. }) {
                     "SELECT id FROM guilds WHERE id=$1::uuid FOR UPDATE"
                 } else {
                     "SELECT id FROM guilds WHERE id=$1::uuid FOR SHARE"
@@ -451,9 +497,11 @@ pub(super) fn dispatch(
                 member(&state,actor)?;
                 match command {
                     PermissionRequest::ViewGuild {..} => {
-                        let channels=state.channels.iter().filter(|ch|effective(&state,actor,Some(ch.id)).contains(&Permission::ViewChannel)).cloned().collect();
-                        Ok(PermissionResponse::Home {home:GuildHome {can_moderate:can_moderate(&state,actor),can_manage_roles:effective(&state,actor,None).contains(&Permission::ManageRoles),can_manage_channels:effective(&state,actor,None).contains(&Permission::ManageChannels),guild:state.guild,channels}})
+                        let channels: Vec<Channel>=state.channels.iter().filter(|ch|effective(&state,actor,Some(ch.id)).contains(&Permission::ViewChannel)).cloned().collect();
+                        let categories=state.categories.iter().filter(|cat|channels.iter().any(|ch|ch.category_id==Some(cat.id))).cloned().collect();
+                        Ok(PermissionResponse::Home {home:GuildHome {categories,can_manage_invites:effective(&state,actor,None).contains(&Permission::ManageInvites),can_moderate:can_moderate(&state,actor),can_manage_roles:effective(&state,actor,None).contains(&Permission::ManageRoles),can_manage_channels:effective(&state,actor,None).contains(&Permission::ManageChannels),guild:state.guild,channels}})
                     }
+                    command @ (PermissionRequest::ListInvites { .. } | PermissionRequest::CreateInvite { .. } | PermissionRequest::RevokeInvite { .. } | PermissionRequest::InspectOrganization { .. } | PermissionRequest::AuditLog { .. }) => organization::request(c,&state,actor,command),
                     PermissionRequest::InspectModeration {..} => Ok(PermissionResponse::Moderation {state:moderation(c,&state,actor)?}),
                     PermissionRequest::Inspect {..} => {
                         require(effective(&state,actor,None).contains(&Permission::ManageRoles))?;
@@ -468,9 +516,11 @@ pub(super) fn dispatch(
                     PermissionRequest::Change {revision, change,..} => {
                         if state.guild.revision!=revision { return Err(Failure::Conflict); }
                         if matches!(change,GuildChange::TransferOwner{..}|GuildChange::Delete {}) { auth::recent(&session)?; }
-                        let moderation_change=matches!(change,GuildChange::BanMember{..}|GuildChange::UnbanMember{..}|GuildChange::TimeoutMember{..}|GuildChange::DisconnectVoice{..});
+                        let moderation_change=organization::moderation_target(&change).is_some() && !matches!(change,GuildChange::RemoveMember {..});
+                        let audit_change=change.clone();
                         let gone=change_guild(c,&state,actor,change)?;
                         if gone { return Ok(PermissionResponse::Done); }
+                        organization::audit(c,&state,actor,&audit_change,&reason)?;
                         execute(c,"UPDATE guilds SET revision=revision+1 WHERE id=$1::uuid", &[&guild_id.to_string()])?;
                         // Assignments can remove the actor's editor access; never return privileged state then.
                         let state=load(c,guild_id)?;
@@ -506,6 +556,71 @@ fn change_guild(
     let need = |permission| require(permissions.contains(&permission));
     let actor_rank = rank(state, actor);
     match change {
+        change @ (GuildChange::CreateCategory { .. }
+        | GuildChange::EditCategory { .. }
+        | GuildChange::DeleteCategory { .. }
+        | GuildChange::EditChannel { .. }) => organization::change(c, state, actor, change)?,
+        GuildChange::SetServerMute { account_id, muted } => {
+            need(Permission::MuteMembers)?;
+            below(state, actor, account_id)?;
+            execute(
+                c,
+                "INSERT INTO guild_moderation(guild_id,account_id,server_muted) VALUES($1::uuid,$2::uuid,$3::boolean) ON CONFLICT(guild_id,account_id) DO UPDATE SET server_muted=EXCLUDED.server_muted",
+                &[&guild, &account_id.to_string(), &muted.to_string()],
+            )?;
+        }
+        GuildChange::SetServerDeafen {
+            account_id,
+            deafened,
+        } => {
+            need(Permission::DeafenMembers)?;
+            below(state, actor, account_id)?;
+            execute(
+                c,
+                "INSERT INTO guild_moderation(guild_id,account_id,server_deafened) VALUES($1::uuid,$2::uuid,$3::boolean) ON CONFLICT(guild_id,account_id) DO UPDATE SET server_deafened=EXCLUDED.server_deafened",
+                &[&guild, &account_id.to_string(), &deafened.to_string()],
+            )?;
+        }
+        GuildChange::MoveVoice {
+            account_id,
+            source_channel_id,
+            channel_id,
+        } => {
+            need(Permission::MoveMembers)?;
+            below(state, actor, account_id)?;
+            require(source_channel_id != channel_id)?;
+            for id in [source_channel_id, channel_id] {
+                require(
+                    state
+                        .channels
+                        .iter()
+                        .any(|ch| ch.id == id && ch.kind == ChannelKind::Voice),
+                )?;
+                for account in [actor, account_id] {
+                    let p = effective(state, account, Some(id));
+                    require(
+                        p.contains(&Permission::ViewChannel) && p.contains(&Permission::JoinVoice),
+                    )?;
+                }
+            }
+            crate::voice::moderation::check_move(
+                state.guild.id,
+                source_channel_id,
+                channel_id,
+                account_id,
+            )?;
+            disconnect_voice(c, &guild, account_id)?;
+            execute(
+                c,
+                "UPDATE guild_moderation SET move_source=$3::uuid,move_destination=$4::uuid,move_revision=voice_revision WHERE guild_id=$1::uuid AND account_id=$2::uuid",
+                &[
+                    &guild,
+                    &account_id.to_string(),
+                    &source_channel_id.to_string(),
+                    &channel_id.to_string(),
+                ],
+            )?;
+        }
         GuildChange::Rename { name: value } => {
             need(Permission::ManageGuild)?;
             execute(
@@ -644,6 +759,40 @@ fn change_guild(
                 "UPDATE guilds SET owner=$2::uuid WHERE id=$1::uuid",
                 &[&guild, &account_id.to_string()],
             )?;
+            // Nobody can moderate an owner. Release prior server restrictions at
+            // transfer so ownership cannot strand the new owner permanently muted.
+            let flags: (bool,bool)=query(c,"SELECT jsonb_build_array(server_muted,server_deafened) AS data FROM guild_moderation WHERE guild_id=$1::uuid AND account_id=$2::uuid", &[&guild,&account_id.to_string()])?.pop().unwrap_or_default();
+            execute(
+                c,
+                "UPDATE guild_moderation SET server_muted=FALSE,server_deafened=FALSE WHERE guild_id=$1::uuid AND account_id=$2::uuid",
+                &[&guild, &account_id.to_string()],
+            )?;
+            for (enabled, change) in [
+                (
+                    flags.0,
+                    GuildChange::SetServerMute {
+                        account_id,
+                        muted: false,
+                    },
+                ),
+                (
+                    flags.1,
+                    GuildChange::SetServerDeafen {
+                        account_id,
+                        deafened: false,
+                    },
+                ),
+            ] {
+                if enabled {
+                    organization::audit(
+                        c,
+                        state,
+                        actor,
+                        &change,
+                        "Released on ownership transfer",
+                    )?;
+                }
+            }
         }
         GuildChange::CreateRole {
             name: value,
@@ -882,16 +1031,18 @@ fn delete_override(
     Ok(())
 }
 
-const MODERATION_PERMISSIONS: [Permission; 4] = [
+const MODERATION_PERMISSIONS: [Permission; 6] = [
     Permission::KickMembers,
     Permission::BanMembers,
     Permission::ModerateMembers,
     Permission::MoveMembers,
+    Permission::MuteMembers,
+    Permission::DeafenMembers,
 ];
 fn disconnect_voice(c: &mut PgConnection, guild: &str, account: AccountId) -> Result<(), Failure> {
     execute(
         c,
-        "INSERT INTO guild_moderation(guild_id,account_id,voice_revision) VALUES($1::uuid,$2::uuid,1) ON CONFLICT (guild_id,account_id) DO UPDATE SET voice_revision=guild_moderation.voice_revision+1",
+        "INSERT INTO guild_moderation(guild_id,account_id,voice_revision) VALUES($1::uuid,$2::uuid,1) ON CONFLICT (guild_id,account_id) DO UPDATE SET voice_revision=guild_moderation.voice_revision+1,move_source=NULL,move_destination=NULL,move_revision=NULL",
         &[guild, &account.to_string()],
     )?;
     Ok(())
@@ -913,6 +1064,11 @@ fn moderation(
     require(can_moderate(state, actor))?;
     let permissions = effective(state, actor, None);
     let can_unban = permissions.contains(&Permission::BanMembers);
+    let voice_flags: Vec<(AccountId, bool, bool)> = query(
+        c,
+        "SELECT jsonb_build_array(account_id,server_muted,server_deafened) AS data FROM guild_moderation WHERE guild_id=$1::uuid AND account_id IN(SELECT account_id FROM guild_members WHERE guild_id=$1::uuid)",
+        &[&state.guild.id.to_string()],
+    )?;
     let members = state
         .members
         .iter()
@@ -921,6 +1077,12 @@ fn moderation(
             username: m.username.clone(),
             display_name: m.display_name.clone(),
             timeout_until: m.timeout_until,
+            server_muted: voice_flags
+                .iter()
+                .any(|(id, muted, _)| *id == m.account_id && *muted),
+            server_deafened: voice_flags
+                .iter()
+                .any(|(id, _, deafened)| *id == m.account_id && *deafened),
             actions: MODERATION_PERMISSIONS
                 .into_iter()
                 .filter(|p| permissions.contains(p) && below(state, actor, m.account_id).is_ok())

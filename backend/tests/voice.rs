@@ -17,6 +17,8 @@ mod bots;
 mod friends;
 #[path = "voice/layers.rs"]
 mod layers;
+#[path = "voice/moderation.rs"]
+mod moderation;
 #[path = "voice/recovery.rs"]
 mod recovery;
 #[path = "voice/red.rs"]
