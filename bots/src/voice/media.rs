@@ -8,7 +8,7 @@ use tokio::{
 };
 
 const SAMPLES: usize = 960 * 2;
-const MAX_PLAYBACK: Duration = Duration::from_secs(6 * 60 * 60);
+pub(super) const MAX_PLAYBACK: Duration = Duration::from_secs(6 * 60 * 60);
 const READ_TIMEOUT: Duration = Duration::from_secs(30);
 type Result<T> = std::result::Result<T, &'static str>;
 
@@ -115,19 +115,19 @@ impl Drop for Player {
 }
 
 #[derive(Default)]
-struct Processes {
-    decoder: Option<Child>,
-    downloader: Option<Child>,
+pub(super) struct Processes {
+    pub(super) decoder: Option<Child>,
+    pub(super) downloader: Option<Child>,
 }
 
 #[derive(Clone, Copy)]
-enum MediaTool {
+pub(super) enum MediaTool {
     YoutubeDownloader,
     Decoder,
 }
 
 impl MediaTool {
-    fn spawn_error(self, error: std::io::Error) -> &'static str {
+    pub(super) fn spawn_error(self, error: std::io::Error) -> &'static str {
         use std::io::ErrorKind;
         // Never expose OS error text: it can contain private paths. Keep enough
         // information for the operator to fix the bot host's installation.
@@ -154,7 +154,7 @@ impl MediaTool {
     }
 }
 
-fn command(program: &str) -> Command {
+pub(super) fn command(program: &str) -> Command {
     let mut command = Command::new(program);
     command.env_clear();
     // No bot credentials, proxy credentials, Python injection hooks or user
@@ -172,6 +172,52 @@ fn command(program: &str) -> Command {
     #[cfg(windows)]
     command.creation_flags(0x0800_0000); // CREATE_NO_WINDOW
     command
+}
+
+pub(super) fn downloader(url: &str, video: bool) -> Command {
+    let mut downloader = command("yt-dlp");
+    // Direct HTTPS formats only: no HLS/DASH or external downloader
+    // subprocesses. Ignore user config/plugins, cookies and proxies.
+    downloader.args([
+        "--ignore-config",
+        "--no-plugin-dirs",
+        "--no-js-runtimes",
+        "--no-remote-components",
+        "--no-cache-dir",
+        "--no-playlist",
+        "--no-progress",
+        "--quiet",
+        "--no-warnings",
+        "--proxy",
+        "",
+        "--socket-timeout",
+        "15",
+        "--retries",
+        "2",
+        "--fragment-retries",
+        "0",
+        "--downloader",
+        "native",
+        "--fixup",
+        "never",
+        "--use-extractors",
+        "Youtube",
+        "--match-filters",
+        "!is_live & duration <= 21600",
+        "--max-filesize",
+        "256M",
+        "-f",
+        if video {
+            "best[protocol=https][vcodec!=none][acodec!=none][height<=720]"
+        } else {
+            "bestaudio[protocol=https]/best[protocol=https]"
+        },
+        "-o",
+        "-",
+        "--",
+        url,
+    ]);
+    downloader
 }
 
 impl Processes {
@@ -204,44 +250,7 @@ impl Processes {
                     .arg(path);
             }
             Source::Youtube(url) => {
-                let mut downloader = command("yt-dlp");
-                // Direct HTTPS formats only: no HLS/DASH or external downloader
-                // subprocesses. Ignore user config/plugins, cookies and proxies.
-                downloader.args([
-                    "--ignore-config",
-                    "--no-plugin-dirs",
-                    "--no-js-runtimes",
-                    "--no-remote-components",
-                    "--no-cache-dir",
-                    "--no-playlist",
-                    "--no-progress",
-                    "--quiet",
-                    "--no-warnings",
-                    "--proxy",
-                    "",
-                    "--socket-timeout",
-                    "15",
-                    "--retries",
-                    "2",
-                    "--fragment-retries",
-                    "0",
-                    "--downloader",
-                    "native",
-                    "--fixup",
-                    "never",
-                    "--use-extractors",
-                    "Youtube",
-                    "--match-filters",
-                    "!is_live & duration <= 21600",
-                    "--max-filesize",
-                    "256M",
-                    "-f",
-                    "bestaudio[protocol=https]/best[protocol=https]",
-                    "-o",
-                    "-",
-                    "--",
-                    &url,
-                ]);
+                let mut downloader = downloader(&url, false);
                 self.downloader = Some(
                     downloader
                         .spawn()
@@ -306,7 +315,7 @@ impl Processes {
         Ok(())
     }
 
-    async fn stop(&mut self) -> bool {
+    pub(super) async fn stop(&mut self) -> bool {
         // Start both kills before awaiting either process, then reap together.
         for child in [&mut self.decoder, &mut self.downloader]
             .into_iter()
@@ -329,7 +338,10 @@ impl Processes {
 /// Own both pipe ends: completing this future must close the decoder's OS stdin
 /// handle, including while its sibling decode future is still being polled.
 /// `shutdown()` alone only flushes Tokio's ChildStdin and does not deliver EOF.
-async fn transfer(mut source: impl AsyncRead + Unpin, mut input: ChildStdin) -> Result<()> {
+pub(super) async fn transfer(
+    mut source: impl AsyncRead + Unpin,
+    mut input: ChildStdin,
+) -> Result<()> {
     // Bounded copy backpressures download -> decoder -> three frames -> RTP.
     tokio::io::copy(&mut source, &mut input)
         .await
@@ -342,7 +354,7 @@ async fn transfer(mut source: impl AsyncRead + Unpin, mut input: ChildStdin) -> 
     Ok(())
 }
 
-async fn wait(child: &mut Child, failed: &'static str) -> Result<()> {
+pub(super) async fn wait(child: &mut Child, failed: &'static str) -> Result<()> {
     let status = timeout(IO_TIMEOUT, child.wait())
         .await
         .map_err(|_| "Media process did not exit")?

@@ -47,6 +47,9 @@ instance-owner diagnostic [voice test bots](../docs/voice-bots.md) are separate.
 
    Send `@jukebox /play https://youtu.be/VIDEO_ID`, then `@jukebox /stop` or
    `@jukebox /leave`. `/help` lists the available commands.
+   For video and sound, send `@jukebox /video https://youtu.be/VIDEO_ID` and open
+   the bot's screen-share tile in the voice channel. FFmpeg needs its `libx264`
+   and `libopus` encoders for this command.
 
 If `/play` fails and `/status` says `Not connected`, voice admission or network
 negotiation failed before the YouTube downloader started. Command failures report
@@ -190,17 +193,21 @@ with `send_with_id`; repeated IDs with identical content deduplicate on the serv
 
 `ctx.join_voice(channel_id).await?` returns a cloneable `Voice` handle. Keep it in
 your application state; its last drop closes playback and the media connection.
-`play_file(path)` and `play_youtube(url)` start or replace playback, `stop()` stops
+`play_file(path)` and `play_youtube(url)` start or replace audio playback.
+`play_youtube_video(url)` shares video with stream audio; `play_video_file(path)`
+does the same for a trusted operator-selected local file. `stop()` stops
 and keeps the connection, and `leave()` stops and leaves. `status()` provides a
-watch receiver for Idle/Starting/Playing/Finished/Stopped/Error/Left. A successful
+watch receiver for Idle/Starting/Playing/SharingVideo/Finished/Stopped/Error/Left. A successful
 play call accepts the request; later extractor/decoder errors appear in status.
 
-The music example offers `/play URL`, `/local`, `/stop`, `/status`, `/leave`, and
+The music example offers `/play URL`, `/video URL`, `/local`, `/stop`, `/status`, `/leave`, and
 `/help`. The voice destination and local-file path are fixed by the operator;
 chat messages cannot choose arbitrary files. These controls are available to
 humans able to post in the configured text channel. Add an author allowlist or
 your own command policy when needed. It plays one track at a time; another play
-replaces it. There is no playlist, search, queue persistence or automatic rejoin.
+replaces it, including switching between audio and video. `/stop` and `/leave`
+stop both the screen share and its audio. There is no playlist, search, queue
+persistence or automatic rejoin.
 
 Install [FFmpeg](https://ffmpeg.org/download.html) on the bot host for playback,
 and [yt-dlp](https://github.com/yt-dlp/yt-dlp#installation) for YouTube. These are
@@ -239,6 +246,24 @@ access to those media endpoints. Playback has bounded startup/read/cleanup waits
 a six-hour maximum and no downloaded media files. Stop, leave, disconnect and
 lost permissions terminate child processes. Trusted executables on PATH handle
 media; they receive neither bot tokens nor the application's environment secrets.
+
+Video uses one FFmpeg timeline for H.264 Baseline and stereo Opus, published on
+the existing screen-video and shared-audio WebRTC tracks. Viewers use the normal
+screen-share tile and stream-audio controls. The fixed maximum is 720p/30 at
+2.5 Mbit/s video plus 96 kbit/s audio, preserving aspect ratio without upscaling;
+actual source quality can be lower. Video requires a direct HTTPS format that
+already contains both video and audio (no separate-format downloads or merges).
+The same YouTube access restrictions apply: a VPS rejected with a sign-in/bot
+verification requirement cannot play that video through this command.
+
+FFmpeg sends encoded packets only to randomly allocated loopback sockets; Rust
+validates and bounds these packets before encrypted publication. The video
+encoder inserts a recovery frame every second for late viewers and packet loss.
+This initial implementation uses fixed quality rather than adaptive layers.
+Screen publication starts only after the server acknowledges the current share,
+and moderation, replacement, stop, disconnect and final-handle drop cancel both
+streams and reap the decoder/downloader. No server desktop or audio device is
+captured. The bot still needs View channel, Join voice and Speak permissions.
 
 ## Delivery and permission semantics
 

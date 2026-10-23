@@ -413,7 +413,9 @@ See [screen-sharing.md](docs/screen-sharing.md) for limits and remaining platfor
 - [x] Guild-scoped bot credentials, provisioning/rotation/revocation and authoritative channel permissions.
 - [x] Server settings bot management, desktop credential storage and permission-filtered text/voice channel lookup by name.
 - [x] Lightweight outgoing Opus/WebRTC playback without microphone/DSP; echo and music examples.
+- [x] `/video` YouTube screen sharing with H.264/Opus, shared stop/replacement controls and bounded process cleanup.
 - [ ] Live YouTube extraction, OS credential-store and audible playback acceptance on Windows/macOS/Linux.
+- [ ] Visual and audible bot video playback acceptance in desktop clients on all three platforms.
 
 ## 9. Hosting and releases
 

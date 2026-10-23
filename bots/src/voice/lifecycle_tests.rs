@@ -19,6 +19,7 @@ struct Fixture {
     peer: ReceiverPeer,
     signals: mpsc::Sender<ServerEvent>,
     hold_unmute: Arc<AtomicBool>,
+    hold_screen: Arc<AtomicBool>,
     queue_stale_rosters: Arc<AtomicBool>,
     stale_rosters_sent: watch::Receiver<bool>,
     release_restriction: mpsc::Sender<()>,
@@ -38,7 +39,11 @@ impl Fixture {
         Self::join_with_member(member()).await
     }
 
-    async fn join_with_member(mut member: Participant) -> Self {
+    async fn join_with_member(member: Participant) -> Self {
+        Self::join_with_screen(member, false).await
+    }
+
+    async fn join_with_screen(mut member: Participant, screen: bool) -> Self {
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let endpoint = format!("http://{}", listener.local_addr().unwrap());
         let peer = ReceiverPeer::new().await;
@@ -46,11 +51,21 @@ impl Fixture {
             .add_track(peer::track() as Arc<dyn TrackLocal>)
             .await
             .unwrap();
+        if screen {
+            for kind in [
+                thiscord_shared::voice::MediaKind::ScreenVideo,
+                thiscord_shared::voice::MediaKind::SystemAudio,
+            ] {
+                peer.pc.add_track(peer::media_track(kind)).await.unwrap();
+            }
+        }
         let offer = serde_json::to_string(&peer.offer().await).unwrap();
         let pc = peer.pc.clone();
         let (signals, mut incoming) = mpsc::channel(8);
         let hold_unmute = Arc::new(AtomicBool::new(false));
         let hold = hold_unmute.clone();
+        let hold_screen = Arc::new(AtomicBool::new(false));
+        let hold_share = hold_screen.clone();
         let queue_stale_rosters = Arc::new(AtomicBool::new(false));
         let queue_stale = queue_stale_rosters.clone();
         let (stale_sent, stale_rosters_sent) = watch::channel(false);
@@ -71,8 +86,8 @@ impl Fixture {
                             ClientEvent::Join { .. } => Some(ServerEvent::Offer {
                                 sdp: offer.take().expect("only one join"), slot: 0,
                                 can_speak: true, ice_servers: vec![], packet_redundancy: true,
-                                remote_audio: false, screen_video: false, camera_video: false,
-                                screen_feedback: false, screen_subscriptions: false, screen_layers: false,
+                                remote_audio: false, screen_video: screen, camera_video: false,
+                                screen_feedback: false, screen_subscriptions: screen, screen_layers: false,
                                 resume_token: None,
                             }),
                             ClientEvent::Answer { sdp, packet_redundancy, remote_audio, .. } => {
@@ -88,6 +103,7 @@ impl Fixture {
                                 assert!(muted || !probing, "unmute requested before the restriction fence");
                                 let changed = member.muted != muted || member.deafened != deafened;
                                 member.muted = muted; member.deafened = deafened;
+                                if deafened { member.sharing_screen = false; member.sharing_audio = false; }
                                 if muted && queue_stale.swap(false, Ordering::AcqRel) {
                                     probing = true;
                                     // A matching old restricted snapshot followed
@@ -102,6 +118,13 @@ impl Fixture {
                                     None
                                 } else if !changed || !muted && hold.load(Ordering::Acquire) { None }
                                 else { Some(ServerEvent::Participants { members: vec![member.clone()] }) }
+                            },
+                            ClientEvent::Screen { active, audio, .. } => {
+                                assert!(screen && !member.deafened);
+                                if active && !member.sharing_screen { member.screen_epoch += 1; }
+                                member.sharing_screen = active;
+                                member.sharing_audio = active && audio;
+                                if hold_share.load(Ordering::Acquire) { None } else { Some(ServerEvent::Participants { members: vec![member.clone()] }) }
                             },
                             ClientEvent::Ping {} => {
                                 if probing { held_pongs += 1; None } else { Some(ServerEvent::Pong {}) }
@@ -155,6 +178,7 @@ impl Fixture {
             peer,
             signals,
             hold_unmute,
+            hold_screen,
             queue_stale_rosters,
             stale_rosters_sent,
             release_restriction,
@@ -380,7 +404,7 @@ async fn ffmpeg_moderation_invalidates_buffered_and_blocked_play_before_release_
                         .0
                         .commands
                         .try_send(Command::Play(
-                            media::Source::File(stale.0.clone()),
+                            media::Source::File(stale.0.clone()).into(),
                             before,
                             reply,
                         ))
@@ -398,7 +422,7 @@ async fn ffmpeg_moderation_invalidates_buffered_and_blocked_play_before_release_
             // channel send. Draining only the present queue cannot revoke it.
             let (reply, delayed_reply) = oneshot::channel();
             let mut delayed_send = Box::pin(voice.0.commands.send(Command::Play(
-                media::Source::File(stale.0.clone()),
+                media::Source::File(stale.0.clone()).into(),
                 before,
                 reply,
             )));
@@ -453,7 +477,7 @@ async fn ffmpeg_moderation_invalidates_buffered_and_blocked_play_before_release_
                 .0
                 .commands
                 .send(Command::Play(
-                    media::Source::File(stale.0.clone()),
+                    media::Source::File(stale.0.clone()).into(),
                     old,
                     reply,
                 ))
@@ -818,4 +842,131 @@ async fn ffmpeg_active_revocation_and_final_drop_stop_rtp_and_reap_children() {
     })
     .await
     .expect("revocation/drop lifecycle timed out");
+}
+
+#[tokio::test]
+#[ignore = "requires Linux procfs and ffmpeg with libx264/libopus"]
+async fn ffmpeg_video_share_stops_replaces_and_revokes_both_tracks() {
+    use thiscord_shared::voice::MediaKind;
+    let clip = video::tests::Clip::new(30).await;
+    let audio = Wav::new(false);
+    let mut fixture = Fixture::join_with_screen(member(), true).await;
+    fixture.voice().play_video_file(&clip.0).await.unwrap();
+    let mut kinds = [false; 2];
+    while !kinds.into_iter().all(|v| v) {
+        let packet = fixture.packet().await;
+        if packet.header.ssrc == MediaKind::ScreenVideo.publisher_ssrc() {
+            kinds[0] = true;
+        }
+        if packet.header.ssrc == MediaKind::SystemAudio.publisher_ssrc() {
+            kinds[1] = true;
+        }
+    }
+    assert_eq!(
+        *fixture.voice().status().borrow(),
+        PlaybackEvent::SharingVideo
+    );
+    let video_pid = decoder_pid(&clip.0).await;
+    fixture.voice().stop().await.unwrap();
+    fixture.silence().await;
+    assert!(!PathBuf::from(format!("/proc/{video_pid}")).exists());
+
+    fixture.voice().play_video_file(&clip.0).await.unwrap();
+    fixture.packet().await;
+    let video_pid = decoder_pid(&clip.0).await;
+    fixture.voice().play_file(&audio.0).await.unwrap();
+    timeout(Duration::from_secs(5), async {
+        while fixture.packet().await.header.ssrc != MediaKind::Microphone.publisher_ssrc() {}
+    })
+    .await
+    .unwrap();
+    assert!(!PathBuf::from(format!("/proc/{video_pid}")).exists());
+    fixture.voice().stop().await.unwrap();
+    fixture.silence().await;
+
+    fixture.voice().play_video_file(&clip.0).await.unwrap();
+    fixture.packet().await;
+    let video_pid = decoder_pid(&clip.0).await;
+    fixture.signals.send(ServerEvent::Revoked {}).await.unwrap();
+    let mut status = fixture.voice().status();
+    timeout(
+        Duration::from_secs(5),
+        status.wait_for(|s| matches!(s, PlaybackEvent::Error(_))),
+    )
+    .await
+    .unwrap()
+    .unwrap();
+    fixture.silence().await;
+    assert!(!PathBuf::from(format!("/proc/{video_pid}")).exists());
+    fixture.voice().leave().await.unwrap();
+}
+
+#[tokio::test]
+#[ignore = "requires Linux procfs and ffmpeg with libx264/libopus"]
+async fn ffmpeg_video_moderation_and_drop_stop_screen_audio_and_reap_decoder() {
+    let clip = video::tests::Clip::new(30).await;
+    for dropped in [false, true] {
+        let mut fixture = Fixture::join_with_screen(member(), true).await;
+        fixture.voice().play_video_file(&clip.0).await.unwrap();
+        fixture.packet().await;
+        let pid = decoder_pid(&clip.0).await;
+        if dropped {
+            drop(fixture.voice.take());
+        } else {
+            let mut restricted = member();
+            restricted.server_muted = true;
+            restricted.publication_revision = 1;
+            fixture
+                .signals
+                .send(ServerEvent::Participants {
+                    members: vec![restricted],
+                })
+                .await
+                .unwrap();
+            let mut status = fixture.voice().status();
+            timeout(
+                Duration::from_secs(5),
+                status.wait_for(|s| *s == PlaybackEvent::Stopped),
+            )
+            .await
+            .unwrap()
+            .unwrap();
+            assert!(fixture.voice().play_video_file(&clip.0).await.is_err());
+        }
+        fixture.silence().await;
+        assert!(!PathBuf::from(format!("/proc/{pid}")).exists());
+    }
+}
+
+#[tokio::test]
+#[ignore = "requires Linux procfs and ffmpeg with libx264/libopus"]
+async fn ffmpeg_video_waits_for_share_ack_and_stop_cancels_pending_start() {
+    let clip = video::tests::Clip::new(5).await;
+    let mut fixture = Fixture::join_with_screen(member(), true).await;
+    fixture.hold_screen.store(true, Ordering::Release);
+    fixture.voice().play_video_file(&clip.0).await.unwrap();
+    fixture.silence().await;
+    assert!(
+        find_decoder(&clip.0).is_none(),
+        "decoder started before screen admission"
+    );
+    fixture.voice().stop().await.unwrap();
+    let mut stale = member();
+    stale.sharing_screen = true;
+    stale.sharing_audio = true;
+    stale.screen_epoch = 1;
+    fixture
+        .signals
+        .send(ServerEvent::Participants {
+            members: vec![stale],
+        })
+        .await
+        .unwrap();
+    fixture.silence().await;
+    assert!(
+        find_decoder(&clip.0).is_none(),
+        "late acknowledgement restarted stopped video"
+    );
+    assert_eq!(*fixture.voice().status().borrow(), PlaybackEvent::Stopped);
+    fixture.voice().leave().await.unwrap();
 }

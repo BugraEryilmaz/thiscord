@@ -2,7 +2,7 @@
 
 Create your own Rust scripting bots with registered `@botname /command args`
 handlers, live mention subscriptions, channel text replies and lightweight voice
-playback. The [bot SDK and echo/music examples](bots/README.md) live in `bots/`.
+playback and YouTube video screen sharing. The [bot SDK and echo/music examples](bots/README.md) live in `bots/`.
 Create and manage bots in **Server settings → Bots**. The examples find text and
 voice channels by name; no channel IDs are needed for uniquely named channels.
 
