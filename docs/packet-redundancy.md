@@ -147,6 +147,13 @@ resetting its attached-time budget or releasing unproven media. Ordinary roster
 changes use the current authoritative access epoch instead of querying the
 database again for every boundary; access invalidation and periodic authorization
 checks remain in force.
+Server moderation boundaries advance the receiver floor and challenge every modern
+publisher, including the moderated participant's own microphone. Ingress stays
+closed until that participant proves the new challenge; egress history is filtered
+against the new receiver floor. Restriction and release each fence retained RED
+and embedded DRED history. A persistent moderation revision preserves coalesced
+edges, so unchanged final booleans cannot reopen an old publication.
+
 A source-only refresh changes publisher privacy and generation, while keeping its
 own receive floor unchanged; it cannot recursively trigger other publishers.
 Concurrent real local PTT/settings boundaries take priority. Only the current

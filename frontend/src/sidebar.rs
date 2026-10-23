@@ -155,6 +155,7 @@ mod tests {
     #[test]
     fn role_menu_respects_membership_owner_self_and_rank() {
         let state = GuildState {
+            categories: vec![],
             capacity: None,
             guild: Guild {
                 id: id(9),

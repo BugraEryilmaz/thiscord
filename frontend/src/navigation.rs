@@ -48,12 +48,68 @@ impl Navigation {
     }
 }
 
+/// Key for the mounted conversation, excluding mutable channel metadata.
+pub fn channel_identity(
+    guild: Option<GuildId>,
+    selected: Option<&thiscord_shared::permissions::Channel>,
+) -> Option<(
+    GuildId,
+    thiscord_shared::ChannelId,
+    thiscord_shared::permissions::ChannelKind,
+)> {
+    Some((guild?, selected?.id, selected?.kind))
+}
+
+/// Refresh selected metadata by identity; callers retain the mounted panel key.
+pub fn refresh_channel(
+    selected: Option<&thiscord_shared::permissions::Channel>,
+    channels: &[thiscord_shared::permissions::Channel],
+) -> Option<thiscord_shared::permissions::Channel> {
+    selected.and_then(|selected| {
+        channels
+            .iter()
+            .find(|channel| channel.id == selected.id)
+            .cloned()
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
 
     fn guild(value: u128) -> GuildId {
         format!("{value:032x}").parse().unwrap()
+    }
+
+    #[test]
+    fn selected_rename_updates_title_without_invalidating_panel_identity() {
+        use thiscord_shared::permissions::{Channel, ChannelKind};
+        let channel = Channel {
+            id: "00000000-0000-0000-0000-000000000001".parse().unwrap(),
+            name: "before".into(),
+            kind: ChannelKind::Text,
+            category_id: None,
+            position: 0,
+        };
+        let mut selected = Some(channel.clone());
+        let key = channel_identity(Some(guild(1)), selected.as_ref());
+        let mut renamed = channel;
+        renamed.name = "after".into();
+        renamed.position = 4;
+        selected = refresh_channel(selected.as_ref(), &[renamed]);
+        assert_eq!(
+            channel_identity(Some(guild(1)), selected.as_ref()),
+            key,
+            "metadata must preserve the keyed panel owner"
+        );
+        assert_eq!(selected.as_ref().unwrap().name, "after");
+        assert_eq!(selected.as_ref().unwrap().position, 4);
+        selected = refresh_channel(selected.as_ref(), &[]);
+        assert_eq!(
+            channel_identity(Some(guild(1)), selected.as_ref()),
+            None,
+            "deletion must retire the panel"
+        );
     }
 
     #[test]

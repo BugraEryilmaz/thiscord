@@ -3,8 +3,9 @@
 Select a text channel from a server's channel list. Guild and private messages
 automatically turn HTTP/HTTPS URLs and bare domains (using HTTPS) into clickable
 links. Desktop links open in the default system browser; browser-preview links
-open in a new tab. Surrounding punctuation stays outside the link. Other content
-remains escaped text; HTML and Markdown are not interpreted. Non-web schemes and
+open in a new tab. Surrounding punctuation stays outside the link. Markdown supports emphasis, lists, quotes, inline code and fenced code blocks.
+Raw HTML is displayed as text; image Markdown displays its alt text without remote
+image requests. Parsing is limited to 4000 characters, 16 levels and 16000 events. Non-web schemes and
 URLs containing credentials are not linked or accepted by the desktop opener.
 Type `@` in the guild chat composer to search members by public profile name or
 username, including offline members. Suggestions show both the profile name and
@@ -262,7 +263,7 @@ Each socket refresh shares one session/guild authorization transaction between
 unread counts and channel events. Commit notifications are scoped to the subscribed
 guild, channel and account.
 Event-log compaction, cross-process fanout, full-guild presence and load tests are
-future work. Search remains pending. Customizable alert subscriptions
+future work. Message search is described in [search.md](search.md). Customizable alert subscriptions
 and desktop banners are described in [notifications.md](notifications.md).
 Native voice uses a separate signaling socket and media admission/drain mechanism;
 see [audio.md](audio.md).
@@ -287,3 +288,41 @@ WebView runtime acceptance.
 `cargo test -p thiscord-frontend --lib --locked` also checks bounded history over
 long sessions, revision/deduplication rules, eviction cleanup, old-history/live
 isolation and variable-height viewport/anchor calculations without a browser.
+
+
+## Replies, reactions and pinned messages
+
+Guild message rows provide Reply, ten emoji reactions, and Pin/Unpin for moderators.
+Replies reference an existing undeleted message in the same channel. They require
+ReadHistory as well as SendMessages. The 160-character preview is read from the
+current target; deleted targets expose no content. Clicking a preview loads a
+bounded context window and highlights the original within the virtual list.
+Each preview carries the target's `target_revision`, independently of the reply's
+own revision. Clients compare these revisions across HTTP and socket snapshots,
+including when the target is outside retained history. Missing legacy revisions
+deserialize as unknown and cannot replace a known revision; two unknown revisions
+retain the existing preview because their freshness cannot be established.
+Unavailable previews remain hidden until the chat state resets. Responses to
+recipients without ReadHistory omit the target revision as well as its content.
+Reply IDs are frozen into pending sends and included in deduplication hashes.
+Existing sends without replies retain their original hash scheme.
+
+Reactions use `react { message_id, emoji, present }`, an explicit desired state.
+The unique message/account/emoji key and channel lock make concurrent retries
+idempotent. ReadHistory and SendMessages are required. Counts and the requesting
+account's `mine` flag are hydrated for history, replies and each socket recipient.
+The fixed shared palette bounds reaction groups to ten per message.
+
+Message pins are shared channel data, distinct from personal sidebar channel pins.
+Pin changes require ReadHistory, ManageMessages and the current message revision.
+A channel holds at most 50 pins. The list omits deleted messages and navigates to
+the original. Pin/reaction changes increment message revision and publish existing
+message events after commit; they do not change message timestamps or unread positions.
+Deleting a message clears its pin, reply and visible reactions. Migration rollback
+removes all reply references, reactions and message pins, retaining message text.
+
+`ChatMessage.reply`, `.reactions` and `.pinned` are additive fields with defaults.
+Old text-only sends still work. Deploy the backend before clients using new commands.
+The new context command returns up to 51 messages; its event cursor is not a socket
+subscription checkpoint. Jumping back keeps the current socket and marks the cache
+as having newer history until Jump to latest refreshes its snapshot.

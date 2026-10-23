@@ -46,6 +46,7 @@ impl Session {
                     .as_ref()
                     .is_some_and(|c| c.accepts(&connection))
                     || deafened
+                    || self.transmit_control.server_deafened()
                     || self.settings.deafened
                     || self.devices.control.deafen.load(Ordering::Acquire)
                     || (slot < thiscord_shared::voice::ROOM_CAPACITY

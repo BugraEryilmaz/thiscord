@@ -1,13 +1,26 @@
 //! Private social contracts. Deliberately no Debug on messages or token frames.
 use crate::ids::{CallId, ConversationId};
 use crate::pagination::{PageCursor, PageSize};
-use crate::{AccountId, ApiError, AvatarId, ClientMessageId, MessageId, Timestamp};
+use crate::{AccountId, ApiError, AttachmentId, AvatarId, ClientMessageId, MessageId, Timestamp};
 use serde::{Deserialize, Serialize};
 
 pub const FRIENDS_PATH: &str = "/api/v1/friends";
 pub const FRIENDS_SOCKET_PATH: &str = "/api/v1/friends/socket";
 pub const VERSION: u8 = 1;
 pub const MAX_RELATIONSHIPS: usize = 200;
+pub const DIRECT_ATTACHMENTS_PATH: &str = "/api/v1/direct-attachments";
+
+#[derive(Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct DirectAttachmentUpload {
+    pub conversation_id: ConversationId,
+    pub filename: String,
+    pub content_type: String,
+}
+
+fn initial_revision() -> i32 {
+    1
+}
 
 #[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Person {
@@ -42,6 +55,14 @@ pub struct DirectMessage {
     pub author_id: AccountId,
     pub content: String,
     pub created_at: Timestamp,
+    #[serde(default = "initial_revision")]
+    pub revision: i32,
+    #[serde(default)]
+    pub deleted: bool,
+    #[serde(default)]
+    pub edited_at: Option<Timestamp>,
+    #[serde(default)]
+    pub attachments: Vec<crate::chat::ChatAttachment>,
 }
 #[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct History {
@@ -78,6 +99,10 @@ pub struct Snapshot {
     pub calls: Vec<Call>,
     pub conversation_id: Option<ConversationId>,
     pub history: Option<History>,
+    #[serde(default)]
+    pub before: Option<PageCursor>,
+    #[serde(default)]
+    pub typing: Vec<AccountId>,
 }
 #[derive(Clone, Serialize, Deserialize)]
 #[serde(tag = "action", rename_all = "snake_case", deny_unknown_fields)]
@@ -107,6 +132,19 @@ pub enum Request {
         conversation_id: ConversationId,
         client_id: ClientMessageId,
         content: String,
+        #[serde(default)]
+        attachments: Vec<AttachmentId>,
+    },
+    Edit {
+        conversation_id: ConversationId,
+        message_id: MessageId,
+        revision: i32,
+        content: String,
+    },
+    Delete {
+        conversation_id: ConversationId,
+        message_id: MessageId,
+        revision: i32,
     },
     /// Acknowledge only messages through an actually displayed message.
     Read {
@@ -146,8 +184,13 @@ pub enum ClientEvent {
     },
     Select {
         conversation_id: Option<ConversationId>,
+        #[serde(default)]
+        before: Option<PageCursor>,
     },
     Ping {},
+    Typing {
+        active: bool,
+    },
 }
 #[derive(Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -167,6 +210,28 @@ pub enum ServerEvent {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn legacy_private_messages_and_sends_default_additive_fields() {
+        let id = "00000000-0000-0000-0000-000000000001";
+        let old = serde_json::json!({"id":id,"conversation_id":id,"client_id":id,"author_id":id,"content":"hello","created_at":"2026-10-23T14:00:00Z"});
+        let message: DirectMessage = serde_json::from_value(old).unwrap();
+        assert_eq!(message.revision, 1);
+        assert!(!message.deleted);
+        assert!(message.edited_at.is_none());
+        assert!(message.attachments.is_empty());
+        let send:Request=serde_json::from_value(serde_json::json!({"action":"send","conversation_id":id,"client_id":id,"content":"hello"})).unwrap();
+        assert!(matches!(send,Request::Send {attachments,..} if attachments.is_empty()));
+        let select: ClientEvent =
+            serde_json::from_value(serde_json::json!({"type":"select","conversation_id":id}))
+                .unwrap();
+        assert!(matches!(select, ClientEvent::Select { before: None, .. }));
+        let snapshot: Snapshot = serde_json::from_value(
+            serde_json::json!({"friends":[],"calls":[],"conversation_id":null,"history":null}),
+        )
+        .unwrap();
+        assert!(snapshot.typing.is_empty());
+        assert!(snapshot.before.is_none());
+    }
     #[test]
     fn unread_counts_are_additive_and_read_commands_are_typed() {
         let id = "00000000-0000-0000-0000-000000000001";

@@ -315,7 +315,12 @@ impl Mixer {
         self.controls
             .callback_samples
             .store(callback_samples, Ordering::Relaxed);
-        let deafened = self.controls.deafen.load(Ordering::Relaxed);
+        let deafened = self.controls.deafen.load(Ordering::Relaxed)
+            || self
+                .controls
+                .receive_guard
+                .get()
+                .is_some_and(|guard| guard.server_deafened());
         for (index, volume) in self.controls.cue_volumes.iter().enumerate() {
             self.cues.volumes[index] = volume.load(Ordering::Relaxed);
         }
@@ -358,7 +363,12 @@ impl Mixer {
         let mut unknown = [0u64; MAX_STREAMS];
         let mut silence = [0u64; MAX_STREAMS];
         for _ in 0..count {
-            let deafened = self.controls.deafen.load(Ordering::Acquire);
+            let deafened = self.controls.deafen.load(Ordering::Acquire)
+                || self
+                    .controls
+                    .receive_guard
+                    .get()
+                    .is_some_and(|guard| guard.server_deafened());
             let master = f32::from_bits(self.controls.master.load(Ordering::Relaxed));
             let mut mix = self.cues.next();
             for (index, stream) in self.streams.iter_mut().enumerate() {
@@ -450,7 +460,12 @@ pub(super) struct Privacy {
 impl Privacy {
     pub fn changed(&mut self) -> bool {
         let state = (
-            self.controls.deafen.load(Ordering::Acquire),
+            self.controls.deafen.load(Ordering::Acquire)
+                || self
+                    .controls
+                    .receive_guard
+                    .get()
+                    .is_some_and(|guard| guard.server_deafened()),
             self.controls
                 .receive_guard
                 .get()
@@ -474,6 +489,29 @@ impl Privacy {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn server_deafen_discards_microphone_and_system_pcm_without_changing_self_state() {
+        let controls = Arc::new(Controls::default());
+        let guard = Arc::new(super::super::outgoing::Control::default());
+        controls.receive_guard.set(guard.clone()).ok();
+        let (mut writers, mut mix) = mixer(controls.clone());
+        for slot in [0, thiscord_shared::voice::ROOM_CAPACITY] {
+            writers[slot].control.active.store(true, Ordering::Release);
+            writers[slot].write(&[0.2; 960]);
+        }
+        guard.server_restrictions(false, true, true);
+        let mut out = [1.0f32; 480];
+        mix.render(&mut out, 1);
+        assert!(out.iter().all(|sample| *sample == 0.0));
+        assert!(!controls.deafen.load(Ordering::Acquire));
+        guard.server_restrictions(false, false, true);
+        mix.render(&mut out, 1);
+        assert!(
+            out.iter().all(|sample| *sample == 0.0),
+            "restricted PCM survived release"
+        );
+    }
+
     #[test]
     fn callback_counter_wrap_latches_saturation_without_retrying() {
         let counter = SampleCounter::default();

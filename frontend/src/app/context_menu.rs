@@ -22,6 +22,8 @@ enum Action {
     Disconnect,
     Friend(thiscord_shared::friends::Request),
     Unfriend(AccountId),
+    Block(AccountId),
+    ReportUser(AccountId),
     Change(GuildId, i64, GuildChange, String),
 }
 #[derive(Clone)]
@@ -314,7 +316,7 @@ async fn items(ui: Ui, target: Target) -> Result<(String, Vec<Item>), String> {
                         );
                     }
                 }
-                if m.actions.contains(&Permission::ModerateMembers) {
+                if !m.actions.is_empty() {
                     items.push(Item::new(
                         crate::i18n::t("Timeout / moderation…"),
                         Action::Page(guild.id, "moderation", Some(member)),
@@ -480,7 +482,18 @@ async fn items(ui: Ui, target: Target) -> Result<(String, Vec<Item>), String> {
 }
 
 fn execute(ui: Ui, action: Action) {
+    execute_reason(ui, action, String::new());
+}
+fn execute_reason(ui: Ui, action: Action, reason: String) {
     match action {
+        Action::Block(id) => super::safety::block(ui, id),
+        Action::ReportUser(account_id) => {
+            ui.friends
+                .report_target
+                .set(Some(thiscord_shared::safety::ReportTarget::User {
+                    account_id,
+                }))
+        }
         Action::Bots(target) => ui.bot_target.set(Some(target)),
         Action::Friend(command) => super::friends::action(ui, command),
         Action::Unfriend(account_id) => {
@@ -558,10 +571,24 @@ fn execute(ui: Ui, action: Action) {
                 let token = ui.token.get_untracked();
                 let result = super::servers::request(
                     ui,
-                    PermissionRequest::Change {
-                        guild_id,
-                        revision,
+                    if matches!(
                         change,
+                        GuildChange::RemoveMember { .. }
+                            | GuildChange::BanMember { .. }
+                            | GuildChange::DisconnectVoice { .. }
+                    ) {
+                        PermissionRequest::Moderate {
+                            guild_id,
+                            revision,
+                            change,
+                            reason,
+                        }
+                    } else {
+                        PermissionRequest::Change {
+                            guild_id,
+                            revision,
+                            change,
+                        }
                     },
                 )
                 .await;
@@ -686,7 +713,11 @@ fn FriendActions(ui: Ui, member: AccountId, run: Callback<Action>) -> impl IntoV
             let disabled = !ui.friends.connected.get() || (action==FriendAction::Add && !account.as_ref().is_some_and(|a|a.email_verified));
             view! {<button role="menuitem" class="context-item" class:context-danger=action==FriendAction::Unfriend disabled=disabled on:click=move |_|run.run(if action==FriendAction::Unfriend {Action::Unfriend(member)} else {Action::Friend(action.request(member))})>{move ||crate::i18n::t(action.label())}</button>}
         }).collect_view()
-    }} }
+    }}
+    <Show when=move ||!is_bot(ui,member) && ui.account.get().is_some_and(|a|a.id!=member)>
+        <button role="menuitem" class="context-item context-danger" on:click=move |_|run.run(Action::Block(member))>{move ||crate::i18n::t("Block account")}</button>
+        <button role="menuitem" class="context-item" on:click=move |_|run.run(Action::ReportUser(member))>{move ||crate::i18n::t("Report account")}</button>
+    </Show> }
 }
 
 fn is_bot(ui: Ui, member: AccountId) -> bool {
@@ -846,6 +877,7 @@ pub(super) fn Host(ui: Ui) -> impl IntoView {
     });
     let return_focus = StoredValue::new_local(None::<web_sys::HtmlElement>);
     let pending = RwSignal::new(None::<Action>);
+    let reason = RwSignal::new(String::new());
     let confirm = NodeRef::<leptos::html::Dialog>::new();
     let account = Memo::new(move |_| ui.account.get().map(|a| a.id));
     Effect::new(move |_| {
@@ -988,6 +1020,7 @@ pub(super) fn Host(ui: Ui) -> impl IntoView {
         close(ui);
         match action {
             Action::Change(..) | Action::Unfriend(_) => {
+                reason.set(String::new());
                 pending.set(Some(action));
                 if let Some(dialog) = confirm.get() {
                     let _ = dialog.show_modal();
@@ -1012,7 +1045,8 @@ pub(super) fn Host(ui: Ui) -> impl IntoView {
         <dialog node_ref=confirm class="context-dialog" aria-label=move || crate::i18n::t("Confirm action") on:click=move |e|super::dialog::dismiss_outside(e,confirm,ui.busy.get_untracked()) on:close=move |_|pending.set(None)>
             <h2 class="text-xl font-semibold">{move ||pending.get().and_then(|a|match a {Action::Change(_,_,_,title)=>Some(title),Action::Unfriend(_)=>Some("Remove this friend?".into()),_=>None})}</h2>
             <Show when=move ||matches!(pending.get(),Some(Action::Unfriend(_)))><p class="mt-3 text-sm text-white/60">{move || crate::i18n::t("Private messages and calls will be unavailable until you become friends again.")}</p></Show>
-            <div class="mt-6 flex justify-end gap-3"><button class="rounded bg-white/10 px-4 py-2" on:click=move |_|if let Some(d)=confirm.get(){d.close();}>{move || crate::i18n::t("Cancel")}</button><button class="rounded bg-red-500/20 px-4 py-2 text-red-200" disabled=move ||ui.busy.get() on:click=move |_|{if let Some(action)=pending.get_untracked(){execute(ui,action);}
+            <Show when=move ||matches!(pending.get(),Some(Action::Change(_,_,GuildChange::RemoveMember {..}|GuildChange::BanMember {..}|GuildChange::DisconnectVoice {..},_)))><label class="settings-field"><span>{move || crate::i18n::t("Reason (optional, up to 500 characters)")}</span><input maxlength="500" prop:value=move ||reason.get() on:input=move |e|reason.set(event_target_value(&e))/></label></Show>
+            <div class="mt-6 flex justify-end gap-3"><button class="rounded bg-white/10 px-4 py-2" on:click=move |_|if let Some(d)=confirm.get(){d.close();}>{move || crate::i18n::t("Cancel")}</button><button class="rounded bg-red-500/20 px-4 py-2 text-red-200" disabled=move ||ui.busy.get() on:click=move |_|{if let Some(action)=pending.get_untracked(){execute_reason(ui,action,reason.get_untracked());}
                 if let Some(d)=confirm.get(){d.close();}}>{move || crate::i18n::t("Confirm")}</button></div>
         </dialog>
 

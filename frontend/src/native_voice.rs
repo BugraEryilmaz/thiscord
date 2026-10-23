@@ -25,13 +25,15 @@ use webrtc::{
 
 struct Job {
     guild_id: GuildId,
-    channel_id: ChannelId,
+    channel_id: Arc<Mutex<ChannelId>>,
     stop: oneshot::Sender<()>,
     task: tokio::task::JoinHandle<()>,
 }
 impl Job {
     fn owns(&self, guild: GuildId, channel: ChannelId) -> bool {
-        self.guild_id == guild && self.channel_id == channel && !self.task.is_finished()
+        self.guild_id == guild
+            && self.channel_id.lock().ok().is_some_and(|id| *id == channel)
+            && !self.task.is_finished()
     }
 }
 #[derive(Default)]
@@ -49,6 +51,79 @@ struct Handler {
     screen: crate::native_screen::ScreenState,
     camera: crate::native_screen::ScreenState,
     keyframes: mpsc::Sender<(MediaKind, usize, u32)>,
+}
+
+/// Kept separately from AudioSettings: moderation never changes self controls.
+#[derive(Default)]
+struct Moderation {
+    own: Option<(u64, bool, bool)>,
+}
+impl Moderation {
+    fn observe(&mut self, own: &Participant) -> bool {
+        let next = (
+            own.publication_revision,
+            own.server_muted,
+            own.server_deafened,
+        );
+        let boundary = self.own.is_some_and(|old| old != next);
+        self.own = Some(next);
+        boundary
+    }
+    fn can_publish(&self) -> bool {
+        self.own
+            .is_some_and(|(_, muted, deafened)| !muted && !deafened)
+    }
+    fn deafened(&self) -> bool {
+        self.own.is_none_or(|(_, _, deafened)| deafened)
+    }
+}
+
+struct ShareSignaling {
+    screen: Option<(bool, bool)>,
+    camera: Option<bool>,
+}
+impl ShareSignaling {
+    fn invalidate(&mut self) {
+        self.screen = None;
+        self.camera = None;
+    }
+    fn publication(
+        &mut self,
+        screen: &crate::native_screen::ScreenState,
+        camera: &crate::native_camera::CameraState,
+        allowed: bool,
+        changed: bool,
+    ) {
+        screen.publication(allowed, changed);
+        camera.publication(allowed, changed);
+        if changed {
+            // The server retired the old publications. An explicit restart can
+            // precede the next tick and have exactly the same signaling shape.
+            self.invalidate();
+        }
+    }
+    fn send_changes(
+        &mut self,
+        screen: (bool, bool),
+        camera: Option<bool>,
+        quality: impl FnOnce() -> Option<thiscord_shared::screen::Quality>,
+        mut send: impl FnMut(ClientEvent),
+    ) {
+        if let Some(active) = camera
+            && self.camera != Some(active)
+        {
+            send(ClientEvent::Camera { active });
+            self.camera = Some(active);
+        }
+        if self.screen != Some(screen) {
+            send(ClientEvent::Screen {
+                active: screen.0,
+                audio: screen.1,
+                quality: quality(),
+            });
+            self.screen = Some(screen);
+        }
+    }
 }
 
 #[derive(Default)]
@@ -258,9 +333,13 @@ pub async fn voice_join(
     let status = state.status.clone();
     let configuration = state.settings.clone();
     let (stop, stopped) = oneshot::channel();
+    let current_channel = Arc::new(Mutex::new(channel_id));
+    let task_channel = current_channel.clone();
     let task = tokio::spawn(async move {
         let mut runtime = Runtime {
             app: app.clone(),
+            current_channel: task_channel,
+            capture_limit: true,
             token,
             guild_id,
             channel_id,
@@ -283,13 +362,15 @@ pub async fn voice_join(
     });
     *job = Some(Job {
         guild_id,
-        channel_id,
+        channel_id: current_channel,
         stop,
         task,
     });
     Ok(())
 }
 struct Attempt {
+    moved_to: Option<ChannelId>,
+    capture_allowed: bool,
     call_id: Option<thiscord_shared::RequestId>,
     signaling: Option<crate::native_signaling::Sender>,
     recovery: Option<crate::native_signaling::recovery::Session>,
@@ -306,6 +387,8 @@ struct Attempt {
 impl Default for Attempt {
     fn default() -> Self {
         Self {
+            moved_to: None,
+            capture_allowed: false,
             call_id: None,
             signaling: None,
             recovery: None,
@@ -373,6 +456,8 @@ impl Drop for Attempt {
     }
 }
 struct Runtime {
+    current_channel: Arc<Mutex<ChannelId>>,
+    capture_limit: bool,
     app: tauri::AppHandle,
     token: String,
     guild_id: GuildId,
@@ -410,6 +495,7 @@ impl Connector for Runtime {
         let call_id = self.attempt.call_id;
         self.attempt = Attempt::default();
         self.attempt.call_id = call_id;
+        self.attempt.capture_allowed = self.capture_limit;
         self.attempt.stage = "setup";
         self.attempt
             .connection
@@ -456,7 +542,23 @@ impl Connector for Runtime {
             status.connected = false;
             status.participants.clear();
         }
+        let moved_to = self.attempt.moved_to;
         self.close().await;
+        if let Some(destination) = moved_to {
+            self.capture_limit &= self.attempt.capture_allowed;
+            self.channel_id = destination;
+            if let Ok(mut current) = self.current_channel.lock() {
+                *current = destination;
+            }
+            self.attempt.call_id = None;
+            return (
+                Failure::temporary(
+                    "Moved by a moderator. Reconnecting with your existing mute/deafen settings.",
+                )
+                .with_reason("moderator_move"),
+                true,
+            );
+        }
         (
             result
                 .err()
@@ -674,6 +776,8 @@ async fn run(
         ServerEvent::Error { error } => return Err(server_failure(&attempt.connection, error)),
         _ => return Err("Invalid voice offer".into()),
     };
+    let can_speak = can_speak && attempt.capture_allowed;
+    attempt.capture_allowed = can_speak;
     attempt.connection.event(
         "voice_offer_received",
         serde_json::json!({
@@ -868,6 +972,9 @@ async fn run(
         thiscord_frontend::audio::outgoing::QUEUE_CAPACITY,
     );
     let transmit_control = engine.outgoing_control();
+    // Await our authoritative participant before admitting capture or playback.
+    transmit_control.server_restrictions(true, true, true);
+    let mut moderation = Moderation::default();
     if packet_redundancy {
         transmit_control.enable_receive_protection();
         transmit_control.pause_receive();
@@ -881,8 +988,10 @@ async fn run(
     let mut ticker = tokio::time::interval(Duration::from_millis(500));
     ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
     let start = Instant::now();
-    let mut screen_state = Some((false, false));
-    let mut camera_state = Some(false);
+    let mut shares = ShareSignaling {
+        screen: Some((false, false)),
+        camera: Some(false),
+    };
     let mut rtp_clock = thiscord_frontend::audio::outgoing::RtpClock::default();
     let mut boundary = thiscord_frontend::audio::red::boundary::Boundary::default();
     let mut red_sender = thiscord_frontend::audio::red::Sender::default();
@@ -953,7 +1062,7 @@ async fn run(
                         attempt.connection.event("voice_media_connected",serde_json::json!({}));
                         if screen_video { app.state::<crate::native_screen::ScreenState>().bind(crate::native_screen::Binding {
                             own_slot, local_epoch: Default::default(), local_visible: Default::default(),
-                            connection: attempt.connection.clone(), video: screen_track.clone(), audio: system_track.clone(), can_publish: can_speak,
+                            connection: attempt.connection.clone(), video: screen_track.clone(), audio: system_track.clone(), can_publish: can_speak && moderation.can_publish() && !settings.lock().map_err(|_|"Settings unavailable")?.deafened,
                             subscriptions: screen_subscriptions,
                             layers: screen_layers.then(|| crate::native_screen::LayerBinding::new(low_track.clone())),
                             demand: Default::default(), network_demand: Default::default(),
@@ -962,11 +1071,11 @@ async fn run(
                         }); }
                         if camera_video { app.state::<crate::native_camera::CameraState>().bind(crate::native_screen::Binding {
                             own_slot, local_epoch: Default::default(), local_visible: Default::default(),
-                            connection: attempt.connection.clone(), video: camera_track.clone(), audio: system_track.clone(), can_publish: can_speak, subscriptions: screen_subscriptions, layers: None,
+                            connection: attempt.connection.clone(), video: camera_track.clone(), audio: system_track.clone(), can_publish: can_speak && moderation.can_publish() && !settings.lock().map_err(|_|"Settings unavailable")?.deafened, subscriptions: screen_subscriptions, layers: None,
                             demand: Default::default(), network_demand: Default::default(), force_keyframe: Default::default(), metrics: Default::default(), video_sequence: Default::default(), audio_sequence: Default::default(), audio_timestamp: Default::default(), started: Instant::now(),
                         }); }
                         engine.notify_control(Command::Roster{connection:attempt.connection.clone(),members:roster.clone()})?;
-                        if let Ok(mut s)=status.lock(){s.connected=true;s.message="Connected".into();}
+                        if let Ok(mut s)=status.lock(){s.connected=true;s.message=if can_speak{"Connected"}else{"Connected as listener. Leave and join again to enable newly granted microphone access."}.into();}
                 } else {
                     if !audio.running {return Err(Failure::from(audio.message).with_reason("audio_stopped"));}
                     if let Ok(mut s)=status.lock(){s.message=audio.message;}
@@ -1023,8 +1132,7 @@ async fn run(
                         boundary.resume();
                         red_sender.clear();
                         if packet_redundancy { engine.notify_control(Command::ReceiveBoundary { connection: attempt.connection.clone(), generation: transmit_control.generation(), epoch: None })?; }
-                        screen_state = None;
-                        camera_state = None;
+                        shares.invalidate();
                         // An interrupted chunked admin reply cannot be replayed
                         // safely. The server rejects that request on reattachment.
                         remote_jobs.abort_all();
@@ -1054,11 +1162,24 @@ async fn run(
                         if status.lock().ok().is_some_and(|s| s.participants.iter().any(|m| m.slot == own_slot && m.screen_epoch == epoch && m.sharing_screen)) { if layer != Some(1) { force_keyframe.store(true, Ordering::Release); }
                             if layer != Some(0) { app.state::<crate::native_screen::ScreenState>().layer_keyframe(); } }
                     },
+                    ServerEvent::Moved {channel_id:destination}=>{
+                        if destination==channel_id {return Err("Invalid move destination".into());}
+                        attempt.moved_to=Some(destination);
+                        return Err(Failure::from("Moved by a moderator").with_reason("moderator_move"));
+                    },
                     ServerEvent::Participants{members}=>{
                         if members.len()>ROOM_CAPACITY||members.iter().any(|m|m.slot>=ROOM_CAPACITY){return Err("Invalid participant list".into());}
                         roster_compatibility.observe(&members)?;
-                        app.state::<crate::native_screen::ScreenState>().roster(if settings.lock().map_err(|_|"Settings unavailable")?.deafened { &[] } else { &members });
-                        app.state::<crate::native_camera::CameraState>().views.roster(if settings.lock().map_err(|_|"Settings unavailable")?.deafened { &[] } else { &members });
+                        let own = members.iter().find(|m| m.slot == own_slot).ok_or("Missing own participant")?;
+                        let changed = moderation.observe(own);
+                        transmit_control.server_restrictions(own.server_muted, own.server_deafened, changed);
+                        let deafened = settings.lock().map_err(|_|"Settings unavailable")?.deafened || moderation.deafened();
+                        let allowed = can_speak && moderation.can_publish() && !deafened;
+                        let screen = app.state::<crate::native_screen::ScreenState>();
+                        let camera = app.state::<crate::native_camera::CameraState>();
+                        shares.publication(&screen, &camera, allowed, changed);
+                        screen.roster(if deafened { &[] } else { &members });
+                        camera.views.roster(if deafened { &[] } else { &members });
                         roster = members.iter().filter(|m|m.slot!=own_slot).cloned().collect();
                         engine.notify_control(Command::Roster{connection:attempt.connection.clone(),members:roster.clone()})?;
                         if let Ok(mut s)=status.lock(){s.participants=members;s.own_slot=Some(own_slot);}
@@ -1142,18 +1263,12 @@ async fn run(
                     let heartbeat_connection=attempt.connection.clone();
                     audio_control.start(move||e.command(Command::Keepalive(heartbeat_connection)));
                 }
-                if configuration.deafened { crate::native_screen::screen_stop(app.state::<crate::native_screen::ScreenState>()); }
+                let deafened = configuration.deafened || moderation.deafened();
+                let allowed = can_speak && moderation.can_publish() && !deafened;
+                let screen = app.state::<crate::native_screen::ScreenState>();
                 let camera = app.state::<crate::native_camera::CameraState>();
-                if configuration.deafened { camera.stop(None); }
-                if camera_video {
-                    let active = camera.active();
-                    if camera_state != Some(active) { signaling.send(ClientEvent::Camera { active }); camera_state = Some(active); }
-                }
-                let current_screen = app.state::<crate::native_screen::ScreenState>().sharing();
-                if Some(current_screen) != screen_state {
-                    signaling.send(ClientEvent::Screen { active: current_screen.0, audio: current_screen.1, quality: screen_layers.then(|| app.state::<crate::native_screen::ScreenState>().quality()) });
-                    screen_state = Some(current_screen);
-                }
+                shares.publication(&screen, &camera, allowed, false);
+                shares.send_changes(screen.sharing(), camera_video.then(|| camera.active()), || screen_layers.then(|| screen.quality()), |event| signaling.send(event));
                 if packet_redundancy && boundary.control(transmit_control.generation())? {
                     red_sender.clear();
                     engine.notify_control(Command::ReceiveBoundary { connection: attempt.connection.clone(), generation: transmit_control.generation(), epoch: None })?;
@@ -1162,8 +1277,8 @@ async fn run(
                     signaling.send(ClientEvent::State{muted:configuration.muted,deafened:configuration.deafened});
                 }
                 if screen_subscriptions {
-                    let mut views = if configuration.deafened { vec![] } else { app.state::<crate::native_screen::ScreenState>().subscriptions() };
-                    if !configuration.deafened { views.extend(camera.views.subscriptions()); }
+                    let mut views = if deafened { vec![] } else { app.state::<crate::native_screen::ScreenState>().subscriptions() };
+                    if !deafened { views.extend(camera.views.subscriptions()); }
                     signaling.send(ClientEvent::ScreenViews { views });
                 }
             }
@@ -1210,7 +1325,7 @@ mod tests {
         let (stop, stopped) = oneshot::channel();
         let mut job = Job {
             guild_id: guild,
-            channel_id: channel,
+            channel_id: Arc::new(Mutex::new(channel)),
             stop,
             task: tokio::spawn(async {
                 let _ = stopped.await;
@@ -1223,9 +1338,129 @@ mod tests {
             assert!(job.owns(guild, channel));
             assert!(!job.owns(guild, other));
         }
+        *job.channel_id.lock().unwrap() = other;
+        assert!(job.owns(guild, other));
+        assert!(!job.owns(guild, channel));
         job.task.abort();
         let _ = (&mut job.task).await;
         assert!(!job.owns(guild, channel));
+    }
+
+    #[test]
+    fn moderation_revision_survives_missed_rosters_and_preserves_self_controls() {
+        let mut own: Participant = serde_json::from_value(serde_json::json!({
+            "account_id":"00000000-0000-0000-0000-000000000001", "username":"fixture",
+            "slot":0, "muted":true,"deafened":false,"can_speak":true
+        }))
+        .unwrap();
+        let mut state = Moderation::default();
+        let control = thiscord_frontend::audio::outgoing::Control::default();
+        assert!(!state.can_publish());
+        assert!(!state.observe(&own));
+        assert!(
+            state.can_publish(),
+            "self microphone mute does not restrict video"
+        );
+        let previous = control.generation();
+        own.publication_revision = 2; // Intermediate restricted roster was lost.
+        let boundary = state.observe(&own);
+        assert!(boundary);
+        control.server_restrictions(own.server_muted, own.server_deafened, boundary);
+        assert!(control.generation() > previous);
+        assert!(own.muted && !own.deafened);
+        assert!(
+            !state.observe(&own),
+            "periodic rosters must not retire new capture"
+        );
+        own.server_deafened = true;
+        assert!(state.observe(&own));
+        assert!(!state.can_publish() && state.deafened());
+    }
+
+    #[test]
+    fn moderation_boundary_resignals_explicit_restart_before_next_tick() {
+        for coalesced in [false, true] {
+            for audio in [false, true] {
+                for quality in [None, Some(thiscord_shared::screen::Quality::default())] {
+                    for restart in [false, true] {
+                        let screen = crate::native_screen::ScreenState::default();
+                        let camera = crate::native_camera::CameraState::default();
+                        let mut shares = ShareSignaling {
+                            screen: Some((false, false)),
+                            camera: Some(false),
+                        };
+                        let mut moderation = Moderation::default();
+                        let mut own: Participant = serde_json::from_value(serde_json::json!({
+                            "account_id":"00000000-0000-0000-0000-000000000001",
+                            "username":"fixture", "slot":0, "muted":false,
+                            "deafened":false, "can_speak":true
+                        }))
+                        .unwrap();
+                        assert!(!moderation.observe(&own));
+                        let mut events = Vec::new();
+                        // The previous publication used this same audio/layer shape.
+                        shares.send_changes(
+                            (true, audio),
+                            Some(true),
+                            || quality,
+                            |e| events.push(e),
+                        );
+                        assert_eq!(events.len(), 2);
+                        events.clear();
+                        if !coalesced {
+                            own.server_muted = true;
+                            own.publication_revision = 1;
+                            let changed = moderation.observe(&own);
+                            assert!(changed);
+                            shares.publication(&screen, &camera, moderation.can_publish(), changed);
+                        }
+                        own.server_muted = false;
+                        own.publication_revision = 2;
+                        let changed = moderation.observe(&own);
+                        assert!(changed);
+                        shares.publication(&screen, &camera, moderation.can_publish(), changed);
+                        assert!(events.is_empty(), "a boundary does not start a publication");
+                        assert_eq!(screen.sharing(), (false, false));
+                        assert!(!camera.active());
+
+                        // Explicit restart supplies fresh capture snapshots BEFORE
+                        // any 500 ms tick observes the stopped publication. Without
+                        // restart, read the stopped state; release must not revive it.
+                        let current_screen = if restart {
+                            (true, audio)
+                        } else {
+                            screen.sharing()
+                        };
+                        let current_camera = if restart { true } else { camera.active() };
+                        let changed = moderation.observe(&own);
+                        assert!(!changed, "a repeated roster is not a new boundary");
+                        shares.publication(&screen, &camera, moderation.can_publish(), changed);
+                        shares.send_changes(
+                            current_screen,
+                            Some(current_camera),
+                            || quality,
+                            |e| events.push(e),
+                        );
+                        assert_eq!(events.len(), 2);
+                        assert!(
+                            matches!(events[0], ClientEvent::Camera { active } if active == restart)
+                        );
+                        assert!(
+                            matches!(events[1], ClientEvent::Screen { active, audio: sent_audio, quality: sent_quality }
+                            if active == restart && sent_audio == (restart && audio) && sent_quality == quality)
+                        );
+                        events.clear();
+                        shares.send_changes(
+                            current_screen,
+                            Some(current_camera),
+                            || quality,
+                            |e| events.push(e),
+                        );
+                        assert!(events.is_empty(), "unchanged ticks still coalesce");
+                    }
+                }
+            }
+        }
     }
 
     #[test]

@@ -52,14 +52,7 @@ pub(super) fn authorize(
             }
         }
         Target::Conversation { conversation_id } => {
-            if query::<bool>(
-                c,
-                "SELECT to_jsonb(TRUE) AS data FROM friendships WHERE id=$1::uuid AND $2::uuid IN (low_id,high_id) AND state='accepted' FOR SHARE",
-                &[&conversation_id.to_string(), &actor.to_string()],
-            )? != [true]
-            {
-                return Err(Failure::Forbidden);
-            }
+            crate::friends::store::pair_access(c, conversation_id, actor, false)?;
         }
         Target::Updates => {}
     }

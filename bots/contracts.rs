@@ -86,7 +86,7 @@ pub enum ServerEvent {
     /// New committed human messages only. No history, edit or retry replay.
     /// Delivery is live and best effort; reconnect starts a new subscription.
     Mention {
-        message: ChatMessage,
+        message: Box<ChatMessage>,
     },
     Pong {},
     Revoked {},

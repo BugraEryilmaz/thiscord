@@ -28,7 +28,11 @@ pages, account emails/recovery web pages, and native OS/tray text remain English
 The home screen includes friends, online presence, friend requests, private text
 conversations and one-to-one desktop voice calls. Use **Add friend** in the top
 right to search by part of a display name or username. See [friends and private conversations](docs/friends.md)
-for behavior, access rules and current limitations.
+for behavior, access rules and current limitations. Private conversations include
+revision-checked editing/deletion, typing and private file/image/video attachments.
+User menus and Friends offer block/report actions; **Settings → Safety & reports**
+contains blocked accounts, submitted reports and authorized review inboxes.
+See [safety and reports](docs/safety.md) for consent and evidence boundaries.
 
 **Settings → Notifications** controls sounds, banners, volume and event filters.
 Right-click channels or conversations for per-source settings and quick mute;
@@ -80,8 +84,14 @@ server name, and moderation is available through context menus. Channel pins and
 notification mutes are saved per account on this device; muted channels hide unread
 and mention badges without marking messages as read or changing voice playback.
 Participant voice settings adjust local playback volume (0% mutes that person).
-Each server has a **Moderation** panel for voice disconnects,
-timeouts, kicks, bans and unbans, with server-side permission and hierarchy checks.
+Each server has a **Moderation** panel for voice disconnects, server mute/deafen,
+moves, timeouts, kicks, bans and unbans, with reasons, audit history and server-side
+permission and hierarchy checks.
+Server settings include **Invite links** (expiring/use-limited codes with revocation
+and paste-to-join) and **Channel organization** (rename/order, categories and channel
+placement without changing permissions). Invite browser landing pages explain app
+acceptance without requiring a custom URL handler. See [guild permissions and
+workflows](docs/permissions.md). Physical three-platform acceptance remains manual.
 Verified Free accounts can own one server with two text and two voice channels.
 In **Settings > Instance access**, the instance owner can create named tiers,
 assign accounts and configure owned-server, channel, member and role limits.
@@ -454,3 +464,10 @@ References: [Leptos CSR](https://book.leptos.dev/getting_started/index.html),
 [Tauri + Leptos](https://v2.tauri.app/start/frontend/leptos/),
 [Axum](https://docs.rs/axum/latest/axum/),
 [Diesel](https://diesel.rs/guides/getting-started).
+
+
+Guild chat supports reply previews and original-message navigation, ten emoji
+reactions, moderator message pins, and safe Markdown with code blocks. Search
+messages in guild channels or private history with channel/person/date filters and
+bounded context views. See [chat](docs/chat.md) and [search](docs/search.md), including
+the private safety branch integration checks still required for this P1 batch.

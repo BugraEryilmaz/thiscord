@@ -8,6 +8,30 @@ use thiscord_shared::{ApiError, ErrorCode, HEALTH_PATH, READY_PATH, REQUEST_ID_H
 use tower::ServiceExt;
 
 #[tokio::test]
+async fn invite_landing_is_script_free_and_does_not_depend_on_database_or_login() {
+    let response = api::router(None, vec![])
+        .oneshot(
+            Request::builder()
+                .uri("/invite")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    assert_eq!(response.headers()["referrer-policy"], "no-referrer");
+    assert_eq!(response.headers()["cache-control"], "no-store");
+    assert_eq!(
+        response.headers()["content-security-policy"],
+        "default-src 'none'; frame-ancestors 'none'; base-uri 'none'"
+    );
+    let html =
+        String::from_utf8(to_bytes(response.into_body(), 8192).await.unwrap().to_vec()).unwrap();
+    assert!(html.contains("Join a server"));
+    assert!(!html.contains("<script"));
+}
+
+#[tokio::test]
 async fn liveness_is_independent_and_request_ids_are_server_generated() {
     let app = api::router(None, vec![]);
     let mut ids = vec![];

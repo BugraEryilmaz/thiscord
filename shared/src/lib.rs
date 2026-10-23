@@ -17,7 +17,9 @@ pub mod overlay;
 pub mod pagination;
 pub mod performance;
 pub mod permissions;
+pub mod safety;
 pub mod screen;
+pub mod search;
 pub mod validation;
 pub mod video_feedback;
 pub mod voice_bots;
@@ -28,6 +30,7 @@ pub use ids::AvatarId;
 pub use ids::{
     AccountId, ChannelId, GuildId, InstanceId, InstanceRoleId, RequestId, RoleId, SessionId,
 };
+pub use ids::{AuditId, CategoryId, InviteId};
 pub use ids::{ClientMessageId, MessageId};
 
 /// RFC 3339 on the wire, normalized to UTC. No OS clock is needed in shared code.

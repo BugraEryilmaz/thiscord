@@ -1,4 +1,5 @@
 //! Bounded, single-process audio SFU. One WebRTC transport per participant.
+pub(crate) mod moderation;
 use crate::access;
 mod bots;
 mod diagnostics;
@@ -123,6 +124,23 @@ struct VoiceAccess {
     active: Arc<AtomicBool>,
 }
 impl VoiceAccess {
+    async fn failed(&self, socket: &mut logging::Socket, id: RequestId, error: Failure) {
+        let pool = self.pool.clone();
+        let token = self.token.clone();
+        let (guild, channel, revision) = (self.guild, self.channel, self.voice_revision);
+        let destination = tokio::task::spawn_blocking(move || {
+            moderation::destination(&pool, &token, guild, channel, revision)
+        })
+        .await
+        .ok()
+        .flatten();
+        if let Some(channel_id) = destination {
+            socket.end("moderator_move");
+            let _ = send(socket, ServerEvent::Moved { channel_id }).await;
+        } else {
+            access_failed(socket, id, error).await;
+        }
+    }
     async fn current_roster(&self, room: &Room) -> Option<Vec<Participant>> {
         let members = room.members.read().await;
         let epoch = self.generation.load(Ordering::Acquire);
@@ -168,13 +186,39 @@ impl VoiceAccess {
             {
                 return Err(Failure::Forbidden);
             }
+            let moderation_changed = member.info.publication_revision != info.publication_revision
+                || member.info.server_muted != info.server_muted
+                || member.info.server_deafened != info.server_deafened;
+            if moderation_changed {
+                if !red::moderation_boundary(room, member) {
+                    return Err(Failure::Forbidden);
+                }
+                member.screen_started = Instant::now();
+                member.camera_started = Instant::now();
+                member.info.server_muted = info.server_muted;
+                member.info.server_deafened = info.server_deafened;
+                member.info.publication_revision = info.publication_revision;
+                // Even a restrict/release pair unseen by this connection retires
+                // existing publications. Release requires an explicit new start.
+                member.views = [None; ROOM_CAPACITY * 2];
+                member.info.sharing_screen = false;
+                member.info.sharing_audio = false;
+                member.info.camera_active = false;
+                room.changed.send_replace(());
+            }
             member.info.username = info.username;
             member.info.display_name = info.display_name;
             member.info.avatar_id = info.avatar_id;
-            if self.generation.load(Ordering::Acquire) != epoch && !red::boundary(room, member) {
+            if self.generation.load(Ordering::Acquire) != epoch
+                && !moderation_changed
+                && !red::boundary(room, member)
+            {
                 return Err(Failure::Forbidden);
             }
             self.generation.store(epoch, Ordering::Release);
+            if moderation_changed {
+                red::challenge_publishers(&mut members, slot);
+            }
             Ok(viewing::participants(&members))
         });
         if result.is_err() {
@@ -528,9 +572,10 @@ fn media_ssrc(index: usize) -> u32 {
 }
 fn may_publish(info: &Participant, kind: MediaKind) -> bool {
     info.can_speak
-        && !info.deafened
+        && !info.is_deafened()
+        && !info.server_muted
         && match kind {
-            MediaKind::Microphone => !info.muted,
+            MediaKind::Microphone => !info.is_muted(),
             MediaKind::ScreenVideo => info.sharing_screen,
             MediaKind::Camera => info.camera_active,
             MediaKind::SystemAudio => info.sharing_screen && info.sharing_audio,
@@ -611,7 +656,12 @@ async fn update_screen_state(
         return Err(());
     }
     let member = members.get_mut(&slot).ok_or(())?;
-    if active && (!member.info.can_speak || member.info.deafened || !member.subscriptions_enabled) {
+    if active
+        && (!member.info.can_speak
+            || member.info.is_deafened()
+            || member.info.server_muted
+            || !member.subscriptions_enabled)
+    {
         return Err(());
     }
     if active && !member.info.sharing_screen {
@@ -724,7 +774,8 @@ async fn handle_signal(
             if !owner.load(Ordering::Acquire)
                 || (active
                     && (!member.info.can_speak
-                        || member.info.deafened
+                        || member.info.is_deafened()
+                        || member.info.server_muted
                         || !member.subscriptions_enabled))
             {
                 return Err("camera_state_rejected");
@@ -803,7 +854,7 @@ async fn request_keyframe(
     if viewer == publisher
         || !members
             .get(&viewer)
-            .is_some_and(|m| m.active.load(Ordering::Acquire) && !m.info.deafened)
+            .is_some_and(|m| m.active.load(Ordering::Acquire) && !m.info.is_deafened())
     {
         return;
     }
@@ -1434,7 +1485,7 @@ async fn serve(mut socket: logging::Socket, pool: DbPool, id: RequestId) {
                     if !resumption::current(&room, slot, source_id, resume.sequence).await { continue; }
                     if let Err(error) = access.refresh(&room, slot, &mut changed).await {
                         let request_id = resume.socket.id;
-                        access_failed(&mut resume.socket, request_id, error).await;
+                        access.failed(&mut resume.socket, request_id, error).await;
                         break;
                     }
                     if socket.recovery_expired() {
@@ -1462,7 +1513,7 @@ async fn serve(mut socket: logging::Socket, pool: DbPool, id: RequestId) {
                 result=changed.changed()=>{
                     if result.is_err(){socket.end("access_watcher_closed");break;}
                     if let Err(error)=access.refresh(&room,slot,&mut changed).await {
-                        access_failed(&mut socket,id,error).await;
+                        access.failed(&mut socket,id,error).await;
                         break;
                     }
                 },
@@ -1520,7 +1571,7 @@ async fn serve(mut socket: logging::Socket, pool: DbPool, id: RequestId) {
                     if !active.load(Ordering::Acquire){socket.end("media_inactive");break;}
                     let members=match access.refresh(&room,slot,&mut changed).await {
                         Ok(members)=>members,
-                        Err(error)=>{access_failed(&mut socket,id,error).await;break;}
+                        Err(error)=>{access.failed(&mut socket,id,error).await;break;}
                     };
                     for kind in [MediaKind::ScreenVideo, MediaKind::Camera] {
                         if let Some((epoch, bitrate)) = viewing::target(&room, slot, kind).await
@@ -1562,7 +1613,7 @@ async fn serve(mut socket: logging::Socket, pool: DbPool, id: RequestId) {
                         Some(members) => members,
                         None => match access.refresh(&room,slot,&mut changed).await {
                             Ok(members)=>members,
-                            Err(error)=>{access_failed(&mut socket,id,error).await;break;}
+                            Err(error)=>{access.failed(&mut socket,id,error).await;break;}
                         }
                     };
                     if send(&mut socket,ServerEvent::Participants{members}).await.is_err(){break;}
@@ -1597,6 +1648,7 @@ async fn serve(mut socket: logging::Socket, pool: DbPool, id: RequestId) {
 }
 
 async fn release_member(room: &Room, slot: usize, source_id: uuid::Uuid) {
+    moderation::remove(source_id);
     let mut members = room.members.write().await;
     if members
         .get(&slot)
@@ -1823,6 +1875,9 @@ mod send_tests {
                     replaced: watch::channel(false).0,
                     network: Arc::new(RwLock::new(Default::default())),
                     info: Participant {
+                        server_muted: false,
+                        server_deafened: false,
+                        publication_revision: 0,
                         test_bot: false,
                         account_id: uuid::Uuid::new_v4().to_string().parse().unwrap(),
                         username: "test".into(),

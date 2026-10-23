@@ -112,6 +112,14 @@ async fn scripting_bots_isolate_credentials_and_deliver_only_live_human_mentions
             (ACCOUNT_PATH, json!({"action":"current"})),
             (PERMISSIONS_PATH, json!({"action":"instance"})),
             (
+                thiscord_shared::safety::SAFETY_PATH,
+                json!({"action":"blocks"}),
+            ),
+            (
+                thiscord_shared::search::SEARCH_PATH,
+                json!({"action":"search","filters":{"scope":{"kind":"guild","guild_id":guild,"channel_id":channel},"query":"needle"}}),
+            ),
+            (
                 thiscord_shared::friends::FRIENDS_PATH,
                 json!({"action":"search","query":"owner"}),
             ),
@@ -449,7 +457,13 @@ async fn scripting_bots_scope_roles_quotas_and_rollback() {
     assert_eq!(full["code"], "limit_exceeded");
     // Rollback removes bot accounts and sessions while retaining human accounts.
     let mut c = db.pool.get().unwrap();
-    c.revert_last_migration(db::MIGRATIONS).unwrap();
+    // Exercise the bot migration even when later features add migrations.
+    loop {
+        let reverted = c.revert_last_migration(db::MIGRATIONS).unwrap();
+        if reverted.to_string() == "20261023010000" {
+            break;
+        }
+    }
     #[derive(QueryableByName)]
     struct Count {
         #[diesel(sql_type=diesel::sql_types::BigInt)]

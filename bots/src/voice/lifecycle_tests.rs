@@ -35,6 +35,10 @@ fn member() -> Participant {
 
 impl Fixture {
     async fn join() -> Self {
+        Self::join_with_member(member()).await
+    }
+
+    async fn join_with_member(mut member: Participant) -> Self {
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let endpoint = format!("http://{}", listener.local_addr().unwrap());
         let peer = ReceiverPeer::new().await;
@@ -54,7 +58,6 @@ impl Fixture {
         let server = ServerTask(tokio::spawn(async move {
             let (tcp, _) = listener.accept().await.unwrap();
             let mut socket = tokio_tungstenite::accept_async(tcp).await.unwrap();
-            let mut member = member();
             let mut offer = Some(offer);
             let mut probing = false;
             let mut held_pongs = 0;
@@ -107,7 +110,12 @@ impl Fixture {
                             _ => panic!("unexpected signal"),
                         }
                     },
-                    event = incoming.recv() => event,
+                    event = incoming.recv() => {
+                        if let Some(ServerEvent::Participants { members }) = &event {
+                            member = members[0].clone();
+                        }
+                        event
+                    },
                     Some(()) = release.recv() => {
                         assert!(probing && held_pongs > 0);
                         assert!(member.muted && member.deafened);
@@ -156,6 +164,17 @@ impl Fixture {
 
     fn voice(&self) -> &Voice {
         self.voice.as_ref().unwrap()
+    }
+
+    async fn hold_commands(&self) {
+        self.voice().0.hold_commands.store(1, Ordering::Release);
+        timeout(Duration::from_secs(3), async {
+            while self.voice().0.hold_commands.load(Ordering::Acquire) != 2 {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("session must acknowledge the command dequeue barrier");
     }
 
     async fn packet(&mut self) -> rtp::Packet {
@@ -249,27 +268,31 @@ impl Drop for Wav {
     }
 }
 
-async fn decoder_pid(path: &Path) -> u32 {
+fn find_decoder(path: &Path) -> Option<u32> {
     use std::os::unix::ffi::OsStrExt;
+    let mut children = BTreeSet::new();
+    for task in std::fs::read_dir("/proc/self/task").unwrap().flatten() {
+        if let Ok(pids) = std::fs::read_to_string(task.path().join("children")) {
+            children.extend(
+                pids.split_whitespace()
+                    .filter_map(|pid| pid.parse::<u32>().ok()),
+            );
+        }
+    }
+    children.into_iter().find(|pid| {
+        std::fs::read(format!("/proc/{pid}/cmdline")).is_ok_and(|command| {
+            command
+                .split(|byte| *byte == 0)
+                .any(|arg| arg == path.as_os_str().as_bytes())
+        })
+    })
+}
+
+async fn decoder_pid(path: &Path) -> u32 {
     timeout(Duration::from_secs(3), async {
         loop {
-            let mut children = BTreeSet::new();
-            for task in std::fs::read_dir("/proc/self/task").unwrap().flatten() {
-                if let Ok(pids) = std::fs::read_to_string(task.path().join("children")) {
-                    children.extend(
-                        pids.split_whitespace()
-                            .filter_map(|pid| pid.parse::<u32>().ok()),
-                    );
-                }
-            }
-            for pid in children {
-                if let Ok(command) = std::fs::read(format!("/proc/{pid}/cmdline"))
-                    && command
-                        .split(|byte| *byte == 0)
-                        .any(|arg| arg == path.as_os_str().as_bytes())
-                {
-                    return pid;
-                }
+            if let Some(pid) = find_decoder(path) {
+                return pid;
             }
             tokio::time::sleep(Duration::from_millis(10)).await;
         }
@@ -286,6 +309,342 @@ async fn reaped(pid: u32) {
     })
     .await
     .expect("ffmpeg child must be killed AND reaped, including zombies");
+}
+
+#[derive(Clone, Copy, Debug)]
+enum PlaybackPhase {
+    Active,
+    AwaitingUnmute,
+    PendingFence,
+}
+
+#[tokio::test]
+#[ignore = "requires Linux procfs and ffmpeg on PATH"]
+async fn ffmpeg_moderation_invalidates_buffered_and_blocked_play_before_release_dequeue() {
+    timeout(Duration::from_secs(35), async {
+        let first = Wav::new(false);
+        let stale = Wav::new(true);
+        for restriction in ["mute", "deafen", "coalesced"] {
+            let mut fixture = Fixture::join().await;
+            let (old_pid, _) = fixture.playing(&first).await;
+            let voice = fixture.voice().clone();
+            let mut publication = voice.0.publication.clone();
+            let before = *publication.borrow_and_update();
+            fixture.hold_commands().await;
+
+            // Poll the actual public API to enqueue, but keep its reply pending.
+            // The session still consumes moderation/release and reaps FFmpeg.
+            let mut queued = Box::pin(voice.play_file(&stale.0));
+            assert!(futures_util::poll!(&mut queued).is_pending());
+            let mut stop = Box::pin(voice.stop());
+            assert!(futures_util::poll!(&mut stop).is_pending());
+
+            let mut restricted = member();
+            match restriction {
+                "mute" => restricted.server_muted = true,
+                "deafen" => restricted.server_deafened = true,
+                "coalesced" => restricted.publication_revision = 2,
+                _ => unreachable!(),
+            }
+            fixture
+                .signals
+                .send(ServerEvent::Participants {
+                    members: vec![restricted.clone()],
+                })
+                .await
+                .unwrap();
+            publication
+                .wait_for(|state| state.generation > before.generation)
+                .await
+                .unwrap();
+            let during = *publication.borrow();
+            let mut status = voice.status();
+            status
+                .wait_for(|event| *event == PlaybackEvent::Stopped)
+                .await
+                .unwrap();
+            reaped(old_pid).await;
+
+            // Fill the bounded queue with real requests issued while restricted.
+            // For the coalesced snapshot, all old stamps predate the revision.
+            let mut restricted_plays = Vec::new();
+            let mut old_replies = Vec::new();
+            for _ in 0..6 {
+                if restriction != "coalesced" {
+                    let mut play = Box::pin(voice.play_file(&stale.0));
+                    assert!(futures_util::poll!(&mut play).is_pending());
+                    restricted_plays.push(play);
+                } else {
+                    let (reply, result) = oneshot::channel();
+                    voice
+                        .0
+                        .commands
+                        .try_send(Command::Play(
+                            media::Source::File(stale.0.clone()),
+                            before,
+                            reply,
+                        ))
+                        .unwrap_or_else(|_| panic!("queue has room"));
+                    old_replies.push(result);
+                }
+            }
+            assert_eq!(voice.0.commands.capacity(), 0);
+            assert!(
+                voice.play_file(&stale.0).await.is_err(),
+                "public overload stays bounded"
+            );
+
+            // Simulate a sender preempted after issuance, including a blocked
+            // channel send. Draining only the present queue cannot revoke it.
+            let (reply, delayed_reply) = oneshot::channel();
+            let mut delayed_send = Box::pin(voice.0.commands.send(Command::Play(
+                media::Source::File(stale.0.clone()),
+                before,
+                reply,
+            )));
+            assert!(futures_util::poll!(&mut delayed_send).is_pending());
+
+            if restriction != "coalesced" {
+                restricted.server_muted = false;
+                restricted.server_deafened = false;
+                restricted.muted = true;
+                restricted.deafened = true;
+                fixture
+                    .signals
+                    .send(ServerEvent::Participants {
+                        members: vec![restricted],
+                    })
+                    .await
+                    .unwrap();
+                publication
+                    .wait_for(|state| !state.restricted)
+                    .await
+                    .unwrap();
+            }
+            // Release (or the coalesced boundary) was definitely consumed first;
+            // every stale Play is still buffered or blocked at this point.
+            assert_eq!(voice.0.commands.capacity(), 0);
+            voice.0.hold_commands.store(0, Ordering::Release);
+            assert!(queued.await.is_err());
+            stop.await.unwrap();
+            for play in restricted_plays {
+                assert!(play.await.is_err());
+            }
+            for reply in old_replies {
+                assert!(reply.await.unwrap().is_err());
+            }
+            delayed_send
+                .await
+                .unwrap_or_else(|_| panic!("session stays open"));
+            assert!(delayed_reply.await.unwrap().is_err());
+            fixture.silence().await;
+            assert!(find_decoder(&stale.0).is_none());
+            assert_eq!(*status.borrow(), PlaybackEvent::Stopped);
+
+            let (fresh_pid, _) = fixture.playing(&first).await;
+            // A late restricted request must also leave a newer valid Play alone.
+            let (reply, result) = oneshot::channel();
+            let old = if restriction == "coalesced" {
+                before
+            } else {
+                during
+            };
+            voice
+                .0
+                .commands
+                .send(Command::Play(
+                    media::Source::File(stale.0.clone()),
+                    old,
+                    reply,
+                ))
+                .await
+                .unwrap_or_else(|_| panic!("session stays open"));
+            assert!(result.await.unwrap().is_err());
+            assert_eq!(*status.borrow(), PlaybackEvent::Playing);
+            fixture.packet().await;
+            assert!(find_decoder(&stale.0).is_none());
+            voice.stop().await.unwrap();
+            reaped(fresh_pid).await;
+            fixture.silence().await;
+            voice.leave().await.unwrap();
+        }
+    })
+    .await
+    .expect("buffered Play moderation lifecycle timed out");
+}
+
+async fn moderation_cancels_playback(phase: PlaybackPhase) {
+    timeout(Duration::from_secs(40), async {
+        let first = Wav::new(false);
+        let replacement = Wav::new(true);
+        // Exercise independent flags without a revision change (older servers),
+        // and a revision-only snapshot after a coalesced restrict/release.
+        for restriction in ["mute", "deafen", "coalesced"] {
+            let mut initial = member();
+            initial.publication_revision = 9;
+            let mut fixture = Fixture::join_with_member(initial.clone()).await;
+            let (old_pid, _) = fixture.playing(&first).await;
+            let active_pid = match phase {
+                PlaybackPhase::Active => Some(old_pid),
+                PlaybackPhase::AwaitingUnmute => {
+                    fixture.hold_unmute.store(true, Ordering::Release);
+                    fixture.voice().play_file(&replacement.0).await.unwrap();
+                    reaped(old_pid).await;
+                    let pid = decoder_pid(&replacement.0).await;
+                    fixture.silence().await;
+                    assert_eq!(*fixture.voice().status().borrow(), PlaybackEvent::Starting);
+                    Some(pid)
+                }
+                PlaybackPhase::PendingFence => {
+                    fixture.queue_stale_rosters.store(true, Ordering::Release);
+                    fixture.voice().play_file(&replacement.0).await.unwrap();
+                    let mut queued = fixture.stale_rosters_sent.clone();
+                    timeout(Duration::from_secs(3), queued.wait_for(|value| *value))
+                        .await
+                        .unwrap()
+                        .unwrap();
+                    reaped(old_pid).await;
+                    fixture.silence().await;
+                    assert_eq!(*fixture.voice().status().borrow(), PlaybackEvent::Starting);
+                    assert!(find_decoder(&replacement.0).is_none());
+                    None
+                }
+            };
+            let mut restricted_member = initial.clone();
+            // The pending command is still self-restricted; an awaiting-unmute
+            // player and active player have already cleared their self flags.
+            if matches!(phase, PlaybackPhase::PendingFence) {
+                restricted_member.muted = true;
+                restricted_member.deafened = true;
+            }
+            match restriction {
+                "mute" => restricted_member.server_muted = true,
+                "deafen" => restricted_member.server_deafened = true,
+                "coalesced" => restricted_member.publication_revision += 2,
+                _ => unreachable!(),
+            }
+            fixture
+                .signals
+                .send(ServerEvent::Participants {
+                    members: vec![restricted_member.clone()],
+                })
+                .await
+                .unwrap();
+            let mut status = fixture.voice().status();
+            timeout(
+                Duration::from_secs(5),
+                status.wait_for(|event| *event == PlaybackEvent::Stopped),
+            )
+            .await
+            .expect("moderation must cancel active AND starting playback")
+            .unwrap();
+            if let Some(pid) = active_pid {
+                reaped(pid).await;
+            }
+            fixture.silence().await;
+            assert!(find_decoder(&first.0).is_none());
+            assert!(find_decoder(&replacement.0).is_none());
+            if restriction != "coalesced" {
+                assert!(
+                    fixture.voice().play_file(&replacement.0).await.is_err(),
+                    "a new Play cannot override observed moderator restrictions"
+                );
+            }
+
+            // Release moderation and any withheld self-state acknowledgement.
+            // Neither may resurrect a decoder or the cancelled pending source.
+            let mut released = initial;
+            released.publication_revision = restricted_member.publication_revision;
+            released.muted = true;
+            released.deafened = true;
+            fixture.hold_unmute.store(false, Ordering::Release);
+            fixture
+                .signals
+                .send(ServerEvent::Participants {
+                    members: vec![released],
+                })
+                .await
+                .unwrap();
+            fixture.silence().await;
+            if matches!(phase, PlaybackPhase::PendingFence) {
+                fixture.release_restriction.send(()).await.unwrap();
+                fixture.silence().await;
+            }
+            assert_eq!(*fixture.voice().status().borrow(), PlaybackEvent::Stopped);
+            assert!(
+                find_decoder(&replacement.0).is_none(),
+                "cancelled decoder restarted"
+            );
+            assert!(!fixture._server.0.is_finished());
+
+            // A genuinely new command still works, at the same publication
+            // revision, and its own Stop must reap the fresh process.
+            let (fresh_pid, _) = fixture.playing(&replacement).await;
+            assert_ne!(fresh_pid, old_pid);
+            fixture.voice().stop().await.unwrap();
+            reaped(fresh_pid).await;
+            fixture.silence().await;
+            fixture.voice().leave().await.unwrap();
+        }
+    })
+    .await
+    .unwrap_or_else(|_| panic!("moderation lifecycle timed out: {phase:?}"));
+}
+
+#[tokio::test]
+#[ignore = "requires Linux procfs and ffmpeg on PATH"]
+async fn ffmpeg_moderation_stops_active_playback_until_new_play() {
+    moderation_cancels_playback(PlaybackPhase::Active).await;
+}
+
+#[tokio::test]
+#[ignore = "requires Linux procfs and ffmpeg on PATH"]
+async fn ffmpeg_moderation_reaps_decoder_awaiting_unmute_until_new_play() {
+    moderation_cancels_playback(PlaybackPhase::AwaitingUnmute).await;
+}
+
+#[tokio::test]
+#[ignore = "requires Linux procfs and ffmpeg on PATH"]
+async fn ffmpeg_moderation_cancels_pending_fence_until_new_play() {
+    moderation_cancels_playback(PlaybackPhase::PendingFence).await;
+}
+
+#[tokio::test]
+#[ignore = "requires Linux procfs and ffmpeg on PATH"]
+async fn ffmpeg_moderation_at_admission_blocks_play_until_release() {
+    timeout(Duration::from_secs(20), async {
+        let wav = Wav::new(false);
+        for server_deafened in [false, true] {
+            let mut initial = member();
+            initial.server_muted = !server_deafened;
+            initial.server_deafened = server_deafened;
+            initial.publication_revision = 12;
+            let mut fixture = Fixture::join_with_member(initial.clone()).await;
+            assert!(fixture.voice().play_file(&wav.0).await.is_err());
+            fixture.silence().await;
+            assert!(find_decoder(&wav.0).is_none());
+            initial.server_muted = false;
+            initial.server_deafened = false;
+            initial.muted = true;
+            initial.deafened = true;
+            fixture
+                .signals
+                .send(ServerEvent::Participants {
+                    members: vec![initial],
+                })
+                .await
+                .unwrap();
+            fixture.silence().await;
+            assert_eq!(*fixture.voice().status().borrow(), PlaybackEvent::Stopped);
+            assert!(find_decoder(&wav.0).is_none());
+            let (pid, _) = fixture.playing(&wav).await;
+            fixture.voice().stop().await.unwrap();
+            reaped(pid).await;
+            fixture.voice().leave().await.unwrap();
+        }
+    })
+    .await
+    .expect("admission moderation lifecycle timed out");
 }
 
 #[tokio::test]

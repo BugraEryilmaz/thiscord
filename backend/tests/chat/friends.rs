@@ -1,7 +1,7 @@
 use super::*;
 use thiscord_shared::friends::{FRIENDS_PATH, FRIENDS_SOCKET_PATH};
 
-async fn social(app: &Router, token: &str, value: Value, status: StatusCode) -> Value {
+pub(super) async fn social(app: &Router, token: &str, value: Value, status: StatusCode) -> Value {
     let (got, body) = call(app, FRIENDS_PATH, token, value).await;
     assert_eq!(got, status, "{body}");
     body
@@ -144,7 +144,7 @@ async fn search_matches_partial_display_names_and_usernames() {
     assert_eq!(result["people"][0]["display_name"], "memedin kocası");
 }
 
-async fn socket(address: std::net::SocketAddr, token: &str) -> Socket {
+pub(super) async fn socket(address: std::net::SocketAddr, token: &str) -> Socket {
     let mut request = format!("ws://{address}{FRIENDS_SOCKET_PATH}")
         .into_client_request()
         .unwrap();
@@ -155,7 +155,7 @@ async fn socket(address: std::net::SocketAddr, token: &str) -> Socket {
     event(&mut socket, json!({"type":"connect","token":token})).await;
     socket
 }
-async fn event(socket: &mut Socket, event: Value) {
+pub(super) async fn event(socket: &mut Socket, event: Value) {
     socket
         .send(WsMessage::Text(
             json!({"version":1,"event":event}).to_string().into(),
@@ -163,7 +163,7 @@ async fn event(socket: &mut Socket, event: Value) {
         .await
         .unwrap();
 }
-async fn snapshot(socket: &mut Socket, predicate: impl Fn(&Value) -> bool) -> Value {
+pub(super) async fn snapshot(socket: &mut Socket, predicate: impl Fn(&Value) -> bool) -> Value {
     tokio::time::timeout(std::time::Duration::from_secs(8), async {
         loop {
             let message = socket.next().await.unwrap().unwrap();

@@ -53,6 +53,14 @@ pub struct Window {
 }
 
 impl<T> MessageCache<T> {
+    pub fn target_anchor(&self, id: MessageId) -> Anchor {
+        Anchor { id, offset: 0.0 }
+    }
+
+    pub fn values(&self) -> impl Iterator<Item = &T> {
+        self.by_id.values().map(|entry| &entry.value)
+    }
+
     pub fn get(&self, id: MessageId) -> Option<&T> {
         self.by_id.get(&id).map(|entry| &entry.value)
     }
@@ -209,6 +217,9 @@ mod tests {
             deleted: false,
             revision: 1,
             sequence,
+            reply: None,
+            reactions: vec![],
+            pinned: false,
         }
     }
 

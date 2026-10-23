@@ -84,7 +84,7 @@ impl Subscription {
                     },
                     event = receive(&mut socket) => {
                         match event? {
-                            Some(ServerEvent::Mention { message }) => { sender.try_send(message).map_err(|_| Error::message("Bot handler fell behind; subscription closed"))?; },
+                            Some(ServerEvent::Mention { message }) => { sender.try_send(*message).map_err(|_| Error::message("Bot handler fell behind; subscription closed"))?; },
                             Some(ServerEvent::Pong {}) => {},
                             Some(ServerEvent::Revoked {}) => return Err(Error::message("Bot subscription access was revoked")),
                             Some(ServerEvent::Error { error }) => return Err(Error::api(error)),
@@ -186,7 +186,9 @@ mod tests {
                     })).unwrap();
                     let frame = ServerFrame {
                         version: SOCKET_VERSION,
-                        event: ServerEvent::Mention { message },
+                        event: ServerEvent::Mention {
+                            message: Box::new(message),
+                        },
                     };
                     socket
                         .send(tungstenite::Message::Text(

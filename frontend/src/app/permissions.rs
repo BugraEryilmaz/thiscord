@@ -1,5 +1,8 @@
+#[path = "organization.rs"]
+mod organization;
 use super::{Field, Ui};
 use leptos::prelude::*;
+pub(super) use organization::{InvitesPanel, OrganizationPanel};
 use thiscord_shared::{
     AccountId, InstanceRoleId,
     pagination::{Page, PageRequest},
@@ -97,7 +100,11 @@ impl Editor {
                 Ok(response) => {
                     self.ui.status.set(String::new());
                     match response {
-                        PermissionResponse::Moderation { .. } => {}
+                        PermissionResponse::Moderation { .. }
+                        | PermissionResponse::Invites { .. }
+                        | PermissionResponse::InviteCreated { .. }
+                        | PermissionResponse::Organization { .. }
+                        | PermissionResponse::AuditLog { .. } => {}
                         PermissionResponse::Joined { .. } | PermissionResponse::Home { .. } => {}
                         PermissionResponse::Instance { access } => {
                             self.instance_members.set(None);

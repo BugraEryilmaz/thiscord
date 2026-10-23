@@ -104,8 +104,8 @@ transfer or delete each owned guild before account deletion or leaving a guild.
 Each guild has exactly one owner who is also a member. Ownership transfer requires
 recent reauthentication and an existing verified member. The former owner keeps
 their ordinary membership and previously assigned roles, losing the owner bypass.
-For now, a member with ManageInvites adds an existing verified username directly;
-invite links and acceptance workflows remain separate roadmap work.
+A member with ManageInvites may add an existing verified username directly or
+create a shareable invite with a bounded lifetime and use count (see below).
 
 The main screen has a left server rail with initials avatars and immediate server
 names on hover or keyboard focus, with accessible labels. Select a server to see
@@ -240,12 +240,11 @@ Voice signaling checks current sessions, membership, ViewChannel and JoinVoice.
 SFU routing also enforces Speak and self mute/deafen. Publisher/receiver writes
 use separate atomic media permits and check their generation; access-changing
 workers drain admitted media writes and commits pause media until sessions revalidate; revoked sessions are evicted. See [audio.md](audio.md). Moderator voice
-disconnects now enforce the target hierarchy; mute/deafen/move remain pending.
+disconnects, server mute/deafen and moves enforce the target hierarchy.
 
 EditOwnMessages/DeleteOwnMessages additionally require message authorship;
-ManageMessages permits moderation. MoveMembers will require access to both source
-and destination channels. Mute/deafen/move/kick/ban must enforce target hierarchy.
-These object-specific rules must be tested when those handlers are introduced.
+ManageMessages permits moderation. MoveMembers requires the actor and target to have ViewChannel and JoinVoice in
+both source and destination channels. Mute/deafen/move/kick/ban enforce target hierarchy.
 
 ## Storage and tests
 
@@ -316,3 +315,96 @@ moderators without ManageRoles, stale requests, timeout bounds/expiry/removal an
 rejoin persistence, chat restrictions, both banned join paths, unban, socket expiry,
 and live voice/screen removal with unaffected participants and explicit rejoining.
 Three-platform interactive moderation acceptance remains a manual check.
+
+
+## Invite links and channel organization
+
+**Server settings > Invite links** requires ManageInvites. Create an invitation
+lasting 1 minute to 28 days with 1–500 uses (the UI offers 1 hour, 1 day, 7 days,
+and 28 days). At most 100 active invitations exist per guild; creating one removes
+expired, spent and revoked records. List/revoke requests never return the code.
+The cryptographically random 256-bit code is returned once on creation; only its
+SHA-256 hash is persisted. Creation and revocation submit the viewed guild revision.
+
+Links use the configured API origin and `/invite#CODE`. The fragment is not sent
+in HTTP requests or server access logs. `/invite` is a static, script-free landing
+page explaining how to sign in, verify email, choose **Join a server**, and paste
+the complete link or code. It sets no-referrer and no-store. No DNS/deployment or
+custom desktop URL registration is assumed. Clients reject links from another
+installation; codes are accepted for the current configured installation. Browser
+preview can also paste/redeem after login. Treat the link as a bearer capability.
+
+Redemption bypasses the guild password, but requires a verified session and no
+guild ban. It preserves existing timeouts and moderator voice restrictions, even
+across leave/rejoin. The current owner's member quota, code expiry/revocation,
+use increment and membership insertion are checked in one guild-locked transaction,
+under the shared instance lock. Concurrent claims cannot overspend the last use or
+last member slot. An existing member does not spend another use. Join-by-ID and
+invite redemption share the existing per-account attempt limiter. Neither endpoint
+logs invitation bodies or codes.
+
+**Server settings > Channel organization** requires ManageChannels independently
+of ManageRoles. Create, rename, delete and order text/voice channels, create/edit/
+delete categories, and select a category or **No category** for each channel.
+Order is an integer 0–10000, ascending with UUID ties; the sidebar groups categories
+in that order, places uncategorized channels first and keeps personal pins within
+their group. There are at most 50 categories per guild. Category deletion confirms
+that children are uncategorized; channel deletion separately confirms permanent
+message deletion. Every write checks the current permission and guild revision.
+
+Categories are **organizational only**. They do not grant, inherit, synchronize or
+override permissions. Moving, renaming or reordering a channel preserves its UUID,
+messages and channel overrides. The normal viewer receives only visible channels
+and categories containing at least one visible channel. Channel managers can see
+all channel/category names in the organization editor, but receive no role/member
+override configuration through that endpoint.
+
+## Moderator voice controls and audit history
+
+**Moderation** includes server mute (MuteMembers), server deafen (DeafenMembers)
+and move (MoveMembers), each restricted to lower-ranked members. Server mute
+blocks all media publication, including screen/system audio/camera to prevent a
+publication bypass; reception remains available. Server deafen blocks both
+publication and reception. Persistent server flags are separate from self flags:
+a client cannot clear a server restriction, and a moderator release does not clear
+self mute/deafen or restart stopped shares. A persistent monotonic publication
+revision records each server mute/deafen edge, including ownership-transfer
+releases. SFU refresh and native capture consume that revision even when both
+restriction and release commit before they observe a roster. Existing screen and
+camera sessions are retired; release allows only an explicit new start. Native
+microphone admission and playback also consume server restrictions independently
+of saved self controls. Media generations fence both ingress
+and queued egress across the commit. Sidebar and overlay use the combined flags.
+Ownership transfer releases any prior server mute/deafen on the new owner and
+audits those releases, since no member may moderate the owner.
+
+Move requires a currently connected source, an available destination slot, and
+current actor/target access to both channels. It increments the target's voice
+revision, fences the old transport, and sends its authenticated client a destination
+notification. The desktop closes old media, stops screen/camera capture and releases
+PTT, then reconnects with the existing self settings and fresh destination checks.
+A listen-only source stays listen-only after an automatic move; leave and join
+explicitly to enable newly granted microphone access. It does not start a
+disconnected user's devices. Admission is checked again on
+reconnect: a concurrent full room, removal, timeout, or permission loss can leave
+the user disconnected. Old clients disconnect safely when receiving the new event;
+update the desktop to support automatic moves. A lost signaling connection may
+also require an explicit rejoin; no move ticket survives independently of the old
+connection's exact revision. This shares the existing single-backend-process limit.
+
+The reason-bearing `moderate` request wraps the existing `GuildChange` and adds an
+optional reason of at most 500 characters. Existing `change` requests remain valid
+and record an empty reason. The panel and kick/ban/disconnect context-menu
+confirmations expose a reason field. Timeout, timeout removal, kick, ban, unban,
+disconnect, mute/deafen and move write a durable audit row in the same transaction
+as the action. Failed/stale actions write no row. Audit logs retain the latest 1000
+successful actions per guild. Moderator or ManageGuild permission is required for
+every keyset-paginated read (50 by default, 100 maximum). The moderation panel shows
+actor/target IDs, timestamp, action, reason and command details, with pagination.
+Account deletion nulls identity references; guild deletion removes its audit log.
+
+Migration `20261023130000_guild_organization` adds these records and fields.
+Rollback removes invites, audit history, categories, order and server voice flags;
+channels, messages and existing timeout/ban records remain. Schema generation and
+migration rollback/reapply were exercised against an isolated test schema, never
+the live database. Physical three-platform audio/move acceptance remains manual.

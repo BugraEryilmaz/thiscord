@@ -16,8 +16,15 @@ fn final_handle_drop_requests_shutdown() {
     let (cancel, cancelled) = watch::channel(false);
     let (_, status) = watch::channel(PlaybackEvent::Idle);
     let (_, closed) = watch::channel(false);
+    let (_, publication) = watch::channel(Publication {
+        generation: 0,
+        restricted: false,
+    });
     let voice = Voice(Arc::new(Inner {
         commands,
+        publication,
+        #[cfg(target_os = "linux")]
+        hold_commands: Arc::new(std::sync::atomic::AtomicU8::new(0)),
         cancel,
         status,
         closed,
@@ -37,6 +44,7 @@ fn roster_restriction_checks_current_own_slot() {
         "slot":2,"muted":true,"deafened":true,"can_speak":true
     }))
     .unwrap();
+    assert_eq!(member.publication_revision, 0);
     assert!(own(&[member.clone()], 2).is_ok());
     assert!(own(&[member.clone()], 1).is_err());
     member.can_speak = false;

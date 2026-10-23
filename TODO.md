@@ -19,7 +19,11 @@ media compatibility spike can happen before chat to expose platform constraints.
 - [x] Private voice invitations, acceptance, decline/hang-up, native audio reuse and media revocation.
 - [x] PostgreSQL/socket and loopback WebRTC tests for private access and lifecycle.
 - [ ] Validate physical private calls and incoming-call controls on Windows/macOS/Linux.
-- [ ] DM unread badges, typing, edit/delete and blocking/reporting.
+- [x] DM unread badges, expiring typing, revision-checked edit/delete and tombstone-safe retries.
+- [x] Private attachment upload/view/download with ownership/consent checks, bounded storage and cleanup.
+- [x] Persistent blocking/unblocking, private access revocation and explicit new friendship consent.
+- [x] User/message reporting, scoped immutable evidence, instance/channel review and revision-checked resolution.
+- [ ] Validate private attachment codecs/downloads and safety UI interactively on Windows/macOS/Linux.
 
 ## Notifications
 
@@ -119,11 +123,11 @@ and single-process chat/media enforcement.
 - [x] Create/edit/delete guild HTTP commands, list memberships, join by ID/password and leave.
 - [x] Joined-server rail with circular initials avatars, names on hover, create/join dialogs.
 - [ ] Custom server images and password-change settings UI.
-- [ ] Invite links with expiry/use limits, revocation and join validation.
+- [x] Invite links with expiry/use limits, revocation and join validation.
 - [x] Ownership transfer, kick/ban/unban and per-server moderation controls.
 - [x] Timeouts with expiry/removal, chat/voice enforcement and join-bypass protection.
-- [ ] Administrative audit events and moderation reasons.
-- [ ] Create/edit/delete/reorder text and voice channels and categories.
+- [x] Guild moderation audit events and reasons (1000-row retention, authorized keyset history).
+- [x] Create/edit/delete/reorder text and voice channels and organizational categories.
 - [ ] Guild navigation, channel/member lists and settings views.
 - [ ] Cascade/archive behavior and confirmation UX for destructive operations.
 - [ ] Transaction and authorization tests for management operations.
@@ -145,7 +149,10 @@ and single-process chat/media enforcement.
 - [x] Reconnect, duplicate delivery, channel isolation and channel deletion tests.
 - [x] Access-controlled text-channel attachments, drag/drop and file picker, image/video viewer and downloads.
 - [ ] Verify attachment drag/drop, downloads and media codec playback interactively on Windows/macOS/Linux clients.
-- [ ] Later: message search and configurable attachment storage quotas.
+- [x] Guild replies, emoji reactions, safe Markdown/code blocks and moderator message pins.
+- [x] Authorized guild/private search with filters, keyset pages and original/context navigation.
+- [x] Integrate private search with DM deletion/blocking and pair_access; validate combined block/unblock, renewed consent, deletion and revocation behavior (docs/search.md).
+- [ ] Later: configurable attachment storage quotas.
 
 ## 5. Frontend audio and media feasibility
 
@@ -341,7 +348,8 @@ speaker isolation and physical acoustic acceptance remain future work.
   transient network/ICE/signaling failures
   reconnect with bounded backoff, fresh authorization and cancellable media leases.
 - [x] Moderator voice disconnect with hierarchy enforcement and targeted transport revocation.
-- [ ] Moderator mute/deafen/move-to-channel controls with hierarchy enforcement.
+- [x] Moderator mute/deafen/move-to-channel controls with hierarchy enforcement.
+- [ ] Physical Windows/macOS/Linux acceptance of moderator moves, capture shutdown and self-state preservation.
 - [x] Desktop voice overlay with participant roster, speaking activity and focus visibility.
 - [x] Customizable global mute/deafen shortcuts and clickable self controls on overlay hover.
 - [x] Compact connection-quality UI with local failure attribution and unavailable values.

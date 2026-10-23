@@ -1,7 +1,7 @@
 //! Native microphone timing and bounded transport admission. Never sent over IPC.
 use super::{connection::Connection, frames, mixer::RATE};
 use std::{
-    sync::atomic::{AtomicBool, AtomicU64, Ordering},
+    sync::atomic::{AtomicBool, AtomicU8, AtomicU64, Ordering},
     time::{Duration, Instant},
 };
 
@@ -53,6 +53,7 @@ pub enum DropReason {
 /// One atomic cutoff is both an invalidation generation and a capture-time fence.
 /// A worker cannot stamp pre-mute PCM with a fresh generation after unmuting.
 pub struct Control {
+    server_restrictions: AtomicU8,
     receive_protected: AtomicBool,
     receive_paused: AtomicBool,
     receive_generation: AtomicU64,
@@ -71,6 +72,7 @@ impl Default for Control {
 impl Control {
     fn new(origin: Instant) -> Self {
         Self {
+            server_restrictions: AtomicU8::new(0),
             receive_protected: AtomicBool::new(false),
             receive_paused: AtomicBool::new(true),
             receive_generation: AtomicU64::new(0),
@@ -81,6 +83,24 @@ impl Control {
             expired: AtomicU64::new(0),
             invalidated: AtomicU64::new(0),
         }
+    }
+    /// Independent of self preferences; releasing moderation cannot unmute the user.
+    pub fn server_restrictions(&self, muted: bool, deafened: bool, boundary: bool) {
+        let next = u8::from(muted) | (u8::from(deafened) << 1);
+        let previous = self.server_restrictions.load(Ordering::Acquire);
+        if previous != next || boundary {
+            // Tighten first; release only after queued/captured work is fenced.
+            self.server_restrictions
+                .store(previous | next, Ordering::Release);
+            self.invalidate();
+            self.server_restrictions.store(next, Ordering::Release);
+        }
+    }
+    pub fn publish_allowed(&self) -> bool {
+        self.server_restrictions.load(Ordering::Acquire) == 0
+    }
+    pub fn server_deafened(&self) -> bool {
+        self.server_restrictions.load(Ordering::Acquire) & 2 != 0
     }
     pub fn enable_receive_protection(&self) {
         self.receive_protected.store(true, Ordering::Release);
@@ -100,9 +120,10 @@ impl Control {
         generation == self.generation()
     }
     pub fn receive_allowed(&self) -> bool {
-        !self.receive_protected.load(Ordering::Acquire)
-            || (!self.receive_paused.load(Ordering::Acquire)
-                && self.receive_generation.load(Ordering::Acquire) == self.generation())
+        !self.server_deafened()
+            && (!self.receive_protected.load(Ordering::Acquire)
+                || (!self.receive_paused.load(Ordering::Acquire)
+                    && self.receive_generation.load(Ordering::Acquire) == self.generation()))
     }
     pub fn invalidate(&self) {
         self.invalidate_at(Instant::now());
@@ -151,7 +172,8 @@ impl Control {
         connection: &Connection,
         now: Instant,
     ) -> Result<(), DropReason> {
-        if !connection.accepts(&frame.connection)
+        if !self.publish_allowed()
+            || !connection.accepts(&frame.connection)
             || !frame.delivery.active()
             || frame.generation != self.generation()
         {
@@ -305,6 +327,36 @@ impl RtpClock {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn moderation_blocks_fresh_capture_and_rejects_backlog_after_release() {
+        let control = Control::default();
+        let connection = Connection::default();
+        let old = frame(Instant::now(), control.generation(), &connection, 0);
+        control.server_restrictions(true, false, true);
+        let restricted = frame(Instant::now(), control.generation(), &connection, 960);
+        assert!(!control.publish_allowed());
+        assert_eq!(
+            control.check(&restricted, &connection, Instant::now()),
+            Err(DropReason::ControlInvalidated)
+        );
+        control.server_restrictions(false, true, true);
+        control.disable_receive_protection();
+        assert!(
+            !control.receive_allowed(),
+            "server deafen also fences legacy playback"
+        );
+        control.server_restrictions(false, false, true);
+        assert!(control.publish_allowed());
+        for packet in [old, restricted] {
+            assert_eq!(
+                control.check(&packet, &connection, Instant::now()),
+                Err(DropReason::ControlInvalidated)
+            );
+        }
+        let fresh = frame(Instant::now(), control.generation(), &connection, 1920);
+        assert!(control.check(&fresh, &connection, Instant::now()).is_ok());
+    }
 
     #[test]
     fn source_refresh_cannot_absorb_local_control_before_or_after_compare_exchange() {

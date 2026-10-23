@@ -77,7 +77,7 @@ pub(super) fn DownloadHost(chat: Chat) -> impl IntoView {
     }
 }
 
-struct Permit {
+pub(in crate::app) struct Permit {
     bytes: u64,
     active: bool,
 }
@@ -93,13 +93,13 @@ impl Permit {
                 "Preview capacity reached. Close another preview or scroll away, then retry.".into()
             })
     }
-    async fn acquire(bytes: u64) -> Result<Self, String> {
+    pub(in crate::app) async fn acquire(bytes: u64) -> Result<Self, String> {
         while BUDGET.with_borrow(FetchBudget::slots_full) {
             gloo_timers::future::TimeoutFuture::new(50).await;
         }
         Self::new(bytes)
     }
-    fn finished(&mut self) {
+    pub(in crate::app) fn finished(&mut self) {
         if self.active {
             BUDGET.with_borrow_mut(FetchBudget::finished);
             self.active = false;
@@ -150,7 +150,7 @@ impl Drop for Transfer {
     }
 }
 
-async fn transfer(
+pub(in crate::app) async fn transfer(
     method: &str,
     path: &str,
     token: &str,

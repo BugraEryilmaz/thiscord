@@ -37,6 +37,9 @@ fn title(page: &str) -> &'static str {
         "updates" => crate::i18n::t("Updates"),
         "notifications" => crate::i18n::t("Notifications"),
         "administration" => crate::i18n::t("Instance access"),
+        "server_organization" => crate::i18n::t("Channel organization"),
+        "server_invites" => crate::i18n::t("Invite links"),
+        "safety" => crate::i18n::t("Safety & reports"),
         "server_roles" => crate::i18n::t("Roles"),
         "server_members" => crate::i18n::t("Members"),
         "server_channels" => crate::i18n::t("Channels & permissions"),
@@ -61,6 +64,7 @@ fn subtitle(page: &str) -> &'static str {
         "updates" => crate::i18n::t("Keep Thiscord up to date, on your schedule."),
         "notifications" => crate::i18n::t("Choose your sounds, banners and subscriptions."),
         "administration" => crate::i18n::t("Manage administrators for this Thiscord installation."),
+        "safety" => crate::i18n::t("Manage blocked accounts and review reports."),
         "server_roles" => crate::i18n::t("Give people the right access with clear, named roles."),
         "server_members" => crate::i18n::t("Invite members and manage their roles."),
         "server_channels" => {
@@ -144,6 +148,7 @@ pub(super) fn Host(ui: Ui) -> impl IntoView {
                             <Show when=client::desktop><NavItem ui=ui page="shortcuts" label="Shortcuts & overlay" icon=Glyph::Keyboard/><NavItem ui=ui page="desktop" label="App behavior" icon=Glyph::Screen/></Show>
                             <NavItem ui=ui page="updates" label="Updates" icon=Glyph::Refresh/>
                             <NavItem ui=ui page="notifications" label="Notifications" icon=Glyph::Volume/>
+                            <NavItem ui=ui page="safety" label="Safety & reports" icon=Glyph::Shield/>
                             <NavItem ui=ui page="administration" label="Instance access" icon=Glyph::Shield/>
                         </nav>
                         <button class="settings-signout" disabled=move ||ui.busy.get() || ui.settings_dirty.get() on:click=move |_|super::run(ui,AccountRequest::Logout)><Icon kind=Glyph::Join/>{move || crate::i18n::t("Sign out")}</button>
@@ -156,6 +161,8 @@ pub(super) fn Host(ui: Ui) -> impl IntoView {
                                 <NavItem ui=ui page="server_members" label="Members" icon=Glyph::Person/>
                                 <NavItem ui=ui page="server_channels" label="Channels & permissions" icon=Glyph::Volume/>
                             </Show>
+                            <Show when=move ||ui.server.get().is_some_and(|s|s.can_manage_channels)><NavItem ui=ui page="server_organization" label="Channel organization" icon=Glyph::Volume/></Show>
+                            <Show when=move ||ui.server.get().is_some_and(|s|s.can_manage_invites)><NavItem ui=ui page="server_invites" label="Invite links" icon=Glyph::Person/></Show>
                             <Show when=move ||ui.server.get().is_some_and(|s|s.can_moderate)><NavItem ui=ui page="moderation" label="Moderation" icon=Glyph::Shield/></Show>
                             <Show when=move ||ui.server.get().is_some_and(|s|ui.account.get().is_some_and(|a|s.guild.owner==a.id))><p class="settings-nav-label">{move || crate::i18n::t("Advanced")}</p><NavItem ui=ui page="server_danger" label="Ownership & deletion" icon=Glyph::Trash/></Show>
                         </nav>
@@ -175,9 +182,12 @@ pub(super) fn Host(ui: Ui) -> impl IntoView {
                         <Show when=move ||ui.page.get()=="shortcuts"><super::shortcuts::ShortcutSettings control=ui.audio_control on_dirty=Callback::new(move |dirty|ui.settings_dirty.set(dirty))/><crate::overlay::OverlaySettings control=ui.audio_control/></Show>
                         <Show when=move ||ui.page.get()=="desktop"><super::window::WindowSettings/></Show>
                         <Show when=move ||ui.page.get()=="updates"><super::updates::Panel ui=ui/></Show>
+                        <Show when=move ||ui.page.get()=="safety"><super::safety::Panel ui/></Show>
                         <Show when=move ||ui.page.get()=="administration"><super::permissions::InstanceSettings ui=ui/></Show>
-                        <Show when=move ||server_page(ui.page.get()) && ui.page.get()!="moderation"><super::permissions::PermissionEditor ui=ui/></Show>
+                        <Show when=move ||server_page(ui.page.get()) && !matches!(ui.page.get(),"moderation"|"server_organization"|"server_invites")><super::permissions::PermissionEditor ui=ui/></Show>
                         <Show when=move ||ui.page.get()=="moderation"><super::moderation::ModerationPanel ui=ui/></Show>
+                        <Show when=move ||ui.page.get()=="server_organization"><super::permissions::OrganizationPanel ui=ui/></Show>
+                        <Show when=move ||ui.page.get()=="server_invites"><super::permissions::InvitesPanel ui=ui/></Show>
                     </div>
                     <Show when=move ||!ui.status.get().is_empty()><p class="settings-feedback" role="status" aria-live="polite">{move ||crate::i18n::message(ui.status.get())}</p></Show>
                 </div>

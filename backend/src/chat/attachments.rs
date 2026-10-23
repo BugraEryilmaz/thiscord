@@ -245,13 +245,17 @@ struct Transfer {
 
 /// The deadline task can release the large buffer even when a blocked transport
 /// stops polling the body. Each emitted chunk owns only its bounded copy.
-struct DownloadStream {
+pub(crate) struct DownloadStream {
     transfer: Arc<Mutex<Option<Transfer>>>,
     deadline: tokio::task::AbortHandle,
     done: bool,
 }
 impl DownloadStream {
-    fn new(bytes: Vec<u8>, permit: Arc<OwnedSemaphorePermit>, timeout: Duration) -> Self {
+    pub(crate) fn new(
+        bytes: Vec<u8>,
+        permit: Arc<OwnedSemaphorePermit>,
+        timeout: Duration,
+    ) -> Self {
         let transfer = Arc::new(Mutex::new(Some(Transfer {
             bytes,
             position: 0,
@@ -309,7 +313,7 @@ impl Drop for DownloadStream {
     }
 }
 
-fn disposition(filename: &str) -> String {
+pub(crate) fn disposition(filename: &str) -> String {
     use std::fmt::Write;
     let mut value = String::from("attachment; filename=\"download\"; filename*=UTF-8''");
     for byte in filename.bytes() {
@@ -318,7 +322,7 @@ fn disposition(filename: &str) -> String {
     value
 }
 
-fn classify(bytes: &[u8]) -> &'static str {
+pub(crate) fn classify(bytes: &[u8]) -> &'static str {
     if bytes.starts_with(b"\x89PNG\r\n\x1a\n") {
         "image/png"
     } else if bytes.starts_with(b"\xff\xd8\xff") {
