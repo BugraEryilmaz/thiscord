@@ -8,6 +8,7 @@ use gloo_net::websocket::{Message, futures::WebSocket};
 use leptos::prelude::*;
 use std::collections::HashSet;
 use thiscord_frontend::chat_history::{Anchor, Merge, MessageCache};
+use thiscord_frontend::rich_chat::{RichChat, SnapshotStatus};
 use thiscord_shared::{
     ChannelId, ClientMessageId, GuildId, MessageId,
     chat::*,
@@ -52,7 +53,7 @@ pub(super) struct Chat {
     typing: RwSignal<bool>,
     last_read: RwSignal<i64>,
     reply_to: RwSignal<Option<MessageId>>,
-    rich_updates: RwSignal<Vec<ChatMessage>>,
+    rich: RwSignal<RichChat>,
     highlight: RwSignal<Option<MessageId>>,
 }
 impl Chat {
@@ -138,7 +139,19 @@ impl Chat {
         }
     }
     fn merge_batch(self, messages: Vec<ChatMessage>, mode: Merge) {
+        self.apply_batch(messages, mode, false);
+    }
+    fn apply_batch(self, messages: Vec<ChatMessage>, mode: Merge, replace: bool) {
         let _timing = crate::performance::start(1);
+        let messages = self
+            .rich
+            .try_update(|rich| {
+                rich.reconcile(messages, |id| {
+                    self.messages
+                        .with_untracked(|cache| cache.get(id).map(|m| m.get_untracked()))
+                })
+            })
+            .expect("live chat state");
         // Capture the visual anchor before changing heights/order. All work in a
         // history page shares one cache mutation and one deferred scroll pass.
         self.scroll();
@@ -150,18 +163,25 @@ impl Chat {
                 attachments::revoke_message(self, message.id);
             }
         }
-        self.rich_updates.set(messages.clone());
         let delivered: HashSet<_> = messages.iter().map(|m| m.client_id).collect();
         self.pending
             .update(|p| p.retain(|p| !delivered.contains(&p.id)));
         self.messages.update(|cache| {
+            if replace {
+                *cache = MessageCache::default();
+                // A context window must never acknowledge the live edge as read.
+                cache.newer = true;
+            }
+            cache.merge(messages.clone(), mode, ArcRwSignal::new, |row, message| {
+                row.set(message)
+            });
             for row in cache.values() {
                 let update = row.with_untracked(|current| {
                     current.reply.as_ref().and_then(|reply| {
-                        messages.iter().find(|m| m.id == reply.id).map(|target| {
-                            (!target.deleted)
-                                .then(|| target.content.chars().take(160).collect::<String>())
-                        })
+                        messages
+                            .iter()
+                            .find(|m| m.id == reply.id)
+                            .map(thiscord_frontend::rich_chat::preview)
                     })
                 });
                 if let Some(preview) = update {
@@ -172,9 +192,6 @@ impl Chat {
                     });
                 }
             }
-            cache.merge(messages, mode, ArcRwSignal::new, |row, message| {
-                row.set(message)
-            })
         });
     }
     fn merge(self, message: ChatMessage) {
@@ -187,7 +204,7 @@ impl Chat {
         );
     }
     fn reset(self) {
-        self.rich_updates.set(vec![]);
+        self.rich.update(RichChat::reset);
         self.reply_to.set(None);
         self.highlight.set(None);
         attachments::clear_downloads(self);
@@ -207,6 +224,7 @@ impl Chat {
             self.history_generation
                 .update(|generation| *generation += 1);
             self.history_loading.set(false);
+            self.rich.update(RichChat::cancel_context);
         }
         self.bottom.set(true);
         if self.messages.with_untracked(|m| m.newer) {
@@ -802,7 +820,7 @@ pub(super) fn ChatPanel(ui: Ui, guild: GuildId, channel: ChannelId, name: String
         typing: RwSignal::new(false),
         last_read: RwSignal::new(0),
         reply_to: RwSignal::new(None),
-        rich_updates: RwSignal::new(vec![]),
+        rich: RwSignal::new(RichChat::default()),
         highlight: RwSignal::new(None),
     };
     let draft = RwSignal::new(String::new());
@@ -813,6 +831,7 @@ pub(super) fn ChatPanel(ui: Ui, guild: GuildId, channel: ChannelId, name: String
     Effect::new(move |_| {
         ui.token.track();
         chat.access_generation.update(|g| *g += 1);
+        chat.rich.update(RichChat::reset);
         attachments::clear_downloads(chat);
         chat.attachment_generation.update(|g| *g += 1);
     });

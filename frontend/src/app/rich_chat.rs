@@ -15,6 +15,10 @@ impl Chat {
         });
     }
     pub(super) fn jump(self, id: MessageId) {
+        // Cached jumps supersede pending context/older requests too.
+        self.history_generation.update(|g| *g += 1);
+        self.history_loading.set(false);
+        self.rich.update(RichChat::cancel_context);
         self.highlight.set(Some(id));
         self.bottom.set(false);
         if self.messages.with_untracked(|m| m.get(id).is_some()) {
@@ -23,9 +27,12 @@ impl Chat {
             self.scroll();
             return;
         }
-        self.history_generation.update(|g| *g += 1);
         let generation = self.history_generation.get_untracked();
         let access = self.access_generation.get_untracked();
+        let ticket = self
+            .rich
+            .try_update(RichChat::begin_context)
+            .expect("live chat state");
         self.history_loading.set(true);
         leptos::task::spawn_local(async move {
             let result = self
@@ -42,10 +49,20 @@ impl Chat {
                 return;
             }
             self.history_loading.set(false);
+            let snapshot = self.rich.try_update(|rich| rich.finish_context(ticket));
+            if snapshot == Some(SnapshotStatus::Cancelled) {
+                return;
+            }
             match result {
                 Ok(ChatResponse::History { history }) => {
-                    self.messages.set(MessageCache::default());
-                    self.merge_batch(history.messages, Merge::Older);
+                    if snapshot == Some(SnapshotStatus::Overflow) {
+                        self.jump(id);
+                        return;
+                    }
+                    // Reconcile against both resident rows and updates received
+                    // outside the window BEFORE replacing the old cache.
+                    self.bottom.set(false);
+                    self.apply_batch(history.messages, Merge::Older, true);
                     self.messages.update(|m| {
                         m.older = history.older;
                         m.newer = true;
@@ -56,6 +73,45 @@ impl Chat {
                 }
                 Err(error) => self.status.set(error),
                 _ => {}
+            }
+        });
+    }
+
+    fn load_pins(self) {
+        let ticket = self
+            .rich
+            .try_update(RichChat::begin_pins)
+            .expect("live chat state");
+        let generation = self.access_generation.get_untracked();
+        leptos::task::spawn_local(async move {
+            let result = self
+                .request(&ChatRequest::Pins {
+                    guild_id: self.guild,
+                    channel_id: self.channel,
+                })
+                .await;
+            if !self.alive() || self.access_generation.get_untracked() != generation {
+                return;
+            }
+            match result {
+                Ok(ChatResponse::Pins { messages }) => {
+                    let status = self.rich.try_update(|rich| {
+                        rich.finish_pins(ticket, messages, |id| {
+                            self.messages
+                                .with_untracked(|cache| cache.get(id).map(|m| m.get_untracked()))
+                        })
+                    });
+                    if status == Some(SnapshotStatus::Overflow) {
+                        self.load_pins();
+                    }
+                }
+                result => {
+                    if self.rich.try_update(|rich| rich.cancel_pins(ticket)) == Some(true)
+                        && let Err(error) = result
+                    {
+                        self.status.set(error);
+                    }
+                }
             }
         });
     }
@@ -95,47 +151,15 @@ pub(super) fn Actions(chat: Chat, message: RwSignal<ChatMessage>) -> impl IntoVi
 }
 #[component]
 pub(super) fn Pins(chat: Chat) -> impl IntoView {
-    let open = RwSignal::new(false);
-    let pins = RwSignal::new(Vec::<ChatMessage>::new());
-    let loading = RwSignal::new(false);
     Effect::new(move |_| {
         chat.access_generation.track();
-        open.set(false);
-        pins.set(vec![]);
-        loading.set(false);
+        chat.rich.update(RichChat::close_pins);
     });
-    Effect::new(move |_| {
-        let changes = chat.rich_updates.get();
-        if !open.get_untracked() {
-            return;
-        }
-        pins.update(|pins| {
-            for change in changes {
-                if let Some(index) = pins.iter().position(|m| m.id == change.id) {
-                    if change.revision <= pins[index].revision {
-                        continue;
-                    }
-                    if !change.pinned || change.deleted {
-                        pins.remove(index);
-                    } else {
-                        pins[index] = change;
-                    }
-                } else if change.pinned && !change.deleted && pins.len() < MAX_CHANNEL_PINS {
-                    pins.push(change);
-                }
-            }
-        });
-    });
-    view! {<button class="mr-4 text-sm text-sky-300 underline" disabled=move ||loading.get() on:click=move |_|{
-        if open.get_untracked(){open.set(false);return;}
-        loading.set(true);let generation=chat.access_generation.get_untracked();
-        leptos::task::spawn_local(async move{
-            let result=chat.request(&ChatRequest::Pins{guild_id:chat.guild,channel_id:chat.channel}).await;
-            if !chat.alive() || chat.access_generation.get_untracked()!=generation{return;}
-            loading.set(false);match result{Ok(ChatResponse::Pins{messages})=>{pins.set(messages);open.set(true);},Err(e)=>chat.status.set(e),_=>{}}
-        });
+    view! {<button class="mr-4 text-sm text-sky-300 underline" disabled=move ||chat.rich.with(RichChat::pins_loading) on:click=move |_|{
+        if chat.rich.with_untracked(RichChat::pins_open){chat.rich.update(RichChat::close_pins);return;}
+        chat.load_pins();
     }>{move ||crate::i18n::t("Pinned messages")}</button>
-    <Show when=move ||open.get()><div class="max-h-64 overflow-auto border-y border-white/10 p-2"><p>{move ||crate::i18n::t("Pinned messages (up to 50)")}</p><Show when=move ||pins.with(|p|p.is_empty())><p>{move ||crate::i18n::t("No pinned messages")}</p></Show>
-        <For each=move ||pins.get() key=|m|(m.id,m.revision) children=move |m|view!{<button class="block w-full truncate p-2 text-left text-sm hover:bg-white/10" on:click=move |_|{open.set(false);chat.jump(m.id);}>{format!("{}: {}",m.display_name(),m.content.chars().take(160).collect::<String>())}</button>}/>
+    <Show when=move ||chat.rich.with(RichChat::pins_open)><div class="max-h-64 overflow-auto border-y border-white/10 p-2"><p>{move ||crate::i18n::t("Pinned messages (up to 50)")}</p><Show when=move ||chat.rich.with(|r|r.pins().is_empty())><p>{move ||crate::i18n::t("No pinned messages")}</p></Show>
+        <For each=move ||chat.rich.with(|r|r.pins().to_vec()) key=|m|(m.id,m.revision) children=move |m|view!{<button class="block w-full truncate p-2 text-left text-sm hover:bg-white/10" on:click=move |_|{chat.rich.update(RichChat::close_pins);chat.jump(m.id);}>{format!("{}: {}",m.display_name(),m.content.chars().take(160).collect::<String>())}</button>}/>
     </div></Show>}
 }
