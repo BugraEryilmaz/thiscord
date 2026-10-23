@@ -62,8 +62,12 @@ impl Chat {
         self.ui.chat_epoch.try_get_untracked() == Some(self.epoch)
     }
     async fn request(self, command: &ChatRequest) -> Result<ChatResponse, String> {
+        let ticket = self
+            .rich
+            .try_update(RichChat::begin_response)
+            .ok_or("Chat closed")?;
         let token = self.ui.token.get_untracked();
-        match futures_util::future::select(
+        let result = match futures_util::future::select(
             Box::pin(crate::account_client::api_request(
                 CHAT_PATH,
                 command,
@@ -75,7 +79,23 @@ impl Chat {
         {
             futures_util::future::Either::Left((result, _)) => result,
             _ => Err("Request timed out; retry safely with the same message ID".into()),
+        };
+        // All send/edit/delete/pin/reaction responses pass through here. Never
+        // replay a mutation on overflow: it may already have committed. History,
+        // context and pins use their own tokens so safe reads can be retried.
+        if matches!(&result, Ok(ChatResponse::Message { .. })) {
+            match self
+                .rich
+                .try_with_untracked(|rich| rich.response_status(ticket))
+            {
+                Some(SnapshotStatus::Ready) => {}
+                Some(SnapshotStatus::Overflow) => {
+                    return Err("Chat changed while the request was pending. It may have succeeded; reload the message before trying again".into());
+                }
+                _ => return Err("Chat reconnected; reload the message to check the result".into()),
+            }
         }
+        result
     }
     fn scroll(self) {
         if self.layout_pending.get_untracked() {
@@ -178,7 +198,14 @@ impl Chat {
             });
             for row in cache.values() {
                 let update = row.with_untracked(|current| {
+                    // Equal message revisions can carry a fresher reply preview.
+                    // MessageCache intentionally updates message bodies only on
+                    // revision advances, so apply the reconciled preview here.
+                    if let Some(message) = messages.iter().find(|m| m.id == current.id) {
+                        return message.reply.as_ref().map(|reply| reply.preview.clone());
+                    }
                     current.reply.as_ref().and_then(|reply| {
+                        reply.preview.as_ref()?;
                         messages
                             .iter()
                             .find(|m| m.id == reply.id)
@@ -246,6 +273,10 @@ impl Chat {
             return;
         };
         let generation = self.history_generation.get_untracked();
+        let ticket = self
+            .rich
+            .try_update(RichChat::begin_response)
+            .expect("live chat state");
         self.history_loading.set(true);
         self.bottom.set(false);
         leptos::task::spawn_local(async move {
@@ -263,6 +294,17 @@ impl Chat {
             self.history_loading.set(false);
             match result {
                 Ok(ChatResponse::History { history }) => {
+                    match self
+                        .rich
+                        .with_untracked(|rich| rich.response_status(ticket))
+                    {
+                        SnapshotStatus::Ready => {}
+                        SnapshotStatus::Overflow => {
+                            self.load_older();
+                            return;
+                        }
+                        SnapshotStatus::Cancelled => return,
+                    }
                     self.bottom.set(false);
                     self.messages.update_untracked(|m| m.older = history.older);
                     self.merge_batch(history.messages, Merge::Older);
