@@ -35,9 +35,20 @@ struct Database {
 }
 impl Drop for Database {
     fn drop(&mut self) {
-        self.connection
-            .batch_execute(&format!("DROP SCHEMA {} CASCADE", self.schema))
-            .unwrap();
+        let statement = format!("DROP SCHEMA {} CASCADE", self.schema);
+        for attempt in 0..3 {
+            match self.connection.batch_execute(&statement) {
+                // Background session checks can outlive a socket and acquire
+                // table locks in a different order from DROP SCHEMA. PostgreSQL
+                // rolls back the failed DROP, allowing that query to finish.
+                Err(diesel::result::Error::DatabaseError(_, ref details))
+                    if details.message() == "deadlock detected" && attempt < 2 => {}
+                result => {
+                    result.unwrap();
+                    return;
+                }
+            }
+        }
     }
 }
 fn database() -> Database {
