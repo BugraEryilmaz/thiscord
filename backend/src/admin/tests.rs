@@ -259,7 +259,7 @@ async fn remote_audio_rechecks_instance_privileges_and_never_retargets_connectio
     crate::permissions::bootstrap_owner(&db.pool, "remote_owner").unwrap();
     let app = crate::api::router(Some(db.pool.clone()), vec![]);
     let connection = RequestId::from_uuid(Uuid::new_v4());
-    let (registration, mut requests) = super::audio::register(connection, false);
+    let (registration, mut requests) = super::audio::register(connection, false, false);
     let path = thiscord_shared::remote_audio::PATH;
     let request = json!({"connection_id":connection,"command":{"command":"audio_current"}});
     command(
@@ -280,6 +280,43 @@ async fn remote_audio_rechecks_instance_privileges_and_never_retargets_connectio
         StatusCode::BAD_REQUEST,
     )
     .await;
+    // Legacy desktops treat unknown commands as invalid voice events.
+    let video = json!({"connection_id":connection,"command":{"command":"video_diagnostics"}});
+    command(&app, &owner, path, video, StatusCode::BAD_REQUEST).await;
+    assert!(requests.try_recv().is_err());
+    let capable = RequestId::from_uuid(Uuid::new_v4());
+    let (_capable, mut video_requests) = super::audio::register(capable, false, true);
+    let video = json!({"connection_id":capable,"command":{"command":"video_diagnostics"}});
+    let response = {
+        let app = app.clone();
+        let owner = owner.clone();
+        tokio::spawn(async move {
+            app.oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri(path)
+                    .header("content-type", "application/json")
+                    .header("authorization", format!("Bearer {owner}"))
+                    .body(Body::from(video.to_string()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap()
+        })
+    };
+    let mut pending =
+        tokio::time::timeout(std::time::Duration::from_secs(5), video_requests.recv())
+            .await
+            .unwrap()
+            .unwrap();
+    assert!(matches!(
+        pending.command,
+        thiscord_shared::remote_audio::Command::VideoDiagnostics {}
+    ));
+    pending.chunk(r#"{"Ok":{"records":[]}}"#).unwrap();
+    pending.finish();
+    let value = assert_response(response.await.unwrap(), StatusCode::OK).await;
+    assert_eq!(value["Ok"]["records"], json!([]));
     command(
         &app,
         &owner,
@@ -345,6 +382,6 @@ async fn remote_audio_rechecks_instance_privileges_and_never_retargets_connectio
     assert_response(response.await.unwrap(), StatusCode::CONFLICT).await;
     assert!(!super::audio::available(connection));
     let (_replacement, _replacement_requests) =
-        super::audio::register(RequestId::from_uuid(Uuid::new_v4()), false);
+        super::audio::register(RequestId::from_uuid(Uuid::new_v4()), false, false);
     command(&app, &owner, path, request, StatusCode::CONFLICT).await;
 }

@@ -150,7 +150,8 @@ the display stops capture; it never falls back to another window/display.
   control. Publisher responses are consumed before the next available GPU input.
   SPS dimensions/reference counts remain bounded.
 - Presentation: compressed H.264 is forwarded to a **local WebRTC peer** bound
-  exclusively to `127.0.0.1`, with no STUN/TURN and no audio track. Rust/WASM
+  exclusively to `127.0.0.1` (diagnostic self-tests excepted, see below), with
+  no STUN/TURN and no audio track. Rust/WASM
   negotiates this peer using control-only Tauri commands, and attaches its
   MediaStream to a real HTML `video` element. There is no native H.264 decode,
   RGB/JPEG conversion, image protocol or frame polling. RTP payload numbers are
@@ -777,6 +778,34 @@ HDR/device references: [Microsoft Advanced Color](https://learn.microsoft.com/en
 [WGC compositor timestamps](https://learn.microsoft.com/en-us/uwp/api/windows.graphics.capture.direct3d11captureframe.systemrelativetime),
 [asynchronous MF events](https://learn.microsoft.com/en-us/windows/win32/api/mfobjects/nf-mfobjects-imfmediaeventgenerator-begingetevent),
 [WebRTC statistics](https://www.w3.org/TR/webrtc-stats/).
+
+### Local bridge records and self-tests
+
+Every player attempt (screens and cameras) records a bounded, content-free
+timeline on both sides of the loopback hop. The WebView records offer gathering,
+candidate/codec summaries, ICE/connection/signaling state changes, candidate errors
+without their addresses, video element events and whitelisted `getStats` fields.
+The desktop records its own ICE/connection states, setup errors, answer summary,
+first forwarded packet and receive counters. Both sides report connectivity-check
+counts per candidate pair, so a stalled player distinguishes "WebView sent checks
+but the desktop received none" from a dropped return path, a DTLS failure, no
+compatible candidates, or a connected bridge without decoded frames. Records keep
+classified addresses only and are retrievable through the admin dashboard
+([admin.md](admin.md#video-playback-diagnostics)); they are not written to disk.
+
+After an attempt times out or fails, the WebView runs a self-test at most once
+per ten minutes, taking about 30 seconds without visible UI or media: two
+WebView peers connecting to each other (data channel only), a video-free desktop
+peer on `127.0.0.1`, and the same desktop peer bound to the computer's non-loopback
+interface addresses. The interface peer exists only for this ICE/DTLS-authenticated
+test, carries no media and closes after ten seconds; viewers remain loopback-only.
+If loopback fails while interfaces connect, interface binding is a candidate fix.
+
+Chromium/WebView2 on Windows reaches `127.0.0.1` from a wildcard-bound host
+socket: in a local Edge 156 run the desktop saw a loopback source and Chromium
+selected a peer-reflexive local candidate. A socket bound to a specific LAN
+address cannot send to loopback on Windows (`WSAEADDRNOTAVAIL`), so a WebView
+build or policy that binds only interface addresses cannot use this bridge.
 
 ## October 22, 2026 crash and reconnect investigation
 

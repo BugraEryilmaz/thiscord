@@ -148,8 +148,12 @@ impl AudioControl {
         serde_json::from_value(value).map_err(|_| "Invalid desktop audio response".into())
     }
     pub async fn download(self) -> Result<(), String> {
-        use wasm_bindgen::JsCast;
         let value: Value = self.invoke("audio_diagnostics_download", json!({})).await?;
+        self.save_json("audio", &value).await
+    }
+    /// Saves a remote desktop's diagnostic reply as `thiscord-<kind>-<connection>.json`.
+    pub async fn save_json(self, kind: &str, value: &Value) -> Result<(), String> {
+        use wasm_bindgen::JsCast;
         let text =
             serde_json::to_string_pretty(&value).map_err(|_| "Cannot prepare diagnostics")?;
         let parts = js_sys::Array::new();
@@ -171,7 +175,7 @@ impl AudioControl {
                 .map_err(|_| "Cannot create download")?;
             link.set_href(&url);
             link.set_download(&format!(
-                "thiscord-audio-{}.json",
+                "thiscord-{kind}-{}.json",
                 self.remote.ok_or("Remote desktop required")?.connection
             ));
             let body = document.body().ok_or("Browser unavailable")?;

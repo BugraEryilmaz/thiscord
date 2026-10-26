@@ -66,6 +66,9 @@ pub enum ClientEvent {
         screen_subscriptions: bool,
         #[serde(default, skip_serializing_if = "is_false")]
         screen_layers: bool,
+        /// Accepts the read-only `video_diagnostics` admin command.
+        #[serde(default, skip_serializing_if = "is_false")]
+        video_diagnostics: bool,
     },
     State {
         muted: bool,
@@ -252,6 +255,9 @@ pub enum ServerEvent {
         screen_subscriptions: bool,
         #[serde(default, skip_serializing_if = "is_false")]
         screen_layers: bool,
+        /// Older desktops reject unknown admin commands as invalid voice events.
+        #[serde(default, skip_serializing_if = "is_false")]
+        video_diagnostics: bool,
         #[serde(default)]
         ice_servers: Vec<IceServer>,
         /// Secret capability bound to this media session; never persist or log it.

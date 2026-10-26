@@ -446,6 +446,7 @@ impl Peer {
                 screen_feedback: true,
                 screen_subscriptions: true,
                 screen_layers,
+                video_diagnostics: false,
                 sdp: serde_json::to_string(&pc.local_description().await.unwrap()).unwrap(),
             },
         )

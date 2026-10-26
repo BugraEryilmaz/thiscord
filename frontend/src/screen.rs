@@ -1,5 +1,6 @@
 //! Native H.264 video transport; independent of the real-time audio worker.
 pub mod adaptation;
+pub mod bridge;
 pub mod cadence;
 #[cfg(target_os = "windows")]
 pub mod capture;

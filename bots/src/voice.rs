@@ -331,6 +331,7 @@ async fn session(
             send(&mut socket, ClientEvent::Answer {
                 sdp, packet_redundancy: false, remote_audio: false,
                 screen_feedback: false, screen_subscriptions: screen_supported, screen_layers: false,
+                video_diagnostics: false,
             }).await?;
             loop {
                 match receive(&mut socket).await? {

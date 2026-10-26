@@ -1168,6 +1168,7 @@ async fn serve(mut socket: logging::Socket, pool: DbPool, id: RequestId) {
     let mut tracks = Vec::new();
     let mut screen_feedback = false;
     let mut remote_audio = false;
+    let mut video_diagnostics = false;
     let negotiation_started = Instant::now();
     let negotiated = async {
         tokio::time::timeout(Duration::from_secs(15), async {
@@ -1201,6 +1202,7 @@ async fn serve(mut socket: logging::Socket, pool: DbPool, id: RequestId) {
                     screen_feedback: true,
                     screen_subscriptions: true,
                     screen_layers: true,
+                    video_diagnostics: true,
                     ice_servers,
                     resume_token: Some(resume_token),
                 },
@@ -1219,6 +1221,7 @@ async fn serve(mut socket: logging::Socket, pool: DbPool, id: RequestId) {
                 screen_layers,
                 remote_audio: audio_enabled,
                 packet_redundancy,
+                video_diagnostics: video_enabled,
             }) = parse(answer)
             else {
                 return Err(());
@@ -1228,6 +1231,7 @@ async fn serve(mut socket: logging::Socket, pool: DbPool, id: RequestId) {
                 packet_redundancy && thiscord_shared::rtp_red::negotiated(&answer.sdp);
             screen_feedback = enabled;
             remote_audio = audio_enabled;
+            video_diagnostics = video_enabled;
             if answer.sdp_type != RTCSdpType::Answer {
                 return Err(());
             }
@@ -1464,7 +1468,8 @@ async fn serve(mut socket: logging::Socket, pool: DbPool, id: RequestId) {
             active: active.clone(),
         };
         let (_audio_registration, mut audio_requests) = if remote_audio {
-            let (guard, receiver) = crate::admin::audio::register(id, access.bot.is_some());
+            let (guard, receiver) =
+                crate::admin::audio::register(id, access.bot.is_some(), video_diagnostics);
             (Some(guard), receiver)
         } else {
             (None, mpsc::channel(1).1)

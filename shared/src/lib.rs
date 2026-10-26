@@ -21,6 +21,7 @@ pub mod safety;
 pub mod screen;
 pub mod search;
 pub mod validation;
+pub mod video_bridge;
 pub mod video_feedback;
 pub mod voice_bots;
 

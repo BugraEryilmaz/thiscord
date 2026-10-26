@@ -11,7 +11,11 @@ use tauri::{Manager, State};
 const VIEWER_LEASE: Duration = Duration::from_secs(3);
 use thiscord_frontend::{
     audio::connection::Connection,
-    screen::receive::{Inbox, MAX_AGE, Sender},
+    screen::{
+        bridge,
+        preview::{Bind, Preview},
+        receive::{Inbox, MAX_AGE, Sender},
+    },
 };
 use thiscord_shared::{
     AccountId,
@@ -95,7 +99,7 @@ struct Viewer {
     watch: Watch,
     touched: Instant,
     connection: Connection,
-    preview: Option<Arc<thiscord_frontend::screen::preview::Preview>>,
+    preview: Option<Arc<Preview>>,
 }
 impl Drop for Viewer {
     fn drop(&mut self) {
@@ -292,6 +296,45 @@ impl ScreenState {
         if let Ok(mut s) = self.0.lock() {
             s.server = counters;
         }
+    }
+    /// Live shares in the room and this desktop's viewer state for each.
+    pub fn stream_sections(&self) -> Vec<thiscord_shared::video_bridge::Section> {
+        let Ok(inner) = self.0.lock() else {
+            return vec![];
+        };
+        let mut sections = Vec::new();
+        for slot in 0..ROOM_CAPACITY {
+            let Some((_, epoch)) = inner.owners[slot] else {
+                continue;
+            };
+            let mut section = thiscord_shared::video_bridge::Section::default();
+            section.fact("kind", format!("{:?}", self.kind()));
+            section.fact("slot", slot);
+            section.fact("epoch", epoch);
+            section.fact(
+                "viewer",
+                match inner.viewers[slot].as_ref() {
+                    None => "none".to_owned(),
+                    Some(v) => format!(
+                        "lease {} ms old, preview {}",
+                        v.touched.elapsed().as_millis(),
+                        match &v.preview {
+                            None => "negotiating",
+                            Some(p) if p.connected.load(Ordering::Acquire) => "connected",
+                            Some(_) => "not connected",
+                        }
+                    ),
+                },
+            );
+            for (key, value) in stream_facts(&inner, slot) {
+                section.fact(key, value);
+            }
+            for (key, value) in &inner.network {
+                section.fact(format!("sfu_{key}"), value);
+            }
+            sections.push(section);
+        }
+        sections
     }
 
     pub fn bind(&self, binding: Binding) {
@@ -530,12 +573,19 @@ pub async fn screen_view_open(
     offer: ViewOffer,
 ) -> Result<ViewAnswer, String> {
     let state = video_state(&app, offer.watch.kind);
+    let watch = offer.watch;
+    let recorder = bridge::open(offer.attempt, record_kind(watch.kind));
+    recorder.fact("slot", watch.slot);
+    recorder.event("desktop received viewer offer");
+    let fail = |error: &str| {
+        recorder.fact(thiscord_frontend::video_bridge::ERROR, error);
+        error.to_owned()
+    };
     static NEGOTIATIONS: tokio::sync::Semaphore =
         tokio::sync::Semaphore::const_new(ROOM_CAPACITY * 2);
     let _permit = NEGOTIATIONS
         .try_acquire()
-        .map_err(|_| "Too many screen viewers connecting")?;
-    let watch = offer.watch;
+        .map_err(|_| fail("Too many screen viewers connecting"))?;
     let lease = Connection::default();
     {
         let mut inner = state.0.lock().map_err(|_| "Screen state unavailable")?;
@@ -545,7 +595,7 @@ pub async fn screen_view_open(
             .is_some_and(|b| b.connection.active())
             || inner.owners.get(watch.slot) != Some(&Some((watch.owner, watch.epoch)))
         {
-            return Err("Screen share is no longer available".into());
+            return Err(fail("Screen share is no longer available"));
         }
         if let Some(metrics) = &inner.receivers[watch.slot] {
             metrics.add("viewer_connections", 1);
@@ -570,45 +620,166 @@ pub async fn screen_view_open(
     }
     let result = tokio::time::timeout(
         Duration::from_secs(8),
-        thiscord_frontend::screen::preview::Preview::answer(&offer.sdp),
+        Preview::answer_with(&offer.sdp, Bind::Loopback, recorder.clone()),
     )
     .await;
     let (preview, sdp) = match result {
         Ok(Ok(answer)) => answer,
-        _ => {
+        Ok(Err(_)) => {
             state.watch(watch, false);
             return Err("Cannot connect the screen video player".into());
         }
+        Err(_) => {
+            state.watch(watch, false);
+            return Err(fail("Cannot connect the screen video player (timed out)"));
+        }
     };
+    let preview = Arc::new(preview);
+    bridge::attach(offer.attempt, &preview);
     let mut inner = state.0.lock().map_err(|_| "Screen state unavailable")?;
     let viewer = inner.viewers[watch.slot]
         .as_mut()
         .filter(|v| v.connection.accepts(&lease))
-        .ok_or("Screen viewer was closed")?;
-    viewer.preview = Some(Arc::new(preview));
+        .ok_or_else(|| fail("Screen viewer was closed"))?;
+    viewer.preview = Some(preview.clone());
     viewer.touched = Instant::now();
     if let Some(inbox) = &inner.inboxes[watch.slot] {
         inbox.restart_subscription();
     }
     let weak = Arc::downgrade(&state.0);
+    let sampled = Arc::downgrade(&preview);
     tauri::async_runtime::spawn(async move {
+        let started = Instant::now();
+        let mut ticks = 0u32;
         while lease.active() {
             tokio::time::sleep(Duration::from_millis(250)).await;
+            ticks += 1;
             let Some(state) = weak.upgrade() else {
                 break;
             };
-            let Ok(mut inner) = state.lock() else {
-                break;
+            // Dense samples while connecting, then a slow trickle for long views.
+            let interval = if started.elapsed() < Duration::from_secs(15) {
+                4
+            } else {
+                20
             };
-            if inner.viewers[watch.slot].as_ref().is_some_and(|v| {
-                v.connection.accepts(&lease) && v.touched.elapsed() >= VIEWER_LEASE
-            }) {
-                if let Some(metrics) = &inner.receivers[watch.slot] {
-                    metrics.add("viewer_expirations", 1);
-                    metrics.event("viewer heartbeat expired");
+            let stream = {
+                let Ok(mut inner) = state.lock() else {
+                    break;
+                };
+                if inner.viewers[watch.slot].as_ref().is_some_and(|v| {
+                    v.connection.accepts(&lease) && v.touched.elapsed() >= VIEWER_LEASE
+                }) {
+                    if let Some(metrics) = &inner.receivers[watch.slot] {
+                        metrics.add("viewer_expirations", 1);
+                        metrics.event("viewer heartbeat expired");
+                    }
+                    recorder.event("desktop viewer heartbeat expired");
+                    inner.viewers[watch.slot] = None;
                 }
-                inner.viewers[watch.slot] = None;
+                ticks
+                    .is_multiple_of(interval)
+                    .then(|| stream_facts(&inner, watch.slot))
+            };
+            if let Some(stream) = stream
+                && let Some(preview) = sampled.upgrade()
+            {
+                recorder.replace("stream.", stream);
+                preview.sample(&recorder).await;
             }
+        }
+        recorder.event("desktop viewer lease ended");
+    });
+    Ok(ViewAnswer { sdp })
+}
+
+fn record_kind(kind: thiscord_shared::voice::MediaKind) -> thiscord_shared::video_bridge::Kind {
+    if kind == thiscord_shared::voice::MediaKind::Camera {
+        thiscord_shared::video_bridge::Kind::Camera
+    } else {
+        thiscord_shared::video_bridge::Kind::Screen
+    }
+}
+
+/// Receive-side counters and SFU totals for one slot, under `stream.`.
+fn stream_facts(inner: &Inner, slot: usize) -> std::collections::BTreeMap<String, String> {
+    let mut facts = std::collections::BTreeMap::new();
+    if let Some(metrics) = &inner.receivers[slot] {
+        let snapshot = metrics.snapshot();
+        for name in [
+            "received_packets",
+            "received_frames",
+            "lost_packets",
+            "preview_frames",
+            "preview_errors",
+            "expired_frames",
+            "queue_resets",
+            "rejected_parameter_sets",
+        ] {
+            if let Some(value) = snapshot.counters.get(name) {
+                facts.insert(format!("stream.{name}"), value.to_string());
+            }
+        }
+    } else {
+        facts.insert("stream.receiver".into(), "none".into());
+    }
+    for (name, value) in &inner.server {
+        facts.insert(format!("stream.{name}"), value.to_string());
+    }
+    facts
+}
+
+/// The WebView pushes its half of each record; the desktop validates bounds.
+#[tauri::command]
+pub fn screen_bridge_report(update: thiscord_shared::video_bridge::Update) -> Result<(), String> {
+    update.validate()?;
+    bridge::update(update);
+    Ok(())
+}
+
+/// Short, video-free self-test peer, isolated from viewers and the SFU.
+#[tauri::command]
+pub async fn screen_bridge_probe(
+    offer: thiscord_shared::video_bridge::ProbeOffer,
+) -> Result<ViewAnswer, String> {
+    use thiscord_shared::video_bridge::Kind;
+    static PROBE: Mutex<Option<Arc<Preview>>> = Mutex::new(None);
+    static NEGOTIATING: tokio::sync::Semaphore = tokio::sync::Semaphore::const_new(1);
+    let _permit = NEGOTIATING
+        .try_acquire()
+        .map_err(|_| "A video self-test is already running")?;
+    let (kind, bind) = if offer.interfaces {
+        (Kind::InterfacesSelfTest, Bind::Interfaces)
+    } else {
+        (Kind::LoopbackSelfTest, Bind::Loopback)
+    };
+    // Only one probe peer exists at a time; a new test closes the previous one.
+    PROBE.lock().map_err(|_| "Self-test unavailable")?.take();
+    let recorder = bridge::open(offer.id, kind);
+    let (preview, sdp) = tokio::time::timeout(
+        Duration::from_secs(8),
+        Preview::answer_with(&offer.sdp, bind, recorder.clone()),
+    )
+    .await
+    .map_err(|_| "Self-test negotiation timed out")??;
+    let preview = Arc::new(preview);
+    bridge::attach(offer.id, &preview);
+    *PROBE.lock().map_err(|_| "Self-test unavailable")? = Some(preview.clone());
+    let probe = Arc::downgrade(&preview);
+    tauri::async_runtime::spawn(async move {
+        for _ in 0..10 {
+            tokio::time::sleep(Duration::from_secs(1)).await;
+            let Some(preview) = probe.upgrade() else {
+                return;
+            };
+            preview.sample(&recorder).await;
+        }
+        if let Ok(mut slot) = PROBE.lock()
+            && slot
+                .as_ref()
+                .is_some_and(|p| std::ptr::eq(Arc::as_ptr(p), probe.as_ptr()))
+        {
+            slot.take();
         }
     });
     Ok(ViewAnswer { sdp })

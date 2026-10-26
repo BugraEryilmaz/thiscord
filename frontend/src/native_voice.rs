@@ -744,6 +744,7 @@ async fn run(
         resume_token,
         remote_audio,
         packet_redundancy,
+        video_diagnostics,
     ) = match first.event {
         ServerEvent::Offer {
             packet_redundancy,
@@ -758,6 +759,7 @@ async fn run(
             screen_layers,
             resume_token,
             remote_audio,
+            video_diagnostics,
         } if first.version == VOICE_VERSION && slot < ROOM_CAPACITY => (
             sdp,
             slot,
@@ -771,6 +773,7 @@ async fn run(
             resume_token,
             remote_audio,
             packet_redundancy,
+            video_diagnostics,
         ),
         ServerEvent::Replaced {} => return Err(Failure::replaced()),
         ServerEvent::Error { error } => return Err(server_failure(&attempt.connection, error)),
@@ -942,6 +945,7 @@ async fn run(
             screen_feedback,
             screen_subscriptions,
             screen_layers,
+            video_diagnostics: remote_audio && video_diagnostics,
         },
         &attempt.connection,
     )

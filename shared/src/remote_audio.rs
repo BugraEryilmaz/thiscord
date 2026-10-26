@@ -45,6 +45,8 @@ pub enum Command {
         enabled: bool,
     },
     AudioDiagnosticsDownload {},
+    /// Read-only local video bridge report; sent only to desktops that opted in.
+    VideoDiagnostics {},
 }
 impl Command {
     pub fn validate(&self) -> Result<(), &'static str> {
@@ -116,5 +118,11 @@ mod tests {
         let command: Command =
             serde_json::from_str(r#"{"command":"audio_diagnostics_download"}"#).unwrap();
         assert!(command.validate().is_ok());
+        let command: Command = serde_json::from_str(r#"{"command":"video_diagnostics"}"#).unwrap();
+        assert!(command.validate().is_ok());
+        assert!(
+            serde_json::from_str::<Command>(r#"{"command":"video_diagnostics","path":"x"}"#)
+                .is_err()
+        );
     }
 }

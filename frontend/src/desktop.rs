@@ -15,6 +15,7 @@ mod native_screen;
 mod native_shortcuts;
 mod native_signaling;
 mod native_update;
+mod native_video_diagnostics;
 mod native_voice;
 mod native_window;
 #[cfg(target_os = "windows")]
@@ -179,6 +180,8 @@ fn main() {
             native_screen::screen_view_keyframe,
             native_screen::screen_view_open,
             native_screen::screen_view_keepalive,
+            native_screen::screen_bridge_report,
+            native_screen::screen_bridge_probe,
             native_screen::screen_sources,
             native_screen::screen_start,
             native_screen::screen_stop,

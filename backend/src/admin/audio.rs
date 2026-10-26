@@ -20,7 +20,12 @@ use std::{
 use thiscord_shared::{RequestId, permissions::InstanceRole, remote_audio::*};
 use tokio::sync::{Semaphore, mpsc, oneshot};
 
-type Registry = Mutex<HashMap<RequestId, (mpsc::Sender<Call>, bool)>>;
+struct Target {
+    calls: mpsc::Sender<Call>,
+    owner_only: bool,
+    video_diagnostics: bool,
+}
+type Registry = Mutex<HashMap<RequestId, Target>>;
 fn registry() -> &'static Registry {
     static REGISTRY: OnceLock<Registry> = OnceLock::new();
     REGISTRY.get_or_init(Default::default)
@@ -31,9 +36,20 @@ impl Drop for Registration {
         registry().lock().unwrap().remove(&self.0);
     }
 }
-pub(crate) fn register(id: RequestId, owner_only: bool) -> (Registration, mpsc::Receiver<Call>) {
-    let (tx, rx) = mpsc::channel(1);
-    registry().lock().unwrap().insert(id, (tx, owner_only));
+pub(crate) fn register(
+    id: RequestId,
+    owner_only: bool,
+    video_diagnostics: bool,
+) -> (Registration, mpsc::Receiver<Call>) {
+    let (calls, rx) = mpsc::channel(1);
+    registry().lock().unwrap().insert(
+        id,
+        Target {
+            calls,
+            owner_only,
+            video_diagnostics,
+        },
+    );
     (Registration(id), rx)
 }
 pub(crate) fn available(id: RequestId) -> bool {
@@ -126,14 +142,20 @@ async fn handle(
         .await?;
         let Json(request) = body.map_err(|_| Failure::Invalid("Invalid remote audio request"))?;
         request.command.validate().map_err(Failure::Invalid)?;
-        let (sender, owner_only) = registry()
+        let (sender, owner_only, video_diagnostics) = registry()
             .lock()
             .unwrap()
             .get(&request.connection_id)
-            .cloned()
+            .map(|t| (t.calls.clone(), t.owner_only, t.video_diagnostics))
             .ok_or(Failure::Conflict)?;
         if owner_only && role != InstanceRole::Owner {
             return Err(Failure::Forbidden);
+        }
+        // Older desktops end their voice connection on unknown commands.
+        if matches!(request.command, Command::VideoDiagnostics {}) && !video_diagnostics {
+            return Err(Failure::Invalid(
+                "Video diagnostics need an updated desktop app. Ask the user to update and rejoin voice.",
+            ));
         }
         let (reply, response) = oneshot::channel();
         sender

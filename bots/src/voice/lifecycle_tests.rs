@@ -88,7 +88,7 @@ impl Fixture {
                                 can_speak: true, ice_servers: vec![], packet_redundancy: true,
                                 remote_audio: false, screen_video: screen, camera_video: false,
                                 screen_feedback: false, screen_subscriptions: screen, screen_layers: false,
-                                resume_token: None,
+                                video_diagnostics: false, resume_token: None,
                             }),
                             ClientEvent::Answer { sdp, packet_redundancy, remote_audio, .. } => {
                                 assert!(!packet_redundancy && !remote_audio);

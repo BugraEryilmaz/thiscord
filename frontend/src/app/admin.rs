@@ -277,13 +277,14 @@ fn RemoteAudioPanel(ui: Ui, selection: Selection, close: Callback<()>) -> impl I
                     }
                 }).unwrap_or_else(|| view! {<p class="mt-2 text-sm text-slate-400">{move ||crate::i18n::t("Waiting for UI counters; older desktops do not report them. Allow 10 seconds after opening the app.")}</p>}.into_any())}
             </section>
+            <VideoDiagnostics control=ui.audio_control/>
             <Show when=move || !loaded.get()><p class="my-3 text-slate-400">{move || crate::i18n::t("Waiting for the connected desktop…")}</p></Show>
             <fieldset disabled=move || !loaded.get() || ui.audio_saving.get() class="mt-5 disabled:opacity-50"><super::audio::AudioSettingsPanel ui=ui/></fieldset>
         }.into_any()
     });
     view! {
         <dialog node_ref=dialog on:cancel=move |_: web_sys::Event| close.run(()) class="fixed inset-0 m-auto max-h-[90vh] w-full max-w-3xl overflow-auto rounded-xl border border-slate-700 bg-slate-950 p-6 text-slate-100 backdrop:bg-black/70">
-            <header class="mb-5 flex items-center justify-between gap-4"><h2 class="text-xl font-semibold">{move || thiscord_frontend::localized_format!(crate::i18n::language(), "Audio settings · {}", selection.name)}</h2><button autofocus class="rounded bg-slate-800 px-4 py-2" on:click=move |_| close.run(())>{move || crate::i18n::t("Close")}</button></header>
+            <header class="mb-5 flex items-center justify-between gap-4"><h2 class="text-xl font-semibold">{move || thiscord_frontend::localized_format!(crate::i18n::language(), "Desktop support · {}", selection.name)}</h2><button autofocus class="rounded bg-slate-800 px-4 py-2" on:click=move |_| close.run(())>{move || crate::i18n::t("Close")}</button></header>
             {content.unwrap_or_else(|| view! {<p>{move || crate::i18n::t("Remote audio is unavailable for this connection. Update the user's desktop app and reconnect to voice.")}</p>}.into_any())}
         </dialog>
     }
@@ -367,4 +368,95 @@ fn TimingTable(rows: Vec<(thiscord_shared::performance::Measurement, String)>) -
     view! {<div class="mt-3 overflow-x-auto"><table class="w-full whitespace-nowrap text-left text-xs"><thead class="text-slate-400"><tr><th class="p-2">{move || crate::i18n::t("Operation")}</th><th class="p-2">{move || crate::i18n::t("Calls")}</th><th class="p-2">{move || crate::i18n::t("Total ms")}</th><th class="p-2">{move || crate::i18n::t("Mean / max ms")}</th><th class="p-2">{move || crate::i18n::t("Slow / budget ms")}</th><th class="p-2">{move || crate::i18n::t("Since last refresh")}</th></tr></thead><tbody>
         {rows.into_iter().map(|(m,recent)|view! {<tr class="border-t border-slate-800"><td class="p-2">{m.name}</td><td class="p-2 font-mono">{m.timing.calls}</td><td class="p-2 font-mono">{format!("{:.1}",m.timing.total_us as f64/1000.0)}</td><td class="p-2 font-mono">{move || if m.timing.calls==0 {"—".into()} else {format!("{:.3} / {:.3}",m.timing.total_us as f64/m.timing.calls as f64/1000.0,m.timing.max_us as f64/1000.0)}}</td><td class="p-2 font-mono">{format!("{} / {:.1}",m.timing.over_budget,m.budget_us as f64/1000.0)}</td><td class="p-2">{recent}</td></tr>}).collect_view()}
     </tbody></table></div>}
+}
+
+/// On-demand local video bridge report from a user's desktop. Collapsed by
+/// default; collection runs only when opened or refreshed.
+#[component]
+fn VideoDiagnostics(control: crate::audio_control::AudioControl) -> impl IntoView {
+    use thiscord_frontend::video_bridge::{Severity, kind_label, verdict};
+    use thiscord_shared::video_bridge::{Kind, Report};
+    let raw = RwSignal::new(None::<serde_json::Value>);
+    let status = RwSignal::new(String::new());
+    let busy = RwSignal::new(false);
+    let load = move || {
+        if busy.get_untracked() {
+            return;
+        }
+        busy.set(true);
+        status.set("Collecting video diagnostics…".into());
+        leptos::task::spawn_local(async move {
+            let result = control
+                .invoke::<serde_json::Value>("video_diagnostics", serde_json::json!({}))
+                .await;
+            if busy.is_disposed() {
+                return;
+            }
+            busy.set(false);
+            match result {
+                Ok(value) => {
+                    raw.set(Some(value));
+                    status.set(String::new());
+                }
+                Err(error) => status.set(error),
+            }
+        });
+    };
+    let report = Memo::new(move |_| {
+        raw.get()
+            .and_then(|v| serde_json::from_value::<Report>(v).ok())
+    });
+    let timeline = |events: Vec<(u64, String)>| {
+        view! {<ol class="max-h-60 overflow-auto font-mono text-xs leading-relaxed text-slate-300">
+            {events.into_iter().map(|(at, text)| view! {<li>{format!("{:>6.1}s  {text}", at as f64 / 1000.0)}</li>}).collect_view()}
+        </ol>}
+    };
+    view! {
+        <details class="my-4 rounded-xl border border-slate-800 p-4" on:toggle=move |event| {
+            let open = event.target().and_then(|t| js_sys::Reflect::get(&t, &"open".into()).ok()).and_then(|v| v.as_bool());
+            if open == Some(true) && raw.get_untracked().is_none() { load(); }
+        }>
+            <summary class="cursor-pointer font-semibold">{move || crate::i18n::t("Video playback diagnostics")}</summary>
+            <p class="mt-2 text-xs text-slate-400">{move || crate::i18n::t("Local video player connections, automatic self-tests, OS and WebView versions, network adapters and firewall summary from this desktop. No IP addresses, SDP or video.")}</p>
+            <div class="mt-3 flex flex-wrap gap-2">
+                <button class="rounded bg-slate-800 px-3 py-1 text-sm hover:bg-slate-700 disabled:opacity-50" disabled=move || busy.get() on:click=move |_| load()>{move || crate::i18n::t("Refresh")}</button>
+                <button class="rounded bg-slate-800 px-3 py-1 text-sm hover:bg-slate-700 disabled:opacity-50" disabled=move || raw.get().is_none() on:click=move |_| {
+                    if let Some(value) = raw.get_untracked() {
+                        leptos::task::spawn_local(async move {
+                            if let Err(error) = control.save_json("video", &value).await && !status.is_disposed() { status.set(error); }
+                        });
+                    }
+                }>{move || crate::i18n::t("Download JSON")}</button>
+            </div>
+            <p role="status" class="mt-2 text-sm text-amber-300">{move || crate::i18n::message(status.get())}</p>
+            {move || report.get().map(|r| {
+                let latest = r.records.iter().rev().find(|x| matches!(x.kind, Kind::Screen | Kind::Camera)).cloned();
+                let system = |key: &str| r.system.facts.get(key).cloned().unwrap_or_else(|| "—".into());
+                let os = format!("{} · build {} · {}", system("windows.family"), system("windows.build"), system("windows.display_version"));
+                view! {
+                    <ul class="mt-3 space-y-1 text-sm">
+                        {verdict(&r).into_iter().map(|(severity, text)| {
+                            let class = match severity { Severity::Good => "text-emerald-300", Severity::Note => "text-slate-300", Severity::Problem => "text-amber-300" };
+                            view! {<li class=class>{text}</li>}
+                        }).collect_view()}
+                    </ul>
+                    <dl class="mt-4 grid gap-x-4 gap-y-1 text-xs sm:grid-cols-[auto_1fr]">
+                        <dt class="text-slate-400">{move || crate::i18n::t("App version")}</dt><dd class="font-mono">{r.app_version.clone()}</dd>
+                        <dt class="text-slate-400">{move || crate::i18n::t("Operating system")}</dt><dd class="font-mono">{os}</dd>
+                        <dt class="text-slate-400">{move || crate::i18n::t("WebView version")}</dt><dd class="font-mono">{system("webview.version")}</dd>
+                    </dl>
+                    {latest.map(|x| view! {
+                        <h4 class="mt-4 text-sm font-semibold">{format!("{} · {:?} · {:.0}s ago", kind_label(x.kind), x.outcome, x.age_ms as f64 / 1000.0)}</h4>
+                        <div class="mt-2 grid gap-3 sm:grid-cols-2">
+                            <div><p class="mb-1 text-xs text-slate-400">{move || crate::i18n::t("WebView")}</p>{timeline(x.webview.events.clone())}</div>
+                            <div><p class="mb-1 text-xs text-slate-400">{move || crate::i18n::t("Desktop")}</p>{timeline(x.desktop.events.clone())}</div>
+                        </div>
+                    })}
+                    <details class="mt-4"><summary class="cursor-pointer text-xs text-slate-400">{move || crate::i18n::t("Full report")}</summary>
+                        <pre class="mt-2 max-h-96 overflow-auto whitespace-pre-wrap text-xs text-slate-300">{raw.get_untracked().and_then(|v| serde_json::to_string_pretty(&v).ok()).unwrap_or_default()}</pre>
+                    </details>
+                }
+            })}
+        </details>
+    }
 }

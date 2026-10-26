@@ -80,6 +80,9 @@ pub async fn execute(app: tauri::AppHandle, connection: Connection, command: Com
                 Ok::<_, String>(serde_json::json!({"version":env!("CARGO_PKG_VERSION"),"settings":settings,"status":status,"status_error":status_error,"ui_performance":ui_performance,"files":files}))
             }).await.map_err(|_| "Diagnostic export failed")??)
         }
+        Command::VideoDiagnostics {} => {
+            serde_json::to_value(crate::native_video_diagnostics::collect(app).await?)
+        }
     };
     value.map_err(|_| "Cannot serialize audio response".into())
 }

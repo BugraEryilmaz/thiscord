@@ -24,6 +24,7 @@ pub mod rich_chat;
 pub mod safety;
 #[cfg(all(not(target_arch = "wasm32"), feature = "screen-share"))]
 pub mod screen;
+pub mod video_bridge;
 pub mod video_feedback;
 pub mod voice_overlay;
 

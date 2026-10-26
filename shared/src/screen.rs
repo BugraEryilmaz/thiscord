@@ -342,6 +342,9 @@ pub struct Watch {
 pub struct ViewOffer {
     pub watch: Watch,
     pub sdp: String,
+    /// WebView-chosen diagnostic record ID; zero records nothing.
+    #[serde(default)]
+    pub attempt: u64,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
