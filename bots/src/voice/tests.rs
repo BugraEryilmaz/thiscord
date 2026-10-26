@@ -377,7 +377,7 @@ async fn signaling_joins_restricted_and_refresh_closes_legacy_session() {
                                     can_speak: true, ice_servers: vec![], packet_redundancy: true,
                                     remote_audio: false, screen_video: false, camera_video: false,
                                     screen_feedback: false, screen_subscriptions: false, screen_layers: false,
-                                    resume_token: None,
+                                    video_diagnostics: false, resume_token: None,
                                 })
                             },
                             ClientEvent::Answer { sdp, packet_redundancy, remote_audio, .. } => {

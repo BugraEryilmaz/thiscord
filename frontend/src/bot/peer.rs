@@ -203,6 +203,8 @@ pub(super) async fn run(
                 screen_feedback: true,
                 screen_subscriptions: true,
                 screen_layers: false,
+                // Bots expose per-stream video diagnostics in their own panel.
+                video_diagnostics: false,
             },
         )
         .await?;

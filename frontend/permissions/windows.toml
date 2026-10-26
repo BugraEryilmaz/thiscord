@@ -49,6 +49,8 @@ commands.allow = [
   "screen_view_keyframe",
   "screen_view_open",
   "screen_view_keepalive",
+  "screen_bridge_report",
+  "screen_bridge_probe",
   "screen_sources",
   "screen_start",
   "screen_stop",

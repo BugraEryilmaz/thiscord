@@ -383,6 +383,7 @@ fn screen_feedback_capabilities_are_opt_in_and_legacy_answers_stay_compatible() 
             screen_feedback: false,
             screen_subscriptions: false,
             screen_layers: false,
+            video_diagnostics: false,
             ..
         }
     ));
@@ -399,6 +400,7 @@ fn screen_feedback_capabilities_are_opt_in_and_legacy_answers_stay_compatible() 
             screen_feedback: false,
             screen_subscriptions: false,
             screen_layers: false,
+            video_diagnostics: false,
             ..
         }
     ));

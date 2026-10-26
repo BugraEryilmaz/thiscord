@@ -157,3 +157,35 @@ behavior and device saves preserve those controls.
 Tests cover authorization/demotion, disconnect identity, reply bounds, cross-socket
 reply rejection, legacy capability defaults, stale native settings and export file
 selection. Real-device acceptance remains listed in TODO.md.
+
+## Video playback diagnostics
+
+A participant's **Desktop support** dialog contains a collapsed **Video playback
+diagnostics** section. Opening it (or **Refresh**) sends the read-only
+`video_diagnostics` command over the same authenticated relay, owner/admin checks
+and limits as remote audio. **Download JSON** saves the complete reply. The
+section explains why a viewer sees "Connecting video..." without asking the user
+to collect logs; see [screen-sharing.md](screen-sharing.md#local-bridge-records-and-self-tests)
+for what each desktop records.
+
+The reply combines:
+
+- The last twelve local bridge records for screens, cameras and self-tests:
+  outcome, WebView and desktop timelines, offered candidate/codec summaries, ICE
+  connectivity-check counts per candidate pair, ICE/DTLS states and decoder fields.
+- Windows product, build and display version, WebView version, WebRTC/proxy-related
+  Edge and WebView2 policies, `WEBVIEW2_*` variables and whether a proxy is set.
+- Network adapter names, descriptions, types, status, metrics and address classes.
+- Windows Firewall profile state, rules naming Thiscord or WebView2, and products
+  registered with Windows Security Center.
+- An in-process UDP loopback round trip and each live share's receive counters.
+
+Addresses are reduced to classes such as `loopback-v4`, `private-v4` or `mdns`.
+SDP, ICE credentials, certificates, hostnames, frames and audio are never collected.
+Adapter names/descriptions, policy values and firewall rule names are visible
+to the administrator. Records live only in desktop memory and reset on restart.
+
+Older desktops treat unknown admin commands as invalid voice events. Desktops opt
+in through a `video_diagnostics` voice answer flag, offered only by servers that
+support it; the server rejects the command for connections without that flag.
+Test bots do not opt in; their panel already shows per-stream video counters.

@@ -121,7 +121,7 @@
   "Audio from all other apps, even when sharing a single window.": "Tek bir pencere paylaşırken bile diğer tüm uygulamaların sesi.",
   "Audio requires desktop": "Ses için masaüstü uygulaması gerekli",
   "Audio settings": "Ses ayarları",
-  "Audio settings · {}": "Ses ayarları · {}",
+  "Desktop support · {}": "Masaüstü desteği · {}",
   "Audio stopped; devices released": "Ses durduruldu; cihazlar serbest bırakıldı",
   "Auto-refresh · 5 seconds": "Otomatik yenileme · 5 saniye",
   "Automatic backend measurements. Recent rates cover the last successful refresh; totals and maximums reset on backend restart. Slow means above the investigation budget, not a confirmed fault. Timings overlap; ms/s is elapsed work across concurrent operations, not CPU use.": "Otomatik arka uç ölçümleri. Son hızlar son başarılı yenilemeden bu yana geçen süreyi kapsar; toplamlar ve en yüksek değerler arka uç yeniden başlatılınca sıfırlanır. Yavaş, inceleme bütçesinin aşıldığı anlamına gelir; doğrulanmış bir hata değildir. Süreler örtüşür; ms/sn CPU kullanımı değil, eşzamanlı işlemlerde geçen iş süresidir.",
@@ -1248,5 +1248,14 @@
   "Invite link copied. Revoke it in Server Settings → Invite links.": "Davet bağlantısı kopyalandı. Sunucu Ayarları → Davet bağlantıları bölümünden iptal edebilirsiniz.",
   "Invitation ready. Sign in and verify your email to continue.": "Davet hazır. Devam etmek için giriş yapın ve e-postanızı doğrulayın.",
   "Unlimited uses. Never expires. Revoke in Server Settings → Invite links.": "Sınırsız kullanım. Süresi dolmaz. Sunucu Ayarları → Davet bağlantıları bölümünden iptal edin.",
-  "Use Copy invite link beside the server name to invite people. Manage and revoke links in Invite links.": "Davet etmek için sunucu adının yanındaki Davet bağlantısını kopyala düğmesini kullanın. Davet bağlantıları bölümünden bağlantıları yönetin ve iptal edin."
+  "Use Copy invite link beside the server name to invite people. Manage and revoke links in Invite links.": "Davet etmek için sunucu adının yanındaki Davet bağlantısını kopyala düğmesini kullanın. Davet bağlantıları bölümünden bağlantıları yönetin ve iptal edin.",
+  "Video playback diagnostics": "Video oynatma tanılaması",
+  "Local video player connections, automatic self-tests, OS and WebView versions, network adapters and firewall summary from this desktop. No IP addresses, SDP or video.": "Bu masaüstündeki yerel video oynatıcı bağlantıları, otomatik öz testler, işletim sistemi ve WebView sürümleri, ağ bağdaştırıcıları ve güvenlik duvarı özeti. IP adresi, SDP veya video içermez.",
+  "Download JSON": "JSON indir",
+  "Collecting video diagnostics…": "Video tanılaması toplanıyor…",
+  "App version": "Uygulama sürümü",
+  "Operating system": "İşletim sistemi",
+  "WebView version": "WebView sürümü",
+  "WebView": "WebView",
+  "Full report": "Tam rapor"
 }

@@ -40,6 +40,8 @@ media compatibility spike can happen before chat to expose platform constraints.
 
 - [x] Remote audio settings and diagnostic JSON downloads for connected desktop participants, with instance authorization and stale-edit checks.
 - [ ] Verify remote hardware changes, shortcut/overlay behavior and downloads with real Windows/macOS/Linux desktop clients.
+- [x] On-demand video playback diagnostics in `/admin`: local WebView bridge records, automatic self-tests, OS/WebView/policy, adapter and firewall summaries (docs/screen-sharing.md).
+- [ ] Use a failing viewer's report to fix "Connecting video..." stalls; consider interface-bound bridge candidates if only the loopback self-test fails.
 - [x] Browser `/admin` dashboard with current instance-owner/admin authorization, host metrics and live voice diagnostics.
 - [x] Prioritized performance audit with bounded backend timings and automatic desktop UI counters accessible through `/admin` (docs/performance-audit.md).
 - [ ] Confirm performance audit priorities under production load before changing polling, pool sizing or frontend snapshot updates.
