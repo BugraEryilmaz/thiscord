@@ -28,6 +28,9 @@ fn snapshot(pool: &DbPool, token: &str, sub: Subscription) -> Result<Snapshot, F
         })
     })
 }
+/// Matches the socket maintenance cadence for expiry-only authorization changes.
+const VOICE_VISIBILITY_RECHECK: Duration = Duration::from_secs(10);
+
 async fn update(socket: &mut WebSocket, sub: Subscription, event: ServerEvent) -> Result<(), ()> {
     send(
         socket,
@@ -105,6 +108,7 @@ pub(super) async fn serve(mut socket: WebSocket, pool: DbPool, id: RequestId, to
     roster_tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
     let mut watch_voice = false;
     let mut last_roster = None;
+    let mut voice_visibility = None::<(Instant, access::Snapshot, Vec<ChannelId>)>;
     loop {
         tokio::select! { biased;
             _ = session_revoked.changed() => { let _ = send(&mut socket, ServerEvent::Revoked {}).await; break; }
@@ -128,7 +132,7 @@ pub(super) async fn serve(mut socket: WebSocket, pool: DbPool, id: RequestId, to
                         subscription = None; typing_expiry = None;
                         messages_dirty = false; presence_dirty = false; unread_dirty = false; unread_due = None;
                         last_members.clear(); last_unread.clear();
-                        watch_voice = voice_roster; last_roster = None;
+                        watch_voice = voice_roster; last_roster = None; voice_visibility = None;
                         roster_tick.reset_immediately();
                         if channel_id.is_some() && guild_id.is_none() {
                             let _ = send(&mut socket, error(id, ErrorCode::BadRequest, "A channel requires a guild")).await; break;
@@ -231,10 +235,21 @@ pub(super) async fn serve(mut socket: WebSocket, pool: DbPool, id: RequestId, to
             }
             _ = roster_tick.tick(), if watch_voice && subscription.is_some() => {
                 let sub = subscription.unwrap();
-                let Some(authorized) = account_access.snapshot(guild_access.as_ref(), member_access.as_ref()) else { let _ = send(&mut socket, ServerEvent::Revoked {}).await; break; };
-                let p = pool.clone(); let t = token.clone();
-                let Ok(Ok(channels)) = crate::performance::blocking(move || store::visible_voice_channels(&p, &t, sub.guild)).await else {
-                    let _ = send(&mut socket, ServerEvent::Revoked {}).await; break;
+                // Every visibility-changing commit advances an epoch in this snapshot
+                // and closes the socket, so reuse the authorization epoch with its
+                // result. Recheck time-based state (session expiry, timeouts) regularly.
+                let (authorized, channels) = match &voice_visibility {
+                    Some((at, authorized, channels)) if at.elapsed() < VOICE_VISIBILITY_RECHECK => (authorized.clone(), channels.clone()),
+                    _ => {
+                        let checked = Instant::now();
+                        let Some(authorized) = account_access.snapshot(guild_access.as_ref(), member_access.as_ref()) else { let _ = send(&mut socket, ServerEvent::Revoked {}).await; break; };
+                        let p = pool.clone(); let t = token.clone();
+                        let Ok(Ok(channels)) = crate::performance::blocking(move || store::visible_voice_channels(&p, &t, sub.guild)).await else {
+                            let _ = send(&mut socket, ServerEvent::Revoked {}).await; break;
+                        };
+                        voice_visibility = Some((checked, authorized.clone(), channels.clone()));
+                        (authorized, channels)
+                    }
                 };
                 let channels = crate::voice::roster(channels).await;
                 if last_roster.as_ref() == Some(&channels) {

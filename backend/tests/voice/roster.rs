@@ -40,6 +40,23 @@ async fn roster(socket: &mut Socket) -> Value {
     .expect("voice roster did not update")
 }
 
+async fn revoked_without_roster(socket: &mut Socket) {
+    tokio::time::timeout(Duration::from_secs(3), async {
+        loop {
+            let Message::Text(text) = socket.next().await.unwrap().unwrap() else {
+                continue;
+            };
+            let frame: Value = serde_json::from_str(&text).unwrap();
+            assert_ne!(frame["event"]["event"]["type"], "voice_roster");
+            if frame["event"]["type"] == "revoked" {
+                break;
+            }
+        }
+    })
+    .await
+    .unwrap();
+}
+
 #[tokio::test]
 #[ignore = "requires TEST_DATABASE_URL; CI runs with --include-ignored"]
 async fn visible_rosters_without_join_permission_follow_membership_and_revoke() {
@@ -143,6 +160,13 @@ async fn visible_rosters_without_join_permission_follow_membership_and_revoke() 
     })
     .await
     .unwrap();
+    // Steady-state ticks reuse cached visibility; a commit within that window
+    // must still revoke before any roster built from the old grants is sent.
+    change(&app, &ot, &mut state, json!({"action":"set_override","channel_id":channel,"target":{"kind":"member","id":viewer},"allow":[],"deny":["view_channel"]}), StatusCode::OK).await;
+    revoked_without_roster(&mut watching).await;
+    let _ = watching.close(None).await;
+    let mut watching = observer(address, &vt, &guild).await;
+    assert_eq!(roster(&mut watching).await, json!([]));
     change(
         &app,
         &ot,
@@ -151,20 +175,7 @@ async fn visible_rosters_without_join_permission_follow_membership_and_revoke() 
         StatusCode::OK,
     )
     .await;
-    tokio::time::timeout(Duration::from_secs(3), async {
-        loop {
-            let Message::Text(text) = watching.next().await.unwrap().unwrap() else {
-                continue;
-            };
-            let frame: Value = serde_json::from_str(&text).unwrap();
-            assert_ne!(frame["event"]["event"]["type"], "voice_roster");
-            if frame["event"]["type"] == "revoked" {
-                break;
-            }
-        }
-    })
-    .await
-    .unwrap();
+    revoked_without_roster(&mut watching).await;
     let _ = watching.close(None).await;
     let _ = denied.close(None).await;
     serving.abort();
