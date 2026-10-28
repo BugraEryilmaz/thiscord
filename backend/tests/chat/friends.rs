@@ -163,6 +163,102 @@ pub(super) async fn event(socket: &mut Socket, event: Value) {
         .await
         .unwrap();
 }
+/// Well under the ten-second database refresh: only commit notifications or
+/// scheduled call expiry can deliver these in time.
+async fn pushed(socket: &mut Socket, predicate: impl Fn(&Value) -> bool) -> Value {
+    tokio::time::timeout(
+        std::time::Duration::from_secs(3),
+        snapshot(socket, predicate),
+    )
+    .await
+    .expect("expected a pushed private snapshot")
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[ignore = "requires TEST_DATABASE_URL"]
+async fn commits_and_call_expiry_push_snapshots_before_periodic_refresh() {
+    let _lock = TEST_LOCK.lock().await;
+    let db = database();
+    let (alice_id, alice) = user(&db, "push_alice");
+    let (bob_id, bob) = user(&db, "push_bob");
+    let app = api::router(
+        Some(db.pool.clone()),
+        vec!["http://localhost:1420".parse().unwrap()],
+    );
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let address = listener.local_addr().unwrap();
+    let service = app.clone();
+    let server = tokio::spawn(async move { axum::serve(listener, service).await.unwrap() });
+    let mut a = socket(address, &alice).await;
+    let mut b = socket(address, &bob).await;
+    snapshot(&mut a, |_| true).await;
+    snapshot(&mut b, |_| true).await;
+
+    social(
+        &app,
+        &alice,
+        json!({"action":"add","account_id":bob_id}),
+        StatusCode::OK,
+    )
+    .await;
+    pushed(&mut b, |s| s["friends"][0]["relationship"] == "incoming").await;
+    social(
+        &app,
+        &bob,
+        json!({"action":"accept","account_id":alice_id}),
+        StatusCode::OK,
+    )
+    .await;
+    let accepted = pushed(&mut a, |s| s["friends"][0]["relationship"] == "friend").await;
+    let conversation = accepted["friends"][0]["conversation_id"].clone();
+
+    let (status, body) = call(
+        &app,
+        thiscord_shared::account::ACCOUNT_PATH,
+        &bob,
+        json!({"action":"update_profile","display_name":"Pushed Bob","bio":""}),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    pushed(&mut a, |s| {
+        s["friends"][0]["person"]["display_name"] == "Pushed Bob"
+    })
+    .await;
+
+    social(&app, &alice, json!({"action":"send","conversation_id":conversation,"client_id":Uuid::new_v4(),"content":"Pushed"}), StatusCode::OK).await;
+    pushed(&mut b, |s| s["friends"][0]["unread_count"] == 1).await;
+
+    social(
+        &app,
+        &alice,
+        json!({"action":"start_call","conversation_id":conversation}),
+        StatusCode::OK,
+    )
+    .await;
+    pushed(&mut b, |s| s["calls"][0]["state"] == "ringing").await;
+    // Expiry is time-only (no commit); the socket schedules a rebuild for it.
+    diesel::sql_query("UPDATE friend_calls SET expires_at=now()+interval '1 second'")
+        .execute(&mut db.pool.get().unwrap())
+        .unwrap();
+    let (status, body) = call(
+        &app,
+        thiscord_shared::account::ACCOUNT_PATH,
+        &alice,
+        json!({"action":"update_profile","display_name":"Alice again","bio":""}),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    pushed(&mut b, |s| {
+        s["friends"][0]["person"]["display_name"] == "Alice again"
+    })
+    .await;
+    pushed(&mut b, |s| {
+        s["calls"].as_array().is_some_and(|c| c.is_empty())
+    })
+    .await;
+    server.abort();
+}
+
 pub(super) async fn snapshot(socket: &mut Socket, predicate: impl Fn(&Value) -> bool) -> Value {
     tokio::time::timeout(std::time::Duration::from_secs(8), async {
         loop {
@@ -291,6 +387,8 @@ async fn unread_messages_persist_and_reads_are_scoped_monotonic_and_bounded() {
     diesel::sql_query("INSERT INTO direct_messages(id,conversation_id,author_id,client_id,content,created_at) SELECT gen_random_uuid(),$1::uuid,$2::uuid,gen_random_uuid(),'Backlog',clock_timestamp()+n*interval '1 microsecond' FROM generate_series(1,105) n")
         .bind::<Text,_>(conversation.as_str().unwrap()).bind::<Text,_>(alice_id.to_string())
         .execute(&mut db.pool.get().unwrap()).unwrap();
+    // Direct SQL bypasses commit notifications; a no-op read wakes Bob's socket.
+    social(&app, &bob, read_second.clone(), StatusCode::OK).await;
     snapshot(&mut b, |s| s["friends"][0]["unread_count"] == 100).await;
     social(&app, &bob, read_second.clone(), StatusCode::OK).await;
     let history = social(

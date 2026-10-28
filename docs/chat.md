@@ -168,14 +168,19 @@ Clients may opt into sidebar voice rosters with `voice_roster: true` on `subscri
 Omitting it defaults to false, so existing clients receive no new event variants.
 Opted-in guild subscriptions receive `update` / `voice_roster` with visible channel
 IDs and live participant metadata, including empty visible rooms. Membership and
-ViewChannel are checked in a locked transaction off the async worker on each
-one-second refresh; JoinVoice is not required to view a roster. The SFU registry
-is read only for authorized channels, excluding inactive or revoked peers. No media
-connection is created for observers. Delivery uses the existing account/session/
-guild/member access epochs and barrier, including the async registry read, so a
-permission change cannot admit a stale snapshot. Unchanged snapshots are suppressed.
-Steady state adds one authorization transaction per second per opted-in guild socket;
-refreshes skip missed ticks. It remains a single-process, personal-deployment path.
+ViewChannel are checked in a locked transaction off the async worker on subscribe
+and at least every ten seconds; JoinVoice is not required to view a roster. Between
+checks, one-second refreshes reuse the visible channel IDs together with the access
+epochs captured before that transaction. Every committed guild, member, account or
+session change advances one of those epochs and closes the socket, so a reused
+result cannot outlive the grants it was computed from. The periodic check covers
+time-only changes (session expiry, timeout end), matching socket maintenance. The
+SFU registry is read only for authorized channels, excluding inactive or revoked
+peers. No media connection is created for observers. Delivery uses the existing
+barrier, including the async registry read, so a permission change cannot admit a
+stale snapshot. Unchanged snapshots are suppressed. Steady state adds one
+authorization transaction per ten seconds per opted-in guild socket; refreshes skip
+missed ticks. It remains a single-process, personal-deployment path.
 The UI clears rosters on subscription changes, disconnects, revocation and logout.
 Deploy the backend before this frontend: older backends reject the new subscribe
 field. The account ribbon reports connecting, authenticated, reconnecting and

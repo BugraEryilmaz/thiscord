@@ -81,6 +81,14 @@ pub(super) fn checked<T>(
 fn call(c: &mut PgConnection, id: CallId, actor: AccountId) -> Result<Call, Failure> {
     query(c, "SELECT to_jsonb(v) AS data FROM friend_calls v WHERE id=$1::uuid AND $2::uuid IN (caller,callee) AND state IN ('ringing','active') AND expires_at>now()", &[&id.to_string(), &actor.to_string()])?.pop().ok_or(Failure::Forbidden)
 }
+/// Accounts whose snapshots list this account (accepted or pending), at most 200.
+pub(crate) fn related(c: &mut PgConnection, id: AccountId) -> Result<Vec<AccountId>, Failure> {
+    query(
+        c,
+        "SELECT to_jsonb(CASE WHEN low_id=$1::uuid THEN high_id ELSE low_id END) AS data FROM friendships WHERE $1::uuid IN (low_id,high_id) AND state<>'removed'",
+        &[&id.to_string()],
+    )
+}
 pub(crate) fn lock_people(c: &mut PgConnection, a: AccountId, b: AccountId) -> Result<(), Failure> {
     let ids: Vec<AccountId> = query(
         c,
@@ -107,6 +115,7 @@ pub(super) fn dispatch(pool: &DbPool, token: &str, request: Request) -> Result<R
     let mut guards = vec![];
     let mut call_guards = vec![];
     let mut notification = None;
+    let mut changed = vec![];
     let result = c.transaction::<_,Failure,_>(|c| {
         // Pair mutations serialize both people's capacity/call-busy checks, in UUID order.
         let other = match &request {
@@ -121,7 +130,7 @@ pub(super) fn dispatch(pool: &DbPool, token: &str, request: Request) -> Result<R
             }
             _ => None,
         };
-        if let Some(other) = other { lock_people(c,actor,other)?; }
+        if let Some(other) = other { lock_people(c,actor,other)?; changed.push(other); }
         auth::read_session(c,token,&session)?;
         match request {
             Request::Search {query: text} => {
@@ -163,6 +172,7 @@ pub(super) fn dispatch(pool: &DbPool, token: &str, request: Request) -> Result<R
             }
             Request::Read {conversation_id,through} => {
                 pair(c,conversation_id,actor,true)?;
+                changed.push(actor);
                 // Resolve the position on the server. A foreign ID cannot advance
                 // the cursor, and delayed acknowledgements never move it back.
                 let at: thiscord_shared::Timestamp = query(c,"SELECT to_jsonb(created_at) AS data FROM direct_messages WHERE conversation_id=$1::uuid AND id=$2::uuid", &[&conversation_id.to_string(),&through.to_string()])?.pop().ok_or(Failure::Invalid("Message does not belong to this conversation"))?;
@@ -171,6 +181,7 @@ pub(super) fn dispatch(pool: &DbPool, token: &str, request: Request) -> Result<R
             }
             Request::Send {conversation_id,client_id,content,attachments} => {
                 let p = pair(c,conversation_id,actor,true)?;
+                changed.extend([actor,p.other(actor)?]);
                 let duplicate = !query::<bool>(c,"SELECT to_jsonb(TRUE) AS data FROM direct_messages WHERE author_id=$1::uuid AND client_id=$2::uuid", &[&actor.to_string(), &client_id.to_string()])?.is_empty();
                 let message = send(c,actor,conversation_id,client_id,content,attachments)?;
                 if !duplicate {
@@ -180,7 +191,8 @@ pub(super) fn dispatch(pool: &DbPool, token: &str, request: Request) -> Result<R
                 Ok(Response::Message { message })
             }
             Request::Edit {conversation_id,message_id,revision,content} => {
-                pair_access(c,conversation_id,actor,true)?;
+                let p=pair(c,conversation_id,actor,true)?;
+                changed.extend([actor,p.other(actor)?]);
                 let old=message(c,conversation_id,message_id)?;
                 if old.author_id!=actor {return Err(Failure::Forbidden);}
                 text(&content,!old.attachments.is_empty())?;
@@ -193,7 +205,8 @@ pub(super) fn dispatch(pool: &DbPool, token: &str, request: Request) -> Result<R
                 Ok(Response::Message {message:message(c,conversation_id,message_id)?})
             }
             Request::Delete {conversation_id,message_id,revision} => {
-                pair_access(c,conversation_id,actor,true)?;
+                let p=pair(c,conversation_id,actor,true)?;
+                changed.extend([actor,p.other(actor)?]);
                 let old=message(c,conversation_id,message_id)?;
                 if old.author_id!=actor {return Err(Failure::Forbidden);}
                 if old.deleted && (old.revision==revision || old.revision==revision.saturating_add(1)) {return Ok(Response::Message {message:old});}
@@ -241,6 +254,10 @@ pub(super) fn dispatch(pool: &DbPool, token: &str, request: Request) -> Result<R
     let result = access::complete(result, &mut guards);
     for guard in call_guards {
         guard.finish(result.is_ok());
+    }
+    if result.is_ok() && !changed.is_empty() {
+        changed.push(actor);
+        super::changed(changed);
     }
     if result.is_ok()
         && let Some(event) = notification
@@ -348,12 +365,30 @@ fn history(
     };
     Ok(History { messages, older })
 }
+#[derive(Deserialize)]
+struct CallRow {
+    #[serde(flatten)]
+    call: Call,
+    expires_at: thiscord_shared::Timestamp,
+}
+/// Refreshes in-memory presence and typing on a database snapshot.
+pub(super) fn live(snapshot: &mut Snapshot, actor: AccountId) {
+    for friend in &mut snapshot.friends {
+        friend.online =
+            friend.relationship == Relationship::Friend && super::online(friend.person.id);
+    }
+    snapshot.typing = snapshot
+        .conversation_id
+        .map(|id| super::typing::read(id, actor))
+        .unwrap_or_default();
+}
+/// Also returns the time until the earliest listed call expires without a write.
 pub(super) fn snapshot(
     pool: &DbPool,
     token: &str,
     selected: Option<ConversationId>,
     before: Option<PageCursor>,
-) -> Result<Snapshot, Failure> {
+) -> Result<(Snapshot, Option<std::time::Duration>), Failure> {
     let _timing = crate::performance::FRIENDS.start();
     let mut c = connection(pool)?;
     let session = auth::authenticate(&mut c, token)?;
@@ -362,13 +397,14 @@ pub(super) fn snapshot(
         let actor=session.account_id;
         // Lock relationships once, then load public profiles in one batch.
         execute(c,"SELECT id FROM friendships WHERE $1::uuid IN (low_id,high_id) AND state<>'removed' ORDER BY id FOR SHARE", &[&actor.to_string()])?;
-        let mut friends:Vec<Friend>=query(c,"SELECT jsonb_build_object('conversation_id',f.id,'person',jsonb_build_object('id',a.id,'username',a.username,'display_name',a.display_name,'avatar_id',v.id),'relationship',CASE WHEN f.state='accepted' THEN 'friend' WHEN f.requester=$1::uuid THEN 'outgoing' ELSE 'incoming' END,'online',false,'unread_count',CASE WHEN f.state='accepted' THEN (SELECT count(*) FROM (SELECT 1 FROM direct_messages m WHERE m.conversation_id=f.id AND m.author_id=a.id AND NOT m.deleted AND m.created_at>COALESCE(CASE WHEN f.low_id=$1::uuid THEN f.low_read_at ELSE f.high_read_at END,'-infinity'::timestamptz) LIMIT 100) unread) ELSE 0 END) AS data FROM friendships f JOIN accounts a ON a.id=CASE WHEN f.low_id=$1::uuid THEN f.high_id ELSE f.low_id END LEFT JOIN account_avatars v ON v.account_id=a.id WHERE $1::uuid IN (f.low_id,f.high_id) AND f.state<>'removed' AND NOT EXISTS(SELECT 1 FROM account_blocks b WHERE (b.blocker_id=f.low_id AND b.blocked_id=f.high_id) OR (b.blocker_id=f.high_id AND b.blocked_id=f.low_id)) ORDER BY a.username,a.id", &[&actor.to_string()])?;
-        for friend in &mut friends { friend.online=friend.relationship==Relationship::Friend && super::online(friend.person.id); }
+        let friends:Vec<Friend>=query(c,"SELECT jsonb_build_object('conversation_id',f.id,'person',jsonb_build_object('id',a.id,'username',a.username,'display_name',a.display_name,'avatar_id',v.id),'relationship',CASE WHEN f.state='accepted' THEN 'friend' WHEN f.requester=$1::uuid THEN 'outgoing' ELSE 'incoming' END,'online',false,'unread_count',CASE WHEN f.state='accepted' THEN (SELECT count(*) FROM (SELECT 1 FROM direct_messages m WHERE m.conversation_id=f.id AND m.author_id=a.id AND NOT m.deleted AND m.created_at>COALESCE(CASE WHEN f.low_id=$1::uuid THEN f.low_read_at ELSE f.high_read_at END,'-infinity'::timestamptz) LIMIT 100) unread) ELSE 0 END) AS data FROM friendships f JOIN accounts a ON a.id=CASE WHEN f.low_id=$1::uuid THEN f.high_id ELSE f.low_id END LEFT JOIN account_avatars v ON v.account_id=a.id WHERE $1::uuid IN (f.low_id,f.high_id) AND f.state<>'removed' AND NOT EXISTS(SELECT 1 FROM account_blocks b WHERE (b.blocker_id=f.low_id AND b.blocked_id=f.high_id) OR (b.blocker_id=f.high_id AND b.blocked_id=f.low_id)) ORDER BY a.username,a.id", &[&actor.to_string()])?;
         let selected=selected.filter(|id|friends.iter().any(|f|f.conversation_id==*id && f.relationship==Relationship::Friend));
         let history=selected.map(|id|history(c,id,before.clone(),Default::default())).transpose()?;
-        let calls=query(c,"SELECT to_jsonb(v) AS data FROM friend_calls v JOIN friendships f ON f.id=v.conversation_id WHERE $1::uuid IN (v.caller,v.callee) AND v.state IN ('ringing','active') AND v.expires_at>now() AND f.state='accepted' AND NOT EXISTS(SELECT 1 FROM account_blocks b WHERE (b.blocker_id=f.low_id AND b.blocked_id=f.high_id) OR (b.blocker_id=f.high_id AND b.blocked_id=f.low_id)) ORDER BY v.id", &[&actor.to_string()])?;
-        let typing=selected.map(|id|super::typing::read(id,actor)).unwrap_or_default();
-        Ok(Snapshot {friends,calls,conversation_id:selected,history,before,typing})
+        let calls:Vec<CallRow>=query(c,"SELECT to_jsonb(v) AS data FROM friend_calls v JOIN friendships f ON f.id=v.conversation_id WHERE $1::uuid IN (v.caller,v.callee) AND v.state IN ('ringing','active') AND v.expires_at>now() AND f.state='accepted' AND NOT EXISTS(SELECT 1 FROM account_blocks b WHERE (b.blocker_id=f.low_id AND b.blocked_id=f.high_id) OR (b.blocker_id=f.high_id AND b.blocked_id=f.low_id)) ORDER BY v.id", &[&actor.to_string()])?;
+        let expiry=calls.iter().map(|v|v.expires_at).min().map(|at|(at-chrono::Utc::now()).to_std().unwrap_or_default()+std::time::Duration::from_millis(50));
+        let mut snapshot=Snapshot {friends,calls:calls.into_iter().map(|v|v.call).collect(),conversation_id:selected,history,before,typing:vec![]};
+        live(&mut snapshot,actor);
+        Ok((snapshot,expiry))
     })
 }
 

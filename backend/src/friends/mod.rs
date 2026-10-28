@@ -23,7 +23,11 @@ use std::{
     time::{Duration, Instant},
 };
 use thiscord_shared::{AccountId, RequestId, friends::*};
-use tokio::sync::Semaphore;
+use tokio::sync::{Semaphore, watch};
+
+/// Database snapshots are rebuilt on commit notifications, call expiry and at
+/// least this often (session expiry, writes outside this module).
+const REFRESH: Duration = Duration::from_secs(10);
 
 pub fn router(origins: Vec<HeaderValue>) -> Router<Option<DbPool>> {
     Router::new()
@@ -88,6 +92,29 @@ impl Drop for Connected {
             if *count == 0 {
                 p.remove(&self.0);
             }
+        }
+    }
+}
+fn watches() -> &'static Mutex<HashMap<AccountId, watch::Sender<u64>>> {
+    static WATCHES: OnceLock<Mutex<HashMap<AccountId, watch::Sender<u64>>>> = OnceLock::new();
+    WATCHES.get_or_init(Default::default)
+}
+fn watch(id: AccountId) -> watch::Receiver<u64> {
+    let mut watches = watches().lock().unwrap();
+    // Only live sockets retain entries; bounded by the socket limit.
+    watches.retain(|_, tx| tx.receiver_count() != 0);
+    watches
+        .entry(id)
+        .or_insert_with(|| watch::channel(0).0)
+        .subscribe()
+}
+/// Call after commit. Wakes these accounts' friends sockets in this process to
+/// rebuild their authorized snapshots; carries no data or authorization.
+pub(crate) fn changed(accounts: impl IntoIterator<Item = AccountId>) {
+    let watches = watches().lock().unwrap();
+    for id in accounts {
+        if let Some(tx) = watches.get(&id) {
+            tx.send_modify(|v| *v = v.wrapping_add(1));
         }
     }
 }
@@ -180,6 +207,11 @@ async fn serve(mut socket: WebSocket, pool: DbPool) {
     let mut last_seen = Instant::now();
     let mut window = Instant::now();
     let mut count = 0;
+    let mut commits = watch(session.account_id);
+    // The last database snapshot with the access epochs captured before reading it.
+    // Presence and typing are in-memory and refresh on every tick.
+    let mut cached = None::<(Snapshot, crate::chat::access::Snapshot)>;
+    let mut refresh_at = Instant::now();
     static READERS: OnceLock<Arc<Semaphore>> = OnceLock::new();
     let readers = READERS.get_or_init(|| Arc::new(Semaphore::new(8)));
     let mut tick = tokio::time::interval(Duration::from_secs(1));
@@ -188,6 +220,7 @@ async fn serve(mut socket: WebSocket, pool: DbPool) {
         tokio::select! {biased;
             _=changed.changed()=>break,
             _=revoked.changed()=>break,
+            Ok(())=commits.changed()=>{cached=None;tick.reset_immediately();}
             message=socket.recv()=>{
                 let Some(Ok(message))=message else {break;};
                 if window.elapsed()>=Duration::from_secs(10) {window=Instant::now();count=0;}
@@ -195,7 +228,7 @@ async fn serve(mut socket: WebSocket, pool: DbPool) {
                 last_seen=Instant::now();
                 match frame(message) {
                     Some(ClientEvent::Ping {})=>{if send(&mut socket,ServerEvent::Pong {}).await.is_err() {break;}}
-                    Some(ClientEvent::Select {conversation_id,before:page})=>{typing.clear();selected=conversation_id;before=page;last=None;tick.reset_immediately();}
+                    Some(ClientEvent::Select {conversation_id,before:page})=>{typing.clear();selected=conversation_id;before=page;last=None;cached=None;tick.reset_immediately();}
                     Some(ClientEvent::Typing {active})=>{
                         let Some(id)=selected else {continue;};
                         let Ok(permit)=readers.clone().try_acquire_owned() else {continue;};
@@ -209,16 +242,25 @@ async fn serve(mut socket: WebSocket, pool: DbPool) {
             }
             _=tick.tick()=>{
                 if last_seen.elapsed()>Duration::from_secs(35) {break;}
-                let Ok(permit)=readers.clone().try_acquire_owned() else {crate::performance::FRIENDS_SKIPPED.fetch_add(1, std::sync::atomic::Ordering::Relaxed);continue;};
-                let Some(epoch)=crate::chat::access::snapshot(&account,Some(&session_scope)) else {break;};
-                let p=pool.clone();let t=token.clone();let page=before.clone();
-                let Ok(Ok(snapshot))=crate::performance::blocking(move ||{let _permit=permit;store::snapshot(&p,&t,selected,page)}).await else {break;};
-                let Some(_delivery)=epoch.deliver() else {break;};
-                if last.as_ref()==Some(&snapshot) { crate::performance::FRIENDS_UNCHANGED.fetch_add(1, std::sync::atomic::Ordering::Relaxed); }
-                if last.as_ref()!=Some(&snapshot) || last_sent.elapsed()>=Duration::from_secs(10) {
+                if cached.is_none() || Instant::now()>=refresh_at {
+                    let Ok(permit)=readers.clone().try_acquire_owned() else {crate::performance::FRIENDS_SKIPPED.fetch_add(1, std::sync::atomic::Ordering::Relaxed);continue;};
+                    // Commits from here on wake the loop again, even during this read.
+                    commits.borrow_and_update();
+                    let checked=Instant::now();
+                    let Some(epoch)=crate::chat::access::snapshot(&account,Some(&session_scope)) else {break;};
+                    let p=pool.clone();let t=token.clone();let page=before.clone();
+                    let Ok(Ok((snapshot,expiry)))=crate::performance::blocking(move ||{let _permit=permit;store::snapshot(&p,&t,selected,page)}).await else {break;};
+                    if last.as_ref()==Some(&snapshot) { crate::performance::FRIENDS_UNCHANGED.fetch_add(1, std::sync::atomic::Ordering::Relaxed); }
+                    refresh_at=checked+expiry.map_or(REFRESH,|e|e.min(REFRESH));
+                    cached=Some((snapshot,epoch));
+                }
+                let (snapshot,epoch)=cached.as_mut().unwrap();
+                store::live(snapshot,session.account_id);
+                let Some(_delivery)=epoch.clone().deliver() else {break;};
+                if last.as_ref()!=Some(&*snapshot) || last_sent.elapsed()>=REFRESH {
                     last_sent=Instant::now();
                     last=Some(snapshot.clone());
-                    if send(&mut socket,ServerEvent::Snapshot {snapshot}).await.is_err() {break;}
+                    if send(&mut socket,ServerEvent::Snapshot {snapshot:snapshot.clone()}).await.is_err() {break;}
                 }
             }
         }
@@ -240,5 +282,25 @@ mod tests {
         assert!(online(id));
         drop(b);
         assert!(!online(id));
+    }
+    #[test]
+    fn commits_wake_only_listed_live_accounts() {
+        let id = AccountId::from_uuid(uuid::Uuid::new_v4());
+        let other = AccountId::from_uuid(uuid::Uuid::new_v4());
+        let mut first = watch(id);
+        let mut second = watch(id);
+        let mut unrelated = watch(other);
+        changed([id]);
+        assert!(first.has_changed().unwrap() && second.has_changed().unwrap());
+        assert!(!unrelated.has_changed().unwrap());
+        first.borrow_and_update();
+        second.borrow_and_update();
+        unrelated.borrow_and_update();
+        drop((first, second));
+        // Dropped sockets release their entry on the next registration.
+        let _ = watch(AccountId::from_uuid(uuid::Uuid::new_v4()));
+        assert!(!watches().lock().unwrap().contains_key(&id));
+        changed([id]);
+        assert!(!unrelated.has_changed().unwrap());
     }
 }

@@ -513,6 +513,8 @@ pub(super) fn dispatch(
                 _ => None,
             };
             let mut changes = Vec::new();
+            // Friends list profiles; woken after commit.
+            let mut related = Vec::new();
             let result = c.transaction(|c| {
                 let result = (|| {
                 if matches!(command, AccountRequest::Current | AccountRequest::Sessions) {
@@ -548,10 +550,12 @@ pub(super) fn dispatch(
                     AccountRequest::UpdateProfile { display_name, bio } => {
                         if display_name.trim().is_empty() || display_name.chars().count()>64 || bio.chars().count()>500 || display_name.chars().any(char::is_control) { return Err(Failure::Invalid("Display name must be 1 to 64 characters; bio at most 500")); }
                         execute(c,"UPDATE accounts SET display_name=$2,bio=$3 WHERE id=$1::uuid", &[&id.to_string(),display_name.trim(),&bio])?;
+                        related = crate::friends::store::related(c,id)?;
                         Ok(AccountResponse::Account { account: account(c,id)? })
                     }
                     AccountRequest::SetAvatar { image_base64 } => {
                         super::avatar::set(c, id, image_base64.as_deref())?;
+                        related = crate::friends::store::related(c,id)?;
                         Ok(AccountResponse::Account { account: account(c,id)? })
                     }
                     AccountRequest::UnlinkIdentity { provider } => {
@@ -570,6 +574,7 @@ pub(super) fn dispatch(
                         // Membership cascades also invalidate editor revisions. Lock in UUID order.
                         execute(c,"SELECT id FROM guilds WHERE id IN (SELECT guild_id FROM guild_members WHERE account_id=$1::uuid) ORDER BY id FOR UPDATE", &[&id.to_string()])?;
                         execute(c,"UPDATE guilds SET revision=revision+1 WHERE id IN (SELECT guild_id FROM guild_members WHERE account_id=$1::uuid)", &[&id.to_string()])?;
+                        related = crate::friends::store::related(c,id)?;
                         execute(c,"DELETE FROM accounts WHERE id=$1::uuid", &[&id.to_string()])?;
                         Ok(done("Account and credentials permanently deleted"))
                     }
@@ -583,6 +588,9 @@ pub(super) fn dispatch(
             });
             for change in changes {
                 change.finish(result.is_ok());
+            }
+            if result.is_ok() {
+                crate::friends::changed(related);
             }
             result
         }

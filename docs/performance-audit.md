@@ -22,14 +22,17 @@ support: bots have no WebView and therefore do not supply UI measurements.
 ## Findings, highest expected impact first
 
 1. **Recurring friends and voice-roster database work.**
-   `backend/src/friends/mod.rs` polls once a second per connected friends socket.
+   `backend/src/friends/mod.rs` polled once a second per connected friends socket;
    `friends/store.rs::snapshot` reauthenticates, locks relationships, reloads all
    friend profiles and, when a conversation is selected, reloads its history.
-   The comparison that suppresses identical outbound snapshots happens *after*
-   this database work. `chat/session.rs` similarly calls
-   `chat/store.rs::visible_voice_channels` once a second for roster subscribers,
-   reloading permission inputs and evaluating visible channels before comparing
-   the roster. These costs grow with connected clients even during idle chat.
+   Since 2026-10-28 that read runs on commit wake-ups, call expiry and at least
+   every ten seconds, with presence/typing refreshed in memory (see
+   [friends](friends.md)). `chat/session.rs` calls
+   `chat/store.rs::visible_voice_channels` for roster subscribers. Since 2026-10-28
+   it reuses that result with its access epochs for up to ten seconds (see
+   [chat](chat.md)), removing about 90% of roster authorization transactions;
+   the one-second in-memory SFU roster read remains. Idle costs still grow with
+   connected clients, now at about a tenth of the previous rate.
    Read **Friends snapshot**, **Voice roster authorization**, unchanged-poll
    totals and **Chat/friends/notification worker queue**. High unchanged ratios together
    with sustained elapsed ms/s make event-driven invalidation worth prioritizing.

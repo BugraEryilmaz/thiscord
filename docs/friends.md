@@ -63,8 +63,8 @@ cannot move the position backward or consume newer messages. Read acknowledgemen
 use the ordinary HTTP request budget, not the message-send write budget.
 Snapshots count incoming messages after that position using an indexed range
 limited to 100 rows per conversation. Own messages and pending relationships never
-contribute. Read state persists across devices/reconnects and follows the existing
-one-second snapshot refresh. Older servers default to zero counts on new clients.
+contribute. Read state persists across devices/reconnects; acknowledgements wake
+the reader's other sockets immediately. Older servers default to zero counts on new clients.
 The read-state migration treats retained messages as unread until viewed; rollback
 discards read positions and the new index while retaining messages/friendships.
 Enter sends the draft; Shift+Enter inserts a newline. IME confirmation and held-key
@@ -85,11 +85,20 @@ and `ping` keeps the socket alive. This separate account-wide socket leaves the
 existing guild chat subscription intact. The client connects while logged in, uses
 ten-second heartbeats, and reconnects with exponential backoff and jitter.
 
-Once per second the server reads an authorized bounded friends/calls snapshot and
-the selected conversation's latest page. Profile lookup is batched. At most eight
-snapshot workers run simultaneously; saturated ticks skip work. Unchanged snapshots
-are suppressed except for a ten-second refresh. This intentionally favors a small
-personal installation over event-log/fanout complexity. The frontend rejects history
+The server reads an authorized bounded friends/calls snapshot and the selected
+conversation's latest page on connect and `select`, after a relevant commit, when
+the earliest listed call expires, and at least every ten seconds. Committed friend
+commands wake both people's sockets (reads wake only the reader); display-name,
+avatar and account-deletion commits wake everyone listing that account. The wake-up
+is an in-process version bump without data or grants: sockets always re-read and
+re-authorize from the database. The ten-second read also covers time-only changes
+(session expiry) and writes outside these paths, such as direct SQL maintenance.
+Presence and typing are in memory and refresh every second on the last database
+snapshot, delivered under the account/session epochs captured before that read.
+Profile lookup is batched. At most eight snapshot workers run simultaneously;
+saturated ticks skip work and retry. Unchanged snapshots are suppressed except for
+a ten-second refresh. This intentionally favors a small personal installation over
+event-log/fanout complexity; wake-ups, like presence, reach only this process. The frontend rejects history
 for a superseded selection and clears account state on logout/token replacement.
 
 Socket delivery captures account/session authorization epochs before database work
@@ -133,7 +142,7 @@ from [audio.md](audio.md), and are not end-to-end encrypted between accounts.
 Shared contracts test bounds and unknown-field rejection. PostgreSQL/socket tests
 cover consent, presence privacy and multiple devices, private history isolation,
 concurrent deduplication, conflicting retries, pagination, call acceptance/end and
-removal. Loopback WebRTC tests exchange packets in both directions, reject premature
+removal, and that commits and call expiry are pushed before the ten-second refresh. Loopback WebRTC tests exchange packets in both directions, reject premature
 and outsider joins, and revoke both peers on hang-up or unfriend. Existing CI runs
 these ignored database tests with `--include-ignored`, plus WASM and native builds.
 
