@@ -1,5 +1,5 @@
 //! Synthetic browser interop probe, explicitly run by a developer. No accounts,
-//! screen capture, microphone, recording, STUN or TURN. Binds loopback only.
+//! screen capture, microphone, recording, STUN or TURN. Uses the production bridge binds.
 use std::{
     sync::atomic::Ordering,
     time::{Duration, Instant},
@@ -77,7 +77,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         }
         tokio::time::sleep(Duration::from_millis(20)).await;
     }
-    println!("Browser connected to loopback video bridge");
+    println!("Browser connected to local video bridge");
     use openh264::{
         encoder::{Encoder, EncoderConfig, Profile, UsageType},
         formats::{RgbaSliceU8, YUVBuffer},

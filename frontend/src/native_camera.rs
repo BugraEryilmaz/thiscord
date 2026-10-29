@@ -1,4 +1,4 @@
-//! Camera capture stays in the WebView. Only compressed H.264 crosses a loopback
+//! Camera capture stays in the WebView. Only compressed H.264 crosses a local
 //! WebRTC peer; the authenticated native call transports it to the SFU.
 use crate::native_screen::{Binding, ScreenState};
 use std::{
@@ -552,7 +552,7 @@ async fn open(state: &CameraState, session: u32, sdp: String) -> Result<ViewAnsw
                     seen: AtomicBool::new(false),
                     connected,
                 }))
-                .with_udp_addrs(vec!["127.0.0.1:0".to_owned()])
+                .with_udp_addrs(thiscord_frontend::screen::local_bridge_udp_addrs())
                 .build()
                 .await
                 .map_err(|_| "Cannot initialize camera transport")?,
@@ -800,6 +800,21 @@ mod tests {
         Arc<Notify>,
         mpsc::Receiver<rtc::rtp::Packet>,
     ) {
+        peer_on("127.0.0.1:0").await
+    }
+    /// Default-route address, as an enumerating WebView would bind it.
+    fn interface_ip() -> std::net::IpAddr {
+        let socket = std::net::UdpSocket::bind("0.0.0.0:0").unwrap();
+        socket.connect("192.0.2.1:9").unwrap();
+        socket.local_addr().unwrap().ip()
+    }
+    async fn peer_on(
+        bind: &str,
+    ) -> (
+        Arc<dyn PeerConnection>,
+        Arc<Notify>,
+        mpsc::Receiver<rtc::rtp::Packet>,
+    ) {
         let gathered = Arc::new(Notify::new());
         let (tx, rx) = mpsc::channel(64);
         let mut engine = MediaEngine::default();
@@ -826,7 +841,7 @@ mod tests {
                 gathered: gathered.clone(),
                 packets: tx,
             }))
-            .with_udp_addrs(vec!["127.0.0.1:0".to_owned()])
+            .with_udp_addrs(vec![bind.to_owned()])
             .build()
             .await
             .unwrap();
@@ -860,7 +875,7 @@ mod tests {
         }
     }
     #[tokio::test]
-    async fn synthetic_camera_crosses_loopback_bridge_and_stops_without_hardware() {
+    async fn synthetic_camera_crosses_local_bridge_and_stops_without_hardware() {
         tokio::time::timeout(Duration::from_secs(25), async {
             let (relay, relay_gathered, _) = peer().await;
             let outgoing = thiscord_frontend::screen::track(MediaKind::Camera.publisher_ssrc());
@@ -883,7 +898,8 @@ mod tests {
             let state = CameraState::default();
             state.bind(binding(outgoing));
             state.prepare(1).await.unwrap();
-            let (browser, browser_gathered, _) = peer().await;
+            // Windows cannot send from an interface-bound WebView socket to loopback.
+            let (browser, browser_gathered, _) = peer_on(&format!("{}:0", interface_ip())).await;
             let camera = thiscord_frontend::screen::track(777);
             browser
                 .add_track(camera.clone() as Arc<dyn TrackLocal>)
@@ -895,13 +911,17 @@ mod tests {
                 .await
                 .unwrap();
             assert!(!answer.sdp.contains("m=audio"));
-            assert!(
-                answer
-                    .sdp
-                    .lines()
-                    .filter(|l| l.starts_with("a=candidate:"))
-                    .all(|l| l.contains("127.0.0.1"))
-            );
+            let candidates: Vec<_> = answer
+                .sdp
+                .lines()
+                .filter(|l| l.starts_with("a=candidate:"))
+                .collect();
+            for ip in ["127.0.0.1".to_owned(), interface_ip().to_string()] {
+                assert!(
+                    candidates.iter().any(|l| l.contains(&format!(" {ip} "))),
+                    "answer must offer {ip}"
+                );
+            }
             browser
                 .set_remote_description(
                     serde_json::from_value(serde_json::json!({"type":"answer","sdp":answer.sdp}))

@@ -620,7 +620,7 @@ pub async fn screen_view_open(
     }
     let result = tokio::time::timeout(
         Duration::from_secs(8),
-        Preview::answer_with(&offer.sdp, Bind::Loopback, recorder.clone()),
+        Preview::answer_with(&offer.sdp, Bind::Bridge, recorder.clone()),
     )
     .await;
     let (preview, sdp) = match result {

@@ -13,6 +13,16 @@ pub mod metrics;
 pub mod pacing;
 pub mod preview;
 pub mod send;
+/// UDP binds for the in-process WebView video bridges (screen preview, camera).
+/// Once media permission enables adapter enumeration, WebView binds its host
+/// socket to an interface address. Windows refuses to send from such a socket
+/// to 127.0.0.1 (WSAEADDRNOTAVAIL) or to another local address, so the answer
+/// must offer the WebView's own address. The wildcard expands to one socket per
+/// usable IPv4 interface. The ports are LAN-reachable, but ICE credentials and
+/// the DTLS fingerprint exchanged in-process still pin the session to the WebView.
+pub fn local_bridge_udp_addrs() -> Vec<String> {
+    vec!["127.0.0.1:0".to_owned(), "0.0.0.0:0".to_owned()]
+}
 pub const SENDER_QUEUE_AGE: std::time::Duration = std::time::Duration::from_millis(200);
 pub fn sender_queue_frames(fps: u32) -> usize {
     (fps.clamp(1, 60) as usize).div_ceil(5)

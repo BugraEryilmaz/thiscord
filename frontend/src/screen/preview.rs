@@ -1,5 +1,6 @@
 //! Compressed-video bridge to the WebView's WebRTC video decoder/compositor.
-//! Viewer peers bind only loopback, use no STUN/TURN and never carry audio.
+//! Viewer peers bind loopback and local interfaces (see `local_bridge_udp_addrs`),
+//! use no STUN/TURN and never carry audio.
 use super::bridge::Recorder;
 use std::{
     sync::{
@@ -39,10 +40,12 @@ impl PeerConnectionEventHandler for Handler {
         );
     }
 }
-/// Where the desktop peer listens. Production binds loopback only; the
-/// interface variant exists for a short, video-free connectivity self-test.
+/// Where the desktop peer listens. Production uses `Bridge`; the loopback-only
+/// and interface-only variants exist for short, video-free self-tests that
+/// tell which path a WebView can reach.
 #[derive(Clone, Copy)]
 pub enum Bind {
+    Bridge,
     Loopback,
     Interfaces,
 }
@@ -57,7 +60,7 @@ pub struct Preview {
 }
 impl Preview {
     pub async fn answer(offer: &str) -> Result<(Self, String), String> {
-        Self::answer_with(offer, Bind::Loopback, Recorder::new()).await
+        Self::answer_with(offer, Bind::Bridge, Recorder::new()).await
     }
     pub async fn answer_with(
         offer: &str,
@@ -106,6 +109,7 @@ impl Preview {
         let gathered = Arc::new(Notify::new());
         let connected = Arc::new(AtomicBool::new(false));
         let addresses = match bind {
+            Bind::Bridge => super::local_bridge_udp_addrs(),
             Bind::Loopback => vec!["127.0.0.1:0".to_owned()],
             // Wildcards expand to one socket per non-loopback interface address.
             Bind::Interfaces => vec!["0.0.0.0:0".to_owned(), "[::]:0".to_owned()],
@@ -260,8 +264,22 @@ mod tests {
             });
         }
     }
+    /// Default-route address, as an enumerating WebView would bind it.
+    fn interface_ip() -> std::net::IpAddr {
+        let socket = std::net::UdpSocket::bind("0.0.0.0:0").unwrap();
+        socket.connect("192.0.2.1:9").unwrap();
+        socket.local_addr().unwrap().ip()
+    }
     #[tokio::test]
     async fn h264_crosses_local_video_only_peer_without_transcoding() {
+        crosses_bridge("127.0.0.1:0".into()).await;
+    }
+    #[tokio::test]
+    async fn interface_bound_webview_reaches_bridge() {
+        // Windows cannot send from an interface-bound socket to loopback.
+        crosses_bridge(format!("{}:0", interface_ip())).await;
+    }
+    async fn crosses_bridge(receiver_bind: String) {
         tokio::time::timeout(Duration::from_secs(15), async {
             let mut media = MediaEngine::default();
             media.register_codec(rtc::rtp_transceiver::rtp_sender::RTCRtpCodecParameters {
@@ -279,7 +297,7 @@ mod tests {
                     gathered: gathered.clone(),
                     packets,
                 }))
-                .with_udp_addrs(vec!["127.0.0.1:0".to_owned()])
+                .with_udp_addrs(vec![receiver_bind])
                 .build()
                 .await
                 .unwrap();
@@ -300,18 +318,22 @@ mod tests {
             let recorder = Recorder::new();
             let (preview, answer) = Preview::answer_with(
                 offer["sdp"].as_str().unwrap(),
-                Bind::Loopback,
+                Bind::Bridge,
                 recorder.clone(),
             )
             .await
             .unwrap();
             assert!(!answer.contains("m=audio"));
-            assert!(
-                answer
-                    .lines()
-                    .filter(|l| l.starts_with("a=candidate:"))
-                    .all(|l| l.contains("127.0.0.1"))
-            );
+            let candidates: Vec<_> = answer
+                .lines()
+                .filter(|l| l.starts_with("a=candidate:"))
+                .collect();
+            for ip in ["127.0.0.1".to_owned(), interface_ip().to_string()] {
+                assert!(
+                    candidates.iter().any(|l| l.contains(&format!(" {ip} "))),
+                    "answer must offer {ip}"
+                );
+            }
             receiver
                 .set_remote_description(
                     serde_json::from_value(serde_json::json!({"type":"answer","sdp":answer}))
@@ -358,7 +380,8 @@ mod tests {
             let facts = &section.facts;
             assert!(facts[crate::video_bridge::RESPONSES_SENT].parse::<u64>().unwrap() > 0);
             assert!(facts["candidates.local"].contains("loopback-v4"), "{facts:?}");
-            assert!(facts["pair.0"].contains("udp host loopback-v4→"), "{facts:?}");
+            // Weak-host platforms may pick loopback or interface pairs either way.
+            assert!(facts["pair.0"].starts_with("succeeded udp host "), "{facts:?}");
             assert_eq!(facts[crate::video_bridge::DTLS_STATE], "connected");
             assert!(
                 section
@@ -368,6 +391,7 @@ mod tests {
             );
             let wire = serde_json::to_string(&section).unwrap();
             assert!(!wire.contains("127.0.0.1"), "{wire}");
+            assert!(!wire.contains(&interface_ip().to_string()), "{wire}");
             // Last-reference release is allowed on a capture/relay worker.
             std::thread::spawn(move || drop(preview)).join().unwrap();
             receiver.close().await.unwrap();
