@@ -86,6 +86,15 @@ impl Converter {
         self.history.fill(0.0);
     }
 
+    /// Restore the state `new` produces, reusing the designed filter.
+    #[cfg_attr(not(feature = "gtcrn"), allow(dead_code))]
+    pub fn restart(&mut self) {
+        self.clear();
+        self.cursor = 0;
+        self.phase = u64::from(self.target);
+        self.expected = None;
+    }
+
     /// Input samples needed to produce exactly `outputs` more output samples.
     pub fn input_needed(&self, outputs: usize) -> usize {
         if outputs == 0 {

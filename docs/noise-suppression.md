@@ -74,8 +74,8 @@ almost none of it was arithmetic, so `processing/gtcrn/` replaces three paths:
   layout and `sequence_lens` instead of approximating them.
 - **ScatterND/Gather** (`indexing.rs`): cache updates and scalar-index cache reads
   took ~7 ms through tract's generic paths. After optimization, those nodes keep
-  tract's facts but evaluate f32 data with bounds-checked slice copies; other
-  types still use tract's implementation.
+  tract's facts but evaluate f32 data with bounds-checked slice copies (constant
+  scatter coordinates become precomputed runs); other types use tract's code.
 
 tract's `Scan` also keeps its hidden state inside a reused `SimpleState` and
 ignores later initial-state inputs. GTCRN's bidirectional intra-frequency GRUs
@@ -117,14 +117,17 @@ laptops were not measured for this change.
 
 | Pipeline (speech + white noise) | Mean / p99 / max per block | RTF | Init | Aligned SNR (input 10.63 dB) |
 | --- | --- | --- | --- | --- |
-| Sonora, Strong | 0.018 / 0.023 / 0.035 ms | 0.002 | 0.2 ms | 0.70 dB |
-| DeepFilterNet3, Maximum | 0.367 / 0.637 / 0.928 ms | 0.037 | 244 ms | 16.14 dB |
-| DeepFilterNet3, Strong | 0.368 / 0.695 / 0.901 ms | 0.037 | 229 ms | 16.76 dB |
-| RNNoise, Strong | 0.030 / 0.041 / 0.179 ms | 0.003 | 0.2 ms | 12.19 dB |
-| GTCRN, Strong | 0.408 / 0.900 / 1.382 ms | 0.041 | 115 ms | 20.99 dB |
+| Sonora, Strong | 0.017 / 0.020 / 0.032 ms | 0.002 | 0.2 ms | 0.70 dB |
+| DeepFilterNet3, Maximum | 0.352 / 0.554 / 0.686 ms | 0.035 | 237 ms | 16.14 dB |
+| DeepFilterNet3, Strong | 0.367 / 0.627 / 0.696 ms | 0.037 | 223 ms | 16.76 dB |
+| RNNoise, Strong | 0.030 / 0.045 / 0.113 ms | 0.003 | 0.1 ms | 12.19 dB |
+| GTCRN, Strong | 0.359 / 0.685 / 0.837 ms | 0.036 | 112 ms | 20.99 dB |
 
-No case missed a 10 ms deadline. GTCRN's reset costs about 1 ms (run-state and
-converter rebuild) versus 0.2 ms for DeepFilterNet3. Aligned SNR is a waveform
+No case missed a 10 ms deadline. In the unoptimized dev profile (`tauri dev`),
+GTCRN measured 2.0 ms mean / 3.4 ms p99, comparable to AEC3 + DeepFilterNet3
+(1.8 / 3.2 ms): its native ops live in the frontend crate, which dev builds do
+not optimize. Constant ScatterND coordinates are precomputed into merged slice
+copies, and reset restarts the resamplers without redesigning their filters. Aligned SNR is a waveform
 metric on one synthetic English fixture with seeded white noise. It penalizes
 coloration and filter phase (hence Sonora's low score) and treats GTCRN's missing
 upper band only as removed noise, so it is **not** a perceptual ranking: listen

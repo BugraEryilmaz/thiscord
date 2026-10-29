@@ -1086,7 +1086,10 @@ async fn owner_bots_use_native_recovery_dsp_devices_and_ptt() {
         .await,
     )
     .unwrap();
-    assert_eq!(observed, serde_json::from_value(processing).unwrap());
+    assert_eq!(
+        observed,
+        serde_json::from_value(processing.clone()).unwrap()
+    );
     let status = audio(
         &app,
         &owner,
@@ -1096,6 +1099,36 @@ async fn owner_bots_use_native_recovery_dsp_devices_and_ptt() {
     .await;
     assert_eq!(status["running"], true);
     assert_eq!(status["echo"]["automatic_gain"], true);
+    // Live switches to the other prewarmed denoisers, with non-default strengths.
+    for (model, strength) in [("rnnoise", "light"), ("gtcrn", "balanced")] {
+        processing["noise_suppression_model"] = json!(model);
+        processing["noise_suppression_strength"] = json!(strength);
+        save_audio(&app, &owner, &receiver["connection_id"], processing.clone()).await;
+        let observed: thiscord_shared::audio::AudioSettings = serde_json::from_value(
+            audio(
+                &app,
+                &owner,
+                &receiver["connection_id"],
+                json!({"command":"audio_current"}),
+            )
+            .await,
+        )
+        .unwrap();
+        assert_eq!(
+            observed,
+            serde_json::from_value(processing.clone()).unwrap()
+        );
+        tokio::time::sleep(Duration::from_millis(300)).await;
+        let status = audio(
+            &app,
+            &owner,
+            &receiver["connection_id"],
+            json!({"command":"audio_status"}),
+        )
+        .await;
+        // Inference failures stop the engine rather than passing raw audio.
+        assert_eq!(status["running"], true, "{model}: {}", status["message"]);
+    }
     settings["talking"] = json!(false);
     bots(
         &app,

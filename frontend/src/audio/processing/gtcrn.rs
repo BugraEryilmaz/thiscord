@@ -110,7 +110,7 @@ impl Gtcrn {
         }
         let mut model = model.into_optimized()?;
         if native {
-            indexing::accelerate(&mut model);
+            indexing::accelerate(&mut model)?;
         }
         Ok(Arc::new(model.into_runnable()?))
     }
@@ -236,9 +236,9 @@ impl CaptureStage for Gtcrn {
         self.queue = [0.0; QUEUE];
         self.queue_start = 0;
         self.queue_len = PREROLL;
-        // Recreate the converters so their integer phase starts block-aligned.
-        self.down = Converter::new(48_000, RATE);
-        self.up = Converter::new(RATE, 48_000);
+        // Restart the converters so their integer phase starts block-aligned.
+        self.down.restart();
+        self.up.restart();
     }
     fn delay_samples(&self) -> usize {
         // Hop history plus preroll at 16 kHz, then both resampler group delays.

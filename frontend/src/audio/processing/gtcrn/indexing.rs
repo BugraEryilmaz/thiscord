@@ -8,14 +8,59 @@ use tract_onnx::prelude::*;
 use tract_onnx::tract_core::internal::*;
 use tract_onnx::tract_core::ops::array::{Gather, ScatterNd};
 
-pub fn accelerate(model: &mut TypedModel) {
-    for node in &mut model.nodes {
-        if let Some(gather) = node.op_as::<Gather>() {
-            node.op = Box::new(FastGather(gather.clone()));
+pub fn accelerate(model: &mut TypedModel) -> TractResult<()> {
+    for id in 0..model.nodes.len() {
+        let node = &model.nodes[id];
+        let op: Box<dyn TypedOp> = if let Some(gather) = node.op_as::<Gather>() {
+            Box::new(FastGather(gather.clone()))
         } else if node.op_is::<ScatterNd>() {
-            node.op = Box::new(FastScatterNd);
+            let (data, indices) = (
+                model.outlet_fact(node.inputs[0])?,
+                model.outlet_fact(node.inputs[1])?,
+            );
+            let runs = match (data.shape.as_concrete(), &indices.konst) {
+                (Some(shape), Some(indices)) => Some(copy_runs(shape, indices)?.into()),
+                _ => None,
+            };
+            Box::new(FastScatterNd { runs })
+        } else {
+            continue;
+        };
+        model.nodes[id].op = op;
+    }
+    Ok(())
+}
+/// A scatter as merged `(output offset, update offset, length)` copies. GTCRN's
+/// constant coordinate tables address contiguous rows, so this turns thousands
+/// of per-element writes into a few slice copies.
+fn copy_runs(shape: &[usize], indices: &Tensor) -> TractResult<Vec<(usize, usize, usize)>> {
+    let depth = *indices.shape().last().context("ScatterND indices rank 0")?;
+    ensure!(
+        (1..=shape.len()).contains(&depth),
+        "ScatterND index depth {depth}"
+    );
+    let inner = shape[depth..].iter().product::<usize>();
+    ensure!(inner > 0, "ScatterND on an empty slice");
+    let strides: TVec<usize> = (0..depth)
+        .map(|axis| shape[axis + 1..].iter().product())
+        .collect();
+    let indices = indices.cast_to::<i64>()?;
+    let mut runs: Vec<(usize, usize, usize)> = Vec::new();
+    for (update, coordinates) in indices.as_slice::<i64>()?.chunks_exact(depth).enumerate() {
+        let mut offset = 0;
+        for ((&index, &dim), stride) in coordinates.iter().zip(shape).zip(&strides) {
+            offset += checked(index, dim)? * stride;
+        }
+        match runs.last_mut() {
+            Some((output, source, len))
+                if *output + *len == offset && *source + *len == update * inner =>
+            {
+                *len += inner
+            }
+            _ => runs.push((offset, update * inner, inner)),
         }
     }
+    Ok(runs)
 }
 fn checked(index: i64, dim: usize) -> TractResult<usize> {
     let index = if index < 0 { index + dim as i64 } else { index };
@@ -72,7 +117,10 @@ impl EvalOp for FastGather {
 }
 
 #[derive(Debug, Clone)]
-struct FastScatterNd;
+struct FastScatterNd {
+    /// Precomputed copies when the indices are constant and shapes concrete.
+    runs: Option<std::sync::Arc<[(usize, usize, usize)]>>,
+}
 impl Op for FastScatterNd {
     fn name(&self) -> Cow<'_, str> {
         "FastScatterNd".into()
@@ -94,6 +142,20 @@ impl EvalOp for FastScatterNd {
             || inputs[2].datum_type() != f32::datum_type()
         {
             return ScatterNd.eval(inputs);
+        }
+        if let Some(runs) = &self.runs {
+            let mut output = inputs[0].as_slice::<f32>()?.to_vec();
+            let updates = inputs[2].as_slice::<f32>()?;
+            for &(at, from, len) in runs.iter() {
+                ensure!(
+                    at + len <= output.len() && from + len <= updates.len(),
+                    "ScatterND run"
+                );
+                output[at..at + len].copy_from_slice(&updates[from..from + len]);
+            }
+            return Ok(tvec![
+                Tensor::from_shape(inputs[0].shape(), &output)?.into_tvalue()
+            ]);
         }
         // indices [..., k] address the first k axes; each selects a slice of
         // the remaining axes, which `updates` supplies in index order.
