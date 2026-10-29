@@ -369,6 +369,14 @@ fn audio_model_selection_preserves_old_settings_and_rejects_unknown_models() {
         to_value(selected).unwrap()["noise_suppression_model"],
         "deep_filter_net3"
     );
+    for (model, name) in [
+        (NoiseSuppressionModel::Rnnoise, "rnnoise"),
+        (NoiseSuppressionModel::Gtcrn, "gtcrn"),
+    ] {
+        let selected: AudioSettings = from_value(json!({"noise_suppression_model":name})).unwrap();
+        assert_eq!(selected.noise_suppression_model, model);
+        assert_eq!(to_value(selected).unwrap()["noise_suppression_model"], name);
+    }
     assert!(from_value::<AudioSettings>(json!({"noise_suppression_model":"unknown"})).is_err());
 }
 

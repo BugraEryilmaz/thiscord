@@ -3,7 +3,7 @@
 mod fixture;
 use std::{hint::black_box, time::Instant};
 use thiscord_frontend::audio::processing::Processing;
-use thiscord_shared::audio::{AudioSettings, NoiseSuppressionModel};
+use thiscord_shared::audio::{AudioSettings, NoiseSuppressionModel, NoiseSuppressionStrength};
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     let args: Vec<_> = std::env::args().skip(1).collect();
@@ -41,26 +41,52 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         "{}",
         serde_json::json!({"os":std::env::consts::OS,"arch":std::env::consts::ARCH,"debug_assertions":cfg!(debug_assertions),"frames":frames,"sample_rate":48000,"hop_samples":480,"scope":"worker DSP only; excludes devices, mixer, codecs and network"})
     );
-    for (name, model, enabled, combined) in [
-        ("bypass", NoiseSuppressionModel::Sonora, false, false),
-        ("sonora", NoiseSuppressionModel::Sonora, true, false),
+    use NoiseSuppressionStrength::{Maximum, Strong};
+    // Unlimited DFN3 rows keep earlier results comparable; others use the default strength.
+    for (name, model, enabled, combined, strength) in [
+        (
+            "bypass",
+            NoiseSuppressionModel::Sonora,
+            false,
+            false,
+            Strong,
+        ),
+        ("sonora", NoiseSuppressionModel::Sonora, true, false, Strong),
         (
             "deep_filter_net3",
             NoiseSuppressionModel::DeepFilterNet3,
             true,
             false,
+            Maximum,
         ),
+        (
+            "deep_filter_net3_strong",
+            NoiseSuppressionModel::DeepFilterNet3,
+            true,
+            false,
+            Strong,
+        ),
+        (
+            "rnnoise",
+            NoiseSuppressionModel::Rnnoise,
+            true,
+            false,
+            Strong,
+        ),
+        ("gtcrn", NoiseSuppressionModel::Gtcrn, true, false, Strong),
         (
             "aec_deep_filter_net3_gain",
             NoiseSuppressionModel::DeepFilterNet3,
             true,
             true,
+            Maximum,
         ),
     ] {
         let start = Instant::now();
         let mut processor = Processing::new(&AudioSettings {
             noise_suppression: enabled,
             noise_suppression_model: model,
+            noise_suppression_strength: strength,
             echo_cancellation: combined,
             automatic_gain: combined,
             ..Default::default()
@@ -106,7 +132,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             let percentile = |p: f64| times[((frames - 1) as f64 * p).ceil() as usize];
             println!(
                 "{}",
-                serde_json::json!({"pipeline":name,"fixture":kind,"initialization_ms":initialization_ms,"reset_ms":reset_ms,"delay_samples":processor.enhancement_delay_samples(),"mean_ms":total/frames as f64,"p50_ms":percentile(0.5),"p95_ms":percentile(0.95),"p99_ms":percentile(0.99),"max_ms":times[frames-1],"rtf":total/(frames as f64*10.0),"deadline_misses":misses,"input_energy":input_energy,"output_energy":output_energy})
+                serde_json::json!({"pipeline":name,"strength":strength,"fixture":kind,"initialization_ms":initialization_ms,"reset_ms":reset_ms,"delay_samples":processor.enhancement_delay_samples(),"mean_ms":total/frames as f64,"p50_ms":percentile(0.5),"p95_ms":percentile(0.95),"p99_ms":percentile(0.99),"max_ms":times[frames-1],"rtf":total/(frames as f64*10.0),"deadline_misses":misses,"input_energy":input_energy,"output_energy":output_energy})
             );
         }
         // Quality result is separate from timings and aligns known model delay.
@@ -131,7 +157,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         let delay = fixture::best_delay(&clean, &output, max_delay);
         println!(
             "{}",
-            serde_json::json!({"pipeline":name,"measured_alignment_samples":delay,"aligned_input_snr_db":fixture::snr(&clean,&noisy),"aligned_output_snr_db":fixture::snr(&clean,&output[delay..delay+count]),"quality_note":"synthetic speech + seeded white noise; not a perceptual or speaker-isolation score"})
+            serde_json::json!({"pipeline":name,"strength":strength,"measured_alignment_samples":delay,"aligned_input_snr_db":fixture::snr(&clean,&noisy),"aligned_output_snr_db":fixture::snr(&clean,&output[delay..delay+count]),"quality_note":"synthetic speech + seeded white noise; not a perceptual or speaker-isolation score"})
         );
     }
     Ok(())

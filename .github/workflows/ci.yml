@@ -263,13 +263,13 @@ jobs:
         if: runner.os == 'Linux'
         run: cargo test -p thiscord-frontend --lib --features scripting-bot --locked ffmpeg_ -- --ignored
       - name: Native audio mixer, DSP, jitter and encrypted WebRTC probe
-        run: cargo test -p thiscord-frontend --lib --example audio_replay --features deep-filter,neural-echo-probe --profile ci --locked
+        run: cargo test -p thiscord-frontend --lib --example audio_replay --features deep-filter,rnnoise,gtcrn,neural-echo-probe --profile ci --locked
       - name: Lint audio stages, regressions and benchmarks
-        run: cargo clippy -p thiscord-frontend --lib --tests --examples --features deep-filter,neural-echo-probe --profile ci --locked -- -D warnings
+        run: cargo clippy -p thiscord-frontend --lib --tests --examples --features deep-filter,rnnoise,gtcrn,neural-echo-probe --profile ci --locked -- -D warnings
       - name: Measure bundled DRED recovery, payload and worker cost
         shell: pwsh
         run: |
-          cargo test -p thiscord-frontend --lib --features deep-filter,neural-echo-probe --profile ci --locked dred -- --nocapture --test-threads=1 > dred-results.txt 2>&1
+          cargo test -p thiscord-frontend --lib --features deep-filter,rnnoise,gtcrn,neural-echo-probe --profile ci --locked dred -- --nocapture --test-threads=1 > dred-results.txt 2>&1
           if ($LASTEXITCODE) { exit $LASTEXITCODE }
       - name: Build production benchmark executables together
         shell: pwsh
@@ -279,16 +279,16 @@ jobs:
           if ($LASTEXITCODE -or !$hostLine) { throw 'Cannot determine Rust host target.' }
           $target = $hostLine.ToString().Substring(6).Trim()
           "BENCH_TARGET=$target" >> $env:GITHUB_ENV
-          cargo build -p thiscord-frontend --example processing_bench --example neural_echo_bench --example dtx_bench --features deep-filter,neural-echo --release --target $target --locked
+          cargo build -p thiscord-frontend --example processing_bench --example neural_echo_bench --example dtx_bench --features deep-filter,rnnoise,gtcrn,neural-echo --release --target $target --locked
           if ($LASTEXITCODE) { exit $LASTEXITCODE }
       - name: Audio processing benchmark (informational)
         shell: pwsh
         run: |
-          cargo run -p thiscord-frontend --example processing_bench --features deep-filter,neural-echo --release --target $env:BENCH_TARGET --locked -- 300 > processing-bench.jsonl
+          cargo run -p thiscord-frontend --example processing_bench --features deep-filter,rnnoise,gtcrn,neural-echo --release --target $env:BENCH_TARGET --locked -- 300 > processing-bench.jsonl
           if ($LASTEXITCODE) { exit $LASTEXITCODE }
-          cargo run -p thiscord-frontend --example neural_echo_bench --features deep-filter,neural-echo --release --target $env:BENCH_TARGET --locked -- frontend/models/ree-v2.tflite > neural-echo-bench.jsonl
+          cargo run -p thiscord-frontend --example neural_echo_bench --features deep-filter,rnnoise,gtcrn,neural-echo --release --target $env:BENCH_TARGET --locked -- frontend/models/ree-v2.tflite > neural-echo-bench.jsonl
           if ($LASTEXITCODE) { exit $LASTEXITCODE }
-          cargo run -p thiscord-frontend --example dtx_bench --features deep-filter,neural-echo --release --target $env:BENCH_TARGET --locked > dtx-bench.jsonl
+          cargo run -p thiscord-frontend --example dtx_bench --features deep-filter,rnnoise,gtcrn,neural-echo --release --target $env:BENCH_TARGET --locked > dtx-bench.jsonl
           if ($LASTEXITCODE) { exit $LASTEXITCODE }
       - uses: actions/upload-artifact@v4
         with:

@@ -1,7 +1,8 @@
 # Voice isolation research and implementation plan
 
-Research date: 2026-09-30. DeepFilterNet3 is now implemented as an experimental
-denoiser. See [integration and local measurements](deep-filter.md). SpeakerBeam-SS
+Research date: 2026-09-30. DeepFilterNet3, RNNoise (nnnoiseless) and GTCRN are
+now implemented as optional denoisers with a shared strength setting. See
+[DeepFilterNet3 integration](deep-filter.md) and [all denoisers](noise-suppression.md). SpeakerBeam-SS
 source feasibility was reviewed below; live integration is blocked on a suitable
 streaming checkpoint. Other candidates and personalized extraction remain research.
 Implementation checklist: [TODO section 5a](../TODO.md#5a-voice-isolation-and-speech-quality).
@@ -14,7 +15,8 @@ Treat the reported similarity to Discord as a listening observation; establish
 a matched baseline before claiming that Thiscord performs better.
 
 Current native processing uses Sonora 0.2 AEC3 with Thiscord's post-mix playback
-reference, a choice of Sonora High or DeepFilterNet3 denoising, then optional
+reference, a choice of Sonora, DeepFilterNet3, RNNoise or GTCRN denoising at a
+selected strength, then optional
 adaptive AGC2. There is no enrolled speaker model. See [audio.md](audio.md) for
 timing, diagnostics and current tests.
 

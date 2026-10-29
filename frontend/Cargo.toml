@@ -10,11 +10,13 @@ default-run = "thiscord-desktop"
 default = []
 welcome = []
 scripting-bot = ["dep:reqwest", "dep:keyring", "dep:uuid", "dep:tokio", "tokio/rt-multi-thread", "tokio/process", "tokio/signal", "dep:tokio-tungstenite", "dep:futures-util", "dep:webrtc", "dep:rtc", "dep:bytes", "dep:opus", "dep:async-trait", "dep:rand"]
-voice-bot = ["native-audio", "deep-filter", "neural-echo", "dep:openh264", "tokio/rt-multi-thread", "tokio/io-std"]
-desktop = ["dep:objc2", "dep:objc2-web-kit", "dep:block2", "screen-share", "dep:tauri", "dep:tauri-build", "dep:keyring", "dep:open", "dep:tokio", "dep:rand", "dep:base64", "native-audio", "deep-filter", "neural-echo", "dep:tauri-plugin-global-shortcut", "dep:tauri-plugin-updater", "dep:tauri-plugin-single-instance", "dep:tauri-plugin-deep-link", "dep:tokio-tungstenite", "dep:futures-util"]
+voice-bot = ["native-audio", "deep-filter", "rnnoise", "gtcrn", "neural-echo", "dep:openh264", "tokio/rt-multi-thread", "tokio/io-std"]
+desktop = ["dep:objc2", "dep:objc2-web-kit", "dep:block2", "screen-share", "dep:tauri", "dep:tauri-build", "dep:keyring", "dep:open", "dep:tokio", "dep:rand", "dep:base64", "native-audio", "deep-filter", "rnnoise", "gtcrn", "neural-echo", "dep:tauri-plugin-global-shortcut", "dep:tauri-plugin-updater", "dep:tauri-plugin-single-instance", "dep:tauri-plugin-deep-link", "dep:tokio-tungstenite", "dep:futures-util"]
 screen-share = ["native-audio", "dep:windows-capture", "dep:windows", "dep:windows-core", "dep:openh264", "dep:wasapi"]
 native-audio = ["dep:cpal", "dep:ringbuf", "dep:opus", "dep:webrtc", "dep:tokio", "dep:bytes", "dep:rtc", "dep:async-trait", "dep:sonora", "dep:hound", "dep:windows", "dep:socket2"]
 deep-filter = ["native-audio", "dep:deep_filter", "dep:ndarray", "dep:tract-core", "dep:tract-hir", "dep:tract-onnx", "dep:tract-pulse"]
+rnnoise = ["native-audio", "dep:nnnoiseless"]
+gtcrn = ["native-audio", "dep:tract-hir", "dep:tract-onnx", "dep:rustfft"]
 release-tools = ["dep:base64", "dep:minisign-verify"]
 neural-echo = ["native-audio", "dep:tract-tflite", "dep:sha2", "dep:rustfft"]
 neural-echo-probe = ["neural-echo"]
@@ -55,7 +57,7 @@ required-features = ["release-tools"]
 
 [[example]]
 name = "processing_bench"
-required-features = ["deep-filter"]
+required-features = ["deep-filter", "rnnoise", "gtcrn"]
 
 [[example]]
 name = "dtx_bench"
@@ -71,7 +73,7 @@ required-features = ["neural-echo", "deep-filter"]
 
 [[example]]
 name = "audio_replay"
-required-features = ["neural-echo", "deep-filter"]
+required-features = ["neural-echo", "deep-filter", "rnnoise", "gtcrn"]
 
 [[example]]
 name = "screen_encode_probe"
@@ -136,6 +138,7 @@ tract-onnx = { version = "=0.21.4", optional = true }
 tract-pulse = { version = "=0.21.4", optional = true }
 tract-tflite = { version = "=0.21.4", optional = true }
 sha2 = { version = "0.10", optional = true }
+nnnoiseless = { version = "0.5.2", default-features = false, optional = true }
 rustfft = { version = "6", optional = true }
 ringbuf = { version = "0.5.2", optional = true }
 opus = { version = "0.4.0", optional = true }

@@ -5,6 +5,24 @@ check **Noise suppression**, then test the microphone or join voice. Both the
 checkbox and model selection can also be changed during an existing call. Existing
 settings keep Sonora selected, and suppression remains off unless enabled.
 DeepFilterNet3 enhances speech generally; it is not an enrolled-speaker isolator.
+RNNoise and GTCRN are further options; see [noise-suppression.md](noise-suppression.md).
+
+## Suppression strength
+
+The shared **Suppression strength** setting sets libDF's attenuation limit:
+Light 6 dB, Balanced 12 dB, Strong 18 dB (default) and Maximum unlimited. A
+finite limit mixes `enhanced * (1 - g) + noisy * g` back into the spectrum before
+synthesis, with `g = 10^(-limit/20)`, so noise is turned down by at most the limit
+instead of being erased. Speech the model misjudges as noise is attenuated
+by the same bound, which reduces the "thin"/underwater sound of full suppression.
+Measured stationary-noise reduction is 5.98/11.98/17.98 dB at the finite limits.
+Strength changes call `set_atten_lim` on the live and pristine models without
+reloading, resetting or replacing the stage.
+
+**Behavior change:** before this setting existed DeepFilterNet3 ran unlimited.
+Saved settings without a strength now use Strong (18 dB); select **Maximum** for
+the previous behavior. Sonora's default Strong level is its previous High level.
+Upstream thresholds (`min_db_thresh` -10 dB, post-filter off) are unchanged.
 
 ## Processing boundaries
 
@@ -21,11 +39,11 @@ pre-roll while preserving AEC adaptation. See [voice activation](voice-activatio
 and an ordered `CaptureChain`. Add an adapter implementing that interface to
 replace a model or compose more stages with `push`; stage order is explicit.
 `processing/deep_filter.rs` is the only adapter coupled to DeepFilterNet types.
-The default chain selects exactly one denoiser, avoiding accidental Sonora + DFN
-double suppression. Independent AEC and gain controls still work in either mode.
+The default chain selects exactly one denoiser, avoiding accidental double
+suppression between Sonora, DFN3, RNNoise and GTCRN. Independent AEC and gain controls still work in either mode.
 
 Graph construction and model warmup happen on the native worker before playback
-and capture start. Live sessions prewarm and retain both denoisers on the worker, so neither
+and capture start. Live sessions prewarm and retain every compiled denoiser on the worker, so neither
 switching models nor re-enabling suppression compiles tract during a call. Bypass skips inference. Changing enable
 states clears delayed samples and gain history; a short discontinuity/warmup is
 possible. Reset restores pristine neural state without reparsing model files:
@@ -84,15 +102,16 @@ the fix adds no noise and does not reset recurrent history.
 ## Regression tests and offline benchmark
 
 ```sh
-cargo test -p thiscord-frontend --lib --features deep-filter --release --locked
-cargo run -p thiscord-frontend --example processing_bench --features deep-filter --release --locked -- 1000
+cargo test -p thiscord-frontend --lib --features deep-filter,rnnoise,gtcrn --release --locked
+cargo run -p thiscord-frontend --example processing_bench --features deep-filter,rnnoise,gtcrn --release --locked -- 1000
 ```
 
 The first optional argument is measured blocks per case (100..100000); the second
 is a 48 kHz mono PCM16 WAV, limited to one minute. Without it, the committed
 synthetic speech fixture is used. The tool never opens devices or saves recordings.
 
-JSON lines report bypass, Sonora, DFN3 and AEC+DFN3+gain, each with speech/noise,
+JSON lines report bypass, Sonora, DFN3 (unlimited and Strong), RNNoise, GTCRN
+and AEC+DFN3+gain, each tagged with its strength and run with speech/noise,
 noise-only and silence inputs. They include startup/reset costs, mean/p50/p95/p99/
 maximum processing time, RTF and 10 ms deadline misses after a one-second warmup.
 Quality runs separately, using seeded noise, measured sample alignment and SNR.
@@ -118,6 +137,10 @@ behavior remain required before changing defaults. The synthetic English fixture
 does not establish intelligibility across real speakers, languages or rooms.
 
 ## Local results (2026-09-30)
+
+These results predate the strength setting and use unlimited attenuation
+(today's Maximum). The benchmark keeps unlimited `deep_filter_net3` rows for
+comparison; see [noise-suppression.md](noise-suppression.md) for later results.
 
 Intel Core i7-13700K, Windows x64 and Kali Linux under WSL on the same host;
 Rust 1.98.1 release builds, 1,000 measured 10 ms blocks per case after 100 warmup

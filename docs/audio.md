@@ -243,10 +243,12 @@ ticks. A device switch replaces local streams/queues only: the WebRTC connection
 Opus encoders/decoders, roster and per-user volume settings stay in place. Echo
 adaptation restarts, and switching devices may produce a brief audio gap.
 
-DeepFilterNet's tract state is not `Send`. Both denoisers are therefore initialized
-on the audio worker before live playback starts and retained there for subsequent
-switches; bypassed stages perform no inference. This adds initialization time and
-resident memory for DeepFilterNet even when Sonora is selected. Neural echo-model
+DeepFilterNet's tract state is not `Send`. All denoisers compiled into the build
+(Sonora, DeepFilterNet3, RNNoise, GTCRN) are therefore initialized on the audio
+worker before live playback starts and retained there for subsequent switches;
+bypassed stages perform no inference. This adds initialization time and resident
+memory for every neural model even when Sonora is selected. Strength changes only
+adjust the active stage and never require replacement. Neural echo-model
 loading and movable AEC state are prepared in the background. No unsafe thread
 transfer or PCM over Tauri IPC is used; device callbacks remain unchanged.
 
@@ -314,7 +316,8 @@ acceptance; these software tests do not establish gapless device switching.
   reference. Noise suppression uses the High setting. Automatic gain explicitly
   enables adaptive digital gain, starts at unity and caps gain at 20 dB with the
   library's -50 dBFS output-noise limit; it does not change OS microphone volume.
-  Echo buffering delay comes from CPAL capture/playback timestamps, mapped onto
+  Noise suppression strength selects Sonora's Low/Moderate/High/VeryHigh level
+  (Strong/High is the default). Echo buffering delay comes from CPAL capture/playback timestamps, mapped onto
   a common monotonic clock. AEC3 estimates/refines the acoustic delay internally.
   Hardware acoustic quality still needs acceptance, so headphones remain recommended.
   Conventional residual estimation remains the default. A vendored Sonora
@@ -327,6 +330,10 @@ acceptance; these software tests do not establish gapless device switching.
   Select it in Audio & voice and enable Noise suppression. Both bypass and model
   changes apply during a call. Existing settings retain Sonora. See [deep-filter.md](deep-filter.md)
   for the pinned runtime/model, stage interface, tests and performance results.
+- [nnnoiseless 0.5.2](https://github.com/jneem/nnnoiseless) (RNNoise) and GTCRN
+  (pinned ONNX through tract-onnx 0.21.4, 16 kHz): further optional denoisers.
+  The four-level strength setting limits attenuation for every model. See
+  [noise-suppression.md](noise-suppression.md) for delays, limits and measurements.
 
 The native path is selected per the project requirement. Windows and Linux
 software probes run locally; CI runs the same tests and desktop builds on all
@@ -915,11 +922,12 @@ denoisers may also add different delays; align comparisons accordingly.
 Replay with the recorded settings, or override the estimator/denoiser:
 
 ```powershell
-cargo run -p thiscord-frontend --release --locked --features deep-filter,neural-echo --example audio_replay -- C:\path\echo-recording C:\path\baseline.wav
-cargo run -p thiscord-frontend --release --locked --features deep-filter,neural-echo --example audio_replay -- C:\path\echo-recording C:\path\candidate.wav --neural-echo on --noise-suppression deep_filter_net3
+cargo run -p thiscord-frontend --release --locked --features deep-filter,rnnoise,gtcrn,neural-echo --example audio_replay -- C:\path\echo-recording C:\path\baseline.wav
+cargo run -p thiscord-frontend --release --locked --features deep-filter,rnnoise,gtcrn,neural-echo --example audio_replay -- C:\path\echo-recording C:\path\candidate.wav --neural-echo on --noise-suppression deep_filter_net3 --noise-suppression-strength balanced
 ```
 
-Overrides accept `--neural-echo on|off` and `--noise-suppression off|sonora|deep_filter_net3`.
+Overrides accept `--neural-echo on|off`, `--noise-suppression off|sonora|deep_filter_net3|rnnoise|gtcrn`
+and `--noise-suppression-strength light|balanced|strong|maximum`.
 Replay preserves the recorded transmit gates and refuses to overwrite output files
 or accept incomplete/oversized input. Change the Rust processing modules to evaluate
 future algorithms against the same inputs. Listening and speech-preservation checks
@@ -1206,8 +1214,9 @@ desktop/Pi capacity until run on the target hardware.
 The planned voice-isolation work, candidate models, published computation costs
 and acceptance criteria are in [voice-isolation.md](voice-isolation.md) and
 [TODO section 5a](../TODO.md#5a-voice-isolation-and-speech-quality).
-DeepFilterNet3 is implemented as an experimental denoiser; the remaining models
-and personalized speaker isolation are still research candidates.
+DeepFilterNet3, RNNoise and GTCRN are implemented as optional denoisers; see
+[noise-suppression.md](noise-suppression.md). Personalized speaker isolation is
+still a research candidate.
 
 Native library tests cover independent mixing/gain, deafen backlog, queue bounds,
 jitter ordering/replay/wrap, finite DSP output and Opus forwarding across two

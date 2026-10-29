@@ -61,6 +61,9 @@ opt-level = 3
 [profile.dev.package.rustfft]
 opt-level = 3
 
+[profile.dev.package.nnnoiseless]
+opt-level = 3
+
 [profile.dev.package.realfft]
 opt-level = 3
 

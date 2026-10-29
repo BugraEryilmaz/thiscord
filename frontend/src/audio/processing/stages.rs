@@ -1,9 +1,33 @@
 //! Ordered, replaceable capture stages. These run only on the native worker.
 //! Each stage consumes/emits exactly 10 ms of normalized 48 kHz mono PCM.
 use crate::audio::failure::Failure;
-use sonora::{AudioProcessing, Config, StreamConfig};
+use sonora::{AudioProcessing, Config, StreamConfig, config::NoiseSuppressionLevel};
+use thiscord_shared::audio::NoiseSuppressionStrength;
 
 pub type Block = [f32; 480];
+
+/// Maximum noise attenuation for models that mix back unprocessed signal.
+/// These match Sonora's nominal Low/Moderate/High levels; Maximum is unlimited.
+pub fn attenuation_limit_db(strength: NoiseSuppressionStrength) -> Option<f32> {
+    match strength {
+        NoiseSuppressionStrength::Light => Some(6.0),
+        NoiseSuppressionStrength::Balanced => Some(12.0),
+        NoiseSuppressionStrength::Strong => Some(18.0),
+        NoiseSuppressionStrength::Maximum => None,
+    }
+}
+/// Linear amplitude of unprocessed signal retained in `wet * (1 - m) + dry * m`.
+pub fn dry_mix(strength: NoiseSuppressionStrength) -> f32 {
+    attenuation_limit_db(strength).map_or(0.0, |db| 10f32.powf(-db / 20.0))
+}
+pub fn sonora_level(strength: NoiseSuppressionStrength) -> NoiseSuppressionLevel {
+    match strength {
+        NoiseSuppressionStrength::Light => NoiseSuppressionLevel::Low,
+        NoiseSuppressionStrength::Balanced => NoiseSuppressionLevel::Moderate,
+        NoiseSuppressionStrength::Strong => NoiseSuppressionLevel::High,
+        NoiseSuppressionStrength::Maximum => NoiseSuppressionLevel::VeryHigh,
+    }
+}
 
 pub trait CaptureStage {
     fn name(&self) -> &'static str;
@@ -14,6 +38,8 @@ pub trait CaptureStage {
     fn delay_samples(&self) -> usize {
         0
     }
+    /// Denoisers apply this live without reloading models; others ignore it.
+    fn set_strength(&mut self, _strength: NoiseSuppressionStrength) {}
 }
 
 /// Stages execute in insertion order. Bypassed stages consume no inference time.
@@ -32,6 +58,12 @@ impl CaptureChain {
     }
     pub fn push(&mut self, enabled: bool, stage: impl CaptureStage + 'static) {
         self.stages.push((enabled, Box::new(stage)));
+    }
+    pub(super) fn push_boxed(&mut self, enabled: bool, stage: Box<dyn CaptureStage>) {
+        self.stages.push((enabled, stage));
+    }
+    pub(super) fn set_strength(&mut self, index: usize, strength: NoiseSuppressionStrength) {
+        self.stages[index].1.set_strength(strength);
     }
     pub fn set_enabled(&mut self, index: usize, enabled: bool) {
         if self.stages[index].0 != enabled {
@@ -142,6 +174,14 @@ impl CaptureStage for SonoraStage {
     }
     fn reset(&mut self) {
         *self = Self::new(self.name, self.config.clone());
+    }
+    fn set_strength(&mut self, strength: NoiseSuppressionStrength) {
+        if let Some(suppression) = &mut self.config.noise_suppression
+            && suppression.level != sonora_level(strength)
+        {
+            suppression.level = sonora_level(strength);
+            self.reset();
+        }
     }
 }
 

@@ -223,8 +223,9 @@ and single-process chat/media enforcement.
 ## 5a. Voice isolation and speech quality
 
 Research, model costs and proposed acceptance budgets: [voice-isolation.md](docs/voice-isolation.md).
-DeepFilterNet3 denoising is available as an experimental option. Personalized
-speaker isolation and physical acoustic acceptance remain future work.
+DeepFilterNet3, RNNoise and GTCRN denoising are available as optional models,
+with a shared strength setting ([noise-suppression.md](docs/noise-suppression.md)).
+Personalized speaker isolation and physical acoustic acceptance remain future work.
 
 - [ ] Establish reproducible acoustic/listening baselines against current Sonora
   processing and Discord, with matched devices, levels and processing settings.
@@ -235,8 +236,12 @@ speaker isolation and physical acoustic acceptance remain future work.
   stages, with Sonora fallback selection, live bypass and persisted model choice.
 - [x] Add deterministic noise/speech, reset, bypass, composition and queue-gap
   regressions; offline CPU/latency/quality benchmarks and three-OS CI artifacts.
-- [ ] Compare nnnoiseless and GTCRN against the measured DeepFilterNet3 baseline,
-  including resampling delay and lost high frequencies.
+- [x] Add nnnoiseless (RNNoise) and GTCRN as selectable prewarmed stages, plus
+  a live Light/Balanced/Strong/Maximum strength for every model, with synthetic
+  attenuation, alignment, reset, switch and long-silence regressions.
+- [ ] Compare nnnoiseless and GTCRN against the measured DeepFilterNet3 baseline
+  by listening tests on real microphones/rooms, including resampling delay and
+  lost high frequencies; only synthetic waveform measurements exist so far.
 - [x] Audit public SpeakerBeam-SS sources/checkpoints for live integration; record
   the streaming and model-availability blockers in [voice-isolation.md](docs/voice-isolation.md#speakerbeam-ss-feasibility-review-2026-09-30).
 - [ ] Obtain a compatible streaming extractor/enrollment checkpoint and reference

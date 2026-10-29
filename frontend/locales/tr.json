@@ -511,7 +511,6 @@
   "Missing video offer": "Video teklifi eksik",
   "Model": "Model",
   "Model file override (optional)": "Özel model dosyası (isteğe bağlı)",
-  "Models can be changed during a call. Echo cancellation needs time to adapt after a change. DeepFilterNet3 uses more CPU and adds buffering; test it with your microphone. It reduces noise but may preserve other people's voices.": "Modeller arama sırasında değiştirilebilir. Değişiklikten sonra yankı gidermenin uyum sağlaması zaman alır. DeepFilterNet3 daha fazla CPU kullanır ve tamponlama ekler; mikrofonunla test et. Gürültüyü azaltır ancak başkalarının sesini koruyabilir.",
   "Moderation": "Moderasyon",
   "Moderation options": "Moderasyon seçenekleri",
   "Move & disconnect members": "Üyeleri taşı ve bağlantısını kes",
@@ -1257,5 +1256,14 @@
   "Operating system": "İşletim sistemi",
   "WebView version": "WebView sürümü",
   "WebView": "WebView",
-  "Full report": "Tam rapor"
+  "Full report": "Tam rapor",
+  "RNNoise (lightweight)": "RNNoise (hafif)",
+  "GTCRN (experimental, 16 kHz)": "GTCRN (deneysel, 16 kHz)",
+  "Suppression strength": "Bastırma gücü",
+  "Light (up to 6 dB)": "Hafif (en fazla 6 dB)",
+  "Balanced (up to 12 dB)": "Dengeli (en fazla 12 dB)",
+  "Strong (up to 18 dB)": "Güçlü (en fazla 18 dB)",
+  "Maximum": "En yüksek",
+  "Lower strength leaves some background noise but keeps your voice more natural. Neural models stop at the listed limit; Maximum removes as much as the model can. Strength applies immediately.": "Düşük güç biraz arka plan gürültüsü bırakır ancak sesini daha doğal tutar. Nöral modeller belirtilen sınırda durur; En yüksek, modelin yapabildiği kadarını kaldırır. Güç hemen uygulanır.",
+  "Models can be changed during a call. Echo cancellation needs time to adapt after a change. Neural models use more CPU and add buffering; test them with your microphone. They reduce noise but may preserve other people's voices. RNNoise is lightweight but leaves hiss. GTCRN removes everything above 8 kHz, so voices sound less crisp.": "Modeller arama sırasında değiştirilebilir. Değişiklikten sonra yankı gidermenin uyum sağlaması zaman alır. Nöral modeller daha fazla CPU kullanır ve tamponlama ekler; mikrofonunla test et. Gürültüyü azaltırlar ancak başkalarının sesini koruyabilirler. RNNoise hafiftir ancak cızırtı bırakır. GTCRN 8 kHz üzerindeki her şeyi kaldırır, bu yüzden sesler daha az net duyulur."
 }

@@ -324,6 +324,7 @@ mod tests {
         settings.audio.noise_suppression = true;
         settings.audio.noise_suppression_model =
             crate::audio::NoiseSuppressionModel::DeepFilterNet3;
+        settings.audio.noise_suppression_strength = crate::audio::NoiseSuppressionStrength::Light;
         settings.audio.automatic_gain = true;
         settings.audio.echo_cancellation = true;
         settings.audio.neural_echo = true;

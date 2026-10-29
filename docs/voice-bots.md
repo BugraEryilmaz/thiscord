@@ -11,7 +11,7 @@ voice roster, overlay, notifications and per-speaker volume controls. Right-clic
 a bot for its test audio settings, or click its name in the browser `/admin`
 participant table as the instance owner. Open **Voice settings and diagnostics**
 for the same Audio & voice panel used by real users. Changes save automatically:
-voice activation/PTT, threshold, gain, volume, mute/deafen, Sonora/DeepFilterNet3,
+voice activation/PTT, threshold, gain, volume, mute/deafen, Sonora/DeepFilterNet3/RNNoise/GTCRN and suppression strength,
 automatic gain, echo cancellation, bundled neural echo processing, adaptive Opus
 FEC, RED, DRED and per-speaker volume all run through the desktop `AudioEngine`.
 The bot's volume affects its silent speakers; your participant slider controls
