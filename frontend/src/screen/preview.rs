@@ -272,14 +272,14 @@ mod tests {
     }
     #[tokio::test]
     async fn h264_crosses_local_video_only_peer_without_transcoding() {
-        crosses_bridge("127.0.0.1:0".into()).await;
+        crosses_bridge("127.0.0.1:0".into(), true).await;
     }
     #[tokio::test]
     async fn interface_bound_webview_reaches_bridge() {
         // Windows cannot send from an interface-bound socket to loopback.
-        crosses_bridge(format!("{}:0", interface_ip())).await;
+        crosses_bridge(format!("{}:0", interface_ip()), false).await;
     }
-    async fn crosses_bridge(receiver_bind: String) {
+    async fn crosses_bridge(receiver_bind: String, loopback_pair: bool) {
         tokio::time::timeout(Duration::from_secs(15), async {
             let mut media = MediaEngine::default();
             media.register_codec(rtc::rtp_transceiver::rtp_sender::RTCRtpCodecParameters {
@@ -380,7 +380,11 @@ mod tests {
             let facts = &section.facts;
             assert!(facts[crate::video_bridge::RESPONSES_SENT].parse::<u64>().unwrap() > 0);
             assert!(facts["candidates.local"].contains("loopback-v4"), "{facts:?}");
-            assert!(facts["pair.0"].contains("udp host loopback-v4→"), "{facts:?}");
+            assert_eq!(
+                facts["pair.0"].contains("udp host loopback-v4→"),
+                loopback_pair,
+                "{facts:?}"
+            );
             assert_eq!(facts[crate::video_bridge::DTLS_STATE], "connected");
             assert!(
                 section
@@ -390,6 +394,7 @@ mod tests {
             );
             let wire = serde_json::to_string(&section).unwrap();
             assert!(!wire.contains("127.0.0.1"), "{wire}");
+            assert!(!wire.contains(&interface_ip().to_string()), "{wire}");
             // Last-reference release is allowed on a capture/relay worker.
             std::thread::spawn(move || drop(preview)).join().unwrap();
             receiver.close().await.unwrap();
