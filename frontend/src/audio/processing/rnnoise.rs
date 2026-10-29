@@ -17,11 +17,18 @@ impl Rnnoise {
     pub fn new(strength: NoiseSuppressionStrength) -> Self {
         // Weights are compiled into the crate; no model file or runtime download.
         const _: () = assert!(DenoiseState::FRAME_SIZE == 480);
-        Self {
+        let mut result = Self {
             state: DenoiseState::new(),
             dry: [0.0; 480],
             mix: dry_mix(strength),
-        }
+        };
+        // nnnoiseless builds FFT plans lazily (thread-local) and shared tables on
+        // first use; run one block on the worker before devices start.
+        result
+            .process(&mut [0.01; 480])
+            .expect("RNNoise processing is infallible");
+        result.reset();
+        result
     }
 }
 impl CaptureStage for Rnnoise {
