@@ -58,6 +58,27 @@ pub enum NoiseSuppressionModel {
     #[default]
     Sonora,
     DeepFilterNet3,
+    /// RNNoise through the pure-Rust nnnoiseless port.
+    Rnnoise,
+    /// GTCRN streaming model; processed at 16 kHz, so output is limited to 8 kHz.
+    Gtcrn,
+}
+
+/// Shared across models. Sonora maps these to its fixed levels; neural models
+/// limit attenuation by mixing back part of the unprocessed signal.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum NoiseSuppressionStrength {
+    Light,
+    Balanced,
+    #[default]
+    Strong,
+    Maximum,
+}
+impl NoiseSuppressionStrength {
+    fn is_default(&self) -> bool {
+        *self == Self::default()
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -73,6 +94,8 @@ pub struct AudioSettings {
     pub global_push_to_talk: bool,
     pub noise_suppression: bool,
     pub noise_suppression_model: NoiseSuppressionModel,
+    #[serde(skip_serializing_if = "NoiseSuppressionStrength::is_default")]
+    pub noise_suppression_strength: NoiseSuppressionStrength,
     pub automatic_gain: bool,
     /// Adapt the Opus loss hint from authenticated microphone uplink RTCP reports.
     #[serde(skip_serializing_if = "is_false")]
@@ -103,6 +126,7 @@ impl Default for AudioSettings {
             global_push_to_talk: false,
             noise_suppression: false,
             noise_suppression_model: NoiseSuppressionModel::Sonora,
+            noise_suppression_strength: NoiseSuppressionStrength::Strong,
             automatic_gain: false,
             adaptive_fec: false,
             deep_redundancy: false,
@@ -233,6 +257,43 @@ mod control_tests {
             serde_json::from_value::<AudioSettings>(value)
                 .unwrap()
                 .deep_redundancy
+        );
+    }
+
+    #[test]
+    fn default_suppression_strength_preserves_legacy_settings_wire_shape() {
+        let old: AudioSettings = serde_json::from_str("{}").unwrap();
+        assert_eq!(
+            old.noise_suppression_strength,
+            NoiseSuppressionStrength::Strong
+        );
+        assert!(
+            serde_json::to_value(&old)
+                .unwrap()
+                .get("noise_suppression_strength")
+                .is_none()
+        );
+        for (strength, name) in [
+            (NoiseSuppressionStrength::Light, "light"),
+            (NoiseSuppressionStrength::Balanced, "balanced"),
+            (NoiseSuppressionStrength::Maximum, "maximum"),
+        ] {
+            let selected = AudioSettings {
+                noise_suppression_strength: strength,
+                ..old.clone()
+            };
+            let value = serde_json::to_value(&selected).unwrap();
+            assert_eq!(value["noise_suppression_strength"], name);
+            assert_eq!(
+                serde_json::from_value::<AudioSettings>(value).unwrap(),
+                selected
+            );
+        }
+        assert!(
+            serde_json::from_value::<AudioSettings>(
+                serde_json::json!({"noise_suppression_strength":"extreme"})
+            )
+            .is_err()
         );
     }
 

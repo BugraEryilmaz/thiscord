@@ -258,7 +258,7 @@ were static and do not substitute for the following executed checks.
 Commands (all Cargo commands use `--locked`):
 
 ```text
-cargo test -p thiscord-frontend --lib --example audio_replay --features deep-filter,neural-echo-probe --profile ci --locked
+cargo test -p thiscord-frontend --lib --example audio_replay --features deep-filter,rnnoise,gtcrn,neural-echo-probe --profile ci --locked
 cargo test -p thiscord-frontend --lib --features deep-filter,neural-echo-probe --profile ci --locked dred -- --nocapture --test-threads=1
 cargo clippy -p thiscord-frontend --lib --tests --examples --features deep-filter,neural-echo-probe --profile ci --locked -- -D warnings
 cargo clippy -p thiscord-frontend --bin thiscord-ui --target wasm32-unknown-unknown --locked -- -D warnings

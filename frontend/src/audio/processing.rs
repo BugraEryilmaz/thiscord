@@ -4,23 +4,29 @@ use super::fixture;
 use super::frames;
 use sonora::{
     AudioProcessing, Config, StreamConfig,
-    config::{
-        AdaptiveDigital, EchoCanceller, GainController2, NoiseSuppression, NoiseSuppressionLevel,
-    },
+    config::{AdaptiveDigital, EchoCanceller, GainController2, NoiseSuppression},
 };
 use std::time::Instant;
-use thiscord_shared::audio::{AudioSettings, EchoDiagnostics, NoiseSuppressionModel};
+use thiscord_shared::audio::{
+    AudioSettings, EchoDiagnostics, NoiseSuppressionModel, NoiseSuppressionStrength,
+};
 #[cfg(feature = "deep-filter")]
 pub mod deep_filter;
 mod denormals;
 #[cfg(test)]
 mod double_talk;
+#[cfg(feature = "gtcrn")]
+pub mod gtcrn;
+#[cfg(all(test, any(feature = "rnnoise", feature = "gtcrn")))]
+mod model_tests;
 #[cfg(feature = "neural-echo")]
 pub mod neural_echo;
 #[cfg(all(test, feature = "neural-echo"))]
 mod neural_echo_tests;
 #[cfg(all(test, feature = "deep-filter"))]
 mod neural_tests;
+#[cfg(feature = "rnnoise")]
+pub mod rnnoise;
 pub mod stages;
 
 #[derive(Default, serde::Serialize)]
@@ -43,7 +49,9 @@ pub struct Processing {
     clipped_input_percent: f32,
     chain: stages::CaptureChain,
     model: NoiseSuppressionModel,
-    spare_noise: Option<Box<dyn stages::CaptureStage>>,
+    strength: NoiseSuppressionStrength,
+    /// Prewarmed, bypassed denoisers for live switches, indexed by model.
+    spare_noise: [Option<Box<dyn stages::CaptureStage>>; MODELS.len()],
     automatic_gain: bool,
     input_gain: f32,
     capture_after: Option<Instant>,
@@ -54,8 +62,55 @@ pub struct Processing {
     #[cfg(feature = "neural-echo")]
     neural_failed: std::sync::Arc<std::sync::atomic::AtomicBool>,
 }
-/// Only movable echo state crosses the preparation thread. DeepFilterNet's
-/// thread-local tract runtime is cached on the processing worker instead.
+const MODELS: [NoiseSuppressionModel; 4] = [
+    NoiseSuppressionModel::Sonora,
+    NoiseSuppressionModel::DeepFilterNet3,
+    NoiseSuppressionModel::Rnnoise,
+    NoiseSuppressionModel::Gtcrn,
+];
+fn slot(model: NoiseSuppressionModel) -> usize {
+    model as usize
+}
+/// Models compiled into this build; selecting another one is rejected.
+pub(super) fn available(model: NoiseSuppressionModel) -> bool {
+    match model {
+        NoiseSuppressionModel::Sonora => true,
+        NoiseSuppressionModel::DeepFilterNet3 => cfg!(feature = "deep-filter"),
+        NoiseSuppressionModel::Rnnoise => cfg!(feature = "rnnoise"),
+        NoiseSuppressionModel::Gtcrn => cfg!(feature = "gtcrn"),
+    }
+}
+fn unavailable(model: NoiseSuppressionModel) -> String {
+    let name = match model {
+        NoiseSuppressionModel::Sonora => "Sonora",
+        NoiseSuppressionModel::DeepFilterNet3 => "DeepFilterNet3",
+        NoiseSuppressionModel::Rnnoise => "RNNoise",
+        NoiseSuppressionModel::Gtcrn => "GTCRN",
+    };
+    format!("This build does not include {name}")
+}
+/// Construct a denoiser on the processing worker; neural graphs are not moved.
+fn denoiser(
+    model: NoiseSuppressionModel,
+    strength: NoiseSuppressionStrength,
+) -> Result<Box<dyn stages::CaptureStage>, String> {
+    Ok(match model {
+        NoiseSuppressionModel::Sonora => Box::new(stages::SonoraStage::new(
+            "Sonora noise suppression",
+            noise_config(strength),
+        )),
+        #[cfg(feature = "deep-filter")]
+        NoiseSuppressionModel::DeepFilterNet3 => Box::new(deep_filter::DeepFilter::new(strength)?),
+        #[cfg(feature = "rnnoise")]
+        NoiseSuppressionModel::Rnnoise => Box::new(rnnoise::Rnnoise::new(strength)),
+        #[cfg(feature = "gtcrn")]
+        NoiseSuppressionModel::Gtcrn => Box::new(gtcrn::Gtcrn::new(strength)?),
+        #[allow(unreachable_patterns)]
+        other => return Err(unavailable(other)),
+    })
+}
+/// Only movable echo state crosses the preparation thread. Neural denoisers'
+/// thread-local tract runtimes are cached on the processing worker instead.
 pub(super) struct Prepared {
     settings: AudioSettings,
     apm: AudioProcessing,
@@ -65,9 +120,8 @@ pub(super) struct Prepared {
 impl Prepared {
     pub fn new(s: &AudioSettings) -> Result<Self, String> {
         s.validate()?;
-        #[cfg(not(feature = "deep-filter"))]
-        if s.noise_suppression_model == NoiseSuppressionModel::DeepFilterNet3 {
-            return Err("This build does not include DeepFilterNet3".into());
+        if !available(s.noise_suppression_model) {
+            return Err(unavailable(s.noise_suppression_model));
         }
         #[cfg(not(feature = "neural-echo"))]
         if s.neural_echo {
@@ -98,10 +152,10 @@ fn config(s: &AudioSettings) -> Config {
         ..Default::default()
     }
 }
-fn noise_config() -> Config {
+fn noise_config(strength: NoiseSuppressionStrength) -> Config {
     Config {
         noise_suppression: Some(NoiseSuppression {
-            level: NoiseSuppressionLevel::High,
+            level: stages::sonora_level(strength),
             ..Default::default()
         }),
         ..Default::default()
@@ -126,18 +180,10 @@ impl Processing {
     pub fn new(s: &AudioSettings) -> Result<Self, String> {
         s.validate()?;
         let mut chain = stages::CaptureChain::default();
-        match s.noise_suppression_model {
-            NoiseSuppressionModel::Sonora => chain.push(
-                s.noise_suppression,
-                stages::SonoraStage::new("Sonora noise suppression", noise_config()),
-            ),
-            NoiseSuppressionModel::DeepFilterNet3 => {
-                #[cfg(feature = "deep-filter")]
-                chain.push(s.noise_suppression, deep_filter::DeepFilter::new()?);
-                #[cfg(not(feature = "deep-filter"))]
-                return Err("This build does not include DeepFilterNet3".into());
-            }
-        }
+        chain.push_boxed(
+            s.noise_suppression,
+            denoiser(s.noise_suppression_model, s.noise_suppression_strength)?,
+        );
         chain.push(true, stages::FixedGain(s.input_gain));
         chain.push(
             s.automatic_gain,
@@ -150,6 +196,7 @@ impl Processing {
             s.automatic_gain,
             s.input_gain,
         );
+        processing.strength = s.noise_suppression_strength;
         processing.neural_requested = s.neural_echo;
         processing.neural_model_path = s.neural_echo_model.clone();
         if s.neural_echo {
@@ -190,7 +237,8 @@ impl Processing {
             clipped_input_percent: 0.0,
             chain,
             model,
-            spare_noise: None,
+            strength: NoiseSuppressionStrength::default(),
+            spare_noise: Default::default(),
             automatic_gain,
             input_gain,
             capture_after: None,
@@ -234,41 +282,36 @@ impl Processing {
             || s.neural_echo_model != self.neural_model_path
             || s.noise_suppression_model != self.model
     }
-    /// Called before live device playback, so selecting either denoiser later
+    /// Called before live device playback, so selecting another denoiser later
     /// never initializes tract on the media-processing path.
     pub(super) fn prewarm(&mut self) -> Result<(), String> {
-        if self.spare_noise.is_none() {
-            self.spare_noise = match self.model {
-                NoiseSuppressionModel::Sonora => {
-                    #[cfg(feature = "deep-filter")]
-                    {
-                        Some(Box::new(deep_filter::DeepFilter::new()?))
-                    }
-                    #[cfg(not(feature = "deep-filter"))]
-                    {
-                        None
-                    }
-                }
-                NoiseSuppressionModel::DeepFilterNet3 => Some(Box::new(stages::SonoraStage::new(
-                    "Sonora noise suppression",
-                    noise_config(),
-                ))),
-            };
+        for model in MODELS {
+            if model != self.model && available(model) && self.spare_noise[slot(model)].is_none() {
+                self.spare_noise[slot(model)] = Some(denoiser(model, self.strength)?);
+            }
         }
         Ok(())
+    }
+    /// Strength is a live parameter: it never requires model replacement.
+    fn set_strength(&mut self, strength: NoiseSuppressionStrength) {
+        if strength != self.strength {
+            self.chain.set_strength(0, strength);
+            self.strength = strength;
+        }
     }
     pub(super) fn install(&mut self, mut prepared: Prepared) -> Result<Prepared, String> {
         let s = &prepared.settings;
         if s.noise_suppression_model != self.model {
             self.prewarm()?;
-            let mut next = self
-                .spare_noise
+            let mut next = self.spare_noise[slot(s.noise_suppression_model)]
                 .take()
-                .ok_or("This build does not include DeepFilterNet3")?;
+                .ok_or_else(|| unavailable(s.noise_suppression_model))?;
+            next.set_strength(self.strength);
             next.reset();
-            self.spare_noise = Some(self.chain.replace(0, next));
+            self.spare_noise[slot(self.model)] = Some(self.chain.replace(0, next));
             self.model = s.noise_suppression_model;
         }
+        self.set_strength(s.noise_suppression_strength);
         self.chain.reset();
         self.chain.set_enabled(0, s.noise_suppression);
         self.set_input_gain(s.input_gain);
@@ -302,6 +345,7 @@ impl Processing {
             self.install(Prepared::new(s)?)?;
             return Ok(());
         }
+        self.set_strength(s.noise_suppression_strength);
         self.chain.set_enabled(0, s.noise_suppression);
         self.set_input_gain(s.input_gain);
         self.chain.set_enabled(2, s.automatic_gain);
@@ -636,10 +680,7 @@ mod tests {
     #[test]
     fn activation_evidence_is_after_denoising_and_independent_of_agc() {
         let speech = fixture::speech();
-        let mut models = vec![NoiseSuppressionModel::Sonora];
-        if cfg!(feature = "deep-filter") {
-            models.push(NoiseSuppressionModel::DeepFilterNet3);
-        }
+        let models = MODELS.into_iter().filter(|&model| available(model));
         for model in models {
             for neural in [false, true] {
                 if neural && !cfg!(feature = "neural-echo") {
@@ -681,10 +722,7 @@ mod tests {
 
     #[test]
     fn boundary_discards_old_device_blocks_and_denoiser_history_without_resetting_aec() {
-        let mut models = vec![NoiseSuppressionModel::Sonora];
-        if cfg!(feature = "deep-filter") {
-            models.push(NoiseSuppressionModel::DeepFilterNet3);
-        }
+        let models = MODELS.into_iter().filter(|&model| available(model));
         for model in models {
             let mut p = Processing::new(&AudioSettings {
                 noise_suppression: true,

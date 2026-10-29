@@ -1,0 +1,18 @@
+Experimental GTCRN streaming speech-enhancement model bundled in Thiscord
+
+File: gtcrn_simple.onnx (535190 bytes)
+SHA-256: b4718df6228e7bdf1a8a435cf98f838636eb2fd331acabf86ba87c5192ebcb87
+Upstream: https://github.com/Xiaobin-Rong/gtcrn
+Revision: 502ebfab64da7c4a9af78dcb9c6ceef1ebb01c73
+Path: stream/onnx_models/gtcrn_simple.onnx (bytes unchanged)
+
+Upstream's stream/gtcrn_stream.py exports this file from the DNS3-trained
+checkpoint (model_trained_on_dns3.tar) and simplifies it with onnxsim.
+The repository, including this model file, is distributed under the MIT
+license (Copyright (c) 2024 Rong Xiaobin); see THIRD_PARTY_AUDIO.txt.
+Terms of the DNS Challenge training data were not separately reviewed.
+
+Interface: 16 kHz mono, 512-point STFT, periodic sqrt-Hann window, 256-sample
+hop; one frame per call with explicit conv/tra/inter caches. Thiscord runs it
+through native Rust tract-onnx 0.21.4. The model is embedded in native clients
+and processed locally; no runtime download is performed.

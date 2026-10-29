@@ -156,8 +156,10 @@ Voice activation uses sustained energy before automatic gain, hysteresis and a
 automatic gate and its delay. See [activation behavior and limits](docs/voice-activation.md).
 Quiet microphones can use the saved Microphone boost control (1×–10×, default 1×)
 in Audio & voice to amplify audio before activation and automatic gain.
-Experimental DeepFilterNet3 noise suppression is available in Voice & audio;
-see [model selection, regression tests and benchmarks](docs/deep-filter.md).
+Noise suppression in Voice & audio offers Sonora, DeepFilterNet3, RNNoise and
+GTCRN, with a shared Light/Balanced/Strong/Maximum strength setting; see
+[models, strengths and measurements](docs/noise-suppression.md) and the
+[DeepFilterNet3 integration](docs/deep-filter.md).
 Experimental neural residual echo estimation is also available, independently
 of denoising. Its model is bundled with native clients; enable echo cancellation
 and the neural estimator to try it. See [setup and measured results](docs/voice-isolation.md#neural-residual-echo-estimator-extension-2026-10-02).

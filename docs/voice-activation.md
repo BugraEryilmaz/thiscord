@@ -151,7 +151,7 @@ while the resulting PCM actually changes with AGC.
 ```powershell
 cargo test -p thiscord-frontend --lib --features native-audio --locked audio:: -- --test-threads=2
 cargo test -p thiscord-frontend --lib --features native-audio --locked labelled_synthetic_comparison -- --nocapture
-cargo test -p thiscord-frontend --lib --example audio_replay --features deep-filter,neural-echo --profile ci --locked
+cargo test -p thiscord-frontend --lib --example audio_replay --features deep-filter,rnnoise,gtcrn,neural-echo --profile ci --locked
 cargo clippy -p thiscord-frontend --lib --tests --examples --features deep-filter,neural-echo --profile ci --locked -- -D warnings
 cargo build -p thiscord-frontend --bin thiscord-desktop --features desktop --locked
 cargo clippy -p thiscord-frontend --bin thiscord-desktop --features desktop --locked -- -D warnings

@@ -33,7 +33,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 }
 fn replay(args: &[String]) -> Result<(), Box<dyn std::error::Error>> {
     if args.len() < 2 || !args.len().is_multiple_of(2) {
-        return Err("Usage: audio_replay <recording-folder> <new-output.wav> [--neural-echo on|off] [--noise-suppression off|sonora|deep_filter_net3]".into());
+        return Err("Usage: audio_replay <recording-folder> <new-output.wav> [--neural-echo on|off] [--noise-suppression off|sonora|deep_filter_net3|rnnoise|gtcrn] [--noise-suppression-strength light|balanced|strong|maximum]".into());
     }
     let configure = |mut s: AudioSettings| -> Result<AudioSettings, Box<dyn std::error::Error>> {
         for pair in args[2..].as_chunks::<2>().0 {
@@ -51,6 +51,19 @@ fn replay(args: &[String]) -> Result<(), Box<dyn std::error::Error>> {
                 ("--noise-suppression", "deep_filter_net3") => {
                     s.noise_suppression = true;
                     s.noise_suppression_model = NoiseSuppressionModel::DeepFilterNet3;
+                }
+                ("--noise-suppression", "rnnoise") => {
+                    s.noise_suppression = true;
+                    s.noise_suppression_model = NoiseSuppressionModel::Rnnoise;
+                }
+                ("--noise-suppression", "gtcrn") => {
+                    s.noise_suppression = true;
+                    s.noise_suppression_model = NoiseSuppressionModel::Gtcrn;
+                }
+                ("--noise-suppression-strength", strength) => {
+                    s.noise_suppression_strength =
+                        serde_json::from_value(serde_json::json!(strength))
+                            .map_err(|_| "Unknown noise suppression strength")?;
                 }
                 _ => return Err("Unknown replay option".into()),
             }

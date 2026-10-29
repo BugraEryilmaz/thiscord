@@ -1,8 +1,14 @@
 //! The only module that knows DeepFilterNet/tract types and model details.
-use super::stages::{Block, CaptureStage};
+use super::stages::{Block, CaptureStage, attenuation_limit_db};
 use crate::audio::failure::Failure;
 use df::tract::{DfParams, DfTract, RuntimeParams};
 use ndarray::{ArrayView2, ArrayViewMut2};
+use thiscord_shared::audio::NoiseSuppressionStrength;
+
+/// libDF treats limits of 100 dB or more as unlimited attenuation.
+fn limit_db(strength: NoiseSuppressionStrength) -> f32 {
+    attenuation_limit_db(strength).unwrap_or(100.0)
+}
 
 pub struct DeepFilter {
     model: DfTract,
@@ -10,10 +16,13 @@ pub struct DeepFilter {
     delay: usize,
 }
 impl DeepFilter {
-    pub fn new() -> Result<Self, String> {
+    pub fn new(strength: NoiseSuppressionStrength) -> Result<Self, String> {
         // Model bytes are bundled by the pinned dependency. No runtime download,
         // Python, external process, device access or user-supplied model path.
-        let pristine = DfTract::new(DfParams::default(), &RuntimeParams::default())
+        // A finite limit mixes back unprocessed spectrum, trading residual noise
+        // for less speech distortion; upstream's default removes all it can.
+        let runtime = RuntimeParams::default().with_atten_lim(limit_db(strength));
+        let pristine = DfTract::new(DfParams::default(), &runtime)
             .map_err(|_| "Cannot initialize the bundled DeepFilterNet3 model")?;
         if (pristine.sr, pristine.hop_size, pristine.ch) != (48_000, 480, 1) {
             return Err("DeepFilterNet3 requires 48 kHz / 480-sample mono blocks".into());
@@ -64,6 +73,11 @@ impl CaptureStage for DeepFilter {
     fn delay_samples(&self) -> usize {
         self.delay
     }
+    fn set_strength(&mut self, strength: NoiseSuppressionStrength) {
+        // The limit is a mix factor, not model history; keep the live state.
+        self.model.set_atten_lim(limit_db(strength));
+        self.pristine.set_atten_lim(limit_db(strength));
+    }
 }
 
 #[cfg(test)]
@@ -75,7 +89,10 @@ mod tests {
     fn long_silence_stays_finite_then_speech_and_privacy_reset_work() {
         let _float_mode = denormals::Guard::new();
         let mut chain = CaptureChain::default();
-        chain.push(true, DeepFilter::new().unwrap());
+        chain.push(
+            true,
+            DeepFilter::new(NoiseSuppressionStrength::Maximum).unwrap(),
+        );
 
         // 100 seconds of real 10 ms inference calls, without resetting history.
         // With FTZ/DAZ the unfloored upstream normalization fails at block 7774.
@@ -99,7 +116,7 @@ mod tests {
         assert!(energy > 1e-6, "speech stayed muted after long silence");
 
         chain.reset();
-        let mut fresh = DeepFilter::new().unwrap();
+        let mut fresh = DeepFilter::new(NoiseSuppressionStrength::Maximum).unwrap();
         // A privacy reset must discard the preceding speech, FFT and recurrent
         // history. Compare both silence and subsequent speech against fresh state.
         for input in std::iter::repeat_n([0.0; 480], 10)
