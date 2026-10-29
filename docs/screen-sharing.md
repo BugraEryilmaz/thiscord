@@ -150,8 +150,13 @@ the display stops capture; it never falls back to another window/display.
   control. Publisher responses are consumed before the next available GPU input.
   SPS dimensions/reference counts remain bounded.
 - Presentation: compressed H.264 is forwarded to a **local WebRTC peer** bound
-  exclusively to `127.0.0.1` (diagnostic self-tests excepted, see below), with
-  no STUN/TURN and no audio track. Rust/WASM
+  to `127.0.0.1` and each usable local IPv4 interface, with no STUN/TURN and no
+  audio track. WebView binds its host socket to an interface address once media
+  permission enables adapter enumeration (for example after camera use), and
+  Windows refuses sends from such a socket to loopback or to another local
+  address. The bridge therefore offers the WebView's own address; those ports
+  are LAN-reachable, but ICE credentials and the DTLS fingerprint exchanged
+  in-process restrict the session to the negotiating WebView. Rust/WASM
   negotiates this peer using control-only Tauri commands, and attaches its
   MediaStream to a real HTML `video` element. There is no native H.264 decode,
   RGB/JPEG conversion, image protocol or frame polling. RTP payload numbers are
@@ -699,7 +704,7 @@ in the throughput result and are absent from the production capture path.
 `screen_pipeline_probe` instead captures an animated, DPI-correct **3840x2160**
 synthetic window with WGC, even on a smaller monitor. It exercises the production
 encoder, sender, expiring demand, receiver controller and receive queue through
-two encrypted WebRTC peers. `--browser` adds the production loopback preview
+two encrypted WebRTC peers. `--browser` adds the production local preview
 bridge. Negotiate a video-only receive offer via `POST /offer` on the local probe
 page at `http://127.0.0.1:18741`, using the collaborative browser tools, and set
 its receiver's `jitterBufferTarget` to the player's 150 ms value. Keep the preview
@@ -798,14 +803,16 @@ per ten minutes, taking about 30 seconds without visible UI or media: two
 WebView peers connecting to each other (data channel only), a video-free desktop
 peer on `127.0.0.1`, and the same desktop peer bound to the computer's non-loopback
 interface addresses. The interface peer exists only for this ICE/DTLS-authenticated
-test, carries no media and closes after ten seconds; viewers remain loopback-only.
-If loopback fails while interfaces connect, interface binding is a candidate fix.
+test, carries no media and closes after ten seconds. Viewers bind both, so the
+two self-tests still tell which path a WebView can reach.
 
 Chromium/WebView2 on Windows reaches `127.0.0.1` from a wildcard-bound host
 socket: in a local Edge 156 run the desktop saw a loopback source and Chromium
 selected a peer-reflexive local candidate. A socket bound to a specific LAN
-address cannot send to loopback on Windows (`WSAEADDRNOTAVAIL`), so a WebView
-build or policy that binds only interface addresses cannot use this bridge.
+address cannot send to loopback on Windows (`WSAEADDRNOTAVAIL`). WebView binds
+interface addresses once media permission enables adapter enumeration; sharing
+a (virtual) camera reproduced this locally, and loopback-only viewers then stayed
+loading. Viewers and the camera bridge therefore also bind every IPv4 interface.
 
 ## October 22, 2026 crash and reconnect investigation
 

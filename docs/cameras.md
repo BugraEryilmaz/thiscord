@@ -33,9 +33,11 @@ inside the connected call, not in the outside-call sidebar roster.
 ## Transport and lifecycle
 
 Rust/WASM calls getUserMedia with audio disabled and bounded video constraints.
-The WebView encodes H.264 and sends it through a loopback-only encrypted WebRTC
-connection to native Rust. No pixels or audio cross Tauri IPC. Native Rust sends
-compressed video over the authenticated call's existing encrypted WebRTC session;
+The WebView encodes H.264 and sends it through a local encrypted WebRTC
+connection to native Rust. Like the screen preview bridge, it binds loopback and
+local interfaces because an enumerating WebView cannot reach loopback on Windows
+(see `docs/screen-sharing.md`). No pixels or audio cross Tauri IPC. Native Rust
+sends compressed video over the authenticated call's existing encrypted WebRTC session;
 the SFU forwards without decoding or transcoding. The server can access media
 because these hops terminate encryption; this is not end-to-end encryption.
 No new application server, JavaScript pipeline or camera library is used.
@@ -109,9 +111,10 @@ No physical camera is required for the automated tests:
 - Backend tests use real encrypted WebRTC peers and synthetic video packets in
   guild and private calls. They cover simultaneous camera/screen/audio delivery,
   hiding screen without losing camera, independent restart epochs and access fences.
-- Native desktop tests send synthetic H.264 packets through the actual camera
-  loopback bridge and onward to a receiving peer; they exercise cleanup/leases and
-  permission rejection. Existing H.264 decode/receive tests cover the common player.
+- Native desktop tests send synthetic H.264 packets from an interface-bound
+  browser stand-in through the actual camera bridge and onward to a receiving peer;
+  they exercise cleanup/leases and permission rejection. Existing H.264
+  decode/receive tests cover the common player.
   Receiver regressions cover restoring a hidden stream after a large RTP sequence
   gap and keeping camera congestion feedback within its encoder budget.
 - Native lifecycle regressions cover cancellation before negotiation, stale stops,
