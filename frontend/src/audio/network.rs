@@ -24,8 +24,8 @@ const RECOVER: Duration = Duration::from_secs(10);
 const FORGET: Duration = Duration::from_secs(60);
 const LOSSY_WINDOWS: u8 = 2;
 const DRED_CLEAR: Duration = Duration::from_secs(20);
-/// Forget most of the minimum RTT over about a minute, so a permanent route
-/// change does not look like congestion forever.
+/// Per accepted one-second window, raise the minimum RTT by 2% of the excess,
+/// so a permanent route change does not look like congestion forever.
 const RTT_BASELINE_RISE: f64 = 0.02;
 /// Receivers: LACE plus deep PLC (5); OSCE wideband-to-fullband extension
 /// is requested separately. NoLACE (7) measured about twice LACE's cost.
@@ -101,15 +101,6 @@ impl Controller {
         if !enabled {
             return (NetworkLevel::Good, false);
         }
-        if let Some(rtt) = rtt_ms.filter(|r| r.is_finite() && *r >= 0.0) {
-            self.rtt_min = Some(self.rtt_min.map_or(rtt, |min| {
-                if rtt < min {
-                    rtt
-                } else {
-                    min + (rtt - min) * RTT_BASELINE_RISE
-                }
-            }));
-        }
         if self
             .last_window
             .is_some_and(|at| now.saturating_duration_since(at) >= FORGET)
@@ -161,10 +152,19 @@ impl Controller {
         if lost > expected {
             return None;
         }
-        let queueing_ms = rtt_ms
-            .filter(|r| r.is_finite() && *r >= 0.0)
-            .zip(self.rtt_min)
-            .map(|(rtt, min)| (rtt - min).max(0.0));
+        // Measure against the previous baseline, then age it once per
+        // accepted window (not per encoded frame).
+        let rtt = rtt_ms.filter(|r| r.is_finite() && *r >= 0.0);
+        let queueing_ms = rtt.zip(self.rtt_min).map(|(rtt, min)| (rtt - min).max(0.0));
+        if let Some(rtt) = rtt {
+            self.rtt_min = Some(self.rtt_min.map_or(rtt, |min| {
+                if rtt < min {
+                    rtt
+                } else {
+                    min + (rtt - min) * RTT_BASELINE_RISE
+                }
+            }));
+        }
         Some(Window {
             loss_percent: f64::from(lost) * 100.0 / f64::from(expected),
             jitter_ms: f64::from(s.jitter) / 48.0,

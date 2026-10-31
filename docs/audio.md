@@ -560,8 +560,9 @@ workers; device callbacks, the SFU and the wire protocol are unchanged.
 uplink reception reports as adaptive FEC (cumulative loss and highest sequence,
 plus RFC 3550 interarrival jitter) and the nominated ICE pair RTT that the
 connection already polls once per second. Queueing delay is RTT above a slowly
-rising minimum (2% of any excess per sample, so a permanent route change is
-forgotten in about a minute). Windows use the adaptive FEC acceptance bounds:
+rising minimum: each accepted window first measures against the baseline, then
+raises it by 2% of any excess (never per encoded frame), so a permanent route
+change fades over a few minutes. Windows use the adaptive FEC acceptance bounds:
 1-6 seconds, 25-400 packets, monotonic counters. Each window is classified:
 
 | Level | Any of | Opus target |

@@ -107,6 +107,26 @@ fn queueing_delay_uses_recent_minimum_rtt() {
 }
 
 #[test]
+fn per_frame_updates_do_not_erode_the_rtt_baseline() {
+    // Production calls the controller every 20 ms with the latest (cached)
+    // report and RTT; only accepted windows may age the baseline.
+    let start = Instant::now();
+    let mut c = Controller::default();
+    let mut level = NetworkLevel::Good;
+    for frame in 0..(8 * 50) {
+        let second = frame / 50;
+        let at = start + Duration::from_millis(frame * 20);
+        let rtt = if second < 4 { 40.0 } else { 240.0 };
+        level = c
+            .update(true, Some(report(start, second, 0, 2)), Some(rtt), at)
+            .0;
+    }
+    assert_eq!(level, NetworkLevel::Poor);
+    let q = c.diagnostics(start).queueing_delay_ms.unwrap();
+    assert!(q >= 150.0, "queueing {q}");
+}
+
+#[test]
 fn random_loss_requests_dred_and_congestion_withdraws_it() {
     let mut f = Feed::new();
     let start = f.start;
@@ -316,6 +336,9 @@ fn remote(at: Instant, source_epoch: u32) -> Remote {
 fn dred_packets() -> Vec<Bytes> {
     let mut encoder = transmit::Encoder::new(true).unwrap();
     encoder.set_deep_redundancy(true).unwrap();
+    speech_packets(&mut encoder)
+}
+fn speech_packets(encoder: &mut transmit::Encoder) -> Vec<Bytes> {
     fixture::speech()
         .as_chunks::<FRAME>()
         .0
@@ -379,6 +402,39 @@ fn remote_uses_osce_for_current_sources_and_enables_dred_under_measured_loss() {
         DECODER_COMPLEXITY
     );
     assert!(speaker.decode_stats.dred_output_frames > 0);
+    // The sender stops DRED while speech continues: shutdown waits for a quiet
+    // stream, then applies (it must not be forgotten during silence).
+    let plain = {
+        let mut encoder = transmit::Encoder::new(true).unwrap();
+        speech_packets(&mut encoder)
+    };
+    let base = encoded.len() * 20 - 100;
+    let mut deferred = false;
+    for ms in 0..15_000usize {
+        let now = at + Duration::from_millis((base + ms) as u64);
+        if ms < 12_000 && ms.is_multiple_of(20) {
+            let n = (base + ms) / 20;
+            speaker.push(
+                n as u16,
+                (n * FRAME) as u32,
+                plain[n % plain.len()].clone(),
+                now,
+                now,
+            );
+        }
+        if ms.is_multiple_of(5) {
+            speaker.adapt_receive(writer, false, now).unwrap();
+            if ms < 12_000 {
+                deferred |= !speaker.receive.wanted && speaker.jitter.deep_redundancy;
+            }
+            speaker.refill(writer, now);
+        }
+        let mut pcm = [0.0_f32; 48];
+        mixer.render(&mut pcm, 1);
+    }
+    assert!(deferred, "shutdown requested during speech is deferred");
+    assert!(!speaker.jitter.deep_redundancy, "applied once quiet");
+    assert_eq!(speaker.jitter.metrics().target_ms, 40.0);
     // Disabling adaptation restores the plain decoder and buffer.
     speaker.configure(writer, false, false, at).unwrap();
     assert_eq!(speaker.decoder.get_complexity().unwrap(), 0);

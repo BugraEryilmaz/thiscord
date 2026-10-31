@@ -592,10 +592,10 @@ impl Remote {
         );
         if wanted != self.jitter.deep_redundancy {
             let metrics = self.jitter.metrics();
+            // Keep the desired state; apply it once the stream is quiet.
             if wanted || metrics.dtx || metrics.inactive {
                 return self.configure(writer, manual, true, now);
             }
-            self.receive.wanted = true; // Keep the current state until quiet.
         }
         Ok(())
     }
