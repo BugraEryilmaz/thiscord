@@ -1,12 +1,12 @@
 //! Desktop overlay IPC contains presentation metadata only.
 use serde::{Deserialize, Serialize};
 
-#[derive(Clone, Default, Serialize, Deserialize)]
+#[derive(Clone, Default, PartialEq, Serialize, Deserialize)]
 pub struct OverlaySnapshot {
     pub participants: Vec<OverlayParticipant>,
 }
 
-#[derive(Clone, Serialize, Deserialize)]
+#[derive(Clone, PartialEq, Serialize, Deserialize)]
 pub struct OverlayParticipant {
     #[serde(default)]
     pub is_self: bool,

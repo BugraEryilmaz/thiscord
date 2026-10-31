@@ -97,6 +97,11 @@ support: bots have no WebView and therefore do not supply UI measurements.
    CPU-sensitive features and multiple remote streams can move this finding to
    first priority for an affected desktop. Compare stage deadlines with queue
    faults; a network loss counter alone does not establish a DSP problem.
+   Since 2026-11-01 the worker is woken by device callbacks and producers instead
+   of a 5 ms poll, batches queued packets, runs at MMCSS/QoS priority with MMCSS
+   WASAPI callbacks on Windows, and non-48 kHz conversion and mixing skip
+   per-tap modulo and inactive-stream work. These changes are unmeasured on real
+   hardware; compare deadline misses and starvation before and after updating.
 
 7. **UI geometry work and the admin dashboard can stall the main thread.**
    Chat is already virtualized with a 500-message cache and batched merges.

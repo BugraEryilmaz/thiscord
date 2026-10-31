@@ -6,15 +6,26 @@ pub(super) const MIN_RATE: u32 = 8_000;
 pub(super) const MAX_RATE: u32 = 384_000;
 const PHASES: usize = 256;
 const BASE_TAPS: usize = 64;
+/// Independent accumulators let the filter loop vectorise without fast-math.
+const LANES: usize = 8;
+const _: () = assert!(BASE_TAPS.is_multiple_of(LANES));
+/// Output frames between playback privacy checks. Each check reads every
+/// stream's controls; once per frame cost more than the filter itself.
+const PRIVACY_CHECK_FRAMES: usize = 16;
 
 pub(super) struct Converter {
     source: u32,
     target: u32,
     phase: u64,
     taps: usize,
+    /// One row per phase, stored oldest-to-newest to match the history window.
     coefficients: Vec<f32>,
+    /// Mirrored: `history[cursor + 1..][..taps]` is always the contiguous
+    /// oldest-to-newest window, avoiding a modulo per tap.
     history: Vec<f32>,
     cursor: usize,
+    /// `PHASES / target`, avoiding a division per output sample.
+    phase_scale: f64,
     expected: Option<Instant>,
 }
 
@@ -39,9 +50,10 @@ impl Converter {
                 *tap = (sinc * window) as f32;
             }
             let sum: f32 = row.iter().sum();
-            for tap in row {
+            for tap in row.iter_mut() {
                 *tap /= sum;
             }
+            row.reverse();
         }
         Self {
             source,
@@ -49,8 +61,9 @@ impl Converter {
             phase: u64::from(target),
             taps,
             coefficients,
-            history: vec![0.0; taps],
+            history: vec![0.0; 2 * taps],
             cursor: 0,
+            phase_scale: PHASES as f64 / f64::from(target),
             expected: None,
         }
     }
@@ -108,26 +121,38 @@ impl Converter {
     pub fn push(&mut self, sample: f32) {
         debug_assert!(self.phase >= u64::from(self.target));
         self.phase -= u64::from(self.target);
-        self.cursor = (self.cursor + 1) % self.taps;
+        self.cursor += 1;
+        if self.cursor == self.taps {
+            self.cursor = 0;
+        }
         self.history[self.cursor] = sample;
+        self.history[self.cursor + self.taps] = sample;
     }
 
     pub fn pop(&mut self) -> Option<f32> {
         if self.phase >= u64::from(self.target) {
             return None;
         }
-        let fraction = self.phase as f64 * PHASES as f64 / f64::from(self.target);
-        let phase = fraction as usize;
-        let weight = fraction.fract() as f32;
+        let fraction = self.phase as f64 * self.phase_scale;
+        let phase = (fraction as usize).min(PHASES - 1);
+        let weight = (fraction - phase as f64) as f32;
         let left = &self.coefficients[phase * self.taps..][..self.taps];
         let right = &self.coefficients[(phase + 1) * self.taps..][..self.taps];
-        let mut sample = 0.0;
-        for (i, (&left, &right)) in left.iter().zip(right).enumerate() {
-            sample += (left + weight * (right - left))
-                * self.history[(self.cursor + self.taps - i) % self.taps];
+        let window = &self.history[self.cursor + 1..][..self.taps];
+        let mut lanes = [0.0_f32; LANES];
+        for ((left, right), window) in left
+            .as_chunks::<LANES>()
+            .0
+            .iter()
+            .zip(right.as_chunks::<LANES>().0)
+            .zip(window.as_chunks::<LANES>().0)
+        {
+            for lane in 0..LANES {
+                lanes[lane] += (left[lane] + weight * (right[lane] - left[lane])) * window[lane];
+            }
         }
         self.phase += u64::from(self.source);
-        Some(sample)
+        Some(lanes.iter().sum())
     }
 }
 
@@ -172,13 +197,21 @@ impl Playback {
         let mut frames = output.chunks_exact_mut(channels);
         let mut remaining = count;
         let mut dropped = 0;
+        // Check at callback start, then every few frames: the mixer already
+        // silences new input per sample, and this bounds how much delayed
+        // filter audio can follow a cutoff within one callback.
+        let mut until_check = 0;
         let mut drain = |converter: &mut Converter| {
             while remaining > 0 {
-                if privacy.changed() {
-                    converter.clear();
-                    reference_converter.clear();
+                if until_check == 0 {
+                    until_check = PRIVACY_CHECK_FRAMES;
+                    if privacy.changed() {
+                        converter.clear();
+                        reference_converter.clear();
+                    }
                 }
                 let Some(sample) = converter.pop() else { break };
+                until_check -= 1;
                 let sample = sample.clamp(-1.0, 1.0);
                 let frame = frames.next().expect("one frame per converted sample");
                 frame.fill(T::from_sample(0.0));
@@ -326,6 +359,44 @@ mod tests {
                 }
             }
             assert!(peak < 0.001, "{source} -> {target}: alias peak {peak}");
+        }
+    }
+
+    /// The mirrored history and reversed rows must equal the direct modulo
+    /// convolution across many wraps of the history ring.
+    #[test]
+    fn contiguous_window_matches_direct_convolution() {
+        for (source, target) in [
+            (44_100, RATE),
+            (RATE, 44_100),
+            (RATE, 8_000),
+            (96_000, RATE),
+        ] {
+            let mut converter = Converter::new(source, target);
+            let taps = converter.taps;
+            let mut pushed = vec![0.0_f32; taps];
+            let mut phase = u64::from(target);
+            for i in 0..taps * 5 {
+                let sample = ((i * 7919) % 1000) as f32 / 500.0 - 1.0;
+                converter.push(sample);
+                pushed.push(sample);
+                phase -= u64::from(target);
+                while let Some(actual) = converter.pop() {
+                    let fraction = phase as f64 * PHASES as f64 / f64::from(target);
+                    let row = fraction as usize;
+                    let weight = fraction.fract() as f32;
+                    let newest = pushed.len() - 1;
+                    let mut expected = 0.0_f32;
+                    for i in 0..taps {
+                        // Rows are stored reversed: index taps-1-i weights sample newest-i.
+                        let left = converter.coefficients[row * taps + taps - 1 - i];
+                        let right = converter.coefficients[(row + 1) * taps + taps - 1 - i];
+                        expected += (left + weight * (right - left)) * pushed[newest - i];
+                    }
+                    assert!((actual - expected).abs() < 1e-5, "{source}->{target}");
+                    phase += u64::from(source);
+                }
+            }
         }
     }
 

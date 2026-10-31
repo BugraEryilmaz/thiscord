@@ -278,7 +278,7 @@ pub enum ServerEvent {
         error: ApiError,
     },
 }
-#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 pub struct VoiceStatus {
     #[serde(default)]
     pub own_slot: Option<usize>,
