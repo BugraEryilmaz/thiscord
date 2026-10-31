@@ -315,9 +315,7 @@ acceptance; these software tests do not establish gapless device switching.
   reference is reconstructed from the clamped device signal at 48 kHz and timed
   to physical playback, accounting for the reference converter's delay. Filter
   histories are cleared on interruptions or playback access/generation, active,
-  gain and deafen changes so delayed audio cannot cross a privacy cutoff. Playback
-  checks those controls at each callback start and then every 16 output frames;
-  the mixer itself still silences new input at the cutoff sample. Clearing
+  gain and deafen changes so delayed audio cannot cross a privacy cutoff. Clearing
   a mixed filter can briefly interrupt other mixed sources too. Filter windows are
   contiguous (mirrored history, reversed coefficient rows) and accumulate in eight
   lanes so the per-tap loop vectorises without reordering-sensitive fast-math. DSP, recording,

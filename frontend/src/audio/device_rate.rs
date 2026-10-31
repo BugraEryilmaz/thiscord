@@ -9,9 +9,6 @@ const BASE_TAPS: usize = 64;
 /// Independent accumulators let the filter loop vectorise without fast-math.
 const LANES: usize = 8;
 const _: () = assert!(BASE_TAPS.is_multiple_of(LANES));
-/// Output frames between playback privacy checks. Each check reads every
-/// stream's controls; once per frame cost more than the filter itself.
-const PRIVACY_CHECK_FRAMES: usize = 16;
 
 pub(super) struct Converter {
     source: u32,
@@ -197,21 +194,13 @@ impl Playback {
         let mut frames = output.chunks_exact_mut(channels);
         let mut remaining = count;
         let mut dropped = 0;
-        // Check at callback start, then every few frames: the mixer already
-        // silences new input per sample, and this bounds how much delayed
-        // filter audio can follow a cutoff within one callback.
-        let mut until_check = 0;
         let mut drain = |converter: &mut Converter| {
             while remaining > 0 {
-                if until_check == 0 {
-                    until_check = PRIVACY_CHECK_FRAMES;
-                    if privacy.changed() {
-                        converter.clear();
-                        reference_converter.clear();
-                    }
+                if privacy.changed() {
+                    converter.clear();
+                    reference_converter.clear();
                 }
                 let Some(sample) = converter.pop() else { break };
-                until_check -= 1;
                 let sample = sample.clamp(-1.0, 1.0);
                 let frame = frames.next().expect("one frame per converted sample");
                 frame.fill(T::from_sample(0.0));
