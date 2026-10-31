@@ -20,6 +20,7 @@ pub mod jitter;
 mod lifecycle;
 pub mod media_runtime;
 pub mod mixer;
+mod network;
 pub mod outgoing;
 mod playout_rate;
 #[cfg(test)]
@@ -504,27 +505,97 @@ struct Remote {
     jitter: jitter::Jitter,
     decoder: opus::Decoder,
     rate: playout_rate::Rate,
+    /// Network adaptation: OSCE enhancement and automatic DRED recovery.
+    adaptation: bool,
+    receive: network::Receive,
 }
 impl Remote {
+    /// Manual DRED preference; network adaptation is retained.
     fn set_deep_redundancy(
         &mut self,
         writer: &StreamWriter,
         enabled: bool,
         now: Instant,
     ) -> Result<(), String> {
-        // Epoch-zero sources cannot fence redundant audio at remote boundaries.
-        let enabled = enabled && self.source_epoch != 0 && self.privacy_epoch != 0;
-        if self.jitter.deep_redundancy != enabled {
+        self.configure(writer, enabled, self.adaptation, now)
+    }
+    /// Decoder policy. Complexity stays constant for a stream unless settings
+    /// change; any change (and any DRED buffer change) clears media and fully
+    /// reinitializes neural state. Epoch-zero sources cannot fence redundant
+    /// or neural audio at remote boundaries, so they keep ordinary Opus.
+    fn configure(
+        &mut self,
+        writer: &StreamWriter,
+        manual: bool,
+        adaptation: bool,
+        now: Instant,
+    ) -> Result<(), String> {
+        self.adaptation = adaptation;
+        let eligible = self.source_epoch != 0 && self.privacy_epoch != 0;
+        let osce = adaptation && eligible;
+        if !osce {
+            self.receive = Default::default();
+        }
+        let enabled = eligible && (manual || (osce && self.receive.wanted));
+        let complexity = if osce {
+            network::DECODER_COMPLEXITY
+        } else if enabled {
+            5
+        } else {
+            0
+        };
+        let changed = self.decoder.get_complexity().ok() != Some(complexity);
+        // Apply the new decoder controls before clearing. A complexity change
+        // always fully reinitializes, whichever direction: ordinary
+        // OPUS_RESET_STATE keeps FARGAN/OSCE history.
+        if let Err(error) = self
+            .decoder
+            .set_complexity(complexity)
+            .and_then(|_| self.decoder.set_osce_bwe(osce))
+            .and_then(|_| {
+                if changed {
+                    self.decoder.reset_full_state()
+                } else {
+                    Ok(())
+                }
+            })
+        {
+            self.decode_stats.reset_failed = true;
+            self.deafened = true;
+            return Err(error.to_string());
+        }
+        if changed || self.jitter.deep_redundancy != enabled {
             self.clear(writer, now);
             if self.decode_stats.reset_failed {
                 return Err("Opus full decoder reset failed".into());
             }
             self.jitter.set_deep_redundancy(enabled);
         }
-        if let Err(error) = self.decoder.set_complexity(if enabled { 5 } else { 0 }) {
-            self.decode_stats.reset_failed = true;
-            self.deafened = true;
-            return Err(error.to_string());
+        Ok(())
+    }
+    /// Once-per-second automatic DRED receive decision. Turning recovery on
+    /// applies immediately; turning it off waits for a quiet stream so the
+    /// buffer change does not cut speech.
+    fn adapt_receive(
+        &mut self,
+        writer: &StreamWriter,
+        manual: bool,
+        now: Instant,
+    ) -> Result<(), String> {
+        if !self.adaptation || manual || self.source_epoch == 0 || self.privacy_epoch == 0 {
+            return Ok(());
+        }
+        let wanted = self.receive.update(
+            now,
+            self.decode_stats.normal_frames,
+            self.jitter.metrics().sequence_gaps,
+        );
+        if wanted != self.jitter.deep_redundancy {
+            let metrics = self.jitter.metrics();
+            if wanted || metrics.dtx || metrics.inactive {
+                return self.configure(writer, manual, true, now);
+            }
+            self.receive.wanted = true; // Keep the current state until quiet.
         }
         Ok(())
     }
@@ -541,6 +612,9 @@ impl Remote {
             && opus::packet::get_nb_samples(&payload, RATE).is_ok_and(|n| n == FRAME)
         {
             let no_data = payload.len() <= 2;
+            if self.adaptation {
+                self.receive.observe_packet(&payload, received_at);
+            }
             let accepted = self
                 .jitter
                 .push(sequence, timestamp, payload, received_at, now);
@@ -1078,6 +1152,10 @@ impl Session {
                             || self.transmit_control.server_deafened(),
                         Instant::now(),
                     );
+                    // A failed reconfiguration poisons and deafens only that
+                    // stream (see Remote::configure); other streams continue.
+                    let _ =
+                        remote.adapt_receive(writer, self.settings.deep_redundancy, Instant::now());
                     remote.refill(writer, Instant::now());
                 }
             }
@@ -1195,9 +1273,21 @@ impl Session {
         }
         self.encoder_generation = generation;
         self.encoder_active = active;
+        let now = Instant::now();
+        self.encoder
+            .adapt_network(
+                self.settings.network_adaptation,
+                self.connection.as_ref().and_then(|c| c.uplink_sample(0)),
+                self.connection
+                    .as_ref()
+                    .and_then(|c| c.metrics.network().rtt_ms),
+                now,
+            )
+            .map_err(|e| failure::Failure::opus("network_adaptation", e))?;
         self.encoder
             .adapt(
-                self.settings.adaptive_fec,
+                // Network adaptation always includes the measured loss hint.
+                self.settings.adaptive_fec || self.settings.network_adaptation,
                 5, // Encoder combines the measured policy with its DRED 20% floor.
                 self.connection.as_ref().and_then(|c| c.uplink_sample(0)),
                 Instant::now(),
@@ -1350,6 +1440,17 @@ impl Session {
         // callback counters are drained exactly once on the worker.
         AudioQuality {
             adaptive_fec: Some(self.encoder.adaptive_diagnostics(Instant::now())),
+            network: Some({
+                let mut network = self.encoder.network_diagnostics(Instant::now());
+                network.dred_receive_streams = self
+                    .remotes
+                    .iter()
+                    .flatten()
+                    .filter(|r| r.jitter.deep_redundancy)
+                    .count()
+                    .min(usize::from(u8::MAX)) as u8;
+                network
+            }),
             metrics: metrics.snapshot(),
             streams: self
                 .remotes
@@ -1710,6 +1811,10 @@ fn run(
                                 }
                                 s.processing.settings(&settings)?;
                                 s.set_deep_redundancy(settings.deep_redundancy)?;
+                                s.set_network_adaptation(
+                                    settings.network_adaptation,
+                                    settings.deep_redundancy,
+                                )?;
                                 s.settings = settings.clone();
                                 debug.settings(&settings);
                                 for (remote, writer) in s.remotes.iter_mut().zip(&s.devices.writers)

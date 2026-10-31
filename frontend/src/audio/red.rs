@@ -200,6 +200,8 @@ mod tests {
             jitter: Default::default(),
             rate: Default::default(),
             decoder: opus::Decoder::new(48_000, opus::Channels::Mono).unwrap(),
+            adaptation: false,
+            receive: Default::default(),
         }
     }
     fn opus_packets() -> Vec<Vec<u8>> {

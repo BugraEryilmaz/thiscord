@@ -312,7 +312,12 @@ Personalized speaker isolation and physical acoustic acceptance remain future wo
 - [x] Bounded local voice-quality metrics, separate transport/CPU/buffer causes,
   compact status and advanced diagnostics (docs/audio-quality.md), integrated with
   capture-age transport deadlines, Opus FEC/DTX and adaptive playout.
-- [ ] Packet-loss/jitter network trials and adaptive microphone bitrate.
+- [x] Default-on automatic network adaptation: congestion-driven microphone bitrate
+  (32/24/16/12 kbit/s) from uplink RTCP loss/jitter and ICE RTT with hysteresis,
+  automatic DRED on random loss, per-stream DRED receive recovery and OSCE
+  LACE/bandwidth-extension decoding; see docs/audio.md.
+- [ ] Packet-loss/jitter network trials of network adaptation thresholds on
+  physical Windows/macOS/Linux clients; 40/60 ms frames are not implemented.
 - [ ] Physical multi-user acceptance of quality attribution, overhead and device
   behavior on Windows/macOS/Linux, including inactivity/DTX and CPU contention.
 

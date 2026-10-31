@@ -124,6 +124,10 @@ impl Pending {
             s.reset_gate(Instant::now());
             s.processed_level = 0.0;
             s.set_deep_redundancy(self.settings.deep_redundancy)?;
+            s.set_network_adaptation(
+                self.settings.network_adaptation,
+                self.settings.deep_redundancy,
+            )?;
             s.settings = self.settings.clone();
             apply(&s.devices.control, &self.settings);
             if deafened {
@@ -576,6 +580,8 @@ mod tests {
             label: "A speaker".into(),
             jitter: Default::default(),
             rate: Default::default(),
+            adaptation: false,
+            receive: Default::default(),
             decoder: opus::Decoder::new(RATE, opus::Channels::Mono).unwrap(),
         });
         s.remotes[3 + thiscord_shared::voice::ROOM_CAPACITY] = Some(super::super::Remote {
@@ -589,6 +595,8 @@ mod tests {
             label: "Shared audio".into(),
             jitter: Default::default(),
             rate: Default::default(),
+            adaptation: false,
+            receive: Default::default(),
             decoder: opus::Decoder::new(RATE, opus::Channels::Mono).unwrap(),
         });
         let target = thiscord_shared::audio::SpeakerVolumeTarget {
@@ -688,6 +696,8 @@ mod tests {
             label: "speaker".into(),
             jitter: Default::default(),
             rate: Default::default(),
+            adaptation: false,
+            receive: Default::default(),
             decoder: opus::Decoder::new(RATE, opus::Channels::Mono).unwrap(),
         });
         s.devices.writers[3].volume(0.37).unwrap();
@@ -794,6 +804,8 @@ mod tests {
             label: "speaker".into(),
             jitter: Default::default(),
             rate: Default::default(),
+            adaptation: false,
+            receive: Default::default(),
             decoder: opus::Decoder::new(RATE, opus::Channels::Mono).unwrap(),
         });
         old.devices.writers[3].volume(0.37).unwrap();

@@ -417,3 +417,63 @@ fn dred_real_padding_red_combination_recovers_burst_through_worker_ingress() {
         }
     }
 }
+
+#[test]
+fn network_adaptation_uses_osce_only_for_current_sources_and_toggles_cleanly() {
+    let (mut s, mut mixer) = session();
+    s.settings.network_adaptation = true;
+    let at = Instant::now();
+    let mut legacy = member(0, 0);
+    legacy.sharing_audio = true;
+    roster(&mut s, vec![legacy], at);
+    for slot in [0, thiscord_shared::voice::ROOM_CAPACITY] {
+        let remote = s.remotes[slot].as_mut().unwrap();
+        assert_eq!(remote.decoder.get_complexity().unwrap(), 0);
+        assert!(!remote.decoder.get_osce_bwe().unwrap());
+    }
+    roster(&mut s, vec![member(10, 10)], at);
+    let remote = s.remotes[0].as_mut().unwrap();
+    assert_eq!(
+        remote.decoder.get_complexity().unwrap(),
+        crate::audio::network::DECODER_COMPLEXITY
+    );
+    assert!(remote.decoder.get_osce_bwe().unwrap());
+    // OSCE alone does not add DRED's receive delay.
+    assert!(!remote.jitter.deep_redundancy);
+    assert_eq!(remote.jitter.metrics().target_ms, 40.0);
+    dirty(&mut s);
+    s.set_network_adaptation(false, false).unwrap();
+    s.settings.network_adaptation = false;
+    assert_silent(&mut mixer);
+    let remote = s.remotes[0].as_mut().unwrap();
+    assert_eq!(remote.decoder.get_complexity().unwrap(), 0);
+    assert!(!remote.decoder.get_osce_bwe().unwrap());
+    dirty(&mut s);
+    s.set_network_adaptation(true, false).unwrap();
+    s.settings.network_adaptation = true;
+    assert_silent(&mut mixer);
+    let remote = s.remotes[0].as_mut().unwrap();
+    let mut fresh = opus::Decoder::new(RATE, opus::Channels::Mono).unwrap();
+    fresh
+        .set_complexity(crate::audio::network::DECODER_COMPLEXITY)
+        .unwrap();
+    fresh.set_osce_bwe(true).unwrap();
+    let mut actual = [0.0; FRAME];
+    let mut expected = [0.0; FRAME];
+    for packet in [&[][..], &encoded()[70], &[], &encoded()[71]] {
+        remote
+            .decoder
+            .decode_float(packet, &mut actual, false)
+            .unwrap();
+        fresh.decode_float(packet, &mut expected, false).unwrap();
+        assert!(actual == expected, "toggle must not retain neural state");
+    }
+    // Manual DRED keeps working on top of adaptation.
+    s.set_deep_redundancy(true).unwrap();
+    let remote = s.remotes[0].as_mut().unwrap();
+    assert!(remote.jitter.deep_redundancy);
+    assert_eq!(
+        remote.decoder.get_complexity().unwrap(),
+        crate::audio::network::DECODER_COMPLEXITY
+    );
+}

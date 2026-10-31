@@ -230,8 +230,8 @@ fn BotAudioSettings(
         <p class="mb-4 text-sm text-slate-400">{move ||crate::i18n::t("Uses the desktop voice engine and settings. Audio changes save automatically. Test conditions apply separately. Virtual devices replace physical hardware; keyboard shortcuts and overlays are unavailable. Speaker echo requires another participant sending audio. DRED recovery requires DRED on both participants.")}</p>
         <p role="status" class="text-amber-300">{move ||ui.status.get()}</p>
         <fieldset disabled=move ||!loaded.get() || ui.audio_saving.get() class="space-y-4 disabled:opacity-50">
-            <div class="flex flex-wrap gap-2">{[("Opus baseline",false,false),("RED",true,false),("DRED",false,true),("RED + DRED",true,true)].into_iter().map(move |(label,red,dred)|view!{
-                <button class="rounded bg-slate-800 px-3 py-2 text-sm" on:click=move |_|{ui.audio.update(|s|{s.packet_redundancy=red;s.deep_redundancy=dred;});super::audio::save(ui);}>{move ||crate::i18n::t(label)}</button>
+            <div class="flex flex-wrap gap-2">{[("Opus baseline",false,false,false),("RED",true,false,false),("DRED",false,true,false),("RED + DRED",true,true,false),("Network adaptation",false,false,true)].into_iter().map(move |(label,red,dred,adaptive)|view!{
+                <button class="rounded bg-slate-800 px-3 py-2 text-sm" on:click=move |_|{ui.audio.update(|s|{s.packet_redundancy=red;s.deep_redundancy=dred;s.network_adaptation=adaptive;});super::audio::save(ui);}>{move ||crate::i18n::t(label)}</button>
             }).collect_view()}</div>
             <super::audio::AudioSettingsPanel ui=ui/>
         </fieldset>

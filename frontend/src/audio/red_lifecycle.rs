@@ -254,10 +254,13 @@ impl Session {
                 rate: Default::default(),
                 decoder: opus::Decoder::new(RATE, opus::Channels::Mono)
                     .map_err(|e| e.to_string())?,
+                adaptation: false,
+                receive: Default::default(),
             });
-            self.remotes[slot].as_mut().unwrap().set_deep_redundancy(
+            self.remotes[slot].as_mut().unwrap().configure(
                 writer,
                 self.settings.deep_redundancy && !shared_audio,
+                self.settings.network_adaptation,
                 now,
             )?;
             writer.control.active.store(true, Ordering::Release);
@@ -299,6 +302,9 @@ mod tests {
             noise_suppression: false,
             automatic_gain: false,
             neural_echo: false,
+            // Manual DRED/RED fixtures assert exact decoder policy; network
+            // adaptation has its own tests (audio::network).
+            network_adaptation: false,
             ..Default::default()
         };
         (

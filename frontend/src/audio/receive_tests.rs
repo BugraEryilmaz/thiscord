@@ -12,6 +12,8 @@ fn remote(at: Instant) -> Remote {
         id: "00000000-0000-0000-0000-000000000001".parse().unwrap(),
         label: "synthetic".into(),
         rate: Default::default(),
+        adaptation: false,
+        receive: Default::default(),
         jitter: Default::default(),
         decoder: opus::Decoder::new(RATE, opus::Channels::Mono).unwrap(),
     }
