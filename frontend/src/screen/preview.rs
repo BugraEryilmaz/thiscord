@@ -52,6 +52,9 @@ pub enum Bind {
 pub struct Preview {
     track: Arc<TrackLocalStaticRTP>,
     payload_type: u8,
+    /// WebView payload type for H.264 High, when its decoder offered one.
+    /// High bitstreams switch to it at an SPS/IDR; baseline keeps `payload_type`.
+    high_payload_type: Option<u8>,
     pub connected: Arc<AtomicBool>,
     peer: Arc<dyn PeerConnection>,
     runtime: tokio::runtime::Handle,
@@ -90,20 +93,35 @@ impl Preview {
             return Err("Invalid screen viewer offer".into());
         }
         let mut media = MediaEngine::default();
-        media
-            .register_codec(
-                rtc::rtp_transceiver::rtp_sender::RTCRtpCodecParameters {
-                    rtp_codec: rtc::rtp_transceiver::rtp_sender::RTCRtpCodec {
-                        mime_type: "video/H264".into(),
-                        clock_rate: 90_000,
-                        sdp_fmtp_line: thiscord_shared::screen::H264_FMTP.into(),
-                        ..Default::default()
+        // Baseline stays the default send codec. The High entries (constrained
+        // and plain constraint bytes, as WebViews offer both) only let the
+        // answer accept the WebView's High decoder; no extra encode is created.
+        for (fmtp, payload_type) in [
+            (
+                thiscord_shared::screen::H264_FMTP,
+                thiscord_shared::voice::MediaKind::ScreenVideo.payload_type(),
+            ),
+            (thiscord_shared::screen::H264_HIGH_FMTP, 126),
+            (
+                "level-asymmetry-allowed=1;packetization-mode=1;profile-level-id=640034",
+                127,
+            ),
+        ] {
+            media
+                .register_codec(
+                    rtc::rtp_transceiver::rtp_sender::RTCRtpCodecParameters {
+                        rtp_codec: rtc::rtp_transceiver::rtp_sender::RTCRtpCodec {
+                            mime_type: "video/H264".into(),
+                            clock_rate: 90_000,
+                            sdp_fmtp_line: fmtp.into(),
+                            ..Default::default()
+                        },
+                        payload_type,
                     },
-                    payload_type: thiscord_shared::voice::MediaKind::ScreenVideo.payload_type(),
-                },
-                rtc::rtp_transceiver::rtp_sender::RtpCodecKind::Video,
-            )
-            .map_err(|_| "Cannot configure video codec")?;
+                    rtc::rtp_transceiver::rtp_sender::RtpCodecKind::Video,
+                )
+                .map_err(|_| "Cannot configure video codec")?;
+        }
         let registry = register_default_interceptors(Registry::new(), &mut media)
             .map_err(|_| "Cannot configure video transport")?;
         let gathered = Arc::new(Notify::new());
@@ -135,6 +153,7 @@ impl Preview {
         let preview = Self {
             track,
             payload_type: 0,
+            high_payload_type: None,
             connected,
             peer,
             runtime: tokio::runtime::Handle::current(),
@@ -176,25 +195,40 @@ impl Preview {
             .as_str()
             .ok_or("Missing screen viewer SDP")?
             .to_owned();
-        let payload_type = sdp
-            .lines()
-            .find_map(|line| {
-                let (pt, codec) = line.strip_prefix("a=rtpmap:")?.split_once(' ')?;
-                codec
-                    .trim()
-                    .eq_ignore_ascii_case("H264/90000")
-                    .then(|| pt.parse::<u8>().ok())
-                    .flatten()
-            })
-            .ok_or("WebView did not negotiate H.264 video")?;
+        let (payload_type, high_payload_type) =
+            h264_payload_types(&sdp).ok_or("WebView did not negotiate H.264 video")?;
         let mut preview = preview;
         preview.payload_type = payload_type;
+        preview.high_payload_type = high_payload_type;
         preview.recorder.fact("answer.payload_type", payload_type);
+        preview.recorder.fact(
+            "answer.high_payload_type",
+            high_payload_type.map_or_else(|| "none".into(), |pt| pt.to_string()),
+        );
         Ok((preview, sdp))
     }
-    pub async fn write(&self, mut packet: rtc::rtp::Packet) -> Result<(), String> {
+    /// The WebView negotiated an H.264 High decoder for this player.
+    pub fn decodes_high(&self) -> bool {
+        self.high_payload_type.is_some()
+    }
+    pub async fn write(&self, packet: rtc::rtp::Packet) -> Result<(), String> {
+        self.write_profile(packet, thiscord_shared::h264::Profile::Baseline)
+            .await
+    }
+    /// High frames use the WebView's High payload type. A profile only changes
+    /// at an SPS/IDR, so the WebView's per-payload decoder starts on a keyframe.
+    pub async fn write_profile(
+        &self,
+        mut packet: rtc::rtp::Packet,
+        profile: thiscord_shared::h264::Profile,
+    ) -> Result<(), String> {
         // Browser-assigned dynamic payload types differ from the SFU contract.
-        packet.header.payload_type = self.payload_type;
+        packet.header.payload_type = match profile {
+            thiscord_shared::h264::Profile::High => {
+                self.high_payload_type.unwrap_or(self.payload_type)
+            }
+            thiscord_shared::h264::Profile::Baseline => self.payload_type,
+        };
         packet.header.ssrc = thiscord_shared::voice::MediaKind::ScreenVideo.publisher_ssrc();
         let result = self
             .track
@@ -220,6 +254,38 @@ impl Preview {
             .await;
         recorder.apply_stats(&super::bridge::stats_facts(&report));
     }
+}
+/// Baseline-compatible and High payload types from a negotiated answer. Any H.264
+/// entry without a High profile-level-id is a baseline candidate (the bridge
+/// registers constrained baseline); High needs packetization mode 1.
+pub fn h264_payload_types(sdp: &str) -> Option<(u8, Option<u8>)> {
+    let mut entries = Vec::new();
+    for line in sdp.lines() {
+        if let Some((pt, codec)) = line
+            .strip_prefix("a=rtpmap:")
+            .and_then(|rest| rest.split_once(' '))
+            && codec.trim().eq_ignore_ascii_case("H264/90000")
+            && let Ok(pt) = pt.parse::<u8>()
+        {
+            entries.push(pt);
+        }
+    }
+    let fmtp = |pt: u8| {
+        sdp.lines().find_map(|line| {
+            let (id, params) = line.strip_prefix("a=fmtp:")?.split_once(' ')?;
+            (id.parse::<u8>().ok()? == pt).then(|| params.trim().to_ascii_lowercase())
+        })
+    };
+    let high = |pt: &u8| {
+        fmtp(*pt).is_some_and(|params| {
+            params.contains("packetization-mode=1")
+                && params
+                    .split(';')
+                    .any(|p| p.trim().starts_with("profile-level-id=64"))
+        })
+    };
+    let baseline = entries.iter().copied().find(|pt| !high(pt))?;
+    Some((baseline, entries.iter().copied().find(high)))
 }
 impl Drop for Preview {
     fn drop(&mut self) {
@@ -272,14 +338,40 @@ mod tests {
     }
     #[tokio::test]
     async fn h264_crosses_local_video_only_peer_without_transcoding() {
-        crosses_bridge("127.0.0.1:0".into()).await;
+        crosses_bridge("127.0.0.1:0".into(), false).await;
+    }
+    #[tokio::test]
+    async fn high_frames_use_the_webviews_negotiated_high_decoder() {
+        crosses_bridge("127.0.0.1:0".into(), true).await;
+    }
+    #[test]
+    fn payload_types_prefer_baseline_and_find_packetized_high() {
+        let sdp = [
+            "a=rtpmap:96 VP8/90000",
+            "a=rtpmap:104 H264/90000",
+            "a=fmtp:104 level-asymmetry-allowed=1;packetization-mode=1;profile-level-id=640c1f",
+            "a=rtpmap:102 H264/90000",
+            "a=fmtp:102 level-asymmetry-allowed=1;packetization-mode=1;profile-level-id=42e01f",
+        ]
+        .join("\r\n");
+        assert_eq!(h264_payload_types(&sdp), Some((102, Some(104))));
+        let baseline = [
+            "a=rtpmap:102 H264/90000",
+            "a=fmtp:102 packetization-mode=1;profile-level-id=42e01f",
+            "a=rtpmap:106 H264/90000",
+            "a=fmtp:106 packetization-mode=0;profile-level-id=640c1f",
+        ]
+        .join("\r\n");
+        // Mode-0 High cannot carry FU-A fragments: it is not a High decoder here.
+        assert_eq!(h264_payload_types(&baseline), Some((102, None)));
+        assert_eq!(h264_payload_types("a=rtpmap:96 VP8/90000"), None);
     }
     #[tokio::test]
     async fn interface_bound_webview_reaches_bridge() {
         // Windows cannot send from an interface-bound socket to loopback.
-        crosses_bridge(format!("{}:0", interface_ip())).await;
+        crosses_bridge(format!("{}:0", interface_ip()), false).await;
     }
-    async fn crosses_bridge(receiver_bind: String) {
+    async fn crosses_bridge(receiver_bind: String, offer_high: bool) {
         tokio::time::timeout(Duration::from_secs(15), async {
             let mut media = MediaEngine::default();
             media.register_codec(rtc::rtp_transceiver::rtp_sender::RTCRtpCodecParameters {
@@ -289,6 +381,15 @@ mod tests {
                     ..Default::default()
                 }, payload_type:102,
             },RtpCodecKind::Video).unwrap();
+            if offer_high {
+                media.register_codec(rtc::rtp_transceiver::rtp_sender::RTCRtpCodecParameters {
+                    rtp_codec: rtc::rtp_transceiver::rtp_sender::RTCRtpCodec {
+                        mime_type:"video/H264".into(),clock_rate:90_000,
+                        sdp_fmtp_line:"level-asymmetry-allowed=1;packetization-mode=1;profile-level-id=640c1f".into(),
+                        ..Default::default()
+                    }, payload_type:104,
+                },RtpCodecKind::Video).unwrap();
+            }
             let gathered = Arc::new(Notify::new());
             let (packets, mut received) = tokio::sync::mpsc::channel(128);
             let receiver = PeerConnectionBuilder::new().with_runtime(Arc::new(crate::audio::media_runtime::MediaRuntime::default()))
@@ -344,6 +445,7 @@ mod tests {
             while !preview.connected.load(Ordering::Acquire) {
                 tokio::time::sleep(Duration::from_millis(10)).await;
             }
+            assert_eq!(preview.decodes_high(), offer_high);
             use openh264::{
                 encoder::{Encoder, EncoderConfig, Profile, UsageType},
                 formats::{RgbaSliceU8, YUVBuffer},
@@ -359,7 +461,8 @@ mod tests {
             )
             .unwrap();
             let data = encoder.encode(&yuv).unwrap().to_vec();
-            for packet in super::super::packetize(data.clone(), &mut 0, 9000).unwrap() {
+            let mut sequence = 0;
+            for packet in super::super::packetize(data.clone(), &mut sequence, 9000).unwrap() {
                 preview.write(packet).await.unwrap();
             }
             let mut assembler = super::super::Assembler::default();
@@ -371,6 +474,22 @@ mod tests {
                         frame, data,
                         "local presentation must not decode/re-encode video"
                     );
+                    break;
+                }
+            }
+            // The same bitstream bytes, labelled for the WebView's High decoder
+            // when it negotiated one; otherwise the baseline payload type.
+            for packet in super::super::packetize(data.clone(), &mut sequence, 18000).unwrap() {
+                preview
+                    .write_profile(packet, thiscord_shared::h264::Profile::High)
+                    .await
+                    .unwrap();
+            }
+            loop {
+                let packet = received.recv().await.unwrap();
+                assert_eq!(packet.header.payload_type, if offer_high { 104 } else { 102 });
+                if let Some(frame) = assembler.push(&packet) {
+                    assert_eq!(frame, data);
                     break;
                 }
             }

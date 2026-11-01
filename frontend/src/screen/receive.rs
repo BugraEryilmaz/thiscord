@@ -99,6 +99,25 @@ impl Sender {
     pub fn tick(&self, now: Instant) {
         self.drain(&mut self.inbox.0.state.lock().unwrap(), now);
     }
+    /// When `tick`/`keyframe_request` next have work: the oldest reordered
+    /// packet's gap deadline, or the next allowed recovery request. `None`
+    /// means idle (no queued gap, synchronized, nothing requested), so a video
+    /// track without an active share needs no periodic timer at all.
+    pub fn next_deadline(&self) -> Option<Instant> {
+        let s = self.inbox.0.state.lock().unwrap();
+        if s.closed {
+            return None;
+        }
+        let reorder = s.reorder.iter().map(|(_, at)| *at + REORDER_AGE).min();
+        let feedback = (s.epoch.is_some() && (!s.synchronized || s.requested)).then(|| {
+            s.feedback_at
+                .map_or_else(Instant::now, |at| at + Duration::from_millis(500))
+        });
+        match (reorder, feedback) {
+            (Some(a), Some(b)) => Some(a.min(b)),
+            (a, b) => a.or(b),
+        }
+    }
     /// Rate limited per stream; epoch prevents feedback targeting reused slots.
     pub fn keyframe_request(&self, now: Instant) -> Option<u32> {
         let mut s = self.inbox.0.state.lock().unwrap();
@@ -298,6 +317,35 @@ impl Inbox {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn idle_tracks_have_no_deadline_and_gaps_or_recovery_schedule_one() {
+        let (tx, _rx) = Inbox::channel();
+        // A negotiated slot nobody is sharing on: no timer needed.
+        assert_eq!(tx.next_deadline(), None);
+        let now = Instant::now();
+        let mut seq = 10;
+        let mut packets = crate::screen::packetize(vec![0, 0, 0, 1, 0x65, 1, 2, 3], &mut seq, 9000)
+            .unwrap()
+            .into_iter()
+            .chain(crate::screen::packetize(vec![0, 0, 0, 1, 0x41, 1], &mut seq, 18000).unwrap())
+            .chain(crate::screen::packetize(vec![0, 0, 0, 1, 0x41, 2], &mut seq, 27000).unwrap())
+            .map(|mut p| {
+                p.header.csrc = vec![7];
+                p
+            })
+            .collect::<Vec<_>>();
+        // Unsynchronized (no IDR yet): recovery may be requested immediately.
+        tx.push(packets.remove(0), now);
+        assert!(tx.next_deadline().unwrap() <= Instant::now());
+        assert_eq!(tx.keyframe_request(now), Some(7));
+        let next = tx.next_deadline().unwrap();
+        assert!(next >= now + Duration::from_millis(500));
+        // A sequence gap schedules its reorder deadline before that.
+        tx.push(packets.remove(1), now);
+        assert_eq!(tx.next_deadline(), Some(now + REORDER_AGE));
+        tx.tick(now + REORDER_AGE);
+        assert_eq!(tx.next_deadline(), Some(next));
+    }
     fn frame(sender: &Sender, seq: &mut u16, key: bool, at: Instant) {
         let data = if key {
             vec![0, 0, 1, 0x67, 66, 0, 0, 1, 0x68, 1, 0, 0, 1, 0x65, 1]

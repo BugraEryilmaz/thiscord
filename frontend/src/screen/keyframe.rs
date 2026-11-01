@@ -37,6 +37,13 @@ impl KeyframePolicy {
                 .is_none_or(|at| now.saturating_duration_since(at) >= STATIC_REFRESH_INTERVAL)
     }
 
+    /// Earliest instant at which `refresh_due(_, false)` can become true, so an
+    /// idle worker can sleep until then. `None` means a refresh is already due.
+    pub fn next_refresh(&self) -> Option<Instant> {
+        let input = self.last_input? + STATIC_REFRESH_INTERVAL;
+        Some(input.min(self.last_keyframe? + RECOVERY_INTERVAL))
+    }
+
     /// Commit only after hardware input submission. Busy hardware/backpressure
     /// must neither advance clocks nor consume the caller's feedback flag.
     pub fn submitted(&mut self, now: Instant, forced: bool) {
@@ -56,6 +63,25 @@ impl KeyframePolicy {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn idle_wait_ends_exactly_when_a_refresh_becomes_due() {
+        let start = Instant::now();
+        let mut policy = KeyframePolicy::default();
+        assert_eq!(policy.next_refresh(), None);
+        policy.submitted(start, true);
+        let due = policy.next_refresh().unwrap();
+        assert_eq!(due, start + STATIC_REFRESH_INTERVAL);
+        assert!(!policy.refresh_due(due - Duration::from_millis(1), false));
+        assert!(policy.refresh_due(due, false));
+        // Recovery spacing can come due before the static heartbeat.
+        policy.observed(start);
+        policy.submitted(
+            start + RECOVERY_INTERVAL - Duration::from_millis(500),
+            false,
+        );
+        assert_eq!(policy.next_refresh(), Some(start + RECOVERY_INTERVAL));
+    }
 
     #[test]
     fn static_heartbeats_do_not_force_one_second_idrs() {

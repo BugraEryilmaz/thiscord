@@ -12,6 +12,7 @@ pub mod keyframe;
 pub mod metrics;
 pub mod pacing;
 pub mod preview;
+pub mod priority;
 pub mod send;
 /// UDP binds for the in-process WebView video bridges (screen preview, camera).
 /// Once media permission enables adapter enumeration, WebView binds its host

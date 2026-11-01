@@ -432,6 +432,7 @@ fn screen_view_subscriptions_and_pause_targets_keep_stable_wire_shapes() {
         owner: ID.parse().unwrap(),
         epoch: 3,
         bitrate: 2_500_000,
+        h264_high: false,
     };
     let value = json!({"type":"screen_views","views":[{"slot":2,"owner":ID,"epoch":3,"bitrate":2_500_000}]});
     assert_eq!(
@@ -447,7 +448,8 @@ fn screen_view_subscriptions_and_pause_targets_keep_stable_wire_shapes() {
             layers: None,
             kind: MediaKind::ScreenVideo,
             epoch: 3,
-            bitrate: 0
+            bitrate: 0,
+            profile: Default::default(),
         })
         .unwrap(),
         pause
@@ -486,6 +488,7 @@ fn layered_screen_contract_is_negotiated_and_legacy_target_defaults_remain_reada
         kind: MediaKind::ScreenVideo,
         epoch: 4,
         bitrate: 200_000,
+        profile: Default::default(),
         layers: Some(LayerTargets {
             primary: 5_000_000,
             low: 200_000,
@@ -538,6 +541,7 @@ fn camera_contract_is_independent_and_legacy_rosters_default_off() {
         owner: ID.parse().unwrap(),
         epoch: 9,
         bitrate: 1_500_000,
+        h264_high: false,
     };
     assert!(camera.valid());
     assert_eq!(to_value(camera).unwrap()["kind"], "camera");

@@ -43,6 +43,12 @@ pub struct Binding {
     pub audio: Arc<TrackLocalStaticRTP>,
     pub can_publish: bool,
     pub subscriptions: bool,
+    /// The server negotiated `screen_profiles`: views report their decoder and
+    /// `high_profile` follows the SFU's single stream-wide plan.
+    pub profiles: bool,
+    /// Encode H.264 High on every layer. One flag for both encoders: mixed
+    /// viewer capabilities select the shared floor, never an extra encode.
+    pub high_profile: Arc<AtomicBool>,
     pub video_sequence: Arc<AtomicU32>,
     pub audio_sequence: Arc<AtomicU32>,
     pub audio_timestamp: Arc<AtomicU32>,
@@ -140,7 +146,20 @@ impl ScreenState {
             layer.force_keyframe.store(true, Ordering::Release);
         }
     }
-    pub fn layer_target(&self, bitrate: u32, layers: Option<LayerTargets>) {
+    pub fn layer_target(&self, bitrate: u32, layers: Option<LayerTargets>, profile: VideoProfile) {
+        if let Ok(inner) = self.0.lock()
+            && let Some(binding) = &inner.binding
+        {
+            // The local preview decodes the same bitstream without the SFU.
+            let own_decodes_high = inner.viewers[binding.own_slot]
+                .as_ref()
+                .and_then(|v| v.preview.as_ref())
+                .is_none_or(|p| p.decodes_high());
+            binding.high_profile.store(
+                binding.profiles && profile == VideoProfile::H264High && own_decodes_high,
+                Ordering::Release,
+            );
+        }
         let primary = if let Ok(inner) = self.0.lock()
             && let Some(layer) = inner.binding.as_ref().and_then(|b| b.layers.as_ref())
         {
@@ -193,6 +212,8 @@ impl ScreenState {
             return vec![];
         }
         let own_slot = inner.binding.as_ref().map(|b| b.own_slot);
+        let profiles = inner.binding.as_ref().is_some_and(|b| b.profiles)
+            && self.kind() == thiscord_shared::voice::MediaKind::ScreenVideo;
         if let Some(binding) = &inner.binding {
             let live = inner.viewers[binding.own_slot].as_ref().is_some_and(|v| {
                 v.connection.active() && v.touched.elapsed() < VIEWER_LEASE && v.preview.is_some()
@@ -261,6 +282,7 @@ impl ScreenState {
                 owner: viewer.watch.owner,
                 epoch: viewer.watch.epoch,
                 bitrate: feedback.receiver.bitrate(),
+                h264_high: profiles && viewer.preview.as_ref().is_some_and(|p| p.decodes_high()),
             });
         }
         views
@@ -444,6 +466,9 @@ impl ScreenState {
         std::thread::spawn(move || {
             let mut viewer_connection: Option<Connection> = None;
             let mut sequence = 0;
+            // Bitstream profile since the last SPS. Each lease starts on a reset
+            // (SPS/PPS/IDR) frame, which always sets it.
+            let mut profile = thiscord_shared::h264::Profile::Baseline;
             while let Some(frame) = rx.next() {
                 if !connection.active() {
                     break;
@@ -478,13 +503,25 @@ impl ScreenState {
                         continue;
                     }
                 }
-                if let Err(reason) = thiscord_frontend::screen::validate_parameter_sets(&frame.data)
-                {
-                    metrics.add("rejected_parameter_sets", 1);
-                    metrics.label("last_parameter_set_rejection", &reason);
-                    metrics.event(&reason.to_string());
-                    rx.resync();
-                    continue;
+                // High is admitted only for a WebView that negotiated its decoder.
+                match thiscord_shared::h264::parameter_set_profile(
+                    &frame.data,
+                    preview.decodes_high(),
+                ) {
+                    Ok(Some(current)) => {
+                        if current != profile {
+                            metrics.label("profile", format!("{current:?}"));
+                        }
+                        profile = current;
+                    }
+                    Ok(None) => {}
+                    Err(reason) => {
+                        metrics.add("rejected_parameter_sets", 1);
+                        metrics.label("last_parameter_set_rejection", &reason);
+                        metrics.event(&reason.to_string());
+                        rx.resync();
+                        continue;
+                    }
                 }
                 let Ok(packets) = thiscord_frontend::screen::packetize(
                     frame.data,
@@ -504,8 +541,11 @@ impl ScreenState {
                             return false;
                         }
                         if !matches!(
-                            tokio::time::timeout(Duration::from_millis(50), preview.write(packet))
-                                .await,
+                            tokio::time::timeout(
+                                Duration::from_millis(50),
+                                preview.write_profile(packet, profile)
+                            )
+                            .await,
                             Ok(Ok(_))
                         ) {
                             return false;
@@ -950,7 +990,9 @@ pub async fn screen_start(
         sequence: binding.video_sequence.clone(),
         metrics: binding.metrics.clone(),
     };
-    tauri::async_runtime::spawn(sender.run(stop.clone(), quality, rx));
+    sender
+        .spawn_paced(stop.clone(), quality, rx)
+        .map_err(|_| "Cannot start screen pacer")?;
     let low_output = binding.layers.as_ref().map(|layer| {
         let low_quality = LayerTargets::low_quality(quality);
         let (tx, rx) = mpsc::channel(thiscord_frontend::screen::sender_queue_frames(
@@ -967,14 +1009,17 @@ pub async fn screen_start(
             sequence: layer.sequence.clone(),
             metrics: layer.metrics.clone(),
         };
-        tauri::async_runtime::spawn(sender.run(stop.clone(), low_quality, rx));
-        thiscord_frontend::screen::LayerOutput {
+        sender
+            .spawn_paced(stop.clone(), low_quality, rx)
+            .map_err(|_| "Cannot start screen pacer")?;
+        Ok::<_, &str>(thiscord_frontend::screen::LayerOutput {
             metrics: layer.metrics.clone(),
             tx,
             demand: layer.demand.clone(),
             force_keyframe: layer.force_keyframe.clone(),
-        }
+        })
     });
+    let low_output = low_output.transpose()?;
     inner.worker = Some(
         std::thread::Builder::new()
             .name("thiscord-screen-capture".into())
@@ -1037,6 +1082,7 @@ fn capture(
         binding.force_keyframe.clone(),
         binding.demand.clone(),
         low_output,
+        binding.high_profile.clone(),
         |encoder| {
             if let Ok(mut inner) = state.0.lock()
                 && inner.stop.as_ref().is_some_and(|s| Arc::ptr_eq(s, stop))

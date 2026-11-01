@@ -134,6 +134,20 @@ pub fn bounded_parameter_sets(data: &[u8]) -> bool {
     validate_parameter_sets(data).is_ok()
 }
 
+/// Bitstream profile class. Constrained baseline remains the compatibility floor;
+/// 8-bit 4:2:0 High is accepted only where the receiving decoder negotiated it.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub enum Profile {
+    #[default]
+    Baseline,
+    High,
+}
+
+/// Same allocation bounds as [`bounded_parameter_sets`], optionally admitting High.
+pub fn bounded_parameter_sets_with(data: &[u8], allow_high: bool) -> bool {
+    parameter_set_profile(data, allow_high).is_ok()
+}
+
 /// Safe diagnostic metadata only: never include encoded bytes or SDP.
 #[derive(Debug, PartialEq, Eq)]
 pub enum ParameterSetError {
@@ -159,6 +173,14 @@ pub enum ParameterSetError {
         height: u32,
     },
     Interlaced,
+    /// High was negotiated, but this SPS is neither baseline nor 8-bit 4:2:0 High.
+    HighProfile {
+        id: u8,
+        constraints: u8,
+        level: u8,
+    },
+    /// High chroma format, bit depth or scaling-list field outside 8-bit 4:2:0.
+    HighFormat,
 }
 impl std::fmt::Display for ParameterSetError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
@@ -202,24 +224,44 @@ impl std::fmt::Display for ParameterSetError {
                 f,
                 "interlaced H.264 is unsupported; expected progressive video"
             ),
+            Self::HighProfile {
+                id,
+                constraints,
+                level,
+            } => write!(
+                f,
+                "unsupported H.264 profile-level-id={id:02x}{constraints:02x}{level:02x}; expected baseline or high"
+            ),
+            Self::HighFormat => write!(
+                f,
+                "unsupported H.264 high chroma format, bit depth or scaling list; expected 8-bit 4:2:0"
+            ),
         }
     }
 }
 
 pub fn validate_parameter_sets(data: &[u8]) -> Result<(), ParameterSetError> {
+    parameter_set_profile(data, false).map(|_| ())
+}
+/// Validates every SPS and reports the last one's profile; `None` without an SPS.
+pub fn parameter_set_profile(
+    data: &[u8],
+    allow_high: bool,
+) -> Result<Option<Profile>, ParameterSetError> {
+    let mut profile = None;
     for nal in nal_units(data) {
         if nal.first().is_none_or(|b| b & 31 != 7) {
             continue;
         }
-        inspect_sps(nal).ok_or(ParameterSetError::Malformed)??;
+        profile = Some(inspect_sps(nal, allow_high).ok_or(ParameterSetError::Malformed)??);
     }
-    Ok(())
+    Ok(profile)
 }
 #[cfg(test)]
 fn bounded_sps(nal: &[u8]) -> Option<bool> {
-    inspect_sps(nal).map(|result| result.is_ok())
+    inspect_sps(nal, false).map(|result| result.is_ok())
 }
-fn inspect_sps(nal: &[u8]) -> Option<Result<(), ParameterSetError>> {
+fn inspect_sps(nal: &[u8], allow_high: bool) -> Option<Result<Profile, ParameterSetError>> {
     let mut rbsp = Vec::with_capacity(nal.len());
     let mut zeros = 0;
     for &b in nal.get(1..)? {
@@ -241,11 +283,24 @@ fn inspect_sps(nal: &[u8]) -> Option<Result<(), ParameterSetError>> {
         88 => constraints & 0xcf == 0xc0,
         _ => false,
     };
-    if !baseline {
-        return Some(Err(ParameterSetError::Profile {
-            id,
-            constraints,
-            level,
+    // High (profile_idc 100) adds CABAC and 8x8 transforms. Constrained High
+    // (constraint_set4/5) is preferred, but the publisher also disables
+    // B-frames, so plain High from a driver that ignores the constraint is
+    // accepted; reordering never changes the decoder allocation bounds below.
+    let high = allow_high && id == 100;
+    if !baseline && !high {
+        return Some(Err(if allow_high {
+            ParameterSetError::HighProfile {
+                id,
+                constraints,
+                level,
+            }
+        } else {
+            ParameterSetError::Profile {
+                id,
+                constraints,
+                level,
+            }
         }));
     }
     let mut bits = Bits {
@@ -255,6 +310,36 @@ fn inspect_sps(nal: &[u8]) -> Option<Result<(), ParameterSetError>> {
     let sps_id = bits.ue()?;
     if sps_id > 31 {
         return Some(Err(ParameterSetError::SpsId(sps_id)));
+    }
+    if high {
+        let chroma = bits.ue()?;
+        let luma_depth = bits.ue()?;
+        let chroma_depth = bits.ue()?;
+        bits.bit()?; // qpprime_y_zero_transform_bypass_flag
+        if chroma != 1 || luma_depth != 0 || chroma_depth != 0 {
+            return Some(Err(ParameterSetError::HighFormat));
+        }
+        if bits.bit()? {
+            // Eight 4:2:0 scaling lists; consumed only to reach the bounded fields.
+            for list in 0..8 {
+                if bits.bit()? {
+                    let size = if list < 6 { 16 } else { 64 };
+                    let (mut last, mut next) = (8_i32, 8_i32);
+                    for _ in 0..size {
+                        if next != 0 {
+                            let delta = bits.se()?;
+                            if !(-128..=127).contains(&delta) {
+                                return Some(Err(ParameterSetError::HighFormat));
+                            }
+                            next = (last + delta + 256) % 256;
+                        }
+                        if next != 0 {
+                            last = next;
+                        }
+                    }
+                }
+            }
+        }
     }
     let frame_bits = bits.ue()?;
     if frame_bits > 12 {
@@ -305,7 +390,11 @@ fn inspect_sps(nal: &[u8]) -> Option<Result<(), ParameterSetError>> {
             height,
         })
     } else {
-        Ok(())
+        Ok(if high {
+            Profile::High
+        } else {
+            Profile::Baseline
+        })
     })
 }
 struct Bits<'a> {
@@ -331,6 +420,15 @@ impl Bits<'_> {
             value = value * 2 + u32::from(self.bit()?);
         }
         Some(value - 1)
+    }
+    fn se(&mut self) -> Option<i32> {
+        let value = self.ue()?;
+        let magnitude = i32::try_from(value.div_ceil(2)).ok()?;
+        Some(if value % 2 == 1 {
+            magnitude
+        } else {
+            -magnitude
+        })
     }
 }
 
@@ -460,6 +558,134 @@ mod tests {
     }
 
     #[test]
+    fn high_profile_is_opt_in_and_keeps_allocation_bounds() {
+        fn ue(bits: &mut String, value: u32) {
+            let code = format!("{:b}", value + 1);
+            bits.push_str(&"0".repeat(code.len() - 1));
+            bits.push_str(&code);
+        }
+        fn se(bits: &mut String, value: i32) {
+            ue(
+                bits,
+                if value > 0 {
+                    value as u32 * 2 - 1
+                } else {
+                    (-value) as u32 * 2
+                },
+            );
+        }
+        // chroma, luma depth, chroma depth, scaling lists (None = absent).
+        fn sps(format: (u32, u32, u32), lists: Option<&[i32]>, refs: u32, width: u32) -> Vec<u8> {
+            let mut bits = String::new();
+            ue(&mut bits, 0); // SPS id
+            ue(&mut bits, format.0);
+            ue(&mut bits, format.1);
+            ue(&mut bits, format.2);
+            bits.push('0'); // qpprime bypass
+            match lists {
+                None => bits.push('0'),
+                Some(deltas) => {
+                    bits.push('1');
+                    for list in 0..8 {
+                        // Present lists stop early at a zero next-scale.
+                        bits.push(if list % 2 == 0 { '1' } else { '0' });
+                        if list % 2 == 0 {
+                            let size = if list < 6 { 16 } else { 64 };
+                            for &delta in deltas.iter().take(size) {
+                                se(&mut bits, delta);
+                            }
+                        }
+                    }
+                }
+            }
+            ue(&mut bits, 0); // log2_max_frame_num_minus4
+            ue(&mut bits, 2); // picture order type
+            ue(&mut bits, refs);
+            bits.push('0');
+            ue(&mut bits, width / 16 - 1);
+            ue(&mut bits, 67); // 1088 coded rows
+            bits.push_str("11001");
+            while !bits.len().is_multiple_of(8) {
+                bits.push('0');
+            }
+            let mut nal = vec![0x67, 100, 0x0c, 52];
+            let mut zeros = 0;
+            for byte in bits.as_bytes().chunks(8) {
+                let byte = byte.iter().fold(0, |v, b| v * 2 + (b - b'0'));
+                if zeros == 2 && byte <= 3 {
+                    nal.push(3);
+                    zeros = 0;
+                }
+                nal.push(byte);
+                zeros = if byte == 0 { zeros + 1 } else { 0 };
+            }
+            nal
+        }
+        let frame = |nal: Vec<u8>| [vec![0, 0, 0, 1], nal].concat();
+        let plain = frame(sps((1, 0, 0), None, 4, 1920));
+        // Older receivers and non-negotiated viewers keep rejecting High.
+        assert!(!bounded_parameter_sets(&plain));
+        assert_eq!(
+            validate_parameter_sets(&plain),
+            Err(ParameterSetError::Profile {
+                id: 100,
+                constraints: 0x0c,
+                level: 52
+            })
+        );
+        assert_eq!(parameter_set_profile(&plain, true), Ok(Some(Profile::High)));
+        // A zero delta at the first entry ends the list (8 -> 0).
+        let scaled = frame(sps((1, 0, 0), Some(&[-8]), 4, 1920));
+        assert_eq!(
+            parameter_set_profile(&scaled, true),
+            Ok(Some(Profile::High))
+        );
+        let full = frame(sps((1, 0, 0), Some(&[1; 64]), 4, 1920));
+        assert_eq!(parameter_set_profile(&full, true), Ok(Some(Profile::High)));
+        assert_eq!(
+            parameter_set_profile(&frame(sps((1, 0, 0), Some(&[200]), 4, 1920)), true),
+            Err(ParameterSetError::HighFormat)
+        );
+        for format in [(0, 0, 0), (2, 0, 0), (3, 0, 0), (1, 2, 0), (1, 0, 2)] {
+            assert_eq!(
+                parameter_set_profile(&frame(sps(format, None, 4, 1920)), true),
+                Err(ParameterSetError::HighFormat)
+            );
+        }
+        // The same reference/dimension budget applies after the High fields.
+        assert_eq!(
+            parameter_set_profile(&frame(sps((1, 0, 0), None, 17, 1920)), true),
+            Err(ParameterSetError::References(17))
+        );
+        assert_eq!(
+            parameter_set_profile(&frame(sps((1, 0, 0), None, 1, 4096)), true),
+            Err(ParameterSetError::Dimensions {
+                width: 4096,
+                height: 1088
+            })
+        );
+        let nal = sps((1, 0, 0), Some(&[1; 64]), 4, 1920);
+        // The final byte holds only the progressive/stop bits after padding.
+        for end in 1..nal.len() - 2 {
+            assert!(parameter_set_profile(&frame(nal[..end].to_vec()), true).is_err());
+        }
+        // Baseline stays accepted (and reported) when High is allowed.
+        let mut baseline = vec![0, 0, 0, 1, 0x67, 66, 0xe0, 31];
+        baseline.extend([0xf4, 0x05, 0x01, 0x6c, 0x80]);
+        assert_eq!(
+            parameter_set_profile(&baseline, true),
+            parameter_set_profile(&baseline, false)
+        );
+        assert_eq!(parameter_set_profile(&[0, 0, 1, 0x65, 1], true), Ok(None));
+        assert_eq!(
+            parameter_set_profile(&frame(vec![0x67, 77, 0, 31, 0xf4]), true)
+                .unwrap_err()
+                .to_string(),
+            "unsupported H.264 profile-level-id=4d001f; expected baseline or high"
+        );
+    }
+
+    #[test]
     fn sps_enforces_dimensions_and_reference_memory_budget() {
         fn sps(width: u32, height: u32, references: u32) -> Vec<u8> {
             let mut bits = String::new();
@@ -500,6 +726,6 @@ mod tests {
             width: 3840,
             height: 2160,
         };
-        assert_eq!(inspect_sps(&sps(3840, 2160, 5)), Some(Err(error)));
+        assert_eq!(inspect_sps(&sps(3840, 2160, 5), false), Some(Err(error)));
     }
 }

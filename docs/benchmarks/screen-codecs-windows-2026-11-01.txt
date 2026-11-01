@@ -1,0 +1,92 @@
+# screen_gpu_probe --adapter=0 (default; HDR regression + SDR fast path)
+GPU adapter: NVIDIA GeForce RTX 4070 Ti
+Display metadata: HDR=true, SDR white=240 nits
+GPU path: NVIDIA H.264 Encoder MFT; 1280x720 ? 1280x720; white scale=1, HDR=false
+120 GPU frames verified in 550.7171ms
+GPU path: NVIDIA H.264 Encoder MFT; 2560x1440 ? 1920x1080; white scale=2, HDR=true
+120 GPU frames verified in 851.2735ms
+GPU path: NVIDIA H.264 Encoder MFT; 3840x2160 ? 1280x720; white scale=2, HDR=true
+120 GPU frames verified in 548.3196ms
+SDR fast path: 1280x720 BGRA8 -> 1280x720 NV12 single blit; 60 frames decoded at level 128
+SDR fast path: 2560x1440 BGRA8 -> 1920x1080 NV12 single blit; 60 frames decoded at level 64
+SDR fast path: 3840x2160 BGRA8 -> 1280x720 NV12 single blit; 60 frames decoded at level 200
+
+# screen_gpu_probe --adapter=0 --conversion
+GPU adapter: NVIDIA GeForce RTX 4070 Ti
+Display metadata: HDR=true, SDR white=240 nits
+Conversion GPU time: 3840x2160 -> 3840x2160 Hdr: mean_ms=0.182 p95_ms=0.185 samples=240 capture_texture_MB=66.4
+Conversion GPU time: 3840x2160 -> 3840x2160 Sdr: mean_ms=0.051 p95_ms=0.050 samples=240 capture_texture_MB=33.2
+Conversion GPU time: 3840x2160 SDR single blit is 3.57x faster than FP16 tone map
+Conversion GPU time: 3840x2160 -> 1920x1080 Hdr: mean_ms=0.140 p95_ms=0.144 samples=240 capture_texture_MB=66.4
+Conversion GPU time: 3840x2160 -> 1920x1080 Sdr: mean_ms=0.046 p95_ms=0.047 samples=240 capture_texture_MB=33.2
+Conversion GPU time: 1920x1080 SDR single blit is 3.03x faster than FP16 tone map
+Conversion GPU time: 3840x2160 -> 1280x720 Hdr: mean_ms=0.135 p95_ms=0.141 samples=240 capture_texture_MB=66.4
+Conversion GPU time: 3840x2160 -> 1280x720 Sdr: mean_ms=0.046 p95_ms=0.046 samples=240 capture_texture_MB=33.2
+Conversion GPU time: 1280x720 SDR single blit is 2.93x faster than FP16 tone map
+
+# screen_gpu_probe --adapter=0 --codecs
+GPU adapter: NVIDIA GeForce RTX 4070 Ti
+Display metadata: HDR=true, SDR white=240 nits
+Codec inventory: H.264: NVIDIA H.264 Encoder MFT; temporal_layers=true, ltr_buffer=true, max_ref_frames=true, cabac=true, quality_vs_speed=true, configure_1080p60=ok
+Codec inventory: H.264: Intel® Quick Sync Video H.264 Encoder MFT; temporal_layers=true, ltr_buffer=true, max_ref_frames=true, cabac=true, quality_vs_speed=true, configure_1080p60=ok
+Codec inventory: H.264: Intel® Quick Sync Video H.264 Encoder MFT; temporal_layers=true, ltr_buffer=true, max_ref_frames=true, cabac=true, quality_vs_speed=true, configure_1080p60=ok
+Codec inventory: HEVC: NVIDIA HEVC Encoder MFT; temporal_layers=true, ltr_buffer=true, max_ref_frames=true, cabac=false, quality_vs_speed=true, configure_1080p60=ok
+Codec inventory: HEVC: Intel® Hardware H265 Encoder MFT; temporal_layers=true, ltr_buffer=true, max_ref_frames=true, cabac=false, quality_vs_speed=true, configure_1080p60=ok
+Codec inventory: HEVC: Intel® Hardware H265 Encoder MFT; temporal_layers=true, ltr_buffer=true, max_ref_frames=true, cabac=false, quality_vs_speed=true, configure_1080p60=ok
+Codec inventory: AV1: NVIDIA AV1 Encoder MFT; temporal_layers=true, ltr_buffer=true, max_ref_frames=true, cabac=false, quality_vs_speed=true, configure_1080p60=ok
+Codec inventory: AV1: Intel® Hardware Accelerated AV1 Encoder MFT; temporal_layers=true, ltr_buffer=true, max_ref_frames=true, cabac=false, quality_vs_speed=true, configure_1080p60=ok
+Codec inventory: AV1: Intel® Hardware Accelerated AV1 Encoder MFT; temporal_layers=true, ltr_buffer=true, max_ref_frames=true, cabac=false, quality_vs_speed=true, configure_1080p60=ok
+Codec fidelity: 1920x1080/60 target=10.0 Mbit/s profile=baseline (validated SPS Some(Baseline)) speed=None readback=Some(33) luma_PSNR_dB=43.65 actual=9.85 Mbit/s sync_encode_ms=2.91
+Codec fidelity: 1920x1080/60 target=10.0 Mbit/s profile=baseline (validated SPS Some(Baseline)) speed=Some(0) readback=Some(0) luma_PSNR_dB=39.58 actual=9.06 Mbit/s sync_encode_ms=2.74
+Codec fidelity: 1920x1080/60 target=10.0 Mbit/s profile=constrained_high (validated SPS Some(High)) speed=None readback=Some(33) luma_PSNR_dB=45.42 actual=9.38 Mbit/s sync_encode_ms=5.64
+Codec fidelity: 1920x1080/60 target=10.0 Mbit/s profile=constrained_high (validated SPS Some(High)) speed=Some(0) readback=Some(0) luma_PSNR_dB=43.89 actual=9.31 Mbit/s sync_encode_ms=3.83
+Codec fidelity summary 1920x1080: High vs baseline +1.77 dB (default hint), +4.31 dB (fastest); default vs fastest hint +4.07 dB (baseline)
+Codec fidelity: 3840x2160/60 target=32.0 Mbit/s profile=baseline (validated SPS Some(Baseline)) speed=None readback=Some(33) luma_PSNR_dB=41.57 actual=29.47 Mbit/s sync_encode_ms=9.89
+Codec fidelity: 3840x2160/60 target=32.0 Mbit/s profile=baseline (validated SPS Some(Baseline)) speed=Some(0) readback=Some(0) luma_PSNR_dB=36.39 actual=28.06 Mbit/s sync_encode_ms=5.05
+Codec fidelity: 3840x2160/60 target=32.0 Mbit/s profile=constrained_high (validated SPS Some(High)) speed=None readback=Some(33) luma_PSNR_dB=44.07 actual=29.26 Mbit/s sync_encode_ms=11.37
+Codec fidelity: 3840x2160/60 target=32.0 Mbit/s profile=constrained_high (validated SPS Some(High)) speed=Some(0) readback=Some(0) luma_PSNR_dB=42.02 actual=28.93 Mbit/s sync_encode_ms=5.21
+Codec fidelity summary 3840x2160: High vs baseline +2.49 dB (default hint), +5.63 dB (fastest); default vs fastest hint +5.18 dB (baseline)
+Temporal layers: requested=2 accepted=[true] readback=Some(2) profile=baseline; non_reference_frames=30/60 prefix_nal_frames=60; full_decode=60/60; base_layer_kept=30 decoded=30 errors=0
+Long-term reference: control=0x10001 accepted=[true] readback=Some(65537) mark_ok=Some(true) use_ok=Some(false); mean_delta_bytes=9598 ltr_recovery_frame_bytes=25886 forced_idr_bytes=148088 decoded=60/60
+Long-term reference: control=0x1 accepted=[true] readback=Some(1) mark_ok=Some(true) use_ok=Some(false); mean_delta_bytes=9598 ltr_recovery_frame_bytes=25886 forced_idr_bytes=148088 decoded=60/60
+
+# screen_pipeline_probe --seconds=30 --assert (summaries; tokio = former shared-runtime pacer)
+== pipeline-tokio2.txt
+  Profile: requested_high=false high_frames=0/1795
+  Complete: 1795 assembled 4K frames; sustained_fps=Some(59.57869659559031)
+  PASS: sustained native 4K60, zero encoded drops, packet loss or preview errors. Browser presentation must be checked separately while visible.
+  labels: {'capture_format': 'fp16_scrgb', 'encoder_profile': 'baseline', 'encoder_quality_vs_speed': '0', 'pacer_timer': None, 'pacer_thread_priority': None}
+  pacing_wait: count=189 mean_ms=15.704 max_ms=24.291
+  pacing_lateness: count=189 mean_ms=7.704 max_ms=16.292
+  frame_send: count=1795 mean_ms=1.677 max_ms=144.153
+  send_age: count=1795 mean_ms=11.869 max_ms=160.746
+  sender_queue_wait: count=1795 mean_ms=3.032 max_ms=104.185
+  assembly: count=1795 mean_ms=1.883 max_ms=145.040
+  counters: {'pacing_sleeps': 189, 'sent_packets': 56523, 'encode_dropped': 0, 'sender_peak_bytes': 636109}
+  receiver: {'lost_packets': 0, 'received_frames': 1795}
+== pipeline-fine16b.txt
+  Profile: requested_high=false high_frames=0/1806
+  Complete: 1806 assembled 4K frames; sustained_fps=Some(59.79540645755509)
+  PASS: sustained native 4K60, zero encoded drops, packet loss or preview errors. Browser presentation must be checked separately while visible.
+  labels: {'capture_format': 'fp16_scrgb', 'encoder_profile': 'baseline', 'encoder_quality_vs_speed': '0', 'pacer_timer': 'high_resolution', 'pacer_thread_priority': 'mmcss_capture'}
+  pacing_wait: count=1481 mean_ms=1.484 max_ms=1.993
+  pacing_lateness: count=1481 mean_ms=0.485 max_ms=0.994
+  frame_send: count=1806 mean_ms=1.247 max_ms=134.666
+  send_age: count=1806 mean_ms=9.971 max_ms=149.856
+  sender_queue_wait: count=1806 mean_ms=2.404 max_ms=94.519
+  assembly: count=1806 mean_ms=1.440 max_ms=134.509
+  counters: {'pacing_sleeps': 1481, 'sent_packets': 52888, 'encode_dropped': 0, 'sender_peak_bytes': 666934}
+  receiver: {'lost_packets': 0, 'received_frames': 1806}
+== pipeline-high.txt
+  Profile: requested_high=true high_frames=1786/1786
+  Complete: 1786 assembled 4K frames; sustained_fps=Some(59.352650252420375)
+  PASS: sustained native 4K60, zero encoded drops, packet loss or preview errors. Browser presentation must be checked separately while visible.
+  labels: {'capture_format': 'fp16_scrgb', 'encoder_profile': 'constrained_high', 'encoder_quality_vs_speed': '0', 'pacer_timer': 'high_resolution', 'pacer_thread_priority': 'mmcss_capture'}
+  pacing_wait: count=2758 mean_ms=1.434 max_ms=2.071
+  pacing_lateness: count=2758 mean_ms=0.435 max_ms=1.071
+  frame_send: count=1786 mean_ms=2.257 max_ms=132.875
+  send_age: count=1786 mean_ms=9.927 max_ms=152.907
+  sender_queue_wait: count=1786 mean_ms=1.600 max_ms=92.183
+  assembly: count=1786 mean_ms=2.303 max_ms=132.742
+  counters: {'pacing_sleeps': 2758, 'sent_packets': 38625, 'encode_dropped': 0, 'sender_peak_bytes': 636731}
+  receiver: {'lost_packets': 0, 'received_frames': 1786}

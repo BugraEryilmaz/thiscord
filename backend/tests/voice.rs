@@ -467,6 +467,7 @@ impl Peer {
                 screen_layers,
                 video_diagnostics: false,
                 soundboard,
+                screen_profiles: false,
                 sdp: serde_json::to_string(&pc.local_description().await.unwrap()).unwrap(),
             },
         )
@@ -592,6 +593,7 @@ async fn watch_screen(source: &mut Peer, receiver: &mut Peer) {
         owner: member.account_id,
         epoch: member.screen_epoch,
         bitrate: 2_500_000,
+        h264_high: false,
     }];
     send(
         &mut receiver.socket,
@@ -2091,6 +2093,7 @@ async fn camera_grid(source: &mut Peer, viewer: &mut Peer) {
                 owner: publisher.account_id,
                 epoch: publisher.video_epoch(kind),
                 bitrate: 1_500_000,
+                h264_high: false,
             })
             .to_vec();
     }

@@ -75,6 +75,45 @@ const TIMINGS: &[&str] = &[
     "assembly",
     "preview_submit",
 ];
+/// Name -> slot lookups run several times per RTP packet. A static FNV-1a map
+/// replaces the former linear string scan over every counter name.
+#[derive(Default)]
+struct Fnv(u64);
+impl std::hash::Hasher for Fnv {
+    fn finish(&self) -> u64 {
+        self.0
+    }
+    fn write(&mut self, bytes: &[u8]) {
+        let mut hash = if self.0 == 0 {
+            0xcbf2_9ce4_8422_2325
+        } else {
+            self.0
+        };
+        for &byte in bytes {
+            hash = (hash ^ u64::from(byte)).wrapping_mul(0x0000_0100_0000_01b3);
+        }
+        self.0 = hash;
+    }
+}
+type Index = std::collections::HashMap<&'static str, usize, std::hash::BuildHasherDefault<Fnv>>;
+fn slot(
+    names: &'static [&'static str],
+    index: &'static std::sync::OnceLock<Index>,
+    name: &str,
+) -> Option<usize> {
+    index
+        .get_or_init(|| names.iter().enumerate().map(|(i, n)| (*n, i)).collect())
+        .get(name)
+        .copied()
+}
+fn counter(name: &str) -> Option<usize> {
+    static INDEX: std::sync::OnceLock<Index> = std::sync::OnceLock::new();
+    slot(COUNTERS, &INDEX, name)
+}
+fn timing(name: &str) -> Option<usize> {
+    static INDEX: std::sync::OnceLock<Index> = std::sync::OnceLock::new();
+    slot(TIMINGS, &INDEX, name)
+}
 struct Inner {
     started: Instant,
     counters: Vec<AtomicU64>,
@@ -110,7 +149,7 @@ impl Metrics {
         ));
     }
     pub fn peak(&self, name: &str, value: u64) {
-        if let Some(i) = COUNTERS.iter().position(|n| *n == name) {
+        if let Some(i) = counter(name) {
             self.0.counters[i].fetch_max(value, Ordering::Relaxed);
         }
     }
@@ -123,12 +162,12 @@ impl Metrics {
             .insert(name.to_owned(), value.to_string());
     }
     pub fn add(&self, name: &str, value: u64) {
-        if let Some(i) = COUNTERS.iter().position(|n| *n == name) {
+        if let Some(i) = counter(name) {
             self.0.counters[i].fetch_add(value, Ordering::Relaxed);
         }
     }
     pub fn time(&self, name: &str, duration: Duration) {
-        if let Some(i) = TIMINGS.iter().position(|n| *n == name) {
+        if let Some(i) = timing(name) {
             let us = duration.as_micros().min(u64::MAX as u128) as u64;
             self.0.timings[i][0].fetch_add(1, Ordering::Relaxed);
             self.0.timings[i][1].fetch_add(us, Ordering::Relaxed);
@@ -229,6 +268,17 @@ pub fn network(
 mod tests {
     use super::*;
 
+    #[test]
+    fn every_counter_and_timing_name_maps_to_its_own_slot() {
+        for (i, name) in COUNTERS.iter().enumerate() {
+            assert_eq!(counter(name), Some(i), "{name}");
+        }
+        for (i, name) in TIMINGS.iter().enumerate() {
+            assert_eq!(timing(name), Some(i), "{name}");
+        }
+        assert_eq!(counter("not_a_counter"), None);
+        assert_eq!(timing("sent_packets"), None);
+    }
     #[test]
     fn rejected_video_parameters_are_visible_in_diagnostics() {
         let metrics = Metrics::default();

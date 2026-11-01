@@ -74,6 +74,11 @@ player awaiting its first decoded frame shows "Waiting for video" and offers
 Rejections identify the specific unsupported profile, invalid SPS field or decoder
 budget (reference frames/dimensions), without including encoded data or SDP.
 
+WebView encoders insert no periodic keyframes. Native Rust requests one keyframe
+(PLI) when viewers first exist, then only for joins, resumed demand, SFU recovery
+requests and local write failures, with a ten-second fallback matching screens. The
+former one-second PLI spent a large share of the 1.5 Mbit/s budget on IDRs.
+
 Camera negotiation selects baseline H.264 with packetization mode 1 explicitly.
 Equivalent baseline offer profiles are registered exactly as offered; incompatible
 profiles are removed before negotiation, avoiding the transport library's MIME-only
