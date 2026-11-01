@@ -102,6 +102,15 @@ support: bots have no WebView and therefore do not supply UI measurements.
    WASAPI callbacks on Windows, and non-48 kHz conversion and mixing skip
    per-tap modulo and inactive-stream work. These changes are unmeasured on real
    hardware; compare deadline misses and starvation before and after updating.
+   Also since 2026-11-01: the denoiser/boost/AGC chain is skipped while nothing
+   can be transmitted (muted, deafened, restricted or push-to-talk released) while
+   echo cancellation keeps adapting; playback mixes 1 ms blocks per stream instead
+   of popping one sample per stream; non-48 kHz playback no longer compares all 32
+   stream slots per output sample; received packets no longer wake the worker;
+   and only explicit/periodic status requests build the quality report. The
+   voice-activation lookbehind still adds a constant 60 ms: sending its pre-roll
+   as a burst would not lower latency unless receivers time-compress the talkspurt
+   start, which would need listening tests.
 
 7. **UI geometry work and the admin dashboard can stall the main thread.**
    Chat is already virtualized with a 500-message cache and batched merges.

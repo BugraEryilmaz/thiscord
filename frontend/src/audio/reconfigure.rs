@@ -494,6 +494,52 @@ mod tests {
         assert!(!s.status().transmitting, "PTT release has no tail");
     }
     #[test]
+    fn released_push_to_talk_skips_enhancement_but_still_encodes_and_resumes_on_press() {
+        let mut s = session();
+        s.settings.mode = TransmitMode::PushToTalk;
+        s.connection = Some(connection::Connection::default());
+        let (tx, mut rx) = tokio::sync::mpsc::channel(8);
+        s.outgoing = Some(tx);
+        let (mut writer, reader) = frames::queue();
+        s.devices.capture = reader;
+        let at = Instant::now() + Duration::from_secs(1);
+        let no = AtomicBool::new(false);
+        let yes = AtomicBool::new(true);
+        let mut debug = recording::Recorder::default();
+        writer.begin_capture(at);
+        for _ in 0..FRAME {
+            writer.push(0.1);
+        }
+        s.tick(&no, &no, &no, &mut debug).unwrap();
+        assert!(!s.processing.enhancing(), "released PTT skips enhancement");
+        // The silent packet is still encoded, preserving DTX/no-data cues.
+        let silent = rx.try_recv().unwrap();
+        let mut clean = transmit::Encoder::new(true).unwrap();
+        let mut expected = [0; 4000];
+        let (len, _, _) = clean.encode(&[0.0; FRAME], false, &mut expected).unwrap();
+        assert_eq!(&silent.payload[..], &expected[..len]);
+        assert!(!s.status().transmitting);
+        // Pressing invalidates before the flag changes (see `AudioEngine::urgent`).
+        s.transmit_control.invalidate();
+        writer.begin_capture(at + Duration::from_millis(20));
+        for _ in 0..FRAME {
+            writer.push(0.1);
+        }
+        s.tick(&no, &yes, &no, &mut debug).unwrap();
+        assert!(s.processing.enhancing());
+        assert!(s.status().transmitting);
+        assert!(rx.try_recv().is_ok());
+        // Muting stops enhancement again even with the key held.
+        s.devices.control.mute.store(true, Ordering::Release);
+        writer.begin_capture(at + Duration::from_millis(40));
+        for _ in 0..FRAME {
+            writer.push(0.1);
+        }
+        s.tick(&no, &yes, &no, &mut debug).unwrap();
+        assert!(!s.processing.enhancing());
+        assert!(!s.status().transmitting);
+    }
+    #[test]
     fn capture_to_opus_queue_preserves_time_under_pressure_and_clears_encoder_speech() {
         let mut s = session();
         s.settings.mode = TransmitMode::PushToTalk;

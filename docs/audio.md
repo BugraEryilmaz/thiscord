@@ -36,6 +36,11 @@ select devices, adjust output level and choose voice activation or push-to-talk.
 For quiet microphones, increase Microphone boost (1×–10×, default 1×). This fixed
 gain runs after denoising and before voice activation and automatic gain; it also
 boosts transmitted audio. See [microphone activation](voice-activation.md).
+During a call, while nothing can be transmitted (muted, deafened, server-restricted
+or push-to-talk released), denoising, boost and automatic gain are skipped; echo
+cancellation keeps adapting, silent packets are still encoded, and the
+"After noise / echo processing" meter reads zero. Resuming starts the skipped
+stages from a clean state. Device tests always process.
 Device lists refresh every three seconds. Open a voice channel and click Join
 voice. Select another voice channel and join to move yourself. The voice bar stays
 available while reading text channels. Disconnect releases the devices.
@@ -96,9 +101,14 @@ gate (including PTT), and mute/deafen/speak restrictions override activity. This
 an activity indicator, not speech recognition. Native visibility and UI metadata
 are polled every 50/100 ms respectively; no audio samples cross IPC. While the
 overlay is hidden its snapshot command returns immediately without querying the
-audio worker, and the WebView keeps its last roster until it is shown again.
+audio worker, and the WebView keeps its last roster until it is shown again. The
+overlay's worker query omits the quality report.
 The main window reads audio status every 500 ms in voice or during a device test,
 otherwise every two seconds, and only replaces voice/settings state that changed.
+Only every fourth main-window poll (every two seconds in voice) and explicit
+status requests (remote support, admin and bots) build the full quality report,
+which merges every stream's histograms on the audio worker. Keepalives and other
+command replies omit it; the main window keeps the last report while audio runs.
 
 Short local rising/falling tones announce other participants joining/leaving the
 connected room through server notification subscriptions. Own joins and
@@ -185,9 +195,11 @@ callbacks. Five seconds without expected input/output callbacks also enters reco
 
 ## Worker resilience and diagnostic logs
 
-The audio worker sleeps until woken: queued commands/packets, urgent mute/PTT/stop
+The audio worker sleeps until woken: queued commands, urgent mute/PTT/stop
 changes, each completed 10 ms capture block and every 10 ms of rendered playback
-unpark it. Its fallback timeout is 10 ms during a session (timers, recovery and
+unpark it. Received packets do not wake it: they carry their network arrival time
+and are needed only by the next refill, which those device wakes already trigger.
+Its fallback timeout is 10 ms during a session (timers, recovery and
 devices that stop calling back) and 100 ms otherwise. Queued packets are admitted
 in batches of up to 32 before one processing tick, so refill work does not scale
 with packets times speakers. The worker joins the MMCSS "Audio" class on Windows
@@ -349,7 +361,10 @@ acceptance; these software tests do not establish gapless device switching.
   reference is reconstructed from the clamped device signal at 48 kHz and timed
   to physical playback, accounting for the reference converter's delay. Filter
   histories are cleared on interruptions or playback access/generation, active,
-  gain and deafen changes so delayed audio cannot cross a privacy cutoff. Clearing
+  gain and deafen changes so delayed audio cannot cross a privacy cutoff. Each
+  callback compares every slot once; per-sample checks then cover deafen, access,
+  master gain and the streams active at callback start, the only ones the mixer
+  plays during that callback. Clearing
   a mixed filter can briefly interrupt other mixed sources too. Filter windows are
   contiguous (mirrored history, reversed coefficient rows) and accumulate in eight
   lanes so the per-tap loop vectorises without reordering-sensitive fast-math. DSP, recording,

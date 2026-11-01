@@ -191,6 +191,13 @@ impl Playback {
         if let Some(reference) = reference {
             reference.begin(reference_converter.capture_time(playback, count));
         }
+        // One full comparison per callback; per-sample checks below cover only
+        // global state and the streams this callback may mix.
+        if privacy.begin() {
+            converter.clear();
+            reference_converter.clear();
+        }
+        let mask = *privacy.mask();
         let mut frames = output.chunks_exact_mut(channels);
         let mut remaining = count;
         let mut dropped = 0;
@@ -219,7 +226,7 @@ impl Playback {
         };
         let remaining = drain(converter);
         let needed = converter.input_needed(remaining);
-        mixer.render_mono(needed, now, |sample| {
+        mixer.render_masked(needed, now, &mask, |sample| {
             converter.push(sample);
             drain(converter);
         });
