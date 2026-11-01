@@ -273,11 +273,17 @@ fn GuildButton(ui: Ui, guild: Guild) -> impl IntoView {
 #[component]
 fn VoiceRoster(ui: Ui, guild: GuildId, channel: thiscord_shared::ChannelId) -> impl IntoView {
     let speaking = Memo::new(move |_| {
-        thiscord_frontend::voice_overlay::speaking_in_channel(
-            &ui.voice.get(),
-            ui.audio_status.get().as_ref(),
-            channel,
-        )
+        // Borrow both statuses: they are replaced on every poll, and cloning
+        // them for each voice channel's roster dominated this memo.
+        ui.voice.with(|voice| {
+            ui.audio_status.with(|audio| {
+                thiscord_frontend::voice_overlay::speaking_in_channel(
+                    voice,
+                    audio.as_ref(),
+                    channel,
+                )
+            })
+        })
     });
     let members = Memo::new(move |_| {
         ui.voice_roster

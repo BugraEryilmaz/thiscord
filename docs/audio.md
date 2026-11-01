@@ -68,7 +68,11 @@ Remote indicators use decoded microphone energy before playback gain, with a
 audio never lights a microphone indicator. Local activity follows the transmit
 gate (including PTT), and mute/deafen/speak restrictions override activity. This is
 an activity indicator, not speech recognition. Native visibility and UI metadata
-are polled every 50/100 ms respectively; no audio samples cross IPC.
+are polled every 50/100 ms respectively; no audio samples cross IPC. While the
+overlay is hidden its snapshot command returns immediately without querying the
+audio worker, and the WebView keeps its last roster until it is shown again.
+The main window reads audio status every 500 ms in voice or during a device test,
+otherwise every two seconds, and only replaces voice/settings state that changed.
 
 Short local rising/falling tones announce other participants joining/leaving the
 connected room through server notification subscriptions. Own joins and
@@ -136,13 +140,26 @@ Diagnostics run on the bounded background worker and also have a timeout.
 
 CPAL buffer underrun/overrun (`Xrun`) and real-time scheduling (`RealtimeDenied`)
 notifications keep the stream running. They may indicate an audible glitch or
-reduced scheduling priority, not a disconnected device. Other notifications enter
+reduced scheduling priority, not a disconnected device. On Windows, CPAL's
+`realtime` feature registers WASAPI callback threads with MMCSS (falling back to
+time-critical priority). CoreAudio callbacks already run on its realtime thread.
+Linux callbacks keep the default policy: an unprivileged boost needs rtkit over
+D-Bus, which would add a libdbus build dependency. Other notifications enter
 bounded recovery and identify the microphone/output stream and CPAL error category.
 Route changes also use recovery instead of accepting an implicit backend reroute.
 Callbacks record atomic failure/activity counters; error formatting stays off the
 callbacks. Five seconds without expected input/output callbacks also enters recovery.
 
 ## Worker resilience and diagnostic logs
+
+The audio worker sleeps until woken: queued commands/packets, urgent mute/PTT/stop
+changes, each completed 10 ms capture block and every 10 ms of rendered playback
+unpark it. Its fallback timeout is 10 ms during a session (timers, recovery and
+devices that stop calling back) and 100 ms otherwise. Queued packets are admitted
+in batches of up to 32 before one processing tick, so refill work does not scale
+with packets times speakers. The worker joins the MMCSS "Audio" class on Windows
+and user-interactive QoS on macOS; it is deliberately not realtime because it also
+opens devices and prepares models. `worker_priority` in diagnostics records the result.
 
 Native audio startup wakes immediately when the media connection becomes ready;
 it does not wait for the next 500 ms maintenance tick. The WebView polls voice
@@ -299,7 +316,9 @@ acceptance; these software tests do not establish gapless device switching.
   to physical playback, accounting for the reference converter's delay. Filter
   histories are cleared on interruptions or playback access/generation, active,
   gain and deafen changes so delayed audio cannot cross a privacy cutoff. Clearing
-  a mixed filter can briefly interrupt other mixed sources too. DSP, recording,
+  a mixed filter can briefly interrupt other mixed sources too. Filter windows are
+  contiguous (mirrored history, reversed coefficient rows) and accumulate in eight
+  lanes so the per-tap loop vectorises without reordering-sensitive fast-math. DSP, recording,
   queue budgets and Opus retain the 48 kHz media clock. Tests cover rate/format
   selection, signal/alias rejection, sample counts, timing, callback boundaries,
   echo-reference reconstruction and privacy cutoffs.
@@ -538,7 +557,9 @@ AEC algorithms, the final post-mix reference and its timing remain unchanged.
 The worker sizes decoded PCM refills from the largest observed device callback,
 with a 15 ms minimum and a 12 ms worker allowance above one callback. The existing
 120 ms PCM ring remains fixed; refill work is bounded to two through six decode
-decisions per stream per tick. Missing packets wait until at most 5 ms remain,
+decisions per stream per tick. The output callback mixes only streams that were
+active at its start; a stream activated mid-callback starts in the next one, while
+deafen, access and generation cutoffs are still observed per sample. Missing packets wait until at most 5 ms remain,
 or until a callback is imminent and cannot be filled. The minimum receive target
 and callback safety trim accommodate this cushion; see [the exact bounds](audio-playout.md).
 A bounded streaming sinc converter corrects sender/output drift before mixing, preserving

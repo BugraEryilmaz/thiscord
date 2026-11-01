@@ -1193,6 +1193,7 @@ mod tests {
             inhibit: Default::default(),
             debug_stop: Default::default(),
             deafen: Default::default(),
+            worker: std::thread::current(),
         };
         engine.notify(Command::Peek);
         let connection = connection::Connection::default();
