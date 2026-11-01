@@ -4,11 +4,15 @@ use thiscord_shared::overlay::OverlaySnapshot;
 
 pub struct OverlayState {
     enabled: AtomicBool,
+    /// Set before showing and cleared after hiding, so snapshots (which query
+    /// the audio worker) are only built while the roster can be seen.
+    visible: AtomicBool,
 }
 impl Default for OverlayState {
     fn default() -> Self {
         Self {
             enabled: AtomicBool::new(true),
+            visible: AtomicBool::new(false),
         }
     }
 }
@@ -38,13 +42,17 @@ pub fn start(app: &tauri::AppHandle) -> tauri::Result<()> {
     }
     let app = app.clone();
     tauri::async_runtime::spawn(async move {
+        // Cursor passthrough as last applied; `None` forces the next update.
+        let mut applied_interactive = Some(false);
         loop {
             let Some(main) = app.get_webview_window("main") else {
                 let _ = window.close();
                 break;
             };
-            let connected = crate::native_voice::voice_status(app.state())
-                .is_ok_and(|s| s.connected && s.channel_id.is_some() && !s.participants.is_empty());
+            let voice = crate::native_voice::voice_status(app.state()).ok();
+            let connected = voice.as_ref().is_some_and(|s| {
+                s.connected && s.channel_id.is_some() && !s.participants.is_empty()
+            });
             let show = app.state::<OverlayState>().enabled.load(Ordering::Relaxed)
                 && connected
                 && !main.is_focused().unwrap_or(true);
@@ -59,16 +67,24 @@ pub fn start(app: &tauri::AppHandle) -> tauri::Result<()> {
                             origin.y + (48.0 * scale) as i32,
                         ));
                     }
+                    app.state::<OverlayState>()
+                        .visible
+                        .store(true, Ordering::Relaxed);
                     let _ = window.show();
                 } else {
                     let _ = window.hide();
+                    app.state::<OverlayState>()
+                        .visible
+                        .store(false, Ordering::Relaxed);
                 }
+                applied_interactive = None;
             }
             // The local row is first (6px padding, 268 x 52px). Query the OS cursor
             // because a click-through WebView cannot receive pointer-enter events.
             let interactive = show
-                && crate::native_voice::voice_status(app.state())
-                    .is_ok_and(|s| s.participants.iter().any(|p| Some(p.slot) == s.own_slot))
+                && voice
+                    .as_ref()
+                    .is_some_and(|s| s.participants.iter().any(|p| Some(p.slot) == s.own_slot))
                 && window
                     .cursor_position()
                     .ok()
@@ -80,7 +96,12 @@ pub fn start(app: &tauri::AppHandle) -> tauri::Result<()> {
                             (cursor.y - f64::from(origin.y)) / scale,
                         )
                     });
-            let _ = window.set_ignore_cursor_events(!interactive);
+            if applied_interactive != Some(interactive) {
+                applied_interactive = window
+                    .set_ignore_cursor_events(!interactive)
+                    .is_ok()
+                    .then_some(interactive);
+            }
             tokio::time::sleep(std::time::Duration::from_millis(50)).await;
         }
     });
@@ -103,11 +124,16 @@ pub fn overlay_enable(state: tauri::State<'_, OverlayState>, enabled: bool) {
     state.enabled.store(enabled, Ordering::Relaxed);
 }
 
+/// `None` while the overlay is hidden: the WebView keeps its last snapshot and
+/// no audio-worker status is computed for a roster nobody can see.
 #[tauri::command]
-pub async fn overlay_snapshot(app: tauri::AppHandle) -> Result<OverlaySnapshot, String> {
+pub async fn overlay_snapshot(app: tauri::AppHandle) -> Result<Option<OverlaySnapshot>, String> {
+    if !app.state::<OverlayState>().visible.load(Ordering::Relaxed) {
+        return Ok(None);
+    }
     let before = crate::native_voice::voice_status(app.state())?;
     if !before.connected || !app.state::<OverlayState>().enabled.load(Ordering::Relaxed) {
-        return Ok(OverlaySnapshot::default());
+        return Ok(Some(OverlaySnapshot::default()));
     }
     let engine = app
         .state::<crate::native_audio::AudioState>()
@@ -121,7 +147,7 @@ pub async fn overlay_snapshot(app: tauri::AppHandle) -> Result<OverlaySnapshot, 
     let settings = crate::native_audio::audio_current(app.clone()).await?;
     let voice = crate::native_voice::voice_status(app.state())?;
     if !voice.connected || voice.channel_id != before.channel_id {
-        return Ok(OverlaySnapshot::default());
+        return Ok(Some(OverlaySnapshot::default()));
     }
     let mut snapshot = thiscord_frontend::voice_overlay::snapshot(&voice, &audio);
     for person in snapshot.participants.iter_mut().filter(|p| p.is_self) {
@@ -129,7 +155,7 @@ pub async fn overlay_snapshot(app: tauri::AppHandle) -> Result<OverlaySnapshot, 
         person.deafened = settings.deafened;
         person.speaking &= !settings.muted && !settings.deafened;
     }
-    Ok(snapshot)
+    Ok(Some(snapshot))
 }
 
 #[tauri::command]

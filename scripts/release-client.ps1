@@ -140,7 +140,7 @@ Thiscord $version
 - Windows x64: download the .exe installer.
 - macOS: download the .dmg matching Apple Silicon (aarch64) or Intel (x86_64).
 - Linux x64: use the AppImage for in-app updates, or install the .deb manually.
-- New releases arrive through your notification subscription. You can also check manually in Settings > Updates. Choose Install and restart when ready; disconnect from voice first.
+- Thiscord checks for updates at launch and offers to download and install them. You can also check manually in Settings > Updates. Disconnect from voice before installing.
 
 Updater archives are signed and verified by Thiscord. OS trust is separate: Windows installers are currently unsigned; macOS requires Developer ID/notarization secrets for a trusted download. See docs/releases.md in the tagged source for setup and platform requirements.
 "@ | Set-Content -LiteralPath $notes
@@ -151,16 +151,34 @@ $assets = @(Get-ChildItem -LiteralPath $output.FullName -File | Where-Object Nam
 Invoke-Checked gh (@('release', 'upload', $Tag, '--repo', $repository, '--clobber') + $assets)
 Invoke-Checked gh @('release', 'edit', $Tag, '--repo', $repository, '--draft=false', '--latest=true')
 Write-Output "Published $Tag with all platforms and signed update feed."
-if ($env:THISCORD_NOTIFICATION_URL -and $env:THISCORD_NOTIFICATION_TOKEN) {
+if ($env:THISCORD_NOTIFICATION_URL -and $env:THISCORD_RELEASE_LOGIN -and $env:THISCORD_RELEASE_PASSWORD) {
     $notificationUri = [Uri]$env:THISCORD_NOTIFICATION_URL
     if ($notificationUri.Scheme -ne 'https' -or $notificationUri.UserInfo -or $notificationUri.Query -or $notificationUri.Fragment -or $notificationUri.AbsolutePath -ne '/api/v1/notifications') {
         throw 'THISCORD_NOTIFICATION_URL must be an HTTPS /api/v1/notifications endpoint without credentials, query or fragment.'
     }
+    # Sign in to a dedicated release account only for this announcement, then
+    # revoke that session. Neither the password nor the token is ever printed.
+    $accountUri = [Uri]::new($notificationUri, '/api/v1/account')
+    $token = $null
     try {
-        $null = Invoke-RestMethod -Method Post -Uri $notificationUri -Headers @{ Authorization = "Bearer $env:THISCORD_NOTIFICATION_TOKEN" } -ContentType 'application/json' -Body (@{ action = 'publish_update'; version = $version } | ConvertTo-Json -Compress) -TimeoutSec 20
+        $login = @{ action = 'login'; login = $env:THISCORD_RELEASE_LOGIN; password = $env:THISCORD_RELEASE_PASSWORD; device = 'Release announcer' } | ConvertTo-Json -Compress
+        $token = (Invoke-RestMethod -Method Post -Uri $accountUri -ContentType 'application/json' -Body $login -TimeoutSec 60).session.token
+        if (-not $token) { throw 'missing session' }
+        if ($env:GITHUB_ACTIONS) { Write-Output "::add-mask::$token" }
+        $headers = @{ Authorization = "Bearer $token" }
+        $null = Invoke-RestMethod -Method Post -Uri $notificationUri -Headers $headers -ContentType 'application/json' -Body (@{ action = 'publish_update'; version = $version } | ConvertTo-Json -Compress) -TimeoutSec 20
         Write-Output "Announced $Tag to notification subscribers."
     } catch {
-        throw 'Release published, but its notification announcement failed. Retry publish_update on the backend; do not republish the release. Check the configured instance administrator session.'
+        throw 'Release published, but its notification announcement failed. Retry publish_update on the backend; do not republish the release. Check the release account login and that it is an instance owner/admin.'
+    } finally {
+        if ($token) {
+            try {
+                $null = Invoke-RestMethod -Method Post -Uri $accountUri -Headers @{ Authorization = "Bearer $token" } -ContentType 'application/json' -Body '{"action":"logout"}' -TimeoutSec 20
+            } catch {
+                Write-Warning 'Could not sign out the release announcement session; it expires on its own.'
+            }
+        }
+        Remove-Variable token, login -ErrorAction SilentlyContinue
     }
 } else {
     Write-Output 'Release notification is not configured. Announce publish_update on the backend after deployment; see docs/notifications.md.'

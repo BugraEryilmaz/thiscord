@@ -25,6 +25,7 @@ pub mod outgoing;
 mod playout_rate;
 #[cfg(test)]
 mod playout_tests;
+mod priority;
 pub mod processing;
 pub mod quality;
 #[cfg(test)]
@@ -174,6 +175,7 @@ where
                 } else {
                     writer.begin_capture(capture_at);
                 }
+                let completed = writer.completed();
                 let mut peak = 0.0_f32;
                 let mut dropped = 0;
                 let mut clipped = 0;
@@ -198,6 +200,9 @@ where
                 control.peak.store(peak.to_bits(), Ordering::Relaxed);
                 control.counts.capture_overflow.add(dropped);
                 control.dropped.fetch_add(dropped, Ordering::Relaxed);
+                if writer.completed() != completed {
+                    control.wake();
+                }
             },
             move |error| {
                 health.report(true, error.kind());
@@ -302,6 +307,9 @@ pub struct AudioEngine {
     inhibit: Arc<AtomicBool>,
     debug_stop: Arc<AtomicBool>,
     deafen: Arc<AtomicBool>,
+    /// Woken after every queued command/packet and urgent atomic change, so the
+    /// worker never waits for its fallback timeout to observe new work.
+    worker: thread::Thread,
 }
 impl Default for AudioEngine {
     fn default() -> Self {
@@ -339,6 +347,7 @@ impl AudioEngine {
         } else if self.sender.try_send((command, None)).is_err() {
             diagnostics::event("control_notification_dropped", self.probe.snapshot());
         }
+        self.worker.unpark();
     }
     /// Privacy-critical controls may not be silently dropped. The caller must
     /// reconnect after an error; close this command's connection immediately.
@@ -350,7 +359,9 @@ impl AudioEngine {
             return Err("Not a voice privacy control".into());
         }
         self.urgent(&command);
-        self.sender.try_send((command, None)).map_err(|error| {
+        let sent = self.sender.try_send((command, None));
+        self.worker.unpark();
+        sent.map_err(|error| {
             let request = match error {
                 mpsc::TrySendError::Full(request) | mpsc::TrySendError::Disconnected(request) => {
                     request
@@ -381,10 +392,15 @@ impl AudioEngine {
         let worker_debug_stop = debug_stop.clone();
         let deafen = Arc::new(AtomicBool::new(false));
         let worker_deafen = deafen.clone();
-        thread::Builder::new()
+        let worker = thread::Builder::new()
             .name("thiscord-audio-control".into())
             .spawn(move || {
                 diagnostics::event("worker_started", worker_probe.snapshot());
+                let priority = priority::promote_worker();
+                diagnostics::event("worker_priority", match &priority {
+                    Ok(class) => serde_json::json!({"class":class}),
+                    Err(error) => serde_json::json!({"error":error}),
+                });
                 for restart in 0..=3 {
                     let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| run(
                         &receiver, &packets, worker_stop.clone(), worker_pressed.clone(),
@@ -403,8 +419,11 @@ impl AudioEngine {
                 }
                 worker_probe.exited();
             })
-            .expect("audio worker");
+            .expect("audio worker")
+            .thread()
+            .clone();
         Self {
+            worker,
             sender,
             media,
             probe,
@@ -463,13 +482,14 @@ impl AudioEngine {
         if settings.deafened {
             self.deafen.store(true, Ordering::Release);
         }
+        self.worker.unpark();
     }
     pub fn command(&self, command: Command) -> Result<AudioStatus, String> {
         self.urgent(&command);
         let (tx, rx) = mpsc::channel();
-        self.sender
-            .try_send((command, Some(tx)))
-            .map_err(|error| {
+        let sent = self.sender.try_send((command, Some(tx)));
+        self.worker.unpark();
+        sent.map_err(|error| {
                 let (event, message) = match error {
                     mpsc::TrySendError::Full(_) => ("control_queue_full", "Audio control queue is full. Open diagnostic logs; the audio worker may be stalled."),
                     mpsc::TrySendError::Disconnected(_) => ("control_worker_disconnected", "Audio worker has exited. Open diagnostic logs, then restart Thiscord."),
@@ -1123,6 +1143,8 @@ impl Session {
         inhibit: &AtomicBool,
         debug: &mut recording::Recorder,
     ) -> Result<(), failure::Failure> {
+        // Device callbacks wake this thread once registered; see `idle_wait`.
+        self.devices.control.worker.get_or_init(thread::current);
         self.devices.control.counts.drain(&self.processing.metrics);
         self.devices
             .health
@@ -1583,6 +1605,14 @@ fn stopped(message: String) -> AudioStatus {
     }
 }
 type Request = (Command, Option<mpsc::Sender<Result<AudioStatus, String>>>);
+/// Packets admitted before a tick must run; bounded so playback refill and
+/// capture draining cannot starve behind a long backlog.
+const MEDIA_BATCH: usize = 32;
+/// Fallback wait when nothing unparks the worker. Device callbacks normally wake
+/// it every 10 ms during a session; without one there are no realtime deadlines.
+fn idle_wait(session: bool) -> Duration {
+    Duration::from_millis(if session { 10 } else { 100 })
+}
 fn lease_expired(voice: bool, elapsed: Duration) -> bool {
     elapsed > Duration::from_secs(if voice { 15 } else { 3 })
 }
@@ -1609,6 +1639,9 @@ fn run(
     let mut lease = Instant::now();
     let mut previous = Instant::now();
     let mut last_snapshot = Instant::now();
+    // A packet already dequeued while batching, handled before waiting again.
+    let mut carried: Option<Command> = None;
+    let mut batched = 0;
     loop {
         probe.enter(worker_health::IDLE);
         probe.active.store(session.is_some(), Ordering::Release);
@@ -1667,14 +1700,31 @@ fn run(
                 );
             }
         }
+        // Control commands keep priority over queued media.
         let request = match receiver.try_recv() {
             Ok(request) => Ok(request),
             Err(mpsc::TryRecvError::Disconnected) => break,
-            Err(mpsc::TryRecvError::Empty) => match packets.try_recv() {
-                Ok(packet) => Ok((packet, None)),
-                Err(_) => receiver.recv_timeout(Duration::from_millis(5)),
-            },
+            Err(mpsc::TryRecvError::Empty) => {
+                match carried.take().map_or_else(|| packets.try_recv(), Ok) {
+                    Ok(packet) => Ok((packet, None)),
+                    Err(_) => {
+                        // Producers, device callbacks and urgent controls unpark this
+                        // thread. The timeout only covers timers (recovery, leases,
+                        // pending replacements) and devices that stop calling back.
+                        thread::park_timeout(idle_wait(session.is_some() || pending.is_some()));
+                        match receiver.try_recv() {
+                            Ok(request) => Ok(request),
+                            Err(mpsc::TryRecvError::Disconnected) => break,
+                            Err(mpsc::TryRecvError::Empty) => packets
+                                .try_recv()
+                                .map(|packet| (packet, None))
+                                .map_err(|_| mpsc::RecvTimeoutError::Timeout),
+                        }
+                    }
+                }
+            }
         };
+        let media = matches!(request, Ok((Command::Packet { .. }, None)));
         match request {
             Ok((command, mut reply)) => {
                 probe.enter(command.operation());
@@ -1885,6 +1935,17 @@ fn run(
             Err(mpsc::RecvTimeoutError::Disconnected) => break,
             Err(mpsc::RecvTimeoutError::Timeout) => {}
         }
+        // Admit a burst of already-queued packets before one processing tick.
+        // Refilling every remote after each packet scales with speakers squared.
+        if media
+            && batched < MEDIA_BATCH
+            && let Ok(packet) = packets.try_recv()
+        {
+            carried = Some(packet);
+            batched += 1;
+            continue;
+        }
+        batched = 0;
         // Commit only between complete processing ticks. Stop takes priority
         // even if it arrived while a replacement was finishing.
         if stop.load(Ordering::Acquire)
@@ -2088,6 +2149,7 @@ mod lifecycle_tests {
             inhibit: Arc::new(AtomicBool::new(false)),
             debug_stop: Arc::new(AtomicBool::new(false)),
             deafen: Arc::new(AtomicBool::new(false)),
+            worker: thread::current(),
         };
         let connection = connection::Connection::default();
         let queued = outgoing::EncodedFrame {
@@ -2182,6 +2244,7 @@ mod lifecycle_tests {
             inhibit: Default::default(),
             debug_stop: Default::default(),
             deafen: Default::default(),
+            worker: thread::current(),
         };
         for command in [
             Command::Settings(AudioSettings {

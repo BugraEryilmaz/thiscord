@@ -125,7 +125,7 @@ pub(super) fn ParticipantVolume(
                 stream.map(|stream|view!{<super::audio::StreamVolume ui=ui stream=stream compact=true/>})
             }/>
         </Show>
-        <For each=move ||{ui.audio_status.get().map(|s|s.streams).unwrap_or_default().into_iter().filter(|s| connected() && s.target.is_some_and(|t|t.guild_id==guild && t.account_id==member && t.shared_audio)).collect::<Vec<_>>()} key=|s|(s.id.clone(),s.target) children=move |stream|view!{<super::audio::StreamVolume ui=ui stream=stream compact=true/>}/>
+        <For each=move ||{let connected=connected(); ui.audio_status.with(|s|s.as_ref().map(|s|s.streams.iter().filter(|s| connected && s.target.is_some_and(|t|t.guild_id==guild && t.account_id==member && t.shared_audio)).cloned().collect::<Vec<_>>()).unwrap_or_default())} key=|s|(s.id.clone(),s.target) children=move |stream|view!{<super::audio::StreamVolume ui=ui stream=stream compact=true/>}/>
         <p class="volume-hint">{move || crate::i18n::t("Only changes what you hear. 0% mutes.")}</p>
     </section>}
 }

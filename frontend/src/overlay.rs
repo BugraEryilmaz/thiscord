@@ -14,7 +14,9 @@ pub fn VoiceOverlay() -> impl IntoView {
             match native::<()>("overlay_toggle_audio", json!({"action":action})).await {
                 Ok(()) => {
                     error.set(String::new());
-                    if let Ok(value) = native("overlay_snapshot", json!({})).await {
+                    if let Ok(Some(value)) =
+                        native::<Option<OverlaySnapshot>>("overlay_snapshot", json!({})).await
+                    {
                         snapshot.set(value);
                     }
                 }
@@ -30,11 +32,21 @@ pub fn VoiceOverlay() -> impl IntoView {
             let _ = futures_util::future::Abortable::new(
                 async move {
                     loop {
-                        snapshot.set(
-                            native("overlay_snapshot", json!({}))
+                        // `Ok(None)`: hidden, keep the last roster. Only changed
+                        // snapshots re-run the per-participant views.
+                        let next =
+                            match native::<Option<OverlaySnapshot>>("overlay_snapshot", json!({}))
                                 .await
-                                .unwrap_or_default(),
-                        );
+                            {
+                                Ok(None) => None,
+                                Ok(Some(value)) => Some(value),
+                                Err(_) => Some(OverlaySnapshot::default()),
+                            };
+                        if let Some(next) = next
+                            && snapshot.with_untracked(|current| *current != next)
+                        {
+                            snapshot.set(next);
+                        }
                         gloo_timers::future::TimeoutFuture::new(100).await;
                     }
                 },

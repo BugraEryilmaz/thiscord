@@ -110,6 +110,10 @@ impl PlaybackCounts {
 }
 pub struct Controls {
     pub(super) receive_guard: OnceLock<Arc<super::outgoing::Control>>,
+    /// The audio worker registers itself on its first tick with these devices.
+    /// Callbacks unpark it instead of letting it poll; unparking neither
+    /// allocates nor locks.
+    pub(super) worker: OnceLock<std::thread::Thread>,
     pub counts: CallbackCounts,
     callback_samples: AtomicUsize,
     callback_origin: Instant,
@@ -128,10 +132,18 @@ pub struct Controls {
     pub dropped: AtomicU64,
     pub underruns: AtomicU64,
 }
+impl Controls {
+    pub(super) fn wake(&self) {
+        if let Some(worker) = self.worker.get() {
+            worker.unpark();
+        }
+    }
+}
 impl Default for Controls {
     fn default() -> Self {
         Self {
             receive_guard: OnceLock::new(),
+            worker: OnceLock::new(),
             counts: Default::default(),
             callback_samples: 0.into(),
             callback_origin: Instant::now(),
@@ -176,6 +188,8 @@ pub struct Mixer {
     streams: Vec<StreamReader>,
     controls: Arc<Controls>,
     reference: Option<frames::Writer>,
+    /// 48 kHz samples rendered since the worker was last woken for refills.
+    since_wake: usize,
 }
 
 pub fn mixer(controls: Arc<Controls>) -> (Vec<StreamWriter>, Mixer) {
@@ -210,6 +224,7 @@ pub fn mixer(controls: Arc<Controls>) -> (Vec<StreamWriter>, Mixer) {
             streams: readers,
             controls,
             reference: None,
+            since_wake: 0,
         },
     )
 }
@@ -326,6 +341,11 @@ impl Mixer {
         }
         self.cues
             .request(self.controls.cues.swap(0, Ordering::Relaxed), deafened);
+        let guard = self.controls.receive_guard.get();
+        // Streams inactive at callback start stay silent until the next callback;
+        // most of the fixed slots are unused, and skipping them keeps the
+        // per-sample loop proportional to actual sources.
+        let mut live = [false; MAX_STREAMS];
         // Keep the legacy local-test trim, but never trim the larger cushion
         // needed by a device callback. Hard resets still discard the whole ring.
         for (index, stream) in self.streams.iter_mut().enumerate() {
@@ -333,16 +353,10 @@ impl Mixer {
             let changed = generation != stream.generation;
             stream.generation = generation;
             let receive_blocked = index < thiscord_shared::voice::ROOM_CAPACITY
-                && self
-                    .controls
-                    .receive_guard
-                    .get()
-                    .is_some_and(|guard| !guard.receive_allowed());
-            let discard = if changed
-                || deafened
-                || receive_blocked
-                || !stream.control.active.load(Ordering::Acquire)
-            {
+                && guard.is_some_and(|guard| !guard.receive_allowed());
+            let active = stream.control.active.load(Ordering::Acquire);
+            live[index] = active;
+            let discard = if changed || deafened || receive_blocked || !active {
                 stream.queue.occupied_len()
             } else {
                 stream
@@ -351,9 +365,7 @@ impl Mixer {
                     .saturating_sub(trim_limit(callback_samples))
             };
             stream.control.counts.discarded.add(discard as u64);
-            for _ in 0..discard {
-                let _ = stream.queue.try_pop();
-            }
+            stream.queue.skip(discard);
             stream.control.cleared.store(generation, Ordering::Release);
         }
         let mut underruns = 0;
@@ -362,31 +374,29 @@ impl Mixer {
         let mut starvation = [0u64; MAX_STREAMS];
         let mut unknown = [0u64; MAX_STREAMS];
         let mut silence = [0u64; MAX_STREAMS];
+        for (index, live) in live.iter().enumerate() {
+            if !live {
+                silence[index] = count as u64;
+            }
+        }
         for _ in 0..count {
             let deafened = self.controls.deafen.load(Ordering::Acquire)
-                || self
-                    .controls
-                    .receive_guard
-                    .get()
-                    .is_some_and(|guard| guard.server_deafened());
+                || guard.is_some_and(|guard| guard.server_deafened());
+            // An urgent cutoff can arrive during this callback. Observe it
+            // before each microphone sample and never affect shared audio.
+            let room_blocked = guard.is_some_and(|guard| !guard.receive_allowed());
             let master = f32::from_bits(self.controls.master.load(Ordering::Relaxed));
             let mut mix = self.cues.next();
             for (index, stream) in self.streams.iter_mut().enumerate() {
-                // An urgent cutoff can arrive during this callback. Observe it
-                // before each microphone sample and never affect shared audio.
-                let receive_blocked = index < thiscord_shared::voice::ROOM_CAPACITY
-                    && self
-                        .controls
-                        .receive_guard
-                        .get()
-                        .is_some_and(|guard| !guard.receive_allowed());
+                if !live[index] {
+                    continue;
+                }
+                let receive_blocked = room_blocked && index < thiscord_shared::voice::ROOM_CAPACITY;
                 let generation = stream.control.generation.load(Ordering::Acquire);
                 if receive_blocked || generation != stream.generation {
                     let discard = stream.queue.occupied_len();
                     stream.control.counts.discarded.add(discard as u64);
-                    for _ in 0..discard {
-                        let _ = stream.queue.try_pop();
-                    }
+                    stream.queue.skip(discard);
                     stream.generation = generation;
                     stream.control.cleared.store(generation, Ordering::Release);
                 }
@@ -394,16 +404,13 @@ impl Mixer {
                     silence[index] += 1;
                     continue;
                 }
-                let audible = master > 0.0
-                    && f32::from_bits(stream.control.volume.load(Ordering::Relaxed)) > 0.0;
+                let volume = f32::from_bits(stream.control.volume.load(Ordering::Relaxed));
+                let audible = master > 0.0 && volume > 0.0;
                 if !audible {
                     silence[index] += 1;
                 }
                 match stream.queue.try_pop() {
-                    Some(sample) if sample.is_finite() => {
-                        mix +=
-                            sample * f32::from_bits(stream.control.volume.load(Ordering::Relaxed))
-                    }
+                    Some(sample) if sample.is_finite() => mix += sample * volume,
                     Some(_) => {}
                     None if audible && stream.control.quiet.load(Ordering::Relaxed) => {
                         silence[index] += 1;
@@ -446,6 +453,12 @@ impl Mixer {
         self.controls
             .reference_dropped
             .fetch_add(reference_dropped, Ordering::Relaxed);
+        // Refill right after consumption; small callbacks wake every 10 ms.
+        self.since_wake += count;
+        if self.since_wake >= frames::SAMPLES {
+            self.since_wake = 0;
+            self.controls.wake();
+        }
     }
 }
 
@@ -717,5 +730,36 @@ mod tests {
         let mut out = [0.0_f32; 1];
         mix.render(&mut out, 1);
         assert_eq!(out, [1.0]);
+    }
+    #[test]
+    fn rendering_wakes_the_registered_worker_every_ten_milliseconds() {
+        let controls = Arc::new(Controls::default());
+        let (_writers, mut mix) = mixer(controls.clone());
+        controls.worker.set(std::thread::current()).unwrap();
+        // Drain any token left by an earlier unpark of this test thread.
+        std::thread::park_timeout(std::time::Duration::ZERO);
+        let mut out = [0.0_f32; frames::SAMPLES - 1];
+        mix.render(&mut out, 1);
+        let started = Instant::now();
+        std::thread::park_timeout(std::time::Duration::from_millis(200));
+        assert!(started.elapsed() >= std::time::Duration::from_millis(150));
+        mix.render(&mut [0.0_f32; 1], 1);
+        let started = Instant::now();
+        std::thread::park_timeout(std::time::Duration::from_secs(5));
+        assert!(started.elapsed() < std::time::Duration::from_secs(1));
+    }
+    #[test]
+    fn streams_inactive_at_callback_start_count_silence_without_mixing() {
+        let controls = Arc::new(Controls::default());
+        let (mut writers, mut mix) = mixer(controls);
+        writers[3].write(&[0.5; 64]);
+        let mut out = [0.0_f32; 64];
+        mix.render(&mut out, 1);
+        assert_eq!(out, [0.0; 64]);
+        assert_eq!(writers[3].occupied_samples(), 0);
+        writers[3].control.active.store(true, Ordering::Release);
+        writers[3].write(&[0.5; 64]);
+        mix.render(&mut out, 1);
+        assert_eq!(out, [0.5; 64]);
     }
 }

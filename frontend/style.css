@@ -188,6 +188,9 @@ html:has(.notification-window), body:has(.notification-window) { margin: 0; back
 /* Settings stay above the active conversation in a focused, native modal. */
 .settings-dialog { margin: auto; padding: 0; width: min(1040px, calc(100vw - 48px)); height: min(760px, calc(100dvh - 64px)); max-width: none; max-height: none; border: 1px solid #ffffff14; border-radius: 18px; background: #202127; color: #f2f3f5; box-shadow: 0 24px 90px #0009; overflow: hidden; }
 .settings-dialog::backdrop { background: #08090dba; backdrop-filter: blur(6px); }
+/* Available updates interrupt startup at most once per version per session. */
+.update-dialog { margin: auto; padding: 0; width: min(960px, 80vw); height: min(720px, 80dvh); max-width: none; max-height: none; border: 1px solid #ffffff14; border-radius: 18px; background: #202127; color: #f2f3f5; box-shadow: 0 24px 90px #0009; overflow: hidden; }
+.update-dialog::backdrop { background: #08090dd9; backdrop-filter: blur(6px); }
 .settings-window { display: grid; grid-template-columns: 224px minmax(0, 1fr); height: 100%; }
 .settings-sidebar { display: flex; flex-direction: column; min-height: 0; padding: 28px 16px 16px; background: #191a20; border-right: 1px solid #ffffff08; }
 .settings-brand { padding: 0 12px 24px; }

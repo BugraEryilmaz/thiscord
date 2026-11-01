@@ -22,6 +22,7 @@ pub struct Writer {
     offset: usize,
     position: u64,
     capture_started: bool,
+    completed: u64,
 }
 
 pub struct Reader {
@@ -47,6 +48,7 @@ pub fn queue() -> (Writer, Reader) {
             offset: 0,
             position: 0,
             capture_started: false,
+            completed: 0,
         },
         Reader {
             queue: consumer,
@@ -81,6 +83,10 @@ impl Writer {
         self.capture_started = true;
         self.begin(at);
     }
+    /// Blocks committed to the ring so far; callbacks wake the worker on change.
+    pub fn completed(&self) -> u64 {
+        self.completed
+    }
     /// Time the first sample of this callback was captured / will be played.
     pub fn begin(&mut self, at: Instant) {
         self.callback_at = at;
@@ -104,6 +110,7 @@ impl Writer {
         let dropped = if self.queue.try_push(self.frame).is_err() {
             SAMPLES as u64
         } else {
+            self.completed = self.completed.wrapping_add(1);
             0
         };
         self.used = 0;

@@ -57,8 +57,17 @@ pub fn start(app: &tauri::AppHandle) {
             s.message = message.into();
         }
     });
-    // Release announcements arrive on the authenticated notification stream.
-    // The UI requests one signed manifest check for a newer announced version.
+    // One signed manifest check per launch, independent of sign-in or release
+    // announcements. Announcements on the notification stream cover running clients.
+    if unsupported().is_none() {
+        let app = app.clone();
+        tauri::async_runtime::spawn(async move {
+            // Let the window and its status listener load first; the UI also
+            // reads the current status on mount, so no result is lost.
+            tokio::time::sleep(Duration::from_secs(3)).await;
+            let _ = check(&app).await;
+        });
+    }
 }
 
 #[tauri::command]

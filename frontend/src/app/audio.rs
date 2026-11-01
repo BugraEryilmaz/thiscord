@@ -6,6 +6,8 @@ use leptos::prelude::*;
 use serde_json::json;
 use thiscord_shared::{ChannelId, GuildId, audio::*, voice::VoiceStatus};
 
+/// 500 ms polls skipped between idle audio-status reads (one read per 2 s).
+const IDLE_STATUS_POLL_SKIPS: u8 = 3;
 pub(super) fn media_publish_allowed(ui: Ui) -> bool {
     let voice = ui.voice.get();
     voice.connected
@@ -230,7 +232,10 @@ pub(super) fn AudioHost(ui: Ui) -> impl IntoView {
                                         }
                                     });
                                 }
-                                ui.voice.set(status);
+                                // Unchanged polls must not re-run every roster/dock subscriber.
+                                if ui.voice.with_untracked(|voice| *voice != status) {
+                                    ui.voice.set(status);
+                                }
                             }
                             gloo_timers::future::TimeoutFuture::new(500).await;
                         }
@@ -251,23 +256,37 @@ pub(super) fn AudioHost(ui: Ui) -> impl IntoView {
                             Ok(_) => {}
                             Err(error) => ui.status.set(error),
                         }
+                        // Without voice or a device test nothing here changes quickly;
+                        // poll every 2 s instead of 500 ms. Joining or starting a test
+                        // updates these signals directly, restoring the fast cadence.
+                        let mut skipped = 0;
                         loop {
-                            if let Ok(status) = ui
-                                .audio_control
-                                .invoke::<AudioStatus>("audio_status", json!({}))
-                                .await
-                            {
-                                ui.audio_status.set(Some(status));
-                            }
-                            let revision = ui.audio_revision.get_untracked();
-                            if let Ok(settings) = ui
-                                .audio_control
-                                .invoke::<AudioSettings>("audio_current", json!({}))
-                                .await
-                                && !ui.audio_saving.get_untracked()
-                                && ui.audio_revision.get_untracked() == revision
-                            {
-                                ui.audio.set(settings);
+                            let active = ui.voice.with_untracked(|v| v.channel_id.is_some())
+                                || ui
+                                    .audio_status
+                                    .with_untracked(|s| s.as_ref().is_some_and(|s| s.running));
+                            if active || skipped >= IDLE_STATUS_POLL_SKIPS {
+                                skipped = 0;
+                                if let Ok(status) = ui
+                                    .audio_control
+                                    .invoke::<AudioStatus>("audio_status", json!({}))
+                                    .await
+                                {
+                                    ui.audio_status.set(Some(status));
+                                }
+                                let revision = ui.audio_revision.get_untracked();
+                                if let Ok(settings) = ui
+                                    .audio_control
+                                    .invoke::<AudioSettings>("audio_current", json!({}))
+                                    .await
+                                    && !ui.audio_saving.get_untracked()
+                                    && ui.audio_revision.get_untracked() == revision
+                                    && ui.audio.with_untracked(|current| *current != settings)
+                                {
+                                    ui.audio.set(settings);
+                                }
+                            } else {
+                                skipped += 1;
                             }
                             gloo_timers::future::TimeoutFuture::new(500).await;
                         }
@@ -335,7 +354,7 @@ pub(super) fn VoiceBar(ui: Ui) -> impl IntoView {
         <Show when=move||ui.voice.get().channel_id.is_some()><div class="voice-dock">
             <div class="flex items-center gap-2">
                 <span class="text-emerald-400"><Icon kind=Glyph::Signal/></span>
-                <div class="min-w-0 flex-1"><button class="voice-health text-sm font-semibold" aria-label=move || crate::i18n::t("Voice connection diagnostics") data-tip=move ||if ui.voice.get().connected {thiscord_frontend::audio_quality::brief(ui.audio_status.get().and_then(|s|s.quality).as_ref())}else{"Connecting · diagnostics pending".into()} class:text-emerald-400=move ||ui.voice.get().connected class:text-amber-300=move ||!ui.voice.get().connected role="status">{move ||if ui.voice.get().connected{crate::i18n::t("Voice connected")}else{crate::i18n::t("Connecting to voice…")}}</button><button class="block max-w-full truncate text-left text-xs text-white/55 hover:text-white" data-tip=move || crate::i18n::t("Open call controls") aria-label=move || crate::i18n::t("Open call controls") on:click=move |_|super::servers::open_voice(ui)>{location}</button></div>
+                <div class="min-w-0 flex-1"><button class="voice-health text-sm font-semibold" aria-label=move || crate::i18n::t("Voice connection diagnostics") data-tip=move ||if ui.voice.get().connected {ui.audio_status.with(|s|thiscord_frontend::audio_quality::brief(s.as_ref().and_then(|s|s.quality.as_ref())))}else{"Connecting · diagnostics pending".into()} class:text-emerald-400=move ||ui.voice.get().connected class:text-amber-300=move ||!ui.voice.get().connected role="status">{move ||if ui.voice.get().connected{crate::i18n::t("Voice connected")}else{crate::i18n::t("Connecting to voice…")}}</button><button class="block max-w-full truncate text-left text-xs text-white/55 hover:text-white" data-tip=move || crate::i18n::t("Open call controls") aria-label=move || crate::i18n::t("Open call controls") on:click=move |_|super::servers::open_voice(ui)>{location}</button></div>
                 <button class="icon-button danger" aria-label=move || crate::i18n::t("Disconnect voice") data-tip=move || crate::i18n::t("Disconnect") disabled=move ||ui.voice_joining.get() on:click=move |_|leave(ui)><Icon kind=Glyph::Disconnect/></button>
             </div>
             <div class="mt-2 flex items-center gap-2">
@@ -344,9 +363,9 @@ pub(super) fn VoiceBar(ui: Ui) -> impl IntoView {
                 <button class="icon-button voice-action" aria-label=move || crate::i18n::t("Audio settings") data-tip=move || crate::i18n::t("Audio settings") on:click=move |_|ui.page.set("audio")><Icon kind=Glyph::Volume/></button>
                 <Show when=move||!ui.audio_control.is_remote() && ui.audio.get().mode==TransmitMode::PushToTalk><button class="icon-button voice-action touch-none select-none" aria-label=move || crate::i18n::t("Hold to talk") data-tip=move || crate::i18n::t("Hold to talk") on:pointerdown=move |_|pressed(true) on:pointerup=move |_|pressed(false) on:pointerleave=move |_|pressed(false) on:pointercancel=move |_|pressed(false) on:keydown=move|e|{if matches!(e.key().as_str()," "|"Enter"){e.prevent_default();pressed(true);}} on:keyup=move|_|pressed(false) on:blur=move |_|pressed(false)><Icon kind=Glyph::Mic/></button></Show>
             </div>
-        <Show when=move||ui.audio_status.get().and_then(|s|s.recording).is_some_and(|r|r.active)>
+        <Show when=move||ui.audio_status.with(|s|s.as_ref().and_then(|s|s.recording.as_ref()).is_some_and(|r|r.active))>
             <button class="mt-2 rounded bg-red-700 px-3 py-1 text-xs text-white" on:click=move |_|debug_command(ui,"audio_debug_stop")>
-                {move||thiscord_frontend::localized_format!(crate::i18n::language(), "● Recording {}s · Stop",ui.audio_status.get().and_then(|s|s.recording).map_or(0,|r|r.elapsed_ms/1000))}
+                {move||thiscord_frontend::localized_format!(crate::i18n::language(), "● Recording {}s · Stop",ui.audio_status.with(|s|s.as_ref().and_then(|s|s.recording.as_ref()).map_or(0,|r|r.elapsed_ms/1000)))}
             </button>
         </Show>
         </div></Show>
@@ -398,7 +417,7 @@ fn DebugRecording(ui: Ui) -> impl IntoView {
 }
 #[component]
 fn StreamVolumes(ui: Ui) -> impl IntoView {
-    view! {<div class="space-y-3"><For each=move || { ui.audio_status.get().map(|s| s.streams).unwrap_or_default().into_iter().filter(|s| !s.target.is_some_and(|t| t.shared_audio)).collect::<Vec<_>>() } key=|s| (s.id.clone(), s.target) children=move |stream| view! { <StreamVolume ui=ui stream=stream/> }/></div>}
+    view! {<div class="space-y-3"><For each=move || ui.audio_status.with(|s| s.as_ref().map(|s| s.streams.iter().filter(|s| !s.target.is_some_and(|t| t.shared_audio)).cloned().collect::<Vec<_>>()).unwrap_or_default()) key=|s| (s.id.clone(), s.target) children=move |stream| view! { <StreamVolume ui=ui stream=stream/> }/></div>}
 }
 
 #[component]
@@ -420,9 +439,10 @@ pub(super) fn StreamVolume(
     let dragging = RwSignal::new(false);
     let error = RwSignal::new(String::new());
     let current_volume = Memo::new(move |_| {
-        ui.audio_status.get().and_then(|s| {
-            s.streams
-                .into_iter()
+        ui.audio_status.with(|s| {
+            s.as_ref()?
+                .streams
+                .iter()
                 .find(|s| s.id == id.to_string() && s.target == target)
                 .map(|s| s.volume)
         })
@@ -621,10 +641,10 @@ pub(super) fn AudioSettingsPanel(ui: Ui) -> impl IntoView {
                 </fieldset>
                 <Show when=move || !ui.audio_control.is_remote()><DebugRecording ui=ui/></Show>
                 <super::diagnostics::DiagnosticsSettings control=ui.audio_control/>
-                <label class="block">{move || crate::i18n::t("Raw microphone")}<meter class="ml-3 w-48" min="0" max="1" value=move||ui.audio_status.get().map(|s|s.raw_input_level).unwrap_or(0.0) /></label>
-                <label class="block">{move || crate::i18n::t("After noise / echo processing")}<meter class="ml-3 w-48" min="0" max="1" value=move||ui.audio_status.get().map(|s|s.input_level).unwrap_or(0.0) /></label>
+                <label class="block">{move || crate::i18n::t("Raw microphone")}<meter class="ml-3 w-48" min="0" max="1" value=move||ui.audio_status.with(|s|s.as_ref().map_or(0.0,|s|s.raw_input_level)) /></label>
+                <label class="block">{move || crate::i18n::t("After noise / echo processing")}<meter class="ml-3 w-48" min="0" max="1" value=move||ui.audio_status.with(|s|s.as_ref().map_or(0.0,|s|s.input_level)) /></label>
                 <p class="text-sm" role="status">{move||ui.audio_status.get().map(|s|thiscord_frontend::localized_format!(crate::i18n::language(), "{} · processing resets {}",s.message,s.processing_resets))}</p>
-                <p class="text-sm text-slate-300">{move||thiscord_frontend::audio_quality::summary(ui.audio_status.get().and_then(|s|s.quality).as_ref())}</p>
+                <p class="text-sm text-slate-300">{move||ui.audio_status.with(|s|thiscord_frontend::audio_quality::summary(s.as_ref().and_then(|s|s.quality.as_ref())))}</p>
                 <details class="rounded border border-white/10 p-3 text-sm">
                     <summary class="cursor-pointer">{move || crate::i18n::t("Advanced voice quality diagnostics")}</summary>
                     <pre class="mt-3 max-h-96 overflow-auto whitespace-pre-wrap text-xs text-slate-300">{move||thiscord_frontend::audio_quality::detail(ui.audio_status.get().and_then(|s|s.quality).as_ref())}</pre>
