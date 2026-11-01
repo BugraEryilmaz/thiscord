@@ -524,7 +524,6 @@
   "Neural residual echo estimation (experimental)": "Sinir ağıyla artık yankı tahmini (deneysel)",
   "New owner": "Yeni sahip",
   "New password": "Yeni şifre",
-  "New releases arrive through your notification subscription. You can also check manually. Updates install only when you choose Install and restart.": "Yeni sürümler bildirim aboneliğin üzerinden gelir. Elle de kontrol edebilirsin. Güncellemeler yalnızca Yükle ve yeniden başlat'ı seçtiğinde yüklenir.",
   "No active voice rooms": "Etkin ses odası yok",
   "No audio device found": "Ses cihazı bulunamadı",
   "No banned members.": "Yasaklı üye yok.",
@@ -1265,5 +1264,12 @@
   "Strong (up to 18 dB)": "Güçlü (en fazla 18 dB)",
   "Maximum": "En yüksek",
   "Lower strength leaves some background noise but keeps your voice more natural. Neural models stop at the listed limit; Maximum removes as much as the model can. Strength applies immediately.": "Düşük güç biraz arka plan gürültüsü bırakır ancak sesini daha doğal tutar. Nöral modeller belirtilen sınırda durur; En yüksek, modelin yapabildiği kadarını kaldırır. Güç hemen uygulanır.",
-  "Models can be changed during a call. Echo cancellation needs time to adapt after a change. Neural models use more CPU and add buffering; test them with your microphone. They reduce noise but may preserve other people's voices. RNNoise is lightweight but leaves hiss. GTCRN removes everything above 8 kHz, so voices sound less crisp.": "Modeller arama sırasında değiştirilebilir. Değişiklikten sonra yankı gidermenin uyum sağlaması zaman alır. Nöral modeller daha fazla CPU kullanır ve tamponlama ekler; mikrofonunla test et. Gürültüyü azaltırlar ancak başkalarının sesini koruyabilirler. RNNoise hafiftir ancak cızırtı bırakır. GTCRN 8 kHz üzerindeki her şeyi kaldırır, bu yüzden sesler daha az net duyulur."
+  "Models can be changed during a call. Echo cancellation needs time to adapt after a change. Neural models use more CPU and add buffering; test them with your microphone. They reduce noise but may preserve other people's voices. RNNoise is lightweight but leaves hiss. GTCRN removes everything above 8 kHz, so voices sound less crisp.": "Modeller arama sırasında değiştirilebilir. Değişiklikten sonra yankı gidermenin uyum sağlaması zaman alır. Nöral modeller daha fazla CPU kullanır ve tamponlama ekler; mikrofonunla test et. Gürültüyü azaltırlar ancak başkalarının sesini koruyabilirler. RNNoise hafiftir ancak cızırtı bırakır. GTCRN 8 kHz üzerindeki her şeyi kaldırır, bu yüzden sesler daha az net duyulur.",
+  "Thiscord checks for updates when it starts and when a new release is announced. You can also check manually. Updates install only when you choose Install and restart.": "Thiscord açılışta ve yeni bir sürüm duyurulduğunda güncellemeleri kontrol eder. Elle de kontrol edebilirsin. Güncellemeler yalnızca Yükle ve yeniden başlat'ı seçtiğinde yüklenir.",
+  "A new version of Thiscord is available": "Thiscord'un yeni bir sürümü hazır",
+  "Version {} is ready. You have version {}.": "{} sürümü hazır. Yüklü sürüm: {}.",
+  "Thiscord downloads and verifies the update, then restarts to finish installing. Nothing is installed until you choose Download and install.": "Thiscord güncellemeyi indirir ve doğrular, ardından yüklemeyi tamamlamak için yeniden başlar. İndir ve yükle'yi seçene kadar hiçbir şey yüklenmez.",
+  "Download and install": "İndir ve yükle",
+  "Not now": "Şimdi değil",
+  "You can also install later from Settings → Updates.": "Daha sonra Ayarlar → Güncellemeler bölümünden de yükleyebilirsin."
 }
