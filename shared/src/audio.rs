@@ -9,7 +9,7 @@ fn is_false(value: &bool) -> bool {
 }
 
 /// Local self controls; deafen suppresses transmission without changing manual mute.
-#[derive(Debug, Clone, Copy, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum AudioToggle {
     Mute,
@@ -30,13 +30,58 @@ pub struct AudioShortcuts {
     /// Empty strings disable individual shortcuts. Native registration validates keys.
     pub mute: String,
     pub deafen: String,
+    /// Overlay shortcuts are disabled by default so upgrading never claims new
+    /// global keys. Empty values are omitted, keeping older desktops compatible.
+    #[serde(skip_serializing_if = "String::is_empty")]
+    pub overlay_visibility: String,
+    #[serde(skip_serializing_if = "String::is_empty")]
+    pub overlay_corner: String,
+    #[serde(skip_serializing_if = "String::is_empty")]
+    pub overlay_unlock: String,
 }
 impl Default for AudioShortcuts {
     fn default() -> Self {
         Self {
             mute: "Control+Shift+M".into(),
             deafen: "Control+Shift+D".into(),
+            overlay_visibility: String::new(),
+            overlay_corner: String::new(),
+            overlay_unlock: String::new(),
         }
+    }
+}
+
+/// What a global shortcut triggers.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ShortcutAction {
+    Audio(AudioToggle),
+    Overlay(crate::overlay::OverlayAction),
+}
+impl AudioShortcuts {
+    pub const MAX_LEN: usize = 128;
+    pub fn bindings(&self) -> [(&str, ShortcutAction); 5] {
+        use crate::overlay::OverlayAction;
+        [
+            (&self.mute, ShortcutAction::Audio(AudioToggle::Mute)),
+            (&self.deafen, ShortcutAction::Audio(AudioToggle::Deafen)),
+            (
+                &self.overlay_visibility,
+                ShortcutAction::Overlay(OverlayAction::ToggleVisibility),
+            ),
+            (
+                &self.overlay_corner,
+                ShortcutAction::Overlay(OverlayAction::NextCorner),
+            ),
+            (
+                &self.overlay_unlock,
+                ShortcutAction::Overlay(OverlayAction::ToggleUnlock),
+            ),
+        ]
+    }
+    pub fn too_long(&self) -> bool {
+        self.bindings()
+            .iter()
+            .any(|(value, _)| value.len() > Self::MAX_LEN)
     }
 }
 

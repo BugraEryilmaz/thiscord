@@ -43,14 +43,35 @@ available while reading text channels. Disconnect releases the devices.
 ### In-game voice overlay
 
 The desktop client shows a transparent, always-on-top roster when connected to
-voice and the main window is out of focus (including when minimized). It sits at
-the top left of the display containing Thiscord. Your entry stays first; hovering
-it reveals clickable Mute/Unmute and Deafen/Undeafen buttons. Other rows and empty
-space pass mouse input through to the game. Initials stand in for missing profile
-pictures. Green rings identify speakers;
-mute/deafen marks remain visible. Audio & voice has an overlay toggle for the
-current app session, enabled by default. Returning to Thiscord, disconnecting or
-losing voice access hides the overlay.
+voice and the main window is out of focus (including when minimized). Your entry
+is always the one closest to the anchored corner; hovering it reveals clickable
+Mute/Unmute and Deafen/Undeafen buttons. Other rows and empty space pass mouse
+input through to the game. Initials stand in for missing profile pictures. Green
+rings identify speakers; mute/deafen marks remain visible. Returning to Thiscord,
+disconnecting or losing voice access hides the overlay.
+
+Settings → Shortcuts & overlay groups the overlay preferences, saved
+automatically to `overlay.json` in the local app configuration directory:
+
+- **On/off** (enabled by default) and an optional **hide/show button**. The 24 px
+  button sits in the anchored corner, stays faint until pointed at, and remains
+  while the roster is collapsed. Collapsing lasts for the current app session.
+- **Position**: a corner (top left by default), a display (by default the one
+  containing Thiscord) and distances in logical pixels from the corner's edges,
+  measured from the display work area so bottom corners clear the taskbar.
+  Positions are clamped to keep the window on screen, and a disconnected saved
+  display falls back to Thiscord's display without losing the choice.
+- **Move on screen** turns on positioning mode: the overlay appears even over
+  Thiscord and outside voice, accepts input everywhere and can be dragged. Done
+  (on the overlay or in Settings) snaps it to the nearest corner by the window
+  center, saving that corner, its edge distances and the display it is on.
+
+Three optional global shortcuts (Keyboard shortcuts → Overlay) toggle the
+collapsed state, move the overlay to the next corner (top left → bottom left →
+bottom right → top right) and toggle positioning mode. They are disabled by
+default so upgrading never claims new global keys, and they share the mute/deafen
+conflict checks. The admin relay can change the on/off preference and shortcuts,
+never placement or positioning mode.
 
 The overlay is intended for windowed/borderless games, not exclusive fullscreen.
 It uses an ordinary Tauri window, without game injection or graphics hooks.
@@ -59,10 +80,15 @@ fullscreen Spaces. macOS transparency enables Tauri's `macos-private-api` featur
 this is for the existing direct-distribution builds, not Mac App Store submission.
 Actual game/monitor behavior still needs Windows/macOS/Linux runtime acceptance.
 
-The overlay capability exposes participant presentation metadata and a narrow
-self mute/deafen command, available only while connected. It cannot select another
-participant, change audio devices, or access credentials. Native cursor hit testing
-enables mouse input only over your own row; the overlay stays non-activating.
+The overlay capability exposes participant presentation metadata, a narrow self
+mute/deafen command available only while connected, and presentation actions for
+the overlay itself (collapse, next corner, leave positioning mode, and an OS window
+drag that is refused unless positioning mode was enabled). It cannot select
+another participant, change audio devices or settings files, or access
+credentials. Native cursor hit testing enables mouse input only over your own row
+and the optional button (layout mirrored in `voice_overlay.rs` and `style.css`);
+the overlay stays non-activating. Wayland does not report window positions, so a
+drag there is not saved; use the corner and distance fields instead.
 Remote indicators use decoded microphone energy before playback gain, with a
 250 ms hangover; missing packets and concealment do not extend activity. Screen
 audio never lights a microphone indicator. Local activity follows the transmit
@@ -233,8 +259,9 @@ falls back to the in-app button; portal integration remains future work.
 
 ### Mute and deafen shortcuts
 
-Audio & voice → Keyboard shortcuts configures global toggle shortcuts. Defaults
-are Ctrl+Shift+M (mute) and Ctrl+Shift+D (deafen). Enter a modifier/key combination
+Settings → Shortcuts & overlay → Keyboard shortcuts configures global toggle
+shortcuts. Defaults are Ctrl+Shift+M (mute) and Ctrl+Shift+D (deafen); the overlay
+shortcuts described above start disabled. Enter a modifier/key combination
 and choose Save shortcuts; an empty field disables that action. Reset to defaults
 fills the default combinations for review before saving. Preferences persist in
 `shortcuts.json` in the local app configuration directory. Holding a key toggles

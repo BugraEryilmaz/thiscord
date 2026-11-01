@@ -366,6 +366,8 @@ Personalized speaker isolation and physical acoustic acceptance remain future wo
 - [ ] Physical Windows/macOS/Linux acceptance of moderator moves, capture shutdown and self-state preservation.
 - [x] Desktop voice overlay with participant roster, speaking activity and focus visibility.
 - [x] Customizable global mute/deafen shortcuts and clickable self controls on overlay hover.
+- [x] Overlay corner/display/offset settings, drag positioning mode, optional hide/show button and overlay shortcuts.
+- [ ] Native Windows/macOS/Linux acceptance of overlay dragging, corner rotation and per-display placement.
 - [x] Compact connection-quality UI with local failure attribution and unavailable values.
 - [ ] In-app remote speaking indicators.
 - [ ] Overlay runtime acceptance in games, mixed-DPI monitors, macOS Spaces and Linux compositors.

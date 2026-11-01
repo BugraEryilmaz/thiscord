@@ -41,12 +41,11 @@ pub async fn execute(app: tauri::AppHandle, connection: Connection, command: Com
             crate::native_shortcuts::audio_shortcuts_save(app, settings).await?;
             Ok(serde_json::Value::Null)
         }
-        Command::OverlayEnabled {} => serde_json::to_value(crate::native_overlay::overlay_enabled(
-            app.clone(),
-            app.state(),
-        )?),
+        Command::OverlayEnabled {} => {
+            serde_json::to_value(crate::native_overlay::overlay_enabled(app)?)
+        }
         Command::OverlayEnable { enabled } => {
-            crate::native_overlay::overlay_enable(app.state(), enabled);
+            crate::native_overlay::overlay_enable(app, enabled).await?;
             Ok(serde_json::Value::Null)
         }
         Command::AudioDiagnosticsEnabled {} => {
