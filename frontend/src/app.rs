@@ -26,6 +26,7 @@ mod search;
 mod servers;
 mod settings;
 mod shortcuts;
+mod soundboard;
 mod tooltip;
 mod updates;
 mod voice_bots;

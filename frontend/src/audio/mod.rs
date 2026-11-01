@@ -1,5 +1,6 @@
 mod activity;
 pub mod adaptive_fec;
+pub mod clips;
 mod codec;
 pub mod connection;
 mod cues;
@@ -234,6 +235,13 @@ pub enum Command {
     Notification {
         kind: thiscord_shared::notifications::Kind,
         volume: u8,
+    },
+    /// A soundboard clip for the current call's output device.
+    Soundboard {
+        connection: connection::Connection,
+        clip: clips::Clip,
+        /// The player's local soundboard level, 0 < gain <= `clips::MAX_GAIN`.
+        gain: f32,
     },
     DebugStart(std::path::PathBuf),
     DebugStop,
@@ -1913,6 +1921,23 @@ fn run(
                                         .cues
                                         .fetch_or(1 << index, Ordering::Relaxed);
                                 }
+                            }
+                        }
+                        Command::Soundboard {
+                            connection,
+                            clip,
+                            gain,
+                        } => {
+                            if let Some(s) = session.as_ref().filter(|s| {
+                                s.connection
+                                    .as_ref()
+                                    .is_some_and(|c| c.accepts(&connection))
+                            }) && !s.devices.control.deafen.load(Ordering::Relaxed)
+                                && let Ok(mut sender) = s.devices.control.clips.lock()
+                                && let Some(sender) = sender.as_mut()
+                                && !sender.play(clip, gain)
+                            {
+                                diagnostics::event("soundboard_queue_full", serde_json::json!({}));
                             }
                         }
                         Command::Status | Command::Peek => {}

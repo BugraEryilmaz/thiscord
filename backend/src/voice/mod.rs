@@ -94,12 +94,19 @@ struct Delivery {
     screen_layer: Option<usize>,
     queued_at: Instant,
 }
+/// An authorized soundboard play, fanned out to every opted-in room member.
+#[derive(Clone, Copy)]
+struct SoundPlay {
+    sound_id: thiscord_shared::SoundId,
+    account_id: thiscord_shared::AccountId,
+}
 struct Room {
     notification_target: Option<(GuildId, ChannelId)>,
     screen_epoch: AtomicU32,
     microphone_epoch: AtomicU32,
     changed: watch::Sender<()>,
     members: RwLock<HashMap<usize, Member>>,
+    soundboard: tokio::sync::broadcast::Sender<SoundPlay>,
 }
 impl Default for Room {
     fn default() -> Self {
@@ -109,9 +116,12 @@ impl Default for Room {
             microphone_epoch: AtomicU32::new(0),
             changed: watch::channel(()).0,
             members: RwLock::new(HashMap::new()),
+            soundboard: tokio::sync::broadcast::channel(16).0,
         }
     }
 }
+/// Minimum spacing between one connection's soundboard plays.
+const SOUNDBOARD_INTERVAL: Duration = Duration::from_millis(1000);
 struct VoiceAccess {
     bot: Option<bots::Context>,
     access: Arc<access::Access>,
@@ -1169,6 +1179,9 @@ async fn serve(mut socket: logging::Socket, pool: DbPool, id: RequestId) {
     let mut screen_feedback = false;
     let mut remote_audio = false;
     let mut video_diagnostics = false;
+    // Guild channels only: private calls and synthetic bots have no soundboard.
+    let soundboard_offered = bot.is_none() && guild_id.as_uuid() != channel_id.as_uuid();
+    let mut soundboard = false;
     let negotiation_started = Instant::now();
     let negotiated = async {
         tokio::time::timeout(Duration::from_secs(15), async {
@@ -1203,6 +1216,7 @@ async fn serve(mut socket: logging::Socket, pool: DbPool, id: RequestId) {
                     screen_subscriptions: true,
                     screen_layers: true,
                     video_diagnostics: true,
+                    soundboard: soundboard_offered,
                     ice_servers,
                     resume_token: Some(resume_token),
                 },
@@ -1222,6 +1236,7 @@ async fn serve(mut socket: logging::Socket, pool: DbPool, id: RequestId) {
                 remote_audio: audio_enabled,
                 packet_redundancy,
                 video_diagnostics: video_enabled,
+                soundboard: soundboard_enabled,
             }) = parse(answer)
             else {
                 return Err(());
@@ -1232,6 +1247,7 @@ async fn serve(mut socket: logging::Socket, pool: DbPool, id: RequestId) {
             screen_feedback = enabled;
             remote_audio = audio_enabled;
             video_diagnostics = video_enabled;
+            soundboard = soundboard_offered && soundboard_enabled;
             if answer.sdp_type != RTCSdpType::Answer {
                 return Err(());
             }
@@ -1454,6 +1470,8 @@ async fn serve(mut socket: logging::Socket, pool: DbPool, id: RequestId) {
         let mut challenge_tick = tokio::time::interval(Duration::from_millis(250));
         challenge_tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
         let mut room_changed = room.changed.subscribe();
+        let mut sound_plays = room.soundboard.subscribe();
+        let mut last_sound: Option<Instant> = None;
         let mut tick = tokio::time::interval(Duration::from_secs(1));
         tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
         let access = VoiceAccess {
@@ -1559,7 +1577,45 @@ async fn serve(mut socket: logging::Socket, pool: DbPool, id: RequestId) {
                     // 14 video subscriptions can each request recovery twice/second,
                     // alongside state, subscription, keepalive and publication changes.
                     if budget > 64 { socket.end("signaling_rate_limit"); break; }
+                    if let Some(ClientEvent::Soundboard { sound_id }) = event {
+                        if !soundboard { socket.end("soundboard_not_negotiated"); break; }
+                        if last_sound.is_some_and(|at| at.elapsed() < SOUNDBOARD_INTERVAL) { continue; }
+                        last_sound = Some(Instant::now());
+                        let epoch = access.generation.load(Ordering::Acquire);
+                        let account_id = match room.members.read().await.get(&slot) {
+                            Some(m) if m.source_id == source_id && m.active.load(Ordering::Acquire)
+                                && m.info.can_speak && !m.info.server_muted && !m.info.is_deafened() => m.info.account_id,
+                            _ => continue,
+                        };
+                        let (pool, token) = (access.pool.clone(), access.token.clone());
+                        let authorized = tokio::task::spawn_blocking(move || {
+                            crate::soundboard::authorize_play(&pool, &token, guild_id, channel_id, sound_id)
+                        }).await.unwrap_or(Err(Failure::Unavailable));
+                        // Revocation during the check closes this epoch; the access
+                        // watcher then ends the connection on its own schedule.
+                        // Hold the access permit through the broadcast so a revocation
+                        // cannot commit between this check and delivery to the room.
+                        if authorized.is_ok() && active.load(Ordering::Acquire)
+                            && let Some(_permit) = connection_access.packet(epoch, access.generation.load(Ordering::Acquire)) {
+                            tracing::info!(request_id = %id, "soundboard sound played");
+                            let _ = room.soundboard.send(SoundPlay { sound_id, account_id });
+                        }
+                        continue;
+                    }
                     if let Err(reason)=handle_signal(&mut socket, &room, slot, event, &active).await { socket.end(reason); break; }
+                },
+                play = sound_plays.recv(), if soundboard => {
+                    let SoundPlay { sound_id, account_id } = match play {
+                        Ok(play) => play,
+                        Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => continue,
+                        Err(tokio::sync::broadcast::error::RecvError::Closed) => { socket.end("soundboard_closed"); break; }
+                    };
+                    if socket.detached() { continue; }
+                    let epoch = access.generation.load(Ordering::Acquire);
+                    let Some(_delivery) = connection_access.packet(epoch, epoch) else { continue; };
+                    let listening = room.members.read().await.get(&slot).is_some_and(|m| m.source_id == source_id
+                        && m.active.load(Ordering::Acquire) && !m.info.is_deafened());
+                    if listening && send(&mut socket, ServerEvent::Soundboard { sound_id, account_id }).await.is_err() { break; }
                 },
                 _=tick.tick()=>{
                     if audio_call.as_ref().is_some_and(|c| c.expired()) { audio_call = None; }

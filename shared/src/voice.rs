@@ -69,6 +69,13 @@ pub enum ClientEvent {
         /// Accepts the read-only `video_diagnostics` admin command.
         #[serde(default, skip_serializing_if = "is_false")]
         video_diagnostics: bool,
+        /// Accepts `ServerEvent::Soundboard`; only sent when the offer advertised it.
+        #[serde(default, skip_serializing_if = "is_false")]
+        soundboard: bool,
+    },
+    /// Plays a guild sound for everyone in this call. Requires a negotiated soundboard.
+    Soundboard {
+        sound_id: crate::SoundId,
     },
     State {
         muted: bool,
@@ -258,6 +265,9 @@ pub enum ServerEvent {
         /// Older desktops reject unknown admin commands as invalid voice events.
         #[serde(default, skip_serializing_if = "is_false")]
         video_diagnostics: bool,
+        /// The server accepts soundboard plays and can deliver them.
+        #[serde(default, skip_serializing_if = "is_false")]
+        soundboard: bool,
         #[serde(default)]
         ice_servers: Vec<IceServer>,
         /// Secret capability bound to this media session; never persist or log it.
@@ -270,6 +280,11 @@ pub enum ServerEvent {
     ResumeUnavailable {},
     Participants {
         members: Vec<Participant>,
+    },
+    /// A participant played a guild sound. Sent only to clients that opted in.
+    Soundboard {
+        sound_id: crate::SoundId,
+        account_id: AccountId,
     },
     Pong {},
     Revoked {},
@@ -286,6 +301,9 @@ pub struct VoiceStatus {
     pub channel_id: Option<ChannelId>,
     pub message: String,
     pub participants: Vec<Participant>,
+    /// The connected call negotiated soundboard playback.
+    #[serde(default)]
+    pub soundboard: bool,
 }
 // TURN credentials are short-lived secrets; deliberately no Debug.
 #[derive(Clone, Serialize, Deserialize)]
@@ -465,6 +483,49 @@ mod media_tests {
         assert_eq!(
             serde_json::to_value(ServerEvent::Replaced {}).unwrap(),
             serde_json::json!({"type":"replaced"})
+        );
+    }
+    #[test]
+    fn soundboard_is_opt_in_and_omitted_for_older_peers() {
+        let legacy: ServerEvent = serde_json::from_value(serde_json::json!({
+            "type":"offer","sdp":"test","slot":0,"can_speak":true
+        }))
+        .unwrap();
+        assert!(matches!(
+            legacy,
+            ServerEvent::Offer {
+                soundboard: false,
+                ..
+            }
+        ));
+        let answer = ClientEvent::Answer {
+            packet_redundancy: false,
+            remote_audio: false,
+            sdp: "test".into(),
+            screen_feedback: false,
+            screen_subscriptions: false,
+            screen_layers: false,
+            video_diagnostics: false,
+            soundboard: false,
+        };
+        assert!(
+            serde_json::to_value(&answer)
+                .unwrap()
+                .get("soundboard")
+                .is_none()
+        );
+        let id = "00000000-0000-0000-0000-000000000001";
+        let wire = serde_json::json!({"version":1,"event":{"type":"soundboard","sound_id":id}});
+        let frame: ClientFrame = serde_json::from_value(wire.clone()).unwrap();
+        assert_eq!(serde_json::to_value(frame).unwrap(), wire);
+        let played = serde_json::to_value(ServerEvent::Soundboard {
+            sound_id: id.parse().unwrap(),
+            account_id: id.parse().unwrap(),
+        })
+        .unwrap();
+        assert_eq!(
+            played,
+            serde_json::json!({"type":"soundboard","sound_id":id,"account_id":id})
         );
     }
     #[test]

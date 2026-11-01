@@ -205,6 +205,7 @@ pub(super) async fn run(
                 screen_layers: false,
                 // Bots expose per-stream video diagnostics in their own panel.
                 video_diagnostics: false,
+                soundboard: false,
             },
         )
         .await?;

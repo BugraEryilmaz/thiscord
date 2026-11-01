@@ -74,6 +74,7 @@ pub fn effective(
         }
         if !permissions.contains(&Permission::JoinVoice) {
             permissions.remove(&Permission::Speak);
+            permissions.remove(&Permission::UseSoundboard);
         }
     }
     // Apply last so role/member allowances cannot bypass a timeout. Reading stays available.

@@ -52,6 +52,7 @@ uuid_id!(InviteId);
 uuid_id!(AuditId);
 uuid_id!(MessageId);
 uuid_id!(AttachmentId);
+uuid_id!(SoundId);
 uuid_id!(ClientMessageId);
 uuid_id!(ConversationId);
 uuid_id!(CallId);

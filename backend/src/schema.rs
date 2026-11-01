@@ -242,6 +242,19 @@ diesel::table! {
 }
 
 diesel::table! {
+    guild_sounds (guild_id, id) {
+        guild_id -> Uuid,
+        id -> Uuid,
+        name -> Text,
+        emoji -> Nullable<Text>,
+        pcm -> Bytea,
+        duration_ms -> Int4,
+        created_by -> Nullable<Uuid>,
+        created_at -> Timestamptz,
+    }
+}
+
+diesel::table! {
     guilds (id) {
         id -> Uuid,
         name -> Text,
@@ -445,6 +458,8 @@ diesel::joinable!(guild_members -> accounts (account_id));
 diesel::joinable!(guild_moderation -> accounts (account_id));
 diesel::joinable!(guild_moderation -> guilds (guild_id));
 diesel::joinable!(guild_roles -> guilds (guild_id));
+diesel::joinable!(guild_sounds -> accounts (created_by));
+diesel::joinable!(guild_sounds -> guilds (guild_id));
 diesel::joinable!(guilds -> accounts (owner));
 diesel::joinable!(identities -> accounts (account_id));
 diesel::joinable!(instance -> accounts (owner_account_id));
@@ -486,6 +501,7 @@ diesel::allow_tables_to_appear_in_same_query!(
     guild_members,
     guild_moderation,
     guild_roles,
+    guild_sounds,
     guilds,
     identities,
     instance,

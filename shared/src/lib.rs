@@ -20,6 +20,7 @@ pub mod permissions;
 pub mod safety;
 pub mod screen;
 pub mod search;
+pub mod soundboard;
 pub mod validation;
 pub mod video_bridge;
 pub mod video_feedback;
@@ -28,6 +29,7 @@ pub mod voice_bots;
 pub use error::{ApiError, ErrorCode};
 pub use ids::AttachmentId;
 pub use ids::AvatarId;
+pub use ids::SoundId;
 pub use ids::{
     AccountId, ChannelId, GuildId, InstanceId, InstanceRoleId, RequestId, RoleId, SessionId,
 };

@@ -11,6 +11,7 @@ mod performance;
 pub mod permissions;
 pub mod safety;
 pub mod schema;
+pub mod soundboard;
 
 pub type BoxError = Box<dyn std::error::Error + Send + Sync>;
 pub mod admin;

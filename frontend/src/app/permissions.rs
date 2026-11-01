@@ -288,6 +288,7 @@ fn permission_name(p: Permission) -> &'static str {
         Permission::MuteMembers => crate::i18n::t("Mute members"),
         Permission::DeafenMembers => crate::i18n::t("Deafen members"),
         Permission::MoveMembers => crate::i18n::t("Move & disconnect members"),
+        Permission::UseSoundboard => crate::i18n::t("Use soundboard"),
     }
 }
 #[component]

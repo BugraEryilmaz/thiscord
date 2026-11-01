@@ -14,6 +14,7 @@ mod native_remote_audio;
 mod native_screen;
 mod native_shortcuts;
 mod native_signaling;
+mod native_soundboard;
 mod native_update;
 mod native_video_diagnostics;
 mod native_voice;
@@ -90,6 +91,7 @@ fn main() {
         .plugin(tauri_plugin_global_shortcut::Builder::new().build())
         .manage(native_audio::AudioState::default())
         .manage(native_voice::VoiceState::default())
+        .manage(native_soundboard::SoundboardState::default())
         .manage(native_screen::ScreenState::default())
         .manage(native_camera::CameraState::default())
         .on_window_event(|window, event| {
@@ -188,6 +190,9 @@ fn main() {
             native_voice::voice_join,
             native_voice::voice_leave,
             native_voice::voice_status,
+            native_soundboard::voice_soundboard_play,
+            native_soundboard::soundboard_volume,
+            native_soundboard::soundboard_set_volume,
             native_audio::audio_toggle,
             native_shortcuts::audio_shortcuts,
             native_shortcuts::audio_shortcuts_save,

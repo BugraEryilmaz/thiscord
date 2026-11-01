@@ -250,6 +250,8 @@ pub async fn voice_leave(
     Ok(())
 }
 async fn stop_job(app: &tauri::AppHandle, state: &VoiceState, job: &mut Option<Job>) {
+    app.state::<crate::native_soundboard::SoundboardState>()
+        .clear();
     app.state::<crate::native_screen::ScreenState>().clear();
     app.state::<crate::native_camera::CameraState>().clear();
     if let Some(Job { stop, mut task, .. }) = job.take() {
@@ -745,6 +747,7 @@ async fn run(
         remote_audio,
         packet_redundancy,
         video_diagnostics,
+        soundboard,
     ) = match first.event {
         ServerEvent::Offer {
             packet_redundancy,
@@ -760,6 +763,7 @@ async fn run(
             resume_token,
             remote_audio,
             video_diagnostics,
+            soundboard,
         } if first.version == VOICE_VERSION && slot < ROOM_CAPACITY => (
             sdp,
             slot,
@@ -774,6 +778,7 @@ async fn run(
             remote_audio,
             packet_redundancy,
             video_diagnostics,
+            soundboard,
         ),
         ServerEvent::Replaced {} => return Err(Failure::replaced()),
         ServerEvent::Error { error } => return Err(server_failure(&attempt.connection, error)),
@@ -946,6 +951,7 @@ async fn run(
             screen_subscriptions,
             screen_layers,
             video_diagnostics: remote_audio && video_diagnostics,
+            soundboard,
         },
         &attempt.connection,
     )
@@ -1009,6 +1015,24 @@ async fn run(
     )> = None;
     let mut remote_tick = tokio::time::interval(Duration::from_millis(100));
     remote_tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+    let sound_state = app.state::<crate::native_soundboard::SoundboardState>();
+    // Load local per-person soundboard levels once, off the async worker.
+    let volumes_app = app.clone();
+    let _ = tokio::task::spawn_blocking(move || {
+        volumes_app
+            .state::<crate::native_soundboard::SoundboardState>()
+            .load_volumes(&volumes_app)
+    })
+    .await;
+    let mut sounds = crate::native_soundboard::Player::new(token, guild_id, channel_id);
+    // Registered only for a negotiated call; dropping it rejects later UI requests.
+    let (_sound_registration, mut sound_requests) = if soundboard {
+        let (registration, requests) =
+            crate::native_soundboard::Registration::new(&sound_state, guild_id, channel_id);
+        (Some(registration), requests)
+    } else {
+        (None, mpsc::channel(1).1)
+    };
     loop {
         if packet_redundancy && audio_started {
             let observed_control = transmit_control.generation();
@@ -1079,7 +1103,7 @@ async fn run(
                             demand: Default::default(), network_demand: Default::default(), force_keyframe: Default::default(), metrics: Default::default(), video_sequence: Default::default(), audio_sequence: Default::default(), audio_timestamp: Default::default(), started: Instant::now(),
                         }); }
                         engine.notify_control(Command::Roster{connection:attempt.connection.clone(),members:roster.clone()})?;
-                        if let Ok(mut s)=status.lock(){s.connected=true;s.message=if can_speak{"Connected"}else{"Connected as listener. Leave and join again to enable newly granted microphone access."}.into();}
+                        if let Ok(mut s)=status.lock(){s.connected=true;s.soundboard=soundboard;s.message=if can_speak{"Connected"}else{"Connected as listener. Leave and join again to enable newly granted microphone access."}.into();}
                 } else {
                     if !audio.running {return Err(Failure::from(audio.message).with_reason("audio_stopped"));}
                     if let Ok(mut s)=status.lock(){s.message=audio.message;}
@@ -1105,6 +1129,15 @@ async fn run(
                     }
                     if chunks.is_empty() { remote_reply = None; }
                 }
+            },
+            Some(sound_id) = sound_requests.recv() => {
+                if audio_started && !signaling.recovering() {
+                    signaling.send(ClientEvent::Soundboard { sound_id });
+                }
+            },
+            Some(result) = sounds.tasks.join_next() => {
+                let listening = !(settings.lock().map_err(|_|"Settings unavailable")?.deafened || moderation.deafened());
+                sounds.fetched(&sound_state, &engine, &attempt.connection, result, audio_started && listening);
             },
             Some((kind, slot, epoch))=keyframe_rx.recv()=>{
                 if screen_feedback && crate::native_screen::video_state(app, kind).watching(slot, epoch) && roster.iter().any(|m| m.slot == slot && m.video_epoch(kind) == epoch && m.video_active(kind)) {
@@ -1158,6 +1191,12 @@ async fn run(
                     ServerEvent::ScreenTarget { kind, epoch, bitrate, layers } => {
                         if status.lock().ok().is_some_and(|s| s.participants.iter().any(|m| m.slot == own_slot && m.video_epoch(kind) == epoch && m.video_active(kind))) {
                             if kind == MediaKind::Camera { app.state::<crate::native_camera::CameraState>().target(bitrate); } else { app.state::<crate::native_screen::ScreenState>().layer_target(bitrate, layers); }
+                        }
+                    },
+                    ServerEvent::Soundboard { sound_id, account_id } => {
+                        let deafened = settings.lock().map_err(|_|"Settings unavailable")?.deafened || moderation.deafened();
+                        if soundboard && audio_started && !deafened {
+                            sounds.played(&sound_state, &engine, &attempt.connection, sound_id, account_id);
                         }
                     },
                     ServerEvent::MediaDiagnostics{counters}=>{ app.state::<crate::native_screen::ScreenState>().server_diagnostics(counters); },

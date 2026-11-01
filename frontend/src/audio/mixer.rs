@@ -1,6 +1,6 @@
 //! Fixed-capacity SPSC queues. The device callback never allocates, locks or waits.
 use super::{
-    cues, frames,
+    clips, cues, frames,
     quality::{Count, Metrics},
 };
 use ringbuf::{HeapCons, HeapProd, HeapRb, traits::*};
@@ -120,6 +120,8 @@ pub struct Controls {
     callback_deadline_ns: AtomicU64,
     pub(super) cues: AtomicU8,
     pub(super) cue_volumes: [AtomicU8; 6],
+    /// Control-worker side of this device's soundboard queue; never locked by the callback.
+    pub(super) clips: std::sync::Mutex<Option<clips::Sender>>,
     pub mute: AtomicBool,
     pub deafen: AtomicBool,
     pub push_to_talk: AtomicBool,
@@ -150,6 +152,7 @@ impl Default for Controls {
             callback_deadline_ns: 0.into(),
             cues: 0.into(),
             cue_volumes: std::array::from_fn(|_| AtomicU8::new(100)),
+            clips: std::sync::Mutex::new(None),
             mute: false.into(),
             deafen: false.into(),
             push_to_talk: false.into(),
@@ -185,6 +188,7 @@ struct StreamReader {
 }
 pub struct Mixer {
     cues: cues::Player,
+    clips: clips::Player,
     streams: Vec<StreamReader>,
     controls: Arc<Controls>,
     reference: Option<frames::Writer>,
@@ -217,10 +221,15 @@ pub fn mixer(controls: Arc<Controls>) -> (Vec<StreamWriter>, Mixer) {
             generation: 0,
         });
     }
+    let (clip_sender, clip_player) = clips::channel();
+    if let Ok(mut sender) = controls.clips.lock() {
+        *sender = Some(clip_sender);
+    }
     (
         writers,
         Mixer {
             cues: cues::Player::new(),
+            clips: clip_player,
             streams: readers,
             controls,
             reference: None,
@@ -341,6 +350,7 @@ impl Mixer {
         }
         self.cues
             .request(self.controls.cues.swap(0, Ordering::Relaxed), deafened);
+        self.clips.begin(deafened);
         let guard = self.controls.receive_guard.get();
         // Streams inactive at callback start stay silent until the next callback;
         // most of the fixed slots are unused, and skipping them keeps the
@@ -386,7 +396,7 @@ impl Mixer {
             // before each microphone sample and never affect shared audio.
             let room_blocked = guard.is_some_and(|guard| !guard.receive_allowed());
             let master = f32::from_bits(self.controls.master.load(Ordering::Relaxed));
-            let mut mix = self.cues.next();
+            let mut mix = self.cues.next() + self.clips.next();
             for (index, stream) in self.streams.iter_mut().enumerate() {
                 if !live[index] {
                     continue;
@@ -632,6 +642,41 @@ mod tests {
         controls.deafen.store(false, Ordering::Relaxed);
         mix.render(&mut out, 1);
         assert_eq!(out, [0.0; frames::SAMPLES]);
+    }
+
+    #[test]
+    fn soundboard_clips_follow_master_reach_echo_reference_and_stop_on_deafen() {
+        let controls = Arc::new(Controls::default());
+        let (_, mix) = mixer(controls.clone());
+        let (producer, mut reference) = frames::queue();
+        let mut mix = mix.with_reference(producer);
+        controls.master.store(0.5_f32.to_bits(), Ordering::Relaxed);
+        let clip: clips::Clip = vec![16_384; frames::SAMPLES * 3].into();
+        let play = |clip: &clips::Clip| {
+            controls
+                .clips
+                .lock()
+                .unwrap()
+                .as_mut()
+                .unwrap()
+                .play(clip.clone(), 1.0)
+        };
+        assert!(play(&clip));
+        let mut out = [0.0_f32; frames::SAMPLES];
+        mix.reference_time(Instant::now());
+        mix.render(&mut out, 1);
+        assert_eq!(out, [0.25; frames::SAMPLES]);
+        assert_eq!(reference.pop().unwrap().0.samples, out);
+        // Deafening retires the rest; the clip is released on the control side.
+        controls.deafen.store(true, Ordering::Relaxed);
+        mix.render(&mut out, 1);
+        assert_eq!(out, [0.0; frames::SAMPLES]);
+        controls.deafen.store(false, Ordering::Relaxed);
+        mix.render(&mut out, 1);
+        assert_eq!(out, [0.0; frames::SAMPLES]);
+        assert_eq!(Arc::strong_count(&clip), 2);
+        assert!(play(&clip));
+        assert_eq!(Arc::strong_count(&clip), 2);
     }
 
     #[test]
