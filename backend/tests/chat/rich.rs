@@ -21,7 +21,9 @@ async fn search(
 async fn rich_preview_revision_tracks_target_across_all_hydration_paths() {
     let _guard = TEST_LOCK.lock().await;
     let db = database();
-    let (app, owner, guest, _, state, channel) = setup(&db).await;
+    let (app, owner, guest, guest_id, state, channel) = setup(&db).await;
+    let avatar = Uuid::new_v4();
+    diesel::sql_query("INSERT INTO account_avatars(account_id,id,png) VALUES($1::uuid,$2::uuid,decode('89','hex'))").bind::<Text, _>(guest_id.to_string()).bind::<Text, _>(avatar.to_string()).execute(&mut db.pool.get().unwrap()).unwrap();
     let guild = state["guild"]["id"].clone();
     let mut target = send_text(&app, &owner, &guild, &channel, "original target").await;
     let send = json!({"action":"send","guild_id":guild,"channel_id":channel,"client_id":Uuid::new_v4(),"content":"reply","reply_to":target["id"]});
@@ -35,6 +37,7 @@ async fn rich_preview_revision_tracks_target_across_all_hydration_paths() {
         assert_eq!(message["reply"]["id"], target["id"]);
         assert_eq!(message["reply"]["preview"], target["content"]);
         assert_eq!(message["reply"]["target_revision"], target["revision"]);
+        assert_eq!(message["author_avatar_id"], json!(avatar));
     };
     // Exact send retries and unchanged edits also use recipient hydration.
     let retry = chat(&app, &guest, send, StatusCode::OK).await;
@@ -85,7 +88,7 @@ async fn rich_preview_revision_tracks_target_across_all_hydration_paths() {
 async fn rich_replies_reactions_pins_and_socket_updates() {
     let _guard = TEST_LOCK.lock().await;
     let db = database();
-    let (app, owner, guest, _, mut state, channel) = setup(&db).await;
+    let (app, owner, guest, guest_id, mut state, channel) = setup(&db).await;
     let guild = state["guild"]["id"].clone();
     let target = send_text(
         &app,
@@ -159,6 +162,38 @@ async fn rich_replies_reactions_pins_and_socket_updates() {
     chat(&app, &guest, reaction.clone(), StatusCode::OK).await;
     let own = chat(&app, &owner, reaction.clone(), StatusCode::OK).await;
     assert_eq!(own["message"]["reactions"][0]["count"], 2);
+    // The extended palette is accepted; arbitrary text and excess kinds are not.
+    let max = thiscord_shared::chat::MAX_REACTION_KINDS;
+    let mut extra = reaction.clone();
+    extra["emoji"] = json!("x");
+    chat(&app, &guest, extra.clone(), StatusCode::BAD_REQUEST).await;
+    let palette: Vec<&str> = thiscord_shared::chat::EMOJI_GROUPS
+        .iter()
+        .flat_map(|(_, group)| group.iter().copied())
+        .filter(|emoji| *emoji != "👍")
+        .collect();
+    extra["emoji"] = json!(palette[0]);
+    chat(&app, &guest, extra.clone(), StatusCode::OK).await;
+    // Seed the remaining kinds directly to stay under the per-account write limit.
+    for emoji in &palette[1..max - 1] {
+        diesel::sql_query("INSERT INTO message_reactions(message_id,account_id,emoji) VALUES($1::uuid,$2::uuid,$3)")
+            .bind::<Text, _>(target["id"].as_str().unwrap())
+            .bind::<Text, _>(guest_id.to_string())
+            .bind::<Text, _>(*emoji)
+            .execute(&mut db.pool.get().unwrap())
+            .unwrap();
+    }
+    extra["emoji"] = json!(palette[max - 1]);
+    chat(&app, &guest, extra.clone(), StatusCode::BAD_REQUEST).await;
+    // Existing kinds can still gain reactions at the cap.
+    let own = chat(&app, &owner, json!({"action":"react","guild_id":guild,"channel_id":channel,"message_id":target["id"],"emoji":palette[0],"present":true}), StatusCode::OK).await;
+    let kinds = own["message"]["reactions"].as_array().unwrap();
+    assert_eq!(kinds.len(), max);
+    assert!(
+        kinds
+            .iter()
+            .any(|r| r["emoji"] == palette[0] && r["count"] == 2)
+    );
     let pin = json!({"action":"pin","guild_id":guild,"channel_id":channel,"message_id":target["id"],"revision":own["message"]["revision"],"pinned":true});
     chat(&app, &guest, pin.clone(), StatusCode::FORBIDDEN).await;
     let pinned = chat(&app, &owner, pin.clone(), StatusCode::OK).await;

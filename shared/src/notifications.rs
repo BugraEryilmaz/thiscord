@@ -96,6 +96,9 @@ pub enum Mute {
     Forever,
 }
 impl Mute {
+    fn none() -> Self {
+        Self::None
+    }
     pub fn active(self, now: Timestamp) -> bool {
         match self {
             Self::None => false,
@@ -155,6 +158,9 @@ pub struct Preferences {
     pub revision: i64,
     pub defaults: Vec<Rule>,
     pub subscriptions: Vec<Subscription>,
+    /// Account-wide Do Not Disturb: while active, no banner or sound is delivered.
+    #[serde(default = "Mute::none")]
+    pub do_not_disturb: Mute,
 }
 impl Default for Preferences {
     fn default() -> Self {
@@ -168,11 +174,18 @@ impl Default for Preferences {
                 })
                 .collect(),
             subscriptions: vec![],
+            do_not_disturb: Mute::None,
         }
     }
 }
 impl Preferences {
+    pub fn do_not_disturb(&self, now: Timestamp) -> bool {
+        self.do_not_disturb.active(now)
+    }
     pub fn delivery(&self, target: Target, kind: Kind, now: Timestamp) -> Option<Delivery> {
+        if self.do_not_disturb(now) {
+            return None;
+        }
         let sub = self.subscriptions.iter().find(|s| s.target == target);
         if sub.is_some_and(|s| s.mute.active(now)) {
             return None;
@@ -206,6 +219,10 @@ pub enum Request {
     RemoveSubscription {
         revision: i64,
         target: Target,
+    },
+    /// Account-wide; `Snooze::Resume` turns Do Not Disturb off.
+    DoNotDisturb {
+        duration: Snooze,
     },
     PublishUpdate {
         version: String,
@@ -309,6 +326,38 @@ mod tests {
                 .mute(now)
                 .active(now + chrono::Duration::days(10000))
         );
+    }
+    #[test]
+    fn do_not_disturb_suppresses_every_kind_until_it_expires() {
+        let now: Timestamp = "2026-10-16T00:00:00Z".parse().unwrap();
+        let legacy: Preferences = serde_json::from_value(
+            serde_json::json!({"revision":3,"defaults":[],"subscriptions":[]}),
+        )
+        .unwrap();
+        assert_eq!(legacy.do_not_disturb, Mute::None);
+        let mut p = Preferences {
+            do_not_disturb: Snooze::Hour1.mute(now),
+            ..Preferences::default()
+        };
+        let channel = Target::Conversation {
+            conversation_id: "00000000-0000-0000-0000-000000000001".parse().unwrap(),
+        };
+        for kind in Kind::ALL {
+            assert!(p.delivery(channel, kind, now).is_none());
+        }
+        assert!(p.delivery(Target::Updates, Kind::Update, now).is_none());
+        let later = now + chrono::Duration::hours(1);
+        assert!(p.delivery(channel, Kind::DirectMessage, later).is_some());
+        p.do_not_disturb = Snooze::Resume.mute(now);
+        assert!(!p.do_not_disturb(now));
+        let request: Request =
+            serde_json::from_str(r#"{"action":"do_not_disturb","duration":"forever"}"#).unwrap();
+        assert!(matches!(
+            request,
+            Request::DoNotDisturb {
+                duration: Snooze::Forever
+            }
+        ));
     }
     #[test]
     fn mentions_are_explicit_and_wire_is_stable() {

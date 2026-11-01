@@ -9,6 +9,7 @@ mod context_menu;
 mod diagnostics;
 mod dialog;
 mod direct_attachments;
+mod emoji;
 mod friends;
 mod icons;
 mod invites;
@@ -31,6 +32,35 @@ mod tooltip;
 mod updates;
 mod voice_bots;
 mod window;
+
+#[derive(Clone, Copy, PartialEq, Eq, Hash)]
+enum Draft {
+    Channel(thiscord_shared::ChannelId),
+    Conversation(thiscord_shared::ids::ConversationId),
+}
+/// Binds a composer signal to the per-target draft store: restore on mount and
+/// save every change while not `paused`, so switching channels or conversations keeps unsent text.
+fn draft_signal(ui: Ui, key: Draft, paused: impl Fn() -> bool + 'static) -> RwSignal<String> {
+    let draft = RwSignal::new(
+        ui.drafts
+            .with_value(|drafts| drafts.get(&key).cloned())
+            .unwrap_or_default(),
+    );
+    Effect::new(move |_| {
+        let text = draft.get();
+        if paused() {
+            return;
+        }
+        ui.drafts.update_value(|drafts| {
+            if text.is_empty() {
+                drafts.remove(&key);
+            } else {
+                drafts.insert(key, text);
+            }
+        });
+    });
+    draft
+}
 
 #[derive(Clone, Copy)]
 struct Ui {
@@ -60,6 +90,8 @@ struct Ui {
     chat_epoch: RwSignal<u64>,
     active_chat: RwSignal<Option<chat::Chat>>,
     chat_jump: RwSignal<Option<(thiscord_shared::ChannelId, thiscord_shared::MessageId)>>,
+    /// Unsent composer text per channel or conversation, in memory for this session only.
+    drafts: StoredValue<std::collections::HashMap<Draft, String>>,
     unread: RwSignal<Vec<thiscord_shared::chat::Unread>>,
     guilds: RwSignal<Vec<thiscord_shared::permissions::Guild>>,
     server: RwSignal<Option<thiscord_shared::permissions::GuildHome>>,
@@ -116,6 +148,7 @@ async fn apply(ui: Ui, response: AccountResponse) {
 }
 async fn clear_local(ui: Ui) {
     servers::reset_session(ui);
+    ui.drafts.update_value(std::collections::HashMap::clear);
     ui.guilds.set(vec![]);
     ui.voice_location.set(None);
     ui.active_stream.set(None);
@@ -362,6 +395,7 @@ pub fn App() -> impl IntoView {
         chat_epoch: RwSignal::new(0),
         active_chat: RwSignal::new(None),
         chat_jump: RwSignal::new(None),
+        drafts: StoredValue::new(Default::default()),
         unread: RwSignal::new(vec![]),
         guilds: RwSignal::new(vec![]),
         server: RwSignal::new(None),

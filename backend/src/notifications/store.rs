@@ -117,6 +117,10 @@ pub(super) fn dispatch(
                 authorize(c, session.account_id, target, None)?;
                 subscription(&mut prefs, target)?.mute = duration.mute(chrono::Utc::now());
             }
+            Request::DoNotDisturb { duration } => {
+                // Like a snooze, this is a latest-wins toggle without a revision check.
+                prefs.do_not_disturb = duration.mute(chrono::Utc::now());
+            }
             Request::RemoveSubscription { revision, target } => {
                 if revision != prefs.revision { return Err(Failure::Conflict); }
                 // Deleting this account's preferences never grants source access.

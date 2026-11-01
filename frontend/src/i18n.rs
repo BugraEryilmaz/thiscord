@@ -32,21 +32,63 @@ pub fn api_error(error: &thiscord_shared::ApiError) -> String {
     localization::api_error(LANGUAGE.with(|language| language.get_untracked()), error)
 }
 
-/// Display dates in the chosen locale, retaining the app's explicit UTC zone.
-/// The wire timestamp remains unchanged.
-pub fn datetime(timestamp: thiscord_shared::Timestamp) -> String {
-    use js_sys::Intl::{DateTimeFormatOptions, DateTimeStyle};
-    let options = DateTimeFormatOptions::new();
-    options.set_date_style(DateTimeStyle::Medium);
-    options.set_time_style(DateTimeStyle::Short);
-    options.set_time_zone("UTC");
-    let date = js_sys::Date::new(&wasm_bindgen::JsValue::from_f64(
+fn local_date(timestamp: thiscord_shared::Timestamp) -> js_sys::Date {
+    js_sys::Date::new(&wasm_bindgen::JsValue::from_f64(
         timestamp.timestamp_millis() as f64,
-    ));
-    format!(
-        "{} UTC",
-        date.to_locale_string(language().code(), options.as_ref())
+    ))
+}
+
+fn format_local(
+    date: &js_sys::Date,
+    date_style: Option<js_sys::Intl::DateTimeStyle>,
+    time_style: Option<js_sys::Intl::DateTimeStyle>,
+) -> String {
+    let options = js_sys::Intl::DateTimeFormatOptions::new();
+    if let Some(style) = date_style {
+        options.set_date_style(style);
+    }
+    if let Some(style) = time_style {
+        options.set_time_style(style);
+    }
+    date.to_locale_string(language().code(), options.as_ref())
+        .into()
+}
+
+/// Display dates in the chosen locale and this device's time zone.
+/// The wire timestamp remains UTC.
+pub fn datetime(timestamp: thiscord_shared::Timestamp) -> String {
+    use js_sys::Intl::DateTimeStyle;
+    format_local(
+        &local_date(timestamp),
+        Some(DateTimeStyle::Medium),
+        Some(DateTimeStyle::Short),
     )
+}
+
+/// Local hour and minute, used beside grouped follow-up messages.
+pub fn clock(timestamp: thiscord_shared::Timestamp) -> String {
+    format_local(
+        &local_date(timestamp),
+        None,
+        Some(js_sys::Intl::DateTimeStyle::Short),
+    )
+}
+
+/// Message header time: "Today at 14:05", "Yesterday at 14:05", or a full date.
+pub fn message_time(timestamp: thiscord_shared::Timestamp) -> String {
+    let date = local_date(timestamp);
+    let day = |d: &js_sys::Date| (d.get_full_year(), d.get_month(), d.get_date());
+    let today = js_sys::Date::new_0();
+    let yesterday = js_sys::Date::new_0();
+    yesterday.set_date(yesterday.get_date() - 1);
+    let time = clock(timestamp);
+    if day(&date) == day(&today) {
+        thiscord_frontend::localized_format!(language(), "Today at {}", time)
+    } else if day(&date) == day(&yesterday) {
+        thiscord_frontend::localized_format!(language(), "Yesterday at {}", time)
+    } else {
+        datetime(timestamp)
+    }
 }
 
 pub fn number(value: f64, decimals: u8) -> String {

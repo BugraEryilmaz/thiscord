@@ -97,6 +97,24 @@ pub fn insert(text: &str, query: &Query, username: &str) -> Option<(String, u32)
     Some((result, caret))
 }
 
+/// Replaces the UTF-16 selection `start..end` (as reported by a textarea) with
+/// `insert`, returning the new text and caret. Invalid offsets append at the end.
+pub fn splice(text: &str, start: u32, end: u32, insert: &str) -> Option<(String, u32)> {
+    let (start, end) = (start.min(end), start.max(end));
+    let (a, b) = match (byte_offset(text, start), byte_offset(text, end)) {
+        (Some(a), Some(b)) => (a, b),
+        _ => (text.len(), text.len()),
+    };
+    let result = format!("{}{insert}{}", &text[..a], &text[b..]);
+    if result.chars().count() > MAX_MESSAGE_CHARS {
+        return None;
+    }
+    Some((
+        result,
+        (text[..a].encode_utf16().count() + insert.encode_utf16().count()) as u32,
+    ))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -158,6 +176,23 @@ mod tests {
         assert!(query("🎮 @a", 1, 1).is_none());
         let long = format!("@{}", "a".repeat(65));
         assert!(query(&long, 66, 66).is_none());
+    }
+    #[test]
+    fn splice_uses_utf16_selection_and_respects_length() {
+        let text = "🎮 hi";
+        let caret = "🎮 ".encode_utf16().count() as u32;
+        assert_eq!(
+            splice(text, caret, caret, "😀"),
+            Some(("🎮 😀hi".into(), caret + 2))
+        );
+        assert_eq!(
+            splice(text, caret + 2, caret, "x"),
+            Some(("🎮 x".into(), caret + 1))
+        );
+        // Offsets inside a surrogate pair or past the end append instead.
+        assert_eq!(splice(text, 1, 1, "!"), Some(("🎮 hi!".into(), 6)));
+        assert_eq!(splice(text, 99, 99, "!"), Some(("🎮 hi!".into(), 6)));
+        assert!(splice(&"a".repeat(MAX_MESSAGE_CHARS), 0, 0, "b").is_none());
     }
     #[test]
     fn insertion_preserves_surroundings_and_utf16_caret() {

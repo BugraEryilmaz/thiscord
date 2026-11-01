@@ -539,7 +539,7 @@ pub(super) fn Picker(
             input.set_value("");
         }/>
         <button type="button" class="icon-button" aria-label=move ||crate::i18n::t("Attach files")
-            data-tip=move ||format!("{}\n{}",crate::i18n::t("Attach files"),crate::i18n::t("Drop files here · up to 4 files, 25 MiB each"))
+            data-tip=move ||format!("{}\n{}",crate::i18n::t("Attach files"),crate::i18n::t("Drop or paste files here · up to 4 files, 25 MiB each"))
             disabled=disabled on:click=move |_| { if let Some(input) = input.get() { input.click(); } }>
             <super::Icon kind=super::Glyph::Paperclip/>
         </button>

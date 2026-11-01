@@ -23,7 +23,7 @@ English fallback for unknown text. Use reactive `i18n::t` calls for labels and
 `localized_format!` for text with arguments; keep placeholders intact and pass
 named arguments explicitly. Shared wire codes, user messages/names, credentials,
 and machine-readable diagnostics are never translated. Dates display in the
-selected locale with an explicit UTC zone. Unrecognized server errors use their
+selected locale and the device's local time zone; wire timestamps stay UTC. Unrecognized server errors use their
 stable wire error code in Turkish and retain the request ID. External provider
 pages, account emails/recovery web pages, and native OS/tray text remain English.
 
@@ -483,8 +483,9 @@ References: [Leptos CSR](https://book.leptos.dev/getting_started/index.html),
 [Diesel](https://diesel.rs/guides/getting-started).
 
 
-Guild chat supports reply previews and original-message navigation, ten emoji
-reactions, moderator message pins, and safe Markdown with code blocks. Search
+Guild chat supports reply previews and original-message navigation, emoji
+reactions from a Unicode palette, an emoji picker, pasted attachments, per-channel
+drafts, grouped messages with profile pictures, a "New messages" divider, moderator message pins, and safe Markdown with code blocks. Search
 the current channel or DM inline with Ctrl+F (Cmd+F on macOS), then click a match
 to jump to its original in history. See [chat](docs/chat.md) and [search](docs/search.md), including
 the private safety branch integration checks still required for this P1 batch.

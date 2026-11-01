@@ -57,6 +57,46 @@ pub(super) struct Chat {
     rich: RwSignal<RichChat>,
     highlight: RwSignal<Option<MessageId>>,
     searching: RwSignal<bool>,
+    /// Unread count captured when the channel opened; consumed by the first snapshot.
+    unread_on_open: RwSignal<i64>,
+    /// Oldest message that was unread when the channel opened ("New messages").
+    first_unread: RwSignal<Option<MessageId>>,
+}
+
+/// Composer text plus in-place edit state. Starting an edit stashes the unsent
+/// draft; finishing or cancelling the edit restores it.
+#[derive(Clone, Copy)]
+pub(super) struct Composer {
+    draft: RwSignal<String>,
+    editing: RwSignal<Option<MessageId>>,
+    stash: StoredValue<Option<String>>,
+    input: NodeRef<leptos::html::Textarea>,
+}
+impl Composer {
+    fn begin_edit(self, id: MessageId, content: String) {
+        if self.editing.get_untracked().is_none() {
+            self.stash.set_value(Some(self.draft.get_untracked()));
+        }
+        self.editing.set(Some(id));
+        self.draft.set(content);
+        if let Some(input) = self.input.get_untracked() {
+            leptos::task::spawn_local(async move {
+                leptos::task::tick().await;
+                let _ = input.focus();
+                let end = input.value().encode_utf16().count() as u32;
+                let _ = input.set_selection_range(end, end);
+            });
+        }
+    }
+    fn end_edit(self) {
+        self.editing.set(None);
+        self.draft.set(
+            self.stash
+                .try_update_value(Option::take)
+                .flatten()
+                .unwrap_or_default(),
+        );
+    }
 }
 impl Chat {
     fn alive(self) -> bool {
@@ -257,6 +297,32 @@ impl Chat {
                 follow: self.bottom.get_untracked() && !self.history_loading.get_untracked(),
             },
         );
+    }
+    /// Places "New messages" above the oldest message counted as unread when the
+    /// channel opened, matching the server count (others' undeleted messages).
+    fn mark_first_unread(self) {
+        let mut remaining = self.unread_on_open.get_untracked();
+        if remaining <= 0 {
+            return;
+        }
+        self.unread_on_open.set(0);
+        let me = self.ui.account.with_untracked(|a| a.as_ref().map(|a| a.id));
+        let mut first = None;
+        self.messages.with_untracked(|cache| {
+            cache.latest_where(|row| {
+                row.with_untracked(|m| {
+                    if m.deleted || (me.is_some() && m.author_id == me) {
+                        return false;
+                    }
+                    first = Some(m.id);
+                    remaining -= 1;
+                    remaining == 0
+                })
+            })
+        });
+        // If the boundary is older than the loaded page, show no divider rather
+        // than mislabel the oldest loaded message.
+        self.first_unread.set(first.filter(|_| remaining == 0));
     }
     fn reset(self) {
         self.rich.update(RichChat::reset);
@@ -735,6 +801,7 @@ fn deliver(chat: Chat, event: ServerEvent) -> Result<(), String> {
             chat.messages.update_untracked(|m| m.older = history.older);
             chat.merge_batch(history.messages, Merge::Older);
             chat.ready.set(true);
+            chat.mark_first_unread();
             chat.load_pins();
             chat.status.set("Connected".into());
             chat.scroll();
@@ -781,8 +848,7 @@ fn MessageRow(
     chat: Chat,
     id: MessageId,
     message: ArcRwSignal<ChatMessage>,
-    editing: RwSignal<Option<MessageId>>,
-    draft: RwSignal<String>,
+    composer: Composer,
 ) -> impl IntoView {
     // This arena handle belongs to the keyed row, not the chat panel. The cache
     // retains only the Arc; evicted rows release both state and measurements.
@@ -809,29 +875,75 @@ fn MessageRow(
             });
         }
     });
+    let divider = move || chat.first_unread.get() == Some(id);
+    // Follow-ups from the same author share the previous row's header. The
+    // cache lookup is O(log n) and only runs for the mounted window.
+    let grouped = Memo::new(move |_| {
+        if divider() || message.with(|m| m.reply.is_some()) {
+            return false;
+        }
+        let Some(previous) = chat
+            .messages
+            .with(|cache| cache.previous(id).map(|(_, row)| row.clone()))
+        else {
+            return false;
+        };
+        previous.with(|p| {
+            message.with(|m| {
+                thiscord_frontend::chat_history::groups_with(
+                    p.author_id,
+                    p.created_at,
+                    m.author_id,
+                    m.created_at,
+                )
+            })
+        })
+    });
+    let edited = move || message.with(|m| m.edited_at.is_some() && !m.deleted);
+    let full_time = move || message.with(|m| crate::i18n::datetime(m.created_at));
+    let author = move || message.with(|m| m.author_id.map(|id| id.to_string()));
+    let name = Signal::derive(move || message.with(|m| m.display_name().to_owned()));
     view! {
-        <li node_ref=row class="message-row min-h-20 pb-4" class:ring-2=move || chat.highlight.get()==Some(id) class:ring-brand=move || chat.highlight.get()==Some(id) data-message-id=id.to_string()>
+        <li node_ref=row class="message-row" class:message-grouped=move || grouped.get() data-message-id=id.to_string()>
+            <Show when=divider>
+                <div class="unread-divider" role="separator"><span>{move || crate::i18n::t("New messages")}</span></div>
+            </Show>
             <div class=move || if message.with(|m| chat.ui.account.with(|a| a.as_ref().is_some_and(|a| m.mentions.contains(&a.id)))) {
-                "rounded-lg bg-brand/10 px-3 py-2"
-            } else { "rounded-lg px-3 py-2" }>
-                <div class="flex flex-wrap items-center gap-3">
-                    <button class="font-semibold hover:underline" aria-haspopup="menu" data-context-user=move ||message.with(|m|m.author_id.map(|id|id.to_string())) data-context-name=move ||message.with(|m|m.display_name().to_owned())>{move || message.with(|m| m.display_name().to_owned())}</button>
-                    <time class="text-xs text-white/40">{move || message.with(|m| crate::i18n::datetime(m.created_at))}</time>
-                    <Show when=move || message.with(|m| m.edited_at.is_some() && !m.deleted)><span class="text-xs text-white/40">{move ||crate::i18n::t("edited")}</span></Show>
+                "message-body bg-brand/10"
+            } else { "message-body" } class:ring-2=move || chat.highlight.get()==Some(id) class:ring-brand=move || chat.highlight.get()==Some(id) class:message-editing=move || composer.editing.get()==Some(id)>
+                <div class="message-gutter">
+                    <Show when=move || !grouped.get() fallback=move || view! {
+                        <time class="message-hover-time" title=full_time>{move || message.with(|m| crate::i18n::clock(m.created_at))}</time>
+                    }>
+                        <span class="block" aria-hidden="true" data-context-user=author data-context-name=name>
+                            <crate::avatar::Avatar class="size-10 text-sm" name avatar_id=Signal::derive(move || message.with(|m| m.author_avatar_id))/>
+                        </span>
+                    </Show>
                 </div>
-                <rich::Reply chat message/>
-                <div class="whitespace-pre-wrap break-words text-white/85">{move || message.with(|m| super::message_content::render(if m.deleted { "Message deleted" } else { &m.content }, chat.ui))}</div>
-                <Show when=move || message.with(|m| !m.deleted)>
-                    <For each=move || message.with(|m| m.attachments.clone()) key=|a| a.id children=move |attachment| view! { <attachments::Card chat message=id attachment/> }/>
-                    <rich::Actions chat message editing draft/>
-                </Show>
+                <div class="min-w-0 flex-1">
+                    <Show when=move || !grouped.get()>
+                        <div class="flex flex-wrap items-baseline gap-x-2">
+                            <button class="font-semibold hover:underline" aria-haspopup="menu" data-context-user=author data-context-name=name>{name}</button>
+                            <time class="text-xs text-white/40" title=full_time>{move || message.with(|m| crate::i18n::message_time(m.created_at))}</time>
+                        </div>
+                    </Show>
+                    <rich::Reply chat message/>
+                    <div class="whitespace-pre-wrap break-words text-white/85">
+                        {move || message.with(|m| super::message_content::render(if m.deleted { "Message deleted" } else { &m.content }, chat.ui))}
+                        <Show when=edited><span class="ml-1 text-xs text-white/40">{move || format!("({})", crate::i18n::t("edited"))}</span></Show>
+                    </div>
+                    <Show when=move || message.with(|m| !m.deleted)>
+                        <For each=move || message.with(|m| m.attachments.clone()) key=|a| a.id children=move |attachment| view! { <attachments::Card chat message=id attachment/> }/>
+                        <rich::Actions chat message composer/>
+                    </Show>
+                </div>
             </div>
         </li>
     }
 }
 
 /// Keep presence in the header, using the same overlapping bubbles and root
-/// tooltip as stream viewers. The presence contract supplies names, not photos.
+/// tooltip as stream viewers, with profile pictures when the server supplies them.
 #[component]
 fn OnlineMembers(chat: Chat) -> impl IntoView {
     const VISIBLE: usize = 4;
@@ -857,7 +969,7 @@ fn OnlineMembers(chat: Chat) -> impl IntoView {
                         view! {
                             <span class="stream-watcher" tabindex="0" role="img" data-tip=move ||names.get()
                                 aria-label=move ||thiscord_frontend::localized_format!(crate::i18n::language(), "Online here: {}", name.get())>
-                                <crate::avatar::Avatar class="size-6 text-[10px]" name avatar_id=Signal::derive(||None)/>
+                                <crate::avatar::Avatar class="size-6 text-[10px]" name avatar_id=Signal::derive(move ||chat.online.with(|members|members.iter().find(|m|m.account_id==id).and_then(|m|m.avatar_id)))/>
                             </span>
                         }
                     }/>
@@ -888,6 +1000,14 @@ pub(super) fn ChatPanel(
             channel_id: Some(channel),
         },
     );
+    let unread_count = move || {
+        ui.unread.with(|unread| {
+            unread
+                .iter()
+                .find(|c| c.channel_id == channel)
+                .map_or(0, |c| c.count)
+        })
+    };
     let epoch = ui.chat_epoch.get_untracked();
     let chat = Chat {
         ui,
@@ -918,15 +1038,33 @@ pub(super) fn ChatPanel(
         rich: RwSignal::new(RichChat::default()),
         highlight: RwSignal::new(None),
         searching: search.active,
+        unread_on_open: RwSignal::new(unread_count()),
+        first_unread: RwSignal::new(None),
     };
+    // The channel list's count can arrive with the new subscription; keep the
+    // latest value until the first history snapshot consumes it.
+    Effect::new(move |_| {
+        let count = unread_count();
+        if count > 0 && !chat.ready.get_untracked() && chat.first_unread.get_untracked().is_none() {
+            chat.unread_on_open.set(count);
+        }
+    });
     Effect::new(move |_| {
         if !search.active.get() {
             chat.scroll();
         }
     });
-    let draft = RwSignal::new(String::new());
-    let mentions = mentions::Picker::new(chat, draft);
     let editing = RwSignal::new(None::<MessageId>);
+    let draft = super::draft_signal(ui, super::Draft::Channel(channel), move || {
+        editing.get_untracked().is_some()
+    });
+    let mentions = mentions::Picker::new(chat, draft);
+    let composer = Composer {
+        draft,
+        editing,
+        stash: StoredValue::new(None),
+        input: mentions.input,
+    };
     let loading = RwSignal::new(false);
     let queue = attachments::Queue::new(chat);
     Effect::new(move |_| {
@@ -1022,8 +1160,10 @@ pub(super) fn ChatPanel(
                 match result {
                     Ok(ChatResponse::Message { message }) => {
                         chat.merge(*message);
-                        editing.set(None);
-                        draft.set(String::new());
+                        // The user may have cancelled (restoring the draft) while saving.
+                        if editing.get_untracked() == Some(id) {
+                            composer.end_edit();
+                        }
                     }
                     Err(e) => chat.status.set(e),
                     _ => {}
@@ -1088,6 +1228,33 @@ pub(super) fn ChatPanel(
         if mentions.keydown(&ev) {
             return;
         }
+        let plain = !ev.shift_key() && !ev.ctrl_key() && !ev.alt_key() && !ev.meta_key();
+        if ev.key() == "Escape" && editing.get_untracked().is_some() {
+            ev.prevent_default();
+            composer.end_edit();
+            return;
+        }
+        // Up in an empty composer edits your newest editable message.
+        if ev.key() == "ArrowUp"
+            && plain
+            && !ev.is_composing()
+            && editing.get_untracked().is_none()
+            && draft.with_untracked(String::is_empty)
+            && chat
+                .permissions
+                .with_untracked(|p| p.contains(&Permission::EditOwnMessages))
+            && let Some(me) = ui.account.with_untracked(|a| a.as_ref().map(|a| a.id))
+            && let Some((id, content)) = chat.messages.with_untracked(|cache| {
+                let id = cache.latest_where(|row| {
+                    row.with_untracked(|m| m.author_id == Some(me) && !m.deleted)
+                })?;
+                Some((id, cache.get(id)?.with_untracked(|m| m.content.clone())))
+            })
+        {
+            ev.prevent_default();
+            composer.begin_edit(id, content);
+            return;
+        }
         // Leave Enter available for IME candidate selection and Shift+Enter newlines.
         if ev.key() == "Enter" && !ev.shift_key() && !ev.is_composing() && ev.key_code() != 229 {
             ev.prevent_default();
@@ -1130,7 +1297,7 @@ pub(super) fn ChatPanel(
                                 .filter_map(|id| cache.get(*id).map(|row| (generation, *id, row.clone()))).collect::<Vec<_>>()))
                         }
                         key=|(generation, id, _)| (*generation, *id)
-                        children=move |(_, id, message)| view! { <MessageRow chat id message editing draft/> }
+                        children=move |(_, id, message)| view! { <MessageRow chat id message composer/> }
                     />
                     <li aria-hidden="true" style:height=move || visible.with(|w| format!("{}px", w.after))></li>
                 </ul>
@@ -1160,7 +1327,7 @@ pub(super) fn ChatPanel(
             </Show>
             <footer class="flex shrink-0 flex-col gap-2 border-t border-white/10 p-3" style:display=move ||if search.active.get(){"none"}else{""}>
                 <p class="text-xs text-white/60" hidden=move ||typing_notice.with(String::is_empty) aria-live="polite">{move ||typing_notice.get()}</p>
-                <Show when=move||editing.get().is_some()><button class="text-sm text-brand underline" on:click=move |_|{editing.set(None);draft.set(String::new());}>{move || crate::i18n::t("Cancel edit")}</button></Show>
+                <Show when=move||editing.get().is_some()><p class="text-xs text-white/60"><button class="text-sm text-brand underline" on:click=move |_|composer.end_edit()>{move || crate::i18n::t("Cancel edit")}</button>" · "{move || crate::i18n::t("Escape to cancel · Enter to save")}</p></Show>
                 <Show when=move ||chat.reply_to.get().is_some()><div class="flex gap-3 text-sm text-sky-300"><span class="max-w-80 truncate">{move || chat.reply_to.get().map(|id|chat.messages.with(|cache|cache.get(id).map(|m|m.with(|m|thiscord_frontend::localized_format!(crate::i18n::language(), "Reply to {}: {}",m.display_name(),m.content.chars().take(80).collect::<String>()))).unwrap_or_else(||crate::i18n::t("Reply selected").into())))}</span><button on:click=move |_|chat.reply_to.set(None)>{move ||crate::i18n::t("Cancel reply")}</button></div></Show>
                 <attachments::QueuedFiles queue/>
                 <form class="flex items-center gap-2" on:submit=submit>
@@ -1176,10 +1343,21 @@ pub(super) fn ChatPanel(
                                 on:compositionstart=move |_| mentions.composition(true) on:compositionend=move |_| mentions.composition(false)
                                 rows="2" maxlength="4000" placeholder=move || crate::i18n::t("Message this channel · @ to mention") prop:value=move||draft.get()
                                 disabled=move||!chat.permissions.with(|p|p.contains(&Permission::SendMessages))
+                                on:paste=move |ev: leptos::ev::ClipboardEvent| {
+                                    // Screenshots and copied files become attachments; text pastes normally.
+                                    if editing.get_untracked().is_none()
+                                        && let Some(files) = ev.clipboard_data().and_then(|d| d.files())
+                                        && files.length() > 0
+                                    {
+                                        ev.prevent_default();
+                                        queue.add(files);
+                                    }
+                                }
                                 on:input=move|ev|{draft.set(event_target_value(&ev));chat.typing.set(true);mentions.input();}/>
                         </label>
                     </div>
                     <div class="flex shrink-0 items-center gap-1">
+                        <super::emoji::ComposerEmoji input=mentions.input draft disabled=Signal::derive(move ||!chat.permissions.with(|p|p.contains(&Permission::SendMessages)))/>
                         <attachments::Picker queue editing/>
                         <button class="icon-button bg-brand" aria-label=move ||if editing.get().is_some(){crate::i18n::t("Save message")}else{crate::i18n::t("Send message")} data-tip=move ||if editing.get().is_some(){crate::i18n::t("Save")}else{crate::i18n::t("Send")} disabled=move||loading.get()||!composer_ready()||!chat.permissions.with(|p|p.contains(&Permission::SendMessages))><Icon kind=Glyph::Send/></button>
                     </div>

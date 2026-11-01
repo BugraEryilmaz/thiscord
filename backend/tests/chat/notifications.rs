@@ -117,13 +117,40 @@ async fn notifications_push_across_channels_deduplicate_filter_mute_and_revoke()
     assert_eq!(next(&mut other_device).await["type"], "ready");
     chat(&app,&owner,json!({"action":"send","guild_id":guild,"channel_id":channel,"client_id":Uuid::new_v4(),"content":"muted"}),StatusCode::OK).await;
     quiet(&mut guest_socket).await;
-    let prefs = notification(
+    notification(
         &app,
         &guest,
         json!({"action":"snooze","target":target,"duration":"resume"}),
         StatusCode::OK,
     )
     .await;
+    next(&mut guest_socket).await;
+    next(&mut other_device).await;
+    // Account-wide Do Not Disturb syncs to every device and silences all sources.
+    let dnd = notification(
+        &app,
+        &guest,
+        json!({"action":"do_not_disturb","duration":"forever"}),
+        StatusCode::OK,
+    )
+    .await;
+    assert_eq!(dnd["do_not_disturb"]["type"], "forever");
+    assert_eq!(
+        next(&mut other_device).await["preferences"]["do_not_disturb"]["type"],
+        "forever"
+    );
+    next(&mut guest_socket).await;
+    chat(&app,&owner,json!({"action":"send","guild_id":guild,"channel_id":channel,"client_id":Uuid::new_v4(),"content":"hello @guest during dnd"}),StatusCode::OK).await;
+    quiet(&mut guest_socket).await;
+    quiet(&mut other_device).await;
+    let prefs = notification(
+        &app,
+        &guest,
+        json!({"action":"do_not_disturb","duration":"resume"}),
+        StatusCode::OK,
+    )
+    .await;
+    assert_eq!(prefs["do_not_disturb"]["type"], "none");
     next(&mut guest_socket).await;
     next(&mut other_device).await;
     let delivery = json!({"mode":"mentions","sound":false,"banner":true,"volume":35});

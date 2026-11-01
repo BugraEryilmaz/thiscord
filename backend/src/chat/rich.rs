@@ -65,16 +65,32 @@ pub(super) fn react(
     emoji: &str,
     present: bool,
 ) -> Result<bool, Failure> {
-    if !REACTION_EMOJI.contains(&emoji) {
+    if !is_reaction_emoji(emoji) {
         return Err(Failure::Invalid("Unsupported reaction"));
     }
     let exists: Vec<bool> = query(
         c,
-        "SELECT to_jsonb(TRUE) AS data FROM messages WHERE id=$1::uuid AND guild_id=$2::uuid AND channel_id=$3::uuid AND NOT deleted",
+        "SELECT to_jsonb(TRUE) AS data FROM messages WHERE id=$1::uuid AND guild_id=$2::uuid AND channel_id=$3::uuid AND NOT deleted FOR NO KEY UPDATE",
         &[&id.to_string(), &guild.to_string(), &channel.to_string()],
     )?;
     if exists.is_empty() {
         return Err(Failure::Forbidden);
+    }
+    // The row lock above serializes reactions on this message, so the distinct
+    // count cannot be exceeded by concurrent first uses of different emoji.
+    if present {
+        let (kinds, repeat): (i64, bool) = query(
+            c,
+            "SELECT jsonb_build_array(count(DISTINCT emoji),COALESCE(bool_or(emoji=$2),FALSE)) AS data FROM message_reactions WHERE message_id=$1::uuid",
+            &[&id.to_string(), emoji],
+        )?
+        .pop()
+        .unwrap_or((0, false));
+        if !repeat && kinds >= MAX_REACTION_KINDS as i64 {
+            return Err(Failure::Invalid(
+                "This message has too many different reactions",
+            ));
+        }
     }
     let changed = if present {
         execute(
@@ -128,7 +144,7 @@ pub(super) fn pins(
 ) -> Result<Vec<ChatMessage>, Failure> {
     let mut rows = query(
         c,
-        "SELECT to_jsonb(m)||jsonb_build_object('username',COALESCE(a.username,'Deleted account'),'display_name',COALESCE(a.display_name,'')) AS data FROM messages m LEFT JOIN accounts a ON a.id=m.author_id WHERE guild_id=$1::uuid AND channel_id=$2::uuid AND pinned AND NOT deleted ORDER BY m.created_at DESC,m.id DESC LIMIT 50",
+        "SELECT to_jsonb(m)||jsonb_build_object('author_avatar_id',av.id,'username',COALESCE(a.username,'Deleted account'),'display_name',COALESCE(a.display_name,'')) AS data FROM messages m LEFT JOIN accounts a ON a.id=m.author_id LEFT JOIN account_avatars av ON av.account_id=m.author_id WHERE guild_id=$1::uuid AND channel_id=$2::uuid AND pinned AND NOT deleted ORDER BY m.created_at DESC,m.id DESC LIMIT 50",
         &[&guild.to_string(), &channel.to_string()],
     )?;
     hydrate(c, actor, &mut rows)?;
@@ -157,7 +173,7 @@ pub(super) fn context(
           (SELECT * FROM messages WHERE guild_id=$1::uuid AND channel_id=$2::uuid AND (created_at,id)<($3::timestamptz,$4::uuid) ORDER BY created_at DESC,id DESC LIMIT 25)
           UNION ALL
           (SELECT * FROM messages WHERE guild_id=$1::uuid AND channel_id=$2::uuid AND (created_at,id)>=($3::timestamptz,$4::uuid) ORDER BY created_at,id LIMIT 26)
-        ) SELECT to_jsonb(m)||jsonb_build_object('username',COALESCE(a.username,'Deleted account'),'display_name',COALESCE(a.display_name,'')) AS data FROM nearby m LEFT JOIN accounts a ON a.id=m.author_id ORDER BY m.created_at,m.id
+        ) SELECT to_jsonb(m)||jsonb_build_object('author_avatar_id',av.id,'username',COALESCE(a.username,'Deleted account'),'display_name',COALESCE(a.display_name,'')) AS data FROM nearby m LEFT JOIN accounts a ON a.id=m.author_id LEFT JOIN account_avatars av ON av.account_id=m.author_id ORDER BY m.created_at,m.id
     "#,
         &[
             &guild.to_string(),
