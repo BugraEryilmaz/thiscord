@@ -141,17 +141,21 @@ contain download URLs or signing keys.
 The release workflow can announce automatically **after** all signed platform
 artifacts and the complete feed are published. Configure the repository variable
 `THISCORD_NOTIFICATION_URL` to the backend HTTPS `/api/v1/notifications` endpoint
-and secret `THISCORD_NOTIFICATION_TOKEN` to a valid instance-admin session. Session
-expiry/revocation still applies; rotate it through normal account management. If
-either is absent the release script reports that announcement is unconfigured.
+and secrets `THISCORD_RELEASE_LOGIN`/`THISCORD_RELEASE_PASSWORD` to the username and
+password of a **dedicated** instance-admin account. The publish job signs in, sends
+`publish_update`, then signs that session out; the token is masked and never stored.
+A dedicated account matters: signing in can evict the account's oldest device session,
+and the secret should not unlock anyone's personal account. If any of these are
+absent the release script reports that announcement is unconfigured.
 An announcement failure after release publication must be retried as this API
 command, not by republishing the release. Deploy this backend before enabling the
 workflow step. No production configuration or release is changed by this feature.
 
-The desktop checks the signed feed once when a newer announcement arrives, or
-when the user explicitly chooses Check for updates. There is no launch/six-hour
-feed polling or one-second UI status polling: native updater status is pushed via
-Tauri events. Announcements cannot install software. Existing signature, signed
+The desktop checks the signed feed once at launch (release builds only), once
+when a newer announcement arrives, or when the user explicitly chooses Check for
+updates. There is no periodic feed polling or one-second UI status polling: native
+updater status is pushed via Tauri events. An available update opens a large
+prompt offering Download and install or Not now; dismissal lasts until restart. Announcements cannot install software. Existing signature, signed
 version, download-origin and explicit install/restart checks remain in force;
 installation is still blocked during voice. Muting update alerts does not disable
 the manual check in Settings → Updates.

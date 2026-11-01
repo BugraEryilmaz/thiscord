@@ -1,9 +1,10 @@
 # Desktop releases and updates
 
-The native client checks the public GitHub update feed when a newer release is
-announced through its server notification subscription. It shows a customizable
-update banner and an **Install and
-restart** button. Nothing downloads or installs until that button is clicked.
+The native client checks the public GitHub update feed once at launch and when
+a newer release is announced through its server notification subscription. An
+available update opens a large prompt with **Download and install** and **Not now**
+(dismissed until the next launch); announcements also show a customizable banner.
+Nothing downloads or installs until the user chooses to install.
 **Settings → App updates** also provides a manual check. Installation is blocked
 while connected to voice; joining voice is blocked during installation/download.
 The login screen has an Updates button too. Development builds disable updates.
