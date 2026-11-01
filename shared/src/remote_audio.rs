@@ -66,11 +66,7 @@ impl Command {
             {
                 Err("Invalid speaker volume")
             }
-            Self::AudioShortcutsSave { settings }
-                if settings.mute.len() > 128 || settings.deafen.len() > 128 =>
-            {
-                Err("Invalid shortcut")
-            }
+            Self::AudioShortcutsSave { settings } if settings.too_long() => Err("Invalid shortcut"),
             _ => Ok(()),
         }
     }
@@ -124,5 +120,32 @@ mod tests {
             serde_json::from_str::<Command>(r#"{"command":"video_diagnostics","path":"x"}"#)
                 .is_err()
         );
+        let long = AudioShortcuts {
+            overlay_unlock: "A".repeat(129),
+            ..Default::default()
+        };
+        assert!(
+            Command::AudioShortcutsSave { settings: long }
+                .validate()
+                .is_err()
+        );
+    }
+
+    #[test]
+    fn disabled_overlay_shortcuts_stay_compatible_with_older_desktops() {
+        let value = serde_json::to_value(AudioShortcuts::default()).unwrap();
+        assert_eq!(
+            value,
+            serde_json::json!({"mute":"Control+Shift+M","deafen":"Control+Shift+D"})
+        );
+        let older: AudioShortcuts = serde_json::from_str(r#"{"mute":"F8","deafen":""}"#).unwrap();
+        assert!(older.overlay_visibility.is_empty() && older.overlay_unlock.is_empty());
+        let set = AudioShortcuts {
+            overlay_corner: "F9".into(),
+            ..Default::default()
+        };
+        let round: AudioShortcuts =
+            serde_json::from_value(serde_json::to_value(&set).unwrap()).unwrap();
+        assert_eq!(round, set);
     }
 }

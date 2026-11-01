@@ -5,7 +5,7 @@ use std::sync::{
 };
 use tauri::Manager;
 use tauri_plugin_global_shortcut::{GlobalShortcutExt, Shortcut, ShortcutState};
-use thiscord_shared::audio::{AudioShortcutStatus, AudioShortcuts, AudioToggle};
+use thiscord_shared::audio::{AudioShortcutStatus, AudioShortcuts, ShortcutAction};
 
 #[derive(Default)]
 pub struct ShortcutStateStore(Mutex<Bindings>);
@@ -16,14 +16,11 @@ struct Bindings {
     error: Option<String>,
 }
 
-fn parse(settings: &AudioShortcuts) -> Result<Vec<(Shortcut, AudioToggle)>, String> {
+fn parse(settings: &AudioShortcuts) -> Result<Vec<(Shortcut, ShortcutAction)>, String> {
     let mut keys = Vec::new();
     let ptt: Shortcut = "Control+Shift+Space".parse().unwrap();
-    for (value, action) in [
-        (&settings.mute, AudioToggle::Mute),
-        (&settings.deafen, AudioToggle::Deafen),
-    ] {
-        if value.len() > 128 {
+    for (value, action) in settings.bindings() {
+        if value.len() > AudioShortcuts::MAX_LEN {
             return Err("Shortcut is too long".into());
         }
         if value.trim().is_empty() {
@@ -36,7 +33,7 @@ fn parse(settings: &AudioShortcuts) -> Result<Vec<(Shortcut, AudioToggle)>, Stri
             return Err("Ctrl+Shift+Space is reserved for push-to-talk".into());
         }
         if keys.iter().any(|(existing, _)| *existing == key) {
-            return Err("Mute and deafen must use different shortcuts".into());
+            return Err("Each action needs a different shortcut".into());
         }
         keys.push((key, action));
     }
@@ -51,7 +48,10 @@ fn install(
     let keys = parse(&settings)?;
     #[cfg(target_os = "linux")]
     if !keys.is_empty() && std::env::var_os("WAYLAND_DISPLAY").is_some() {
-        return Err("Global shortcuts need an X11 session. Clear both shortcuts to disable them on Wayland.".into());
+        return Err(
+            "Global shortcuts need an X11 session. Clear all shortcuts to disable them on Wayland."
+                .into(),
+        );
     }
     let mut added = Vec::new();
     for (key, _) in &keys {
@@ -84,9 +84,16 @@ fn install(
                                 .find(|(k, _)| *k == key)
                                 .map(|(_, a)| a)
                         });
-                    if let Some(action) = action
-                        && let Err(error) =
+                    let result = match action {
+                        Some(ShortcutAction::Audio(action)) => {
                             crate::native_audio::audio_toggle(app.clone(), action).await
+                        }
+                        Some(ShortcutAction::Overlay(action)) => {
+                            crate::native_overlay::action(app.clone(), action).await
+                        }
+                        None => Ok(()),
+                    };
+                    if let Err(error) = result
                         && let Ok(mut state) = app.state::<ShortcutStateStore>().0.lock()
                     {
                         state.error = Some(error);
@@ -220,31 +227,51 @@ mod tests {
         assert!(
             parse(&AudioShortcuts {
                 mute: "Ctrl+Shift+M".into(),
-                deafen: "Shift+Control+KeyM".into()
+                deafen: "Shift+Control+KeyM".into(),
+                ..Default::default()
             })
             .is_err()
         );
         assert!(
             parse(&AudioShortcuts {
-                mute: "Ctrl+Shift+Space".into(),
-                deafen: String::new()
+                overlay_unlock: "Ctrl+Shift+Space".into(),
+                ..Default::default()
             })
             .is_err()
         );
         assert!(
             parse(&AudioShortcuts {
-                mute: "not a key".into(),
-                deafen: String::new()
+                overlay_corner: "not a key".into(),
+                ..Default::default()
             })
             .is_err()
         );
         assert!(
             parse(&AudioShortcuts {
                 mute: String::new(),
-                deafen: String::new()
+                deafen: String::new(),
+                ..Default::default()
             })
             .unwrap()
             .is_empty()
         );
+        // Overlay shortcuts join the same conflict check as mute and deafen.
+        assert!(
+            parse(&AudioShortcuts {
+                overlay_visibility: "Control+Shift+M".into(),
+                ..Default::default()
+            })
+            .is_err()
+        );
+        let all = parse(&AudioShortcuts {
+            overlay_visibility: "Control+Shift+O".into(),
+            overlay_corner: "Control+Shift+K".into(),
+            overlay_unlock: "Control+Shift+L".into(),
+            ..Default::default()
+        })
+        .unwrap();
+        assert_eq!(all.len(), 5);
+        assert!(all.iter().any(|(_, action)| *action
+            == ShortcutAction::Overlay(thiscord_shared::overlay::OverlayAction::NextCorner)));
     }
 }

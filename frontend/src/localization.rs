@@ -222,6 +222,7 @@ mod tests {
         }
         use thiscord_shared::{
             notifications::{Kind, Snooze},
+            overlay::OverlayCorner,
             voice_bots::{ConnectionProfile, MicrophoneLoop},
         };
         for label in Kind::ALL
@@ -230,6 +231,7 @@ mod tests {
             .chain(Snooze::OPTIONS.map(|(_, label)| label))
             .chain(ConnectionProfile::ALL.map(ConnectionProfile::label))
             .chain(MicrophoneLoop::ALL.map(MicrophoneLoop::label))
+            .chain(OverlayCorner::ALL.map(OverlayCorner::label))
             .chain(Kind::ALL.map(crate::notification_sound::description))
         {
             assert!(

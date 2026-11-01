@@ -182,9 +182,11 @@ Exactly three Cargo packages share a root lockfile:
 
 Desktop voice includes a participant overlay with green speaking rings while
 Thiscord is out of focus. Hover your own entry for mute/deafen controls; other
-areas pass clicks through. Voice & audio also has customizable global mute/deafen
-shortcuts (Ctrl+Shift+M / Ctrl+Shift+D by default). Use windowed or
-borderless games. See [overlay behavior and platform limits](docs/audio.md#in-game-voice-overlay).
+areas pass clicks through. Settings → Shortcuts & overlay chooses its corner,
+display and edge distances, lets you drag it in positioning mode, and adds an
+optional hide/show button. Global shortcuts toggle mute/deafen (Ctrl+Shift+M /
+Ctrl+Shift+D by default) and, once set, hide/show, rotate corners or unlock the
+overlay. Use windowed or borderless games. See [overlay behavior and platform limits](docs/audio.md#in-game-voice-overlay).
 
 The root defaults to `shared` so plain `cargo check` needs neither desktop system
 libraries nor PostgreSQL headers. Select other packages explicitly.

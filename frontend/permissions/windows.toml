@@ -58,8 +58,9 @@ commands.allow = [
   "voice_leave",
   "voice_status",
   "overlay_snapshot",
-  "overlay_enabled",
-  "overlay_enable",
+  "overlay_settings",
+  "overlay_settings_save",
+  "overlay_action",
   "update_status",
   "update_check",
   "update_install",
@@ -74,6 +75,11 @@ commands.allow = ["overlay_snapshot"]
 identifier = "overlay-self-controls"
 description = "Toggle only the local microphone mute and deafen while connected to voice."
 commands.allow = ["overlay_toggle_audio"]
+
+[[permission]]
+identifier = "overlay-presentation"
+description = "Hide, rotate or move the overlay itself; moving requires positioning mode enabled from Settings or a shortcut."
+commands.allow = ["overlay_action", "overlay_start_drag"]
 
 [[permission]]
 identifier = "notification-banner"

@@ -89,8 +89,25 @@ html:has(.voice-overlay), body:has(.voice-overlay) {
   overflow: hidden;
   margin: 0;
 }
-.voice-overlay { padding: 6px; user-select: none; pointer-events: none; }
-.overlay-person { position: relative; display: flex; align-items: center; margin-bottom: 10px; height: 52px; }
+/* Geometry mirrors voice_overlay.rs hit testing: 6px padding, 24px button,
+   10px gaps and 52px rows measured from the anchored corner. */
+.voice-overlay { box-sizing: border-box; display: flex; flex-direction: column; align-items: flex-start; gap: 10px; height: 100vh; padding: 6px; overflow: hidden; user-select: none; pointer-events: none; }
+.voice-overlay.overlay-bottom { flex-direction: column-reverse; }
+.voice-overlay.overlay-right { align-items: flex-end; }
+.overlay-person { position: relative; display: flex; flex-shrink: 0; align-items: center; max-width: 100%; height: 52px; }
+.overlay-right .overlay-person { flex-direction: row-reverse; }
+.overlay-right .overlay-label { margin-left: 0; margin-right: 8px; }
+.overlay-right .overlay-actions { left: 0; right: 56px; justify-content: flex-end; }
+.overlay-visibility { display: grid; place-items: center; flex-shrink: 0; width: 24px; height: 24px; border: 1px solid #ffffff24; border-radius: 6px; background: #17191eb3; color: #d6d8df; opacity: .4; pointer-events: auto; cursor: pointer; transition: opacity .12s; }
+.overlay-visibility:hover, .overlay-visibility:focus-visible, .overlay-visibility[aria-pressed="true"]:hover { opacity: 1; }
+.overlay-visibility svg { width: 14px; height: 14px; }
+.voice-overlay.overlay-unlocked { pointer-events: auto; cursor: move; border-radius: 10px; background: #11131ab3; outline: 2px dashed #8490ff; outline-offset: -2px; }
+.overlay-move-bar { display: flex; flex-shrink: 0; align-items: center; gap: 6px; align-self: stretch; padding: 6px 8px; border-radius: 7px; background: #24262ef2; color: #e6e8ef; font-size: 12px; font-weight: 600; }
+.overlay-move-bar span { flex: 1; }
+.overlay-move-bar button { padding: 4px 8px; border: 1px solid #ffffff24; border-radius: 5px; background: #ffffff12; color: white; font-size: 12px; cursor: pointer; }
+.overlay-move-bar .overlay-done { border-color: transparent; background: #6975f5; }
+.overlay-placeholder { padding: 8px; color: #c9ccd6; font-size: 13px; line-height: 1.5; }
+.overlay-error { flex-shrink: 0; padding: 8px; border-radius: 5px; background: #0f172a; color: #fca5a5; font-size: 14px; }
 .overlay-avatar {
   display: grid; place-items: center; flex: 0 0 48px; height: 48px;
   border: 3px solid #747781; border-radius: 50%; background: #303344;

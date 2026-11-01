@@ -107,8 +107,9 @@ an active voice connection expose their actual devices, saved preferences, meter
 echo/quality diagnostics and speaker gains. The dialog renders the same
 `AudioSettingsPanel`, shortcut, overlay and diagnostic-logging components as the
 local desktop, using an explicit remote command adapter. Changes use the native
-save path, apply during the call, and persist on that computer; the overlay toggle
-retains its existing session-only behavior. The desktop refreshes audio preferences
+save path, apply during the call, and persist on that computer. The overlay
+section offers only its on/off toggle remotely; placement and positioning mode
+stay local because they depend on the user's screen. The desktop refreshes audio preferences
 so remote changes appear locally. Local-only recording, filesystem-opening,
 push-to-talk hold and connection/test actions are not remotely callable.
 
