@@ -1,5 +1,6 @@
 use crate::{
-    AccountId, ApiError, AttachmentId, ChannelId, ClientMessageId, GuildId, MessageId, Timestamp,
+    AccountId, ApiError, AttachmentId, AvatarId, ChannelId, ClientMessageId, GuildId, MessageId,
+    Timestamp,
     pagination::{PageCursor, PageSize},
 };
 use serde::{Deserialize, Serialize};
@@ -9,8 +10,68 @@ pub const SOCKET_VERSION: u8 = 1;
 pub const MAX_MESSAGE_CHARS: usize = 4000;
 pub const MAX_MENTION_QUERY_CHARS: usize = 64;
 pub const MENTION_SUGGESTION_LIMIT: usize = 8;
-/// A bounded, interoperable reaction palette. No custom image or shortcode URLs.
+/// Quick reactions shown first. Every entry is also part of [`EMOJI_GROUPS`].
 pub const REACTION_EMOJI: &[&str] = &["👍", "👎", "❤️", "😂", "🎉", "😮", "😢", "🔥", "✅", "👀"];
+/// A bounded, interoperable Unicode emoji palette for the picker and reactions.
+/// No custom image or shortcode URLs. Labels are English UI catalog keys.
+pub const EMOJI_GROUPS: &[(&str, &[&str])] = &[
+    (
+        "Smileys",
+        &[
+            "😀", "😃", "😄", "😁", "😆", "😅", "🤣", "😂", "🙂", "😉", "😊", "😇", "🥰", "😍",
+            "🤩", "😘", "😋", "😛", "😜", "🤪", "🤔", "🤨", "😐", "😑", "😶", "🙄", "😏", "😬",
+            "😌", "😔", "😴", "😷", "🤒", "🤯", "🥳", "😎", "🤓", "😮", "😲", "😳", "🥺", "😢",
+            "😭", "😱", "😤", "😡", "🤬", "💀", "🤡", "👻",
+        ],
+    ),
+    (
+        "People",
+        &[
+            "👍", "👎", "👌", "✌️", "🤞", "🤟", "🤘", "👋", "👏", "🙌", "🙏", "💪", "👀", "🤝",
+            "✋", "👉", "👈", "👆", "👇", "🤷", "🤦",
+        ],
+    ),
+    (
+        "Nature",
+        &[
+            "🐶", "🐱", "🐭", "🦊", "🐻", "🐼", "🐸", "🐵", "🐔", "🐧", "🦄", "🐝", "🐢", "🐍",
+            "🌸", "🌻", "🌲", "🌈", "☀️", "🌙", "⚡", "❄️", "🌊",
+        ],
+    ),
+    (
+        "Food",
+        &[
+            "🍕", "🍔", "🍟", "🌭", "🍿", "🥐", "🍩", "🍪", "🎂", "🍰", "🍫", "🍎", "🍉", "🍓",
+            "🍌", "☕", "🍵", "🍺", "🍻", "🥂", "🍷",
+        ],
+    ),
+    (
+        "Activities",
+        &[
+            "🎉", "🎊", "🎁", "🎈", "🏆", "🥇", "⚽", "🏀", "🎮", "🕹️", "🎲", "🎧", "🎤", "🎵",
+            "🎸", "🎬",
+        ],
+    ),
+    (
+        "Objects",
+        &[
+            "📷", "💻", "🖥️", "⌨️", "📱", "💡", "📌", "📎", "🔒", "🔑", "🔔", "🔕", "⏰", "💰",
+            "🚀", "✈️", "🚗", "🏠",
+        ],
+    ),
+    (
+        "Symbols",
+        &[
+            "❤️", "🧡", "💛", "💚", "💙", "💜", "🖤", "🤍", "💔", "💯", "✅", "❌", "❓", "❗",
+            "⭐", "✨", "💥", "💤", "💬", "🔥", "🇹🇷",
+        ],
+    ),
+];
+/// Distinct reaction emoji per message; repeats of existing reactions remain allowed.
+pub const MAX_REACTION_KINDS: usize = 20;
+pub fn is_reaction_emoji(emoji: &str) -> bool {
+    EMOJI_GROUPS.iter().any(|(_, group)| group.contains(&emoji))
+}
 pub const MAX_CHANNEL_PINS: usize = 50;
 
 #[derive(Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -73,6 +134,9 @@ pub struct ChatMessage {
     pub username: String,
     #[serde(default)]
     pub display_name: String,
+    /// Current profile picture of the author. Missing on older servers.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub author_avatar_id: Option<AvatarId>,
     pub content: String,
     #[serde(default)]
     pub attachments: Vec<ChatAttachment>,
@@ -118,6 +182,8 @@ pub struct OnlineMember {
     #[serde(default)]
     pub display_name: String,
     pub typing: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub avatar_id: Option<AvatarId>,
 }
 impl OnlineMember {
     /// Profile label, falling back to the username for older servers.
@@ -339,6 +405,42 @@ mod tests {
         );
         let message:ChatMessage=serde_json::from_value(json!({"id":id,"client_id":id,"guild_id":id,"channel_id":id,"author_id":null,"username":"old","content":"hello","mentions":[],"created_at":"2026-01-01T00:00:00Z","edited_at":null,"deleted":false,"revision":0,"sequence":1})).unwrap();
         assert!(message.reply.is_none() && message.reactions.is_empty() && !message.pinned);
+        assert!(message.author_avatar_id.is_none());
+        assert!(
+            serde_json::to_value(&message)
+                .unwrap()
+                .get("author_avatar_id")
+                .is_none()
+        );
+    }
+
+    #[test]
+    fn author_and_presence_avatars_are_additive() {
+        let id = "00000000-0000-0000-0000-000000000001";
+        let message: ChatMessage = serde_json::from_value(json!({"id":id,"client_id":id,"guild_id":id,"channel_id":id,"author_id":id,"username":"u","author_avatar_id":id,"content":"hi","mentions":[],"created_at":"2026-01-01T00:00:00Z","edited_at":null,"deleted":false,"revision":0,"sequence":1})).unwrap();
+        assert_eq!(message.author_avatar_id.unwrap().to_string(), id);
+        let member: OnlineMember = serde_json::from_value(
+            json!({"account_id":id,"username":"u","typing":false,"avatar_id":id}),
+        )
+        .unwrap();
+        assert_eq!(serde_json::to_value(&member).unwrap()["avatar_id"], id);
+    }
+
+    #[test]
+    fn emoji_palette_is_bounded_unique_and_contains_quick_reactions() {
+        let mut seen = std::collections::HashSet::new();
+        for (label, group) in EMOJI_GROUPS {
+            assert!(!label.is_empty() && !group.is_empty());
+            for emoji in *group {
+                // Mirrors the message_reactions length constraint.
+                assert!((1..=16).contains(&emoji.chars().count()), "{emoji}");
+                assert!(seen.insert(*emoji), "duplicate {emoji}");
+            }
+        }
+        for emoji in REACTION_EMOJI {
+            assert!(is_reaction_emoji(emoji), "{emoji}");
+        }
+        assert!(!is_reaction_emoji("x") && !is_reaction_emoji("") && !is_reaction_emoji("👍👍"));
     }
 
     #[test]

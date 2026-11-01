@@ -161,10 +161,11 @@ fn ActionPopover(
         if !open.get() {
             return;
         }
-        if let (Some(button), Some(panel)) = (trigger.get(), panel.get()) {
-            // Reveal before measuring: the reactive hidden attribute can update
-            // after this effect, otherwise the first open measures a zero box.
-            panel.set_hidden(false);
+        let place = move || {
+            let (Some(button), Some(panel)) = (trigger.get_untracked(), panel.get_untracked())
+            else {
+                return;
+            };
             let anchor = button.get_bounding_client_rect();
             let size = panel.get_bounding_client_rect();
             let w = window()
@@ -186,6 +187,14 @@ fn ActionPopover(
                 (anchor.right() - size.width()).clamp(8.0, (w - size.width() - 8.0).max(8.0)),
                 y.clamp(8.0, (h - size.height() - 8.0).max(8.0)),
             ));
+        };
+        if let Some(panel) = panel.get() {
+            // Reveal before measuring: the reactive hidden attribute can update
+            // after this effect, otherwise the first open measures a zero box.
+            panel.set_hidden(false);
+            place();
+            // Re-place when contents grow, such as the expanded emoji palette.
+            super::observe_size(panel.unchecked_ref(), place);
             if let Ok(Some(first)) = panel.query_selector("button:not(:disabled)")
                 && let Ok(first) = first.dyn_into::<web_sys::HtmlElement>()
             {
@@ -238,6 +247,41 @@ fn ActionPopover(
     }
 }
 
+/// Toggles this account's `emoji` reaction, using the current recipient state.
+fn react(chat: Chat, message: RwSignal<ChatMessage>, busy: RwSignal<bool>, emoji: String) {
+    if busy.get_untracked() {
+        return;
+    }
+    busy.set(true);
+    let (id, present) = message.with_untracked(|m| {
+        (
+            m.id,
+            !m.reactions.iter().any(|r| r.emoji == emoji && r.mine),
+        )
+    });
+    let generation = chat.access_generation.get_untracked();
+    leptos::task::spawn_local(async move {
+        let result = chat
+            .request(&ChatRequest::React {
+                guild_id: chat.guild,
+                channel_id: chat.channel,
+                message_id: id,
+                emoji,
+                present,
+            })
+            .await;
+        if !chat.alive() || chat.access_generation.get_untracked() != generation {
+            return;
+        }
+        busy.try_set(false);
+        match result {
+            Ok(ChatResponse::Message { message }) => chat.merge(*message),
+            Err(e) => chat.status.set(e),
+            _ => {}
+        }
+    });
+}
+
 #[component]
 fn ReactionButton(
     chat: Chat,
@@ -259,18 +303,7 @@ fn ReactionButton(
         <button type="button" aria-pressed=move ||reaction.with(|r|r.as_ref().is_some_and(|r|r.mine)).to_string()
             aria-label=move ||thiscord_frontend::localized_format!(crate::i18n::language(), "React {}", emoji.get_value())
             disabled=move ||busy.get() || !chat.permissions.with(|p|p.contains(&Permission::SendMessages))
-            on:click=move |_| {
-                busy.set(true);
-                let id = message.with_untracked(|m|m.id);
-                let present = !reaction.with_untracked(|r|r.as_ref().is_some_and(|r|r.mine));
-                let generation = chat.access_generation.get_untracked();
-                leptos::task::spawn_local(async move {
-                    let result = chat.request(&ChatRequest::React { guild_id:chat.guild, channel_id:chat.channel, message_id:id, emoji:emoji.get_value(), present }).await;
-                    if !chat.alive() || chat.access_generation.get_untracked()!=generation { return; }
-                    busy.try_set(false);
-                    match result { Ok(ChatResponse::Message { message }) => chat.merge(*message), Err(e) => chat.status.set(e), _ => {} }
-                });
-            }>
+            on:click=move |_| react(chat, message, busy, emoji.get_value())>
             <span>{emoji.get_value()}</span>
             {count.then(||view! {<span>{move ||reaction.with(|r|r.as_ref().map(|r|r.count.to_string()).unwrap_or_default())}</span>})}
         </button>
@@ -281,10 +314,10 @@ fn ReactionButton(
 pub(super) fn Actions(
     chat: Chat,
     message: RwSignal<ChatMessage>,
-    editing: RwSignal<Option<MessageId>>,
-    draft: RwSignal<String>,
+    composer: Composer,
 ) -> impl IntoView {
     let busy = RwSignal::new(false);
+    let more = RwSignal::new(false);
     let own = move || {
         message.with(|m| {
             chat.ui
@@ -323,6 +356,12 @@ pub(super) fn Actions(
                         <div class="message-reaction-picker">
                             {REACTION_EMOJI.iter().map(|emoji| view! {<ReactionButton chat message busy emoji=emoji.to_string()/>}).collect_view()}
                         </div>
+                        <details class="message-reaction-more" on:toggle=move |e| more.set(e.target().and_then(|t| t.dyn_into::<web_sys::HtmlDetailsElement>().ok()).is_some_and(|d| d.open()))>
+                            <summary>{move ||crate::i18n::t("More reactions")}</summary>
+                            <Show when=move ||more.get()>
+                                <super::super::emoji::EmojiGrid pick=Callback::new(move |emoji: &'static str| react(chat, message, busy, emoji.to_owned()))/>
+                            </Show>
+                        </details>
                     </ActionPopover>
                 </Show>
                 <Show when=has_more>
@@ -335,8 +374,8 @@ pub(super) fn Actions(
                             </Show>
                             <Show when=can_edit>
                                 <button type="button" class="context-item" on:click=move |_| {
-                                    editing.set(Some(message.with_untracked(|m|m.id)));
-                                    draft.set(message.with_untracked(|m|m.content.clone()));
+                                    let (id, content) = message.with_untracked(|m| (m.id, m.content.clone()));
+                                    composer.begin_edit(id, content);
                                 }><Icon kind=Glyph::Edit/>{move ||crate::i18n::t("Edit message")}</button>
                             </Show>
                             <Show when=move ||!own()>

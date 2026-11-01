@@ -1,15 +1,32 @@
 //! Bounded, ID-indexed history and variable-height window geometry, independent of the DOM.
 use std::collections::{BTreeMap, HashMap};
-use thiscord_shared::{MessageId, chat::ChatMessage, pagination::PageCursor};
+use thiscord_shared::{AccountId, MessageId, Timestamp, chat::ChatMessage, pagination::PageCursor};
 
 pub const RESIDENT_LIMIT: usize = 500;
 pub const ESTIMATED_HEIGHT: f64 = 112.0;
-pub const MIN_ROW_HEIGHT: f64 = 80.0;
+/// Floor for measured rows; grouped follow-up messages can be a single line.
+pub const MIN_ROW_HEIGHT: f64 = 24.0;
+/// Consecutive messages by one author within this window share a header.
+pub const GROUP_WINDOW_SECONDS: i64 = 7 * 60;
 const OVERSCAN: f64 = 400.0;
+
+/// Whether a message shares the previous message's author header: same known
+/// author, sent in order and within [`GROUP_WINDOW_SECONDS`].
+pub fn groups_with(
+    previous_author: Option<AccountId>,
+    previous_at: Timestamp,
+    author: Option<AccountId>,
+    at: Timestamp,
+) -> bool {
+    previous_author.is_some()
+        && previous_author == author
+        && (0..GROUP_WINDOW_SECONDS).contains(&(at - previous_at).num_seconds())
+}
 
 struct Entry<T> {
     value: T,
     revision: i32,
+    sequence: i64,
     cursor: PageCursor,
     height: f64,
 }
@@ -69,6 +86,22 @@ impl<T> MessageCache<T> {
         self.order.last_key_value().map_or(0, |(seq, _)| *seq)
     }
 
+    /// The resident row immediately before `id` in channel order.
+    pub fn previous(&self, id: MessageId) -> Option<(MessageId, &T)> {
+        let sequence = self.by_id.get(&id)?.sequence;
+        let (_, previous) = self.order.range(..sequence).next_back()?;
+        Some((*previous, &self.by_id[previous].value))
+    }
+
+    /// Newest resident row matching `predicate`.
+    pub fn latest_where(&self, mut predicate: impl FnMut(&T) -> bool) -> Option<MessageId> {
+        self.order
+            .values()
+            .rev()
+            .find(|id| predicate(&self.by_id[*id].value))
+            .copied()
+    }
+
     /// One page/event batch, with O(log n) ordered insertion and O(1) ID lookup.
     /// `T` can be a reference-counted reactive row, released on eviction.
     pub fn merge(
@@ -107,6 +140,7 @@ impl<T> MessageCache<T> {
                 message.id,
                 Entry {
                     revision: message.revision,
+                    sequence: message.sequence,
                     cursor: PageCursor::new(message.created_at, message.id.as_uuid()),
                     height: ESTIMATED_HEIGHT,
                     value: create(message),
@@ -204,7 +238,6 @@ impl<T> MessageCache<T> {
 mod tests {
     use super::*;
     use std::{cell::Cell, rc::Rc};
-    use thiscord_shared::Timestamp;
 
     fn message(sequence: i64) -> ChatMessage {
         let uuid = format!("00000000-0000-0000-0000-{sequence:012x}");
@@ -216,6 +249,7 @@ mod tests {
             author_id: None,
             username: "test".into(),
             display_name: String::new(),
+            author_avatar_id: None,
             content: format!("message {sequence}"),
             mentions: vec![],
             attachments: vec![],
@@ -453,5 +487,49 @@ mod tests {
         );
         assert!(!cache.measure(message(101).id, f64::NAN));
         assert!(!cache.measure(message(101).id, f64::INFINITY));
+    }
+
+    #[test]
+    fn previous_and_latest_follow_channel_order_not_arrival() {
+        let mut cache = MessageCache::default();
+        merge(&mut cache, vec![message(5), message(3)], Merge::Older);
+        merge(&mut cache, vec![message(4)], Merge::Older);
+        assert_eq!(
+            cache.previous(message(5).id).map(|(id, _)| id),
+            Some(message(4).id)
+        );
+        assert_eq!(
+            cache.previous(message(4).id).map(|(id, _)| id),
+            Some(message(3).id)
+        );
+        assert!(cache.previous(message(3).id).is_none());
+        assert!(cache.previous(message(9).id).is_none());
+        assert_eq!(cache.latest_where(|m| m.sequence < 5), Some(message(4).id));
+        assert_eq!(cache.latest_where(|_| false), None);
+    }
+
+    #[test]
+    fn grouping_requires_same_known_author_in_order_within_window() {
+        let author = Some("00000000-0000-0000-0000-000000000001".parse().unwrap());
+        let other = Some("00000000-0000-0000-0000-000000000002".parse().unwrap());
+        let at = Timestamp::from_timestamp(1_000_000, 0).unwrap();
+        let later = |seconds: i64| Timestamp::from_timestamp(1_000_000 + seconds, 0).unwrap();
+        assert!(groups_with(author, at, author, later(0)));
+        assert!(groups_with(
+            author,
+            at,
+            author,
+            later(GROUP_WINDOW_SECONDS - 1)
+        ));
+        assert!(!groups_with(
+            author,
+            at,
+            author,
+            later(GROUP_WINDOW_SECONDS)
+        ));
+        assert!(!groups_with(author, at, author, later(-1)));
+        assert!(!groups_with(author, at, other, later(1)));
+        // Deleted accounts have no author and never merge.
+        assert!(!groups_with(None, at, None, later(1)));
     }
 }

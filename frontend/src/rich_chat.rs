@@ -376,6 +376,7 @@ mod tests {
             author_id: None,
             username: "test".into(),
             display_name: String::new(),
+            author_avatar_id: None,
             content: format!("message {sequence} revision {revision}"),
             attachments: vec![],
             mentions: vec![],

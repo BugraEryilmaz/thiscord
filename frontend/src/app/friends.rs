@@ -497,7 +497,22 @@ fn Conversation(ui: Ui, id: ConversationId) -> impl IntoView {
     let saved_top = StoredValue::new(0);
     let messages = RwSignal::new(Vec::<DirectMessage>::new());
     let older = RwSignal::new(None);
-    let draft = RwSignal::new(String::new());
+    let draft = super::draft_signal(ui, super::Draft::Conversation(id), || false);
+    let input = NodeRef::<leptos::html::Textarea>::new();
+    let edit_request = RwSignal::new(None::<thiscord_shared::MessageId>);
+    // Unread count when the conversation opened, consumed by the first history.
+    let unread_on_open = StoredValue::new(
+        ui.friends
+            .snapshot
+            .with_untracked(|s| {
+                s.friends
+                    .iter()
+                    .find(|f| f.conversation_id == id)
+                    .map(|f| f.unread_count)
+            })
+            .unwrap_or(0),
+    );
+    let first_unread = RwSignal::new(None::<thiscord_shared::MessageId>);
     let error = RwSignal::new(String::new());
     let busy = RwSignal::new(false);
     let loading = RwSignal::new(false);
@@ -594,6 +609,24 @@ fn Conversation(ui: Ui, id: ConversationId) -> impl IntoView {
             });
             let changed = messages.with_untracked(|m| *m != history.messages);
             older.set(history.older);
+            let mut remaining = unread_on_open.get_value();
+            if remaining > 0 && !history.messages.is_empty() {
+                // Same rule as the server count: the friend's undeleted messages.
+                unread_on_open.set_value(0);
+                let me = ui.account.with_untracked(|a| a.as_ref().map(|a| a.id));
+                let mut first = None;
+                for m in history.messages.iter().rev() {
+                    if m.deleted || Some(m.author_id) == me {
+                        continue;
+                    }
+                    first = Some(m.id);
+                    remaining -= 1;
+                    if remaining == 0 {
+                        break;
+                    }
+                }
+                first_unread.set(first.filter(|_| remaining == 0));
+            }
             if changed {
                 // The live window is a complete bounded snapshot, so reconnect
                 // cannot leave a gap after more than one page of missed messages.
@@ -722,6 +755,27 @@ fn Conversation(ui: Ui, id: ConversationId) -> impl IntoView {
         });
     };
     let keydown = move |ev: leptos::ev::KeyboardEvent| {
+        // Up in an empty composer edits your newest message in this window.
+        if ev.key() == "ArrowUp"
+            && !ev.shift_key()
+            && !ev.ctrl_key()
+            && !ev.alt_key()
+            && !ev.meta_key()
+            && !ev.is_composing()
+            && draft.with_untracked(String::is_empty)
+            && retry.with_untracked(Option::is_none)
+            && let Some(me) = ui.account.with_untracked(|a| a.as_ref().map(|a| a.id))
+            && let Some(last) = messages.with_untracked(|rows| {
+                rows.iter()
+                    .rev()
+                    .find(|m| m.author_id == me && !m.deleted)
+                    .map(|m| m.id)
+            })
+        {
+            ev.prevent_default();
+            edit_request.set(Some(last));
+            return;
+        }
         // Preserve IME candidate selection and Shift+Enter newlines.
         if ev.key() == "Enter" && !ev.shift_key() && !ev.is_composing() && ev.key_code() != 229 {
             ev.prevent_default();
@@ -749,13 +803,13 @@ fn Conversation(ui: Ui, id: ConversationId) -> impl IntoView {
             <Show when=move ||past.get()><button class="mb-4 ml-4 text-sm text-brand" on:click=move |_|{pending_jump.set(None);highlight.set(None);bottom.set(true);past.set(false);ui.friends.before.set(None);}>{move || crate::i18n::t("Jump to latest")}</button></Show>
             <p class="text-sm text-white/50" role="status">{move ||if loading.get(){crate::i18n::t("Loading…")}else{""}}</p>
             <Show when=move ||messages.get().is_empty() && !loading.get()><div class="private-empty py-12 text-center"><h3 class="text-xl font-semibold">{move || crate::i18n::t("Start a conversation")}</h3><p class="mt-2 text-sm text-white/45">{move || crate::i18n::t("Only you and your friend can access this conversation.")}</p></div></Show>
-            <ol class="space-y-5" aria-label=move ||crate::i18n::t("Private messages")><For each=move ||messages.get() key=|m|m.id children=move |m|view!{<DirectRow ui id message=m messages friend highlight/>}/></ol>
+            <ol aria-label=move ||crate::i18n::t("Private messages")><For each=move ||messages.get() key=|m|m.id children=move |m|view!{<DirectRow ui id message=m messages friend highlight edit_request first_unread/>}/></ol>
         </div>
         <p class="px-6 text-xs text-white/50" role="status">{move ||if ui.friends.connected.get() && ui.friends.snapshot.with(|s|s.conversation_id==Some(id) && !s.typing.is_empty()) {crate::i18n::t("Typing…")}else{""}}</p>
         <form class="shrink-0 border-t border-white/10 p-4" style:display=move ||if search.active.get(){"none"}else{""} on:submit=move |ev|{ev.prevent_default();send();}>
             <p role="alert" class="mb-2 text-sm text-red-200">{move ||crate::i18n::message(error.get())}</p>
             <super::direct_attachments::Composer uploads locked=Signal::derive(move ||busy.get()||retry.get().is_some())/>
-            <div class="flex items-end gap-3 rounded-xl bg-white/5 p-3"><textarea class="max-h-40 min-h-12 flex-1 resize-y bg-transparent p-2 outline-none read-only:opacity-50" aria-label=move || crate::i18n::t("Private message") aria-describedby="private-message-hint" placeholder=move || crate::i18n::t("Message your friend…") maxlength="4000" prop:value=move ||draft.get() readonly=move ||busy.get() || retry.get().is_some() on:keydown=keydown on:input=move |ev|{let text=event_target_value(&ev);ui.friends.typing_at.set(if text.trim().is_empty(){0.0}else{js_sys::Date::now()});draft.set(text);}></textarea><button class="rounded-lg bg-brand p-3 disabled:opacity-40" aria-label=move || crate::i18n::t("Send private message") disabled=move ||busy.get() || uploads.busy.get() || !ui.friends.connected.get() || (draft.get().trim().is_empty() && uploads.files.get().is_empty())>{move ||if busy.get(){crate::i18n::t("Sending…")}else if retry.get().is_some(){crate::i18n::t("Retry")}else{crate::i18n::t("Send")}}</button></div>
+            <div class="flex items-end gap-3 rounded-xl bg-white/5 p-3"><textarea node_ref=input on:paste=move |ev: leptos::ev::ClipboardEvent| { if !busy.get_untracked() && retry.with_untracked(Option::is_none) && let Some(file) = ev.clipboard_data().and_then(|d| d.files()).and_then(|f| f.get(0)) { ev.prevent_default(); uploads.add(file); } } class="max-h-40 min-h-12 flex-1 resize-y bg-transparent p-2 outline-none read-only:opacity-50" aria-label=move || crate::i18n::t("Private message") aria-describedby="private-message-hint" placeholder=move || crate::i18n::t("Message your friend…") maxlength="4000" prop:value=move ||draft.get() readonly=move ||busy.get() || retry.get().is_some() on:keydown=keydown on:input=move |ev|{let text=event_target_value(&ev);ui.friends.typing_at.set(if text.trim().is_empty(){0.0}else{js_sys::Date::now()});draft.set(text);}></textarea><super::emoji::ComposerEmoji input draft disabled=Signal::derive(move ||busy.get() || retry.get().is_some())/><button class="rounded-lg bg-brand p-3 disabled:opacity-40" aria-label=move || crate::i18n::t("Send private message") disabled=move ||busy.get() || uploads.busy.get() || !ui.friends.connected.get() || (draft.get().trim().is_empty() && uploads.files.get().is_empty())>{move ||if busy.get(){crate::i18n::t("Sending…")}else if retry.get().is_some(){crate::i18n::t("Retry")}else{crate::i18n::t("Send")}}</button></div>
             <p id="private-message-hint" class="mt-2 text-xs text-white/40">{move || crate::i18n::t("Enter to send · Shift+Enter for a new line")}</p>
             <Show when=move ||retry.get().is_some() && !busy.get()><button type="button" class="mt-2 text-xs text-white/50" on:click=move |_|{retry.set(None);error.set(String::new());}>{move || crate::i18n::t("Discard retry and edit draft")}</button></Show>
         </form>
@@ -770,6 +824,8 @@ fn DirectRow(
     messages: RwSignal<Vec<DirectMessage>>,
     friend: Signal<Option<Friend>>,
     highlight: RwSignal<Option<thiscord_shared::MessageId>>,
+    edit_request: RwSignal<Option<thiscord_shared::MessageId>>,
+    first_unread: RwSignal<Option<thiscord_shared::MessageId>>,
 ) -> impl IntoView {
     let initial = StoredValue::new(message);
     let message = Signal::derive(move || {
@@ -795,6 +851,76 @@ fn DirectRow(
     let draft = RwSignal::new(message.get().content);
     let busy = RwSignal::new(false);
     let error = RwSignal::new(String::new());
+    let editor = NodeRef::<leptos::html::Textarea>::new();
+    let start_edit = move || {
+        let m = message.get_untracked();
+        draft.set(m.content);
+        edit_revision.set_value(m.revision);
+        editing.set(true);
+    };
+    Effect::new(move |_| {
+        if edit_request.get() == Some(initial.with_value(|m| m.id)) {
+            edit_request.set(None);
+            if own && !message.get_untracked().deleted {
+                start_edit();
+            }
+        }
+    });
+    Effect::new(move |_| {
+        if editing.get()
+            && let Some(editor) = editor.get()
+        {
+            let _ = editor.focus();
+            let end = editor.value().encode_utf16().count() as u32;
+            let _ = editor.set_selection_range(end, end);
+        }
+    });
+    let divider = move || first_unread.get() == Some(initial.with_value(|m| m.id));
+    let grouped = Memo::new(move |_| {
+        let me = initial.with_value(|m| m.id);
+        !divider()
+            && messages
+                .with(|rows| {
+                    let index = rows.iter().position(|m| m.id == me)?;
+                    let previous = rows.get(index.checked_sub(1)?)?;
+                    let current = &rows[index];
+                    Some(thiscord_frontend::chat_history::groups_with(
+                        Some(previous.author_id),
+                        previous.created_at,
+                        Some(current.author_id),
+                        current.created_at,
+                    ))
+                })
+                .unwrap_or(false)
+    });
+    let name = Signal::derive(move || {
+        if own {
+            ui.account
+                .with(|a| {
+                    a.as_ref().map(|a| {
+                        if a.display_name.is_empty() {
+                            a.username.clone()
+                        } else {
+                            a.display_name.clone()
+                        }
+                    })
+                })
+                .unwrap_or_default()
+        } else {
+            friend.with(|f| {
+                f.as_ref()
+                    .map(|f| f.person.display_name.clone())
+                    .unwrap_or_default()
+            })
+        }
+    });
+    let avatar = Signal::derive(move || {
+        if own {
+            ui.account.with(|a| a.as_ref().and_then(|a| a.avatar_id))
+        } else {
+            friend.with(|f| f.as_ref().and_then(|f| f.person.avatar_id))
+        }
+    });
     let apply = move |delete: bool| {
         if busy.get_untracked() {
             return;
@@ -847,18 +973,33 @@ fn DirectRow(
             }
         });
     };
-    view! {<li class="space-y-1 rounded" data-message-id=initial.with_value(|m|m.id.to_string()) class=("bg-brand/20",move ||highlight.get()==Some(initial.with_value(|m|m.id)))>
-        <div class="flex items-baseline gap-3"><button class="text-sm font-semibold hover:underline" aria-haspopup="menu" data-context-user=message.get().author_id.to_string() data-context-name=if own {crate::i18n::t("You").into()}else{friend.get_untracked().map(|f|f.person.display_name).unwrap_or_default()}>{move ||if own {crate::i18n::t("You").into()}else{friend.get().map(|f|f.person.display_name).unwrap_or_default()}}</button>
-        <time class="text-xs text-white/35" datetime=message.get().created_at.to_rfc3339()>{move ||crate::i18n::datetime(message.get().created_at)}</time>
-        <Show when=move ||message.get().edited_at.is_some()&&!message.get().deleted><span class="text-xs text-white/40">{move ||crate::i18n::t("edited")}</span></Show></div>
+    let full_time = move || crate::i18n::datetime(message.get().created_at);
+    view! {<li class="direct-row" class:message-grouped=move ||grouped.get() data-message-id=initial.with_value(|m|m.id.to_string())>
+        <Show when=divider><div class="unread-divider" role="separator"><span>{move || crate::i18n::t("New messages")}</span></div></Show>
+        <div class="message-body" class=("bg-brand/20",move ||highlight.get()==Some(initial.with_value(|m|m.id))) class:message-editing=move ||editing.get()>
+        <div class="message-gutter">
+            <Show when=move ||!grouped.get() fallback=move ||view!{<time class="message-hover-time" datetime=message.get().created_at.to_rfc3339() title=full_time>{move ||crate::i18n::clock(message.get().created_at)}</time>}>
+                <span class="block" aria-hidden="true" data-context-user=message.get().author_id.to_string() data-context-name=name><crate::avatar::Avatar class="size-10 text-sm" name avatar_id=avatar/></span>
+            </Show>
+        </div>
+        <div class="min-w-0 flex-1">
+        <Show when=move ||!grouped.get()><div class="flex items-baseline gap-2"><button class="text-sm font-semibold hover:underline" aria-haspopup="menu" data-context-user=message.get().author_id.to_string() data-context-name=name>{name}</button>
+        <time class="text-xs text-white/35" datetime=message.get().created_at.to_rfc3339() title=full_time>{move ||crate::i18n::message_time(message.get().created_at)}</time></div></Show>
         <Show when=move ||!editing.get() fallback=move ||view!{<form class="space-y-2" on:submit=move |ev|{ev.prevent_default();apply(false);}>
-            <textarea class="w-full rounded bg-white/10 p-2" aria-label=move ||crate::i18n::t("Edit private message") maxlength="4000" prop:value=move ||draft.get() on:input=move |ev|draft.set(event_target_value(&ev))/>
+            <textarea node_ref=editor class="w-full rounded bg-white/10 p-2" aria-label=move ||crate::i18n::t("Edit private message") maxlength="4000" prop:value=move ||draft.get() on:input=move |ev|draft.set(event_target_value(&ev))
+                on:keydown=move |ev| {
+                    if ev.key() == "Escape" { ev.prevent_default(); editing.set(false); }
+                    else if ev.key() == "Enter" && !ev.shift_key() && !ev.is_composing() && ev.key_code() != 229 { ev.prevent_default(); if !ev.repeat() { apply(false); } }
+                }/>
+            <p class="text-xs text-white/50">{move ||crate::i18n::t("Escape to cancel · Enter to save")}</p>
             <button class="mr-3 text-brand" disabled=move ||busy.get()>{move ||crate::i18n::t("Save")}</button><button type="button" disabled=move ||busy.get() on:click=move |_|editing.set(false)>{move ||crate::i18n::t("Cancel")}</button>
-        </form>}><div class="whitespace-pre-wrap break-words text-white/85">{move ||{let m=message.get();super::message_content::render(if m.deleted {crate::i18n::t("Message deleted")}else{&m.content},ui)}}</div></Show>
+        </form>}><div class="whitespace-pre-wrap break-words text-white/85">{move ||{let m=message.get();super::message_content::render(if m.deleted {crate::i18n::t("Message deleted")}else{&m.content},ui)}}<Show when=move ||message.get().edited_at.is_some()&&!message.get().deleted><span class="ml-1 text-xs text-white/40">{move ||format!("({})",crate::i18n::t("edited"))}</span></Show></div></Show>
         <Show when=move ||!message.get().deleted>
             <For each=move ||message.get().attachments key=|a|a.id children=move |attachment|view!{<super::direct_attachments::Card ui id attachment/>}/>
-            <div class="flex gap-3 text-xs text-white/50"><Show when=move ||own><button disabled=move ||busy.get() on:click=move |_|{let m=message.get_untracked();draft.set(m.content);edit_revision.set_value(m.revision);editing.set(true);}>{move ||crate::i18n::t("Edit")}</button><button disabled=move ||busy.get() on:click=move |_|apply(true)>{move ||crate::i18n::t("Delete")}</button></Show>
+            <div class="direct-actions flex gap-3 text-xs text-white/60"><Show when=move ||own><button disabled=move ||busy.get() on:click=move |_|start_edit()>{move ||crate::i18n::t("Edit")}</button><button disabled=move ||busy.get() on:click=move |_|apply(true)>{move ||crate::i18n::t("Delete")}</button></Show>
             <Show when=move ||!own><super::safety::ReportButton ui target=thiscord_shared::safety::ReportTarget::DirectMessage {conversation_id:id,message_id:message.get().id}/></Show></div>
         </Show><p role="alert" class="text-xs text-red-200">{move ||crate::i18n::message(error.get())}</p>
+        </div>
+        </div>
     </li>}
 }

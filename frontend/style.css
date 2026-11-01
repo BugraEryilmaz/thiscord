@@ -41,6 +41,7 @@
 .connection-dot { position: absolute; right: -1px; bottom: -1px; width: 13px; height: 13px; border: 3px solid var(--color-dock); border-radius: 50%; background: #858894; }
 .connection-dot.connected { background: #53bd84; }
 .connection-dot.connecting { background: #f4be58; }
+.connection-dot.connected.dnd { background: #ed4245; }
 .icon-button { position: relative; display: inline-flex; align-items: center; justify-content: center; width: 34px; height: 36px; border-radius: 7px; color: #b7b9c4; cursor: pointer; }
 .icon-button:hover { background: #ffffff12; color: white; }
 .icon-button[aria-pressed="true"], .icon-button.danger { color: #ff828a; }
@@ -48,9 +49,32 @@
 .icon-button:disabled { opacity: .4; cursor: not-allowed; }
 button:focus-visible { outline: 2px solid #a4adff; outline-offset: 2px; }
 /* Message tools stay out of the transcript until the row is being used. */
-.message-row { position: relative; }
-.message-row:focus-within { z-index: 3; }
-.message-row:hover > div, .message-row:focus-within > div { background-image: linear-gradient(#ffffff04, #ffffff04); }
+.message-row, .direct-row { position: relative; padding-top: 12px; }
+.message-row.message-grouped, .direct-row.message-grouped { padding-top: 2px; }
+.message-row:focus-within, .direct-row:focus-within { z-index: 3; }
+.message-body { display: flex; gap: 12px; border-radius: 8px; padding: 2px 12px; }
+.message-row:hover > .message-body, .message-row:focus-within > .message-body, .direct-row:hover > .message-body, .direct-row:focus-within > .message-body { background-image: linear-gradient(#ffffff04, #ffffff04); }
+.message-body.message-editing { background-color: #5865f214; box-shadow: inset 2px 0 0 #8490ff; }
+/* Grouped follow-ups keep the avatar column; their time shows on hover. */
+.message-gutter { width: 40px; flex-shrink: 0; }
+.message-hover-time { display: block; padding-top: 3px; text-align: right; font-size: 10px; line-height: 1rem; color: #ffffff66; white-space: nowrap; opacity: 0; }
+.message-row:hover .message-hover-time, .message-row:focus-within .message-hover-time, .direct-row:hover .message-hover-time, .direct-row:focus-within .message-hover-time { opacity: 1; }
+.unread-divider { display: flex; align-items: center; gap: 8px; margin: 0 12px 8px; color: #f37b7f; font-size: 11px; font-weight: 600; text-transform: uppercase; letter-spacing: .02em; }
+.unread-divider::before, .unread-divider::after { content: ""; flex: 1; height: 1px; background: #f23f4373; }
+.direct-actions { position: absolute; top: -6px; right: 12px; z-index: 2; padding: 4px 10px; border: 1px solid #ffffff14; border-radius: 8px; background: var(--color-sidebar); box-shadow: 0 3px 8px #0003; opacity: 0; pointer-events: none; }
+.direct-row:hover .direct-actions, .direct-row:focus-within .direct-actions { opacity: 1; pointer-events: auto; }
+.direct-row.message-grouped .direct-actions { top: -14px; }
+/* Emoji palette: composer popover and the expanded reaction picker. */
+.emoji-popover { position: absolute; right: 0; bottom: calc(100% + 8px); z-index: 30; width: 300px; max-width: calc(100vw - 32px); padding: 8px; border: 1px solid #ffffff14; border-radius: 10px; background: #111218; box-shadow: 0 8px 32px #0008; }
+.emoji-grid { max-height: 260px; overflow-y: auto; overscroll-behavior: contain; }
+.emoji-grid h4 { position: sticky; top: 0; padding: 4px 2px; background: #111218; color: #ffffff80; font-size: 11px; font-weight: 600; text-transform: uppercase; }
+.emoji-grid-items { display: grid; grid-template-columns: repeat(8, minmax(0, 1fr)); gap: 2px; }
+.emoji-grid-items button { display: grid; place-items: center; height: 32px; border-radius: 6px; font-size: 20px; cursor: pointer; }
+.emoji-grid-items button:hover { background: #ffffff12; }
+.message-popover .emoji-grid { max-height: 220px; margin-top: 4px; }
+.message-popover .emoji-grid-items { grid-template-columns: repeat(5, minmax(0, 1fr)); }
+.message-reaction-more summary { margin-top: 4px; padding: 4px 6px; border-radius: 6px; color: #b7b9c4; font-size: 13px; cursor: pointer; }
+.message-reaction-more summary:hover { background: #ffffff0a; }
 .message-actions { position: absolute; top: -12px; right: 12px; z-index: 2; display: flex; gap: 2px; padding: 3px; border: 1px solid #ffffff14; border-radius: 8px; background: var(--color-sidebar); box-shadow: 0 3px 8px #0003; opacity: 0; pointer-events: none; }
 .message-row:hover .message-actions, .message-row:focus-within .message-actions { opacity: 1; pointer-events: auto; }
 .message-actions .icon-button { width: 30px; height: 30px; border-radius: 5px; }
@@ -71,6 +95,8 @@ button:focus-visible { outline: 2px solid #a4adff; outline-offset: 2px; }
 @media (hover: none), (pointer: coarse), (max-width: 600px) {
   .message-actions { position: static; width: max-content; margin: 6px 0 0 auto; opacity: 1; pointer-events: auto; box-shadow: none; }
   .message-actions .icon-button { width: 36px; height: 36px; }
+  .direct-actions { position: static; width: max-content; margin-top: 4px; opacity: 1; pointer-events: auto; box-shadow: none; }
+  .message-hover-time { opacity: 1; }
 }
 .voice-action { width: 100%; height: 34px; background: #ffffff08; }
 .voice-dock .voice-action, .screen-control { flex: 1; }

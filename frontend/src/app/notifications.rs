@@ -113,6 +113,16 @@ pub(super) fn snooze(ui: Ui, target: Target, duration: Snooze) {
 pub(super) fn edit(ui: Ui, target: Target, title: String) {
     ui.notifications.editor.set(Some((target, title)));
 }
+/// Reactive: whether account-wide Do Not Disturb is currently active.
+pub(super) fn do_not_disturb(ui: Ui) -> bool {
+    ui.notifications
+        .preferences
+        .with(|p| match p.do_not_disturb {
+            Mute::None => false,
+            Mute::Forever => true,
+            Mute::Until { at } => at.timestamp_millis() as f64 > ui.notifications.now.get(),
+        })
+}
 pub(super) fn muted(ui: Ui, target: Target) -> bool {
     ui.notifications
         .preferences
@@ -213,6 +223,11 @@ struct BrowserAudio {
 }
 thread_local! { static BROWSER_AUDIO: std::cell::RefCell<Option<BrowserAudio>> = const { std::cell::RefCell::new(None) }; }
 fn receive(ui: Ui, mut alert: Alert, replayed: bool) {
+    // The server already withholds alerts during Do Not Disturb; this also covers
+    // alerts that were in flight when it was turned on from another device.
+    if untrack(|| do_not_disturb(ui)) {
+        return;
+    }
     if let Target::Conversation { conversation_id } = alert.target
         && let Some(friend) = ui
             .friends
@@ -367,7 +382,9 @@ pub(super) fn Host(ui: Ui) -> impl IntoView {
         let next = prefs
             .subscriptions
             .iter()
-            .filter_map(|s| match s.mute {
+            .map(|s| s.mute)
+            .chain([prefs.do_not_disturb])
+            .filter_map(|mute| match mute {
                 Mute::Until { at } => Some(at.timestamp_millis() as f64),
                 _ => None,
             })
@@ -591,6 +608,20 @@ fn Controls(
 pub(super) fn Panel(ui: Ui) -> impl IntoView {
     view! {<div class="space-y-4">
         <div class="settings-card"><p>{move || crate::i18n::t("Choose what reaches you, and how. Changes are saved to your account and apply to every connected device.")}</p><p class="text-sm text-white/60">{move || crate::i18n::t("Right-click a channel or conversation to mute it or choose its own settings. Mentions only is available for server messages.")}</p><p role="status">{move ||if ui.notifications.connected.get(){crate::i18n::t("Notifications connected")}else{crate::i18n::t("Reconnecting notifications…")}}</p><p role="alert" class="text-red-200">{move ||crate::i18n::message(ui.notifications.error.get())}</p></div>
+        <section class="settings-card space-y-3" aria-label=move || crate::i18n::t("Do not disturb")>
+            <h3 class="font-semibold">{move || crate::i18n::t("Do not disturb")}</h3>
+            <p class="text-sm text-white/60">{move || crate::i18n::t("Silence every notification banner and sound on all your devices. Incoming calls and unread badges still appear in the app.")}</p>
+            <p role="status" class="text-sm">{move || if !do_not_disturb(ui) { crate::i18n::t("Off").to_owned() } else {
+                match ui.notifications.preferences.with(|p| p.do_not_disturb) {
+                    Mute::Until { at } => thiscord_frontend::localized_format!(crate::i18n::language(), "On until {}", crate::i18n::datetime(at)),
+                    _ => crate::i18n::t("On until you turn it off").to_owned(),
+                }
+            }}</p>
+            <div class="flex flex-wrap gap-2">{Snooze::OPTIONS.into_iter().map(|(duration,label)| {
+                let label = if duration == Snooze::Resume { "Turn off" } else { label };
+                view!{<button class="rounded bg-white/10 px-3 py-2 text-sm disabled:opacity-40" disabled=move ||ui.notifications.saving.get() || !ui.notifications.connected.get() || (duration == Snooze::Resume && !do_not_disturb(ui)) on:click=move |_|request(ui,Request::DoNotDisturb {duration})>{move || crate::i18n::t(label)}</button>}
+            }).collect_view()}</div>
+        </section>
         {Kind::ALL.into_iter().map(|kind| {
             let delivery=Signal::derive(move ||ui.notifications.preferences.get().defaults.iter().find(|r|r.kind==kind).map_or_else(||Delivery::default_for(kind),|r|r.delivery));
             view!{<section class="settings-card"><h3 class="mb-3 font-semibold">{move ||crate::i18n::t(kind.label())}</h3><p class="mb-3 text-sm text-white/60">{move ||crate::i18n::t(thiscord_frontend::notification_sound::description(kind))}</p><Controls delivery=delivery mentions=matches!(kind,Kind::GuildMessage) disabled=Signal::derive(move ||ui.notifications.saving.get()||!ui.notifications.connected.get()) change=Callback::new(move |delivery|request(ui,Request::SetDefault {revision:ui.notifications.preferences.get_untracked().revision,kind,delivery}))/><button class="mt-3 text-sm text-brand" on:click=move |_|sound(ui,kind,delivery.get_untracked().volume)>{move || crate::i18n::t("Preview sound")}</button></section>}

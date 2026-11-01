@@ -233,6 +233,12 @@ mod tests {
             .chain(MicrophoneLoop::ALL.map(MicrophoneLoop::label))
             .chain(OverlayCorner::ALL.map(OverlayCorner::label))
             .chain(Kind::ALL.map(crate::notification_sound::description))
+            .chain(
+                thiscord_shared::chat::EMOJI_GROUPS
+                    .iter()
+                    .map(|(label, _)| *label),
+            )
+            .chain(["Turn off"])
         {
             assert!(
                 CATALOG.iter().any(|(en, _)| *en == label),

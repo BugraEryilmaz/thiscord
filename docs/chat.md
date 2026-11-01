@@ -26,8 +26,18 @@ an `@` for unread mentions. Online/typing indicators describe people viewing the
 same channel, not deployment-wide availability. Voice uses its separate media transport.
 
 The composer shows sending/failed states. Retry reuses the original client UUID,
-so a response lost after commit cannot create a duplicate. Drafts and pending sends
-are held in memory for the open channel, not across channel changes/app restarts.
+so a response lost after commit cannot create a duplicate. Unsent drafts are kept
+in memory per channel and private conversation while you switch between them; they
+are cleared on sign-out and never persisted to disk. Pending sends stay with the
+open channel. Paste (Ctrl+V) files or screenshots into the composer to queue them
+as attachments; text pastes normally. The emoji button inserts at the caret.
+In an empty composer, Up Arrow edits your newest message; Escape cancels an edit
+and restores the unsent draft. Consecutive messages from one author within seven
+minutes share a header (avatar, name, time); their local time shows on hover.
+Messages carry the author's current `author_avatar_id`. Opening a channel or
+conversation with unread messages shows a "New messages" divider above the oldest
+unread message, using the same count rules as the badge. Times use the device's
+local time zone ("Today at 14:05", "Yesterday at 14:05", or a full date).
 Edit/delete controls reflect current permissions; the backend checks them again.
 Deletion requires confirmation and leaves a content-free tombstone. Loading older
 history preserves scroll position; incoming messages follow while at the bottom
@@ -303,7 +313,7 @@ isolation and variable-height viewport/anchor calculations without a browser.
 
 ## Replies, reactions and pinned messages
 
-Guild message rows provide Reply, ten emoji reactions, and Pin/Unpin for moderators.
+Guild message rows provide Reply, emoji reactions, and Pin/Unpin for moderators.
 Replies reference an existing undeleted message in the same channel. They require
 ReadHistory as well as SendMessages. The 160-character preview is read from the
 current target; deleted targets expose no content. Clicking a preview loads a
@@ -322,7 +332,12 @@ Reactions use `react { message_id, emoji, present }`, an explicit desired state.
 The unique message/account/emoji key and channel lock make concurrent retries
 idempotent. ReadHistory and SendMessages are required. Counts and the requesting
 account's `mine` flag are hydrated for history, replies and each socket recipient.
-The fixed shared palette bounds reaction groups to ten per message.
+Ten quick reactions are shown first; **More reactions** opens the shared Unicode
+palette (`EMOJI_GROUPS`). The backend accepts only palette emoji and at most 20
+distinct emoji per message (`MAX_REACTION_KINDS`); existing kinds can always gain
+reactions. The message row lock serializes that check. The database bounds stored
+values to 16 characters; rolling back the palette migration deletes reactions
+outside the original ten.
 
 Message pins are shared channel data, distinct from personal sidebar channel pins.
 Pin changes require ReadHistory, ManageMessages and the current message revision.
@@ -339,7 +354,8 @@ change message timestamps or unread positions.
 Deleting a message clears its pin, reply and visible reactions. Migration rollback
 removes all reply references, reactions and message pins, retaining message text.
 
-`ChatMessage.reply`, `.reactions` and `.pinned` are additive fields with defaults.
+`ChatMessage.reply`, `.reactions`, `.pinned` and `.author_avatar_id` (and
+`OnlineMember.avatar_id`) are additive fields with defaults.
 Old text-only sends still work. Deploy the backend before clients using new commands.
 The new context command returns up to 51 messages; its event cursor is not a socket
 subscription checkpoint. Jumping back keeps the current socket and marks the cache

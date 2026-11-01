@@ -7,7 +7,7 @@ media compatibility spike can happen before chat to expose platform constraints.
 ## Languages
 
 - [x] English/Turkish selectors on login, settings and browser administration, system-language detection and device-local persistence.
-- [x] Reactive UI translations, translated wire errors with request IDs, localized UTC dates and catalog/format compatibility tests.
+- [x] Reactive UI translations, translated wire errors with request IDs, localized local-time dates and catalog/format compatibility tests.
 - [ ] Native Windows/macOS/Linux acceptance of persisted language and overlay/notification-window synchronization during active voice.
 - [ ] Localize account emails/recovery web pages and native tray/OS text.
 
@@ -32,6 +32,7 @@ media compatibility spike can happen before chat to expose platform constraints.
 - [x] Channel/DM context-menu mute and banner snooze for 15 minutes, 1 hour, 1 day, 30 days and forever.
 - [x] App-owned desktop banners with call actions, native tones and in-browser previews; event-driven updater discovery/status.
 - [x] Authorization, deduplication, preference revision, expiry and socket integration tests.
+- [x] Account-wide Do Not Disturb with expiry, cross-device sync and ribbon status (not shown to others).
 - [ ] Physical Windows/macOS/Linux banner focus/fullscreen, sound-device and call-action acceptance.
 - [ ] Configure production release announcement URL/admin session and verify release workflow delivery.
 - [ ] OS notification-center integration and alerts while the app is fully closed.
@@ -156,6 +157,9 @@ and single-process chat/media enforcement.
 - [x] Guild replies, emoji reactions, safe Markdown/code blocks and moderator message pins.
 - [x] Authorized guild/private search API with filters; inline Ctrl+F conversation search, keyset result pages and jumps to original messages in channel/DM history.
 - [x] Integrate private search with DM deletion/blocking and pair_access; validate combined block/unblock, renewed consent, deletion and revocation behavior (docs/search.md).
+- [x] Per-channel/DM in-memory drafts, pasted attachments, emoji picker and Unicode reaction palette (20 kinds per message).
+- [x] Grouped messages with profile pictures, local "Today/Yesterday" times, "New messages" divider and Up Arrow to edit.
+- [ ] Verify paste, emoji rendering and grouped layout interactively on Windows/macOS/Linux clients.
 - [ ] Later: configurable attachment storage quotas.
 
 ## 5. Frontend audio and media feasibility

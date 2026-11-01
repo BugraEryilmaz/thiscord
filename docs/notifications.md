@@ -47,6 +47,15 @@ Client preference writes use a bounded FIFO; snooze waits for earlier saves and
 its banner is dismissed after the server confirms the mute. **Remove saved settings
 and mute** deletes an account's override even after access to that source is lost.
 
+**Do not disturb** (Settings → Notifications) silences every banner and sound on all
+of the account's devices, for 15 minutes to 30 days or until turned off. It is the
+account-wide `do_not_disturb` mute in `Preferences`, set with the revision-free
+`do_not_disturb { duration }` command (`resume` turns it off). The server withholds
+alerts while it is active; clients also drop alerts already in flight. Incoming call
+controls and unread badges still appear in the app, and the account ribbon shows the
+status. It is not shown to other people.
+
+
 ## Push transport and access
 
 `POST /api/v1/notifications` accepts the shared `notifications::Request` contract.

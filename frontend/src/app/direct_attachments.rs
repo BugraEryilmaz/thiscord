@@ -32,7 +32,7 @@ impl Uploads {
         });
         value
     }
-    fn add(self, file: web_sys::File) {
+    pub(super) fn add(self, file: web_sys::File) {
         if self.busy.get_untracked() {
             return;
         }
