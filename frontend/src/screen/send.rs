@@ -53,10 +53,60 @@ impl Sender {
         self,
         stop: Arc<AtomicBool>,
         quality: Quality,
-        mut rx: tokio::sync::mpsc::Receiver<Outgoing>,
+        rx: tokio::sync::mpsc::Receiver<Outgoing>,
     ) {
-        let mut pacer =
-            super::pacing::Pacer::new(super::pacing::transport_bitrate(quality.bitrate()));
+        self.run_paced(stop, quality, rx, None).await
+    }
+    /// Production pacing: a dedicated MMCSS thread, its own current-thread
+    /// runtime and a high-resolution timer. `write_rtp` only enqueues to the
+    /// peer's driver task, so this runtime never blocks shared async workers.
+    pub fn spawn_paced(
+        self,
+        stop: Arc<AtomicBool>,
+        quality: Quality,
+        rx: tokio::sync::mpsc::Receiver<Outgoing>,
+    ) -> std::io::Result<std::thread::JoinHandle<()>> {
+        std::thread::Builder::new()
+            .name("screen-pacer".into())
+            .spawn(move || {
+                let metrics = self.metrics.clone();
+                metrics.label(
+                    "pacer_thread_priority",
+                    super::priority::promote_video_thread(),
+                );
+                let timer = super::pacing::BlockingTimer::new();
+                metrics.label(
+                    "pacer_timer",
+                    if timer.is_some() {
+                        "high_resolution"
+                    } else {
+                        "tokio"
+                    },
+                );
+                match tokio::runtime::Builder::new_current_thread()
+                    .enable_all()
+                    .build()
+                {
+                    Ok(runtime) => {
+                        runtime.block_on(self.run_paced(stop, quality, rx, timer.as_ref()))
+                    }
+                    Err(_) => metrics.event("screen pacer runtime unavailable"),
+                }
+            })
+    }
+    pub async fn run_paced(
+        self,
+        stop: Arc<AtomicBool>,
+        quality: Quality,
+        mut rx: tokio::sync::mpsc::Receiver<Outgoing>,
+        timer: Option<&super::pacing::BlockingTimer>,
+    ) {
+        let bitrate = super::pacing::transport_bitrate(quality.bitrate());
+        let mut pacer = if timer.is_some() {
+            super::pacing::Pacer::fine(bitrate)
+        } else {
+            super::pacing::Pacer::new(bitrate)
+        };
         let mut waiting = false;
         'frames: while let Some(mut frame) = rx.recv().await {
             let epoch = self
@@ -125,7 +175,12 @@ impl Sender {
                 if at > Instant::now() {
                     let sleep_started = Instant::now();
                     self.metrics.add("pacing_sleeps", 1);
-                    tokio::time::sleep_until(at.into()).await;
+                    // Sole task on its runtime: a blocking high-resolution wait
+                    // cannot delay other futures. Fallback keeps async sleep.
+                    match timer {
+                        Some(timer) => timer.sleep_until(at),
+                        None => tokio::time::sleep_until(at.into()).await,
+                    }
                     self.metrics.time("pacing_wait", sleep_started.elapsed());
                     self.metrics.time(
                         "pacing_lateness",

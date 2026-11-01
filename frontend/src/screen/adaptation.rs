@@ -427,7 +427,7 @@ mod tests {
         for second in 1..40 {
             if second == 1 || second == 20 {
                 demand.reject_encoder_frame(floor.bitrate(), true);
-            } else if second < 8 || second >= 12 {
+            } else if !(8..12).contains(&second) {
                 demand.delivered_encoder_frame(floor.bitrate());
             }
             let next = controller.update_with_recovery(

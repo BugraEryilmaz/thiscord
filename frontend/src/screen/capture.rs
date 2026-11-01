@@ -1,7 +1,15 @@
 //! Windows Graphics Capture delivers compositor frames; no screenshot polling.
 //! The callback copies GPU textures only. A latest-frame mailbox decouples it
 //! from the encoder, so overload replaces raw frames without breaking H.264 refs.
-use super::{gpu, keyframe::KeyframePolicy, metrics::Metrics};
+//! SDR displays are captured as 8-bit BGRA and converted by one video-processor
+//! blit; HDR displays use FP16 scRGB and the tone-map shader. Turning HDR on
+//! mid-share restarts the capture session in FP16 (one IDR), never clipping.
+use super::{
+    gpu::{self, SourceFormat},
+    hardware::{EncoderOptions, SpeedPolicy},
+    keyframe::KeyframePolicy,
+    metrics::Metrics,
+};
 use crate::audio::connection::Connection;
 use std::{
     sync::{
@@ -11,7 +19,7 @@ use std::{
     time::{Duration, Instant},
 };
 use thiscord_shared::screen::{Quality, Source, SourceId};
-use windows::Win32::Graphics::{Direct3D11::*, Dxgi::Common::*, Gdi::*};
+use windows::Win32::Graphics::{Direct3D11::*, Gdi::*};
 use windows_capture::{
     capture::{Context, GraphicsCaptureApiHandler},
     frame::Frame,
@@ -20,6 +28,14 @@ use windows_capture::{
     settings::*,
     window::Window,
 };
+
+/// Window validity/minimized checks are syscalls; once per 100 ms is ample.
+const WINDOW_CHECK: Duration = Duration::from_millis(100);
+/// Longest encoder-worker sleep without a capture or MFT wake. It bounds how
+/// long atomics (demand, feedback, stop) can wait to be observed.
+const IDLE_WAIT: Duration = Duration::from_millis(20);
+/// Short poll while a raw frame waits on time, sender backpressure or credit.
+const PENDING_WAIT: Duration = Duration::from_millis(2);
 
 #[derive(Clone)]
 struct Pixels {
@@ -39,10 +55,12 @@ struct Mailbox {
 struct Flags {
     mailboxes: Vec<Arc<(Mutex<Mailbox>, Condvar)>>,
     stop: Arc<AtomicBool>,
+    session: Arc<AtomicBool>,
     connection: Connection,
     period: Duration,
     active_fps: Arc<[AtomicU32; 2]>,
     metrics: Metrics,
+    format: SourceFormat,
 }
 struct Capture {
     flags: Flags,
@@ -80,7 +98,10 @@ impl GraphicsCaptureApiHandler for Capture {
         frame: &mut Frame,
         control: InternalCaptureControl,
     ) -> Result<(), String> {
-        if self.flags.stop.load(Ordering::Acquire) || !self.flags.connection.active() {
+        if self.flags.stop.load(Ordering::Acquire)
+            || self.flags.session.load(Ordering::Acquire)
+            || !self.flags.connection.active()
+        {
             control.stop();
             return Ok(());
         }
@@ -133,8 +154,8 @@ impl GraphicsCaptureApiHandler for Capture {
                         frame.device(),
                         width,
                         height,
-                        DXGI_FORMAT_R16G16B16A16_FLOAT,
-                        D3D11_BIND_SHADER_RESOURCE.0 as u32,
+                        self.flags.format.dxgi(),
+                        self.flags.format.bind_flags(),
                     )
                     .map(Arc::new)
                 })
@@ -227,7 +248,11 @@ fn minimized(window: Window) -> bool {
         .as_bool()
     }
 }
-fn settings<T: TryInto<GraphicsCaptureItemType>>(item: T, flags: Flags) -> Settings<Flags, T> {
+fn settings<T: TryInto<GraphicsCaptureItemType>>(
+    item: T,
+    flags: Flags,
+    format: SourceFormat,
+) -> Settings<Flags, T> {
     Settings::new(
         item,
         CursorCaptureSettings::Default,
@@ -237,9 +262,77 @@ fn settings<T: TryInto<GraphicsCaptureItemType>>(item: T, flags: Flags) -> Setti
         SecondaryWindowSettings::Default,
         MinimumUpdateIntervalSettings::Default,
         DirtyRegionSettings::Default,
-        ColorFormat::Rgba16F,
+        match format {
+            SourceFormat::Hdr => ColorFormat::Rgba16F,
+            SourceFormat::Sdr => ColorFormat::Bgra8,
+        },
         flags,
     )
+}
+
+/// The selected display, or a window's dominant display (it can move).
+fn monitor(source: &SourceId) -> HMONITOR {
+    match source {
+        SourceId::Monitor(id) => HMONITOR(*id as *mut _),
+        SourceId::Window(id) => unsafe {
+            MonitorFromWindow(
+                windows::Win32::Foundation::HWND(*id as *mut _),
+                MONITOR_DEFAULTTONEAREST,
+            )
+        },
+    }
+}
+fn read_display(source: &SourceId) -> Result<(f32, bool), String> {
+    gpu::display_white(monitor(source))
+        .map_err(|e| format!("Cannot read display HDR calibration: {}", e.code()))
+}
+
+/// SDR white/HDR state refreshed once per second on its own thread.
+/// `QueryDisplayConfig` can take milliseconds; encoders only read the cache.
+struct Display {
+    state: Mutex<Result<(f32, bool), String>>,
+    stop: Mutex<bool>,
+    wake: Condvar,
+}
+impl Display {
+    fn current(&self) -> Result<(f32, bool), String> {
+        self.state.lock().unwrap().clone()
+    }
+    fn refresh(&self, source: &SourceId) {
+        loop {
+            let stop = self.stop.lock().unwrap();
+            let (stop, _) = self
+                .wake
+                .wait_timeout_while(stop, Duration::from_secs(1), |stop| !*stop)
+                .unwrap();
+            if *stop {
+                return;
+            }
+            drop(stop);
+            *self.state.lock().unwrap() = read_display(source);
+        }
+    }
+    fn close(&self) {
+        *self.stop.lock().unwrap() = true;
+        self.wake.notify_all();
+    }
+}
+
+#[derive(Debug, PartialEq, Eq)]
+enum Session {
+    Stopped,
+    /// An SDR session's display switched to HDR; recapture in FP16.
+    HdrEnabled,
+}
+/// The user's stop ends sharing; a session stop only ends this capture format.
+struct Stops<'a> {
+    user: &'a AtomicBool,
+    session: &'a AtomicBool,
+}
+impl Stops<'_> {
+    fn stopped(&self) -> bool {
+        self.user.load(Ordering::Acquire) || self.session.load(Ordering::Acquire)
+    }
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -266,10 +359,12 @@ pub fn run(
         force_keyframe,
         demand,
         None,
+        Arc::default(),
         report,
     )
 }
 
+/// `high_profile` is one stream-wide flag for both layers (see `VideoProfile`).
 #[allow(clippy::too_many_arguments)]
 pub fn run_layers(
     source: &SourceId,
@@ -282,8 +377,73 @@ pub fn run_layers(
     force_keyframe: Arc<AtomicBool>,
     demand: Arc<super::adaptation::Demand>,
     low: Option<super::LayerOutput>,
+    high_profile: Arc<AtomicBool>,
     mut report: impl FnMut(String),
 ) -> Result<(), String> {
+    let display = Display {
+        state: Mutex::new(read_display(source)),
+        stop: Mutex::new(false),
+        wake: Condvar::new(),
+    };
+    std::thread::scope(|scope| {
+        scope.spawn(|| display.refresh(source));
+        let result = (|| loop {
+            let format = if display.current()?.1 {
+                SourceFormat::Hdr
+            } else {
+                SourceFormat::Sdr
+            };
+            metrics.label(
+                "capture_format",
+                match format {
+                    SourceFormat::Hdr => "fp16_scrgb",
+                    SourceFormat::Sdr => "bgra8",
+                },
+            );
+            match session(
+                source,
+                quality,
+                &stop,
+                &connection,
+                started,
+                &tx,
+                &metrics,
+                &force_keyframe,
+                &demand,
+                low.as_ref(),
+                &high_profile,
+                &display,
+                format,
+                &mut report,
+            )? {
+                Session::Stopped => return Ok(()),
+                Session::HdrEnabled => {
+                    metrics.event("display switched to HDR; restarting capture in FP16");
+                }
+            }
+        })();
+        display.close();
+        result
+    })
+}
+
+#[allow(clippy::too_many_arguments)]
+fn session(
+    source: &SourceId,
+    quality: Quality,
+    stop: &Arc<AtomicBool>,
+    connection: &Connection,
+    started: Instant,
+    tx: &tokio::sync::mpsc::Sender<super::Outgoing>,
+    metrics: &Metrics,
+    force_keyframe: &AtomicBool,
+    demand: &super::adaptation::Demand,
+    low: Option<&super::LayerOutput>,
+    high_profile: &AtomicBool,
+    display: &Display,
+    format: SourceFormat,
+    report: &mut impl FnMut(String),
+) -> Result<Session, String> {
     let mailbox = Arc::new((Mutex::new(Mailbox::default()), Condvar::new()));
     let active_fps = Arc::new(std::array::from_fn(|_| AtomicU32::new(0)));
     let low_mailbox = low
@@ -291,13 +451,16 @@ pub fn run_layers(
         .map(|_| Arc::new((Mutex::new(Mailbox::default()), Condvar::new())));
     let mut mailboxes = vec![mailbox.clone()];
     mailboxes.extend(low_mailbox.iter().cloned());
+    let session_stop = Arc::new(AtomicBool::new(false));
     let flags = Flags {
         mailboxes,
         stop: stop.clone(),
+        session: session_stop.clone(),
         connection: connection.clone(),
         period: Duration::from_secs_f64(1.0 / quality.fps as f64),
         active_fps: active_fps.clone(),
         metrics: metrics.clone(),
+        format,
     };
     let mut window = None;
     let capture = match source {
@@ -307,7 +470,7 @@ pub fn run_layers(
                 .into_iter()
                 .find(|m| m.as_raw_hmonitor() as u64 == *id)
                 .ok_or("Selected screen is no longer available")?;
-            Capture::start_free_threaded(settings(monitor, flags))
+            Capture::start_free_threaded(settings(monitor, flags, format))
         }
         SourceId::Window(id) => {
             let selected = Window::enumerate()
@@ -316,42 +479,52 @@ pub fn run_layers(
                 .find(|w| w.as_raw_hwnd() as u64 == *id && w.is_valid() && !minimized(*w))
                 .ok_or("Selected window is no longer available")?;
             window = Some(selected);
-            Capture::start_free_threaded(settings(selected, flags))
+            Capture::start_free_threaded(settings(selected, flags, format))
         }
     }
     .map_err(|_| "Cannot start Windows Graphics Capture. Check capture permissions.")?;
+    let stops = Stops {
+        user: stop,
+        session: &session_stop,
+    };
     let result = std::thread::scope(|scope| {
         let low_job = low.zip(low_mailbox).map(|(low, mailbox)| {
-            let stop = &stop;
-            let connection = &connection;
+            let stops = &stops;
             let active_fps = &active_fps;
+            let tx = low.tx.clone();
             scope.spawn(move || {
-                struct StopOnExit<'a>(&'a AtomicBool);
+                // A panicking low encoder must still end the share and its session.
+                struct StopOnExit<'a>(&'a Stops<'a>);
                 impl Drop for StopOnExit<'_> {
                     fn drop(&mut self) {
-                        self.0.store(true, Ordering::Release);
+                        self.0.session.store(true, Ordering::Release);
+                        if std::thread::panicking() {
+                            self.0.user.store(true, Ordering::Release);
+                        }
                     }
                 }
-                let _stop_on_exit = StopOnExit(stop);
+                let _stop_on_exit = StopOnExit(stops);
                 let result = encode(
                     &mailbox,
                     None,
                     window,
                     thiscord_shared::screen::LayerTargets::low_quality(quality),
-                    stop,
+                    stops,
                     connection,
                     started,
-                    low.tx,
+                    tx,
                     &mut |_| {},
-                    source,
                     &low.metrics,
                     &low.force_keyframe,
                     &low.demand,
                     active_fps,
                     true,
+                    format,
+                    display,
+                    high_profile,
                 );
                 if result.is_err() {
-                    stop.store(true, Ordering::Release);
+                    stops.user.store(true, Ordering::Release);
                 }
                 result
             })
@@ -361,30 +534,36 @@ pub fn run_layers(
             Some(&capture),
             window,
             quality,
-            &stop,
-            &connection,
+            &stops,
+            connection,
             started,
-            tx,
-            &mut report,
-            source,
-            &metrics,
-            &force_keyframe,
-            &demand,
+            tx.clone(),
+            report,
+            metrics,
+            force_keyframe,
+            demand,
             &active_fps,
             false,
+            format,
+            display,
+            high_profile,
         );
-        stop.store(true, Ordering::Release);
-        let secondary = low_job.map_or(Ok(()), |job| {
+        // A format restart only ends this session; anything else ends sharing.
+        if result != Ok(Session::HdrEnabled) {
+            stop.store(true, Ordering::Release);
+        }
+        session_stop.store(true, Ordering::Release);
+        let secondary = low_job.map_or(Ok(Session::Stopped), |job| {
             job.join()
                 .unwrap_or_else(|_| Err("Screen low encoder worker failed".into()))
         });
-        result.and(secondary)
+        result.and_then(|session| secondary.map(|_| session))
     });
     // Stop also wakes/joins capture when the source is static (no callbacks).
     let stopped = capture
         .stop()
         .map_err(|_| "Cannot close screen capture".to_owned());
-    result.and(stopped)
+    result.and_then(|session| stopped.map(|_| session))
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -393,21 +572,28 @@ fn encode(
     capture: Option<&windows_capture::capture::CaptureControl<Capture, String>>,
     window: Option<Window>,
     quality: Quality,
-    stop: &AtomicBool,
+    stops: &Stops,
     connection: &Connection,
     started: Instant,
     tx: tokio::sync::mpsc::Sender<super::Outgoing>,
     report: &mut impl FnMut(String),
-    source: &SourceId,
     metrics: &Metrics,
     force_keyframe: &AtomicBool,
     demand: &super::adaptation::Demand,
     active_fps: &[AtomicU32; 2],
     secondary: bool,
-) -> Result<(), String> {
+    format: SourceFormat,
+    display: &Display,
+    high_profile: &AtomicBool,
+) -> Result<Session, String> {
+    metrics.label(
+        "encoder_thread_priority",
+        super::priority::promote_video_thread(),
+    );
     let requested = quality;
     let mut adaptation = super::adaptation::QualityController::new(requested);
     let mut quality = requested.constrained(demand.bitrate());
+    let mut high = high_profile.load(Ordering::Acquire);
     let mut paused = true;
     let mut reconfigure = true;
     let mut last_raw: Option<Pixels> = None;
@@ -421,10 +607,14 @@ fn encode(
     let mut sequence = 0;
     let mut waiting_for_keyframe = true;
     let mut keyframe = KeyframePolicy::default();
-    let mut color_checked = Instant::now() - Duration::from_secs(2);
-    let mut color = (1.0, false);
+    let mut speed = SpeedPolicy::default();
+    let mut gpu_priority = false;
+    let mut color;
+    let mut previous_color = None;
     let mut previous = Instant::now();
     let mut previous_bitrate = None;
+    let mut window_checked = Instant::now() - WINDOW_CHECK;
+    let mut last_source = None;
     let mut recovery_scale = 100;
     let mut send_budget =
         super::pacing::SendBudget::new(super::pacing::transport_bitrate(quality.bitrate()));
@@ -432,16 +622,33 @@ fn encode(
     metrics.label("requested_fps", requested.fps);
     metrics.label("requested_height", requested.height);
     metrics.label("video_paused", true);
-    while !stop.load(Ordering::Acquire) && connection.active() {
+    while !stops.stopped() && connection.active() {
         if previous.elapsed() > Duration::from_secs(2) {
             return Err("Screen capture paused; start sharing again.".into());
         }
         previous = Instant::now();
-        if window.is_some_and(|w| !w.is_valid() || minimized(w))
-            || mailbox.0.lock().unwrap().closed
-            || capture.is_some_and(|c| c.is_finished())
-        {
+        if window_checked.elapsed() >= WINDOW_CHECK {
+            window_checked = Instant::now();
+            if window.is_some_and(|w| !w.is_valid() || minimized(w)) {
+                return Err(
+                    "The shared source closed or became unavailable; sharing stopped.".into(),
+                );
+            }
+        }
+        if mailbox.0.lock().unwrap().closed || capture.is_some_and(|c| c.is_finished()) {
             return Err("The shared source closed or became unavailable; sharing stopped.".into());
+        }
+        color = display.current()?;
+        if previous_color != Some(color) {
+            metrics.label("hdr", color.1);
+            metrics.label("sdr_white_nits", color.0 * 80.0);
+            previous_color = Some(color);
+        }
+        // 8-bit capture of an HDR composition would clip highlights. Only the
+        // SDR->HDR direction restarts: FP16 remains correct (if costlier) on
+        // SDR, so a window dragged across mixed displays cannot flap.
+        if !secondary && format == SourceFormat::Sdr && color.1 {
+            return Ok(Session::HdrEnabled);
         }
         let bitrate = demand.bitrate();
         if previous_bitrate != Some(bitrate) {
@@ -468,8 +675,16 @@ fn encode(
             continue;
         }
         let next = next.expect("active demand has a quality target");
-        if paused || next != quality || recovery_scale != adaptation.scale_percent() {
+        // A profile change rebuilds like a quality change: the new bitstream
+        // starts with SPS/PPS/IDR, so viewers switch decoders on a keyframe.
+        let want_high = high_profile.load(Ordering::Acquire);
+        if paused
+            || next != quality
+            || recovery_scale != adaptation.scale_percent()
+            || want_high != high
+        {
             quality = next;
+            high = want_high;
             recovery_scale = adaptation.scale_percent();
             active_fps[usize::from(secondary)].store(quality.fps, Ordering::Release);
             refresh_after = Instant::now();
@@ -483,32 +698,37 @@ fn encode(
             force_keyframe.store(true, Ordering::Release);
             metrics.label("video_paused", false);
             metrics.label("recovery_scale_percent", recovery_scale);
+            metrics.label(
+                "encoder_profile_requested",
+                if high { "high" } else { "baseline" },
+            );
         }
         // Share live demand with the sender, retaining burst capacity even after
         // a recovery downgrade. Shed raw input at this rate before encoding more
         // dependencies; a small budget dip must not halve the transport rate.
         send_budget.set_bitrate(super::pacing::transport_budget(quality.bitrate(), bitrate));
-        if color_checked.elapsed() >= Duration::from_secs(1) {
-            let monitor = match source {
-                SourceId::Monitor(id) => HMONITOR(*id as *mut _),
-                SourceId::Window(id) => unsafe {
-                    MonitorFromWindow(
-                        windows::Win32::Foundation::HWND(*id as *mut _),
-                        MONITOR_DEFAULTTONEAREST,
-                    )
-                },
-            };
-            color = gpu::display_white(monitor)
-                .map_err(|e| format!("Cannot read display HDR calibration: {}", e.code()))?;
-            metrics.label("hdr", color.1);
-            metrics.label("sdr_white_nits", color.0 * 80.0);
-            color_checked = Instant::now();
-        }
         let (pixels, fresh) = {
             let guard = mailbox.0.lock().unwrap();
+            let now = Instant::now();
+            // Sleep until real work can be due: a capture/MFT notification wakes
+            // the condvar early. Pending input polls briefly for time, credit or
+            // sender drain; otherwise wait for the next static refresh.
+            let timeout = if pending_pixels.is_some() {
+                PENDING_WAIT
+            } else if hardware.is_some() && last_texture.is_some() {
+                keyframe
+                    .next_refresh()
+                    .map_or(Duration::ZERO, |at| {
+                        at.max(refresh_after).saturating_duration_since(now)
+                    })
+                    .min(IDLE_WAIT)
+            } else {
+                IDLE_WAIT
+            }
+            .max(Duration::from_millis(1));
             let (mut guard, _) = mailbox
                 .1
-                .wait_timeout_while(guard, Duration::from_millis(3), |m| {
+                .wait_timeout_while(guard, timeout, |m| {
                     m.latest.is_none() && !m.closed && !m.encoder_event
                 })
                 .unwrap();
@@ -527,6 +747,7 @@ fn encode(
         };
         // Capture waiting can outlast an MFT NeedInput/HaveOutput event. Drain
         // after waking, before testing encoder readiness for this new frame.
+        let mut rebuild = false;
         if let Some(hw) = hardware.as_mut() {
             metrics.peak("encoder_peak_pending", hw.pending() as u64);
             metrics.peak(
@@ -539,6 +760,7 @@ fn encode(
             if record_frames(&frames, started, metrics) {
                 keyframe.observed(Instant::now());
             }
+            rebuild = observe_speed(&frames, &mut speed, hw, quality.fps, metrics);
             if !send_frames(
                 frames,
                 started,
@@ -552,6 +774,15 @@ fn encode(
                 force_keyframe.store(true, Ordering::Release);
                 metrics.event("encoded frame dropped before paced sender; requesting keyframe");
             }
+        }
+        if rebuild {
+            hardware = None;
+            processor = None;
+            configured = None;
+            last_texture = None;
+            waiting_for_keyframe = true;
+            reconfigure = true;
+            force_keyframe.store(true, Ordering::Release);
         }
         let pixels = pixels
             .map(|mut p| {
@@ -606,10 +837,13 @@ fn encode(
             captured_at = pixels.arrived;
             last_raw = Some(pixels.clone());
             reconfigure = false;
-            metrics.label(
-                "source_resolution",
-                format!("{}x{}", pixels.width, pixels.height),
-            );
+            if last_source != Some((pixels.width, pixels.height)) {
+                last_source = Some((pixels.width, pixels.height));
+                metrics.label(
+                    "source_resolution",
+                    format!("{}x{}", pixels.width, pixels.height),
+                );
+            }
             let scale =
                 (quality.width() as f64 * f64::from(recovery_scale) / 100.0 / pixels.width as f64)
                     .min(
@@ -621,12 +855,18 @@ fn encode(
             let w = ((pixels.width as f64 * scale) as u32 & !1).max(2);
             let h = ((pixels.height as f64 * scale) as u32 & !1).max(2);
             if configured != Some((w, h)) {
+                let options = EncoderOptions {
+                    high_profile: high,
+                    quality_speed: speed.hint(w as usize, h as usize, quality.fps),
+                };
+                speed.reset_window();
                 hardware = Some(
-                    super::hardware::HardwareEncoder::new_gpu(
+                    super::hardware::HardwareEncoder::new_gpu_with(
                         w as usize,
                         h as usize,
                         quality,
                         &pixels.device,
+                        options,
                     )
                     .map_err(|e| format!("GPU H.264 surface encoding unavailable: {}", e.code()))?,
                 );
@@ -639,15 +879,20 @@ fn encode(
                         wake.1.notify_one();
                     })
                     .map_err(|e| format!("GPU encoder event subscription failed: {}", e.code()))?;
-                processor = Some(
-                    gpu::Processor::new(&pixels.device, w, h)
-                        .map_err(|e| format!("GPU video conversion unavailable: {}", e.code()))?,
-                );
+                processor = None;
+                if !gpu_priority {
+                    gpu_priority = true;
+                    metrics.label(
+                        "gpu_thread_priority",
+                        gpu::raise_gpu_priority(&pixels.device),
+                    );
+                }
                 metrics.label("resolution", format!("{w}x{h}"));
                 metrics.label("target_fps", quality.fps);
                 metrics.label("target_bitrate", quality.bitrate());
                 metrics.label("encoder", &hardware.as_ref().unwrap().name);
                 let hw = hardware.as_ref().unwrap();
+                metrics.label("encoder_profile", hw.profile);
                 metrics.label(
                     "encoder_buffer_target_bytes",
                     super::hardware::buffer_bytes(quality.bitrate()),
@@ -679,16 +924,44 @@ fn encode(
                 }
                 metrics.label(
                     "pixel_path",
-                    "FP16 GPU / tone map / BT.709 NV12 / GPU encoder",
+                    match format {
+                        SourceFormat::Hdr => "FP16 GPU / tone map / BT.709 NV12 / GPU encoder",
+                        SourceFormat::Sdr => {
+                            "BGRA8 GPU / video-processor scale + BT.709 NV12 / GPU encoder"
+                        }
+                    },
                 );
                 configured = Some((w, h));
                 last_texture = None;
                 keyframe = KeyframePolicy::default();
                 force_keyframe.store(true, Ordering::Release);
                 report(format!(
-                    "GPU capture/scale/BT.709 NV12 -> {} (FP16 HDR-aware)",
-                    hardware.as_ref().unwrap().name
+                    "GPU capture/scale/BT.709 NV12 -> {} ({}, {})",
+                    hardware.as_ref().unwrap().name,
+                    match format {
+                        SourceFormat::Hdr => "FP16 HDR-aware",
+                        SourceFormat::Sdr => "SDR single blit",
+                    },
+                    hardware.as_ref().unwrap().profile,
                 ));
+            }
+            // SDR scales from the capture surface, so a source resize needs a
+            // new blit even when the encoded size is unchanged.
+            if processor.as_ref().is_none_or(|p| {
+                format == SourceFormat::Sdr && p.source() != (pixels.width, pixels.height)
+            }) {
+                processor = Some(
+                    match format {
+                        SourceFormat::Hdr => gpu::Processor::new(&pixels.device, w, h),
+                        SourceFormat::Sdr => gpu::Processor::new_sdr(
+                            &pixels.device,
+                            (pixels.width, pixels.height),
+                            w,
+                            h,
+                        ),
+                    }
+                    .map_err(|e| format!("GPU video conversion unavailable: {}", e.code()))?,
+                );
             }
             if !hardware.as_ref().unwrap().ready() {
                 metrics.add("gpu_busy", 1);
@@ -743,6 +1016,7 @@ fn encode(
         if record_frames(&frames, started, metrics) {
             keyframe.observed(Instant::now());
         }
+        let rebuild = observe_speed(&frames, &mut speed, hw, quality.fps, metrics);
         if !send_frames(
             frames,
             started,
@@ -755,8 +1029,41 @@ fn encode(
         )? {
             force_keyframe.store(true, Ordering::Release);
         }
+        if rebuild {
+            hardware = None;
+            processor = None;
+            configured = None;
+            last_texture = None;
+            waiting_for_keyframe = true;
+            reconfigure = true;
+            force_keyframe.store(true, Ordering::Release);
+        }
     }
-    Ok(())
+    Ok(Session::Stopped)
+}
+/// Feed MFT service times to the speed policy. Returns true when the encoder
+/// must be rebuilt because the driver ignored a live speed-hint change.
+fn observe_speed(
+    frames: &[super::hardware::Encoded],
+    speed: &mut SpeedPolicy,
+    hw: &super::hardware::HardwareEncoder,
+    fps: u32,
+    metrics: &Metrics,
+) -> bool {
+    if hw.quality_vs_speed() == Some(0) {
+        return false;
+    }
+    for frame in frames {
+        if speed.observe(frame.encoding_duration, fps) {
+            metrics.event("encoder service near frame interval; using fastest speed hint");
+            if hw.set_quality_vs_speed(0).is_ok() {
+                metrics.label("encoder_quality_vs_speed", 0);
+                return false;
+            }
+            return true;
+        }
+    }
+    false
 }
 fn record_frames(frames: &[super::hardware::Encoded], started: Instant, metrics: &Metrics) -> bool {
     let mut keyframe = false;

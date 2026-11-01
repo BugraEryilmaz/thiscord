@@ -73,6 +73,8 @@ struct Member {
     feedback_enabled: bool,
     subscriptions_enabled: bool,
     screen_layers: bool,
+    /// Sends per-view decoder capability and accepts a planned encoder profile.
+    screen_profiles: bool,
     screen_quality: thiscord_shared::screen::Quality,
     screen_routes: Arc<std::sync::Mutex<[layers::Route; ROOM_CAPACITY]>>,
     views: [Option<viewing::View>; ROOM_CAPACITY * 2],
@@ -1078,6 +1080,7 @@ async fn serve(mut socket: logging::Socket, pool: DbPool, id: RequestId) {
             feedback_enabled: false,
             subscriptions_enabled: false,
             screen_layers: false,
+            screen_profiles: false,
             screen_quality: Default::default(),
             screen_routes: Default::default(),
             views: [None; ROOM_CAPACITY * 2],
@@ -1215,6 +1218,7 @@ async fn serve(mut socket: logging::Socket, pool: DbPool, id: RequestId) {
                     screen_feedback: true,
                     screen_subscriptions: true,
                     screen_layers: true,
+                    screen_profiles: true,
                     video_diagnostics: true,
                     soundboard: soundboard_offered,
                     ice_servers,
@@ -1237,6 +1241,7 @@ async fn serve(mut socket: logging::Socket, pool: DbPool, id: RequestId) {
                 packet_redundancy,
                 video_diagnostics: video_enabled,
                 soundboard: soundboard_enabled,
+                screen_profiles,
             }) = parse(answer)
             else {
                 return Err(());
@@ -1264,6 +1269,7 @@ async fn serve(mut socket: logging::Socket, pool: DbPool, id: RequestId) {
                 member.packet_redundancy = packet_redundancy;
                 member.subscriptions_enabled = screen_subscriptions;
                 member.screen_layers = screen_layers && screen_subscriptions && enabled;
+                member.screen_profiles = screen_profiles && screen_subscriptions;
                 member.negotiated = true;
                 tracing::info!(request_id = %id, slot, packet_redundancy,
                     microphone_source_epoch = member.info.microphone_source_epoch,
@@ -1636,7 +1642,7 @@ async fn serve(mut socket: logging::Socket, pool: DbPool, id: RequestId) {
                     };
                     for kind in [MediaKind::ScreenVideo, MediaKind::Camera] {
                         if let Some((epoch, bitrate)) = viewing::target(&room, slot, kind).await
-                            && send(&mut socket, ServerEvent::ScreenTarget { kind, epoch, bitrate, layers: viewing::layer_target(&room, slot, kind).await }).await.is_err() { active.store(false, Ordering::Release); break; }
+                            && send(&mut socket, ServerEvent::ScreenTarget { kind, epoch, bitrate, layers: viewing::layer_target(&room, slot, kind).await, profile: viewing::profile_target(&room, slot, kind).await }).await.is_err() { active.store(false, Ordering::Release); break; }
                     }
                     if !route_logged { route_logged=log_selected_route(pc.as_ref(),id).await; }
                 if send(&mut socket,ServerEvent::Participants{members}).await.is_err(){break;}
@@ -1978,6 +1984,7 @@ mod send_tests {
                     feedback_enabled: true,
                     subscriptions_enabled: true,
                     screen_layers: false,
+                    screen_profiles: false,
                     screen_quality: Default::default(),
                     screen_routes: Default::default(),
                     views: [None; ROOM_CAPACITY * 2],
@@ -1999,6 +2006,7 @@ mod send_tests {
                     owner,
                     epoch: 7,
                     bitrate: 2_500_000,
+                    h264_high: false,
                 }],
                 &AtomicBool::new(true)
             )

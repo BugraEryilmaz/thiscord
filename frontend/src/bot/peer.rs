@@ -206,6 +206,8 @@ pub(super) async fn run(
                 // Bots expose per-stream video diagnostics in their own panel.
                 video_diagnostics: false,
                 soundboard: false,
+                // Bots decode with OpenH264 (baseline only); never request High.
+                screen_profiles: false,
             },
         )
         .await?;

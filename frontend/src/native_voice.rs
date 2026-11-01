@@ -191,18 +191,22 @@ impl PeerConnectionEventHandler for Handler {
         let connection = self.connection.clone();
         let mut closed = self.closed.clone();
         tokio::spawn(async move {
-            let mut tick = tokio::time::interval(Duration::from_millis(10));
-            tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+            // Every video track used to wake every 10 ms for the whole call,
+            // shared or not. Sleep until the inbox's next gap/recovery deadline;
+            // the 250 ms idle bound only picks up UI-initiated recovery requests.
+            let mut deadline = None;
             loop {
                 if !connection.active() {
                     break;
                 }
+                let wake = deadline.unwrap_or_else(|| Instant::now() + Duration::from_millis(250));
                 let event = tokio::select! { biased;
                     _ = closed.changed() => break,
-                    _ = tick.tick(), if screen_receiver.is_some() => {
+                    _ = tokio::time::sleep_until(wake.into()), if screen_receiver.is_some() => {
                         let receiver = screen_receiver.as_ref().unwrap();
                         receiver.tick(Instant::now());
                         if let Some(epoch) = receiver.keyframe_request(Instant::now()) && let Some((kind, slot)) = MediaKind::from_relay_ssrc(ssrc) { let _ = keyframes.try_send((kind, slot, epoch)); }
+                        deadline = receiver.next_deadline();
                         continue;
                     },
                     event = track.poll() => match event { Some(event) => event, None => break },
@@ -211,6 +215,7 @@ impl PeerConnectionEventHandler for Handler {
                     let arrived = Instant::now();
                     if let Some(receiver) = &screen_receiver {
                         receiver.push(packet, Instant::now());
+                        deadline = receiver.next_deadline();
                         continue;
                     }
                     let slot = MediaKind::from_relay_ssrc(packet.header.ssrc)
@@ -748,6 +753,7 @@ async fn run(
         packet_redundancy,
         video_diagnostics,
         soundboard,
+        screen_profiles,
     ) = match first.event {
         ServerEvent::Offer {
             packet_redundancy,
@@ -764,6 +770,7 @@ async fn run(
             remote_audio,
             video_diagnostics,
             soundboard,
+            screen_profiles,
         } if first.version == VOICE_VERSION && slot < ROOM_CAPACITY => (
             sdp,
             slot,
@@ -779,6 +786,8 @@ async fn run(
             packet_redundancy,
             video_diagnostics,
             soundboard,
+            // Profiles describe this desktop's WebView decoders as a viewer.
+            screen_profiles && screen_subscriptions,
         ),
         ServerEvent::Replaced {} => return Err(Failure::replaced()),
         ServerEvent::Error { error } => return Err(server_failure(&attempt.connection, error)),
@@ -952,6 +961,7 @@ async fn run(
             screen_layers,
             video_diagnostics: remote_audio && video_diagnostics,
             soundboard,
+            screen_profiles,
         },
         &attempt.connection,
     )
@@ -1091,7 +1101,7 @@ async fn run(
                         if screen_video { app.state::<crate::native_screen::ScreenState>().bind(crate::native_screen::Binding {
                             own_slot, local_epoch: Default::default(), local_visible: Default::default(),
                             connection: attempt.connection.clone(), video: screen_track.clone(), audio: system_track.clone(), can_publish: can_speak && moderation.can_publish() && !settings.lock().map_err(|_|"Settings unavailable")?.deafened,
-                            subscriptions: screen_subscriptions,
+                            subscriptions: screen_subscriptions, profiles: screen_profiles, high_profile: Default::default(),
                             layers: screen_layers.then(|| crate::native_screen::LayerBinding::new(low_track.clone())),
                             demand: Default::default(), network_demand: Default::default(),
                             force_keyframe: force_keyframe.clone(), metrics: Default::default(),
@@ -1099,7 +1109,7 @@ async fn run(
                         }); }
                         if camera_video { app.state::<crate::native_camera::CameraState>().bind(crate::native_screen::Binding {
                             own_slot, local_epoch: Default::default(), local_visible: Default::default(),
-                            connection: attempt.connection.clone(), video: camera_track.clone(), audio: system_track.clone(), can_publish: can_speak && moderation.can_publish() && !settings.lock().map_err(|_|"Settings unavailable")?.deafened, subscriptions: screen_subscriptions, layers: None,
+                            connection: attempt.connection.clone(), video: camera_track.clone(), audio: system_track.clone(), can_publish: can_speak && moderation.can_publish() && !settings.lock().map_err(|_|"Settings unavailable")?.deafened, subscriptions: screen_subscriptions, profiles: false, high_profile: Default::default(), layers: None,
                             demand: Default::default(), network_demand: Default::default(), force_keyframe: Default::default(), metrics: Default::default(), video_sequence: Default::default(), audio_sequence: Default::default(), audio_timestamp: Default::default(), started: Instant::now(),
                         }); }
                         engine.notify_control(Command::Roster{connection:attempt.connection.clone(),members:roster.clone()})?;
@@ -1188,9 +1198,9 @@ async fn run(
                             });
                         }
                     },
-                    ServerEvent::ScreenTarget { kind, epoch, bitrate, layers } => {
+                    ServerEvent::ScreenTarget { kind, epoch, bitrate, layers, profile } => {
                         if status.lock().ok().is_some_and(|s| s.participants.iter().any(|m| m.slot == own_slot && m.video_epoch(kind) == epoch && m.video_active(kind))) {
-                            if kind == MediaKind::Camera { app.state::<crate::native_camera::CameraState>().target(bitrate); } else { app.state::<crate::native_screen::ScreenState>().layer_target(bitrate, layers); }
+                            if kind == MediaKind::Camera { app.state::<crate::native_camera::CameraState>().target(bitrate); } else { app.state::<crate::native_screen::ScreenState>().layer_target(bitrate, layers, profile); }
                         }
                     },
                     ServerEvent::Soundboard { sound_id, account_id } => {

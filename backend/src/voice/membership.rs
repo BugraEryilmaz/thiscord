@@ -101,6 +101,7 @@ mod tests {
             feedback_enabled: true,
             subscriptions_enabled: true,
             screen_layers: false,
+            screen_profiles: false,
             screen_quality: Default::default(),
             screen_routes: Default::default(),
             views: [None; ROOM_CAPACITY * 2],

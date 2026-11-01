@@ -15,11 +15,20 @@ pub struct Scene {
 }
 impl Scene {
     pub fn new(device: &ID3D11Device, width: u32, height: u32) -> windows::core::Result<Self> {
+        Self::with_format(device, width, height, DXGI_FORMAT_R16G16B16A16_FLOAT)
+    }
+    /// BGRA8 renders the same scene as SDR compositor output (clamped 0..1).
+    pub fn with_format(
+        device: &ID3D11Device,
+        width: u32,
+        height: u32,
+        format: DXGI_FORMAT,
+    ) -> windows::core::Result<Self> {
         let texture = gpu::texture(
             device,
             width,
             height,
-            DXGI_FORMAT_R16G16B16A16_FLOAT,
+            format,
             (D3D11_BIND_RENDER_TARGET.0 | D3D11_BIND_SHADER_RESOURCE.0) as u32,
         )?;
         unsafe {

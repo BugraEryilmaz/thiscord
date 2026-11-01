@@ -175,14 +175,28 @@ pub async fn run() -> Result<(), Box<dyn std::error::Error>> {
     })
     .await?;
 
+    // `--high` exercises the profile-negotiated path: Constrained High from the
+    // GPU encoder, validated and relabelled per-profile on the WebView bridge.
+    let high = std::env::args().any(|arg| arg == "--high");
     let receiving = inbox.clone();
     let runtime = tokio::runtime::Handle::current();
     let preview_metrics = receive_metrics.clone();
     let relay = std::thread::spawn(move || {
         let mut frames = 0;
+        let mut high_frames = 0;
         let mut sequence = 0;
+        let mut profile = thiscord_shared::h264::Profile::Baseline;
         while let Some(frame) = receiving.next() {
-            assert!(screen::bounded_parameter_sets(&frame.data));
+            let allow_high = high && preview.as_ref().is_none_or(|p| p.decodes_high());
+            if let Some(current) =
+                thiscord_shared::h264::parameter_set_profile(&frame.data, allow_high)
+                    .expect("bounded parameter sets")
+            {
+                profile = current;
+            }
+            if profile == thiscord_shared::h264::Profile::High {
+                high_frames += 1;
+            }
             if let Some(preview) = &preview {
                 let packets =
                     screen::packetize(frame.data, &mut sequence, frame.timestamp).unwrap();
@@ -190,8 +204,11 @@ pub async fn run() -> Result<(), Box<dyn std::error::Error>> {
                 let sent = runtime.block_on(async {
                     for packet in packets {
                         if !matches!(
-                            tokio::time::timeout(Duration::from_millis(50), preview.write(packet))
-                                .await,
+                            tokio::time::timeout(
+                                Duration::from_millis(50),
+                                preview.write_profile(packet, profile)
+                            )
+                            .await,
                             Ok(Ok(_))
                         ) {
                             return false;
@@ -211,7 +228,7 @@ pub async fn run() -> Result<(), Box<dyn std::error::Error>> {
             }
             frames += 1;
         }
-        frames
+        (frames, high_frames)
     });
     let source = super::window::Source::new()?;
     let connection = Connection::default();
@@ -231,7 +248,16 @@ pub async fn run() -> Result<(), Box<dyn std::error::Error>> {
         sequence: Arc::default(),
         metrics: metrics.clone(),
     };
-    let send_task = tokio::spawn(sender.run(Arc::new(AtomicBool::new(false)), quality, rx));
+    // Production pacing: dedicated MMCSS thread + high-resolution timer.
+    // `--tokio-pacer` keeps the former shared-runtime task for A/B runs.
+    let send_task = if std::env::args().any(|arg| arg == "--tokio-pacer") {
+        tokio::spawn(sender.run(Arc::new(AtomicBool::new(false)), quality, rx))
+    } else {
+        let task = sender.spawn_paced(Arc::new(AtomicBool::new(false)), quality, rx)?;
+        tokio::task::spawn_blocking(move || {
+            let _ = task.join();
+        })
+    };
     let started = Instant::now();
     let worker = {
         let (stop, connection, metrics, force_keyframe, demand) = (
@@ -243,7 +269,7 @@ pub async fn run() -> Result<(), Box<dyn std::error::Error>> {
         );
         let id = source.id;
         std::thread::spawn(move || {
-            screen::capture::run(
+            screen::capture::run_layers(
                 &SourceId::Window(id),
                 quality,
                 stop,
@@ -253,6 +279,8 @@ pub async fn run() -> Result<(), Box<dyn std::error::Error>> {
                 metrics,
                 force_keyframe,
                 demand,
+                None,
+                Arc::new(AtomicBool::new(high)),
                 |message| println!("{message}"),
             )
         })
@@ -311,7 +339,8 @@ pub async fn run() -> Result<(), Box<dyn std::error::Error>> {
     publisher.close().await?;
     receiver.close().await?;
     inbox.close();
-    let frames = relay.join().map_err(|_| "Receiver probe panicked")?;
+    let (frames, high_frames) = relay.join().map_err(|_| "Receiver probe panicked")?;
+    println!("Profile: requested_high={high} high_frames={high_frames}/{frames}");
     println!(
         "Publisher diagnostics: {}",
         serde_json::to_string(&metrics.snapshot())?
@@ -334,6 +363,7 @@ pub async fn run() -> Result<(), Box<dyn std::error::Error>> {
             || publisher.counters["encode_dropped"] != 0
             || receiver.counters["lost_packets"] != 0
             || receiver.counters["preview_errors"] != 0
+            || (high && high_frames * 10 < frames * 9)
         {
             return Err(
                 "4K60 native pipeline acceptance failed; inspect aggregate diagnostics".into(),

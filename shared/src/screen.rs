@@ -7,6 +7,10 @@ pub const MAX_WIDTH: u32 = 3840;
 pub const MAX_HEIGHT: u32 = 2160;
 pub const H264_FMTP: &str =
     "level-asymmetry-allowed=1;packetization-mode=1;profile-level-id=42e034";
+/// Constrained High level 5.2, offered only on the local WebView bridge. The
+/// SFU transport stays codec-opaque; its negotiated baseline entry carries both.
+pub const H264_HIGH_FMTP: &str =
+    "level-asymmetry-allowed=1;packetization-mode=1;profile-level-id=640c34";
 pub const MAX_PACKETS_PER_SECOND: usize = 12_000;
 pub const MAX_BYTES_PER_SECOND: usize = 12_000_000;
 pub const MAX_FRAME_BYTES: usize = 4 * 1024 * 1024;
@@ -193,6 +197,31 @@ impl LayerTargets {
     }
 }
 
+/// One bitstream per encoder layer serves every viewer. The SFU selects the
+/// most capable profile that *all* current viewers decode, so mixed viewer
+/// capabilities never add encoders: at most the existing two layers run.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum VideoProfile {
+    /// Constrained baseline: every client, bot and old viewer decodes it.
+    #[default]
+    H264Baseline,
+    /// 8-bit 4:2:0 Constrained High (CABAC, 8x8 transform, no B-frames).
+    H264High,
+}
+impl VideoProfile {
+    pub fn is_baseline(&self) -> bool {
+        *self == Self::H264Baseline
+    }
+    /// Lowest common capability; no viewers keeps the compatibility default.
+    pub fn plan(mut high_capable: impl Iterator<Item = bool>) -> Self {
+        match high_capable.next() {
+            Some(true) if high_capable.all(|high| high) => Self::H264High,
+            _ => Self::H264Baseline,
+        }
+    }
+}
+
 /// Full replacement of a receiver's active viewers, renewed over authenticated signaling.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -206,6 +235,10 @@ pub struct Subscription {
     pub owner: crate::AccountId,
     pub epoch: u32,
     pub bitrate: u32,
+    /// The viewer's local decoder negotiated H.264 High. Only sent to servers
+    /// that advertised `screen_profiles`; omitted (false) otherwise.
+    #[serde(default, skip_serializing_if = "crate::voice::is_false")]
+    pub h264_high: bool,
 }
 impl Subscription {
     pub fn valid(self) -> bool {
@@ -248,6 +281,51 @@ mod tests {
                 );
             }
         }
+    }
+    #[test]
+    fn profile_plan_is_lowest_common_capability_and_wire_compatible() {
+        assert_eq!(
+            VideoProfile::plan([].into_iter()),
+            VideoProfile::H264Baseline
+        );
+        assert_eq!(
+            VideoProfile::plan([true, true].into_iter()),
+            VideoProfile::H264High
+        );
+        assert_eq!(
+            VideoProfile::plan([true, false, true].into_iter()),
+            VideoProfile::H264Baseline
+        );
+        assert_eq!(
+            VideoProfile::plan([false].into_iter()),
+            VideoProfile::H264Baseline
+        );
+        let view = Subscription {
+            kind: crate::voice::MediaKind::ScreenVideo,
+            slot: 1,
+            owner: crate::AccountId::from_uuid(uuid::Uuid::nil()),
+            epoch: 3,
+            bitrate: MIN_VIEW_BITRATE,
+            h264_high: false,
+        };
+        // Legacy servers deny unknown fields: false must be omitted entirely.
+        let wire = serde_json::to_value(view).unwrap();
+        assert!(wire.get("h264_high").is_none());
+        let high = serde_json::to_value(Subscription {
+            h264_high: true,
+            ..view
+        })
+        .unwrap();
+        assert_eq!(high["h264_high"], true);
+        assert!(
+            serde_json::from_value::<Subscription>(high)
+                .unwrap()
+                .h264_high
+        );
+        assert_eq!(
+            serde_json::to_value(VideoProfile::H264High).unwrap(),
+            "h264_high"
+        );
     }
     #[test]
     fn local_source_ids_preserve_native_handles_and_old_status_stays_readable() {

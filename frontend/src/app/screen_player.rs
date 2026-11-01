@@ -368,20 +368,24 @@ pub async fn run(
                     if now - last_stats >= 1000.0 {
                         let seconds = (now - last_stats) / 1000.0;
                         last_stats = now;
-                        if let Ok(stats) = native::<thiscord_shared::screen::Diagnostics>(
-                            "screen_view_diagnostics",
-                            json!({"watch":watch}),
-                        )
-                        .await
+                        // Decoder pressure and PLI recovery need the browser
+                        // stats every second. The copyable text is only shown
+                        // while waiting for video, so a playing grid of tiles
+                        // no longer fetches/serializes native diagnostics per tile.
+                        let (browser, pli, decoder) = browser_stats(&player.pc).await;
+                        if pli > last_pli {
+                            let _ = native::<bool>("screen_view_keyframe", json!({"watch":watch}))
+                                .await;
+                        }
+                        decoder_pressure = decoder.is_some_and(|s| decoder_load.sample(s));
+                        last_pli = pli;
+                        if !message.get_untracked().is_empty()
+                            && let Ok(stats) = native::<thiscord_shared::screen::Diagnostics>(
+                                "screen_view_diagnostics",
+                                json!({"watch":watch}),
+                            )
+                            .await
                         {
-                            let (browser, pli, decoder) = browser_stats(&player.pc).await;
-                            if pli > last_pli {
-                                let _ =
-                                    native::<bool>("screen_view_keyframe", json!({"watch":watch}))
-                                        .await;
-                            }
-                            decoder_pressure = decoder.is_some_and(|s| decoder_load.sample(s));
-                            last_pli = pli;
                             let playback = {
                                 let q = player.video.get_video_playback_quality();
                                 let presented = q

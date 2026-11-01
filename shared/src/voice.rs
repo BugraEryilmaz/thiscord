@@ -72,6 +72,10 @@ pub enum ClientEvent {
         /// Accepts `ServerEvent::Soundboard`; only sent when the offer advertised it.
         #[serde(default, skip_serializing_if = "is_false")]
         soundboard: bool,
+        /// Sends per-view `h264_high` and accepts `ScreenTarget::profile`. Only
+        /// sent when the offer advertised `screen_profiles`.
+        #[serde(default, skip_serializing_if = "is_false")]
+        screen_profiles: bool,
     },
     /// Plays a guild sound for everyone in this call. Requires a negotiated soundboard.
     Soundboard {
@@ -105,7 +109,7 @@ pub enum ClientEvent {
 fn accepted_by_default() -> bool {
     true
 }
-fn is_false(value: &bool) -> bool {
+pub(crate) fn is_false(value: &bool) -> bool {
     !value
 }
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -233,6 +237,13 @@ pub enum ServerEvent {
         layers: Option<crate::screen::LayerTargets>,
         /// Zero pauses video. Legacy publishers use the lowest receiver budget.
         bitrate: u32,
+        /// Stream-wide encoder profile every current viewer can decode. Only
+        /// sent to publishers that negotiated `screen_profiles`.
+        #[serde(
+            default,
+            skip_serializing_if = "crate::screen::VideoProfile::is_baseline"
+        )]
+        profile: crate::screen::VideoProfile,
     },
     ScreenKeyframe {
         #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -268,6 +279,10 @@ pub enum ServerEvent {
         /// The server accepts soundboard plays and can deliver them.
         #[serde(default, skip_serializing_if = "is_false")]
         soundboard: bool,
+        /// The server accepts per-view decoder capabilities and plans one
+        /// stream-wide encoder profile from them (no per-viewer encodes).
+        #[serde(default, skip_serializing_if = "is_false")]
+        screen_profiles: bool,
         #[serde(default)]
         ice_servers: Vec<IceServer>,
         /// Secret capability bound to this media session; never persist or log it.
@@ -507,13 +522,49 @@ mod media_tests {
             screen_layers: false,
             video_diagnostics: false,
             soundboard: false,
+            screen_profiles: false,
         };
-        assert!(
-            serde_json::to_value(&answer)
-                .unwrap()
-                .get("soundboard")
-                .is_none()
+        let answer_wire = serde_json::to_value(&answer).unwrap();
+        assert!(answer_wire.get("soundboard").is_none());
+        // Older servers deny unknown answer fields; the default must be omitted.
+        assert!(answer_wire.get("screen_profiles").is_none());
+        assert!(matches!(
+            legacy,
+            ServerEvent::Offer {
+                screen_profiles: false,
+                ..
+            }
+        ));
+        // Older publishers deny unknown target fields: baseline stays omitted
+        // and an omitted profile decodes as baseline.
+        let target = ServerEvent::ScreenTarget {
+            kind: MediaKind::ScreenVideo,
+            epoch: 4,
+            layers: None,
+            bitrate: 2_000_000,
+            profile: crate::screen::VideoProfile::H264Baseline,
+        };
+        let target_wire = serde_json::to_value(&target).unwrap();
+        assert_eq!(
+            target_wire,
+            serde_json::json!({"type":"screen_target","epoch":4,"bitrate":2_000_000})
         );
+        assert!(matches!(
+            serde_json::from_value(target_wire).unwrap(),
+            ServerEvent::ScreenTarget {
+                profile: crate::screen::VideoProfile::H264Baseline,
+                ..
+            }
+        ));
+        let high = serde_json::to_value(ServerEvent::ScreenTarget {
+            kind: MediaKind::ScreenVideo,
+            epoch: 4,
+            layers: None,
+            bitrate: 2_000_000,
+            profile: crate::screen::VideoProfile::H264High,
+        })
+        .unwrap();
+        assert_eq!(high["profile"], "h264_high");
         let id = "00000000-0000-0000-0000-000000000001";
         let wire = serde_json::json!({"version":1,"event":{"type":"soundboard","sound_id":id}});
         let frame: ClientFrame = serde_json::from_value(wire.clone()).unwrap();

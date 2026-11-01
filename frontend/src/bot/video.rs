@@ -243,6 +243,7 @@ impl Receiver {
                     owner: s.stats.owner,
                     epoch: s.stats.epoch,
                     bitrate: s.stats.bitrate,
+                    h264_high: false,
                 }
             })
             .collect();

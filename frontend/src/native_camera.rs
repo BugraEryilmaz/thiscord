@@ -363,6 +363,16 @@ impl CameraState {
         }
     }
 }
+/// WebView encoders insert no periodic keyframes; joins, resumed demand, SFU
+/// recovery requests and local write failures set `force`. A one-second PLI
+/// spent a large share of the 1.5 Mbit/s budget on IDRs (screens measured a
+/// 9 dB PSNR drop at each forced boundary); the fallback now matches screens.
+pub const CAMERA_KEYFRAME_FALLBACK: Duration =
+    thiscord_frontend::screen::keyframe::RECOVERY_INTERVAL;
+fn camera_keyframe_due(last: Instant, now: Instant, force: &AtomicBool) -> bool {
+    let forced = force.swap(false, Ordering::AcqRel);
+    forced || now.saturating_duration_since(last) >= CAMERA_KEYFRAME_FALLBACK
+}
 #[tauri::command]
 pub async fn camera_prepare(state: State<'_, CameraState>, session: u32) -> Result<(), String> {
     state.prepare(session).await
@@ -413,7 +423,10 @@ impl PeerConnectionEventHandler for Handler {
         tokio::spawn(async move {
             let mut tick = tokio::time::interval(Duration::from_millis(250));
             tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
-            let mut last_keyframe = Instant::now() - Duration::from_secs(2);
+            // Request one keyframe as soon as viewers exist, then only on demand.
+            let mut last_keyframe = Instant::now()
+                .checked_sub(CAMERA_KEYFRAME_FALLBACK)
+                .unwrap_or_else(Instant::now);
             let mut timestamp_base = None;
             let mut last_sequence: Option<u16> = None;
             let mut count = 0;
@@ -425,7 +438,7 @@ impl PeerConnectionEventHandler for Handler {
                 }
                 tokio::select! {
                     _ = tick.tick() => {
-                        if binding.demand.bitrate()>0 && (last_keyframe.elapsed() >= Duration::from_secs(1) || force.swap(false, Ordering::AcqRel)) {
+                        if binding.demand.bitrate()>0 && camera_keyframe_due(last_keyframe, Instant::now(), &force) {
                             last_keyframe = Instant::now();
                             let pli = rtc::rtcp::payload_feedbacks::picture_loss_indication::PictureLossIndication { sender_ssrc: 1, media_ssrc: ssrc };
                             let _ = tokio::time::timeout(Duration::from_millis(50), track.write_rtcp(vec![Box::new(pli)])).await;
@@ -864,6 +877,8 @@ mod tests {
             audio: thiscord_frontend::audio::transport::track(902),
             can_publish: true,
             subscriptions: true,
+            profiles: false,
+            high_profile: Default::default(),
             video_sequence: Default::default(),
             audio_sequence: Default::default(),
             audio_timestamp: Default::default(),
@@ -873,6 +888,39 @@ mod tests {
             network_demand: Default::default(),
             metrics: Default::default(),
         }
+    }
+    #[test]
+    fn camera_keyframes_follow_requests_not_a_one_second_clock() {
+        let start = Instant::now();
+        let force = AtomicBool::new(false);
+        // Between requests, no periodic one-second PLI is sent.
+        for ms in [250, 1000, 1500, 5000, 9999] {
+            assert!(!camera_keyframe_due(
+                start,
+                start + Duration::from_millis(ms),
+                &force
+            ));
+        }
+        force.store(true, Ordering::Release);
+        assert!(camera_keyframe_due(
+            start,
+            start + Duration::from_millis(250),
+            &force
+        ));
+        assert!(!force.load(Ordering::Acquire), "a request is consumed once");
+        assert!(camera_keyframe_due(
+            start,
+            start + CAMERA_KEYFRAME_FALLBACK,
+            &force
+        ));
+        // A due fallback also consumes a pending request: one PLI covers both.
+        force.store(true, Ordering::Release);
+        assert!(camera_keyframe_due(
+            start,
+            start + CAMERA_KEYFRAME_FALLBACK,
+            &force
+        ));
+        assert!(!force.load(Ordering::Acquire));
     }
     #[tokio::test]
     async fn synthetic_camera_crosses_local_bridge_and_stops_without_hardware() {

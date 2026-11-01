@@ -53,12 +53,29 @@ the display stops capture; it never falls back to another window/display.
   RTP timestamps and capture admission use WGC's compositor/QPC timestamp rather
   than callback arrival time. An asynchronous MFT event wakes the encoder worker;
   it does not wait for the next capture or a coarse timer to collect output.
-- Pixel processing and encoding: capture requests **FP16 linear scRGB** surfaces.
-  Three owned capture textures decouple WGC callbacks from the encoder. A D3D11
-  shader scales the selected source and normalizes by its monitor's SDR reference
+  Without a capture or MFT wake, the worker sleeps until its next refresh is due
+  (at most 20 ms; 2 ms while a raw frame waits on time, credit or sender drain)
+  instead of waking every 3 ms. Window validity is checked every 100 ms, and the
+  display's SDR white/HDR state is refreshed once per second on its own thread,
+  so `QueryDisplayConfig` no longer runs on the encoder threads. Encoder and pacer
+  threads run under MMCSS "Capture" and the capture device requests GPU thread
+  priority 7 (advisory); diagnostics report `encoder_thread_priority`,
+  `pacer_thread_priority` and `gpu_thread_priority`.
+- Pixel processing and encoding: the capture format is chosen per session from the
+  source display's HDR state (`capture_format` diagnostic). **SDR displays** capture
+  8-bit BGRA; one D3D11 video-processor blit scales it and produces limited-range
+  BT.709 NV12, with no shader pass, FP16 copy or BGRA intermediate (about 3x less
+  graphics-queue time and half the capture-texture memory in the synthetic probe;
+  see [video-codecs.md](video-codecs.md#client-pixel-path-sdr-fast-path)).
+  **HDR displays** capture **FP16 linear scRGB**. Turning HDR on during an SDR share
+  restarts capture in FP16 with one IDR; an FP16 session stays FP16 if HDR is
+  later turned off, so a window moving between mixed displays cannot flap.
+  Three owned capture textures decouple WGC callbacks from the encoder. For HDR, a
+  D3D11 shader scales the selected source and normalizes by its monitor's SDR reference
   white (Windows HDR brightness setting; scRGB 1.0 = 80 nits). An HDR luminance
   shoulder compresses highlights; BT.709 transfer and a video processor produce
-  limited-range BT.709 NV12. The encoder consumes these D3D11 textures through
+  limited-range BT.709 NV12. Shader-resource and video-processor views are cached
+  per pooled texture instead of being created per frame. The encoder consumes these D3D11 textures through
   an MF DXGI device manager. No raw-pixel readback, CPU resizing/color conversion,
   CPU upload, or software encoding occurs in the production sharing path.
   Capture, processing and hardware MFT selection use the same adapter/device;
@@ -81,8 +98,11 @@ the display stops capture; it never falls back to another window/display.
   measured throughput guarantees. The selected preset is a maximum; adaptive modes
   also allow 360p and 5 fps, down to roughly 167 kbit/s. Preset maxima range from
   1.25 to 32 Mbit/s.
-  Access units are bounded to 4 MiB. H.264 Baseline level 5.2 is advertised with a
-  90 kHz RTP clock. Initial/reconfigured encoders start with an IDR. Join/loss
+  Access units are bounded to 4 MiB. H.264 level 5.2 with a 90 kHz RTP clock:
+  constrained baseline by default, and Constrained High (CABAC/8x8, no B-frames)
+  when every current viewer's WebView negotiated a High decoder. One profile is
+  planned per stream for both layers, never one encode per viewer; see
+  [video-codecs.md](video-codecs.md). Initial/reconfigured encoders start with an IDR. Join/loss
   feedback can force another with a 200 ms minimum interval. The fallback IDR
   interval is ten seconds by elapsed time; the hardware GOP target is also ten
   seconds of nominal frames. This removes both former one-second IDR triggers.
@@ -99,14 +119,20 @@ the display stops capture; it never falls back to another window/display.
   This is rate-control headroom, not added playout delay or a hard frame-size bound.
   The sender's 100 ms byte admission, 200 ms queue-age and 350 ms in-flight limits
   remain unchanged, including when the driver rejects/overruns the HRD target.
-  The optional quality/speed hint is 0 (fastest);
-  it preserves selected dimensions, FPS and bitrate but can reduce coding fidelity.
-  Diagnostics expose its readback; the measured quality tradeoff is listed below.
+  The quality/speed hint keeps the driver default up to the 1080p60 pixel rate and
+  uses 0 (fastest) above it. Sustained MFT service above 70% of the frame interval
+  switches a session to 0 once (live, or one rebuild if the driver ignores it).
+  The hint preserves selected dimensions, FPS and bitrate; diagnostics expose its
+  readback and the measured tradeoff is in [video-codecs.md](video-codecs.md).
 - The network remains the Rust WebRTC client and single-process SFU; the SFU
   forwards compressed video without transcoding. The publisher byte-paces packets
   at 1.2 times target codec bitrate (transport overhead allowance), with at most
-  16 ms of burst credit and nominal 8 ms batch sleeps to accommodate OS timer granularity. It does not accumulate
-  catch-up credit during stalls. Stale/partially sent frames trigger IDR recovery
+  16 ms of burst credit. Each sender runs on its own MMCSS thread and runtime and
+  sleeps on a Windows high-resolution waitable timer in 1 ms batches (`pacer_timer`
+  diagnostic); tokio's 15.6 ms timer ticks previously made 8 ms sleeps wake 7.8 ms
+  late on average (16 ms worst case), now 0.49 ms (1.0 ms worst case) in the 4K60
+  pipeline probe. Without a high-resolution timer it falls back to 8 ms async
+  batches. It does not accumulate catch-up credit during stalls. Stale/partially sent frames trigger IDR recovery
   instead of terminating the share. Encoded queues hold 200 ms of target-rate
   frames (six at 30 FPS, twelve at 60 FPS); frames older than 200 ms are rejected
   before sending. The in-flight frame retains a 350 ms capture-age deadline, and
@@ -141,8 +167,10 @@ the display stops capture; it never falls back to another window/display.
   screen transport errors leave voice connected. Recovery uses the existing
   viewer dependency-loss handling and publisher IDRs, without renegotiation.
 - Receivers reorder up to 256 packets for 40 ms, handle sequence wraparound and
-  reject duplicates/late packets. A 10 ms timer resolves gaps even if no more
-  packets arrive. Complete-frame queues allow eight frames, at most 8 MiB and
+  reject duplicates/late packets. A deadline timer resolves gaps even if no more
+  packets arrive: each video track sleeps until its oldest reordered packet's
+  40 ms deadline or its next allowed recovery request (250 ms idle bound), instead
+  of waking every 10 ms for the whole call on all sixteen video tracks. Complete-frame queues allow eight frames, at most 8 MiB and
   250 ms age. Short backlogs drain in order; overflow can retain a newer queued
   keyframe and its suffix. Unrecoverable dependency loss requests a fresh IDR.
   Feedback is coalesced to one request per stream per 500 ms and per publisher
@@ -361,8 +389,11 @@ at most 125% of the selected preset (at most 33.25 Mbit/s codec upload); each pa
 adds the existing 20% transport allowance. This is a ceiling, not an uplink capacity
 estimate. Multiple simultaneous shares still have no shared-link allocator.
 
-Windows uses one WGC session and fans out owned FP16 textures to two latest-frame
-mailboxes. Each encoder owns its MFT, NV12 processor, four-sample admission limit,
+Windows uses one WGC session and fans out owned capture textures (BGRA8 on SDR,
+FP16 on HDR) to two latest-frame mailboxes. Both layers convert from that shared
+surface with their own processor: chaining the low layer from the primary's NV12
+output would couple two independently paused/rebuilt encoders to save one small
+SDR blit per low frame. Each encoder owns its MFT, NV12 processor, four-sample admission limit,
 200 ms frame queue and 100 ms unsent-byte budget. Capture owns seven bounded textures
 when layered (three for legacy capture), each processor at most six NV12 surfaces.
 Low-layer input has its own FPS admission and never blocks primary queue admission.
@@ -548,8 +579,10 @@ warning for duplicate `dct.o` object names; linking and tests succeeded.
 
 ## Pipeline diagnostics and validation
 
-Expand **Screen pipeline diagnostics** by the sharing controls or **Playback
-diagnostics** under a received stream. **Copy diagnostics** copies aggregate
+Expand **Screen pipeline diagnostics** by the sharing controls, or use **Copy video
+diagnostics** on a received stream that is still waiting for video (a playing tile
+no longer fetches native text diagnostics every second; browser decoder statistics
+still drive PLI and decoder-pressure feedback). Copying includes aggregate
 values only. Native counters include capture events/throttling, raw replacement,
 encoded/sent/received frames and bytes, reordered/late/lost packets, queue peaks,
 expired frames, recovery requests and local bridge errors. Timing aggregates
@@ -690,6 +723,10 @@ cargo build -p thiscord-frontend --example screen_gpu_probe --example screen_pip
 .\target\ci\examples\screen_gpu_probe.exe --quality --adapter=0
 .\target\ci\examples\screen_pipeline_probe.exe --seconds=180 --assert
 .\target\ci\examples\screen_pipeline_probe.exe --browser --seconds=180 --assert
+.\target\ci\examples\screen_gpu_probe.exe --codecs --adapter=0
+.\target\ci\examples\screen_gpu_probe.exe --conversion --adapter=0
+.\target\ci\examples\screen_pipeline_probe.exe --seconds=30 --assert --high
+.\target\ci\examples\screen_pipeline_probe.exe --seconds=30 --assert --tokio-pacer
 ```
 
 `--throughput` pre-renders eight moving FP16 source frames, then measures 600
@@ -742,7 +779,9 @@ buffering address distinct bottlenecks; changing the quality picker is not a fix
 
 The speed hint has a measurable fidelity tradeoff on the moving synthetic scene:
 31.29 dB luma PSNR versus 32.87 dB for the NVIDIA driver's default hint (33), at
-the same 3840x2160/60 FPS/32 Mbit/s configuration. This does not establish
+the same 3840x2160/60 FPS/32 Mbit/s configuration. The `--codecs` probe, which
+decodes with Windows' H.264 decoder and aligns frames by sample time, measured a
+larger +5.2 dB at 4K60 and +4.1 dB at 1080p60 (see [video-codecs.md](video-codecs.md)). This does not establish
 subjective text or video quality for every source. Re-test representative content
 before changing the speed hint or claiming equivalent image quality.
 

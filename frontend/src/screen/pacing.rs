@@ -82,15 +82,98 @@ impl Drop for PendingBytes {
         self.outstanding.fetch_sub(self.remaining, Ordering::AcqRel);
     }
 }
+/// Blocking sleeps for a dedicated pacing thread. On Windows this is a
+/// high-resolution waitable timer (Windows 10 1803+), which wakes within about
+/// a millisecond regardless of the process or system timer resolution, unlike
+/// tokio's IOCP park (15.6 ms ticks unless the process raises its resolution,
+/// which Windows 11 may also ignore while the window is minimized/occluded).
+pub struct BlockingTimer {
+    #[cfg(target_os = "windows")]
+    handle: windows::Win32::Foundation::HANDLE,
+}
+// SAFETY: a kernel timer handle may be used from any thread. Concurrent sleeps
+// would only re-arm each other's due time; the pacer owns one timer per thread.
+#[cfg(target_os = "windows")]
+unsafe impl Send for BlockingTimer {}
+#[cfg(target_os = "windows")]
+unsafe impl Sync for BlockingTimer {}
+impl BlockingTimer {
+    /// None when the OS lacks high-resolution timers; callers keep tokio pacing.
+    pub fn new() -> Option<Self> {
+        #[cfg(target_os = "windows")]
+        {
+            use windows::Win32::System::Threading::*;
+            // SAFETY: no attributes or name; the handle is closed on drop.
+            let handle = unsafe {
+                CreateWaitableTimerExW(
+                    None,
+                    windows::core::PCWSTR::null(),
+                    CREATE_WAITABLE_TIMER_HIGH_RESOLUTION,
+                    TIMER_ALL_ACCESS.0,
+                )
+            }
+            .ok()?;
+            Some(Self { handle })
+        }
+        #[cfg(not(target_os = "windows"))]
+        {
+            Some(Self {})
+        }
+    }
+    pub fn sleep_until(&self, at: Instant) {
+        let Some(wait) = at.checked_duration_since(Instant::now()) else {
+            return;
+        };
+        #[cfg(target_os = "windows")]
+        {
+            use windows::Win32::System::Threading::*;
+            // Negative due time is relative, in 100 ns units.
+            let due = -i64::try_from(wait.as_nanos().div_ceil(100)).unwrap_or(i64::MAX);
+            // SAFETY: valid owned handle and due-time pointer; no APC routine.
+            let armed = unsafe { SetWaitableTimer(self.handle, &due, 0, None, None, false) };
+            if armed.is_ok() {
+                // SAFETY: waits on the owned timer handle only.
+                unsafe { WaitForSingleObject(self.handle, INFINITE) };
+                return;
+            }
+        }
+        std::thread::sleep(wait);
+    }
+}
+#[cfg(target_os = "windows")]
+impl Drop for BlockingTimer {
+    fn drop(&mut self) {
+        // SAFETY: the handle was created by this value and is closed once.
+        unsafe {
+            let _ = windows::Win32::Foundation::CloseHandle(self.handle);
+        }
+    }
+}
+
 pub struct Pacer {
     next: Option<Instant>,
     bytes_per_second: u64,
+    quantum: Duration,
+    credit: Duration,
 }
 impl Pacer {
+    /// Coarse async timers: 8 ms batch sleeps, one 16 ms OS tick of credit.
     pub fn new(bitrate: u32) -> Self {
+        Self::with_timing(bitrate, Duration::from_millis(8), Duration::from_millis(16))
+    }
+    /// High-resolution timer: the same 16 ms burst credit (so frames after an
+    /// idle gap are not delayed further), but 1 ms batches. Data beyond the
+    /// credit leaves as an even trickle, and a wake can no longer overshoot by
+    /// a 15.6 ms OS tick and release a second tick's worth of packets at once.
+    pub fn fine(bitrate: u32) -> Self {
+        Self::with_timing(bitrate, Duration::from_millis(1), Duration::from_millis(16))
+    }
+    fn with_timing(bitrate: u32, quantum: Duration, credit: Duration) -> Self {
         Self {
             next: None,
             bytes_per_second: u64::from(bitrate) / 8,
+            quantum,
+            credit,
         }
     }
     pub fn set_bitrate(&mut self, bitrate: u32, now: Instant) {
@@ -107,9 +190,9 @@ impl Pacer {
             } else {
                 now - now
                     .duration_since(at)
-                    .min(Duration::from_millis(16))
+                    .min(self.credit)
                     .mul_f64(scale)
-                    .min(Duration::from_millis(16))
+                    .min(self.credit)
             }
         });
         self.bytes_per_second = rate;
@@ -119,11 +202,8 @@ impl Pacer {
         // wake after 15.6 ms on Windows; capping credit at 8 ms discarded
         // half the byte budget every batch. Long stalls still cannot release
         // an unbounded catch-up burst.
-        let quantum = Duration::from_millis(8);
-        let at = self
-            .next
-            .unwrap_or(now)
-            .max(now - Duration::from_millis(16));
+        let quantum = self.quantum;
+        let at = self.next.unwrap_or(now).max(now - self.credit);
         self.next =
             Some(at + Duration::from_secs_f64(bytes as f64 / self.bytes_per_second.max(1) as f64));
         if at <= now {

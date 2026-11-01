@@ -1,5 +1,8 @@
 //! Synthetic FP16 input only. No desktop capture, accounts or network.
 #[cfg(windows)]
+#[path = "screen_gpu_probe/codecs.rs"]
+mod codecs;
+#[cfg(windows)]
 #[path = "screen_gpu_probe/keyframes.rs"]
 mod keyframes;
 #[cfg(windows)]
@@ -97,6 +100,12 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         if std::env::args().any(|arg| arg == "--throughput") {
             return throughput::run(&device, &context);
         }
+        if std::env::args().any(|arg| arg == "--conversion") {
+            return throughput::conversion(&device, &context);
+        }
+        if std::env::args().any(|arg| arg == "--codecs") {
+            return codecs::run(&device, &context);
+        }
         if std::env::args().any(|arg| arg == "--quality") {
             return quality::run(&device, &context);
         }
@@ -171,6 +180,75 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             }
             println!("{decoded} GPU frames verified in {:?}", start.elapsed());
         }
+        sdr_probe(&device, &context)?;
+    }
+    Ok(())
+}
+
+/// SDR fast path: an 8-bit BGRA capture surface scaled and converted to NV12
+/// by one video-processor blit, then hardware encoded and decoded.
+#[cfg(windows)]
+fn sdr_probe(
+    device: &windows::Win32::Graphics::Direct3D11::ID3D11Device,
+    context: &windows::Win32::Graphics::Direct3D11::ID3D11DeviceContext,
+) -> Result<(), Box<dyn std::error::Error>> {
+    use openh264::formats::YUVSource;
+    use std::time::{Duration, Instant};
+    use thiscord_frontend::screen::{gpu, hardware::HardwareEncoder};
+    for (w, h, source_w, source_h, value) in [
+        (1280u32, 720u32, 1280u32, 720u32, 128u8),
+        (1920, 1080, 2560, 1440, 64),
+        (1280, 720, 3840, 2160, 200),
+    ] {
+        let format = gpu::SourceFormat::Sdr;
+        let texture = gpu::texture(
+            device,
+            source_w,
+            source_h,
+            format.dxgi(),
+            format.bind_flags(),
+        )?;
+        let pixels = vec![value; (source_w * source_h * 4) as usize];
+        unsafe {
+            context.UpdateSubresource(&texture, 0, None, pixels.as_ptr().cast(), source_w * 4, 0);
+        }
+        let processor = gpu::Processor::new_sdr(device, (source_w, source_h), w, h)?;
+        let quality = thiscord_shared::screen::Quality { height: h, fps: 60 };
+        let mut encoder = HardwareEncoder::new_gpu(w as usize, h as usize, quality, device)?;
+        let mut decoder = openh264::decoder::Decoder::new()?;
+        let (mut submitted, mut decoded) = (0u64, 0);
+        let start = Instant::now();
+        while start.elapsed() < Duration::from_secs(8) && decoded < 60 {
+            let mut frames = encoder.poll()?;
+            if submitted < 60
+                && encoder.ready()
+                && let Some(nv12) = processor.process(&texture, 1.0, false)?
+            {
+                frames.extend(encoder.encode_texture(nv12, submitted * 16_667)?);
+                submitted += 1;
+            }
+            for frame in frames {
+                let image = decoder.decode(&frame.data)?.ok_or("Missing SDR frame")?;
+                assert_eq!(image.dimensions(), (w as usize, h as usize));
+                let mut rgb = vec![0u8; (w * h * 3) as usize];
+                image.write_rgb8(&mut rgb);
+                // Gamma-encoded BGRA passes through unchanged (no tone curve).
+                let mean = rgb.iter().map(|v| f64::from(*v)).sum::<f64>() / rgb.len() as f64;
+                if (mean - f64::from(value)).abs() > 6.0 {
+                    return Err(format!("SDR level {mean} for input {value}").into());
+                }
+                decoded += 1;
+            }
+            std::thread::sleep(Duration::from_millis(2));
+        }
+        if decoded != 60 {
+            return Err(
+                format!("SDR path stalled: {submitted} submitted, {decoded} decoded").into(),
+            );
+        }
+        println!(
+            "SDR fast path: {source_w}x{source_h} BGRA8 -> {w}x{h} NV12 single blit; {decoded} frames decoded at level {value}"
+        );
     }
     Ok(())
 }

@@ -60,6 +60,9 @@ pub struct HardwareEncoder {
     pub name: String,
     pub buffer_applied: bool,
     pub gop_applied: bool,
+    /// Output type the MFT accepted: "constrained_high", "high" or "baseline".
+    pub profile: &'static str,
+    high: bool,
     sps: Vec<u8>,
     pps: Vec<u8>,
     _manager: Option<IMFDXGIDeviceManager>,
@@ -99,6 +102,77 @@ struct Configuration {
     manager: Option<IMFDXGIDeviceManager>,
     buffer_applied: bool,
     gop_applied: bool,
+    profile: &'static str,
+}
+/// Production encoder choices that never change resolution, FPS or bitrate.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct EncoderOptions {
+    /// Prefer Constrained High (then High), falling back to baseline inside the
+    /// same MFT. Only requested when every current viewer decodes High.
+    pub high_profile: bool,
+    /// `CODECAPI_AVEncCommonQualityVsSpeed`; `None` keeps the driver default.
+    pub quality_speed: Option<u32>,
+}
+impl Default for EncoderOptions {
+    fn default() -> Self {
+        Self {
+            high_profile: false,
+            quality_speed: Some(0),
+        }
+    }
+}
+
+/// Pixel rate above which the fastest speed hint is chosen up front. 1080p60
+/// leaves measured headroom even on integrated GPUs; larger modes may not.
+pub const FAST_HINT_PIXEL_RATE: u64 = 1920 * 1088 * 60;
+/// Mean MFT service time, as a fraction of the frame interval, that marks the
+/// selected hint as overloaded. Below it, quality-favoring hints have headroom.
+const SERVICE_BUDGET: f64 = 0.7;
+const SERVICE_WINDOW: u32 = 30;
+
+/// Chooses the encoder quality/speed hint. The driver default favors fidelity
+/// (measured +1.6 dB on NVIDIA versus the fastest hint) and is used whenever the
+/// pixel rate leaves headroom. Sustained service time near the frame interval
+/// switches this session to the fastest hint; it is never raised again, so the
+/// policy cannot oscillate or force repeated encoder rebuilds.
+#[derive(Debug, Default)]
+pub struct SpeedPolicy {
+    overloaded: bool,
+    samples: u32,
+    total: Duration,
+}
+impl SpeedPolicy {
+    pub fn hint(&self, width: usize, height: usize, fps: u32) -> Option<u32> {
+        let rate = width as u64 * height as u64 * u64::from(fps);
+        (self.overloaded || rate > FAST_HINT_PIXEL_RATE).then_some(0)
+    }
+    /// Returns true once, when a full window first shows overload.
+    pub fn observe(&mut self, service: Duration, fps: u32) -> bool {
+        if self.overloaded {
+            return false;
+        }
+        self.samples += 1;
+        self.total += service;
+        if self.samples < SERVICE_WINDOW {
+            return false;
+        }
+        let mean = self.total.as_secs_f64() / f64::from(self.samples);
+        self.samples = 0;
+        self.total = Duration::ZERO;
+        self.overloaded = mean > SERVICE_BUDGET / f64::from(fps.max(1));
+        self.overloaded
+    }
+    /// Discard partial evidence after a rebuild; overload persists.
+    pub fn reset_window(&mut self) {
+        self.samples = 0;
+        self.total = Duration::ZERO;
+    }
+}
+// Probe-only configuration values, scoped to one constructor call on this
+// thread. Production never sets them, so its configuration is unchanged.
+type ExtraValues = Option<(Vec<(windows::core::GUID, u32)>, Vec<bool>)>;
+thread_local! {
+    static EXTRA_VALUES: std::cell::RefCell<ExtraValues> = const { std::cell::RefCell::new(None) };
 }
 /// H.264 HRD size is in bytes. Give IDRs/scene changes 200 ms of codec budget
 /// instead of compressing them into 100 ms. This is rate-control headroom, not
@@ -127,7 +201,27 @@ impl HardwareEncoder {
         quality: Quality,
         device: &ID3D11Device,
     ) -> Result<Self> {
-        Self::create(width, height, quality, Some(device), Some(0), None)
+        Self::new_gpu_with(width, height, quality, device, EncoderOptions::default())
+    }
+    pub fn new_gpu_with(
+        width: usize,
+        height: usize,
+        quality: Quality,
+        device: &ID3D11Device,
+        options: EncoderOptions,
+    ) -> Result<Self> {
+        if options.quality_speed.is_some_and(|v| v > 100) {
+            return Err(fail());
+        }
+        Self::create_with(
+            width,
+            height,
+            quality,
+            Some(device),
+            options.quality_speed,
+            None,
+            options.high_profile,
+        )
     }
     /// Diagnostic comparison at identical dimensions/rate. `None` leaves the
     /// driver's complexity default untouched; production uses the speed hint.
@@ -169,6 +263,37 @@ impl HardwareEncoder {
             Some((gop_frames, bytes)),
         )
     }
+    /// Diagnostic only: production options plus extra `ICodecAPI` values set
+    /// before the output type (temporal layers, LTR). Returns each setter's
+    /// acceptance; drivers may still ignore accepted values, so probes inspect
+    /// the bitstream rather than trusting these flags.
+    pub fn new_gpu_with_codec_values(
+        width: usize,
+        height: usize,
+        quality: Quality,
+        device: &ID3D11Device,
+        options: EncoderOptions,
+        values: &[(windows::core::GUID, u32)],
+    ) -> Result<(Self, Vec<bool>)> {
+        let accepted = std::cell::RefCell::new(Vec::new());
+        EXTRA_VALUES.with(|extra| *extra.borrow_mut() = Some((values.to_vec(), Vec::new())));
+        let encoder = Self::new_gpu_with(width, height, quality, device, options);
+        EXTRA_VALUES.with(|extra| {
+            if let Some((_, results)) = extra.borrow_mut().take() {
+                *accepted.borrow_mut() = results;
+            }
+        });
+        Ok((encoder?, accepted.into_inner()))
+    }
+    /// Diagnostic only: a live `ICodecAPI` change, e.g. marking/using an LTR.
+    pub fn set_codec_value(&self, api: &windows::core::GUID, value: u32) -> Result<()> {
+        unsafe { self.codec.SetValue(api, &VARIANT::from(value)) }
+    }
+    pub fn codec_value(&self, api: &windows::core::GUID) -> Option<u32> {
+        unsafe { self.codec.GetValue(api) }
+            .ok()
+            .and_then(|value| u32::try_from(&value).ok())
+    }
     fn create(
         width: usize,
         height: usize,
@@ -176,6 +301,26 @@ impl HardwareEncoder {
         device: Option<&ID3D11Device>,
         quality_speed: Option<u32>,
         recovery_targets: Option<(u32, u32)>,
+    ) -> Result<Self> {
+        Self::create_with(
+            width,
+            height,
+            quality,
+            device,
+            quality_speed,
+            recovery_targets,
+            false,
+        )
+    }
+    #[allow(clippy::too_many_arguments)]
+    fn create_with(
+        width: usize,
+        height: usize,
+        quality: Quality,
+        device: Option<&ID3D11Device>,
+        quality_speed: Option<u32>,
+        recovery_targets: Option<(u32, u32)>,
+        high: bool,
     ) -> Result<Self> {
         if !quality.encoding_valid()
             || width < 2
@@ -254,6 +399,7 @@ impl HardwareEncoder {
                     device,
                     quality_speed,
                     recovery_targets,
+                    high,
                 ) {
                     Ok(config) => {
                         let name = unsafe {
@@ -286,6 +432,8 @@ impl HardwareEncoder {
                             name,
                             buffer_applied: config.buffer_applied,
                             gop_applied: config.gop_applied,
+                            profile: config.profile,
+                            high: config.profile != "baseline",
                             sps: Vec::new(),
                             pps: Vec::new(),
                             _manager: config.manager,
@@ -301,6 +449,7 @@ impl HardwareEncoder {
         }
         Err(fail())
     }
+    #[allow(clippy::too_many_arguments)]
     fn configure(
         transform: &IMFTransform,
         width: usize,
@@ -309,6 +458,7 @@ impl HardwareEncoder {
         device: Option<&ID3D11Device>,
         quality_speed: Option<u32>,
         recovery_targets: Option<(u32, u32)>,
+        high: bool,
     ) -> Result<Configuration> {
         unsafe {
             let attributes = transform.GetAttributes()?;
@@ -358,6 +508,14 @@ impl HardwareEncoder {
             let gop_applied = codec
                 .SetValue(&CODECAPI_AVEncMPVGOPSize, &VARIANT::from(gop))
                 .is_ok();
+            EXTRA_VALUES.with(|extra| {
+                if let Some((values, results)) = extra.borrow_mut().as_mut() {
+                    results.clear();
+                    for (api, value) in values.iter() {
+                        results.push(codec.SetValue(api, &VARIANT::from(*value)).is_ok());
+                    }
+                }
+            });
             let (mut input, mut output) = ([0], [0]);
             if transform.GetStreamIDs(&mut input, &mut output).is_err() {
                 input[0] = 0;
@@ -385,10 +543,35 @@ impl HardwareEncoder {
                 media.SetUINT32(&MF_MT_VIDEO_NOMINAL_RANGE, MFNominalRange_16_235.0 as u32)?;
                 Ok(media)
             };
-            let media = make_type(&MFVideoFormat_H264)?;
-            media.SetUINT32(&MF_MT_AVG_BITRATE, quality.bitrate())?;
-            media.SetUINT32(&MF_MT_MPEG2_PROFILE, eAVEncH264VProfile_Base.0 as u32)?;
-            transform.SetOutputType(output[0], &media, 0)?;
+            // B-frames stay disabled above, so High never reorders frames on
+            // the RTP path. Drivers differ in which High variant they accept.
+            let candidates: &[(eAVEncH264VProfile, &'static str)] = if high {
+                let _ = codec.SetValue(&CODECAPI_AVEncH264CABACEnable, &VARIANT::from(true));
+                &[
+                    (eAVEncH264VProfile_UCConstrainedHigh, "constrained_high"),
+                    (eAVEncH264VProfile_High, "high"),
+                    (eAVEncH264VProfile_Base, "baseline"),
+                ]
+            } else {
+                &[(eAVEncH264VProfile_Base, "baseline")]
+            };
+            let mut profile = None;
+            let mut last_error = None;
+            for &(candidate, name) in candidates {
+                let media = make_type(&MFVideoFormat_H264)?;
+                media.SetUINT32(&MF_MT_AVG_BITRATE, quality.bitrate())?;
+                media.SetUINT32(&MF_MT_MPEG2_PROFILE, candidate.0 as u32)?;
+                match transform.SetOutputType(output[0], &media, 0) {
+                    Ok(()) => {
+                        profile = Some(name);
+                        break;
+                    }
+                    Err(error) => last_error = Some(error),
+                }
+            }
+            let Some(profile) = profile else {
+                return Err(last_error.unwrap_or_else(fail));
+            };
             transform.SetInputType(input[0], &make_type(&MFVideoFormat_NV12)?, 0)?;
             codec.SetValue(&CODECAPI_AVEncVideoForceKeyFrame, &VARIANT::from(1u32))?;
             transform.ProcessMessage(MFT_MESSAGE_NOTIFY_BEGIN_STREAMING, 0)?;
@@ -401,6 +584,7 @@ impl HardwareEncoder {
                 manager,
                 buffer_applied,
                 gop_applied,
+                profile,
             })
         }
     }
@@ -418,6 +602,17 @@ impl HardwareEncoder {
         unsafe { self.codec.GetValue(&CODECAPI_AVEncCommonQualityVsSpeed) }
             .ok()
             .and_then(|value| u32::try_from(&value).ok())
+    }
+    /// Applies a new speed hint to a running encoder. Drivers that only read it
+    /// at configuration fail the readback; the caller then rebuilds once.
+    pub fn set_quality_vs_speed(&self, value: u32) -> Result<()> {
+        unsafe {
+            self.codec
+                .SetValue(&CODECAPI_AVEncCommonQualityVsSpeed, &VARIANT::from(value))
+        }?;
+        (self.quality_vs_speed() == Some(value))
+            .then_some(())
+            .ok_or_else(fail)
     }
     pub fn force_keyframe(&self) -> Result<()> {
         unsafe {
@@ -640,7 +835,9 @@ impl HardwareEncoder {
                 prefix.append(&mut bytes);
                 bytes = prefix;
             }
-            if bytes.len() > MAX_FRAME_BYTES || !super::bounded_parameter_sets(&bytes) {
+            if bytes.len() > MAX_FRAME_BYTES
+                || !thiscord_shared::h264::bounded_parameter_sets_with(&bytes, self.high)
+            {
                 return Err(fail());
             }
             Ok(Some(Encoded {
@@ -719,6 +916,35 @@ mod tests {
             receiving.recv_timeout(Duration::from_secs(2)),
             Err(std::sync::mpsc::RecvTimeoutError::Disconnected)
         ));
+    }
+    #[test]
+    fn speed_hint_favors_fidelity_until_measured_overload() {
+        let mut policy = SpeedPolicy::default();
+        // Up to 1080p60 keeps the driver's quality default; larger pixel rates
+        // start at the fastest hint (UHD 770 measured 67 FPS unpaced at 4K).
+        assert_eq!(policy.hint(1920, 1080, 60), None);
+        assert_eq!(policy.hint(2560, 1440, 30), None);
+        assert_eq!(policy.hint(2560, 1440, 60), Some(0));
+        assert_eq!(policy.hint(3840, 2160, 30), Some(0));
+        // Healthy service (about a quarter of the 16.7 ms interval) never trips.
+        for _ in 0..300 {
+            assert!(!policy.observe(Duration::from_millis(4), 60));
+        }
+        // A brief spike inside an otherwise healthy window is averaged out.
+        for i in 0..30 {
+            let ms = if i == 0 { 40 } else { 4 };
+            assert!(!policy.observe(Duration::from_millis(ms), 60));
+        }
+        assert_eq!(policy.hint(1920, 1080, 60), None);
+        // Sustained service near the frame interval switches once, permanently.
+        let tripped = (0..30)
+            .filter(|_| policy.observe(Duration::from_millis(13), 60))
+            .count();
+        assert_eq!(tripped, 1);
+        assert_eq!(policy.hint(1280, 720, 30), Some(0));
+        policy.reset_window();
+        assert!(!policy.observe(Duration::from_millis(30), 60));
+        assert_eq!(policy.hint(1280, 720, 30), Some(0));
     }
     #[test]
     fn h264_buffer_uses_bytes_and_leaves_sender_deadline_headroom() {

@@ -100,11 +100,20 @@ pub(super) async fn update(
     let Some(_permit) = receiver.access.packet(generation, generation) else {
         return true;
     };
+    // Capability is descriptive input to one shared encoder plan, never an
+    // access grant. Only receivers that negotiated it may report it.
+    let profiles = receiver.screen_profiles;
     let now = Instant::now();
     let mut next = [None; ROOM_CAPACITY * 2];
     let mut source_permits = Vec::new();
     if receiver.active.load(Ordering::Acquire) && !receiver.info.is_deafened() {
         for subscription in views {
+            let subscription = Subscription {
+                h264_high: subscription.h264_high
+                    && profiles
+                    && subscription.kind == MediaKind::ScreenVideo,
+                ..subscription
+            };
             let Some(source) = members.get(&subscription.slot) else {
                 continue;
             };
@@ -264,6 +273,38 @@ pub(super) async fn layer_target(
     Some(layer_plan(&members, source))
 }
 
+/// One profile for the whole stream (both layers): the most capable bitstream
+/// that every live, authorized viewer decodes. Mixed capabilities therefore
+/// select the compatibility floor rather than adding an encoder per viewer.
+pub(super) fn profile_plan(
+    members: &HashMap<usize, Member>,
+    source: &Member,
+    kind: MediaKind,
+) -> thiscord_shared::screen::VideoProfile {
+    if kind != MediaKind::ScreenVideo || !source.screen_profiles {
+        return Default::default();
+    }
+    thiscord_shared::screen::VideoProfile::plan(
+        members
+            .values()
+            .filter(|receiver| receives(receiver, source, kind, Instant::now()))
+            .filter_map(|receiver| {
+                receiver.views[kind.view_index(source.info.slot)].map(|v| v.subscription.h264_high)
+            }),
+    )
+}
+
+pub(super) async fn profile_target(
+    room: &Room,
+    slot: usize,
+    kind: MediaKind,
+) -> thiscord_shared::screen::VideoProfile {
+    let members = room.members.read().await;
+    members.get(&slot).map_or_else(Default::default, |source| {
+        profile_plan(&members, source, kind)
+    })
+}
+
 /// Cleanup also runs for receivers whose source has left or stopped publishing.
 pub(super) async fn prune_routes(room: &Room, slot: usize) {
     let members = room.members.read().await;
@@ -366,6 +407,7 @@ mod tests {
                     feedback_enabled: true,
                     subscriptions_enabled: true,
                     screen_layers: false,
+                    screen_profiles: false,
                     screen_quality: Default::default(),
                     screen_routes: Default::default(),
                     views: [None; ROOM_CAPACITY * 2],
@@ -385,6 +427,7 @@ mod tests {
             owner: room.members.read().await[&0].info.account_id,
             epoch: 9,
             bitrate: 5_000_000,
+            h264_high: false,
         }
     }
     async fn allowed(room: &Room, receiver: usize, kind: MediaKind, queued: Instant) -> bool {
@@ -583,6 +626,66 @@ mod tests {
             !allowed(&room, 1, MediaKind::ScreenVideo, queued).await,
             "old queued packets cannot reach a new viewer"
         );
+    }
+    #[tokio::test]
+    async fn one_profile_serves_all_viewers_and_capability_is_negotiated() {
+        use thiscord_shared::screen::VideoProfile;
+        let room = room().await;
+        let view = subscription(&room).await;
+        let high = Subscription {
+            h264_high: true,
+            ..view
+        };
+        let live = AtomicBool::new(true);
+        let plan = |room: &Room| {
+            let members = room.members.try_read().unwrap();
+            profile_plan(&members, &members[&0], MediaKind::ScreenVideo)
+        };
+        // A publisher that did not negotiate profiles never receives one.
+        assert!(update(&room, 1, vec![high], &live).await);
+        assert_eq!(plan(&room), VideoProfile::H264Baseline);
+        room.members
+            .write()
+            .await
+            .get_mut(&0)
+            .unwrap()
+            .screen_profiles = true;
+        // An un-negotiated receiver's claim is discarded, not trusted.
+        assert!(update(&room, 1, vec![high], &live).await);
+        assert_eq!(plan(&room), VideoProfile::H264Baseline);
+        for slot in [1, 2] {
+            room.members
+                .write()
+                .await
+                .get_mut(&slot)
+                .unwrap()
+                .screen_profiles = true;
+        }
+        assert!(update(&room, 1, vec![high], &live).await);
+        assert_eq!(plan(&room), VideoProfile::H264High);
+        assert_eq!(
+            profile_target(&room, 0, MediaKind::ScreenVideo).await,
+            VideoProfile::H264High
+        );
+        // Cameras are WebView-encoded and keep their own contract.
+        let members = room.members.read().await;
+        assert_eq!(
+            profile_plan(&members, &members[&0], MediaKind::Camera),
+            VideoProfile::H264Baseline
+        );
+        drop(members);
+        // One baseline-only viewer selects the shared floor for everyone:
+        // still exactly one bitstream, never a per-viewer encode.
+        assert!(update(&room, 2, vec![view], &live).await);
+        assert_eq!(plan(&room), VideoProfile::H264Baseline);
+        assert!(update(&room, 2, vec![high], &live).await);
+        assert_eq!(plan(&room), VideoProfile::H264High);
+        // Leaving viewers (or losing access) no longer constrain the plan.
+        assert!(update(&room, 2, vec![view], &live).await);
+        assert!(update(&room, 2, vec![], &live).await);
+        assert_eq!(plan(&room), VideoProfile::H264High);
+        assert!(update(&room, 1, vec![], &live).await);
+        assert_eq!(plan(&room), VideoProfile::H264Baseline);
     }
     #[tokio::test]
     async fn layered_demand_keeps_fast_quality_and_expires_with_authorized_leases() {

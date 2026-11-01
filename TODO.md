@@ -413,7 +413,17 @@ Personalized speaker isolation and physical acoustic acceptance remain future wo
   on queued/in-flight bytes; synthetic large-frame backlog regression and NVIDIA probe.
 - [x] Reproducible 4K capture/playback, GPU headroom and fidelity probes; coarse-timer,
   UDP-burst and encoder-event regressions, plus SFU 32/64 Mbit/s load validation.
-- [ ] Live HDR/SDR capture acceptance across Intel/AMD/NVIDIA and mixed-HDR displays.
+- [x] SDR single-blit BGRA8 -> NV12 capture path with HDR-on restart to FP16, display
+  calibration off the encoder threads, MMCSS encoder/pacer threads and a
+  high-resolution-timer pacer; synthetic NVIDIA and 4K60 WGC pipeline validation.
+- [x] Negotiated stream-wide H.264 Constrained High (one plan for both layers, baseline
+  fallback for any non-High viewer), adaptive encoder speed hint and request-driven
+  camera keyframes (docs/video-codecs.md).
+- [ ] Live HDR/SDR capture acceptance across Intel/AMD/NVIDIA and mixed-HDR displays,
+  including the SDR fast path on an SDR monitor and High decode in WKWebView/WebKitGTK.
+- [ ] SFU temporal-layer dropping for weak viewers (NVIDIA H.264 base layer verified
+  decodable in `--codecs`); LTR recovery is unavailable on the tested NVIDIA MFT.
+- [ ] AV1 primary layer with H.264 low-layer fallback, scoped in docs/video-codecs.md.
 - [ ] Measured end-to-end 30/60 fps, high-resolution performance and real WebView
   hardware-decoder verification on Windows/macOS/Linux.
 

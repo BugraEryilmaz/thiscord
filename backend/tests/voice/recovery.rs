@@ -284,6 +284,7 @@ async fn encrypted_screen_nacks_cannot_amplify_or_bypass_lifecycle_and_camera_st
         owner: source.account_id,
         epoch: source.camera_epoch,
         bitrate: 1_500_000,
+        h264_high: false,
     });
     screen_forwarded(&mut call.source, &mut call.viewer, 2).await;
     call.source.screen_sequences[2] += 1;
