@@ -466,9 +466,10 @@ The SHA-256 pins the reviewed graph for runtime compatibility, not provenance.
 The feature is experimental, optional and off by default. The model is embedded
 in native clients and processed locally; no runtime download is performed.
 
-Opus 1.6.1 with bundled DRED/PLC model arrays (opusic-sys 0.7.5)
+Opus 1.6.1 with bundled DRED/PLC/OSCE model arrays (opusic-sys 0.7.5)
 https://opus-codec.org/ ; https://github.com/xiph/opus
-Generated built-in model arrays include DRED RDO-VAE, FARGAN, PLC and pitch DNN.
+Generated built-in model arrays include DRED RDO-VAE, FARGAN, PLC, pitch DNN,
+and OSCE LACE, NoLACE and bandwidth-extension (BBWENet) enhancement.
 No downloaded or locally retrained weights. See docs/deep-redundancy.md for hashes.
 
 Copyright 2001-2023 Xiph.Org, Skype Limited, Octasic,

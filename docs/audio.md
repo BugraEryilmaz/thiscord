@@ -569,6 +569,82 @@ queue pressure, stalls, flush acknowledgement, deafen and source replacement.
 Actual device scheduling, acoustic quality and prolonged stalls still need
 three-platform live validation.
 
+### Automatic network adaptation
+
+**Audio & voice > Advanced & troubleshooting > Automatic network adaptation**
+(`network_adaptation`, **default on**) persists in `audio.json`; only `false` is
+serialized, so older settings files and remote-support peers keep their shape.
+It applies during calls without rejoining. It has three parts, all on native
+workers; device callbacks, the SFU and the wire protocol are unchanged.
+
+**Sender bitrate.** `audio::network::Controller` reads the same authenticated
+uplink reception reports as adaptive FEC (cumulative loss and highest sequence,
+plus RFC 3550 interarrival jitter) and the nominated ICE pair RTT that the
+connection already polls once per second. Queueing delay is RTT above a slowly
+rising minimum: each accepted window first measures against the baseline, then
+raises it by 2% of any excess (never per encoded frame), so a permanent route
+change fades over a few minutes. Windows use the adaptive FEC acceptance bounds:
+1-6 seconds, 25-400 packets, monotonic counters. Each window is classified:
+
+| Level | Any of | Opus target |
+| --- | --- | --- |
+| Good | none below | 32 kbit/s (40 with DRED) |
+| Fair (congested) | jitter >= 25 ms, queueing >= 60 ms | 24 kbit/s |
+| Poor | loss >= 12%, jitter >= 50 ms, queueing >= 150 ms | 16 kbit/s |
+| Severe | loss >= 20%, jitter >= 80 ms, queueing >= 300 ms | 12 kbit/s |
+
+Two consecutive worse windows step down to the milder of the two
+classifications; each step back up needs ten seconds of better windows. Without
+usable windows (DTX silence or an outage) the level is held for 60 seconds, then
+returns to Good. A new peer/source starts at Good. Loss below 12% without delay
+growth is treated as random loss, not congestion: the bitrate stays and loss
+protection grows instead. At 12 kbit/s libopus uses SILK wideband; at 16-24 kbit/s
+it normally stays hybrid. The level cap also applies to manual DRED, which then
+receives little or no DRED budget (libopus allocates DRED bits only above about
+20 kbit/s with in-band FEC enabled).
+
+**Loss protection.** Enabling adaptation also enables the measured adaptive FEC
+loss hint (below), whether or not that separate preference is set. Two
+consecutive Good windows with at least 5% loss request automatic DRED: the 40
+kbit/s DRED budget, 60 ms of history and the 20% loss floor documented in
+[deep redundancy](deep-redundancy.md). It is latched only at a silence frame,
+after the existing talkspurt reset cleared DRED latents, so mid-speech enabling
+cannot send stale history and the encoder is never reset mid-talkspurt for it.
+Any congestion withdraws it immediately; 20 seconds below 2% loss also clears it.
+Continuous transmission without silence frames keeps its current state.
+
+**Receivers.** For current-protocol microphone sources (nonzero source and
+privacy epochs; never legacy or shared audio) the decoder runs at complexity 6:
+deep PLC plus OSCE LACE enhancement of SILK/hybrid frames, with the OSCE
+wideband-to-fullband extension (BWE) requested. The vendored wrapper preserves
+the BWE request across `reset_full_state`; any complexity change fully
+reinitializes the decoder and clears that stream's queued media. Per stream,
+DRED receive recovery (and its 80 ms minimum buffer) is enabled after two
+one-second windows with at least 3% sequence-gap loss while packets carry Opus
+code-3 padding (how DRED travels). It stays on during silence, turns off when
+active media has carried no padding for ten seconds or after 30 seconds below
+1% loss, and the off transition waits for a quiet stream (DTX or inactive) so
+the buffer change does not cut speech. The manual DRED preference keeps its
+fixed behavior on top.
+
+Optimized Windows measurements on the committed speech fixture (informational,
+not a CPU budget): decoding costs about 29 us per 20 ms frame at complexity 0,
+41 us with LACE and 86 us with NoLACE at 32 kbit/s; at 12 kbit/s SILK-only,
+LACE plus BWE costs about 117-121 us per frame (about 0.6% of one core per
+speaking stream; a shared macOS ARM64 CI runner measured 253 us). NoLACE was not selected because it doubled LACE's cost.
+`osce_extends_low_bitrate_silk_and_survives_full_reset` verifies that BWE adds
+more than four times the plain decoder's energy above 8 kHz at 12 kbit/s (measured
+about 17x on Windows x64 and 8.6x on macOS ARM64 CI) and that
+a full reset matches a fresh decoder. OSCE adds the LACE, NoLACE and BWE model
+arrays from the pinned libopus tree to native binaries.
+
+Not implemented: 40/60 ms frames (the jitter buffer, FEC/DRED/RED donors and
+older clients assume 20 ms packets), receiver-driven sender adaptation (a
+receiver's own downlink loss cannot make a sender add DRED), and physical
+adverse-network acceptance. Diagnostics: `AudioQuality.network` reports level,
+current target, automatic DRED request, last window loss/jitter/queueing,
+feedback age and the number of streams using DRED receive recovery.
+
 ### Adaptive microphone FEC
 
 **Audio & voice > Advanced & troubleshooting > Adaptive Opus in-band FEC**
@@ -617,17 +693,16 @@ the mailbox and establishes its sequence fence. Within one peer/SSRC this assume
 continuous RTP sequence numbers; a sequence restart requires a fresh peer or an
 explicit matching transport/report reset.
 
-For DRED integration, pass **floor 20 when `deep_redundancy` is enabled, otherwise
-5** to `Encoder::adapt` immediately before encoding, even when adaptive FEC is
-off. That method owns the final `OPUS_SET_PACKET_LOSS_PERC` call; DRED must not
-write it afterward. Off/absent/stale/reset/low-loss states all honor the floor,
-and floor changes apply immediately. DRED separately owns its 40 kbit/s total
-codec budget; adaptive FEC never changes bitrate. This branch implements neither
-DRED nor RED. Parent integration must test all eight combined toggle states and
-update combined UI bitrate/fallback copy.
+`Encoder::adapt` runs immediately before encoding, even when adaptive FEC is
+off, and owns the final `OPUS_SET_PACKET_LOSS_PERC` call. While DRED is emitted
+(manual preference or automatic request) the encoder applies a 20% floor;
+otherwise 5%. Off/absent/stale/reset/low-loss states all honor the floor, and
+floor changes apply immediately. Adaptive FEC never changes bitrate; DRED owns
+its 40 kbit/s budget and network adaptation owns the congestion cap. The eight
+FEC/RED/DRED preference combinations are tested in `audio::dred::combination_tests`.
 
 Adaptive FEC adds no packets, retained PCM, buffering delay or codec budget:
-the microphone remains 32 kbit/s VBR. Reallocated bits can reduce speech detail;
+the microphone remains 32 kbit/s VBR unless network adaptation lowers it. Reallocated bits can reduce speech detail;
 packet sizes still vary. Interception retains ordinary pass-through packets only
 during synchronous chain traversal, with a 1024-packet cap per direction. It
 scans at most 32 RTCP packets by 31 report blocks, and never logs media, reports,
@@ -673,7 +748,8 @@ bounded Opus DRED recovery and documents its source/privacy protocol merge gate.
 It is separate from the default ordinary FEC behavior below.
 
 Microphone encoding retains 48 kHz mono, 20 ms frames, `Application::Voip` and
-32 kbit/s. It explicitly sets `set_inband_fec(true)` and
+32 kbit/s (lowered by [network adaptation](#automatic-network-adaptation) under
+congestion). It explicitly sets `set_inband_fec(true)` and
 `set_packet_loss_perc(5)` by default. This conservative **fixed 5% expected-loss
 hint** remains the disabled/fallback policy. The optional adaptive policy below
 uses authenticated server reception reports; it is off for existing and new installs.

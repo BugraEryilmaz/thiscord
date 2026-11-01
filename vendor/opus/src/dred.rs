@@ -13,18 +13,42 @@ impl Encoder {
 }
 
 impl Decoder {
-    /// Reinitialize the entire owned decoder, including FARGAN state which
-    /// OPUS_RESET_STATE in libopus 1.6.1 does not clear. Preserves complexity;
-    /// other decoder controls return to creation defaults. No allocation.
+    /// Reinitialize the entire owned decoder, including FARGAN and OSCE state
+    /// which OPUS_RESET_STATE in libopus 1.6.1 does not fully clear. Preserves
+    /// complexity and the OSCE bandwidth-extension request; other decoder
+    /// controls return to creation defaults. No allocation.
     pub fn reset_full_state(&mut self) -> Result<()> {
         let rate = self.get_sample_rate()?;
         let complexity = self.get_complexity()?;
+        let bwe = self.get_osce_bwe()?;
         // SAFETY: uniquely owned live allocation, same channel count and rate
         // as its creation, so opus_decoder_get_size(channels) fits exactly.
-        // The pinned init clears that entire allocation and calls fargan_init.
+        // The pinned init clears that entire allocation, calls fargan_init and
+        // reloads the built-in OSCE weights (static tables, no allocation).
         let code = unsafe { ffi::opus_decoder_init(self.ptr, rate as i32, self.channels as i32) };
         check(code, "opus_decoder_init")?;
-        self.set_complexity(complexity)
+        self.set_complexity(complexity)?;
+        self.set_osce_bwe(bwe)
+    }
+
+    /// OSCE wideband-to-fullband extension for SILK frames at 48 kHz output.
+    /// Takes effect only with decoder complexity of at least 4.
+    pub fn set_osce_bwe(&mut self, enabled: bool) -> Result<()> {
+        // SAFETY: self uniquely owns the live decoder; the CTL takes an int.
+        let code = unsafe {
+            ffi::opus_decoder_ctl(self.ptr, ffi::OPUS_SET_OSCE_BWE_REQUEST, i32::from(enabled))
+        };
+        check(code, "OPUS_SET_OSCE_BWE").map(|_| ())
+    }
+
+    /// Whether the OSCE bandwidth extension is requested.
+    pub fn get_osce_bwe(&mut self) -> Result<bool> {
+        let mut value = 0i32;
+        // SAFETY: live owned decoder, and a valid writable int for this CTL.
+        let code = unsafe {
+            ffi::opus_decoder_ctl(self.ptr, ffi::OPUS_GET_OSCE_BWE_REQUEST, &mut value)
+        };
+        check(code, "OPUS_GET_OSCE_BWE").map(|_| value != 0)
     }
 
     /// Current decoder complexity (including whether neural synthesis is enabled).
@@ -37,7 +61,8 @@ impl Decoder {
         check(code, "OPUS_GET_COMPLEXITY").map(|_| complexity)
     }
 
-    /// Decoder complexity; 5 enables the neural synthesis required by DRED.
+    /// Decoder complexity; 5 enables the neural synthesis required by DRED,
+    /// 6 adds OSCE LACE and 7 NoLACE enhancement of SILK frames.
     pub fn set_complexity(&mut self, complexity: i32) -> Result<()> {
         // SAFETY: self uniquely owns the live decoder; the CTL takes an int.
         let code = unsafe {

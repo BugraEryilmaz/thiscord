@@ -17,12 +17,14 @@ pub use rtcp::register;
 
 #[derive(Clone, Copy)]
 pub(crate) struct Sample {
-    source: u64,
-    generation: u64,
-    reports: u64,
-    sequence: u32,
-    lost: u32,
-    at: Instant,
+    pub(super) source: u64,
+    pub(super) generation: u64,
+    pub(super) reports: u64,
+    pub(super) sequence: u32,
+    pub(super) lost: u32,
+    /// RFC 3550 interarrival jitter at the server, in 48 kHz RTP units.
+    pub(super) jitter: u32,
+    pub(super) at: Instant,
 }
 
 /// One fixed-size mailbox per peer. Only the owning authenticated DTLS-SRTP
@@ -94,6 +96,7 @@ impl Feedback {
                 reports,
                 sequence: report.last_sequence_number,
                 lost: report.total_lost,
+                jitter: report.jitter,
                 at: now,
             });
         }

@@ -57,4 +57,4 @@ path = "tests/tests.rs"
 
 [dependencies.opusic-sys]
 version = "=0.7.5"
-features = ["dred"]
+features = ["dred", "osce"]

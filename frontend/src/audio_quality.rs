@@ -1,6 +1,6 @@
 //! Local presentation shared by the WASM view and native presentation tests.
 use std::fmt::Write;
-use thiscord_shared::audio::{AudioQuality, QualityMetrics, QualityTiming};
+use thiscord_shared::audio::{AudioQuality, NetworkLevel, QualityMetrics, QualityTiming};
 
 pub fn summary(value: Option<&AudioQuality>) -> String {
     let Some(q) = value else {
@@ -10,11 +10,32 @@ pub fn summary(value: Option<&AudioQuality>) -> String {
     if causes.is_empty() {
         causes.push("No recent measured quality faults");
     }
-    format!(
+    let mut out = format!(
         "{} · SFU-hop RTT {}",
         causes.join(" · "),
         optional(q.sfu_hop_rtt_ms, "ms")
-    )
+    );
+    if let Some(n) = q.network.as_ref().filter(|n| n.enabled) {
+        if n.level != NetworkLevel::Good {
+            let _ = write!(
+                out,
+                " · {} uplink: microphone lowered to {} kbit/s",
+                level_name(n.level),
+                n.bitrate_bps / 1000
+            );
+        } else if n.automatic_dred {
+            out.push_str(" · Uplink packet loss: deep redundancy on");
+        }
+    }
+    out
+}
+fn level_name(level: NetworkLevel) -> &'static str {
+    match level {
+        NetworkLevel::Good => "Good",
+        NetworkLevel::Fair => "Congested",
+        NetworkLevel::Poor => "Poor",
+        NetworkLevel::Severe => "Severely degraded",
+    }
 }
 fn faults(q: &AudioQuality) -> Vec<&'static str> {
     let c = &q.metrics.recent;
@@ -232,6 +253,21 @@ pub fn detail(value: Option<&AudioQuality>) -> String {
         return "Join native voice or start an audio test. Metrics are unavailable in browser preview and older clients.".into();
     };
     let mut out = String::new();
+    if let Some(n) = &q.network {
+        let _ = writeln!(
+            out,
+            "Network adaptation: {}; uplink {}; microphone target {} kbit/s; automatic DRED {}; uplink loss {}, jitter {}, queueing delay {}; feedback age {}; DRED receive recovery on {} streams",
+            if n.enabled { "on" } else { "off" },
+            level_name(n.level),
+            n.bitrate_bps / 1000,
+            if n.automatic_dred { "requested" } else { "off" },
+            optional(n.uplink_loss_percent, "%"),
+            optional(n.uplink_jitter_ms, "ms"),
+            optional(n.queueing_delay_ms, "ms"),
+            optional(n.feedback_age_ms.map(|ms| ms as f64), "ms"),
+            n.dred_receive_streams
+        );
+    }
     if let Some(fec) = &q.adaptive_fec {
         let _ = writeln!(
             out,
@@ -371,5 +407,25 @@ mod tests {
         };
         q.metrics.capture.deadline_misses = 0;
         assert!(summary(Some(&q)).contains("No recent measured"));
+    }
+
+    #[test]
+    fn network_adaptation_is_summarized_only_when_it_acts() {
+        let mut q = AudioQuality {
+            network: Some(thiscord_shared::audio::NetworkAdaptationDiagnostics {
+                enabled: true,
+                bitrate_bps: 32_000,
+                ..Default::default()
+            }),
+            ..Default::default()
+        };
+        assert!(!summary(Some(&q)).contains("uplink"));
+        let n = q.network.as_mut().unwrap();
+        n.level = NetworkLevel::Poor;
+        n.bitrate_bps = 16_000;
+        assert!(summary(Some(&q)).contains("Poor uplink: microphone lowered to 16 kbit/s"));
+        let text = detail(Some(&q));
+        assert!(text.contains("Network adaptation: on; uplink Poor; microphone target 16 kbit/s"));
+        assert!(text.contains("uplink loss unavailable"));
     }
 }

@@ -12,6 +12,7 @@ fn sample(start: Instant, second: u64, sequence: u32, lost: u32) -> Sample {
         reports: second + 1,
         sequence,
         lost,
+        jitter: 0,
         at: start + Duration::from_secs(second),
     }
 }

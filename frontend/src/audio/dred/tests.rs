@@ -274,6 +274,8 @@ fn remote(at: Instant) -> crate::audio::Remote {
         jitter: Default::default(),
         decoder: decoder(false),
         rate: Default::default(),
+        adaptation: false,
+        receive: Default::default(),
     }
 }
 

@@ -1,10 +1,17 @@
 # Experimental Opus deep redundancy
 
-**Stack dependency:** reviewed FEC+RED commit
-`a0228279f314793bfb83ccc1e0a0210d40292f9e` supplies the authenticated publisher,
-source and receiver privacy protocol independently of the RED preference. This
-branch integrates that protocol; PR #52 remains draft pending the final combined
-checks and review. The parent owns CI, merge order and readiness.
+**Status:** merged in PR #52 (2026-10-19) on top of the FEC+RED privacy protocol
+(`a0228279`). Software checks below pass; physical three-platform listening, CPU
+contention and adverse real-network acceptance remain open (see TODO.md).
+
+DRED is used in two ways:
+
+- **Automatic** (default, through [network adaptation](audio.md#automatic-network-adaptation)):
+  senders emit DRED only during sustained uplink loss without congestion, and
+  receivers enable DRED recovery only for streams that are losing packets and
+  carry DRED. Neither side needs a manual opt-in.
+- **Manual** `deep_redundancy` preference ("Always use Opus deep redundancy"):
+  the fixed policy described below, always on for sending and receiving.
 
 The `deep_redundancy` preference defaults to false, survives `audio.json`, and uses
 the existing local and admin settings command paths. Audio & voice → Advanced &
@@ -72,7 +79,7 @@ DRED is an extension inside Opus code-3 padding. Ordinary receivers ignore that
 padding and decode the primary audio. Compatible enabled receivers parse the
 extension; absence/incompatible versions fall back safely. No separate RTP codec
 payload type or SDP DRED codec negotiation is necessary. Both encoder and receiver
-must enable this preference for DRED recovery. The source/privacy fence protocol
+must use DRED (manual preference, or the automatic policy) for recovery. The source/privacy fence protocol
 is independently required and works with the RED preference off. Modern SFU-to-receiver RTP
 carries exactly two CSRCs: stable source identity and effective privacy revision
 (the maximum of source and listener privacy). Roster source authorization,
@@ -114,7 +121,9 @@ That crate's `dred` feature sets CMake `OPUS_DRED=ON`, which also builds deep PL
 The existing CMake/C compiler infrastructure works across the Windows x64,
 Linux x64 and macOS ARM64 audio matrix; no Python model tooling, network model
 fetch, dynamic system Opus, new workspace package or npm dependency is added.
-Decoder complexity remains zero while off; enabled recovery uses complexity 5.
+Decoder complexity remains zero while off; enabled recovery uses complexity 5,
+or 6 when network adaptation enables OSCE for that stream. The `osce` feature
+adds the pinned tree's LACE, NoLACE and BWE model arrays; no model is downloaded.
 
 The bundled generated model arrays are distributed with upstream libopus under
 its BSD-style COPYING notice, reproduced in the shipped THIRD_PARTY_AUDIO.txt.
@@ -287,5 +296,4 @@ The earlier standalone baseline log remains at its path above.
 
 macOS and the final exact-head three-platform CI matrix remain parent/CI checks;
 no physical-device, subjective listening or many-speaker CPU acceptance is claimed.
-The PR remains draft for the parent's final CI/readiness assessment. No deployment,
-release tag, version bump or merge is performed by this implementation task.
+These records describe the merged implementation's original validation.

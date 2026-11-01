@@ -15,6 +15,8 @@ fn remote() -> Remote {
         jitter: Default::default(),
         decoder: opus::Decoder::new(RATE, opus::Channels::Mono).unwrap(),
         rate: Default::default(),
+        adaptation: false,
+        receive: Default::default(),
     }
 }
 
