@@ -114,7 +114,9 @@ download buttons save attachments. Each message supports four files of up to 25 
 each. See [chat protocol and limits](docs/chat.md). Desktop voice channels
 use native Rust audio, independent speaker volume controls and a Rust WebRTC SFU.
 Open **Settings > Voice & audio** to select devices and test audio, then join a
-voice channel. See [audio setup, networking and remaining checks](docs/audio.md).
+voice channel. Calls adapt to weak connections by default: congestion lowers the
+microphone bitrate, packet loss adds Opus deep redundancy, and incoming voices use
+Opus neural enhancement. See [audio setup, networking and remaining checks](docs/audio.md).
 Missing saved audio devices immediately fall back to the system default for that
 direction on join or recovery, preserving the other selection and saved preferences.
 Other device failures retry selected devices three times, then system defaults

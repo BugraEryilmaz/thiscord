@@ -11,6 +11,12 @@ identity or report bodies. These describe microphone-to-SFU feedback separately
 from the existing listener receive counters. Absent/undersampled/stale reports
 use baseline (normally 5%). Suspended capture may still show a previous applied
 CTL; the next encode applies fallback. See [adaptive FEC](audio.md#adaptive-microphone-fec).
+Network adaptation diagnostics (`AudioQuality.network`) report enabled state,
+uplink level, the current microphone Opus target, whether automatic DRED is
+requested, the last accepted window's loss, server-measured jitter and queueing
+delay (RTT above the recent minimum), feedback age, and how many remote streams
+use DRED receive recovery. The summary line mentions adaptation only when it
+lowered the bitrate or requested DRED. See [network adaptation](audio.md#automatic-network-adaptation).
 Experimental DRED adds technical decoder counters `dred_attempts` and
 `dred_output_frames`, plus configured preference/bitrate in audio logs. Output
 counts require a parsed, covered interval; they are neural reconstruction, not

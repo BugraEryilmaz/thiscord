@@ -16,18 +16,25 @@ pub struct Stats {
 
 pub struct Encoder {
     pub(crate) adaptive: super::adaptive_fec::Controller,
+    pub(crate) network: super::network::Controller,
     pub codec: opus::Encoder,
     pub stats: Stats,
     in_dtx: bool,
     no_data_sent: bool,
     dtx_enabled: bool,
     deep_redundancy: bool,
+    /// Requested by network adaptation; latched into `auto_dred` only at a
+    /// silence frame, after the existing talkspurt reset cleared DRED latents.
+    auto_dred_requested: bool,
+    auto_dred: bool,
+    level: thiscord_shared::audio::NetworkLevel,
     loss_floor: u8,
 }
 impl Encoder {
     pub fn new(dtx: bool) -> Result<Self, opus::Error> {
         Ok(Self {
             adaptive: Default::default(),
+            network: Default::default(),
             codec: {
                 let mut codec = super::codec::microphone_encoder()?;
                 codec.set_dtx(dtx)?;
@@ -38,6 +45,9 @@ impl Encoder {
             no_data_sent: false,
             dtx_enabled: dtx,
             deep_redundancy: false,
+            auto_dred_requested: false,
+            auto_dred: false,
+            level: Default::default(),
             loss_floor: 5,
         })
     }
@@ -59,6 +69,55 @@ impl Encoder {
         self.loss_floor = floor.clamp(5, 30);
         self.apply_loss_hint()
     }
+    /// Network adaptation: bitrate level and automatic DRED request. Bitrate
+    /// changes apply immediately; enabling automatic DRED waits for silence.
+    pub(crate) fn adapt_network(
+        &mut self,
+        enabled: bool,
+        sample: Option<super::adaptive_fec::Sample>,
+        rtt_ms: Option<f64>,
+        now: Instant,
+    ) -> Result<(), opus::Error> {
+        let (level, dred) = self.network.update(enabled, sample, rtt_ms, now);
+        self.level = level;
+        self.auto_dred_requested = dred;
+        if !dred {
+            self.auto_dred = false;
+        }
+        self.apply_bitrate()
+    }
+    fn dred_enabled(&self) -> bool {
+        self.deep_redundancy || self.auto_dred
+    }
+    /// Total Opus target: DRED's budget when emitting it, otherwise 32 kbit/s,
+    /// capped by the congestion level (which also starves manual DRED).
+    pub(crate) fn bitrate(&self) -> i32 {
+        let budget = if self.dred_enabled() {
+            super::dred::BITRATE
+        } else {
+            32_000
+        };
+        match self.level {
+            thiscord_shared::audio::NetworkLevel::Good => budget,
+            congested => budget.min(super::network::bitrate(congested)),
+        }
+    }
+    fn apply_bitrate(&mut self) -> Result<(), opus::Error> {
+        let target = opus::Bitrate::Bits(self.bitrate());
+        if self.codec.get_bitrate()? != target {
+            self.codec.set_bitrate(target)?;
+        }
+        self.apply_loss_hint()
+    }
+    pub(crate) fn network_diagnostics(
+        &self,
+        now: Instant,
+    ) -> thiscord_shared::audio::NetworkAdaptationDiagnostics {
+        let mut status = self.network.diagnostics(now);
+        status.bitrate_bps = self.bitrate() as u32;
+        status.automatic_dred = self.auto_dred_requested;
+        status
+    }
     pub(crate) fn adaptive_diagnostics(
         &self,
         now: Instant,
@@ -66,7 +125,7 @@ impl Encoder {
         let mut status = self.adaptive.diagnostics(now);
         status.baseline_loss_percent =
             self.loss_floor
-                .max(if self.deep_redundancy { 20 } else { 5 });
+                .max(if self.dred_enabled() { 20 } else { 5 });
         status.effective_loss_percent = status
             .effective_loss_percent
             .max(status.baseline_loss_percent);
@@ -86,13 +145,8 @@ impl Encoder {
         if self.deep_redundancy != enabled {
             self.reset()?;
             self.codec.set_dred_duration(0)?;
-            self.codec.set_bitrate(opus::Bitrate::Bits(if enabled {
-                super::dred::BITRATE
-            } else {
-                32_000
-            }))?;
             self.deep_redundancy = enabled;
-            self.apply_loss_hint()?;
+            self.apply_bitrate()?;
         }
         Ok(())
     }
@@ -105,15 +159,19 @@ impl Encoder {
         let start = Instant::now();
         // Do not let codec VAD discard quiet speech/pre-roll admitted by our gate.
         self.codec.set_dtx(self.dtx_enabled && !protect_speech)?;
+        if !protect_speech && self.auto_dred != self.auto_dred_requested {
+            self.auto_dred = self.auto_dred_requested;
+            self.apply_bitrate()?;
+        }
         // DRED must not pad no-data frames or defeat silence omission. Existing
         // gate/control resets clear encoder latents before entering silence.
         self.codec
-            .set_dred_duration(if self.deep_redundancy && protect_speech {
+            .set_dred_duration(if self.dred_enabled() && protect_speech {
                 super::dred::DURATION
             } else {
                 0
             })?;
-        let budget = if self.deep_redundancy {
+        let budget = if self.dred_enabled() {
             output.len().min(1100)
         } else {
             output.len()

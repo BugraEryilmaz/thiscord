@@ -34,6 +34,33 @@ impl super::Session {
         )
     }
 
+    /// Receivers: OSCE and automatic DRED recovery for eligible streams.
+    pub(super) fn set_network_adaptation(
+        &mut self,
+        enabled: bool,
+        manual: bool,
+    ) -> Result<(), String> {
+        let now = std::time::Instant::now();
+        for (index, (remote, writer)) in self
+            .remotes
+            .iter_mut()
+            .zip(&self.devices.writers)
+            .enumerate()
+        {
+            if let Some(remote) = remote
+                && remote.adaptation != enabled
+            {
+                remote.configure(
+                    writer,
+                    manual && index < thiscord_shared::voice::ROOM_CAPACITY,
+                    enabled,
+                    now,
+                )?;
+            }
+        }
+        Ok(())
+    }
+
     pub(super) fn set_deep_redundancy(&mut self, enabled: bool) -> Result<(), String> {
         if self.settings.deep_redundancy != enabled {
             let now = std::time::Instant::now();

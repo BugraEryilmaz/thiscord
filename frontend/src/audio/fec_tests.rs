@@ -49,6 +49,8 @@ fn remote(now: Instant) -> Remote {
         id: "00000000-0000-0000-0000-000000000001".parse().unwrap(),
         label: "fixture".into(),
         rate: Default::default(),
+        adaptation: false,
+        receive: Default::default(),
         jitter: Jitter::default(),
         decoder: decoder(),
     }

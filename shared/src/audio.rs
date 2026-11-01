@@ -1,6 +1,9 @@
 //! Native audio control contracts; PCM never crosses the WebView bridge.
 use serde::{Deserialize, Serialize};
 
+fn is_true(value: &bool) -> bool {
+    *value
+}
 fn is_false(value: &bool) -> bool {
     !value
 }
@@ -148,6 +151,10 @@ pub struct AudioSettings {
     /// Experimental Opus DRED encoding and bounded receive recovery; native only.
     #[serde(skip_serializing_if = "std::ops::Not::not")]
     pub deep_redundancy: bool,
+    /// Automatic microphone bitrate/loss protection and receive-side DRED from
+    /// measured network conditions. Default on; only `false` is serialized.
+    #[serde(skip_serializing_if = "is_true")]
+    pub network_adaptation: bool,
     pub echo_cancellation: bool,
     /// Experimental residual estimator, independent of the noise suppressor.
     pub neural_echo: bool,
@@ -175,6 +182,7 @@ impl Default for AudioSettings {
             automatic_gain: false,
             adaptive_fec: false,
             deep_redundancy: false,
+            network_adaptation: true,
             echo_cancellation: false,
             neural_echo: false,
             packet_redundancy: false,
@@ -339,6 +347,34 @@ mod control_tests {
                 serde_json::json!({"noise_suppression_strength":"extreme"})
             )
             .is_err()
+        );
+    }
+
+    #[test]
+    fn network_adaptation_defaults_on_and_only_opt_out_is_serialized() {
+        let old: AudioSettings = serde_json::from_str("{}").unwrap();
+        assert!(old.network_adaptation);
+        assert!(
+            serde_json::to_value(&old)
+                .unwrap()
+                .get("network_adaptation")
+                .is_none()
+        );
+        let disabled = AudioSettings {
+            network_adaptation: false,
+            ..old
+        };
+        let value = serde_json::to_value(&disabled).unwrap();
+        assert_eq!(value["network_adaptation"], false);
+        assert_eq!(
+            serde_json::from_value::<AudioSettings>(value).unwrap(),
+            disabled
+        );
+        let quality: AudioQuality = serde_json::from_str("{}").unwrap();
+        assert!(quality.network.is_none());
+        assert_eq!(
+            serde_json::to_value(NetworkLevel::Severe).unwrap(),
+            "severe"
         );
     }
 
@@ -535,10 +571,39 @@ pub struct AdaptiveFecDiagnostics {
     pub feedback_age_ms: Option<u64>,
     pub adapting: bool,
 }
+/// Sender uplink classification. Higher levels lower the microphone bitrate.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum NetworkLevel {
+    #[default]
+    Good,
+    Fair,
+    Poor,
+    Severe,
+}
+/// Numeric local diagnostics for automatic network adaptation; no identifiers.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(default)]
+pub struct NetworkAdaptationDiagnostics {
+    pub enabled: bool,
+    pub level: NetworkLevel,
+    /// Current microphone Opus target, including any DRED budget.
+    pub bitrate_bps: u32,
+    /// Automatic DRED emission requested for sustained uplink loss.
+    pub automatic_dred: bool,
+    pub uplink_loss_percent: Option<f64>,
+    pub uplink_jitter_ms: Option<f64>,
+    /// Round-trip time above the call's recent minimum.
+    pub queueing_delay_ms: Option<f64>,
+    pub feedback_age_ms: Option<u64>,
+    /// Remote microphone streams currently using DRED receive recovery.
+    pub dred_receive_streams: u8,
+}
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 #[serde(default)]
 pub struct AudioQuality {
     pub adaptive_fec: Option<AdaptiveFecDiagnostics>,
+    pub network: Option<NetworkAdaptationDiagnostics>,
     pub metrics: QualityMetrics,
     pub streams: Vec<StreamQuality>,
     pub capture_blocks: usize,
