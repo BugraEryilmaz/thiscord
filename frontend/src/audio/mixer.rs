@@ -14,6 +14,8 @@ pub const RATE: u32 = 48_000;
 pub const FRAME: usize = 960;
 pub const MAX_STREAMS: usize = 32;
 pub const CAPACITY: usize = FRAME * 6;
+/// Samples mixed per block; per-stream controls are read once per block (1 ms).
+const MIX_BLOCK: usize = 48;
 
 /// Leave space for one maximally stretched packet. Small device callbacks keep
 /// the original 15 ms refill cushion; larger ones need a complete callback plus
@@ -194,6 +196,53 @@ pub struct Mixer {
     reference: Option<frames::Writer>,
     /// 48 kHz samples rendered since the worker was last woken for refills.
     since_wake: usize,
+    /// Each stream's samples for the current mix block, allocated with the mixer.
+    scratch: Box<[[f32; MIX_BLOCK]; MAX_STREAMS]>,
+}
+
+/// A stream mixed into the current block, with the controls it was mixed with.
+#[derive(Clone, Copy, Default)]
+struct Contributor {
+    index: usize,
+    generation: u64,
+    volume: u32,
+    popped: usize,
+}
+
+/// Rebuild `shared`/`room` for block samples `from..n` from cues/clips and the
+/// remaining contributors' retained samples.
+fn mix_from(
+    from: usize,
+    n: usize,
+    base: &[f32; MIX_BLOCK],
+    contributors: &[Contributor],
+    scratch: &[[f32; MIX_BLOCK]; MAX_STREAMS],
+    shared: &mut [f32; MIX_BLOCK],
+    room: &mut [f32; MIX_BLOCK],
+) {
+    shared[from..n].copy_from_slice(&base[from..n]);
+    room[from..n].fill(0.0);
+    for c in contributors {
+        if c.popped <= from {
+            continue;
+        }
+        let mix = if c.index < thiscord_shared::voice::ROOM_CAPACITY {
+            &mut *room
+        } else {
+            &mut *shared
+        };
+        let volume = f32::from_bits(c.volume);
+        for (mix, sample) in mix[from..c.popped]
+            .iter_mut()
+            .zip(&scratch[c.index][from..c.popped])
+        {
+            *mix += if sample.is_finite() {
+                sample * volume
+            } else {
+                0.0
+            };
+        }
+    }
 }
 
 pub fn mixer(controls: Arc<Controls>) -> (Vec<StreamWriter>, Mixer) {
@@ -234,6 +283,7 @@ pub fn mixer(controls: Arc<Controls>) -> (Vec<StreamWriter>, Mixer) {
             controls,
             reference: None,
             since_wake: 0,
+            scratch: Box::new([[0.0; MIX_BLOCK]; MAX_STREAMS]),
         },
     )
 }
@@ -318,11 +368,28 @@ impl Mixer {
         Privacy {
             controls: self.controls.clone(),
             streams: self.streams.iter().map(|s| s.control.clone()).collect(),
-            previous: None,
+            initialized: false,
+            global: (false, true, 0),
+            previous: [(0, false, 0); MAX_STREAMS],
+            watched: [0; MAX_STREAMS],
+            watched_len: 0,
+            mask: [false; MAX_STREAMS],
         }
     }
 
-    pub(super) fn render_mono(&mut self, count: usize, now: Instant, mut emit: impl FnMut(f32)) {
+    pub(super) fn render_mono(&mut self, count: usize, now: Instant, emit: impl FnMut(f32)) {
+        self.render_masked(count, now, &[true; MAX_STREAMS], emit);
+    }
+
+    /// `mask` limits which slots may play during this callback. The device-rate
+    /// path passes the streams its per-sample privacy check watches.
+    pub(super) fn render_masked(
+        &mut self,
+        count: usize,
+        now: Instant,
+        mask: &[bool; MAX_STREAMS],
+        mut emit: impl FnMut(f32),
+    ) {
         let callback_samples = count;
         let deadline = now.saturating_duration_since(self.controls.callback_origin)
             + frames::sample_duration(callback_samples.min(CAPACITY));
@@ -354,7 +421,7 @@ impl Mixer {
         let guard = self.controls.receive_guard.get();
         // Streams inactive at callback start stay silent until the next callback;
         // most of the fixed slots are unused, and skipping them keeps the
-        // per-sample loop proportional to actual sources.
+        // mixing work proportional to actual sources.
         let mut live = [false; MAX_STREAMS];
         // Keep the legacy local-test trim, but never trim the larger cushion
         // needed by a device callback. Hard resets still discard the whole ring.
@@ -365,7 +432,7 @@ impl Mixer {
             let receive_blocked = index < thiscord_shared::voice::ROOM_CAPACITY
                 && guard.is_some_and(|guard| !guard.receive_allowed());
             let active = stream.control.active.load(Ordering::Acquire);
-            live[index] = active;
+            live[index] = active && mask[index];
             let discard = if changed || deafened || receive_blocked || !active {
                 stream.queue.occupied_len()
             } else {
@@ -389,19 +456,34 @@ impl Mixer {
                 silence[index] = count as u64;
             }
         }
-        for _ in 0..count {
-            let deafened = self.controls.deafen.load(Ordering::Acquire)
+        // Streams are mixed in short blocks: each block reads a stream's controls
+        // once and pops its samples in bulk, so the inner loop vectorises. Before
+        // every output sample the contributing streams' generation, activity and
+        // gain are re-read; a change rebuilds the rest of the block from the
+        // remaining contributors, so no stale audio is emitted after a cutoff.
+        // Deafen, master and the urgent room cutoff are likewise observed per
+        // output sample; the room cutoff also discards room queues at once.
+        let mut offset = 0;
+        while offset < count {
+            let n = (count - offset).min(MIX_BLOCK);
+            let block_deafened = self.controls.deafen.load(Ordering::Acquire)
                 || guard.is_some_and(|guard| guard.server_deafened());
-            // An urgent cutoff can arrive during this callback. Observe it
-            // before each microphone sample and never affect shared audio.
-            let room_blocked = guard.is_some_and(|guard| !guard.receive_allowed());
-            let master = f32::from_bits(self.controls.master.load(Ordering::Relaxed));
-            let mut mix = self.cues.next() + self.clips.next();
+            let block_room_blocked = guard.is_some_and(|guard| !guard.receive_allowed());
+            let block_master = f32::from_bits(self.controls.master.load(Ordering::Relaxed));
+            // Cues and clips are shared audio; room voices are kept apart so a
+            // cutoff observed mid-block removes only room voices.
+            let mut base = [0.0_f32; MIX_BLOCK];
+            for sample in &mut base[..n] {
+                *sample = self.cues.next() + self.clips.next();
+            }
+            let mut contributors = [Contributor::default(); MAX_STREAMS];
+            let mut contributing = 0;
             for (index, stream) in self.streams.iter_mut().enumerate() {
                 if !live[index] {
                     continue;
                 }
-                let receive_blocked = room_blocked && index < thiscord_shared::voice::ROOM_CAPACITY;
+                let receive_blocked =
+                    block_room_blocked && index < thiscord_shared::voice::ROOM_CAPACITY;
                 let generation = stream.control.generation.load(Ordering::Acquire);
                 if receive_blocked || generation != stream.generation {
                     let discard = stream.queue.occupied_len();
@@ -410,41 +492,131 @@ impl Mixer {
                     stream.generation = generation;
                     stream.control.cleared.store(generation, Ordering::Release);
                 }
-                if deafened || receive_blocked || !stream.control.active.load(Ordering::Relaxed) {
-                    silence[index] += 1;
+                if block_deafened
+                    || receive_blocked
+                    || !stream.control.active.load(Ordering::Relaxed)
+                {
+                    silence[index] += n as u64;
                     continue;
                 }
-                let volume = f32::from_bits(stream.control.volume.load(Ordering::Relaxed));
-                let audible = master > 0.0 && volume > 0.0;
-                if !audible {
-                    silence[index] += 1;
+                let volume = stream.control.volume.load(Ordering::Relaxed);
+                let popped = stream.queue.pop_slice(&mut self.scratch[index][..n]);
+                if !(block_master > 0.0 && f32::from_bits(volume) > 0.0) {
+                    silence[index] += n as u64;
+                    continue;
                 }
-                match stream.queue.try_pop() {
-                    Some(sample) if sample.is_finite() => mix += sample * volume,
-                    Some(_) => {}
-                    None if audible && stream.control.quiet.load(Ordering::Relaxed) => {
-                        silence[index] += 1;
+                let missing = (n - popped) as u64;
+                if missing > 0 {
+                    if stream.control.quiet.load(Ordering::Relaxed) {
+                        silence[index] += missing;
+                    } else if stream.control.pending_media.load(Ordering::Relaxed) {
+                        starvation[index] += missing;
+                        underruns += missing;
+                    } else {
+                        unknown[index] += missing;
                     }
-                    None if audible && stream.control.pending_media.load(Ordering::Relaxed) => {
-                        starvation[index] += 1;
-                        underruns += 1;
-                    }
-                    None if audible => unknown[index] += 1,
-                    None => {}
+                }
+                if popped > 0 {
+                    contributors[contributing] = Contributor {
+                        index,
+                        generation,
+                        volume,
+                        popped,
+                    };
+                    contributing += 1;
                 }
             }
-            if !deafened && (mix * master).abs() > 1.0 {
-                clipped += 1;
+            let mut shared = [0.0_f32; MIX_BLOCK];
+            let mut room = [0.0_f32; MIX_BLOCK];
+            mix_from(
+                0,
+                n,
+                &base,
+                &contributors[..contributing],
+                &self.scratch,
+                &mut shared,
+                &mut room,
+            );
+            let mut room_cut = block_room_blocked;
+            for i in 0..n {
+                // A contributor's slot can be reassigned, deactivated or muted
+                // during this callback; apply it before the next sample.
+                let mut changed = false;
+                let mut k = 0;
+                while k < contributing {
+                    let c = contributors[k];
+                    let stream = &mut self.streams[c.index];
+                    let generation = stream.control.generation.load(Ordering::Acquire);
+                    let active = stream.control.active.load(Ordering::Relaxed);
+                    let volume = stream.control.volume.load(Ordering::Relaxed);
+                    if generation == c.generation && active && volume == c.volume {
+                        k += 1;
+                        continue;
+                    }
+                    changed = true;
+                    if generation != c.generation {
+                        let discard = stream.queue.occupied_len();
+                        stream.control.counts.discarded.add(discard as u64);
+                        stream.queue.skip(discard);
+                        stream.generation = generation;
+                        stream.control.cleared.store(generation, Ordering::Release);
+                    }
+                    if generation == c.generation && active && f32::from_bits(volume) > 0.0 {
+                        contributors[k].volume = volume;
+                        k += 1;
+                    } else {
+                        contributing -= 1;
+                        contributors[k] = contributors[contributing];
+                    }
+                }
+                if changed {
+                    mix_from(
+                        i,
+                        n,
+                        &base,
+                        &contributors[..contributing],
+                        &self.scratch,
+                        &mut shared,
+                        &mut room,
+                    );
+                }
+                let deafened = self.controls.deafen.load(Ordering::Acquire)
+                    || guard.is_some_and(|guard| guard.server_deafened());
+                // An urgent cutoff can arrive during this callback. Observe it
+                // before each microphone sample and never affect shared audio.
+                if !room_cut && guard.is_some_and(|guard| !guard.receive_allowed()) {
+                    room_cut = true;
+                    for (stream, _) in self
+                        .streams
+                        .iter_mut()
+                        .zip(live)
+                        .take(thiscord_shared::voice::ROOM_CAPACITY)
+                        .filter(|(_, live)| *live)
+                    {
+                        let generation = stream.control.generation.load(Ordering::Acquire);
+                        let discard = stream.queue.occupied_len();
+                        stream.control.counts.discarded.add(discard as u64);
+                        stream.queue.skip(discard);
+                        stream.generation = generation;
+                        stream.control.cleared.store(generation, Ordering::Release);
+                    }
+                }
+                let master = f32::from_bits(self.controls.master.load(Ordering::Relaxed));
+                let mix = shared[i] + if room_cut { 0.0 } else { room[i] };
+                if !deafened && (mix * master).abs() > 1.0 {
+                    clipped += 1;
+                }
+                let sample = if deafened {
+                    0.0
+                } else {
+                    (mix * master).clamp(-1.0, 1.0)
+                };
+                emit(sample);
+                if let Some(reference) = self.reference.as_mut() {
+                    reference_dropped += reference.push(sample);
+                }
             }
-            let sample = if deafened {
-                0.0
-            } else {
-                (mix * master).clamp(-1.0, 1.0)
-            };
-            emit(sample);
-            if let Some(reference) = &mut self.reference {
-                reference_dropped += reference.push(sample);
-            }
+            offset += n;
         }
         self.controls.counts.output_samples.add(count as u64);
         self.controls.counts.output_clipped.add(clipped);
@@ -474,37 +646,77 @@ impl Mixer {
 
 // Device filters hold delayed mixed audio. Flush it on access/generation, gain,
 // active-state or deafen changes, including when no new 48 kHz sample is needed.
-type PrivacyState = (bool, bool, u32, [(u64, bool, u32); MAX_STREAMS]);
+type StreamState = (u64, bool, u32);
 pub(super) struct Privacy {
     controls: Arc<Controls>,
     streams: Vec<Arc<StreamControl>>,
-    previous: Option<PrivacyState>,
+    initialized: bool,
+    global: (bool, bool, u32),
+    previous: [StreamState; MAX_STREAMS],
+    /// Streams active at callback start. Only these can contribute mixed audio
+    /// during the callback (see `Mixer::render_mono`), so per-sample checks skip
+    /// the remaining fixed slots; `begin` compares every slot once per callback.
+    watched: [u8; MAX_STREAMS],
+    watched_len: usize,
+    mask: [bool; MAX_STREAMS],
 }
 impl Privacy {
-    pub fn changed(&mut self) -> bool {
-        let state = (
+    fn global(&self) -> (bool, bool, u32) {
+        let guard = self.controls.receive_guard.get();
+        (
             self.controls.deafen.load(Ordering::Acquire)
-                || self
-                    .controls
-                    .receive_guard
-                    .get()
-                    .is_some_and(|guard| guard.server_deafened()),
-            self.controls
-                .receive_guard
-                .get()
-                .is_none_or(|g| g.receive_allowed()),
+                || guard.is_some_and(|guard| guard.server_deafened()),
+            guard.is_none_or(|g| g.receive_allowed()),
             self.controls.master.load(Ordering::Relaxed),
-            std::array::from_fn(|i| {
-                let stream = &self.streams[i];
-                (
-                    stream.generation.load(Ordering::Acquire),
-                    stream.active.load(Ordering::Acquire),
-                    stream.volume.load(Ordering::Relaxed),
-                )
-            }),
-        );
-        let changed = self.previous.is_some_and(|previous| previous != state);
-        self.previous = Some(state);
+        )
+    }
+    fn stream(&self, index: usize) -> StreamState {
+        let stream = &self.streams[index];
+        (
+            stream.generation.load(Ordering::Acquire),
+            stream.active.load(Ordering::Acquire),
+            stream.volume.load(Ordering::Relaxed),
+        )
+    }
+    /// Full comparison of every slot, run once at the start of each device callback.
+    pub fn begin(&mut self) -> bool {
+        let global = self.global();
+        let mut changed = global != self.global;
+        self.global = global;
+        self.watched_len = 0;
+        for index in 0..self.streams.len() {
+            let state = self.stream(index);
+            changed |= state != self.previous[index];
+            self.previous[index] = state;
+            self.mask[index] = state.1;
+            if state.1 {
+                self.watched[self.watched_len] = index as u8;
+                self.watched_len += 1;
+            }
+        }
+        let changed = changed && self.initialized;
+        self.initialized = true;
+        changed
+    }
+    /// Streams the mixer may render during this callback: those watched here.
+    pub fn mask(&self) -> &[bool; MAX_STREAMS] {
+        &self.mask
+    }
+    /// Per-sample check of deafen/access/master and the streams that were active
+    /// at callback start. Changes to other slots are found by the next `begin`.
+    pub fn changed(&mut self) -> bool {
+        if !self.initialized {
+            return self.begin();
+        }
+        let global = self.global();
+        let mut changed = global != self.global;
+        self.global = global;
+        for &index in &self.watched[..self.watched_len] {
+            let index = usize::from(index);
+            let state = self.stream(index);
+            changed |= state != self.previous[index];
+            self.previous[index] = state;
+        }
         changed
     }
 }
@@ -806,5 +1018,101 @@ mod tests {
         writers[3].write(&[0.5; 64]);
         mix.render(&mut out, 1);
         assert_eq!(out, [0.5; 64]);
+    }
+    #[test]
+    fn urgent_room_cutoff_inside_a_mix_block_silences_room_voices_at_that_sample() {
+        let controls = Arc::new(Controls::default());
+        let guard = Arc::new(super::super::outgoing::Control::default());
+        guard.enable_receive_protection();
+        assert!(guard.admit_receive(guard.generation()));
+        controls.receive_guard.set(guard.clone()).ok();
+        let (mut writers, mut mix) = mixer(controls.clone());
+        let shared = thiscord_shared::voice::ROOM_CAPACITY;
+        for (slot, level) in [(0, 0.25), (shared, 0.125)] {
+            writers[slot].control.active.store(true, Ordering::Release);
+            writers[slot].write(&[level; 960]);
+        }
+        let mut out = Vec::new();
+        mix.render_mono(MIX_BLOCK * 2, Instant::now(), |sample| {
+            out.push(sample);
+            if out.len() == 10 {
+                guard.pause_receive();
+            }
+        });
+        // The cutoff arrives after sample 9 was emitted, inside the first block.
+        assert!(out[..10].iter().all(|s| *s == 0.375), "{out:?}");
+        assert!(out[10..].iter().all(|s| *s == 0.125), "{out:?}");
+        assert_eq!(writers[0].occupied_samples(), 0, "room backlog discarded");
+        assert!(writers[shared].occupied_samples() > 0, "shared audio kept");
+    }
+    #[test]
+    fn privacy_checks_watched_streams_per_sample_and_all_slots_per_callback() {
+        let controls = Arc::new(Controls::default());
+        let (mut writers, mut mix) = mixer(controls.clone());
+        writers[0].control.active.store(true, Ordering::Release);
+        let mut privacy = mix.privacy();
+        assert!(!privacy.begin(), "the first snapshot is a baseline");
+        assert!(privacy.mask()[0] && !privacy.mask()[1]);
+        assert!(!privacy.changed());
+        writers[0].volume(0.5).unwrap();
+        assert!(privacy.changed(), "watched gain change");
+        assert!(!privacy.changed());
+        controls.master.store(0.5_f32.to_bits(), Ordering::Relaxed);
+        assert!(privacy.changed(), "master change");
+        // A slot that was inactive at callback start cannot be mixed in this
+        // callback, so the next callback's full comparison reports it.
+        writers[1].control.active.store(true, Ordering::Release);
+        assert!(!privacy.changed());
+        writers[1].write(&[0.5; 64]);
+        let mut out = Vec::new();
+        mix.render_masked(64, Instant::now(), privacy.mask(), |s| out.push(s));
+        assert!(out.iter().all(|s| *s == 0.0), "unwatched slot stays silent");
+        assert!(privacy.begin());
+        assert!(privacy.mask()[1]);
+        writers[1].write(&[0.5; 64]);
+        out.clear();
+        mix.render_masked(64, Instant::now(), privacy.mask(), |s| out.push(s));
+        assert!(out.iter().all(|s| *s == 0.25), "{out:?}");
+    }
+    #[test]
+    fn per_stream_cutoffs_inside_a_mix_block_apply_from_the_next_sample() {
+        for cutoff in 0..3 {
+            let controls = Arc::new(Controls::default());
+            let (mut writers, mut mix) = mixer(controls);
+            for writer in writers.iter_mut().take(2) {
+                writer.control.active.store(true, Ordering::Release);
+                writer.write(&[0.25; 960]);
+            }
+            let control = writers[0].control.clone();
+            let mut out = Vec::new();
+            mix.render_mono(MIX_BLOCK, Instant::now(), |sample| {
+                out.push(sample);
+                if out.len() == 10 {
+                    match cutoff {
+                        0 => {
+                            control.generation.fetch_add(1, Ordering::AcqRel);
+                        }
+                        1 => control.active.store(false, Ordering::Release),
+                        _ => control.volume.store(0.0_f32.to_bits(), Ordering::Relaxed),
+                    }
+                }
+            });
+            assert!(
+                out[..10].iter().all(|s| *s == 0.5),
+                "cutoff {cutoff}: {out:?}"
+            );
+            assert!(
+                out[10..].iter().all(|s| *s == 0.25),
+                "cutoff {cutoff}: {out:?}"
+            );
+            if cutoff == 0 {
+                assert_eq!(
+                    writers[0].occupied_samples(),
+                    0,
+                    "reassigned slot discarded"
+                );
+                assert!(writers[0].ready());
+            }
+        }
     }
 }

@@ -286,7 +286,10 @@ pub enum Command {
         gain: f32,
     },
     Pressed(bool),
+    /// Status including the full quality report.
     Status,
+    /// Live status without the quality report; replies to every other
+    /// command, including `Keepalive`, use the same lightweight form.
     Peek,
     Keepalive(connection::Connection),
     #[cfg(test)]
@@ -315,8 +318,9 @@ pub struct AudioEngine {
     inhibit: Arc<AtomicBool>,
     debug_stop: Arc<AtomicBool>,
     deafen: Arc<AtomicBool>,
-    /// Woken after every queued command/packet and urgent atomic change, so the
-    /// worker never waits for its fallback timeout to observe new work.
+    /// Woken after every queued command and urgent atomic change, so the worker
+    /// never waits for its fallback timeout to observe them. Media packets wait
+    /// for the next device-callback wake (see `notify`).
     worker: thread::Thread,
 }
 impl Default for AudioEngine {
@@ -352,6 +356,11 @@ impl AudioEngine {
                     .add(Count::IncomingQueueDroppedPackets, 1);
                 self.probe.packet_drops.fetch_add(1, Ordering::Relaxed);
             }
+            // Packets carry their arrival time and are only needed by the next
+            // refill, which device callbacks already wake every 10 ms (with the
+            // worker's 10 ms fallback). Waking per packet would add a context
+            // switch per speaker packet, rarely letting batching coalesce them.
+            return;
         } else if self.sender.try_send((command, None)).is_err() {
             diagnostics::event("control_notification_dropped", self.probe.snapshot());
         }
@@ -1221,6 +1230,11 @@ impl Session {
                 break;
             }
             let generation = self.transmit_control.generation();
+            // Read after `generation`: every relaxation (unmute, PTT press,
+            // lifted restriction) invalidates before changing its flag, so a
+            // later relaxation also makes this packet stale and discarded.
+            let enhance = self.outgoing.is_none() || self.transmit_possible(inhibit, pressed);
+            self.processing.set_enhancement(enhance);
             let Some(packet) = self.processing.capture_tapped(
                 &mut self.devices.capture,
                 &mut |frame, gap, reset, delay| {
@@ -1247,6 +1261,15 @@ impl Session {
             self.capture_packet(packet, generation, inhibit, debug)?;
         }
         Ok(())
+    }
+    /// Whether a packet captured now could reach the gate's output. When false,
+    /// the gate discards it regardless of content, so enhancement is skipped.
+    fn transmit_possible(&self, inhibit: &AtomicBool, pressed: &AtomicBool) -> bool {
+        !inhibit.load(Ordering::Acquire)
+            && self.transmit_control.publish_allowed()
+            && !self.devices.control.mute.load(Ordering::Relaxed)
+            && !self.devices.control.deafen.load(Ordering::Relaxed)
+            && (self.settings.mode != TransmitMode::PushToTalk || pressed.load(Ordering::Acquire))
     }
     fn capture_packet(
         &mut self,
@@ -1277,7 +1300,9 @@ impl Session {
                 .capture_after
                 .is_none_or(|after| captured.at[0] >= after)
             && !self.devices.control.mute.load(Ordering::Relaxed)
-            && !self.devices.control.deafen.load(Ordering::Relaxed);
+            && !self.devices.control.deafen.load(Ordering::Relaxed)
+            // Never transmit a block whose enhancement was skipped.
+            && self.processing.enhancing();
         let gate::Output { pcm, active } = self.gate.process(
             captured.pcm,
             captured.evidence,
@@ -1513,10 +1538,21 @@ impl Session {
             ..Default::default()
         }
     }
+    /// Status with the full quality report. Building it merges every stream's
+    /// histograms on this worker, so only explicit `Command::Status` requests
+    /// (diagnostics, remote support, periodic UI refresh) pay for it.
+    fn detailed_status(&self) -> AudioStatus {
+        AudioStatus {
+            quality: Some(self.quality()),
+            ..self.status()
+        }
+    }
+    /// Live status for keepalives, overlays and command replies: levels,
+    /// speaking flags, volumes and messages, without the quality report.
     fn status(&self) -> AudioStatus {
         AudioStatus {
             ui_performance: None,
-            quality: Some(self.quality()),
+            quality: None,
             recording: None,
             running: true,
             input_level: self.processed_level,
@@ -1716,9 +1752,10 @@ fn run(
                 match carried.take().map_or_else(|| packets.try_recv(), Ok) {
                     Ok(packet) => Ok((packet, None)),
                     Err(_) => {
-                        // Producers, device callbacks and urgent controls unpark this
-                        // thread. The timeout only covers timers (recovery, leases,
-                        // pending replacements) and devices that stop calling back.
+                        // Control producers, device callbacks and urgent controls
+                        // unpark this thread; media packets wait for those wakes.
+                        // The timeout covers timers (recovery, leases, pending
+                        // replacements) and devices that stop calling back.
                         thread::park_timeout(idle_wait(session.is_some() || pending.is_some()));
                         match receiver.try_recv() {
                             Ok(request) => Ok(request),
@@ -1736,6 +1773,7 @@ fn run(
         match request {
             Ok((command, mut reply)) => {
                 probe.enter(command.operation());
+                let detailed = matches!(command, Command::Status);
                 if matches!(
                     command,
                     Command::Start { .. }
@@ -1950,7 +1988,13 @@ fn run(
                     let _ = reply.send(result.map(|_| {
                         let mut status = session
                             .as_ref()
-                            .map(|s| s.status())
+                            .map(|s| {
+                                if detailed {
+                                    s.detailed_status()
+                                } else {
+                                    s.status()
+                                }
+                            })
                             .unwrap_or_else(|| stopped(message.clone()));
                         status.recording = debug.status();
                         status

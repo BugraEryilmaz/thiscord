@@ -333,8 +333,15 @@ pub async fn audio_stop(
 pub async fn audio_status(
     app: tauri::AppHandle,
     state: State<'_, AudioState>,
+    quality: Option<bool>,
 ) -> Result<AudioStatus, String> {
-    let mut result = command(state.engine.clone(), Command::Status).await?;
+    // Omitted means the full report, preserving older callers and remote support.
+    let request = if quality == Some(false) {
+        Command::Peek
+    } else {
+        Command::Status
+    };
+    let mut result = command(state.engine.clone(), request).await?;
     result.ui_performance = crate::native_performance::snapshot();
     if !result.running
         && crate::native_voice::voice_status(app.state()).is_ok_and(|s| s.channel_id.is_none())

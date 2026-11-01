@@ -438,7 +438,8 @@ pub async fn overlay_snapshot(app: tauri::AppHandle) -> Result<Option<OverlaySna
         .engine
         .clone();
     let audio = tauri::async_runtime::spawn_blocking(move || {
-        engine.command(thiscord_frontend::audio::Command::Status)
+        // Only speaking/mute presentation is needed; skip the quality report.
+        engine.command(thiscord_frontend::audio::Command::Peek)
     })
     .await
     .map_err(|_| "Audio worker unavailable")??;

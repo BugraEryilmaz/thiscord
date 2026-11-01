@@ -13,7 +13,7 @@ pub async fn execute(app: tauri::AppHandle, connection: Connection, command: Com
         Command::AudioCurrent {} => serde_json::to_value(audio::audio_current(app).await?),
         Command::AudioDevices {} => serde_json::to_value(audio::audio_devices().await?),
         Command::AudioStatus {} => {
-            let mut status = audio::audio_status(app.clone(), app.state()).await?;
+            let mut status = audio::audio_status(app.clone(), app.state(), None).await?;
             status.recording = None;
             serde_json::to_value(status)
         }
@@ -66,13 +66,14 @@ pub async fn execute(app: tauri::AppHandle, connection: Connection, command: Com
                 .try_lock()
                 .ok()
                 .map(|s| s.clone());
-            let (status, status_error) = match audio::audio_status(app.clone(), app.state()).await {
-                Ok(mut status) => {
-                    status.recording = None;
-                    (Some(status), None)
-                }
-                Err(error) => (None, Some(error)),
-            };
+            let (status, status_error) =
+                match audio::audio_status(app.clone(), app.state(), None).await {
+                    Ok(mut status) => {
+                        status.recording = None;
+                        (Some(status), None)
+                    }
+                    Err(error) => (None, Some(error)),
+                };
             Ok(tauri::async_runtime::spawn_blocking(move || {
                 let files = diagnostics::export()?;
                 let ui_performance = crate::native_performance::snapshot();

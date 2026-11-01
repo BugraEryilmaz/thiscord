@@ -8,6 +8,25 @@ use thiscord_shared::{ChannelId, GuildId, audio::*, voice::VoiceStatus};
 
 /// 500 ms polls skipped between idle audio-status reads (one read per 2 s).
 const IDLE_STATUS_POLL_SKIPS: u8 = 3;
+/// Every Nth status poll (2 s at the active 500 ms cadence) requests the full
+/// quality report for the connection tooltip and diagnostics; the others fetch
+/// only live levels, speaking state and volumes.
+const QUALITY_POLL_INTERVAL: u8 = 4;
+
+/// Lightweight replies omit the quality report. Keep the last report while
+/// audio keeps running so the tooltip and diagnostics do not blank between
+/// detailed polls; a stopped worker clears it.
+fn set_audio_status(ui: Ui, mut status: AudioStatus) {
+    if status.quality.is_none() && status.running {
+        status.quality = ui.audio_status.with_untracked(|previous| {
+            previous
+                .as_ref()
+                .filter(|previous| previous.running)
+                .and_then(|previous| previous.quality.clone())
+        });
+    }
+    ui.audio_status.set(Some(status));
+}
 pub(super) fn media_publish_allowed(ui: Ui) -> bool {
     let voice = ui.voice.get();
     voice.connected
@@ -260,6 +279,7 @@ pub(super) fn AudioHost(ui: Ui) -> impl IntoView {
                         // poll every 2 s instead of 500 ms. Joining or starting a test
                         // updates these signals directly, restoring the fast cadence.
                         let mut skipped = 0;
+                        let mut polls: u8 = 0;
                         loop {
                             let active = ui.voice.with_untracked(|v| v.channel_id.is_some())
                                 || ui
@@ -267,12 +287,21 @@ pub(super) fn AudioHost(ui: Ui) -> impl IntoView {
                                     .with_untracked(|s| s.as_ref().is_some_and(|s| s.running));
                             if active || skipped >= IDLE_STATUS_POLL_SKIPS {
                                 skipped = 0;
+                                let detailed = polls == 0;
+                                polls = (polls + 1) % QUALITY_POLL_INTERVAL;
+                                // The remote relay accepts no arguments and always
+                                // returns the full report.
+                                let args = if ui.audio_control.is_remote() {
+                                    json!({})
+                                } else {
+                                    json!({"quality": detailed})
+                                };
                                 if let Ok(status) = ui
                                     .audio_control
-                                    .invoke::<AudioStatus>("audio_status", json!({}))
+                                    .invoke::<AudioStatus>("audio_status", args)
                                     .await
                                 {
-                                    ui.audio_status.set(Some(status));
+                                    set_audio_status(ui, status);
                                 }
                                 let revision = ui.audio_revision.get_untracked();
                                 if let Ok(settings) = ui
@@ -387,7 +416,7 @@ fn debug_command(ui: Ui, command: &'static str) {
             .invoke::<AudioStatus>(command, json!({}))
             .await
         {
-            Ok(status) => ui.audio_status.set(Some(status)),
+            Ok(status) => set_audio_status(ui, status),
             Err(error) => ui.status.set(error),
         }
     });
@@ -472,7 +501,7 @@ pub(super) fn StreamVolume(
                 return;
             }
             match result {
-                Ok(status) => ui.audio_status.set(Some(status)),
+                Ok(status) => set_audio_status(ui, status),
                 Err(message) => {
                     error.set(message);
                     if let Some(current) = current_volume.get_untracked() {
@@ -581,7 +610,7 @@ pub(super) fn AudioSettingsPanel(ui: Ui) -> impl IntoView {
             }
             busy.set(false);
             match result {
-                Ok(status) => ui.audio_status.set(Some(status)),
+                Ok(status) => set_audio_status(ui, status),
                 Err(error) => message.set(error),
             }
         });

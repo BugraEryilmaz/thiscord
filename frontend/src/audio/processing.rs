@@ -48,6 +48,12 @@ pub struct Processing {
     clipped_samples: usize,
     clipped_input_percent: f32,
     chain: stages::CaptureChain,
+    /// False while nothing captured can be transmitted (muted, deafened,
+    /// restricted or push-to-talk released): AEC keeps adapting, but the
+    /// denoiser/boost/AGC chain is skipped and the block is replaced by silence.
+    enhance: bool,
+    /// The chain has processed audio since its last reset.
+    chain_dirty: bool,
     model: NoiseSuppressionModel,
     strength: NoiseSuppressionStrength,
     /// Prewarmed, bypassed denoisers for live switches, indexed by model.
@@ -236,6 +242,8 @@ impl Processing {
             clipped_samples: 0,
             clipped_input_percent: 0.0,
             chain,
+            enhance: true,
+            chain_dirty: false,
             model,
             strength: NoiseSuppressionStrength::default(),
             spare_noise: Default::default(),
@@ -258,13 +266,29 @@ impl Processing {
             .build();
         #[cfg(feature = "neural-echo")]
         self.attach_neural();
-        self.chain.reset();
+        self.reset_chain();
         self.render_at = None;
         self.reference_level = 0.0;
         self.capture_frames = 0;
         self.clipped_samples = 0;
         self.clipped_input_percent = 0.0;
         self.resets += 1;
+    }
+    fn reset_chain(&mut self) {
+        self.chain.reset();
+        self.chain_dirty = false;
+    }
+    /// Select whether captured blocks are enhanced (see `enhance`). Resuming
+    /// starts the chain from a clean state, so it never continues audio that
+    /// predates the skipped interval; privacy boundaries usually reset it first.
+    pub(super) fn set_enhancement(&mut self, enhance: bool) {
+        if enhance && !self.enhance && self.chain_dirty {
+            self.reset_chain();
+        }
+        self.enhance = enhance;
+    }
+    pub(super) fn enhancing(&self) -> bool {
+        self.enhance
     }
     /// Discard enhancement history at a privacy boundary without restarting AEC.
     /// Old device blocks still advance AEC/reference timing, but feed zeros into
@@ -275,7 +299,7 @@ impl Processing {
     }
     /// Replay and live privacy boundaries clear delayed enhancement, not AEC.
     pub fn clear_enhancement_history(&mut self) {
-        self.chain.reset();
+        self.reset_chain();
     }
     pub(super) fn needs_replacement(&self, s: &AudioSettings) -> bool {
         s.neural_echo != self.neural_requested
@@ -312,7 +336,7 @@ impl Processing {
             self.model = s.noise_suppression_model;
         }
         self.set_strength(s.noise_suppression_strength);
-        self.chain.reset();
+        self.reset_chain();
         self.chain.set_enabled(0, s.noise_suppression);
         self.set_input_gain(s.input_gain);
         self.chain.set_enabled(2, s.automatic_gain);
@@ -538,10 +562,16 @@ impl Processing {
             ));
         }
         frame.copy_from_slice(&out);
+        if !self.enhance {
+            // Nothing from this block can be sent; skip the expensive stages.
+            frame.fill(0.0);
+            return Ok(0.0);
+        }
         if !retain {
             frame.fill(0.0);
         }
         let mut rms = 0.0;
+        self.chain_dirty = true;
         self.chain.process_observed(frame, &mut |index, block| {
             if index == 1 {
                 rms = super::gate::Evidence::rms(block);
@@ -598,6 +628,72 @@ pub(super) struct Captured {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn skipped_enhancement_runs_no_stage_and_resumes_from_a_clean_chain() {
+        use std::sync::{
+            Arc,
+            atomic::{AtomicUsize, Ordering},
+        };
+        struct Counting {
+            processed: Arc<AtomicUsize>,
+            resets: Arc<AtomicUsize>,
+        }
+        impl stages::CaptureStage for Counting {
+            fn name(&self) -> &'static str {
+                "counting"
+            }
+            fn process(&mut self, _: &mut stages::Block) -> Result<(), Failure> {
+                self.processed.fetch_add(1, Ordering::Relaxed);
+                Ok(())
+            }
+            fn reset(&mut self) {
+                self.resets.fetch_add(1, Ordering::Relaxed);
+            }
+        }
+        let processed = Arc::new(AtomicUsize::new(0));
+        let resets = Arc::new(AtomicUsize::new(0));
+        let mut chain = stages::CaptureChain::default();
+        chain.push(
+            true,
+            Counting {
+                processed: processed.clone(),
+                resets: resets.clone(),
+            },
+        );
+        let mut p = Processing::with_chain(
+            Config::default(),
+            chain,
+            NoiseSuppressionModel::Sonora,
+            false,
+            1.0,
+        );
+        let mut block = [0.1; 480];
+        p.capture_frame_metered(&mut block, 0, true).unwrap();
+        assert_eq!(processed.load(Ordering::Relaxed), 1);
+        p.set_enhancement(false);
+        for _ in 0..5 {
+            let mut block = [0.1; 480];
+            assert_eq!(p.capture_frame_metered(&mut block, 0, true).unwrap(), 0.0);
+            assert_eq!(block, [0.0; 480], "a skipped block is silence");
+        }
+        assert_eq!(processed.load(Ordering::Relaxed), 1, "no stage ran");
+        let before = resets.load(Ordering::Relaxed);
+        p.set_enhancement(true);
+        assert_eq!(
+            resets.load(Ordering::Relaxed),
+            before + 1,
+            "stale chain reset"
+        );
+        p.capture_frame_metered(&mut block, 0, true).unwrap();
+        assert_eq!(processed.load(Ordering::Relaxed), 2);
+        // A privacy boundary during the skip already cleaned the chain.
+        p.set_enhancement(false);
+        p.clear_enhancement_history();
+        let before = resets.load(Ordering::Relaxed);
+        p.set_enhancement(true);
+        assert_eq!(resets.load(Ordering::Relaxed), before, "no second reset");
+    }
 
     #[test]
     fn microphone_boost_opens_and_holds_quiet_speech_without_bypassing_restrictions() {
