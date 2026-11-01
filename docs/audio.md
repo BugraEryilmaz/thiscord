@@ -610,9 +610,10 @@ Optimized Windows measurements on the committed speech fixture (informational,
 not a CPU budget): decoding costs about 29 us per 20 ms frame at complexity 0,
 41 us with LACE and 86 us with NoLACE at 32 kbit/s; at 12 kbit/s SILK-only,
 LACE plus BWE costs about 117-121 us per frame (about 0.6% of one core per
-speaking stream). NoLACE was not selected because it doubled LACE's cost.
+speaking stream; a shared macOS ARM64 CI runner measured 253 us). NoLACE was not selected because it doubled LACE's cost.
 `osce_extends_low_bitrate_silk_and_survives_full_reset` verifies that BWE adds
-more than ten times the plain decoder's energy above 8 kHz at 12 kbit/s and that
+more than four times the plain decoder's energy above 8 kHz at 12 kbit/s (measured
+about 17x on Windows x64 and 8.6x on macOS ARM64 CI) and that
 a full reset matches a fresh decoder. OSCE adds the LACE, NoLACE and BWE model
 arrays from the pinned libopus tree to native binaries.
 
