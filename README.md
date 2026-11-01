@@ -117,6 +117,11 @@ Open **Settings > Voice & audio** to select devices and test audio, then join a
 voice channel. Calls adapt to weak connections by default: congestion lowers the
 microphone bitrate, packet loss adds Opus deep redundancy, and incoming voices use
 Opus neural enhancement. See [audio setup, networking and remaining checks](docs/audio.md).
+The voice dock's **Soundboard** button plays sounds for everyone in the call: four
+built-in sounds (cricket, clap, sad horn, ba dum tss) plus up to 24 a server uploads in
+**Server settings > Soundboard** (Manage server). The Use soundboard permission
+controls who can play them, and right-clicking a participant offers a local
+**Soundboard volume** for that person (0% mutes). See [soundboard](docs/soundboard.md).
 Missing saved audio devices immediately fall back to the system default for that
 direction on join or recovery, preserving the other selection and saved preferences.
 Other device failures retry selected devices three times, then system defaults

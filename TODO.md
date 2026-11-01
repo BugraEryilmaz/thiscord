@@ -363,6 +363,10 @@ Personalized speaker isolation and physical acoustic acceptance remain future wo
   reconnect with bounded backoff, fresh authorization and cancellable media leases.
 - [x] Moderator voice disconnect with hierarchy enforcement and targeted transport revocation.
 - [x] Moderator mute/deafen/move-to-channel controls with hierarchy enforcement.
+- [x] Guild soundboard: bundled CC0 built-in sounds, server-normalized uploads (24 per
+  server), Use soundboard permission with channel overrides, signaling-relayed plays,
+  native clip mixing and local per-person soundboard volume.
+- [ ] Physical Windows/macOS/Linux soundboard acceptance (uploads of real MP3/Ogg/FLAC files, overlap, deafen).
 - [ ] Physical Windows/macOS/Linux acceptance of moderator moves, capture shutdown and self-state preservation.
 - [x] Desktop voice overlay with participant roster, speaking activity and focus visibility.
 - [x] Customizable global mute/deafen shortcuts and clickable self controls on overlay hover.

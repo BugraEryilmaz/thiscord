@@ -146,8 +146,8 @@ owner-based member capacity check and revision increment share the guild transac
 Changing an existing server password is not yet exposed.
 
 Everyone is implicit on every membership, cannot be assigned/deleted, and has rank
-zero. Default permissions are view, history, send, edit/delete own messages and
-voice join/speak. Other roles have ranks 1–10000; equal rank grants no authority
+zero. Default permissions are view, history, send, edit/delete own messages,
+voice join/speak and use soundboard (see [soundboard](soundboard.md)). Other roles have ranks 1–10000; equal rank grants no authority
 over one another. Base permissions are the union of Everyone and all assigned roles.
 
 Guild owners and members with Administrator receive every permission and bypass
@@ -183,7 +183,7 @@ Apply the following sequence to base permissions:
    role ordering and rank do not change this result.
 3. Member override: remove denied permissions, then add allowed permissions.
 4. Without ViewChannel, strip history, message and voice permissions. Without
-   JoinVoice, strip Speak. A missing membership/channel always yields no permissions.
+   JoinVoice, strip Speak and UseSoundboard. A missing membership/channel always yields no permissions.
 
 A single override cannot both allow and deny a permission. Administrator cannot
 appear in an override. ManageRoles is required to manage overrides; the role/member

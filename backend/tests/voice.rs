@@ -27,6 +27,8 @@ mod red;
 mod roster;
 #[path = "voice/scripting_bots.rs"]
 mod scripting_bots;
+#[path = "voice/soundboard.rs"]
+mod soundboard;
 
 struct Database {
     connection: PgConnection,
@@ -286,20 +288,37 @@ impl Peer {
         Self::with_layers(socket, capacity, packet_redundancy, false).await
     }
     async fn with_layers(
+        socket: Socket,
+        capacity: usize,
+        packet_redundancy: bool,
+        screen_layers: bool,
+    ) -> Self {
+        Self::with_options(socket, capacity, packet_redundancy, screen_layers, false).await
+    }
+    async fn with_soundboard(socket: Socket) -> Self {
+        Self::with_options(socket, 64, false, false, true).await
+    }
+    async fn with_options(
         mut socket: Socket,
         capacity: usize,
         packet_redundancy: bool,
         screen_layers: bool,
+        soundboard: bool,
     ) -> Self {
         let ServerEvent::Offer {
             sdp,
             slot,
             resume_token,
+            soundboard: soundboard_offered,
             ..
         } = event(&mut socket).await
         else {
             panic!("Expected offer")
         };
+        assert!(
+            !soundboard || soundboard_offered,
+            "guild calls offer the soundboard"
+        );
         socket
             .send(Message::Ping(b"before-answer".as_slice().into()))
             .await
@@ -447,6 +466,7 @@ impl Peer {
                 screen_subscriptions: true,
                 screen_layers,
                 video_diagnostics: false,
+                soundboard,
                 sdp: serde_json::to_string(&pc.local_description().await.unwrap()).unwrap(),
             },
         )

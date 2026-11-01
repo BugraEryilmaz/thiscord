@@ -41,6 +41,7 @@ fn title(page: &str) -> &'static str {
         "server_invites" => crate::i18n::t("Invite links"),
         "safety" => crate::i18n::t("Safety & reports"),
         "server_bots" => crate::i18n::t("Bots"),
+        "server_soundboard" => crate::i18n::t("Soundboard"),
         "server_roles" => crate::i18n::t("Roles"),
         "server_members" => crate::i18n::t("Members"),
         "server_channels" => crate::i18n::t("Channels & permissions"),
@@ -67,6 +68,7 @@ fn subtitle(page: &str) -> &'static str {
         "administration" => crate::i18n::t("Manage administrators for this Thiscord installation."),
         "safety" => crate::i18n::t("Manage blocked accounts and review reports."),
         "server_bots" => crate::i18n::t("Create bot identities and manage their access tokens."),
+        "server_soundboard" => crate::i18n::t("Sounds everyone in a voice call can hear."),
         "server_roles" => crate::i18n::t("Give people the right access with clear, named roles."),
         "server_members" => crate::i18n::t("Invite members and manage their roles."),
         "server_channels" => {
@@ -163,7 +165,7 @@ pub(super) fn Host(ui: Ui) -> impl IntoView {
                                 <NavItem ui=ui page="server_members" label="Members" icon=Glyph::Person/>
                                 <NavItem ui=ui page="server_channels" label="Channels & permissions" icon=Glyph::Volume/>
                             </Show>
-                            <Show when=move ||ui.server.get().is_some_and(|s|s.can_manage_bots)><NavItem ui=ui page="server_bots" label="Bots" icon=Glyph::Connections/></Show>
+                            <Show when=move ||ui.server.get().is_some_and(|s|s.can_manage_bots)><NavItem ui=ui page="server_bots" label="Bots" icon=Glyph::Connections/><NavItem ui=ui page="server_soundboard" label="Soundboard" icon=Glyph::Soundboard/></Show>
                             <Show when=move ||ui.server.get().is_some_and(|s|s.can_manage_channels)><NavItem ui=ui page="server_organization" label="Channel organization" icon=Glyph::Volume/></Show>
                             <Show when=move ||ui.server.get().is_some_and(|s|s.can_manage_invites)><NavItem ui=ui page="server_invites" label="Invite links" icon=Glyph::Person/></Show>
                             <Show when=move ||ui.server.get().is_some_and(|s|s.can_moderate)><NavItem ui=ui page="moderation" label="Moderation" icon=Glyph::Shield/></Show>
@@ -187,8 +189,9 @@ pub(super) fn Host(ui: Ui) -> impl IntoView {
                         <Show when=move ||ui.page.get()=="updates"><super::updates::Panel ui=ui/></Show>
                         <Show when=move ||ui.page.get()=="safety"><super::safety::Panel ui/></Show>
                         <Show when=move ||ui.page.get()=="administration"><super::permissions::InstanceSettings ui=ui/></Show>
-                        <Show when=move ||server_page(ui.page.get()) && !matches!(ui.page.get(),"moderation"|"server_organization"|"server_invites"|"server_bots")><super::permissions::PermissionEditor ui=ui/></Show>
+                        <Show when=move ||server_page(ui.page.get()) && !matches!(ui.page.get(),"moderation"|"server_organization"|"server_invites"|"server_bots"|"server_soundboard")><super::permissions::PermissionEditor ui=ui/></Show>
                         <Show when=move ||ui.page.get()=="server_bots"><super::scripting_bots::Panel ui=ui/></Show>
+                        <Show when=move ||ui.page.get()=="server_soundboard"><super::soundboard::Panel ui=ui/></Show>
                         <Show when=move ||ui.page.get()=="moderation"><super::moderation::ModerationPanel ui=ui/></Show>
                         <Show when=move ||ui.page.get()=="server_organization"><super::permissions::OrganizationPanel ui=ui/></Show>
                         <Show when=move ||ui.page.get()=="server_invites"><super::permissions::InvitesPanel ui=ui/></Show>

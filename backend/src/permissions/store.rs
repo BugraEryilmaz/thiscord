@@ -458,7 +458,7 @@ pub(super) fn dispatch(
                 let id = GuildId::from_uuid(Uuid::new_v4());
                 execute(c,"INSERT INTO guilds(id,name,owner,password_hash) VALUES($1::uuid,$2,$3::uuid,NULLIF($4,''))", &[&id.to_string(),name,&actor.to_string(),hash.as_deref().unwrap_or("")])?;
                 execute(c,"INSERT INTO guild_members(guild_id,account_id) VALUES($1::uuid,$2::uuid)", &[&id.to_string(),&actor.to_string()])?;
-                let defaults: Permissions = [Permission::ViewChannel,Permission::ReadHistory,Permission::SendMessages,Permission::EditOwnMessages,Permission::DeleteOwnMessages,Permission::JoinVoice,Permission::Speak].into_iter().collect();
+                let defaults: Permissions = [Permission::ViewChannel,Permission::ReadHistory,Permission::SendMessages,Permission::EditOwnMessages,Permission::DeleteOwnMessages,Permission::JoinVoice,Permission::Speak,Permission::UseSoundboard].into_iter().collect();
                 execute(c,"INSERT INTO guild_roles(guild_id,name,position,everyone,permissions) VALUES($1::uuid,'Everyone',0,TRUE,$2::jsonb)", &[&id.to_string(),&json(&defaults)?])?;
                 Ok(PermissionResponse::State { state: load(c,id)? })
             }

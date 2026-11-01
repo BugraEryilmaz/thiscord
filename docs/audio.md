@@ -113,6 +113,13 @@ uses no allocation, locks or file I/O.
 The Rust palette in `frontend/src/notification_sound.rs` also renders the browser
 and out-of-call desktop cues so the same event keeps the same sound everywhere.
 
+Guild soundboard clips use the same output path: the desktop downloads normalized
+48 kHz PCM after the server relays a play, and the control worker hands immutable
+clips to the callback through bounded SPSC queues. Finished clips return to the
+worker for release, so the callback never allocates or frees. Clips follow master
+volume and deafen, reach the echo reference and never enter the microphone stream.
+See [soundboard](soundboard.md).
+
 Each speaker has an independent 0-200% voice volume slider directly in their
 right-click menu while connected to the same call. Sidebar avatars gain a green
 ring while speaking, using the same native activity and mute/deafen rules as the

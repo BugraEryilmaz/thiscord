@@ -26,9 +26,11 @@ pub enum Permission {
     MuteMembers,
     DeafenMembers,
     MoveMembers,
+    /// See and play a guild's soundboard sounds in a voice channel.
+    UseSoundboard,
 }
 impl Permission {
-    pub const ALL: [Self; 19] = [
+    pub const ALL: [Self; 20] = [
         Self::Administrator,
         Self::ManageGuild,
         Self::ManageChannels,
@@ -48,6 +50,7 @@ impl Permission {
         Self::MuteMembers,
         Self::DeafenMembers,
         Self::MoveMembers,
+        Self::UseSoundboard,
     ];
 }
 pub type Permissions = BTreeSet<Permission>;

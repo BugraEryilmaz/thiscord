@@ -45,6 +45,9 @@ rtc = "0.21.0"
 async-trait = "0.1"
 futures-util = { version = "0.3", features = ["sink"] }
 hmac = "0.12"
+# Soundboard uploads are decoded and normalized server-side (pure Rust codecs).
+symphonia = { version = "0.5.4", default-features = false, features = ["wav", "pcm", "adpcm", "mp3", "ogg", "vorbis", "flac"] }
+rubato = "0.14.1"
 sha1 = "0.10"
 
 [dev-dependencies]

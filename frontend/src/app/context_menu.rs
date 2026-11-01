@@ -127,7 +127,71 @@ pub(super) fn ParticipantVolume(
         </Show>
         <For each=move ||{let connected=connected(); ui.audio_status.with(|s|s.as_ref().map(|s|s.streams.iter().filter(|s| connected && s.target.is_some_and(|t|t.guild_id==guild && t.account_id==member && t.shared_audio)).cloned().collect::<Vec<_>>()).unwrap_or_default())} key=|s|(s.id.clone(),s.target) children=move |stream|view!{<super::audio::StreamVolume ui=ui stream=stream compact=true/>}/>
         <p class="volume-hint">{move || crate::i18n::t("Only changes what you hear. 0% mutes.")}</p>
+        <Show when=super::client::desktop><SoundboardVolume member=member/></Show>
     </section>}
+}
+/// Local only: this device's level for the person's soundboard plays. 0% ignores them.
+#[component]
+fn SoundboardVolume(member: AccountId) -> impl IntoView {
+    let volume = RwSignal::new(None::<u16>);
+    let saved = RwSignal::new(100_u16);
+    let busy = RwSignal::new(false);
+    let error = RwSignal::new(String::new());
+    leptos::task::spawn_local(async move {
+        let result = super::client::native::<u16>(
+            "soundboard_volume",
+            serde_json::json!({"accountId":member}),
+        )
+        .await;
+        if volume.is_disposed() {
+            return;
+        }
+        match result {
+            Ok(current) => {
+                saved.set(current);
+                volume.set(Some(current));
+            }
+            Err(e) => error.set(e),
+        }
+    });
+    let save = move |value: u16| {
+        busy.set(true);
+        error.set(String::new());
+        leptos::task::spawn_local(async move {
+            let result = super::client::native::<u16>(
+                "soundboard_set_volume",
+                serde_json::json!({"accountId":member,"volume":value}),
+            )
+            .await;
+            if volume.is_disposed() {
+                return;
+            }
+            match result {
+                Ok(current) => {
+                    saved.set(current);
+                    volume.set(Some(current));
+                }
+                Err(e) => {
+                    volume.set(Some(saved.get_untracked()));
+                    error.set(e);
+                }
+            }
+            busy.set(false);
+        });
+    };
+    view! {
+        <div class="stream-volume compact mt-3">
+            <label class="flex flex-wrap items-center gap-3">
+                <span class="volume-label">{move || crate::i18n::t("Soundboard volume")}</span>
+                <input aria-label=move || crate::i18n::t("Soundboard volume") type="range" min="0" max="200" step="1"
+                    disabled=move || busy.get() || volume.get().is_none() prop:value=move || volume.get().unwrap_or(100).to_string()
+                    on:input=move |e| { if let Ok(value) = event_target_value(&e).parse::<u16>() { volume.set(Some(value)); } }
+                    on:change=move |e| { if let Ok(value) = event_target_value(&e).parse::<u16>() { save(value); } }/>
+                <output class="volume-value">{move || format!("{}%", volume.get().unwrap_or(100))}</output>
+            </label>
+            <Show when=move || !error.get().is_empty()><p class="volume-hint" role="alert">{move || crate::i18n::message(error.get())}</p></Show>
+        </div>
+    }
 }
 fn save_preference(ui: Ui, channel: ChannelId, pin: bool) {
     ui.sidebar_preferences.update(|p| p.toggle(channel, pin));
