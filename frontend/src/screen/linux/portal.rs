@@ -20,6 +20,19 @@ use std::{
 pub const UNAVAILABLE: &str = "Screen sharing needs xdg-desktop-portal with a ScreenCast backend (GNOME, KDE, wlroots or Hyprland portal).";
 const CANCELLED: &str = "Screen selection was cancelled.";
 
+/// A private session-bus connection on the calling runtime. ashpd's default
+/// `new()` caches one process-wide connection whose driver tasks would die with
+/// the short-lived runtime that created it. Dropping this connection when its
+/// runtime ends also makes the portal close any session or dialog it owned.
+async fn screencast() -> Result<Screencast, String> {
+    let connection = ashpd::zbus::Connection::session()
+        .await
+        .map_err(|_| UNAVAILABLE.to_owned())?;
+    Screencast::with_connection(connection)
+        .await
+        .map_err(|_| UNAVAILABLE.to_owned())
+}
+
 fn runtime() -> Result<tokio::runtime::Runtime, String> {
     tokio::runtime::Builder::new_current_thread()
         .enable_all()
@@ -30,9 +43,7 @@ fn runtime() -> Result<tokio::runtime::Runtime, String> {
 /// Source kinds the portal offers: (screens, windows).
 pub fn available() -> Result<(bool, bool), String> {
     runtime()?.block_on(async {
-        let proxy = Screencast::new()
-            .await
-            .map_err(|_| UNAVAILABLE.to_owned())?;
+        let proxy = screencast().await?;
         let types = proxy
             .available_source_types()
             .await
@@ -137,9 +148,7 @@ async fn session(
     closed: Arc<AtomicBool>,
 ) {
     let start = async {
-        let proxy = Screencast::new()
-            .await
-            .map_err(|_| UNAVAILABLE.to_owned())?;
+        let proxy = screencast().await?;
         let cursor = proxy
             .available_cursor_modes()
             .await
@@ -217,4 +226,29 @@ async fn session(
         }
     }
     let _ = session.close().await;
+}
+
+#[cfg(test)]
+mod tests {
+    #[test]
+    fn repeated_portal_queries_do_not_reuse_a_dead_connection() {
+        if std::env::var_os("DBUS_SESSION_BUS_ADDRESS").is_none() {
+            eprintln!("no session bus; skipping");
+            return;
+        }
+        // Each query runs on its own short-lived runtime. A connection cached
+        // from the first runtime would hang or fail once that runtime is gone.
+        let query = || {
+            let (tx, rx) = std::sync::mpsc::channel();
+            std::thread::spawn(move || {
+                let _ = tx.send(super::available());
+            });
+            rx.recv_timeout(std::time::Duration::from_secs(20))
+                .expect("portal query hung")
+        };
+        let first = query();
+        let second = query();
+        eprintln!("portal: {first:?} then {second:?}");
+        assert_eq!(first, second);
+    }
 }

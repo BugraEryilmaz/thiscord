@@ -175,7 +175,7 @@ objc2-screen-capture-kit = { version = "0.3", optional = true, default-features 
 objc2-core-media = { version = "0.3", optional = true, default-features = false, features = ["std", "CMBase", "CMBlockBuffer", "CMFormatDescription", "CMSampleBuffer", "CMSync", "CMTime", "objc2-core-video"] }
 objc2-core-video = { version = "0.3", optional = true, default-features = false, features = ["std", "CVBase", "CVBuffer", "CVImageBuffer", "CVPixelBuffer", "CVReturn"] }
 objc2-video-toolbox = { version = "0.3", optional = true, default-features = false, features = ["std", "VTBase", "VTCompressionProperties", "VTCompressionSession", "VTErrors", "VTSession", "objc2-core-media", "objc2-core-video"] }
-objc2-core-graphics = { version = "0.3", optional = true, default-features = false, features = ["std", "CGColorSpace", "CGDirectDisplay", "CGDisplayStream", "CGWindow"] }
+objc2-core-graphics = { version = "0.3", optional = true, default-features = false, features = ["std", "CGColorSpace", "CGDirectDisplay", "CGDisplayStream", "CGGeometry", "CGWindow"] }
 dispatch2 = { version = "0.3", optional = true }
 
 [target.'cfg(target_os = "linux")'.dependencies]

@@ -252,3 +252,32 @@ fn system_audio_runs_and_stops() {
     );
     result.unwrap();
 }
+
+#[test]
+fn window_points_follow_live_window_bounds() {
+    use objc2_core_foundation::CFNumber;
+    use objc2_core_graphics::{CGWindowListCopyWindowInfo, CGWindowListOption, kCGWindowNumber};
+    assert_eq!(content::window_points(u32::MAX - 7), None);
+    let Some(list) = CGWindowListCopyWindowInfo(CGWindowListOption::OptionOnScreenOnly, 0) else {
+        eprintln!("no window server session; skipping");
+        return;
+    };
+    let ids: Vec<u32> = (0..list.count())
+        .filter_map(|i| {
+            // SAFETY: in-bounds index; elements are CFDictionaryRef owned by the list.
+            let info = unsafe { list.value_at_index(i) }.cast::<CFDictionary>();
+            // SAFETY: constant key; the value is a CFNumber or null.
+            let key: *const CFString = unsafe { kCGWindowNumber };
+            let number = unsafe { info.as_ref()?.value(key.cast()) }.cast::<CFNumber>();
+            // SAFETY: owned by the list for this scope.
+            u32::try_from(unsafe { number.as_ref()? }.as_i64()?).ok()
+        })
+        .collect();
+    eprintln!("{} on-screen windows", ids.len());
+    let sizes: Vec<_> = ids
+        .iter()
+        .filter_map(|id| content::window_points(*id))
+        .collect();
+    assert_eq!(sizes.len(), ids.len(), "every listed window reports bounds");
+    assert!(sizes.iter().all(|(w, h)| *w >= 0.0 && *h >= 0.0));
+}

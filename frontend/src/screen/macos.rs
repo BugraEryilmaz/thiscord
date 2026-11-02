@@ -371,8 +371,15 @@ pub fn run_layers(
     let platform = || Sck {
         window: target.window,
     };
+    let mut primary = Primary {
+        layer: platform(),
+        stream: &stream,
+        quality,
+        scale: target.scale,
+        size: (width, height),
+    };
     let result = worker::run_layers(
-        &mut platform(),
+        &mut primary,
         &mailbox,
         None,
         low.as_ref()
@@ -424,6 +431,58 @@ fn video_config(width: u32, height: u32, fps: u32) -> Retained<SCStreamConfigura
         config.setQueueDepth(8);
         config.setMinimumFrameInterval(CMTime::new(1, fps.clamp(1, 60) as i32));
         config
+    }
+}
+
+/// The primary layer also follows window resizes: Windows Graphics Capture
+/// delivers frames at the new size, so the window server's output size is
+/// re-fitted to the preset (one encoder rebuild/IDR) instead of staying at
+/// the window's initial size.
+struct Primary<'a> {
+    layer: Sck,
+    stream: &'a SCStream,
+    quality: Quality,
+    scale: f64,
+    size: (u32, u32),
+}
+impl worker::Platform for Primary<'_> {
+    type Frame = Frame;
+    type Encoder = encoder::VideoToolbox;
+    fn source_lost(&mut self) -> bool {
+        let Some(id) = self.layer.window else {
+            return false;
+        };
+        let Some((w, h)) = content::window_points(id) else {
+            return !content::window_exists(id);
+        };
+        let pixels = (
+            ((w * self.scale).round() as u32).max(2),
+            ((h * self.scale).round() as u32).max(2),
+        );
+        let size = worker::encoded_size(self.quality, 100, pixels);
+        if size != self.size {
+            self.size = size;
+            let config = video_config(size.0, size.1, self.quality.fps);
+            // SAFETY: valid configuration; no completion handler is needed
+            // because frames at the new size arrive through the same output.
+            unsafe {
+                self.stream
+                    .updateConfiguration_completionHandler(&config, None)
+            };
+        }
+        false
+    }
+    fn encoder(
+        &mut self,
+        pixels: &Pixels<Frame>,
+        size: (u32, u32),
+        quality: Quality,
+        options: super::encode::EncoderOptions,
+        wake: Box<dyn Fn() + Send + Sync>,
+        metrics: &Metrics,
+    ) -> Result<encoder::VideoToolbox, String> {
+        self.layer
+            .encoder(pixels, size, quality, options, wake, metrics)
     }
 }
 

@@ -177,6 +177,8 @@ pub(crate) struct Target {
     pub filter: Retained<SCContentFilter>,
     pub pixels: (u32, u32),
     pub window: Option<u32>,
+    /// Pixels per point of the shared window, for resize tracking.
+    pub scale: f64,
 }
 impl Target {
     pub fn resolve(source: &SourceId) -> Result<Self, String> {
@@ -192,6 +194,7 @@ impl Target {
                     filter: super::display_filter(&display),
                     pixels: display_pixels(&display),
                     window: None,
+                    scale: 1.0,
                 })
             }
             SourceId::Window(id) => {
@@ -221,6 +224,7 @@ impl Target {
                     pixels,
                     // SAFETY: plain property read.
                     window: Some(unsafe { window.windowID() }),
+                    scale,
                 })
             }
         }
@@ -233,4 +237,26 @@ impl Target {
 pub(crate) fn window_exists(id: u32) -> bool {
     CGWindowListCopyWindowInfo(CGWindowListOption::OptionIncludingWindow, id)
         .is_some_and(|list| list.count() > 0)
+}
+
+/// Current window size in points; `None` once the window no longer exists.
+pub(crate) fn window_points(id: u32) -> Option<(f64, f64)> {
+    use objc2_core_foundation::{CFDictionary, CGRect};
+    let list = CGWindowListCopyWindowInfo(CGWindowListOption::OptionIncludingWindow, id)?;
+    if list.count() < 1 {
+        return None;
+    }
+    // SAFETY: index 0 is in bounds; elements are CFDictionaryRef owned by the list.
+    let info = unsafe { list.value_at_index(0) }.cast::<CFDictionary>();
+    // SAFETY: kCGWindowBounds is a constant CFString key.
+    let key: *const objc2_core_foundation::CFString =
+        unsafe { objc2_core_graphics::kCGWindowBounds };
+    // SAFETY: non-null checked; the value is a rect dictionary or null.
+    let bounds = unsafe { info.as_ref()?.value(key.cast()) }.cast::<CFDictionary>();
+    let mut rect = CGRect::default();
+    // SAFETY: `bounds` is null or a rect dictionary owned by `list`; `rect` is valid.
+    let parsed = unsafe {
+        objc2_core_graphics::CGRectMakeWithDictionaryRepresentation(bounds.as_ref(), &mut rect)
+    };
+    parsed.then_some((rect.size.width, rect.size.height))
 }

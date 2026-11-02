@@ -456,8 +456,10 @@ impl Capture {
             .by_name("src")
             .ok_or("Cannot build the PipeWire capture pipeline.")?;
         src.set_property("fd", fd);
-        if !set(&src, "target-object", &node.to_string()) {
-            set(&src, "path", &node.to_string());
+        // The portal hands out a node id; `target-object` expects a name or
+        // object serial, so prefer the (deprecated) id-based `path`.
+        if !set(&src, "path", &node.to_string()) {
+            set(&src, "target-object", &node.to_string());
         }
         set(&src, "always-copy", if copy { "true" } else { "false" });
         // Static sources are refreshed by the encoder worker, not resent here.
