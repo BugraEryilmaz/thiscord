@@ -1,6 +1,16 @@
-//! Windows process loopback excludes this process tree, including voice playback.
+//! Shared system audio. Windows process loopback excludes this process tree,
+//! including voice playback. macOS uses ScreenCaptureKit audio excluding this
+//! process; Linux routes every other application's PipeWire output into a
+//! private capture sink. Capture threads never encode: Opus and RTP run here.
 use crate::native_screen::{Binding, ScreenState};
-use std::sync::{Arc, atomic::AtomicBool};
+use std::{
+    sync::{
+        Arc,
+        atomic::{AtomicBool, Ordering},
+    },
+    time::Duration,
+};
+use webrtc::media_stream::track_local::TrackLocal;
 
 pub fn start(
     binding: Binding,
@@ -16,12 +26,116 @@ pub fn start(
         })
         .map_err(|_| "Cannot start system audio worker".into())
 }
+/// 48 kHz mono Opus at 64 kbit/s in 20 ms RTP packets on the shared-audio track.
+struct Uplink {
+    encoder: opus::Encoder,
+    runtime: tokio::runtime::Runtime,
+    encoded: [u8; 4000],
+    pcm: [f32; 960],
+    fill: usize,
+}
+impl Uplink {
+    fn new() -> Result<Self, String> {
+        let mut encoder =
+            opus::Encoder::new(48_000, opus::Channels::Mono, opus::Application::Audio)
+                .map_err(|_| "Cannot initialize shared audio encoder")?;
+        // Shared music/system audio keeps continuous transmission.
+        encoder.set_dtx(false).map_err(|e| e.to_string())?;
+        encoder
+            .set_bitrate(opus::Bitrate::Bits(64_000))
+            .map_err(|_| "Cannot configure shared audio encoder")?;
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .map_err(|_| "Cannot initialize shared audio sender")?;
+        Ok(Self {
+            encoder,
+            runtime,
+            encoded: [0; 4000],
+            pcm: [0.0; 960],
+            fill: 0,
+        })
+    }
+    /// Interleaved 48 kHz stereo in; every complete 20 ms downmix is sent.
+    #[cfg_attr(
+        target_os = "windows",
+        expect(dead_code, reason = "WASAPI fills the downmix buffer directly.")
+    )]
+    fn push_stereo(
+        &mut self,
+        binding: &Binding,
+        stop: &AtomicBool,
+        samples: &[f32],
+    ) -> Result<(), String> {
+        for pair in samples.as_chunks::<2>().0 {
+            self.pcm[self.fill] = downmix(pair[0], pair[1]);
+            self.fill += 1;
+            if self.fill == self.pcm.len() {
+                self.fill = 0;
+                if stop.load(Ordering::Acquire) || !binding.connection.active() {
+                    return Ok(());
+                }
+                self.send(binding)?;
+            }
+        }
+        Ok(())
+    }
+    fn send(&mut self, binding: &Binding) -> Result<(), String> {
+        let n = self
+            .encoder
+            .encode_float(&self.pcm, &mut self.encoded)
+            .map_err(|_| "Cannot encode shared audio")?;
+        let packet = rtc::rtp::Packet {
+            header: rtc::rtp::header::Header {
+                version: 2,
+                payload_type: thiscord_shared::voice::MediaKind::SystemAudio.payload_type(),
+                ssrc: thiscord_shared::voice::MediaKind::SystemAudio.publisher_ssrc(),
+                sequence_number: binding.audio_sequence.fetch_add(1, Ordering::Relaxed) as u16,
+                timestamp: binding.audio_timestamp.fetch_add(960, Ordering::Relaxed),
+                ..Default::default()
+            },
+            payload: bytes::Bytes::copy_from_slice(&self.encoded[..n]),
+        };
+        if !matches!(
+            self.runtime.block_on(async {
+                tokio::time::timeout(Duration::from_millis(100), binding.audio.write_rtp(packet))
+                    .await
+            }),
+            Ok(Ok(_))
+        ) {
+            binding.metrics.add("audio_send_failures", 1);
+            return Err("Shared audio sender stalled; sharing stopped".into());
+        }
+        binding.metrics.add("audio_sent_frames", 1);
+        Ok(())
+    }
+}
+fn downmix(left: f32, right: f32) -> f32 {
+    let mixed = (left + right) * 0.5;
+    if mixed.is_finite() {
+        mixed.clamp(-1.0, 1.0)
+    } else {
+        0.0
+    }
+}
+
+/// macOS/Linux capture lives with the platform screen backend; this worker
+/// only receives interleaved stereo PCM and encodes it off capture threads.
+#[cfg(any(target_os = "macos", target_os = "linux"))]
+fn capture(binding: &Binding, stop: &AtomicBool) -> Result<(), String> {
+    let mut uplink = Uplink::new()?;
+    thiscord_frontend::screen::capture::system_audio(
+        stop,
+        &|| binding.connection.active(),
+        &binding.metrics,
+        &mut |samples| uplink.push_stereo(binding, stop, samples),
+    )
+}
+
 #[cfg(target_os = "windows")]
 fn capture(binding: &Binding, stop: &AtomicBool) -> Result<(), String> {
-    use std::sync::atomic::Ordering;
-    use std::{collections::VecDeque, time::Duration};
+    use std::collections::VecDeque;
     use wasapi::*;
-    use webrtc::media_stream::track_local::TrackLocal;
     initialize_mta()
         .ok()
         .map_err(|_| "Cannot initialize system audio")?;
@@ -51,20 +165,8 @@ fn capture(binding: &Binding, stop: &AtomicBool) -> Result<(), String> {
     let capture = client
         .get_audiocaptureclient()
         .map_err(|_| "Cannot access system audio")?;
-    let mut encoder = opus::Encoder::new(48_000, opus::Channels::Mono, opus::Application::Audio)
-        .map_err(|_| "Cannot initialize shared audio encoder")?;
-    // Shared music/system audio keeps continuous transmission.
-    encoder.set_dtx(false).map_err(|e| e.to_string())?;
-    encoder
-        .set_bitrate(opus::Bitrate::Bits(64_000))
-        .map_err(|_| "Cannot configure shared audio encoder")?;
-    let runtime = tokio::runtime::Builder::new_current_thread()
-        .enable_all()
-        .build()
-        .map_err(|_| "Cannot initialize shared audio sender")?;
+    let mut uplink = Uplink::new()?;
     let mut queue = VecDeque::<u8>::with_capacity(48_000);
-    let mut pcm = [0.0_f32; 960];
-    let mut encoded = [0_u8; 4000];
     client
         .start_stream()
         .map_err(|_| "Cannot start system audio capture")?;
@@ -103,52 +205,19 @@ fn capture(binding: &Binding, stop: &AtomicBool) -> Result<(), String> {
                 }
             }
             while queue.len() >= 960 * 8 {
-                for sample in &mut pcm {
+                for sample in &mut uplink.pcm {
                     let mut pair = [0; 8];
                     for byte in &mut pair {
                         *byte = queue.pop_front().unwrap_or(0);
                     }
                     let left = f32::from_le_bytes(pair[..4].try_into().unwrap());
                     let right = f32::from_le_bytes(pair[4..].try_into().unwrap());
-                    let mixed = (left + right) * 0.5;
-                    *sample = if mixed.is_finite() {
-                        mixed.clamp(-1.0, 1.0)
-                    } else {
-                        0.0
-                    };
+                    *sample = downmix(left, right);
                 }
                 if stop.load(Ordering::Acquire) || !binding.connection.active() {
                     break;
                 }
-                let n = encoder
-                    .encode_float(&pcm, &mut encoded)
-                    .map_err(|_| "Cannot encode shared audio")?;
-                let packet = rtc::rtp::Packet {
-                    header: rtc::rtp::header::Header {
-                        version: 2,
-                        payload_type: thiscord_shared::voice::MediaKind::SystemAudio.payload_type(),
-                        ssrc: thiscord_shared::voice::MediaKind::SystemAudio.publisher_ssrc(),
-                        sequence_number: binding.audio_sequence.fetch_add(1, Ordering::Relaxed)
-                            as u16,
-                        timestamp: binding.audio_timestamp.fetch_add(960, Ordering::Relaxed),
-                        ..Default::default()
-                    },
-                    payload: bytes::Bytes::copy_from_slice(&encoded[..n]),
-                };
-                if !matches!(
-                    runtime.block_on(async {
-                        tokio::time::timeout(
-                            Duration::from_millis(100),
-                            binding.audio.write_rtp(packet),
-                        )
-                        .await
-                    }),
-                    Ok(Ok(_))
-                ) {
-                    binding.metrics.add("audio_send_failures", 1);
-                    return Err("Shared audio sender stalled; sharing stopped".into());
-                }
-                binding.metrics.add("audio_sent_frames", 1);
+                uplink.send(binding)?;
             }
             // Silence produces no loopback packets. Poll with a bounded wait so
             // Stop, disconnect and permission revocation promptly release WASAPI.

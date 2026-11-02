@@ -1,3 +1,22 @@
 {
-  "bundle": { "targets": ["appimage", "deb"] }
+  "bundle": {
+    "targets": ["appimage", "deb"],
+    "linux": {
+      "deb": {
+        "depends": [
+          "libpipewire-0.3-0t64 | libpipewire-0.3-0",
+          "gstreamer1.0-pipewire",
+          "gstreamer1.0-plugins-base",
+          "gstreamer1.0-plugins-good",
+          "gstreamer1.0-plugins-bad",
+          "xdg-desktop-portal"
+        ],
+        "recommends": [
+          "xdg-desktop-portal-gnome | xdg-desktop-portal-kde | xdg-desktop-portal-wlr | xdg-desktop-portal-hyprland",
+          "intel-media-va-driver | mesa-va-drivers",
+          "gstreamer1.0-plugins-ugly"
+        ]
+      }
+    }
+  }
 }

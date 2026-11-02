@@ -389,7 +389,7 @@ Personalized speaker isolation and physical acoustic acceptance remain future wo
   explicit local device suspend/resume recovery without unexpected capture.
 - [ ] Multi-user acceptance on Windows/macOS/Linux with real microphones.
 
-## 8a. Screen sharing (Windows first)
+## 8a. Screen sharing
 
 - [ ] Resolve the October 22 Windows 0.1.42 native crash during screen sharing
   with test bots; the saved dump points toward the NVIDIA Media Foundation path
@@ -404,7 +404,11 @@ Personalized speaker isolation and physical acoustic acceptance remain future wo
 - [x] Isolate SFU screen backpressure from microphone writes, bound egress bytes/age
   including in-flight packets, and recover video without disconnecting voice.
 - [ ] Two-client Windows capture/audio acceptance, mixed-DPI/protected windows and suspend/network checks.
-- [ ] macOS/Linux publishing and OS permission acceptance; portable receiving code is included.
+- [x] macOS (ScreenCaptureKit + VideoToolbox) and Linux (portal/PipeWire + GStreamer
+  VA/NVENC) publishing and system audio on the shared encode worker; synthetic
+  encoder validation on Apple M2 and WSL NVENC.
+- [ ] Live macOS capture/audio with Screen Recording permission, Linux portal capture
+  on GNOME/KDE/wlroots, VA-API/DMA-BUF hardware and Linux system-audio acceptance.
 - [x] Explicit viewer subscriptions with lease expiry and receiver-driven bitrate/resolution/FPS adaptation; pause video with no viewers.
 - [x] Negotiated two-quality screen encoding with demand-driven low layer, per-viewer
   IDR-gated SFU selection, RTP continuity and legacy single-layer fallback.

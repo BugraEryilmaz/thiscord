@@ -152,9 +152,10 @@ Desktop calls and voice rooms show simultaneous webcams and screen shares in a
 grid, with local previews, click-to-fullscreen and right-click hide/restore.
 The camera button uses the system default webcam (up to 720p/30); right-click a
 participant for separate voice and screen-audio volume/mute controls. Camera
-publishing requires WebView H.264/WebRTC and device permissions. Windows screen
-sharing retains its explicit source/quality picker, D3D11 hardware encoder and
-system audio capture. See [cameras and hardware-free tests](docs/cameras.md) and
+publishing requires WebView H.264/WebRTC and device permissions. Screen sharing
+works on Windows, macOS 12.3+ and Linux (xdg-desktop-portal + PipeWire) with
+native capture, GPU hardware H.264 encoding and system audio that excludes
+Thiscord's own playback. See [cameras and hardware-free tests](docs/cameras.md) and
 [screen sharing requirements](docs/screen-sharing.md) for limits and platform checks.
 For echo troubleshooting, Voice & audio can save a 60-second local debug recording
 of playback, raw microphone and outgoing audio, with metadata for offline DSP replay.
