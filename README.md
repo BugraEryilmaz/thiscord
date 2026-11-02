@@ -377,6 +377,13 @@ move elsewhere. Keep conditional classes as complete strings (for example,
 Shared color tokens live in its `@theme` block and produce utilities such as
 `bg-brand`, `bg-surface`, and `text-content`.
 
+Settings → Appearance lets each device pick a dark theme and accent color. It
+overrides the surface tokens and `--color-brand` on `<html>`; accent shades are
+derived from `--color-brand` with `color-mix`. Use those variables instead of
+fixed surface or accent hex values so new UI follows the user's choice. Text on
+solid `bg-brand` fills uses `--color-on-brand`. Only dark palettes exist, because
+the UI layers translucent white over its surfaces.
+
 See [Tailwind source detection](https://tailwindcss.com/docs/detecting-classes-in-source-files)
 and [Trunk's asset pipeline](https://github.com/trunk-rs/trunk/blob/v0.21.14/guide/src/assets/index.md).
 

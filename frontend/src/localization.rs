@@ -239,6 +239,9 @@ mod tests {
                     .map(|(label, _)| *label),
             )
             .chain(["Turn off"])
+            .chain(crate::appearance::Theme::ALL.map(crate::appearance::Theme::label))
+            .chain(crate::appearance::Theme::ALL.map(crate::appearance::Theme::description))
+            .chain(crate::appearance::ACCENTS.map(|(label, _)| label))
         {
             assert!(
                 CATALOG.iter().any(|(en, _)| *en == label),
