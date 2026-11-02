@@ -2,6 +2,20 @@ use futures_util::{future::Either, pin_mut};
 use leptos::prelude::*;
 use thiscord_frontend::downloads::{LATEST_API, LATEST_PAGE, Platform, REPOSITORY, Release};
 
+/// The web client, served by the same backend.
+const WEB_APP: &str = "/app/";
+
+/// Phones and tablets have no installers, so the web client leads there.
+fn mobile_visitor() -> bool {
+    web_sys::window().is_some_and(|w| {
+        let navigator = w.navigator();
+        thiscord_frontend::downloads::mobile(
+            &navigator.user_agent().unwrap_or_default(),
+            navigator.max_touch_points(),
+        )
+    })
+}
+
 #[derive(Clone)]
 enum Downloads {
     Loading,
@@ -43,9 +57,11 @@ pub fn Welcome() -> impl IntoView {
         return view! { <Invitation/> }.into_any();
     }
     let downloads = RwSignal::new(Downloads::Loading);
+    let mobile = mobile_visitor();
     let suggested = web_sys::window()
         .and_then(|w| w.navigator().user_agent().ok())
-        .and_then(|ua| Platform::suggested(&ua));
+        .and_then(|ua| Platform::suggested(&ua))
+        .filter(|_| !mobile);
     refresh(downloads);
     let primary_link = move || match (downloads.get(), suggested) {
         (Downloads::Ready(release), Some(platform)) => release
@@ -81,10 +97,20 @@ pub fn Welcome() -> impl IntoView {
                         <h1 id="welcome-title">"A place for"<br/>"your people."</h1>
                         <p class="welcome-lead">"The late-night games. The one-more-story calls. The comfortable silence. Make room for it all on Thiscord."</p>
                         <div class="welcome-hero-actions flex flex-wrap items-center gap-4">
-                            <a class="welcome-primary" href=primary_link><Icon kind="download"/>{primary_label}</a>
-                            <a class="welcome-text-link" href="#downloads">"All downloads"</a>
+                            {if mobile {
+                                view! {
+                                    <a class="welcome-primary" href=WEB_APP><Icon kind="external"/>"Open Thiscord in your browser"</a>
+                                    <a class="welcome-text-link" href="#downloads">"Desktop downloads"</a>
+                                }.into_any()
+                            } else {
+                                view! {
+                                    <a class="welcome-primary" href=primary_link><Icon kind="download"/>{primary_label}</a>
+                                    <a class="welcome-secondary" href=WEB_APP>"Open in your browser"</a>
+                                    <a class="welcome-text-link" href="#downloads">"All downloads"</a>
+                                }.into_any()
+                            }}
                         </div>
-                        <p class="welcome-platform-note">"Made for Windows, macOS & Linux."</p>
+                        <p class="welcome-platform-note">"Made for Windows, macOS & Linux. Or open it in any modern browser."</p>
                     </div>
                     <Room/>
                 </section>
@@ -120,6 +146,7 @@ pub fn Welcome() -> impl IntoView {
                             </div>
                         </div>
                         <div class="welcome-download-list">
+                            <BrowserRow/>
                             { [Platform::Windows, Platform::Mac, Platform::Linux, Platform::Debian].into_iter()
                                 .map(|platform| view! { <DownloadRow platform downloads/> }).collect_view() }
                             <p class="welcome-requirements">"macOS: Apple Silicon, 11.3 or newer. Linux: built on Ubuntu 24.04; compatible system libraries required."</p>
@@ -156,9 +183,14 @@ fn Invitation() -> impl IntoView {
     let link = link.unwrap_or_default();
     let automatic = link.clone();
     let browser_link = StoredValue::new(format!("{base}/invite#{code}"));
+    // Same-origin web client; the code stays in the fragment, out of requests and logs.
+    let web_link =
+        StoredValue::new(thiscord_frontend::invites::web_app_link(&code).unwrap_or_default());
     let link = StoredValue::new(link);
     let status = RwSignal::new(String::new());
-    if valid {
+    // Phones have no desktop app; an unhandled custom scheme only shows an error.
+    let mobile = mobile_visitor();
+    if valid && !mobile {
         leptos::task::spawn_local(async move {
             gloo_timers::future::TimeoutFuture::new(300).await;
             let _ = window().location().set_href(&automatic);
@@ -174,12 +206,19 @@ fn Invitation() -> impl IntoView {
                 <section class="invite-card" aria-labelledby="invite-title">
                     <div class="invite-symbol" aria-hidden="true"><Icon kind="chat"/></div>
                     <h1 id="invite-title">{if valid { "Your people are waiting." } else { "This invite is incomplete." }}</h1>
-                    <p class="invite-lead">{if valid { "Open Thiscord to join the server. Your invitation will be ready in the app." } else { "Ask for a new invite link, then open the complete link you receive." }}</p>
-                    <Show when=move ||valid>
-                        <a class="welcome-primary invite-open" href=link.get_value()>"Open Thiscord"<Icon kind="external"/></a>
-                        <p class="invite-note">"Allow your browser to open the app if it asks. Already running? We’ll bring it to the front."</p>
+                    <p class="invite-lead">{if valid { "Open Thiscord to join the server. Your invitation will be ready after you sign in." } else { "Ask for a new invite link, then open the complete link you receive." }}</p>
+                    <Show when=move ||valid && mobile>
+                        <a class="welcome-primary invite-open" href=web_link.get_value()>"Open in your browser"<Icon kind="external"/></a>
+                        <p class="invite-note">"Thiscord runs right in your browser. Sign in or create an account to join."</p>
+                    </Show>
+                    <Show when=move ||valid && !mobile>
+                        <a class="welcome-primary invite-open" href=link.get_value()>"Open the Thiscord app"<Icon kind="external"/></a>
+                        <a class="welcome-secondary invite-open invite-browser" href=web_link.get_value()>"Open in your browser"</a>
+                        <p class="invite-note">"Allow your browser to open the app if it asks. Already running? We’ll bring it to the front. No app? Continue in your browser."</p>
+                    </Show>
+                    <Show when=move ||valid && !mobile>
                         <details class="invite-fallback"><summary>"App didn’t open?"</summary>
-                            <p>"Install or update Thiscord below, then choose Open Thiscord again. You can also paste this link into Join a server in the app."</p>
+                            <p>"Install or update Thiscord below, then choose Open the Thiscord app again. You can also paste this link into Join a server in the app."</p>
                             <label>"Invitation link"<input readonly value=browser_link.get_value()/></label>
                             <button class="welcome-text-link" on:click=move |_| {
                                 let value = browser_link.get_value();
@@ -193,8 +232,8 @@ fn Invitation() -> impl IntoView {
                     </Show>
                 </section>
                 <section id="downloads" class="invite-downloads" aria-labelledby="invite-download-title">
-                    <h2 id="invite-download-title">"New here? Get Thiscord."</h2>
-                    <p>"Install the app, then come back to this invitation."</p>
+                    <h2 id="invite-download-title">"Prefer the desktop app?"</h2>
+                    <p>"Install it for screen sharing and shortcuts, then come back to this invitation."</p>
                     <div class="welcome-release-status" role="status">{move ||match downloads.get() {
                         Downloads::Loading => "Finding the latest installers…".to_owned(),
                         Downloads::Ready(release) => format!("Latest release: {}", release.version().unwrap_or_default()),
@@ -208,6 +247,17 @@ fn Invitation() -> impl IntoView {
                     <a class="welcome-text-link" href=LATEST_PAGE>"All releases on GitHub"<Icon kind="external"/></a>
                 </section>
             </main>
+        </div>
+    }
+}
+
+#[component]
+fn BrowserRow() -> impl IntoView {
+    view! {
+        <div class="welcome-download-row">
+            <div class="welcome-platform-icon"><Icon kind="globe"/></div>
+            <div class="welcome-download-copy"><h3>"Web browser"</h3><p>"Chrome, Safari, Firefox or Edge, phones included"</p></div>
+            <div class="welcome-download-action"><a href=WEB_APP aria-label="Open Thiscord in your browser"><span>"Open"</span><Icon kind="external"/></a></div>
         </div>
     }
 }
@@ -311,6 +361,9 @@ fn Icon(kind: &'static str) -> impl IntoView {
         "mic" => "M9 5a3 3 0 0 1 6 0v7a3 3 0 0 1-6 0V5ZM5 10v2a7 7 0 0 0 14 0v-2M12 19v3M8 22h8",
         "volume" => "M3 9h4l5-4v14l-5-4H3V9ZM16 8a6 6 0 0 1 0 8M19 5a10 10 0 0 1 0 14",
         "windows" => "M3 4h8v7H3V4Zm10-1 8-1v9h-8V3ZM3 13h8v7l-8-1v-6Zm10 0h8v9l-8-1v-8Z",
+        "globe" => {
+            "M21 12a9 9 0 1 1-18 0 9 9 0 0 1 18 0ZM3 12h18M12 3c3 3 3 15 0 18M12 3c-3 3-3 15 0 18"
+        }
         "apple" => {
             "M14 6c3 0 4-3 4-4-3 0-4 2-4 4ZM12 7C6 3 2 9 5 16c3 8 5 3 7 4 3-1 4 4 8-4-4-2-4-6-1-8-2-3-4-2-7-1Z"
         }

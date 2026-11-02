@@ -127,7 +127,7 @@ and single-process chat/media enforcement.
 - [x] Joined-server rail with circular initials avatars, names on hover, create/join dialogs.
 - [ ] Custom server images and password-change settings UI.
 - [x] Invite links with optional expiry/use limits, revocation and join validation.
-- [x] Browser invite landing with desktop handoff, installer links and unlimited invite copying.
+- [x] Browser invite landing with desktop handoff, web client handoff, installer links and unlimited invite copying.
 - [ ] Validate installed invite activation on Windows, macOS and Linux (cold start, running/tray and signed out).
 - [x] Ownership transfer, kick/ban/unban and per-server moderation controls.
 - [x] Timeouts with expiry/removal, chat/voice enforcement and join-bypass protection.
@@ -453,6 +453,11 @@ See [screen-sharing.md](docs/screen-sharing.md) for limits and remaining platfor
 
 - [x] Public welcome page with responsive design, latest GitHub installer links,
   failure fallback, and a separate web bundle integrated into CI/VPS deployment.
+- [x] Web client shell at `/app/`: HttpOnly cookie sessions, phone/tablet layout,
+  long-press menus, browser invite handoff, web manifest and a same-origin Trunk proxy.
+- [ ] Hands-on web client acceptance on iOS Safari, Android Chrome and desktop
+  Firefox/Safari (keyboard and safe areas, Google sign-in popups, installed home-screen app).
+- [ ] Optional browser `Notification` permission for background message alerts.
 
 - [x] Direct backend HTTPS/WSS using Let's Encrypt PEM files, TLS tests and SIGHUP reload.
 - [ ] Finalize public hostname/DNS, browser hosting and certificate renewal automation.

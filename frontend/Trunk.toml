@@ -13,3 +13,26 @@ ignore = ["dist", "gen", "capabilities", "src/desktop.rs"]
 addresses = ["127.0.0.1"]
 port = 1420
 open = false
+
+# `trunk serve` is same-origin with the API, like the deployed web client at
+# /app/: the browser sends the HttpOnly session cookie to proxied API routes.
+# The desktop app (`cargo tauri dev` also runs `trunk serve`) ignores these and
+# keeps using THISCORD_API_URL. Start the backend on port 3000 first.
+[[proxy]]
+backend = "ws://localhost:3000/api/v1/socket"
+ws = true
+
+[[proxy]]
+backend = "ws://localhost:3000/api/v1/friends/socket"
+ws = true
+
+[[proxy]]
+backend = "ws://localhost:3000/api/v1/notifications/socket"
+ws = true
+
+[[proxy]]
+backend = "ws://localhost:3000/api/v1/voice"
+ws = true
+
+[[proxy]]
+backend = "http://localhost:3000/api/"

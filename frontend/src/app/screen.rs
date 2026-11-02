@@ -123,7 +123,7 @@ pub(super) fn ScreenControls(ui: Ui) -> impl IntoView {
     view! {
         <div class="screen-control" aria-label=move || crate::i18n::t("Screen sharing")>
             <Show when=move ||status.get().sharing fallback=move ||view!{
-                <button class="icon-button voice-action" aria-label=move || crate::i18n::t("Share screen") data-tip=move ||if !super::audio::media_publish_allowed(ui){crate::i18n::t("Undeafen to share")}else if !status.get().available{crate::i18n::t("Screen sharing unavailable")}else{crate::i18n::t("Share screen")} disabled=move ||!status.get().available||!super::audio::media_publish_allowed(ui)||busy.get() on:click=choose><Icon kind=Glyph::Screen/></button>
+                <button class="icon-button voice-action" aria-label=move || crate::i18n::t("Share screen") data-tip=move ||if !crate::account_client::desktop(){crate::i18n::t("Available in the desktop app")}else if !super::audio::media_publish_allowed(ui){crate::i18n::t("Undeafen to share")}else if !status.get().available{crate::i18n::t("Screen sharing unavailable")}else{crate::i18n::t("Share screen")} disabled=move ||!status.get().available||!super::audio::media_publish_allowed(ui)||busy.get() on:click=choose><Icon kind=Glyph::Screen/></button>
             }>
                 <button class="icon-button voice-action share-stop" aria-label=move || crate::i18n::t("Stop sharing") data-tip=move || crate::i18n::t("Stop sharing") disabled=move ||busy.get() on:click=move |_|{
                     busy.set(true);error.set(String::new());

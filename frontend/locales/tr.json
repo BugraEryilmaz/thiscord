@@ -1369,5 +1369,11 @@
   "On until {}": "Açık · bitiş: {}",
   "On until you turn it off": "Sen kapatana kadar açık",
   "Off": "Kapalı",
-  "Turn off": "Kapat"
+  "Turn off": "Kapat",
+  "Thiscord web": "Thiscord web",
+  "Loading Thiscord…": "Thiscord yükleniyor…",
+  "Back to channels": "Kanallara dön",
+  "Get the desktop app": "Masaüstü uygulamasını edinin",
+  "Available in the desktop app": "Masaüstü uygulamasında kullanılabilir",
+  "The desktop app adds screen sharing, cameras, global shortcuts and the in-game overlay, and installs updates when you choose.": "Masaüstü uygulaması ekran paylaşımı, kamera, genel kısayollar ve oyun içi katman ekler; güncellemeleri de siz seçtiğinizde yükler."
 }

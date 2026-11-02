@@ -31,6 +31,7 @@ pub mod voice_overlay;
 pub mod audio_quality;
 pub mod sidebar;
 pub mod stream_ui;
+pub mod touch;
 
 #[cfg(all(not(target_arch = "wasm32"), feature = "voice-bot"))]
 pub mod bot;

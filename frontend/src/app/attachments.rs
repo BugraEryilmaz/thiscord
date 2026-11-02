@@ -162,8 +162,11 @@ pub(in crate::app) async fn transfer(
         web_sys::XmlHttpRequest::new().map_err(|_| crate::i18n::t("Transfers are unavailable"))?;
     xhr.open(method, &format!("{}{path}", client::api_base()))
         .map_err(|_| crate::i18n::t("Invalid transfer URL"))?;
-    xhr.set_request_header("Authorization", &format!("Bearer {token}"))
-        .map_err(|_| crate::i18n::t("Cannot authenticate transfer"))?;
+    // Same-origin web transfers carry the session cookie instead.
+    if let Some(token) = client::bearer(Some(token)) {
+        xhr.set_request_header("Authorization", &format!("Bearer {token}"))
+            .map_err(|_| crate::i18n::t("Cannot authenticate transfer"))?;
+    }
     if body.is_some() {
         xhr.set_request_header("Content-Type", "application/octet-stream")
             .map_err(|_| crate::i18n::t("Cannot prepare upload"))?;

@@ -123,7 +123,11 @@ fn Prompt(ui: Ui) -> impl IntoView {
 pub(super) fn Panel(ui: Ui) -> impl IntoView {
     view! {<div class="settings-card">
         <h2 class="settings-panel-title text-xl font-semibold">{move || crate::i18n::t("Application updates")}</h2>
-        <Show when=desktop fallback=||view!{<p>{move || crate::i18n::t("Refresh the browser to load the latest web version.")}</p>}>
+        <Show when=desktop fallback=||view!{
+            <p>{move || crate::i18n::t("Refresh the browser to load the latest web version.")}</p>
+            <p class="settings-hint">{move || crate::i18n::t("The desktop app adds screen sharing, cameras, global shortcuts and the in-game overlay, and installs updates when you choose.")}</p>
+            <super::settings::DesktopAppLink class="settings-secondary"/>
+        }>
             <p>{move||thiscord_frontend::localized_format!(crate::i18n::language(), "Installed version: {}",ui.updates.get().current_version)}</p>
             <p class="text-sm text-white/60">{move || crate::i18n::t("Thiscord checks for updates when it starts and when a new release is announced. You can also check manually. Updates install only when you choose Install and restart.")}</p>
             <p role="status">{move||crate::i18n::message(ui.updates.get().message)}</p>

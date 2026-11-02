@@ -1,5 +1,10 @@
-//! Invite URL validation shared by the web landing page and native launcher.
+//! Invite URL validation shared by the web landing page, web client and native launcher.
+use thiscord_shared::account::WEB_APP_PATH;
 use url::Url;
+
+/// Fragment prefix the web client reads at `/app/#invite=CODE`. Like
+/// `/invite#CODE`, the fragment is never sent to servers or written to logs.
+const WEB_FRAGMENT: &str = "invite=";
 
 pub fn valid_code(code: &str) -> bool {
     code.len() == 43
@@ -60,6 +65,20 @@ pub fn desktop_code(link: &str, base: &str) -> Option<String> {
     valid_code(code).then(|| code.to_owned())
 }
 
+/// Same-origin path that opens the web client with a pending invitation.
+pub fn web_app_link(code: &str) -> Option<String> {
+    valid_code(code).then(|| format!("{WEB_APP_PATH}/#{WEB_FRAGMENT}{code}"))
+}
+
+/// The pending invitation in a web client `location.hash`, if complete.
+pub fn fragment_code(hash: &str) -> Option<String> {
+    let code = hash
+        .strip_prefix('#')
+        .unwrap_or(hash)
+        .strip_prefix(WEB_FRAGMENT)?;
+    valid_code(code).then(|| code.to_owned())
+}
+
 pub fn input_code(input: &str, base: &str) -> Option<String> {
     let input = input.trim();
     if valid_code(input) {
@@ -70,15 +89,20 @@ pub fn input_code(input: &str, base: &str) -> Option<String> {
     }
     let link = Url::parse(input).ok()?;
     if link.origin() != origin(base)?.origin()
-        || link.path() != "/invite"
         || link.query().is_some()
         || !link.username().is_empty()
         || link.password().is_some()
     {
         return None;
     }
-    let code = link.fragment()?;
-    valid_code(code).then(|| code.to_owned())
+    let fragment = link.fragment()?;
+    if link.path() == "/invite" {
+        valid_code(fragment).then(|| fragment.to_owned())
+    } else if link.path().trim_end_matches('/') == WEB_APP_PATH {
+        fragment_code(fragment)
+    } else {
+        None
+    }
 }
 
 #[cfg(test)]
@@ -128,6 +152,38 @@ mod tests {
         );
         assert!(desktop_link("file:///", CODE).is_none());
         assert!(desktop_link("https://thiscord.com.tr", "bad").is_none());
+    }
+    #[test]
+    fn web_app_fragment_round_trip() {
+        let link = web_app_link(CODE).unwrap();
+        assert_eq!(link, format!("/app/#invite={CODE}"));
+        let hash = link.split_once('#').map(|(_, h)| format!("#{h}")).unwrap();
+        assert_eq!(fragment_code(&hash), Some(CODE.into()));
+        assert_eq!(fragment_code(&hash[1..]), Some(CODE.into()));
+        assert!(web_app_link("bad").is_none());
+        for hash in [
+            "",
+            "#",
+            "#invite=",
+            "#invite=bad",
+            &format!("#{CODE}"),
+            &format!("#x{CODE}"),
+            &format!("#invite={CODE}&x"),
+            "#voice-overlay",
+            "#notifications",
+        ] {
+            assert!(fragment_code(hash).is_none(), "{hash}");
+        }
+        let base = "https://thiscord.com.tr";
+        for path in ["/app/", "/app"] {
+            assert_eq!(
+                input_code(&format!("{base}{path}#invite={CODE}"), base),
+                Some(CODE.into())
+            );
+        }
+        assert!(input_code(&format!("{base}/app/#{CODE}"), base).is_none());
+        assert!(input_code(&format!("{base}/app/x#invite={CODE}"), base).is_none());
+        assert!(input_code(&format!("https://other.example/app/#invite={CODE}"), base).is_none());
     }
     #[test]
     fn accepts_only_complete_invites_for_this_installation() {

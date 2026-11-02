@@ -1,7 +1,7 @@
 # Public welcome page
 
-The public landing page introduces Thiscord and offers the latest desktop
-installers. It uses the existing `thiscord-ui` Leptos/WASM binary with a `welcome`
+The public landing page introduces Thiscord, opens the [web client](web.md#web-client)
+at `/app/` and offers the latest desktop installers. It uses the existing `thiscord-ui` Leptos/WASM binary with a `welcome`
 feature selected by `frontend/welcome/index.html`, excluding the chat client
 modules from this build. The desktop and admin
 entry point remains `frontend/index.html`; no additional package or JavaScript
@@ -41,6 +41,19 @@ Allow same-origin WASM, styles, fonts and generated JavaScript, plus connections
 to `https://api.github.com`. The built-in server hashes Trunk's inline bootstrap
 for CSP and does not allow arbitrary inline scripts/styles. API routes, including
 their JSON 404 responses, and `/admin` are independent of the welcome page.
+
+## Open in browser
+
+The hero offers **Open in your browser** beside the suggested installer, and the
+download list starts with a **Web browser** row. Phones and tablets (including
+iPadOS, which reports a Mac user agent but has touch points) get the web client
+as the primary hero action, since there are no mobile installers.
+
+The invitation page (`/invite#CODE`) links **Open in your browser** to
+`/app/#invite=CODE`. The code stays in the fragment, so it is never sent to the
+server or written to logs. On phones this is the only primary action and the page
+does not attempt the `thiscord://` handoff, which would only show a browser error.
+Desktop visitors still get the automatic app handoff plus both buttons.
 
 ## Downloads
 
