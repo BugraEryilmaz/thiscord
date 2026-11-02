@@ -1,12 +1,13 @@
-//! Reactive appearance state for each WebView. Only the theme identifier and
-//! accent color are stored, on this device; storage events keep the overlay,
+//! Reactive appearance state for each WebView. The theme code (theme and
+//! custom colors) is stored on this device; storage events keep the overlay,
 //! notification window and browser tabs in step.
 use leptos::prelude::*;
 use thiscord_frontend::appearance::Appearance;
 use wasm_bindgen::JsCast;
 
-const THEME_KEY: &str = "thiscord.theme";
-const ACCENT_KEY: &str = "thiscord.accent";
+const STORAGE_KEY: &str = "thiscord.appearance";
+/// Client 0.1.53 stored the theme and accent separately.
+const LEGACY_KEYS: [&str; 2] = ["thiscord.theme", "thiscord.accent"];
 thread_local! {
     static APPEARANCE: ArcRwSignal<Appearance> = ArcRwSignal::new(Appearance::default());
 }
@@ -31,12 +32,17 @@ pub fn save(appearance: Appearance) -> bool {
     let Some(storage) = window().local_storage().ok().flatten() else {
         return false;
     };
-    let theme = storage.set_item(THEME_KEY, appearance.theme.id()).is_ok();
-    let accent = match appearance.accent {
-        Some(accent) => storage.set_item(ACCENT_KEY, &accent.hex()).is_ok(),
-        None => storage.remove_item(ACCENT_KEY).is_ok(),
+    let saved = if appearance == Appearance::default() {
+        storage.remove_item(STORAGE_KEY).is_ok()
+    } else {
+        storage.set_item(STORAGE_KEY, &appearance.encode()).is_ok()
     };
-    theme && accent
+    if saved {
+        for key in LEGACY_KEYS {
+            let _ = storage.remove_item(key);
+        }
+    }
+    saved
 }
 
 fn saved() -> Appearance {
@@ -46,7 +52,13 @@ fn saved() -> Appearance {
             .as_ref()
             .and_then(|storage| storage.get_item(key).ok().flatten())
     };
-    Appearance::resolve(item(THEME_KEY).as_deref(), item(ACCENT_KEY).as_deref())
+    match item(STORAGE_KEY) {
+        Some(code) => Appearance::resolve(Some(&code)),
+        None => Appearance::legacy(
+            item(LEGACY_KEYS[0]).as_deref(),
+            item(LEGACY_KEYS[1]).as_deref(),
+        ),
+    }
 }
 
 /// Values are validated `#rrggbb` colors, set through CSSOM so the
@@ -60,7 +72,10 @@ fn apply(appearance: Appearance) {
     };
     let style = root.style();
     for (name, value) in appearance.properties() {
-        let _ = style.set_property(name, &value);
+        let _ = match value {
+            Some(value) => style.set_property(name, &value),
+            None => style.remove_property(name).map(drop),
+        };
     }
 }
 
@@ -71,11 +86,7 @@ pub fn initialize() {
     APPEARANCE.with(|appearance| appearance.set(initial));
     Effect::new(move |_| apply(current()));
     let listener = window_event_listener(leptos::ev::storage, move |event| {
-        if event
-            .key()
-            .as_deref()
-            .is_none_or(|key| key == THEME_KEY || key == ACCENT_KEY)
-        {
+        if event.key().as_deref().is_none_or(|key| key == STORAGE_KEY) {
             APPEARANCE.with(|appearance| appearance.set(saved()));
         }
     });
