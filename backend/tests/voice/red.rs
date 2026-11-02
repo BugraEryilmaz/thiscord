@@ -251,6 +251,7 @@ async fn pending_and_invalid_sdp_never_publish_legacy_replacement_rosters() {
     send(
         &mut pending,
         ClientEvent::Answer {
+            browser_publisher: false,
             sdp: json!({"type":"answer","sdp":"v=0\r\n"}).to_string(),
             packet_redundancy: false,
             remote_audio: false,

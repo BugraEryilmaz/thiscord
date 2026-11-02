@@ -460,6 +460,7 @@ impl Peer {
         send(
             &mut socket,
             ClientEvent::Answer {
+                browser_publisher: false,
                 packet_redundancy,
                 remote_audio: true,
                 screen_feedback: true,

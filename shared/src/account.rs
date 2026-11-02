@@ -3,6 +3,13 @@ use crate::{AccountId, AvatarId, SessionId, Timestamp};
 use serde::{Deserialize, Serialize};
 
 pub const ACCOUNT_PATH: &str = "/api/v1/account";
+/// Same-origin web clients send this header (value [`SESSION_MODE_COOKIE`]) on
+/// account requests. Issued sessions then live only in an HttpOnly cookie and the
+/// returned `Session::token` is empty; later requests authenticate with that cookie.
+pub const SESSION_MODE_HEADER: &str = "x-thiscord-session";
+pub const SESSION_MODE_COOKIE: &str = "cookie";
+/// Path of the browser web client bundle served by the backend.
+pub const WEB_APP_PATH: &str = "/app";
 pub const AVATAR_PATH: &str = "/api/v1/avatars";
 pub const MAX_AVATAR_BYTES: usize = 2 * 1024 * 1024;
 pub const MAX_AVATAR_BASE64: usize = MAX_AVATAR_BYTES.div_ceil(3) * 4;

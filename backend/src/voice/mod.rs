@@ -1233,6 +1233,7 @@ async fn serve(mut socket: logging::Socket, pool: DbPool, id: RequestId) {
             };
             tracing::info!(request_id = %id, elapsed_ms = negotiation_started.elapsed().as_millis(), "voice answer received");
             let Some(ClientEvent::Answer {
+                browser_publisher: _,
                 sdp,
                 screen_feedback: enabled,
                 screen_subscriptions,

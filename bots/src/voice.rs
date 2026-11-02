@@ -329,6 +329,7 @@ async fn session(
             let p = peer.as_ref().expect("peer created");
             let sdp = p.answer_with_screen(&sdp, screen_supported).await?;
             send(&mut socket, ClientEvent::Answer {
+                browser_publisher: false,
                 sdp, packet_redundancy: false, remote_audio: false,
                 screen_feedback: false, screen_subscriptions: screen_supported, screen_layers: false,
                 video_diagnostics: false, soundboard: false, screen_profiles: false,

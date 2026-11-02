@@ -194,6 +194,7 @@ pub(super) async fn run(
         send(
             &tx,
             ClientEvent::Answer {
+                browser_publisher: false,
                 sdp: serde_json::to_string(
                     &pc.local_description().await.ok_or(Failure::Unavailable)?,
                 )
