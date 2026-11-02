@@ -61,8 +61,10 @@
   hash bearer/code tokens, preserve replay revocation and account-level locking,
   and require recent reauthentication for identity/credential changes and deletion.
   Never automatically link by email. Keep Argon2 work bounded and off async workers.
-- Desktop tokens belong in the OS credential store, browser-preview tokens in memory.
-  Do not add plaintext persistence or token logging. Google callback URLs carry
+- Desktop tokens belong in the OS credential store, admin/browser-preview tokens in
+  memory. The `/app` web client uses HttpOnly SameSite=Strict cookie sessions issued
+  only to allowed origins (`docs/web.md`); never expose them to JavaScript. Do not
+  add plaintext persistence or token logging. Google callback URLs carry
   notifications only; session tickets are redeemed separately. Provider configuration
   is local-only; development mail files contain sensitive codes and stay ignored.
 - Select Rust WebRTC/SFU libraries after a three-platform compatibility spike.

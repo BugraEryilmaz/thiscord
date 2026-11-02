@@ -44,6 +44,8 @@ media compatibility spike can happen before chat to expose platform constraints.
 - [x] On-demand video playback diagnostics in `/admin`: local WebView bridge records, automatic self-tests, OS/WebView/policy, adapter and firewall summaries (docs/screen-sharing.md).
 - [ ] Use a failing viewer's report to fix "Connecting video..." stalls; consider interface-bound bridge candidates if only the loopback self-test fails.
 - [x] Browser `/admin` dashboard with current instance-owner/admin authorization, host metrics and live voice diagnostics.
+- [x] Backend for the `/app` web client: HttpOnly cookie sessions with Origin-based CSRF rules, cookie socket authentication, bundle hosting/deploy and browser Opus microphone publishers in the SFU (docs/web.md).
+- [ ] Accept the `/app` web client and browser voice interactively in desktop and mobile Chrome, Safari and Firefox.
 - [x] Prioritized performance audit with bounded backend timings and automatic desktop UI counters accessible through `/admin` (docs/performance-audit.md).
 - [ ] Confirm performance audit priorities under production load before changing polling, pool sizing or frontend snapshot updates.
 - [ ] Deploy the admin bundle to the VPS and verify production password/Google login and real-client telemetry.

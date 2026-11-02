@@ -19,6 +19,8 @@ This explicitly permits inspection of instance-wide room metadata, including roo
 It does not grant guild membership, message access or permission to join/listen to media.
 
 Browser session tokens stay in memory; reloading requires signing in again.
+The dashboard deliberately does not use the `/app` web client's cookie session
+(see [web.md](web.md)): it sends bearer headers only.
 The dashboard polls every five seconds, clears data on errors or denied access,
 and times out unresponsive requests after four seconds. Requests do not overlap.
 Responses and web assets are `Cache-Control: no-store`. Admin uses same-origin API

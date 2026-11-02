@@ -17,6 +17,7 @@ pub type BoxError = Box<dyn std::error::Error + Send + Sync>;
 pub mod admin;
 pub mod tls;
 pub mod voice;
+pub mod web_app;
 pub mod welcome;
 
 pub mod search;

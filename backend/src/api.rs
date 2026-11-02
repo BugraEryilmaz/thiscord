@@ -39,6 +39,7 @@ fn routes(
     origins: Vec<HeaderValue>,
     voice: Router<Option<DbPool>>,
 ) -> Router {
+    let cookie_origins = std::sync::Arc::new(origins.clone());
     Router::new()
         .route(HEALTH_PATH, get(health))
         .route(READY_PATH, get(ready))
@@ -55,6 +56,11 @@ fn routes(
         .merge(crate::admin::router())
         .fallback(not_found)
         .method_not_allowed_fallback(method_not_allowed)
+        // Before handlers: an allowed web-client session cookie becomes the
+        // bearer header that every existing authorization path already reads.
+        .layer(middleware::from_fn(move |request: Request, next: Next| {
+            crate::auth::cookie::middleware(cookie_origins.clone(), request, next)
+        }))
         .layer(
             CorsLayer::new()
                 .allow_origin(origins)
