@@ -4,8 +4,9 @@ Voice channels use native Rust capture/playback and a Rust SFU in the backend.
 Screen/window sharing with system audio is available on Windows; see
 [screen-sharing.md](screen-sharing.md) for the separate native capture/video path.
 Only settings, levels and participant metadata cross Tauri IPC. PCM and encoded
-audio never pass through WASM or handwritten JavaScript. Browser preview supports
-text chat; voice requires the desktop executable. Exactly three packages remain.
+audio never pass through WASM or handwritten JavaScript. The browser web client
+joins voice with the browser's own WebRTC engine; see [Browser voice](#browser-voice).
+Exactly three packages remain.
 
 The persistent bottom account ribbon has microphone, deafen and settings icons,
 with accessible labels and hover/focus hints. Joining expands it to show the voice
@@ -19,6 +20,88 @@ directly; the ribbon's channel name opens call controls. Hovering or focusing
 server-hop loss and local transport drops. Intentional control discards are
 excluded; unavailable metrics remain labeled unavailable. Sidebar rosters are available before
 joining through permission-filtered chat socket updates; see [chat.md](chat.md).
+
+## Browser voice
+
+The web client (served same-origin with the API) joins guild voice channels and
+private calls from desktop and mobile Chrome, Safari and Firefox. `AudioControl`
+dispatches the same command names and JSON shapes as the native client to
+`frontend/src/browser_voice.rs` when `account_client::web_app()` is true; the
+desktop CPAL/Opus path and the admin relay are unchanged. Pure rules (m-line
+mapping, directions, gates, constraints, reconnect policy, RED stripping) live in
+`frontend/src/browser_call.rs` and are unit tested natively.
+
+Media stays inside the browser: `getUserMedia` captures and processes the
+microphone, the browser encodes plain Opus, and one detached `<audio>` element per
+remote stream plays it. WASM only signals, routes tracks, sets element volume and
+reads levels. No PCM or Opus crosses into Rust.
+
+Signaling and negotiation:
+
+- The socket is `socket_base() + VOICE_PATH`. `Join` carries `ui.token`, which is
+  empty in the cookie-authenticated web client. `JoinAttempt.call_id` is a random
+  UUID kept across automatic retries (`reconnect: true`), as on desktop.
+- The SFU offers `MediaKind::TRACK_COUNT` m-lines in track order. Transceivers are
+  mapped by their `mid` to the offer's m-line position, never by browser order; an
+  offer with another shape is refused. The member's own microphone m-line is
+  `sendrecv` with the microphone track (`replaceTrack`); other members'
+  microphone and screen-audio m-lines are `recvonly`; all video is `inactive`.
+- `setCodecPreferences` limits every audio transceiver to the browser's `audio/opus`
+  capability. Where it is unavailable, RED payload types are removed from the
+  local answer before `setLocalDescription`. The SFU rejects a RED microphone
+  from browser publishers.
+- After ICE gathering completes (non-trickle, up to 8 s), the client sends
+  `Answer { browser_publisher: true }` with every other capability false:
+  no RED, remote audio admin, screen/camera feedback or subscriptions, video
+  diagnostics or soundboard. Plain Opus publishers send no microphone boundary
+  messages. Nothing is sent before the answer.
+- `State` is sent on every self mute/deafen change and every 2 s as the
+  signaling keepalive. A server silence of 20 s counts as a lost socket.
+- A lost socket resumes with `Resume` (same sequence rules, 20 s window) while the
+  peer is alive. `ResumeUnavailable`, `Replaced` (event or close code 4001),
+  `Revoked`, permission errors and protocol closes are final; transport,
+  ICE-failure and media-timeout (15 s) errors rejoin with the desktop backoff
+  (1–30 s plus jitter; reset after 30 s connected). `Moved` rejoins the new channel.
+  Each attempt sends `Leave` before it closes; `pagehide` leaves the call.
+
+Controls: mute and push-to-talk disable the microphone track; deafen also mutes
+every element. Server mute/deafen from the roster override self controls. Voice
+activation uses an `AnalyserNode` peak with the saved threshold and a 500 ms hold;
+it fails open (transmits while unmuted) when the tab is hidden, because timers run
+about once per second there, or when the AudioContext is not running. Push-to-talk
+works from the voice-bar hold button and Ctrl+Shift+Space while the page has focus;
+there is no global shortcut. Remote speaking rings use `getStats` inbound-rtp
+`audioLevel` (threshold 0.02, 250 ms hangover); the local ring follows the gate.
+
+Settings persist in `localStorage` (`thiscord.browser-audio.v1`, per-speaker
+volumes in `thiscord.browser-volumes.v1`, bounded to 512 entries); they are not
+secrets. Browser defaults turn on the browser's echo cancellation, noise
+suppression and automatic gain; changing them or the input device reopens the
+microphone and swaps the track without renegotiating. The output device list
+appears only where `HTMLMediaElement.setSinkId` exists (not Safari). Element
+volume is capped at 100%, so speaker and output volumes above 100% play at 100%.
+
+Desktop-only in the browser: screen sharing and watching streams, cameras,
+soundboard playback, the overlay, global shortcuts, microphone boost, the native
+noise-suppression models and neural echo, packet-loss options (RED/DRED/adaptive
+FEC/network adaptation), device tests, debug recordings, diagnostics logs and
+remote admin audio control. These controls are hidden or labeled "Available in the
+desktop app".
+
+Browser requirements and limits:
+
+- A secure context is required for the microphone (HTTPS, or `localhost`). On an
+  insecure page, or when permission is denied, no device exists or it is busy,
+  the call continues as a listener and the voice bar explains why. Granting the
+  microphone later needs a rejoin, like a newly granted Speak permission.
+- Joining from a click primes playback elements and the AudioContext inside the
+  gesture (iOS Safari). Active capture also lifts autoplay limits. If a browser
+  still refuses playback, the voice bar shows **Tap to enable call audio**.
+- A hidden tab keeps its call. Returning to the tab replays suspended elements;
+  mobile browsers may still suspend background tabs.
+- The app CSP allows no blob workers or worklets; none are used. `srcObject`
+  streams need no `media-src` change.
+- SDP, ICE/TURN credentials, tokens and resume tokens are never logged or stored.
 
 ## Remote support
 

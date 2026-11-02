@@ -359,6 +359,13 @@ Personalized speaker isolation and physical acoustic acceptance remain future wo
 - [ ] Physically listen to bot profiles and verify menus/admin edits on Windows/macOS/Linux.
 
 - [x] Join/leave and move yourself between voice channels; live participant list.
+- [x] Browser web-client voice for guild channels and private calls: browser WebRTC
+  Opus publisher on the own microphone m-line, per-stream playback elements,
+  mute/deafen/PTT, speaking rings, device/processing settings, resume and backoff.
+- [ ] Browser voice end-to-end acceptance against the browser-publisher SFU on desktop
+  and mobile Chrome, Safari and Firefox (audio both ways, autoplay unlock, iOS
+  background behavior, output selection, moves/revocation).
+- [ ] Browser stream viewing (screen share/camera video) and soundboard playback.
 - [x] Connect native capture/playback to SFU streams with per-speaker volume sliders.
 - [x] User mute/deafen enforced locally and by the server; persistent voice controls.
 - [x] Capacity, join/speak permissions and live permission-change enforcement.

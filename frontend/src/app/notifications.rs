@@ -321,8 +321,7 @@ fn interaction(ui: Ui, alert: Alert, action: BannerAction) {
         snooze(ui, alert.target, duration);
         return;
     }
-    if matches!(action, BannerAction::Accept) && !client::desktop() && !ui.audio_control.is_remote()
-    {
+    if matches!(action, BannerAction::Accept) && !super::audio::voice_available(ui) {
         ui.status
             .set("Open the desktop app to accept this call.".into());
         return;
@@ -495,7 +494,7 @@ pub(super) fn Host(ui: Ui) -> impl IntoView {
     });
     view! {
         <aside class="fixed bottom-6 right-6 z-50 w-[380px] max-w-[90vw] space-y-2" aria-live="polite"><For each=move ||ui.notifications.banners.get() key=|a|a.id.clone() children=move |alert| {
-            let saved=StoredValue::new(alert.clone()); view!{<crate::notification_banner::Banner alert=alert can_accept=client::desktop()||ui.audio_control.is_remote() action=Callback::new(move |action|interaction(ui,saved.get_value(),action))/>}
+            let saved=StoredValue::new(alert.clone()); view!{<crate::notification_banner::Banner alert=alert can_accept=super::audio::voice_available(ui) action=Callback::new(move |action|interaction(ui,saved.get_value(),action))/>}
         }/></aside>
         <Editor ui=ui/>
     }

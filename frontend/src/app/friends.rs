@@ -115,7 +115,7 @@ pub(super) fn open(ui: Ui, id: ConversationId) {
     super::servers::home(ui);
 }
 fn available(ui: Ui) -> bool {
-    account_client::desktop() || ui.audio_control.is_remote()
+    super::audio::voice_available(ui)
 }
 
 #[component]

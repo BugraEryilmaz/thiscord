@@ -1,4 +1,5 @@
-//! One UI command adapter for local IPC and the restricted admin relay.
+//! One UI command adapter for local IPC, the restricted admin relay and,
+//! in the browser web client, browser-native voice (`browser_voice`).
 use leptos::prelude::*;
 use serde::de::DeserializeOwned;
 use serde_json::{Value, json};
@@ -70,6 +71,9 @@ impl AudioControl {
         mut args: Value,
     ) -> Result<T, String> {
         let Some(remote) = self.remote else {
+            if crate::account_client::web_app() {
+                return crate::browser_voice::invoke(name, args).await;
+            }
             return crate::account_client::native(name, args).await;
         };
         let serial = remote.serial.try_get_value().ok_or("Audio panel closed")?;
