@@ -97,9 +97,10 @@ impl AccessUnits {
             ..Self::default()
         }
     }
-    /// Annex B access unit in, Annex B access unit out. `None` rejects output
-    /// that exceeds the frame bound or violates the negotiated profile.
-    pub fn finish(&mut self, mut bytes: Vec<u8>) -> Option<Vec<u8>> {
+    /// Annex B access unit in, Annex B access unit out. Rejects output that
+    /// exceeds the frame bound or violates the negotiated profile, naming the
+    /// violated bound (safe metadata only, never encoded bytes).
+    pub fn finish(&mut self, mut bytes: Vec<u8>) -> Result<Vec<u8>, String> {
         let mut idr = false;
         let (mut has_sps, mut has_pps) = (false, false);
         for nal in thiscord_shared::h264::nal_units(&bytes) {
@@ -125,9 +126,15 @@ impl AccessUnits {
             prefix.append(&mut bytes);
             bytes = prefix;
         }
-        (bytes.len() <= thiscord_shared::screen::MAX_FRAME_BYTES
-            && thiscord_shared::h264::bounded_parameter_sets_with(&bytes, self.high))
-        .then_some(bytes)
+        if bytes.len() > thiscord_shared::screen::MAX_FRAME_BYTES {
+            return Err(format!(
+                "encoded frame of {} bytes exceeds the frame bound",
+                bytes.len()
+            ));
+        }
+        thiscord_shared::h264::parameter_set_profile(&bytes, self.high)
+            .map_err(|error| error.to_string())?;
+        Ok(bytes)
     }
 }
 
@@ -219,11 +226,11 @@ mod tests {
         let delta = units.finish(vec![0, 0, 0, 1, 0x41, 0x9a]);
         let recovery = units.finish(vec![0, 0, 0, 1, 0x65, 0x88, 0x84]);
         // Results depend on SPS bound parsing; a valid SPS must flow through.
-        if let (Some(first), Some(recovery)) = (first, recovery) {
+        if let (Ok(first), Ok(recovery)) = (first, recovery) {
             assert!(thiscord_shared::h264::recovery_frame(&first));
             assert!(thiscord_shared::h264::recovery_frame(&recovery));
             assert_eq!(thiscord_shared::h264::nal_units(&recovery).count(), 3);
         }
-        assert!(delta.is_some());
+        assert!(delta.is_ok());
     }
 }

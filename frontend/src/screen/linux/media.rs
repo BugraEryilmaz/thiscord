@@ -709,10 +709,9 @@ impl LayerEncoder for Layer {
                     submitted = Some(at);
                 }
             }
-            let data = self
-                .units
-                .finish(data)
-                .ok_or("Encoder produced an out-of-bounds H.264 access unit")?;
+            let data = self.units.finish(data).map_err(|error| {
+                format!("Encoder produced an out-of-bounds H.264 access unit: {error}")
+            })?;
             frames.push(Encoded {
                 data,
                 timestamp,
@@ -823,6 +822,102 @@ mod tests {
         assert_eq!(choose_profile(&main_only, true), "baseline");
         assert_eq!(choose_profile(&[], true), "constrained-high");
         assert_eq!(profile_label("constrained-baseline"), "baseline");
+    }
+
+    /// Presets above 1080p60 at full session size: every access unit must stay
+    /// within the receiver bounds, including the reference-picture budget
+    /// that an encoder's level-derived DPB default can exceed.
+    #[test]
+    fn high_presets_stay_within_receiver_bounds() {
+        if init().is_err() || installed().is_err() {
+            eprintln!("GStreamer encoders unavailable; skipping");
+            return;
+        }
+        let spec = select().expect("an encoder family must pass its self-test");
+        for (width, height, fps) in [(2560, 1440, 60), (3840, 2160, 30), (3840, 2160, 60)] {
+            let capture = format!(
+                "videotestsrc num-buffers=8 pattern=ball ! video/x-raw,format=BGRx,width={width},height={height},framerate={fps}/1 ! {}appsink name=sink sync=false",
+                if spec.capture.is_empty() {
+                    String::new()
+                } else {
+                    format!("{} ! ", spec.capture)
+                }
+            );
+            let source = gst::parse::launch(&capture)
+                .unwrap()
+                .downcast::<gst::Pipeline>()
+                .unwrap();
+            let sink = source
+                .by_name("sink")
+                .unwrap()
+                .downcast::<gst_app::AppSink>()
+                .unwrap();
+            source.set_state(gst::State::Playing).unwrap();
+            let (wake_tx, wake_rx) = std::sync::mpsc::channel::<()>();
+            let wake_tx = Mutex::new(wake_tx);
+            let mut layer: Option<Layer> = None;
+            let mut out = Vec::new();
+            let mut sent = 0;
+            while let Ok(sample) = sink.pull_sample() {
+                let frame = Frame {
+                    buffer: sample.buffer_owned().unwrap(),
+                    caps: sample.caps_owned().unwrap(),
+                };
+                let layer = layer.get_or_insert_with(|| {
+                    let contexts = pipeline_contexts(&source, spec);
+                    let wake = wake_tx.lock().unwrap().clone();
+                    Layer::new(
+                        spec,
+                        &frame.caps,
+                        (width, height),
+                        Quality { height, fps },
+                        EncoderOptions {
+                            high_profile: false,
+                            quality_speed: crate::screen::encode::SpeedPolicy::default().hint(
+                                width as usize,
+                                height as usize,
+                                fps,
+                            ),
+                        },
+                        &contexts,
+                        Box::new(move || {
+                            let _ = wake.send(());
+                        }),
+                    )
+                    .unwrap()
+                });
+                let pixels = Pixels {
+                    width,
+                    height,
+                    arrived: Instant::now(),
+                    frame,
+                };
+                let input = layer.convert(&pixels).unwrap().unwrap();
+                while !layer.ready() {
+                    let _ = wake_rx.recv_timeout(Duration::from_millis(50));
+                    out.extend(layer.poll().unwrap());
+                }
+                out.extend(
+                    layer
+                        .encode(&input, sent * 1_000_000 / u64::from(fps))
+                        .unwrap(),
+                );
+                sent += 1;
+            }
+            let layer = layer.as_mut().expect("frames were captured");
+            let deadline = Instant::now() + Duration::from_secs(5);
+            while (out.len() as u64) < sent && Instant::now() < deadline {
+                let _ = wake_rx.recv_timeout(Duration::from_millis(50));
+                out.extend(layer.poll().unwrap());
+            }
+            let _ = source.set_state(gst::State::Null);
+            eprintln!(
+                "{} {width}x{height}@{fps}: {} access units",
+                spec.encoder,
+                out.len()
+            );
+            assert!(out.len() >= 6, "only {} access units", out.len());
+        }
     }
 
     /// Runs the production per-layer pipeline on synthetic frames delivered

@@ -27,6 +27,16 @@ use thiscord_shared::screen::{MAX_FRAME_BYTES, Quality};
 
 /// Matches the Windows MFT admission limit.
 const MAX_PENDING: usize = 4;
+/// Reference frames requested from VideoToolbox. Its automatic level otherwise
+/// advertises the level's whole DPB (12 frames at 1440p60, 5 at 4K), which
+/// receivers reject: their bound is four 4K frames of reference memory. Four
+/// frames fit that bound at every size up to 4K.
+const MAX_REFERENCES: i32 = 4;
+/// H.264 level 5.0 limits (macroblocks per frame / per second). Any stream
+/// within them advertises at most 110400 DPB macroblocks, inside the receiver
+/// reference budget, so this is the fallback when the reference cap is missing.
+const LEVEL_5_0_FRAME_MBS: u64 = 22_080;
+const LEVEL_5_0_MBS_PER_SECOND: u64 = 589_824;
 const STALL: Duration = Duration::from_millis(500);
 
 #[derive(Default)]
@@ -56,6 +66,10 @@ pub struct VideoToolbox {
     pub buffer_applied: bool,
     pub gop_applied: bool,
     pub low_latency: bool,
+    /// Whether VideoToolbox accepted `MAX_REFERENCES` (macOS 13+).
+    pub references_capped: bool,
+    /// Session size; smaller than requested only without the reference cap.
+    pub size: (u32, u32),
 }
 // SAFETY: a VTCompressionSession may be driven from any one thread at a time;
 // the worker owns it exclusively. `callback` is an Arc kept alive until after
@@ -86,8 +100,24 @@ impl VideoToolbox {
         // baseline profile, in which case the ordinary realtime mode is used.
         let mut last_error = String::new();
         for low_latency in [true, false] {
-            match Self::create(width, height, quality, options, low_latency, &callback) {
-                Ok(encoder) => return Ok(encoder),
+            let create = |(width, height)| {
+                Self::create(width, height, quality, options, low_latency, &callback)
+            };
+            match create((width, height)) {
+                Ok(encoder) if encoder.references_capped => return Ok(encoder),
+                Ok(encoder) => {
+                    // No reference cap (macOS 12): stay within level 5.0;
+                    // VideoToolbox scales the larger capture on the GPU.
+                    let fitted = level_5_0_size((width, height), quality.fps);
+                    if fitted == (width, height) {
+                        return Ok(encoder);
+                    }
+                    drop(encoder);
+                    match create(fitted) {
+                        Ok(encoder) => return Ok(encoder),
+                        Err(error) => last_error = error,
+                    }
+                }
                 Err(error) => last_error = error,
             }
         }
@@ -160,6 +190,8 @@ impl VideoToolbox {
             buffer_applied: false,
             gop_applied: false,
             low_latency,
+            references_capped: false,
+            size: (width, height),
         };
         encoder.configure(quality, options)?;
         // SAFETY: valid session; allocates encoder resources up front.
@@ -201,6 +233,13 @@ impl VideoToolbox {
                 .find(|(level, _)| set(session, kVTCompressionPropertyKey_ProfileLevel, level))
                 .map(|(_, name)| *name)
                 .ok_or("profile rejected")?;
+            // SAFETY: constant key; macOS 13+ (weakly linked, checked first).
+            self.references_capped = super::at_least(13, 0)
+                && set(
+                    session,
+                    kVTCompressionPropertyKey_ReferenceBufferCount,
+                    &CFNumber::new_i32(MAX_REFERENCES),
+                );
             let high = self.profile != "baseline";
             *(*self.callback).units.lock().unwrap() = AccessUnits::new(high);
             if high {
@@ -288,6 +327,27 @@ impl VideoToolbox {
             return Err("hardware encoder stalled".into());
         }
         Ok(output.frames.drain(..).collect())
+    }
+}
+
+/// Largest even size with the source aspect that stays within H.264 level 5.0
+/// at `fps`; sizes already within it are returned unchanged.
+pub(crate) fn level_5_0_size((width, height): (u32, u32), fps: u32) -> (u32, u32) {
+    let limit = LEVEL_5_0_FRAME_MBS.min(LEVEL_5_0_MBS_PER_SECOND / u64::from(fps.max(1)));
+    let fits = |(w, h): (u32, u32)| u64::from(w.div_ceil(16)) * u64::from(h.div_ceil(16)) <= limit;
+    if fits((width, height)) {
+        return (width, height);
+    }
+    let mut scale = (limit as f64 * 256.0 / (f64::from(width) * f64::from(height))).sqrt();
+    loop {
+        let size = (
+            ((f64::from(width) * scale) as u32 & !1).max(2),
+            ((f64::from(height) * scale) as u32 & !1).max(2),
+        );
+        if fits(size) || size == (2, 2) {
+            return size;
+        }
+        scale *= 0.99;
     }
 }
 
@@ -385,8 +445,8 @@ impl LayerEncoder for VideoToolbox {
     }
     fn describe(&self) -> String {
         format!(
-            "ScreenCaptureKit NV12 IOSurface -> {} ({})",
-            self.name, self.profile
+            "ScreenCaptureKit NV12 IOSurface -> {} ({}, {}x{})",
+            self.name, self.profile, self.size.0, self.size.1
         )
     }
 }
@@ -467,7 +527,7 @@ fn annex_b(sample: &CMSampleBuffer, units: &Mutex<AccessUnits>) -> Result<Vec<u8
         .lock()
         .unwrap()
         .finish(out)
-        .ok_or_else(|| "encoder output violates the negotiated H.264 bounds".into())
+        .map_err(|error| format!("encoder output violates the negotiated H.264 bounds: {error}"))
 }
 
 /// SPS/PPS and the AVCC NAL length size from the session's format description.

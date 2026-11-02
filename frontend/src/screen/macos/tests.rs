@@ -178,6 +178,132 @@ fn videotoolbox_high_profile_stays_within_receiver_bounds() {
     );
 }
 
+/// Every preset above 1080p30 at its real session size, bitrate and speed
+/// hint, paced in real time: output must stay within the receiver bounds
+/// (reference-picture budget included) for one second of content changes.
+#[test]
+fn videotoolbox_high_presets_stay_within_receiver_bounds() {
+    let modes = [
+        (1440, 60, (2560, 1440)),
+        (2160, 30, (3840, 2160)),
+        (2160, 60, (3840, 2160)),
+    ];
+    let mut failures = Vec::new();
+    for (height, fps, (width, h)) in modes {
+        for high in [false, true] {
+            let quality = Quality { height, fps };
+            let (wake, woken) = std::sync::mpsc::channel::<()>();
+            let wake = Mutex::new(wake);
+            let options = EncoderOptions {
+                high_profile: high,
+                quality_speed: crate::screen::encode::SpeedPolicy::default().hint(
+                    width as usize,
+                    h as usize,
+                    fps,
+                ),
+            };
+            let mut encoder = encoder::VideoToolbox::new(
+                (width, h),
+                quality,
+                options,
+                Box::new(move || {
+                    let _ = wake.lock().unwrap().send(());
+                }),
+            )
+            .expect("hardware VideoToolbox session");
+            let surfaces: Vec<_> = (0..4)
+                .map(|i| surface(width as usize, h as usize, i))
+                .collect();
+            let period = Duration::from_secs_f64(1.0 / f64::from(fps));
+            let start = Instant::now();
+            let mut frames = Vec::new();
+            let mut result = Ok(());
+            for i in 0..fps as usize {
+                let next = start + period * i as u32;
+                while Instant::now() < next {
+                    let _ = woken.recv_timeout(next - Instant::now());
+                    match encoder.poll() {
+                        Ok(out) => frames.extend(out),
+                        Err(error) => result = Err(error),
+                    }
+                }
+                if result.is_err() {
+                    break;
+                }
+                if !encoder.ready() {
+                    continue;
+                }
+                match encoder.encode(
+                    &surfaces[i % surfaces.len()],
+                    (period * i as u32).as_micros() as u64,
+                ) {
+                    Ok(out) => frames.extend(out),
+                    Err(error) => result = Err(error),
+                }
+                if result.is_err() {
+                    break;
+                }
+            }
+            let deadline = Instant::now() + Duration::from_secs(2);
+            while result.is_ok() && encoder.pending() > 0 && Instant::now() < deadline {
+                let _ = woken.recv_timeout(Duration::from_millis(50));
+                match encoder.poll() {
+                    Ok(out) => frames.extend(out),
+                    Err(error) => result = Err(error),
+                }
+            }
+            let label = format!(
+                "{width}x{h}@{fps} {} ({})",
+                encoder.profile(),
+                encoder.describe()
+            );
+            eprintln!("{label}: {} frames, {result:?}", frames.len());
+            match result {
+                Err(error) => failures.push(format!("{label}: {error}")),
+                Ok(()) if frames.len() < fps as usize / 2 => {
+                    failures.push(format!("{label}: only {} frames", frames.len()))
+                }
+                // openh264 decodes baseline: the capped stream must decode
+                // every frame at full size.
+                Ok(()) if !high => {
+                    use openh264::formats::YUVSource;
+                    let mut decoder = openh264::decoder::Decoder::new().unwrap();
+                    let mut decoded = 0;
+                    for frame in &frames {
+                        if let Some(image) = decoder.decode(&frame.data).unwrap() {
+                            assert_eq!(image.dimensions(), (width as usize, h as usize));
+                            decoded += 1;
+                        }
+                    }
+                    if decoded != frames.len() {
+                        failures.push(format!("{label}: decoded {decoded}/{}", frames.len()));
+                    }
+                }
+                Ok(()) => {}
+            }
+        }
+    }
+    assert!(failures.is_empty(), "{failures:#?}");
+}
+
+#[test]
+fn level_5_0_fallback_keeps_aspect_within_level_limits() {
+    use encoder::level_5_0_size;
+    let mbs = |(w, h): (u32, u32)| u64::from(w.div_ceil(16)) * u64::from(h.div_ceil(16));
+    // Presets up to 1440p30 already fit and are untouched.
+    assert_eq!(level_5_0_size((2560, 1440), 30), (2560, 1440));
+    assert_eq!(level_5_0_size((1920, 1080), 60), (1920, 1080));
+    for (size, fps) in [((2560, 1440), 60), ((3840, 2160), 30), ((3840, 2160), 60)] {
+        let fitted = level_5_0_size(size, fps);
+        assert!(mbs(fitted) <= 22_080 && mbs(fitted) * u64::from(fps) <= 589_824);
+        assert!(fitted.0.is_multiple_of(2) && fitted.1.is_multiple_of(2));
+        let aspect = f64::from(fitted.0) / f64::from(fitted.1);
+        assert!((aspect - 16.0 / 9.0).abs() < 0.01, "{fitted:?}");
+        // Not shrunk further than needed.
+        assert!(mbs(fitted) * u64::from(fps) > 589_824 * 9 / 10 || mbs(fitted) > 22_080 * 9 / 10);
+    }
+}
+
 /// End-to-end ScreenCaptureKit -> VideoToolbox -> paced queue on the main
 /// display. Needs Screen Recording permission for the test process.
 #[test]
