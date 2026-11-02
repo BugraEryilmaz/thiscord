@@ -152,7 +152,11 @@ fn microphone_problem(error: &JsValue) -> MicError {
     }
 }
 
+/// Measures a clone of the microphone track. A disabled track feeds silence
+/// to WebAudio too, so metering the sent track would keep a closed
+/// voice-activation gate closed forever.
 struct Meter {
+    stream: MediaStream,
     source: MediaStreamAudioSourceNode,
     analyser: AnalyserNode,
     sink: GainNode,
@@ -205,7 +209,7 @@ impl Microphone {
             stop_stream(&stream);
             return Err(MicError::NotFound);
         };
-        let meter = context.and_then(|context| meter(context, &stream));
+        let meter = context.and_then(|context| meter(context, &track));
         Ok(Self {
             stream,
             track,
@@ -237,21 +241,31 @@ impl Microphone {
             let _ = meter.source.disconnect();
             let _ = meter.analyser.disconnect();
             let _ = meter.sink.disconnect();
+            stop_stream(&meter.stream);
         }
         stop_stream(&self.stream);
     }
 }
-fn meter(context: &AudioContext, stream: &MediaStream) -> Option<Meter> {
-    let source = context.create_media_stream_source(stream).ok()?;
-    let analyser = context.create_analyser().ok()?;
-    analyser.set_fft_size(2048);
-    // A silent sink keeps every engine pulling the analyser.
-    let sink = context.create_gain().ok()?;
-    sink.gain().set_value(0.0);
-    source.connect_with_audio_node(&analyser).ok()?;
-    analyser.connect_with_audio_node(&sink).ok()?;
-    sink.connect_with_audio_node(&context.destination()).ok()?;
+fn meter(context: &AudioContext, track: &MediaStreamTrack) -> Option<Meter> {
+    let stream = MediaStream::new_with_tracks(&Array::of1(&track.clone())).ok()?;
+    let nodes = (|| {
+        let source = context.create_media_stream_source(&stream).ok()?;
+        let analyser = context.create_analyser().ok()?;
+        analyser.set_fft_size(2048);
+        // A silent sink keeps every engine pulling the analyser.
+        let sink = context.create_gain().ok()?;
+        sink.gain().set_value(0.0);
+        source.connect_with_audio_node(&analyser).ok()?;
+        analyser.connect_with_audio_node(&sink).ok()?;
+        sink.connect_with_audio_node(&context.destination()).ok()?;
+        Some((source, analyser, sink))
+    })();
+    let Some((source, analyser, sink)) = nodes else {
+        stop_stream(&stream);
+        return None;
+    };
     Some(Meter {
+        stream,
         source,
         analyser,
         sink,
