@@ -127,7 +127,7 @@ pub(super) fn ParticipantVolume(
         </Show>
         <For each=move ||{let connected=connected(); ui.audio_status.with(|s|s.as_ref().map(|s|s.streams.iter().filter(|s| connected && s.target.is_some_and(|t|t.guild_id==guild && t.account_id==member && t.shared_audio)).cloned().collect::<Vec<_>>()).unwrap_or_default())} key=|s|(s.id.clone(),s.target) children=move |stream|view!{<super::audio::StreamVolume ui=ui stream=stream compact=true/>}/>
         <p class="volume-hint">{move || crate::i18n::t("Only changes what you hear. 0% mutes.")}</p>
-        <Show when=super::client::desktop><SoundboardVolume member=member/></Show>
+        <Show when=move ||super::client::desktop() || super::audio::browser_voice(ui)><SoundboardVolume member=member/></Show>
     </section>}
 }
 /// Local only: this device's level for the person's soundboard plays. 0% ignores them.
@@ -138,11 +138,9 @@ fn SoundboardVolume(member: AccountId) -> impl IntoView {
     let busy = RwSignal::new(false);
     let error = RwSignal::new(String::new());
     leptos::task::spawn_local(async move {
-        let result = super::client::native::<u16>(
-            "soundboard_volume",
-            serde_json::json!({"accountId":member}),
-        )
-        .await;
+        let result = crate::audio_control::AudioControl::default()
+            .invoke::<u16>("soundboard_volume", serde_json::json!({"accountId":member}))
+            .await;
         if volume.is_disposed() {
             return;
         }
@@ -158,11 +156,12 @@ fn SoundboardVolume(member: AccountId) -> impl IntoView {
         busy.set(true);
         error.set(String::new());
         leptos::task::spawn_local(async move {
-            let result = super::client::native::<u16>(
-                "soundboard_set_volume",
-                serde_json::json!({"accountId":member,"volume":value}),
-            )
-            .await;
+            let result = crate::audio_control::AudioControl::default()
+                .invoke::<u16>(
+                    "soundboard_set_volume",
+                    serde_json::json!({"accountId":member,"volume":value}),
+                )
+                .await;
             if volume.is_disposed() {
                 return;
             }

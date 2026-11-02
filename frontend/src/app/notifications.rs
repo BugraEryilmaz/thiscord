@@ -284,8 +284,45 @@ fn receive(ui: Ui, mut alert: Alert, replayed: bool) {
             }
         });
     } else {
+        if client::web_app() {
+            system_notification(ui, &alert, replayed);
+        }
         show_in_app(ui, alert);
     }
+}
+/// Web client: a system notification while the tab is in the background,
+/// besides the in-app banner (docs/notifications.md).
+fn system_notification(ui: Ui, alert: &Alert, replayed: bool) {
+    let presentation = thiscord_frontend::web_notifications::Presentation {
+        permission: crate::browser_notify::permission(),
+        enabled: crate::browser_notify::enabled(),
+        away: crate::browser_notify::away(),
+        do_not_disturb: untrack(|| do_not_disturb(ui)),
+        replayed,
+    };
+    if !presentation.system(alert)
+        || !thiscord_frontend::notification_queue::can_present(
+            alert,
+            &ui.notifications.ringing.get_untracked(),
+        )
+    {
+        return;
+    }
+    let saved = alert.clone();
+    let token = ui.token.get_untracked();
+    crate::browser_notify::show(alert, crate::i18n::t(alert.kind.label()), move || {
+        if ui.notifications.banners.is_disposed() || ui.token.get_untracked() != token {
+            return;
+        }
+        match (saved.kind, saved.target) {
+            // Keep the in-app banner with Accept and Decline; show the caller.
+            (Kind::IncomingCall, Target::Conversation { conversation_id }) => {
+                super::friends::open(ui, conversation_id)
+            }
+            (Kind::IncomingCall, _) => {}
+            _ => interaction(ui, saved, BannerAction::Open),
+        }
+    });
 }
 fn show_in_app(ui: Ui, alert: Alert) {
     if !thiscord_frontend::notification_queue::can_present(
@@ -450,6 +487,9 @@ pub(super) fn Host(ui: Ui) -> impl IntoView {
         ui.notifications.generation.set(None);
         ui.notifications.ringing.set(vec![]);
         ui.notifications.editor.set(None);
+        if client::web_app() {
+            crate::browser_notify::close_all();
+        }
         let Some(token) = token else {
             if client::desktop() {
                 leptos::task::spawn_local(async {
@@ -500,6 +540,9 @@ pub(super) fn Host(ui: Ui) -> impl IntoView {
     }
 }
 async fn sync_calls(ui: Ui, ringing: Vec<thiscord_shared::ids::CallId>) {
+    if client::web_app() {
+        crate::browser_notify::retain_calls(&ringing);
+    }
     ui.notifications.ringing.set(ringing.clone());
     ui.notifications
         .banners
@@ -601,6 +644,38 @@ fn Controls(
         <label class="flex items-center gap-2">{move || crate::i18n::t("Volume")}<input aria-label=move || crate::i18n::t("Notification volume") type="range" min="0" max="100" prop:value=move ||delivery.get().volume disabled=move ||disabled.get() on:change=move |e|if let Ok(volume)=event_target_value(&e).parse(){change.run(Delivery {volume,..delivery.get_untracked()});}/><span>{move ||format!("{}%",delivery.get().volume)}</span></label>
     </div>}
 }
+/// Web client: system notifications while the tab is in the background.
+#[component]
+fn BrowserNotifications() -> impl IntoView {
+    use thiscord_frontend::web_notifications::Permission;
+    let permission = RwSignal::new(crate::browser_notify::permission());
+    let enabled = RwSignal::new(crate::browser_notify::enabled());
+    let busy = RwSignal::new(false);
+    let allow = move |_| {
+        busy.set(true);
+        // Started inside the click, as browsers require.
+        let request = crate::browser_notify::request();
+        leptos::task::spawn_local(async move {
+            let result = request.await;
+            if permission.is_disposed() {
+                return;
+            }
+            permission.set(result);
+            enabled.set(crate::browser_notify::enabled());
+            busy.set(false);
+        });
+    };
+    view! {<section class="settings-card space-y-3" aria-label=move || crate::i18n::t("Browser notifications")>
+        <h3 class="font-semibold">{move || crate::i18n::t("Browser notifications")}</h3>
+        <p class="text-sm text-white/60">{move || crate::i18n::t("Show a system notification for alerts with Banner on while this tab is in the background or another window has focus. Sounds still play in this tab; Do not disturb and mutes apply. Notifications appear only while Thiscord is open in a tab.")}</p>
+        {move || match permission.get() {
+            Permission::Unsupported => view! {<p class="text-sm">{move || crate::i18n::t("This browser cannot show notifications for this page. On iPhone and iPad, add Thiscord to your Home Screen first.")}</p>}.into_any(),
+            Permission::Denied => view! {<p class="text-sm text-amber-200" role="status">{move || crate::i18n::t("Notifications are blocked for this site. Allow them in your browser’s site settings, then reload.")}</p>}.into_any(),
+            Permission::Default => view! {<button class="rounded bg-brand px-3 py-2 text-sm disabled:opacity-50" disabled=move || busy.get() on:click=allow>{move || crate::i18n::t("Allow browser notifications")}</button>}.into_any(),
+            Permission::Granted => view! {<label class="flex items-center gap-2"><input type="checkbox" prop:checked=move || enabled.get() on:change=move |e| {let value = event_target_checked(&e); crate::browser_notify::set_enabled(value); enabled.set(value);}/>{move || crate::i18n::t("Show browser notifications")}</label>}.into_any(),
+        }}
+    </section>}
+}
 #[component]
 pub(super) fn Panel(ui: Ui) -> impl IntoView {
     view! {<div class="space-y-4">
@@ -619,6 +694,7 @@ pub(super) fn Panel(ui: Ui) -> impl IntoView {
                 view!{<button class="rounded bg-white/10 px-3 py-2 text-sm disabled:opacity-40" disabled=move ||ui.notifications.saving.get() || !ui.notifications.connected.get() || (duration == Snooze::Resume && !do_not_disturb(ui)) on:click=move |_|request(ui,Request::DoNotDisturb {duration})>{move || crate::i18n::t(label)}</button>}
             }).collect_view()}</div>
         </section>
+        <Show when=client::web_app><BrowserNotifications/></Show>
         {Kind::ALL.into_iter().map(|kind| {
             let delivery=Signal::derive(move ||ui.notifications.preferences.get().defaults.iter().find(|r|r.kind==kind).map_or_else(||Delivery::default_for(kind),|r|r.delivery));
             view!{<section class="settings-card"><h3 class="mb-3 font-semibold">{move ||crate::i18n::t(kind.label())}</h3><p class="mb-3 text-sm text-white/60">{move ||crate::i18n::t(thiscord_frontend::notification_sound::description(kind))}</p><Controls delivery=delivery mentions=matches!(kind,Kind::GuildMessage) disabled=Signal::derive(move ||ui.notifications.saving.get()||!ui.notifications.connected.get()) change=Callback::new(move |delivery|request(ui,Request::SetDefault {revision:ui.notifications.preferences.get_untracked().revision,kind,delivery}))/><button class="mt-3 text-sm text-brand" on:click=move |_|sound(ui,kind,delivery.get_untracked().volume)>{move || crate::i18n::t("Preview sound")}</button></section>}

@@ -196,6 +196,72 @@ fn pressed(pressed: bool) {
         let _ = native::<AudioStatus>("audio_pressed", json!({"pressed":pressed})).await;
     });
 }
+/// Text fields, where only shortcuts with a command modifier or function key
+/// apply so typing is never captured.
+fn editable(target: Option<web_sys::EventTarget>) -> bool {
+    use leptos::wasm_bindgen::JsCast;
+    let Some(element) = target.and_then(|t| t.dyn_into::<web_sys::HtmlElement>().ok()) else {
+        return false;
+    };
+    if element.is_content_editable() {
+        return true;
+    }
+    match element.tag_name().as_str() {
+        "TEXTAREA" | "SELECT" => true,
+        "INPUT" => element
+            .dyn_ref::<web_sys::HtmlInputElement>()
+            .is_some_and(|input| {
+                !matches!(
+                    input.type_().as_str(),
+                    "checkbox" | "radio" | "range" | "button" | "submit" | "reset" | "color"
+                )
+            }),
+        _ => false,
+    }
+}
+/// Focused-page shortcuts in the browser: push-to-talk (Ctrl+Shift+Space)
+/// during calls, and the configured mute/deafen toggles.
+fn browser_key(ui: Ui, e: &web_sys::KeyboardEvent, down: bool) {
+    use thiscord_frontend::web_shortcuts::{Chord, PUSH_TO_TALK, Pressed};
+    let code = e.code();
+    let Some(ptt) = Chord::parse(PUSH_TO_TALK) else {
+        return;
+    };
+    if !down {
+        if ptt.released_by(&code) {
+            crate::browser_voice::pressed(false);
+        }
+        return;
+    }
+    let pressed_keys = Pressed {
+        code: &code,
+        control: e.ctrl_key(),
+        shift: e.shift_key(),
+        alt: e.alt_key(),
+        meta: e.meta_key(),
+    };
+    if ptt.matches(&pressed_keys)
+        && ui
+            .audio
+            .with_untracked(|a| a.mode == TransmitMode::PushToTalk)
+        && ui.voice.with_untracked(|v| v.channel_id.is_some())
+    {
+        e.prevent_default();
+        if !e.repeat() {
+            crate::browser_voice::pressed(true);
+        }
+        return;
+    }
+    if e.repeat() || e.default_prevented() {
+        return;
+    }
+    if let Some(action) =
+        crate::browser_voice::shortcut_bindings().action(&pressed_keys, editable(e.target()))
+    {
+        e.prevent_default();
+        toggle(ui, action);
+    }
+}
 pub(super) fn leave(ui: Ui) {
     super::friends::end_call(ui);
     leptos::task::spawn_local(async move {
@@ -212,6 +278,16 @@ pub(super) fn leave(ui: Ui) {
 pub(super) fn AudioHost(ui: Ui) -> impl IntoView {
     let (abort, registration) = futures_util::future::AbortHandle::new_pair();
     let local = desktop() || browser_voice(ui);
+    if browser_voice(ui) {
+        // Browsers deliver keys only while this page has focus; there are no
+        // global shortcuts. Push-to-talk stays Ctrl+Shift+Space like desktop.
+        let down = window_event_listener(leptos::ev::keydown, move |e| browser_key(ui, &e, true));
+        let up = window_event_listener(leptos::ev::keyup, move |e| browser_key(ui, &e, false));
+        on_cleanup(move || {
+            down.remove();
+            up.remove();
+        });
+    }
     on_cleanup(move || {
         abort.abort();
         if local {
@@ -400,15 +476,15 @@ pub(super) fn VoiceBar(ui: Ui) -> impl IntoView {
         <Show when=move||ui.voice.get().channel_id.is_some()><div class="voice-dock">
             <div class="flex items-center gap-2">
                 <span class="text-emerald-400"><Icon kind=Glyph::Signal/></span>
-                <div class="min-w-0 flex-1"><button class="voice-health text-sm font-semibold" aria-label=move || crate::i18n::t("Voice connection diagnostics") data-tip=move ||if ui.voice.get().connected {ui.audio_status.with(|s|thiscord_frontend::audio_quality::brief(s.as_ref().and_then(|s|s.quality.as_ref())))}else{"Connecting · diagnostics pending".into()} class:text-emerald-400=move ||ui.voice.get().connected class:text-amber-300=move ||!ui.voice.get().connected role="status">{move ||if ui.voice.get().connected{crate::i18n::t("Voice connected")}else{crate::i18n::t("Connecting to voice…")}}</button><button class="block max-w-full truncate text-left text-xs text-white/55 hover:text-white" data-tip=move || crate::i18n::t("Open call controls") aria-label=move || crate::i18n::t("Open call controls") on:click=move |_|super::servers::open_voice(ui)>{location}</button></div>
+                <div class="min-w-0 flex-1"><button class="voice-health text-sm font-semibold" aria-label=move || crate::i18n::t("Voice connection diagnostics") data-tip=move ||if !ui.voice.get().connected {"Connecting · diagnostics pending".into()} else if browser_voice(ui) {ui.audio_status.track();crate::browser_voice::connection_brief()} else {ui.audio_status.with(|s|thiscord_frontend::audio_quality::brief(s.as_ref().and_then(|s|s.quality.as_ref())))} class:text-emerald-400=move ||ui.voice.get().connected class:text-amber-300=move ||!ui.voice.get().connected role="status">{move ||if ui.voice.get().connected{crate::i18n::t("Voice connected")}else{crate::i18n::t("Connecting to voice…")}}</button><button class="block max-w-full truncate text-left text-xs text-white/55 hover:text-white" data-tip=move || crate::i18n::t("Open call controls") aria-label=move || crate::i18n::t("Open call controls") on:click=move |_|super::servers::open_voice(ui)>{location}</button></div>
                 <button class="icon-button danger" aria-label=move || crate::i18n::t("Disconnect voice") data-tip=move || crate::i18n::t("Disconnect") disabled=move ||ui.voice_joining.get() on:click=move |_|leave(ui)><Icon kind=Glyph::Disconnect/></button>
             </div>
             <div class="mt-2 flex items-center gap-2">
                 <Show when=move ||!browser_voice(ui)>
                     <super::camera::CameraControls ui=ui/>
                     <super::screen::ScreenControls ui=ui/>
-                    <super::soundboard::SoundboardControls ui=ui/>
                 </Show>
+                <super::soundboard::SoundboardControls ui=ui/>
                 <button class="icon-button voice-action" aria-label=move || crate::i18n::t("Audio settings") data-tip=move || crate::i18n::t("Audio settings") on:click=move |_|ui.page.set("audio")><Icon kind=Glyph::Volume/></button>
                 <Show when=move||!ui.audio_control.is_remote() && ui.audio.get().mode==TransmitMode::PushToTalk><button class="icon-button voice-action touch-none select-none" aria-label=move || crate::i18n::t("Hold to talk") data-tip=move || crate::i18n::t("Hold to talk") on:pointerdown=move |_|pressed(true) on:pointerup=move |_|pressed(false) on:pointerleave=move |_|pressed(false) on:pointercancel=move |_|pressed(false) on:keydown=move|e|{if matches!(e.key().as_str()," "|"Enter"){e.prevent_default();pressed(true);}} on:keyup=move|_|pressed(false) on:blur=move |_|pressed(false)><Icon kind=Glyph::Mic/></button></Show>
             </div>
@@ -440,7 +516,6 @@ fn BrowserVoiceNotice() -> impl IntoView {
         <Show when=move ||!crate::browser_voice::notice().is_empty()>
             <p class="browser-voice-notice mt-2 text-xs text-amber-200" role="status">{move || crate::i18n::message(crate::browser_voice::notice())}</p>
         </Show>
-        <p class="browser-voice-hint mt-1 text-xs text-white/45">{move || crate::i18n::t("Screen sharing, cameras and the soundboard are available in the desktop app.")}</p>
     }
 }
 fn debug_command(ui: Ui, command: &'static str) {
@@ -599,7 +674,8 @@ pub(super) fn AudioSettingsPanel(ui: Ui) -> impl IntoView {
     let (abort, registration) = futures_util::future::AbortHandle::new_pair();
     on_cleanup(move || {
         abort.abort();
-        if desktop()
+        // Leaving the page ends a running device test.
+        if (desktop() || browser)
             && !ui.audio_control.is_remote()
             && ui.voice.get_untracked().channel_id.is_none()
         {
@@ -632,15 +708,21 @@ pub(super) fn AudioSettingsPanel(ui: Ui) -> impl IntoView {
             .await;
         });
     }
+    let loopback = RwSignal::new(true);
     let test = move |microphone| {
+        if browser {
+            // Mobile browsers start audio only inside the click itself.
+            crate::browser_voice::prime();
+        }
         busy.set(true);
         let settings = ui.audio.get_untracked();
+        let loopback = loopback.get_untracked();
         leptos::task::spawn_local(async move {
             let result = ui
                 .audio_control
                 .invoke::<AudioStatus>(
                     "audio_test",
-                    json!({"settings":settings,"microphone":microphone}),
+                    json!({"settings":settings,"microphone":microphone,"loopback":loopback}),
                 )
                 .await;
             if busy.try_get_untracked().is_none() {
@@ -653,30 +735,36 @@ pub(super) fn AudioSettingsPanel(ui: Ui) -> impl IntoView {
             }
         });
     };
+    let testing = move || {
+        ui.audio_status
+            .with(|s| s.as_ref().is_some_and(|s| s.running))
+            && ui.voice.get().channel_id.is_none()
+    };
     view! {<div class="space-y-5"><h2 class="settings-panel-title text-xl font-semibold">{move || crate::i18n::t("Audio & voice")}</h2>
             <Show when=move ||ui.audio_control.is_remote() && !ui.audio_control.is_bot()><ShortcutSettings control=ui.audio_control/><crate::overlay::OverlaySettings control=ui.audio_control/></Show>
             <Show when=move ||voice_available(ui) fallback=||view!{<p>{move || crate::i18n::t("Audio devices and voice are available in the desktop app.")}</p>}>
-                <Show when=move ||browser><p class="settings-hint">{move || crate::i18n::t("Browser voice uses your browser’s microphone processing and playback. Screen sharing, cameras, the soundboard, neural noise suppression, diagnostics and recordings are available in the desktop app.")}</p></Show>
+                <Show when=move ||browser><p class="settings-hint">{move || crate::i18n::t("Browser voice uses your browser’s echo cancellation, noise suppression and automatic gain. Neural noise suppression models, packet-loss options and debug recordings are available in the desktop app.")}</p></Show>
                 <section class="settings-card"><h3>{move || crate::i18n::t("Devices & microphone")}</h3><p class="settings-hint">{move || crate::i18n::t("Changes save automatically and apply to your current call.")}</p>
                 {[(true,"Microphone"),(false,"Speakers / headphones")].into_iter().filter(move |(input,_)|*input || outputs).map(move|(input,label)|view!{
                     <label class="block space-y-2"><span>{move || crate::i18n::t(label)}</span><select class="w-full rounded bg-slate-900 p-2 disabled:opacity-50" disabled=move||ui.audio_saving.get() prop:value=move||{let s=ui.audio.get();if input{s.input}else{s.output}.unwrap_or_default()} on:change=move|e|{let v=event_target_value(&e);ui.audio.update(|s|{let value=(!v.is_empty()).then_some(v);if input{s.input=value;}else{s.output=value;}});save(ui);}>
                         <option value="">{move || crate::i18n::t("System default")}</option>{move||devices.get().into_iter().filter(|d|d.input==input).map(|d|view!{<option value=d.id>{d.name}</option>}).collect_view()}
                     </select></label>
                 }).collect_view()}
+                <Show when=move ||!outputs><p class="settings-hint">{move || crate::i18n::t("This browser always plays through your system’s output device.")}</p></Show>
                 <label class="flex flex-wrap gap-3"><span>{move || crate::i18n::t("Output volume")}</span><output class="text-xs text-white/60">{move ||format!("{}%",(ui.audio.get().output_volume*100.0).round())}</output><input type="range" min="0" max="200" prop:value=move||(ui.audio.get().output_volume*100.0).to_string() on:change=move|e|{if let Ok(v)=event_target_value(&e).parse::<f32>(){ui.audio.update(|s|s.output_volume=v/100.0);save(ui);}}/></label>
-                <Show when=move ||browser><p class="settings-hint">{move || crate::i18n::t("Browsers play voices at up to 100% volume; higher settings play at 100%.")}</p></Show>
                 <label class="block space-y-2"><span>{move || crate::i18n::t("Transmit mode")}</span><select class="w-full rounded bg-slate-900 p-2" prop:value=move||if ui.audio.get().mode==TransmitMode::PushToTalk{"ptt"}else{"activity"} on:change=move|e|{ui.audio.update(|s|s.mode=if event_target_value(&e)=="ptt"{TransmitMode::PushToTalk}else{TransmitMode::VoiceActivity});save(ui);}><option value="activity">{move || crate::i18n::t("Voice activation")}</option><option value="ptt">{move || crate::i18n::t("Push to talk")}</option></select></label>
-                <Show when=move ||!browser>
                 <label class="flex flex-wrap gap-3"><span>{move || crate::i18n::t("Microphone boost")}</span><output class="text-xs text-white/60">{move||format!("{:.1}×",ui.audio.get().input_gain)}</output><input type="range" min="1" max="10" step="0.1" disabled=move||ui.audio_saving.get() prop:value=move||ui.audio.get().input_gain.to_string() on:change=move|e|{if let Ok(v)=event_target_value(&e).parse::<f32>(){ui.audio.update(|s|s.input_gain=v);save(ui);}}/></label>
-                <p class="settings-hint">{move ||crate::i18n::t("Boosts your microphone before voice activation and automatic gain. Start at 2× for a quiet microphone; reduce it if your voice distorts or background noise activates it. 1× leaves the level unchanged.")}</p>
-                </Show>
+                <p class="settings-hint">{move ||if browser {crate::i18n::t("Boosts your microphone after the browser’s processing and before voice activation. Start at 2× for a quiet microphone; reduce it if your voice distorts or background noise activates it. 1× leaves the level unchanged.")} else {crate::i18n::t("Boosts your microphone before voice activation and automatic gain. Start at 2× for a quiet microphone; reduce it if your voice distorts or background noise activates it. 1× leaves the level unchanged.")}}</p>
                 <label class="flex flex-wrap gap-3"><span>{move || crate::i18n::t("Activation threshold")}</span><input type="range" min="1" max="100" prop:value=move||(ui.audio.get().activation_threshold*1000.0).to_string() on:change=move|e|{if let Ok(v)=event_target_value(&e).parse::<f32>(){ui.audio.update(|s|s.activation_threshold=v/1000.0);save(ui);}}/></label>
-                <Show when=move ||browser><p class="settings-hint">{move || crate::i18n::t("In the browser, hold Ctrl+Shift+Space while Thiscord is focused, or hold the talk button in the voice bar.")}</p></Show>
+                <Show when=move ||browser><p class="settings-hint">{move || crate::i18n::t("Hold Ctrl+Shift+Space or the talk button in the voice bar. Browsers receive keys only while this Thiscord tab is focused; set mute and deafen keys in Settings → Keyboard shortcuts.")}</p></Show>
                 <Show when=move || !ui.audio_control.is_bot() && !browser><label class="flex items-center gap-3"><input type="checkbox" disabled=move||ui.audio_saving.get() prop:checked=move||ui.audio.get().global_push_to_talk on:change=move|e|{ui.audio.update(|s|s.global_push_to_talk=event_target_checked(&e));save(ui);}/>{move || crate::i18n::t("Global push-to-talk: Ctrl+Shift+Space (Windows, macOS, Linux/X11)")}</label></Show>
-                <Show when=move ||!browser>
+                <Show when=move ||voice_available(ui)>
                 <div class="settings-actions">                <button class="rounded bg-brand px-4 py-2 disabled:opacity-50" disabled=move||busy.get()||ui.voice.get().channel_id.is_some() on:click=move |_|test(false)>{move || crate::i18n::t("Test playback (5 seconds)")}</button>
                     <button class="rounded bg-white/10 px-4 py-2 disabled:opacity-50" disabled=move||busy.get()||ui.voice.get().channel_id.is_some() on:click=move |_|test(true)>{move || crate::i18n::t("Test microphone (60 seconds)")}</button>
-    </div><p class="settings-hint">{move || crate::i18n::t("Use headphones for the microphone test. Sound tests are available when you’re outside a call.")}</p>
+                    <Show when=move ||browser && testing()><button class="rounded bg-white/10 px-4 py-2" on:click=move |_|leptos::task::spawn_local(async move {if let Ok(status)=ui.audio_control.invoke::<AudioStatus>("audio_stop",json!({})).await{set_audio_status(ui,status);}})>{move || crate::i18n::t("Stop test")}</button></Show>
+    </div>
+                <Show when=move ||browser><label class="flex items-center gap-3"><input type="checkbox" prop:checked=move||loopback.get() on:change=move|e|loopback.set(event_target_checked(&e))/>{move || crate::i18n::t("Hear my microphone during the test")}</label></Show>
+                <p class="settings-hint">{move || crate::i18n::t("Use headphones for the microphone test. Sound tests are available when you’re outside a call.")}</p>
                 </Show>
                 </section>
                 <section class="settings-card"><h3>{move || crate::i18n::t("Voice processing")}</h3>

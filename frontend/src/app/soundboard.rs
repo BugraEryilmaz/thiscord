@@ -1,6 +1,7 @@
 //! Guild soundboard: a call control that plays sounds for everyone in the call,
-//! and the server settings page that manages them. Audio never enters WASM; the
-//! desktop process downloads and mixes clips after the server relays a play.
+//! and the server settings page that manages them. On desktop, audio never
+//! enters WASM: the native process downloads and mixes clips after the server
+//! relays a play. The web client plays them through its WebAudio call graph.
 use super::{
     Ui, client,
     icons::{Glyph, Icon},
@@ -45,7 +46,11 @@ pub(super) fn SoundboardControls(ui: Ui) -> impl IntoView {
     let position = RwSignal::new((8.0, 8.0));
     let group = NodeRef::<leptos::html::Div>::new();
     let trigger = NodeRef::<leptos::html::Button>::new();
-    let available = move || client::desktop() && ui.voice.get().connected && call(ui).is_some();
+    let available = move || {
+        (client::desktop() || super::audio::browser_voice(ui))
+            && ui.voice.get().connected
+            && call(ui).is_some()
+    };
     let close = move || {
         if let Some(button) = trigger.get_untracked() {
             let _ = button.focus();
@@ -127,11 +132,13 @@ pub(super) fn SoundboardControls(ui: Ui) -> impl IntoView {
         };
         notice.set(String::new());
         leptos::task::spawn_local(async move {
-            let result = client::native::<()>(
-                "voice_soundboard_play",
-                json!({"guildId":guild_id,"channelId":channel_id,"soundId":sound_id}),
-            )
-            .await;
+            // Native process on desktop, browser voice in the web client.
+            let result = crate::audio_control::AudioControl::default()
+                .invoke::<()>(
+                    "voice_soundboard_play",
+                    json!({"guildId":guild_id,"channelId":channel_id,"soundId":sound_id}),
+                )
+                .await;
             if let Err(error) = result
                 && !notice.is_disposed()
             {

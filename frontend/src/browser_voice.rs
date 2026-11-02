@@ -1,39 +1,52 @@
 //! Browser voice backend for `AudioControl` in the web client. It implements
-//! the subset of the native audio/voice commands a browser can honour, with the
-//! same argument and reply JSON, using the browser's own getUserMedia/WebRTC
-//! against the Rust SFU. Native-only commands report "Available in the desktop
-//! app". Preferences (not secrets) persist in localStorage.
+//! the native audio/voice commands a browser can honour, with the same
+//! argument and reply JSON, using the browser's own getUserMedia/WebRTC and
+//! WebAudio against the Rust SFU. Native-only commands report "Available in
+//! the desktop app". Preferences (not secrets) persist in localStorage.
 mod call;
+mod device_test;
 mod media;
 mod socket;
+mod soundboard;
 
 use call::Call;
+use device_test::DeviceTest;
 use leptos::prelude::*;
 use serde_json::Value;
 use std::{cell::RefCell, rc::Rc};
-use thiscord_frontend::browser_call::{self as rules, MAX_STORED_VOLUMES};
+use thiscord_frontend::{
+    browser_audio::{RemoteSource, VolumeStore},
+    browser_call as rules,
+    web_shortcuts::Bindings,
+};
 use thiscord_shared::{
-    AccountId, ChannelId, GuildId,
+    AccountId, ChannelId, GuildId, SoundId,
     audio::{
-        AudioSettings, AudioStatus, AudioToggle, SpeakerVolumeTarget, StreamLevel, TransmitMode,
+        AudioSettings, AudioShortcutStatus, AudioShortcuts, AudioStatus, AudioToggle,
+        SpeakerVolumeTarget, StreamLevel,
     },
-    voice::{ROOM_CAPACITY, VoiceStatus},
+    voice::VoiceStatus,
 };
 use wasm_bindgen::{JsCast, prelude::Closure};
 
 const SETTINGS_KEY: &str = "thiscord.browser-audio.v1";
 const VOLUMES_KEY: &str = "thiscord.browser-volumes.v1";
+const SHORTCUTS_KEY: &str = "thiscord.browser-shortcuts.v1";
 const DESKTOP_ONLY: &str = "Available in the desktop app";
 
 #[derive(Default)]
 struct State {
     settings: Option<AudioSettings>,
-    volumes: Option<Vec<(String, f32)>>,
+    volumes: Option<VolumeStore>,
+    shortcuts: Option<(AudioShortcuts, Bindings)>,
     voice: VoiceStatus,
     call: Option<Rc<Call>>,
-    /// Playback prepared inside the join gesture, consumed by `voice_join`.
+    test: Option<Rc<DeviceTest>>,
+    /// Playback prepared inside a join or device-test gesture, consumed by
+    /// the next `voice_join` or `audio_test`.
     primed: Option<media::Output>,
     pressed: bool,
+    /// Call and device-test generations.
     next_call: u64,
     listening: bool,
 }
@@ -61,12 +74,13 @@ pub fn notice() -> String {
 fn set_notice(message: &str) {
     NOTICE.with(|notice| notice.set(message.to_owned()));
 }
+/// Whether this browser can choose the speaker/headphone device.
 pub fn output_selectable() -> bool {
     media::output_selectable()
 }
 
-/// Call synchronously from the join click: mobile browsers only allow audio
-/// playback (and start an AudioContext) inside a user gesture.
+/// Call synchronously from the join or device-test click: mobile browsers
+/// only allow audio playback (and start an AudioContext) inside a gesture.
 pub fn prime() {
     install_listeners();
     STATE.with(|state| {
@@ -83,6 +97,15 @@ pub fn unlock() {
     } else {
         set_blocked(false);
     }
+}
+/// The "Voice connected" tooltip: RTT, jitter and loss from `getStats`.
+pub fn connection_brief() -> String {
+    let stats = current().and_then(|call| call.stats.get());
+    thiscord_frontend::browser_audio::connection_brief(stats.as_ref())
+}
+/// Focused-page mute/deafen bindings from Settings → Keyboard shortcuts.
+pub fn shortcut_bindings() -> Bindings {
+    shortcuts().1
 }
 /// Push-to-talk from the hold button or the focused-page shortcut.
 pub fn pressed(pressed: bool) {
@@ -122,49 +145,63 @@ fn store_settings(settings: AudioSettings) {
     }
     STATE.with(|state| state.borrow_mut().settings = Some(settings));
 }
-fn with_volumes<T>(f: impl FnOnce(&mut Vec<(String, f32)>) -> T) -> T {
+fn with_volumes<T>(f: impl FnOnce(&mut VolumeStore) -> T) -> T {
     STATE.with(|state| {
         let mut state = state.borrow_mut();
         let volumes = state.volumes.get_or_insert_with(|| {
-            storage()
-                .and_then(|s| s.get_item(VOLUMES_KEY).ok().flatten())
-                .and_then(|text| serde_json::from_str::<Vec<(String, f32)>>(&text).ok())
-                .unwrap_or_default()
-                .into_iter()
-                .filter(|(key, gain)| {
-                    key.len() < 128 && gain.is_finite() && (0.0..=2.0).contains(gain)
-                })
-                .take(MAX_STORED_VOLUMES)
-                .collect()
+            let stored = storage().and_then(|s| s.get_item(VOLUMES_KEY).ok().flatten());
+            VolumeStore::parse(stored.as_deref())
         });
         f(volumes)
     })
 }
-fn stream_gain(guild_id: GuildId, account_id: AccountId, shared_audio: bool) -> f32 {
+/// The saved voice or stream-audio level for one person in one guild (1.0
+/// when unset). Voice and stream audio are stored separately.
+fn stream_gain(guild_id: GuildId, account_id: AccountId, source: RemoteSource) -> f32 {
     let key = rules::volume_key(&SpeakerVolumeTarget {
         guild_id,
         account_id,
-        shared_audio,
+        shared_audio: source == RemoteSource::SystemAudio,
     });
-    with_volumes(|volumes| {
-        volumes
-            .iter()
-            .find(|(stored, _)| *stored == key)
-            .map_or(1.0, |(_, gain)| *gain)
-    })
+    with_volumes(|volumes| volumes.get(&key).unwrap_or(1.0))
 }
 fn store_gain(target: &SpeakerVolumeTarget, gain: f32) {
     let key = rules::volume_key(target);
     let text = with_volumes(|volumes| {
-        volumes.retain(|(stored, _)| *stored != key);
-        volumes.push((key, gain));
-        let excess = volumes.len().saturating_sub(MAX_STORED_VOLUMES);
-        volumes.drain(..excess);
-        serde_json::to_string(volumes).ok()
+        volumes.set(key, gain);
+        volumes.to_json()
     });
-    if let (Some(storage), Some(text)) = (storage(), text) {
+    if let Some(storage) = storage() {
         let _ = storage.set_item(VOLUMES_KEY, &text);
     }
+}
+fn shortcuts() -> (AudioShortcuts, Bindings) {
+    if let Some(saved) = STATE.with(|state| state.borrow().shortcuts.clone()) {
+        return saved;
+    }
+    let saved = storage()
+        .and_then(|s| s.get_item(SHORTCUTS_KEY).ok().flatten())
+        .and_then(|text| serde_json::from_str::<AudioShortcuts>(&text).ok())
+        .and_then(|shortcuts| {
+            let bindings = Bindings::from_settings(&shortcuts).ok()?;
+            Some((shortcuts, bindings))
+        })
+        .unwrap_or_else(|| {
+            let defaults = AudioShortcuts::default();
+            let bindings = Bindings::from_settings(&defaults).unwrap_or_default();
+            (defaults, bindings)
+        });
+    STATE.with(|state| state.borrow_mut().shortcuts = Some(saved.clone()));
+    saved
+}
+fn save_shortcuts(shortcuts: AudioShortcuts) -> Result<(), String> {
+    let bindings = Bindings::from_settings(&shortcuts)?;
+    let text = serde_json::to_string(&shortcuts).map_err(|_| "Cannot save shortcuts")?;
+    storage()
+        .and_then(|s| s.set_item(SHORTCUTS_KEY, &text).ok())
+        .ok_or("Cannot save shortcuts")?;
+    STATE.with(|state| state.borrow_mut().shortcuts = Some((shortcuts, bindings)));
+    Ok(())
 }
 
 fn update_voice(call: &Call, f: impl FnOnce(&mut VoiceStatus)) {
@@ -211,10 +248,16 @@ fn leave(message: &str) {
     set_blocked(false);
     set_notice("");
 }
+fn stop_test() {
+    if let Some(test) = STATE.with(|state| state.borrow_mut().test.take()) {
+        test.stop();
+    }
+}
 
-/// Window listeners, installed once: focused-page push-to-talk, playback
+/// Window listeners, installed once: push-to-talk release on blur, playback
 /// recovery after a background tab, and Leave when the page goes away. A
-/// hidden tab keeps its call; only `pagehide` ends it.
+/// hidden tab keeps its call; only `pagehide` ends it. Keyboard shortcuts
+/// are handled by the app while the page has focus.
 fn install_listeners() {
     if STATE.with(|state| std::mem::replace(&mut state.borrow_mut().listening, true)) {
         return;
@@ -222,41 +265,23 @@ fn install_listeners() {
     let Some(window) = web_sys::window() else {
         return;
     };
-    let ptt_mode = || current().is_some() && settings().mode == TransmitMode::PushToTalk;
-    let down =
-        Closure::<dyn FnMut(web_sys::KeyboardEvent)>::new(move |e: web_sys::KeyboardEvent| {
-            if e.code() == "Space" && e.ctrl_key() && e.shift_key() && ptt_mode() {
-                e.prevent_default();
-                if !e.repeat() {
-                    pressed(true);
-                }
-            }
-        });
-    let up = Closure::<dyn FnMut(web_sys::KeyboardEvent)>::new(move |e: web_sys::KeyboardEvent| {
-        if pressed_now()
-            && matches!(
-                e.code().as_str(),
-                "Space" | "ControlLeft" | "ControlRight" | "ShiftLeft" | "ShiftRight"
-            )
-        {
-            pressed(false);
-        }
-    });
     let blur = Closure::<dyn FnMut()>::new(move || pressed(false));
     let visible = Closure::<dyn FnMut()>::new(move || {
         let shown = web_sys::window()
             .and_then(|w| w.document())
             .is_some_and(|d| !d.hidden());
         if shown && let Some(call) = current() {
+            // Mobile browsers suspend or interrupt background audio.
             call.output.unlock();
             call.apply();
         } else if !shown {
             pressed(false);
         }
     });
-    let hide = Closure::<dyn FnMut()>::new(move || leave("Disconnected from voice"));
-    let _ = window.add_event_listener_with_callback("keydown", down.as_ref().unchecked_ref());
-    let _ = window.add_event_listener_with_callback("keyup", up.as_ref().unchecked_ref());
+    let hide = Closure::<dyn FnMut()>::new(move || {
+        stop_test();
+        leave("Disconnected from voice");
+    });
     let _ = window.add_event_listener_with_callback("blur", blur.as_ref().unchecked_ref());
     let _ = window.add_event_listener_with_callback("pagehide", hide.as_ref().unchecked_ref());
     if let Some(document) = window.document() {
@@ -264,14 +289,44 @@ fn install_listeners() {
             .add_event_listener_with_callback("visibilitychange", visible.as_ref().unchecked_ref());
     }
     // Page-lifetime listeners.
-    down.forget();
-    up.forget();
     blur.forget();
     visible.forget();
     hide.forget();
 }
 
+fn test_status() -> Option<AudioStatus> {
+    let test = STATE.with(|state| state.borrow().test.clone())?;
+    if test.expired() {
+        stop_test();
+        return None;
+    }
+    let microphone = test.microphone.as_ref();
+    Some(AudioStatus {
+        ui_performance: None,
+        quality: None,
+        recording: None,
+        running: true,
+        input_level: microphone.and_then(|m| m.level()).unwrap_or(0.0),
+        raw_input_level: microphone.and_then(|m| m.raw_level()).unwrap_or(0.0),
+        processing_resets: 0,
+        echo: None,
+        transmitting: false,
+        message: if microphone.is_some() {
+            "Testing microphone"
+        } else {
+            "Testing playback"
+        }
+        .into(),
+        streams: vec![],
+        dropped_samples: 0,
+        underrun_samples: 0,
+    })
+}
+
 fn audio_status() -> AudioStatus {
+    if let Some(status) = test_status() {
+        return status;
+    }
     let call = current();
     let connected = call.as_ref().is_some_and(|c| c.connected());
     let streams = call
@@ -285,23 +340,24 @@ fn audio_status() -> AudioStatus {
                     .iter()
                     .filter(|member| Some(member.slot) != own)
                     .flat_map(|member| {
-                        let mut streams = vec![(member.slot, false)];
+                        let mut sources = vec![RemoteSource::Microphone];
                         if member.sharing_audio {
-                            streams.push((ROOM_CAPACITY + member.slot, true));
+                            sources.push(RemoteSource::SystemAudio);
                         }
-                        streams.into_iter().map(|(slot, shared_audio)| {
-                            let target = SpeakerVolumeTarget {
-                                guild_id: call.guild_id,
-                                account_id: member.account_id,
-                                shared_audio,
-                            };
-                            StreamLevel {
+                        sources.into_iter().filter_map(|source| {
+                            let slot = source.slot(member.slot)?;
+                            let shared_audio = source == RemoteSource::SystemAudio;
+                            Some(StreamLevel {
                                 speaking: !shared_audio && call.remote_speaking(slot),
                                 id: slot.to_string(),
-                                target: Some(target),
+                                target: Some(SpeakerVolumeTarget {
+                                    guild_id: call.guild_id,
+                                    account_id: member.account_id,
+                                    shared_audio,
+                                }),
                                 label: member.display_name().to_owned(),
-                                volume: stream_gain(call.guild_id, member.account_id, shared_audio),
-                            }
+                                volume: stream_gain(call.guild_id, member.account_id, source),
+                            })
                         })
                     })
                     .collect(),
@@ -309,13 +365,21 @@ fn audio_status() -> AudioStatus {
         })
         .unwrap_or_default();
     let level = call.as_ref().map_or(0.0, |c| c.local_level.get());
+    let raw = call
+        .as_ref()
+        .and_then(|c| c.microphone.borrow().as_ref().and_then(|m| m.raw_level()))
+        .unwrap_or(level);
     AudioStatus {
         ui_performance: None,
-        quality: None,
+        quality: call
+            .as_ref()
+            .filter(|_| connected)
+            .and_then(|c| c.stats.get())
+            .map(|stats| stats.quality()),
         recording: None,
         running: connected,
         input_level: level,
-        raw_input_level: level,
+        raw_input_level: raw,
         processing_resets: 0,
         echo: None,
         transmitting: connected && call.as_ref().is_some_and(|c| c.transmitting.get()),
@@ -331,6 +395,13 @@ fn audio_status() -> AudioStatus {
 }
 
 fn apply_settings(previous: &AudioSettings, next: &AudioSettings) {
+    if let Some(test) = STATE.with(|state| state.borrow().test.clone()) {
+        if previous.output != next.output {
+            test.output
+                .set_sink(next.output.as_deref().unwrap_or_default());
+        }
+        test.apply(next);
+    }
     let Some(call) = current() else {
         return;
     };
@@ -359,6 +430,7 @@ async fn voice_join(args: &Value) -> Result<Value, String> {
     {
         return Ok(Value::Null);
     }
+    stop_test();
     leave("Disconnected from voice");
     install_listeners();
     // Claim the call slot before awaiting the microphone so a second click or
@@ -380,6 +452,7 @@ async fn voice_join(args: &Value) -> Result<Value, String> {
     if let Some(device) = &settings.output {
         output.set_sink(device);
     }
+    output.set_master(settings.output_volume, settings.deafened);
     let capture = rules::Capture::from_settings(&settings);
     let microphone = media::Microphone::open(&capture, output.context()).await;
     let still_current = STATE.with(|state| {
@@ -412,6 +485,54 @@ async fn voice_join(args: &Value) -> Result<Value, String> {
     Ok(Value::Null)
 }
 
+async fn audio_test(args: &Value) -> Result<Value, String> {
+    let mut requested: AudioSettings = parse(args, "settings")?;
+    requested.validate().map_err(str::to_owned)?;
+    let microphone: bool = parse(args, "microphone")?;
+    let loopback = args
+        .get("loopback")
+        .and_then(Value::as_bool)
+        .unwrap_or(true);
+    if current().is_some() {
+        return Err("Leave voice to test your devices".into());
+    }
+    stop_test();
+    let saved = settings();
+    requested.muted = saved.muted;
+    requested.deafened = saved.deafened;
+    let (id, output) = STATE.with(|state| {
+        let mut state = state.borrow_mut();
+        state.next_call += 1;
+        (state.next_call, state.primed.take())
+    });
+    let output = output.unwrap_or_else(media::Output::new);
+    let test = DeviceTest::start(id, output, &requested, microphone, loopback).await?;
+    let current_test = STATE.with(|state| {
+        let mut state = state.borrow_mut();
+        let current = state.next_call == id && state.call.is_none();
+        if current {
+            state.test = Some(Rc::new(test));
+            None
+        } else {
+            Some(test)
+        }
+    });
+    if let Some(stale) = current_test {
+        stale.stop();
+        return serde_json::to_value(audio_status()).map_err(|_| "Invalid audio response".into());
+    }
+    let length = STATE
+        .with(|state| state.borrow().test.as_ref().map(|t| t.length_ms()))
+        .unwrap_or(0.0);
+    wasm_bindgen_futures::spawn_local(async move {
+        gloo_timers::future::TimeoutFuture::new(length as u32 + 100).await;
+        if STATE.with(|state| state.borrow().test.as_ref().is_some_and(|t| t.id == id)) {
+            stop_test();
+        }
+    });
+    serde_json::to_value(audio_status()).map_err(|_| "Invalid audio response".into())
+}
+
 fn parse<T: serde::de::DeserializeOwned>(args: &Value, key: &str) -> Result<T, String> {
     serde_json::from_value(args.get(key).cloned().unwrap_or(Value::Null))
         .map_err(|_| "Invalid audio request".into())
@@ -429,7 +550,12 @@ async fn dispatch(name: &str, args: Value) -> Result<Value, String> {
         "voice_status" => value(serde_json::to_value(
             STATE.with(|state| state.borrow().voice.clone()),
         )),
-        "audio_status" | "audio_stop" => value(serde_json::to_value(audio_status())),
+        "audio_status" => value(serde_json::to_value(audio_status())),
+        "audio_stop" => {
+            stop_test();
+            value(serde_json::to_value(audio_status()))
+        }
+        "audio_test" => audio_test(&args).await,
         "audio_load" | "audio_current" => value(serde_json::to_value(settings())),
         "audio_save" => {
             let next: AudioSettings = parse(&args, "settings")?;
@@ -441,12 +567,11 @@ async fn dispatch(name: &str, args: Value) -> Result<Value, String> {
         }
         "audio_toggle" => {
             let action: AudioToggle = parse(&args, "action")?;
-            let mut next = settings();
+            let previous = settings();
+            let mut next = previous.clone();
             action.apply(&mut next);
-            store_settings(next);
-            if let Some(call) = current() {
-                call.apply();
-            }
+            store_settings(next.clone());
+            apply_settings(&previous, &next);
             Ok(Value::Null)
         }
         "audio_pressed" => {
@@ -467,6 +592,33 @@ async fn dispatch(name: &str, args: Value) -> Result<Value, String> {
                 call.apply();
             }
             value(serde_json::to_value(audio_status()))
+        }
+        "audio_shortcuts" => value(serde_json::to_value(AudioShortcutStatus {
+            shortcuts: shortcuts().0,
+            error: None,
+        })),
+        "audio_shortcuts_save" => {
+            save_shortcuts(parse(&args, "settings")?)?;
+            Ok(Value::Null)
+        }
+        "voice_soundboard_play" => {
+            let guild_id: GuildId = parse(&args, "guildId")?;
+            let channel_id: ChannelId = parse(&args, "channelId")?;
+            let sound_id: SoundId = parse(&args, "soundId")?;
+            let call = current().ok_or("Join this voice channel to use its soundboard")?;
+            soundboard::play(&call, guild_id, channel_id, sound_id)?;
+            Ok(Value::Null)
+        }
+        "soundboard_volume" => {
+            let account: AccountId = parse(&args, "accountId")?;
+            value(serde_json::to_value(soundboard::volume(account)))
+        }
+        "soundboard_set_volume" => {
+            let account: AccountId = parse(&args, "accountId")?;
+            let volume: u16 = parse(&args, "volume")?;
+            value(serde_json::to_value(soundboard::set_volume(
+                account, volume,
+            )?))
         }
         _ => Err(DESKTOP_ONLY.into()),
     }

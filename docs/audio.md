@@ -31,10 +31,13 @@ desktop CPAL/Opus path and the admin relay are unchanged. Pure rules (m-line
 mapping, directions, gates, constraints, reconnect policy, RED stripping) live in
 `frontend/src/browser_call.rs` and are unit tested natively.
 
-Media stays inside the browser: `getUserMedia` captures and processes the
-microphone, the browser encodes plain Opus, and one detached `<audio>` element per
-remote stream plays it. WASM only signals, routes tracks, sets element volume and
-reads levels. No PCM or Opus crosses into Rust.
+Media stays inside the browser: `getUserMedia` captures the microphone with the
+browser's echo cancellation, noise suppression and automatic gain, the browser
+encodes plain Opus, and the browser decodes and plays remote streams. WASM builds
+and controls a WebAudio graph (`frontend/src/browser_voice/media.rs`), routes
+tracks, sets gains and reads levels; voice PCM and Opus never cross into Rust.
+Pure gain, volume-store, soundboard-queue and statistics rules live in
+`frontend/src/browser_audio.rs` and are unit tested natively.
 
 Signaling and negotiation:
 
@@ -51,10 +54,10 @@ Signaling and negotiation:
   local answer before `setLocalDescription`. The SFU rejects a RED microphone
   from browser publishers.
 - After ICE gathering completes (non-trickle, up to 8 s), the client sends
-  `Answer { browser_publisher: true }` with every other capability false:
-  no RED, remote audio admin, screen/camera feedback or subscriptions, video
-  diagnostics or soundboard. Plain Opus publishers send no microphone boundary
-  messages. Nothing is sent before the answer.
+  `Answer { browser_publisher: true }`. It opts into `soundboard` whenever the
+  offer advertises it (guild calls); RED, remote audio admin, screen/camera
+  feedback or subscriptions and video diagnostics stay false. Plain Opus
+  publishers send no microphone boundary messages. Nothing is sent before the answer.
 - `State` is sent on every self mute/deafen change and every 2 s as the
   signaling keepalive. A server silence of 20 s counts as a lost socket.
 - A lost socket resumes with `Resume` (same sequence rules, 20 s window) while the
@@ -64,30 +67,81 @@ Signaling and negotiation:
   (1–30 s plus jitter; reset after 30 s connected). `Moved` rejoins the new channel.
   Each attempt sends `Leave` before it closes; `pagehide` leaves the call.
 
-Controls: mute and push-to-talk disable the microphone track; deafen also mutes
-every element. Server mute/deafen from the roster override self controls. Voice
-activation uses an `AnalyserNode` peak with the saved threshold and a 500 ms hold.
-The meter reads a clone of the microphone track: a disabled track feeds silence
-to WebAudio, so metering the sent track would never reopen a closed gate. It fails open (transmits while unmuted) when the tab is hidden, because timers run
-about once per second there, or when the AudioContext is not running. Push-to-talk
-works from the voice-bar hold button and Ctrl+Shift+Space while the page has focus;
-there is no global shortcut. Remote speaking rings use `getStats` inbound-rtp
-`audioLevel` (threshold 0.02, 250 ms hangover); the local ring follows the gate.
+Playback graph: one `AudioContext` per call, created inside the join click. Each
+of the `2 × ROOM_CAPACITY` mixer slots (microphones, then system/screen audio, the
+native mixer order) has a `MediaStreamAudioSourceNode` and a gain node (the saved
+per-speaker or per-stream volume, 0–200%). Slots, the soundboard bus and device-test
+audio feed a master gain (output volume 0–200%, 0 while self- or server-deafened),
+then a limiter (-2 dBFS, 20:1; its automatic makeup gain is cancelled, so quieter
+audio passes unchanged). Chrome only delivers remote WebRTC audio to WebAudio while
+the track is also attached to a media element, so every slot keeps a muted, detached
+`<audio>` element. Output devices use `AudioContext.setSinkId` (Chromium); Firefox
+routes the graph through a `MediaStreamAudioDestinationNode` into one element with
+`HTMLMediaElement.setSinkId` while a non-default device is selected; Safari has no
+output selection and the list is hidden. Without WebAudio, elements play directly
+at up to 100%. `Output::play_remote(source, member_slot, track)` with
+`RemoteSource::{Microphone, SystemAudio}` is the single entry point for remote audio;
+`set_stream_gain` and `stop_remote` complete it.
 
-Settings persist in `localStorage` (`thiscord.browser-audio.v1`, per-speaker
-volumes in `thiscord.browser-volumes.v1`, bounded to 512 entries); they are not
-secrets. Browser defaults turn on the browser's echo cancellation, noise
-suppression and automatic gain; changing them or the input device reopens the
-microphone and swaps the track without renegotiating. The output device list
-appears only where `HTMLMediaElement.setSinkId` exists (not Safari). Element
-volume is capped at 100%, so speaker and output volumes above 100% play at 100%.
+Send graph: microphone track → source → boost gain (Microphone boost 1×–10×) →
+limiter → `MediaStreamAudioDestinationNode`, whose track is sent. The browser's own
+processing runs before the boost (desktop boosts before automatic gain). Two
+`AnalyserNode`s read the capture (raw) and the boosted signal before the send gate,
+so the voice-activation meter keeps measuring while the gate is closed. Mute,
+push-to-talk release, deafen and server restrictions disable the sent track (silence);
+the captured track stays enabled for metering. If the AudioContext is not running
+(autoplay refused, interrupted), the raw capture is sent instead, gated directly,
+without boost; voice activation then fails open. The client swaps tracks with
+`replaceTrack` when that changes, without renegotiating.
 
-Desktop-only in the browser: screen sharing and watching streams, cameras,
-soundboard playback, the overlay, global shortcuts, microphone boost, the native
-noise-suppression models and neural echo, packet-loss options (RED/DRED/adaptive
-FEC/network adaptation), device tests, debug recordings, diagnostics logs and
-remote admin audio control. These controls are hidden or labeled "Available in the
-desktop app".
+Controls: server mute/deafen from the roster override self controls. Voice
+activation uses the boosted peak with the saved threshold and a 500 ms hold. It
+fails open (transmits while unmuted) when the tab is hidden, because timers run
+about once per second there, or when the AudioContext is not running. Remote
+speaking rings use `getStats` inbound-rtp `audioLevel` (threshold 0.02, 250 ms
+hangover, before local gain); the local ring follows the gate.
+
+Keyboard: while the page has focus, Ctrl+Shift+Space is push-to-talk (also the
+voice-bar hold button) and the Settings → Keyboard shortcuts mute/deafen bindings
+(defaults Ctrl+Shift+M/D, same syntax and validation as desktop, stored in
+`thiscord.browser-shortcuts.v1`) toggle self controls, also outside calls. In text
+fields only combinations with Control, Alt or Super, or function keys, apply.
+Browsers cannot see keys while another tab or app has focus, and the settings say so.
+
+Device tests (Audio settings, outside calls, started from the click): **Test
+playback** plays 5 s of alternating tones through output volume and the selected
+device; **Test microphone** opens the selected microphone for 60 s with the same
+constraints and boost, shows the level meter and, unless **Hear my microphone
+during the test** is off, plays it back through the selected output. Leaving the
+page, joining voice or **Stop test** ends it and releases the devices.
+
+Connection diagnostics: every 200 ms `getStats` provides the selected
+candidate-pair `currentRoundTripTime` (else the SFU's receiver-report
+`roundTripTime`), inbound audio `jitter`, `packetsReceived`/`packetsLost`, and the
+SFU's `remote-inbound-rtp` `jitter`/`fractionLost` for the microphone. Hovering
+**Voice connected** shows server RTT, receive/send jitter and receive/send loss;
+missing values stay "unavailable". The values also fill the shared
+`AudioQuality` fields they map to (`sfu_hop_rtt_ms`, received/lost packets,
+`network.uplink_*`).
+
+Soundboard: the voice-bar Soundboard grid works as on desktop; see
+[soundboard.md](soundboard.md#web-client).
+
+Settings persist in `localStorage` (`thiscord.browser-audio.v1`; per-speaker voice
+and stream-audio volumes in `thiscord.browser-volumes.v1`, keyed by guild, account
+and voice/stream, bounded to 512 entries; per-person soundboard levels in
+`thiscord.browser-soundboard-volumes.v1`, at most 1000); they are not secrets.
+Browser defaults turn on the browser's echo cancellation, noise suppression and
+automatic gain; changing them or the input device reopens the microphone and swaps
+the track without renegotiating.
+
+Desktop-only, because browsers cannot provide them: global shortcuts while another
+app or tab is focused, the in-game overlay, tray/close-to-tray and the auto-updater,
+the native noise-suppression models and neural echo, packet-loss options (RED and
+deep redundancy need encoder access; adaptive FEC/network adaptation need the native
+encoder), echo debug recordings and diagnostic logs (raw PCM capture), and remote
+admin audio control (it adjusts native preferences on the user's computer). These
+controls are hidden or labeled "Available in the desktop app".
 
 Browser requirements and limits:
 
@@ -95,16 +149,21 @@ Browser requirements and limits:
   insecure page, or when permission is denied, no device exists or it is busy,
   the call continues as a listener and the voice bar explains why. Granting the
   microphone later needs a rejoin, like a newly granted Speak permission.
-- Joining from a click primes playback elements and the AudioContext inside the
-  gesture (iOS Safari). Active capture also lifts autoplay limits. If a browser
-  still refuses playback, the voice bar shows **Tap to enable call audio**.
+- Joining (or a device test) from a click creates and resumes the AudioContext
+  inside the gesture (iOS Safari). Active capture also lifts autoplay limits. A
+  context that stays suspended for 1.5 s, or a refused element, shows **Tap to
+  enable call audio**; the client also retries resuming about once per second.
 - On phones, an open channel or conversation hides the account dock; during a
   call a compact dock (call status, disconnect, audio settings, push-to-talk,
   mute, deafen) stays visible above the content.
-- A hidden tab keeps its call. Returning to the tab replays suspended elements;
-  mobile browsers may still suspend background tabs.
-- The app CSP allows no blob workers or worklets; none are used. `srcObject`
-  streams need no `media-src` change.
+- A hidden tab keeps its call. Returning to the tab resumes the AudioContext and
+  replays suspended elements; mobile browsers may still suspend or interrupt
+  background audio (iOS during phone calls), and timers slow to about once per second.
+- Echo cancellation references the browser's own playback. Chromium, Firefox and
+  Safari include WebAudio output in that reference, but this needs physical
+  verification on each platform.
+- The app CSP allows no blob workers or worklets; none are used (all nodes are
+  built-in). `srcObject` streams need no `media-src` change.
 - SDP, ICE/TURN credentials, tokens and resume tokens are never logged or stored.
 
 ## Remote support
@@ -376,6 +435,8 @@ and the reserved Ctrl+Shift+Space PTT binding are rejected. OS registration
 conflicts preserve the previous working bindings. Startup failures appear in the
 shortcut settings panel. Windows, macOS and Linux/X11 use the native shortcut
 plugin; Wayland requires disabling the global shortcuts and using the UI controls.
+The browser web client keeps its own focused-tab bindings in Settings → Keyboard
+shortcuts; see [Browser voice](#browser-voice).
 
 The voice bar, global shortcuts and overlay toggle the same native preferences.
 Device/processing saves preserve the current native mute/deafen values, and the

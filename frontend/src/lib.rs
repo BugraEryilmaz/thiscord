@@ -10,6 +10,7 @@ pub mod bot_credentials;
 #[cfg(all(not(target_arch = "wasm32"), feature = "scripting-bot"))]
 #[path = "../../bots/src/lib.rs"]
 pub mod bots;
+pub mod browser_audio;
 pub mod browser_call;
 pub mod chat_history;
 pub mod direct_history;
@@ -28,6 +29,8 @@ pub mod screen;
 pub mod video_bridge;
 pub mod video_feedback;
 pub mod voice_overlay;
+pub mod web_notifications;
+pub mod web_shortcuts;
 
 pub mod audio_quality;
 pub mod sidebar;
