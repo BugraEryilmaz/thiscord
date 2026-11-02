@@ -10,6 +10,9 @@ The public welcome page provides Windows, macOS Apple Silicon and Linux download
 from the latest GitHub client release, with a responsive introduction and an
 illustrative voice room. See [welcome page build and hosting](docs/welcome.md).
 
+The same client also runs in ordinary browsers at `https://thiscord.com.tr/app/`,
+on desktop and phones; see [Web client](#web-client).
+
 English and Turkish are available from the language selector on the login screen
 and **Settings → Language** (also in the browser admin dashboard). The first launch
 uses the first supported system language, falling back to English. The choice is
@@ -92,9 +95,10 @@ permission and hierarchy checks.
 The server header and context menu offer **Copy invite link** to members with
 invite permission: unlimited uses, no expiry, and revocation in **Server settings >
 Invite links**. Settings also offer bounded invites. Invitation pages open or focus
-the installed desktop app, preserve the invitation through sign-in, and offer the
-same installers as the welcome page. A browser may require an explicit **Open
-Thiscord** click. **Channel organization** supports rename/order, categories and
+the installed desktop app or continue in the web client (the primary action on
+phones), preserve the invitation through sign-in, and offer the same installers
+as the welcome page. A browser may require an explicit **Open the Thiscord app**
+click. **Channel organization** supports rename/order, categories and
 channel placement without changing permissions. See [guild permissions and
 workflows](docs/permissions.md). Installed Windows/macOS/Linux link activation
 remains a manual release check.
@@ -337,9 +341,24 @@ cargo tauri dev
 ```
 
 On macOS/Linux, also run `cargo tauri dev` from `frontend/`, with access to the
-backend. For a browser preview, use `trunk serve` and visit
-`http://127.0.0.1:1420`. Browser sessions stay in memory; desktop sessions use the
-OS credential store. Restart an existing backend and desktop process after updating.
+backend. For the web client, use `trunk serve` and visit `http://127.0.0.1:1420`;
+Trunk proxies `/api/` and the sockets to `localhost:3000`, so development is
+same-origin like production (the backend's `ALLOWED_ORIGINS` must include
+`http://127.0.0.1:1420`). Web sessions use an HttpOnly cookie the page cannot read;
+desktop sessions use the OS credential store. Restart an existing backend and
+desktop process after updating.
+
+### Web client
+
+The web build of the same Leptos UI is served at `/app/` (for example
+`https://thiscord.com.tr/app/`). It targets current Chrome, Edge, Firefox and
+Safari on desktop, Android and iOS/iPadOS. It covers sign-in (password and Google),
+servers, channels, direct messages, friends, attachments, search, settings and
+invitations; phones get a one-pane layout with a back button, long-press context
+menus and full-screen settings. Screen sharing, cameras, global shortcuts, the
+in-game overlay, close-to-tray, native notification windows and installable updates
+remain desktop-only; the web client shows **Get the desktop app** in Settings. It
+has no service worker or offline mode. See [web client](docs/web.md#web-client).
 
 Windows normally reaches WSL via `localhost:3000`; if forwarding is unavailable,
 configure WSL networking and `BACKEND_BIND` deliberately. Remote machines need a

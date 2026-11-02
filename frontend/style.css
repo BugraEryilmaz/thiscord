@@ -24,19 +24,21 @@
 .brand-mark { display: block; flex-shrink: 0; background-color: currentColor; mask: url("./brand-assets/thiscord-mark.png") center / contain no-repeat; -webkit-mask: url("./brand-assets/thiscord-mark.png") center / contain no-repeat; }
 
 /* The account ribbon spans the rail and channel list; content keeps its height. */
-.app-shell { --sidebar-width: 248px; --dock-height: 84px; height: 100dvh; }
+.app-shell { --sidebar-width: 248px; --dock-height: 84px; height: 100dvh; padding: env(safe-area-inset-top, 0px) env(safe-area-inset-right, 0px) 0 env(safe-area-inset-left, 0px); }
 .app-shell.in-voice { --dock-height: 186px; }
 .app-shell:has(.user-dock button.bg-red-700) { --dock-height: 218px; }
 .app-main { margin-left: 80px; height: 100%; display: flex; flex-direction: column; min-width: 0; overflow: hidden; }
 .app-main.settings-page { padding: 24px 24px var(--dock-height); gap: 20px; }
-.server-rail { position: fixed; inset: 0 auto var(--dock-height) 0; z-index: 20; width: 80px; display: flex; flex-direction: column; align-items: center; padding: 16px 0 8px; background: var(--color-rail); border-right: 1px solid #ffffff08; }
+.server-rail { position: fixed; inset: 0 auto var(--dock-height) env(safe-area-inset-left, 0px); z-index: 20; width: 80px; display: flex; flex-direction: column; align-items: center; padding: calc(16px + env(safe-area-inset-top, 0px)) 0 8px; background: var(--color-rail); border-right: 1px solid #ffffff08; }
 .server-layout { display: grid; grid-template-columns: var(--sidebar-width) minmax(0, 1fr); height: 100%; min-height: 0; }
 .channel-sidebar { display: flex; flex-direction: column; gap: 18px; min-height: 0; min-width: 0; background: var(--color-sidebar); padding: 20px 12px var(--dock-height); }
-.server-layout > section { border-radius: 0; border-width: 0; }
+.server-content { display: flex; flex-direction: column; min-width: 0; min-height: 0; }
+.server-content > :not(.mobile-back-bar) { flex: 1 1 0; height: auto; min-height: 0; }
+.server-content > section { border-radius: 0; border-width: 0; }
 .guild-button { width: 48px; height: 48px; flex-shrink: 0; border-radius: 18px; background: #30313c; color: #d8d9e0; font-weight: 650; transition: background .12s, border-radius .12s; }
 .guild-button:hover, .guild-button.selected { background: var(--color-brand); color: white; border-radius: 14px; }
 .guild-button.selected { box-shadow: -32px 0 0 -20px white; }
-.user-dock { position: fixed; bottom: 8px; left: 8px; z-index: 30; width: calc(64px + var(--sidebar-width)); border: 1px solid #ffffff08; border-radius: 12px; background: var(--color-dock); box-shadow: 0 4px 16px #0003; }
+.user-dock { position: fixed; bottom: calc(8px + env(safe-area-inset-bottom, 0px)); left: calc(8px + env(safe-area-inset-left, 0px)); z-index: 30; width: calc(64px + var(--sidebar-width)); border: 1px solid #ffffff08; border-radius: 12px; background: var(--color-dock); box-shadow: 0 4px 16px #0003; }
 .voice-dock { padding: 12px; border-bottom: 1px solid #ffffff0c; }
 .connection-dot { position: absolute; right: -1px; bottom: -1px; width: 13px; height: 13px; border: 3px solid var(--color-dock); border-radius: 50%; background: #858894; }
 .connection-dot.connected { background: #53bd84; }
@@ -523,6 +525,9 @@ html:has(.welcome-page) { scroll-behavior: smooth; scroll-padding-top: 28px; bac
 .welcome-hero-actions { margin-top: 33px; }
 .welcome-primary { display: inline-flex; gap: 12px; align-items: center; justify-content: center; background: var(--color-welcome-cobalt); color: white; border-radius: 12px; padding: 16px 22px; font-size: 15px; font-weight: 650; box-shadow: 0 5px 0 #1836ae; }
 .welcome-primary:hover { background: #1b3dc1; }
+.welcome-secondary { display: inline-flex; gap: 10px; align-items: center; justify-content: center; border: 2px solid #2449d84d; color: var(--color-welcome-cobalt); border-radius: 12px; padding: 14px 20px; font-size: 15px; font-weight: 650; background: white; }
+.welcome-secondary:hover { border-color: var(--color-welcome-cobalt); }
+.invite-browser { margin-top: 12px; }
 .welcome-primary .welcome-icon { width: 20px; height: 20px; }
 .welcome-text-link { display: inline-flex; align-items: center; gap: 6px; color: var(--color-welcome-cobalt); font-size: 14px; font-weight: 600; text-decoration: underline; text-underline-offset: 5px; text-decoration-color: #2449d84d; }
 .welcome-text-link:hover { text-decoration-color: currentColor; }
@@ -652,3 +657,48 @@ html:has(.welcome-page) { scroll-behavior: smooth; scroll-padding-top: 28px; bac
   .welcome-message p { font-size: 12px; }
 }
 @media (prefers-reduced-motion: reduce) { html:has(.welcome-page) { scroll-behavior: auto; } }
+
+/* ---- Web client: phones and touch screens ----
+   Phones show navigation (server rail + channel or friends list) or the open
+   conversation, never both. Tablets and desktop windows keep the full layout. */
+@media (min-width: 768px) { .mobile-only { display: none !important; } }
+.mobile-back-bar { display: flex; align-items: center; gap: 8px; flex-shrink: 0; padding: 6px 8px; border-bottom: 1px solid #ffffff0a; color: #b7b9c4; font-size: 14px; font-weight: 600; }
+@media (max-width: 767px) {
+  .app-shell { height: var(--viewport-height, 100dvh); }
+  .server-rail { width: 72px; padding-bottom: 4px; }
+  .server-rail .guild-button, .server-rail .rail-action { width: 44px; height: 44px; }
+  .app-main { margin-left: 72px; }
+  .server-layout { grid-template-columns: minmax(0, 1fr); }
+  .server-content { display: none; }
+  .channel-sidebar { padding: 16px 10px calc(var(--dock-height) + env(safe-area-inset-bottom, 0px)); }
+  .user-dock { right: calc(8px + env(safe-area-inset-right, 0px)); width: auto; }
+  .chat-online { display: none; }
+  .friends-home-header { gap: 8px; padding: 10px 12px; }
+  .friends-home-header > nav { flex-wrap: nowrap; order: 3; width: 100%; overflow-x: auto; scrollbar-width: none; }
+  .friends-home-header > nav > button { flex-shrink: 0; }
+  .app-shell.mobile-content { --dock-height: 0px !important; }
+  .mobile-content .server-rail, .mobile-content .user-dock, .mobile-content .channel-sidebar, .mobile-content .friends-home-header { display: none; }
+  .mobile-content .app-main { margin-left: 0; }
+  .mobile-content .server-content { display: flex; }
+  .server-content footer { padding-bottom: calc(12px + env(safe-area-inset-bottom, 0px)); }
+  .message-body { padding-inline: 4px; gap: 10px; }
+  .settings-dialog { width: 100vw; height: var(--viewport-height, 100dvh); max-height: none; border: 0; border-radius: 0; padding-top: env(safe-area-inset-top, 0px); }
+  .settings-nav { scrollbar-width: none; }
+  .settings-nav-item { min-height: 40px; }
+  .settings-signout { min-height: 32px; }
+  .update-dialog { width: 100vw; height: 100dvh; border-radius: 0; }
+}
+@media (max-width: 767px), (pointer: coarse) {
+  /* iOS zooms into inputs smaller than 16px. */
+  input:not([type="checkbox"]):not([type="radio"]):not([type="range"]), select, textarea { font-size: 16px !important; }
+}
+@media (pointer: coarse) {
+  .icon-button { min-width: 44px; min-height: 44px; }
+  .user-dock .icon-button { min-width: 40px; min-height: 40px; }
+  .context-item, .settings-nav-item, .settings-item-list button { min-height: 44px; }
+  .context-item { padding-block: 12px; font-size: 15px; }
+  .channel-sidebar li > button { min-height: 44px; }
+  .message-reactions button { min-height: 32px; }
+  /* Long presses open menus and hints instead of selecting text. */
+  [data-context-server], [data-context-conversation], [data-context-user], button[data-tip] { -webkit-touch-callout: none; -webkit-user-select: none; user-select: none; }
+}

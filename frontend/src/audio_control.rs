@@ -100,20 +100,24 @@ impl AudioControl {
             .map_err(|_| "This action is available only on the user's computer")?;
         command.validate().map_err(str::to_owned)?;
         let fetch = async {
-            let response = gloo_net::http::Request::post(&format!(
+            let mut request = gloo_net::http::Request::post(&format!(
                 "{}{}",
                 crate::account_client::api_base(),
                 remote_audio::PATH
-            ))
-            .header("Authorization", &format!("Bearer {token}"))
-            .json(&remote_audio::Request {
-                connection_id: remote.connection,
-                command,
-            })
-            .map_err(|_| "Invalid audio request")?
-            .send()
-            .await
-            .map_err(|_| "Cannot reach the desktop. Check that the user is still in voice.")?;
+            ));
+            // The web client's empty token means the session cookie authenticates.
+            if let Some(token) = crate::account_client::bearer(Some(&token)) {
+                request = request.header("Authorization", &format!("Bearer {token}"));
+            }
+            let response = request
+                .json(&remote_audio::Request {
+                    connection_id: remote.connection,
+                    command,
+                })
+                .map_err(|_| "Invalid audio request")?
+                .send()
+                .await
+                .map_err(|_| "Cannot reach the desktop. Check that the user is still in voice.")?;
             if !response.ok() {
                 let status = response.status();
                 let detail = response.json::<ApiError>().await.map(|e| {

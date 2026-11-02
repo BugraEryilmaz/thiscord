@@ -44,10 +44,7 @@ impl Platform {
     // A convenience suggestion only; all architectures remain explicitly labeled.
     // Mac UAs cannot reliably distinguish Intel from Apple Silicon.
     pub fn suggested(user_agent: &str) -> Option<Self> {
-        if ["Android", "iPhone", "iPad", "Mobile"]
-            .iter()
-            .any(|s| user_agent.contains(s))
-        {
+        if mobile(user_agent, 0) {
             None
         } else if user_agent.contains("Windows") {
             Some(Self::Windows)
@@ -59,6 +56,15 @@ impl Platform {
             None
         }
     }
+}
+
+/// Phones and tablets have no installers; the web client is their way in.
+/// iPadOS Safari reports a Mac user agent, but Macs have no touch points.
+pub fn mobile(user_agent: &str, touch_points: i32) -> bool {
+    ["Android", "iPhone", "iPad", "Mobile"]
+        .iter()
+        .any(|s| user_agent.contains(s))
+        || (user_agent.contains("Macintosh") && touch_points > 1)
 }
 
 #[derive(Clone, Debug, Deserialize)]
@@ -225,5 +231,15 @@ mod tests {
             Platform::suggested("X11; Linux x86_64"),
             Some(Platform::Linux)
         );
+    }
+
+    #[test]
+    fn phones_and_tablets_including_desktop_mode_ipads_are_mobile() {
+        assert!(mobile("Linux; Android 14; Pixel 8", 5));
+        assert!(mobile("iPhone; CPU iPhone OS 18_0", 5));
+        assert!(mobile("Macintosh; Intel Mac OS X 10_15_7", 5));
+        assert!(!mobile("Macintosh; Intel Mac OS X 10_15_7", 0));
+        assert!(!mobile("Windows NT 10.0; Win64; x64", 10));
+        assert!(!mobile("X11; Linux x86_64", 0));
     }
 }

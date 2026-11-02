@@ -1413,5 +1413,10 @@
   "Invalid voice request": "Geçersiz ses isteği",
   "Invalid audio request": "Geçersiz ses isteği",
   "Invalid audio response": "Geçersiz ses yanıtı",
-  "Invalid volume": "Geçersiz ses düzeyi"
+  "Invalid volume": "Geçersiz ses düzeyi",
+  "Thiscord web": "Thiscord web",
+  "Loading Thiscord…": "Thiscord yükleniyor…",
+  "Back to channels": "Kanallara dön",
+  "Get the desktop app": "Masaüstü uygulamasını edinin",
+  "The desktop app adds screen sharing, cameras, global shortcuts and the in-game overlay, and installs updates when you choose.": "Masaüstü uygulaması ekran paylaşımı, kamera, genel kısayollar ve oyun içi katman ekler; güncellemeleri de siz seçtiğinizde yükler."
 }

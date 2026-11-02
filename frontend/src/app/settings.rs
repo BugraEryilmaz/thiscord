@@ -154,6 +154,7 @@ pub(super) fn Host(ui: Ui) -> impl IntoView {
                             <NavItem ui=ui page="notifications" label="Notifications" icon=Glyph::Volume/>
                             <NavItem ui=ui page="safety" label="Safety & reports" icon=Glyph::Shield/>
                             <NavItem ui=ui page="administration" label="Instance access" icon=Glyph::Shield/>
+                            <Show when=client::web_app><DesktopAppLink class="settings-nav-item"/></Show>
                         </nav>
                         <button class="settings-signout" disabled=move ||ui.busy.get() || ui.settings_dirty.get() on:click=move |_|super::run(ui,AccountRequest::Logout)><Icon kind=Glyph::Join/>{move || crate::i18n::t("Sign out")}</button>
                     }>
@@ -207,6 +208,13 @@ pub(super) fn Host(ui: Ui) -> impl IntoView {
                 ui.settings_pending.set(None);}>{move || crate::i18n::t("Discard changes")}</button></div>
         </dialog>
     }
+}
+
+/// Web client only: voice, screen sharing, shortcuts and the overlay are
+/// desktop features; the public page at `/` offers the installers.
+#[component]
+pub(super) fn DesktopAppLink(class: &'static str) -> impl IntoView {
+    view! {<a class=class href="/#downloads" target="_blank" rel="noopener noreferrer"><Icon kind=Glyph::Download/><span>{move || crate::i18n::t("Get the desktop app")}</span></a>}
 }
 
 #[component]

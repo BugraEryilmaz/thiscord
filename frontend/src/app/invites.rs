@@ -119,6 +119,40 @@ fn receive(ui: Ui) {
     });
 }
 
+/// The web client receives invitations at `/app/#invite=CODE` (from the
+/// browser invite page). Like the desktop pending slot, the code waits in
+/// memory through sign-in and email verification for the join dialog.
+pub(super) fn receive_fragment(ui: Ui) {
+    if let Some(code) = window()
+        .location()
+        .hash()
+        .ok()
+        .and_then(|hash| thiscord_frontend::invites::fragment_code(&hash))
+    {
+        ui.invites.pending.set(Some(code));
+    }
+}
+
+/// Once the join dialog has the code, drop it from the address bar and history
+/// entry so reloads and shared screenshots do not expose it again.
+pub(super) fn clear_fragment() {
+    let location = window().location();
+    if !location
+        .hash()
+        .is_ok_and(|hash| hash.starts_with("#invite="))
+    {
+        return;
+    }
+    let url = format!(
+        "{}{}",
+        location.pathname().unwrap_or_default(),
+        location.search().unwrap_or_default()
+    );
+    if let Ok(history) = window().history() {
+        let _ = history.replace_state_with_url(&wasm_bindgen::JsValue::NULL, "", Some(&url));
+    }
+}
+
 #[component]
 pub(super) fn Host(ui: Ui) -> impl IntoView {
     let listener = StoredValue::new_local(None::<client::EventListener>);

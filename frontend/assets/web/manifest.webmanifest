@@ -1,0 +1,16 @@
+{
+  "id": "/app/",
+  "name": "Thiscord",
+  "short_name": "Thiscord",
+  "description": "A place for your people. Text chat with your servers and friends.",
+  "start_url": "/app/",
+  "scope": "/app/",
+  "display": "standalone",
+  "orientation": "any",
+  "background_color": "#202127",
+  "theme_color": "#202127",
+  "icons": [
+    { "src": "brand-assets/thiscord-mark.png", "sizes": "128x128", "type": "image/png", "purpose": "monochrome" },
+    { "src": "icon.png", "sizes": "512x512", "type": "image/png", "purpose": "any" }
+  ]
+}

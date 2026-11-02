@@ -48,10 +48,15 @@ extern "C" {
 pub fn desktop() -> bool {
     js_sys::Reflect::has(&js_sys::global(), &JsValue::from_str("__TAURI__")).unwrap_or(false)
 }
+/// Desktop-only integrations. Browsers have no `__TAURI__` global, so web pages
+/// fail closed here instead of calling into a missing namespace.
 pub async fn native<T: serde::de::DeserializeOwned>(
     command: &str,
     args: serde_json::Value,
 ) -> Result<T, String> {
+    if !desktop() {
+        return Err("Available in the desktop app".into());
+    }
     let value = native_invoke(
         command,
         serde_wasm_bindgen::to_value(&args).map_err(|_| "Invalid command")?,
@@ -82,6 +87,9 @@ pub async fn listen<T: serde::de::DeserializeOwned + 'static>(
     name: &str,
     mut callback: impl FnMut(T) + 'static,
 ) -> Result<EventListener, String> {
+    if !desktop() {
+        return Err("Available in the desktop app".into());
+    }
     let callback = Closure::wrap(Box::new(move |event: JsValue| {
         if let Ok(payload) = js_sys::Reflect::get(&event, &JsValue::from_str("payload"))
             && let Ok(value) = serde_wasm_bindgen::from_value(payload)
@@ -112,8 +120,12 @@ pub async fn api_request<T: serde::Serialize, R: serde::de::DeserializeOwned>(
 ) -> Result<R, String> {
     let base = api_base();
     let mut request = Request::post(&format!("{}{path}", base.trim_end_matches('/')));
-    if let Some(token) = token {
+    if let Some(token) = bearer(token) {
         request = request.header("Authorization", &format!("Bearer {token}"));
+    }
+    if path == ACCOUNT_PATH && web_app() {
+        // Sessions issued to this page become an HttpOnly cookie instead of a token.
+        request = request.header(SESSION_MODE_HEADER, SESSION_MODE_COOKIE);
     }
     let response = request
         .json(command)
@@ -133,6 +145,39 @@ pub async fn api_request<T: serde::Serialize, R: serde::de::DeserializeOwned>(
         .await
         .map_err(|_| "Server returned an invalid response".into())
 }
+/// Web client startup: the browser attaches the HttpOnly session cookie, if
+/// any. `Ok(None)` means signed out (401) and is not an error.
+pub async fn restore_cookie_session() -> Result<Option<Account>, String> {
+    let response = Request::post(&format!("{}{ACCOUNT_PATH}", api_base()))
+        .header(SESSION_MODE_HEADER, SESSION_MODE_COOKIE)
+        .json(&AccountRequest::Current)
+        .map_err(|_| "Invalid request")?
+        .send()
+        .await
+        .map_err(|_| "Cannot reach Thiscord. Check your connection")?;
+    if response.status() == 401 {
+        return Ok(None);
+    }
+    if !response.ok() {
+        let error = response
+            .json::<ApiError>()
+            .await
+            .map_err(|_| "Server returned an invalid response")?;
+        return Err(crate::i18n::api_error(&error));
+    }
+    match response.json().await {
+        Ok(AccountResponse::Account { account }) => Ok(Some(account)),
+        _ => Err("Server returned an invalid response".into()),
+    }
+}
+/// The web client's signed-in marker is an empty token: its credential is the
+/// HttpOnly cookie the browser attaches to same-origin requests. Only non-empty
+/// tokens (desktop, admin dashboard) become an `Authorization` header.
+pub fn bearer(token: Option<&str>) -> Option<&str> {
+    token.filter(|token| !token.is_empty())
+}
+/// Session tokens live in the OS credential store on desktop. The web client's
+/// cookie is set and cleared by the server, so there is nothing to persist.
 pub async fn persist(token: Option<&str>) -> Result<(), String> {
     if desktop() {
         if let Some(token) = token {
@@ -147,12 +192,14 @@ pub async fn persist(token: Option<&str>) -> Result<(), String> {
 
 /// Confirm a socket authentication failure with HTTP. Older servers can report
 /// socket rate limits/service failures as Unauthorized; those remain retryable.
+/// An empty token checks the web client's session cookie instead.
 pub async fn session_rejected(token: &str) -> bool {
     let check = async {
-        let Ok(request) = Request::post(&format!("{}{ACCOUNT_PATH}", api_base()))
-            .header("Authorization", &format!("Bearer {token}"))
-            .json(&AccountRequest::Current)
-        else {
+        let mut request = Request::post(&format!("{}{ACCOUNT_PATH}", api_base()));
+        if let Some(token) = bearer(Some(token)) {
+            request = request.header("Authorization", &format!("Bearer {token}"));
+        }
+        let Ok(request) = request.json(&AccountRequest::Current) else {
             return false;
         };
         request
@@ -168,4 +215,13 @@ pub async fn session_rejected(token: &str) -> bool {
         .await,
         futures_util::future::Either::Left((true, _))
     )
+}
+
+/// Opens an external page in a new browser tab without giving it a handle to
+/// this window. With `noopener` browsers return no handle, so callers keep a
+/// visible link for popup blockers.
+pub fn open_tab(url: &str) {
+    if let Some(window) = web_sys::window() {
+        let _ = window.open_with_url_and_target_and_features(url, "_blank", "noopener,noreferrer");
+    }
 }

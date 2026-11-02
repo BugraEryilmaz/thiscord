@@ -1268,6 +1268,7 @@ pub(super) fn ChatPanel(
             <attachments::DownloadHost chat/>
             <header class="shrink-0 border-b border-white/10 p-4">
                 <div class="flex min-w-0 items-center gap-3">
+                    <super::servers::BackButton ui/>
                     <h2 class="min-w-0 flex-1 truncate text-lg font-semibold">{move ||format!("# {}",name.get())}</h2>
                     <OnlineMembers chat/>
                     <super::search::Launcher state=search/>
@@ -1279,7 +1280,7 @@ pub(super) fn ChatPanel(
             <super::search::Results state=search on_jump=Callback::new(move |hit: thiscord_shared::search::Hit| {
                 ui.chat_jump.set(Some((channel, hit.id)));
             })/>
-            <div node_ref=chat.list class="min-h-0 flex-1 overflow-x-hidden overflow-y-auto overscroll-contain p-4" style="overflow-anchor: none" style:display=move ||if search.active.get(){"none"}else{""} on:scroll=move |_|chat.scrolled()>
+            <div node_ref=chat.list class="min-h-0 flex-1 overflow-x-hidden overflow-y-auto overscroll-contain p-4 [overflow-anchor:none]" style:display=move ||if search.active.get(){"none"}else{""} on:scroll=move |_|chat.scrolled()>
                 <div class="h-10">
                     <Show when=move || chat.messages.with(|m| m.older.is_some())>
                         <button class="text-sm text-brand underline" disabled=move || chat.history_loading.get()

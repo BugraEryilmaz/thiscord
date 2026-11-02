@@ -357,7 +357,7 @@ pub(super) fn CameraControls(ui: Ui) -> impl IntoView {
     view! {
         <button class="icon-button" class:active=move ||active.get() disabled=move ||!crate::account_client::desktop() || !super::audio::media_publish_allowed(ui)
             aria-label=move ||if busy.get(){crate::i18n::t("Cancel camera")}else if active.get(){crate::i18n::t("Turn camera off")}else{crate::i18n::t("Turn camera on")}
-            data-tip=move ||if active.get(){crate::i18n::t("Turn camera off")}else{crate::i18n::t("Turn camera on")} aria-pressed=move ||active.get() on:click=toggle>
+            data-tip=move ||if !crate::account_client::desktop(){crate::i18n::t("Available in the desktop app")}else if active.get(){crate::i18n::t("Turn camera off")}else{crate::i18n::t("Turn camera on")} aria-pressed=move ||active.get() on:click=toggle>
             {move ||view!{<super::icons::Icon kind=if active.get(){super::icons::Glyph::Camera}else{super::icons::Glyph::CameraOff}/>}}
         </button>
         <Show when=move ||!error.get().is_empty()><span class="max-w-64 text-xs text-red-300" role="alert">{move ||crate::i18n::message(error.get())}</span></Show>

@@ -133,7 +133,8 @@ Outgoing ringing and unjoined calls retain their cancel/join controls. Acceptanc
 and automatic joining apply to the device that explicitly started/accepted the
 call; other devices may explicitly join. The existing mute, deafen, devices and
 hang-up controls apply.
-Voice requires the desktop app; browser preview supports friends and messaging.
+The `/app` web client supports friends, messaging and call audio through the browser's
+WebRTC (see [browser voice](audio.md#browser-voice)); screen sharing and cameras need the desktop app.
 Calls use the existing server-terminated WebRTC encryption and STUN/TURN requirements
 from [audio.md](audio.md), and are not end-to-end encrypted between accounts.
 
