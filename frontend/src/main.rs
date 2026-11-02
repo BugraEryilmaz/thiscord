@@ -16,6 +16,8 @@ mod notification_banner;
 mod overlay;
 #[cfg(all(target_arch = "wasm32", not(feature = "welcome")))]
 mod performance;
+#[cfg(all(target_arch = "wasm32", not(feature = "welcome")))]
+mod theme;
 #[cfg(all(target_arch = "wasm32", feature = "welcome"))]
 mod welcome;
 
@@ -33,6 +35,7 @@ fn main() {
     {
         leptos::mount::mount_to_body(|| {
             i18n::initialize();
+            theme::initialize();
             overlay::VoiceOverlay()
         });
     } else if web_sys::window()
@@ -40,11 +43,13 @@ fn main() {
     {
         leptos::mount::mount_to_body(|| {
             i18n::initialize();
+            theme::initialize();
             notification_banner::DesktopBanners()
         });
     } else {
         leptos::mount::mount_to_body(|| {
             i18n::initialize();
+            theme::initialize();
             app::App()
         });
         // mount_to_body initializes Leptos's local task executor.
