@@ -8,14 +8,36 @@ pub fn admin_page() -> bool {
             .and_then(|w| w.location().pathname().ok())
             .is_some_and(|p| p == "/admin" || p.starts_with("/admin/"))
 }
+/// The browser web client (served at `/app`, or by `trunk serve` with its API
+/// proxy). It is same-origin with the API and authenticates with an HttpOnly
+/// session cookie, so it never holds a readable session token.
+pub fn web_app() -> bool {
+    !desktop() && !admin_page()
+}
+/// Empty for same-origin browser pages (web client and admin dashboard); the
+/// desktop uses the compile-time `THISCORD_API_URL`.
 pub fn api_base() -> &'static str {
-    if admin_page() {
-        ""
-    } else {
+    if desktop() {
         option_env!("THISCORD_API_URL")
             .unwrap_or("http://localhost:3000")
             .trim_end_matches('/')
+    } else {
+        ""
     }
+}
+/// Absolute HTTP(S) origin of the API, for links shown to users.
+pub fn public_base() -> String {
+    if api_base().is_empty() {
+        web_sys::window()
+            .and_then(|w| w.location().origin().ok())
+            .unwrap_or_default()
+    } else {
+        api_base().to_owned()
+    }
+}
+/// WS(S) origin of the API for socket URLs.
+pub fn socket_base() -> String {
+    public_base().replacen("http", "ws", 1)
 }
 
 #[wasm_bindgen]

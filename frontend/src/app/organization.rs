@@ -82,11 +82,7 @@ impl Panel {
             if !self.loaded.is_disposed() {
                 match result {
                     Ok(PermissionResponse::InviteCreated { code, .. }) => {
-                        let base = if crate::account_client::api_base().is_empty() {
-                            window().location().origin().unwrap_or_default()
-                        } else {
-                            crate::account_client::api_base().to_owned()
-                        };
+                        let base = crate::account_client::public_base();
                         self.link.set(format!("{base}/invite#{code}"));
                         self.message.set(
                             "Invite created. Copy this link now; the code is shown only once."

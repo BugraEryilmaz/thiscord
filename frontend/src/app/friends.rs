@@ -229,9 +229,7 @@ fn join_call(ui: Ui, call: Call) {
     );
 }
 async fn connected(ui: Ui, token: &str) -> Result<(), ()> {
-    let base = account_client::api_base()
-        .trim_end_matches('/')
-        .replacen("http", "ws", 1);
+    let base = account_client::socket_base();
     let (mut sink, mut stream) = WebSocket::open(&format!("{base}{FRIENDS_SOCKET_PATH}"))
         .map_err(|_| ())?
         .split();

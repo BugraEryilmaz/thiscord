@@ -597,10 +597,8 @@ pub(super) fn ChatHost(ui: Ui) -> impl IntoView {
 
 async fn connected(ui: Ui, token: &str) -> Result<(), String> {
     use std::{cell::Cell, rc::Rc};
-    let base = option_env!("THISCORD_API_URL")
-        .unwrap_or("http://localhost:3000")
-        .trim_end_matches('/');
-    let socket = WebSocket::open(&format!("{}{SOCKET_PATH}", base.replacen("http", "ws", 1)))
+    let base = crate::account_client::socket_base();
+    let socket = WebSocket::open(&format!("{base}{SOCKET_PATH}"))
         .map_err(|_| crate::i18n::t("Cannot open chat connection"))?;
     let (mut sink, mut stream) = socket.split();
     sink.send(Message::Text(

@@ -518,9 +518,7 @@ async fn connected(
     token: &str,
     seen: &mut std::collections::VecDeque<String>,
 ) -> Result<(), ()> {
-    let base = client::api_base()
-        .trim_end_matches('/')
-        .replacen("http", "ws", 1);
+    let base = client::socket_base();
     let (mut sink, mut stream) = WebSocket::open(&format!("{base}{SOCKET_PATH}"))
         .map_err(|_| ())?
         .split();

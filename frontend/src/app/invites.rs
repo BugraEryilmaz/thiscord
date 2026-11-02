@@ -25,11 +25,7 @@ impl State {
 }
 
 pub(super) fn base() -> String {
-    if client::api_base().is_empty() {
-        window().location().origin().unwrap_or_default()
-    } else {
-        client::api_base().to_owned()
-    }
+    client::public_base()
 }
 
 async fn link(ui: Ui, guild_id: GuildId) -> Result<String, String> {
