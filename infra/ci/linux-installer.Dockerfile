@@ -6,6 +6,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     ca-certificates curl git build-essential pkg-config cmake file xz-utils \
     libwebkit2gtk-4.1-dev libssl-dev libdbus-1-dev libxdo-dev \
     libayatana-appindicator3-dev librsvg2-dev patchelf libasound2-dev libfuse2t64 \
+    libgstreamer1.0-dev libgstreamer-plugins-base1.0-dev libpipewire-0.3-dev libclang-dev \
     && curl -fsSL https://packages.microsoft.com/config/ubuntu/24.04/packages-microsoft-prod.deb -o /tmp/microsoft.deb \
     && dpkg -i /tmp/microsoft.deb && rm /tmp/microsoft.deb \
     && apt-get update && apt-get install -y --no-install-recommends powershell \
