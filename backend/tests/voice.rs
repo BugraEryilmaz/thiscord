@@ -13,6 +13,8 @@ use tower::ServiceExt;
 use uuid::Uuid;
 #[path = "voice/bots.rs"]
 mod bots;
+#[path = "voice/browser.rs"]
+mod browser;
 #[path = "voice/friends.rs"]
 mod friends;
 #[path = "voice/layers.rs"]
@@ -266,6 +268,7 @@ struct Peer {
     resume_token: String,
     pc: Arc<dyn PeerConnection>,
     track: Arc<TrackLocalStaticRTP>,
+    microphone_ssrc: u32,
     packets: mpsc::Receiver<rtp::Packet>,
     slot: usize,
     sequence: u16,
@@ -299,11 +302,34 @@ impl Peer {
         Self::with_options(socket, 64, false, false, true).await
     }
     async fn with_options(
+        socket: Socket,
+        capacity: usize,
+        packet_redundancy: bool,
+        screen_layers: bool,
+        soundboard: bool,
+    ) -> Self {
+        Self::with_publisher(
+            socket,
+            capacity,
+            packet_redundancy,
+            screen_layers,
+            soundboard,
+            900,
+            false,
+        )
+        .await
+    }
+    /// A desktop publisher uses fixed SSRC 900 plus screen tracks. Any other
+    /// microphone SSRC models a browser: it adds only one H.264 video track
+    /// (when flagged as a browser publisher) and cannot choose its SSRCs.
+    async fn with_publisher(
         mut socket: Socket,
         capacity: usize,
         packet_redundancy: bool,
         screen_layers: bool,
         soundboard: bool,
+        microphone_ssrc: u32,
+        browser_publisher: bool,
     ) -> Self {
         let ServerEvent::Offer {
             sdp,
@@ -366,7 +392,7 @@ impl Peer {
             RtpCodecKind::Audio,
             vec![RTCRtpEncodingParameters {
                 rtp_coding_parameters: RTCRtpCodingParameters {
-                    ssrc: Some(900),
+                    ssrc: Some(microphone_ssrc),
                     ..Default::default()
                 },
                 codec: RTCRtpCodec {
@@ -414,7 +440,12 @@ impl Peer {
                 }],
             )))
         });
-        for track in &screen_tracks {
+        let desktop = microphone_ssrc == 900;
+        for track in screen_tracks.iter().take(if desktop {
+            3
+        } else {
+            usize::from(browser_publisher)
+        }) {
             pc.add_track(track.clone() as Arc<dyn TrackLocal>)
                 .await
                 .unwrap();
@@ -460,7 +491,7 @@ impl Peer {
         send(
             &mut socket,
             ClientEvent::Answer {
-                browser_publisher: false,
+                browser_publisher,
                 packet_redundancy,
                 remote_audio: true,
                 screen_feedback: true,
@@ -499,6 +530,7 @@ impl Peer {
             resume_token: resume_token.expect("resume capability"),
             pc,
             track,
+            microphone_ssrc,
             packets: rx,
             slot,
             sequence: 0,
@@ -518,7 +550,7 @@ impl Peer {
                 header: rtp::header::Header {
                     version: 2,
                     payload_type: 111,
-                    ssrc: 900,
+                    ssrc: self.microphone_ssrc,
                     csrc: self
                         .microphone_generation
                         .map(|g| vec![(g >> 32) as u32, g as u32])

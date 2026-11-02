@@ -142,11 +142,13 @@ async fn upgrade(
     else {
         return Failure::Limited.response(id);
     };
+    // Web client: cookie-derived bearer, used only when the frame token is empty.
+    let upgrade_token = auth::bearer(&headers);
     ws.max_message_size(16 * 1024)
         .max_frame_size(16 * 1024)
         .on_upgrade(move |socket| async move {
             let _permit = permit;
-            serve(socket, pool).await
+            serve(socket, pool, upgrade_token).await
         })
 }
 fn frame(message: Message) -> Option<ClientEvent> {
@@ -170,7 +172,7 @@ async fn send(socket: &mut WebSocket, event: ServerEvent) -> Result<(), ()> {
     .map_err(|_| ())?
     .map_err(|_| ())
 }
-async fn serve(mut socket: WebSocket, pool: DbPool) {
+async fn serve(mut socket: WebSocket, pool: DbPool, upgrade_token: String) {
     let Ok(Some(Ok(message))) = tokio::time::timeout(Duration::from_secs(5), socket.recv()).await
     else {
         return;
@@ -178,6 +180,7 @@ async fn serve(mut socket: WebSocket, pool: DbPool) {
     let Some(ClientEvent::Connect { token }) = frame(message) else {
         return;
     };
+    let token = auth::socket_token(token, &upgrade_token);
     let p = pool.clone();
     let t = token.clone();
     let Ok(Ok(session)) = crate::performance::blocking(move || {

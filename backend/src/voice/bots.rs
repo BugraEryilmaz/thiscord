@@ -294,7 +294,7 @@ async fn add(
         let connection_id = RequestId::from_uuid(uuid::Uuid::new_v4());
         bot.lock().unwrap().connection_id = Some(connection_id);
         let (socket, tx, rx) = logging::Socket::internal(connection_id, context);
-        let server = serve(socket, pool, connection_id);
+        let server = serve(socket, pool, connection_id, String::new());
         let client = peer::run(
             tx,
             rx,

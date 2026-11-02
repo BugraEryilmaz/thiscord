@@ -1248,6 +1248,30 @@ This is transport encryption between client and SFU, **not end-to-end encryption
 the SFU terminates DTLS-SRTP and can access encoded Opus. Do not log SDP, tokens,
 TURN credentials or packet contents.
 
+### Browser voice
+
+Browsers cannot choose RTP SSRCs, so the fixed publisher SSRCs above do not apply
+to them. A browser sends `browser_publisher: true` in its Answer. The server records
+this before applying the remote description, then classifies that peer's tracks by
+codec: exactly one 48 kHz `audio/opus` track with any SSRC becomes its microphone
+(a second audio track ends the connection, like a desktop duplicate). Incoming
+browser video is left unread and never forwarded; screen, camera and system audio
+publishing are not supported from browsers. Browser publishers never use RED or
+the microphone-boundary protocol: the server forces `packet_redundancy` off, rejects
+an `audio/red` microphone track, and forwards plain Opus with payload type 111.
+Clients must therefore select Opus only for the sending transceiver (for example
+with `setCodecPreferences`). Plain-Opus publishers need no `MicrophoneBoundary`;
+mute, Speak, rate and size limits are enforced as for desktop.
+
+All offered m-lines are `sendrecv` (`add_track`), so a browser can send on the
+microphone m-line of its own slot and set the others to `recvonly` or `inactive`.
+Forwarded packets carry the receiver-facing relay SSRC for the publisher's slot
+and reach both RED and non-RED receivers. Without the flag, an unknown SSRC
+still ends the connection. Signaling may authenticate with the web client's
+HttpOnly cookie instead of a Join/Resume token; see [web.md](web.md).
+`backend/tests/voice/browser.rs` covers a random-SSRC browser publisher reaching
+RED and non-RED receivers, an ignored video track and rejection without the flag.
+
 ## WSL and public networking
 
 HTTP localhost forwarding alone does not forward WebRTC UDP. The backend chooses

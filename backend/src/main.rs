@@ -94,6 +94,21 @@ async fn main() -> Result<(), BoxError> {
     if configured.is_some() || directory.is_dir() {
         app = app.merge(thiscord_backend::welcome::router(&directory)?);
     }
+    let configured = env::var_os("APP_DIST_DIR");
+    let directory = configured.clone().map(std::path::PathBuf::from).unwrap_or(
+        env::current_exe()?
+            .parent()
+            .ok_or("Missing executable directory")?
+            .join("app"),
+    );
+    if configured.is_some() || directory.is_dir() {
+        let public =
+            env::var("PUBLIC_BACKEND_URL").unwrap_or_else(|_| "http://localhost:3000".into());
+        app = app.merge(thiscord_backend::web_app::router(
+            &directory,
+            public.trim(),
+        )?);
+    }
     let listener = tokio::net::TcpListener::bind(bind).await?;
     let address = listener.local_addr()?;
     if let Some(tls) = tls {

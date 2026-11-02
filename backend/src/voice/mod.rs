@@ -322,12 +322,14 @@ async fn upgrade(
     let Ok(permit) = limit.try_acquire_owned() else {
         return Failure::Limited.response(id);
     };
+    // Web client: cookie-derived bearer, used only when the frame token is empty.
+    let upgrade_token = crate::auth::bearer(&headers);
     ws.max_message_size(128 * 1024)
         .max_frame_size(128 * 1024)
         .on_upgrade(move |socket| async move {
             let mut socket = logging::Socket::new(socket, id);
             socket.permit = Some(permit);
-            serve(socket, pool, id).await
+            serve(socket, pool, id, upgrade_token).await
         })
         .into_response()
 }
@@ -412,6 +414,9 @@ struct Handler {
     generation: Arc<AtomicU64>,
     track_seen: [AtomicBool; 5],
     screen_rate: Arc<std::sync::Mutex<layers::IngressBudget>>,
+    /// Set from the Answer before the remote description is applied. Browsers
+    /// cannot choose RTP SSRCs, so their tracks are identified by codec instead.
+    browser_publisher: Arc<AtomicBool>,
 }
 #[async_trait::async_trait]
 impl PeerConnectionEventHandler for Handler {
@@ -437,8 +442,20 @@ impl PeerConnectionEventHandler for Handler {
         let Some(codec) = track.codec(ssrc).await else {
             return;
         };
-        let low_layer = ssrc == thiscord_shared::screen::LOW_LAYER_SSRC;
-        let Some(kind) = (if low_layer {
+        let browser = self.browser_publisher.load(Ordering::Acquire);
+        if browser && codec.mime_type.to_ascii_lowercase().starts_with("video/") {
+            // Browser publishers send only their microphone. Leave unexpected
+            // video unread (its bounded receive queue drops) instead of ending
+            // the call; it is never forwarded.
+            tracing::info!(request_id = %self.request_id, "ignored browser publisher video track");
+            return;
+        }
+        let low_layer = !browser && ssrc == thiscord_shared::screen::LOW_LAYER_SSRC;
+        let Some(kind) = (if browser {
+            // Any SSRC; the codec check below admits only 48 kHz Opus, and
+            // `track_seen` admits only one microphone track per connection.
+            Some(MediaKind::Microphone)
+        } else if low_layer {
             Some(MediaKind::ScreenVideo)
         } else {
             MediaKind::from_publisher_ssrc(ssrc)
@@ -453,6 +470,7 @@ impl PeerConnectionEventHandler for Handler {
         };
         if !(codec.mime_type.eq_ignore_ascii_case(mime)
             || (kind == MediaKind::Microphone
+                && !browser
                 && codec
                     .mime_type
                     .eq_ignore_ascii_case(thiscord_shared::rtp_red::MIME)))
@@ -928,7 +946,7 @@ async fn log_selected_route(pc: &dyn PeerConnection, id: RequestId) -> bool {
     }
     false
 }
-async fn serve(mut socket: logging::Socket, pool: DbPool, id: RequestId) {
+async fn serve(mut socket: logging::Socket, pool: DbPool, id: RequestId, upgrade_token: String) {
     let bot = socket.bot.clone();
     let Ok(Some(Ok(first))) = tokio::time::timeout(Duration::from_secs(5), socket.recv()).await
     else {
@@ -947,7 +965,7 @@ async fn serve(mut socket: logging::Socket, pool: DbPool, id: RequestId) {
         resumption::attach(
             socket,
             &pool,
-            token,
+            crate::auth::socket_token(token, &upgrade_token),
             guild_id,
             channel_id,
             resume_token,
@@ -971,6 +989,7 @@ async fn serve(mut socket: logging::Socket, pool: DbPool, id: RequestId) {
         .await;
         return;
     };
+    let token = crate::auth::socket_token(token, &upgrade_token);
     socket.stage = "authorize";
     let connection_access = match access::identify(&pool, &token, Some(guild_id)).await {
         Ok((identity, access)) => match &bot {
@@ -1108,6 +1127,7 @@ async fn serve(mut socket: logging::Socket, pool: DbPool, id: RequestId) {
         }
     };
     let gathered = Arc::new(Notify::new());
+    let browser_publisher = Arc::new(AtomicBool::new(false));
     let (in_tx, mut in_rx) = mpsc::channel::<Ingress>(8);
     let (media_in_tx, mut media_in_rx) = mpsc::channel::<Ingress>(4096);
     let mut engine = MediaEngine::default();
@@ -1148,6 +1168,7 @@ async fn serve(mut socket: logging::Socket, pool: DbPool, id: RequestId) {
             generation: generation.clone(),
             track_seen: std::array::from_fn(|_| AtomicBool::new(false)),
             screen_rate: Default::default(),
+            browser_publisher: browser_publisher.clone(),
         }))
         .with_udp_addrs(vec![local_bind().unwrap_or_else(|_| "127.0.0.1:0".into())])
         .build()
@@ -1233,7 +1254,7 @@ async fn serve(mut socket: logging::Socket, pool: DbPool, id: RequestId) {
             };
             tracing::info!(request_id = %id, elapsed_ms = negotiation_started.elapsed().as_millis(), "voice answer received");
             let Some(ClientEvent::Answer {
-                browser_publisher: _,
+                browser_publisher: browser,
                 sdp,
                 screen_feedback: enabled,
                 screen_subscriptions,
@@ -1248,8 +1269,13 @@ async fn serve(mut socket: logging::Socket, pool: DbPool, id: RequestId) {
                 return Err(());
             };
             let answer: RTCSessionDescription = serde_json::from_str(&sdp).map_err(|_| ())?;
-            let packet_redundancy =
-                packet_redundancy && thiscord_shared::rtp_red::negotiated(&answer.sdp);
+            // Browser publishers send plain Opus only; their RED (if any) does
+            // not follow the authenticated sender-generation protocol.
+            let packet_redundancy = packet_redundancy
+                && !browser
+                && thiscord_shared::rtp_red::negotiated(&answer.sdp);
+            // Tracks open only after the remote description; classify first.
+            browser_publisher.store(browser, Ordering::Release);
             screen_feedback = enabled;
             remote_audio = audio_enabled;
             video_diagnostics = video_enabled;
@@ -1272,7 +1298,7 @@ async fn serve(mut socket: logging::Socket, pool: DbPool, id: RequestId) {
                 member.screen_layers = screen_layers && screen_subscriptions && enabled;
                 member.screen_profiles = screen_profiles && screen_subscriptions;
                 member.negotiated = true;
-                tracing::info!(request_id = %id, slot, packet_redundancy,
+                tracing::info!(request_id = %id, slot, packet_redundancy, browser_publisher = browser,
                     microphone_source_epoch = member.info.microphone_source_epoch,
                     "voice source negotiated");
                 room.changed.send_replace(());
