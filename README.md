@@ -28,7 +28,7 @@ stable wire error code in Turkish and retain the request ID. External provider
 pages, account emails/recovery web pages, and native OS/tray text remain English.
 
 The home screen includes friends, online presence, friend requests, private text
-conversations and one-to-one desktop voice calls. Use **Add friend** in the top
+conversations and one-to-one voice calls (desktop app or browser). Use **Add friend** in the top
 right to search by part of a display name or username. See [friends and private conversations](docs/friends.md)
 for behavior, access rules and current limitations. Private conversations include
 revision-checked editing/deletion, typing and private file/image/video attachments.
@@ -113,6 +113,10 @@ full-window viewer; videos have a play overlay and playback controls. Files and 
 download buttons save attachments. Each message supports four files of up to 25 MiB
 each. See [chat protocol and limits](docs/chat.md). Desktop voice channels
 use native Rust audio, independent speaker volume controls and a Rust WebRTC SFU.
+The browser web client joins the same voice channels and private calls with the
+browser's own microphone processing and WebRTC (HTTPS required for the microphone);
+screen sharing, cameras, the soundboard and advanced audio processing remain
+desktop-only. See [browser voice](docs/audio.md#browser-voice).
 Open **Settings > Voice & audio** to select devices and test audio, then join a
 voice channel. Calls adapt to weak connections by default: congestion lowers the
 microphone bitrate, packet loss adds Opus deep redundancy, and incoming voices use

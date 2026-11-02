@@ -214,6 +214,30 @@ mod tests {
         for file in ["app.rs", "i18n.rs", "overlay.rs", "notification_banner.rs"] {
             check_file(&root.join(file));
         }
+        // Final browser-voice failures reach the status notice untranslated.
+        for file in [
+            "browser_voice.rs",
+            "browser_voice/call.rs",
+            "browser_voice/media.rs",
+            "browser_voice/socket.rs",
+        ] {
+            let source = fs::read_to_string(root.join(file)).unwrap();
+            for marker in ["Failure::final_(", "leave(", "Err(DESKTOP_ONLY"] {
+                for rest in source.split(marker).skip(1) {
+                    if let Some('"') = rest.trim_start().chars().next() {
+                        let key = serde_json::Deserializer::from_str(rest.trim_start())
+                            .into_iter::<String>()
+                            .next()
+                            .unwrap()
+                            .unwrap();
+                        assert!(
+                            CATALOG.iter().any(|(en, _)| *en == key),
+                            "missing translation in {file}: {key}"
+                        );
+                    }
+                }
+            }
+        }
         for file in fs::read_dir(root.join("app")).unwrap() {
             let path = file.unwrap().path();
             if path.extension().is_some_and(|ext| ext == "rs") {
@@ -238,11 +262,27 @@ mod tests {
                     .iter()
                     .map(|(label, _)| *label),
             )
-            .chain(["Turn off"])
+            .chain(["Turn off", "Available in the desktop app"])
+            .chain(
+                crate::browser_call::MicrophoneProblem::ALL
+                    .map(crate::browser_call::MicrophoneProblem::notice),
+            )
         {
             assert!(
                 CATALOG.iter().any(|(en, _)| *en == label),
                 "missing shared label: {label}"
+            );
+        }
+        for failure in [
+            crate::browser_call::Failure::replaced(),
+            crate::browser_call::Failure::revoked(),
+            crate::browser_call::Failure::resume_unavailable(),
+            crate::browser_call::Failure::closed(1008),
+        ] {
+            assert!(
+                CATALOG.iter().any(|(en, _)| *en == failure.message),
+                "missing browser voice failure: {}",
+                failure.message
             );
         }
     }
