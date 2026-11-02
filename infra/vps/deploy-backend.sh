@@ -62,6 +62,8 @@ if grep -q 'not found' "$source_dir/voice-bot-libraries.txt"; then
     echo 'Voice-bot companion has missing runtime libraries; deployment aborted.' >&2
     exit 1
 fi
+# Serialize Binaryen like CI: multithreaded Linux wasm-opt can crash on large bundles.
+export BINARYEN_CORES=1
 (cd frontend && trunk build --release --locked --public-url /admin/ --dist dist-admin)
 [[ -s frontend/dist-admin/index.html ]] || { echo 'Admin bundle is missing; refusing to activate an API-only release.' >&2; exit 1; }
 (cd frontend && trunk build --release --locked --public-url /app/ --dist dist-app)
