@@ -1512,7 +1512,7 @@
   "Errors, deletions, Do Not Disturb and unread markers.": "Hatalar, silmeler, Rahatsız Etmeyin ve okunmamış işaretleri.",
   "Fine-tune every color. Type a hex code or pick a color; the reset button returns a color to the theme's default.": "Her rengi ince ayarla. Bir hex kodu yaz ya da renk seç; sıfırlama düğmesi rengi temanın varsayılanına döndürür.",
   "Hard to read": "Okuması zor",
-  "Labels, hints, timestamps and icons.": "Etiketler, ipuçları, zaman damgaları ve simgeler.",
+  "Labels, hints and icons. Faded timestamps follow Text.": "Etiketler, ipuçları ve simgeler. Soluk zaman damgaları Metin rengini izler.",
   "Light surfaces with dark text.": "Koyu metinli açık yüzeyler.",
   "Links": "Bağlantılar",
   "Links and replies in messages.": "Mesajlardaki bağlantılar ve yanıtlar.",

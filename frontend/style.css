@@ -489,7 +489,8 @@ button.stream-live-badge:hover { background: color-mix(in srgb, var(--color-dang
 .stream-choice svg { width: 16px; height: 16px; }
 .stream-prompt { padding: 60px 16px; color: color-mix(in srgb, var(--color-muted) 80%, transparent); text-align: center; font-size: 13px; }
 .stream-view { display: flex; flex-direction: column; overflow: hidden; min-width: 0; border: 1px solid var(--tint-6); border-radius: 12px; background: var(--color-rail); }
-.stream-view.expanded { position: fixed; inset: 0; z-index: 60; border: 0; border-radius: 0; background: #090a0e; overflow-y: auto; }
+/* Near-black on dark themes; light themes soften --color-black so the title stays readable. */
+.stream-view.expanded { position: fixed; inset: 0; z-index: 60; border: 0; border-radius: 0; background: color-mix(in srgb, var(--color-rail) 50%, var(--color-black)); overflow-y: auto; }
 .stream-toolbar { display: flex; align-items: center; justify-content: space-between; flex-shrink: 0; gap: 12px; padding: 8px 12px; }
 .stream-title { display: flex; align-items: center; gap: 9px; min-width: 0; font-size: 12px; color: color-mix(in srgb, var(--color-content) 55%, var(--color-muted)); overflow-wrap: anywhere; }
 .stream-title > svg { width: 17px; height: 17px; color: color-mix(in srgb, var(--color-muted) 75%, transparent); }
@@ -577,7 +578,7 @@ button.stream-live-badge:hover { background: color-mix(in srgb, var(--color-dang
 .media-tile .stream-player { position: absolute; inset: 0; min-height: 0; }
 .media-tile .stream-player video { width: 100%; height: 100%; max-height: none; aspect-ratio: auto; object-fit: contain; }
 .media-tile .stream-placeholder { height: 100%; min-height: 0; }
-.media-tile:fullscreen { width: 100%; height: 100%; border: 0; background: #08090c; }
+.media-tile:fullscreen { width: 100%; height: 100%; border: 0; background: color-mix(in srgb, var(--color-rail) 50%, var(--color-black)); }
 .media-tile:fullscreen .stream-player, .media-tile.expanded .stream-player { height: 100%; }
 .media-tile:fullscreen video, .media-tile.expanded video { height: 100%; max-height: calc(100dvh - 52px); }
 .media-item-menu { position: absolute; right: 8px; top: 44px; z-index: 70; width: min(300px, calc(100% - 16px)); padding: 12px; border: 1px solid var(--tint-13); border-radius: 12px; background: var(--color-panel); box-shadow: 0 12px 32px #0008; }

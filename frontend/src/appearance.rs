@@ -179,7 +179,7 @@ impl Token {
             Self::Popover => "Menus, pickers and tooltips.",
             Self::Raised => "Server buttons and rail actions.",
             Self::Text => "Messages, names and headings. Hover and border tints follow it.",
-            Self::Muted => "Labels, hints, timestamps and icons.",
+            Self::Muted => "Labels, hints and icons. Faded timestamps follow Text.",
             Self::Accent => "Buttons, selections, mentions and focus outlines.",
             Self::Link => "Links and replies in messages.",
             Self::Speaking => "Rings around people who are talking.",
