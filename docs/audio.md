@@ -66,8 +66,9 @@ Signaling and negotiation:
 
 Controls: mute and push-to-talk disable the microphone track; deafen also mutes
 every element. Server mute/deafen from the roster override self controls. Voice
-activation uses an `AnalyserNode` peak with the saved threshold and a 500 ms hold;
-it fails open (transmits while unmuted) when the tab is hidden, because timers run
+activation uses an `AnalyserNode` peak with the saved threshold and a 500 ms hold.
+The meter reads a clone of the microphone track: a disabled track feeds silence
+to WebAudio, so metering the sent track would never reopen a closed gate. It fails open (transmits while unmuted) when the tab is hidden, because timers run
 about once per second there, or when the AudioContext is not running. Push-to-talk
 works from the voice-bar hold button and Ctrl+Shift+Space while the page has focus;
 there is no global shortcut. Remote speaking rings use `getStats` inbound-rtp
@@ -97,6 +98,9 @@ Browser requirements and limits:
 - Joining from a click primes playback elements and the AudioContext inside the
   gesture (iOS Safari). Active capture also lifts autoplay limits. If a browser
   still refuses playback, the voice bar shows **Tap to enable call audio**.
+- On phones, an open channel or conversation hides the account dock; during a
+  call a compact dock (call status, disconnect, audio settings, push-to-talk,
+  mute, deafen) stays visible above the content.
 - A hidden tab keeps its call. Returning to the tab replays suspended elements;
   mobile browsers may still suspend background tabs.
 - The app CSP allows no blob workers or worklets; none are used. `srcObject`

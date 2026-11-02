@@ -419,13 +419,13 @@ pub(super) fn VoiceBar(ui: Ui) -> impl IntoView {
             </button>
         </Show>
         </div></Show>
-        <div class="flex min-w-0 items-center gap-2 p-2">
-            <button class="flex min-w-0 flex-1 items-center gap-2 rounded-lg p-1 text-left hover:bg-white/5" aria-label=move || crate::i18n::t("Your profile") data-tip=move ||ui.account.get().map(|a|format!("{} (@{})",a.display_name,a.username)).unwrap_or_default() on:click=move |_|ui.page.set("profile")>
+        <div class="dock-account flex min-w-0 items-center gap-2 p-2">
+            <button class="dock-profile flex min-w-0 flex-1 items-center gap-2 rounded-lg p-1 text-left hover:bg-white/5" aria-label=move || crate::i18n::t("Your profile") data-tip=move ||ui.account.get().map(|a|format!("{} (@{})",a.display_name,a.username)).unwrap_or_default() on:click=move |_|ui.page.set("profile")>
                 <span class="relative shrink-0"><crate::avatar::Avatar name=Signal::derive(move ||ui.account.get().map(|a|a.display_name).unwrap_or_default()) avatar_id=Signal::derive(move ||ui.account.get().and_then(|a|a.avatar_id))/><span class="connection-dot" class:dnd=move ||super::notifications::do_not_disturb(ui) class:connected=move ||ui.socket_status.get()==super::chat::ConnectionStatus::Connected class:connecting=move ||matches!(ui.socket_status.get(),super::chat::ConnectionStatus::Connecting|super::chat::ConnectionStatus::Reconnecting)></span></span>
                 <span class="min-w-0"><span class="block truncate text-sm font-semibold">{move ||ui.account.get().map(|a|if a.display_name.is_empty(){a.username}else{a.display_name})}</span><span class="block truncate text-xs text-white/55" role="status">{move ||if ui.socket_status.get()==super::chat::ConnectionStatus::Connected && super::notifications::do_not_disturb(ui) {crate::i18n::t("Do not disturb")} else {ui.socket_status.get().label()}}</span></span>
             </button>
             <VoiceControls ui=ui/>
-            <button class="icon-button shrink-0" aria-label=move || crate::i18n::t("Settings") data-tip=move || crate::i18n::t("Settings") on:click=move |_|ui.page.set("profile")><Icon kind=Glyph::Settings/></button>
+            <button class="dock-settings icon-button shrink-0" aria-label=move || crate::i18n::t("Settings") data-tip=move || crate::i18n::t("Settings") on:click=move |_|ui.page.set("profile")><Icon kind=Glyph::Settings/></button>
         </div>
     </aside>}
 }
@@ -440,7 +440,7 @@ fn BrowserVoiceNotice() -> impl IntoView {
         <Show when=move ||!crate::browser_voice::notice().is_empty()>
             <p class="browser-voice-notice mt-2 text-xs text-amber-200" role="status">{move || crate::i18n::message(crate::browser_voice::notice())}</p>
         </Show>
-        <p class="mt-1 text-xs text-white/45">{move || crate::i18n::t("Screen sharing, cameras and the soundboard are available in the desktop app.")}</p>
+        <p class="browser-voice-hint mt-1 text-xs text-white/45">{move || crate::i18n::t("Screen sharing, cameras and the soundboard are available in the desktop app.")}</p>
     }
 }
 fn debug_command(ui: Ui, command: &'static str) {
