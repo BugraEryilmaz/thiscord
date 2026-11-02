@@ -322,13 +322,23 @@ pub fn start_screen(
             .dyn_into::<js_sys::Promise>()
             .ok()
     })();
+    // Bind the capture to the call it was requested in (see `publish`).
+    let origin = super::current();
     async move {
         let Some(promise) = promise else {
             fail("Screen sharing isn't supported in this browser");
             return;
         };
         match JsFuture::from(promise).await {
-            Ok(stream) => publish(MediaKind::ScreenVideo, stream.unchecked_into(), quality).await,
+            Ok(stream) => {
+                publish(
+                    origin,
+                    MediaKind::ScreenVideo,
+                    stream.unchecked_into(),
+                    quality,
+                )
+                .await
+            }
             Err(error) => {
                 if let Some(message) = media_error(MediaKind::ScreenVideo, &error) {
                     fail(message);
@@ -378,15 +388,18 @@ pub async fn start_camera() {
         (publishing.device.clone(), publishing.facing)
     };
     match camera_stream(device.as_deref(), facing).await {
-        Ok(stream) => publish(MediaKind::Camera, stream, Quality::default()).await,
+        Ok(stream) => publish(Some(call), MediaKind::Camera, stream, Quality::default()).await,
         Err(error) => fail(media_error(MediaKind::Camera, &error).unwrap_or_default()),
     }
 }
 
 /// Publishes a new capture on the own-slot senders, replacing any previous
-/// capture of that kind. The stream is stopped on every failure path.
-async fn publish(kind: MediaKind, stream: MediaStream, quality: Quality) {
-    let Some(call) = super::current() else {
+/// capture of that kind. The stream is stopped on every failure path, and
+/// when the call it was requested in (`origin`) ended during the permission
+/// prompt or picker, so a capture never lands in a later call.
+async fn publish(origin: Option<Rc<Call>>, kind: MediaKind, stream: MediaStream, quality: Quality) {
+    let Some(call) = super::current().filter(|call| origin.is_some_and(|o| Rc::ptr_eq(&o, call)))
+    else {
         stop_stream(&stream);
         return;
     };
@@ -597,7 +610,13 @@ pub async fn switch_camera(device: Option<String>) {
     match camera_stream(device.as_deref(), facing).await {
         Ok(stream) => {
             if call.publishing.borrow().camera.is_some() {
-                publish(MediaKind::Camera, stream, Quality::default()).await;
+                publish(
+                    Some(call.clone()),
+                    MediaKind::Camera,
+                    stream,
+                    Quality::default(),
+                )
+                .await;
             } else {
                 stop_stream(&stream);
             }

@@ -571,6 +571,9 @@ async fn attempt(
             return Failure::final_("Invalid voice offer").into();
         }
     };
+    // Screen, shared audio and camera follow the server's Speak permission; only
+    // the microphone also needs a successful capture.
+    let may_publish = can_speak;
     let can_speak = can_speak && call.capture_allowed.get();
     if !can_speak {
         call.release_microphone();
@@ -600,7 +603,15 @@ async fn attempt(
         media: Default::default(),
         soundboard,
     });
-    let answer = match negotiate(call, &pc, &sdp, own_slot, can_speak, microphone.as_deref()).await
+    let answer = match negotiate(
+        call,
+        &pc,
+        &sdp,
+        own_slot,
+        may_publish,
+        microphone.as_deref(),
+    )
+    .await
     {
         Ok(answer) => answer,
         Err(failure) => return failure.into(),

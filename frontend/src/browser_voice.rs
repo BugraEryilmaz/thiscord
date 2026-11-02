@@ -49,6 +49,8 @@ struct State {
     pressed: bool,
     /// Call and device-test generations.
     next_call: u64,
+    /// Bumped by every stop so a test still awaiting permission cannot start.
+    test_generation: u64,
     listening: bool,
 }
 thread_local! {
@@ -250,7 +252,11 @@ fn leave(message: &str) {
     set_notice("");
 }
 fn stop_test() {
-    if let Some(test) = STATE.with(|state| state.borrow_mut().test.take()) {
+    if let Some(test) = STATE.with(|state| {
+        let mut state = state.borrow_mut();
+        state.test_generation = state.test_generation.wrapping_add(1);
+        state.test.take()
+    }) {
         test.stop();
     }
 }
@@ -501,16 +507,17 @@ async fn audio_test(args: &Value) -> Result<Value, String> {
     let saved = settings();
     requested.muted = saved.muted;
     requested.deafened = saved.deafened;
-    let (id, output) = STATE.with(|state| {
+    let (id, generation, output) = STATE.with(|state| {
         let mut state = state.borrow_mut();
         state.next_call += 1;
-        (state.next_call, state.primed.take())
+        (state.next_call, state.test_generation, state.primed.take())
     });
     let output = output.unwrap_or_else(media::Output::new);
     let test = DeviceTest::start(id, output, &requested, microphone, loopback).await?;
     let current_test = STATE.with(|state| {
         let mut state = state.borrow_mut();
-        let current = state.next_call == id && state.call.is_none();
+        let current =
+            state.next_call == id && state.test_generation == generation && state.call.is_none();
         if current {
             state.test = Some(Rc::new(test));
             None
