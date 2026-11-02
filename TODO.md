@@ -369,7 +369,13 @@ Personalized speaker isolation and physical acoustic acceptance remain future wo
 - [ ] Browser voice end-to-end acceptance against the browser-publisher SFU on desktop
   and mobile Chrome, Safari and Firefox (audio both ways, autoplay unlock, iOS
   background behavior, output selection, moves/revocation).
-- [ ] Browser stream viewing (screen share/camera video).
+- [x] Browser screen sharing and cameras: viewing in the call grid (recvonly baseline
+  H.264, ScreenViews demand, receiver budgets, keyframe requests) and publishing with
+  getDisplayMedia/getUserMedia on own-slot m-lines (replaceTrack, ScreenTarget
+  bitrate/pause, PLI keyframes from the SFU, tab/system audio in Chromium).
+- [ ] Browser screen sharing/camera acceptance on physical devices: Firefox, Safari
+  (macOS/iOS) and Android Chrome cameras, real displays/webcams, front/back camera
+  switching, mobile background behavior and multi-viewer bandwidth.
 - [ ] Physically verify browser echo cancellation with WebAudio playback, Firefox
   element-sink output routing and iOS interruption recovery.
 - [x] Connect native capture/playback to SFU streams with per-speaker volume sliders.

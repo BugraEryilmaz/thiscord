@@ -47,16 +47,22 @@ Signaling and negotiation:
 - The SFU offers `MediaKind::TRACK_COUNT` m-lines in track order. Transceivers are
   mapped by their `mid` to the offer's m-line position, never by browser order; an
   offer with another shape is refused. The member's own microphone m-line is
-  `sendrecv` with the microphone track (`replaceTrack`); other members'
-  microphone and screen-audio m-lines are `recvonly`; all video is `inactive`.
+  `sendrecv` with the microphone track (`replaceTrack`); its own screen,
+  screen-audio and camera m-lines are `sendrecv` with idle senders (with Speak
+  permission); other members' audio m-lines are `recvonly`, and their video
+  m-lines `recvonly` where the browser decodes baseline H.264 (else `inactive`).
+  Screen sharing and cameras are described in
+  [screen-sharing.md](screen-sharing.md#browser-screen-sharing).
 - `setCodecPreferences` limits every audio transceiver to the browser's `audio/opus`
   capability. Where it is unavailable, RED payload types are removed from the
   local answer before `setLocalDescription`. The SFU rejects a RED microphone
   from browser publishers.
 - After ICE gathering completes (non-trickle, up to 8 s), the client sends
   `Answer { browser_publisher: true }`. It opts into `soundboard` whenever the
-  offer advertises it (guild calls); RED, remote audio admin, screen/camera
-  feedback or subscriptions and video diagnostics stay false. Plain Opus
+  offer advertises it (guild calls) and into `screen_feedback` and
+  `screen_subscriptions` (viewing demand, `ScreenTarget`, keyframe recovery);
+  RED, remote audio admin, `screen_layers`, `screen_profiles` and video
+  diagnostics stay false. Plain Opus
   publishers send no microphone boundary messages. Nothing is sent before the answer.
 - `State` is sent on every self mute/deafen change and every 2 s as the
   signaling keepalive. A server silence of 20 s counts as a lost socket.
@@ -81,7 +87,10 @@ routes the graph through a `MediaStreamAudioDestinationNode` into one element wi
 output selection and the list is hidden. Without WebAudio, elements play directly
 at up to 100%. `Output::play_remote(source, member_slot, track)` with
 `RemoteSource::{Microphone, SystemAudio}` is the single entry point for remote audio;
-`set_stream_gain` and `stop_remote` complete it.
+`set_stream_gain` and `stop_remote` complete it. Another member's shared screen
+audio plays only while this page watches that member's screen (a visible, mounted
+grid tile); hiding the tile, closing the grid or hiding the tab stops it locally
+and the SFU stops forwarding it with the next `ScreenViews` renewal.
 
 Send graph: microphone track → source → boost gain (Microphone boost 1×–10×) →
 limiter → `MediaStreamAudioDestinationNode`, whose track is sent. The browser's own
@@ -1404,24 +1413,41 @@ TURN credentials or packet contents.
 Browsers cannot choose RTP SSRCs, so the fixed publisher SSRCs above do not apply
 to them. A browser sends `browser_publisher: true` in its Answer. The server records
 this before applying the remote description, then classifies that peer's tracks by
-codec: exactly one 48 kHz `audio/opus` track with any SSRC becomes its microphone
-(a second audio track ends the connection, like a desktop duplicate). Incoming
-browser video is left unread and never forwarded; screen, camera and system audio
-publishing are not supported from browsers. Browser publishers never use RED or
-the microphone-boundary protocol: the server forces `packet_redundancy` off, rejects
-an `audio/red` microphone track, and forwards plain Opus with payload type 111.
-Clients must therefore select Opus only for the sending transceiver (for example
-with `setCodecPreferences`). Plain-Opus publishers need no `MicrophoneBoundary`;
-mute, Speak, rate and size limits are enforced as for desktop.
+the m-line that received them (`backend/src/voice/browser.rs`): the transceiver whose
+receiver owns the track gives its mid, and the offer's m-line order maps the mid to
+`MediaKind::from_track`. Only the member's own microphone, shared screen audio
+(Opus), screen video and camera (H.264) m-lines publish, with any SSRC; a track on
+another member's m-line is left unread and never forwarded, without ending the
+call. Codec, clock rate, one-track-per-kind (`track_seen`), rate/size limits,
+publication state, Speak, mute/deafen and revocation are enforced as for desktop.
+Browser publishers never use RED or the microphone-boundary protocol: the server
+forces `packet_redundancy` off, rejects an `audio/red` microphone track, and
+forwards plain Opus with payload type 111. Clients must therefore select Opus only
+for the sending transceiver (for example with `setCodecPreferences`). Plain-Opus
+publishers need no `MicrophoneBoundary`.
 
-All offered m-lines are `sendrecv` (`add_track`), so a browser can send on the
-microphone m-line of its own slot and set the others to `recvonly` or `inactive`.
-Forwarded packets carry the receiver-facing relay SSRC for the publisher's slot
-and reach both RED and non-RED receivers. Without the flag, an unknown SSRC
-still ends the connection. Signaling may authenticate with the web client's
-HttpOnly cookie instead of a Join/Resume token; see [web.md](web.md).
-`backend/tests/voice/browser.rs` covers a random-SSRC browser publisher reaching
-RED and non-RED receivers, an ignored video track and rejection without the flag.
+Browser publishers are single-layer screen publishers: `screen_layers` is forced
+off, no low layer is planned or awaited, and a browser SSRC equal to the native
+low-layer SSRC is never treated as one. Viewers still receive legacy `ScreenTarget`
+budgets (the lowest live viewer budget). Keyframe demand for a browser publisher is
+sent as RTCP PLI on its own screen or camera SSRC (browsers answer with an IDR)
+instead of `ServerEvent::ScreenKeyframe`, under the same authorization and 250 ms
+coalescing. The SFU's H.264 offer (payload type 125) carries `nack`, `nack pli` and
+`transport-cc` feedback from the default interceptors, so browsers run their
+normal congestion control; RTX is offered but browsers answer without it.
+
+All offered m-lines are `sendrecv` (`add_track`), so a browser can send on its own
+slot's m-lines and set the others to `recvonly` or `inactive`. Forwarded packets
+carry the receiver-facing relay SSRC for the publisher's slot and reach both RED
+and non-RED receivers. Without the flag, an unknown SSRC still ends the connection,
+and native publishers keep the fixed-SSRC, layer and `ScreenKeyframe` contract.
+Signaling may authenticate with the web client's HttpOnly cookie instead of a
+Join/Resume token; see [web.md](web.md). `backend/tests/voice/browser.rs` covers a
+random-SSRC browser microphone reaching RED and non-RED receivers, browser screen
+video, shared audio and camera with random SSRCs reaching a subscribed desktop
+viewer, viewer keyframe demand arriving as PLI on the browser's SSRCs (never as
+`ScreenKeyframe`), media on another member's m-line staying unforwarded, stopping
+a share, and rejection without the flag.
 
 ## WSL and public networking
 

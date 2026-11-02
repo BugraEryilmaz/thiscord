@@ -137,3 +137,23 @@ fullscreen/context-menu interaction and an eight-person mixed camera/4K-screen l
 still require manual acceptance on Windows, macOS and Linux. Automated packet tests
 do not establish those runtime or performance results. A virtual camera selected
 as the system default can supply moving test video on a machine without a webcam.
+
+## Browser cameras
+
+In the `/app` web client the camera button calls `getUserMedia` (video only, up to
+1280×720 at 30 fps, `facingMode: "user"` by default) and attaches the track to the
+member's own camera m-line with `replaceTrack`, after sending `Camera { active: true }`.
+The browser encodes baseline H.264 itself (see
+[browser screen sharing](screen-sharing.md#browser-screen-sharing) for codec
+negotiation, `ScreenTarget` bitrate/pause and PLI keyframes); the camera ceiling is
+the same 1.5 Mbit/s as the desktop camera. While the camera is on and more than one
+camera exists (or on touch devices), **Switch camera** lists the cameras by label
+and, on phones and tablets, flips between front and back cameras; switching replaces
+the track without a new camera epoch or renegotiation. Your own tile shows a local
+preview. A blocked, missing or busy camera shows an error and leaves voice running.
+Deafen, server mute/deafen, lost Speak permission, an ended track, leaving and
+reconnecting stop the camera; it is never restarted automatically.
+
+Receiving cameras uses the same grid players and viewing demand as screens. Phone
+browsers (iOS Safari, Android Chrome) can publish and watch cameras; Firefox,
+Safari and mobile camera behavior still need physical acceptance.

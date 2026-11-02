@@ -164,8 +164,12 @@ shortcuts (Settings → Keyboard shortcuts) run in the browser; see
 [browser voice](audio.md#browser-voice) and [soundboard](soundboard.md#web-client).
 Browser system notifications are optional and requested only from Settings →
 Notifications; see [notifications](notifications.md#browser-system-notifications).
-Screen sharing and camera buttons are disabled with an “Available in the desktop
-app” hint.
+Cameras (getUserMedia) and screen sharing (getDisplayMedia, with tab or system audio
+in Chrome and Edge) also run in the browser, and the call grid plays received
+screens and cameras; see
+[browser screen sharing](screen-sharing.md#browser-screen-sharing). Phones and
+tablets have no `getDisplayMedia`: their Share screen control explains “Screen
+sharing isn't supported in this browser”.
 
 What remains desktop-only is impossible or unavailable in a browser page: global
 shortcuts while another app or tab has focus (pages receive keys only while

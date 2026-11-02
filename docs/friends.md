@@ -134,7 +134,8 @@ and automatic joining apply to the device that explicitly started/accepted the
 call; other devices may explicitly join. The existing mute, deafen, devices and
 hang-up controls apply.
 The `/app` web client supports friends, messaging and call audio through the browser's
-WebRTC (see [browser voice](audio.md#browser-voice)); screen sharing and cameras need the desktop app.
+WebRTC (see [browser voice](audio.md#browser-voice)), including cameras and, in desktop
+browsers, screen sharing (see [browser screen sharing](screen-sharing.md#browser-screen-sharing)).
 Calls use the existing server-terminated WebRTC encryption and STUN/TURN requirements
 from [audio.md](audio.md), and are not end-to-end encrypted between accounts.
 

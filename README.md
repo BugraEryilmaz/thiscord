@@ -121,8 +121,10 @@ The browser web client joins the same voice channels and private calls with the
 browser's own microphone processing and WebRTC (HTTPS required for the microphone),
 with per-speaker volume up to 200%, microphone boost, device tests, the soundboard,
 connection diagnostics, focused-tab shortcuts and optional browser notifications.
-Screen sharing, cameras, global shortcuts, the overlay and native audio processing
-remain desktop-only. See [browser voice](docs/audio.md#browser-voice).
+It also watches and publishes cameras and screen shares (screen sharing needs a
+desktop browser; tab or system audio needs Chrome or Edge); see
+[browser screen sharing](docs/screen-sharing.md#browser-screen-sharing).
+Global shortcuts, the overlay and native audio processing remain desktop-only. See [browser voice](docs/audio.md#browser-voice).
 Open **Settings > Voice & audio** to select devices and test audio, then join a
 voice channel. Calls adapt to weak connections by default: congestion lowers the
 microphone bitrate, packet loss adds Opus deep redundancy, and incoming voices use
@@ -357,8 +359,8 @@ The web build of the same Leptos UI is served at `/app/` (for example
 Safari on desktop, Android and iOS/iPadOS. It covers sign-in (password and Google),
 servers, channels, direct messages, friends, attachments, search, settings and
 invitations; phones get a one-pane layout with a back button, long-press context
-menus and full-screen settings. Screen sharing, cameras, global shortcuts, the
-in-game overlay, close-to-tray, native notification windows and installable updates
+menus and full-screen settings. It shares screens (desktop browsers) and cameras
+and watches both in the call grid. Global shortcuts, the in-game overlay, close-to-tray, native notification windows and installable updates
 remain desktop-only; the web client shows **Get the desktop app** in Settings. It
 has no service worker or offline mode. See [web client](docs/web.md#web-client).
 
