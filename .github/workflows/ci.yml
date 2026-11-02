@@ -198,7 +198,9 @@ jobs:
         if: runner.os == 'Linux'
         run: |
           sudo apt-get update
-          sudo apt-get install -y libwebkit2gtk-4.1-dev build-essential libssl-dev libdbus-1-dev libxdo-dev libayatana-appindicator3-dev librsvg2-dev patchelf libasound2-dev cmake
+          sudo apt-get install -y libwebkit2gtk-4.1-dev build-essential libssl-dev libdbus-1-dev libxdo-dev libayatana-appindicator3-dev librsvg2-dev patchelf libasound2-dev cmake \
+            libgstreamer1.0-dev libgstreamer-plugins-base1.0-dev libpipewire-0.3-dev libclang-dev \
+            gstreamer1.0-plugins-base gstreamer1.0-plugins-good gstreamer1.0-plugins-bad gstreamer1.0-plugins-ugly
       - name: Install pinned toolchain
         run: rustup show
       - uses: ./.github/actions/cargo-cache

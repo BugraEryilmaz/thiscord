@@ -27,6 +27,7 @@ pub(super) fn navigate(ui: Ui, page: &'static str) {
 fn title(page: &str) -> &'static str {
     match page {
         "language" => crate::i18n::t("Language"),
+        "appearance" => crate::i18n::t("Appearance"),
         "audio" => crate::i18n::t("Voice & audio"),
         "shortcuts" if client::web_app() => crate::i18n::t("Keyboard shortcuts"),
         "shortcuts" => crate::i18n::t("Shortcuts & overlay"),
@@ -57,6 +58,7 @@ fn subtitle(page: &str) -> &'static str {
         "language" => {
             crate::i18n::t("Choose your language. Changes apply immediately on this device.")
         }
+        "appearance" => crate::i18n::t("Customize how Thiscord looks on this device."),
         "audio" => crate::i18n::t("Choose your devices and sound your best."),
         "shortcuts" if client::web_app() => {
             crate::i18n::t("Mute, deafen and talk while this tab is focused.")
@@ -152,6 +154,7 @@ pub(super) fn Host(ui: Ui) -> impl IntoView {
                             <NavItem ui=ui page="devices" label="Devices & connections" icon=Glyph::Connections/>
                             <p class="settings-nav-label">{move || crate::i18n::t("Your app")}</p>
                             <NavItem ui=ui page="audio" label="Voice & audio" icon=Glyph::Headphones/>
+                            <NavItem ui=ui page="appearance" label="Appearance" icon=Glyph::Palette/>
                             <NavItem ui=ui page="language" label="Language" icon=Glyph::Settings/>
                             <Show when=client::desktop><NavItem ui=ui page="shortcuts" label="Shortcuts & overlay" icon=Glyph::Keyboard/><NavItem ui=ui page="desktop" label="App behavior" icon=Glyph::Screen/></Show>
                             <Show when=client::web_app><NavItem ui=ui page="shortcuts" label="Keyboard shortcuts" icon=Glyph::Keyboard/></Show>
@@ -183,6 +186,7 @@ pub(super) fn Host(ui: Ui) -> impl IntoView {
                 <div class="settings-main">
                     <header class="settings-header"><div><h2>{move ||title(ui.page.get())}</h2><p>{move ||subtitle(ui.page.get())}</p></div><button class="settings-close" aria-label=move || crate::i18n::t("Close settings") disabled=move ||ui.busy.get()||ui.audio_saving.get() on:click=move |_|navigate(ui,"servers")><Icon kind=Glyph::Close/><span>"Esc"</span></button></header>
                     <div class="settings-content" node_ref=content>
+                        <Show when=move ||ui.page.get()=="appearance"><super::appearance::Panel/></Show>
                         <Show when=move ||ui.page.get()=="language"><section class="settings-card"><crate::i18n::LanguageSelector/></section></Show>
                         <Show when=move ||ui.ticket.get().is_some()><div class="settings-card"><p>{move || crate::i18n::t("Finish connecting Google in your browser.")}</p>{move ||ui.authorization_url.get().map(|url|view!{<a class="settings-link" href=url target="_blank" rel="noopener noreferrer">{move || crate::i18n::t("Continue with Google")}</a>})}<button class="settings-secondary" on:click=move |_|super::cancel_google(ui)>{move || crate::i18n::t("Cancel")}</button></div></Show>
                         <Show when=move ||ui.page.get()=="profile"><Profile ui=ui/></Show>

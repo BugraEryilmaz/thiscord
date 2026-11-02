@@ -55,6 +55,8 @@ media compatibility spike can happen before chat to expose platform constraints.
 - [x] Persistent opt-in close-to-tray setting with Open/Quit tray actions and macOS Dock restore.
 - [ ] Verify close-to-tray, active calls/screen sharing, restore, restart persistence and explicit quit interactively on Windows/macOS/Linux (including Linux without a tray host).
 - [x] Tailwind CSS styling through Trunk, with Rust source scanning and shared theme tokens.
+- [x] Device-local appearance settings: dark theme presets and preset/custom accent colors.
+- [ ] Light theme (requires replacing translucent-white overlays with theme tokens).
 - [x] Axum health endpoint consumed by the UI, optional Diesel pool and migration setup.
 - [x] Setup documentation and project rules in AGENTS.md.
 - [x] Set up local PostgreSQL in WSL and verify connectivity/first migration.
@@ -408,7 +410,7 @@ Personalized speaker isolation and physical acoustic acceptance remain future wo
   explicit local device suspend/resume recovery without unexpected capture.
 - [ ] Multi-user acceptance on Windows/macOS/Linux with real microphones.
 
-## 8a. Screen sharing (Windows first)
+## 8a. Screen sharing
 
 - [ ] Resolve the October 22 Windows 0.1.42 native crash during screen sharing
   with test bots; the saved dump points toward the NVIDIA Media Foundation path
@@ -423,7 +425,11 @@ Personalized speaker isolation and physical acoustic acceptance remain future wo
 - [x] Isolate SFU screen backpressure from microphone writes, bound egress bytes/age
   including in-flight packets, and recover video without disconnecting voice.
 - [ ] Two-client Windows capture/audio acceptance, mixed-DPI/protected windows and suspend/network checks.
-- [ ] macOS/Linux publishing and OS permission acceptance; portable receiving code is included.
+- [x] macOS (ScreenCaptureKit + VideoToolbox) and Linux (portal/PipeWire + GStreamer
+  VA/NVENC) publishing and system audio on the shared encode worker; synthetic
+  encoder validation on Apple M2 and WSL NVENC.
+- [ ] Live macOS capture/audio with Screen Recording permission, Linux portal capture
+  on GNOME/KDE/wlroots, VA-API/DMA-BUF hardware and Linux system-audio acceptance.
 - [x] Explicit viewer subscriptions with lease expiry and receiver-driven bitrate/resolution/FPS adaptation; pause video with no viewers.
 - [x] Negotiated two-quality screen encoding with demand-driven low layer, per-viewer
   IDR-gated SFU selection, RTP continuity and legacy single-layer fallback.

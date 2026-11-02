@@ -267,6 +267,9 @@ mod tests {
                 crate::browser_call::MicrophoneProblem::ALL
                     .map(crate::browser_call::MicrophoneProblem::notice),
             )
+            .chain(crate::appearance::Theme::ALL.map(crate::appearance::Theme::label))
+            .chain(crate::appearance::Theme::ALL.map(crate::appearance::Theme::description))
+            .chain(crate::appearance::ACCENTS.map(|(label, _)| label))
         {
             assert!(
                 CATALOG.iter().any(|(en, _)| *en == label),

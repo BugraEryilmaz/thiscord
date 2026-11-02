@@ -2,6 +2,7 @@ use crate::account_client as client;
 use leptos::prelude::*;
 use thiscord_shared::account::*;
 mod admin;
+mod appearance;
 mod audio;
 mod browser_media;
 mod camera;

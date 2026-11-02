@@ -19,7 +19,7 @@ mod native_update;
 mod native_video_diagnostics;
 mod native_voice;
 mod native_window;
-#[cfg(target_os = "windows")]
+#[cfg(any(target_os = "windows", target_os = "macos", target_os = "linux"))]
 mod system_audio;
 
 fn main() {

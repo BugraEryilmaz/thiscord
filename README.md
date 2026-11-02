@@ -164,9 +164,10 @@ Desktop calls and voice rooms show simultaneous webcams and screen shares in a
 grid, with local previews, click-to-fullscreen and right-click hide/restore.
 The camera button uses the system default webcam (up to 720p/30); right-click a
 participant for separate voice and screen-audio volume/mute controls. Camera
-publishing requires WebView H.264/WebRTC and device permissions. Windows screen
-sharing retains its explicit source/quality picker, D3D11 hardware encoder and
-system audio capture. See [cameras and hardware-free tests](docs/cameras.md) and
+publishing requires WebView H.264/WebRTC and device permissions. Screen sharing
+works on Windows, macOS 12.3+ and Linux (xdg-desktop-portal + PipeWire) with
+native capture, GPU hardware H.264 encoding and system audio that excludes
+Thiscord's own playback. See [cameras and hardware-free tests](docs/cameras.md) and
 [screen sharing requirements](docs/screen-sharing.md) for limits and platform checks.
 For echo troubleshooting, Voice & audio can save a 60-second local debug recording
 of playback, raw microphone and outgoing audio, with metadata for offline DSP replay.
@@ -403,6 +404,13 @@ move elsewhere. Keep conditional classes as complete strings (for example,
 `"text-red-500"`), rather than assembling fragments with `format!`.
 Shared color tokens live in its `@theme` block and produce utilities such as
 `bg-brand`, `bg-surface`, and `text-content`.
+
+Settings → Appearance lets each device pick a dark theme and accent color. It
+overrides the surface tokens and `--color-brand` on `<html>`; accent shades are
+derived from `--color-brand` with `color-mix`. Use those variables instead of
+fixed surface or accent hex values so new UI follows the user's choice. Text on
+solid `bg-brand` fills uses `--color-on-brand`. Only dark palettes exist, because
+the UI layers translucent white over its surfaces.
 
 See [Tailwind source detection](https://tailwindcss.com/docs/detecting-classes-in-source-files)
 and [Trunk's asset pipeline](https://github.com/trunk-rs/trunk/blob/v0.21.14/guide/src/assets/index.md).

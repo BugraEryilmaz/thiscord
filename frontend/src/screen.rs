@@ -4,16 +4,28 @@ pub mod bridge;
 pub mod cadence;
 #[cfg(target_os = "windows")]
 pub mod capture;
+pub mod encode;
 #[cfg(target_os = "windows")]
 pub mod gpu;
 #[cfg(target_os = "windows")]
 pub mod hardware;
+/// xdg-desktop-portal ScreenCast + PipeWire capture, GStreamer GPU encoders.
+#[cfg(target_os = "linux")]
+pub mod linux;
+#[cfg(target_os = "linux")]
+pub use linux as capture;
+/// ScreenCaptureKit capture and VideoToolbox hardware encoding.
+#[cfg(target_os = "macos")]
+pub mod macos;
+#[cfg(target_os = "macos")]
+pub use macos as capture;
 pub mod keyframe;
 pub mod metrics;
 pub mod pacing;
 pub mod preview;
 pub mod priority;
 pub mod send;
+pub mod worker;
 /// UDP binds for the in-process WebView video bridges (screen preview, camera).
 /// Once media permission enables adapter enumeration, WebView binds its host
 /// socket to an interface address. Windows refuses to send from such a socket

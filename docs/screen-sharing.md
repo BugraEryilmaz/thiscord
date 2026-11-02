@@ -1,9 +1,11 @@
-# Screen sharing (Windows first)
+# Screen sharing
 
-Join a voice channel in the Windows desktop app, then choose **Share screen**
+Join a voice channel in the Windows, macOS or Linux desktop app, then choose **Share screen**
 in the persistent voice bar. The source picker separates Screens and Windows;
 select a source, resolution/frame rate and whether to include system audio, then
-choose **Go live**. Selecting a source alone never starts capture.
+choose **Go live**. Selecting a source alone never starts capture. On Linux the
+desktop's ScreenCast portal owns source selection: the picker offers **Screen** and
+**Window** entries, and **Go live** opens the system dialog for the actual choice.
 Voice rooms and private calls show a grid of all active webcams and screen shares.
 Click a participant's name or LIVE badge to open the room's grid; this joins that
 voice channel if needed, using the current microphone settings. A participant
@@ -20,7 +22,8 @@ generation. Hiding your own tile does not stop publishing. All other tiles
 continue playing. Keyboard users can focus a tile and press Enter to expand.
 
 System audio captures all other applications, even for a single-window share.
-It excludes Thiscord's process tree. Microphone mute/PTT affects only the
+It excludes Thiscord's process tree on Windows and Linux and Thiscord's own
+process on macOS (see [platform backends](#platform-backends)). Microphone mute/PTT affects only the
 microphone. Stop sharing stops screen and shared audio. Deafen also stops local
 screen/camera publication and received media. Use a participant's right-click
 menu (sidebar or grid) for separate voice and **Stream audio** volume/mute.
@@ -30,11 +33,80 @@ while reading text or settings.
 
 See [cameras](cameras.md) for camera permissions, limits and testing without hardware.
 
-Windows system audio requires build 20348 or newer, normally Windows 11.
+Windows system audio requires build 20348 or newer, normally Windows 11; macOS
+system audio requires macOS 13; Linux requires a running PipeWire server.
 Unsupported or unavailable loopback capture stops the share with an error;
 the user can explicitly retry with system audio unchecked. No microphone is
 substituted for system audio. Closing/minimizing the selected window or losing
-the display stops capture; it never falls back to another window/display.
+the display stops capture; it never falls back to another window/display. On macOS a
+minimized window or one on another Space keeps sharing its last image (ScreenCaptureKit
+does not report minimization); closing it stops the share.
+
+## Platform backends
+
+The encode loop is shared: `frontend/src/screen/worker.rs` owns capture cadence,
+latest-frame mailboxes, demand pause, adaptive quality, keyframe/static-refresh
+policy, raw-input/byte backpressure, the speed hint and the optional low layer on
+every platform. Each OS supplies only GPU-resident capture frames and a hardware
+H.264 session (`worker::Platform`/`LayerEncoder`). The pacer, SFU, viewer bridge,
+subscriptions, layers and diagnostics described below are identical. Windows details
+in the following sections apply unchanged; macOS and Linux differ as follows.
+
+| | Windows | macOS (12.3+) | Linux |
+|---|---|---|---|
+| Source selection | In-app list (WGC) | In-app list (ScreenCaptureKit) | xdg-desktop-portal ScreenCast dialog |
+| Capture | WGC FP16/BGRA8 textures | SCStream IOSurface NV12 (BT.709), scaled to the preset by the window server | `pipewiresrc` copied into the encoder family's GPU memory |
+| Scale/convert | D3D11 video processor/shader | VideoToolbox (GPU) | `vapostproc` / `cudaconvertscale` (GPU) |
+| Encoder | Media Foundation hardware MFT | VideoToolbox hardware, low-latency rate control when available | VA (`vah264lpenc`/`vah264enc`), NVENC (`nvcudah264enc`/`nvh264enc`), legacy VA-API, then labelled software |
+| System audio | WASAPI process loopback | ScreenCaptureKit audio, `excludesCurrentProcessAudio` | Private PipeWire capture node linked to other apps' outputs |
+| HDR | FP16 capture and tone map to SDR H.264 | System-composed SDR capture | SDR (portal streams are SDR) |
+
+**macOS.** Screen Recording permission is required (System Settings › Privacy &
+Security › Screen & System Audio Recording); without it the source list explains how
+to grant it, and macOS may require restarting Thiscord afterwards. SCStream delivers
+only complete compositor frames as retained IOSurface-backed NV12 buffers (queue
+depth 8), timed on the host clock; nothing is copied, read back or converted on the
+CPU. The capture size is the aspect-preserving fit of the source into the selected
+preset, and each VideoToolbox session scales it further on the GPU for adaptive or
+low layers. Sessions require hardware encoding, try low-latency rate control first,
+disable frame reordering, use Constrained Baseline/High with BT.709 VUI, a 200 ms
+data-rate window (`encode::buffer_bytes`) and the ten-second GOP. Forced IDRs use
+per-frame `ForceKeyFrame`; output is converted from AVCC to Annex B with SPS/PPS on
+every IDR. In low-latency mode VideoToolbox already favours speed, so the speed hint
+reports 0. System audio runs as a separate audio-only SCStream on the main display
+(all applications, even for window shares) and is handed to the Opus worker through a
+bounded lock-free queue. WebKit's WebContent process is a separate process, so sounds
+played by the WebView itself may be captured. ScreenCaptureKit and VideoToolbox are
+weakly linked so the app still launches on macOS 11.3–12.2, where publishing reports
+that 12.3 (13 for audio) is required.
+
+**Linux.** The ScreenCast portal (GNOME, KDE, wlroots, Hyprland and other backends)
+works on Wayland and X11 sessions that run `xdg-desktop-portal`; cancelling the dialog
+reports "Screen selection was cancelled." The portal session stays open for the share
+and closing it from the desktop stops sharing. Once per process, Thiscord self-tests
+encoder families in order: VA (`vapostproc`, zero-copy DMA-BUF import on GStreamer
+1.24+), NVENC with CUDA scaling (needs NVRTC), legacy `gstreamer-vaapi`, NVENC with CPU
+scaling, then software x264/OpenH264. The software family is the only CPU encoder in
+the product: it is used only when no GPU encoder works, and the status line,
+`encoder_family` and `pixel_path` say "software". `THISCORD_SCREEN_ENCODER=<family>`
+forces a family for diagnostics. Capture copies each PipeWire buffer into the family's
+pooled GPU memory immediately, so frames held for refreshes or in-flight encodes never
+starve PipeWire. Each layer is `appsrc ! scaler ! NV12 ! encoder ! h264parse ! appsink`
+with CBR, no B-frames, the 200 ms CPB, the ten-second GOP and serialized ForceKeyUnit
+events. System audio creates a private, non-autoconnecting PipeWire capture stream and
+links every other application's `Stream/Output/Audio` ports to it (their speaker
+links are untouched), excluding nodes whose PipeWire client PID or
+`application.process.id` belongs to Thiscord's process tree. The real-time callback
+only converts samples into a bounded lock-free queue.
+
+Linux runtime packages (Debian/Ubuntu names; the `.deb` declares them):
+`gstreamer1.0-pipewire`, `gstreamer1.0-plugins-base`, `-good`, `-bad` (VA and NVENC),
+`xdg-desktop-portal` with a desktop backend, PipeWire and WirePlumber; optionally a VA
+driver (`intel-media-va-driver`/`mesa-va-drivers`) and `gstreamer1.0-plugins-ugly`
+(x264 fallback). Fedora: `pipewire-gstreamer`, `gstreamer1-plugins-base`, `-good`,
+`-bad-free` (NVENC needs RPM Fusion `-bad-freeworld`). The AppImage uses the host's
+GStreamer plugins. Building needs `libgstreamer1.0-dev`,
+`libgstreamer-plugins-base1.0-dev`, `libpipewire-0.3-dev` and `libclang-dev`.
 
 ## Media and dependencies
 
@@ -547,11 +619,25 @@ slots whose epoch no longer matches their roster. Clients only send the new scre
 
 ## Compatibility and acceptance
 
-This delivery prioritizes Windows publishing, as requested. macOS/Linux desktop
-builds retain the receiving/video-player path; their screen publishing controls are disabled. Camera capture instead uses the WebView on all three platforms, subject to its H.264/WebRTC support; hardware acceptance remains required.
-Their native screen/audio permission and capture implementations remain follow-up
-work. The existing Rust WebRTC implementation is retained. No new SFU or WebView
+Windows, macOS and Linux publish through native capture and hardware encoders (see
+[platform backends](#platform-backends)). Camera capture instead uses the WebView on
+all three platforms, subject to its H.264/WebRTC support; hardware acceptance remains
+required. The existing Rust WebRTC implementation is retained. No new SFU or WebView
 capture library is selected in place of the native transport.
+
+Verified for the cross-platform backends (2026-11-02): on Windows the refactored
+shared worker passed `screen_pipeline_probe --seconds=30 --assert` (WGC 4K60, NVIDIA
+MFT, 1800/1800 frames, zero drops). On an Apple M2 (macOS 27), VideoToolbox encoded
+IOSurface NV12 input (GPU-scaled 1280x720 -> 640x360, forced IDR, Constrained High)
+that decoded with OpenH264 and passed the shared parameter-set bounds. Under WSL,
+the production GStreamer layer pipeline encoded with NVENC (`nvh264enc`, CPU-scale
+family) and x264 and decoded through FFmpeg, and a live PipeWire graph linked
+another app's outputs to the private sink. Not yet run: live ScreenCaptureKit
+capture/audio (TCC denies the SSH test session; the `#[ignore]` tests
+`capture_main_display_end_to_end` and `system_audio_runs_and_stops` need a logged-in
+terminal with Screen Recording permission), the Linux portal dialog and PipeWire
+screen capture on a real desktop, VA-API/DMA-BUF and CUDA-scaling families on real
+hardware, and Linux system-audio samples (WSL's PipeWire graph does not run).
 
 Automated checks cover codec/RTP round trips and loss, bounded malformed input,
 wire compatibility, capture cancellation state, and real-peer SFU video/audio
@@ -565,7 +651,7 @@ screen_gpu_probe --features screen-share --locked -- --adaptive` exercises
 checking an initial SPS/PPS/IDR and ten decoded frames at each step. This passed
 locally; it does not establish behavior on every GPU or under network congestion.
 
-Manual Windows acceptance still needs two desktop clients: share a monitor and
+Manual acceptance on each OS still needs two desktop clients: share a monitor and
 a window, play another app's audio, verify Thiscord playback is excluded, mute
 the microphone, stop/restart, minimize/close the source, leave/rejoin, revoke
 Speak/membership, disconnect the network and suspend/resume. Check privacy prompts,

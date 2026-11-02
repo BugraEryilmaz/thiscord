@@ -9,6 +9,16 @@ fn main() {
     if std::env::var("CARGO_CFG_TARGET_ARCH").as_deref() == Ok("wasm32") {
         println!("cargo:rustc-link-arg-bin=thiscord-ui=-zstack-size={WASM_STACK_BYTES}");
     }
+    // ScreenCaptureKit (12.3+) and newer VideoToolbox keys must not stop the
+    // app from launching on older supported macOS; the screen backend checks
+    // the OS version before touching them.
+    if std::env::var("CARGO_CFG_TARGET_OS").as_deref() == Ok("macos")
+        && std::env::var_os("CARGO_FEATURE_SCREEN_SHARE").is_some()
+    {
+        for framework in ["ScreenCaptureKit", "VideoToolbox"] {
+            println!("cargo:rustc-link-arg=-Wl,-weak_framework,{framework}");
+        }
+    }
     #[cfg(feature = "desktop")]
     {
         // Rebuild native resources and generated window/tray images on icon-only changes.

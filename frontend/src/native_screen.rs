@@ -25,12 +25,21 @@ use thiscord_shared::{
 use tokio::sync::mpsc;
 use webrtc::media_stream::track_local::static_rtp::TrackLocalStaticRTP;
 
+/// Native capture/encode backends: WGC + Media Foundation (Windows),
+/// ScreenCaptureKit + VideoToolbox (macOS), portal/PipeWire + GStreamer (Linux).
+const PUBLISHING: bool = cfg!(any(
+    target_os = "windows",
+    target_os = "macos",
+    target_os = "linux"
+));
+const UNSUPPORTED: &str = "Screen publishing is not available on this platform.";
+
 #[derive(Clone)]
 #[cfg_attr(
-    not(target_os = "windows"),
+    not(any(target_os = "windows", target_os = "macos", target_os = "linux")),
     expect(
         dead_code,
-        reason = "Publishing is Windows-only; other desktop platforms receive shares."
+        reason = "Unsupported desktop platforms only receive shares."
     )
 )]
 pub struct Binding {
@@ -364,11 +373,9 @@ impl ScreenState {
         let local = (self.kind() == thiscord_shared::voice::MediaKind::ScreenVideo)
             .then(|| Arc::new(self.receiver(binding.connection.clone(), binding.own_slot)));
         if let Ok(mut inner) = self.0.lock() {
-            inner.status.available =
-                binding.can_publish && binding.subscriptions && cfg!(target_os = "windows");
-            if !cfg!(target_os = "windows") {
-                inner.status.message =
-                    "Screen publishing is currently available on Windows.".into();
+            inner.status.available = binding.can_publish && binding.subscriptions && PUBLISHING;
+            if !PUBLISHING {
+                inner.status.message = UNSUPPORTED.into();
             } else if !binding.subscriptions {
                 inner.status.message =
                     "Update the server to enable screen viewing subscriptions.".into();
@@ -383,8 +390,7 @@ impl ScreenState {
         if let Ok(mut inner) = self.0.lock() {
             if let Some(binding) = &mut inner.binding {
                 binding.can_publish = allowed;
-                inner.status.available =
-                    allowed && binding.subscriptions && cfg!(target_os = "windows");
+                inner.status.available = allowed && binding.subscriptions && PUBLISHING;
             }
             if !allowed || boundary {
                 if let Some(stop) = &inner.stop {
@@ -914,18 +920,18 @@ pub fn screen_stop(state: State<'_, ScreenState>) {
 }
 #[tauri::command]
 pub async fn screen_sources() -> Result<Vec<Source>, String> {
-    if !cfg!(target_os = "windows") {
-        return Err("Screen publishing is currently available on Windows.".into());
+    if !PUBLISHING {
+        return Err(UNSUPPORTED.into());
     }
     tauri::async_runtime::spawn_blocking(list_sources)
         .await
         .map_err(|_| "Screen scan failed")?
 }
-#[cfg(not(target_os = "windows"))]
+#[cfg(not(any(target_os = "windows", target_os = "macos", target_os = "linux")))]
 fn list_sources() -> Result<Vec<Source>, String> {
-    Err("Screen publishing is currently available on Windows.".into())
+    Err(UNSUPPORTED.into())
 }
-#[cfg(target_os = "windows")]
+#[cfg(any(target_os = "windows", target_os = "macos", target_os = "linux"))]
 fn list_sources() -> Result<Vec<Source>, String> {
     thiscord_frontend::screen::capture::sources()
 }
@@ -940,8 +946,8 @@ pub async fn screen_start(
     if !quality.valid() {
         return Err("Choose a supported screen resolution and frame rate.".into());
     }
-    if !cfg!(target_os = "windows") {
-        return Err("Screen publishing is currently available on Windows.".into());
+    if !PUBLISHING {
+        return Err(UNSUPPORTED.into());
     }
     let mut inner = state.0.lock().map_err(|_| "Screen state unavailable")?;
     if inner.worker.as_ref().is_some_and(|w| !w.is_finished()) {
@@ -1039,7 +1045,7 @@ pub async fn screen_start(
     );
     Ok(())
 }
-#[cfg(target_os = "windows")]
+#[cfg(any(target_os = "windows", target_os = "macos", target_os = "linux"))]
 fn capture(
     state: &ScreenState,
     binding: &Binding,
@@ -1098,7 +1104,7 @@ fn capture(
     result
 }
 
-#[cfg(not(target_os = "windows"))]
+#[cfg(not(any(target_os = "windows", target_os = "macos", target_os = "linux")))]
 fn capture(
     _: &ScreenState,
     _: &Binding,
@@ -1108,7 +1114,7 @@ fn capture(
     _: mpsc::Sender<thiscord_frontend::screen::Outgoing>,
     _: Option<thiscord_frontend::screen::LayerOutput>,
 ) -> Result<(), String> {
-    Err("Screen publishing is currently available on Windows.".into())
+    Err(UNSUPPORTED.into())
 }
 
 #[cfg(test)]

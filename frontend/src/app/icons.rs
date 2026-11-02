@@ -40,6 +40,7 @@ pub(super) enum Glyph {
     Soundboard,
     Back,
     Download,
+    Palette,
 }
 
 #[component]
@@ -98,6 +99,9 @@ pub(super) fn Icon(kind: Glyph) -> impl IntoView {
         Glyph::Person => "M16 7a4 4 0 1 1-8 0 4 4 0 0 1 8 0ZM4 21v-2a8 8 0 0 1 16 0v2",
         Glyph::Shield => "m12 3 8 3v6c0 5-8 9-8 9s-8-4-8-9V6l8-3Zm-4 9 3 3 5-6",
         Glyph::Connections => "M3 4h18v12H3V4ZM8 21h8M12 16v5M8 9h8M8 12h4",
+        Glyph::Palette => {
+            "M12 3a9 9 0 0 0 0 18 2 2 0 0 0 1.5-3.3 2 2 0 0 1 1.5-3.3h2.4A4.6 4.6 0 0 0 21 9.8C21 6 17 3 12 3ZM7.5 11.5h.01M10 7.5h.01M14.5 7.5h.01M17 11h.01"
+        }
         Glyph::Keyboard => {
             "M3 6h18v13H3V6ZM7 10h.01M11 10h.01M15 10h.01M18 10h.01M7 13h.01M11 13h.01M15 13h.01M7 16h10"
         }
