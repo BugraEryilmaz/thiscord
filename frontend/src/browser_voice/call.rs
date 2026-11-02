@@ -347,6 +347,23 @@ impl Call {
         let mut speaking = self.local_speaking.get();
         speaking.observe(level, threshold, rules::SPEAKING_HANGOVER_MS, time);
         self.local_speaking.set(speaking);
+        // Remote speaking: WebAudio meters while the graph runs (every tick),
+        // else `getStats` inbound `audioLevel` (every stats pass).
+        let mut metered = [false; PLAYBACK_SLOTS];
+        {
+            let mut remote = self.remote.borrow_mut();
+            for (slot, activity) in remote.iter_mut().enumerate() {
+                if let Some(level) = self.output.level(slot) {
+                    metered[slot] = true;
+                    activity.observe(
+                        level,
+                        rules::REMOTE_SPEAKING_LEVEL,
+                        rules::SPEAKING_HANGOVER_MS,
+                        time,
+                    );
+                }
+            }
+        }
         if let Some(stats) = stats
             && let Some(live) = self.live.borrow().as_ref()
         {
@@ -360,7 +377,8 @@ impl Call {
                         track_id.as_deref() == Some(r.track_id.as_str())
                             || mid.as_deref() == Some(r.mid.as_str())
                     })
-                    .map(|r| r.slot);
+                    .map(|r| r.slot)
+                    .filter(|slot| !metered.get(*slot).copied().unwrap_or(true));
                 if let Some(activity) = slot.and_then(|slot| remote.get_mut(slot)) {
                     activity.observe(
                         level,

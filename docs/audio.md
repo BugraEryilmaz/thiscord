@@ -98,8 +98,11 @@ Controls: server mute/deafen from the roster override self controls. Voice
 activation uses the boosted peak with the saved threshold and a 500 ms hold. It
 fails open (transmits while unmuted) when the tab is hidden, because timers run
 about once per second there, or when the AudioContext is not running. Remote
-speaking rings use `getStats` inbound-rtp `audioLevel` (threshold 0.02, 250 ms
-hangover, before local gain); the local ring follows the gate.
+speaking rings use a pass-through `AnalyserNode` in each slot before its gain
+(threshold 0.02 peak, 250 ms hangover), because Chromium reports inbound-rtp
+`audioLevel` as 0 for tracks that play only through WebAudio; `getStats`
+`audioLevel` remains the fallback while the context is not running. The local
+ring follows the gate.
 
 Keyboard: while the page has focus, Ctrl+Shift+Space is push-to-talk (also the
 voice-bar hold button) and the Settings → Keyboard shortcuts mute/deafen bindings

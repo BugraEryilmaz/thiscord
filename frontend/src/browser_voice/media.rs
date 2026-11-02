@@ -43,6 +43,8 @@ use web_sys::{
 /// -2 dBFS, 20:1 above it.
 const LIMIT_DB: f32 = -2.0;
 const LIMIT_RATIO: f32 = 20.0;
+/// Remote speaking meter window (about 21 ms at 48 kHz).
+const METER_SAMPLES: usize = 1024;
 /// A context that stays suspended this long is reported as blocked playback.
 const BLOCKED_AFTER_MS: f64 = 1_500.0;
 
@@ -120,6 +122,9 @@ fn set_param(param: &web_sys::AudioParam, value: f32) {
 struct Slot {
     /// Keeps Chrome decoding the remote track; muted while the graph plays it.
     element: HtmlAudioElement,
+    /// Pass-through level meter before the slot gain. Chrome reports no
+    /// inbound `audioLevel` for tracks played only through WebAudio.
+    meter: Option<AnalyserNode>,
     gain: Option<GainNode>,
     source: RefCell<Option<MediaStreamAudioSourceNode>>,
     track: RefCell<Option<String>>,
@@ -152,6 +157,7 @@ pub(super) struct Output {
     suspended_since: Cell<Option<f64>>,
     resumed_at: Cell<f64>,
     clips: Rc<Cell<usize>>,
+    samples: RefCell<Vec<f32>>,
 }
 impl Output {
     pub fn new() -> Self {
@@ -178,14 +184,19 @@ impl Output {
             .filter_map(|_| {
                 let element = HtmlAudioElement::new().ok()?;
                 element.set_autoplay(true);
-                let gain = graph.as_ref().and_then(|graph| {
+                let nodes = graph.as_ref().and_then(|graph| {
+                    let meter = graph.context.create_analyser().ok()?;
+                    meter.set_fft_size(METER_SAMPLES as u32);
                     let gain = graph.context.create_gain().ok()?;
+                    meter.connect_with_audio_node(&gain).ok()?;
                     gain.connect_with_audio_node(&graph.master).ok()?;
                     element.set_muted(true);
-                    Some(gain)
+                    Some((meter, gain))
                 });
+                let (meter, gain) = nodes.unzip();
                 Some(Slot {
                     element,
+                    meter,
                     gain,
                     source: RefCell::new(None),
                     track: RefCell::new(None),
@@ -201,6 +212,7 @@ impl Output {
             suspended_since: Cell::new(None),
             resumed_at: Cell::new(0.0),
             clips: Rc::default(),
+            samples: RefCell::new(vec![0.0; METER_SAMPLES]),
         }
     }
     pub fn context(&self) -> Option<&AudioContext> {
@@ -258,13 +270,31 @@ impl Output {
         };
         slot.element.set_src_object(Some(&stream));
         play(&slot.element, &self.refused);
-        if let (Some(graph), Some(gain)) = (&self.graph, &slot.gain)
+        if let (Some(graph), Some(meter)) = (&self.graph, &slot.meter)
             && let Ok(source) = graph.context.create_media_stream_source(&stream)
-            && source.connect_with_audio_node(gain).is_ok()
+            && source.connect_with_audio_node(meter).is_ok()
         {
             *slot.source.borrow_mut() = Some(source);
         }
         *slot.track.borrow_mut() = Some(id);
+    }
+    /// Decoded peak of one mixer slot before local gain, while the graph
+    /// runs; `None` means the caller should use `getStats` levels.
+    pub fn level(&self, slot: usize) -> Option<f32> {
+        if !self.running() {
+            return None;
+        }
+        let slot = self.slots.get(slot)?;
+        let meter = slot.meter.as_ref()?;
+        slot.source.borrow().as_ref()?;
+        let mut samples = self.samples.borrow_mut();
+        meter.get_float_time_domain_data(&mut samples);
+        Some(
+            samples
+                .iter()
+                .fold(0.0_f32, |peak, sample| peak.max(sample.abs()))
+                .min(1.0),
+        )
     }
     pub fn detach_all(&self) {
         for slot in &self.slots {
