@@ -252,6 +252,9 @@ fn videotoolbox_high_presets_stay_within_receiver_bounds() {
                     Err(error) => result = Err(error),
                 }
             }
+            // Full size when capped; the level 5.0 fallback size otherwise.
+            let session = encoder.size;
+            assert!(!encoder.references_capped || session == (width, h));
             let label = format!(
                 "{width}x{h}@{fps} {} ({})",
                 encoder.profile(),
@@ -264,14 +267,17 @@ fn videotoolbox_high_presets_stay_within_receiver_bounds() {
                     failures.push(format!("{label}: only {} frames", frames.len()))
                 }
                 // openh264 decodes baseline: the capped stream must decode
-                // every frame at full size.
+                // every frame at the session size.
                 Ok(()) if !high => {
                     use openh264::formats::YUVSource;
                     let mut decoder = openh264::decoder::Decoder::new().unwrap();
                     let mut decoded = 0;
                     for frame in &frames {
                         if let Some(image) = decoder.decode(&frame.data).unwrap() {
-                            assert_eq!(image.dimensions(), (width as usize, h as usize));
+                            assert_eq!(
+                                image.dimensions(),
+                                (session.0 as usize, session.1 as usize)
+                            );
                             decoded += 1;
                         }
                     }
