@@ -118,9 +118,11 @@ download buttons save attachments. Each message supports four files of up to 25 
 each. See [chat protocol and limits](docs/chat.md). Desktop voice channels
 use native Rust audio, independent speaker volume controls and a Rust WebRTC SFU.
 The browser web client joins the same voice channels and private calls with the
-browser's own microphone processing and WebRTC (HTTPS required for the microphone);
-screen sharing, cameras, the soundboard and advanced audio processing remain
-desktop-only. See [browser voice](docs/audio.md#browser-voice).
+browser's own microphone processing and WebRTC (HTTPS required for the microphone),
+with per-speaker volume up to 200%, microphone boost, device tests, the soundboard,
+connection diagnostics, focused-tab shortcuts and optional browser notifications.
+Screen sharing, cameras, global shortcuts, the overlay and native audio processing
+remain desktop-only. See [browser voice](docs/audio.md#browser-voice).
 Open **Settings > Voice & audio** to select devices and test audio, then join a
 voice channel. Calls adapt to weak connections by default: congestion lowers the
 microphone bitrate, packet loss adds Opus deep redundancy, and incoming voices use

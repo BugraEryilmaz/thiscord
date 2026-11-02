@@ -28,6 +28,7 @@ fn title(page: &str) -> &'static str {
     match page {
         "language" => crate::i18n::t("Language"),
         "audio" => crate::i18n::t("Voice & audio"),
+        "shortcuts" if client::web_app() => crate::i18n::t("Keyboard shortcuts"),
         "shortcuts" => crate::i18n::t("Shortcuts & overlay"),
         "devices" => crate::i18n::t("Devices & connections"),
         "security" | "password" | "delete" | "reauthenticate" => {
@@ -57,6 +58,9 @@ fn subtitle(page: &str) -> &'static str {
             crate::i18n::t("Choose your language. Changes apply immediately on this device.")
         }
         "audio" => crate::i18n::t("Choose your devices and sound your best."),
+        "shortcuts" if client::web_app() => {
+            crate::i18n::t("Mute, deafen and talk while this tab is focused.")
+        }
         "shortcuts" => crate::i18n::t("Stay in control while other apps are focused."),
         "devices" => crate::i18n::t("Manage where you’re signed in and how you log in."),
         "security" | "password" | "delete" | "reauthenticate" => {
@@ -150,6 +154,7 @@ pub(super) fn Host(ui: Ui) -> impl IntoView {
                             <NavItem ui=ui page="audio" label="Voice & audio" icon=Glyph::Headphones/>
                             <NavItem ui=ui page="language" label="Language" icon=Glyph::Settings/>
                             <Show when=client::desktop><NavItem ui=ui page="shortcuts" label="Shortcuts & overlay" icon=Glyph::Keyboard/><NavItem ui=ui page="desktop" label="App behavior" icon=Glyph::Screen/></Show>
+                            <Show when=client::web_app><NavItem ui=ui page="shortcuts" label="Keyboard shortcuts" icon=Glyph::Keyboard/></Show>
                             <NavItem ui=ui page="updates" label="Updates" icon=Glyph::Refresh/>
                             <NavItem ui=ui page="notifications" label="Notifications" icon=Glyph::Volume/>
                             <NavItem ui=ui page="safety" label="Safety & reports" icon=Glyph::Shield/>
@@ -185,7 +190,7 @@ pub(super) fn Host(ui: Ui) -> impl IntoView {
                         <Show when=move ||ui.page.get()=="devices"><Devices ui=ui/></Show>
                         <Show when=move ||ui.page.get()=="audio"><super::audio::AudioSettingsPanel ui=ui/></Show>
                         <Show when=move ||ui.page.get()=="notifications"><super::notifications::Panel ui=ui/></Show>
-                        <Show when=move ||ui.page.get()=="shortcuts"><super::shortcuts::ShortcutSettings control=ui.audio_control on_dirty=Callback::new(move |dirty|ui.settings_dirty.set(dirty))/><crate::overlay::OverlaySettings control=ui.audio_control/></Show>
+                        <Show when=move ||ui.page.get()=="shortcuts"><super::shortcuts::ShortcutSettings control=ui.audio_control on_dirty=Callback::new(move |dirty|ui.settings_dirty.set(dirty))/><Show when=client::desktop><crate::overlay::OverlaySettings control=ui.audio_control/></Show></Show>
                         <Show when=move ||ui.page.get()=="desktop"><super::window::WindowSettings/></Show>
                         <Show when=move ||ui.page.get()=="updates"><super::updates::Panel ui=ui/></Show>
                         <Show when=move ||ui.page.get()=="safety"><super::safety::Panel ui/></Show>

@@ -11,6 +11,7 @@ use std::{
     cell::{Cell, RefCell},
     rc::Rc,
 };
+use thiscord_frontend::browser_audio::{ConnectionStats, RemoteSource};
 use thiscord_frontend::browser_call::{
     self as rules, Activity, Answering, Backoff, Failure, FailureKind, Gate, PLAYBACK_SLOTS,
 };
@@ -58,6 +59,8 @@ pub(super) struct Live {
     sent_at: f64,
     /// Own-slot screen/camera senders and received video of this attempt.
     pub media: video::Media,
+    /// Soundboard negotiated: offered by the SFU and opted into here.
+    soundboard: bool,
 }
 impl Drop for Live {
     fn drop(&mut self) {
@@ -83,7 +86,7 @@ impl Live {
 pub(super) struct Call {
     pub id: u64,
     pub guild_id: GuildId,
-    token: String,
+    pub(super) token: String,
     pub channel_id: Cell<ChannelId>,
     pub output: Output,
     pub microphone: RefCell<Option<Rc<Microphone>>>,
@@ -101,6 +104,12 @@ pub(super) struct Call {
     reopening: Cell<u32>,
     /// Screen and camera capture; ends with the attempt, never restarted.
     pub publishing: RefCell<video::Publishing>,
+    /// Whether the sender carries the WebAudio-processed microphone (boost)
+    /// rather than the raw capture (used while the AudioContext cannot run).
+    sent_processed: Cell<Option<bool>>,
+    /// Latest `getStats` connection measurements.
+    pub stats: Cell<Option<ConnectionStats>>,
+    pub sounds: super::soundboard::Sounds,
 }
 impl Call {
     pub fn new(
@@ -129,7 +138,39 @@ impl Call {
             transmitting: Cell::new(false),
             reopening: Cell::new(0),
             publishing: RefCell::default(),
+            sent_processed: Cell::new(None),
+            stats: Cell::new(None),
+            sounds: Default::default(),
         })
+    }
+    pub fn is_closed(&self) -> bool {
+        self.closed.get()
+    }
+    /// Self or server deafen: no playback, no soundboard.
+    pub fn deafened(&self) -> bool {
+        super::settings().deafened
+            || self
+                .live
+                .borrow()
+                .as_ref()
+                .and_then(Live::own)
+                .is_some_and(|m| m.server_deafened)
+    }
+    pub fn soundboard(&self) -> bool {
+        self.live
+            .borrow()
+            .as_ref()
+            .is_some_and(|live| live.soundboard && live.connected)
+    }
+    /// Sends a client event after negotiation; false before the Answer.
+    pub fn signal(&self, event: ClientEvent) -> bool {
+        match self.live.borrow().as_ref() {
+            Some(live) if live.answered => {
+                live.socket.send(event);
+                true
+            }
+            _ => false,
+        }
     }
     pub fn start(self: &Rc<Self>) {
         let (handle, registration) = futures_util::future::AbortHandle::new_pair();
@@ -167,6 +208,8 @@ impl Call {
         self.output.detach_all();
         *self.remote.borrow_mut() = [Activity::default(); PLAYBACK_SLOTS];
         self.transmitting.set(false);
+        self.sent_processed.set(None);
+        self.stats.set(None);
     }
     fn release_microphone(&self) {
         self.capture_allowed.set(false);
@@ -198,10 +241,12 @@ impl Call {
         let live = self.live.borrow();
         let own = live.as_ref().and_then(Live::own);
         let microphone = self.microphone.borrow().clone();
+        // The WebAudio send path (boost, meters) works only while the context
+        // runs; otherwise the raw capture is sent and gated directly.
+        let processed = self.output.running() && microphone.as_ref().is_some_and(|m| m.metered());
         // Hidden tabs run timers about once per second, too coarse to gate
         // speech, and a stopped meter cannot open the gate: both fail open.
-        let metered =
-            !hidden && self.output.metering() && microphone.as_ref().is_some_and(|m| m.metered());
+        let metered = !hidden && processed;
         let voice_open = !metered
             || self
                 .activation
@@ -216,7 +261,8 @@ impl Call {
         };
         let sending = gate.sending(&settings);
         if let Some(microphone) = &microphone {
-            microphone.set_enabled(sending);
+            microphone.set_boost(settings.input_gain);
+            microphone.set_sending(sending, processed);
         }
         // Without a meter the indicator follows the send gate alone.
         let speaking = !metered
@@ -226,25 +272,29 @@ impl Call {
                 .active(rules::SPEAKING_HANGOVER_MS, now());
         self.transmitting.set(sending && speaking);
         let deafened = settings.deafened || own.is_some_and(|m| m.server_deafened);
+        self.output.set_master(settings.output_volume, deafened);
         for slot in 0..PLAYBACK_SLOTS {
+            let Some((source, member)) = RemoteSource::from_slot(slot) else {
+                continue;
+            };
             let gain = live
                 .as_ref()
-                .and_then(|live| {
-                    let (shared, member) = if slot < ROOM_CAPACITY {
-                        (false, slot)
-                    } else {
-                        (true, slot - ROOM_CAPACITY)
-                    };
-                    live.roster
-                        .iter()
-                        .find(|m| m.slot == member)
-                        .map(|m| super::stream_gain(self.guild_id, m.account_id, shared))
-                })
-                .unwrap_or(1.0);
-            self.output.set_volume(
-                slot,
-                rules::element_volume(gain, settings.output_volume, deafened),
-            );
+                .and_then(|live| live.roster.iter().find(|m| m.slot == member))
+                .map_or(1.0, |m| {
+                    super::stream_gain(self.guild_id, m.account_id, source)
+                });
+            self.output.set_stream_gain(source, member, gain);
+        }
+        // Swap the sent track when the processed path starts or stops working.
+        if let (Some(microphone), Some(sender)) =
+            (&microphone, live.as_ref().and_then(|l| l.sender.clone()))
+            && self.sent_processed.get() != Some(processed)
+        {
+            self.sent_processed.set(Some(processed));
+            let promise = sender.replace_track(Some(microphone.track(processed)));
+            wasm_bindgen_futures::spawn_local(async move {
+                let _ = JsFuture::from(promise).await;
+            });
         }
         drop(live);
         let state = (settings.muted, settings.deafened);
@@ -285,8 +335,11 @@ impl Call {
                         .borrow()
                         .as_ref()
                         .and_then(|live| live.sender.clone());
+                    let processed = call.output.running() && microphone.metered();
                     if let Some(sender) = sender {
-                        let _ = JsFuture::from(sender.replace_track(Some(&microphone.track))).await;
+                        let track = microphone.track(processed);
+                        let _ = JsFuture::from(sender.replace_track(Some(track))).await;
+                        call.sent_processed.set(Some(processed));
                     }
                     if call.closed.get() || call.reopening.get() != generation {
                         microphone.stop();
@@ -301,9 +354,10 @@ impl Call {
             }
         });
     }
-    fn tick(&self, stats: Option<Vec<media::InboundLevel>>) {
+    fn tick(&self, stats: Option<media::Stats>) {
         let settings = super::settings();
         let time = now();
+        self.output.check(time);
         let level = self
             .microphone
             .borrow()
@@ -318,11 +372,29 @@ impl Call {
         let mut speaking = self.local_speaking.get();
         speaking.observe(level, threshold, rules::SPEAKING_HANGOVER_MS, time);
         self.local_speaking.set(speaking);
+        // Remote speaking: WebAudio meters while the graph runs (every tick),
+        // else `getStats` inbound `audioLevel` (every stats pass).
+        let mut metered = [false; PLAYBACK_SLOTS];
+        {
+            let mut remote = self.remote.borrow_mut();
+            for (slot, activity) in remote.iter_mut().enumerate() {
+                if let Some(level) = self.output.level(slot) {
+                    metered[slot] = true;
+                    activity.observe(
+                        level,
+                        rules::REMOTE_SPEAKING_LEVEL,
+                        rules::SPEAKING_HANGOVER_MS,
+                        time,
+                    );
+                }
+            }
+        }
         if let Some(stats) = stats
             && let Some(live) = self.live.borrow().as_ref()
         {
+            self.stats.set(Some(stats.connection));
             let mut remote = self.remote.borrow_mut();
-            for (track_id, mid, level) in stats {
+            for (track_id, mid, level) in stats.levels {
                 let slot = live
                     .receivers
                     .iter()
@@ -330,7 +402,8 @@ impl Call {
                         track_id.as_deref() == Some(r.track_id.as_str())
                             || mid.as_deref() == Some(r.mid.as_str())
                     })
-                    .map(|r| r.slot);
+                    .map(|r| r.slot)
+                    .filter(|slot| !metered.get(*slot).copied().unwrap_or(true));
                 if let Some(activity) = slot.and_then(|slot| remote.get_mut(slot)) {
                     activity.observe(
                         level,
@@ -481,15 +554,16 @@ async fn attempt(
             return failure.into();
         }
     };
-    let (sdp, own_slot, can_speak, ice_servers, resume_token) = match first {
+    let (sdp, own_slot, can_speak, ice_servers, resume_token, soundboard) = match first {
         ServerEvent::Offer {
             sdp,
             slot,
             can_speak,
             ice_servers,
             resume_token,
+            soundboard,
             ..
-        } if slot < ROOM_CAPACITY => (sdp, slot, can_speak, ice_servers, resume_token),
+        } if slot < ROOM_CAPACITY => (sdp, slot, can_speak, ice_servers, resume_token, soundboard),
         ServerEvent::Replaced {} => return Failure::replaced().into(),
         ServerEvent::Error { error } => return Failure::server(&error).into(),
         _ => {
@@ -524,6 +598,7 @@ async fn attempt(
         sent_state: None,
         sent_at: 0.0,
         media: Default::default(),
+        soundboard,
     });
     let answer = match negotiate(call, &pc, &sdp, own_slot, can_speak, microphone.as_deref()).await
     {
@@ -543,7 +618,8 @@ async fn attempt(
             screen_subscriptions: true,
             screen_layers: false,
             video_diagnostics: false,
-            soundboard: false,
+            // Opt in whenever the SFU offers it (guild calls only).
+            soundboard,
             screen_profiles: false,
         });
     }
@@ -619,9 +695,13 @@ async fn negotiate(
             && let Some(microphone) = microphone
         {
             let track_sender = transceiver.sender();
-            JsFuture::from(track_sender.replace_track(Some(&microphone.track)))
+            // The processed (boosted) track while WebAudio runs; `apply` swaps
+            // tracks when that changes.
+            let processed = call.output.running() && microphone.metered();
+            JsFuture::from(track_sender.replace_track(Some(microphone.track(processed))))
                 .await
                 .map_err(|_| Failure::final_("Cannot attach the microphone"))?;
+            call.sent_processed.set(Some(processed));
             sender = Some(track_sender);
         }
         if direction == rules::Direction::SendRecv
@@ -633,14 +713,22 @@ async fn negotiate(
         if !media::set_direction(&transceiver, direction.as_str()) {
             return Err(Failure::final_("Cannot configure voice media"));
         }
-        if let Some(playback) = rules::playback_slot(kind, slot, own_slot) {
+        if let Some(playback) = rules::playback_slot(kind, slot, own_slot)
+            && let Some((source, member)) = RemoteSource::from_slot(playback)
+        {
             let track = transceiver.receiver().track();
             receivers.push(Receiver {
                 slot: playback,
                 track_id: track.id(),
                 mid,
             });
-            call.output.attach(playback, &track);
+            call.output.play_remote(source, member, &track);
+            if source == RemoteSource::SystemAudio {
+                // Plays only while this member's screen is watched (`video::tick`).
+                video_media
+                    .shared_audio
+                    .push((member, Clone::clone(&track)));
+            }
         } else if kind.is_video() && direction == rules::Direction::RecvOnly {
             video_media.remote.push(video::Remote {
                 kind,
@@ -773,10 +861,14 @@ async fn run(
                 .is_some_and(|live| !std::mem::replace(&mut live.connected, true));
             if first {
                 *connected_at = Some(now());
-                let can_speak = call.live.borrow().as_ref().is_some_and(|l| l.can_speak);
+                let (can_speak, soundboard) = call
+                    .live
+                    .borrow()
+                    .as_ref()
+                    .map_or((false, false), |l| (l.can_speak, l.soundboard));
                 super::update_voice(call, |voice| {
                     voice.connected = true;
-                    voice.soundboard = false;
+                    voice.soundboard = soundboard;
                     voice.message = if can_speak {
                         "Connected"
                     } else {
@@ -792,7 +884,7 @@ async fn run(
             next_stats = now() + STATS_MS;
             let pc = call.live.borrow().as_ref().map(|live| live.pc.clone());
             match pc {
-                Some(pc) => Some(media::inbound_levels(&pc).await),
+                Some(pc) => Some(media::stats(&pc).await),
                 None => None,
             }
         } else {
@@ -853,9 +945,17 @@ fn handle(call: &Rc<Call>, event: ServerEvent) -> Option<Ending> {
             video::target(call, kind, epoch, bitrate);
             None
         }
+        // Only delivered after this client opted in (`Answer.soundboard`).
+        ServerEvent::Soundboard {
+            sound_id,
+            account_id,
+        } => {
+            super::soundboard::played(call, sound_id, account_id);
+            None
+        }
         // Plain Opus publishers have no RED privacy boundary to refresh;
-        // browsers answer keyframe requests as RTCP PLI, and soundboard and
-        // admin events are never negotiated here. MediaDiagnostics is ignored.
+        // browsers answer keyframe requests as RTCP PLI, and admin events are
+        // never negotiated here. MediaDiagnostics is ignored.
         _ => None,
     }
 }

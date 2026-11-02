@@ -360,12 +360,18 @@ Personalized speaker isolation and physical acoustic acceptance remain future wo
 
 - [x] Join/leave and move yourself between voice channels; live participant list.
 - [x] Browser web-client voice for guild channels and private calls: browser WebRTC
-  Opus publisher on the own microphone m-line, per-stream playback elements,
-  mute/deafen/PTT, speaking rings, device/processing settings, resume and backoff.
+  Opus publisher on the own microphone m-line, mute/deafen/PTT, speaking rings,
+  device/processing settings, resume and backoff.
+- [x] Browser WebAudio playback/send graph: per-speaker and stream-audio volume up to
+  200%, master volume/deafen, limiter, output selection (AudioContext or element
+  sink), microphone boost, device tests, getStats connection tooltip, soundboard
+  playback/sending and per-person soundboard volume, focused-tab mute/deafen/PTT keys.
 - [ ] Browser voice end-to-end acceptance against the browser-publisher SFU on desktop
   and mobile Chrome, Safari and Firefox (audio both ways, autoplay unlock, iOS
   background behavior, output selection, moves/revocation).
-- [ ] Browser stream viewing (screen share/camera video) and soundboard playback.
+- [ ] Browser stream viewing (screen share/camera video).
+- [ ] Physically verify browser echo cancellation with WebAudio playback, Firefox
+  element-sink output routing and iOS interruption recovery.
 - [x] Connect native capture/playback to SFU streams with per-speaker volume sliders.
 - [x] User mute/deafen enforced locally and by the server; persistent voice controls.
 - [x] Capacity, join/speak permissions and live permission-change enforcement.
@@ -466,7 +472,8 @@ See [screen-sharing.md](docs/screen-sharing.md) for limits and remaining platfor
   long-press menus, browser invite handoff, web manifest and a same-origin Trunk proxy.
 - [ ] Hands-on web client acceptance on iOS Safari, Android Chrome and desktop
   Firefox/Safari (keyboard and safe areas, Google sign-in popups, installed home-screen app).
-- [ ] Optional browser `Notification` permission for background message alerts.
+- [x] Optional browser `Notification` system notifications for background alerts
+  (permission from Settings only; DND, mutes and banner preferences apply).
 
 - [x] Direct backend HTTPS/WSS using Let's Encrypt PEM files, TLS tests and SIGHUP reload.
 - [ ] Finalize public hostname/DNS, browser hosting and certificate renewal automation.

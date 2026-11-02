@@ -2,7 +2,8 @@
 
 Guild voice calls have a soundboard. The **Soundboard** button in the connected
 voice dock opens a grid of the server's sounds; clicking one plays it for everyone
-in the call, including you. Playing needs the desktop app, like the rest of voice.
+in the call, including you. It works in the desktop app and in the browser web
+client (see [Web client](#web-client)).
 
 ## Built-in sounds
 
@@ -82,8 +83,27 @@ persist across restarts and are shared by accounts using this OS profile, like
 speaker volumes. Each queued clip carries its own gain, so overlapping sounds from
 different people keep their own levels.
 
-PCM never crosses Tauri IPC or WASM. Logs record that a sound was played, without
-sound names or audio. Private calls and voice test bots have no soundboard.
+On desktop, PCM never crosses Tauri IPC or WASM. Logs record that a sound was
+played, without sound names or audio. Private calls and voice test bots have no soundboard.
+
+## Web client
+
+The browser web client opts into `Answer.soundboard` whenever the offer advertises
+it, and the voice-bar grid sends `ClientEvent::Soundboard` through browser voice
+(the same permission rules; one play per second is enforced locally too, with the
+desktop's "Wait a moment" message). On `ServerEvent::Soundboard` it downloads the
+clip from the same `GET /api/v1/soundboard/{guild}/{channel}/{sound}` endpoint as the
+desktop. The session cookie authenticates the same-origin request; no token is
+readable or sent. The body is bounded to 480 KB (`Content-Length` and actual length),
+validated with `decode_pcm`, converted to floats in WASM outside any audio callback
+and played as a 48 kHz `AudioBuffer` through the call's WebAudio graph: per-person
+level (0–200%, 0% skips the download), master output volume, deafen, limiter and the
+selected output device. Built-in sounds use the same endpoint. Up to 16 decoded clips
+are cached per call (about 1 MB each as floats) and dropped when the call ends;
+four downloads, four waiting plays per sound, four overlapping clips and the 3-second
+lateness rule match the desktop. Per-person levels are stored in this browser's
+`localStorage` (`thiscord.browser-soundboard-volumes.v1`, non-default levels only,
+at most 1000) and edited from the same participant context menu.
 
 ## Limits and follow-ups
 

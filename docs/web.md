@@ -157,14 +157,28 @@ browser pages other than `/admin`; such pages call the same-origin API
 ### Desktop-only features
 
 `account_client::native` and `listen` fail closed (“Available in the desktop app”)
-when `__TAURI__` is absent, so no web code path can call into Tauri. The web
-client hides shortcuts/overlay and close-to-tray settings and the updater, and
-shows **Get the desktop app** (linking to `/#downloads`) in Settings and the
-Updates panel. Screen sharing and camera buttons are disabled with an “Available in
-the desktop app” hint. In-app banners and sounds remain; native notification
-windows are desktop-only, and browser `Notification` permission is not requested.
-Links open in a new tab with `noopener noreferrer`; attachments download through a
-blob link. Voice in browsers is documented separately.
+when `__TAURI__` is absent, so no web code path can call into Tauri. Browser voice,
+device tests, microphone boost, per-speaker volumes above 100%, the soundboard and
+per-person soundboard volume, connection diagnostics and focused-page keyboard
+shortcuts (Settings → Keyboard shortcuts) run in the browser; see
+[browser voice](audio.md#browser-voice) and [soundboard](soundboard.md#web-client).
+Browser system notifications are optional and requested only from Settings →
+Notifications; see [notifications](notifications.md#browser-system-notifications).
+Screen sharing and camera buttons are disabled with an “Available in the desktop
+app” hint.
+
+What remains desktop-only is impossible or unavailable in a browser page: global
+shortcuts while another app or tab has focus (pages receive keys only while
+focused), the in-game overlay (an always-on-top window over other apps),
+close-to-tray (no tray icon; closing a tab ends the page), the signed auto-updater
+(the server always serves the current web bundle), native neural noise-suppression
+models and neural echo, packet-loss options (RED/deep redundancy/adaptive FEC need
+the native Opus encoder, which browsers do not expose), echo debug recordings and
+diagnostic logs (raw device PCM), and remote admin audio control (it changes native
+preferences on the user's computer). The web client hides those settings and shows
+**Get the desktop app** (linking to `/#downloads`) in Settings and the Updates
+panel. Links open in a new tab with `noopener noreferrer`; attachments download
+through a blob link.
 
 ### Invitations
 

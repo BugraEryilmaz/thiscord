@@ -13,6 +13,7 @@ use js_sys::{Array, Function, Reflect};
 use leptos::prelude::*;
 use std::{cell::Cell, rc::Rc};
 use thiscord_frontend::{
+    browser_audio::RemoteSource,
     browser_video::{self as rules, Facing, Inbound, Recovery, VideoSupport},
     video_feedback::{DecoderPressure, DecoderSample},
 };
@@ -132,6 +133,10 @@ pub(super) struct Media {
     pub senders: [Option<RtcRtpSender>; 3],
     pub remote: Vec<Remote>,
     pub support: VideoSupport,
+    /// Other members' received shared screen audio, by member slot.
+    pub shared_audio: Vec<(usize, MediaStreamTrack)>,
+    /// Members whose shared audio is currently stopped locally.
+    audio_stopped: [bool; ROOM_CAPACITY],
     sent_views: bool,
     views_at: f64,
     stats_at: f64,
@@ -963,6 +968,22 @@ pub(super) fn tick(call: &Call, stats: Option<InboundVideo>) {
     let Some(live) = live.as_mut() else {
         return;
     };
+    // Shared screen audio plays only while its screen is watched; the SFU
+    // also stops forwarding it to non-viewers with the next renewal.
+    let media = &mut live.media;
+    for (slot, track) in &media.shared_audio {
+        let wanted = views
+            .iter()
+            .any(|v| v.kind == MediaKind::ScreenVideo && v.slot == *slot);
+        let stopped = &mut media.audio_stopped[*slot % ROOM_CAPACITY];
+        if wanted && *stopped {
+            call.output
+                .play_remote(RemoteSource::SystemAudio, *slot, track);
+        } else if !wanted && !*stopped {
+            call.output.stop_remote(RemoteSource::SystemAudio, *slot);
+        }
+        *stopped = !wanted;
+    }
     for watch in keyframes {
         live.send(ClientEvent::ScreenKeyframe {
             kind: watch.kind,
