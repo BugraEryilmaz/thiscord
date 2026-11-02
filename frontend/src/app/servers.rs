@@ -351,6 +351,7 @@ pub(super) fn ServerRail(ui: Ui) -> impl IntoView {
             error.set(String::new());
             if dialog.show_modal().is_ok() {
                 ui.invites.pending.set(None);
+                super::invites::clear_fragment();
             }
         }
     });
@@ -465,6 +466,21 @@ pub(super) fn ServerRail(ui: Ui) -> impl IntoView {
             </form>
         </dialog>
     }
+}
+
+/// Phones show either the channel list or the open channel; this returns to
+/// the list without closing the channel. Hidden at tablet widths and up.
+#[component]
+pub(super) fn BackButton(
+    ui: Ui,
+    #[prop(default = "Back to channels")] label: &'static str,
+) -> impl IntoView {
+    view! {<button type="button" class="icon-button mobile-only" aria-label=move || crate::i18n::t(label) on:click=move |_|ui.mobile_content.set(false)><Icon kind=Glyph::Back/></button>}
+}
+
+#[component]
+fn MobileBack(ui: Ui) -> impl IntoView {
+    view! {<div class="mobile-back-bar mobile-only"><BackButton ui=ui/><span>{move || crate::i18n::t("Channels")}</span></div>}
 }
 
 #[component]
@@ -613,7 +629,7 @@ pub(super) fn ServerHome(ui: Ui) -> impl IntoView {
                         <ul class="min-h-0 flex-1 space-y-1 overflow-y-auto text-white/70">{let channel_guild=home.guild.clone();let channels=home.channels;let categories=home.categories;move ||{let mut channels=channels.clone();channels.sort_by_key(|c|(c.category_id.and_then(|id|categories.iter().find(|cat|cat.id==id).map(|cat|(cat.position,cat.id))),!ui.sidebar_preferences.get().pinned.contains(&c.id),c.position,c.id));let mut previous=None;let categories=categories.clone();let channel_guild=channel_guild.clone();channels.into_iter().map(move |ch|{
                             let id=ch.id; let is_voice=ch.kind==ChannelKind::Voice; let name=ch.name.clone();let guild=channel_guild.clone();let guild_id=guild.id;
                             let heading=if previous!=Some(ch.category_id){previous=Some(ch.category_id);Some(ch.category_id.and_then(|id|categories.iter().find(|cat|cat.id==id).map(|cat|cat.name.clone())).unwrap_or_else(||crate::i18n::t("No category").into()))}else{None};
-                            view!{<li>{heading.map(|title|view!{<h4 class="px-2 pb-1 pt-4 text-xs font-semibold uppercase text-white/50">{title}</h4>})}<button data-context-server=guild_id.to_string() data-context-channel=id.to_string() aria-haspopup="menu" class="flex w-full items-center gap-2 rounded-md px-2 py-2 text-left hover:bg-white/10" class:channel-selected=move ||selected.get().is_some_and(|c|c.id==id) class:voice-active=move ||ui.voice.get().channel_id==Some(id) aria-label=name.clone() data-tip=name.clone() disabled=move ||is_voice && ui.voice_joining.get() on:click=move |_|if is_voice {super::audio::join(ui,guild.clone(),ch.clone());}else{selected.set(Some(ch.clone()));}>
+                            view!{<li>{heading.map(|title|view!{<h4 class="px-2 pb-1 pt-4 text-xs font-semibold uppercase text-white/50">{title}</h4>})}<button data-context-server=guild_id.to_string() data-context-channel=id.to_string() aria-haspopup="menu" class="flex w-full items-center gap-2 rounded-md px-2 py-2 text-left hover:bg-white/10" class:channel-selected=move ||selected.get().is_some_and(|c|c.id==id) class:voice-active=move ||ui.voice.get().channel_id==Some(id) aria-label=name.clone() data-tip=name.clone() disabled=move ||is_voice && ui.voice_joining.get() on:click=move |_|if is_voice {if selected.with_untracked(|c|c.as_ref().is_some_and(|c|c.id==id)){ui.mobile_content.set(true);}super::audio::join(ui,guild.clone(),ch.clone());}else{selected.set(Some(ch.clone()));ui.mobile_content.set(true);}>
                                 {move || if is_voice {view!{<Icon kind=Glyph::Volume/>}.into_any()}else{view!{<span class="w-5 text-center text-xl text-white/40">"#"</span>}.into_any()}}
                                 <span class="min-w-0 flex-1 truncate text-sm">{name.clone()}</span>
                                 <Show when=move ||ui.sidebar_preferences.get().pinned.contains(&id)><span aria-label=move || crate::i18n::t("Pinned") class="channel-indicator"><Icon kind=Glyph::Pin/></span></Show>
@@ -623,13 +639,15 @@ pub(super) fn ServerHome(ui: Ui) -> impl IntoView {
                         }).collect_view()}}</ul>
                     </nav>
                 })}
+                <div class="server-content">
                     <Show when=move||selected.get().is_some() fallback=move||view!{<div class="flex items-center justify-center rounded-xl border border-white/10 p-8 text-white/60">{move || crate::i18n::t("Choose a channel to get started.")}</div>}>
                         <For each={move ||panel.get().into_iter().collect::<Vec<_>>()} key=|(guild, channel, _)|(*guild, *channel) children=move |(guild, channel, kind)| {
                             let name = Signal::derive(move || selected.get().filter(|ch|ch.id==channel).map(|ch|ch.name).unwrap_or_default());
-                            if kind==ChannelKind::Voice {view!{<super::audio::VoiceChannel ui=ui guild=guild channel=channel name=name/>}.into_any()}else{view!{<super::chat::ChatPanel ui=ui guild=guild channel=channel name=name/>}.into_any()}
+                            if kind==ChannelKind::Voice {view!{<MobileBack ui=ui/><super::audio::VoiceChannel ui=ui guild=guild channel=channel name=name/>}.into_any()}else{view!{<super::chat::ChatPanel ui=ui guild=guild channel=channel name=name/>}.into_any()}
                         }/>
 
                     </Show>
+                </div>
             </section>
         </Show>
         <dialog node_ref=dialog on:click=move |e|super::dialog::dismiss_outside(e,dialog,ui.busy.get_untracked()) aria-labelledby="channel-dialog-title" class="m-auto max-h-[85vh] w-[calc(100%-2rem)] max-w-md overflow-y-auto rounded-2xl border border-white/15 bg-surface p-6 text-white shadow-2xl backdrop:bg-black/70" on:cancel=move |ev: web_sys::Event|{if ui.busy.get_untracked(){ev.prevent_default();}}>

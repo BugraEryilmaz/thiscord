@@ -44,6 +44,8 @@ media compatibility spike can happen before chat to expose platform constraints.
 - [x] On-demand video playback diagnostics in `/admin`: local WebView bridge records, automatic self-tests, OS/WebView/policy, adapter and firewall summaries (docs/screen-sharing.md).
 - [ ] Use a failing viewer's report to fix "Connecting video..." stalls; consider interface-bound bridge candidates if only the loopback self-test fails.
 - [x] Browser `/admin` dashboard with current instance-owner/admin authorization, host metrics and live voice diagnostics.
+- [x] Backend for the `/app` web client: HttpOnly cookie sessions with Origin-based CSRF rules, cookie socket authentication, bundle hosting/deploy and browser Opus microphone publishers in the SFU (docs/web.md).
+- [ ] Accept the `/app` web client and browser voice interactively in desktop and mobile Chrome, Safari and Firefox.
 - [x] Prioritized performance audit with bounded backend timings and automatic desktop UI counters accessible through `/admin` (docs/performance-audit.md).
 - [ ] Confirm performance audit priorities under production load before changing polling, pool sizing or frontend snapshot updates.
 - [ ] Deploy the admin bundle to the VPS and verify production password/Google login and real-client telemetry.
@@ -129,7 +131,7 @@ and single-process chat/media enforcement.
 - [x] Joined-server rail with circular initials avatars, names on hover, create/join dialogs.
 - [ ] Custom server images and password-change settings UI.
 - [x] Invite links with optional expiry/use limits, revocation and join validation.
-- [x] Browser invite landing with desktop handoff, installer links and unlimited invite copying.
+- [x] Browser invite landing with desktop handoff, web client handoff, installer links and unlimited invite copying.
 - [ ] Validate installed invite activation on Windows, macOS and Linux (cold start, running/tray and signed out).
 - [x] Ownership transfer, kick/ban/unban and per-server moderation controls.
 - [x] Timeouts with expiry/removal, chat/voice enforcement and join-bypass protection.
@@ -359,6 +361,25 @@ Personalized speaker isolation and physical acoustic acceptance remain future wo
 - [ ] Physically listen to bot profiles and verify menus/admin edits on Windows/macOS/Linux.
 
 - [x] Join/leave and move yourself between voice channels; live participant list.
+- [x] Browser web-client voice for guild channels and private calls: browser WebRTC
+  Opus publisher on the own microphone m-line, mute/deafen/PTT, speaking rings,
+  device/processing settings, resume and backoff.
+- [x] Browser WebAudio playback/send graph: per-speaker and stream-audio volume up to
+  200%, master volume/deafen, limiter, output selection (AudioContext or element
+  sink), microphone boost, device tests, getStats connection tooltip, soundboard
+  playback/sending and per-person soundboard volume, focused-tab mute/deafen/PTT keys.
+- [ ] Browser voice end-to-end acceptance against the browser-publisher SFU on desktop
+  and mobile Chrome, Safari and Firefox (audio both ways, autoplay unlock, iOS
+  background behavior, output selection, moves/revocation).
+- [x] Browser screen sharing and cameras: viewing in the call grid (recvonly baseline
+  H.264, ScreenViews demand, receiver budgets, keyframe requests) and publishing with
+  getDisplayMedia/getUserMedia on own-slot m-lines (replaceTrack, ScreenTarget
+  bitrate/pause, PLI keyframes from the SFU, tab/system audio in Chromium).
+- [ ] Browser screen sharing/camera acceptance on physical devices: Firefox, Safari
+  (macOS/iOS) and Android Chrome cameras, real displays/webcams, front/back camera
+  switching, mobile background behavior and multi-viewer bandwidth.
+- [ ] Physically verify browser echo cancellation with WebAudio playback, Firefox
+  element-sink output routing and iOS interruption recovery.
 - [x] Connect native capture/playback to SFU streams with per-speaker volume sliders.
 - [x] User mute/deafen enforced locally and by the server; persistent voice controls.
 - [x] Capacity, join/speak permissions and live permission-change enforcement.
@@ -459,6 +480,12 @@ See [screen-sharing.md](docs/screen-sharing.md) for limits and remaining platfor
 
 - [x] Public welcome page with responsive design, latest GitHub installer links,
   failure fallback, and a separate web bundle integrated into CI/VPS deployment.
+- [x] Web client shell at `/app/`: HttpOnly cookie sessions, phone/tablet layout,
+  long-press menus, browser invite handoff, web manifest and a same-origin Trunk proxy.
+- [ ] Hands-on web client acceptance on iOS Safari, Android Chrome and desktop
+  Firefox/Safari (keyboard and safe areas, Google sign-in popups, installed home-screen app).
+- [x] Optional browser `Notification` system notifications for background alerts
+  (permission from Settings only; DND, mutes and banner preferences apply).
 
 - [x] Direct backend HTTPS/WSS using Let's Encrypt PEM files, TLS tests and SIGHUP reload.
 - [ ] Finalize public hostname/DNS, browser hosting and certificate renewal automation.

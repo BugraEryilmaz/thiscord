@@ -112,10 +112,11 @@ pub(super) fn end_call(ui: Ui) {
 pub(super) fn open(ui: Ui, id: ConversationId) {
     ui.friends.before.set(None);
     ui.friends.selected.set(Some(id));
+    ui.mobile_content.set(true);
     super::servers::home(ui);
 }
 fn available(ui: Ui) -> bool {
-    account_client::desktop() || ui.audio_control.is_remote()
+    super::audio::voice_available(ui)
 }
 
 #[component]
@@ -229,9 +230,7 @@ fn join_call(ui: Ui, call: Call) {
     );
 }
 async fn connected(ui: Ui, token: &str) -> Result<(), ()> {
-    let base = account_client::api_base()
-        .trim_end_matches('/')
-        .replacen("http", "ws", 1);
+    let base = account_client::socket_base();
     let (mut sink, mut stream) = WebSocket::open(&format!("{base}{FRIENDS_SOCKET_PATH}"))
         .map_err(|_| ())?
         .split();
@@ -362,7 +361,7 @@ async fn connected(ui: Ui, token: &str) -> Result<(), ()> {
 pub(super) fn Home(ui: Ui) -> impl IntoView {
     let filter = RwSignal::new("online");
     view! {<section class="flex h-full min-h-0 flex-col pb-[var(--dock-height)] lg:pb-0">
-        <header class="flex flex-wrap items-center gap-4 border-b border-white/10 px-6 py-4">
+        <header class="friends-home-header flex flex-wrap items-center gap-4 border-b border-white/10 px-6 py-4">
             <button class="flex items-center gap-2 text-lg font-bold" on:click=move |_|ui.friends.selected.set(None)><Icon kind=Glyph::Person/>{move || crate::i18n::t("Friends")}</button>
             <nav class="flex flex-wrap gap-2" aria-label=move || crate::i18n::t("Friend filters")>
                 {[("online","Online"),("all","All"),("pending","Requests"),("messages","Messages")].into_iter().map(|(value,label)|view!{<button class="flex items-center gap-2 rounded-lg px-3 py-2 text-sm hover:bg-white/10" class:bg-brand=move ||filter.get()==value && ui.friends.selected.get().is_none() aria-pressed=move ||filter.get()==value && ui.friends.selected.get().is_none() on:click=move |_|{filter.set(value);ui.friends.selected.set(None);}>{move || crate::i18n::t(label)}
@@ -785,7 +784,7 @@ fn Conversation(ui: Ui, id: ConversationId) -> impl IntoView {
         }
     };
     view! {<section class="flex h-full min-h-0 flex-col">
-        <header data-context-conversation=id.to_string() class="flex items-center gap-3 border-b border-white/10 px-6 py-4"><button class="icon-button lg:hidden" aria-label=move || crate::i18n::t("Back to friends") on:click=move |_|ui.friends.selected.set(None)><Icon kind=Glyph::Close/></button><h2 class="min-w-0 flex-1 truncate font-semibold">{move ||friend.get().map(|f|f.person.display_name).unwrap_or_default()}</h2><span class="text-xs text-white/50">{move ||if friend.get().is_some_and(|f|f.online){crate::i18n::t("Online")}else{crate::i18n::t("Offline")}}</span><button class="icon-button disabled:opacity-40" aria-label=move || crate::i18n::t("Start private voice call") data-tip=move || crate::i18n::t("Voice call (desktop)") disabled=move ||!available(ui) || !ui.friends.snapshot.get().calls.is_empty() on:click=move |_|action(ui,Request::StartCall {conversation_id:id})><Icon kind=Glyph::Headphones/></button><super::search::Launcher state=search/></header>
+        <header data-context-conversation=id.to_string() class="flex items-center gap-3 border-b border-white/10 px-6 py-4"><button class="icon-button lg:hidden" aria-label=move || crate::i18n::t("Back to friends") on:click=move |_|{ui.mobile_content.set(false);ui.friends.selected.set(None);}><Icon kind=Glyph::Back/></button><h2 class="min-w-0 flex-1 truncate font-semibold">{move ||friend.get().map(|f|f.person.display_name).unwrap_or_default()}</h2><span class="text-xs text-white/50">{move ||if friend.get().is_some_and(|f|f.online){crate::i18n::t("Online")}else{crate::i18n::t("Offline")}}</span><button class="icon-button disabled:opacity-40" aria-label=move || crate::i18n::t("Start private voice call") data-tip=move || crate::i18n::t("Voice call (desktop)") disabled=move ||!available(ui) || !ui.friends.snapshot.get().calls.is_empty() on:click=move |_|action(ui,Request::StartCall {conversation_id:id})><Icon kind=Glyph::Headphones/></button><super::search::Launcher state=search/></header>
         <super::search::Bar state=search/>
         <super::search::Results state=search on_jump=jump/>
         <For each=move ||{ui.friends.snapshot.get().calls.into_iter().filter(|c|c.conversation_id==id && c.state==CallState::Ringing && ui.account.get().is_some_and(|a|a.id==c.callee)).collect::<Vec<_>>()} key=|c|c.id children=move |call|view!{

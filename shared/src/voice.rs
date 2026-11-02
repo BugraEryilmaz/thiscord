@@ -55,6 +55,10 @@ pub enum ClientEvent {
         done: bool,
     },
     Answer {
+        /// A browser WebRTC stack that cannot choose RTP SSRCs. Its single
+        /// Opus send track is the microphone, whatever SSRC it uses.
+        #[serde(default, skip_serializing_if = "is_false")]
+        browser_publisher: bool,
         #[serde(default, skip_serializing_if = "is_false")]
         packet_redundancy: bool,
         #[serde(default, skip_serializing_if = "is_false")]
@@ -514,6 +518,7 @@ mod media_tests {
             }
         ));
         let answer = ClientEvent::Answer {
+            browser_publisher: false,
             packet_redundancy: false,
             remote_audio: false,
             sdp: "test".into(),

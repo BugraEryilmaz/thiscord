@@ -4,6 +4,7 @@ use thiscord_shared::account::*;
 mod admin;
 mod appearance;
 mod audio;
+mod browser_media;
 mod camera;
 mod chat;
 mod context_menu;
@@ -112,6 +113,19 @@ struct Ui {
     sessions: RwSignal<Vec<SessionInfo>>,
     ticket: RwSignal<Option<String>>,
     authorization_url: RwSignal<Option<String>>,
+    /// Narrow screens show either navigation or the open conversation; this is
+    /// the user's latest choice. See [`mobile_content`] for the effective view.
+    mobile_content: RwSignal<bool>,
+}
+/// On phones, content replaces navigation only while something is open in the
+/// current context; otherwise navigation stays reachable.
+fn mobile_content(ui: Ui) -> bool {
+    ui.mobile_content.get()
+        && if ui.navigation.with(|n| n.current().guild.is_some()) {
+            ui.server.with(Option::is_some) && ui.selected_channel.with(Option::is_some)
+        } else {
+            ui.friends.selected.with(Option::is_some)
+        }
 }
 async fn apply(ui: Ui, response: AccountResponse) {
     match response {
@@ -219,8 +233,42 @@ fn device_name() -> &'static str {
     } else if client::admin_page() {
         crate::i18n::t("Thiscord admin browser")
     } else {
-        crate::i18n::t("Browser preview")
+        crate::i18n::t("Thiscord web")
     }
+}
+/// Browsers report the on-screen keyboard through the visual viewport. Narrow
+/// layouts size the shell to it so the composer stays above the keyboard.
+fn track_visual_viewport() {
+    use wasm_bindgen::{JsCast, prelude::Closure};
+    let Some(viewport) = js_sys::Reflect::get(&window(), &"visualViewport".into())
+        .ok()
+        .filter(|v| v.is_object())
+    else {
+        return;
+    };
+    let update = {
+        let viewport = viewport.clone();
+        move || {
+            if let Some(height) = js_sys::Reflect::get(&viewport, &"height".into())
+                .ok()
+                .and_then(|v| v.as_f64())
+                && let Some(root) = document()
+                    .document_element()
+                    .and_then(|root| root.dyn_into::<web_sys::HtmlElement>().ok())
+            {
+                // CSSOM, not a `style` attribute: the web CSP forbids inline styles.
+                let _ = root
+                    .style()
+                    .set_property("--viewport-height", &format!("{height}px"));
+            }
+        }
+    };
+    update();
+    let listener = Closure::<dyn FnMut()>::new(update);
+    let target: web_sys::EventTarget = viewport.unchecked_into();
+    let _ = target.add_event_listener_with_callback("resize", listener.as_ref().unchecked_ref());
+    // The app shell lives for the whole page.
+    listener.forget();
 }
 fn cancel_google(ui: Ui) {
     let ticket = ui.ticket.get_untracked();
@@ -273,6 +321,9 @@ fn google(ui: Ui, purpose: GooglePurpose) {
                 )
                 .await?;
             } else {
+                // Browsers may still treat this as part of the click. Popup
+                // blockers (and mobile Safari) keep the visible link instead.
+                client::open_tab(&authorization_url);
                 ui.authorization_url.set(Some(authorization_url));
             }
             ui.status
@@ -360,7 +411,7 @@ fn StatusNotice(ui: Ui) -> impl IntoView {
     });
     view! {
         <Show when=move || visible.get()>
-            <div class="fixed bottom-5 right-5 z-50 flex max-w-sm items-start gap-4 rounded-lg border border-white/10 bg-slate-900 p-4 shadow-lg">
+            <div class="fixed left-3 right-3 top-[calc(env(safe-area-inset-top)+0.75rem)] z-50 flex items-start gap-4 rounded-lg border border-white/10 bg-slate-900 p-4 shadow-lg md:bottom-5 md:left-auto md:right-5 md:top-auto md:max-w-sm">
                 <p class="text-sm" role="status" aria-live="polite">{move || crate::i18n::message(ui.status.get())}</p>
                 <button class="text-white/60 hover:text-white" aria-label=move || crate::i18n::t("Dismiss notification") on:click=move |_| visible.set(false)>"×"</button>
             </div>
@@ -416,6 +467,7 @@ pub fn App() -> impl IntoView {
         sessions: RwSignal::new(vec![]),
         ticket: RwSignal::new(None),
         authorization_url: RwSignal::new(None),
+        mobile_content: RwSignal::new(false),
     };
     if crate::account_client::admin_page() {
         return view! {
@@ -445,6 +497,47 @@ pub fn App() -> impl IntoView {
             ui.busy.set(false);
         });
     }
+    // The web client restores its HttpOnly cookie session; avoid flashing the
+    // login form while that check runs.
+    let restoring = RwSignal::new(client::web_app());
+    if client::web_app() {
+        track_visual_viewport();
+        invites::receive_fragment(ui);
+        window_event_listener(leptos::ev::hashchange, move |_| {
+            invites::receive_fragment(ui)
+        });
+        leptos::task::spawn_local(async move {
+            match client::restore_cookie_session().await {
+                Ok(Some(account)) => {
+                    servers::reset_session(ui);
+                    ui.token.set(Some(String::new()));
+                    ui.account.set(Some(account));
+                    ui.page.set("servers");
+                    ui.status.set(String::new());
+                }
+                Ok(None) => {}
+                Err(error) => ui.status.set(thiscord_frontend::localized_format!(
+                    crate::i18n::language(),
+                    "Could not restore session: {error}. Sign in to continue",
+                    error = crate::i18n::message(error)
+                )),
+            }
+            restoring.set(false);
+        });
+    }
+    // Selecting a channel or conversation opens it on phones.
+    let opened = Memo::new(move |_| {
+        (
+            ui.selected_channel.with(|c| c.as_ref().map(|c| c.id)),
+            ui.friends.selected.get(),
+        )
+    });
+    Effect::new(move |previous: Option<()>| {
+        let (channel, conversation) = opened.get();
+        if previous.is_some() && (channel.is_some() || conversation.is_some()) {
+            ui.mobile_content.set(true);
+        }
+    });
     window_event_listener(leptos::ev::focus, move |_| {
         if !ui.busy.get_untracked()
             && ui
@@ -460,8 +553,15 @@ pub fn App() -> impl IntoView {
         <invites::Host ui=ui/>
         <updates::Host ui=ui/>
         <notifications::Host ui=ui/>
-        <Show when=move ||ui.account.get().is_some() fallback=move ||view!{<login::Login ui=ui/>}>
-        <div class="app-shell" class:in-voice=move ||ui.voice.get().channel_id.is_some()>
+        <Show when=move ||ui.account.get().is_some() fallback=move ||view!{
+            <Show when=move ||restoring.get() fallback=move ||view!{<login::Login ui=ui/>}>
+                <main class="flex min-h-dvh flex-col items-center justify-center gap-4 text-white/60" aria-busy="true">
+                    <crate::brand::BrandMark class="h-12 w-12 animate-pulse text-brand"/>
+                    <p role="status">{move || crate::i18n::t("Loading Thiscord…")}</p>
+                </main>
+            </Show>
+        }>
+        <div class="app-shell" class:in-voice=move ||ui.voice.get().channel_id.is_some() class:mobile-content=move ||mobile_content(ui)>
         <servers::ServerRail ui=ui/>
         <audio::AudioHost ui=ui/>
         <chat::ChatHost ui=ui/>

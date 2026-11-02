@@ -2,6 +2,7 @@
 pub(crate) mod moderation;
 use crate::access;
 mod bots;
+mod browser;
 mod diagnostics;
 mod egress;
 mod ice;
@@ -322,12 +323,14 @@ async fn upgrade(
     let Ok(permit) = limit.try_acquire_owned() else {
         return Failure::Limited.response(id);
     };
+    // Web client: cookie-derived bearer, used only when the frame token is empty.
+    let upgrade_token = crate::auth::bearer(&headers);
     ws.max_message_size(128 * 1024)
         .max_frame_size(128 * 1024)
         .on_upgrade(move |socket| async move {
             let mut socket = logging::Socket::new(socket, id);
             socket.permit = Some(permit);
-            serve(socket, pool, id).await
+            serve(socket, pool, id, upgrade_token).await
         })
         .into_response()
 }
@@ -412,6 +415,10 @@ struct Handler {
     generation: Arc<AtomicU64>,
     track_seen: [AtomicBool; 5],
     screen_rate: Arc<std::sync::Mutex<layers::IngressBudget>>,
+    /// Browsers cannot choose RTP SSRCs; their tracks are identified by the
+    /// own-slot m-line that received them instead (see `browser.rs`).
+    browser: Arc<browser::Publisher>,
+    slot: usize,
 }
 #[async_trait::async_trait]
 impl PeerConnectionEventHandler for Handler {
@@ -437,8 +444,26 @@ impl PeerConnectionEventHandler for Handler {
         let Some(codec) = track.codec(ssrc).await else {
             return;
         };
-        let low_layer = ssrc == thiscord_shared::screen::LOW_LAYER_SSRC;
-        let Some(kind) = (if low_layer {
+        let browser = self.browser.enabled();
+        let browser_kind = if browser {
+            // Any SSRC on the member's own microphone, screen, shared-audio or
+            // camera m-line. Tracks on other m-lines stay unread (their bounded
+            // receive queue drops) instead of ending the call; never forwarded.
+            let kind = self.browser.kind(&track, self.slot).await;
+            if kind.is_none() {
+                tracing::info!(request_id = %self.request_id, "ignored browser track outside its own media lines");
+                return;
+            }
+            kind
+        } else {
+            None
+        };
+        let low_layer = !browser && ssrc == thiscord_shared::screen::LOW_LAYER_SSRC;
+        let Some(kind) = (if browser {
+            // The codec check below admits Opus audio or H.264 video, and
+            // `track_seen` admits one track per kind and connection.
+            browser_kind
+        } else if low_layer {
             Some(MediaKind::ScreenVideo)
         } else {
             MediaKind::from_publisher_ssrc(ssrc)
@@ -453,6 +478,7 @@ impl PeerConnectionEventHandler for Handler {
         };
         if !(codec.mime_type.eq_ignore_ascii_case(mime)
             || (kind == MediaKind::Microphone
+                && !browser
                 && codec
                     .mime_type
                     .eq_ignore_ascii_case(thiscord_shared::rtp_red::MIME)))
@@ -462,6 +488,9 @@ impl PeerConnectionEventHandler for Handler {
         {
             self.active.store(false, Ordering::Release);
             return;
+        }
+        if browser {
+            self.browser.publishing(kind, ssrc, &track);
         }
         let tx = if kind == MediaKind::Microphone {
             self.packets.clone()
@@ -928,7 +957,7 @@ async fn log_selected_route(pc: &dyn PeerConnection, id: RequestId) -> bool {
     }
     false
 }
-async fn serve(mut socket: logging::Socket, pool: DbPool, id: RequestId) {
+async fn serve(mut socket: logging::Socket, pool: DbPool, id: RequestId, upgrade_token: String) {
     let bot = socket.bot.clone();
     let Ok(Some(Ok(first))) = tokio::time::timeout(Duration::from_secs(5), socket.recv()).await
     else {
@@ -947,7 +976,7 @@ async fn serve(mut socket: logging::Socket, pool: DbPool, id: RequestId) {
         resumption::attach(
             socket,
             &pool,
-            token,
+            crate::auth::socket_token(token, &upgrade_token),
             guild_id,
             channel_id,
             resume_token,
@@ -971,6 +1000,7 @@ async fn serve(mut socket: logging::Socket, pool: DbPool, id: RequestId) {
         .await;
         return;
     };
+    let token = crate::auth::socket_token(token, &upgrade_token);
     socket.stage = "authorize";
     let connection_access = match access::identify(&pool, &token, Some(guild_id)).await {
         Ok((identity, access)) => match &bot {
@@ -1108,6 +1138,7 @@ async fn serve(mut socket: logging::Socket, pool: DbPool, id: RequestId) {
         }
     };
     let gathered = Arc::new(Notify::new());
+    let browser_publisher = Arc::new(browser::Publisher::default());
     let (in_tx, mut in_rx) = mpsc::channel::<Ingress>(8);
     let (media_in_tx, mut media_in_rx) = mpsc::channel::<Ingress>(4096);
     let mut engine = MediaEngine::default();
@@ -1148,6 +1179,8 @@ async fn serve(mut socket: logging::Socket, pool: DbPool, id: RequestId) {
             generation: generation.clone(),
             track_seen: std::array::from_fn(|_| AtomicBool::new(false)),
             screen_rate: Default::default(),
+            browser: browser_publisher.clone(),
+            slot,
         }))
         .with_udp_addrs(vec![local_bind().unwrap_or_else(|_| "127.0.0.1:0".into())])
         .build()
@@ -1202,8 +1235,9 @@ async fn serve(mut socket: logging::Socket, pool: DbPool, id: RequestId) {
             pc.set_local_description(offer).await.map_err(|_| ())?;
             socket.stage = "ice_gathering";
             gathered.notified().await;
-            let sdp =
-                serde_json::to_string(&pc.local_description().await.ok_or(())?).map_err(|_| ())?;
+            let local = pc.local_description().await.ok_or(())?;
+            browser_publisher.bind(&pc, &local.sdp);
+            let sdp = serde_json::to_string(&local).map_err(|_| ())?;
             socket.stage = "offer_send";
             send(
                 &mut socket,
@@ -1233,6 +1267,7 @@ async fn serve(mut socket: logging::Socket, pool: DbPool, id: RequestId) {
             };
             tracing::info!(request_id = %id, elapsed_ms = negotiation_started.elapsed().as_millis(), "voice answer received");
             let Some(ClientEvent::Answer {
+                browser_publisher: browser,
                 sdp,
                 screen_feedback: enabled,
                 screen_subscriptions,
@@ -1247,8 +1282,13 @@ async fn serve(mut socket: logging::Socket, pool: DbPool, id: RequestId) {
                 return Err(());
             };
             let answer: RTCSessionDescription = serde_json::from_str(&sdp).map_err(|_| ())?;
-            let packet_redundancy =
-                packet_redundancy && thiscord_shared::rtp_red::negotiated(&answer.sdp);
+            // Browser publishers send plain Opus only; their RED (if any) does
+            // not follow the authenticated sender-generation protocol.
+            let packet_redundancy = packet_redundancy
+                && !browser
+                && thiscord_shared::rtp_red::negotiated(&answer.sdp);
+            // Tracks open only after the remote description; classify first.
+            browser_publisher.enabled.store(browser, Ordering::Release);
             screen_feedback = enabled;
             remote_audio = audio_enabled;
             video_diagnostics = video_enabled;
@@ -1268,10 +1308,11 @@ async fn serve(mut socket: logging::Socket, pool: DbPool, id: RequestId) {
                 member.feedback_enabled = enabled;
                 member.packet_redundancy = packet_redundancy;
                 member.subscriptions_enabled = screen_subscriptions;
-                member.screen_layers = screen_layers && screen_subscriptions && enabled;
+                // Browsers publish one encoding: never plan or wait for a low layer.
+                member.screen_layers = screen_layers && screen_subscriptions && enabled && !browser;
                 member.screen_profiles = screen_profiles && screen_subscriptions;
                 member.negotiated = true;
-                tracing::info!(request_id = %id, slot, packet_redundancy,
+                tracing::info!(request_id = %id, slot, packet_redundancy, browser_publisher = browser,
                     microphone_source_epoch = member.info.microphone_source_epoch,
                     "voice source negotiated");
                 room.changed.send_replace(());
@@ -1292,6 +1333,7 @@ async fn serve(mut socket: logging::Socket, pool: DbPool, id: RequestId) {
         let relay_active = active.clone();
         let relay_generation = generation.clone();
         let relay_access = connection_access.clone();
+        let relay_browser = browser_publisher.clone();
         let relay = tokio::spawn(async move {
             let mut performance_sample = 0_u64;
             while let Some(Ingress {
@@ -1333,8 +1375,11 @@ async fn serve(mut socket: logging::Socket, pool: DbPool, id: RequestId) {
                 {
                     continue;
                 }
-                let layer =
-                    usize::from(packet.header.ssrc == thiscord_shared::screen::LOW_LAYER_SSRC);
+                // A browser-chosen SSRC can equal the native low-layer SSRC.
+                let layer = usize::from(
+                    !relay_browser.enabled()
+                        && packet.header.ssrc == thiscord_shared::screen::LOW_LAYER_SSRC,
+                );
                 let layer_packet = thiscord_shared::screen::LayerPacket::parse(&packet.header.csrc);
                 if kind == MediaKind::ScreenVideo
                     && ((layer == 1 && !source.screen_layers)
@@ -1550,7 +1595,10 @@ async fn serve(mut socket: logging::Socket, pool: DbPool, id: RequestId) {
                     // Revalidate the publisher and generation after queued feedback.
                     let allowed = connection_access.packet(access.generation.load(Ordering::Acquire), access.generation.load(Ordering::Acquire)).is_some()
                         && room.members.read().await.get(&slot).is_some_and(|m| m.source_id == source_id && m.feedback_enabled && m.active.load(Ordering::Acquire) && m.info.video_active(kind) && m.info.video_epoch(kind) == epoch);
-                    if allowed && send(&mut socket, ServerEvent::ScreenKeyframe { kind, epoch, layer }).await.is_err() { break; }
+                    if allowed && browser_publisher.enabled() {
+                        // Browsers answer RTCP PLI on their media SSRC with an IDR.
+                        browser_publisher.keyframe(kind, slot).await;
+                    } else if allowed && send(&mut socket, ServerEvent::ScreenKeyframe { kind, epoch, layer }).await.is_err() { break; }
                 },
                 Some(call)=audio_requests.recv()=>{
                     if socket.detached() { call.reject(Failure::Unavailable); continue; }

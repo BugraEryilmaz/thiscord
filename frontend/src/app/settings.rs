@@ -29,6 +29,7 @@ fn title(page: &str) -> &'static str {
         "language" => crate::i18n::t("Language"),
         "appearance" => crate::i18n::t("Appearance"),
         "audio" => crate::i18n::t("Voice & audio"),
+        "shortcuts" if client::web_app() => crate::i18n::t("Keyboard shortcuts"),
         "shortcuts" => crate::i18n::t("Shortcuts & overlay"),
         "devices" => crate::i18n::t("Devices & connections"),
         "security" | "password" | "delete" | "reauthenticate" => {
@@ -59,6 +60,9 @@ fn subtitle(page: &str) -> &'static str {
         }
         "appearance" => crate::i18n::t("Customize how Thiscord looks on this device."),
         "audio" => crate::i18n::t("Choose your devices and sound your best."),
+        "shortcuts" if client::web_app() => {
+            crate::i18n::t("Mute, deafen and talk while this tab is focused.")
+        }
         "shortcuts" => crate::i18n::t("Stay in control while other apps are focused."),
         "devices" => crate::i18n::t("Manage where you’re signed in and how you log in."),
         "security" | "password" | "delete" | "reauthenticate" => {
@@ -153,10 +157,12 @@ pub(super) fn Host(ui: Ui) -> impl IntoView {
                             <NavItem ui=ui page="appearance" label="Appearance" icon=Glyph::Palette/>
                             <NavItem ui=ui page="language" label="Language" icon=Glyph::Settings/>
                             <Show when=client::desktop><NavItem ui=ui page="shortcuts" label="Shortcuts & overlay" icon=Glyph::Keyboard/><NavItem ui=ui page="desktop" label="App behavior" icon=Glyph::Screen/></Show>
+                            <Show when=client::web_app><NavItem ui=ui page="shortcuts" label="Keyboard shortcuts" icon=Glyph::Keyboard/></Show>
                             <NavItem ui=ui page="updates" label="Updates" icon=Glyph::Refresh/>
                             <NavItem ui=ui page="notifications" label="Notifications" icon=Glyph::Volume/>
                             <NavItem ui=ui page="safety" label="Safety & reports" icon=Glyph::Shield/>
                             <NavItem ui=ui page="administration" label="Instance access" icon=Glyph::Shield/>
+                            <Show when=client::web_app><DesktopAppLink class="settings-nav-item"/></Show>
                         </nav>
                         <button class="settings-signout" disabled=move ||ui.busy.get() || ui.settings_dirty.get() on:click=move |_|super::run(ui,AccountRequest::Logout)><Icon kind=Glyph::Join/>{move || crate::i18n::t("Sign out")}</button>
                     }>
@@ -188,7 +194,7 @@ pub(super) fn Host(ui: Ui) -> impl IntoView {
                         <Show when=move ||ui.page.get()=="devices"><Devices ui=ui/></Show>
                         <Show when=move ||ui.page.get()=="audio"><super::audio::AudioSettingsPanel ui=ui/></Show>
                         <Show when=move ||ui.page.get()=="notifications"><super::notifications::Panel ui=ui/></Show>
-                        <Show when=move ||ui.page.get()=="shortcuts"><super::shortcuts::ShortcutSettings control=ui.audio_control on_dirty=Callback::new(move |dirty|ui.settings_dirty.set(dirty))/><crate::overlay::OverlaySettings control=ui.audio_control/></Show>
+                        <Show when=move ||ui.page.get()=="shortcuts"><super::shortcuts::ShortcutSettings control=ui.audio_control on_dirty=Callback::new(move |dirty|ui.settings_dirty.set(dirty))/><Show when=client::desktop><crate::overlay::OverlaySettings control=ui.audio_control/></Show></Show>
                         <Show when=move ||ui.page.get()=="desktop"><super::window::WindowSettings/></Show>
                         <Show when=move ||ui.page.get()=="updates"><super::updates::Panel ui=ui/></Show>
                         <Show when=move ||ui.page.get()=="safety"><super::safety::Panel ui/></Show>
@@ -211,6 +217,13 @@ pub(super) fn Host(ui: Ui) -> impl IntoView {
                 ui.settings_pending.set(None);}>{move || crate::i18n::t("Discard changes")}</button></div>
         </dialog>
     }
+}
+
+/// Web client only: voice, screen sharing, shortcuts and the overlay are
+/// desktop features; the public page at `/` offers the installers.
+#[component]
+pub(super) fn DesktopAppLink(class: &'static str) -> impl IntoView {
+    view! {<a class=class href="/#downloads" target="_blank" rel="noopener noreferrer"><Icon kind=Glyph::Download/><span>{move || crate::i18n::t("Get the desktop app")}</span></a>}
 }
 
 #[component]

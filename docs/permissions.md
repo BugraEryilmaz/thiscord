@@ -342,8 +342,9 @@ prevents future joins without removing current members.
 Links use the configured API origin and `/invite#CODE`. The fragment is not sent
 in HTTP requests or access logs. The public welcome WASM bundle serves `/invite`
 without login or a database and uses no-referrer/no-store headers. It tries
-`thiscord://invite?origin=ENCODED_ORIGIN#CODE` once and keeps an explicit **Open
-Thiscord** action for browser consent, installer links and a copy/paste fallback.
+`thiscord://invite?origin=ENCODED_ORIGIN#CODE` once (not on phones) and keeps an
+explicit **Open the Thiscord app** action for browser consent, an **Open in your
+browser** action to `/app/#invite=CODE`, installer links and a copy/paste fallback.
 The downloads jump preserves the fragment. API-only installs without the welcome
 bundle do not serve this page.
 
@@ -355,7 +356,10 @@ Only the main window can consume it. The validated invitation stays pending
 through login/email verification, then prefills **Join a server** for confirmation.
 Nothing joins automatically. The native launcher checks the exact scheme/route,
 code format and configured API origin; a link can never change the backend.
-Browser preview still accepts pasted links/codes. Treat links as bearer capabilities.
+The web client reads `#invite=CODE` into the same in-memory pending slot, keeps it
+through sign-in/verification, prefills **Join a server**, and then removes the
+fragment with `history.replaceState`. Join dialogs also accept pasted links, web
+client links and codes. Treat links as bearer capabilities.
 
 The `20261023170000_unlimited_invites` rollback revokes and bounds unlimited or
 non-expiring invites before restoring old constraints; finite invites survive.

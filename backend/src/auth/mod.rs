@@ -1,5 +1,6 @@
 //! Account entry points. Database and Argon2 work run on bounded blocking workers.
 mod avatar;
+pub mod cookie;
 mod google;
 pub mod mail;
 mod password_reset;
@@ -157,6 +158,17 @@ pub(crate) fn bearer(headers: &HeaderMap) -> String {
         .to_owned()
 }
 
+/// Socket credentials: a non-empty token in the first frame always wins. The web
+/// client sends an empty one and relies on the bearer captured at upgrade time,
+/// which the cookie middleware derives from its HttpOnly session cookie.
+pub(crate) fn socket_token(frame: String, upgrade: &str) -> String {
+    if frame.is_empty() {
+        upgrade.to_owned()
+    } else {
+        frame
+    }
+}
+
 pub(crate) fn actor_bearer(headers: &HeaderMap) -> String {
     headers
         .get("authorization")
@@ -190,9 +202,35 @@ async fn handle(
     State(pool): State<Option<DbPool>>,
     Extension(id): Extension<RequestId>,
     peer: Option<Extension<ConnectInfo<SocketAddr>>>,
+    allowed_origin: Option<Extension<cookie::AllowedOrigin>>,
+    cookie_session: Option<Extension<cookie::CookieSession>>,
     headers: HeaderMap,
     body: Result<Json<AccountRequest>, JsonRejection>,
 ) -> Response {
+    let cookie_authenticated = cookie_session.is_some();
+    let command = body.as_ref().ok().map(|Json(command)| command);
+    let cookie_mode = cookie::cookie_mode(
+        &headers,
+        allowed_origin.is_some(),
+        cookie_authenticated && matches!(command, Some(AccountRequest::Rotate)),
+    );
+    // Commands that end the current session (or every session) on success.
+    let ends_session = matches!(
+        command,
+        Some(
+            AccountRequest::LogoutAll
+                | AccountRequest::DeleteAccount { .. }
+                | AccountRequest::ChangePassword { .. }
+                | AccountRequest::UnlinkIdentity { .. }
+        )
+    );
+    let logout = matches!(command, Some(AccountRequest::Logout));
+    // Only pure session checks clear on 401: a mistyped reauthentication
+    // password must not sign the browser out.
+    let session_check = matches!(
+        command,
+        Some(AccountRequest::Current | AccountRequest::Sessions | AccountRequest::Rotate)
+    );
     let result = async {
         let Json(command) = body.map_err(|_| Failure::Invalid("Invalid account request"))?;
         let pool = pool.ok_or(Failure::Unavailable)?;
@@ -237,10 +275,24 @@ async fn handle(
         }
     }
     .await;
+    let clear = cookie_authenticated
+        && (logout
+            || (ends_session && result.is_ok())
+            || (session_check && matches!(result, Err(Failure::Unauthorized))));
+    let mut set_cookie = None;
     let mut response = match result {
+        // Web client sessions stay out of JavaScript: deliver only the cookie.
+        Ok(AccountResponse::Session { mut session }) if cookie_mode => {
+            set_cookie = Some(cookie::issue(&session.token, session.expires_at));
+            session.token = String::new();
+            Json(AccountResponse::Session { session }).into_response()
+        }
         Ok(body) => Json(body).into_response(),
         Err(e) => e.response(id),
     };
+    if let Some(value) = set_cookie.or_else(|| clear.then(cookie::clear)) {
+        response.headers_mut().insert("set-cookie", value);
+    }
     response
         .headers_mut()
         .insert("cache-control", "no-store".parse().unwrap());

@@ -210,15 +210,22 @@ Sign into the existing account, reauthenticate, then explicitly link Google.
 - Windows Credential Manager, macOS Keychain and Linux Secret Service store desktop
   tokens using Rust [`keyring`](https://docs.rs/keyring/3.6.3/keyring/). Linux requires
   an unlocked Secret Service (e.g. GNOME Keyring/KWallet) and a session D-Bus.
-- Browser preview keeps tokens only in memory. There is no localStorage/plaintext
-  fallback. Credential-store failures are shown; the current window can continue
+- The `/app` web client receives its session only as an `HttpOnly`, `Secure`,
+  `SameSite=Strict` `__Host-thiscord_session` cookie, issued only to origins in
+  `ALLOWED_ORIGINS`; response bodies carry an empty token. See [web.md](web.md).
+  The `/admin` dashboard and ordinary browser preview keep bearer tokens only in
+  memory. There is no localStorage/plaintext or JavaScript-readable persistence.
+  Credential-store failures are shown; the current window can continue
   without persistent storage. Store keys are scoped to the compiled backend URL.
 - Logout tries server revocation and clears local credentials. If unreachable,
   the UI reports that server revocation was not confirmed.
 
 Account APIs require HTTPS outside loopback development. Bearer headers are not
-ambient cookies, so cross-origin forms cannot authenticate mutations. CORS permits
-only configured origins and the Authorization/Content-Type headers. Proxy headers
+ambient cookies, so cross-origin forms cannot authenticate mutations. The web
+client's session cookie is ambient, so the backend honors it only when the request
+`Origin` is in `ALLOWED_ORIGINS`, or for GET/HEAD without `Origin`; otherwise the
+request is anonymous, and an explicit bearer header always wins. CORS permits
+only configured origins and the Authorization/Content-Type headers, without credentials. Proxy headers
 are ignored for rate limiting: deploy a trusted proxy policy before using forwarded
 client addresses. As written, proxied clients share the proxy IP's rate budget.
 

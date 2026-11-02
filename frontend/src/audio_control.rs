@@ -1,4 +1,5 @@
-//! One UI command adapter for local IPC and the restricted admin relay.
+//! One UI command adapter for local IPC, the restricted admin relay and,
+//! in the browser web client, browser-native voice (`browser_voice`).
 use leptos::prelude::*;
 use serde::de::DeserializeOwned;
 use serde_json::{Value, json};
@@ -70,6 +71,9 @@ impl AudioControl {
         mut args: Value,
     ) -> Result<T, String> {
         let Some(remote) = self.remote else {
+            if crate::account_client::web_app() {
+                return crate::browser_voice::invoke(name, args).await;
+            }
             return crate::account_client::native(name, args).await;
         };
         let serial = remote.serial.try_get_value().ok_or("Audio panel closed")?;
@@ -96,20 +100,24 @@ impl AudioControl {
             .map_err(|_| "This action is available only on the user's computer")?;
         command.validate().map_err(str::to_owned)?;
         let fetch = async {
-            let response = gloo_net::http::Request::post(&format!(
+            let mut request = gloo_net::http::Request::post(&format!(
                 "{}{}",
                 crate::account_client::api_base(),
                 remote_audio::PATH
-            ))
-            .header("Authorization", &format!("Bearer {token}"))
-            .json(&remote_audio::Request {
-                connection_id: remote.connection,
-                command,
-            })
-            .map_err(|_| "Invalid audio request")?
-            .send()
-            .await
-            .map_err(|_| "Cannot reach the desktop. Check that the user is still in voice.")?;
+            ));
+            // The web client's empty token means the session cookie authenticates.
+            if let Some(token) = crate::account_client::bearer(Some(&token)) {
+                request = request.header("Authorization", &format!("Bearer {token}"));
+            }
+            let response = request
+                .json(&remote_audio::Request {
+                    connection_id: remote.connection,
+                    command,
+                })
+                .map_err(|_| "Invalid audio request")?
+                .send()
+                .await
+                .map_err(|_| "Cannot reach the desktop. Check that the user is still in voice.")?;
             if !response.ok() {
                 let status = response.status();
                 let detail = response.json::<ApiError>().await.map(|e| {

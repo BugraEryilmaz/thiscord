@@ -17,6 +17,8 @@ pub(super) fn ShortcutSettings(
     let message = RwSignal::new(String::new());
     let loaded = RwSignal::new(false);
     let dirty = RwSignal::new(false);
+    // The web client stores these in this browser and has no overlay.
+    let browser = crate::account_client::web_app() && !control.is_remote();
     let load = move |shortcuts: AudioShortcuts| {
         mute.set(shortcuts.mute);
         deafen.set(shortcuts.deafen);
@@ -60,7 +62,11 @@ pub(super) fn ShortcutSettings(
     view! {
         <section class="space-y-3 rounded-lg border border-white/15 p-4" aria-label=move || crate::i18n::t("Voice keyboard shortcuts")>
             <h3 class="font-semibold">{move || crate::i18n::t("Keyboard shortcuts")}</h3>
-            <p class="text-sm text-white/60">{move || crate::i18n::t("Global desktop shortcuts work while other apps are focused. Enter a combination such as Control+Shift+M, Alt+M or F8. Use Super for the Command / Windows key. Clear a field to disable that shortcut. Ctrl+Shift+Space is reserved for push-to-talk. Requires Windows, macOS or Linux/X11.")}</p>
+            <p class="text-sm text-white/60">{move || if browser {
+                crate::i18n::t("Browsers can only see keys while this Thiscord tab is focused; shortcuts do not work from other apps or tabs (use the desktop app for global shortcuts). Enter a combination such as Control+Shift+M, Alt+M or F8. Use Super for the Command / Windows key. Clear a field to disable that shortcut. Ctrl+Shift+Space is push-to-talk. Keys without Control, Alt or Super are ignored while you type.")
+            } else {
+                crate::i18n::t("Global desktop shortcuts work while other apps are focused. Enter a combination such as Control+Shift+M, Alt+M or F8. Use Super for the Command / Windows key. Clear a field to disable that shortcut. Ctrl+Shift+Space is reserved for push-to-talk. Requires Windows, macOS or Linux/X11.")
+            }}</p>
             <fieldset class="space-y-3">
                 <legend class="mb-2 text-sm font-semibold text-white/80">{move || crate::i18n::t("Voice")}</legend>
                 <div class="grid gap-3 sm:grid-cols-2">
@@ -68,6 +74,7 @@ pub(super) fn ShortcutSettings(
                     {field(|| crate::i18n::t("Toggle deafen"), deafen)}
                 </div>
             </fieldset>
+            <Show when=move || !browser>
             <fieldset class="space-y-3">
                 <legend class="mb-2 text-sm font-semibold text-white/80">{move || crate::i18n::t("Overlay")}</legend>
                 <p class="text-sm text-white/60">{move || crate::i18n::t("Off until you choose a combination, so other apps keep their keys.")}</p>
@@ -77,6 +84,7 @@ pub(super) fn ShortcutSettings(
                     {field(|| crate::i18n::t("Unlock to drag"), overlay_unlock)}
                 </div>
             </fieldset>
+            </Show>
             <div class="flex gap-3">
                 <button class="rounded bg-brand px-3 py-2 text-sm disabled:opacity-50" disabled=move || busy.get() on:click=move |_| {
                     busy.set(true);

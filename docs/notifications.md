@@ -133,11 +133,37 @@ notification-center integration; there are no notifications after the app exits.
 During voice, notification tones go through the native mixer and echo-reference
 path, using bounded atomic requests and precomputed PCM. Outside voice, a bounded
 native worker plays short tones on the default output device. Audio callbacks do
-not allocate, lock, synthesize tones or use networking. Browser previews use
-in-page banners and Web Audio; browser autoplay policy can require a user gesture
-(the Preview sound button provides one). There is no service worker/mobile push.
-OS focus/fullscreen/compositor behavior still requires physical acceptance on all
-three desktop platforms.
+not allocate, lock, synthesize tones or use networking. The browser web client plays
+the same tones with Web Audio on the default output; browser autoplay policy can
+require a user gesture (the Preview sound button provides one). There is no service
+worker/mobile push. OS focus/fullscreen/compositor behavior still requires physical
+acceptance on all three desktop platforms.
+
+### Browser system notifications
+
+The web client always shows in-app banners and plays sounds as above. In addition,
+**Settings → Notifications → Browser notifications** can show system notifications
+through the Web `Notification` API, the counterpart of the desktop banner window:
+
+- Permission is requested only when the user clicks **Allow browser notifications**
+  (the request starts inside the click). Once granted, **Show browser notifications**
+  turns them off or on for this browser (`thiscord.browser-notifications.v1` in
+  `localStorage`, on by default). Denied or unsupported states explain how to
+  re-enable them (iOS/iPadOS need a Home Screen web app).
+- A system notification appears only for alerts whose delivery has Banner on
+  (the server already applied event defaults, source overrides and snoozes), only
+  while the tab is hidden or another window has focus, never during Do not
+  disturb, and never for a reconnect replay (`frontend/src/web_notifications.rs`,
+  unit-tested). Calls must still be ringing.
+- It shows the alert's source title and event name, never message text. The page's
+  own sound plays, so the notification is silent. At most three stay open; each
+  closes after the banner lifetime (12 s, 30 s for calls), when a call stops ringing,
+  when the tab regains focus, on sign-out or when turned off.
+- Clicking focuses the tab and opens the source like the desktop banner. For an
+  incoming call it opens the conversation and keeps the in-app banner with Accept
+  and Decline, because page notifications cannot carry action buttons without a
+  service worker.
+- Notifications exist only while Thiscord is open in a tab; there is no push.
 
 ## Release announcements
 

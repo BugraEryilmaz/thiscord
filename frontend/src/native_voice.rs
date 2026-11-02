@@ -953,6 +953,7 @@ async fn run(
     send_event(
         send,
         ClientEvent::Answer {
+            browser_publisher: false,
             packet_redundancy,
             remote_audio,
             sdp,

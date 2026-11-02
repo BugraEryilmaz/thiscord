@@ -4,8 +4,9 @@ Voice channels use native Rust capture/playback and a Rust SFU in the backend.
 Screen/window sharing with system audio is available on Windows; see
 [screen-sharing.md](screen-sharing.md) for the separate native capture/video path.
 Only settings, levels and participant metadata cross Tauri IPC. PCM and encoded
-audio never pass through WASM or handwritten JavaScript. Browser preview supports
-text chat; voice requires the desktop executable. Exactly three packages remain.
+audio never pass through WASM or handwritten JavaScript. The browser web client
+joins voice with the browser's own WebRTC engine; see [Browser voice](#browser-voice).
+Exactly three packages remain.
 
 The persistent bottom account ribbon has microphone, deafen and settings icons,
 with accessible labels and hover/focus hints. Joining expands it to show the voice
@@ -19,6 +20,163 @@ directly; the ribbon's channel name opens call controls. Hovering or focusing
 server-hop loss and local transport drops. Intentional control discards are
 excluded; unavailable metrics remain labeled unavailable. Sidebar rosters are available before
 joining through permission-filtered chat socket updates; see [chat.md](chat.md).
+
+## Browser voice
+
+The web client (served same-origin with the API) joins guild voice channels and
+private calls from desktop and mobile Chrome, Safari and Firefox. `AudioControl`
+dispatches the same command names and JSON shapes as the native client to
+`frontend/src/browser_voice.rs` when `account_client::web_app()` is true; the
+desktop CPAL/Opus path and the admin relay are unchanged. Pure rules (m-line
+mapping, directions, gates, constraints, reconnect policy, RED stripping) live in
+`frontend/src/browser_call.rs` and are unit tested natively.
+
+Media stays inside the browser: `getUserMedia` captures the microphone with the
+browser's echo cancellation, noise suppression and automatic gain, the browser
+encodes plain Opus, and the browser decodes and plays remote streams. WASM builds
+and controls a WebAudio graph (`frontend/src/browser_voice/media.rs`), routes
+tracks, sets gains and reads levels; voice PCM and Opus never cross into Rust.
+Pure gain, volume-store, soundboard-queue and statistics rules live in
+`frontend/src/browser_audio.rs` and are unit tested natively.
+
+Signaling and negotiation:
+
+- The socket is `socket_base() + VOICE_PATH`. `Join` carries `ui.token`, which is
+  empty in the cookie-authenticated web client. `JoinAttempt.call_id` is a random
+  UUID kept across automatic retries (`reconnect: true`), as on desktop.
+- The SFU offers `MediaKind::TRACK_COUNT` m-lines in track order. Transceivers are
+  mapped by their `mid` to the offer's m-line position, never by browser order; an
+  offer with another shape is refused. The member's own microphone m-line is
+  `sendrecv` with the microphone track (`replaceTrack`); its own screen,
+  screen-audio and camera m-lines are `sendrecv` with idle senders (with Speak
+  permission); other members' audio m-lines are `recvonly`, and their video
+  m-lines `recvonly` where the browser decodes baseline H.264 (else `inactive`).
+  Screen sharing and cameras are described in
+  [screen-sharing.md](screen-sharing.md#browser-screen-sharing).
+- `setCodecPreferences` limits every audio transceiver to the browser's `audio/opus`
+  capability. Where it is unavailable, RED payload types are removed from the
+  local answer before `setLocalDescription`. The SFU rejects a RED microphone
+  from browser publishers.
+- After ICE gathering completes (non-trickle, up to 8 s), the client sends
+  `Answer { browser_publisher: true }`. It opts into `soundboard` whenever the
+  offer advertises it (guild calls) and into `screen_feedback` and
+  `screen_subscriptions` (viewing demand, `ScreenTarget`, keyframe recovery);
+  RED, remote audio admin, `screen_layers`, `screen_profiles` and video
+  diagnostics stay false. Plain Opus
+  publishers send no microphone boundary messages. Nothing is sent before the answer.
+- `State` is sent on every self mute/deafen change and every 2 s as the
+  signaling keepalive. A server silence of 20 s counts as a lost socket.
+- A lost socket resumes with `Resume` (same sequence rules, 20 s window) while the
+  peer is alive. `ResumeUnavailable`, `Replaced` (event or close code 4001),
+  `Revoked`, permission errors and protocol closes are final; transport,
+  ICE-failure and media-timeout (15 s) errors rejoin with the desktop backoff
+  (1–30 s plus jitter; reset after 30 s connected). `Moved` rejoins the new channel.
+  Each attempt sends `Leave` before it closes; `pagehide` leaves the call.
+
+Playback graph: one `AudioContext` per call, created inside the join click. Each
+of the `2 × ROOM_CAPACITY` mixer slots (microphones, then system/screen audio, the
+native mixer order) has a `MediaStreamAudioSourceNode` and a gain node (the saved
+per-speaker or per-stream volume, 0–200%). Slots, the soundboard bus and device-test
+audio feed a master gain (output volume 0–200%, 0 while self- or server-deafened),
+then a limiter (-2 dBFS, 20:1; its automatic makeup gain is cancelled, so quieter
+audio passes unchanged). Chrome only delivers remote WebRTC audio to WebAudio while
+the track is also attached to a media element, so every slot keeps a muted, detached
+`<audio>` element. Output devices use `AudioContext.setSinkId` (Chromium); Firefox
+routes the graph through a `MediaStreamAudioDestinationNode` into one element with
+`HTMLMediaElement.setSinkId` while a non-default device is selected; Safari has no
+output selection and the list is hidden. Without WebAudio, elements play directly
+at up to 100%. `Output::play_remote(source, member_slot, track)` with
+`RemoteSource::{Microphone, SystemAudio}` is the single entry point for remote audio;
+`set_stream_gain` and `stop_remote` complete it. Another member's shared screen
+audio plays only while this page watches that member's screen (a visible, mounted
+grid tile); hiding the tile, closing the grid or hiding the tab stops it locally
+and the SFU stops forwarding it with the next `ScreenViews` renewal.
+
+Send graph: microphone track → source → boost gain (Microphone boost 1×–10×) →
+limiter → `MediaStreamAudioDestinationNode`, whose track is sent. The browser's own
+processing runs before the boost (desktop boosts before automatic gain). Two
+`AnalyserNode`s read the capture (raw) and the boosted signal before the send gate,
+so the voice-activation meter keeps measuring while the gate is closed. Mute,
+push-to-talk release, deafen and server restrictions disable the sent track (silence);
+the captured track stays enabled for metering. If the AudioContext is not running
+(autoplay refused, interrupted), the raw capture is sent instead, gated directly,
+without boost; voice activation then fails open. The client swaps tracks with
+`replaceTrack` when that changes, without renegotiating.
+
+Controls: server mute/deafen from the roster override self controls. Voice
+activation uses the boosted peak with the saved threshold and a 500 ms hold. It
+fails open (transmits while unmuted) when the tab is hidden, because timers run
+about once per second there, or when the AudioContext is not running. Remote
+speaking rings use a pass-through `AnalyserNode` in each slot before its gain
+(threshold 0.02 peak, 250 ms hangover), because Chromium reports inbound-rtp
+`audioLevel` as 0 for tracks that play only through WebAudio; `getStats`
+`audioLevel` remains the fallback while the context is not running. The local
+ring follows the gate.
+
+Keyboard: while the page has focus, Ctrl+Shift+Space is push-to-talk (also the
+voice-bar hold button) and the Settings → Keyboard shortcuts mute/deafen bindings
+(defaults Ctrl+Shift+M/D, same syntax and validation as desktop, stored in
+`thiscord.browser-shortcuts.v1`) toggle self controls, also outside calls. In text
+fields only combinations with Control, Alt or Super, or function keys, apply.
+Browsers cannot see keys while another tab or app has focus, and the settings say so.
+
+Device tests (Audio settings, outside calls, started from the click): **Test
+playback** plays 5 s of alternating tones through output volume and the selected
+device; **Test microphone** opens the selected microphone for 60 s with the same
+constraints and boost, shows the level meter and, unless **Hear my microphone
+during the test** is off, plays it back through the selected output. Leaving the
+page, joining voice or **Stop test** ends it and releases the devices.
+
+Connection diagnostics: every 200 ms `getStats` provides the selected
+candidate-pair `currentRoundTripTime` (else the SFU's receiver-report
+`roundTripTime`), inbound audio `jitter`, `packetsReceived`/`packetsLost`, and the
+SFU's `remote-inbound-rtp` `jitter`/`fractionLost` for the microphone. Hovering
+**Voice connected** shows server RTT, receive/send jitter and receive/send loss;
+missing values stay "unavailable". The values also fill the shared
+`AudioQuality` fields they map to (`sfu_hop_rtt_ms`, received/lost packets,
+`network.uplink_*`).
+
+Soundboard: the voice-bar Soundboard grid works as on desktop; see
+[soundboard.md](soundboard.md#web-client).
+
+Settings persist in `localStorage` (`thiscord.browser-audio.v1`; per-speaker voice
+and stream-audio volumes in `thiscord.browser-volumes.v1`, keyed by guild, account
+and voice/stream, bounded to 512 entries; per-person soundboard levels in
+`thiscord.browser-soundboard-volumes.v1`, at most 1000); they are not secrets.
+Browser defaults turn on the browser's echo cancellation, noise suppression and
+automatic gain; changing them or the input device reopens the microphone and swaps
+the track without renegotiating.
+
+Desktop-only, because browsers cannot provide them: global shortcuts while another
+app or tab is focused, the in-game overlay, tray/close-to-tray and the auto-updater,
+the native noise-suppression models and neural echo, packet-loss options (RED and
+deep redundancy need encoder access; adaptive FEC/network adaptation need the native
+encoder), echo debug recordings and diagnostic logs (raw PCM capture), and remote
+admin audio control (it adjusts native preferences on the user's computer). These
+controls are hidden or labeled "Available in the desktop app".
+
+Browser requirements and limits:
+
+- A secure context is required for the microphone (HTTPS, or `localhost`). On an
+  insecure page, or when permission is denied, no device exists or it is busy,
+  the call continues as a listener and the voice bar explains why. Granting the
+  microphone later needs a rejoin, like a newly granted Speak permission.
+- Joining (or a device test) from a click creates and resumes the AudioContext
+  inside the gesture (iOS Safari). Active capture also lifts autoplay limits. A
+  context that stays suspended for 1.5 s, or a refused element, shows **Tap to
+  enable call audio**; the client also retries resuming about once per second.
+- On phones, an open channel or conversation hides the account dock; during a
+  call a compact dock (call status, disconnect, audio settings, push-to-talk,
+  mute, deafen) stays visible above the content.
+- A hidden tab keeps its call. Returning to the tab resumes the AudioContext and
+  replays suspended elements; mobile browsers may still suspend or interrupt
+  background audio (iOS during phone calls), and timers slow to about once per second.
+- Echo cancellation references the browser's own playback. Chromium, Firefox and
+  Safari include WebAudio output in that reference, but this needs physical
+  verification on each platform.
+- The app CSP allows no blob workers or worklets; none are used (all nodes are
+  built-in). `srcObject` streams need no `media-src` change.
+- SDP, ICE/TURN credentials, tokens and resume tokens are never logged or stored.
 
 ## Remote support
 
@@ -289,6 +447,8 @@ and the reserved Ctrl+Shift+Space PTT binding are rejected. OS registration
 conflicts preserve the previous working bindings. Startup failures appear in the
 shortcut settings panel. Windows, macOS and Linux/X11 use the native shortcut
 plugin; Wayland requires disabling the global shortcuts and using the UI controls.
+The browser web client keeps its own focused-tab bindings in Settings → Keyboard
+shortcuts; see [Browser voice](#browser-voice).
 
 The voice bar, global shortcuts and overlay toggle the same native preferences.
 Device/processing saves preserve the current native mute/deafen values, and the
@@ -1247,6 +1407,47 @@ production metrics remain pending.
 This is transport encryption between client and SFU, **not end-to-end encryption**:
 the SFU terminates DTLS-SRTP and can access encoded Opus. Do not log SDP, tokens,
 TURN credentials or packet contents.
+
+### Browser voice
+
+Browsers cannot choose RTP SSRCs, so the fixed publisher SSRCs above do not apply
+to them. A browser sends `browser_publisher: true` in its Answer. The server records
+this before applying the remote description, then classifies that peer's tracks by
+the m-line that received them (`backend/src/voice/browser.rs`): the transceiver whose
+receiver owns the track gives its mid, and the offer's m-line order maps the mid to
+`MediaKind::from_track`. Only the member's own microphone, shared screen audio
+(Opus), screen video and camera (H.264) m-lines publish, with any SSRC; a track on
+another member's m-line is left unread and never forwarded, without ending the
+call. Codec, clock rate, one-track-per-kind (`track_seen`), rate/size limits,
+publication state, Speak, mute/deafen and revocation are enforced as for desktop.
+Browser publishers never use RED or the microphone-boundary protocol: the server
+forces `packet_redundancy` off, rejects an `audio/red` microphone track, and
+forwards plain Opus with payload type 111. Clients must therefore select Opus only
+for the sending transceiver (for example with `setCodecPreferences`). Plain-Opus
+publishers need no `MicrophoneBoundary`.
+
+Browser publishers are single-layer screen publishers: `screen_layers` is forced
+off, no low layer is planned or awaited, and a browser SSRC equal to the native
+low-layer SSRC is never treated as one. Viewers still receive legacy `ScreenTarget`
+budgets (the lowest live viewer budget). Keyframe demand for a browser publisher is
+sent as RTCP PLI on its own screen or camera SSRC (browsers answer with an IDR)
+instead of `ServerEvent::ScreenKeyframe`, under the same authorization and 250 ms
+coalescing. The SFU's H.264 offer (payload type 125) carries `nack`, `nack pli` and
+`transport-cc` feedback from the default interceptors, so browsers run their
+normal congestion control; RTX is offered but browsers answer without it.
+
+All offered m-lines are `sendrecv` (`add_track`), so a browser can send on its own
+slot's m-lines and set the others to `recvonly` or `inactive`. Forwarded packets
+carry the receiver-facing relay SSRC for the publisher's slot and reach both RED
+and non-RED receivers. Without the flag, an unknown SSRC still ends the connection,
+and native publishers keep the fixed-SSRC, layer and `ScreenKeyframe` contract.
+Signaling may authenticate with the web client's HttpOnly cookie instead of a
+Join/Resume token; see [web.md](web.md). `backend/tests/voice/browser.rs` covers a
+random-SSRC browser microphone reaching RED and non-RED receivers, browser screen
+video, shared audio and camera with random SSRCs reaching a subscribed desktop
+viewer, viewer keyframe demand arriving as PLI on the browser's SSRCs (never as
+`ScreenKeyframe`), media on another member's m-line staying unforwarded, stopping
+a share, and rejection without the flag.
 
 ## WSL and public networking
 

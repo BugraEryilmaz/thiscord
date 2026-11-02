@@ -127,7 +127,7 @@ pub(super) fn ParticipantVolume(
         </Show>
         <For each=move ||{let connected=connected(); ui.audio_status.with(|s|s.as_ref().map(|s|s.streams.iter().filter(|s| connected && s.target.is_some_and(|t|t.guild_id==guild && t.account_id==member && t.shared_audio)).cloned().collect::<Vec<_>>()).unwrap_or_default())} key=|s|(s.id.clone(),s.target) children=move |stream|view!{<super::audio::StreamVolume ui=ui stream=stream compact=true/>}/>
         <p class="volume-hint">{move || crate::i18n::t("Only changes what you hear. 0% mutes.")}</p>
-        <Show when=super::client::desktop><SoundboardVolume member=member/></Show>
+        <Show when=move ||super::client::desktop() || super::audio::browser_voice(ui)><SoundboardVolume member=member/></Show>
     </section>}
 }
 /// Local only: this device's level for the person's soundboard plays. 0% ignores them.
@@ -138,11 +138,9 @@ fn SoundboardVolume(member: AccountId) -> impl IntoView {
     let busy = RwSignal::new(false);
     let error = RwSignal::new(String::new());
     leptos::task::spawn_local(async move {
-        let result = super::client::native::<u16>(
-            "soundboard_volume",
-            serde_json::json!({"accountId":member}),
-        )
-        .await;
+        let result = crate::audio_control::AudioControl::default()
+            .invoke::<u16>("soundboard_volume", serde_json::json!({"accountId":member}))
+            .await;
         if volume.is_disposed() {
             return;
         }
@@ -158,11 +156,12 @@ fn SoundboardVolume(member: AccountId) -> impl IntoView {
         busy.set(true);
         error.set(String::new());
         leptos::task::spawn_local(async move {
-            let result = super::client::native::<u16>(
-                "soundboard_set_volume",
-                serde_json::json!({"accountId":member,"volume":value}),
-            )
-            .await;
+            let result = crate::audio_control::AudioControl::default()
+                .invoke::<u16>(
+                    "soundboard_set_volume",
+                    serde_json::json!({"accountId":member,"volume":value}),
+                )
+                .await;
             if volume.is_disposed() {
                 return;
             }
@@ -939,6 +938,24 @@ fn focus_menu_item(menu: &web_sys::Element, key: &str) {
     let _ = buttons[index].focus();
 }
 
+/// Elements with a right-click menu.
+const CONTEXT_TARGETS: &str =
+    "[data-context-server],[data-context-conversation],[data-context-user]";
+/// Long presses also reveal `data-tip` hints, which have no hover on touch screens.
+const LONG_PRESS_TARGETS: &str =
+    "[data-context-server],[data-context-conversation],[data-context-user],[data-tip]";
+
+fn menu_at(ui: Ui, target: Option<web_sys::EventTarget>, x: f64, y: f64) {
+    if user_menu(ui, target.clone(), x, y) || conversation_menu(ui, target.clone(), x, y) {
+        return;
+    }
+    if let Some(element) = element(target) {
+        open(ui, element, x, y);
+    } else {
+        close(ui);
+    }
+}
+
 #[component]
 pub(super) fn Host(ui: Ui) -> impl IntoView {
     let menu_node = NodeRef::<leptos::html::Div>::new();
@@ -974,18 +991,91 @@ pub(super) fn Host(ui: Ui) -> impl IntoView {
             .unwrap_or_default();
         ui.sidebar_preferences.set(preferences);
     });
+    // Touch screens: a still ~500 ms hold opens the same menus (iOS has no
+    // long-press `contextmenu`) or, on other controls, shows their hint.
+    let press = StoredValue::new(thiscord_frontend::touch::LongPress::default());
+    let pressed = StoredValue::new_local(None::<web_sys::Element>);
     let context = window_event_listener(leptos::ev::contextmenu, move |e| {
         e.prevent_default();
-        return_focus.set_value(document().active_element().and_then(|e| e.dyn_into().ok()));
-        if user_menu(ui, e.target(), e.client_x().into(), e.client_y().into())
-            || conversation_menu(ui, e.target(), e.client_x().into(), e.client_y().into())
-        {
+        // Android also reports long presses as `contextmenu`; open only once.
+        if press.with_value(|p| p.suppresses(js_sys::Date::now())) {
             return;
         }
-        if let Some(element) = element(e.target()) {
-            open(ui, element, e.client_x().into(), e.client_y().into());
-        } else {
-            close(ui);
+        press.update_value(thiscord_frontend::touch::LongPress::cancel);
+        return_focus.set_value(document().active_element().and_then(|e| e.dyn_into().ok()));
+        menu_at(ui, e.target(), e.client_x().into(), e.client_y().into());
+    });
+    let touch_start = window_event_listener(leptos::ev::touchstart, move |e| {
+        let touches = e.touches();
+        let Some(touch) = touches.get(0) else { return };
+        let Some(element) = e
+            .target()
+            .and_then(|t| t.dyn_into::<web_sys::Element>().ok())
+            .and_then(|t| t.closest(LONG_PRESS_TARGETS).ok().flatten())
+        else {
+            press.update_value(thiscord_frontend::touch::LongPress::cancel);
+            return;
+        };
+        let (x, y) = (f64::from(touch.client_x()), f64::from(touch.client_y()));
+        let Some(generation) = press
+            .try_update_value(|p| p.start(x, y, touches.length()))
+            .flatten()
+        else {
+            return;
+        };
+        pressed.set_value(Some(element));
+        leptos::task::spawn_local(async move {
+            gloo_timers::future::TimeoutFuture::new(thiscord_frontend::touch::HOLD_MS).await;
+            let Some((x, y)) = press.try_update_value(|p| p.elapsed(generation)).flatten() else {
+                return;
+            };
+            let Some(element) = pressed.try_get_value().flatten() else {
+                return;
+            };
+            return_focus.set_value(document().active_element().and_then(|e| e.dyn_into().ok()));
+            let target: web_sys::EventTarget = element.clone().into();
+            if element.closest(CONTEXT_TARGETS).ok().flatten().is_some() {
+                menu_at(ui, Some(target), x, y);
+            } else if let Some(hint) = element.closest("[data-tip]").ok().flatten()
+                && let Ok(hint) = hint.dyn_into::<web_sys::HtmlElement>()
+            {
+                // The shared tooltip host shows hints for focused controls.
+                let _ = hint.focus();
+            }
+        });
+    });
+    let touch_move = window_event_listener(leptos::ev::touchmove, move |e| {
+        if let Some(touch) = e.touches().get(0) {
+            let (x, y) = (f64::from(touch.client_x()), f64::from(touch.client_y()));
+            press.update_value(|p| p.moved(x, y));
+        }
+    });
+    let touch_end = window_event_listener(leptos::ev::touchend, move |_| {
+        press.update_value(|p| p.end(js_sys::Date::now()));
+    });
+    let touch_cancel = window_event_listener(leptos::ev::touchcancel, move |_| {
+        press.update_value(|p| p.end(js_sys::Date::now()));
+    });
+    // Capture phase runs before any control's click handler: the release of a
+    // long press must not also activate what is under the finger.
+    let click_guard = StoredValue::new_local(Some(wasm_bindgen::closure::Closure::<
+        dyn FnMut(web_sys::Event),
+    >::new(move |e: web_sys::Event| {
+        if press
+            .try_with_value(|p| p.suppresses(js_sys::Date::now()))
+            .unwrap_or(false)
+        {
+            e.prevent_default();
+            e.stop_propagation();
+        }
+    })));
+    click_guard.with_value(|guard| {
+        if let Some(guard) = guard {
+            let _ = window().add_event_listener_with_callback_and_bool(
+                "click",
+                guard.as_ref().unchecked_ref(),
+                true,
+            );
         }
     });
     let outside = window_event_listener(leptos::ev::pointerdown, move |e| {
@@ -1051,6 +1141,17 @@ pub(super) fn Host(ui: Ui) -> impl IntoView {
         }
     });
     on_cleanup(move || {
+        if let Some(Some(guard)) = click_guard.try_update_value(Option::take) {
+            let _ = window().remove_event_listener_with_callback_and_bool(
+                "click",
+                guard.as_ref().unchecked_ref(),
+                true,
+            );
+        }
+        touch_start.remove();
+        touch_move.remove();
+        touch_end.remove();
+        touch_cancel.remove();
         context.remove();
         outside.remove();
         key.remove();

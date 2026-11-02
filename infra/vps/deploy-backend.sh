@@ -62,8 +62,12 @@ if grep -q 'not found' "$source_dir/voice-bot-libraries.txt"; then
     echo 'Voice-bot companion has missing runtime libraries; deployment aborted.' >&2
     exit 1
 fi
+# Serialize Binaryen like CI: multithreaded Linux wasm-opt can crash on large bundles.
+export BINARYEN_CORES=1
 (cd frontend && trunk build --release --locked --public-url /admin/ --dist dist-admin)
 [[ -s frontend/dist-admin/index.html ]] || { echo 'Admin bundle is missing; refusing to activate an API-only release.' >&2; exit 1; }
+(cd frontend && trunk build --release --locked --public-url /app/ --dist dist-app)
+[[ -s frontend/dist-app/index.html ]] || { echo 'Web app bundle is missing; deployment aborted.' >&2; exit 1; }
 (cd frontend && trunk build welcome/index.html --release --locked --public-url /welcome/ --dist dist-welcome)
 [[ -s frontend/dist-welcome/index.html ]] || { echo 'Welcome bundle is missing; deployment aborted.' >&2; exit 1; }
 if [[ $build_only == true ]]; then
@@ -87,6 +91,11 @@ sudo -n cp -R frontend/dist-welcome/. "$release/welcome/"
 sudo -n chown -R root:root "$release/welcome"
 sudo -n find "$release/welcome" -type d -exec chmod 0755 {} +
 sudo -n find "$release/welcome" -type f -exec chmod 0644 {} +
+sudo -n install -d -o root -g root -m 0755 "$release/app"
+sudo -n cp -R frontend/dist-app/. "$release/app/"
+sudo -n chown -R root:root "$release/app"
+sudo -n find "$release/app" -type d -exec chmod 0755 {} +
+sudo -n find "$release/app" -type f -exec chmod 0644 {} +
 echo "Stopping backend and backing up PostgreSQL before activation: $release"
 stopped=true
 sudo -n systemctl stop thiscord
@@ -115,6 +124,12 @@ if ! curl --noproxy '*' --silent --show-error --fail --max-time 10 \
     --resolve thiscord.com.tr:443:127.0.0.1 \
     https://thiscord.com.tr/admin >/dev/null; then
     echo 'Admin route check failed; healthy API left running. Check the installed bundle and ADMIN_DIST_DIR.' >&2
+    exit 1
+fi
+if ! curl --noproxy '*' --silent --show-error --fail --max-time 10 \
+    --resolve thiscord.com.tr:443:127.0.0.1 \
+    https://thiscord.com.tr/app/ >/dev/null; then
+    echo 'Web app route check failed; healthy API left running. Check the installed bundle and APP_DIST_DIR.' >&2
     exit 1
 fi
 if ! curl --silent --show-error --fail --max-time 20 https://thiscord.com.tr/api/v1/ready; then

@@ -21,6 +21,9 @@ only on loopback.
   client, required for owner test bots. Deploy both binaries from the same commit.
 - `/opt/thiscord/releases/<commit>/admin`: browser bundle installed by new deployments;
   see [admin build and access](admin.md). The build host requires Trunk 0.21.14.
+- `/opt/thiscord/releases/<commit>/app`: browser web client bundle served at `/app`;
+  see [web.md](web.md). `ALLOWED_ORIGINS` in `/etc/thiscord/backend.env` must include
+  `https://thiscord.com.tr` for web sign-in.
 - `/opt/thiscord/current`: symlink to the selected release directory.
 - `/etc/thiscord/backend.env`: root-owned, service-readable production settings.
   It preserves provider credentials and uses a separate VPS database password.

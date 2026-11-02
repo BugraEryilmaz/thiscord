@@ -9,6 +9,10 @@ mod avatar;
 #[cfg(target_arch = "wasm32")]
 mod brand;
 #[cfg(all(target_arch = "wasm32", not(feature = "welcome")))]
+mod browser_notify;
+#[cfg(all(target_arch = "wasm32", not(feature = "welcome")))]
+mod browser_voice;
+#[cfg(all(target_arch = "wasm32", not(feature = "welcome")))]
 mod i18n;
 #[cfg(all(target_arch = "wasm32", not(feature = "welcome")))]
 mod notification_banner;

@@ -2,12 +2,22 @@
 <html lang="en">
   <head>
     <meta charset="utf-8" />
-    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover, interactive-widget=resizes-content" />
+    <meta name="theme-color" content="#202127" />
+    <meta name="mobile-web-app-capable" content="yes" />
+    <meta name="apple-mobile-web-app-capable" content="yes" />
+    <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent" />
+    <meta name="apple-mobile-web-app-title" content="Thiscord" />
     <title>Thiscord</title>
     <link data-trunk rel="rust" data-bin="thiscord-ui" data-cargo-no-default-features />
     <link data-trunk rel="tailwind-css" href="style.css" />
     <link data-trunk rel="copy-dir" href="assets/brand" data-target-path="brand-assets" />
+    <link data-trunk rel="copy-file" href="assets/web/manifest.webmanifest" />
+    <link data-trunk rel="copy-file" href="icons/icon.png" />
     <link data-trunk rel="icon" href="assets/brand/favicon.png" />
+    <!-- Relative to the bundle root: /app/ for the web client, / for the desktop app. -->
+    <link rel="manifest" href="manifest.webmanifest" />
+    <link rel="apple-touch-icon" href="icon.png" />
   </head>
   <body></body>
 </html>

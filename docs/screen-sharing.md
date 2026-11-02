@@ -962,3 +962,78 @@ The client also returns to sign-in after an HTTP-confirmed session rejection.
 Signing out and back in restored the affected installed client. These source
 changes require a backend deployment and client release; neither was performed
 as part of the investigation.
+
+## Browser screen sharing
+
+The `/app` web client shares and watches screens with the browser's own capture,
+H.264 encoder/decoder and WebRTC; Rust/WASM only routes tracks, sets encoder limits
+and signals (`frontend/src/browser_voice/video.rs`, pure rules in
+`frontend/src/browser_video.rs`, UI in `frontend/src/app/browser_media.rs`). No
+pixels or PCM pass through Rust. Server handling is in
+[audio.md](audio.md#browser-voice-1); cameras are in
+[cameras.md](cameras.md#browser-cameras).
+
+Publishing:
+
+- **Share screen** in the voice bar opens a picker with the desktop presets
+  (720p–4K at 15/30/60 fps); **Go live** calls `getDisplayMedia` inside that click
+  with `width`/`height`/`frameRate` maxima, `selfBrowserSurface: "exclude"` (the
+  call tab cannot share itself) and, when **Share audio** is on, `audio: true` and
+  `systemAudio: "include"`. The audio option is shown only in Chromium browsers
+  (Chrome, Edge), which can share a tab's audio and, on Windows and ChromeOS, the
+  whole system's audio; other browsers share video only. Without
+  `getDisplayMedia` (iOS, Android) the control explains “Screen sharing isn't
+  supported in this browser”. Cancelling the browser's picker is not an error.
+- The answer negotiates the member's own screen, screen-audio and camera m-lines
+  `sendrecv` with idle senders (Speak permission required), so starting, switching
+  and stopping media use `replaceTrack` with no renegotiation. The client sends
+  `Screen { active, audio, quality: None }` before attaching the tracks; browser
+  publishers have no layers.
+- Encoding is H.264 constrained baseline, packetization mode 1, without RTX, RED or
+  FEC: `setCodecPreferences` limits every video transceiver to the browser's
+  baseline H.264 capabilities (constrained baseline first); where it is missing the
+  local answer's video sections are restricted to those payload types instead. A
+  browser without a baseline H.264 encoder cannot publish video and says so; one
+  without a decoder answers other members' video `inactive`.
+- `contentHint` is `detail` (`motion` at 60 fps). The sender starts at the preset's
+  bitrate and frame rate; each `ScreenTarget` sets `maxBitrate` to the lowest live
+  viewer budget (capped by the preset) with `setParameters`, and zero viewers set
+  the encoding `active: false`, so nothing is encoded or sent until someone watches.
+  The browser's congestion control (transport-cc) and the SFU's measured limits
+  still apply. Keyframes come from the browser answering the SFU's RTCP PLI.
+- Sharing stops on **Stop sharing**, the browser's own stop control or a closed
+  source (the track ends), deafen, server mute/deafen, lost Speak permission,
+  leaving, moving, reconnecting (a new media session never restarts a share) and
+  page hide. Stopping replaces both senders' tracks with `null`, stops the
+  captured tracks and sends `Screen { active: false }`.
+
+Viewing: other members' screen and camera m-lines are `recvonly`. The existing call
+grid, fullscreen, hide/restore, LIVE badges and viewer avatars are shared with the
+desktop app; only each tile's player differs. A mounted, visible tile registers a
+view: the client binds the received track to its `<video>`, renews `ScreenViews`
+every 500 ms (one subscription per stream, never for hidden tiles or a hidden page),
+keeps a per-view receiver budget with the native controller's thresholds
+(`thiscord_shared::video_feedback`, loss and decoder pressure from `getStats`), and
+sends `ScreenKeyframe` when a view starts and whenever packets arrive for 2 s
+without a decoded frame (at most once per second). Hiding, closing or unmounting a
+tile stops its subscription with the next renewal; a member's shared screen audio
+plays only while their screen is watched, at the per-stream **Stream audio**
+volume. Your own screen tile is a local preview of the captured track.
+
+Requirements and limits: a secure context (HTTPS or localhost); desktop Chrome, Edge,
+Firefox or Safari with WebRTC H.264. Received native streams can be up to 4K;
+browsers decode them with their own (hardware or software) H.264 decoder. The
+browser always receives the baseline profile (`screen_profiles` is not negotiated).
+Sharing audio from other apps outside Chromium on Windows/ChromeOS, and any screen
+sharing on phones and tablets, remain desktop-app features.
+
+Verification: native unit tests cover codec filtering, answer restriction, presets,
+encoder limits, receiver samples and keyframe timing; backend tests cover browser
+screen/audio/camera forwarding and PLI. A live run on Chromium 152 (two isolated
+tabs with canvas test sources, a temporary backend and a desktop-style webrtc-rs
+fixture) decoded browser→browser screens at 1280×720 ~30 fps and cameras at 640×360,
+showed shared audio stopping when the tile was hidden, paused encoding without
+viewers, recovered 1.4 s after unhiding, delivered constrained-baseline
+SPS/PPS/IDR to the native-style peer and decoded a fixed-SSRC native-style screen in
+the browser. Firefox, Safari, phones and physical capture devices still need manual
+acceptance.

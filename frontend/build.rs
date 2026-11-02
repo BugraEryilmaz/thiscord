@@ -1,5 +1,14 @@
+/// wasm-ld reserves only 1 MiB of stack. Unoptimized Leptos components (the
+/// chat panel in `trunk serve` debug builds) overflow it, which silently
+/// corrupts linear memory ("memory access out of bounds"). A build-script link
+/// argument also applies when CARGO_ENCODED_RUSTFLAGS overrides config flags.
+const WASM_STACK_BYTES: u32 = 8 * 1024 * 1024;
+
 fn main() {
     translations();
+    if std::env::var("CARGO_CFG_TARGET_ARCH").as_deref() == Ok("wasm32") {
+        println!("cargo:rustc-link-arg-bin=thiscord-ui=-zstack-size={WASM_STACK_BYTES}");
+    }
     // ScreenCaptureKit (12.3+) and newer VideoToolbox keys must not stop the
     // app from launching on older supported macOS; the screen backend checks
     // the OS version before touching them.

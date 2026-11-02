@@ -153,6 +153,16 @@ jobs:
           name: admin-assets
           path: frontend/dist-admin/
           if-no-files-found: error
+      - name: Build browser web client bundle
+        working-directory: frontend
+        env:
+          BINARYEN_CORES: "1"
+        run: trunk build --release --locked --public-url /app/ --dist dist-app
+      - uses: actions/upload-artifact@v4
+        with:
+          name: web-app-assets
+          path: frontend/dist-app/
+          if-no-files-found: error
       - name: Build public welcome page
         working-directory: frontend
         env:
