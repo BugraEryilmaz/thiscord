@@ -513,6 +513,11 @@ impl worker::Platform for Sck {
         metrics.label("encoder_buffer_applied", encoder.buffer_applied);
         metrics.label("encoder_gop_applied", encoder.gop_applied);
         metrics.label("encoder_low_latency", encoder.low_latency);
+        metrics.label("encoder_references_capped", encoder.references_capped);
+        metrics.label(
+            "encoder_resolution",
+            format!("{}x{}", encoder.size.0, encoder.size.1),
+        );
         metrics.label(
             "pixel_path",
             "SCK NV12 IOSurface / VideoToolbox scale / hardware H.264",

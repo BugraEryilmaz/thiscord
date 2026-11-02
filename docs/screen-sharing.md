@@ -73,7 +73,11 @@ disable frame reordering, use Constrained Baseline/High with BT.709 VUI, a 200 m
 data-rate window (`encode::buffer_bytes`) and the ten-second GOP. Forced IDRs use
 per-frame `ForceKeyFrame`; output is converted from AVCC to Annex B with SPS/PPS on
 every IDR. In low-latency mode VideoToolbox already favours speed, so the speed hint
-reports 0. System audio runs as a separate audio-only SCStream on the main display
+reports 0. Its automatic level advertises the level's whole DPB as reference frames
+(12 at 1440p60, 5 at 4K), which exceeds the receivers' reference-picture budget, so
+sessions cap `ReferenceBufferCount` at 4 (macOS 13+). Without that key (macOS 12) the
+session size is reduced to fit H.264 level 5.0, whose DPB always fits the budget, and
+VideoToolbox scales the capture down on the GPU. System audio runs as a separate audio-only SCStream on the main display
 (all applications, even for window shares) and is handed to the Opus worker through a
 bounded lock-free queue. WebKit's WebContent process is a separate process, so sounds
 played by the WebView itself may be captured. ScreenCaptureKit and VideoToolbox are
@@ -629,7 +633,9 @@ Verified for the cross-platform backends (2026-11-02): on Windows the refactored
 shared worker passed `screen_pipeline_probe --seconds=30 --assert` (WGC 4K60, NVIDIA
 MFT, 1800/1800 frames, zero drops). On an Apple M2 (macOS 27), VideoToolbox encoded
 IOSurface NV12 input (GPU-scaled 1280x720 -> 640x360, forced IDR, Constrained High)
-that decoded with OpenH264 and passed the shared parameter-set bounds. Under WSL,
+that decoded with OpenH264 and passed the shared parameter-set bounds; 1440p60, 4K30
+and 4K60 sessions encoded in real time at full size within those bounds (before the
+reference cap, every one was rejected for its reference count). Under WSL,
 the production GStreamer layer pipeline encoded with NVENC (`nvh264enc`, CPU-scale
 family) and x264 and decoded through FFmpeg, and a live PipeWire graph linked
 another app's outputs to the private sink. Not yet run: live ScreenCaptureKit
