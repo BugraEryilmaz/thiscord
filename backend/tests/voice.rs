@@ -167,6 +167,58 @@ use webrtc::{
     peer_connection::*,
 };
 type Socket = WebSocketStream<MaybeTlsStream<tokio::net::TcpStream>>;
+/// Inbound PLI count per media SSRC.
+type KeyframeRequests = Arc<std::sync::Mutex<std::collections::HashMap<u32, u32>>>;
+/// Counts inbound RTCP PLI; every packet passes through unchanged.
+#[derive(Default)]
+struct PliCounter {
+    requests: KeyframeRequests,
+    read: std::collections::VecDeque<rtc::interceptor::TaggedPacket>,
+    write: std::collections::VecDeque<rtc::interceptor::TaggedPacket>,
+}
+impl rtc::sansio::Protocol<rtc::interceptor::TaggedPacket, rtc::interceptor::TaggedPacket, ()>
+    for PliCounter
+{
+    type Rout = rtc::interceptor::TaggedPacket;
+    type Wout = rtc::interceptor::TaggedPacket;
+    type Eout = ();
+    type Error = rtc::shared::error::Error;
+    type Time = std::time::Instant;
+    fn handle_read(&mut self, msg: Self::Rout) -> Result<(), Self::Error> {
+        use rtc::rtcp::payload_feedbacks::picture_loss_indication::PictureLossIndication;
+        if let rtc::interceptor::Packet::Rtcp(packets) = &msg.message.packet {
+            for pli in packets
+                .iter()
+                .filter_map(|p| p.as_any().downcast_ref::<PictureLossIndication>())
+            {
+                *self
+                    .requests
+                    .lock()
+                    .unwrap()
+                    .entry(pli.media_ssrc)
+                    .or_default() += 1;
+            }
+        }
+        self.read.push_back(msg);
+        Ok(())
+    }
+    fn poll_read(&mut self) -> Option<Self::Rout> {
+        self.read.pop_front()
+    }
+    fn handle_write(&mut self, msg: Self::Wout) -> Result<(), Self::Error> {
+        self.write.push_back(msg);
+        Ok(())
+    }
+    fn poll_write(&mut self) -> Option<Self::Wout> {
+        self.write.pop_front()
+    }
+}
+impl rtc::interceptor::Interceptor for PliCounter {
+    fn bind_local_stream(&mut self, _: &rtc::interceptor::StreamInfo) {}
+    fn unbind_local_stream(&mut self, _: &rtc::interceptor::StreamInfo) {}
+    fn bind_remote_stream(&mut self, _: &rtc::interceptor::StreamInfo) {}
+    fn unbind_remote_stream(&mut self, _: &rtc::interceptor::StreamInfo) {}
+}
 struct Handler {
     gathered: Arc<Notify>,
     packets: mpsc::Sender<rtp::Packet>,
@@ -278,6 +330,14 @@ struct Peer {
     screen_tracks: [Arc<TrackLocalStaticRTP>; 3],
     low_track: Option<Arc<TrackLocalStaticRTP>>,
     screen_sequences: [u16; 3],
+    /// Screen video, shared audio and camera SSRCs: fixed for desktop
+    /// publishers (901-903), browser-chosen for browser publishers.
+    screen_ssrcs: [u32; 3],
+    /// Browser stand-ins only: unused senders that place the real tracks on
+    /// the member's own m-lines (see `with_publisher`).
+    foreign_tracks: Vec<Arc<TrackLocalStaticRTP>>,
+    /// Inbound PLI per SSRC (browser stand-ins only).
+    keyframe_requests: KeyframeRequests,
     views: Vec<thiscord_shared::screen::Subscription>,
 }
 impl Peer {
@@ -370,18 +430,27 @@ impl Peer {
                 )
                 .unwrap();
         }
-        let pc: Arc<dyn PeerConnection> = Arc::new(
-            PeerConnectionBuilder::new()
-                .with_media_engine(media)
-                .with_handler(Arc::new(Handler {
-                    gathered: gathered.clone(),
-                    packets: tx,
-                }))
-                .with_udp_addrs(vec!["127.0.0.1:0".to_owned()])
-                .build()
-                .await
-                .unwrap(),
-        );
+        let keyframe_requests = KeyframeRequests::default();
+        let builder = PeerConnectionBuilder::new()
+            .with_media_engine(media)
+            .with_handler(Arc::new(Handler {
+                gathered: gathered.clone(),
+                packets: tx,
+            }))
+            .with_udp_addrs(vec!["127.0.0.1:0".to_owned()]);
+        // Browser stand-ins observe the PLI a real browser would answer with an IDR.
+        let builder = if browser_publisher {
+            builder.with_interceptor_registry(rtc::interceptor::Registry::new().with(
+                rtc::interceptor::Slot::from(14_000),
+                PliCounter {
+                    requests: keyframe_requests.clone(),
+                    ..Default::default()
+                },
+            ))
+        } else {
+            builder
+        };
+        let pc: Arc<dyn PeerConnection> = Arc::new(builder.build().await.unwrap());
         pc.set_remote_description(serde_json::from_str(&sdp).unwrap())
             .await
             .unwrap();
@@ -408,12 +477,11 @@ impl Peer {
         pc.add_track(track.clone() as Arc<dyn TrackLocal>)
             .await
             .unwrap();
-        let screen_tracks = std::array::from_fn(|index| {
-            let video = index != 1;
+        let media_track = |name: String, video: bool, ssrc: u32| {
             Arc::new(TrackLocalStaticRTP::new(MediaStreamTrack::new(
-                format!("screen-{index}"),
-                format!("screen-{index}"),
-                format!("screen-{index}"),
+                name.clone(),
+                name.clone(),
+                name,
                 if video {
                     RtpCodecKind::Video
                 } else {
@@ -421,7 +489,7 @@ impl Peer {
                 },
                 vec![RTCRtpEncodingParameters {
                     rtp_coding_parameters: RTCRtpCodingParameters {
-                        ssrc: Some(901 + index as u32),
+                        ssrc: Some(ssrc),
                         ..Default::default()
                     },
                     codec: RTCRtpCodec {
@@ -439,16 +507,54 @@ impl Peer {
                     ..Default::default()
                 }],
             )))
-        });
+        };
         let desktop = microphone_ssrc == 900;
-        for track in screen_tracks.iter().take(if desktop {
-            3
-        } else {
-            usize::from(browser_publisher)
-        }) {
-            pc.add_track(track.clone() as Arc<dyn TrackLocal>)
-                .await
-                .unwrap();
+        // Browsers cannot choose SSRCs; derive distinct arbitrary ones.
+        let screen_ssrcs: [u32; 3] = std::array::from_fn(|index| {
+            if desktop || !browser_publisher {
+                901 + index as u32
+            } else {
+                microphone_ssrc ^ (0x0101_0000 * (index as u32 + 1))
+            }
+        });
+        let screen_tracks: [Arc<TrackLocalStaticRTP>; 3] = std::array::from_fn(|index| {
+            media_track(format!("screen-{index}"), index != 1, screen_ssrcs[index])
+        });
+        let mut foreign_tracks = Vec::new();
+        if desktop {
+            for track in &screen_tracks {
+                pc.add_track(track.clone() as Arc<dyn TrackLocal>)
+                    .await
+                    .unwrap();
+            }
+        } else if browser_publisher {
+            // add_track takes the first free m-line of its kind. As slot 0 the
+            // microphone took m-line 0; fill the other members' microphone
+            // (1-7) and screen (9-15) m-lines so shared audio lands on 16,
+            // screen video on 8 and the camera on 24: this member's own lines.
+            assert_eq!(slot, 0, "browser stand-ins must join first");
+            let foreign = |index: usize, video: bool| {
+                media_track(
+                    format!("foreign-{index}"),
+                    video,
+                    microphone_ssrc.wrapping_add(0x10 + index as u32),
+                )
+            };
+            for index in 1..voice::ROOM_CAPACITY {
+                foreign_tracks.push(foreign(index, false));
+            }
+            foreign_tracks.push(screen_tracks[1].clone());
+            foreign_tracks.push(screen_tracks[0].clone());
+            for index in 1..voice::ROOM_CAPACITY {
+                foreign_tracks.push(foreign(voice::ROOM_CAPACITY + index, true));
+            }
+            foreign_tracks.push(screen_tracks[2].clone());
+            for track in &foreign_tracks {
+                pc.add_track(track.clone() as Arc<dyn TrackLocal>)
+                    .await
+                    .unwrap();
+            }
+            foreign_tracks.retain(|t| !screen_tracks.iter().any(|s| Arc::ptr_eq(s, t)));
         }
         let low_track = if screen_layers {
             let track = Arc::new(TrackLocalStaticRTP::new(MediaStreamTrack::new(
@@ -540,6 +646,9 @@ impl Peer {
             screen_tracks,
             low_track,
             screen_sequences: [0; 3],
+            screen_ssrcs,
+            foreign_tracks,
+            keyframe_requests,
             views: vec![],
         }
     }
@@ -572,7 +681,7 @@ impl Peer {
                 header: rtp::header::Header {
                     version: 2,
                     payload_type: if kind != 1 { 125 } else { 111 },
-                    ssrc: 901 + kind as u32,
+                    ssrc: self.screen_ssrcs[kind],
                     sequence_number: sequence,
                     timestamp: sequence as u32 * if kind != 1 { 9000 } else { 960 },
                     marker: true,

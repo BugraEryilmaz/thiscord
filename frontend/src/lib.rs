@@ -11,6 +11,7 @@ pub mod bot_credentials;
 #[path = "../../bots/src/lib.rs"]
 pub mod bots;
 pub mod browser_call;
+pub mod browser_video;
 pub mod chat_history;
 pub mod direct_history;
 pub mod downloads;

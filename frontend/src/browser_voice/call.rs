@@ -5,13 +5,14 @@
 use super::{
     media::{self, Microphone, Output},
     socket::{self, Incoming, Socket},
+    video,
 };
 use std::{
     cell::{Cell, RefCell},
     rc::Rc,
 };
 use thiscord_frontend::browser_call::{
-    self as rules, Activity, Backoff, Failure, FailureKind, Gate, PLAYBACK_SLOTS,
+    self as rules, Activity, Answering, Backoff, Failure, FailureKind, Gate, PLAYBACK_SLOTS,
 };
 use thiscord_shared::{ChannelId, GuildId, RequestId, voice::*};
 use wasm_bindgen::JsCast;
@@ -55,6 +56,8 @@ pub(super) struct Live {
     answered: bool,
     sent_state: Option<(bool, bool)>,
     sent_at: f64,
+    /// Own-slot screen/camera senders and received video of this attempt.
+    pub media: video::Media,
 }
 impl Drop for Live {
     fn drop(&mut self) {
@@ -63,8 +66,17 @@ impl Drop for Live {
     }
 }
 impl Live {
-    fn own(&self) -> Option<&Participant> {
+    pub(super) fn own(&self) -> Option<&Participant> {
         self.roster.iter().find(|m| m.slot == self.own_slot)
+    }
+    /// The Answer was sent; other events may follow it.
+    pub(super) fn answered(&self) -> bool {
+        self.answered
+    }
+    pub(super) fn send(&self, event: ClientEvent) {
+        if self.answered {
+            self.socket.send(event);
+        }
     }
 }
 
@@ -87,6 +99,8 @@ pub(super) struct Call {
     pub local_level: Cell<f32>,
     pub transmitting: Cell<bool>,
     reopening: Cell<u32>,
+    /// Screen and camera capture; ends with the attempt, never restarted.
+    pub publishing: RefCell<video::Publishing>,
 }
 impl Call {
     pub fn new(
@@ -114,6 +128,7 @@ impl Call {
             local_level: Cell::new(0.0),
             transmitting: Cell::new(false),
             reopening: Cell::new(0),
+            publishing: RefCell::default(),
         })
     }
     pub fn start(self: &Rc<Self>) {
@@ -136,7 +151,17 @@ impl Call {
             .get(slot)
             .is_some_and(|a| a.active(rules::SPEAKING_HANGOVER_MS, now()))
     }
+    /// Sends a signaling event on the current attempt after its Answer.
+    pub(super) fn send(&self, event: ClientEvent) {
+        if let Some(live) = self.live.borrow().as_ref() {
+            live.send(event);
+        }
+    }
     fn end_attempt(&self) {
+        // Screen and camera end with the media session; rejoining never
+        // restarts them. Players rebind to the next attempt's tracks.
+        video::release(self);
+        video::unbind_all();
         let live = self.live.borrow_mut().take();
         drop(live);
         self.output.detach_all();
@@ -498,6 +523,7 @@ async fn attempt(
         answered: false,
         sent_state: None,
         sent_at: 0.0,
+        media: Default::default(),
     });
     let answer = match negotiate(call, &pc, &sdp, own_slot, can_speak, microphone.as_deref()).await
     {
@@ -511,8 +537,10 @@ async fn attempt(
             packet_redundancy: false,
             remote_audio: false,
             sdp: answer,
-            screen_feedback: false,
-            screen_subscriptions: false,
+            // Viewing demand, ScreenTarget and keyframe recovery; browsers
+            // publish one encoding (no layers) and decode baseline only.
+            screen_feedback: true,
+            screen_subscriptions: true,
             screen_layers: false,
             video_diagnostics: false,
             soundboard: false,
@@ -548,11 +576,21 @@ async fn negotiate(
         .await
         .map_err(|_| Failure::final_("Cannot accept the voice server offer"))?;
     let publish = can_speak && microphone.is_some();
+    let support = video::support();
+    let answering = Answering {
+        microphone: publish,
+        media: can_speak,
+        h264_send: support.encode,
+        h264_receive: support.decode,
+    };
     let opus = media::opus_codecs();
     let mut sender = None;
     // The SFU rejects a RED microphone from browser publishers.
-    let mut opus_only = false;
+    let mut opus_only = true;
+    // Plain baseline H.264 only, without RTX/RED/FEC.
+    let mut h264_only = true;
     let mut receivers = Vec::new();
+    let mut video_media = video::Media::new(support);
     for transceiver in pc.get_transceivers().iter() {
         let transceiver: RtcRtpTransceiver = transceiver.unchecked_into();
         let Some(mid) = transceiver.mid() else {
@@ -562,16 +600,22 @@ async fn negotiate(
             media::set_direction(&transceiver, rules::Direction::Inactive.as_str());
             continue;
         };
-        let direction = rules::direction(kind, slot, own_slot, publish);
+        let direction = rules::direction(kind, slot, own_slot, answering);
         // Every audio m-line, even inactive ones, offers plain Opus only.
-        let preferred = !kind.is_video()
-            && opus
-                .as_ref()
-                .is_some_and(|codecs| media::prefer_codecs(&transceiver, codecs));
-        if direction == rules::Direction::SendRecv {
-            opus_only = preferred;
+        let preferred = if kind.is_video() {
+            direction == rules::Direction::Inactive || video::prefer_h264(&transceiver)
+        } else {
+            opus.as_ref()
+                .is_some_and(|codecs| media::prefer_codecs(&transceiver, codecs))
+        };
+        if direction == rules::Direction::SendRecv && !kind.is_video() {
+            opus_only &= preferred;
+        }
+        if kind.is_video() {
+            h264_only &= preferred;
         }
         if direction == rules::Direction::SendRecv
+            && kind == MediaKind::Microphone
             && let Some(microphone) = microphone
         {
             let track_sender = transceiver.sender();
@@ -579,6 +623,12 @@ async fn negotiate(
                 .await
                 .map_err(|_| Failure::final_("Cannot attach the microphone"))?;
             sender = Some(track_sender);
+        }
+        if direction == rules::Direction::SendRecv
+            && let Some(index) = video::sender_index(kind)
+        {
+            // Idle until Share screen or the camera attaches a track.
+            video_media.senders[index] = Some(transceiver.sender());
         }
         if !media::set_direction(&transceiver, direction.as_str()) {
             return Err(Failure::final_("Cannot configure voice media"));
@@ -591,24 +641,39 @@ async fn negotiate(
                 mid,
             });
             call.output.attach(playback, &track);
+        } else if kind.is_video() && direction == rules::Direction::RecvOnly {
+            video_media.remote.push(video::Remote {
+                kind,
+                slot,
+                mid,
+                track: transceiver.receiver().track(),
+            });
         }
     }
     if let Some(live) = call.live.borrow_mut().as_mut() {
         live.publishing = sender.is_some();
         live.sender = sender;
         live.receivers = receivers;
+        live.media = video_media;
     }
     let answer: RtcSessionDescriptionInit = JsFuture::from(pc.create_answer())
         .await
         .map_err(|_| Failure::final_("Cannot create a voice answer"))?
         .unchecked_into();
-    if publish && !opus_only {
-        // Without setCodecPreferences, drop RED from the answer instead.
-        let created = js_sys::Reflect::get(&answer, &"sdp".into())
+    if !opus_only || !h264_only {
+        // Without setCodecPreferences, drop RED from audio and every format
+        // but baseline H.264 from video sections of the answer instead.
+        let mut created = js_sys::Reflect::get(&answer, &"sdp".into())
             .ok()
             .and_then(|sdp| sdp.as_string())
             .ok_or_else(|| Failure::final_("Cannot create a voice answer"))?;
-        answer.set_sdp(&rules::strip_red(&created));
+        if !opus_only {
+            created = rules::strip_red(&created);
+        }
+        if !h264_only {
+            created = thiscord_frontend::browser_video::restrict_video(&created);
+        }
+        answer.set_sdp(&created);
     }
     JsFuture::from(pc.set_local_description(&answer))
         .await
@@ -733,6 +798,16 @@ async fn run(
         } else {
             None
         };
+        let video_stats = if video::stats_due(call) {
+            let pc = call.live.borrow().as_ref().map(|live| live.pc.clone());
+            match pc {
+                Some(pc) => Some(video::inbound(&pc).await),
+                None => None,
+            }
+        } else {
+            None
+        };
+        video::tick(call, video_stats);
         call.tick(stats);
     }
 }
@@ -769,8 +844,18 @@ fn handle(call: &Rc<Call>, event: ServerEvent) -> Option<Ending> {
         ServerEvent::Replaced {} => Some(Failure::replaced().into()),
         ServerEvent::ResumeUnavailable {} => Some(Failure::resume_unavailable().into()),
         ServerEvent::Error { error } => Some(Failure::server(&error).into()),
+        ServerEvent::ScreenTarget {
+            kind,
+            epoch,
+            bitrate,
+            ..
+        } => {
+            video::target(call, kind, epoch, bitrate);
+            None
+        }
         // Plain Opus publishers have no RED privacy boundary to refresh;
-        // soundboard, screen and admin events are never negotiated here.
+        // browsers answer keyframe requests as RTCP PLI, and soundboard and
+        // admin events are never negotiated here. MediaDiagnostics is ignored.
         _ => None,
     }
 }

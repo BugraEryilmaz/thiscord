@@ -125,7 +125,7 @@ pub(super) fn Panel(ui: Ui) -> impl IntoView {
         <h2 class="settings-panel-title text-xl font-semibold">{move || crate::i18n::t("Application updates")}</h2>
         <Show when=desktop fallback=||view!{
             <p>{move || crate::i18n::t("Refresh the browser to load the latest web version.")}</p>
-            <p class="settings-hint">{move || crate::i18n::t("The desktop app adds screen sharing, cameras, global shortcuts and the in-game overlay, and installs updates when you choose.")}</p>
+            <p class="settings-hint">{move || crate::i18n::t("The desktop app adds global shortcuts, the in-game overlay and screen sharing with system audio, and installs updates when you choose.")}</p>
             <super::settings::DesktopAppLink class="settings-secondary"/>
         }>
             <p>{move||thiscord_frontend::localized_format!(crate::i18n::language(), "Installed version: {}",ui.updates.get().current_version)}</p>

@@ -2,6 +2,7 @@
 pub(crate) mod moderation;
 use crate::access;
 mod bots;
+mod browser;
 mod diagnostics;
 mod egress;
 mod ice;
@@ -414,9 +415,10 @@ struct Handler {
     generation: Arc<AtomicU64>,
     track_seen: [AtomicBool; 5],
     screen_rate: Arc<std::sync::Mutex<layers::IngressBudget>>,
-    /// Set from the Answer before the remote description is applied. Browsers
-    /// cannot choose RTP SSRCs, so their tracks are identified by codec instead.
-    browser_publisher: Arc<AtomicBool>,
+    /// Browsers cannot choose RTP SSRCs; their tracks are identified by the
+    /// own-slot m-line that received them instead (see `browser.rs`).
+    browser: Arc<browser::Publisher>,
+    slot: usize,
 }
 #[async_trait::async_trait]
 impl PeerConnectionEventHandler for Handler {
@@ -442,19 +444,25 @@ impl PeerConnectionEventHandler for Handler {
         let Some(codec) = track.codec(ssrc).await else {
             return;
         };
-        let browser = self.browser_publisher.load(Ordering::Acquire);
-        if browser && codec.mime_type.to_ascii_lowercase().starts_with("video/") {
-            // Browser publishers send only their microphone. Leave unexpected
-            // video unread (its bounded receive queue drops) instead of ending
-            // the call; it is never forwarded.
-            tracing::info!(request_id = %self.request_id, "ignored browser publisher video track");
-            return;
-        }
+        let browser = self.browser.enabled();
+        let browser_kind = if browser {
+            // Any SSRC on the member's own microphone, screen, shared-audio or
+            // camera m-line. Tracks on other m-lines stay unread (their bounded
+            // receive queue drops) instead of ending the call; never forwarded.
+            let kind = self.browser.kind(&track, self.slot).await;
+            if kind.is_none() {
+                tracing::info!(request_id = %self.request_id, "ignored browser track outside its own media lines");
+                return;
+            }
+            kind
+        } else {
+            None
+        };
         let low_layer = !browser && ssrc == thiscord_shared::screen::LOW_LAYER_SSRC;
         let Some(kind) = (if browser {
-            // Any SSRC; the codec check below admits only 48 kHz Opus, and
-            // `track_seen` admits only one microphone track per connection.
-            Some(MediaKind::Microphone)
+            // The codec check below admits Opus audio or H.264 video, and
+            // `track_seen` admits one track per kind and connection.
+            browser_kind
         } else if low_layer {
             Some(MediaKind::ScreenVideo)
         } else {
@@ -480,6 +488,9 @@ impl PeerConnectionEventHandler for Handler {
         {
             self.active.store(false, Ordering::Release);
             return;
+        }
+        if browser {
+            self.browser.publishing(kind, ssrc, &track);
         }
         let tx = if kind == MediaKind::Microphone {
             self.packets.clone()
@@ -1127,7 +1138,7 @@ async fn serve(mut socket: logging::Socket, pool: DbPool, id: RequestId, upgrade
         }
     };
     let gathered = Arc::new(Notify::new());
-    let browser_publisher = Arc::new(AtomicBool::new(false));
+    let browser_publisher = Arc::new(browser::Publisher::default());
     let (in_tx, mut in_rx) = mpsc::channel::<Ingress>(8);
     let (media_in_tx, mut media_in_rx) = mpsc::channel::<Ingress>(4096);
     let mut engine = MediaEngine::default();
@@ -1168,7 +1179,8 @@ async fn serve(mut socket: logging::Socket, pool: DbPool, id: RequestId, upgrade
             generation: generation.clone(),
             track_seen: std::array::from_fn(|_| AtomicBool::new(false)),
             screen_rate: Default::default(),
-            browser_publisher: browser_publisher.clone(),
+            browser: browser_publisher.clone(),
+            slot,
         }))
         .with_udp_addrs(vec![local_bind().unwrap_or_else(|_| "127.0.0.1:0".into())])
         .build()
@@ -1223,8 +1235,9 @@ async fn serve(mut socket: logging::Socket, pool: DbPool, id: RequestId, upgrade
             pc.set_local_description(offer).await.map_err(|_| ())?;
             socket.stage = "ice_gathering";
             gathered.notified().await;
-            let sdp =
-                serde_json::to_string(&pc.local_description().await.ok_or(())?).map_err(|_| ())?;
+            let local = pc.local_description().await.ok_or(())?;
+            browser_publisher.bind(&pc, &local.sdp);
+            let sdp = serde_json::to_string(&local).map_err(|_| ())?;
             socket.stage = "offer_send";
             send(
                 &mut socket,
@@ -1275,7 +1288,7 @@ async fn serve(mut socket: logging::Socket, pool: DbPool, id: RequestId, upgrade
                 && !browser
                 && thiscord_shared::rtp_red::negotiated(&answer.sdp);
             // Tracks open only after the remote description; classify first.
-            browser_publisher.store(browser, Ordering::Release);
+            browser_publisher.enabled.store(browser, Ordering::Release);
             screen_feedback = enabled;
             remote_audio = audio_enabled;
             video_diagnostics = video_enabled;
@@ -1295,7 +1308,8 @@ async fn serve(mut socket: logging::Socket, pool: DbPool, id: RequestId, upgrade
                 member.feedback_enabled = enabled;
                 member.packet_redundancy = packet_redundancy;
                 member.subscriptions_enabled = screen_subscriptions;
-                member.screen_layers = screen_layers && screen_subscriptions && enabled;
+                // Browsers publish one encoding: never plan or wait for a low layer.
+                member.screen_layers = screen_layers && screen_subscriptions && enabled && !browser;
                 member.screen_profiles = screen_profiles && screen_subscriptions;
                 member.negotiated = true;
                 tracing::info!(request_id = %id, slot, packet_redundancy, browser_publisher = browser,
@@ -1319,6 +1333,7 @@ async fn serve(mut socket: logging::Socket, pool: DbPool, id: RequestId, upgrade
         let relay_active = active.clone();
         let relay_generation = generation.clone();
         let relay_access = connection_access.clone();
+        let relay_browser = browser_publisher.clone();
         let relay = tokio::spawn(async move {
             let mut performance_sample = 0_u64;
             while let Some(Ingress {
@@ -1360,8 +1375,11 @@ async fn serve(mut socket: logging::Socket, pool: DbPool, id: RequestId, upgrade
                 {
                     continue;
                 }
-                let layer =
-                    usize::from(packet.header.ssrc == thiscord_shared::screen::LOW_LAYER_SSRC);
+                // A browser-chosen SSRC can equal the native low-layer SSRC.
+                let layer = usize::from(
+                    !relay_browser.enabled()
+                        && packet.header.ssrc == thiscord_shared::screen::LOW_LAYER_SSRC,
+                );
                 let layer_packet = thiscord_shared::screen::LayerPacket::parse(&packet.header.csrc);
                 if kind == MediaKind::ScreenVideo
                     && ((layer == 1 && !source.screen_layers)
@@ -1577,7 +1595,10 @@ async fn serve(mut socket: logging::Socket, pool: DbPool, id: RequestId, upgrade
                     // Revalidate the publisher and generation after queued feedback.
                     let allowed = connection_access.packet(access.generation.load(Ordering::Acquire), access.generation.load(Ordering::Acquire)).is_some()
                         && room.members.read().await.get(&slot).is_some_and(|m| m.source_id == source_id && m.feedback_enabled && m.active.load(Ordering::Acquire) && m.info.video_active(kind) && m.info.video_epoch(kind) == epoch);
-                    if allowed && send(&mut socket, ServerEvent::ScreenKeyframe { kind, epoch, layer }).await.is_err() { break; }
+                    if allowed && browser_publisher.enabled() {
+                        // Browsers answer RTCP PLI on their media SSRC with an IDR.
+                        browser_publisher.keyframe(kind, slot).await;
+                    } else if allowed && send(&mut socket, ServerEvent::ScreenKeyframe { kind, epoch, layer }).await.is_err() { break; }
                 },
                 Some(call)=audio_requests.recv()=>{
                     if socket.detached() { call.reject(Failure::Unavailable); continue; }

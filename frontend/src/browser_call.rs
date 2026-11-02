@@ -125,20 +125,40 @@ impl Direction {
     }
 }
 
-/// Answer direction for one SFU m-line. The browser publishes its single Opus
-/// track on its own microphone m-line, receives other members' microphone and
-/// screen audio, and declines all video (viewing is desktop-only).
-pub fn direction(kind: MediaKind, slot: usize, own_slot: usize, publish: bool) -> Direction {
-    match kind {
-        MediaKind::Microphone if slot == own_slot => {
-            if publish {
-                Direction::SendRecv
-            } else {
-                Direction::Inactive
-            }
+/// What this browser can do on the SFU's m-lines in its answer.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct Answering {
+    /// Speak permission and an open microphone.
+    pub microphone: bool,
+    /// Speak permission: screen, shared audio and camera may be published
+    /// later without renegotiation, even by a listener without a microphone.
+    pub media: bool,
+    /// Baseline H.264 encoding (publishing video) and decoding (viewing).
+    pub h264_send: bool,
+    pub h264_receive: bool,
+}
+
+/// Answer direction for one SFU m-line. The browser sends its microphone,
+/// shared screen audio, screen video and camera on its own slot's m-lines
+/// (attached later with `replaceTrack`; an idle sender sends nothing), and
+/// receives other members' audio and, with an H.264 decoder, their video.
+pub fn direction(kind: MediaKind, slot: usize, own_slot: usize, answering: Answering) -> Direction {
+    let send = |allowed: bool| {
+        if allowed {
+            Direction::SendRecv
+        } else {
+            Direction::Inactive
         }
-        MediaKind::Microphone | MediaKind::SystemAudio if slot != own_slot => Direction::RecvOnly,
-        _ => Direction::Inactive,
+    };
+    match kind {
+        MediaKind::Microphone if slot == own_slot => send(answering.microphone),
+        MediaKind::SystemAudio if slot == own_slot => send(answering.media),
+        MediaKind::ScreenVideo | MediaKind::Camera if slot == own_slot => {
+            send(answering.media && answering.h264_send)
+        }
+        MediaKind::Microphone | MediaKind::SystemAudio => Direction::RecvOnly,
+        MediaKind::ScreenVideo | MediaKind::Camera if answering.h264_receive => Direction::RecvOnly,
+        MediaKind::ScreenVideo | MediaKind::Camera => Direction::Inactive,
     }
 }
 
@@ -509,34 +529,50 @@ mod tests {
     }
 
     #[test]
-    fn directions_publish_only_the_own_microphone_and_decline_video() {
+    fn directions_send_own_media_and_receive_others() {
         let own = 3;
-        assert_eq!(
-            direction(MediaKind::Microphone, own, own, true),
-            Direction::SendRecv
-        );
-        assert_eq!(
-            direction(MediaKind::Microphone, own, own, false),
-            Direction::Inactive
-        );
-        assert_eq!(
-            direction(MediaKind::Microphone, 0, own, true),
-            Direction::RecvOnly
-        );
-        assert_eq!(
-            direction(MediaKind::SystemAudio, 0, own, true),
-            Direction::RecvOnly
-        );
-        assert_eq!(
-            direction(MediaKind::SystemAudio, own, own, true),
-            Direction::Inactive
-        );
+        let full = Answering {
+            microphone: true,
+            media: true,
+            h264_send: true,
+            h264_receive: true,
+        };
+        let d = |kind, slot, answering| direction(kind, slot, own, answering);
+        for kind in MediaKind::ALL {
+            assert_eq!(d(kind, own, full), Direction::SendRecv, "{kind:?}");
+            assert_eq!(d(kind, 0, full), Direction::RecvOnly, "{kind:?}");
+        }
+        // A listener without a microphone can still publish screen and camera.
+        let listener = Answering {
+            microphone: false,
+            ..full
+        };
+        assert_eq!(d(MediaKind::Microphone, own, listener), Direction::Inactive);
+        assert_eq!(d(MediaKind::Camera, own, listener), Direction::SendRecv);
+        // Without Speak permission nothing of its own is negotiated for sending.
+        let receive_only = Answering {
+            microphone: false,
+            media: false,
+            ..full
+        };
+        for kind in MediaKind::ALL {
+            assert_eq!(d(kind, own, receive_only), Direction::Inactive);
+        }
+        // No H.264 encoder: no own video; no decoder: other video declined.
+        let no_h264 = Answering {
+            h264_send: false,
+            h264_receive: false,
+            ..full
+        };
         for kind in [MediaKind::ScreenVideo, MediaKind::Camera] {
-            for slot in 0..ROOM_CAPACITY {
-                assert_eq!(direction(kind, slot, own, true), Direction::Inactive);
+            assert_eq!(d(kind, own, no_h264), Direction::Inactive);
+            for slot in (0..ROOM_CAPACITY).filter(|s| *s != own) {
+                assert_eq!(d(kind, slot, no_h264), Direction::Inactive);
                 assert_eq!(playback_slot(kind, slot, own), None);
             }
         }
+        assert_eq!(d(MediaKind::SystemAudio, own, no_h264), Direction::SendRecv);
+        assert_eq!(d(MediaKind::SystemAudio, 1, no_h264), Direction::RecvOnly);
         assert_eq!(playback_slot(MediaKind::Microphone, own, own), None);
         assert_eq!(playback_slot(MediaKind::Microphone, 1, own), Some(1));
         assert_eq!(

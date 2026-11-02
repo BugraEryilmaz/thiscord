@@ -6,6 +6,7 @@
 mod call;
 mod media;
 mod socket;
+pub mod video;
 
 use call::Call;
 use leptos::prelude::*;

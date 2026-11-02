@@ -16,7 +16,7 @@ pub(super) fn open_stream(ui: Ui, guild: GuildId, channel: ChannelId, member: Pa
     if !member.sharing_screen && !member.camera_active {
         return;
     }
-    if !crate::account_client::desktop() {
+    if !crate::account_client::desktop() && !super::audio::browser_voice(ui) {
         ui.status
             .set("Open the desktop app to watch streams".into());
         return;
@@ -298,7 +298,8 @@ pub(super) fn ScreenViewer(ui: Ui, guild: GuildId, channel: ChannelId) -> impl I
                 </figcaption>
                 <div class="media-tile-content" role="button" tabindex="0" aria-label=move || crate::i18n::t("View fullscreen") on:click=move |_|full() on:keydown=move |e|{if e.key()=="Enter" || e.key()==" "{e.prevent_default();full();}}>
                     <Show when=move ||!super::audio::media_deafened(ui) fallback=||view!{<div class="stream-placeholder">{move || crate::i18n::t("Undeafen to view media")}</div>}>
-                        {move || if own && kind==MediaKind::Camera {view!{<super::camera::LocalCamera/>}.into_any()}
+                        {move || if super::audio::browser_voice(ui) {view!{<super::browser_media::BrowserVideo watch=watch own=own/>}.into_any()}
+                        else if own && kind==MediaKind::Camera {view!{<super::camera::LocalCamera/>}.into_any()}
 
                         else {view!{<ScreenVideo watch=watch/>}.into_any()}}
                     </Show>

@@ -714,3 +714,11 @@ html:has(.welcome-page) { scroll-behavior: smooth; scroll-padding-top: 28px; bac
   .mobile-content .user-dock .dock-profile, .mobile-content .user-dock .dock-settings, .mobile-content .user-dock .browser-voice-hint { display: none; }
   .mobile-content .user-dock .dock-account { justify-content: flex-end; padding-block: 4px; }
 }
+
+/* Browser screen sharing and cameras ----
+   Camera switch menu above the voice bar; errors from getDisplayMedia and
+   getUserMedia appear once under both controls. */
+.browser-camera-switch { position: relative; flex-shrink: 0; }
+.browser-camera-menu { position: absolute; z-index: 130; bottom: calc(100% + 6px); left: 0; display: flex; flex-direction: column; gap: 2px; min-width: 200px; max-width: min(320px, calc(100vw - 24px)); padding: 6px; border: 1px solid #ffffff14; border-radius: 10px; background: #111218; box-shadow: 0 8px 32px #0008; }
+.browser-camera-menu .stream-choice { width: 100%; overflow: hidden; text-align: left; text-overflow: ellipsis; white-space: nowrap; }
+.browser-media-error { overflow-wrap: anywhere; }

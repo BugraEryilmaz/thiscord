@@ -409,10 +409,14 @@ pub(super) fn VoiceBar(ui: Ui) -> impl IntoView {
                     <super::screen::ScreenControls ui=ui/>
                     <super::soundboard::SoundboardControls ui=ui/>
                 </Show>
+                <Show when=move ||browser_voice(ui)>
+                    <super::browser_media::BrowserCameraControls ui=ui/>
+                    <super::browser_media::BrowserScreenControls ui=ui/>
+                </Show>
                 <button class="icon-button voice-action" aria-label=move || crate::i18n::t("Audio settings") data-tip=move || crate::i18n::t("Audio settings") on:click=move |_|ui.page.set("audio")><Icon kind=Glyph::Volume/></button>
                 <Show when=move||!ui.audio_control.is_remote() && ui.audio.get().mode==TransmitMode::PushToTalk><button class="icon-button voice-action touch-none select-none" aria-label=move || crate::i18n::t("Hold to talk") data-tip=move || crate::i18n::t("Hold to talk") on:pointerdown=move |_|pressed(true) on:pointerup=move |_|pressed(false) on:pointerleave=move |_|pressed(false) on:pointercancel=move |_|pressed(false) on:keydown=move|e|{if matches!(e.key().as_str()," "|"Enter"){e.prevent_default();pressed(true);}} on:keyup=move|_|pressed(false) on:blur=move |_|pressed(false)><Icon kind=Glyph::Mic/></button></Show>
             </div>
-        <Show when=move ||browser_voice(ui)><BrowserVoiceNotice/></Show>
+        <Show when=move ||browser_voice(ui)><BrowserVoiceNotice/><super::browser_media::BrowserMediaError/></Show>
         <Show when=move||ui.audio_status.with(|s|s.as_ref().and_then(|s|s.recording.as_ref()).is_some_and(|r|r.active))>
             <button class="mt-2 rounded bg-red-700 px-3 py-1 text-xs text-white" on:click=move |_|debug_command(ui,"audio_debug_stop")>
                 {move||thiscord_frontend::localized_format!(crate::i18n::language(), "● Recording {}s · Stop",ui.audio_status.with(|s|s.as_ref().and_then(|s|s.recording.as_ref()).map_or(0,|r|r.elapsed_ms/1000)))}
@@ -440,7 +444,7 @@ fn BrowserVoiceNotice() -> impl IntoView {
         <Show when=move ||!crate::browser_voice::notice().is_empty()>
             <p class="browser-voice-notice mt-2 text-xs text-amber-200" role="status">{move || crate::i18n::message(crate::browser_voice::notice())}</p>
         </Show>
-        <p class="browser-voice-hint mt-1 text-xs text-white/45">{move || crate::i18n::t("Screen sharing, cameras and the soundboard are available in the desktop app.")}</p>
+        <p class="browser-voice-hint mt-1 text-xs text-white/45">{move || crate::i18n::t("The soundboard is available in the desktop app.")}</p>
     }
 }
 fn debug_command(ui: Ui, command: &'static str) {
@@ -581,7 +585,7 @@ pub(super) fn VoiceChannel(
 ) -> impl IntoView {
     view! {<section class="voice-channel-view">
         <header class="voice-channel-header"><Icon kind=Glyph::Volume/><h2>{move ||name.get()}</h2></header>
-        <Show when=move ||desktop() || ui.audio_control.is_remote() fallback=move ||view!{<p class="voice-channel-empty">{move ||if browser_voice(ui) {crate::i18n::t("Voice works in this browser. Watching screen shares and cameras is available in the desktop app.")} else {crate::i18n::t("Open the desktop app to use voice and watch streams.")}}</p>}>
+        <Show when=move ||desktop() || ui.audio_control.is_remote() || browser_voice(ui) fallback=move ||view!{<p class="voice-channel-empty">{move ||crate::i18n::t("Open the desktop app to use voice and watch streams.")}</p>}>
             <super::screen::ScreenViewer ui=ui guild=guild channel=channel/>
         </Show>
     </section>}
@@ -656,7 +660,7 @@ pub(super) fn AudioSettingsPanel(ui: Ui) -> impl IntoView {
     view! {<div class="space-y-5"><h2 class="settings-panel-title text-xl font-semibold">{move || crate::i18n::t("Audio & voice")}</h2>
             <Show when=move ||ui.audio_control.is_remote() && !ui.audio_control.is_bot()><ShortcutSettings control=ui.audio_control/><crate::overlay::OverlaySettings control=ui.audio_control/></Show>
             <Show when=move ||voice_available(ui) fallback=||view!{<p>{move || crate::i18n::t("Audio devices and voice are available in the desktop app.")}</p>}>
-                <Show when=move ||browser><p class="settings-hint">{move || crate::i18n::t("Browser voice uses your browser’s microphone processing and playback. Screen sharing, cameras, the soundboard, neural noise suppression, diagnostics and recordings are available in the desktop app.")}</p></Show>
+                <Show when=move ||browser><p class="settings-hint">{move || crate::i18n::t("Browser voice uses your browser’s microphone processing and playback. The soundboard, neural noise suppression, diagnostics and recordings are available in the desktop app.")}</p></Show>
                 <section class="settings-card"><h3>{move || crate::i18n::t("Devices & microphone")}</h3><p class="settings-hint">{move || crate::i18n::t("Changes save automatically and apply to your current call.")}</p>
                 {[(true,"Microphone"),(false,"Speakers / headphones")].into_iter().filter(move |(input,_)|*input || outputs).map(move|(input,label)|view!{
                     <label class="block space-y-2"><span>{move || crate::i18n::t(label)}</span><select class="w-full rounded bg-slate-900 p-2 disabled:opacity-50" disabled=move||ui.audio_saving.get() prop:value=move||{let s=ui.audio.get();if input{s.input}else{s.output}.unwrap_or_default()} on:change=move|e|{let v=event_target_value(&e);ui.audio.update(|s|{let value=(!v.is_empty()).then_some(v);if input{s.input=value;}else{s.output=value;}});save(ui);}>

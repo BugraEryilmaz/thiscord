@@ -3,6 +3,7 @@ use leptos::prelude::*;
 use thiscord_shared::account::*;
 mod admin;
 mod audio;
+mod browser_media;
 mod camera;
 mod chat;
 mod context_menu;
