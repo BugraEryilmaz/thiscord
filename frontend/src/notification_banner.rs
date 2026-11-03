@@ -9,6 +9,8 @@ pub fn Banner(
     #[prop(default = true)] can_accept: bool,
 ) -> impl IntoView {
     let call = alert.call_id.is_some();
+    // Server alerts show the server's icon; the glyph remains if it fails to load.
+    let guild_icon = RwSignal::new(alert.guild_icon_id);
     let (label, icon) = match alert.kind {
         Kind::DirectMessage => ("Direct message", "M4 4h16v12H8l-4 4V4Zm4 4h8M8 12h5"),
         Kind::GuildMessage => ("Server message", "M9 3 7 21M17 3l-2 18M4 9h17M3 15h17"),
@@ -35,7 +37,7 @@ pub fn Banner(
     view! {<section class="notification-card" class:notification-call=call aria-label=move || crate::i18n::t("Notification")>
         <div class="notification-heading">
             <button class="notification-open" title=alert.title on:click=move |_|action.run(BannerAction::Open)>
-                <span class="notification-icon"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d=icon/></svg></span>
+                <span class="notification-icon relative overflow-hidden"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d=icon/></svg>{move ||guild_icon.get().map(|id|view!{<img class="absolute inset-0 size-full object-cover" alt="" draggable="false" referrerpolicy="no-referrer" src=format!("{}{}/{id}",crate::account_client::api_base(),thiscord_shared::permissions::GUILD_ICON_PATH) on:error=move |_|guild_icon.set(None)/>})}</span>
                 <span class="notification-copy"><span class="notification-kind">{move || crate::i18n::t(label)}<span class="notification-app">" · Thiscord"</span></span><span class="notification-title">{title}</span></span>
             </button>
             <button class="notification-dismiss" aria-label=move || crate::i18n::t("Dismiss notification") on:click=move |_|action.run(BannerAction::Dismiss)><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" aria-hidden="true"><path d="m6 6 12 12M6 18 18 6"/></svg></button>

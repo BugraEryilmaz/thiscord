@@ -238,6 +238,9 @@ pub struct Alert {
     pub actor: Option<AccountId>,
     pub call_id: Option<CallId>,
     pub version: Option<String>,
+    /// Icon of the alert's guild, added after authorization. Older servers omit it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub guild_icon_id: Option<crate::GuildIconId>,
 }
 // Never Debug: the connect event contains a bearer token.
 #[derive(Serialize, Deserialize)]

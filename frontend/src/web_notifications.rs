@@ -86,6 +86,7 @@ mod tests {
             actor: None,
             call_id: None,
             version: None,
+            guild_icon_id: None,
         }
     }
     fn presentation() -> Presentation {

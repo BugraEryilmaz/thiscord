@@ -606,6 +606,7 @@ async fn connected(ui: Ui, token: &str) -> Result<(), String> {
             version: SOCKET_VERSION,
             event: ClientEvent::Connect {
                 token: token.into(),
+                guild_updates: true,
             },
         })
         .map_err(|_| crate::i18n::t("Invalid socket request"))?,
@@ -636,6 +637,11 @@ async fn connected(ui: Ui, token: &str) -> Result<(), String> {
                     ui.socket_status.set(ConnectionStatus::Connected);
                 }
                 ServerEvent::Pong {} => {}
+                // Another member renamed the server or changed its icon. The
+                // hint carries no data; re-read guilds over authorized HTTP.
+                ServerEvent::GuildUpdated { .. } => {
+                    leptos::task::spawn_local(super::servers::refresh(ui));
+                }
                 ServerEvent::Revoked {} => {
                     ui.unread.set(vec![]);
                     if let Some(chat) = ui.active_chat.get_untracked() {
