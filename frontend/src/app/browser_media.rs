@@ -104,20 +104,38 @@ pub(super) fn BrowserScreenControls(ui: Ui) -> impl IntoView {
 #[component]
 pub(super) fn BrowserCameraControls(ui: Ui) -> impl IntoView {
     let busy = RwSignal::new(false);
-    let menu = RwSignal::new(false);
-    let cameras = RwSignal::new(Vec::<video::Camera>::new());
     let active = move || video::state().camera;
-    let refresh = move || {
+    // Follow camera selections (voice-bar menu or settings) while publishing;
+    // `switch_camera` is serialized, so re-check the selection afterwards.
+    let following = StoredValue::new(false);
+    let follow = move |from: u32| {
+        if following.get_value() {
+            return;
+        }
+        following.set_value(true);
         leptos::task::spawn_local(async move {
-            let list = video::cameras().await;
-            if cameras.try_get_untracked().is_some() {
-                cameras.set(list);
+            let mut applied = from;
+            loop {
+                let wanted = crate::cameras::revision_untracked();
+                if wanted == applied || !video::state_untracked().camera {
+                    break;
+                }
+                applied = wanted;
+                video::switch_camera(false).await;
             }
+            following.try_set_value(false);
         });
     };
-    refresh();
+    let applied = StoredValue::new(crate::cameras::revision_untracked());
+    Effect::new(move |_| {
+        let revision = crate::cameras::revision();
+        let from = applied.get_value();
+        applied.set_value(revision);
+        if from != revision {
+            follow(from);
+        }
+    });
     let toggle = move |_| {
-        menu.set(false);
         if video::state_untracked().camera {
             video::stop_camera();
             return;
@@ -126,48 +144,33 @@ pub(super) fn BrowserCameraControls(ui: Ui) -> impl IntoView {
             return;
         }
         busy.set(true);
+        let revision = crate::cameras::revision_untracked();
         leptos::task::spawn_local(async move {
             video::start_camera().await;
             if busy.is_disposed() {
                 return;
             }
             busy.set(false);
-            // Device labels appear once the camera permission is granted.
-            refresh();
+            // The selection may have changed during the permission prompt.
+            follow(revision);
         });
     };
-    let switch = move |device: Option<String>| {
-        menu.set(false);
-        busy.set(true);
-        leptos::task::spawn_local(async move {
-            video::switch_camera(device).await;
-            if busy.try_get_untracked().is_some() {
-                busy.set(false);
-            }
-        });
-    };
-    let outside = window_event_listener(leptos::ev::pointerdown, move |_| menu.set(false));
-    on_cleanup(move || outside.remove());
+    let flip = coarse_pointer().then(|| {
+        Callback::new(move |()| {
+            busy.set(true);
+            leptos::task::spawn_local(async move {
+                video::switch_camera(true).await;
+                busy.try_set(false);
+            });
+        })
+    });
     view! {
         <button class="icon-button" class:active=active disabled=move ||busy.get() || (!active() && !super::audio::media_publish_allowed(ui))
             aria-label=move ||if active(){crate::i18n::t("Turn camera off")}else{crate::i18n::t("Turn camera on")}
             data-tip=move ||if active(){crate::i18n::t("Turn camera off")}else if !super::audio::media_publish_allowed(ui){crate::i18n::t("Undeafen to share")}else{crate::i18n::t("Turn camera on")} aria-pressed=move ||active().to_string() on:click=toggle>
             {move ||view!{<Icon kind=if active(){Glyph::Camera}else{Glyph::CameraOff}/>}}
         </button>
-        <Show when=move ||active() && (cameras.get().len() > 1 || coarse_pointer())>
-            <div class="browser-camera-switch" on:pointerdown=move |e|e.stop_propagation()>
-                <button class="icon-button" aria-label=move || crate::i18n::t("Switch camera") data-tip=move || crate::i18n::t("Switch camera") aria-haspopup="menu" aria-expanded=move ||menu.get().to_string() disabled=move ||busy.get() on:click=move |_|menu.update(|m| *m = !*m)><Icon kind=Glyph::Refresh/></button>
-                <Show when=move ||menu.get()>
-                    <div class="browser-camera-menu" role="menu" aria-label=move || crate::i18n::t("Cameras")>
-                        {coarse_pointer().then(||view!{<button role="menuitem" class="stream-choice" on:click=move |_|switch(None)>{move || crate::i18n::t("Flip front/back camera")}</button>})}
-                        <For each=move ||cameras.get() key=|c|c.id.clone() children=move |camera| {
-                            let id = camera.id.clone();
-                            view!{<button role="menuitem" class="stream-choice" on:click=move |_|switch(Some(id.clone()))>{camera.label}</button>}
-                        }/>
-                    </div>
-                </Show>
-            </div>
-        </Show>
+        <super::camera_select::CameraMenu ui=ui flip=flip/>
     }
 }
 

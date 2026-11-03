@@ -6,6 +6,7 @@ mod appearance;
 mod audio;
 mod browser_media;
 mod camera;
+mod camera_select;
 mod chat;
 mod context_menu;
 mod diagnostics;

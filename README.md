@@ -162,7 +162,8 @@ If an older voice client triggers a slot compatibility transition, updated deskt
 automatically reconnect after a brief interruption instead of requiring a manual join.
 Desktop calls and voice rooms show simultaneous webcams and screen shares in a
 grid, with local previews, click-to-fullscreen and right-click hide/restore.
-The camera button uses the system default webcam (up to 720p/30); right-click a
+The camera button uses the webcam chosen in Settings > Voice & audio > Camera or
+the chevron beside it (system default unless chosen; up to 720p/30); right-click a
 participant for separate voice and screen-audio volume/mute controls. Camera
 publishing requires WebView H.264/WebRTC and device permissions. Screen sharing
 works on Windows, macOS 12.3+ and Linux (xdg-desktop-portal + PipeWire) with
