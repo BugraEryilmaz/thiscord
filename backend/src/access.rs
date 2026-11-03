@@ -247,6 +247,10 @@ pub(crate) fn pause(scope: Scope) -> Mutation {
     let mutation = Mutation {
         id,
         committed: false,
+        members: match scope {
+            Scope::Guild(guild) | Scope::Member(guild, _) => Some(guild),
+            Scope::Account(_) | Scope::Session(_) => None,
+        },
         chat: Some(
             match scope {
                 Scope::Account(id) => crate::chat::access::account(id),
@@ -265,6 +269,8 @@ pub(crate) fn pause(scope: Scope) -> Mutation {
 pub(crate) struct Mutation {
     id: u64,
     committed: bool,
+    /// Membership/role changes refresh this guild's member lists after commit.
+    members: Option<GuildId>,
     chat: Option<crate::chat::access::Mutation>,
 }
 impl Mutation {
@@ -290,6 +296,12 @@ impl Drop for Mutation {
                 drain.0.revoked.send_modify(|v| *v = v.wrapping_add(1));
             }
             drop(drain);
+        }
+        drop(registry);
+        if self.committed
+            && let Some(guild) = self.members
+        {
+            crate::chat::members::changed([guild]);
         }
     }
 }

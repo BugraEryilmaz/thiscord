@@ -11,6 +11,8 @@ pub(super) enum Change {
     Message(GuildId, ChannelId),
     Presence(GuildId, ChannelId),
     Read(GuildId, AccountId),
+    /// Membership, roles or a member's public profile/status changed.
+    Members(GuildId),
 }
 
 #[derive(Clone, Copy, Default, Debug, PartialEq, Eq)]
@@ -18,6 +20,7 @@ pub(super) struct Versions {
     pub messages: u64,
     pub presence: u64,
     pub unread: u64,
+    pub members: u64,
 }
 
 struct Route {
@@ -96,6 +99,10 @@ impl Notifications {
                     v.unread = v.unread.wrapping_add(1);
                     true
                 }
+                Change::Members(guild) if route.guild == guild => {
+                    v.members = v.members.wrapping_add(1);
+                    true
+                }
                 _ => false,
             });
         }
@@ -105,6 +112,36 @@ impl Notifications {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn member_changes_wake_every_route_in_that_guild_only() {
+        let routes = Notifications::default();
+        let guild = GuildId::from_uuid(Uuid::new_v4());
+        let mut channel = routes.subscribe(
+            guild,
+            Some(ChannelId::from_uuid(Uuid::new_v4())),
+            AccountId::from_uuid(Uuid::new_v4()),
+        );
+        let mut guild_only = routes.subscribe(guild, None, AccountId::from_uuid(Uuid::new_v4()));
+        let foreign = routes.subscribe(
+            GuildId::from_uuid(Uuid::new_v4()),
+            None,
+            AccountId::from_uuid(Uuid::new_v4()),
+        );
+        routes.publish(Change::Members(guild));
+        routes.publish(Change::Members(guild));
+        for listener in [&mut channel, &mut guild_only] {
+            let versions = *listener.receiver.borrow_and_update();
+            assert_eq!(
+                versions,
+                Versions {
+                    members: 2,
+                    ..Versions::default()
+                }
+            );
+        }
+        assert!(!foreign.receiver.has_changed().unwrap());
+    }
 
     #[test]
     fn routes_work_by_guild_channel_account_and_kind() {
@@ -131,7 +168,8 @@ mod tests {
             Versions {
                 messages: 1,
                 presence: 1,
-                unread: 2
+                unread: 2,
+                members: 0
             }
         );
         assert_eq!(other_channel.receiver.borrow().messages, 0);
@@ -163,7 +201,8 @@ mod tests {
             Versions {
                 messages: 1,
                 presence: 1,
-                unread: 1001
+                unread: 1001,
+                members: 0
             }
         );
         assert!(!listener.receiver.has_changed().unwrap());

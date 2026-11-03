@@ -116,7 +116,9 @@ Right-click menus replace the browser menu: servers offer copy ID, settings,
 moderation and leave; channels offer personal pins/mutes, mark-as-read for text,
 voice join/disconnect, permissions and deletion when authorized. Participant menus
 offer local voice volume, role editing for lower-ranked members and the specific
-actions returned by `InspectModeration`. Destructive actions require confirmation.
+actions returned by `InspectModeration`. Member list entries open the same menu
+without voice items (see [chat.md](chat.md#member-list-and-profile-cards)).
+Destructive actions require confirmation.
 Menus fetch current capabilities when opened, submit the viewed guild revision,
 and never automatically retry a rejected mutation. Backend checks remain authoritative.
 Shift+F10 opens menus from focused items; arrows, Home/End, Enter and Escape

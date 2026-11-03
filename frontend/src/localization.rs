@@ -273,6 +273,9 @@ mod tests {
             .chain(crate::appearance::Token::ALL.map(crate::appearance::Token::label))
             .chain(crate::appearance::Token::ALL.map(crate::appearance::Token::description))
             .chain(crate::appearance::Group::ALL.map(crate::appearance::Group::label))
+            .chain(
+                crate::member_list::StatusExpiry::ALL.map(crate::member_list::StatusExpiry::label),
+            )
         {
             assert!(
                 CATALOG.iter().any(|(en, _)| *en == label),

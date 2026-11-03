@@ -138,6 +138,10 @@ and single-process chat/media enforcement.
 - [x] Guild moderation audit events and reasons (1000-row retention, authorized keyset history).
 - [x] Create/edit/delete/reorder text and voice channels and organizational categories.
 - [ ] Guild navigation, channel/member lists and settings views.
+- [x] Live guild member list (online/offline, presence, custom status, block filtering) with profile cards, member menus and a phone/tablet drawer.
+- [x] Account custom status with emoji, expiry presets, cross-device sync and friend/guild/DM/voice-tooltip display.
+- [ ] Role display/hoist settings for member list grouping and colours.
+- [ ] Accept the member list drawer, profile cards and custom status dialog interactively on Windows/macOS/Linux and mobile browsers.
 - [ ] Cascade/archive behavior and confirmation UX for destructive operations.
 - [ ] Transaction and authorization tests for management operations.
 

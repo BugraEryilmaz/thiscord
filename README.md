@@ -65,8 +65,13 @@ credentials configured in `backend/.env` (see `docs/accounts.md`).
 Everyone can upload or remove a profile picture in **Settings > Profile**. Pictures
 appear in voice chat and the desktop overlay, with initials when no picture is set.
 The bottom account ribbon spans the server rail and channel list, showing your
-profile, authenticated socket status, mute/deafen and settings controls. It expands
+profile, authenticated socket status, custom status, mute/deafen and settings controls. It expands
 during calls with the channel/server name, camera, screen sharing and disconnect controls.
+Set a custom status (emoji, short text and an optional expiry) from the ribbon; friends
+and fellow server members see it (see [custom status](docs/accounts.md#custom-status)).
+Text channels have a toggleable member list (a drawer on phones and tablets) grouped
+online/offline, with profile cards and member actions (see
+[member list](docs/chat.md#member-list-and-profile-cards)).
 Sidebar controls show immediate hover/focus hints
 outside the scroll area. Visible voice channels show participants before joining;
 clicking a voice channel joins directly while keeping the current text chat open.

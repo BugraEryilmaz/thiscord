@@ -154,6 +154,7 @@ fn chat_session_subscription_contracts_are_additive() {
             guild_id: None,
             channel_id: None,
             voice_roster: false,
+            members: false,
         },
     };
     assert_eq!(

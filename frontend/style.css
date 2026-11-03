@@ -845,3 +845,33 @@ html:has(.welcome-page) { scroll-behavior: smooth; scroll-padding-top: 28px; bac
 .camera-preview .stream-player { width: 100%; height: 100%; min-height: 0; }
 .camera-preview-status { position: absolute; padding: 0 12px; color: var(--color-muted); font-size: 12px; text-align: center; }
 .browser-media-error { overflow-wrap: anywhere; }
+
+/* Guild member list ----
+   Wide layouts show a right-side panel beside the chat, toggled from the channel
+   header and remembered per device. Phones and tablets show the same list as an
+   overlay drawer with a backdrop, above the rail and account ribbon. */
+.chat-layout { display: flex; height: 100%; min-width: 0; min-height: 0; }
+.chat-layout > section { border-radius: 0; border-width: 0; }
+.member-panel { display: none; flex-direction: column; flex-shrink: 0; width: 240px; min-height: 0; border-left: 1px solid var(--tint-8); background: var(--color-sidebar); }
+.member-panel-header { display: flex; align-items: center; gap: 8px; min-height: 52px; padding: 8px 8px 4px 16px; }
+.member-panel-scroll { flex: 1 1 0; min-height: 0; overflow-y: auto; overscroll-behavior: contain; padding: 0 8px 12px; }
+.member-group-heading { padding: 12px 8px 4px; color: color-mix(in srgb, var(--color-muted) 85%, transparent); font-size: 11px; font-weight: 600; letter-spacing: .06em; text-transform: uppercase; }
+.member-row { display: flex; align-items: center; gap: 10px; width: 100%; min-width: 0; padding: 6px 8px; border-radius: 7px; text-align: left; }
+.member-row:hover, .member-row:focus-visible { background: var(--tint-6); }
+.member-row:focus-visible { outline: 2px solid var(--color-brand); outline-offset: -2px; }
+.member-offline { opacity: .65; }
+.member-offline:hover, .member-offline:focus-visible { opacity: 1; }
+.presence-dot { position: absolute; right: -2px; bottom: -2px; width: 12px; height: 12px; border: 2px solid var(--color-sidebar); border-radius: 50%; background: color-mix(in srgb, var(--color-muted) 70%, transparent); }
+.presence-dot.online { background: var(--color-success); }
+.presence-dot.online.dnd { background: var(--color-danger); }
+.member-badge { flex-shrink: 0; padding: 0 5px; border-radius: 4px; background: var(--tint-10); color: var(--color-muted); font-size: 10px; font-weight: 600; line-height: 16px; text-transform: uppercase; }
+.member-drawer-close, .member-drawer-backdrop { display: none; }
+.profile-card { width: min(420px, calc(100vw - 32px)); }
+.status-emoji-popover { top: calc(100% + 8px); right: auto; bottom: auto; left: 0; }
+@media (min-width: 1024px) { .member-panel.member-panel-open { display: flex; } }
+@media (max-width: 1023px) {
+  .member-panel.member-panel-open { position: fixed; z-index: 61; inset: 0 0 0 auto; display: flex; width: min(300px, 85vw); padding: env(safe-area-inset-top, 0px) env(safe-area-inset-right, 0px) env(safe-area-inset-bottom, 0px) 0; box-shadow: -8px 0 32px #0008; }
+  .member-drawer-backdrop { position: fixed; z-index: 60; inset: 0; display: block; background: #0009; }
+  .member-drawer-close { display: inline-grid; place-items: center; }
+}
+@media (max-width: 767px) { .mobile-content .user-dock .dock-status { display: none; } }

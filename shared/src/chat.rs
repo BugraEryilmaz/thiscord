@@ -73,6 +73,57 @@ pub fn is_reaction_emoji(emoji: &str) -> bool {
     EMOJI_GROUPS.iter().any(|(_, group)| group.contains(&emoji))
 }
 pub const MAX_CHANNEL_PINS: usize = 50;
+/// Member list bound; equal to the enforced per-guild member capacity ceiling.
+pub const MAX_MEMBER_LIST: usize = 500;
+
+/// One entry of a guild's member list, sorted by display name then username.
+/// `online` is account-wide presence. Presence and custom status are omitted
+/// across a block in either direction; Do Not Disturb is never disclosed.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct GuildMember {
+    pub account_id: AccountId,
+    pub username: String,
+    #[serde(default)]
+    pub display_name: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub avatar_id: Option<AvatarId>,
+    #[serde(default)]
+    pub online: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub custom_status: Option<crate::account::CustomStatus>,
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub owner: bool,
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub bot: bool,
+}
+impl GuildMember {
+    /// Profile label, falling back to the username.
+    pub fn display_name(&self) -> &str {
+        if self.display_name.trim().is_empty() {
+            &self.username
+        } else {
+            &self.display_name
+        }
+    }
+}
+
+/// Public profile of a fellow guild member, read on demand for profile cards.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct MemberProfile {
+    pub account_id: AccountId,
+    pub username: String,
+    pub display_name: String,
+    #[serde(default)]
+    pub bio: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub avatar_id: Option<AvatarId>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub custom_status: Option<crate::account::CustomStatus>,
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub owner: bool,
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub bot: bool,
+}
 
 #[derive(Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct Reaction {
@@ -268,6 +319,11 @@ pub enum ChatRequest {
         channel_id: ChannelId,
         message_id: MessageId,
     },
+    /// Requires current membership of both the requester and the target.
+    MemberProfile {
+        guild_id: GuildId,
+        account_id: AccountId,
+    },
 }
 #[derive(Clone, Serialize, Deserialize)]
 #[serde(tag = "result", rename_all = "snake_case")]
@@ -277,6 +333,7 @@ pub enum ChatResponse {
     Message { message: Box<ChatMessage> },
     Unread { channels: Vec<Unread> },
     Pins { messages: Vec<ChatMessage> },
+    MemberProfile { profile: MemberProfile },
     Done,
 }
 
@@ -307,6 +364,9 @@ pub enum ClientEvent {
         /// Opt in so older clients never receive an unknown event variant.
         #[serde(default, skip_serializing_if = "std::ops::Not::not")]
         voice_roster: bool,
+        /// Opt in to the guild member list (`members` / `member_presence` updates).
+        #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+        members: bool,
     },
     Authenticate {
         token: String,
@@ -352,6 +412,14 @@ pub enum ServerEvent {
     Presence {
         members: Vec<OnlineMember>,
     },
+    /// Complete member list, replacing any previous one for the subscription.
+    Members {
+        members: Vec<GuildMember>,
+    },
+    /// Complete set of members currently shown online; applies to the last list.
+    MemberPresence {
+        online: Vec<AccountId>,
+    },
     Pong {},
     Revoked {},
     Error {
@@ -373,6 +441,51 @@ mod tests {
         let response = json!({"result":"mention_suggestions", "members":[{
             "account_id":id, "username":"ada_2", "display_name":"Ada Lovelace"
         }]});
+        let parsed: ChatResponse = serde_json::from_value(response.clone()).unwrap();
+        assert_eq!(serde_json::to_value(parsed).unwrap(), response);
+    }
+
+    #[test]
+    fn member_list_contracts_are_opt_in_and_additive() {
+        let id = "00000000-0000-0000-0000-000000000001";
+        let legacy: ClientEvent = serde_json::from_value(
+            json!({"type":"subscribe","subscription":1,"guild_id":id,"channel_id":null}),
+        )
+        .unwrap();
+        assert!(matches!(
+            legacy,
+            ClientEvent::Subscribe { members: false, .. }
+        ));
+        let opted = ClientEvent::Subscribe {
+            subscription: 2,
+            guild_id: None,
+            channel_id: None,
+            voice_roster: false,
+            members: true,
+        };
+        assert_eq!(serde_json::to_value(&opted).unwrap()["members"], true);
+        // Minimal entries decode; offline members without status stay compact.
+        let member: GuildMember =
+            serde_json::from_value(json!({"account_id":id,"username":"user_1"})).unwrap();
+        assert_eq!(member.display_name(), "user_1");
+        assert!(!member.online && !member.owner && !member.bot);
+        assert_eq!(
+            serde_json::to_value(&member).unwrap(),
+            json!({"account_id":id,"username":"user_1","display_name":"","online":false})
+        );
+        let event = ServerEvent::Update {
+            subscription: 2,
+            event: Box::new(ServerEvent::MemberPresence {
+                online: vec![member.account_id],
+            }),
+        };
+        let wire = serde_json::to_value(&event).unwrap();
+        assert_eq!(wire["event"]["type"], "member_presence");
+        assert_eq!(wire["event"]["online"][0], id);
+        let request = json!({"action":"member_profile","guild_id":id,"account_id":id});
+        let parsed: ChatRequest = serde_json::from_value(request.clone()).unwrap();
+        assert_eq!(serde_json::to_value(parsed).unwrap(), request);
+        let response = json!({"result":"member_profile","profile":{"account_id":id,"username":"u","display_name":"U","bio":"Hi","custom_status":{"emoji":"🎮","text":"Playing"}}});
         let parsed: ChatResponse = serde_json::from_value(response.clone()).unwrap();
         assert_eq!(serde_json::to_value(parsed).unwrap(), response);
     }

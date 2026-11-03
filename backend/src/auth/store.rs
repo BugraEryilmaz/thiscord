@@ -107,7 +107,35 @@ pub(super) fn device(value: &str) -> Result<&str, Failure> {
     Ok(value.trim())
 }
 pub(super) fn account(c: &mut PgConnection, id: AccountId) -> Result<Account, Failure> {
-    query(c, "SELECT to_jsonb(a) || jsonb_build_object('avatar_id', (SELECT id FROM account_avatars WHERE account_id=a.id), 'identities', (SELECT jsonb_agg(provider ORDER BY provider) FROM identities WHERE account_id=a.id)) AS data FROM accounts a WHERE id=$1::uuid", &[&id.to_string()])?.pop().ok_or(Failure::Unauthorized)
+    query(c, "SELECT to_jsonb(a) || jsonb_build_object('avatar_id', (SELECT id FROM account_avatars WHERE account_id=a.id), 'identities', (SELECT jsonb_agg(provider ORDER BY provider) FROM identities WHERE account_id=a.id), 'custom_status', (SELECT jsonb_strip_nulls(jsonb_build_object('emoji',s.emoji,'text',s.status_text,'expires_at',s.expires_at)) FROM account_custom_statuses s WHERE s.account_id=a.id AND (s.expires_at IS NULL OR s.expires_at>now()))) AS data FROM accounts a WHERE id=$1::uuid", &[&id.to_string()])?.pop().ok_or(Failure::Unauthorized)
+}
+/// Replaces (or with `None`, clears) the account's custom status. The caller
+/// holds the account/session lock; expiry uses the database clock.
+fn set_custom_status(
+    c: &mut PgConnection,
+    id: AccountId,
+    status: Option<&CustomStatusUpdate>,
+) -> Result<(), Failure> {
+    let Some(status) = status else {
+        execute(
+            c,
+            "DELETE FROM account_custom_statuses WHERE account_id=$1::uuid",
+            &[&id.to_string()],
+        )?;
+        return Ok(());
+    };
+    let text = status.validate().map_err(Failure::Invalid)?;
+    execute(
+        c,
+        "INSERT INTO account_custom_statuses(account_id,emoji,status_text,expires_at,updated_at) VALUES($1::uuid,NULLIF($2,''),$3,CASE WHEN $4='' THEN NULL ELSE now()+make_interval(secs=>$4::integer) END,now()) ON CONFLICT(account_id) DO UPDATE SET emoji=EXCLUDED.emoji,status_text=EXCLUDED.status_text,expires_at=EXCLUDED.expires_at,updated_at=EXCLUDED.updated_at",
+        &[
+            &id.to_string(),
+            status.emoji.as_deref().unwrap_or_default(),
+            text,
+            &status.expires_in.map(|s| s.to_string()).unwrap_or_default(),
+        ],
+    )?;
+    Ok(())
 }
 #[derive(Deserialize, Clone)]
 pub(crate) struct Session {
@@ -515,6 +543,8 @@ pub(super) fn dispatch(
             let mut changes = Vec::new();
             // Friends list profiles; woken after commit.
             let mut related = Vec::new();
+            // Guild member lists showing this profile; woken after commit.
+            let mut guilds = Vec::new();
             let result = c.transaction(|c| {
                 let result = (|| {
                 if matches!(command, AccountRequest::Current | AccountRequest::Sessions) {
@@ -551,11 +581,21 @@ pub(super) fn dispatch(
                         if display_name.trim().is_empty() || display_name.chars().count()>64 || bio.chars().count()>500 || display_name.chars().any(char::is_control) { return Err(Failure::Invalid("Display name must be 1 to 64 characters; bio at most 500")); }
                         execute(c,"UPDATE accounts SET display_name=$2,bio=$3 WHERE id=$1::uuid", &[&id.to_string(),display_name.trim(),&bio])?;
                         related = crate::friends::store::related(c,id)?;
+                        guilds = crate::chat::members::guilds_of(c,id)?;
                         Ok(AccountResponse::Account { account: account(c,id)? })
                     }
                     AccountRequest::SetAvatar { image_base64 } => {
                         super::avatar::set(c, id, image_base64.as_deref())?;
                         related = crate::friends::store::related(c,id)?;
+                        guilds = crate::chat::members::guilds_of(c,id)?;
+                        Ok(AccountResponse::Account { account: account(c,id)? })
+                    }
+                    AccountRequest::SetCustomStatus { status } => {
+                        set_custom_status(c, id, status.as_ref())?;
+                        // The account's own friends socket carries the status to its other devices.
+                        related = crate::friends::store::related(c,id)?;
+                        related.push(id);
+                        guilds = crate::chat::members::guilds_of(c,id)?;
                         Ok(AccountResponse::Account { account: account(c,id)? })
                     }
                     AccountRequest::UnlinkIdentity { provider } => {
@@ -575,6 +615,7 @@ pub(super) fn dispatch(
                         execute(c,"SELECT id FROM guilds WHERE id IN (SELECT guild_id FROM guild_members WHERE account_id=$1::uuid) ORDER BY id FOR UPDATE", &[&id.to_string()])?;
                         execute(c,"UPDATE guilds SET revision=revision+1 WHERE id IN (SELECT guild_id FROM guild_members WHERE account_id=$1::uuid)", &[&id.to_string()])?;
                         related = crate::friends::store::related(c,id)?;
+                        guilds = crate::chat::members::guilds_of(c,id)?;
                         execute(c,"DELETE FROM accounts WHERE id=$1::uuid", &[&id.to_string()])?;
                         Ok(done("Account and credentials permanently deleted"))
                     }
@@ -591,6 +632,7 @@ pub(super) fn dispatch(
             }
             if result.is_ok() {
                 crate::friends::changed(related);
+                crate::chat::members::changed(guilds);
             }
             result
         }

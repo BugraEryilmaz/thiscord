@@ -66,6 +66,40 @@ a private five-minute browser cache. Removal/account deletion deletes the stored
 image; previously downloaded/cached copies cannot be recalled. The migration stores
 one bounded image per account in PostgreSQL; rollback drops only these pictures.
 
+### Custom status
+
+The smiley button in the account ribbon opens **Set custom status**: an optional
+emoji from the shared picker palette, up to 128 characters of single-line text,
+and **Clear after** (Don't clear, 30 minutes, 1 hour, 4 hours or Today). Save or
+**Clear status** applies it to every device; the ribbon then shows it instead of
+the connection label while connected. Text is plain text: it is rendered as a
+text node, never Markdown or HTML.
+
+`set_custom_status` on `POST /api/v1/account` takes `status` (`null` clears it)
+with `emoji`, `text` and `expires_in` (1–604,800 seconds, or `null` for no expiry).
+"Today" is computed by the client as seconds until local midnight; the server
+always derives `expires_at` from its own clock, and a client cannot submit an
+instant. Validation (`CustomStatusUpdate::validate` in `shared/src/account.rs`)
+trims text, rejects control characters (including newlines), non-palette or
+multiple emoji, an empty status and out-of-range lifetimes. The command uses the
+account/session lock and the sensitive account rate budget like profile edits.
+`Account.custom_status` is optional and omitted when unset, so older clients
+ignore it; older servers simply never send it.
+
+Statuses live in `account_custom_statuses`, one row per account, cascading on
+account deletion. Expired rows are treated as cleared by every read (account,
+friends snapshots, member lists, profiles) without a scheduled write; setting or
+clearing the status replaces/deletes the row. Sockets schedule a refresh at the
+earliest listed expiry, so expired statuses disappear without a commit. The
+`20261103100000_custom_status` rollback drops every status.
+
+The audience matches the public profile: the account itself (all devices, via
+the friends socket `own_status`), accepted friends (`Person.custom_status`; never
+search results or pending requests) and fellow guild members (member list and
+profile cards, see [chat.md](chat.md#member-list-and-profile-cards)). A block in
+either direction withholds it in all of those places. Do Not Disturb remains
+private and is never part of the status.
+
 Username and email are immutable
 in this version; changing verified identifiers needs a separate confirmation flow.
 Permanent deletion requires recent reauthentication and typing the username. It
