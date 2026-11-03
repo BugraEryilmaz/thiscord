@@ -6,6 +6,10 @@ use serde::{Deserialize, Serialize};
 
 pub const FRIENDS_PATH: &str = "/api/v1/friends";
 pub const FRIENDS_SOCKET_PATH: &str = "/api/v1/friends/socket";
+/// Socket query opt-in: the client keeps the history it last received on this
+/// socket, so the server may omit an unchanged history (see `Snapshot::history`).
+/// Older servers ignore the query; older clients never send it.
+pub const RETAINED_HISTORY_QUERY: &str = "history=retained";
 pub const VERSION: u8 = 1;
 pub const MAX_RELATIONSHIPS: usize = 200;
 pub const DIRECT_ATTACHMENTS_PATH: &str = "/api/v1/direct-attachments";
@@ -98,6 +102,11 @@ pub struct Snapshot {
     pub friends: Vec<Friend>,
     pub calls: Vec<Call>,
     pub conversation_id: Option<ConversationId>,
+    /// Always present with a selected conversation, except on sockets opened with
+    /// `RETAINED_HISTORY_QUERY`: there `None` alongside `Some(conversation_id)`
+    /// means unchanged since the history this socket last delivered for the same
+    /// conversation and `before` page. Every new socket or `Select` starts with a
+    /// full history.
     pub history: Option<History>,
     #[serde(default)]
     pub before: Option<PageCursor>,
