@@ -11,6 +11,9 @@ env:
   CARGO_INCREMENTAL: "0"
   THISCORD_DISABLE_LOCAL_CACHE: ${{ vars.THISCORD_DISABLE_LOCAL_CACHE }}
   THISCORD_API_URL: https://thiscord.com.tr
+  # SHA-1 of the self-signed "Thiscord Release Signing" certificate. Changing it
+  # makes every macOS user re-grant permissions once; see docs/releases.md.
+  MACOS_SIGNING_SHA1: 2F0C37CC7A08EE7629D1041E7D99B372CBC36010
 
 jobs:
   installers:
@@ -64,20 +67,29 @@ jobs:
           BUILD_TARGET: ${{ matrix.target }}
           TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
           TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
-          APPLE_CERTIFICATE: ${{ secrets.APPLE_CERTIFICATE }}
-          APPLE_CERTIFICATE_PASSWORD: ${{ secrets.APPLE_CERTIFICATE_PASSWORD }}
-          APPLE_SIGNING_IDENTITY: ${{ secrets.APPLE_SIGNING_IDENTITY }}
-          APPLE_ID: ${{ secrets.APPLE_ID }}
-          APPLE_PASSWORD: ${{ secrets.APPLE_PASSWORD }}
-          APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+          MACOS_SIGNING_CERTIFICATE: ${{ secrets.MACOS_SIGNING_CERTIFICATE }}
+          MACOS_SIGNING_CERTIFICATE_PASSWORD: ${{ secrets.MACOS_SIGNING_CERTIFICATE_PASSWORD }}
         run: |
           # Assets already passed the production WASM build in the reusable CI.
           ../scripts/clear-installer-bundles.ps1 -TargetDirectory $env:CARGO_TARGET_DIR -Target $env:BUILD_TARGET
           '{"build":{"beforeBuildCommand":""}}' | Set-Content tauri.ci.conf.json
-          if ($IsMacOS -and !$env:APPLE_SIGNING_IDENTITY) { $env:APPLE_SIGNING_IDENTITY = '-' }
-          Get-ChildItem Env:APPLE_* | Where-Object { !$_.Value } | Remove-Item
+          if ($IsMacOS) {
+            # macOS keys Screen Recording/microphone grants and Keychain access to
+            # the designated requirement. Ad-hoc signatures change it every build.
+            $identity = ../scripts/macos-signing.ps1 -Mode Import
+            if ($identity -cne $env:MACOS_SIGNING_SHA1) { throw 'MACOS_SIGNING_CERTIFICATE is not the pinned release certificate.' }
+            $env:APPLE_SIGNING_IDENTITY = $identity
+          }
           cargo tauri build --ci --target $env:BUILD_TARGET --config tauri.ci.conf.json -- --locked
           if ($LASTEXITCODE) { exit $LASTEXITCODE }
+          if ($IsMacOS) {
+            $app = Join-Path $env:CARGO_TARGET_DIR "$env:BUILD_TARGET/release/bundle/macos/Thiscord.app"
+            ../scripts/macos-signing.ps1 -Mode Verify -App $app -Certificate $env:MACOS_SIGNING_SHA1
+          }
+      - name: Remove macOS signing keychain
+        if: always() && runner.os == 'macOS'
+        shell: pwsh
+        run: ./scripts/macos-signing.ps1 -Mode Remove
       - name: Verify signatures and collect release artifacts
         if: runner.os != 'Linux'
         shell: pwsh

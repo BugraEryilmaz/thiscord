@@ -7,19 +7,70 @@ use tokio::{
     sync::oneshot,
 };
 
-fn entry() -> Result<keyring::Entry, String> {
-    keyring::Entry::new(
-        "tr.com.thiscord.desktop",
-        option_env!("THISCORD_API_URL").unwrap_or("http://localhost:3000"),
-    )
-    .map_err(|_| "OS credential storage is unavailable".into())
+const SERVICE: &str = "tr.com.thiscord.desktop";
+fn account() -> &'static str {
+    option_env!("THISCORD_API_URL").unwrap_or("http://localhost:3000")
 }
+
+/// OS credential storage through `keyring`, with a macOS-specific read.
+mod store {
+    fn entry(service: &str, account: &str) -> Result<keyring::Entry, ()> {
+        keyring::Entry::new(service, account).map_err(|_| ())
+    }
+    #[cfg(not(target_os = "macos"))]
+    pub fn load(service: &str, account: &str) -> Result<Option<String>, ()> {
+        match entry(service, account)?.get_password() {
+            Ok(token) => Ok(Some(token)),
+            Err(keyring::Error::NoEntry) => Ok(None),
+            Err(_) => Err(()),
+        }
+    }
+    /// Reads the login Keychain item `keyring` writes, then re-creates it.
+    ///
+    /// Keychain items trust the signing requirement of the build that created
+    /// them. A build with another requirement (any earlier ad-hoc release) must
+    /// ask before reading, and keeps asking on every launch unless the user
+    /// chooses Always Allow. Deleting and adding items needs no approval, so
+    /// after one approved read the item is re-added as this build's own. Later
+    /// writes and reads then match without prompting.
+    #[cfg(target_os = "macos")]
+    pub fn load(service: &str, account: &str) -> Result<Option<String>, ()> {
+        use security_framework::os::macos::{
+            keychain::{SecKeychain, SecPreferencesDomain},
+            passwords::find_generic_password,
+        };
+        const NOT_FOUND: i32 = -25300; // errSecItemNotFound
+        let keychain =
+            SecKeychain::default_for_domain(SecPreferencesDomain::User).map_err(|_| ())?;
+        match find_generic_password(Some(std::slice::from_ref(&keychain)), service, account) {
+            Ok((password, item)) => {
+                let token = String::from_utf8(password.to_owned()).map_err(|_| ())?;
+                item.delete();
+                // On failure the caller still holds the token; the rotated
+                // replacement is saved (added) again after sign-in.
+                let _ = keychain.add_generic_password(service, account, token.as_bytes());
+                Ok(Some(token))
+            }
+            Err(error) if error.code() == NOT_FOUND => Ok(None),
+            Err(_) => Err(()),
+        }
+    }
+    pub fn save(service: &str, account: &str, token: &str) -> Result<(), ()> {
+        entry(service, account)?.set_password(token).map_err(|_| ())
+    }
+    pub fn clear(service: &str, account: &str) -> Result<(), ()> {
+        match entry(service, account)?.delete_credential() {
+            Ok(()) | Err(keyring::Error::NoEntry) => Ok(()),
+            Err(_) => Err(()),
+        }
+    }
+}
+
 #[tauri::command]
 pub async fn load_session() -> Result<Option<String>, String> {
-    tauri::async_runtime::spawn_blocking(|| match entry()?.get_password() {
-        Ok(token) => Ok(Some(token)),
-        Err(keyring::Error::NoEntry) => Ok(None),
-        Err(_) => Err("Unlock your OS credential store to restore your session".into()),
+    tauri::async_runtime::spawn_blocking(|| {
+        store::load(SERVICE, account())
+            .map_err(|()| "Unlock your OS credential store to restore your session".to_string())
     })
     .await
     .map_err(|_| "Credential storage task failed".to_string())?
@@ -34,9 +85,8 @@ pub async fn save_session(token: String) -> Result<(), String> {
         return Err("Invalid session".into());
     }
     tauri::async_runtime::spawn_blocking(move || {
-        entry()?
-            .set_password(&token)
-            .map_err(|_| "Could not save session in OS credential storage".into())
+        store::save(SERVICE, account(), &token)
+            .map_err(|()| "Could not save session in OS credential storage".to_string())
     })
     .await
     .map_err(|_| "Credential storage task failed".to_string())?
@@ -47,9 +97,9 @@ pub async fn clear_session(app: tauri::AppHandle) -> Result<(), String> {
     let _ = crate::native_notifications::notification_clear(app.clone());
     // Clearing credentials also cancels a sleeping/in-flight voice retry.
     crate::native_voice::voice_leave(app.clone(), app.state()).await?;
-    tauri::async_runtime::spawn_blocking(|| match entry()?.delete_credential() {
-        Ok(()) | Err(keyring::Error::NoEntry) => Ok(()),
-        Err(_) => Err("Could not remove the stored session".into()),
+    tauri::async_runtime::spawn_blocking(|| {
+        store::clear(SERVICE, account())
+            .map_err(|()| "Could not remove the stored session".to_string())
     })
     .await
     .map_err(|_| "Credential storage task failed".to_string())?
@@ -204,12 +254,25 @@ mod tests {
     #[test]
     #[ignore = "requires an unlocked OS credential store"]
     fn credential_store_round_trip() {
+        let service = "tr.com.thiscord.test-only";
         let name = format!("test-{}", std::process::id());
-        let entry = keyring::Entry::new("tr.com.thiscord.test-only", &name).unwrap();
-        let token = URL_SAFE_NO_PAD.encode([42u8; 32]);
-        entry.set_password(&token).unwrap();
-        assert_eq!(entry.get_password().unwrap(), token);
-        entry.delete_credential().unwrap();
-        assert!(matches!(entry.get_password(), Err(keyring::Error::NoEntry)));
+        let first = URL_SAFE_NO_PAD.encode([42u8; 32]);
+        let second = URL_SAFE_NO_PAD.encode([7u8; 32]);
+        store::clear(service, &name).unwrap();
+        assert_eq!(store::load(service, &name).unwrap(), None);
+        store::save(service, &name, &first).unwrap();
+        // Same order as a launch: read, then replace the rotated token.
+        assert_eq!(
+            store::load(service, &name).unwrap().as_deref(),
+            Some(&*first)
+        );
+        store::save(service, &name, &second).unwrap();
+        assert_eq!(
+            store::load(service, &name).unwrap().as_deref(),
+            Some(&*second)
+        );
+        store::clear(service, &name).unwrap();
+        assert_eq!(store::load(service, &name).unwrap(), None);
+        store::clear(service, &name).unwrap();
     }
 }

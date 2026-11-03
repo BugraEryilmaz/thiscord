@@ -8609,6 +8609,7 @@ dependencies = [
  "ringbuf",
  "rtc",
  "rustfft",
+ "security-framework 3.7.0",
  "serde",
  "serde-wasm-bindgen",
  "serde_json",
