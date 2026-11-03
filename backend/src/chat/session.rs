@@ -42,7 +42,13 @@ async fn update(socket: &mut WebSocket, sub: Subscription, event: ServerEvent) -
     .await
 }
 
-pub(super) async fn serve(mut socket: WebSocket, pool: DbPool, id: RequestId, token: String) {
+pub(super) async fn serve(
+    mut socket: WebSocket,
+    pool: DbPool,
+    id: RequestId,
+    token: String,
+    guild_updates: bool,
+) {
     let Ok(account_access) = socket_access(&pool, &token).await else {
         let _ = send(
             &mut socket,
@@ -109,6 +115,7 @@ pub(super) async fn serve(mut socket: WebSocket, pool: DbPool, id: RequestId, to
     let mut watch_voice = false;
     let mut last_roster = None;
     let mut voice_visibility = None::<(Instant, access::Snapshot, Vec<ChannelId>)>;
+    let mut guild_hints = guild_updates.then(|| super::guild_updates().subscribe());
     loop {
         tokio::select! { biased;
             _ = session_revoked.changed() => { let _ = send(&mut socket, ServerEvent::Revoked {}).await; break; }
@@ -260,6 +267,24 @@ pub(super) async fn serve(mut socket: WebSocket, pool: DbPool, id: RequestId, to
                     last_roster = Some(channels.clone());
                     if update(&mut socket, sub, ServerEvent::VoiceRoster { channels }).await.is_err() { break; }
                 }
+            }
+            hint = async { match &mut guild_hints { Some(hints) => hints.recv().await, None => std::future::pending().await } } => {
+                use tokio::sync::broadcast::error::RecvError;
+                let guild = match hint {
+                    Ok(guild) => guild,
+                    // Hints are advisory; a missed one is recovered by the next refresh.
+                    Err(RecvError::Lagged(_)) => continue,
+                    Err(RecvError::Closed) => { guild_hints = None; continue; }
+                };
+                let Some(authorized) = account_access.snapshot(None, None) else { let _ = send(&mut socket, ServerEvent::Revoked {}).await; break; };
+                let p = pool.clone();
+                let member = crate::performance::blocking(move || {
+                    let mut c = auth::store::connection(&p)?;
+                    Ok::<_, Failure>(auth::store::query::<bool>(&mut c, "SELECT to_jsonb(EXISTS(SELECT 1 FROM guild_members WHERE guild_id=$1::uuid AND account_id=$2::uuid)) AS data", &[&guild.to_string(), &account.to_string()])? == [true])
+                }).await;
+                if !matches!(member, Ok(Ok(true))) { continue; }
+                let Some(_delivery) = authorized.deliver() else { let _ = send(&mut socket, ServerEvent::Revoked {}).await; break; };
+                if send(&mut socket, ServerEvent::GuildUpdated { guild_id: guild }).await.is_err() { break; }
             }
             _ = maintenance.tick() => {
                 if last_seen.elapsed() > Duration::from_secs(35) { break; }

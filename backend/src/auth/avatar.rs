@@ -16,7 +16,8 @@ use std::io::Cursor;
 use thiscord_shared::{AccountId, AvatarId, RequestId, account::*};
 use uuid::Uuid;
 
-fn normalize(encoded: &str) -> Result<Vec<u8>, Failure> {
+/// Shared with guild icons: bounded decoding, orientation, square crop and PNG re-encode.
+pub(crate) fn normalize(encoded: &str) -> Result<Vec<u8>, Failure> {
     let invalid =
         || Failure::Invalid("Choose a valid PNG, JPEG or WebP up to 2 MiB and 4096 × 4096 pixels");
     if encoded.len() > MAX_AVATAR_BASE64 {

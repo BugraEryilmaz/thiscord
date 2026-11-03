@@ -45,6 +45,7 @@ uuid_id!(AccountId);
 uuid_id!(AvatarId);
 uuid_id!(SessionId);
 uuid_id!(GuildId);
+uuid_id!(GuildIconId);
 uuid_id!(RoleId);
 uuid_id!(ChannelId);
 uuid_id!(CategoryId);

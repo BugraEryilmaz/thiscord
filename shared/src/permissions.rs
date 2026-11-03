@@ -1,9 +1,17 @@
 //! Stable, explicit permission names; unknown permissions fail deserialization.
-use crate::{AccountId, AuditId, CategoryId, ChannelId, GuildId, InstanceRoleId, InviteId, RoleId};
+use crate::{
+    AccountId, AuditId, CategoryId, ChannelId, GuildIconId, GuildId, InstanceRoleId, InviteId,
+    RoleId,
+};
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeSet;
 
 pub const PERMISSIONS_PATH: &str = "/api/v1/permissions";
+/// `POST` sets/removes a guild icon; `GET {GUILD_ICON_PATH}/{icon_id}` serves it.
+pub const GUILD_ICON_PATH: &str = "/api/v1/guild-icons";
+/// Icons reuse the profile-picture limits and normalization.
+pub const MAX_GUILD_ICON_BYTES: usize = crate::account::MAX_AVATAR_BYTES;
+pub const MAX_GUILD_ICON_BASE64: usize = crate::account::MAX_AVATAR_BASE64;
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum Permission {
@@ -120,6 +128,20 @@ pub struct Guild {
     pub name: String,
     pub owner: AccountId,
     pub revision: i64,
+    /// Opaque, replaceable icon image ID. Absent from older servers or when unset.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub icon_id: Option<GuildIconId>,
+}
+
+/// Body of `POST {GUILD_ICON_PATH}`. Requires ManageGuild and the current guild
+/// revision; `image_base64: null` removes the icon. Responds with the updated [`Guild`].
+// Carries up to 2 MiB of image data; Debug would dump it into logs.
+#[derive(Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct SetGuildIcon {
+    pub guild_id: GuildId,
+    pub revision: i64,
+    pub image_base64: Option<String>,
 }
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Role {
@@ -535,6 +557,29 @@ pub struct GuildHome {
 mod tests {
     use super::*;
     use serde_json::json;
+
+    #[test]
+    fn guild_icon_is_optional_and_additive() {
+        let id = "00000000-0000-0000-0000-000000000001";
+        let legacy = json!({"id":id,"name":"Home","owner":id,"revision":3});
+        let guild: Guild = serde_json::from_value(legacy.clone()).unwrap();
+        assert!(guild.icon_id.is_none());
+        assert_eq!(serde_json::to_value(&guild).unwrap(), legacy);
+        let current = json!({"id":id,"name":"Home","owner":id,"revision":3,"icon_id":id});
+        let guild: Guild = serde_json::from_value(current.clone()).unwrap();
+        assert_eq!(guild.icon_id.unwrap().to_string(), id);
+        assert_eq!(serde_json::to_value(&guild).unwrap(), current);
+        let set = json!({"guild_id":id,"revision":3,"image_base64":null});
+        let parsed: SetGuildIcon = serde_json::from_value(set.clone()).unwrap();
+        assert!(parsed.image_base64.is_none());
+        assert_eq!(serde_json::to_value(parsed).unwrap(), set);
+        assert!(
+            serde_json::from_value::<SetGuildIcon>(
+                json!({"guild_id":id,"revision":3,"image_base64":null,"path":"x"})
+            )
+            .is_err()
+        );
+    }
 
     #[test]
     fn finite_and_unlimited_invites_round_trip() {

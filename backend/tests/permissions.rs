@@ -12,6 +12,8 @@ use thiscord_shared::{AccountId, ChannelId, GuildId, RoleId, permissions::*};
 use tower::ServiceExt;
 use uuid::Uuid;
 
+#[path = "permissions/icons.rs"]
+mod icons;
 #[path = "permissions/limits.rs"]
 mod limits;
 #[path = "permissions/organization.rs"]
@@ -1065,6 +1067,7 @@ fn combined_roles_overrides_and_admin_behavior() {
             owner,
             name: "guild".into(),
             revision: 0,
+            icon_id: None,
         },
         members: vec![
             Member {
