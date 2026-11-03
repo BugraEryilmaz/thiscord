@@ -34,8 +34,13 @@ async fn main() -> Result<(), BoxError> {
 
     // A configured database must connect and migrate before serving requests.
     // Without a URL, liveness stays available but readiness returns 503.
+    let pool_size = match env::var(db::POOL_SIZE_VAR) {
+        Ok(value) => db::pool_size(Some(&value))?,
+        Err(env::VarError::NotPresent) => db::pool_size(None)?,
+        Err(_) => return Err(format!("{} must contain valid Unicode", db::POOL_SIZE_VAR).into()),
+    };
     let pool = match env::var("DATABASE_URL") {
-        Ok(url) => Some(tokio::task::spawn_blocking(move || db::connect_and_migrate(&url))
+        Ok(url) => Some(tokio::task::spawn_blocking(move || db::connect_and_migrate_sized(&url, pool_size))
             .await?
             .map_err(|_| {
                 if cfg!(windows) {
