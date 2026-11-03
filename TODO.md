@@ -510,5 +510,11 @@ See [screen-sharing.md](docs/screen-sharing.md) for limits and remaining platfor
 - [ ] Configure GitHub signing secrets and run the first installer release pipeline.
 - [ ] Windows Authenticode and Apple Developer ID/notarization configuration.
 - [ ] Initial-install and version-to-version update acceptance on all three OSes.
-- [ ] Accessibility, keyboard navigation, failure recovery and platform smoke tests.
+- [x] Keyboard navigation and accessibility: Ctrl/⌘+K quick switcher, channel/unread/server
+  shortcuts, Esc to mark read, shortcut reference, roving focus in lists/grids, focus-managed
+  modal dialogs, landmarks, live announcements, focus rings, reduced motion and muted-text
+  contrast checks (docs/accessibility.md).
+- [ ] Screen-reader acceptance with NVDA (Windows), VoiceOver (macOS, iOS Safari) and Orca
+  (Linux), plus keyboard-only passes in all three desktop WebViews and non-US layouts.
+- [ ] Failure recovery and platform smoke tests.
 - [ ] Review session security, authorization, file access and media permissions.

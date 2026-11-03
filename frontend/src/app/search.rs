@@ -218,7 +218,7 @@ pub(super) fn Results(state: State, on_jump: Callback<Hit>) -> impl IntoView {
     view! {
         <Show when=move ||state.active.get()>
             <div node_ref=list class="min-h-0 flex-1 overflow-y-auto px-4 py-3" aria-busy=move ||state.loading.get().to_string()>
-                <p class="mb-4 text-sm text-white/50" role="status">{move ||crate::i18n::message(state.status.get())}</p>
+                <p class="mb-4 text-sm text-white/60" role="status">{move ||crate::i18n::message(state.status.get())}</p>
                 <ol aria-label=move ||crate::i18n::t("Search results")>
                     <For each=move ||state.rows.get() key=|hit|(hit.id,hit.content.clone()) children=move |hit| {
                         let hit = StoredValue::new(hit);
@@ -227,7 +227,7 @@ pub(super) fn Results(state: State, on_jump: Callback<Hit>) -> impl IntoView {
                                 on:click=move |_|{let hit=hit.get_value();state.close();on_jump.run(hit);}>
                                 <span class="flex flex-wrap items-baseline gap-x-3 gap-y-1">
                                     <span class="font-semibold">{hit.with_value(|h|format!("@{}",h.username))}</span>
-                                    <time class="text-xs text-white/45">{move ||hit.with_value(|h|crate::i18n::datetime(h.created_at))}</time>
+                                    <time class="text-xs text-white/60">{move ||hit.with_value(|h|crate::i18n::datetime(h.created_at))}</time>
                                 </span>
                                 <span class="mt-1 block whitespace-pre-wrap break-words text-sm text-content">{hit.with_value(|h|h.content.clone())}</span>
                             </button></li>

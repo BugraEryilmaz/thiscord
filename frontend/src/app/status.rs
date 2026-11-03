@@ -63,7 +63,7 @@ pub(super) fn StatusButton(ui: Ui) -> impl IntoView {
         picking.set(false);
         error.set(String::new());
         if let Some(dialog) = dialog.get() {
-            let _ = dialog.show_modal();
+            super::dialog::open(&dialog);
         }
     };
     let save = move |status: Option<CustomStatusUpdate>| {
@@ -157,7 +157,7 @@ pub(super) fn StatusButton(ui: Ui) -> impl IntoView {
                         {StatusExpiry::ALL.map(|preset| view! {<option value=preset.key()>{move || crate::i18n::t(preset.label())}</option>}).collect_view()}
                     </select>
                 </label>
-                <p class="text-xs text-white/55">{move || crate::i18n::t("Friends and members of your servers can see your status.")}</p>
+                <p class="text-xs text-white/60">{move || crate::i18n::t("Friends and members of your servers can see your status.")}</p>
                 <p class="text-sm text-red-300" role="alert" hidden=move || error.with(String::is_empty)>{move || crate::i18n::message(error.get())}</p>
                 <div class="flex flex-wrap justify-end gap-2">
                     <Show when=move || ui.account.with(|a| a.as_ref().is_some_and(|a| a.custom_status.is_some()))>

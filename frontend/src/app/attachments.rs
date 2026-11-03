@@ -795,7 +795,7 @@ pub(super) fn Card(
                 <button type="button" class="shrink-0 rounded bg-white/10 px-2 py-1 hover:bg-white/20 disabled:opacity-50" aria-label=move || crate::i18n::t("Download attachment")
                     disabled=move || busy.get() || download.get().is_some() on:click=move |_| fetch(true)>{move || crate::i18n::t("↓ Download")}</button>
             </div>
-            <p class="text-xs text-white/50">{format!("{:.1} MiB", attachment.get_value().size_bytes as f64 / 1048576.0)}</p>
+            <p class="text-xs text-white/60">{format!("{:.1} MiB", attachment.get_value().size_bytes as f64 / 1048576.0)}</p>
             <Show when=move || busy.get()><p class="text-xs" role="status">{move || crate::i18n::t("Loading attachment…")}</p></Show>
             <Show when=move || !error.get().is_empty()><p class="text-xs text-amber-300" role="status">{move || crate::i18n::message(error.get())}</p><button type="button" class="text-xs text-brand underline" on:click=move |_| { error.set(String::new()); fetch(kind == PreviewKind::File); }>{move || crate::i18n::t("Retry")}</button></Show>
             <Show when=move || viewer.get() && url.get().is_some()>
@@ -854,7 +854,7 @@ fn Viewer(
     );
     Effect::new(move |_| {
         if let Some(d) = dialog.get() {
-            let _ = d.show_modal();
+            super::super::dialog::open(&d);
         }
     });
     let play = move || {

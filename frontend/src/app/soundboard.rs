@@ -165,7 +165,7 @@ pub(super) fn SoundboardControls(ui: Ui) -> impl IntoView {
                         } else {
                             crate::i18n::t("This server has no sounds yet.")
                         }}</p>}.into_any(),
-                        Some(Ok(state)) => view! {<div class="soundboard-grid">{state.sounds.into_iter().map(|sound| {
+                        Some(Ok(state)) => view! {<div class="soundboard-grid" on:keydown=move |e| super::keyboard::rove_grid(&e, ".soundboard-sound")>{state.sounds.into_iter().map(|sound| {
                             let id = sound.id;
                             let name = label(&sound);
                             let title = name.clone();

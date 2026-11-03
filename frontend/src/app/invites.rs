@@ -172,7 +172,7 @@ pub(super) fn Host(ui: Ui) -> impl IntoView {
     Effect::new(move |_| {
         if let Some(dialog) = dialog.get() {
             if ui.invites.fallback.get().is_some() {
-                let _ = dialog.show_modal();
+                super::dialog::open(&dialog);
             } else {
                 dialog.close();
             }

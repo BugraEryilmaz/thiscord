@@ -21,6 +21,98 @@ pub(super) fn dismiss_outside(
     }
 }
 
+/// Opens a native modal dialog. Native modals make the rest of the page inert
+/// and close on Escape; this adds `aria-modal` and returns focus to the
+/// invoker when closing would otherwise leave it on the page body (WebViews
+/// differ here). Callers that move focus elsewhere on close are respected.
+pub(super) fn open(dialog: &web_sys::HtmlDialogElement) -> bool {
+    if dialog.open() {
+        return true;
+    }
+    let invoker = document()
+        .active_element()
+        .and_then(|e| e.dyn_into::<web_sys::HtmlElement>().ok())
+        .filter(|e| !dialog.contains(Some(e)));
+    let _ = dialog.set_attribute("aria-modal", "true");
+    if dialog.show_modal().is_err() {
+        return false;
+    }
+    if let Some(invoker) = invoker {
+        let target = dialog.clone();
+        let restore = wasm_bindgen::closure::Closure::once_into_js(move || {
+            let lost = document().active_element().is_none_or(|active| {
+                document().body().is_some_and(|body| active == *body)
+                    || target.contains(Some(&active))
+            });
+            if lost && invoker.is_connected() {
+                let _ = invoker.focus();
+            }
+        });
+        let options = web_sys::AddEventListenerOptions::new();
+        options.set_once(true);
+        let _ = dialog.add_event_listener_with_callback_and_add_event_listener_options(
+            "close",
+            restore.unchecked_ref(),
+            &options,
+        );
+    }
+    true
+}
+
+/// Whether a native modal dialog is showing (the page behind it is inert).
+pub(super) fn modal_open() -> bool {
+    let Ok(open) = document().query_selector_all("dialog[open]") else {
+        return false;
+    };
+    (0..open.length()).any(|i| {
+        open.get(i)
+            .and_then(|node| node.dyn_into::<web_sys::Element>().ok())
+            .is_some_and(|dialog| dialog.matches(":modal").unwrap_or(true))
+    })
+}
+
+const FOCUSABLE: &str = "a[href], button:not([disabled]), input:not([disabled]):not([type=hidden]), select:not([disabled]), textarea:not([disabled]), summary, [contenteditable=true], [tabindex]";
+
+/// Keeps Tab inside the modal dialog that has focus: from its last control
+/// to its first, and Shift+Tab the other way, instead of leaving the page.
+pub(super) fn wrap_tab(event: &web_sys::KeyboardEvent) {
+    if event.alt_key() || event.ctrl_key() || event.meta_key() {
+        return;
+    }
+    let Some(active) = document().active_element() else {
+        return;
+    };
+    let Some(dialog) = active.closest("dialog[open]").ok().flatten() else {
+        return;
+    };
+    if !dialog.matches(":modal").unwrap_or(true) {
+        return;
+    }
+    let Ok(nodes) = dialog.query_selector_all(FOCUSABLE) else {
+        return;
+    };
+    let items: Vec<web_sys::HtmlElement> = (0..nodes.length())
+        .filter_map(|i| nodes.get(i)?.dyn_into::<web_sys::HtmlElement>().ok())
+        .filter(|e| {
+            let rect = e.get_bounding_client_rect();
+            e.tab_index() >= 0 && (rect.width() > 0.0 || rect.height() > 0.0)
+        })
+        .collect();
+    let (Some(first), Some(last)) = (items.first(), items.last()) else {
+        event.prevent_default();
+        return;
+    };
+    let wrap = if event.shift_key() {
+        (active == **first || active == dialog).then_some(last)
+    } else {
+        (active == **last).then_some(first)
+    };
+    if let Some(next) = wrap {
+        event.prevent_default();
+        let _ = next.focus();
+    }
+}
+
 type Outcome = Pin<Box<dyn Future<Output = Result<(), String>>>>;
 
 /// The confirmed operation. It receives the optional reason text and reports a
@@ -184,9 +276,7 @@ pub(super) fn ConfirmHost(ui: Ui) -> impl IntoView {
         if open {
             reason.set(String::new());
             error.set(String::new());
-            if !element.open() {
-                let _ = element.show_modal();
-            }
+            self::open(&element);
             if let Some(cancel) = cancel.get_untracked() {
                 let _ = cancel.focus();
             }

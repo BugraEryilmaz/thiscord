@@ -237,7 +237,7 @@ fn RemoteAudioPanel(ui: Ui, selection: Selection, close: Callback<()>) -> impl I
     let dialog = NodeRef::<leptos::html::Dialog>::new();
     Effect::new(move |_| {
         if let Some(dialog) = dialog.get() {
-            let _ = dialog.show_modal();
+            super::dialog::open(&dialog);
         }
     });
     let content = selection.connection.map(|connection| {
@@ -300,8 +300,8 @@ fn RemoteAudioPanel(ui: Ui, selection: Selection, close: Callback<()>) -> impl I
         }.into_any()
     });
     view! {
-        <dialog node_ref=dialog on:cancel=move |_: web_sys::Event| close.run(()) class="fixed inset-0 m-auto max-h-[90vh] w-full max-w-3xl overflow-auto rounded-xl border border-slate-700 bg-slate-950 p-6 text-slate-100 backdrop:bg-black/70">
-            <header class="mb-5 flex items-center justify-between gap-4"><h2 class="text-xl font-semibold">{move || thiscord_frontend::localized_format!(crate::i18n::language(), "Desktop support · {}", selection.name)}</h2><button autofocus class="rounded bg-slate-800 px-4 py-2" on:click=move |_| close.run(())>{move || crate::i18n::t("Close")}</button></header>
+        <dialog node_ref=dialog aria-labelledby="desktop-support-title" on:cancel=move |_: web_sys::Event| close.run(()) class="fixed inset-0 m-auto max-h-[90vh] w-full max-w-3xl overflow-auto rounded-xl border border-slate-700 bg-slate-950 p-6 text-slate-100 backdrop:bg-black/70">
+            <header class="mb-5 flex items-center justify-between gap-4"><h2 id="desktop-support-title" class="text-xl font-semibold">{move || thiscord_frontend::localized_format!(crate::i18n::language(), "Desktop support · {}", selection.name)}</h2><button autofocus class="rounded bg-slate-800 px-4 py-2" on:click=move |_| close.run(())>{move || crate::i18n::t("Close")}</button></header>
             {content.unwrap_or_else(|| view! {<p>{move || crate::i18n::t("Remote audio is unavailable for this connection. Update the user's desktop app and reconnect to voice.")}</p>}.into_any())}
         </dialog>
     }

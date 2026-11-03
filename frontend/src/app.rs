@@ -16,6 +16,7 @@ mod emoji;
 mod friends;
 mod icons;
 mod invites;
+mod keyboard;
 mod login;
 mod members;
 mod message_content;
@@ -70,6 +71,7 @@ fn draft_signal(ui: Ui, key: Draft, paused: impl Fn() -> bool + 'static) -> RwSi
 #[derive(Clone, Copy)]
 struct Ui {
     confirm: dialog::Confirmations,
+    keyboard: keyboard::State,
     invites: invites::State,
     bot_target: RwSignal<Option<voice_bots::Target>>,
     notifications: notifications::State,
@@ -454,6 +456,7 @@ fn StatusNotice(ui: Ui) -> impl IntoView {
 pub fn App() -> impl IntoView {
     let ui = Ui {
         confirm: dialog::Confirmations::new(),
+        keyboard: keyboard::State::new(),
         invites: invites::State::new(),
         bot_target: RwSignal::new(None),
         friends: friends::State::new(),
@@ -595,12 +598,19 @@ pub fn App() -> impl IntoView {
                 </main>
             </Show>
         }>
+        <a class="skip-link" href="#app-content" on:click=move |e| {
+            // Focus the region instead of navigating, so the URL fragment stays free for invites.
+            e.prevent_default();
+            if let Some(main) = document().get_element_by_id("app-content").and_then(|m| wasm_bindgen::JsCast::dyn_into::<web_sys::HtmlElement>(m).ok()) { let _ = main.focus(); }
+        }>{move || crate::i18n::t("Skip to content")}</a>
         <div class="app-shell" class:in-voice=move ||ui.voice.get().channel_id.is_some() class:mobile-content=move ||mobile_content(ui)>
+        <h1 class="sr-only">"Thiscord"</h1>
+        <keyboard::Host ui=ui/>
         <servers::ServerRail ui=ui/>
         <audio::AudioHost ui=ui/>
         <chat::ChatHost ui=ui/>
         <friends::Host ui=ui/>
-        <main class="app-main">
+        <main id="app-content" tabindex="-1" class="app-main">
             <StatusNotice ui=ui/>
             <div class="min-h-0 min-w-0 flex-1"><servers::ServerHome ui=ui/></div>
         </main>

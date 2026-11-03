@@ -89,7 +89,7 @@ fn subtitle(page: &str) -> &'static str {
 
 #[component]
 fn NavItem(ui: Ui, page: &'static str, label: &'static str, icon: Glyph) -> impl IntoView {
-    view! {<button class="settings-nav-item" aria-current=move ||if ui.page.get()==page || (page=="security" && matches!(ui.page.get(),"password"|"delete"|"reauthenticate")){Some("page")}else{None} disabled=move ||ui.busy.get() on:click=move |_|{
+    view! {<button class="settings-nav-item" data-rove aria-current=move ||if ui.page.get()==page || (page=="security" && matches!(ui.page.get(),"password"|"delete"|"reauthenticate")){Some("page")}else{None} disabled=move ||ui.busy.get() on:click=move |_|{
         navigate(ui,page);
     }><Icon kind=icon/><span>{move || crate::i18n::t(label)}</span></button>}
 }
@@ -116,7 +116,7 @@ pub(super) fn Host(ui: Ui) -> impl IntoView {
             if open {
                 if !dialog.open() {
                     ui.status.set(String::new());
-                    let _ = dialog.show_modal();
+                    super::dialog::open(&dialog);
                 }
             } else {
                 dialog.close();
@@ -130,7 +130,7 @@ pub(super) fn Host(ui: Ui) -> impl IntoView {
     Effect::new(move |_| {
         if let Some(dialog) = discard.get() {
             if ui.settings_pending.get().is_some() {
-                let _ = dialog.show_modal();
+                super::dialog::open(&dialog);
             } else {
                 dialog.close();
             }
@@ -147,7 +147,7 @@ pub(super) fn Host(ui: Ui) -> impl IntoView {
                         <p class="settings-scope">{move ||if server_page(ui.page.get()){ui.server.get().map(|s|s.guild.name).unwrap_or_default()}else{ui.account.get().map(|a|format!("@{}",a.username)).unwrap_or_default()}}</p>
                     </div>
                     <Show when=move ||server_page(ui.page.get()) fallback=move ||view!{
-                        <nav class="settings-nav" aria-label=move || crate::i18n::t("General settings")>
+                        <nav class="settings-nav" aria-label=move || crate::i18n::t("General settings") data-rove-list on:keydown=move |e| super::keyboard::rove(&e)>
                             <p class="settings-nav-label">{move || crate::i18n::t("Your account")}</p>
                             <NavItem ui=ui page="profile" label="Profile" icon=Glyph::Person/>
                             <NavItem ui=ui page="security" label="Password & security" icon=Glyph::Shield/>
@@ -166,7 +166,7 @@ pub(super) fn Host(ui: Ui) -> impl IntoView {
                         </nav>
                         <button class="settings-signout" disabled=move ||ui.busy.get() || ui.settings_dirty.get() on:click=move |_|super::run(ui,AccountRequest::Logout)><Icon kind=Glyph::Join/>{move || crate::i18n::t("Sign out")}</button>
                     }>
-                        <nav class="settings-nav" aria-label=move || crate::i18n::t("Server settings")>
+                        <nav class="settings-nav" aria-label=move || crate::i18n::t("Server settings") data-rove-list on:keydown=move |e| super::keyboard::rove(&e)>
                             <p class="settings-nav-label">{move || crate::i18n::t("Community")}</p>
                             <Show when=move ||ui.server.get().is_some_and(|s|s.can_manage_roles)>
                                 <NavItem ui=ui page="server_overview" label="Overview" icon=Glyph::Settings/>
@@ -194,7 +194,7 @@ pub(super) fn Host(ui: Ui) -> impl IntoView {
                         <Show when=move ||ui.page.get()=="devices"><Devices ui=ui/></Show>
                         <Show when=move ||ui.page.get()=="audio"><super::audio::AudioSettingsPanel ui=ui/></Show>
                         <Show when=move ||ui.page.get()=="notifications"><super::notifications::Panel ui=ui/></Show>
-                        <Show when=move ||ui.page.get()=="shortcuts"><super::shortcuts::ShortcutSettings control=ui.audio_control on_dirty=Callback::new(move |dirty|ui.settings_dirty.set(dirty))/><Show when=client::desktop><crate::overlay::OverlaySettings control=ui.audio_control/></Show></Show>
+                        <Show when=move ||ui.page.get()=="shortcuts"><section class="settings-card" aria-labelledby="navigation-shortcuts-title"><h3 id="navigation-shortcuts-title">{move || crate::i18n::t("Navigation and chat shortcuts")}</h3><p class="settings-hint">{move || crate::i18n::t("These work while Thiscord is focused, including in the message box. Press Ctrl+/ (⌘/ on macOS) anywhere to see them.")}</p><super::keyboard::ShortcutReference/></section><super::shortcuts::ShortcutSettings control=ui.audio_control on_dirty=Callback::new(move |dirty|ui.settings_dirty.set(dirty))/><Show when=client::desktop><crate::overlay::OverlaySettings control=ui.audio_control/></Show></Show>
                         <Show when=move ||ui.page.get()=="desktop"><super::window::WindowSettings/></Show>
                         <Show when=move ||ui.page.get()=="updates"><super::updates::Panel ui=ui/></Show>
                         <Show when=move ||ui.page.get()=="safety"><super::safety::Panel ui/></Show>

@@ -43,5 +43,6 @@ pub mod touch;
 #[cfg(all(not(target_arch = "wasm32"), feature = "voice-bot"))]
 pub mod bot;
 
+pub mod keyboard;
 pub mod markdown;
 pub mod member_list;

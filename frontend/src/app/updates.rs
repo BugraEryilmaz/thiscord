@@ -49,7 +49,7 @@ pub(super) fn Host(ui: Ui) -> impl IntoView {
     view! {<Show when=desktop>
         <Prompt ui=ui/>
         <Show when=move||ui.account.get().is_none()>
-            <button class="fixed bottom-4 right-4 z-30 rounded-lg bg-surface px-3 py-2 text-sm text-white/70 hover:text-white" on:click=move |_|{if let Some(d)=dialog.get(){let _=d.show_modal();}}>{move || crate::i18n::t("Updates")}</button>
+            <button class="fixed bottom-4 right-4 z-30 rounded-lg bg-surface px-3 py-2 text-sm text-white/70 hover:text-white" on:click=move |_|{if let Some(d)=dialog.get(){super::dialog::open(&d);}}>{move || crate::i18n::t("Updates")}</button>
         </Show>
         <dialog node_ref=dialog aria-label=move || crate::i18n::t("Application updates") class="m-auto max-h-[85vh] w-[calc(100%-2rem)] max-w-lg overflow-y-auto rounded-xl border border-white/20 bg-surface p-6 text-white backdrop:bg-black/70">
             <button class="float-right rounded px-2 py-1 hover:bg-white/10" aria-label=move || crate::i18n::t("Close updates") on:click=move |_|{if let Some(d)=dialog.get(){d.close();}}>{move || crate::i18n::t("Close")}</button>
@@ -71,7 +71,7 @@ fn Prompt(ui: Ui) -> impl IntoView {
             && status.available_version != dismissed.get()
             && !d.open()
         {
-            let _ = d.show_modal();
+            super::dialog::open(&d);
         }
     });
     let installing = move || ui.updates.get().phase == UpdatePhase::Installing;
@@ -113,7 +113,7 @@ fn Prompt(ui: Ui) -> impl IntoView {
                 </div>
                 <Show when=move||ui.voice.get().channel_id.is_some()><p class="text-sm text-white/60">{move || crate::i18n::t("Disconnect from voice before installing.")}</p></Show>
                 <p role="alert" class="text-sm text-red-300">{move||crate::i18n::message(ui.update_error.get())}</p>
-                <p class="text-xs text-white/40">{move || crate::i18n::t("You can also install later from Settings → Updates.")}</p>
+                <p class="text-xs text-white/60">{move || crate::i18n::t("You can also install later from Settings → Updates.")}</p>
             </div>
         </dialog>
     }

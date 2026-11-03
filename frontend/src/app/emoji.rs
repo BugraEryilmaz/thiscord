@@ -7,8 +7,16 @@ use wasm_bindgen::JsCast;
 /// Every palette emoji, grouped under translated headings.
 #[component]
 pub(super) fn EmojiGrid(pick: Callback<&'static str>) -> impl IntoView {
+    // One Tab stop; arrow keys move through the grid (and across groups).
+    let grid = NodeRef::<leptos::html::Div>::new();
+    Effect::new(move |_| {
+        if let Some(grid) = grid.get() {
+            super::keyboard::single_tab_stop(&grid, ".emoji-grid-items button");
+        }
+    });
     view! {
-        <div class="emoji-grid">
+        <div node_ref=grid class="emoji-grid" data-single-stop
+            on:keydown=move |e| super::keyboard::rove_grid(&e, ".emoji-grid-items button")>
             {EMOJI_GROUPS.iter().map(|&(label, group)| view! {
                 <section role="group" aria-label=move || crate::i18n::t(label)>
                     <h4>{move || crate::i18n::t(label)}</h4>
