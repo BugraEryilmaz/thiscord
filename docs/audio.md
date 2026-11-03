@@ -1300,7 +1300,10 @@ Lost session/channel access or a changed Speak grant closes affected connections
 
 Sender and receiver epochs are independent. Viewer admission, bitrate votes,
 keyframe feedback, queue admission and each transport poll validate both endpoints
-against their own grants. Media remains valid with unequal epochs. Queued packets
+against their own grants. The relay admits each recipient's packet under the room
+read lock, taking both endpoints' access permits, then releases the lock and
+enqueues synchronously before awaiting anything; the permits are held through the
+enqueue, so a matching mutation's drain still waits for those packets. Media remains valid with unequal epochs. Queued packets
 retain both original epochs and are discarded after either endpoint changes, even
 if that endpoint subsequently reauthorizes. Screen identity, share epoch, viewer
 lease and ingress timestamp checks also reject stale subscriptions and packets.
