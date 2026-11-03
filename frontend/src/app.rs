@@ -66,6 +66,7 @@ fn draft_signal(ui: Ui, key: Draft, paused: impl Fn() -> bool + 'static) -> RwSi
 
 #[derive(Clone, Copy)]
 struct Ui {
+    confirm: dialog::Confirmations,
     invites: invites::State,
     bot_target: RwSignal<Option<voice_bots::Target>>,
     notifications: notifications::State,
@@ -178,12 +179,37 @@ async fn clear_local(ui: Ui) {
     }
 }
 fn run(ui: Ui, command: AccountRequest) {
+    if let Some(outcome) = perform(ui, command) {
+        leptos::task::spawn_local(async move {
+            let _ = outcome.await;
+        });
+    }
+}
+/// Account command for a confirmation dialog: its error stays in the dialog.
+fn confirmed(ui: Ui, command: impl Fn() -> AccountRequest + 'static) -> dialog::Action {
+    dialog::Action::new(move |_| {
+        let outcome = perform(ui, command());
+        async move {
+            match outcome {
+                Some(outcome) => outcome.await,
+                None => Err(dialog::busy_error()),
+            }
+        }
+    })
+}
+/// Starts an account command unless another one is running; resolves with the
+/// error that was also reported in the status bar.
+fn perform(
+    ui: Ui,
+    command: AccountRequest,
+) -> Option<impl std::future::Future<Output = Result<(), String>> + 'static> {
     if ui.busy.get_untracked() {
-        return;
+        return None;
     }
     ui.busy.set(true);
     ui.status.set("Working…".into());
-    leptos::task::spawn_local(async move {
+    Some(async move {
+        let mut outcome = Ok(());
         let clears = matches!(
             command,
             AccountRequest::Logout
@@ -213,6 +239,7 @@ fn run(ui: Ui, command: AccountRequest) {
                 }
             }
             Err(error) => {
+                outcome = Err(error.clone());
                 ui.status.set(error.clone());
                 if matches!(command, AccountRequest::Logout) {
                     clear_local(ui).await;
@@ -225,7 +252,8 @@ fn run(ui: Ui, command: AccountRequest) {
             }
         }
         ui.busy.set(false);
-    });
+        outcome
+    })
 }
 fn device_name() -> &'static str {
     if client::desktop() {
@@ -421,6 +449,7 @@ fn StatusNotice(ui: Ui) -> impl IntoView {
 #[component]
 pub fn App() -> impl IntoView {
     let ui = Ui {
+        confirm: dialog::Confirmations::new(),
         invites: invites::State::new(),
         bot_target: RwSignal::new(None),
         friends: friends::State::new(),
@@ -471,7 +500,7 @@ pub fn App() -> impl IntoView {
     };
     if crate::account_client::admin_page() {
         return view! {
-            <tooltip::Host/><context_menu::Host ui=ui/><voice_bots::Host ui=ui/>
+            <tooltip::Host/><context_menu::Host ui=ui/><voice_bots::Host ui=ui/><dialog::ConfirmHost ui=ui/>
             <Show when=move ||ui.account.get().is_some() fallback=move ||view!{<login::Login ui=ui admin=true/>}>
                 <admin::Dashboard ui=ui/>
             </Show>
@@ -549,7 +578,7 @@ pub fn App() -> impl IntoView {
         }
     });
     view! {
-        <tooltip::Host/><context_menu::Host ui=ui/><voice_bots::Host ui=ui/>
+        <tooltip::Host/><context_menu::Host ui=ui/><voice_bots::Host ui=ui/><dialog::ConfirmHost ui=ui/>
         <invites::Host ui=ui/>
         <updates::Host ui=ui/>
         <notifications::Host ui=ui/>

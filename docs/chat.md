@@ -39,7 +39,8 @@ conversation with unread messages shows a "New messages" divider above the oldes
 unread message, using the same count rules as the badge. Times use the device's
 local time zone ("Today at 14:05", "Yesterday at 14:05", or a full date).
 Edit/delete controls reflect current permissions; the backend checks them again.
-Deletion requires confirmation and leaves a content-free tombstone. Loading older
+Deletion requires confirmation (hold Shift while clicking Delete to skip it) and
+leaves a content-free tombstone. Loading older
 history preserves scroll position; incoming messages follow while at the bottom
 (with two pixels of rounding tolerance). Scrolling upward pauses following until
 you return to the bottom or choose Jump to latest.
@@ -173,6 +174,15 @@ Guild-only subscriptions receive permission-filtered unread/mention counts even
 when no text channel is open. Read acknowledgements update other devices' badges.
 There is no five-second HTTP unread poll or per-channel permissions-preview fetch.
 User commands (send/edit/delete/read and loading older history) still use HTTP.
+
+Clients may opt into guild presentation hints with `guild_updates: true` on
+`connect`. After a rename or icon change commits, the backend publishes the guild ID
+on an in-process broadcast; each opted-in socket checks current membership off the
+async worker and, through the existing account delivery barrier, sends
+`guild_updated { guild_id }`. The hint carries no data, so clients re-read guilds
+over authorized HTTP. Missed hints (lagging receivers) are dropped and recovered by
+the next refresh. Omitting the field keeps older clients free of the new variant;
+older backends reject the field, so deploy the backend first.
 
 Clients may opt into sidebar voice rosters with `voice_roster: true` on `subscribe`.
 Omitting it defaults to false, so existing clients receive no new event variants.

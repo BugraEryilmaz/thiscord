@@ -128,7 +128,8 @@ and single-process chat/media enforcement.
 
 - [x] Create/edit/delete guild HTTP commands, list memberships, join by ID/password and leave.
 - [x] Joined-server rail with circular initials avatars, names on hover, create/join dialogs.
-- [ ] Custom server images and password-change settings UI.
+- [x] Custom server icons: upload/replace/remove with ManageGuild, live rail/header/banner updates.
+- [ ] Server password-change settings UI.
 - [x] Invite links with optional expiry/use limits, revocation and join validation.
 - [x] Browser invite landing with desktop handoff, web client handoff, installer links and unlimited invite copying.
 - [ ] Validate installed invite activation on Windows, macOS and Linux (cold start, running/tray and signed out).
@@ -137,7 +138,8 @@ and single-process chat/media enforcement.
 - [x] Guild moderation audit events and reasons (1000-row retention, authorized keyset history).
 - [x] Create/edit/delete/reorder text and voice channels and organizational categories.
 - [ ] Guild navigation, channel/member lists and settings views.
-- [ ] Cascade/archive behavior and confirmation UX for destructive operations.
+- [x] Shared confirmation dialog for destructive operations; current cascades documented.
+- [ ] Archive (soft-delete/restore) behavior for destructive operations.
 - [ ] Transaction and authorization tests for management operations.
 
 ## 4. Text chat and real-time transport

@@ -4,9 +4,10 @@ use base64::{Engine, engine::general_purpose::STANDARD};
 use leptos::prelude::*;
 use thiscord_shared::account::{AccountRequest, AccountResponse, MAX_AVATAR_BYTES};
 
-async fn save(ui: Ui, token: String, image_base64: Option<String>) {
+async fn save(ui: Ui, token: String, image_base64: Option<String>) -> Result<(), String> {
     let removing = image_base64.is_none();
     let result = client::request(&AccountRequest::SetAvatar { image_base64 }, Some(&token)).await;
+    let outcome = result.as_ref().map(|_| ()).map_err(Clone::clone);
     // Never apply an old session's result to a newly signed-in account.
     if ui.token.get_untracked().as_deref() == Some(&token) {
         match result {
@@ -34,6 +35,7 @@ async fn save(ui: Ui, token: String, image_base64: Option<String>) {
         }
     }
     ui.busy.set(false);
+    outcome
 }
 
 #[component]
@@ -61,7 +63,7 @@ pub(super) fn ProfilePicture(ui: Ui) -> impl IntoView {
             match wasm_bindgen_futures::JsFuture::from(file.array_buffer()).await {
                 Ok(buffer) => {
                     let encoded = STANDARD.encode(js_sys::Uint8Array::new(&buffer).to_vec());
-                    save(ui, token, Some(encoded)).await;
+                    let _ = save(ui, token, Some(encoded)).await;
                 }
                 Err(_) => {
                     ui.status
@@ -87,14 +89,25 @@ pub(super) fn ProfilePicture(ui: Ui) -> impl IntoView {
                     </label>
                     <button type="button" class="settings-link disabled:opacity-50"
                         disabled=move || ui.busy.get() || ui.account.get().is_none_or(|a| a.avatar_id.is_none())
-                        on:click=move |_| {
-                            if ui.busy.get_untracked() { return; }
-                            if let Some(token) = ui.token.get_untracked() {
-                                ui.busy.set(true);
-                                ui.status.set("Removing profile picture…".into());
-                                leptos::task::spawn_local(save(ui, token, None));
-                            }
-                        }>{move || crate::i18n::t("Remove picture")}</button>
+                        on:click=move |_| super::dialog::confirm(ui, super::dialog::Confirmation::new(
+                            crate::i18n::t("Remove your profile picture?"),
+                            crate::i18n::t("Your initials are shown instead. Copies others already downloaded cannot be recalled."),
+                            crate::i18n::t("Remove picture"),
+                            super::dialog::Action::new(move |_| {
+                                let token = ui.token.get_untracked();
+                                let start = !ui.busy.get_untracked() && token.is_some();
+                                if start {
+                                    ui.busy.set(true);
+                                    ui.status.set("Removing profile picture…".into());
+                                }
+                                async move {
+                                    match token.filter(|_| start) {
+                                        Some(token) => save(ui, token, None).await,
+                                        None => Err(super::dialog::busy_error()),
+                                    }
+                                }
+                            }),
+                        ))>{move || crate::i18n::t("Remove picture")}</button>
                 </div>
             </div>
             <p class="text-sm text-white/60">{move || crate::i18n::t("PNG, JPEG or WebP, up to 2 MiB. Pictures are cropped to a square and save immediately.")}</p>

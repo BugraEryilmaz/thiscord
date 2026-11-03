@@ -89,6 +89,16 @@ async fn request(ui: Ui, command: &Request) -> Result<Response, String> {
     }
     response
 }
+/// Ends a friendship; the error is also reported in the status bar.
+pub(super) async fn remove(ui: Ui, account_id: thiscord_shared::AccountId) -> Result<(), String> {
+    match request(ui, &Request::Remove { account_id }).await {
+        Ok(_) => Ok(()),
+        Err(error) => {
+            ui.status.set(error.clone());
+            Err(error)
+        }
+    }
+}
 pub(super) fn action(ui: Ui, command: Request) {
     leptos::task::spawn_local(async move {
         match request(ui, &command).await {
@@ -420,7 +430,8 @@ fn FriendList(ui: Ui, filter: RwSignal<&'static str>) -> impl IntoView {
                 <Show when=move ||f.get().relationship==Relationship::Incoming><button class="rounded-lg bg-emerald-600 px-3 py-2 text-sm" on:click=move |_|action(ui,Request::Accept {account_id:person})>{move || crate::i18n::t("Accept")}</button></Show>
                 <super::safety::PersonActions ui account_id=person/>
                 <button class="rounded-lg px-3 py-2 text-sm text-white/50 hover:bg-red-500/10 hover:text-red-200" on:click=move |_|{
-                    if f.get_untracked().relationship!=Relationship::Friend || window().confirm_with_message(crate::i18n::t("Remove this friend? Private messages and calls will be unavailable until you become friends again.")).unwrap_or(false) {action(ui,Request::Remove {account_id:person});}
+                    if f.get_untracked().relationship!=Relationship::Friend {action(ui,Request::Remove {account_id:person});return;}
+                    super::dialog::confirm(ui,super::dialog::Confirmation::new(crate::i18n::t("Remove this friend?"),crate::i18n::t("Private messages and calls will be unavailable until you become friends again."),crate::i18n::t("Remove friend"),super::dialog::Action::new(move |_|remove(ui,person))).target(f.get_untracked().person.display_name));
                 }>{move ||match f.get().relationship {Relationship::Incoming=>crate::i18n::t("Decline"),Relationship::Outgoing=>crate::i18n::t("Cancel"),Relationship::Friend=>crate::i18n::t("Remove")}}</button>
             </div>}
         }/>
@@ -924,15 +935,6 @@ fn DirectRow(
         if busy.get_untracked() {
             return;
         }
-        if delete
-            && !window()
-                .confirm_with_message(crate::i18n::t(
-                    "Delete this private message and its attachments?",
-                ))
-                .unwrap_or(false)
-        {
-            return;
-        }
         let m = message.get();
         let command = if delete {
             Request::Delete {
@@ -995,7 +997,10 @@ fn DirectRow(
         </form>}><div class="whitespace-pre-wrap break-words text-white/85">{move ||{let m=message.get();super::message_content::render(if m.deleted {crate::i18n::t("Message deleted")}else{&m.content},ui)}}<Show when=move ||message.get().edited_at.is_some()&&!message.get().deleted><span class="ml-1 text-xs text-white/40">{move ||format!("({})",crate::i18n::t("edited"))}</span></Show></div></Show>
         <Show when=move ||!message.get().deleted>
             <For each=move ||message.get().attachments key=|a|a.id children=move |attachment|view!{<super::direct_attachments::Card ui id attachment/>}/>
-            <div class="direct-actions flex gap-3 text-xs text-white/60"><Show when=move ||own><button disabled=move ||busy.get() on:click=move |_|start_edit()>{move ||crate::i18n::t("Edit")}</button><button disabled=move ||busy.get() on:click=move |_|apply(true)>{move ||crate::i18n::t("Delete")}</button></Show>
+            <div class="direct-actions flex gap-3 text-xs text-white/60"><Show when=move ||own><button disabled=move ||busy.get() on:click=move |_|start_edit()>{move ||crate::i18n::t("Edit")}</button><button disabled=move ||busy.get() title=move ||crate::i18n::t("Shift-click to delete without confirming") on:click=move |ev:leptos::ev::MouseEvent|{
+                if ev.shift_key() { apply(true); return; }
+                super::dialog::confirm(ui,super::dialog::Confirmation::new(crate::i18n::t("Delete this message?"),crate::i18n::t("The private message and its attachments are deleted for both of you. This cannot be undone."),crate::i18n::t("Delete"),super::dialog::Action::tracked(move ||apply(true),busy,error)));
+            }>{move ||crate::i18n::t("Delete")}</button></Show>
             <Show when=move ||!own><super::safety::ReportButton ui target=thiscord_shared::safety::ReportTarget::DirectMessage {conversation_id:id,message_id:message.get().id}/></Show></div>
         </Show><p role="alert" class="text-xs text-red-200">{move ||crate::i18n::message(error.get())}</p>
         </div>

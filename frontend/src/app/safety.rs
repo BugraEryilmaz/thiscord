@@ -17,18 +17,33 @@ async fn request(ui: Ui, command: &Request) -> Result<Response, String> {
     }
     result
 }
-pub(super) fn block(ui: Ui, account_id: AccountId) {
-    if !window().confirm_with_message(crate::i18n::t("Block this account? Friendship requests, private messages and calls will stop. Unblocking will not restore friendship. Shared server interactions stay visible.")).unwrap_or(false){return;}
-    leptos::task::spawn_local(async move {
-        match request(ui, &Request::Block { account_id }).await {
-            Ok(_) => {
-                ui.friends.selected.set(None);
-                ui.status
-                    .set("Account blocked. Manage blocked accounts in Safety & reports.".into());
+/// Confirmation for blocking an account; name the person with `.target(..)`.
+pub(super) fn block_prompt(ui: Ui, account_id: AccountId) -> super::dialog::Confirmation {
+    super::dialog::Confirmation::new(
+        crate::i18n::t("Block this account?"),
+        crate::i18n::t(
+            "Friendship requests, private messages and calls will stop. Unblocking will not restore friendship. Shared server interactions stay visible.",
+        ),
+        crate::i18n::t("Block"),
+        super::dialog::Action::new(move |_| async move {
+            match request(ui, &Request::Block { account_id }).await {
+                Ok(_) => {
+                    ui.friends.selected.set(None);
+                    ui.status.set(
+                        "Account blocked. Manage blocked accounts in Safety & reports.".into(),
+                    );
+                    Ok(())
+                }
+                Err(e) => {
+                    ui.status.set(e.clone());
+                    Err(e)
+                }
             }
-            Err(e) => ui.status.set(e),
-        }
-    });
+        }),
+    )
+}
+pub(super) fn block(ui: Ui, account_id: AccountId) {
+    super::dialog::confirm(ui, block_prompt(ui, account_id));
 }
 #[component]
 pub(super) fn ReportButton(ui: Ui, target: ReportTarget) -> impl IntoView {

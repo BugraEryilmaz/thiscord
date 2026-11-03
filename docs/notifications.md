@@ -68,7 +68,9 @@ muted. Notification subscriptions are independent of the currently viewed chat.
 They never grant access to a channel or a private conversation.
 
 The socket returns `ready` with saved preferences and pushes `alert` events with
-the server-selected delivery settings. There is no HTTP notification poll and no
+the server-selected delivery settings. Server alerts carry the optional
+`guild_icon_id`, looked up after the alert is authorized; in-app and desktop banners
+show that icon instead of the event glyph (the glyph remains if it fails to load). There is no HTTP notification poll and no
 server timer discovering notification activity. Guild messages publish only after
 new sends commit; edits, deletions and exact send retries do not alert. Direct
 messages and call invitation changes publish after commit on their blocking workers,

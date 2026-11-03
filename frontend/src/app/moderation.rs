@@ -92,16 +92,19 @@ impl Panel {
             _ => {}
         }
     }
-    fn change(self, change: GuildChange) {
+    /// Runs a confirmed moderation change; the error is also shown in the panel.
+    async fn change(self, change: GuildChange) -> Result<(), String> {
         if self.ui.busy.get_untracked() {
-            return;
+            return Err(super::dialog::busy_error());
         }
         let Some(state) = self.state.get_untracked() else {
-            return;
+            return Err(
+                "Server moderation is unavailable. Your permissions may have changed.".into(),
+            );
         };
         self.ui.busy.set(true);
         self.message.set(String::new());
-        leptos::task::spawn_local(async move {
+        {
             let result = super::servers::request(
                 self.ui,
                 PermissionRequest::Moderate {
@@ -112,17 +115,25 @@ impl Panel {
                 },
             )
             .await;
+            let outcome = result.map(|_| ()).map_err(|error| {
+                thiscord_frontend::localized_format!(
+                    crate::i18n::language(),
+                    "{error}. The member list has been refreshed; review it before trying again.",
+                    error = crate::i18n::message(error)
+                )
+            });
             if self.state.try_get_untracked().is_some() {
-                self.message.set(match result {
-                    Ok(_) => "Action completed.".into(),
-                    Err(error) => thiscord_frontend::localized_format!(crate::i18n::language(), "{error}. The member list has been refreshed; review it before trying again.", error = crate::i18n::message(error)),
+                self.message.set(match &outcome {
+                    Ok(()) => "Action completed.".into(),
+                    Err(error) => error.clone(),
                 });
                 self.load().await;
                 self.audit(None).await;
                 super::servers::refresh(self.ui).await;
             }
             self.ui.busy.set(false);
-        });
+            outcome
+        }
     }
 }
 
@@ -156,8 +167,6 @@ fn ServerModeration(ui: Ui, guild: GuildId) -> impl IntoView {
             })
             .map(|c| c.channel_id)
     };
-    let dialog = NodeRef::<leptos::html::Dialog>::new();
-    let pending = RwSignal::new(None::<(GuildChange, String, String)>);
     let member = move || {
         panel.state.get().and_then(|s| {
             s.members
@@ -167,10 +176,32 @@ fn ServerModeration(ui: Ui, guild: GuildId) -> impl IntoView {
     };
     let allowed = move |permission| member().is_some_and(|m| m.actions.contains(&permission));
     let confirm = move |change: GuildChange, title: String, detail: String| {
-        pending.set(Some((change, title, detail)));
-        if let Some(dialog) = dialog.get() {
-            let _ = dialog.show_modal();
-        }
+        let label = match &change {
+            GuildChange::SetServerMute { muted: true, .. } => "Server mute",
+            GuildChange::SetServerMute { .. } => "Release server mute",
+            GuildChange::SetServerDeafen { deafened: true, .. } => "Server deafen",
+            GuildChange::SetServerDeafen { .. } => "Release server deafen",
+            GuildChange::MoveVoice { .. } => "Move member",
+            GuildChange::DisconnectVoice { .. } => "Disconnect",
+            GuildChange::TimeoutMember {
+                duration_seconds: Some(_),
+                ..
+            } => "Apply timeout",
+            GuildChange::TimeoutMember { .. } => "Remove timeout",
+            GuildChange::RemoveMember { .. } => "Kick",
+            GuildChange::BanMember { .. } => "Ban",
+            GuildChange::UnbanMember { .. } => "Unban",
+            _ => "Confirm",
+        };
+        super::dialog::confirm(
+            ui,
+            super::dialog::Confirmation::new(
+                crate::i18n::message(title),
+                crate::i18n::message(detail),
+                crate::i18n::t(label),
+                super::dialog::Action::new(move |_| panel.change(change.clone())),
+            ),
+        );
     };
     leptos::task::spawn_local(async move {
         panel.load().await;
@@ -214,7 +245,7 @@ fn ServerModeration(ui: Ui, guild: GuildId) -> impl IntoView {
                                     <option value="60">{move || crate::i18n::t("1 minute")}</option><option value="600">{move || crate::i18n::t("10 minutes")}</option><option value="3600">{move || crate::i18n::t("1 hour")}</option><option value="86400">{move || crate::i18n::t("1 day")}</option><option value="604800">{move || crate::i18n::t("1 week")}</option><option value="2419200">{move || crate::i18n::t("28 days")}</option>
                                 </select></label>
                                 <div class="flex flex-wrap gap-3"><button class="rounded bg-amber-500/20 px-4 py-2 text-amber-200" on:click=move |_|if let Some(m)=member(){confirm(GuildChange::TimeoutMember{account_id:m.account_id,duration_seconds:Some(duration.get_untracked())},thiscord_frontend::localized_format!(crate::i18n::language(), "Timeout {}?",m.display_name().to_owned()),thiscord_frontend::localized_format!(crate::i18n::language(), "Restrict communication for {} minutes. Current voice and screen sharing will stop.",duration.get_untracked()/60));}>{move || crate::i18n::t("Apply timeout")}</button>
-                                <button class="rounded bg-white/10 px-4 py-2 disabled:opacity-40" disabled=move ||member().is_none_or(|m|m.timeout_until.is_none()) on:click=move |_|if let Some(m)=member(){panel.change(GuildChange::TimeoutMember{account_id:m.account_id,duration_seconds:None});}>{move || crate::i18n::t("Remove timeout")}</button></div>
+                                <button class="rounded bg-white/10 px-4 py-2 disabled:opacity-40" disabled=move ||member().is_none_or(|m|m.timeout_until.is_none()) on:click=move |_|if let Some(m)=member(){confirm(GuildChange::TimeoutMember{account_id:m.account_id,duration_seconds:None},thiscord_frontend::localized_format!(crate::i18n::language(), "Remove {}’s timeout?",m.display_name().to_owned()),"They can message, use moderation permissions, join voice and share their screen again immediately.".into());}>{move || crate::i18n::t("Remove timeout")}</button></div>
                             </div>
                         </Show>
                         <div class="flex flex-wrap gap-3">
@@ -235,13 +266,6 @@ fn ServerModeration(ui: Ui, guild: GuildId) -> impl IntoView {
             <ul class="space-y-3">{move ||panel.audit.get().map(|page|page.items.into_iter().map(|entry|view!{<li class="border-b border-white/10 py-2 text-sm"><p>{format!("{} · {}",crate::i18n::datetime(entry.created_at),audit_description(&entry))}</p><p>{thiscord_frontend::localized_format!(crate::i18n::language(), "Actor: {} · Member: {}",entry.actor.map(|id|id.to_string()).unwrap_or_else(||crate::i18n::t("Deleted account").into()),entry.target.map(|id|id.to_string()).unwrap_or_else(||crate::i18n::t("Deleted account").into()))}</p><p class="break-words">{entry.reason}</p></li>}).collect_view())}</ul>
             <button class="settings-secondary" disabled=move ||panel.audit.get().is_none_or(|p|p.next_cursor.is_none()) on:click=move |_|if let Some(after)=panel.audit.get_untracked().and_then(|p|p.next_cursor){leptos::task::spawn_local(async move {panel.audit(Some(after)).await;});}>{move || crate::i18n::t("Next page")}</button>
         </section>
-        <dialog node_ref=dialog on:click=move |e|super::dialog::dismiss_outside(e,dialog,ui.busy.get_untracked()) aria-labelledby="moderation-confirm-title" class="m-auto w-[calc(100%-2rem)] max-w-md space-y-5 rounded-2xl border border-white/15 bg-surface p-6 text-white shadow-2xl backdrop:bg-black/70" on:close=move |_|pending.set(None)>
-            <h2 id="moderation-confirm-title" class="text-xl font-semibold">{move ||pending.get().map(|(_,title,_)|crate::i18n::message(title))}</h2>
-            <p class="text-sm text-white/70">{move ||pending.get().map(|(_,_,detail)|crate::i18n::message(detail))}</p>
-            <div class="flex justify-end gap-3"><button class="rounded bg-white/10 px-4 py-2" on:click=move |_|if let Some(dialog)=dialog.get(){dialog.close();}>{move || crate::i18n::t("Cancel")}</button><button class="rounded bg-red-500/20 px-4 py-2 text-red-200" on:click=move |_|{
-                if let Some((change,_,_))=pending.get_untracked(){panel.change(change);}
-                if let Some(dialog)=dialog.get(){dialog.close();}
-            }>{move || crate::i18n::t("Confirm")}</button></div>
-        </dialog>
+
     }
 }

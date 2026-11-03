@@ -1,18 +1,32 @@
 use super::*;
 impl Chat {
     fn action(self, request: ChatRequest) {
-        let generation = self.access_generation.get_untracked();
+        let outcome = self.perform(request);
         leptos::task::spawn_local(async move {
+            let _ = outcome.await;
+        });
+    }
+    /// Resolves with the error that was also shown in the chat status.
+    fn perform(
+        self,
+        request: ChatRequest,
+    ) -> impl std::future::Future<Output = Result<(), String>> + 'static {
+        let generation = self.access_generation.get_untracked();
+        async move {
             let result = self.request(&request).await;
             if !self.alive() || self.access_generation.get_untracked() != generation {
-                return;
+                return result.map(|_| ());
             }
             match result {
                 Ok(ChatResponse::Message { message }) => self.merge(*message),
-                Err(e) => self.status.set(e),
+                Err(e) => {
+                    self.status.set(e.clone());
+                    return Err(e);
+                }
                 _ => {}
             }
-        });
+            Ok(())
+        }
     }
     pub(super) fn jump(self, id: MessageId) {
         // Cached jumps supersede pending context/older requests too.
@@ -384,9 +398,22 @@ pub(super) fn Actions(
                                 </button>
                             </Show>
                             <Show when=can_delete>
-                                <button type="button" class="context-item context-danger" on:click=move |_| {
-                                    if !window().confirm_with_message(crate::i18n::t("Delete this message?")).unwrap_or(false) { return; }
-                                    message.with_untracked(|m|chat.action(ChatRequest::Delete {guild_id:chat.guild,channel_id:chat.channel,message_id:m.id,revision:m.revision}));
+                                <button type="button" class="context-item context-danger" title=move ||crate::i18n::t("Shift-click to delete without confirming") on:click=move |ev:leptos::ev::MouseEvent| {
+                                    // Discord-style: Shift skips the prompt for quick cleanup.
+                                    if ev.shift_key() {
+                                        message.with_untracked(|m|chat.action(ChatRequest::Delete {guild_id:chat.guild,channel_id:chat.channel,message_id:m.id,revision:m.revision}));
+                                        return;
+                                    }
+                                    let preview = message.with_untracked(|m| m.content.chars().take(120).collect::<String>());
+                                    crate::app::dialog::confirm(chat.ui, crate::app::dialog::Confirmation::new(
+                                        crate::i18n::t("Delete this message?"),
+                                        crate::i18n::t("The message, its attachments, reactions and pin are removed for everyone. Replies show it as deleted. This cannot be undone."),
+                                        crate::i18n::t("Delete"),
+                                        crate::app::dialog::Action::new(move |_| {
+                                            let (id, revision) = message.with_untracked(|m| (m.id, m.revision));
+                                            chat.perform(ChatRequest::Delete {guild_id:chat.guild,channel_id:chat.channel,message_id:id,revision})
+                                        }),
+                                    ).target(preview));
                                 }><Icon kind=Glyph::Trash/>{move ||crate::i18n::t("Delete message")}</button>
                             </Show>
                         </div>
