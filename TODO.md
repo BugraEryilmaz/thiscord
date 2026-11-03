@@ -461,7 +461,11 @@ Personalized speaker isolation and physical acoustic acceptance remain future wo
 - [x] Simultaneous camera/screen grid, self previews, fullscreen, hide/restore and contextual audio controls.
 - [x] Camera epochs, viewer leases, permission fences and independent recovery/bitrate feedback.
 - [ ] Physical camera/WebView acceptance on Windows/macOS/Linux and measured eight-person mixed-media capacity.
-- [ ] In-app webcam selection (currently the system default).
+- [x] In-app webcam selection for the desktop app and `/app`: device-local choice,
+  settings preview, voice-bar quick switch, in-call track replacement and a
+  one-time missing-camera fallback notice (docs/cameras.md#choosing-a-camera).
+- [ ] Physically verify camera selection, hot-plug and in-call switching on
+  Windows/macOS/Linux WebViews and browsers (device IDs, WebKit single-capture).
 
 See [screen-sharing.md](docs/screen-sharing.md) for limits and remaining platform checks.
 
