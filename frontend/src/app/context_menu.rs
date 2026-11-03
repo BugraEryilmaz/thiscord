@@ -273,17 +273,17 @@ async fn items(ui: Ui, target: Target) -> Result<(String, Vec<Item>), String> {
     let guild = home.guild;
     let mut items = vec![];
     if let Some(member) = target.member {
-        let channel = target
-            .channel
-            .ok_or(crate::i18n::t("Voice channel unavailable"))?;
-        if !home.channels.iter().any(|c| c.id == channel) {
+        // Voice participants carry their channel; member list entries have none.
+        if let Some(channel) = target.channel
+            && !home.channels.iter().any(|c| c.id == channel)
+        {
             return Err("Channel is no longer accessible".into());
         }
         let label = ui
             .voice_roster
             .get_untracked()
             .iter()
-            .find(|r| r.channel_id == channel)
+            .find(|r| Some(r.channel_id) == target.channel)
             .and_then(|r| r.members.iter().find(|m| m.account_id == member))
             .map(|m| m.display_name().to_owned())
             .or_else(|| {
@@ -294,9 +294,12 @@ async fn items(ui: Ui, target: Target) -> Result<(String, Vec<Item>), String> {
                     .find(|m| m.account_id == member)
                     .map(|m| m.display_name().to_owned())
             })
+            .or_else(|| ui.members.name(guild.id, member))
             .unwrap_or_else(|| "Voice participant".into());
         let own = ui.account.get_untracked().is_some_and(|a| a.id == member);
-        if is_bot(ui, member) {
+        if let Some(channel) = target.channel
+            && is_bot(ui, member)
+        {
             if matches!(super::servers::request(ui, PermissionRequest::Instance {}).await, Ok(PermissionResponse::Instance { access }) if access.role == InstanceRole::Owner)
             {
                 items.push(Item::new(
@@ -315,7 +318,12 @@ async fn items(ui: Ui, target: Target) -> Result<(String, Vec<Item>), String> {
             }
             return Ok((label, items));
         }
-        if own {
+        if own && target.channel.is_none() {
+            items.push(Item::new(
+                crate::i18n::t("Edit profile"),
+                Action::Page(guild.id, "profile", None),
+            ));
+        } else if own {
             items.push(Item::new(
                 crate::i18n::t("Your audio settings"),
                 Action::Page(guild.id, "audio", None),
@@ -944,6 +952,11 @@ const CONTEXT_TARGETS: &str =
 /// Long presses also reveal `data-tip` hints, which have no hover on touch screens.
 const LONG_PRESS_TARGETS: &str =
     "[data-context-server],[data-context-conversation],[data-context-user],[data-tip]";
+
+/// Opens the element's context menu below it, as Shift+F10 would.
+pub(super) fn open_for(ui: Ui, element: web_sys::Element) {
+    menu_at(ui, Some(element.into()), 0.0, 0.0);
+}
 
 fn menu_at(ui: Ui, target: Option<web_sys::EventTarget>, x: f64, y: f64) {
     if user_menu(ui, target.clone(), x, y) || conversation_menu(ui, target.clone(), x, y) {

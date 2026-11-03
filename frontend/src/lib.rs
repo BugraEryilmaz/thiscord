@@ -43,3 +43,4 @@ pub mod touch;
 pub mod bot;
 
 pub mod markdown;
+pub mod member_list;

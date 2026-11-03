@@ -16,6 +16,7 @@ mod friends;
 mod icons;
 mod invites;
 mod login;
+mod members;
 mod message_content;
 mod moderation;
 mod notifications;
@@ -30,6 +31,7 @@ mod servers;
 mod settings;
 mod shortcuts;
 mod soundboard;
+mod status;
 mod tooltip;
 mod updates;
 mod voice_bots;
@@ -70,6 +72,7 @@ struct Ui {
     bot_target: RwSignal<Option<voice_bots::Target>>,
     notifications: notifications::State,
     friends: friends::State,
+    members: members::State,
     audio_control: crate::audio_control::AudioControl,
     updates: RwSignal<thiscord_shared::update::UpdateStatus>,
     update_error: RwSignal<String>,
@@ -424,6 +427,7 @@ pub fn App() -> impl IntoView {
         invites: invites::State::new(),
         bot_target: RwSignal::new(None),
         friends: friends::State::new(),
+        members: members::State::new(),
         notifications: notifications::State::new(),
         audio_control: Default::default(),
         updates: RwSignal::new(Default::default()),

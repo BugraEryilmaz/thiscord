@@ -541,6 +541,7 @@ pub(super) fn ChatHost(ui: Ui) -> impl IntoView {
         }
         ui.unread.set(vec![]);
         ui.voice_roster.set(vec![]);
+        ui.members.clear();
         ui.socket_status.set(ConnectionStatus::Offline);
         let Some(token) = token else {
             return;
@@ -569,6 +570,7 @@ pub(super) fn ChatHost(ui: Ui) -> impl IntoView {
                             ConnectionStatus::Offline
                         });
                         ui.voice_roster.set(vec![]);
+                        ui.members.clear();
                         ui.unread.set(vec![]);
                         if let Some(chat) = ui.active_chat.get_untracked() {
                             chat.online.set(vec![]);
@@ -638,6 +640,7 @@ async fn connected(ui: Ui, token: &str) -> Result<(), String> {
                 ServerEvent::Pong {} => {}
                 ServerEvent::Revoked {} => {
                     ui.unread.set(vec![]);
+                    ui.members.clear();
                     if let Some(chat) = ui.active_chat.get_untracked() {
                         let _ = deliver(chat, ServerEvent::Revoked {});
                     }
@@ -711,6 +714,10 @@ async fn connected(ui: Ui, token: &str) -> Result<(), String> {
                     match *event {
                         ServerEvent::Unread { channels } => ui.unread.set(channels),
                         ServerEvent::VoiceRoster { channels } => ui.voice_roster.set(channels),
+                        ServerEvent::Members { members } => {
+                            ui.members.replace(desired(ui).guild, members)
+                        }
+                        ServerEvent::MemberPresence { online } => ui.members.presence(&online),
                         event => {
                             if let Some(chat) = ui
                                 .active_chat
@@ -746,12 +753,16 @@ async fn connected(ui: Ui, token: &str) -> Result<(), String> {
                 sent.set(Some((serial, wanted)));
                 ui.unread.set(vec![]);
                 ui.voice_roster.set(vec![]);
+                // The list is guild-wide: keep it while switching channels in a guild.
+                if ui.members.guild() != wanted.guild {
+                    ui.members.clear();
+                }
                 Some(ClientEvent::Subscribe {
                     subscription: serial,
                     guild_id: wanted.guild,
                     channel_id: wanted.channel,
                     voice_roster: true,
-                    members: false,
+                    members: wanted.guild.is_some(),
                 })
             } else if count.is_multiple_of(100) {
                 Some(ClientEvent::Ping {})
@@ -1263,7 +1274,8 @@ pub(super) fn ChatPanel(
         }
     };
     view! {
-        <section class="flex h-full min-h-0 min-w-0 flex-col overflow-hidden rounded-xl border border-white/10 bg-white/5" aria-label=move || crate::i18n::t("Text chat")
+        <div class="chat-layout">
+        <section class="flex h-full min-h-0 min-w-0 flex-1 flex-col overflow-hidden rounded-xl border border-white/10 bg-white/5" aria-label=move || crate::i18n::t("Text chat")
             on:dragover=move |ev: leptos::ev::DragEvent| { ev.prevent_default(); if let Some(data) = ev.data_transfer() { data.set_drop_effect(if editing.get_untracked().is_some() { "none" } else { "copy" }); } }
             on:drop=move |ev: leptos::ev::DragEvent| { ev.prevent_default(); if editing.get_untracked().is_none() && let Some(files) = ev.data_transfer().and_then(|d| d.files()) { queue.add(files); } }>
             <attachments::DownloadHost chat/>
@@ -1273,6 +1285,7 @@ pub(super) fn ChatPanel(
                     <h2 class="min-w-0 flex-1 truncate text-lg font-semibold">{move ||format!("# {}",name.get())}</h2>
                     <OnlineMembers chat/>
                     <super::search::Launcher state=search/>
+                    <super::members::Toggle ui/>
                 </div>
                 <p class="break-words text-xs text-white/60" role="status">{move||crate::i18n::message(chat.status.get())}</p>
             </header>
@@ -1364,5 +1377,8 @@ pub(super) fn ChatPanel(
                 </form>
             </footer>
         </section>
+        <super::members::Panel ui guild/>
+        <super::members::ProfileHost ui/>
+        </div>
     }
 }
