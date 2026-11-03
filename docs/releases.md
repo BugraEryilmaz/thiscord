@@ -33,6 +33,10 @@ installation usable and can be retried. Account tokens never go to GitHub.
    Reserve GitHub's Latest release for stable clients; future backend-only releases
    must not replace that marker.
 
+4. Add the macOS code-signing certificate described in
+   [Stable macOS signing](#stable-macos-signing) as `MACOS_SIGNING_CERTIFICATE`
+   and `MACOS_SIGNING_CERTIFICATE_PASSWORD`. Releases fail without it.
+
 If setting up another checkout, obtain the existing signing key from your backup.
 Do not generate a different key: already installed clients trust the public key
 embedded in their binary. Key rotation needs an update signed with the old key
@@ -161,47 +165,76 @@ libraries; an AppImage is not a promise of compatibility with every distribution
 Updater signatures authenticate in-app updates. They do **not** replace Windows
 Authenticode or Apple Developer ID/notarization for the first download. Windows
 installers currently have no Authenticode certificate and may show SmartScreen
-warnings. macOS builds are ad-hoc signed unless Apple signing secrets are provided;
-Gatekeeper may block downloaded applications. For trusted macOS distribution add:
+warnings. macOS builds use a stable self-signed certificate, so Gatekeeper still
+blocks the first downloaded `.dmg` until the user opens it explicitly; in-app
+updates are not quarantined.
 
-- `APPLE_CERTIFICATE`: base64-encoded Developer ID Application `.p12` certificate.
-- `APPLE_CERTIFICATE_PASSWORD` and `APPLE_SIGNING_IDENTITY`.
-- `APPLE_ID`, `APPLE_PASSWORD` (app-specific password), `APPLE_TEAM_ID` for notarization.
+The macOS entitlement enables microphone and camera access under the hardened
+runtime; `Info.plist` supplies the usage prompts. Certificate purchase, Windows
+signing configuration and Apple account setup remain deployment work. Updater keys
+and HTTPS certificates cannot substitute for platform code-signing credentials.
 
-The macOS entitlement enables microphone access under the hardened runtime;
-`Info.plist` supplies the microphone usage prompt. Certificate purchase, Windows
-signing configuration and Apple account setup remain deployment work. The existing
-workflow passes these Apple secrets to Tauri; adding them enables Developer ID
-signing and notarization on the macOS runner. Updater keys and HTTPS certificates
-cannot substitute for platform code-signing credentials.
+### Stable macOS signing
 
-### Enroll and configure macOS signing
+macOS remembers Screen Recording, microphone and camera grants (TCC) and Keychain
+item access by the app's *designated requirement*. An ad-hoc signature's
+requirement is its code hash, which changes every build: each update then looked
+like a new app, lost Screen Recording and asked for the login password before
+reading the stored session. Releases up to 0.1.54 were ad-hoc signed.
 
-1. Enroll in the [Apple Developer Program](https://developer.apple.com/programs/enroll/).
-   Apple lists USD 99 per membership year, with regional pricing. An individual
-   membership can distribute Developer ID applications outside the App Store.
-2. On a Mac, generate a certificate signing request in Keychain Access and use it
-   to create a **Developer ID Application** certificate in the developer account.
-   Install the certificate into the keychain containing the corresponding private
-   key. Follow [Apple's certificate instructions](https://developer.apple.com/help/account/certificates/create-developer-id-certificates).
-3. Export the certificate with its private key as a password-protected `.p12`.
-   Encode it into a local file, outside the repository:
+Releases are now signed with the self-signed **Thiscord Release Signing**
+certificate (RSA-3072, code-signing EKU, valid until 2046). Its requirement is
+`identifier "tr.com.thiscord.desktop" and certificate root = H"2f0c37cc…"`, the
+same for every build signed with it. The installer job imports
+`MACOS_SIGNING_CERTIFICATE` (base64 `.p12`) with `scripts/macos-signing.ps1` into
+a temporary keychain, checks its SHA-1 against `MACOS_SIGNING_SHA1` in
+`build-installers.yml`, signs through Tauri's `APPLE_SIGNING_IDENTITY`, verifies
+that requirement on the built `.app` and removes the keychain. `security` lists
+the identity as untrusted (`CSSMERR_TP_NOT_TRUSTED`); codesign, TCC and Keychain
+matching do not need it to be trusted. The binary links only system libraries,
+so hardened-runtime library validation holds without a Team ID.
 
-   ```sh
-   openssl base64 -A -in /path/to/developer-id.p12 -out /path/to/certificate-base64.txt
-   security find-identity -v -p codesigning
-   ```
+The certificate, its `.p12` password and PEM are outside Git in
+`C:\Users\bugra\.thiscord\signing\macos-signing.*`, next to the updater key.
+**Keep using this certificate.** A different certificate, or switching to
+Developer ID, changes the requirement: every macOS user must re-grant permissions
+and approve one Keychain read once more. Update `MACOS_SIGNING_SHA1` and this
+section deliberately if that is ever intended.
 
-4. Put the encoded file's contents in the repository's `APPLE_CERTIFICATE` Actions
-   secret and its export password in `APPLE_CERTIFICATE_PASSWORD`. Set
-   `APPLE_SIGNING_IDENTITY` to the full `Developer ID Application: ... (TEAMID)`
-   identity reported by `security`. Use GitHub secrets, not backend `.env`.
-5. Add `APPLE_ID`, an **app-specific** password as `APPLE_PASSWORD`, and
-   `APPLE_TEAM_ID`. These authenticate notarization; do not use the Apple account's
-   normal password. See [Tauri's macOS signing guide](https://v2.tauri.app/distribute/sign/macos/).
-6. Publish a new version through the release workflow and verify the downloaded
-   app's signature, notarization ticket and first launch on a separate Mac.
-   Until credentials are configured, CI continues to produce ad-hoc signed builds.
+Moving from an ad-hoc release to the first signed one is such a change. Existing
+users must, once, remove the old Thiscord entry under **System Settings → Privacy
+& Security → Screen & System Audio Recording** with **−** and add the app again,
+and approve one Keychain prompt. The client deletes and re-adds its Keychain item
+after that approved read (deleting and adding need no approval), so the item
+then trusts the signed requirement and later updates read it silently; see
+[accounts](accounts.md#session-model-and-desktop-storage).
+
+To recreate an equivalent certificate (only for a deliberate rotation), use
+LibreSSL, or OpenSSL 3 with `-legacy` on the export, for a `.p12` that
+`security import` accepts:
+
+```sh
+openssl req -x509 -newkey rsa:3072 -sha256 -days 7300 -nodes \
+  -keyout key.pem -out macos-signing.cer.pem -subj "/CN=Thiscord Release Signing/O=Thiscord" \
+  -addext "basicConstraints=critical,CA:false" -addext "keyUsage=critical,digitalSignature" \
+  -addext "extendedKeyUsage=critical,codeSigning"
+openssl pkcs12 -export -inkey key.pem -in macos-signing.cer.pem -out macos-signing.p12 \
+  -name "Thiscord Release Signing" -passout file:macos-signing-password.txt
+openssl x509 -in macos-signing.cer.pem -noout -fingerprint -sha1
+```
+
+Delete `key.pem` afterwards. Store `base64` of the `.p12` and the password file's
+contents as the two repository secrets.
+
+### Developer ID (not configured)
+
+A [Developer ID](https://developer.apple.com/programs/enroll/) certificate
+(Apple Developer Program, USD 99 per year) plus notarization would also remove
+the Gatekeeper warning on first download. It needs `APPLE_CERTIFICATE`,
+`APPLE_CERTIFICATE_PASSWORD`, `APPLE_SIGNING_IDENTITY`, `APPLE_ID`, an app-specific
+`APPLE_PASSWORD` and `APPLE_TEAM_ID` passed to Tauri, a requirement check for the
+Apple-anchored requirement instead of the pinned certificate, and one more
+permission reset for existing users. See [Tauri's macOS signing guide](https://v2.tauri.app/distribute/sign/macos/).
 
 ### Choose Windows signing before configuring CI
 

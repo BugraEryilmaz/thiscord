@@ -210,6 +210,14 @@ Sign into the existing account, reauthenticate, then explicitly link Google.
 - Windows Credential Manager, macOS Keychain and Linux Secret Service store desktop
   tokens using Rust [`keyring`](https://docs.rs/keyring/3.6.3/keyring/). Linux requires
   an unlocked Secret Service (e.g. GNOME Keyring/KWallet) and a session D-Bus.
+- macOS Keychain items trust the signing requirement of the build that created
+  them. Reading one created under another requirement prompts for the login
+  password; deleting, adding and in-place modification do not. On macOS the
+  client therefore reads the token once, then deletes and re-adds the same item
+  as the running build's own, so a single **Allow** suffices and later launches do
+  not prompt. Releases keep one stable requirement (see
+  [releases](releases.md#stable-macos-signing)), so updates read it silently. A
+  denied read fails without retrying, like other credential-store failures.
 - The `/app` web client receives its session only as an `HttpOnly`, `Secure`,
   `SameSite=Strict` `__Host-thiscord_session` cookie, issued only to origins in
   `ALLOWED_ORIGINS`; response bodies carry an empty token. See [web.md](web.md).

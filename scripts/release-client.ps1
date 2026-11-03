@@ -142,7 +142,7 @@ Thiscord $version
 - Linux x64: use the AppImage for in-app updates, or install the .deb manually.
 - Thiscord checks for updates at launch and offers to download and install them. You can also check manually in Settings > Updates. Disconnect from voice before installing.
 
-Updater archives are signed and verified by Thiscord. OS trust is separate: Windows installers are currently unsigned; macOS requires Developer ID/notarization secrets for a trusted download. See docs/releases.md in the tagged source for setup and platform requirements.
+Updater archives are signed and verified by Thiscord. OS trust is separate: Windows installers are currently unsigned; macOS builds use a stable self-signed certificate without notarization, so Gatekeeper asks before opening the first download. See docs/releases.md in the tagged source for setup and platform requirements.
 "@ | Set-Content -LiteralPath $notes
 if ($existing.Count -eq 0) {
     Invoke-Checked gh @('release', 'create', $Tag, '--repo', $repository, '--verify-tag', '--draft', '--title', "Thiscord $version", '--notes-file', $notes)
