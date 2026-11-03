@@ -153,7 +153,12 @@ fn row_key(member: &GuildMember) -> RowKey {
 }
 
 #[component]
-fn Row(ui: Ui, guild: GuildId, member: GuildMember) -> impl IntoView {
+fn Row(
+    ui: Ui,
+    guild: GuildId,
+    member: GuildMember,
+    roving: super::keyboard::Roving<thiscord_shared::AccountId>,
+) -> impl IntoView {
     let id = member.account_id;
     let name = member.display_name().to_owned();
     let status = member.custom_status.as_ref().map(status_text);
@@ -184,6 +189,7 @@ fn Row(ui: Ui, guild: GuildId, member: GuildMember) -> impl IntoView {
     view! {
         <li>
             <button type="button" class="member-row" class:member-offline=!online
+                data-rove tabindex=roving.tabindex(id) on:focus=move |_| roving.focus(id)
                 data-context-server=guild.to_string() data-context-member=id.to_string()
                 aria-haspopup="dialog" aria-label=label
                 on:click=move |ev| {
@@ -202,7 +208,7 @@ fn Row(ui: Ui, guild: GuildId, member: GuildMember) -> impl IntoView {
                         {member.owner.then(|| view! {<span class="member-badge">{move || crate::i18n::t("Owner")}</span>})}
                         {member.bot.then(|| view! {<span class="member-badge">{move || crate::i18n::t("Bot")}</span>})}
                     </span>
-                    {status.map(|status| view! {<span class="block truncate text-xs text-white/55">{status}</span>})}
+                    {status.map(|status| view! {<span class="block truncate text-xs text-white/60">{status}</span>})}
                 </span>
             </button>
         </li>
@@ -216,6 +222,7 @@ fn Group(
     title: &'static str,
     heading: &'static str,
     members: Memo<Vec<GuildMember>>,
+    roving: super::keyboard::Roving<thiscord_shared::AccountId>,
 ) -> impl IntoView {
     view! {
         <Show when=move || members.with(|m| !m.is_empty())>
@@ -225,7 +232,7 @@ fn Group(
                 </h3>
                 <ul role="list" class="space-y-0.5">
                     <For each=move || members.get() key=row_key
-                        children=move |member| view! {<Row ui guild member/>}/>
+                        children=move |member| view! {<Row ui guild member roving/>}/>
                 </ul>
             </section>
         </Show>
@@ -258,6 +265,13 @@ pub(super) fn Panel(ui: Ui, guild: GuildId) -> impl IntoView {
         Memo::new(move |_| list.with(|l| grouped(l).0.into_iter().cloned().collect::<Vec<_>>()));
     let offline =
         Memo::new(move |_| list.with(|l| grouped(l).1.into_iter().cloned().collect::<Vec<_>>()));
+    let roving = super::keyboard::Roving::new(
+        move || {
+            online
+                .with(|on| offline.with(|off| on.iter().chain(off).map(|m| m.account_id).collect()))
+        },
+        || None,
+    );
     // Opening the drawer moves focus into it; closing returns focus to the toggle.
     let close_button = NodeRef::<leptos::html::Button>::new();
     Effect::new(move |_| {
@@ -294,14 +308,14 @@ pub(super) fn Panel(ui: Ui, guild: GuildId) -> impl IntoView {
                 <button node_ref=close_button type="button" class="icon-button member-drawer-close" aria-label=move || crate::i18n::t("Close member list")
                     on:click=move |_| close()><Icon kind=Glyph::Close/></button>
             </header>
-            <div class="member-panel-scroll">
+            <div class="member-panel-scroll" data-rove-list on:keydown=move |e| super::keyboard::rove(&e)>
                 <Show when=move || list.with(Vec::is_empty)>
-                    <p class="px-2 py-4 text-sm text-white/55" role="status">{move ||
+                    <p class="px-2 py-4 text-sm text-white/60" role="status">{move ||
                         if ui.socket_status.get() == super::chat::ConnectionStatus::Connected { crate::i18n::t("Loading members…") }
                         else { ui.socket_status.get().label() }}</p>
                 </Show>
-                <Group ui guild title="Online" heading="member-group-online" members=online/>
-                <Group ui guild title="Offline" heading="member-group-offline" members=offline/>
+                <Group ui guild title="Online" heading="member-group-online" members=online roving/>
+                <Group ui guild title="Offline" heading="member-group-offline" members=offline roving/>
             </div>
         </aside>
     }
@@ -331,7 +345,7 @@ pub(super) fn ProfileHost(ui: Ui) -> impl IntoView {
         if let Some(dialog) = dialog.get_untracked()
             && !dialog.open()
         {
-            let _ = dialog.show_modal();
+            super::dialog::open(&dialog);
         }
         let token = ui.token.get_untracked();
         leptos::task::spawn_local(async move {
@@ -426,14 +440,14 @@ pub(super) fn ProfileHost(ui: Ui) -> impl IntoView {
                 let text = status_text(status);
                 view! {
                     <section class="mt-4" aria-labelledby="profile-card-status">
-                        <h3 id="profile-card-status" class="text-xs font-semibold uppercase tracking-wider text-white/50">{move || crate::i18n::t("Custom status")}</h3>
+                        <h3 id="profile-card-status" class="text-xs font-semibold uppercase tracking-wider text-white/60">{move || crate::i18n::t("Custom status")}</h3>
                         <p class="mt-1 whitespace-pre-wrap break-words text-sm">{text}</p>
                     </section>
                 }
             }))}
             <Show when=move || profile.with(|p| p.as_ref().is_some_and(|p| !p.bio.trim().is_empty()))>
                 <section class="mt-4" aria-labelledby="profile-card-bio">
-                    <h3 id="profile-card-bio" class="text-xs font-semibold uppercase tracking-wider text-white/50">{move || crate::i18n::t("About me")}</h3>
+                    <h3 id="profile-card-bio" class="text-xs font-semibold uppercase tracking-wider text-white/60">{move || crate::i18n::t("About me")}</h3>
                     <p class="mt-1 max-h-48 overflow-y-auto whitespace-pre-wrap break-words text-sm">{move || profile.with(|p| p.as_ref().map(|p| p.bio.clone()))}</p>
                 </section>
             </Show>

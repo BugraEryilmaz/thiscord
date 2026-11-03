@@ -358,6 +358,24 @@ impl Chat {
         self.scroll();
         self.read();
     }
+    /// Escape: jump to the live edge and acknowledge it, like the button.
+    /// Returns whether there was anything to catch up on.
+    pub(super) fn mark_read(self) -> bool {
+        if !self.alive() || self.searching.get_untracked() {
+            return false;
+        }
+        let behind = !self.bottom.get_untracked()
+            || self.messages.with_untracked(|m| m.newer)
+            || self.ui.unread.with_untracked(|unread| {
+                unread
+                    .iter()
+                    .any(|u| u.channel_id == self.channel && u.count > 0)
+            });
+        if behind {
+            self.latest();
+        }
+        behind
+    }
     fn load_older(self) {
         if self.history_loading.get_untracked() || !self.ready.get_untracked() {
             return;
@@ -824,6 +842,21 @@ fn deliver(chat: Chat, event: ServerEvent) -> Result<(), String> {
             chat.read();
         }
         ServerEvent::Message { message, .. } => {
+            let me = chat.ui.account.with_untracked(|a| a.as_ref().map(|a| a.id));
+            let arrived = !message.deleted
+                && message.author_id != me
+                && chat.ready.get_untracked()
+                && chat
+                    .messages
+                    .with_untracked(|cache| cache.get(message.id).is_none());
+            if arrived {
+                super::keyboard::announce_message(
+                    chat.ui,
+                    message.display_name(),
+                    &message.content,
+                    message.attachments.len(),
+                );
+            }
             chat.merge(*message);
             chat.read();
         }
@@ -924,7 +957,7 @@ fn MessageRow(
             <Show when=divider>
                 <div class="unread-divider" role="separator"><span>{move || crate::i18n::t("New messages")}</span></div>
             </Show>
-            <div class=move || if message.with(|m| chat.ui.account.with(|a| a.as_ref().is_some_and(|a| m.mentions.contains(&a.id)))) {
+            <article aria-label=move || format!("{}, {}", name.get(), full_time()) class=move || if message.with(|m| chat.ui.account.with(|a| a.as_ref().is_some_and(|a| m.mentions.contains(&a.id)))) {
                 "message-body bg-brand/10"
             } else { "message-body" } class:ring-2=move || chat.highlight.get()==Some(id) class:ring-brand=move || chat.highlight.get()==Some(id) class:message-editing=move || composer.editing.get()==Some(id)>
                 <div class="message-gutter">
@@ -940,20 +973,20 @@ fn MessageRow(
                     <Show when=move || !grouped.get()>
                         <div class="flex flex-wrap items-baseline gap-x-2">
                             <button class="font-semibold hover:underline" aria-haspopup="menu" data-context-user=author data-context-name=name>{name}</button>
-                            <time class="text-xs text-white/40" title=full_time>{move || message.with(|m| crate::i18n::message_time(m.created_at))}</time>
+                            <time class="text-xs text-white/60" title=full_time>{move || message.with(|m| crate::i18n::message_time(m.created_at))}</time>
                         </div>
                     </Show>
                     <rich::Reply chat message/>
                     <div class="whitespace-pre-wrap break-words text-white/85">
                         {move || message.with(|m| super::message_content::render(if m.deleted { "Message deleted" } else { &m.content }, chat.ui))}
-                        <Show when=edited><span class="ml-1 text-xs text-white/40">{move || format!("({})", crate::i18n::t("edited"))}</span></Show>
+                        <Show when=edited><span class="ml-1 text-xs text-white/60">{move || format!("({})", crate::i18n::t("edited"))}</span></Show>
                     </div>
                     <Show when=move || message.with(|m| !m.deleted)>
                         <For each=move || message.with(|m| m.attachments.clone()) key=|a| a.id children=move |attachment| view! { <attachments::Card chat message=id attachment/> }/>
                         <rich::Actions chat message composer/>
                     </Show>
                 </div>
-            </div>
+            </article>
         </li>
     }
 }
@@ -1300,14 +1333,14 @@ pub(super) fn ChatPanel(
             <super::search::Results state=search on_jump=Callback::new(move |hit: thiscord_shared::search::Hit| {
                 ui.chat_jump.set(Some((channel, hit.id)));
             })/>
-            <div node_ref=chat.list class="min-h-0 flex-1 overflow-x-hidden overflow-y-auto overscroll-contain p-4 [overflow-anchor:none]" style:display=move ||if search.active.get(){"none"}else{""} on:scroll=move |_|chat.scrolled()>
+            <div node_ref=chat.list role="region" tabindex="0" aria-label=move || crate::i18n::t("Messages") class="min-h-0 flex-1 overflow-x-hidden overflow-y-auto overscroll-contain p-4 [overflow-anchor:none]" style:display=move ||if search.active.get(){"none"}else{""} on:scroll=move |_|chat.scrolled()>
                 <div class="h-10">
                     <Show when=move || chat.messages.with(|m| m.older.is_some())>
                         <button class="text-sm text-brand underline" disabled=move || chat.history_loading.get()
                             on:click=move |_| chat.load_older()>{move || crate::i18n::t("Load older messages")}</button>
                     </Show>
                 </div>
-                <ul node_ref=chat.rows>
+                <ul node_ref=chat.rows aria-label=move || crate::i18n::t("Message history")>
                     <li aria-hidden="true" style:height=move || visible.with(|w| format!("{}px", w.before))></li>
                     <For
                         each=move || {
@@ -1325,7 +1358,7 @@ pub(super) fn ChatPanel(
                         children=move |id| {
                             let pending = Memo::new(move |_| chat.pending.with(|p| p.iter().find(|p| p.id == id).cloned()));
                             view! {
-                                <li class="whitespace-pre-wrap break-words text-white/50">
+                                <li class="whitespace-pre-wrap break-words text-white/60">
                                     <div>{move || pending.with(|p| super::message_content::render(p.as_ref().map(|p| p.content.as_str()).unwrap_or_default(), chat.ui))}</div>
                                     <p class="text-xs">{move || pending.with(|p| p.as_ref().map(|p| p.filenames.join(", ")).unwrap_or_default())}</p>
                                     {move || if pending.with(|p| p.as_ref().is_some_and(|p| p.failed)) { crate::i18n::t("Failed to send") } else { crate::i18n::t("Sending…") }}
@@ -1345,7 +1378,7 @@ pub(super) fn ChatPanel(
                 <button class="bg-brand/20 py-2 text-sm" on:click=move |_| chat.latest()>{move || crate::i18n::t("Jump to latest / mark read")}</button>
             </Show>
             <footer class="flex shrink-0 flex-col gap-2 border-t border-white/10 p-3" style:display=move ||if search.active.get(){"none"}else{""}>
-                <p class="text-xs text-white/60" hidden=move ||typing_notice.with(String::is_empty) aria-live="polite">{move ||typing_notice.get()}</p>
+                <p class="text-xs text-white/60" class:sr-only=move ||typing_notice.with(String::is_empty) aria-live="polite" aria-atomic="true">{move ||typing_notice.get()}</p>
                 <Show when=move||editing.get().is_some()><p class="text-xs text-white/60"><button class="text-sm text-brand underline" on:click=move |_|composer.end_edit()>{move || crate::i18n::t("Cancel edit")}</button>" · "{move || crate::i18n::t("Escape to cancel · Enter to save")}</p></Show>
                 <Show when=move ||chat.reply_to.get().is_some()><div class="flex gap-3 text-sm text-sky-300"><span class="max-w-80 truncate">{move || chat.reply_to.get().map(|id|chat.messages.with(|cache|cache.get(id).map(|m|m.with(|m|thiscord_frontend::localized_format!(crate::i18n::language(), "Reply to {}: {}",m.display_name(),m.content.chars().take(80).collect::<String>()))).unwrap_or_else(||crate::i18n::t("Reply selected").into())))}</span><button on:click=move |_|chat.reply_to.set(None)>{move ||crate::i18n::t("Cancel reply")}</button></div></Show>
                 <attachments::QueuedFiles queue/>
@@ -1353,7 +1386,7 @@ pub(super) fn ChatPanel(
                     <div class="relative min-w-0 flex-1">
                         <mentions::Suggestions picker=mentions/>
                         <label class="block"><span class="sr-only">{move || crate::i18n::t("Message")}</span>
-                            <textarea node_ref=mentions.input class="block w-full resize-none rounded-lg bg-black/20 p-3 outline-none focus:ring-2 focus:ring-brand"
+                            <textarea node_ref=mentions.input id="chat-composer" class="block w-full resize-none rounded-lg bg-black/20 p-3 outline-none focus:ring-2 focus:ring-brand"
                                 aria-autocomplete="list" aria-controls="mention-suggestions" aria-expanded=move || mentions.expanded().to_string()
                                 aria-activedescendant=move || mentions.active_descendant()
                                 on:keydown=keydown on:click=move |_| mentions.refresh() on:select=move |_| mentions.refresh()

@@ -247,7 +247,7 @@ fn ActionPopover(
                 }
             }>
             <button node_ref=trigger type="button" class="icon-button" aria-label=move ||crate::i18n::t(label)
-                data-tip=move ||crate::i18n::t(label) aria-expanded=move ||open.get().to_string()
+                data-tip=move ||crate::i18n::t(label) aria-haspopup="true" aria-expanded=move ||open.get().to_string()
                 on:click=move |_|open.update(|value| *value = !*value)><Icon kind=icon/></button>
             <div node_ref=panel class="message-popover" hidden=move ||!open.get() role="group" aria-label=move ||crate::i18n::t(label)
                 style:left=move ||format!("{}px",position.get().0) style:top=move ||format!("{}px",position.get().1)
@@ -367,7 +367,8 @@ pub(super) fn Actions(
                     <button type="button" class="icon-button" aria-label=move ||crate::i18n::t("Reply") data-tip=move ||crate::i18n::t("Reply")
                         on:click=move |_|chat.reply_to.set(Some(message.with_untracked(|m|m.id)))><Icon kind=Glyph::Reply/></button>
                     <ActionPopover chat label="Add reaction" icon=Glyph::Reaction>
-                        <div class="message-reaction-picker">
+                        <div class="message-reaction-picker" role="group" aria-label=move ||crate::i18n::t("Quick reactions")
+                            on:keydown=move |e| super::super::keyboard::rove_grid(&e, "button")>
                             {REACTION_EMOJI.iter().map(|emoji| view! {<ReactionButton chat message busy emoji=emoji.to_string()/>}).collect_view()}
                         </div>
                         <details class="message-reaction-more" on:toggle=move |e| more.set(e.target().and_then(|t| t.dyn_into::<web_sys::HtmlDetailsElement>().ok()).is_some_and(|d| d.open()))>
@@ -380,7 +381,7 @@ pub(super) fn Actions(
                 </Show>
                 <Show when=has_more>
                     <ActionPopover chat label="More message options" icon=Glyph::More>
-                        <div class="message-options">
+                        <div class="message-options" on:keydown=move |e| super::super::keyboard::rove_items(&e, ".context-item")>
                             <Show when=can_pin>
                                 <button type="button" class="context-item" on:click=move |_|message.with_untracked(|m|chat.action(ChatRequest::Pin {guild_id:chat.guild,channel_id:chat.channel,message_id:m.id,revision:m.revision,pinned:!m.pinned}))>
                                     <Icon kind=Glyph::Pin/>{move ||message.with(|m|if m.pinned {crate::i18n::t("Unpin")}else{crate::i18n::t("Pin")})}
@@ -438,7 +439,7 @@ pub(super) fn Pins(chat: Chat) -> impl IntoView {
             <section class="max-h-[30vh] shrink-0 overflow-y-auto overscroll-contain border-b border-white/10 bg-surface"
                 aria-label=move ||crate::i18n::t("Pinned messages")>
                 <Show when=move ||chat.rich.with(RichChat::pins_loading)>
-                    <p class="px-4 py-2 text-xs text-white/50" role="status">{move ||crate::i18n::t("Loading pinned messages…")}</p>
+                    <p class="px-4 py-2 text-xs text-white/60" role="status">{move ||crate::i18n::t("Loading pinned messages…")}</p>
                 </Show>
                 <Show when=move ||chat.rich.with(|r|!r.pins_open() && !r.pins_loading())>
                     <button class="m-3 rounded px-3 py-2 text-sm text-sky-300 hover:bg-white/5" on:click=move |_|chat.load_pins()>{move ||crate::i18n::t("Retry pinned messages")}</button>
@@ -463,7 +464,7 @@ fn PinnedMessage(chat: Chat, id: MessageId) -> impl IntoView {
                 <button class="flex min-w-0 flex-1 flex-wrap items-baseline gap-x-3 text-left hover:underline"
                     title=move ||crate::i18n::t("Jump to pinned message") on:click=move |_|chat.jump(id)>
                     <span class="truncate text-sm font-semibold">{move ||message.with(|m|m.as_ref().map(|m|m.display_name().to_owned()))}</span>
-                    <time class="text-xs text-white/45">{move ||message.with(|m|m.as_ref().map(|m|crate::i18n::datetime(m.created_at)))}</time>
+                    <time class="text-xs text-white/60">{move ||message.with(|m|m.as_ref().map(|m|crate::i18n::datetime(m.created_at)))}</time>
                 </button>
                 <button class="icon-button shrink-0" aria-label=move ||crate::i18n::t("Jump to pinned message") title=move ||crate::i18n::t("Jump to pinned message") on:click=move |_|chat.jump(id)><Icon kind=Glyph::Join/></button>
                 <Show when=move ||chat.permissions.with(|p|p.contains(&Permission::ManageMessages))>

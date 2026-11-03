@@ -39,7 +39,7 @@ pub(super) fn BrowserScreenControls(ui: Ui) -> impl IntoView {
         if picking.get()
             && let Some(d) = dialog.get()
         {
-            let _ = d.show_modal();
+            super::dialog::open(&d);
         }
     });
     let choose = move |_| {
@@ -166,7 +166,7 @@ pub(super) fn BrowserCameraControls(ui: Ui) -> impl IntoView {
     });
     view! {
         <button class="icon-button" class:active=active disabled=move ||busy.get() || (!active() && !super::audio::media_publish_allowed(ui))
-            aria-label=move ||if active(){crate::i18n::t("Turn camera off")}else{crate::i18n::t("Turn camera on")}
+            aria-label=move ||crate::i18n::t("Camera")
             data-tip=move ||if active(){crate::i18n::t("Turn camera off")}else if !super::audio::media_publish_allowed(ui){crate::i18n::t("Undeafen to share")}else{crate::i18n::t("Turn camera on")} aria-pressed=move ||active().to_string() on:click=toggle>
             {move ||view!{<Icon kind=if active(){Glyph::Camera}else{Glyph::CameraOff}/>}}
         </button>

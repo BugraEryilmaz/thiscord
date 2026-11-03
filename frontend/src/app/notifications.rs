@@ -737,7 +737,7 @@ fn Editor(ui: Ui) -> impl IntoView {
         let open = ui.notifications.editor.get().is_some();
         if let Some(d) = dialog.get() {
             if open {
-                let _ = d.show_modal();
+                super::dialog::open(&d);
             } else {
                 d.close();
             }
