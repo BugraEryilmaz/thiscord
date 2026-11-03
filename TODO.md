@@ -47,7 +47,8 @@ media compatibility spike can happen before chat to expose platform constraints.
 - [x] Backend for the `/app` web client: HttpOnly cookie sessions with Origin-based CSRF rules, cookie socket authentication, bundle hosting/deploy and browser Opus microphone publishers in the SFU (docs/web.md).
 - [ ] Accept the `/app` web client and browser voice interactively in desktop and mobile Chrome, Safari and Firefox.
 - [x] Prioritized performance audit with bounded backend timings and automatic desktop UI counters accessible through `/admin` (docs/performance-audit.md).
-- [ ] Confirm performance audit priorities under production load before changing polling, pool sizing or frontend snapshot updates.
+- [x] Follow-up performance changes: friends history reuse, configurable pool size, shorter SFU locked fan-out, capped unread counts, indexed friend rows and lighter admin room names (docs/performance-audit.md).
+- [ ] Measure the 2026-11-03 performance follow-ups under production load (friends, pool checkout, SFU fan-out, unread, UI lookup counters) and record results.
 - [ ] Deploy the admin bundle to the VPS and verify production password/Google login and real-client telemetry.
 
 - [x] Three-package workspace with shared Serde communication contracts.
@@ -151,7 +152,7 @@ and single-process chat/media enforcement.
 - [x] History/composer UI with pending/failed/retry states and scroll behavior.
 - [x] Unread markers, mentions, typing indicators and online presence.
 - [x] Guild mention autocomplete by public profile name or username, showing both names with keyboard and pointer selection.
-- [ ] Measure unread fan-out with large backlogs; evaluate maintained sequence-bucket aggregates (see docs/unread-performance.md).
+- [ ] Measure unread fan-out under production subscriber counts with capped counts; re-evaluate maintained aggregates only if it remains costly (see docs/unread-performance.md).
 - [x] Safe message rendering, bounded payloads and spam controls.
 - [x] Clickable web links in guild/private messages, opening in the default desktop browser.
 - [x] Reconnect, duplicate delivery, channel isolation and channel deletion tests.

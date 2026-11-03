@@ -123,6 +123,55 @@ support: bots have no WebView and therefore do not supply UI measurements.
    distinguish frontend responsiveness from backend latency. Timer lateness is a
    screening signal: OS sleep and scheduling can also cause it.
 
+## Follow-up changes (2026-11-03)
+
+These changes address the findings above without new production measurements.
+They are expected to reduce the named work; none of them has a measured speedup.
+Compare the same monitors before and after deploying them.
+
+- **Finding 1, friends history.** Snapshot reads keep their authentication,
+  relationship locks, access filtering, call expiry and ten-second cadence, but
+  reload the selected conversation's history only after the selection/page
+  changes, a message send/edit/delete commits in that conversation, or the cached
+  page is 60 seconds old (see [friends](friends.md)). New clients opt in with a
+  socket query to receive history only when it changed; older clients still get
+  it in every snapshot. **Friends snapshot** includes the remaining reads;
+  **Friends unchanged** now counts reads where neither the snapshot nor the history
+  revision changed.
+- **Finding 2, pool size.** `DATABASE_POOL_SIZE` (1-32, default 5) configures the
+  pool; checkout, statement and lock timeouts are unchanged (see
+  [database](database.md)). The default stays five because no checkout-wait
+  measurement has justified a different value.
+- **Finding 3, SFU fan-out.** Packet-only parsing (screen layer and layer CSRCs)
+  moved before the room read lock. Under the lock the relay still validates the
+  source, rewrites the header, plans screen layers and admits each recipient,
+  including both endpoints' access permits, viewer/route state and the screen byte
+  budget. The mpsc enqueues, which can wake writer tasks, now run after the lock is
+  released, synchronously and while the admitted permits are held. Access-mutation
+  drains therefore still wait for every admitted packet, and egress writers still
+  revalidate under the room lock before transport writes. **SFU locked fanout**
+  measures the shorter locked admission only; enqueue time is not separately timed.
+- **Finding 4, unread counts.** Counts and mentions are exact below 1,000 and
+  capped at 1,000 otherwise (shown as "999+"), with each channel's scan limited to
+  that many live rows. Mentions use a new partial index of mention-bearing messages.
+  The synthetic local benchmark visits 40,000 instead of 200,000 message rows for a
+  200,000-message backlog (see [unread performance](unread-performance.md)); this
+  is one local measurement, not production latency.
+- **Finding 5, friend rows.** A memoized map indexes friends by conversation ID.
+  Rows, call cards and the open conversation read single entries through memos
+  that clone only that friend; list filters, call lists and the conversation's
+  history effect borrow the snapshot instead of cloning it, and history is cloned
+  only for the matching conversation. **Friend row snapshot lookup** now times
+  each row memo's map lookup and single-row clone, so its call count follows rows
+  re-evaluated after a friends-list change rather than every derived read.
+- **Finding 7, admin dashboard.** Diagnostics read channel names only for rooms
+  live in the voice registry, instead of every channel, and skip that query when no
+  room exists. The dashboard's room section re-renders only when room telemetry
+  changes, so idle instances no longer rebuild it on every five-second refresh;
+  host and performance sections still rebuild per refresh. Chat geometry reads in
+  `app/chat.rs` are unchanged: no change was found that clearly avoids a forced
+  layout without changing scroll anchoring behavior.
+
 ## Reading the monitors
 
 Open `/admin` as the instance owner or an instance admin. **Performance monitors**
