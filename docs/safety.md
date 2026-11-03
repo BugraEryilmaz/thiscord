@@ -31,6 +31,11 @@ channel override or remove anyone from a shared room. Existing guild sockets may
 conservatively reconnect and guild media reauthorizes after account gate invalidation.
 Use guild moderation and personal voice controls for shared-room behavior. The UI
 explains this before blocking and in Settings → Safety & reports.
+One exception extends the private presence rule to guilds: across a block in either
+direction, guild member lists show the other account as offline and omit its custom
+status, and profile cards omit the status. Membership, names, avatars and bios stay
+visible to identify members for moderation and reports. Block/unblock revokes both
+accounts' existing sockets, so reconnecting member lists reflect the change.
 
 ## Explicit reporting and evidence
 

@@ -22,6 +22,15 @@ friend list to add or unfriend them. Pending requests offer Accept/Decline or
 Cancel instead; removing a friend requires confirmation. These actions follow
 the live relationship state and are disabled while the friends socket reconnects.
 
+Friend rows and the direct-message header show an accepted friend's custom status
+(`Person.custom_status`); search results and pending requests never include it.
+Each snapshot also carries the connected account's own status as `own_status`,
+which keeps the account ribbon synchronized live across that account's devices:
+setting or clearing a status wakes the account's own friends sockets as well as
+everyone listing it. Snapshots are rebuilt at the earliest listed status expiry,
+like call expiry. Both fields are optional and omitted when unset. See
+[accounts.md](accounts.md#custom-status).
+
 Accepted friends can open a private conversation and start a voice call without
 sharing a guild. Online means at least one authenticated friends socket is alive,
 regardless of the selected guild/channel. Multiple devices count as one person;
