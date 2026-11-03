@@ -356,6 +356,9 @@ pub struct ClientFrame {
 pub enum ClientEvent {
     Connect {
         token: String,
+        /// Opt in to `guild_updated` hints so older clients never receive them.
+        #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+        guild_updates: bool,
     },
     Subscribe {
         subscription: u64,
@@ -425,12 +428,46 @@ pub enum ServerEvent {
     Error {
         error: ApiError,
     },
+    /// Presentation metadata (name/icon) of a guild the account belongs to changed.
+    /// A hint only: clients re-read guilds over authorized HTTP. Sent only to
+    /// sockets that opted in with `guild_updates` on `connect`.
+    GuildUpdated {
+        guild_id: GuildId,
+    },
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
     use serde_json::json;
+
+    #[test]
+    fn guild_update_hints_are_opt_in() {
+        let legacy = json!({"type":"connect","token":"t"});
+        let ClientEvent::Connect { guild_updates, .. } =
+            serde_json::from_value(legacy.clone()).unwrap()
+        else {
+            panic!()
+        };
+        assert!(!guild_updates);
+        let event = ClientEvent::Connect {
+            token: "t".into(),
+            guild_updates: false,
+        };
+        assert_eq!(serde_json::to_value(event).unwrap(), legacy);
+        let opted = json!({"type":"connect","token":"t","guild_updates":true});
+        assert!(matches!(
+            serde_json::from_value(opted).unwrap(),
+            ClientEvent::Connect {
+                guild_updates: true,
+                ..
+            }
+        ));
+        let id = "00000000-0000-0000-0000-000000000001";
+        let hint = json!({"type":"guild_updated","guild_id":id});
+        let parsed: ServerEvent = serde_json::from_value(hint.clone()).unwrap();
+        assert_eq!(serde_json::to_value(parsed).unwrap(), hint);
+    }
 
     #[test]
     fn mention_suggestions_use_public_identity_and_stable_tags() {

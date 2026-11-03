@@ -347,7 +347,7 @@ fn GuildSounds(ui: Ui, guild: GuildId) -> impl IntoView {
                     {if sound.builtin {
                         view! {<span class="settings-badge">{move || crate::i18n::t("Built-in")}</span>}.into_any()
                     } else {
-                        view! {<ConfirmButton ui=ui label="Delete" title="Delete this sound?" detail="Everyone in this server will lose access to it." on_confirm=Callback::new(move |()| run(SoundboardRequest::Delete { guild_id: guild, revision, sound_id: id }))/>}.into_any()
+                        view! {<ConfirmButton ui=ui label="Delete" title="Delete this sound?" detail="Everyone in this server will lose access to it. This cannot be undone." target=Signal::stored(label(&sound)) on_confirm=Callback::new(move |()| run(SoundboardRequest::Delete { guild_id: guild, revision, sound_id: id }))/>}.into_any()
                     }}
                 </li>}
             }).collect_view())}</ul>

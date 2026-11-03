@@ -195,6 +195,14 @@ diesel::table! {
 }
 
 diesel::table! {
+    guild_icons (guild_id) {
+        guild_id -> Uuid,
+        id -> Uuid,
+        png -> Bytea,
+    }
+}
+
+diesel::table! {
     guild_invites (id) {
         id -> Uuid,
         guild_id -> Uuid,
@@ -463,6 +471,7 @@ diesel::joinable!(direct_messages -> accounts (author_id));
 diesel::joinable!(direct_messages -> friendships (conversation_id));
 diesel::joinable!(friend_calls -> friendships (conversation_id));
 diesel::joinable!(guild_audit_log -> guilds (guild_id));
+diesel::joinable!(guild_icons -> guilds (guild_id));
 diesel::joinable!(guild_invites -> accounts (created_by));
 diesel::joinable!(guild_invites -> guilds (guild_id));
 diesel::joinable!(guild_members -> accounts (account_id));
@@ -508,6 +517,7 @@ diesel::allow_tables_to_appear_in_same_query!(
     friend_calls,
     friendships,
     guild_audit_log,
+    guild_icons,
     guild_invites,
     guild_member_roles,
     guild_members,

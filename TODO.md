@@ -129,7 +129,8 @@ and single-process chat/media enforcement.
 
 - [x] Create/edit/delete guild HTTP commands, list memberships, join by ID/password and leave.
 - [x] Joined-server rail with circular initials avatars, names on hover, create/join dialogs.
-- [ ] Custom server images and password-change settings UI.
+- [x] Custom server icons: upload/replace/remove with ManageGuild, live rail/header/banner updates.
+- [ ] Server password-change settings UI.
 - [x] Invite links with optional expiry/use limits, revocation and join validation.
 - [x] Browser invite landing with desktop handoff, web client handoff, installer links and unlimited invite copying.
 - [ ] Validate installed invite activation on Windows, macOS and Linux (cold start, running/tray and signed out).
@@ -142,7 +143,8 @@ and single-process chat/media enforcement.
 - [x] Account custom status with emoji, expiry presets, cross-device sync and friend/guild/DM/voice-tooltip display.
 - [ ] Role display/hoist settings for member list grouping and colours.
 - [ ] Accept the member list drawer, profile cards and custom status dialog interactively on Windows/macOS/Linux and mobile browsers.
-- [ ] Cascade/archive behavior and confirmation UX for destructive operations.
+- [x] Shared confirmation dialog for destructive operations; current cascades documented.
+- [ ] Archive (soft-delete/restore) behavior for destructive operations.
 - [ ] Transaction and authorization tests for management operations.
 
 ## 4. Text chat and real-time transport

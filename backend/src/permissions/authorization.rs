@@ -30,7 +30,7 @@ pub(crate) fn load(
             ))
         )
         SELECT jsonb_build_object(
-            'guild', jsonb_build_object('id',g.id,'name',g.name,'owner',g.owner,'revision',g.revision),
+            'guild', jsonb_build_object('id',g.id,'name',g.name,'owner',g.owner,'revision',g.revision,'icon_id',(SELECT i.id FROM guild_icons i WHERE i.guild_id=g.id)),
             'roles', COALESCE((SELECT jsonb_agg(to_jsonb(r)) FROM selected_roles r), '[]'),
             'members', COALESCE((SELECT jsonb_agg(jsonb_build_object(
                 'account_id', a.id, 'username', a.username, 'display_name', a.display_name,

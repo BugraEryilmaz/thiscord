@@ -274,7 +274,7 @@ fn Security(ui: Ui) -> impl IntoView {
             <Show when=move ||ui.page.get()=="reauthenticate"><button class="settings-link" on:click=move |_|navigate(ui,"administration")>{move ||crate::i18n::t("Return to instance access")}</button></Show>
         </section>
         <section class="settings-card"><h3>{move || crate::i18n::t("Change password")}</h3><p class="settings-hint">{move || crate::i18n::t("Use at least 12 characters. Saving signs you out on every device.")}</p><form class="space-y-4" on:submit=move |e:leptos::ev::SubmitEvent|{e.prevent_default();let value=password.get_untracked();password.set(String::new());super::run(ui,AccountRequest::ChangePassword{password:value});}><Field label="New password" value=password kind="password" autocomplete="new-password"/><button class="settings-primary" disabled=move ||ui.busy.get()||password.get().chars().count()<12>{move || crate::i18n::t("Save new password")}</button></form></section>
-        <details class="settings-card settings-danger-zone"><summary>{move || crate::i18n::t("Delete account")}</summary><p class="settings-hint">{move || crate::i18n::t("Permanently deletes your profile, credentials and sessions. Transfer or delete any servers you own first. Confirm your identity above before continuing.")}</p><Field label="Type your username to confirm" value=confirmation/><ConfirmButton ui=ui label="Delete my account" title="Permanently delete your account?" detail="This cannot be undone. Your profile, credentials and sessions will be deleted." disabled=Signal::derive(move ||ui.account.get().is_none_or(|a|confirmation.get()!=a.username)) on_confirm=Callback::new(move |()|super::run(ui,AccountRequest::DeleteAccount{confirmation:confirmation.get_untracked()}))/></details>
+        <details class="settings-card settings-danger-zone"><summary>{move || crate::i18n::t("Delete account")}</summary><p class="settings-hint">{move || crate::i18n::t("Permanently deletes your profile, credentials and sessions. Transfer or delete any servers you own first. Confirm your identity above before continuing.")}</p><Field label="Type your username to confirm" value=confirmation/><ConfirmButton ui=ui label="Delete my account" title="Permanently delete your account?" detail="This cannot be undone. Your profile, credentials and sessions will be deleted." disabled=Signal::derive(move ||ui.account.get().is_none_or(|a|confirmation.get()!=a.username)) target=Signal::derive(move ||ui.account.get().map(|a|format!("@{}",a.username)).unwrap_or_default()) action=super::confirmed(ui,move ||AccountRequest::DeleteAccount{confirmation:confirmation.get_untracked()})/></details>
     }
 }
 
@@ -282,25 +282,46 @@ fn Security(ui: Ui) -> impl IntoView {
 fn Devices(ui: Ui) -> impl IntoView {
     view! {
         <section class="settings-card"><h3>{move || crate::i18n::t("Signed-in devices")}</h3><p class="settings-hint">{move || crate::i18n::t("Remove access for devices you no longer use.")}</p><Show when=move ||ui.sessions.get().is_empty()><p class="settings-hint">{move ||if ui.busy.get(){crate::i18n::t("Loading devices…")}else{crate::i18n::t("No devices to display.")}}</p></Show>
-            <ul class="settings-device-list">{move ||ui.sessions.get().into_iter().map(|s|{let id=s.id;view!{<li><div class="settings-device-icon"><Icon kind=Glyph::Screen/></div><div class="min-w-0 flex-1"><strong>{s.device}</strong><Show when=move ||s.current><span class="settings-badge">{move || crate::i18n::t("This device")}</span></Show><p>{move || thiscord_frontend::localized_format!(crate::i18n::language(), "Last active {}",crate::i18n::datetime(s.last_seen_at))}</p></div><ConfirmButton ui=ui label="Sign out" title="Sign out this device?" detail="Its current session will end." on_confirm=Callback::new(move |()|super::run(ui,AccountRequest::RevokeSession{session_id:id}))/></li>}}).collect_view()}</ul>
-            <ConfirmButton ui=ui label="Sign out all devices" title="Sign out everywhere?" detail="You’ll need to sign in again on every device, including this one." on_confirm=Callback::new(move |()|super::run(ui,AccountRequest::LogoutAll))/>
+            <ul class="settings-device-list">{move ||ui.sessions.get().into_iter().map(|s|{let id=s.id;let device=s.device.clone();view!{<li><div class="settings-device-icon"><Icon kind=Glyph::Screen/></div><div class="min-w-0 flex-1"><strong>{s.device}</strong><Show when=move ||s.current><span class="settings-badge">{move || crate::i18n::t("This device")}</span></Show><p>{move || thiscord_frontend::localized_format!(crate::i18n::language(), "Last active {}",crate::i18n::datetime(s.last_seen_at))}</p></div><ConfirmButton ui=ui label="Sign out" title="Sign out this device?" detail="Its current session will end." target=Signal::stored(device.clone()) action=super::confirmed(ui,move ||AccountRequest::RevokeSession{session_id:id})/></li>}}).collect_view()}</ul>
+            <ConfirmButton ui=ui label="Sign out all devices" title="Sign out everywhere?" detail="You’ll need to sign in again on every device, including this one." action=super::confirmed(ui,||AccountRequest::LogoutAll)/>
         </section>
-        <section class="settings-card"><h3>{move || crate::i18n::t("Login methods")}</h3><p class="settings-hint">{move || crate::i18n::t("Confirm your identity in Password & security before changing login methods. Keep at least one method.")}</p>{move ||ui.account.get().map(|a|a.identities.into_iter().map(|provider|view!{<div class="settings-info-row"><strong>{match provider{IdentityProvider::Google=>"Google",IdentityProvider::Password=>crate::i18n::t("Password")}}</strong><ConfirmButton ui=ui label="Remove" title="Remove this login method?" detail="Make sure you can sign in with another method before continuing." on_confirm=Callback::new(move |()|super::run(ui,AccountRequest::UnlinkIdentity{provider}))/></div>}).collect_view())}<button class="settings-secondary" disabled=move ||ui.busy.get() on:click=move |_|super::google(ui,GooglePurpose::Link)>{move || crate::i18n::t("Connect Google")}</button><button class="settings-link" on:click=move |_|navigate(ui,"security")>{move || crate::i18n::t("Password & security")}</button></section>
+        <section class="settings-card"><h3>{move || crate::i18n::t("Login methods")}</h3><p class="settings-hint">{move || crate::i18n::t("Confirm your identity in Password & security before changing login methods. Keep at least one method.")}</p>{move ||ui.account.get().map(|a|a.identities.into_iter().map(|provider|view!{<div class="settings-info-row"><strong>{match provider{IdentityProvider::Google=>"Google",IdentityProvider::Password=>crate::i18n::t("Password")}}</strong><ConfirmButton ui=ui label="Remove" title="Remove this login method?" detail="Make sure you can sign in with another method before continuing." target=Signal::stored(match provider{IdentityProvider::Google=>"Google".to_owned(),IdentityProvider::Password=>crate::i18n::t("Password").to_owned()}) action=super::confirmed(ui,move ||AccountRequest::UnlinkIdentity{provider})/></div>}).collect_view())}<button class="settings-secondary" disabled=move ||ui.busy.get() on:click=move |_|super::google(ui,GooglePurpose::Link)>{move || crate::i18n::t("Connect Google")}</button><button class="settings-link" on:click=move |_|navigate(ui,"security")>{move || crate::i18n::t("Password & security")}</button></section>
     }
 }
 
+/// Danger button that asks for confirmation in the shared dialog. Prefer `action`,
+/// which reports errors inside the dialog; `on_confirm` adapts busy-flag commands.
 #[component]
 pub(super) fn ConfirmButton(
     ui: Ui,
     label: &'static str,
     title: &'static str,
     detail: &'static str,
-    on_confirm: Callback<()>,
+    #[prop(optional)] on_confirm: Option<Callback<()>>,
+    #[prop(optional)] action: Option<super::dialog::Action>,
+    /// Names what is affected, e.g. a channel, role or device.
+    #[prop(optional, into)]
+    target: Option<Signal<String>>,
     #[prop(default = Signal::derive(||false))] disabled: Signal<bool>,
 ) -> impl IntoView {
-    let dialog = NodeRef::<leptos::html::Dialog>::new();
-    view! {<button type="button" class="settings-danger" disabled=move ||disabled.get()||ui.busy.get() on:click=move |_|if let Some(d)=dialog.get(){let _=d.show_modal();}>{move || crate::i18n::t(label)}</button>
-        <dialog node_ref=dialog class="context-dialog" aria-label=move ||crate::i18n::t(title) on:click=move |e|super::dialog::dismiss_outside(e,dialog,false)><h2 class="text-xl font-semibold">{move || crate::i18n::t(title)}</h2><p class="mt-3 text-sm text-white/60">{move || crate::i18n::t(detail)}</p><div class="settings-actions mt-6"><button type="button" class="settings-secondary" autofocus on:click=move |_|if let Some(d)=dialog.get(){d.close();}>{move || crate::i18n::t("Cancel")}</button><button type="button" class="settings-danger" disabled=move ||disabled.get()||ui.busy.get() on:click=move |_|{on_confirm.run(());
-                if let Some(d)=dialog.get(){d.close();}}>{move || crate::i18n::t(label)}</button></div></dialog>
-    }
+    let action =
+        StoredValue::new_local(action.or_else(|| {
+            on_confirm.map(|run| super::dialog::Action::settle(ui, move || run.run(())))
+        }));
+    let open = move |_| {
+        let Some(action) = action.get_value() else {
+            return;
+        };
+        let mut prompt = super::dialog::Confirmation::new(
+            crate::i18n::t(title),
+            crate::i18n::t(detail),
+            crate::i18n::t(label),
+            action,
+        );
+        if let Some(target) = target {
+            prompt = prompt.target(target.get_untracked());
+        }
+        super::dialog::confirm(ui, prompt);
+    };
+    view! {<button type="button" class="settings-danger" disabled=move ||disabled.get()||ui.busy.get() on:click=open>{move || crate::i18n::t(label)}</button>}
 }

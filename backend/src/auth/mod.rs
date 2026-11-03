@@ -1,5 +1,5 @@
 //! Account entry points. Database and Argon2 work run on bounded blocking workers.
-mod avatar;
+pub(crate) mod avatar;
 pub mod cookie;
 mod google;
 pub mod mail;

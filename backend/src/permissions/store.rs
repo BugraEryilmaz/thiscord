@@ -180,7 +180,7 @@ pub(crate) fn load(c: &mut PgConnection, id: GuildId) -> Result<GuildState, Fail
     let id = id.to_string();
     let guild: Guild = query(
         c,
-        "SELECT to_jsonb(g) AS data FROM guilds g WHERE id=$1::uuid",
+        "SELECT to_jsonb(g)||jsonb_build_object('icon_id',(SELECT i.id FROM guild_icons i WHERE i.guild_id=g.id)) AS data FROM guilds g WHERE id=$1::uuid",
         &[&id],
     )?
     .pop()
@@ -294,6 +294,14 @@ pub(super) fn dispatch(
                 | PermissionRequest::CreateGuild { .. }
         ),
     )?;
+    let renamed = match &command {
+        PermissionRequest::Change {
+            guild_id,
+            change: GuildChange::Rename { .. },
+            ..
+        } => Some(*guild_id),
+        _ => None,
+    };
     let mut c = connection(pool)?;
     let scope = match &command {
         PermissionRequest::Change {
@@ -445,7 +453,7 @@ pub(super) fn dispatch(
                 Ok(PermissionResponse::Instance { access: public_instance(c,actor)? })
             }
             PermissionRequest::AcceptInvite { code } => organization::accept(c,actor,&code),
-            PermissionRequest::ListGuilds {} => Ok(PermissionResponse::Guilds { guilds: query(c,"SELECT to_jsonb(g) AS data FROM guilds g JOIN guild_members m ON m.guild_id=g.id WHERE m.account_id=$1::uuid ORDER BY g.id", &[&actor.to_string()])? }),
+            PermissionRequest::ListGuilds {} => Ok(PermissionResponse::Guilds { guilds: query(c,"SELECT to_jsonb(g)||jsonb_build_object('icon_id',(SELECT i.id FROM guild_icons i WHERE i.guild_id=g.id)) AS data FROM guilds g JOIN guild_members m ON m.guild_id=g.id WHERE m.account_id=$1::uuid ORDER BY g.id", &[&actor.to_string()])? }),
             PermissionRequest::CreateGuild { name: value, password } => {
                 verified(c,actor)?;
                 let name=name(&value)?;
@@ -476,7 +484,7 @@ pub(super) fn dispatch(
                     execute(c,"INSERT INTO guild_members(guild_id,account_id) VALUES($1::uuid,$2::uuid)", &[&guild_id.to_string(),&actor.to_string()])?;
                     execute(c,"UPDATE guilds SET revision=revision+1 WHERE id=$1::uuid", &[&guild_id.to_string()])?;
                 }
-                let guild=query(c,"SELECT to_jsonb(g) AS data FROM guilds g WHERE id=$1::uuid", &[&guild_id.to_string()])?.pop().ok_or(Failure::Forbidden)?;
+                let guild=query(c,"SELECT to_jsonb(g)||jsonb_build_object('icon_id',(SELECT i.id FROM guild_icons i WHERE i.guild_id=g.id)) AS data FROM guilds g WHERE id=$1::uuid", &[&guild_id.to_string()])?.pop().ok_or(Failure::Forbidden)?;
                 Ok(PermissionResponse::Joined {guild})
             }
             command => {
@@ -542,7 +550,13 @@ pub(super) fn dispatch(
     for change in changes {
         change.finish(result.is_ok());
     }
-    crate::access::complete(result, &mut mutations)
+    let result = crate::access::complete(result, &mut mutations);
+    if result.is_ok()
+        && let Some(guild) = renamed
+    {
+        crate::chat::guild_updated(guild);
+    }
+    result
 }
 
 fn change_guild(

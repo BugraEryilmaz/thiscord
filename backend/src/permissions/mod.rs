@@ -1,5 +1,6 @@
 pub(crate) mod authorization;
 pub mod evaluator;
+mod icon;
 pub(crate) mod store;
 
 use crate::{
@@ -11,7 +12,7 @@ use axum::{
     extract::{DefaultBodyLimit, State, rejection::JsonRejection},
     http::HeaderMap,
     response::{IntoResponse, Response},
-    routing::post,
+    routing::{get, post},
 };
 use thiscord_shared::{RequestId, permissions::*};
 
@@ -19,6 +20,11 @@ pub fn router() -> Router<Option<DbPool>> {
     Router::new()
         .route(PERMISSIONS_PATH, post(handle))
         .layer(DefaultBodyLimit::max(16 * 1024))
+        .route(
+            GUILD_ICON_PATH,
+            post(icon::set).layer(DefaultBodyLimit::max(MAX_GUILD_ICON_BASE64 + 1024)),
+        )
+        .route(&format!("{GUILD_ICON_PATH}/{{icon_id}}"), get(icon::get))
 }
 async fn handle(
     State(pool): State<Option<DbPool>>,

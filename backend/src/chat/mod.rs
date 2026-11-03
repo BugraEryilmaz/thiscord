@@ -30,6 +30,17 @@ use thiscord_shared::{ApiError, ErrorCode, RequestId, chat::*, permissions::Perm
 use tokio::sync::Semaphore;
 use uuid::Uuid;
 
+fn guild_updates() -> &'static tokio::sync::broadcast::Sender<thiscord_shared::GuildId> {
+    static UPDATES: OnceLock<tokio::sync::broadcast::Sender<thiscord_shared::GuildId>> =
+        OnceLock::new();
+    UPDATES.get_or_init(|| tokio::sync::broadcast::channel(64).0)
+}
+/// Call after a guild presentation change (name/icon) commits. Opted-in sockets
+/// check current membership before forwarding the ID-only hint. Single process only.
+pub(crate) fn guild_updated(guild: thiscord_shared::GuildId) {
+    let _ = guild_updates().send(guild);
+}
+
 pub fn router(origins: Vec<HeaderValue>) -> Router<Option<DbPool>> {
     Router::new()
         .route(CHAT_PATH, post(handle))
@@ -162,9 +173,13 @@ async fn serve(mut socket: WebSocket, pool: DbPool, id: RequestId, upgrade_token
         return;
     };
     let event = frame(message);
-    if let Some(ClientEvent::Connect { token }) = event {
+    if let Some(ClientEvent::Connect {
+        token,
+        guild_updates,
+    }) = event
+    {
         let token = auth::socket_token(token, &upgrade_token);
-        session::serve(socket, pool, id, token).await;
+        session::serve(socket, pool, id, token, guild_updates).await;
         return;
     }
     let Some(ClientEvent::Authenticate {

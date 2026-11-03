@@ -42,6 +42,7 @@ fn update_home(ui: Ui, selection: Selection, home: GuildHome) {
             old.guild.id == home.guild.id
                 && old.guild.revision == home.guild.revision
                 && old.guild.name == home.guild.name
+                && old.guild.icon_id == home.guild.icon_id
                 && old.guild.owner == home.guild.owner
                 && old.can_manage_roles == home.can_manage_roles
                 && old.can_manage_channels == home.can_manage_channels
@@ -257,16 +258,10 @@ pub(super) fn open_voice(ui: Ui) {
 #[component]
 fn GuildButton(ui: Ui, guild: Guild) -> impl IntoView {
     let id = guild.id;
-    let initials = guild
-        .name
-        .split_whitespace()
-        .take(2)
-        .filter_map(|s| s.chars().next())
-        .collect::<String>()
-        .to_uppercase();
+    let (name, icon) = (guild.name.clone(), guild.icon_id);
     view! {
-        <button class="guild-button" data-context-server=id.to_string() aria-haspopup="menu" class:selected=move ||ui.navigation.get().current().guild==Some(id) aria-busy=move ||(ui.navigation.get().current().guild==Some(id) && ui.navigation.get().pending).to_string() aria-label=guild.name.clone() data-tip=guild.name
-            on:click=move |_|navigate(ui,id)>{initials}</button>
+        <button class="guild-button relative overflow-hidden" data-context-server=id.to_string() aria-haspopup="menu" class:selected=move ||ui.navigation.get().current().guild==Some(id) aria-busy=move ||(ui.navigation.get().current().guild==Some(id) && ui.navigation.get().pending).to_string() aria-label=guild.name.clone() data-tip=guild.name
+            on:click=move |_|navigate(ui,id)><crate::avatar::GuildIcon name=name icon_id=icon/></button>
     }
 }
 
@@ -616,7 +611,7 @@ pub(super) fn ServerHome(ui: Ui) -> impl IntoView {
             <section class="server-layout">
                 {move ||ui.server.get().map(|home|view!{
                     <nav class="channel-sidebar" aria-label=move || crate::i18n::t("Server channels")>
-                        <div class="flex items-center gap-2" data-context-server=home.guild.id.to_string()><h2 class="min-w-0 flex-1 break-words text-lg font-bold">{home.guild.name.clone()}</h2>
+                        <div class="flex items-center gap-2" data-context-server=home.guild.id.to_string()><span class="relative grid size-8 shrink-0 place-items-center overflow-hidden rounded-xl bg-white/10 text-xs font-semibold"><crate::avatar::GuildIcon name=home.guild.name.clone() icon_id=home.guild.icon_id/></span><h2 class="min-w-0 flex-1 break-words text-lg font-bold">{home.guild.name.clone()}</h2>
                             <Show when=move ||home.can_manage_bots || home.can_manage_roles || home.can_manage_channels || home.can_manage_invites || home.can_moderate><button class="icon-button shrink-0" aria-label=move || crate::i18n::t("Server roles and settings") data-tip=move || crate::i18n::t("Server settings") on:click=move |_|{ui.role_target.set(None);ui.permission_channel.set(None);ui.page.set(if home.can_manage_roles{"permissions"}else if home.can_manage_bots{"server_bots"}else if home.can_manage_channels{"server_organization"}else if home.can_manage_invites{"server_invites"}else{"moderation"});}><Icon kind=Glyph::Settings/></button></Show>
                             <Show when=move ||home.can_manage_invites><button class="shrink-0 rounded p-1 text-white/50 hover:bg-white/10 hover:text-white disabled:opacity-50" data-tip=move || crate::i18n::t("Copy invite link") aria-label=move || crate::i18n::t("Copy invite link") disabled=move ||ui.busy.get() on:click=move |_|super::invites::copy(ui,home.guild.id)><Icon kind=Glyph::Link/></button></Show>
                         </div>

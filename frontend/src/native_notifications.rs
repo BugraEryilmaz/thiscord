@@ -470,6 +470,7 @@ mod tests {
             actor: None,
             call_id: None,
             version: None,
+            guild_icon_id: None,
         };
         let mut state = Presentation::default();
         let old_generation = state.generation;
@@ -504,6 +505,7 @@ mod tests {
             actor: None,
             call_id: Some(call),
             version: None,
+            guild_icon_id: None,
         };
         let mut state = Presentation::default();
         state.sync_calls(vec![call]);
