@@ -74,7 +74,8 @@ fn presence() -> &'static Mutex<HashMap<AccountId, usize>> {
     static PRESENCE: OnceLock<Mutex<HashMap<AccountId, usize>>> = OnceLock::new();
     PRESENCE.get_or_init(Default::default)
 }
-fn online(id: AccountId) -> bool {
+/// Account-wide presence: at least one authenticated friends socket in this process.
+pub(crate) fn online(id: AccountId) -> bool {
     presence().lock().unwrap().contains_key(&id)
 }
 struct Connected(AccountId);

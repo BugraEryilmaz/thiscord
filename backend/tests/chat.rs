@@ -20,6 +20,8 @@ mod attachments;
 mod bots;
 #[path = "chat/friends.rs"]
 mod friends;
+#[path = "chat/members.rs"]
+mod members;
 #[path = "chat/mentions.rs"]
 mod mentions;
 #[path = "chat/notifications.rs"]

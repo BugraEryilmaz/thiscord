@@ -751,6 +751,7 @@ async fn connected(ui: Ui, token: &str) -> Result<(), String> {
                     guild_id: wanted.guild,
                     channel_id: wanted.channel,
                     voice_roster: true,
+                    members: false,
                 })
             } else if count.is_multiple_of(100) {
                 Some(ClientEvent::Ping {})

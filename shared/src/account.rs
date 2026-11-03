@@ -17,6 +17,10 @@ pub const AVATAR_SIZE: u32 = 256;
 pub const GOOGLE_CALLBACK_PATH: &str = "/api/v1/account/google/callback";
 pub const EMAIL_VERIFICATION_PATH: &str = "/api/v1/account/verify-email";
 pub const PASSWORD_RESET_PATH: &str = "/api/v1/account/reset-password";
+/// Custom status text bound, in Unicode scalar values.
+pub const MAX_STATUS_CHARS: usize = 128;
+/// Longest accepted custom status lifetime: seven days, in seconds.
+pub const MAX_STATUS_SECONDS: u32 = 7 * 24 * 60 * 60;
 
 #[derive(Serialize, Deserialize)]
 pub struct PasswordResetQuery {
@@ -85,6 +89,10 @@ pub enum AccountRequest {
     SetAvatar {
         image_base64: Option<String>,
     },
+    /// Null clears the custom status on every device.
+    SetCustomStatus {
+        status: Option<CustomStatusUpdate>,
+    },
     UnlinkIdentity {
         provider: IdentityProvider,
     },
@@ -131,6 +139,65 @@ pub struct Account {
     pub avatar_id: Option<AvatarId>,
     pub created_at: Timestamp,
     pub identities: Vec<IdentityProvider>,
+    /// Absent from older servers and while no unexpired status is set.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub custom_status: Option<CustomStatus>,
+}
+
+/// Account-level custom status. Its audience matches the public profile (the
+/// account itself, accepted friends and fellow guild members), except across a
+/// block in either direction. Text is plain text, never Markdown or HTML.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CustomStatus {
+    /// One emoji from the shared palette ([`crate::chat::EMOJI_GROUPS`]).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub emoji: Option<String>,
+    #[serde(default)]
+    pub text: String,
+    /// Null means the status stays until cleared. Expired statuses are never sent.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub expires_at: Option<Timestamp>,
+}
+
+/// Requested custom status. The server computes the expiry with its own clock.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct CustomStatusUpdate {
+    #[serde(default)]
+    pub emoji: Option<String>,
+    #[serde(default)]
+    pub text: String,
+    /// Seconds from now (1 to [`MAX_STATUS_SECONDS`]); null keeps it until cleared.
+    #[serde(default)]
+    pub expires_in: Option<u32>,
+}
+
+impl CustomStatusUpdate {
+    /// Validates the update and returns its trimmed text. The emoji must be a
+    /// single palette entry; text is bounded, single-line and control-free.
+    pub fn validate(&self) -> Result<&str, &'static str> {
+        let text = self.text.trim();
+        if text.chars().count() > MAX_STATUS_CHARS || text.chars().any(char::is_control) {
+            return Err("Custom status text must be at most 128 characters on one line");
+        }
+        if self
+            .emoji
+            .as_deref()
+            .is_some_and(|emoji| !crate::chat::is_reaction_emoji(emoji))
+        {
+            return Err("Choose a custom status emoji from the picker");
+        }
+        if text.is_empty() && self.emoji.is_none() {
+            return Err("Add an emoji or text to set a custom status");
+        }
+        if self
+            .expires_in
+            .is_some_and(|seconds| seconds == 0 || seconds > MAX_STATUS_SECONDS)
+        {
+            return Err("Custom status can expire after at most seven days");
+        }
+        Ok(text)
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -175,6 +242,80 @@ pub enum AccountResponse {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn custom_status_is_validated_and_additive() {
+        let update =
+            |emoji: Option<&str>, text: &str, expires_in: Option<u32>| CustomStatusUpdate {
+                emoji: emoji.map(Into::into),
+                text: text.into(),
+                expires_in,
+            };
+        assert_eq!(
+            update(Some("🎮"), "  Playing  ", None).validate(),
+            Ok("Playing")
+        );
+        assert_eq!(update(Some("🎮"), "", Some(1800)).validate(), Ok(""));
+        let longest = "ç".repeat(MAX_STATUS_CHARS);
+        assert_eq!(
+            update(None, &longest, Some(MAX_STATUS_SECONDS)).validate(),
+            Ok(longest.as_str())
+        );
+        for invalid in [
+            update(None, "", None),
+            update(None, "   ", None),
+            update(None, &"x".repeat(MAX_STATUS_CHARS + 1), None),
+            update(None, "two\nlines", None),
+            update(None, "bell\u{7}", None),
+            update(Some("x"), "text", None),
+            update(Some("🎮🎮"), "text", None),
+            update(Some("<img>"), "", None),
+            update(None, "text", Some(0)),
+            update(None, "text", Some(MAX_STATUS_SECONDS + 1)),
+        ] {
+            assert!(invalid.validate().is_err(), "{invalid:?}");
+        }
+        let wire = serde_json::json!({"action":"set_custom_status","status":{"emoji":"🎮","text":"Playing","expires_in":3600}});
+        let request: AccountRequest = serde_json::from_value(wire.clone()).unwrap();
+        assert_eq!(serde_json::to_value(request).unwrap(), wire);
+        let clear: AccountRequest =
+            serde_json::from_value(serde_json::json!({"action":"set_custom_status","status":null}))
+                .unwrap();
+        assert!(matches!(
+            clear,
+            AccountRequest::SetCustomStatus { status: None }
+        ));
+        // Clients cannot choose the server-computed expiry instant.
+        assert!(
+            serde_json::from_value::<AccountRequest>(serde_json::json!({
+                "action":"set_custom_status",
+                "status":{"text":"x","expires_at":"2026-01-01T00:00:00Z"}
+            }))
+            .is_err()
+        );
+        // Older servers omit the status; unset statuses stay off the wire.
+        let account: Account = serde_json::from_value(serde_json::json!({
+            "id":"00000000-0000-0000-0000-000000000001", "username":"user",
+            "email":"user@example.test", "email_verified":true, "display_name":"User",
+            "bio":"", "created_at":"2026-10-10T00:00:00Z", "identities":["password"],
+            "custom_status":null
+        }))
+        .unwrap();
+        assert!(account.custom_status.is_none());
+        assert!(
+            serde_json::to_value(&account)
+                .unwrap()
+                .get("custom_status")
+                .is_none()
+        );
+        let status: CustomStatus =
+            serde_json::from_value(serde_json::json!({"text":"Away"})).unwrap();
+        assert_eq!((status.emoji.as_deref(), status.expires_at), (None, None));
+        assert_eq!(
+            serde_json::to_value(&status).unwrap(),
+            serde_json::json!({"text":"Away"})
+        );
+    }
 
     #[test]
     fn avatar_commands_and_older_profiles_are_wire_compatible() {

@@ -1,5 +1,6 @@
 pub(crate) mod access;
 pub(crate) mod attachments;
+pub(crate) mod members;
 pub use attachments::start_cleanup as start_attachment_cleanup;
 mod notifications;
 mod rich;

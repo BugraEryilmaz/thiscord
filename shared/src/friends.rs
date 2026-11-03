@@ -28,6 +28,9 @@ pub struct Person {
     pub username: String,
     pub display_name: String,
     pub avatar_id: Option<AvatarId>,
+    /// Accepted friends only; never in search results, requests or across a block.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub custom_status: Option<crate::account::CustomStatus>,
 }
 #[derive(Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -103,6 +106,10 @@ pub struct Snapshot {
     pub before: Option<PageCursor>,
     #[serde(default)]
     pub typing: Vec<AccountId>,
+    /// The connected account's own unexpired custom status, synchronizing it
+    /// live across that account's devices. Absent when unset.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub own_status: Option<crate::account::CustomStatus>,
 }
 #[derive(Clone, Serialize, Deserialize)]
 #[serde(tag = "action", rename_all = "snake_case", deny_unknown_fields)]
@@ -231,6 +238,18 @@ mod tests {
         .unwrap();
         assert!(snapshot.typing.is_empty());
         assert!(snapshot.before.is_none());
+        assert!(snapshot.own_status.is_none());
+        let person: Person = serde_json::from_value(
+            serde_json::json!({"id":id,"username":"u","display_name":"U","avatar_id":null}),
+        )
+        .unwrap();
+        assert!(person.custom_status.is_none());
+        assert!(
+            serde_json::to_value(&person)
+                .unwrap()
+                .get("custom_status")
+                .is_none()
+        );
     }
     #[test]
     fn unread_counts_are_additive_and_read_commands_are_typed() {

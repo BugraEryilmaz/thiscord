@@ -26,6 +26,16 @@ diesel::table! {
 }
 
 diesel::table! {
+    account_custom_statuses (account_id) {
+        account_id -> Uuid,
+        emoji -> Nullable<Text>,
+        status_text -> Text,
+        expires_at -> Nullable<Timestamptz>,
+        updated_at -> Timestamptz,
+    }
+}
+
+diesel::table! {
     accounts (id) {
         id -> Uuid,
         username -> Text,
@@ -441,6 +451,7 @@ diesel::table! {
 
 diesel::joinable!(account_avatars -> accounts (account_id));
 diesel::joinable!(account_codes -> accounts (account_id));
+diesel::joinable!(account_custom_statuses -> accounts (account_id));
 diesel::joinable!(attachments -> accounts (owner_id));
 diesel::joinable!(attachments -> messages (message_id));
 diesel::joinable!(channel_categories -> guilds (guild_id));
@@ -483,6 +494,7 @@ diesel::allow_tables_to_appear_in_same_query!(
     account_avatars,
     account_blocks,
     account_codes,
+    account_custom_statuses,
     accounts,
     attachments,
     auth_limits,
