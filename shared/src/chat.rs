@@ -169,6 +169,9 @@ pub struct History {
     pub older: Option<PageCursor>,
     pub event_cursor: i64,
 }
+/// Unread `count` and `mentions` are exact below this value; a value equal to it
+/// means at least this many (display as "999+"). Older servers send exact counts.
+pub const UNREAD_COUNT_LIMIT: i64 = 1000;
 #[derive(Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct Unread {
     pub channel_id: ChannelId,

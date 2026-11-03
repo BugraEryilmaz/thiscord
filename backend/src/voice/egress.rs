@@ -24,6 +24,22 @@ pub(super) struct Sender {
     screen_budget: Arc<std::sync::Mutex<[viewing::ByteBudget; ROOM_CAPACITY]>>,
 }
 
+/// A delivery admitted under the room lock. Its source and receiver access
+/// permits stay held until the enqueue completes, so access mutations still drain
+/// it, and the egress writer revalidates under the room lock before writing.
+pub(super) struct Admitted {
+    tx: Sender,
+    delivery: Delivery,
+    _permits: (access::Packet, access::Packet),
+}
+impl Admitted {
+    /// Enqueue without the room lock. Callers must not await before this, so a
+    /// revocation drain waits at most for these synchronous enqueues.
+    pub(super) fn send(self) -> Result<(), ()> {
+        self.tx.try_send(self.delivery)
+    }
+}
+
 pub(super) struct Queued {
     delivery: Delivery,
     // Count queued AND in-flight bytes; cancellation/closure releases the reservation.
@@ -51,12 +67,28 @@ pub(super) fn channel(kind: MediaKind) -> (Sender, mpsc::Receiver<Queued>) {
 impl Sender {
     /// Called under the room lock and access permit. Intentional filtering is
     /// not congestion and must not request a keyframe or consume queue budget.
+    #[cfg(test)]
     pub(super) fn forward(
         &self,
         source: &Member,
         receiver: &Member,
         delivery: Delivery,
     ) -> Result<(), ()> {
+        match self.admit(source, receiver, delivery)? {
+            Some(admitted) => admitted.send(),
+            None => Ok(()),
+        }
+    }
+
+    /// The authorization and filtering half of `forward`, under the room lock and
+    /// source access permit. `Ok(None)` is intentional filtering; `Err` is
+    /// congestion. Send the result with [`Admitted::send`] after releasing the lock.
+    pub(super) fn admit(
+        &self,
+        source: &Member,
+        receiver: &Member,
+        delivery: Delivery,
+    ) -> Result<Option<Admitted>, ()> {
         if delivery.source != source.source_id
             || !delivery.source_active.load(Ordering::Acquire)
             || delivery.epoch != source.generation.load(Ordering::Acquire)
@@ -83,16 +115,16 @@ impl Sender {
             || !viewing::receives(receiver, source, self.kind, delivery.queued_at)
             || (self.kind == MediaKind::Microphone && !red::receives(source, receiver))
         {
-            return Ok(());
+            return Ok(None);
         }
-        let Some(_permits) = delivery_permits(
+        let Some(permits) = delivery_permits(
             &source.access,
             delivery.epoch,
             &receiver.access,
             delivery.receiver_epoch,
             receiver.generation.load(Ordering::Acquire),
         ) else {
-            return Ok(());
+            return Ok(None);
         };
         if self.kind == MediaKind::ScreenVideo {
             let bitrate = receiver.views[source.info.slot]
@@ -108,7 +140,11 @@ impl Sender {
                 return Err(());
             }
         }
-        self.try_send(delivery)
+        Ok(Some(Admitted {
+            tx: self.clone(),
+            delivery,
+            _permits: permits,
+        }))
     }
 
     fn try_send(&self, delivery: Delivery) -> Result<(), ()> {

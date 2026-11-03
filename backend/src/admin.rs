@@ -38,7 +38,8 @@ async fn handle(
     Extension(start): Extension<Instant>,
     headers: HeaderMap,
 ) -> Response {
-    respond(pool, id, start, headers, crate::voice::diagnostics()).await
+    let live = crate::voice::live_channels().await;
+    respond(pool, id, start, headers, live, crate::voice::diagnostics()).await
 }
 
 // Collect telemetry without holding DB locks or delivery permits. The final
@@ -48,6 +49,7 @@ async fn respond(
     id: RequestId,
     start: Instant,
     headers: HeaderMap,
+    live: Vec<ChannelId>,
     active_rooms: impl Future<Output = HashMap<ChannelId, Vec<ParticipantDiagnostics>>>,
 ) -> Response {
     let result = async {
@@ -71,8 +73,13 @@ async fn respond(
                 store::read_session(c, &token, &session)?;
                 let role = crate::permissions::store::instance(c, session.account_id)?.role;
                 if !matches!(role, InstanceRole::Owner | InstanceRole::Admin) { return Err(Failure::Forbidden); }
-                let names: Vec<RoomDiagnostics> = store::query(c,
-                    "SELECT jsonb_build_object('guild_id',g.id,'guild_name',g.name,'channel_id',ch.id,'channel_name',ch.name,'participants','[]'::jsonb) AS data FROM channels ch JOIN guilds g ON g.id=ch.guild_id ORDER BY g.name,ch.name,ch.id", &[])?;
+                // Names only for rooms live before this request, not every channel.
+                // A room created meanwhile appears on the next refresh.
+                let names: Vec<RoomDiagnostics> = if live.is_empty() { Vec::new() } else {
+                    let ids = format!("{{{}}}", live.iter().map(ToString::to_string).collect::<Vec<_>>().join(","));
+                    store::query(c,
+                        "SELECT jsonb_build_object('guild_id',g.id,'guild_name',g.name,'channel_id',ch.id,'channel_name',ch.name,'participants','[]'::jsonb) AS data FROM channels ch JOIN guilds g ON g.id=ch.guild_id WHERE ch.id=ANY($1::uuid[]) ORDER BY g.name,ch.name,ch.id", &[&ids])?
+                };
                 Ok((role, names))
             })?;
             drop(c);

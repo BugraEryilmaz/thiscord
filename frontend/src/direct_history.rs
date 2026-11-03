@@ -1,6 +1,6 @@
 //! HTTP pages and live snapshots may complete in either order.
-use thiscord_shared::friends::DirectMessage;
-use thiscord_shared::{MessageId, Timestamp, pagination::PageCursor};
+use thiscord_shared::friends::{DirectMessage, History, Snapshot};
+use thiscord_shared::{MessageId, Timestamp, ids::ConversationId, pagination::PageCursor};
 
 /// History's upper bound is exclusive. Its immediate successor includes exactly
 /// this message, even when many messages share a PostgreSQL timestamp.
@@ -27,9 +27,89 @@ pub fn preserve_revisions(incoming: &mut [DirectMessage], current: &[DirectMessa
     }
 }
 
+/// The last history received on one friends socket, keyed by selection and page.
+pub type Received = Option<(ConversationId, Option<PageCursor>, History)>;
+
+/// A server that honours `RETAINED_HISTORY_QUERY` omits an unchanged history after
+/// delivering it on the same socket. Restore it so a snapshot never loses history;
+/// a snapshot for another selection or page never receives this one.
+pub fn retain(snapshot: &mut Snapshot, received: &mut Received) {
+    let Some(id) = snapshot.conversation_id else {
+        *received = None;
+        return;
+    };
+    match &snapshot.history {
+        Some(history) => *received = Some((id, snapshot.before.clone(), history.clone())),
+        None => {
+            if let Some((at, before, history)) = received
+                && *at == id
+                && *before == snapshot.before
+            {
+                snapshot.history = Some(history.clone());
+            }
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn omitted_history_is_restored_only_for_the_same_selection_and_page() {
+        let id: ConversationId = "00000000-0000-4000-8000-000000000002".parse().unwrap();
+        let other: ConversationId = "00000000-0000-4000-8000-000000000005".parse().unwrap();
+        let message: DirectMessage = serde_json::from_value(serde_json::json!({
+            "id":"00000000-0000-4000-8000-000000000001",
+            "conversation_id":id,
+            "client_id":"00000000-0000-4000-8000-000000000003",
+            "author_id":"00000000-0000-4000-8000-000000000004",
+            "content":"kept", "created_at":"2026-10-23T00:00:00Z"
+        }))
+        .unwrap();
+        let history = History {
+            messages: vec![message],
+            older: None,
+        };
+        let mut received = None;
+        let mut full = Snapshot {
+            conversation_id: Some(id),
+            history: Some(history.clone()),
+            ..Default::default()
+        };
+        retain(&mut full, &mut received);
+        assert!(full.history == Some(history.clone()));
+        let mut omitted = Snapshot {
+            conversation_id: Some(id),
+            ..Default::default()
+        };
+        retain(&mut omitted, &mut received);
+        assert!(omitted.history == Some(history.clone()));
+        // Another page or conversation never borrows this history.
+        let mut paged = omitted.clone();
+        paged.history = None;
+        paged.before = Some(PageCursor::new(
+            Timestamp::from_timestamp_micros(1).unwrap(),
+            id.as_uuid(),
+        ));
+        retain(&mut paged, &mut received);
+        assert!(paged.history.is_none());
+        let mut elsewhere = Snapshot {
+            conversation_id: Some(other),
+            ..Default::default()
+        };
+        retain(&mut elsewhere, &mut received);
+        assert!(elsewhere.history.is_none());
+        // Losing access (no selection) forgets the retained history.
+        retain(&mut Snapshot::default(), &mut received);
+        assert!(received.is_none());
+        let mut later = Snapshot {
+            conversation_id: Some(id),
+            ..Default::default()
+        };
+        retain(&mut later, &mut received);
+        assert!(later.history.is_none());
+    }
 
     #[test]
     fn jump_cursor_includes_target_without_later_timestamp_ties() {

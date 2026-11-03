@@ -85,9 +85,9 @@ and `ping` keeps the socket alive. This separate account-wide socket leaves the
 existing guild chat subscription intact. The client connects while logged in, uses
 ten-second heartbeats, and reconnects with exponential backoff and jitter.
 
-The server reads an authorized bounded friends/calls snapshot and the selected
-conversation's latest page on connect and `select`, after a relevant commit, when
-the earliest listed call expires, and at least every ten seconds. Committed friend
+The server reads an authorized bounded friends/calls snapshot on connect and
+`select`, after a relevant commit, when the earliest listed call expires, and at
+least every ten seconds. Committed friend
 commands wake both people's sockets (reads wake only the reader); display-name,
 avatar and account-deletion commits wake everyone listing that account. The wake-up
 is an in-process version bump without data or grants: sockets always re-read and
@@ -100,6 +100,24 @@ saturated ticks skip work and retry. Unchanged snapshots are suppressed except f
 a ten-second refresh. This intentionally favors a small personal installation over
 event-log/fanout complexity; wake-ups, like presence, reach only this process. The frontend rejects history
 for a superseded selection and clears account state on logout/token replacement.
+
+Each socket keeps the selected conversation's latest (or `before`) page between
+reads. Every read still reauthenticates, locks relationships and re-checks that the
+selection is an accessible friendship; only the history query is skipped unless the
+selection or page changed, a send/edit/delete committed in that conversation since
+the page was loaded, or the copy is 60 seconds old. Committed message writes bump a
+fixed, lock-free per-conversation epoch (1,024 shared slots; a shared slot only
+causes an extra reload) before waking sockets, and the epoch is read before the
+snapshot transaction, so a concurrent write always forces a later reload. Lost
+access drops the copy. The 60-second reload bounds staleness after writes outside
+these paths, like the other ten-second checks. Epochs and copies are per process.
+
+Clients opening the socket with `?history=retained` (`RETAINED_HISTORY_QUERY`)
+keep the history last received on that socket for the same conversation and page.
+The server then sends history only when it changed and on the first snapshot after
+connect or `select`; other snapshots carry `conversation_id` with `history: null`.
+Older clients do not send the query and still receive history in every snapshot;
+older servers ignore it and always send history, which the new client accepts.
 
 Socket delivery captures account/session authorization epochs before database work
 and validates them when admitting bounded sends. Removal drains both accounts'
