@@ -270,6 +270,9 @@ mod tests {
             .chain(crate::appearance::Theme::ALL.map(crate::appearance::Theme::label))
             .chain(crate::appearance::Theme::ALL.map(crate::appearance::Theme::description))
             .chain(crate::appearance::ACCENTS.map(|(label, _)| label))
+            .chain(crate::appearance::Token::ALL.map(crate::appearance::Token::label))
+            .chain(crate::appearance::Token::ALL.map(crate::appearance::Token::description))
+            .chain(crate::appearance::Group::ALL.map(crate::appearance::Group::label))
         {
             assert!(
                 CATALOG.iter().any(|(en, _)| *en == label),
