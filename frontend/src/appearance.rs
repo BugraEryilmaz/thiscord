@@ -321,7 +321,7 @@ impl Theme {
                 [
                     0xffffff, 0xf2f3f5, 0xe3e5e8, 0xebedef, 0xf6f7f8, 0xffffff, 0xdcdee3,
                 ],
-                [0x23262b, 0x5c5f68, 0x0060c7],
+                [0x23262b, 0x53565f, 0x0060c7],
             ),
         }
     }
@@ -833,6 +833,32 @@ mod tests {
         assert!((WHITE.contrast(Rgb(0, 0, 0)) - 21.0).abs() < 1e-9);
         assert_eq!(hex(0x204060).mix(WHITE, 0.0), WHITE);
         assert_eq!(hex(0x204060).mix(BLACK, 1.0), hex(0x204060));
+    }
+
+    /// Secondary text (style.css mixes --color-muted at >= 90% opacity for
+    /// small text) meets WCAG AA (4.5:1) on every preset background layer.
+    #[test]
+    fn muted_text_meets_wcag_aa_on_preset_backgrounds() {
+        for theme in Theme::ALL {
+            let p = theme.palette();
+            let muted = p.get(Token::Muted);
+            for layer in [
+                Token::Surface,
+                Token::Sidebar,
+                Token::Rail,
+                Token::Dock,
+                Token::Panel,
+                Token::Popover,
+            ] {
+                let background = p.get(layer);
+                let ratio = muted.mix(background, 0.9).contrast(background);
+                assert!(
+                    ratio >= 4.5,
+                    "{} muted on {layer:?}: {ratio:.2}",
+                    theme.id()
+                );
+            }
+        }
     }
 
     #[test]
