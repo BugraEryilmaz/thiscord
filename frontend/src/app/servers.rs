@@ -634,7 +634,7 @@ pub(super) fn ServerHome(ui: Ui) -> impl IntoView {
                                 <span class="min-w-0 flex-1 truncate text-sm">{name.clone()}</span>
                                 <Show when=move ||ui.sidebar_preferences.get().pinned.contains(&id)><span aria-label=move || crate::i18n::t("Pinned") class="channel-indicator"><Icon kind=Glyph::Pin/></span></Show>
                                 <Show when=move ||super::notifications::muted(ui, thiscord_shared::notifications::Target::Channel { guild_id, channel_id: id })><span aria-label=move || crate::i18n::t("Notifications muted") class="channel-indicator"><Icon kind=Glyph::BellOff/></span></Show>
-                                <span class="shrink-0 text-xs text-brand">{move||if super::notifications::muted(ui, thiscord_shared::notifications::Target::Channel { guild_id, channel_id: id }){None}else{unread.get().iter().find(|u|u.channel_id==id&&u.count>0).map(|u|format!("{}{}",u.count,if u.mentions>0{" @"}else{""}))}}</span>
+                                <span class="shrink-0 text-xs text-brand">{move||if super::notifications::muted(ui, thiscord_shared::notifications::Target::Channel { guild_id, channel_id: id }){None}else{unread.with(|unread|unread.iter().find(|u|u.channel_id==id&&u.count>0).map(|u|format!("{}{}",if u.count>=thiscord_shared::chat::UNREAD_COUNT_LIMIT{"999+".into()}else{u.count.to_string()},if u.mentions>0{" @"}else{""})))}}</span>
                             </button>{is_voice.then(||view!{<VoiceRoster ui=ui guild=guild_id channel=id/>})}</li>}
                         }).collect_view()}}</ul>
                     </nav>

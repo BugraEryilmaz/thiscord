@@ -146,7 +146,9 @@ each channel's exclusive sequence range above its read marker (zero if absent).
 The partial `channel_unread_range` index excludes tombstones and covers author and
 mention checks. Own messages are excluded with `IS DISTINCT FROM`, so retained
 messages from deleted accounts still count. Edits use current mentions; empty
-counts are omitted. Results are ordered by channel ID to keep socket comparisons
+counts are omitted. Counts and mentions are exact below `UNREAD_COUNT_LIMIT`
+(1,000) and equal to it for larger backlogs; badges show "999+". Mentions use the
+partial `channel_unread_mentions` index of mention-bearing live messages. Results are ordered by channel ID to keep socket comparisons
 stable. Both HTTP and socket updates share this query and the existing guild lock.
 
 See [unread query measurements](unread-performance.md) for the reproducible
