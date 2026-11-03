@@ -30,7 +30,7 @@ pub struct HostMetrics {
     pub load_average: Option<[f64; 3]>,
 }
 
-#[derive(Clone, Debug, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct RoomDiagnostics {
     pub guild_id: GuildId,
     pub guild_name: String,
@@ -39,7 +39,7 @@ pub struct RoomDiagnostics {
     pub participants: Vec<ParticipantDiagnostics>,
 }
 
-#[derive(Clone, Debug, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct ParticipantDiagnostics {
     /// Present only for a connected desktop supporting remote audio controls.
     #[serde(default)]
@@ -50,7 +50,7 @@ pub struct ParticipantDiagnostics {
     pub video_counters: [u64; 5],
 }
 
-#[derive(Clone, Debug, Default, Serialize, Deserialize)]
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
 pub struct NetworkMetrics {
     pub sampled_at: Option<DateTime<Utc>>,
     /// ICE round-trip time between this participant and the SFU, not mouth-to-ear delay.

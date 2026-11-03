@@ -293,6 +293,15 @@ pub(crate) async fn diagnostics()
 -> HashMap<ChannelId, Vec<thiscord_shared::admin::ParticipantDiagnostics>> {
     diagnostics::snapshot().await
 }
+/// Channels with a live room, used only to look up diagnostic room names.
+pub(crate) async fn live_channels() -> Vec<ChannelId> {
+    let rooms = ROOMS.get_or_init(Default::default).lock().await;
+    rooms
+        .iter()
+        .filter(|(_, room)| room.strong_count() > 0)
+        .map(|(id, _)| *id)
+        .collect()
+}
 pub(crate) fn router_with_limit(
     origins: Vec<HeaderValue>,
     connections: usize,

@@ -113,6 +113,7 @@ async fn collecting(
         RequestId::from_uuid(Uuid::new_v4()),
         Instant::now(),
         headers,
+        vec![],
         async move {
             ready.send(()).unwrap();
             proceed.await.unwrap();
