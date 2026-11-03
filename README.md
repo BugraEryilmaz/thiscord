@@ -72,6 +72,11 @@ and fellow server members see it (see [custom status](docs/accounts.md#custom-st
 Text channels have a toggleable member list (a drawer on phones and tablets) grouped
 online/offline, with profile cards and member actions (see
 [member list](docs/chat.md#member-list-and-profile-cards)).
+The UI works from the keyboard: **Ctrl/⌘+K** opens a quick switcher for servers,
+channels and friends, **Alt+↑/↓** (with Shift: unread only) moves between channels,
+**Ctrl+Alt+↑/↓** between servers, **Esc** marks the open channel read and **Ctrl/⌘+/**
+lists every shortcut. Lists use arrow keys, dialogs keep and restore focus, and screen
+readers get landmarks and polite announcements (see [accessibility](docs/accessibility.md)).
 Sidebar controls show immediate hover/focus hints
 outside the scroll area. Visible voice channels show participants before joining;
 clicking a voice channel joins directly while keeping the current text chat open.
