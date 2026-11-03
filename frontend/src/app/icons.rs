@@ -41,6 +41,7 @@ pub(super) enum Glyph {
     Back,
     Download,
     Palette,
+    Chevron,
 }
 
 #[component]
@@ -75,6 +76,7 @@ pub(super) fn Icon(kind: Glyph) -> impl IntoView {
         Glyph::Screen => "M3 3h18v14H3V3ZM8 21h8M12 17v4M12 13V6m-3 3 3-3 3 3",
         Glyph::Window => "M3 4h18v16H3V4ZM3 9h18M6 6.5h.01M9 6.5h.01",
         Glyph::Camera => "M3 5h12v14H3V5ZM15 10l6-4v12l-6-4",
+        Glyph::Chevron => "m6 15 6-6 6 6",
         Glyph::CameraOff => "m3 3 18 18M9 5h6v6M15 10l6-4v12l-4-3M3 7v12h12v-4",
         Glyph::Signal => "M4 20v-3M9 20v-7M14 20V9M19 20V4",
         Glyph::Volume => "M3 9h4l5-4v14l-5-4H3V9ZM16 8a6 6 0 0 1 0 8M19 5a10 10 0 0 1 0 14",

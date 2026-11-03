@@ -493,6 +493,7 @@ pub(super) fn VoiceBar(ui: Ui) -> impl IntoView {
                 <Show when=move||!ui.audio_control.is_remote() && ui.audio.get().mode==TransmitMode::PushToTalk><button class="icon-button voice-action touch-none select-none" aria-label=move || crate::i18n::t("Hold to talk") data-tip=move || crate::i18n::t("Hold to talk") on:pointerdown=move |_|pressed(true) on:pointerup=move |_|pressed(false) on:pointerleave=move |_|pressed(false) on:pointercancel=move |_|pressed(false) on:keydown=move|e|{if matches!(e.key().as_str()," "|"Enter"){e.prevent_default();pressed(true);}} on:keyup=move|_|pressed(false) on:blur=move |_|pressed(false)><Icon kind=Glyph::Mic/></button></Show>
             </div>
         <Show when=move ||browser_voice(ui)><BrowserVoiceNotice/><super::browser_media::BrowserMediaError/></Show>
+        <super::camera_select::CameraNotice/>
         <Show when=move||ui.audio_status.with(|s|s.as_ref().and_then(|s|s.recording.as_ref()).is_some_and(|r|r.active))>
             <button class="mt-2 rounded bg-red-700 px-3 py-1 text-xs text-white" on:click=move |_|debug_command(ui,"audio_debug_stop")>
                 {move||thiscord_frontend::localized_format!(crate::i18n::language(), "● Recording {}s · Stop",ui.audio_status.with(|s|s.as_ref().and_then(|s|s.recording.as_ref()).map_or(0,|r|r.elapsed_ms/1000)))}
@@ -771,6 +772,7 @@ pub(super) fn AudioSettingsPanel(ui: Ui) -> impl IntoView {
                 <p class="settings-hint">{move || crate::i18n::t("Use headphones for the microphone test. Sound tests are available when you’re outside a call.")}</p>
                 </Show>
                 </section>
+                <Show when=move ||!ui.audio_control.is_remote() && (desktop() || browser)><super::camera_select::CameraSettings ui=ui/></Show>
                 <section class="settings-card"><h3>{move || crate::i18n::t("Voice processing")}</h3>
                     <label class="flex gap-3"><input type="checkbox" prop:checked=move||ui.audio.get().noise_suppression on:change=move|e|{ui.audio.update(|s|s.noise_suppression=event_target_checked(&e));save(ui);}/>{move || crate::i18n::t("Noise suppression")}</label>
                     <Show when=move ||!browser>
