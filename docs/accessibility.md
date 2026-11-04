@@ -62,7 +62,9 @@ Notes and conflict rules:
   a stream, F opens full screen, Alt+←/→ (or ↑/↓) moves it, Alt+Home/End moves it
   to the start or end, and Shift+F10 or the context-menu key opens its options.
   Focus stays on the tile (or the menu item) across repeated moves. The options
-  menu holds only menu items; volume sliders follow it as a labelled group. A
+  menu holds only menu items (moves that are not possible stay focusable and are
+  announced as unavailable); volume sliders follow it as a labelled group.
+  Escape leaves focus mode only while the media view, or nothing, has focus. A
   polite live region announces moves, focus and hide/restore; tile animations
   stop under reduced motion.
 
