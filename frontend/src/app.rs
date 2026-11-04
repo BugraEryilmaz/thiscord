@@ -422,8 +422,8 @@ fn Field(
     #[prop(default = "text")] kind: &'static str,
     #[prop(default = "off")] autocomplete: &'static str,
 ) -> impl IntoView {
-    view! { <label class="block space-y-2 text-sm font-medium"><span>{move || crate::i18n::t(label)}</span>
-        <input class="w-full rounded-md border border-white/20 bg-black/20 px-3 py-2 text-white focus:border-brand focus:outline-none"
+    view! { <label class="field"><span class="field-label">{move || crate::i18n::t(label)}</span>
+        <input class="field-input"
             type=kind autocomplete=autocomplete prop:value=move ||value.get() on:input=move |event|value.set(event_target_value(&event)) />
     </label> }
 }
@@ -445,9 +445,9 @@ fn StatusNotice(ui: Ui) -> impl IntoView {
     });
     view! {
         <Show when=move || visible.get()>
-            <div class="fixed left-3 right-3 top-[calc(env(safe-area-inset-top)+0.75rem)] z-50 flex items-start gap-4 rounded-lg border border-white/10 bg-slate-900 p-4 shadow-lg md:bottom-5 md:left-auto md:right-5 md:top-auto md:max-w-sm">
-                <p class="text-sm" role="status" aria-live="polite">{move || crate::i18n::message(ui.status.get())}</p>
-                <button class="text-white/60 hover:text-white" aria-label=move || crate::i18n::t("Dismiss notification") on:click=move |_| visible.set(false)>"×"</button>
+            <div class="app-toast">
+                <p class="min-w-0 flex-1" role="status" aria-live="polite">{move || crate::i18n::message(ui.status.get())}</p>
+                <button class="icon-button" aria-label=move || crate::i18n::t("Dismiss notification") on:click=move |_| visible.set(false)><icons::Icon kind=icons::Glyph::Close/></button>
             </div>
         </Show>
     }

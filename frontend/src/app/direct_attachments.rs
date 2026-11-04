@@ -67,16 +67,35 @@ impl Uploads {
         });
     }
 }
+/// Inline attach button for the private composer; the file input stays hidden
+/// so no raw browser control is shown.
+#[component]
+pub(super) fn Picker(uploads: Uploads, locked: Signal<bool>) -> impl IntoView {
+    let input = NodeRef::<leptos::html::Input>::new();
+    let disabled = move || {
+        locked.get()
+            || uploads.busy.get()
+            || uploads.files.with(|v| v.len() >= 4)
+            || !uploads.ui.friends.connected.get()
+    };
+    view! {
+        <input node_ref=input class="hidden" type="file" disabled=disabled
+            on:change=move |ev|{let input=event_target::<web_sys::HtmlInputElement>(&ev);if let Some(file)=input.files().and_then(|f|f.get(0)){uploads.add(file);}input.set_value("");}/>
+        <button type="button" class="icon-button" aria-label=move ||crate::i18n::t("Attach file (25 MiB)")
+            data-tip=move ||crate::i18n::t("Attach file (25 MiB)") disabled=disabled
+            on:click=move |_| { if let Some(input) = input.get() { input.click(); } }>
+            <super::icons::Icon kind=super::icons::Glyph::Paperclip/>
+        </button>
+    }
+}
+
+/// Uploaded files waiting to be sent, upload progress and errors.
 #[component]
 pub(super) fn Composer(uploads: Uploads, locked: Signal<bool>) -> impl IntoView {
-    view! {<div class="mb-2 space-y-2 text-sm">
-        <label class="inline-block rounded bg-white/10 px-3 py-2">{move ||crate::i18n::t("Attach file (25 MiB)")}
-            <input class="block max-w-full text-xs" type="file" disabled=move ||locked.get()||uploads.busy.get()||uploads.files.with(|v|v.len()>=4)||!uploads.ui.friends.connected.get()
-                on:change=move |ev|{let input=event_target::<web_sys::HtmlInputElement>(&ev);if let Some(file)=input.files().and_then(|f|f.get(0)){uploads.add(file);}input.set_value("");}/>
-        </label>
-        <Show when=move ||uploads.busy.get()><span role="status">{move ||crate::i18n::t("Uploading…")}</span></Show>
-        <For each=move ||uploads.files.get() key=|a|a.id children=move |a|view!{<div class="flex items-center gap-3"><span>{a.filename}</span><button type="button" disabled=move ||locked.get() class="text-red-200" on:click=move |_|uploads.files.update(|files|files.retain(|f|f.id!=a.id))>{move ||crate::i18n::t("Remove attachment")}</button></div>}/>
-        <p role="alert" class="text-red-200">{move ||crate::i18n::message(uploads.error.get())}</p>
+    view! {<div class="composer-queue">
+        <Show when=move ||uploads.busy.get()><span class="composer-chip" role="status">{move ||crate::i18n::t("Uploading…")}</span></Show>
+        <For each=move ||uploads.files.get() key=|a|a.id children=move |a|view!{<span class="composer-chip"><super::icons::Icon kind=super::icons::Glyph::Paperclip/><span class="min-w-0 truncate">{a.filename}</span><button type="button" class="composer-chip-remove" disabled=move ||locked.get() aria-label=move ||crate::i18n::t("Remove attachment") data-tip=move ||crate::i18n::t("Remove attachment") on:click=move |_|uploads.files.update(|files|files.retain(|f|f.id!=a.id))><super::icons::Icon kind=super::icons::Glyph::Close/></button></span>}/>
+        <p role="alert" class="composer-error">{move ||crate::i18n::message(uploads.error.get())}</p>
     </div>}
 }
 struct Asset {

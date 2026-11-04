@@ -150,34 +150,34 @@ pub(super) fn Host(ui: Ui) -> impl IntoView {
                         <nav class="settings-nav" aria-label=move || crate::i18n::t("General settings") data-rove-list on:keydown=move |e| super::keyboard::rove(&e)>
                             <p class="settings-nav-label">{move || crate::i18n::t("Your account")}</p>
                             <NavItem ui=ui page="profile" label="Profile" icon=Glyph::Person/>
-                            <NavItem ui=ui page="security" label="Password & security" icon=Glyph::Shield/>
-                            <NavItem ui=ui page="devices" label="Devices & connections" icon=Glyph::Connections/>
+                            <NavItem ui=ui page="security" label="Password & security" icon=Glyph::Lock/>
+                            <NavItem ui=ui page="devices" label="Devices & connections" icon=Glyph::Devices/>
                             <p class="settings-nav-label">{move || crate::i18n::t("Your app")}</p>
                             <NavItem ui=ui page="audio" label="Voice & audio" icon=Glyph::Headphones/>
                             <NavItem ui=ui page="appearance" label="Appearance" icon=Glyph::Palette/>
-                            <NavItem ui=ui page="language" label="Language" icon=Glyph::Settings/>
+                            <NavItem ui=ui page="language" label="Language" icon=Glyph::Globe/>
                             <Show when=client::desktop><NavItem ui=ui page="shortcuts" label="Shortcuts & overlay" icon=Glyph::Keyboard/><NavItem ui=ui page="desktop" label="App behavior" icon=Glyph::Screen/></Show>
                             <Show when=client::web_app><NavItem ui=ui page="shortcuts" label="Keyboard shortcuts" icon=Glyph::Keyboard/></Show>
-                            <NavItem ui=ui page="updates" label="Updates" icon=Glyph::Refresh/>
-                            <NavItem ui=ui page="notifications" label="Notifications" icon=Glyph::Volume/>
+                            <NavItem ui=ui page="updates" label="Updates" icon=Glyph::Download/>
+                            <NavItem ui=ui page="notifications" label="Notifications" icon=Glyph::Bell/>
                             <NavItem ui=ui page="safety" label="Safety & reports" icon=Glyph::Shield/>
-                            <NavItem ui=ui page="administration" label="Instance access" icon=Glyph::Shield/>
+                            <NavItem ui=ui page="administration" label="Instance access" icon=Glyph::Key/>
                             <Show when=client::web_app><DesktopAppLink class="settings-nav-item"/></Show>
                         </nav>
-                        <button class="settings-signout" disabled=move ||ui.busy.get() || ui.settings_dirty.get() on:click=move |_|super::run(ui,AccountRequest::Logout)><Icon kind=Glyph::Join/>{move || crate::i18n::t("Sign out")}</button>
+                        <button class="settings-signout" disabled=move ||ui.busy.get() || ui.settings_dirty.get() on:click=move |_|super::run(ui,AccountRequest::Logout)><Icon kind=Glyph::Logout/>{move || crate::i18n::t("Sign out")}</button>
                     }>
                         <nav class="settings-nav" aria-label=move || crate::i18n::t("Server settings") data-rove-list on:keydown=move |e| super::keyboard::rove(&e)>
                             <p class="settings-nav-label">{move || crate::i18n::t("Community")}</p>
                             <Show when=move ||ui.server.get().is_some_and(|s|s.can_manage_roles)>
-                                <NavItem ui=ui page="server_overview" label="Overview" icon=Glyph::Settings/>
+                                <NavItem ui=ui page="server_overview" label="Overview" icon=Glyph::Sliders/>
                                 <NavItem ui=ui page="server_roles" label="Roles" icon=Glyph::Shield/>
-                                <NavItem ui=ui page="server_members" label="Members" icon=Glyph::Person/>
-                                <NavItem ui=ui page="server_channels" label="Channels & permissions" icon=Glyph::Volume/>
+                                <NavItem ui=ui page="server_members" label="Members" icon=Glyph::Users/>
+                                <NavItem ui=ui page="server_channels" label="Channels & permissions" icon=Glyph::Hash/>
                             </Show>
-                            <Show when=move ||ui.server.get().is_some_and(|s|s.can_manage_bots)><NavItem ui=ui page="server_bots" label="Bots" icon=Glyph::Connections/><NavItem ui=ui page="server_soundboard" label="Soundboard" icon=Glyph::Soundboard/></Show>
-                            <Show when=move ||ui.server.get().is_some_and(|s|s.can_manage_channels)><NavItem ui=ui page="server_organization" label="Channel organization" icon=Glyph::Volume/></Show>
-                            <Show when=move ||ui.server.get().is_some_and(|s|s.can_manage_invites)><NavItem ui=ui page="server_invites" label="Invite links" icon=Glyph::Person/></Show>
-                            <Show when=move ||ui.server.get().is_some_and(|s|s.can_moderate)><NavItem ui=ui page="moderation" label="Moderation" icon=Glyph::Shield/></Show>
+                            <Show when=move ||ui.server.get().is_some_and(|s|s.can_manage_bots)><NavItem ui=ui page="server_bots" label="Bots" icon=Glyph::Bot/><NavItem ui=ui page="server_soundboard" label="Soundboard" icon=Glyph::Soundboard/></Show>
+                            <Show when=move ||ui.server.get().is_some_and(|s|s.can_manage_channels)><NavItem ui=ui page="server_organization" label="Channel organization" icon=Glyph::Folder/></Show>
+                            <Show when=move ||ui.server.get().is_some_and(|s|s.can_manage_invites)><NavItem ui=ui page="server_invites" label="Invite links" icon=Glyph::Ticket/></Show>
+                            <Show when=move ||ui.server.get().is_some_and(|s|s.can_moderate)><NavItem ui=ui page="moderation" label="Moderation" icon=Glyph::Gavel/></Show>
                             <Show when=move ||ui.server.get().is_some_and(|s|ui.account.get().is_some_and(|a|s.guild.owner==a.id))><p class="settings-nav-label">{move || crate::i18n::t("Advanced")}</p><NavItem ui=ui page="server_danger" label="Ownership & deletion" icon=Glyph::Trash/></Show>
                         </nav>
                     </Show>

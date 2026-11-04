@@ -204,9 +204,9 @@ const fn hex(value: u32) -> Rgb {
     Rgb((value >> 16) as u8, (value >> 8) as u8, value as u8)
 }
 
-pub const DEFAULT_ACCENT: Rgb = hex(0x5865f2);
+pub const DEFAULT_ACCENT: Rgb = hex(0x4762f5);
 /// Text, secondary text and links for dark themes.
-const LIGHT_TEXT: [u32; 3] = [0xf2f3f5, 0xb7b9c4, 0x00bcff];
+const LIGHT_TEXT: [u32; 3] = [0xeceef3, 0xb4b7c3, 0x8aa4ff];
 /// Accent and status colors shared by every theme.
 const ACCENT_DEFAULTS: [Rgb; 5] = [
     DEFAULT_ACCENT,
@@ -289,7 +289,7 @@ impl Theme {
         match self {
             Self::Graphite => palette(
                 [
-                    0x202127, 0x191a21, 0x121318, 0x292a32, 0x24262e, 0x111218, 0x30313c,
+                    0x24252c, 0x1b1c22, 0x131418, 0x2b2c34, 0x2a2b33, 0x16171c, 0x31323c,
                 ],
                 LIGHT_TEXT,
             ),
@@ -319,9 +319,9 @@ impl Theme {
             ),
             Self::Daylight => palette(
                 [
-                    0xffffff, 0xf2f3f5, 0xe3e5e8, 0xebedef, 0xf6f7f8, 0xffffff, 0xdcdee3,
+                    0xffffff, 0xf4f5f8, 0xe8eaf0, 0xeef0f4, 0xf7f8fa, 0xffffff, 0xe1e4eb,
                 ],
-                [0x23262b, 0x53565f, 0x0060c7],
+                [0x1d2027, 0x545864, 0x2449d8],
             ),
         }
     }
@@ -396,8 +396,9 @@ const BLACK: Rgb = Rgb(0, 0, 0);
 const INK: Rgb = Rgb(0x11, 0x12, 0x16);
 
 /// Preset accents; labels are English and translated at the call site.
-pub const ACCENTS: [(&str, Rgb); 8] = [
-    ("Blurple", DEFAULT_ACCENT),
+pub const ACCENTS: [(&str, Rgb); 9] = [
+    ("Cobalt", DEFAULT_ACCENT),
+    ("Blurple", Rgb(0x58, 0x65, 0xf2)),
     ("Ocean", Rgb(0x25, 0x82, 0xeb)),
     ("Teal", Rgb(0x14, 0xa3, 0x94)),
     ("Green", Rgb(0x2f, 0xa8, 0x5a)),
@@ -678,8 +679,8 @@ mod tests {
 
     #[test]
     fn parses_only_six_digit_hex() {
-        assert_eq!(Rgb::parse("#5865F2"), Some(DEFAULT_ACCENT));
-        assert_eq!(DEFAULT_ACCENT.hex(), "#5865f2");
+        assert_eq!(Rgb::parse("#4762F5"), Some(DEFAULT_ACCENT));
+        assert_eq!(DEFAULT_ACCENT.hex(), "#4762f5");
         for bad in [
             "",
             "5865f2",
@@ -701,10 +702,10 @@ mod tests {
             assert_eq!(Token::from_id(token.id()), Some(token));
         }
         let graphite = Theme::Graphite.palette();
-        assert_eq!(graphite.get(Token::Surface), hex(0x202127));
-        assert_eq!(graphite.get(Token::Raised), hex(0x30313c));
-        assert_eq!(graphite.get(Token::Text), hex(0xf2f3f5));
-        assert_eq!(graphite.get(Token::Muted), hex(0xb7b9c4));
+        assert_eq!(graphite.get(Token::Surface), hex(0x24252c));
+        assert_eq!(graphite.get(Token::Raised), hex(0x31323c));
+        assert_eq!(graphite.get(Token::Text), hex(0xeceef3));
+        assert_eq!(graphite.get(Token::Muted), hex(0xb4b7c3));
         assert_eq!(graphite.get(Token::Accent), DEFAULT_ACCENT);
         assert_eq!(graphite.get(Token::Danger), hex(0xed4245));
     }
@@ -718,7 +719,7 @@ mod tests {
             .with(Token::Surface, Some(hex(0x101010)));
         let code = custom.encode();
         assert_eq!(code, "slate;surface=#101010;accent=#14a394");
-        assert_eq!(Theme::Graphite.palette().get(Token::Link), hex(0x00bcff));
+        assert_eq!(Theme::Graphite.palette().get(Token::Link), hex(0x8aa4ff));
         assert_eq!(Appearance::decode(&code), Some(custom));
         assert_eq!(
             Appearance::decode(" slate ; ACCENT=#14A394 ;\n"),
