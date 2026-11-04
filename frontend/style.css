@@ -289,6 +289,7 @@ dialog header > button.icon-button:last-child svg { width: 18px; height: 18px; }
 .friend-list > .friend-row { max-width: 944px; margin-inline: max(-12px, calc((100% - 944px) / 2)); }
 /* Names keep room: on narrow rows the actions wrap under them instead of squeezing them. */
 .friend-row-name { min-width: 7rem; }
+@media (max-width: 767px) { .friend-row { flex-wrap: nowrap; gap: 8px; } .friend-row-name { min-width: 5.5rem; } }
 .friend-row-name + * { margin-left: auto; }
 /* "More reactions" uses the app chevron, not the browser's disclosure marker. */
 .message-reaction-more summary { display: flex; align-items: center; gap: 6px; list-style: none; }
