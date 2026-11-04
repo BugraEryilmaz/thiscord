@@ -452,6 +452,76 @@ pub fn nominal_fps(measured: f64) -> u32 {
     measured.round() as u32
 }
 
+/// An order for `aspects` that packs better, used until the user arranges the
+/// tiles themselves: grouping similar shapes lets rows fill the width. Returns
+/// indices into `aspects`; the given order wins unless another shows clearly
+/// more video.
+pub fn arrange(width: f64, height: f64, gap: f64, aspects: &[f64]) -> Vec<usize> {
+    let identity: Vec<usize> = (0..aspects.len()).collect();
+    if aspects.len() < 3 || width <= 0.0 || height <= 0.0 {
+        return identity;
+    }
+    let shown = |order: &[usize]| {
+        let ordered: Vec<f64> = order.iter().map(|i| aspects[*i]).collect();
+        let p = grid(width, height, gap, &ordered);
+        let area: f64 = p.tiles.iter().map(Rect::area).sum();
+        if p.scrolls { area / 2.0 } else { area }
+    };
+    // Tiles of the same shape are interchangeable, so only distinct shape
+    // sequences are tried (lexicographic permutations of shape classes).
+    let mut by_shape = identity.clone();
+    by_shape.sort_by(|a, b| sane_aspect(aspects[*a]).total_cmp(&sane_aspect(aspects[*b])));
+    let mut classes = Vec::with_capacity(aspects.len());
+    let mut members: Vec<Vec<usize>> = Vec::new();
+    let mut previous = f64::NAN;
+    for i in &by_shape {
+        let shape = (sane_aspect(aspects[*i]) * 100.0).round();
+        if shape != previous {
+            members.push(Vec::new());
+            previous = shape;
+        }
+        members.last_mut().expect("pushed above").push(*i);
+        classes.push(members.len() - 1);
+    }
+    for group in &mut members {
+        group.sort_unstable();
+    }
+    // Each try searches 2^(n-1) row splits; keep the whole search small.
+    let budget = (40_000usize >> (aspects.len() - 1).min(15)).clamp(1, 720);
+    let mut best = (shown(&identity) * 1.05, identity);
+    for _ in 0..budget {
+        let mut next = vec![0; members.len()];
+        let order: Vec<usize> = classes
+            .iter()
+            .map(|c| {
+                next[*c] += 1;
+                members[*c][next[*c] - 1]
+            })
+            .collect();
+        let area = shown(&order);
+        if area > best.0 + 1e-6 {
+            best = (area, order);
+        }
+        if !next_permutation(&mut classes) {
+            break;
+        }
+    }
+    best.1
+}
+
+fn next_permutation(items: &mut [usize]) -> bool {
+    let Some(pivot) = (1..items.len()).rev().find(|i| items[i - 1] < items[*i]) else {
+        return false;
+    };
+    let swap = (pivot..items.len())
+        .rev()
+        .find(|i| items[*i] > items[pivot - 1])
+        .expect("a larger item exists after the pivot");
+    items.swap(pivot - 1, swap);
+    items[pivot..].reverse();
+    true
+}
+
 /// Moves the item at `from` to `to`, shifting the items between.
 pub fn move_item<T>(items: &mut Vec<T>, from: usize, to: usize) {
     if from < items.len() && to < items.len() && from != to {
@@ -656,6 +726,26 @@ mod tests {
             .map(|y| p.tiles[1..].iter().filter(|t| t.y.round() == *y).count())
             .collect();
         assert!(counts.iter().all(|c| *c >= 2), "{counts:?} {p:?}");
+    }
+
+    #[test]
+    fn automatic_order_packs_mixed_shapes_better_and_keeps_equal_ones() {
+        let mixed = [WIDE, WIDE, 2.39, 0.5625, 4.0 / 3.0];
+        let order = arrange(1080.0, 790.0, 12.0, &mixed);
+        let mut sorted = order.clone();
+        sorted.sort();
+        assert_eq!(sorted, [0, 1, 2, 3, 4]);
+        let area = |o: &[usize]| {
+            let a: Vec<f64> = o.iter().map(|i| mixed[*i]).collect();
+            grid(1080.0, 790.0, 12.0, &a)
+                .tiles
+                .iter()
+                .map(Rect::area)
+                .sum::<f64>()
+        };
+        assert!(area(&order) >= area(&[0, 1, 2, 3, 4]));
+        assert!(area(&order) / (1080.0 * 790.0) > 0.6, "{order:?}");
+        assert_eq!(arrange(1080.0, 790.0, 12.0, &[WIDE; 5]), [0, 1, 2, 3, 4]);
     }
 
     #[test]

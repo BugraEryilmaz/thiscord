@@ -874,18 +874,18 @@ button.stream-live-badge:hover { background: color-mix(in srgb, var(--color-dang
 .media-stage.empty { display: none; }
 .media-stage.scrolls { overflow-y: auto; overscroll-behavior: contain; }
 .media-stage-content { position: relative; width: 100%; }
-.media-tile { position: absolute; left: 0; top: 0; margin: 0; border-radius: var(--radius-lg); background: #08090c; box-shadow: 0 0 0 1px var(--tint-6); container-type: size; transition: left .24s cubic-bezier(.2, .8, .2, 1), top .24s cubic-bezier(.2, .8, .2, 1), width .24s cubic-bezier(.2, .8, .2, 1), height .24s cubic-bezier(.2, .8, .2, 1), opacity .15s, box-shadow .15s; }
+.media-tile { position: absolute; left: 0; top: 0; margin: 0; border-radius: var(--radius-lg); background: #08090c; box-shadow: 0 0 0 1px var(--tint-6); container-type: size; transition: left .24s cubic-bezier(.2, .8, .2, 1), top .24s cubic-bezier(.2, .8, .2, 1), width .24s cubic-bezier(.2, .8, .2, 1), height .24s cubic-bezier(.2, .8, .2, 1), transform .24s cubic-bezier(.2, .8, .2, 1), opacity .15s, box-shadow .15s; transform-origin: 0 0; }
 .media-tile.unplaced { visibility: hidden; }
 .media-tile.stage { box-shadow: 0 0 0 1px var(--tint-10), var(--shadow-2); }
 .media-tile.menu-open { z-index: 70; }
 .media-tile[draggable="true"] { cursor: grab; }
 .media-stage.dragging .media-tile { cursor: grabbing; }
-.media-tile.dragging { opacity: .4; }
+.media-tile.dragging { opacity: .45; outline: 2px dashed var(--brand-ink); outline-offset: 3px; }
 .media-tile.drop-stage { box-shadow: 0 0 0 3px var(--brand-ink), var(--shadow-2); }
 .media-tile.drop-stage::after { content: ""; position: absolute; inset: 0; border-radius: inherit; background: color-mix(in srgb, var(--color-brand) 18%, transparent); pointer-events: none; }
 .media-tile-content { position: absolute; inset: 0; overflow: hidden; border-radius: inherit; cursor: pointer; }
 .media-tile-content:focus-visible { outline: none; }
-.media-tile:has(> .media-tile-content:focus-visible) { box-shadow: 0 0 0 2px var(--color-surface), 0 0 0 4px var(--focus-ring); }
+.media-tile:has(> .media-tile-content:focus-visible), .media-tile:has(> .media-tile-content[data-keyboard]:focus) { box-shadow: 0 0 0 2px var(--color-surface), 0 0 0 4px var(--focus-ring); }
 .media-tile .stream-player { position: absolute; inset: 0; min-height: 0; background: transparent; }
 .media-tile .stream-player video { width: 100%; height: 100%; max-height: none; aspect-ratio: auto; object-fit: contain; }
 .media-tile .stream-placeholder { height: 100%; min-height: 0; padding: 12px; font-size: 12px; text-align: center; color: #c9cbd3; }
@@ -906,7 +906,8 @@ button.stream-live-badge:hover { background: color-mix(in srgb, var(--color-dang
 .media-tile .stream-player-status { font-size: 12px; }
 @container (max-width: 300px) { .media-tile:hover .media-tile-caption, .media-tile:focus-within .media-tile-caption, .media-tile.menu-open .media-tile-caption { max-width: calc(100% - 56px); } .media-tile-actions > :not(.media-tile-more) { display: none; } }
 @container (max-width: 150px) or (max-height: 96px) { .media-tile-actions { display: none; } .media-tile-caption, .media-tile:hover .media-tile-caption, .media-tile:focus-within .media-tile-caption { left: 4px; top: 4px; max-width: calc(100% - 8px); min-height: 22px; padding: 0 8px 0 6px; } }
-@container (max-width: 240px) or (max-height: 130px) { .media-quality-fps, .media-tile .stream-watchers { display: none; } .media-quality { left: 4px; bottom: 4px; padding: 1px 6px; } }
+.media-quality-compact { display: none; }
+@container (max-width: 240px) or (max-height: 130px) { .media-quality-full, .media-tile .stream-watchers { display: none; } .media-quality-compact { display: inline; } .media-quality { left: 4px; bottom: 4px; padding: 1px 6px; } }
 @container (max-width: 130px) or (max-height: 76px) { .media-quality { display: none; } }
 @container (max-height: 90px) { .media-tile-caption { top: 4px; left: 4px; min-height: 24px; } .media-tile-actions { top: 4px; right: 4px; } }
 /* Fullscreen (or the expanded fallback where WebViews lack it) drops the layout box. */
@@ -917,6 +918,8 @@ button.stream-live-badge:hover { background: color-mix(in srgb, var(--color-dang
 .media-item-menu { position: absolute; right: 8px; top: 48px; z-index: 71; display: flex; flex-direction: column; width: min(300px, calc(100vw - 32px)); padding: 6px; border: 1px solid var(--tint-8); border-radius: var(--radius-lg); background: var(--color-popover); color: var(--color-content); box-shadow: var(--shadow-2); cursor: default; }
 .media-item-menu.up { top: auto; bottom: 48px; }
 .media-item-menu.start { right: auto; left: 8px; }
+.media-item-menu { overflow-y: auto; overscroll-behavior: contain; }
+.media-menu-items { display: flex; flex-direction: column; }
 .media-item-menu .context-item { display: flex; align-items: center; gap: 10px; }
 .media-item-menu .context-shortcut { margin-left: auto; padding: 0 6px; border-radius: var(--radius-sm); background: var(--tint-6); color: color-mix(in srgb, var(--color-muted) 100%, transparent); font: 600 12px/20px inherit; font-family: inherit; }
 .media-menu-volume { margin-top: 4px; padding: 8px 10px 4px; border-top: 1px solid var(--tint-6); }
@@ -929,10 +932,14 @@ button.stream-live-badge:hover { background: color-mix(in srgb, var(--color-dang
   /* Touch: tap focuses; the one options button holds everything else. */
   .media-tile-actions { opacity: 1; }
   .media-tile:not(.expanded) .media-tile-actions > :not(.media-tile-more) { display: none; }
-  .media-tile-button { width: 44px; height: 44px; }
+  .media-tile-button { position: relative; isolation: isolate; width: 44px; height: 44px; background: none; backdrop-filter: none; -webkit-backdrop-filter: none; }
+  .media-tile-button::before { content: ""; position: absolute; inset: 6px; z-index: -1; border-radius: var(--radius-md); background: rgb(10 11 15 / .74); }
+  .media-tile-button[aria-pressed="true"]::before { background: var(--color-brand); }
   .media-tile .media-tile-caption, .media-tile:hover .media-tile-caption { max-width: calc(100% - 68px); min-height: 32px; }
   /* Every tile keeps its options button on touch, however small. */
-  @container (max-width: 150px) or (max-height: 96px) { .media-tile .media-tile-actions { display: flex; top: 0; right: 0; } .media-tile .media-tile-caption, .media-tile:hover .media-tile-caption { max-width: calc(100% - 52px); } }
+  @container (max-width: 150px) or (max-height: 96px) { .media-tile .media-tile-actions { display: flex; top: 0; right: 0; } .media-tile .media-tile-caption, .media-tile:hover .media-tile-caption { max-width: calc(100% - 48px); } }
+  .media-tile-actions { top: 2px; right: 2px; }
+  .media-tile .media-tile-caption, .media-tile:hover .media-tile-caption { max-width: calc(100% - 56px); }
   .media-bar-hint { display: none; }
   .media-chip, .media-bar-grid { min-height: 44px; }
 }
@@ -940,8 +947,8 @@ button.stream-live-badge:hover { background: color-mix(in srgb, var(--color-dang
   /* The view already stops at the dock; clear its rounded top edge. */
   .voice-channel-view .channel-streams { padding-bottom: 28px; }
   .media-menu-scrim { position: fixed; inset: 0; z-index: 70; display: block; background: color-mix(in srgb, var(--color-black, #000) 45%, transparent); }
-  .media-item-menu, .media-item-menu.up, .media-item-menu.start { position: fixed; top: auto; right: 8px; left: 8px; bottom: calc(var(--dock-height, 0px) + 16px + env(safe-area-inset-bottom, 0px)); width: auto; max-height: 70dvh; overflow-y: auto; padding: 8px; border-radius: var(--radius-xl); box-shadow: var(--shadow-3); }
-  .media-item-menu::before { content: ""; align-self: center; width: 36px; height: 4px; margin: 2px 0 6px; border-radius: 2px; background: var(--tint-19); }
+  .media-item-menu, .media-item-menu.up, .media-item-menu.start { position: fixed; z-index: 71; top: auto; right: 0; left: 0; bottom: 0; width: auto; max-height: 80dvh !important; padding: 8px 8px calc(12px + env(safe-area-inset-bottom, 0px)); border-width: 1px 0 0; border-radius: var(--radius-xl) var(--radius-xl) 0 0; box-shadow: var(--shadow-3); }
+  .media-item-menu::before { content: ""; flex-shrink: 0; align-self: center; width: 40px; height: 5px; margin: 2px 0 8px; border-radius: 3px; background: color-mix(in srgb, var(--color-muted) 70%, transparent); }
   .media-item-menu .context-shortcut { display: none; }
   /* Query containment would trap the fixed sheet inside the tile. */
   .media-tile.menu-open { container-type: normal; }
@@ -951,7 +958,7 @@ button.stream-live-badge:hover { background: color-mix(in srgb, var(--color-dang
 .stream-watchers { position: absolute; right: 10px; bottom: 10px; z-index: 2; display: flex; flex-direction: row; align-items: center; padding: 3px; border-radius: 999px; background: #08090c99; }
 .stream-watcher { display: inline-flex; position: relative; border: 2px solid var(--color-surface); border-radius: 50%; background: var(--color-raised); outline-offset: 2px; }
 .stream-watcher + .stream-watcher { margin-left: -6px; }
-.stream-watcher:hover, .stream-watcher:focus-visible { z-index: 1; outline: 2px solid var(--brand-lighter); }
+.stream-watchers:focus-visible { outline: 2px solid var(--focus-ring); outline-offset: 2px; }
 .chat-online { display: flex; flex-shrink: 0; align-items: center; padding-left: 6px; }
 .chat-online::before { content: ""; width: 6px; height: 6px; margin-right: 8px; border-radius: 50%; background: var(--color-success); }
 

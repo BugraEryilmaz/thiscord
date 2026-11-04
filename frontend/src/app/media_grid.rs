@@ -73,6 +73,20 @@ fn observe_size(element: &web_sys::Element, callback: impl FnMut() + 'static) {
     }
 }
 
+fn reduced_motion() -> bool {
+    let window = window();
+    js_sys::Reflect::get(&window, &"matchMedia".into())
+        .ok()
+        .and_then(|f| f.dyn_into::<js_sys::Function>().ok())
+        .and_then(|f| {
+            f.call1(&window, &"(prefers-reduced-motion: reduce)".into())
+                .ok()
+        })
+        .and_then(|query| js_sys::Reflect::get(&query, &"matches".into()).ok())
+        .and_then(|matches| matches.as_bool())
+        .unwrap_or(false)
+}
+
 fn now() -> f64 {
     window().performance().map(|p| p.now()).unwrap_or_default()
 }
@@ -102,6 +116,9 @@ pub(super) fn ScreenViewer(ui: Ui, guild: GuildId, channel: ChannelId) -> impl I
     let rates = RwSignal::new(HashMap::<Key, f64>::new());
     let announcement = RwSignal::new(String::new());
     let last_move = StoredValue::new(0.0f64);
+    // Until the user rearranges, tiles follow a shape-aware automatic order.
+    let arranged = RwSignal::new(false);
+    let menu_place = RwSignal::new((false, None::<f64>));
     let stage = NodeRef::<leptos::html::Div>::new();
     let announce = move |text: String| announcement.set(text);
     // The gesture hint retires after a few uses; it is remembered per device.
@@ -141,7 +158,26 @@ pub(super) fn ScreenViewer(ui: Ui, guild: GuildId, channel: ChannelId) -> impl I
             })
             .collect::<Vec<Tile>>()
     });
-    // The user's order first; streams that start later join at the end.
+    // Stream shapes, rounded so resolution changes of the same shape don't
+    // reorder anything.
+    let shapes = Memo::new(move |_| {
+        dims.with(|d| {
+            d.iter()
+                .filter(|(_, (w, h))| *w > 0 && *h > 0)
+                .map(|(k, (w, h))| (*k, ((*w as f64 / *h as f64) * 100.0).round() as u32))
+                .collect::<Vec<_>>()
+        })
+    });
+    let aspect_of = move |shapes: &[(Key, u32)], key: &Key| {
+        shapes
+            .iter()
+            .find(|(k, _)| k == key)
+            .map(|(_, a)| *a as f64 / 100.0)
+            .unwrap_or(media_layout::DEFAULT_ASPECT)
+    };
+    // The user's order first; streams that start later join at the end. Until
+    // the user rearranges, the order is chosen to pack shapes well (from the
+    // area at that moment, so resizing alone never reshuffles tiles).
     let visible = Memo::new(move |_| {
         let tiles = tiles.get();
         let hidden = hidden.get();
@@ -152,8 +188,15 @@ pub(super) fn ScreenViewer(ui: Ui, guild: GuildId, channel: ChannelId) -> impl I
             .filter(|k| tiles.iter().any(|t| key_of(t) == *k))
             .collect();
         keys.extend(tiles.iter().map(key_of).filter(|k| !order.contains(k)));
+        keys.retain(|k| !hidden.contains(k));
+        if !arranged.get() {
+            let (width, height) = size.get_untracked();
+            let aspects: Vec<f64> = shapes.with(|s| keys.iter().map(|k| aspect_of(s, k)).collect());
+            let gap = if width < 600.0 { 8.0 } else { 12.0 };
+            let auto = media_layout::arrange(width, height, gap, &aspects);
+            keys = auto.into_iter().map(|i| keys[i]).collect();
+        }
         keys.into_iter()
-            .filter(|k| !hidden.contains(k))
             .filter_map(|k| tiles.iter().find(|t| key_of(t) == k).cloned())
             .collect::<Vec<Tile>>()
     });
@@ -204,14 +247,7 @@ pub(super) fn ScreenViewer(ui: Ui, guild: GuildId, channel: ChannelId) -> impl I
     let arrangement = Memo::new(move |_| {
         let (width, height) = size.get();
         let keys = visible_keys.get();
-        let aspects: Vec<f64> = dims.with(|d| {
-            keys.iter()
-                .map(|k| match d.get(k) {
-                    Some((w, h)) if *w > 0 && *h > 0 => *w as f64 / *h as f64,
-                    _ => media_layout::DEFAULT_ASPECT,
-                })
-                .collect()
-        });
+        let aspects: Vec<f64> = shapes.with(|s| keys.iter().map(|k| aspect_of(s, k)).collect());
         let gap = if width < 600.0 { 8.0 } else { 12.0 };
         let focused = focus
             .get()
@@ -347,6 +383,17 @@ pub(super) fn ScreenViewer(ui: Ui, guild: GuildId, channel: ChannelId) -> impl I
             return;
         }
         order.update(|o| {
+            if !arranged.get_untracked() {
+                // The first move starts from what the user sees.
+                let mut seeded = visible_keys.get_untracked();
+                seeded.extend(
+                    o.iter()
+                        .filter(|k| !seeded.contains(k))
+                        .copied()
+                        .collect::<Vec<_>>(),
+                );
+                *o = seeded;
+            }
             for k in visible_keys.get_untracked() {
                 if !o.contains(&k) {
                     o.push(k);
@@ -359,6 +406,7 @@ pub(super) fn ScreenViewer(ui: Ui, guild: GuildId, channel: ChannelId) -> impl I
                 media_layout::move_item(o, from, to);
             }
         });
+        arranged.set(true);
     };
     let announce_position = move |key: Key| {
         let keys = visible_keys.get_untracked();
@@ -382,7 +430,15 @@ pub(super) fn ScreenViewer(ui: Ui, guild: GuildId, channel: ChannelId) -> impl I
                 focus_selector(&format!("{tile} [data-move='{item}']:not(:disabled)"))
                     || focus_selector(&format!("{tile} [data-move]:not(:disabled)"))
             });
-            if !done {
+            if !done
+                && let Some(content) = document()
+                    .query_selector(&format!("{tile} .media-tile-content"))
+                    .ok()
+                    .flatten()
+            {
+                // Programmatic focus after a DOM move does not match
+                // :focus-visible; mark it so the ring still shows.
+                let _ = content.set_attribute("data-keyboard", "");
                 focus_selector(&format!("{tile} .media-tile-content"));
             }
         });
@@ -442,9 +498,13 @@ pub(super) fn ScreenViewer(ui: Ui, guild: GuildId, channel: ChannelId) -> impl I
             e.prevent_default();
             exit_full();
         } else if focus.with_untracked(Option::is_some)
-            && document()
-                .active_element()
-                .is_some_and(|a| a.closest(".media-stage").ok().flatten().is_some())
+            && !document().active_element().is_some_and(|a| {
+                matches!(a.tag_name().as_str(), "INPUT" | "TEXTAREA" | "SELECT")
+                    || a.closest("[contenteditable='true'], dialog")
+                        .ok()
+                        .flatten()
+                        .is_some()
+            })
         {
             e.prevent_default();
             set_focus(None);
@@ -464,11 +524,37 @@ pub(super) fn ScreenViewer(ui: Ui, guild: GuildId, channel: ChannelId) -> impl I
             handle.clear();
         }
     });
-    // Opening a menu moves keyboard focus to its first item.
+    // Opening a menu keeps it inside the window, then moves keyboard focus to
+    // its first item.
     Effect::new(move |_| {
         if let Some(key) = menu.get() {
+            menu_place.set((false, None));
             leptos::task::spawn_local(async move {
                 leptos::task::tick().await;
+                let tile = format!("[data-media-key='{}']", key_text(key));
+                let size = |v: Result<wasm_bindgen::JsValue, _>| {
+                    v.ok().and_then(|v| v.as_f64()).unwrap_or(0.0)
+                };
+                let viewport = size(window().inner_height());
+                if size(window().inner_width()) >= 768.0
+                    && let (Some(figure), Some(popover)) = (
+                        document().query_selector(&tile).ok().flatten(),
+                        document()
+                            .query_selector(&format!("{tile} .media-item-menu"))
+                            .ok()
+                            .flatten(),
+                    )
+                {
+                    let (bounds, needed) = (
+                        figure.get_bounding_client_rect(),
+                        popover.scroll_height() as f64,
+                    );
+                    let below = viewport - (bounds.top() + 48.0) - 8.0;
+                    let above = bounds.bottom() - 48.0 - 8.0;
+                    let up = needed > below && above > below;
+                    let room = if up { above } else { below };
+                    menu_place.set((up, (needed > room).then_some(room.max(160.0))));
+                }
                 focus_selector(&format!(
                     "[data-media-key='{}'] [role=menuitem]",
                     key_text(key)
@@ -538,6 +624,30 @@ pub(super) fn ScreenViewer(ui: Ui, guild: GuildId, channel: ChannelId) -> impl I
                 let figure=NodeRef::<leptos::html::Figure>::new();
                 let rect=Memo::new(move |_|arrangement.with(|a|a.rects.iter().find(|(k,_)|*k==key).map(|(_,r)|*r)));
                 let on_stage=Memo::new(move |_|arrangement.with(|a|a.stage==Some(key)));
+                // A keyed row moved in the DOM loses its CSS transition and
+                // would jump; animate it from where it was instead (FLIP).
+                let shown_at=StoredValue::new(None::<Rect>);
+                Effect::new(move |_| {
+                    let Some(next)=rect.get() else {return;};
+                    let Some(previous)=shown_at.get_value() else {shown_at.set_value(Some(next));return;};
+                    shown_at.set_value(Some(next));
+                    if expanded.get_untracked()==Some(key) || ((previous.x-next.x).abs()<1.0 && (previous.y-next.y).abs()<1.0) {return;}
+                    leptos::task::spawn_local(async move {
+                        gloo_timers::future::TimeoutFuture::new(0).await;
+                        let Some(element)=figure.get_untracked() else {return;};
+                        if reduced_motion() {return;}
+
+                        let (left,top)=(element.offset_left() as f64,element.offset_top() as f64);
+                        // Tiles still in place are animating on their own.
+                        if (left-next.x).abs()>1.0 || (top-next.y).abs()>1.0 {return;}
+                        let style=element.style();
+                        let _=style.set_property("transition","none");
+                        let _=style.set_property("transform",&format!("translate({:.1}px, {:.1}px) scale({:.4}, {:.4})",previous.x-next.x,previous.y-next.y,previous.w/next.w.max(1.0),previous.h/next.h.max(1.0)));
+                        let _=element.offset_width();
+                        let _=style.remove_property("transition");
+                        let _=style.remove_property("transform");
+                    });
+                });
                 let is_expanded=move ||expanded.get()==Some(key);
                 let placed=move |f: fn(Rect)->String| move ||if is_expanded() {String::new()} else {rect.get().map(f).unwrap_or_default()};
                 let full=move || {
@@ -554,7 +664,7 @@ pub(super) fn ScreenViewer(ui: Ui, guild: GuildId, channel: ChannelId) -> impl I
                 let index=Memo::new(move |_|visible_keys.with(|v|v.iter().position(|k|*k==key)));
                 let first=move ||index.get()==Some(0);
                 let last=move ||index.get().is_some_and(|i|visible_keys.with(|v|i+1==v.len()));
-                let menu_up=move ||arrangement.with(|a|rect.get().is_some_and(|r|r.y+r.h/2.0>a.height/2.0 && r.h<420.0));
+                let menu_up=move ||menu_place.get().0;
                 let menu_start=move ||arrangement.with(|a|rect.get().is_some_and(|r|r.x+r.w<320.0 && a.width>r.x+r.w+8.0));
                 let quality=Memo::new(move |_| {
                     let (w,h)=dims.with(|d|d.get(&key).copied())?;
@@ -563,9 +673,10 @@ pub(super) fn ScreenViewer(ui: Ui, guild: GuildId, channel: ChannelId) -> impl I
                     let nominal=media_layout::nominal_fps(fps);
                     let language=crate::i18n::language();
                     let rate=(nominal>0).then(||localized_format!(language, "{} fps", nominal));
-                    let detail=if own {localized_format!(language, "{}×{} · {} fps (your capture)", w, h, format!("{fps:.1}"))}
-                        else {localized_format!(language, "{}×{} · {} fps received", w, h, format!("{fps:.1}"))};
-                    Some((resolution,rate,detail))
+                    let compact=if nominal>0 {format!("{resolution}{nominal}")} else {resolution.clone()};
+                    let detail=if own {localized_format!(language, "{}×{} · {} fps (your capture)", w, h, nominal)}
+                        else {localized_format!(language, "{}×{} · {} fps received", w, h, nominal)};
+                    Some((resolution,rate,detail,compact))
                 });
                 let hint=hint_id();
                 let quality_id=format!("media-quality-{grid_id}-{}",key_text(key));
@@ -610,6 +721,7 @@ pub(super) fn ScreenViewer(ui: Ui, guild: GuildId, channel: ChannelId) -> impl I
                     <div class="media-tile-content" role="button" tabindex="0" aria-label=label.clone() aria-describedby=format!("{hint} {quality_id}")
                         aria-pressed=move ||several().then(||on_stage.get().to_string())
                         on:click=move |_|toggle_focus()
+                        on:blur=move |e|{if let Some(t)=e.target().and_then(|t|t.dyn_into::<web_sys::Element>().ok()){let _=t.remove_attribute("data-keyboard");}}
                         on:keydown=move |e|{
                             let key_name=e.key();
                             let plain=!e.alt_key()&&!e.ctrl_key()&&!e.meta_key();
@@ -651,17 +763,19 @@ pub(super) fn ScreenViewer(ui: Ui, guild: GuildId, channel: ChannelId) -> impl I
                     <Show when=move ||quality.get().is_some()>
                         <span class="media-quality" id=quality_id.clone() data-tip=move ||quality.get().map(|q|q.2).unwrap_or_default()>
                             <span class="sr-only">{move ||quality.get().map(|q|q.2).unwrap_or_default()}</span>
-                            <span aria-hidden="true">{move ||quality.get().map(|q|q.0).unwrap_or_default()}</span>
-                            {move ||quality.get().and_then(|q|q.1).map(|rate|view!{<span class="media-quality-fps" aria-hidden="true">" · "{rate}</span>})}
+                            <span class="media-quality-full" aria-hidden="true">{move ||quality.get().map(|q|q.0).unwrap_or_default()}
+                                {move ||quality.get().and_then(|q|q.1).map(|rate|view!{" · "{rate}})}</span>
+                            <span class="media-quality-compact" aria-hidden="true">{move ||quality.get().map(|q|q.3).unwrap_or_default()}</span>
                         </span>
                     </Show>
                     <super::screen::StreamWatchers ui=ui owner=owner kind=kind epoch=epoch/>
                     <Show when=move ||menu.get()==Some(key)>
                         <div class="media-menu-scrim" aria-hidden="true" on:pointerdown=move |e|e.stop_propagation() on:click=move |_|close_menu(true)></div>
-                        <div class="media-item-menu message-options" class:up=menu_up class:start=menu_start role="menu" aria-label=label_menu.clone()
-                            on:pointerdown=move |e|e.stop_propagation() on:click=move |e|e.stop_propagation()
-                            on:keydown=move |e|super::keyboard::rove_items(&e,"[role=menuitem]")>
+                        <div class="media-item-menu message-options" class:up=menu_up class:start=menu_start
+                            style:max-height=move ||menu_place.get().1.map(|h|format!("{h:.0}px")).unwrap_or_default()
+                            on:pointerdown=move |e|e.stop_propagation() on:click=move |e|e.stop_propagation()>
                             <p class="context-heading" aria-hidden="true">{label_heading.clone()}</p>
+                            <div class="media-menu-items" role="menu" aria-label=label_menu.clone() on:keydown=move |e|super::keyboard::rove_items(&e,"[role=menuitem]")>
                             <Show when=several>
                                 <button type="button" role="menuitem" class="context-item" on:click=move |_|{toggle_focus();close_menu(false);}>
                                     {move ||view!{<Icon kind=if on_stage.get() {Glyph::Grid} else {Glyph::Spotlight}/>}}
@@ -680,7 +794,8 @@ pub(super) fn ScreenViewer(ui: Ui, guild: GuildId, channel: ChannelId) -> impl I
                                 announce(localized_format!(crate::i18n::language(), "Hidden: {}", tile_name(key)));
                                 focus_selector(".media-bar-hidden .media-chip");
                             }><Icon kind=Glyph::EyeOff/>{move ||crate::i18n::t("Hide this stream")}</button>
-                            {(!own).then(||view!{<div class="media-menu-volume"><super::context_menu::ParticipantVolume ui=ui guild=guild channel=channel member=owner/></div>})}
+                            </div>
+                            {(!own).then(||view!{<div class="media-menu-volume" role="group" aria-label=move ||crate::i18n::t("Volume")><super::context_menu::ParticipantVolume ui=ui guild=guild channel=channel member=owner/></div>})}
                         </div>
                     </Show>
                 </figure>}

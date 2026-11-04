@@ -57,10 +57,14 @@ Notes and conflict rules:
   and use arrow keys spatially across rows and emoji groups. Quick reactions and
   soundboard sounds use the same arrow movement.
 - Theme and accent pickers are radio groups: arrows move and select.
-- Call media tiles are buttons: Enter/Space focuses or unfocuses a stream, F opens
-  full screen, Alt+←/→ (or ↑/↓) moves it earlier or later, and Shift+F10 or the
-  context-menu key opens its options. A polite live region announces moves,
-  focus and hide/restore; tile animations stop under reduced motion.
+- Call media tiles are buttons with two Tab stops (the tile and its options
+  button, plus the viewer avatars as one group): Enter/Space focuses or unfocuses
+  a stream, F opens full screen, Alt+←/→ (or ↑/↓) moves it, Alt+Home/End moves it
+  to the start or end, and Shift+F10 or the context-menu key opens its options.
+  Focus stays on the tile (or the menu item) across repeated moves. The options
+  menu holds only menu items; volume sliders follow it as a labelled group. A
+  polite live region announces moves, focus and hide/restore; tile animations
+  stop under reduced motion.
 
 ## Dialogs
 

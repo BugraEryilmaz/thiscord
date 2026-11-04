@@ -240,13 +240,13 @@ pub(super) fn StreamWatchers(
     });
     view! {
         <Show when=move ||!viewers.get().is_empty()>
-            <div class="stream-watchers" role="group" aria-label=move || crate::i18n::t("Watching this stream")>
+            <div class="stream-watchers" role="img" tabindex="0"
+                aria-label=move ||thiscord_frontend::localized_format!(crate::i18n::language(), "Watching: {}",viewer_names.get())
+                data-tip=move ||viewer_names.get()>
                 <For each=move ||viewers.get() key=|p|p.account_id children=move |initial| {
                     let id=initial.account_id;
                     let person=Signal::derive(move ||ui.voice.get().participants.into_iter().find(|p|p.account_id==id).unwrap_or_else(||initial.clone()));
-                    view! {<span class="stream-watcher" tabindex="0" role="img"
-                        aria-label=move ||thiscord_frontend::localized_format!(crate::i18n::language(), "Watching: {}",person.get().display_name())
-                        data-tip=move ||viewer_names.get()>
+                    view! {<span class="stream-watcher" aria-hidden="true">
                         <crate::avatar::Avatar class="size-6 text-[10px]" name=Signal::derive(move ||person.get().display_name().to_owned()) avatar_id=Signal::derive(move ||person.get().avatar_id)/>
                     </span>}
                 }/>
