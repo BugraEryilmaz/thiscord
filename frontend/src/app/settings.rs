@@ -89,7 +89,20 @@ fn subtitle(page: &str) -> &'static str {
 
 #[component]
 fn NavItem(ui: Ui, page: &'static str, label: &'static str, icon: Glyph) -> impl IntoView {
-    view! {<button class="settings-nav-item" data-rove aria-current=move ||if ui.page.get()==page || (page=="security" && matches!(ui.page.get(),"password"|"delete"|"reauthenticate")){Some("page")}else{None} disabled=move ||ui.busy.get() on:click=move |_|{
+    let item = NodeRef::<leptos::html::Button>::new();
+    // On phones the navigation is a horizontal strip; bring the open section into view.
+    Effect::new(move |_| {
+        if ui.page.get() == page
+            && let Some(item) = item.get()
+            && let Some(strip) = item.parent_element()
+            && strip.scroll_width() > strip.client_width()
+        {
+            let offset =
+                item.get_bounding_client_rect().left() - strip.get_bounding_client_rect().left();
+            strip.set_scroll_left(strip.scroll_left() + offset as i32 - 16);
+        }
+    });
+    view! {<button node_ref=item class="settings-nav-item" data-rove aria-current=move ||if ui.page.get()==page || (page=="security" && matches!(ui.page.get(),"password"|"delete"|"reauthenticate")){Some("page")}else{None} disabled=move ||ui.busy.get() on:click=move |_|{
         navigate(ui,page);
     }><Icon kind=icon/><span>{move || crate::i18n::t(label)}</span></button>}
 }

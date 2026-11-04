@@ -1018,13 +1018,13 @@ fn OnlineMembers(chat: Chat) -> impl IntoView {
                         view! {
                             <span class="stream-watcher" tabindex="0" role="img" data-tip=move ||names.get()
                                 aria-label=move ||thiscord_frontend::localized_format!(crate::i18n::language(), "Online here: {}", name.get())>
-                                <crate::avatar::Avatar class="size-6 text-[11px]" name avatar_id=Signal::derive(move ||chat.online.with(|members|members.iter().find(|m|m.account_id==id).and_then(|m|m.avatar_id)))/>
+                                <crate::avatar::Avatar class="size-6 text-xs" name avatar_id=Signal::derive(move ||chat.online.with(|members|members.iter().find(|m|m.account_id==id).and_then(|m|m.avatar_id)))/>
                             </span>
                         }
                     }/>
                 <Show when=move ||chat.online.with(|members| members.len() > VISIBLE)>
                     <span class="stream-watcher" tabindex="0" role="img" data-tip=move ||names.get() aria-label=move ||names.get()>
-                        <span class="inline-grid size-6 place-items-center rounded-full text-[11px] font-semibold" aria-hidden="true">
+                        <span class="inline-grid size-6 place-items-center rounded-full text-xs font-semibold" aria-hidden="true">
                             {move ||format!("+{}",chat.online.with(Vec::len).saturating_sub(VISIBLE))}
                         </span>
                     </span>

@@ -106,7 +106,7 @@ pub(super) fn ComposerEmoji(
             }>
             <button type="button" class="icon-button" aria-label=move || crate::i18n::t("Emoji") data-tip=move || crate::i18n::t("Emoji")
                 aria-haspopup="dialog" aria-expanded=move || open.get().to_string() disabled=move || disabled.get()
-                on:click=move |_| open.update(|value| *value = !*value)><Icon kind=Glyph::Reaction/></button>
+                on:click=move |_| open.update(|value| *value = !*value)><Icon kind=Glyph::Emoji/></button>
             <Show when=move || open.get()>
                 <div class="emoji-popover" role="dialog" aria-label=move || crate::i18n::t("Emoji")>
                     <EmojiGrid pick/>

@@ -123,7 +123,7 @@ pub(super) fn Toggle(ui: Ui) -> impl IntoView {
         <button type="button" class="icon-button shrink-0" aria-controls="member-list"
             aria-expanded=move || ui.members.open().to_string()
             aria-label=move || crate::i18n::t("Member list") data-tip=move || crate::i18n::t("Member list")
-            on:click=move |_| ui.members.toggle()><Icon kind=Glyph::Person/></button>
+            on:click=move |_| ui.members.toggle()><Icon kind=Glyph::Users/></button>
     }
 }
 

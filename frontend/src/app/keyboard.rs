@@ -825,7 +825,7 @@ fn QuickSwitcher(ui: Ui) -> impl IntoView {
                         Kind::Server => view! {<Icon kind=Glyph::Server/>}.into_any(),
                         Kind::TextChannel => view! {<span class="w-5 text-center text-lg" aria-hidden="true">"#"</span>}.into_any(),
                         Kind::VoiceChannel => view! {<Icon kind=Glyph::Volume/>}.into_any(),
-                        Kind::Conversation => view! {<Icon kind=Glyph::Person/>}.into_any(),
+                        Kind::Conversation => view! {<Icon kind=Glyph::Message/>}.into_any(),
                     };
                     let kind = match candidate.kind {
                         Kind::Server => "Server",

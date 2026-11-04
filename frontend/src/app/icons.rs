@@ -44,6 +44,9 @@ pub(super) enum Glyph {
     Friends,
     Server,
     Update,
+    Emoji,
+    Status,
+    Message,
     Globe,
     Bell,
     Lock,
@@ -124,6 +127,11 @@ pub(super) fn Icon(kind: Glyph) -> impl IntoView {
         Glyph::Globe => {
             "M21 12a9 9 0 1 1-18 0 9 9 0 0 1 18 0ZM3.5 9h17M3.5 15h17M12 3c-2.5 2.5-3.5 5.5-3.5 9s1 6.5 3.5 9c2.5-2.5 3.5-5.5 3.5-9s-1-6.5-3.5-9Z"
         }
+        Glyph::Emoji => {
+            "M21 12a9 9 0 1 1-18 0 9 9 0 0 1 18 0ZM8 14a4 4 0 0 0 8 0M9 9.5h.01M15 9.5h.01"
+        }
+        Glyph::Status => "M12 3a9 9 0 1 0 9 9M16 3.5a5 5 0 0 0 4.5 4.5M12 12h.01",
+        Glyph::Message => "M4 5h16v11H9l-5 4V5ZM8 9.5h8M8 12.5h5",
         Glyph::Update => "M21 12a9 9 0 1 1-18 0 9 9 0 0 1 18 0ZM12 16V8M8.5 11.5 12 8l3.5 3.5",
         Glyph::Server => "M4 4h16v6H4V4ZM4 14h16v6H4v-6ZM8 7h.01M8 17h.01",
         Glyph::Bell => "M6 9a6 6 0 0 1 12 0c0 6 2.5 8 2.5 8h-17S6 15 6 9ZM10 21h4",

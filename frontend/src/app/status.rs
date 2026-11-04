@@ -114,7 +114,7 @@ pub(super) fn StatusButton(ui: Ui) -> impl IntoView {
         <button type="button" class="dock-status icon-button shrink-0" aria-haspopup="dialog"
             aria-label=move || crate::i18n::t("Set custom status")
             data-tip=move || own(ui).unwrap_or_else(|| crate::i18n::t("Set custom status").to_owned())
-            on:click=open><Icon kind=Glyph::Reaction/></button>
+            on:click=open><Icon kind=Glyph::Status/></button>
         <dialog node_ref=dialog class="context-dialog" aria-labelledby="custom-status-title"
             on:click=move |e| super::dialog::dismiss_outside(e, dialog, saving.get_untracked())
             on:cancel=move |ev: web_sys::Event| if saving.get_untracked() { ev.prevent_default(); }>
@@ -130,7 +130,7 @@ pub(super) fn StatusButton(ui: Ui) -> impl IntoView {
                             aria-label=move || emoji.get().map_or_else(|| crate::i18n::t("Choose an emoji").to_owned(), |e| thiscord_frontend::localized_format!(crate::i18n::language(), "Emoji: {}", e))
                             aria-haspopup="dialog" aria-expanded=move || picking.get().to_string()
                             on:click=move |_| picking.update(|p| *p = !*p)>
-                            {move || emoji.get().map_or_else(|| view! {<Icon kind=Glyph::Reaction/>}.into_any(), |e| e.into_any())}
+                            {move || emoji.get().map_or_else(|| view! {<Icon kind=Glyph::Emoji/>}.into_any(), |e| e.into_any())}
                         </button>
                         <Show when=move || picking.get()>
                             <div class="emoji-popover status-emoji-popover" role="dialog" aria-label=move || crate::i18n::t("Emoji")
