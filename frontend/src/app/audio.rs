@@ -198,7 +198,7 @@ fn pressed(pressed: bool) {
 }
 /// Text fields, where only shortcuts with a command modifier or function key
 /// apply so typing is never captured.
-fn editable(target: Option<web_sys::EventTarget>) -> bool {
+pub(super) fn editable(target: Option<web_sys::EventTarget>) -> bool {
     use leptos::wasm_bindgen::JsCast;
     let Some(element) = target.and_then(|t| t.dyn_into::<web_sys::HtmlElement>().ok()) else {
         return false;
@@ -450,8 +450,8 @@ pub(super) fn toggle(ui: Ui, action: AudioToggle) {
 fn VoiceControls(ui: Ui) -> impl IntoView {
     let available = move || voice_available(ui);
     view! {<div class="flex shrink-0 items-center">
-        <button class="icon-button" disabled=move ||!available() aria-label=move ||if ui.audio.get().muted {crate::i18n::t("Unmute")}else{crate::i18n::t("Mute")} data-tip=move ||if !available(){crate::i18n::t("Microphone requires desktop")}else if ui.audio.get().muted{crate::i18n::t("Unmute")}else{crate::i18n::t("Mute")} aria-pressed=move || ui.audio.get().muted on:click=move |_|toggle(ui, AudioToggle::Mute)>{move||view!{<Icon kind=if ui.audio.get().muted{Glyph::MicOff}else{Glyph::Mic}/>}}</button>
-        <button class="icon-button" disabled=move ||!available() aria-label=move ||if ui.audio.get().deafened {crate::i18n::t("Undeafen")}else{crate::i18n::t("Deafen")} data-tip=move ||if !available(){crate::i18n::t("Audio requires desktop")}else if ui.audio.get().deafened{crate::i18n::t("Undeafen")}else{crate::i18n::t("Deafen")} aria-pressed=move || ui.audio.get().deafened on:click=move |_|toggle(ui, AudioToggle::Deafen)>{move||view!{<Icon kind=if ui.audio.get().deafened{Glyph::Deafen}else{Glyph::Headphones}/>}}</button>
+        <button class="icon-button" disabled=move ||!available() aria-label=move ||crate::i18n::t("Mute") data-tip=move ||if !available(){crate::i18n::t("Microphone requires desktop")}else if ui.audio.get().muted{crate::i18n::t("Unmute")}else{crate::i18n::t("Mute")} aria-pressed=move || ui.audio.get().muted on:click=move |_|toggle(ui, AudioToggle::Mute)>{move||view!{<Icon kind=if ui.audio.get().muted{Glyph::MicOff}else{Glyph::Mic}/>}}</button>
+        <button class="icon-button" disabled=move ||!available() aria-label=move ||crate::i18n::t("Deafen") data-tip=move ||if !available(){crate::i18n::t("Audio requires desktop")}else if ui.audio.get().deafened{crate::i18n::t("Undeafen")}else{crate::i18n::t("Deafen")} aria-pressed=move || ui.audio.get().deafened on:click=move |_|toggle(ui, AudioToggle::Deafen)>{move||view!{<Icon kind=if ui.audio.get().deafened{Glyph::Deafen}else{Glyph::Headphones}/>}}</button>
     </div>}
 }
 #[component]
@@ -476,7 +476,7 @@ pub(super) fn VoiceBar(ui: Ui) -> impl IntoView {
         <Show when=move||ui.voice.get().channel_id.is_some()><div class="voice-dock">
             <div class="flex items-center gap-2">
                 <span class="text-emerald-400"><Icon kind=Glyph::Signal/></span>
-                <div class="min-w-0 flex-1"><button class="voice-health text-sm font-semibold" aria-label=move || crate::i18n::t("Voice connection diagnostics") data-tip=move ||if !ui.voice.get().connected {"Connecting · diagnostics pending".into()} else if browser_voice(ui) {ui.audio_status.track();crate::browser_voice::connection_brief()} else {ui.audio_status.with(|s|thiscord_frontend::audio_quality::brief(s.as_ref().and_then(|s|s.quality.as_ref())))} class:text-emerald-400=move ||ui.voice.get().connected class:text-amber-300=move ||!ui.voice.get().connected role="status">{move ||if ui.voice.get().connected{crate::i18n::t("Voice connected")}else{crate::i18n::t("Connecting to voice…")}}</button><button class="block max-w-full truncate text-left text-xs text-white/55 hover:text-white" data-tip=move || crate::i18n::t("Open call controls") aria-label=move || crate::i18n::t("Open call controls") on:click=move |_|super::servers::open_voice(ui)>{location}</button></div>
+                <div class="min-w-0 flex-1"><button class="voice-health text-sm font-semibold" aria-label=move || crate::i18n::t("Voice connection diagnostics") data-tip=move ||if !ui.voice.get().connected {"Connecting · diagnostics pending".into()} else if browser_voice(ui) {ui.audio_status.track();crate::browser_voice::connection_brief()} else {ui.audio_status.with(|s|thiscord_frontend::audio_quality::brief(s.as_ref().and_then(|s|s.quality.as_ref())))} class:text-emerald-400=move ||ui.voice.get().connected class:text-amber-300=move ||!ui.voice.get().connected role="status">{move ||if ui.voice.get().connected{crate::i18n::t("Voice connected")}else{crate::i18n::t("Connecting to voice…")}}</button><button class="block max-w-full truncate text-left text-xs text-white/60 hover:text-white" data-tip=move || crate::i18n::t("Open call controls") aria-label=move || crate::i18n::t("Open call controls") on:click=move |_|super::servers::open_voice(ui)>{location}</button></div>
                 <button class="icon-button danger" aria-label=move || crate::i18n::t("Disconnect voice") data-tip=move || crate::i18n::t("Disconnect") disabled=move ||ui.voice_joining.get() on:click=move |_|leave(ui)><Icon kind=Glyph::Disconnect/></button>
             </div>
             <div class="mt-2 flex items-center gap-2">
@@ -493,6 +493,7 @@ pub(super) fn VoiceBar(ui: Ui) -> impl IntoView {
                 <Show when=move||!ui.audio_control.is_remote() && ui.audio.get().mode==TransmitMode::PushToTalk><button class="icon-button voice-action touch-none select-none" aria-label=move || crate::i18n::t("Hold to talk") data-tip=move || crate::i18n::t("Hold to talk") on:pointerdown=move |_|pressed(true) on:pointerup=move |_|pressed(false) on:pointerleave=move |_|pressed(false) on:pointercancel=move |_|pressed(false) on:keydown=move|e|{if matches!(e.key().as_str()," "|"Enter"){e.prevent_default();pressed(true);}} on:keyup=move|_|pressed(false) on:blur=move |_|pressed(false)><Icon kind=Glyph::Mic/></button></Show>
             </div>
         <Show when=move ||browser_voice(ui)><BrowserVoiceNotice/><super::browser_media::BrowserMediaError/></Show>
+        <super::camera_select::CameraNotice/>
         <Show when=move||ui.audio_status.with(|s|s.as_ref().and_then(|s|s.recording.as_ref()).is_some_and(|r|r.active))>
             <button class="mt-2 rounded bg-red-700 px-3 py-1 text-xs text-white" on:click=move |_|debug_command(ui,"audio_debug_stop")>
                 {move||thiscord_frontend::localized_format!(crate::i18n::language(), "● Recording {}s · Stop",ui.audio_status.with(|s|s.as_ref().and_then(|s|s.recording.as_ref()).map_or(0,|r|r.elapsed_ms/1000)))}
@@ -502,8 +503,9 @@ pub(super) fn VoiceBar(ui: Ui) -> impl IntoView {
         <div class="dock-account flex min-w-0 items-center gap-2 p-2">
             <button class="dock-profile flex min-w-0 flex-1 items-center gap-2 rounded-lg p-1 text-left hover:bg-white/5" aria-label=move || crate::i18n::t("Your profile") data-tip=move ||ui.account.get().map(|a|format!("{} (@{})",a.display_name,a.username)).unwrap_or_default() on:click=move |_|ui.page.set("profile")>
                 <span class="relative shrink-0"><crate::avatar::Avatar name=Signal::derive(move ||ui.account.get().map(|a|a.display_name).unwrap_or_default()) avatar_id=Signal::derive(move ||ui.account.get().and_then(|a|a.avatar_id))/><span class="connection-dot" class:dnd=move ||super::notifications::do_not_disturb(ui) class:connected=move ||ui.socket_status.get()==super::chat::ConnectionStatus::Connected class:connecting=move ||matches!(ui.socket_status.get(),super::chat::ConnectionStatus::Connecting|super::chat::ConnectionStatus::Reconnecting)></span></span>
-                <span class="min-w-0"><span class="block truncate text-sm font-semibold">{move ||ui.account.get().map(|a|if a.display_name.is_empty(){a.username}else{a.display_name})}</span><span class="block truncate text-xs text-white/55" role="status">{move ||if ui.socket_status.get()==super::chat::ConnectionStatus::Connected && super::notifications::do_not_disturb(ui) {crate::i18n::t("Do not disturb")} else {ui.socket_status.get().label()}}</span></span>
+                <span class="min-w-0"><span class="block truncate text-sm font-semibold">{move ||ui.account.get().map(|a|if a.display_name.is_empty(){a.username}else{a.display_name})}</span><span class="block truncate text-xs text-white/60" role="status">{move ||match super::status::own(ui) {Some(status) if ui.socket_status.get()==super::chat::ConnectionStatus::Connected => status, _ if ui.socket_status.get()==super::chat::ConnectionStatus::Connected && super::notifications::do_not_disturb(ui) => crate::i18n::t("Do not disturb").to_owned(), _ => ui.socket_status.get().label().to_owned()}}</span></span>
             </button>
+            <super::status::StatusButton ui=ui/>
             <VoiceControls ui=ui/>
             <button class="dock-settings icon-button shrink-0" aria-label=move || crate::i18n::t("Settings") data-tip=move || crate::i18n::t("Settings") on:click=move |_|ui.page.set("profile")><Icon kind=Glyph::Settings/></button>
         </div>
@@ -637,7 +639,7 @@ pub(super) fn StreamVolume(
             </label>
             {shared_audio.then(|| view! {
                 <button class="icon-button" disabled=move || busy.get()
-                    aria-label=move ||if gain.get()==0.0{crate::i18n::t("Unmute stream audio")}else{crate::i18n::t("Mute stream audio")}
+                    aria-label=move ||crate::i18n::t("Mute stream audio")
                     data-tip=move ||if gain.get()==0.0{crate::i18n::t("Unmute stream audio")}else{crate::i18n::t("Mute stream audio")}
                     aria-pressed=move || (gain.get() == 0.0).to_string()
                     on:click=move |_| {
@@ -771,6 +773,7 @@ pub(super) fn AudioSettingsPanel(ui: Ui) -> impl IntoView {
                 <p class="settings-hint">{move || crate::i18n::t("Use headphones for the microphone test. Sound tests are available when you’re outside a call.")}</p>
                 </Show>
                 </section>
+                <Show when=move ||!ui.audio_control.is_remote() && (desktop() || browser)><super::camera_select::CameraSettings ui=ui/></Show>
                 <section class="settings-card"><h3>{move || crate::i18n::t("Voice processing")}</h3>
                     <label class="flex gap-3"><input type="checkbox" prop:checked=move||ui.audio.get().noise_suppression on:change=move|e|{ui.audio.update(|s|s.noise_suppression=event_target_checked(&e));save(ui);}/>{move || crate::i18n::t("Noise suppression")}</label>
                     <Show when=move ||!browser>

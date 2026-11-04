@@ -107,16 +107,20 @@ their ordinary membership and previously assigned roles, losing the owner bypass
 A member with ManageInvites may add an existing verified username directly or
 create a shareable invite with optional lifetime and use limits (see below).
 
-The main screen has a left server rail with initials avatars and immediate server
-names on hover or keyboard focus, with accessible labels. Select a server to see
-its ID and visible channels. Custom server image uploads are not implemented.
+The main screen has a left server rail with server icons (initials when no icon is
+set or it fails to load) and immediate server names on hover or keyboard focus,
+with accessible labels. Select a server to see its ID and visible channels. See
+[Server icons](#server-icons) for uploads.
 Account settings sit in the bottom ribbon spanning the rail and channel list.
 Server settings sit in the channel header beside the name and copy-ID control.
 Right-click menus replace the browser menu: servers offer copy ID, settings,
 moderation and leave; channels offer personal pins/mutes, mark-as-read for text,
 voice join/disconnect, permissions and deletion when authorized. Participant menus
 offer local voice volume, role editing for lower-ranked members and the specific
-actions returned by `InspectModeration`. Destructive actions require confirmation.
+actions returned by `InspectModeration`. Member list entries open the same menu
+without voice items (see [chat.md](chat.md#member-list-and-profile-cards)).
+Destructive actions require confirmation
+(see [Destructive actions](#destructive-actions-and-cascades)).
 Menus fetch current capabilities when opened, submit the viewed guild revision,
 and never automatically retry a rejected mutation. Backend checks remain authoritative.
 Shift+F10 opens menus from focused items; arrows, Home/End, Enter and Escape
@@ -192,6 +196,74 @@ within the actor's base grants. Guild management operations always use base
 permissions; putting ManageGuild/ManageRoles in a channel override does not grant
 guild administration. The evaluator is authoritative in
 `backend/src/permissions/evaluator.rs`; the frontend only renders its result.
+
+## Server icons
+
+Members with ManageGuild (owners and Administrator included) can upload, replace or
+remove a server icon in **Server settings > Overview**. Uploads use the profile-picture
+pipeline: PNG, JPEG or WebP up to 2 MiB and 4096 × 4096 pixels, bounded decoding,
+orientation applied, centre-cropped to 256 × 256 and re-encoded as a metadata-free
+PNG. Choosing a file saves immediately; removal asks for confirmation. Like renaming,
+the Overview page is reachable only with ManageRoles, because it reads the role
+editor state.
+
+`POST /api/v1/guild-icons` takes `SetGuildIcon { guild_id, revision, image_base64 }`
+(`null` removes) and returns the updated `Guild`. It authenticates and rate-limits
+before decoding on one of two dedicated blocking workers, then locks the session,
+instance (shared) and guild row, requires current membership and ManageGuild, and
+checks the submitted revision in that transaction. A changed icon advances the guild
+revision; removing an absent icon is a no-op. Non-members, including instance
+admins, get 403. Bodies allow 2,797,228 bytes; other permission commands keep 16 KiB.
+
+`Guild.icon_id` is optional, so older clients and servers interoperate. The opaque
+ID appears only where the guild DTO already reaches members (server list, home
+view, settings, moderation) and in authorized server alerts. Invite links and the
+browser invite landing show no guild details, so non-members see neither name nor
+icon. `GET /api/v1/guild-icons/{icon_id}` serves the image without a bearer token,
+like profile pictures, so `<img>` and the overlay/banner windows can load it: anyone
+holding the URL can view it, including a former member who saved it, until the icon
+is replaced or removed (each replacement issues a new ID; old URLs return 404).
+There is no lookup by guild ID or listing. Responses use `image/png`, `nosniff`,
+`no-referrer` in clients and a private five-minute cache. Migration
+`20261103200000_guild_icons` stores one bounded image per guild; guild deletion
+cascades it and rollback drops only the icons.
+
+After a rename or icon change commits, sockets that opted in with
+`connect { guild_updates: true }` receive an ID-only `guild_updated` hint if the
+account is still a member; the app then re-reads its server list over HTTP. See
+[chat.md](chat.md#real-time-transport).
+
+## Destructive actions and cascades
+
+Every destructive action opens one shared confirmation dialog with the target's
+name and what is lost or kept. Cancel has initial focus; Escape and Cancel dismiss;
+Enter activates only the focused button. While the request runs, the dialog shows
+progress and cannot be dismissed; failures (translated wire errors) stay in the
+dialog for retry, and focus returns to the invoking control (the original menu
+target for context menus). Deleting a message with Shift held skips the prompt.
+The backend does not archive: these operations are immediate and permanent.
+
+| Action | Current behaviour |
+| --- | --- |
+| Delete server | Owner, recent reauthentication and typed name. Cascades channels, messages, attachments, roles, invites, overrides, moderation state, audit log, sounds, bots and the icon. |
+| Leave server | Removes membership and role assignments; authored messages stay. Rejoining needs an invite or join details. Owners must transfer first. |
+| Delete channel | Cascades its messages, attachments, pins, reactions, read markers, presence and overrides. |
+| Delete category | Its channels move to No category; channels, messages and permissions are preserved. |
+| Delete role | Removes its assignments and its channel overrides. |
+| Remove channel override | The role/member falls back to server-wide permissions in that channel. |
+| Kick / ban | Removes membership and roles and disconnects voice; bans block rejoining until unbanned. Messages are retained. |
+| Timeout / remove timeout, mute, deafen, move, disconnect | Moderation state changes; no data is deleted. |
+| Revoke invite | The link stops admitting members; existing members stay. |
+| Transfer ownership | The new owner gets full control; the former owner remains a member. |
+| Remove server icon / profile picture | Deletes the stored image; copies already downloaded cannot be recalled. |
+| Delete sound / bot, rotate bot token | Deletes the sound; deletes the bot and revokes its token and connections; rotation invalidates the old token. |
+| Delete message | Leaves a content-free tombstone; removes attachments, reactions and pin. |
+| Remove friend / block | Ends private messages and calls; blocking also stops requests. |
+| Remove saved notification settings | The source returns to event defaults; its mute/snooze ends. |
+| Sign out device / all devices, remove login method, delete account | See [accounts.md](accounts.md); deletion keeps typed-username and recent reauthentication. |
+
+Pending composer attachments, failed local messages and form resets are discarded
+locally without a prompt because nothing stored on the server is lost.
 
 ## API, consistency and scope
 

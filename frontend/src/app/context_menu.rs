@@ -273,17 +273,17 @@ async fn items(ui: Ui, target: Target) -> Result<(String, Vec<Item>), String> {
     let guild = home.guild;
     let mut items = vec![];
     if let Some(member) = target.member {
-        let channel = target
-            .channel
-            .ok_or(crate::i18n::t("Voice channel unavailable"))?;
-        if !home.channels.iter().any(|c| c.id == channel) {
+        // Voice participants carry their channel; member list entries have none.
+        if let Some(channel) = target.channel
+            && !home.channels.iter().any(|c| c.id == channel)
+        {
             return Err("Channel is no longer accessible".into());
         }
         let label = ui
             .voice_roster
             .get_untracked()
             .iter()
-            .find(|r| r.channel_id == channel)
+            .find(|r| Some(r.channel_id) == target.channel)
             .and_then(|r| r.members.iter().find(|m| m.account_id == member))
             .map(|m| m.display_name().to_owned())
             .or_else(|| {
@@ -294,9 +294,12 @@ async fn items(ui: Ui, target: Target) -> Result<(String, Vec<Item>), String> {
                     .find(|m| m.account_id == member)
                     .map(|m| m.display_name().to_owned())
             })
+            .or_else(|| ui.members.name(guild.id, member))
             .unwrap_or_else(|| "Voice participant".into());
         let own = ui.account.get_untracked().is_some_and(|a| a.id == member);
-        if is_bot(ui, member) {
+        if let Some(channel) = target.channel
+            && is_bot(ui, member)
+        {
             if matches!(super::servers::request(ui, PermissionRequest::Instance {}).await, Ok(PermissionResponse::Instance { access }) if access.role == InstanceRole::Owner)
             {
                 items.push(Item::new(
@@ -315,7 +318,12 @@ async fn items(ui: Ui, target: Target) -> Result<(String, Vec<Item>), String> {
             }
             return Ok((label, items));
         }
-        if own {
+        if own && target.channel.is_none() {
+            items.push(Item::new(
+                crate::i18n::t("Edit profile"),
+                Action::Page(guild.id, "profile", None),
+            ));
+        } else if own {
             items.push(Item::new(
                 crate::i18n::t("Your audio settings"),
                 Action::Page(guild.id, "audio", None),
@@ -490,7 +498,7 @@ async fn items(ui: Ui, target: Target) -> Result<(String, Vec<Item>), String> {
                         GuildChange::DeleteChannel { channel_id: id },
                         thiscord_frontend::localized_format!(
                             crate::i18n::language(),
-                            "Delete #{}? This removes the channel and its messages.",
+                            "Delete #{}?",
                             channel.name
                         ),
                     ),
@@ -542,7 +550,7 @@ async fn items(ui: Ui, target: Target) -> Result<(String, Vec<Item>), String> {
                     GuildChange::Leave {},
                     thiscord_frontend::localized_format!(
                         crate::i18n::language(),
-                        "Leave {}? You will need its join details to return.",
+                        "Leave {}?",
                         guild.name
                     ),
                 ),
@@ -553,10 +561,131 @@ async fn items(ui: Ui, target: Target) -> Result<(String, Vec<Item>), String> {
     Ok((guild.name, items))
 }
 
-fn execute(ui: Ui, action: Action) {
-    execute_reason(ui, action, String::new());
+/// Destructive menu actions open the shared confirmation dialog first.
+fn confirmation(ui: Ui, action: &Action, name: String) -> Option<super::dialog::Confirmation> {
+    use super::dialog::{Action as Confirmed, Confirmation};
+    let t = crate::i18n::t;
+    match action.clone() {
+        Action::Change(guild_id, revision, change, title) => {
+            let (detail, confirm, reason) = match &change {
+                GuildChange::RemoveMember { .. } => (
+                    t(
+                        "They lose access to this server and are disconnected from voice. They can rejoin with a new invite.",
+                    ),
+                    t("Kick"),
+                    true,
+                ),
+                GuildChange::BanMember { .. } => (
+                    t(
+                        "They are removed and disconnected from voice, and cannot rejoin until unbanned.",
+                    ),
+                    t("Ban"),
+                    true,
+                ),
+                GuildChange::DisconnectVoice { .. } => (
+                    t("They are removed from the voice channel and can join again."),
+                    t("Disconnect"),
+                    true,
+                ),
+                GuildChange::DeleteChannel { .. } => (
+                    t(
+                        "Its messages, attachments, pins, reactions and permission overrides are permanently deleted. This cannot be undone.",
+                    ),
+                    t("Delete channel"),
+                    false,
+                ),
+                GuildChange::Leave {} => (
+                    t(
+                        "You lose access to its channels and history; your messages stay. Rejoining needs an invite or its join details.",
+                    ),
+                    t("Leave server"),
+                    false,
+                ),
+                _ => (t("This cannot be undone."), t("Confirm"), false),
+            };
+            let prompt = Confirmation::new(
+                title,
+                detail,
+                confirm,
+                Confirmed::new(move |reason| {
+                    change_guild(ui, guild_id, revision, change.clone(), reason)
+                }),
+            );
+            Some(if reason { prompt.reason() } else { prompt })
+        }
+        Action::Unfriend(account_id) => Some(
+            Confirmation::new(
+                t("Remove this friend?"),
+                t("Private messages and calls will be unavailable until you become friends again."),
+                t("Remove friend"),
+                Confirmed::new(move |_| super::friends::remove(ui, account_id)),
+            )
+            .target(name),
+        ),
+        Action::Block(account_id) => Some(super::safety::block_prompt(ui, account_id).target(name)),
+        _ => None,
+    }
 }
-fn execute_reason(ui: Ui, action: Action, reason: String) {
+async fn change_guild(
+    ui: Ui,
+    guild_id: GuildId,
+    revision: i64,
+    change: GuildChange,
+    reason: String,
+) -> Result<(), String> {
+    if ui.busy.get_untracked() {
+        return Err(super::dialog::busy_error());
+    }
+    ui.busy.set(true);
+    let selection = ui.navigation.get_untracked().current();
+    let token = ui.token.get_untracked();
+    let result = super::servers::request(
+        ui,
+        if matches!(
+            change,
+            GuildChange::RemoveMember { .. }
+                | GuildChange::BanMember { .. }
+                | GuildChange::DisconnectVoice { .. }
+        ) {
+            PermissionRequest::Moderate {
+                guild_id,
+                revision,
+                change,
+                reason,
+            }
+        } else {
+            PermissionRequest::Change {
+                guild_id,
+                revision,
+                change,
+            }
+        },
+    )
+    .await;
+    if !super::servers::current(ui, selection) || ui.token.get_untracked() != token {
+        ui.busy.set(false);
+        return result.map(|_| ());
+    }
+    let outcome = match result {
+        Ok(_) => {
+            ui.status.set("Action completed".into());
+            Ok(())
+        }
+        Err(error) => {
+            let message = thiscord_frontend::localized_format!(
+                crate::i18n::language(),
+                "{error}. Reopen the menu to refresh permissions before retrying.",
+                error = crate::i18n::message(error)
+            );
+            ui.status.set(message.clone());
+            Err(message)
+        }
+    };
+    super::servers::refresh(ui).await;
+    ui.busy.set(false);
+    outcome
+}
+fn execute(ui: Ui, action: Action) {
     match action {
         Action::Block(id) => super::safety::block(ui, id),
         Action::ReportUser(account_id) => {
@@ -568,9 +697,9 @@ fn execute_reason(ui: Ui, action: Action, reason: String) {
         }
         Action::Bots(target) => ui.bot_target.set(Some(target)),
         Action::Friend(command) => super::friends::action(ui, command),
-        Action::Unfriend(account_id) => {
-            super::friends::action(ui, thiscord_shared::friends::Request::Remove { account_id })
-        }
+        Action::Unfriend(account_id) => leptos::task::spawn_local(async move {
+            let _ = super::friends::remove(ui, account_id).await;
+        }),
         Action::Notifications(target, title) => super::notifications::edit(ui, target, title),
         Action::Snooze(target, duration) => super::notifications::snooze(ui, target, duration),
         Action::Preference(channel, pin) => save_preference(ui, channel, pin),
@@ -634,55 +763,9 @@ fn execute_reason(ui: Ui, action: Action, reason: String) {
                 Err(error) => ui.status.set(error),
             }
         }),
-        Action::Change(guild_id, revision, change, _) => {
-            if ui.busy.get_untracked() {
-                return;
-            }
-            ui.busy.set(true);
-            leptos::task::spawn_local(async move {
-                let selection = ui.navigation.get_untracked().current();
-                let token = ui.token.get_untracked();
-                let result = super::servers::request(
-                    ui,
-                    if matches!(
-                        change,
-                        GuildChange::RemoveMember { .. }
-                            | GuildChange::BanMember { .. }
-                            | GuildChange::DisconnectVoice { .. }
-                    ) {
-                        PermissionRequest::Moderate {
-                            guild_id,
-                            revision,
-                            change,
-                            reason,
-                        }
-                    } else {
-                        PermissionRequest::Change {
-                            guild_id,
-                            revision,
-                            change,
-                        }
-                    },
-                )
-                .await;
-                if !super::servers::current(ui, selection) || ui.token.get_untracked() != token {
-                    ui.busy.set(false);
-                    return;
-                }
-                ui.status.set(match result {
-                    Ok(_) => "Action completed".into(),
-                    Err(error) => {
-                        thiscord_frontend::localized_format!(
-                            crate::i18n::language(),
-                            "{error}. Reopen the menu to refresh permissions before retrying.",
-                            error = crate::i18n::message(error)
-                        )
-                    }
-                });
-                super::servers::refresh(ui).await;
-                ui.busy.set(false);
-            });
-        }
+        Action::Change(guild_id, revision, change, _) => leptos::task::spawn_local(async move {
+            let _ = change_guild(ui, guild_id, revision, change, String::new()).await;
+        }),
     }
 }
 
@@ -945,6 +1028,11 @@ const CONTEXT_TARGETS: &str =
 const LONG_PRESS_TARGETS: &str =
     "[data-context-server],[data-context-conversation],[data-context-user],[data-tip]";
 
+/// Opens the element's context menu below it, as Shift+F10 would.
+pub(super) fn open_for(ui: Ui, element: web_sys::Element) {
+    menu_at(ui, Some(element.into()), 0.0, 0.0);
+}
+
 fn menu_at(ui: Ui, target: Option<web_sys::EventTarget>, x: f64, y: f64) {
     if user_menu(ui, target.clone(), x, y) || conversation_menu(ui, target.clone(), x, y) {
         return;
@@ -967,16 +1055,9 @@ pub(super) fn Host(ui: Ui) -> impl IntoView {
         mute_open.set(false);
     });
     let return_focus = StoredValue::new_local(None::<web_sys::HtmlElement>);
-    let pending = RwSignal::new(None::<Action>);
-    let reason = RwSignal::new(String::new());
-    let confirm = NodeRef::<leptos::html::Dialog>::new();
     let account = Memo::new(move |_| ui.account.get().map(|a| a.id));
     Effect::new(move |_| {
         close(ui);
-        pending.set(None);
-        if let Some(dialog) = confirm.get_untracked() {
-            dialog.close();
-        }
         let preferences = account
             .get()
             .and_then(|a| {
@@ -1192,16 +1273,15 @@ pub(super) fn Host(ui: Ui) -> impl IntoView {
         }
     });
     let run = move |action: Action| {
+        let name = ui
+            .context_menu
+            .get_untracked()
+            .map(|m| m.title)
+            .unwrap_or_default();
         close(ui);
-        match action {
-            Action::Change(..) | Action::Unfriend(_) => {
-                reason.set(String::new());
-                pending.set(Some(action));
-                if let Some(dialog) = confirm.get() {
-                    let _ = dialog.show_modal();
-                }
-            }
-            other => execute(ui, other),
+        match confirmation(ui, &action, name) {
+            Some(prompt) => super::dialog::confirm_returning(ui, prompt, return_focus.get_value()),
+            None => execute(ui, action),
         }
     };
     view! {
@@ -1217,13 +1297,5 @@ pub(super) fn Host(ui: Ui) -> impl IntoView {
                 <p class="px-2 text-xs text-white/60" role="status">{move ||ui.context_menu.get().map(|m|m.note)}</p>
             </div>
         </Show>
-        <dialog node_ref=confirm class="context-dialog" aria-label=move || crate::i18n::t("Confirm action") on:click=move |e|super::dialog::dismiss_outside(e,confirm,ui.busy.get_untracked()) on:close=move |_|pending.set(None)>
-            <h2 class="text-xl font-semibold">{move ||pending.get().and_then(|a|match a {Action::Change(_,_,_,title)=>Some(title),Action::Unfriend(_)=>Some("Remove this friend?".into()),_=>None})}</h2>
-            <Show when=move ||matches!(pending.get(),Some(Action::Unfriend(_)))><p class="mt-3 text-sm text-white/60">{move || crate::i18n::t("Private messages and calls will be unavailable until you become friends again.")}</p></Show>
-            <Show when=move ||matches!(pending.get(),Some(Action::Change(_,_,GuildChange::RemoveMember {..}|GuildChange::BanMember {..}|GuildChange::DisconnectVoice {..},_)))><label class="settings-field"><span>{move || crate::i18n::t("Reason (optional, up to 500 characters)")}</span><input maxlength="500" prop:value=move ||reason.get() on:input=move |e|reason.set(event_target_value(&e))/></label></Show>
-            <div class="mt-6 flex justify-end gap-3"><button class="rounded bg-white/10 px-4 py-2" on:click=move |_|if let Some(d)=confirm.get(){d.close();}>{move || crate::i18n::t("Cancel")}</button><button class="rounded bg-red-500/20 px-4 py-2 text-red-200" disabled=move ||ui.busy.get() on:click=move |_|{if let Some(action)=pending.get_untracked(){execute_reason(ui,action,reason.get_untracked());}
-                if let Some(d)=confirm.get(){d.close();}}>{move || crate::i18n::t("Confirm")}</button></div>
-        </dialog>
-
     }
 }

@@ -14,7 +14,7 @@ use leptos::prelude::*;
 use std::{cell::Cell, rc::Rc};
 use thiscord_frontend::{
     browser_audio::RemoteSource,
-    browser_video::{self as rules, Facing, Inbound, Recovery, VideoSupport},
+    browser_video::{self as rules, Inbound, Recovery, VideoSupport},
     video_feedback::{DecoderPressure, DecoderSample},
 };
 use thiscord_shared::{
@@ -25,8 +25,8 @@ use thiscord_shared::{
 use wasm_bindgen::{JsCast, JsValue, prelude::Closure};
 use wasm_bindgen_futures::JsFuture;
 use web_sys::{
-    HtmlVideoElement, MediaDeviceInfo, MediaDeviceKind, MediaStream, MediaStreamConstraints,
-    MediaStreamTrack, MediaStreamTrackState, RtcPeerConnection, RtcRtpSender, RtcRtpTransceiver,
+    HtmlVideoElement, MediaStream, MediaStreamTrack, MediaStreamTrackState, RtcPeerConnection,
+    RtcRtpSender, RtcRtpTransceiver,
 };
 
 fn json(value: serde_json::Value) -> JsValue {
@@ -211,8 +211,12 @@ impl Drop for Capture {
 pub(super) struct Publishing {
     screen: Option<Capture>,
     camera: Option<Capture>,
-    facing: Facing,
-    device: Option<String>,
+    facing: rules::Facing,
+    /// Front/back flipping on phones overrides the saved camera for this call.
+    facing_only: bool,
+    /// A camera switch is in progress: browsers (notably WebKit) may end the
+    /// previous track as soon as the next camera opens.
+    switching: bool,
 }
 
 /// Publication state for the voice bar.
@@ -256,6 +260,7 @@ fn publishing_state(publishing: &Publishing) {
             .is_some_and(|c| c.audio.is_some());
         s.camera = publishing.camera.is_some();
     });
+    crate::cameras::set_call_camera(publishing.camera.is_some());
 }
 
 fn media_error(kind: MediaKind, error: &JsValue) -> Option<&'static str> {
@@ -348,29 +353,14 @@ pub fn start_screen(
     }
 }
 
-async fn camera_stream(device: Option<&str>, facing: Facing) -> Result<MediaStream, JsValue> {
-    let devices = web_sys::window()
-        .ok_or(JsValue::NULL)?
-        .navigator()
-        .media_devices()?;
-    let request = |device: Option<&str>| {
-        let constraints = MediaStreamConstraints::new();
-        constraints.set_audio(&JsValue::FALSE);
-        constraints.set_video(&json(rules::camera_constraints(device, Some(facing))));
-        devices.get_user_media_with_constraints(&constraints)
+/// The saved camera (with the missing-device fallback), or the facing mode
+/// after a front/back flip.
+async fn camera_stream(call: &Call) -> Result<MediaStream, JsValue> {
+    let (facing, facing_only) = {
+        let publishing = call.publishing.borrow();
+        (publishing.facing, publishing.facing_only)
     };
-    let mut result = JsFuture::from(request(device)?).await;
-    // A remembered device may be gone; fall back to the facing mode.
-    if device.is_some()
-        && let Err(error) = &result
-        && matches!(
-            error_name(error).as_str(),
-            "NotFoundError" | "OverconstrainedError"
-        )
-    {
-        result = JsFuture::from(request(None)?).await;
-    }
-    result.map(JsCast::unchecked_into)
+    crate::cameras::open(Some(facing), !facing_only).await
 }
 
 pub async fn start_camera() {
@@ -383,11 +373,7 @@ pub async fn start_camera() {
         fail(message);
         return;
     }
-    let (device, facing) = {
-        let publishing = call.publishing.borrow();
-        (publishing.device.clone(), publishing.facing)
-    };
-    match camera_stream(device.as_deref(), facing).await {
+    match camera_stream(&call).await {
         Ok(stream) => publish(Some(call), MediaKind::Camera, stream, Quality::default()).await,
         Err(error) => fail(media_error(MediaKind::Camera, &error).unwrap_or_default()),
     }
@@ -551,63 +537,33 @@ pub(super) fn release(call: &Call) {
     publishing_state(&publishing);
 }
 
-/// A selectable camera.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct Camera {
-    pub id: String,
-    pub label: String,
-}
-/// Video inputs; labels are empty until the site has camera permission.
-pub async fn cameras() -> Vec<Camera> {
-    let Some(devices) = web_sys::window().and_then(|w| w.navigator().media_devices().ok()) else {
-        return vec![];
-    };
-    let Ok(promise) = devices.enumerate_devices() else {
-        return vec![];
-    };
-    let Ok(list) = JsFuture::from(promise).await else {
-        return vec![];
-    };
-    let mut count = 0;
-    Array::from(&list)
-        .iter()
-        .filter_map(|device| device.dyn_into::<MediaDeviceInfo>().ok())
-        .filter(|device| device.kind() == MediaDeviceKind::Videoinput)
-        .filter(|device| !device.device_id().is_empty() && device.device_id().len() <= 2048)
-        .take(16)
-        .map(|device| {
-            count += 1;
-            let label = device.label();
-            Camera {
-                id: device.device_id(),
-                label: if label.trim().is_empty() {
-                    format!("Camera {count}")
-                } else {
-                    label
-                },
-            }
-        })
-        .collect()
-}
-/// Switches the live camera (or the next start) to a device, or flips
-/// between front and back cameras with `None`. No renegotiation.
-pub async fn switch_camera(device: Option<String>) {
+/// Moves the live camera to the saved selection, or with `flip` between the
+/// front and back cameras. Replaces the track: no new camera epoch or
+/// renegotiation. Waits for a switch already in progress.
+pub async fn switch_camera(flip: bool) {
     clear_error();
-    let Some(call) = super::current() else {
-        return;
+    let call = loop {
+        let Some(call) = super::current() else {
+            return;
+        };
+        if !call.publishing.borrow().switching {
+            break call;
+        }
+        gloo_timers::future::TimeoutFuture::new(100).await;
     };
-    let facing = {
+    {
         let mut publishing = call.publishing.borrow_mut();
-        if device.is_none() {
+        if flip {
             publishing.facing = publishing.facing.flipped();
         }
-        publishing.device = device.clone();
-        publishing.facing
-    };
-    if call.publishing.borrow().camera.is_none() {
-        return;
+        publishing.facing_only = flip;
+        if publishing.camera.is_none() {
+            return;
+        }
+        publishing.switching = true;
     }
-    match camera_stream(device.as_deref(), facing).await {
+    let result = camera_stream(&call).await;
+    match result {
         Ok(stream) => {
             if call.publishing.borrow().camera.is_some() {
                 publish(
@@ -623,6 +579,7 @@ pub async fn switch_camera(device: Option<String>) {
         }
         Err(error) => fail(media_error(MediaKind::Camera, &error).unwrap_or_default()),
     }
+    call.publishing.borrow_mut().switching = false;
 }
 
 /// The local capture track for self-preview (video only).
@@ -888,6 +845,7 @@ pub(super) fn tick(call: &Call, stats: Option<InboundVideo>) {
             (MediaKind::Camera, &publishing.camera),
         ]
         .into_iter()
+        .filter(|(kind, _)| *kind != MediaKind::Camera || !publishing.switching)
         .filter(|(_, c)| c.as_ref().is_some_and(|c| !c.live()))
         .map(|(kind, _)| kind)
         .collect()

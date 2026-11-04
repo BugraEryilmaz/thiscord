@@ -42,6 +42,7 @@ fn update_home(ui: Ui, selection: Selection, home: GuildHome) {
             old.guild.id == home.guild.id
                 && old.guild.revision == home.guild.revision
                 && old.guild.name == home.guild.name
+                && old.guild.icon_id == home.guild.icon_id
                 && old.guild.owner == home.guild.owner
                 && old.can_manage_roles == home.can_manage_roles
                 && old.can_manage_channels == home.can_manage_channels
@@ -200,7 +201,7 @@ pub(super) fn select(ui: Ui, id: GuildId) -> impl Future<Output = Result<bool, S
     }
 }
 
-fn navigate(ui: Ui, id: GuildId) {
+pub(super) fn navigate(ui: Ui, id: GuildId) {
     // Keep the open conversation/draft and don't restart a pending selection.
     // A failed selection has no loaded view and remains retryable.
     let loaded = ui
@@ -255,18 +256,15 @@ pub(super) fn open_voice(ui: Ui) {
 }
 
 #[component]
-fn GuildButton(ui: Ui, guild: Guild) -> impl IntoView {
+fn GuildButton(ui: Ui, guild: Guild, roving: super::keyboard::Roving<GuildId>) -> impl IntoView {
     let id = guild.id;
-    let initials = guild
-        .name
-        .split_whitespace()
-        .take(2)
-        .filter_map(|s| s.chars().next())
-        .collect::<String>()
-        .to_uppercase();
+    let (name, icon) = (guild.name.clone(), guild.icon_id);
+    let current = move || ui.navigation.with(|n| n.current().guild == Some(id));
     view! {
-        <button class="guild-button" data-context-server=id.to_string() aria-haspopup="menu" class:selected=move ||ui.navigation.get().current().guild==Some(id) aria-busy=move ||(ui.navigation.get().current().guild==Some(id) && ui.navigation.get().pending).to_string() aria-label=guild.name.clone() data-tip=guild.name
-            on:click=move |_|navigate(ui,id)>{initials}</button>
+        <li><button class="guild-button relative overflow-hidden" data-rove data-context-server=id.to_string() aria-haspopup="menu" class:selected=current
+            aria-current=move || current().then_some("page") tabindex=roving.tabindex(id) on:focus=move |_| roving.focus(id)
+            aria-busy=move ||(current() && ui.navigation.get().pending).to_string() aria-label=guild.name.clone() data-tip=guild.name
+            on:click=move |_|navigate(ui,id)><crate::avatar::GuildIcon name=name icon_id=icon/></button></li>
     }
 }
 
@@ -297,17 +295,69 @@ fn VoiceRoster(ui: Ui, guild: GuildId, channel: thiscord_shared::ChannelId) -> i
         <For each=move ||members.get() key=|m|m.account_id children=move |initial|{
             let id=initial.account_id;
             let member=Signal::derive(move ||members.get().into_iter().find(|m|m.account_id==id).unwrap_or_else(||initial.clone()));
-            view!{<li tabindex="0" aria-haspopup="menu" data-context-server=guild.to_string() data-context-channel=channel.to_string() data-context-member=id.to_string() class="voice-member sidebar-member" class:voice-speaking=move ||speaking.get().contains(&id) data-tip=move ||format!("{} (@{})",member.get().display_name(),member.get().username)>
+            view!{<li tabindex="0" aria-haspopup="menu" data-context-server=guild.to_string() data-context-channel=channel.to_string() data-context-member=id.to_string() class="voice-member sidebar-member" class:voice-speaking=move ||speaking.get().contains(&id) data-tip=move ||{let tip=format!("{} (@{})",member.get().display_name(),member.get().username);match ui.members.status(guild,id) {Some(status)=>format!("{tip} · {status}"),None=>tip}}>
                 <button class="voice-person" class:has-stream=move ||member.get().sharing_screen || member.get().camera_active aria-label=move ||if member.get().sharing_screen || member.get().camera_active{thiscord_frontend::localized_format!(crate::i18n::language(), "Watch {}’s stream",member.get().display_name())}else{member.get().display_name().to_owned()} data-tip=move ||if member.get().sharing_screen || member.get().camera_active{crate::i18n::t("Watch stream")}else{crate::i18n::t("Right-click for options")} on:click=move |_|if member.get_untracked().sharing_screen || member.get_untracked().camera_active{super::screen::open_stream(ui,guild,channel,member.get_untracked());}>
                 <span class="voice-avatar"><crate::avatar::Avatar class="size-6 text-xs" name=Signal::derive(move ||member.get().display_name().to_owned()) avatar_id=Signal::derive(move ||member.get().avatar_id)/></span>
                 <span class="min-w-0 flex-1 truncate">{move ||member.get().display_name().to_owned()}</span>
                 </button><Show when=move ||speaking.get().contains(&id)><span class="sr-only">{move || crate::i18n::t("Speaking")}</span></Show>
-                <Show when=move ||member.get().is_deafened()><span aria-label=move || crate::i18n::t("Deafened")><Icon kind=Glyph::Deafen/></span></Show>
-                <Show when=move ||!member.get().is_deafened() && (member.get().is_muted() || !member.get().can_speak)><span aria-label=move || crate::i18n::t("Muted")><Icon kind=Glyph::MicOff/></span></Show>
+                <Show when=move ||member.get().is_deafened()><span role="img" aria-label=move || crate::i18n::t("Deafened")><Icon kind=Glyph::Deafen/></span></Show>
+                <Show when=move ||!member.get().is_deafened() && (member.get().is_muted() || !member.get().can_speak)><span role="img" aria-label=move || crate::i18n::t("Muted")><Icon kind=Glyph::MicOff/></span></Show>
                 <Show when=move ||member.get().sharing_screen || member.get().camera_active><button class="stream-live-badge" aria-label=move ||thiscord_frontend::localized_format!(crate::i18n::language(), "Watch {}’s stream",member.get().display_name()) data-tip=move || crate::i18n::t("Watch stream") on:click=move |_|super::screen::open_stream(ui,guild,channel,member.get_untracked())>{move || crate::i18n::t("LIVE")}</button></Show>
             </li>}
         }/>
     </ul>}
+}
+
+/// Screen-reader name for a sidebar channel: its name, kind, unread count,
+/// mentions and voice connection (the visual badges are not announced).
+fn channel_label(
+    ui: Ui,
+    guild: GuildId,
+    channel: thiscord_shared::ChannelId,
+    name: &str,
+    voice: bool,
+) -> String {
+    let mut parts = vec![
+        name.to_owned(),
+        crate::i18n::t(if voice {
+            "Voice channel"
+        } else {
+            "Text channel"
+        })
+        .to_owned(),
+    ];
+    let muted = super::notifications::muted(
+        ui,
+        thiscord_shared::notifications::Target::Channel {
+            guild_id: guild,
+            channel_id: channel,
+        },
+    );
+    if muted {
+        parts.push(crate::i18n::t("Notifications muted").to_owned());
+    } else if let Some((count, mentions)) = ui.unread.with(|unread| {
+        unread
+            .iter()
+            .find(|u| u.channel_id == channel && u.count > 0)
+            .map(|u| (u.count, u.mentions))
+    }) {
+        parts.push(thiscord_frontend::localized_format!(
+            crate::i18n::language(),
+            "{} unread",
+            if count >= thiscord_shared::chat::UNREAD_COUNT_LIMIT {
+                "999+".to_owned()
+            } else {
+                count.to_string()
+            }
+        ));
+        if mentions > 0 {
+            parts.push(crate::i18n::t("mentions you").to_owned());
+        }
+    }
+    if voice && ui.voice.with(|v| v.channel_id == Some(channel)) {
+        parts.push(crate::i18n::t("Connected").to_owned());
+    }
+    parts.join(", ")
 }
 
 #[component]
@@ -336,7 +386,7 @@ pub(super) fn ServerRail(ui: Ui) -> impl IntoView {
         password.set(String::new());
         error.set(String::new());
         if let Some(dialog) = dialog.get() {
-            let _ = dialog.show_modal();
+            super::dialog::open(&dialog);
         }
     };
     Effect::new(move |_| {
@@ -349,7 +399,7 @@ pub(super) fn ServerRail(ui: Ui) -> impl IntoView {
             server_id.set(code);
             password.set(String::new());
             error.set(String::new());
-            if dialog.show_modal().is_ok() {
+            if super::dialog::open(&dialog) {
                 ui.invites.pending.set(None);
                 super::invites::clear_fragment();
             }
@@ -436,21 +486,29 @@ pub(super) fn ServerRail(ui: Ui) -> impl IntoView {
             ui.busy.set(false);
         });
     };
+    let roving = super::keyboard::Roving::new(
+        move || {
+            ui.guilds
+                .with(|guilds| guilds.iter().map(|g| g.id).collect())
+        },
+        move || ui.navigation.with(|n| n.current().guild),
+    );
     view! {
-        <aside class="server-rail" aria-label=move || crate::i18n::t("Servers")>
-            <button class="relative mb-4 flex h-12 w-12 shrink-0 items-center justify-center rounded-2xl bg-brand text-white" data-tip=move || crate::i18n::t("Thiscord home") aria-label=move ||thiscord_frontend::localized_format!(crate::i18n::language(), "Thiscord home, {} incoming requests, {} unread messages",ui.friends.pending_count(),super::friends::count_text(ui.friends.unread_count())) on:click=move |_|{ui.friends.selected.set(None);home(ui);}>
+        <nav class="server-rail" aria-label=move || crate::i18n::t("Servers")>
+            <button class="relative mb-4 flex h-12 w-12 shrink-0 items-center justify-center rounded-2xl bg-brand text-white" aria-current=move || ui.navigation.with(|n| n.current().guild.is_none()).then_some("page") data-tip=move || crate::i18n::t("Thiscord home") aria-label=move ||thiscord_frontend::localized_format!(crate::i18n::language(), "Thiscord home, {} incoming requests, {} unread messages",ui.friends.pending_count(),super::friends::count_text(ui.friends.unread_count())) on:click=move |_|{ui.friends.selected.set(None);home(ui);}>
                 <crate::brand::BrandMark class="h-8 w-8"/>
                 <span class="absolute -bottom-1 -right-1"><super::friends::CountBubble count=Signal::derive(move ||ui.friends.pending_count()+ui.friends.unread_count()) label="pending requests and unread messages"/></span>
             </button>
-            <nav class="flex min-h-0 w-full flex-1 flex-col items-center gap-3 overflow-y-auto py-2" aria-label=move || crate::i18n::t("Joined servers")>
-                {move ||ui.guilds.get().into_iter().map(move |guild|view!{<GuildButton ui=ui guild= guild/>}).collect_view()}
-            </nav>
+            <ul class="flex min-h-0 w-full flex-1 flex-col items-center gap-3 overflow-y-auto py-2" aria-label=move || crate::i18n::t("Joined servers")
+                data-rove-list on:keydown=move |e| super::keyboard::rove(&e)>
+                {move ||ui.guilds.get().into_iter().map(move |guild|view!{<GuildButton ui=ui guild=guild roving/>}).collect_view()}
+            </ul>
             <div class="mt-3 flex shrink-0 flex-col items-center gap-3 border-t border-white/10 pt-4">
                 <Show when=move ||ui.can_create_server.get()><button class="rail-action" data-tip=move || crate::i18n::t("Create a server") aria-label=move || crate::i18n::t("Create a server") disabled=move ||ui.busy.get() on:click=move |_|open(true)><Icon kind=Glyph::Plus/></button></Show>
                 <button class="rail-action" data-tip=move || crate::i18n::t("Join a server") aria-label=move || crate::i18n::t("Join a server") disabled=move ||ui.busy.get() on:click=move |_|open(false)><Icon kind=Glyph::Compass/></button>
                 <button class="rail-action" aria-label=move || crate::i18n::t("Refresh servers") data-tip=move || crate::i18n::t("Refresh servers") disabled=move ||ui.busy.get() on:click=move |_|{ui.busy.set(true);leptos::task::spawn_local(async move{refresh(ui).await;ui.busy.set(false);});}><Icon kind=Glyph::Refresh/></button>
             </div>
-        </aside>
+        </nav>
         <dialog node_ref=dialog on:click=move |e|super::dialog::dismiss_outside(e,dialog,ui.busy.get_untracked()) aria-labelledby="server-dialog-title" class="m-auto max-h-[85vh] w-[calc(100%-2rem)] max-w-md overflow-y-auto rounded-2xl border border-white/15 bg-surface p-7 text-white shadow-2xl backdrop:bg-black/70 backdrop:backdrop-blur-sm" on:close=move |_|password.set(String::new()) on:cancel=move |ev: web_sys::Event|{if ui.busy.get_untracked(){ev.prevent_default();}}>
             <header class="mb-6 flex items-center justify-between"><h2 id="server-dialog-title" class="text-2xl font-semibold">{move ||if creating.get(){crate::i18n::t("Create a server")}else{crate::i18n::t("Join a server")}}</h2><button aria-label=move || crate::i18n::t("Close dialog") class="px-2 text-xl" disabled=move ||ui.busy.get() on:click=move |_|if let Some(dialog)=dialog.get(){dialog.close();}>"×"</button></header>
             <form class="space-y-5" on:submit=submit>
@@ -589,6 +647,25 @@ pub(super) fn ServerHome(ui: Ui) -> impl IntoView {
         });
     };
     let unread = ui.unread;
+    let channel_roving = super::keyboard::Roving::new(
+        move || {
+            ui.server.with(|home| {
+                home.as_ref().map_or_else(Vec::new, |home| {
+                    ui.sidebar_preferences.with(|p| {
+                        thiscord_frontend::keyboard::channel_order(
+                            &home.channels,
+                            &home.categories,
+                            &p.pinned,
+                        )
+                        .into_iter()
+                        .map(|c| c.id)
+                        .collect()
+                    })
+                })
+            })
+        },
+        move || selected.with(|c| c.as_ref().map(|c| c.id)),
+    );
     Effect::new(move |_| {
         if let Some(channel) = selected.get()
             && ui
@@ -616,25 +693,27 @@ pub(super) fn ServerHome(ui: Ui) -> impl IntoView {
             <section class="server-layout">
                 {move ||ui.server.get().map(|home|view!{
                     <nav class="channel-sidebar" aria-label=move || crate::i18n::t("Server channels")>
-                        <div class="flex items-center gap-2" data-context-server=home.guild.id.to_string()><h2 class="min-w-0 flex-1 break-words text-lg font-bold">{home.guild.name.clone()}</h2>
+                        <div class="flex items-center gap-2" data-context-server=home.guild.id.to_string()><span class="relative grid size-8 shrink-0 place-items-center overflow-hidden rounded-xl bg-white/10 text-xs font-semibold"><crate::avatar::GuildIcon name=home.guild.name.clone() icon_id=home.guild.icon_id/></span><h2 class="min-w-0 flex-1 break-words text-lg font-bold">{home.guild.name.clone()}</h2>
                             <Show when=move ||home.can_manage_bots || home.can_manage_roles || home.can_manage_channels || home.can_manage_invites || home.can_moderate><button class="icon-button shrink-0" aria-label=move || crate::i18n::t("Server roles and settings") data-tip=move || crate::i18n::t("Server settings") on:click=move |_|{ui.role_target.set(None);ui.permission_channel.set(None);ui.page.set(if home.can_manage_roles{"permissions"}else if home.can_manage_bots{"server_bots"}else if home.can_manage_channels{"server_organization"}else if home.can_manage_invites{"server_invites"}else{"moderation"});}><Icon kind=Glyph::Settings/></button></Show>
-                            <Show when=move ||home.can_manage_invites><button class="shrink-0 rounded p-1 text-white/50 hover:bg-white/10 hover:text-white disabled:opacity-50" data-tip=move || crate::i18n::t("Copy invite link") aria-label=move || crate::i18n::t("Copy invite link") disabled=move ||ui.busy.get() on:click=move |_|super::invites::copy(ui,home.guild.id)><Icon kind=Glyph::Link/></button></Show>
+                            <Show when=move ||home.can_manage_invites><button class="shrink-0 rounded p-1 text-white/60 hover:bg-white/10 hover:text-white disabled:opacity-50" data-tip=move || crate::i18n::t("Copy invite link") aria-label=move || crate::i18n::t("Copy invite link") disabled=move ||ui.busy.get() on:click=move |_|super::invites::copy(ui,home.guild.id)><Icon kind=Glyph::Link/></button></Show>
                         </div>
-                        <div class="flex items-center justify-between"><h3 class="text-xs font-semibold uppercase tracking-widest text-white/50">{move || crate::i18n::t("Channels")}</h3>
+                        <div class="flex items-center justify-between"><h3 class="text-xs font-semibold uppercase tracking-widest text-white/60">{move || crate::i18n::t("Channels")}</h3>
                             <Show when=move ||home.can_manage_channels><button class="rounded px-2 text-xl text-white/60 hover:bg-white/10 hover:text-white" data-tip=move || crate::i18n::t("Create channel") aria-label=move || crate::i18n::t("Create channel") disabled=move ||ui.busy.get() on:click=move |_| {
                                 target.set(ui.server.get_untracked().map(|s|s.guild));name.set(String::new());voice.set(false);error.set(String::new());
-                                if let Some(dialog)=dialog.get(){let _=dialog.show_modal();}
+                                if let Some(dialog)=dialog.get(){super::dialog::open(&dialog);}
                             }>"+"</button></Show>
                         </div>
-                        <ul class="min-h-0 flex-1 space-y-1 overflow-y-auto text-white/70">{let channel_guild=home.guild.clone();let channels=home.channels;let categories=home.categories;move ||{let mut channels=channels.clone();channels.sort_by_key(|c|(c.category_id.and_then(|id|categories.iter().find(|cat|cat.id==id).map(|cat|(cat.position,cat.id))),!ui.sidebar_preferences.get().pinned.contains(&c.id),c.position,c.id));let mut previous=None;let categories=categories.clone();let channel_guild=channel_guild.clone();channels.into_iter().map(move |ch|{
+                        <ul class="min-h-0 flex-1 space-y-1 overflow-y-auto text-white/70" data-rove-list on:keydown=move |e| super::keyboard::rove(&e)>{let channel_guild=home.guild.clone();let channels=home.channels;let categories=home.categories;move ||{let channels=ui.sidebar_preferences.with(|p|thiscord_frontend::keyboard::channel_order(&channels,&categories,&p.pinned).into_iter().cloned().collect::<Vec<_>>());let mut previous=None;let categories=categories.clone();let channel_guild=channel_guild.clone();channels.into_iter().map(move |ch|{
                             let id=ch.id; let is_voice=ch.kind==ChannelKind::Voice; let name=ch.name.clone();let guild=channel_guild.clone();let guild_id=guild.id;
                             let heading=if previous!=Some(ch.category_id){previous=Some(ch.category_id);Some(ch.category_id.and_then(|id|categories.iter().find(|cat|cat.id==id).map(|cat|cat.name.clone())).unwrap_or_else(||crate::i18n::t("No category").into()))}else{None};
-                            view!{<li>{heading.map(|title|view!{<h4 class="px-2 pb-1 pt-4 text-xs font-semibold uppercase text-white/50">{title}</h4>})}<button data-context-server=guild_id.to_string() data-context-channel=id.to_string() aria-haspopup="menu" class="flex w-full items-center gap-2 rounded-md px-2 py-2 text-left hover:bg-white/10" class:channel-selected=move ||selected.get().is_some_and(|c|c.id==id) class:voice-active=move ||ui.voice.get().channel_id==Some(id) aria-label=name.clone() data-tip=name.clone() disabled=move ||is_voice && ui.voice_joining.get() on:click=move |_|if is_voice {if selected.with_untracked(|c|c.as_ref().is_some_and(|c|c.id==id)){ui.mobile_content.set(true);}super::audio::join(ui,guild.clone(),ch.clone());}else{selected.set(Some(ch.clone()));ui.mobile_content.set(true);}>
+                            view!{<li>{heading.map(|title|view!{<h4 class="px-2 pb-1 pt-4 text-xs font-semibold uppercase text-white/60">{title}</h4>})}<button data-rove tabindex=channel_roving.tabindex(id) on:focus=move |_|channel_roving.focus(id) data-context-server=guild_id.to_string() data-context-channel=id.to_string() aria-haspopup="menu" class="flex w-full items-center gap-2 rounded-md px-2 py-2 text-left hover:bg-white/10" class:channel-selected=move ||selected.get().is_some_and(|c|c.id==id) class:voice-active=move ||ui.voice.get().channel_id==Some(id)
+                                aria-current=move ||selected.with(|c|c.as_ref().is_some_and(|c|c.id==id)).then_some("page")
+                                aria-label={let name=name.clone();move ||channel_label(ui,guild_id,id,&name,is_voice)} data-tip=name.clone() disabled=move ||is_voice && ui.voice_joining.get() on:click=move |_|if is_voice {if selected.with_untracked(|c|c.as_ref().is_some_and(|c|c.id==id)){ui.mobile_content.set(true);}super::audio::join(ui,guild.clone(),ch.clone());}else{selected.set(Some(ch.clone()));ui.mobile_content.set(true);}>
                                 {move || if is_voice {view!{<Icon kind=Glyph::Volume/>}.into_any()}else{view!{<span class="w-5 text-center text-xl text-white/40">"#"</span>}.into_any()}}
                                 <span class="min-w-0 flex-1 truncate text-sm">{name.clone()}</span>
                                 <Show when=move ||ui.sidebar_preferences.get().pinned.contains(&id)><span aria-label=move || crate::i18n::t("Pinned") class="channel-indicator"><Icon kind=Glyph::Pin/></span></Show>
                                 <Show when=move ||super::notifications::muted(ui, thiscord_shared::notifications::Target::Channel { guild_id, channel_id: id })><span aria-label=move || crate::i18n::t("Notifications muted") class="channel-indicator"><Icon kind=Glyph::BellOff/></span></Show>
-                                <span class="shrink-0 text-xs text-brand">{move||if super::notifications::muted(ui, thiscord_shared::notifications::Target::Channel { guild_id, channel_id: id }){None}else{unread.get().iter().find(|u|u.channel_id==id&&u.count>0).map(|u|format!("{}{}",u.count,if u.mentions>0{" @"}else{""}))}}</span>
+                                <span class="shrink-0 text-xs text-brand">{move||if super::notifications::muted(ui, thiscord_shared::notifications::Target::Channel { guild_id, channel_id: id }){None}else{unread.with(|unread|unread.iter().find(|u|u.channel_id==id&&u.count>0).map(|u|format!("{}{}",if u.count>=thiscord_shared::chat::UNREAD_COUNT_LIMIT{"999+".into()}else{u.count.to_string()},if u.mentions>0{" @"}else{""})))}}</span>
                             </button>{is_voice.then(||view!{<VoiceRoster ui=ui guild=guild_id channel=id/>})}</li>}
                         }).collect_view()}}</ul>
                     </nav>

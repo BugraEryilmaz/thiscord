@@ -52,6 +52,7 @@ mod tests {
             actor: None,
             call_id: Some(call),
             version: None,
+            guild_icon_id: None,
         };
         assert!(can_present(&alert, &[call]));
         // Native show has been started; a pushed end arrives before its error.

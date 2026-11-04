@@ -2,6 +2,7 @@ use super::*;
 use diesel::sql_types::{Json, Jsonb};
 
 const RANGE_SQL: &str = include_str!("../../src/chat/unread.sql");
+const LIMIT: i64 = thiscord_shared::chat::UNREAD_COUNT_LIMIT;
 const ORIGINAL_SQL: &str = "SELECT jsonb_build_object('channel_id',m.channel_id,'count',count(*),'mentions',count(*) FILTER (WHERE m.mentions @> jsonb_build_array($2::uuid))) AS data FROM messages m LEFT JOIN channel_reads r ON r.guild_id=m.guild_id AND r.channel_id=m.channel_id AND r.account_id=$2::uuid WHERE m.guild_id=$1::uuid AND NOT m.deleted AND m.author_id IS DISTINCT FROM $2::uuid AND m.sequence>COALESCE(r.through,0) GROUP BY m.channel_id";
 
 #[derive(QueryableByName)]
@@ -176,6 +177,31 @@ async fn unread_preserves_authors_mentions_boundaries_and_current_permissions() 
     .await;
 }
 
+#[test]
+fn unread_sql_limits_match_the_shared_display_cap() {
+    // Both the count and mention scans stop at the documented cap.
+    assert_eq!(
+        RANGE_SQL
+            .matches(&format!(
+                "LIMIT {LIMIT}
+"
+            ))
+            .count(),
+        2
+    );
+}
+
+/// The exact original aggregation, capped like the wire format.
+fn capped(mut rows: Vec<Value>) -> Vec<Value> {
+    for row in &mut rows {
+        for field in ["count", "mentions"] {
+            row[field] = json!(row[field].as_i64().unwrap().min(LIMIT));
+        }
+    }
+    rows.sort_by_key(|r| r["channel_id"].as_str().unwrap().to_owned());
+    rows
+}
+
 // Also a reproducible benchmark: --test chat unread_ranges -- --ignored --nocapture.
 // Timing is informational; row counts and result equivalence are regression gates.
 #[tokio::test]
@@ -194,6 +220,15 @@ async fn unread_ranges_scan_backlog_instead_of_history() {
             .as_str()
             .unwrap()
             .contains("INCLUDE (author_id, mentions)")
+    );
+    let mentions = diesel::sql_query("SELECT to_jsonb(indexdef) AS data FROM pg_indexes WHERE schemaname=current_schema() AND indexname='channel_unread_mentions'")
+        .get_result::<Data>(&mut c).unwrap().data;
+    let mentions = mentions.as_str().unwrap();
+    assert!(
+        mentions.contains("INCLUDE (author_id, mentions)")
+            && mentions.contains("NOT deleted")
+            && mentions.contains("mentions <> '[]'::jsonb"),
+        "{mentions}"
     );
     c.batch_execute(
         "SET statement_timeout = '30s'; SET jit = on; SET max_parallel_workers_per_gather = 0;",
@@ -224,11 +259,33 @@ async fn unread_ranges_scan_backlog_instead_of_history() {
             .join(",")
     );
     let params = [guild, guest_id.to_string(), ids];
-    for (scenario, marker) in [
-        ("small backlog", None),
-        ("large backlog", Some(0)),
-        ("fully read", Some(200000)),
+    // Every fixture message mentions the guest until the last scenario, so both
+    // capped scans run; then the mention scan must not revisit the backlog.
+    for (scenario, marker, expected, expected_rows) in [
+        ("small backlog", None, 1000, 2000),
+        (
+            "large backlog",
+            Some(0),
+            20 * LIMIT as u64,
+            40 * LIMIT as u64,
+        ),
+        ("fully read", Some(200000), 0, 0),
+        (
+            "large backlog without mentions",
+            Some(0),
+            20 * LIMIT as u64,
+            20 * LIMIT as u64,
+        ),
     ] {
+        if scenario.ends_with("without mentions") {
+            diesel::sql_query("UPDATE messages SET mentions='[]' WHERE guild_id=$1::uuid")
+                .bind::<Text, _>(&params[0])
+                .execute(&mut c)
+                .unwrap();
+            // Remove the dead index entries left by this bulk update, as on a
+            // settled table; the scenarios above measure fresh inserts.
+            c.batch_execute("VACUUM (ANALYZE) messages").unwrap();
+        }
         if let Some(marker) = marker {
             diesel::sql_query("UPDATE channel_reads SET through=$1::bigint")
                 .bind::<Text, _>(marker.to_string())
@@ -236,15 +293,9 @@ async fn unread_ranges_scan_backlog_instead_of_history() {
                 .unwrap();
             c.batch_execute("ANALYZE channel_reads").unwrap();
         }
-        let mut old = data(&mut c, ORIGINAL_SQL, &params[..2]);
+        let old = capped(data(&mut c, ORIGINAL_SQL, &params[..2]));
         let new = data(&mut c, RANGE_SQL, &params);
-        old.sort_by_key(|r| r["channel_id"].as_str().unwrap().to_owned());
         assert_eq!(old, new);
-        let expected = match marker {
-            None => 1000,
-            Some(0) => 200000,
-            _ => 0,
-        };
         assert_eq!(
             new.iter()
                 .map(|r| r["count"].as_u64().unwrap())
@@ -272,7 +323,7 @@ async fn unread_ranges_scan_backlog_instead_of_history() {
                 times[2], rows, plan["Plan"]["Total Cost"], jit
             );
             if name == "range" {
-                assert_eq!(rows, expected, "{plan}");
+                assert_eq!(rows, expected_rows, "{plan}");
                 assert!(!jit, "unexpected JIT compilation: {plan}");
             }
         }

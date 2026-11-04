@@ -273,6 +273,14 @@ mod tests {
             .chain(crate::appearance::Token::ALL.map(crate::appearance::Token::label))
             .chain(crate::appearance::Token::ALL.map(crate::appearance::Token::description))
             .chain(crate::appearance::Group::ALL.map(crate::appearance::Group::label))
+            .chain(
+                crate::member_list::StatusExpiry::ALL.map(crate::member_list::StatusExpiry::label),
+            )
+            .chain(crate::keyboard::SHORTCUTS.iter().flat_map(|(group, rows)| {
+                std::iter::once(*group).chain(rows.iter().map(|row| row.action))
+            }))
+            // Quick-switcher result kinds are translated through a variable.
+            .chain(["Server", "Text channel", "Voice channel", "Direct message"])
         {
             assert!(
                 CATALOG.iter().any(|(en, _)| *en == label),

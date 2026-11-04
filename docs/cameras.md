@@ -2,11 +2,10 @@
 
 Join a voice room or accepted private call in the desktop app and press the camera
 button in the voice bar. Grant the operating system/WebView camera permission.
-The default webcam starts at up to 1280×720, 30 FPS and 1.5 Mbit/s. Microphone mute
-and PTT do not stop video. Press the camera button again to stop capture. A missing,
-busy or denied device produces an error without ending voice or screen sharing.
-Camera choice currently follows the system default; an in-app device selector is
-not implemented.
+The selected webcam (see below) starts at up to 1280×720, 30 FPS and 1.5 Mbit/s.
+Microphone mute and PTT do not stop video. Press the camera button again to stop
+capture. A missing, busy or denied device produces an error without ending voice or
+screen sharing.
 
 Cameras and screen shares appear together in a grid, including local previews.
 Only active media gets a tile; voice-only participants remain in the sidebar.
@@ -29,6 +28,50 @@ hiding, deafening, disconnecting, expiry or permission loss removes the viewer.
 Presence updates arrive with the call roster, normally within one to two seconds;
 abandoned subscriptions expire after three seconds. Viewer lists are only sent
 inside the connected call, not in the outside-call sidebar roster.
+
+## Choosing a camera
+
+Settings → Voice & audio → **Camera** lists the webcams and offers **System
+default**. **Preview camera** opens the chosen camera in a small local preview
+(nothing is sent); while your call camera is on, the card shows that capture
+instead. When several cameras are available, the chevron next to the voice-bar
+camera button opens the same choice as a menu (arrow keys, Home/End and Escape
+work; on touch browsers it also flips front/back cameras). The list refreshes on
+`devicechange`.
+
+The desktop app and the `/app` web client both capture in the page, so the list
+comes from `navigator.mediaDevices.enumerateDevices` and the choice is passed as a
+`deviceId: { exact }` constraint; no native camera API is involved. The choice is
+saved device-locally in the WebView's or site's localStorage
+(`thiscord.camera.v1`: the opaque device ID and its label, used only to name a
+disconnected camera). It is not synced to the account; browsers scope device IDs
+to the origin, and clearing site data forgets the choice.
+
+Changing the camera while it is on in a call replaces the video track: the
+desktop WebView's local bridge sender and the browser's own-slot camera sender
+both use `replaceTrack`, keeping the same session, camera epoch and viewer leases
+without renegotiation or a new `Camera` event. The same encoder continues with
+the new source; WebRTC encoders normally send a keyframe when the source
+resolution changes, and viewers otherwise rely on the existing recovery/PLI
+requests (not verified with physical cameras). A switch that fails
+leaves the previous camera publishing and shows an error. Because WebKit may end
+the previous track as soon as another camera opens, the ended-track check is
+suspended for the duration of a switch; if the switch then fails, the normal
+"camera stopped" handling applies.
+
+Before camera permission, browsers hide names and may hide or vary device IDs.
+The card then says names appear after camera access is allowed. Such a list
+cannot prove that the saved camera is gone, so the exact device is requested and,
+on `NotFoundError`/`OverconstrainedError`, the system default is opened instead.
+Once names are visible, a saved camera missing from the list opens the system
+default directly. Either way the voice bar (and the settings card) shows a
+one-time notice naming the missing camera. The preference is kept, so a
+reconnected camera is used again on the next start, like the audio device
+fallback in `docs/audio.md`. The notice is not repeated until that camera has
+been seen again or a different camera is chosen. Denied permission, busy devices
+and other failures keep their existing errors and do not fall back. Selection
+rules (validation, listing bounds, the fallback plan and the one-time notice) are
+unit-tested in `frontend/src/camera_choice.rs`.
 
 ## Transport and lifecycle
 
@@ -126,6 +169,10 @@ No physical camera is required for the automated tests:
   replacement during asynchronous camera shutdown, disconnect and pending lease expiry.
 - A compiled Tauri ACL regression checks all four camera commands are available
   to the local main window and denied to auxiliary windows and remote pages.
+- Camera selection rules are pure Rust tests: stored-preference validation,
+  bounded/deduplicated listing, permission-dependent fallback and the one-time
+  missing-camera notice. Enumeration, `replaceTrack` switching and hot-plug have
+  no automated browser test.
 
 Run the backend tests in WSL with TEST_DATABASE_URL for the dedicated test database
 and THISCORD_VOICE_BIND=127.0.0.1:0. Do not import production STUN/TURN configuration
@@ -136,20 +183,24 @@ Physical camera permission prompts, unplug/busy-device behavior, visual quality,
 fullscreen/context-menu interaction and an eight-person mixed camera/4K-screen load
 still require manual acceptance on Windows, macOS and Linux. Automated packet tests
 do not establish those runtime or performance results. A virtual camera selected
-as the system default can supply moving test video on a machine without a webcam.
+as the system default (or chosen in the camera settings) can supply moving test
+video on a machine without a webcam. In-app selection, hot-plug refresh and
+switching between physical cameras during a call also need that manual acceptance,
+including whether each WebView keeps device IDs across restarts.
 
 ## Browser cameras
 
 In the `/app` web client the camera button calls `getUserMedia` (video only, up to
 1280×720 at 30 fps, `facingMode: "user"` by default) and attaches the track to the
 member's own camera m-line with `replaceTrack`, after sending `Camera { active: true }`.
+It uses the camera chosen as described in [choosing a camera](#choosing-a-camera).
 The browser encodes baseline H.264 itself (see
 [browser screen sharing](screen-sharing.md#browser-screen-sharing) for codec
 negotiation, `ScreenTarget` bitrate/pause and PLI keyframes); the camera ceiling is
-the same 1.5 Mbit/s as the desktop camera. While the camera is on and more than one
-camera exists (or on touch devices), **Switch camera** lists the cameras by label
-and, on phones and tablets, flips between front and back cameras; switching replaces
-the track without a new camera epoch or renegotiation. Your own tile shows a local
+the same 1.5 Mbit/s as the desktop camera. The camera chevron lists the cameras by
+label and, on phones and tablets while the camera is on, flips between front and
+back cameras (for the rest of that call, until another camera is chosen); switching
+replaces the track without a new camera epoch or renegotiation. Your own tile shows a local
 preview. A blocked, missing or busy camera shows an error and leaves voice running.
 Deafen, server mute/deafen, lost Speak permission, an ended track, leaving and
 reconnecting stop the camera; it is never restarted automatically.

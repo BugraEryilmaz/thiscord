@@ -30,6 +30,9 @@ fn snapshot(pool: &DbPool, token: &str, sub: Subscription) -> Result<Snapshot, F
 }
 /// Matches the socket maintenance cadence for expiry-only authorization changes.
 const VOICE_VISIBILITY_RECHECK: Duration = Duration::from_secs(10);
+/// Member lists reload on commit notifications and status expiry; this bounds
+/// staleness from writes outside those paths (unchanged lists are not resent).
+const MEMBER_REFRESH: Duration = Duration::from_secs(60);
 
 async fn update(socket: &mut WebSocket, sub: Subscription, event: ServerEvent) -> Result<(), ()> {
     send(
@@ -42,7 +45,13 @@ async fn update(socket: &mut WebSocket, sub: Subscription, event: ServerEvent) -
     .await
 }
 
-pub(super) async fn serve(mut socket: WebSocket, pool: DbPool, id: RequestId, token: String) {
+pub(super) async fn serve(
+    mut socket: WebSocket,
+    pool: DbPool,
+    id: RequestId,
+    token: String,
+    guild_updates: bool,
+) {
     let Ok(account_access) = socket_access(&pool, &token).await else {
         let _ = send(
             &mut socket,
@@ -109,6 +118,17 @@ pub(super) async fn serve(mut socket: WebSocket, pool: DbPool, id: RequestId, to
     let mut watch_voice = false;
     let mut last_roster = None;
     let mut voice_visibility = None::<(Instant, access::Snapshot, Vec<ChannelId>)>;
+    // Opt-in member list: the authorized DB rows with the epochs captured before
+    // reading them. Online flags are in-memory and refresh every second.
+    let mut watch_members = false;
+    let mut members_dirty = false;
+    let mut members_due = None::<Instant>;
+    let mut member_list = None::<(access::Snapshot, members::MemberList)>;
+    let mut last_member_list = None::<Vec<thiscord_shared::chat::GuildMember>>;
+    let mut last_online = Vec::new();
+    let mut member_tick = tokio::time::interval(Duration::from_secs(1));
+    member_tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+    let mut guild_hints = guild_updates.then(|| super::guild_updates().subscribe());
     loop {
         tokio::select! { biased;
             _ = session_revoked.changed() => { let _ = send(&mut socket, ServerEvent::Revoked {}).await; break; }
@@ -123,7 +143,7 @@ pub(super) async fn serve(mut socket: WebSocket, pool: DbPool, id: RequestId, to
                 if count > 30 { let _ = send(&mut socket, error(id, ErrorCode::RateLimited, "Socket event limit exceeded")).await; break; }
                 last_seen = Instant::now();
                 match frame(incoming) {
-                    Some(ClientEvent::Subscribe { subscription: serial, guild_id, channel_id, voice_roster }) => {
+                    Some(ClientEvent::Subscribe { subscription: serial, guild_id, channel_id, voice_roster, members: member_roster }) => {
                         if revoked.has_changed().unwrap_or(true) || session_revoked.has_changed().unwrap_or(true) { let _ = send(&mut socket, ServerEvent::Revoked {}).await; break; }
                         let p = pool.clone();
                         let _ = crate::performance::blocking(move || store::cleanup(&p, connection)).await;
@@ -134,6 +154,8 @@ pub(super) async fn serve(mut socket: WebSocket, pool: DbPool, id: RequestId, to
                         last_members.clear(); last_unread.clear();
                         watch_voice = voice_roster; last_roster = None; voice_visibility = None;
                         roster_tick.reset_immediately();
+                        watch_members = member_roster; members_dirty = false; members_due = None;
+                        member_list = None; last_member_list = None; last_online.clear();
                         if channel_id.is_some() && guild_id.is_none() {
                             let _ = send(&mut socket, error(id, ErrorCode::BadRequest, "A channel requires a guild")).await; break;
                         }
@@ -162,6 +184,7 @@ pub(super) async fn serve(mut socket: WebSocket, pool: DbPool, id: RequestId, to
                             if send(&mut socket, ServerEvent::Subscribed { subscription: serial, history: ready.history, permissions: ready.permissions }).await.is_err() { break; }
                             if update(&mut socket, sub, ServerEvent::Unread { channels: ready.unread }).await.is_err() { break; }
                             subscription = Some(sub); listener = Some(route); presence_dirty = sub.channel.is_some();
+                            members_dirty = watch_members;
                         } else {
                             let Some(_delivery) = authorized.deliver() else { let _ = send(&mut socket, ServerEvent::Revoked {}).await; break; };
                             if send(&mut socket, ServerEvent::Subscribed { subscription: serial, history: None, permissions: Permissions::new() }).await.is_err() { break; }
@@ -185,7 +208,47 @@ pub(super) async fn serve(mut socket: WebSocket, pool: DbPool, id: RequestId, to
                 messages_dirty |= next.messages != versions.messages;
                 presence_dirty |= next.presence != versions.presence;
                 if next.unread != versions.unread { unread_due.get_or_insert_with(|| Instant::now() + Duration::from_millis(75)); }
+                members_dirty |= watch_members && next.members != versions.members;
                 versions = next;
+            }
+            _ = async { if let Some(at) = members_due { tokio::time::sleep_until(at.into()).await; } else { std::future::pending::<()>().await; } } => {
+                members_due = None; members_dirty = watch_members;
+            }
+            _ = async {}, if members_dirty && subscription.is_some() => {
+                members_dirty = false;
+                let sub = subscription.unwrap();
+                let Some(authorized) = account_access.snapshot(guild_access.as_ref(), member_access.as_ref()) else { let _ = send(&mut socket, ServerEvent::Revoked {}).await; break; };
+                if revoked.has_changed().unwrap_or(true) || session_revoked.has_changed().unwrap_or(true) { let _ = send(&mut socket, ServerEvent::Revoked {}).await; break; }
+                let p = pool.clone(); let t = token.clone();
+                let Ok(Ok(list)) = crate::performance::blocking(move || members::snapshot(&p, &t, sub.guild)).await else {
+                    let _ = send(&mut socket, ServerEvent::Revoked {}).await; break;
+                };
+                let refresh = list.expiry(chrono::Utc::now()).map_or(MEMBER_REFRESH, |e| e.min(MEMBER_REFRESH));
+                members_due = Some(Instant::now() + refresh);
+                let online = list.online(crate::friends::online);
+                let view = list.members(&online);
+                let Some(_delivery) = authorized.clone().deliver() else { let _ = send(&mut socket, ServerEvent::Revoked {}).await; break; };
+                last_online = online;
+                member_list = Some((authorized, list));
+                if last_member_list.as_ref() != Some(&view) {
+                    last_member_list = Some(view.clone());
+                    if update(&mut socket, sub, ServerEvent::Members { members: view }).await.is_err() { break; }
+                }
+            }
+            _ = member_tick.tick(), if member_list.is_some() && subscription.is_some() => {
+                let sub = subscription.unwrap();
+                let (authorized, list) = member_list.as_ref().unwrap();
+                let online = list.online(crate::friends::online);
+                if online != last_online {
+                    // Every access-changing commit for this viewer advances an epoch
+                    // in this snapshot and closes the socket before reuse here.
+                    let Some(_delivery) = authorized.clone().deliver() else { let _ = send(&mut socket, ServerEvent::Revoked {}).await; break; };
+                    last_online = online.clone();
+                    if let Some(view) = &mut last_member_list {
+                        for member in view.iter_mut() { member.online = online.contains(&member.account_id); }
+                    }
+                    if update(&mut socket, sub, ServerEvent::MemberPresence { online }).await.is_err() { break; }
+                }
             }
             _ = async { if let Some(at) = unread_due { tokio::time::sleep_until(at.into()).await; } else { std::future::pending::<()>().await; } } => {
                 unread_due = None; unread_dirty = true;
@@ -260,6 +323,24 @@ pub(super) async fn serve(mut socket: WebSocket, pool: DbPool, id: RequestId, to
                     last_roster = Some(channels.clone());
                     if update(&mut socket, sub, ServerEvent::VoiceRoster { channels }).await.is_err() { break; }
                 }
+            }
+            hint = async { match &mut guild_hints { Some(hints) => hints.recv().await, None => std::future::pending().await } } => {
+                use tokio::sync::broadcast::error::RecvError;
+                let guild = match hint {
+                    Ok(guild) => guild,
+                    // Hints are advisory; a missed one is recovered by the next refresh.
+                    Err(RecvError::Lagged(_)) => continue,
+                    Err(RecvError::Closed) => { guild_hints = None; continue; }
+                };
+                let Some(authorized) = account_access.snapshot(None, None) else { let _ = send(&mut socket, ServerEvent::Revoked {}).await; break; };
+                let p = pool.clone();
+                let member = crate::performance::blocking(move || {
+                    let mut c = auth::store::connection(&p)?;
+                    Ok::<_, Failure>(auth::store::query::<bool>(&mut c, "SELECT to_jsonb(EXISTS(SELECT 1 FROM guild_members WHERE guild_id=$1::uuid AND account_id=$2::uuid)) AS data", &[&guild.to_string(), &account.to_string()])? == [true])
+                }).await;
+                if !matches!(member, Ok(Ok(true))) { continue; }
+                let Some(_delivery) = authorized.deliver() else { let _ = send(&mut socket, ServerEvent::Revoked {}).await; break; };
+                if send(&mut socket, ServerEvent::GuildUpdated { guild_id: guild }).await.is_err() { break; }
             }
             _ = maintenance.tick() => {
                 if last_seen.elapsed() > Duration::from_secs(35) { break; }

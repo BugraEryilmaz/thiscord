@@ -1,4 +1,5 @@
 mod attachments;
+mod history;
 pub(crate) mod store;
 mod typing;
 use crate::{
@@ -9,7 +10,7 @@ pub use attachments::start_cleanup as start_attachment_cleanup;
 use axum::{
     Extension, Json, Router,
     extract::{
-        DefaultBodyLimit, State, WebSocketUpgrade,
+        DefaultBodyLimit, RawQuery, State, WebSocketUpgrade,
         rejection::JsonRejection,
         ws::{Message, WebSocket, rejection::WebSocketUpgradeRejection},
     },
@@ -74,7 +75,8 @@ fn presence() -> &'static Mutex<HashMap<AccountId, usize>> {
     static PRESENCE: OnceLock<Mutex<HashMap<AccountId, usize>>> = OnceLock::new();
     PRESENCE.get_or_init(Default::default)
 }
-fn online(id: AccountId) -> bool {
+/// Account-wide presence: at least one authenticated friends socket in this process.
+pub(crate) fn online(id: AccountId) -> bool {
     presence().lock().unwrap().contains_key(&id)
 }
 struct Connected(AccountId);
@@ -122,6 +124,7 @@ async fn upgrade(
     State(pool): State<Option<DbPool>>,
     Extension(id): Extension<RequestId>,
     Extension(origins): Extension<Arc<Vec<HeaderValue>>>,
+    RawQuery(query): RawQuery,
     headers: HeaderMap,
     ws: Result<WebSocketUpgrade, WebSocketUpgradeRejection>,
 ) -> HttpResponse {
@@ -144,11 +147,14 @@ async fn upgrade(
     };
     // Web client: cookie-derived bearer, used only when the frame token is empty.
     let upgrade_token = auth::bearer(&headers);
+    let retains = query
+        .as_deref()
+        .is_some_and(|q| q.split('&').any(|p| p == RETAINED_HISTORY_QUERY));
     ws.max_message_size(16 * 1024)
         .max_frame_size(16 * 1024)
         .on_upgrade(move |socket| async move {
             let _permit = permit;
-            serve(socket, pool, upgrade_token).await
+            serve(socket, pool, upgrade_token, retains).await
         })
 }
 fn frame(message: Message) -> Option<ClientEvent> {
@@ -172,7 +178,7 @@ async fn send(socket: &mut WebSocket, event: ServerEvent) -> Result<(), ()> {
     .map_err(|_| ())?
     .map_err(|_| ())
 }
-async fn serve(mut socket: WebSocket, pool: DbPool, upgrade_token: String) {
+async fn serve(mut socket: WebSocket, pool: DbPool, upgrade_token: String, retains: bool) {
     let Ok(Some(Ok(message))) = tokio::time::timeout(Duration::from_secs(5), socket.recv()).await
     else {
         return;
@@ -212,8 +218,10 @@ async fn serve(mut socket: WebSocket, pool: DbPool, upgrade_token: String) {
     let mut count = 0;
     let mut commits = watch(session.account_id);
     // The last database snapshot with the access epochs captured before reading it.
-    // Presence and typing are in-memory and refresh on every tick.
+    // Presence and typing are in-memory and refresh on every tick. History is
+    // kept separately and reloaded only after message writes or selection changes.
     let mut cached = None::<(Snapshot, crate::chat::access::Snapshot)>;
+    let mut history = history::Cache::default();
     let mut refresh_at = Instant::now();
     static READERS: OnceLock<Arc<Semaphore>> = OnceLock::new();
     let readers = READERS.get_or_init(|| Arc::new(Semaphore::new(8)));
@@ -231,7 +239,7 @@ async fn serve(mut socket: WebSocket, pool: DbPool, upgrade_token: String) {
                 last_seen=Instant::now();
                 match frame(message) {
                     Some(ClientEvent::Ping {})=>{if send(&mut socket,ServerEvent::Pong {}).await.is_err() {break;}}
-                    Some(ClientEvent::Select {conversation_id,before:page})=>{typing.clear();selected=conversation_id;before=page;last=None;cached=None;tick.reset_immediately();}
+                    Some(ClientEvent::Select {conversation_id,before:page})=>{typing.clear();selected=conversation_id;before=page;last=None;cached=None;history.selected();tick.reset_immediately();}
                     Some(ClientEvent::Typing {active})=>{
                         let Some(id)=selected else {continue;};
                         let Ok(permit)=readers.clone().try_acquire_owned() else {continue;};
@@ -250,20 +258,23 @@ async fn serve(mut socket: WebSocket, pool: DbPool, upgrade_token: String) {
                     // Commits from here on wake the loop again, even during this read.
                     commits.borrow_and_update();
                     let checked=Instant::now();
+                    let plan=history.plan(selected,&before);
                     let Some(epoch)=crate::chat::access::snapshot(&account,Some(&session_scope)) else {break;};
-                    let p=pool.clone();let t=token.clone();let page=before.clone();
-                    let Ok(Ok((snapshot,expiry)))=crate::performance::blocking(move ||{let _permit=permit;store::snapshot(&p,&t,selected,page)}).await else {break;};
-                    if last.as_ref()==Some(&snapshot) { crate::performance::FRIENDS_UNCHANGED.fetch_add(1, std::sync::atomic::Ordering::Relaxed); }
+                    let p=pool.clone();let t=token.clone();let page=before.clone();let load=plan.load;
+                    let Ok(Ok((mut snapshot,expiry)))=crate::performance::blocking(move ||{let _permit=permit;store::snapshot(&p,&t,selected,page,load)}).await else {break;};
+                    history.finish(plan,&mut snapshot);
+                    if last.as_ref()==Some(&snapshot) && !history.pending(&snapshot) { crate::performance::FRIENDS_UNCHANGED.fetch_add(1, std::sync::atomic::Ordering::Relaxed); }
                     refresh_at=checked+expiry.map_or(REFRESH,|e|e.min(REFRESH));
                     cached=Some((snapshot,epoch));
                 }
                 let (snapshot,epoch)=cached.as_mut().unwrap();
                 store::live(snapshot,session.account_id);
                 let Some(_delivery)=epoch.clone().deliver() else {break;};
-                if last.as_ref()!=Some(&*snapshot) || last_sent.elapsed()>=REFRESH {
+                if last.as_ref()!=Some(&*snapshot) || history.pending(snapshot) || last_sent.elapsed()>=REFRESH {
                     last_sent=Instant::now();
                     last=Some(snapshot.clone());
-                    if send(&mut socket,ServerEvent::Snapshot {snapshot:snapshot.clone()}).await.is_err() {break;}
+                    let outgoing=history.outgoing(snapshot,retains);
+                    if send(&mut socket,ServerEvent::Snapshot {snapshot:outgoing}).await.is_err() {break;}
                 }
             }
         }

@@ -65,8 +65,18 @@ credentials configured in `backend/.env` (see `docs/accounts.md`).
 Everyone can upload or remove a profile picture in **Settings > Profile**. Pictures
 appear in voice chat and the desktop overlay, with initials when no picture is set.
 The bottom account ribbon spans the server rail and channel list, showing your
-profile, authenticated socket status, mute/deafen and settings controls. It expands
+profile, authenticated socket status, custom status, mute/deafen and settings controls. It expands
 during calls with the channel/server name, camera, screen sharing and disconnect controls.
+Set a custom status (emoji, short text and an optional expiry) from the ribbon; friends
+and fellow server members see it (see [custom status](docs/accounts.md#custom-status)).
+Text channels have a toggleable member list (a drawer on phones and tablets) grouped
+online/offline, with profile cards and member actions (see
+[member list](docs/chat.md#member-list-and-profile-cards)).
+The UI works from the keyboard: **Ctrl/⌘+K** opens a quick switcher for servers,
+channels and friends, **Alt+↑/↓** (with Shift: unread only) moves between channels,
+**Ctrl+Alt+↑/↓** between servers, **Esc** marks the open channel read and **Ctrl/⌘+/**
+lists every shortcut. Lists use arrow keys, dialogs keep and restore focus, and screen
+readers get landmarks and polite announcements (see [accessibility](docs/accessibility.md)).
 Sidebar controls show immediate hover/focus hints
 outside the scroll area. Visible voice channels show participants before joining;
 clicking a voice channel joins directly while keeping the current text chat open.
@@ -162,7 +172,8 @@ If an older voice client triggers a slot compatibility transition, updated deskt
 automatically reconnect after a brief interruption instead of requiring a manual join.
 Desktop calls and voice rooms show simultaneous webcams and screen shares in a
 grid, with local previews, click-to-fullscreen and right-click hide/restore.
-The camera button uses the system default webcam (up to 720p/30); right-click a
+The camera button uses the webcam chosen in Settings > Voice & audio > Camera or
+the chevron beside it (system default unless chosen; up to 720p/30); right-click a
 participant for separate voice and screen-audio volume/mute controls. Camera
 publishing requires WebView H.264/WebRTC and device permissions. Screen sharing
 works on Windows, macOS 12.3+ and Linux (xdg-desktop-portal + PipeWire) with

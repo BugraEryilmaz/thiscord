@@ -39,7 +39,8 @@ conversation with unread messages shows a "New messages" divider above the oldes
 unread message, using the same count rules as the badge. Times use the device's
 local time zone ("Today at 14:05", "Yesterday at 14:05", or a full date).
 Edit/delete controls reflect current permissions; the backend checks them again.
-Deletion requires confirmation and leaves a content-free tombstone. Loading older
+Deletion requires confirmation (hold Shift while clicking Delete to skip it) and
+leaves a content-free tombstone. Loading older
 history preserves scroll position; incoming messages follow while at the bottom
 (with two pixels of rounding tolerance). Scrolling upward pauses following until
 you return to the bottom or choose Jump to latest.
@@ -146,7 +147,9 @@ each channel's exclusive sequence range above its read marker (zero if absent).
 The partial `channel_unread_range` index excludes tombstones and covers author and
 mention checks. Own messages are excluded with `IS DISTINCT FROM`, so retained
 messages from deleted accounts still count. Edits use current mentions; empty
-counts are omitted. Results are ordered by channel ID to keep socket comparisons
+counts are omitted. Counts and mentions are exact below `UNREAD_COUNT_LIMIT`
+(1,000) and equal to it for larger backlogs; badges show "999+". Mentions use the
+partial `channel_unread_mentions` index of mention-bearing live messages. Results are ordered by channel ID to keep socket comparisons
 stable. Both HTTP and socket updates share this query and the existing guild lock.
 
 See [unread query measurements](unread-performance.md) for the reproducible
@@ -173,6 +176,15 @@ Guild-only subscriptions receive permission-filtered unread/mention counts even
 when no text channel is open. Read acknowledgements update other devices' badges.
 There is no five-second HTTP unread poll or per-channel permissions-preview fetch.
 User commands (send/edit/delete/read and loading older history) still use HTTP.
+
+Clients may opt into guild presentation hints with `guild_updates: true` on
+`connect`. After a rename or icon change commits, the backend publishes the guild ID
+on an in-process broadcast; each opted-in socket checks current membership off the
+async worker and, through the existing account delivery barrier, sends
+`guild_updated { guild_id }`. The hint carries no data, so clients re-read guilds
+over authorized HTTP. Missed hints (lagging receivers) are dropped and recovered by
+the next refresh. Omitting the field keeps older clients free of the new variant;
+older backends reject the field, so deploy the backend first.
 
 Clients may opt into sidebar voice rosters with `voice_roster: true` on `subscribe`.
 Omitting it defaults to false, so existing clients receive no new event variants.
@@ -306,10 +318,65 @@ and subscription scope changes. Run with
 `--include-ignored`. Shared tests cover wire versions and bounds. Browser smoke
 tests use isolated fixtures; native compilation does not establish cross-platform
 WebView runtime acceptance.
+Member list tests (`backend/tests/chat/members.rs`) cover opt-in delivery, sorting,
+pushed presence, status/profile/removal wake-ups without revoking other viewers,
+block filtering, profile authorization, custom status validation/expiry/clearing
+and cross-device status synchronization.
 `cargo test -p thiscord-frontend --lib --locked` also checks bounded history over
 long sessions, revision/deduplication rules, eviction cleanup, old-history/live
 isolation and variable-height viewport/anchor calculations without a browser.
 
+
+## Member list and profile cards
+
+The person button in a text channel header shows or hides the server's member
+list. Wide windows show it as a right-side panel; the choice is stored per device
+(`thiscord.member_panel.v1` in local storage, no account data). Below 1024 px
+(phones, tablets, narrow windows) it opens as an overlay drawer with a backdrop
+and close button; Escape or the backdrop closes it and returns focus to the
+toggle, and it is closed again on navigation. Members are grouped **Online** and
+**Offline** (each a labelled list), sorted by display name then username, with
+avatar, presence dot, owner/bot badges and custom status. Roles have no display
+or hoist setting yet, so they do not create groups or colours. Every entry is a
+keyboard-focusable button with a descriptive label. Click/Enter opens a profile
+card (display name, `@username`, owner/bot badge, custom status and bio) with
+**Send message** for accepted friends, **Edit profile** for yourself and **More
+actions…**. Right-click, long press, Shift+F10 or **More actions…** open the
+existing member menu: friend requests, block/report, role editing and the
+moderation actions returned by `InspectModeration`, without voice-only items.
+Voice roster tooltips append a member's status when the list is loaded.
+
+Clients opt in with `members: true` on `subscribe` (omitted means false, so older
+clients receive no new event variants; deploy the backend before this frontend).
+For a guild subscription the server sends `update`/`members` with the complete
+list (at most `MAX_MEMBER_LIST` = 500, the per-guild member ceiling) and then
+`update`/`member_presence` with the complete set of members shown online. Lists
+require current guild membership only; channel permissions are not needed. They
+contain public profile fields (no email, bio, credentials or roles). `online` is
+account-wide presence: at least one authenticated friends socket in this process.
+Do Not Disturb is never disclosed (the viewer's own row shows it locally). Across
+a block in either direction the member stays listed, but always offline and
+without custom status.
+
+The database list is read under the existing guild-locked authorization check
+and cached with the access epochs captured before the read. Presence is
+recomputed from memory once a second and sent only when the online set changes;
+it never queries the database. Committed membership/role changes (every guild or
+member access mutation, including join, invite redemption, leave, kick, ban and
+role assignment), profile edits, avatar changes, custom status changes and
+account deletion publish a `Change::Members` wake-up for the affected guilds; the
+socket rereads its list and suppresses unchanged results. Reloads also happen at
+the earliest custom-status expiry and at least every 60 seconds for writes
+outside these paths. Bursts coalesce through the subscription watch. Membership
+or access loss for the viewer closes the socket as before; the client clears the
+list on guild changes, disconnects and revocation. This shares the
+single-backend-process limit.
+
+`member_profile { guild_id, account_id }` on `POST /api/v1/chat` returns
+`MemberProfile` (public profile plus bio) for a current member; the requester
+must be a current member (403 otherwise) and a non-member target returns 404.
+Custom status is withheld across a block; bio remains visible like other public
+profile fields in shared guilds ([safety.md](safety.md)).
 
 ## Replies, reactions and pinned messages
 

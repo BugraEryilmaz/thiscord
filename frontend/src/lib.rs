@@ -14,6 +14,7 @@ pub mod bots;
 pub mod browser_audio;
 pub mod browser_call;
 pub mod browser_video;
+pub mod camera_choice;
 pub mod chat_history;
 pub mod direct_history;
 pub mod downloads;
@@ -42,4 +43,6 @@ pub mod touch;
 #[cfg(all(not(target_arch = "wasm32"), feature = "voice-bot"))]
 pub mod bot;
 
+pub mod keyboard;
 pub mod markdown;
+pub mod member_list;

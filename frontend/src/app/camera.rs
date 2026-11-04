@@ -11,9 +11,9 @@ use std::{
 use wasm_bindgen::{JsCast, JsValue};
 use wasm_bindgen_futures::JsFuture;
 use web_sys::{
-    MediaStream, MediaStreamConstraints, MediaStreamTrack, MediaStreamTrackState,
-    MediaTrackConstraints, RtcIceGatheringState, RtcPeerConnection, RtcPeerConnectionState,
-    RtcRtpTransceiverDirection, RtcRtpTransceiverInit, RtcSdpType, RtcSessionDescriptionInit,
+    MediaStream, MediaStreamTrack, MediaStreamTrackState, RtcIceGatheringState, RtcPeerConnection,
+    RtcPeerConnectionState, RtcRtpSender, RtcRtpTransceiverDirection, RtcRtpTransceiverInit,
+    RtcSdpType, RtcSessionDescriptionInit,
 };
 static NEXT_SESSION: AtomicU32 = AtomicU32::new(1);
 #[derive(Default)]
@@ -35,19 +35,20 @@ fn local_stream(stream: Option<MediaStream>) {
     });
 }
 struct Capture {
-    stream: MediaStream,
+    /// Replaced in place when the camera is switched during a call.
+    stream: RefCell<MediaStream>,
     pc: RtcPeerConnection,
     session: u32,
     stopped: Cell<bool>,
+    /// The camera selection (`cameras::revision`) this capture follows.
+    revision: Cell<u32>,
 }
 impl Capture {
     fn stop(&self) {
         if self.stopped.replace(true) {
             return;
         }
-        for track in self.stream.get_tracks().iter() {
-            track.unchecked_into::<MediaStreamTrack>().stop();
-        }
+        crate::cameras::stop_stream(&self.stream.borrow());
         self.pc.close();
         let session = self.session;
         leptos::task::spawn_local(async move {
@@ -61,23 +62,7 @@ impl Drop for Capture {
     }
 }
 fn media_error(error: JsValue) -> String {
-    let name = js_sys::Reflect::get(&error, &"name".into())
-        .ok()
-        .and_then(|v| v.as_string())
-        .unwrap_or_default();
-    match name.as_str() {
-        "NotFoundError" | "DevicesNotFoundError" => {
-            crate::i18n::t("No camera found. Connect a webcam or enable a virtual camera.")
-        }
-        "NotAllowedError" | "PermissionDeniedError" => crate::i18n::t(
-            "Camera access was denied. Allow camera access in your system privacy settings.",
-        ),
-        "NotReadableError" | "TrackStartError" => crate::i18n::t(
-            "The camera is busy or unavailable. Close other camera apps and try again.",
-        ),
-        _ => crate::i18n::t("Cannot start the camera on this WebView."),
-    }
-    .into()
+    crate::cameras::error_message(&error).into()
 }
 async fn capture(session: u32, generation: &Cell<u32>) -> Result<Capture, String> {
     native::<()>("camera_prepare", json!({"session":session})).await?;
@@ -85,36 +70,24 @@ async fn capture(session: u32, generation: &Cell<u32>) -> Result<Capture, String
         let _ = native::<()>("camera_stop", json!({"session":session})).await;
         return Err("Camera start cancelled".into());
     }
-    let devices = window().navigator().media_devices().map_err(media_error)?;
-    let constraints = MediaStreamConstraints::new();
-    constraints.set_audio(&JsValue::FALSE);
-    let video = MediaTrackConstraints::new();
-    video.set_width(&json_value(json!({"ideal":1280,"max":1280})));
-    video.set_height(&json_value(json!({"ideal":720,"max":720})));
-    video.set_frame_rate(&json_value(json!({"ideal":30,"max":30})));
-    constraints.set_video(video.as_ref());
-    let stream: MediaStream = JsFuture::from(
-        devices
-            .get_user_media_with_constraints(&constraints)
-            .map_err(media_error)?,
-    )
-    .await
-    .map_err(media_error)?
-    .unchecked_into();
+    // The saved camera, or the system default with a one-time notice.
+    let revision = crate::cameras::revision_untracked();
+    let stream = crate::cameras::open(None, true)
+        .await
+        .map_err(media_error)?;
     let pc = match RtcPeerConnection::new() {
         Ok(pc) => pc,
         Err(_) => {
-            for t in stream.get_tracks().iter() {
-                t.unchecked_into::<MediaStreamTrack>().stop();
-            }
+            crate::cameras::stop_stream(&stream);
             return Err("WebRTC camera support is unavailable".into());
         }
     };
     Ok(Capture {
-        stream,
+        stream: RefCell::new(stream),
         pc,
         session,
         stopped: Cell::new(false),
+        revision: Cell::new(revision),
     })
 }
 fn json_value(value: serde_json::Value) -> JsValue {
@@ -123,6 +96,7 @@ fn json_value(value: serde_json::Value) -> JsValue {
 async fn connect(capture: &Capture) -> Result<(), String> {
     let track: MediaStreamTrack = capture
         .stream
+        .borrow()
         .get_video_tracks()
         .get(0)
         .dyn_into()
@@ -202,6 +176,45 @@ async fn budget(capture: &Capture, bitrate: u32) -> Result<(), String> {
     }
     Ok(())
 }
+/// Moves a running capture to the currently selected camera by replacing the
+/// bridge sender's track: same session, camera epoch and viewer leases, no
+/// renegotiation. On failure the previous camera keeps publishing.
+async fn switch(capture: &Capture) -> Result<(), String> {
+    let stream = crate::cameras::open(None, true)
+        .await
+        .map_err(media_error)?;
+    if capture.stopped.get() {
+        crate::cameras::stop_stream(&stream);
+        return Ok(());
+    }
+    let Ok(track) = stream
+        .get_video_tracks()
+        .get(0)
+        .dyn_into::<MediaStreamTrack>()
+    else {
+        crate::cameras::stop_stream(&stream);
+        return Err(crate::i18n::t("No camera video track").into());
+    };
+    for sender in capture.pc.get_senders().iter() {
+        let sender: RtcRtpSender = sender.unchecked_into();
+        if JsFuture::from(sender.replace_track(Some(&track)))
+            .await
+            .is_err()
+        {
+            crate::cameras::stop_stream(&stream);
+            return Err(crate::i18n::t("Cannot switch camera").into());
+        }
+    }
+    // A stop during the switch already stopped the previous stream.
+    if capture.stopped.get() {
+        crate::cameras::stop_stream(&stream);
+        return Ok(());
+    }
+    let previous = capture.stream.replace(stream.clone());
+    crate::cameras::stop_stream(&previous);
+    local_stream(Some(stream));
+    Ok(())
+}
 #[component]
 pub(super) fn CameraControls(ui: Ui) -> impl IntoView {
     let active = RwSignal::new(false);
@@ -210,6 +223,10 @@ pub(super) fn CameraControls(ui: Ui) -> impl IntoView {
     let generation = Rc::new(std::cell::Cell::new(0u32));
     let owned_session = Rc::new(Cell::new(None));
     let current: Rc<RefCell<Option<Rc<Capture>>>> = Rc::new(RefCell::new(None));
+    // A camera switch is replacing the track; WebKit may end the previous
+    // track as soon as another camera opens, which is not a device failure.
+    let switching = Rc::new(Cell::new(false));
+    Effect::new(move |_| crate::cameras::set_call_camera(active.get()));
     let stop = {
         let current = current.clone();
         let generation = generation.clone();
@@ -220,6 +237,8 @@ pub(super) fn CameraControls(ui: Ui) -> impl IntoView {
                 c.stop();
             }
             local_stream(None);
+            // Cleanup may run after `active` is disposed.
+            crate::cameras::set_call_camera(false);
             // Also release a reservation while getUserMedia/permission is pending.
             if let Some(session) = owned_session.take() {
                 leptos::task::spawn_local(async move {
@@ -240,6 +259,47 @@ pub(super) fn CameraControls(ui: Ui) -> impl IntoView {
             end();
         }
     });
+    // Follow camera selections (voice-bar menu or settings) while publishing.
+    let follow = {
+        let current = current.clone();
+        let switching = switching.clone();
+        Rc::new(move || {
+            if switching.replace(true) {
+                return;
+            }
+            let current = current.clone();
+            let switching = switching.clone();
+            leptos::task::spawn_local(async move {
+                loop {
+                    let Some(capture) = current.borrow().clone() else {
+                        break;
+                    };
+                    let wanted = crate::cameras::revision_untracked();
+                    if capture.stopped.get()
+                        || capture.revision.get() == wanted
+                        || !active.try_get_untracked().unwrap_or(false)
+                    {
+                        break;
+                    }
+                    let result = switch(&capture).await;
+                    // Failed choices are not retried until the next selection.
+                    capture.revision.set(wanted);
+                    if let Err(e) = result
+                        && !capture.stopped.get()
+                    {
+                        error.try_set(e);
+                        break;
+                    }
+                }
+                switching.set(false);
+            });
+        })
+    };
+    let follow_selection = follow.clone();
+    Effect::new(move |_| {
+        crate::cameras::revision();
+        follow_selection();
+    });
     let toggle = move |_| {
         if !crate::account_client::desktop() {
             error.set("Open the desktop app to use your camera".into());
@@ -257,6 +317,8 @@ pub(super) fn CameraControls(ui: Ui) -> impl IntoView {
         let generation = generation.clone();
         let current = current.clone();
         let stop = stop.clone();
+        let switching = switching.clone();
+        let follow = follow.clone();
         leptos::task::spawn_local(async move {
             let result = capture(session, &generation).await;
             if generation.get() != session {
@@ -266,7 +328,7 @@ pub(super) fn CameraControls(ui: Ui) -> impl IntoView {
             let result = match result {
                 Ok(c) => {
                     let c = Rc::new(c);
-                    local_stream(Some(c.stream.clone()));
+                    local_stream(Some(c.stream.borrow().clone()));
                     *current.borrow_mut() = Some(c.clone());
                     match connect(&c).await {
                         Ok(()) => Ok(c),
@@ -286,9 +348,11 @@ pub(super) fn CameraControls(ui: Ui) -> impl IntoView {
                     error.set(e);
                 }
                 Ok(c) => {
-                    local_stream(Some(c.stream.clone()));
+                    local_stream(Some(c.stream.borrow().clone()));
                     *current.borrow_mut() = Some(c);
                     active.set(true);
+                    // The selection may have changed while connecting.
+                    follow();
                     let mut last_budget = None;
                     let mut disconnected = 0;
                     loop {
@@ -300,10 +364,11 @@ pub(super) fn CameraControls(ui: Ui) -> impl IntoView {
                             !matches!(
                                 c.pc.connection_state(),
                                 RtcPeerConnectionState::Failed | RtcPeerConnectionState::Closed
-                            ) && c.stream.get_video_tracks().iter().all(|t| {
-                                t.unchecked_into::<MediaStreamTrack>().ready_state()
-                                    == MediaStreamTrackState::Live
-                            })
+                            ) && (switching.get()
+                                || c.stream.borrow().get_video_tracks().iter().all(|t| {
+                                    t.unchecked_into::<MediaStreamTrack>().ready_state()
+                                        == MediaStreamTrackState::Live
+                                }))
                         });
                         let allowed = native::<thiscord_shared::camera::Status>(
                             "camera_keepalive",
@@ -356,10 +421,11 @@ pub(super) fn CameraControls(ui: Ui) -> impl IntoView {
     };
     view! {
         <button class="icon-button" class:active=move ||active.get() disabled=move ||!crate::account_client::desktop() || !super::audio::media_publish_allowed(ui)
-            aria-label=move ||if busy.get(){crate::i18n::t("Cancel camera")}else if active.get(){crate::i18n::t("Turn camera off")}else{crate::i18n::t("Turn camera on")}
+            aria-label=move ||if busy.get(){crate::i18n::t("Cancel camera")}else{crate::i18n::t("Camera")}
             data-tip=move ||if !crate::account_client::desktop(){crate::i18n::t("Available in the desktop app")}else if active.get(){crate::i18n::t("Turn camera off")}else{crate::i18n::t("Turn camera on")} aria-pressed=move ||active.get() on:click=toggle>
             {move ||view!{<super::icons::Icon kind=if active.get(){super::icons::Glyph::Camera}else{super::icons::Glyph::CameraOff}/>}}
         </button>
+        <super::camera_select::CameraMenu ui=ui/>
         <Show when=move ||!error.get().is_empty()><span class="max-w-64 text-xs text-red-300" role="alert">{move ||crate::i18n::message(error.get())}</span></Show>
     }
 }

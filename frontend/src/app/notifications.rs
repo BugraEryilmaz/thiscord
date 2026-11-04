@@ -737,7 +737,7 @@ fn Editor(ui: Ui) -> impl IntoView {
         let open = ui.notifications.editor.get().is_some();
         if let Some(d) = dialog.get() {
             if open {
-                let _ = d.show_modal();
+                super::dialog::open(&d);
             } else {
                 d.close();
             }
@@ -750,7 +750,7 @@ fn Editor(ui: Ui) -> impl IntoView {
             let delivery=Signal::derive(move ||{let p=ui.notifications.preferences.get();p.subscriptions.iter().find(|s|s.target==target).and_then(|s|s.delivery).unwrap_or_else(||p.defaults.iter().find(|r|r.kind==kind).map_or_else(||Delivery::default_for(kind),|r|r.delivery))});
             view!{<p class="text-sm text-white/60">{move || crate::i18n::t("This override applies to all notifications from this source. Use defaults to keep separate message, call and voice preferences.")}</p><Controls delivery=delivery mentions=matches!(kind,Kind::GuildMessage) disabled=Signal::derive(move ||ui.notifications.saving.get()||!ui.notifications.connected.get()) change=Callback::new(move |delivery|request(ui,Request::SetSubscription {revision:ui.notifications.preferences.get_untracked().revision,target,delivery:Some(delivery)}))/>
                 <button class="text-brand" disabled=move ||ui.notifications.saving.get() on:click=move |_|request(ui,Request::SetSubscription {revision:ui.notifications.preferences.get_untracked().revision,target,delivery:None})>{move || crate::i18n::t("Use event defaults")}</button>
-                <button class="block text-brand" disabled=move ||ui.notifications.saving.get() on:click=move |_|request(ui,Request::RemoveSubscription {revision:ui.notifications.preferences.get_untracked().revision,target})>{move || crate::i18n::t("Remove saved settings and mute")}</button>
+                <button class="block text-brand" disabled=move ||ui.notifications.saving.get() on:click=move |_|super::dialog::confirm(ui,super::dialog::Confirmation::new(crate::i18n::t("Remove saved settings and mute?"),crate::i18n::t("This source goes back to your event defaults and any mute or snooze on it ends."),crate::i18n::t("Remove"),super::dialog::Action::tracked(move ||request(ui,Request::RemoveSubscription {revision:ui.notifications.preferences.get_untracked().revision,target}),ui.notifications.saving,ui.notifications.error)))>{move || crate::i18n::t("Remove saved settings and mute")}</button>
                 <p>{move ||if muted(ui,target){crate::i18n::t("This subscription is muted.")}else{crate::i18n::t("This subscription is not muted.")}}</p>
                 <div class="flex flex-wrap gap-2">{Snooze::OPTIONS.into_iter().map(|(duration,label)|view!{<button class="rounded bg-white/10 px-3 py-2 text-sm" disabled=move ||ui.notifications.saving.get() on:click=move |_|snooze(ui,target,duration)>{move || crate::i18n::snooze_label(duration,label)}</button>}).collect_view()}</div>
             }

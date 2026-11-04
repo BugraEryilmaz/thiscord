@@ -52,8 +52,21 @@ impl Editor {
         self.dispatch(command, None);
     }
     fn dispatch(self, command: PermissionRequest, on_success: Option<Callback<()>>) {
+        if let Some(outcome) = self.submit(command, on_success) {
+            leptos::task::spawn_local(async move {
+                let _ = outcome.await;
+            });
+        }
+    }
+    /// Starts a command unless another one is running. Resolves with the error
+    /// that was also reported in the status bar.
+    fn submit(
+        self,
+        command: PermissionRequest,
+        on_success: Option<Callback<()>>,
+    ) -> Option<impl std::future::Future<Output = Result<(), String>> + 'static> {
         if self.ui.busy.get_untracked() {
-            return;
+            return None;
         }
         self.ui.busy.set(true);
         let instance_mutation = matches!(
@@ -80,7 +93,8 @@ impl Editor {
                 ..
             }
         );
-        leptos::task::spawn_local(async move {
+        Some(async move {
+            let mut outcome = Ok(());
             let selection = self.ui.navigation.get_untracked().current();
             let token = self.ui.token.get_untracked();
             let result = crate::account_client::api_request::<_, PermissionResponse>(
@@ -94,7 +108,7 @@ impl Editor {
                 || !super::servers::current(self.ui, selection)
             {
                 self.ui.busy.set(false);
-                return;
+                return outcome;
             }
             match result {
                 Ok(response) => {
@@ -175,7 +189,7 @@ impl Editor {
                         || !super::servers::current(self.ui, selection)
                     {
                         self.ui.busy.set(false);
-                        return;
+                        return outcome;
                     }
                     if !self.state.is_disposed() {
                         self.guilds.set(self.ui.guilds.get_untracked());
@@ -197,6 +211,7 @@ impl Editor {
                     }
                 }
                 Err(error) => {
+                    outcome = Err(error.clone());
                     // Reload the authoritative policies after rejected writes, including
                     // stale revisions. Never retry a mutation with a new revision.
                     if instance_mutation {
@@ -212,7 +227,7 @@ impl Editor {
                             || !super::servers::current(self.ui, selection)
                         {
                             self.ui.busy.set(false);
-                            return;
+                            return outcome;
                         }
                         if let Ok(PermissionResponse::Instance { access }) = refreshed {
                             self.instance_members.set(None);
@@ -236,10 +251,65 @@ impl Editor {
                 }
             }
             self.ui.busy.set(false);
-        });
+            outcome
+        })
     }
     fn change(self, change: GuildChange) {
         self.change_then(change, None);
+    }
+    /// Guild change for a confirmation dialog, using the revision current at confirmation.
+    fn confirmed(
+        self,
+        change: impl Fn() -> Option<GuildChange> + 'static,
+    ) -> super::dialog::Action {
+        self.confirmed_inner(change, None)
+    }
+    /// Non-guild command for a confirmation dialog.
+    fn confirmed_request(
+        self,
+        command: impl Fn() -> Option<PermissionRequest> + 'static,
+    ) -> super::dialog::Action {
+        super::dialog::Action::new(move |_| {
+            let outcome = command().and_then(|command| self.submit(command, None));
+            async move {
+                match outcome {
+                    Some(outcome) => outcome.await,
+                    None => Err(super::dialog::busy_error()),
+                }
+            }
+        })
+    }
+    fn confirmed_then(
+        self,
+        change: impl Fn() -> Option<GuildChange> + 'static,
+        on_success: Callback<()>,
+    ) -> super::dialog::Action {
+        self.confirmed_inner(change, Some(on_success))
+    }
+    fn confirmed_inner(
+        self,
+        change: impl Fn() -> Option<GuildChange> + 'static,
+        on_success: Option<Callback<()>>,
+    ) -> super::dialog::Action {
+        super::dialog::Action::new(move |_| {
+            let outcome = change().and_then(|change| {
+                let state = self.state.get_untracked()?;
+                self.submit(
+                    PermissionRequest::Change {
+                        guild_id: state.guild.id,
+                        revision: state.guild.revision,
+                        change,
+                    },
+                    on_success,
+                )
+            });
+            async move {
+                match outcome {
+                    Some(outcome) => outcome.await,
+                    None => Err(super::dialog::busy_error()),
+                }
+            }
+        })
     }
     fn change_then(self, change: GuildChange, on_success: Option<Callback<()>>) {
         if let Some(state) = self.state.get_untracked() {
@@ -326,7 +396,142 @@ fn Overview(editor: Editor) -> impl IntoView {
     view! {
         <CapacitySummary editor=editor/>
         <div class="settings-card"><h3>{move || crate::i18n::t("Your community")}</h3><div class="settings-info-row"><span>{move || crate::i18n::t("Server")}</span><strong>{saved}</strong></div><div class="settings-info-row"><span>{move || crate::i18n::t("Members")}</span><strong>{move ||editor.state.get().map(|s|s.members.len())}</strong></div><div class="settings-info-row"><span>{move || crate::i18n::t("Channels")}</span><strong>{move ||editor.state.get().map(|s|s.channels.len())}</strong></div><div class="settings-info-row"><span>{move || crate::i18n::t("Server ID")}</span><strong class="text-xs">{move ||editor.state.get().map(|s|s.guild.id.to_string())}</strong></div><p class="settings-hint">{move || crate::i18n::t("Use Copy invite link beside the server name to invite people. Manage and revoke links in Invite links.")}</p></div>
+        <Show when=move ||editor.allowed(Permission::ManageGuild)><ServerIcon editor=editor/></Show>
         <Show when=move ||editor.allowed(Permission::ManageGuild)><form class="settings-card" on:submit=move |e:leptos::ev::SubmitEvent|{e.prevent_default();editor.change(GuildChange::Rename{name:name.get_untracked()});}><h3>{move || crate::i18n::t("Server name")}</h3><Field label="Name" value=name/><div class="settings-actions"><button type="button" class="settings-secondary" disabled=move ||!ui.settings_dirty.get() on:click=move |_|name.set(saved.get_untracked())>{move || crate::i18n::t("Reset")}</button><button class="settings-primary" disabled=move ||!ui.settings_dirty.get()||name.get().trim().is_empty()>{move || crate::i18n::t("Save changes")}</button></div></form></Show>
+    }
+}
+
+/// Uploads (Some) or removes (None) the guild icon at the editor's current revision.
+async fn set_icon(editor: Editor, image_base64: Option<String>) -> Result<(), String> {
+    let ui = editor.ui;
+    let Some(state) = editor.state.get_untracked() else {
+        return Err("Server settings are unavailable. Your permissions may have changed.".into());
+    };
+    if ui.busy.get_untracked() {
+        return Err(super::dialog::busy_error());
+    }
+    ui.busy.set(true);
+    let removing = image_base64.is_none();
+    let selection = ui.navigation.get_untracked().current();
+    let token = ui.token.get_untracked();
+    ui.status.set(
+        if removing {
+            "Removing server icon…"
+        } else {
+            "Uploading server icon…"
+        }
+        .into(),
+    );
+    let result = crate::account_client::api_request::<_, Guild>(
+        GUILD_ICON_PATH,
+        &SetGuildIcon {
+            guild_id: state.guild.id,
+            revision: state.guild.revision,
+            image_base64,
+        },
+        token.as_deref(),
+    )
+    .await;
+    if ui.token.get_untracked() != token
+        || editor.state.is_disposed()
+        || !super::servers::current(ui, selection)
+    {
+        ui.busy.set(false);
+        return result.map(|_| ());
+    }
+    let outcome = match result {
+        Ok(guild) => {
+            editor.state.update(|current| {
+                if let Some(current) = current
+                    && current.guild.id == guild.id
+                {
+                    current.guild = guild;
+                }
+            });
+            ui.status.set(
+                if removing {
+                    "Server icon removed"
+                } else {
+                    "Server icon saved"
+                }
+                .into(),
+            );
+            Ok(())
+        }
+        Err(error) => {
+            ui.status.set(error.clone());
+            Err(error)
+        }
+    };
+    super::servers::refresh(ui).await;
+    ui.busy.set(false);
+    // A stale revision means someone else changed the server: reload it.
+    if outcome.is_err() && !editor.state.is_disposed() {
+        editor.request(PermissionRequest::Inspect {
+            guild_id: state.guild.id,
+        });
+    }
+    outcome
+}
+
+#[component]
+fn ServerIcon(editor: Editor) -> impl IntoView {
+    use base64::{Engine, engine::general_purpose::STANDARD};
+    let ui = editor.ui;
+    let name = Signal::derive(move || editor.state.get().map(|s| s.guild.name).unwrap_or_default());
+    let icon = Signal::derive(move || editor.state.get().and_then(|s| s.guild.icon_id));
+    let choose = move |event| {
+        let input = event_target::<web_sys::HtmlInputElement>(&event);
+        let file = input.files().and_then(|files| files.get(0));
+        input.set_value(""); // Selecting the same file again should retry a failed upload.
+        let Some(file) = file else {
+            return;
+        };
+        if file.size() == 0.0 || file.size() > MAX_GUILD_ICON_BYTES as f64 {
+            ui.status.set("Choose a picture up to 2 MiB".into());
+            return;
+        }
+        leptos::task::spawn_local(async move {
+            match wasm_bindgen_futures::JsFuture::from(file.array_buffer()).await {
+                Ok(buffer) => {
+                    let encoded = STANDARD.encode(js_sys::Uint8Array::new(&buffer).to_vec());
+                    let _ = set_icon(editor, Some(encoded)).await;
+                }
+                Err(_) => ui
+                    .status
+                    .set("Cannot read this picture. Please choose it again".into()),
+            }
+        });
+    };
+    let remove = move |_| {
+        super::dialog::confirm(
+            ui,
+            super::dialog::Confirmation::new(
+                crate::i18n::t("Remove the server icon?"),
+                crate::i18n::t("Members will see the server’s initials instead. You can upload a new icon at any time."),
+                crate::i18n::t("Remove icon"),
+                super::dialog::Action::new(move |_| set_icon(editor, None)),
+            )
+            .target(name.get_untracked()),
+        );
+    };
+    view! {
+        <section class="settings-card" aria-label=move || crate::i18n::t("Server icon")>
+            <h3>{move || crate::i18n::t("Server icon")}</h3>
+            <div class="flex flex-wrap items-center gap-4">
+                <span class="relative grid size-20 shrink-0 place-items-center overflow-hidden rounded-2xl bg-white/10 text-2xl font-semibold">
+                    <crate::avatar::GuildIcon name=name icon_id=icon/>
+                </span>
+                <div class="space-y-2">
+                    <label class="block space-y-2 text-sm">
+                        <span class="settings-secondary">{move || if icon.get().is_some() { crate::i18n::t("Change icon") } else { crate::i18n::t("Upload icon") }}</span>
+                        <input class="sr-only" type="file" accept="image/png,image/jpeg,image/webp" disabled=move || ui.busy.get() on:change=choose/>
+                    </label>
+                    <button type="button" class="settings-link disabled:opacity-50" disabled=move || ui.busy.get() || icon.get().is_none() on:click=remove>{move || crate::i18n::t("Remove icon")}</button>
+                </div>
+            </div>
+            <p class="settings-hint">{move || crate::i18n::t("PNG, JPEG or WebP, up to 2 MiB. Icons are cropped to a square, save immediately and are visible to server members.")}</p>
+        </section>
     }
 }
 
@@ -365,7 +570,7 @@ fn Roles(editor: Editor) -> impl IntoView {
             <h3>{move ||if role.get().is_empty(){crate::i18n::t("Create role")}else{crate::i18n::t("Edit role")}}</h3><Field label="Role name" value=name/><Field label="Hierarchy rank" value=position kind="number"/><p class="settings-hint">{move || crate::i18n::t("Higher ranks can manage lower ranks. Everyone stays at rank 0. You can only grant permissions you already have.")}</p>
             <details><summary>{move || crate::i18n::t("Permissions")}</summary><PermissionChecks value=grants/></details>
             <Show when=move ||ui.settings_dirty.get()><p class="settings-hint">{move || crate::i18n::t("Unsaved changes. Save or reset before selecting another role.")}</p></Show><div class="settings-actions"><button type="button" class="settings-secondary" disabled=move ||!ui.settings_dirty.get() on:click=move |_|reset()>{move || crate::i18n::t("Reset")}</button><button class="settings-primary" disabled=move ||!ui.settings_dirty.get()||name.get().trim().is_empty()>{move || crate::i18n::t("Save role")}</button></div>
-            <Show when=move ||editor.state.get().is_some_and(|s|s.roles.iter().any(|r|!r.everyone&&r.id.to_string()==role.get()))><super::settings::ConfirmButton ui=ui label="Delete role" title="Delete this role?" detail="Members will lose the permissions this role grants." on_confirm=Callback::new(move |()|if let Ok(role_id)=role.get_untracked().parse(){editor.change(GuildChange::DeleteRole{role_id});role.set(String::new());})/></Show>
+            <Show when=move ||editor.state.get().is_some_and(|s|s.roles.iter().any(|r|!r.everyone&&r.id.to_string()==role.get()))><super::settings::ConfirmButton ui=ui label="Delete role" title="Delete this role?" detail="Members lose the permissions it grants, and its channel permission overrides are removed. This cannot be undone." target=Signal::derive(move ||editor.state.get().and_then(|s|s.roles.into_iter().find(|r|r.id.to_string()==role.get()).map(|r|r.name)).unwrap_or_default()) action=editor.confirmed_then(move ||role.get_untracked().parse().ok().map(|role_id|GuildChange::DeleteRole{role_id}),Callback::new(move |()|role.set(String::new())))/></Show>
         </form>
     </div>}
 }
@@ -474,10 +679,10 @@ fn Channels(editor: Editor) -> impl IntoView {
                 <Show when=move ||target().is_some()><form on:submit=move |e:leptos::ev::SubmitEvent|{e.prevent_default();if let (Ok(channel_id),Some(target))=(channel.get_untracked().parse(),target()){editor.change(GuildChange::SetOverride{channel_id,target,allow:allow.get_untracked(),deny:deny.get_untracked()});}}>
                     {Permission::ALL.into_iter().filter(|p|*p!=Permission::Administrator).map(move |p|view!{<label class="settings-permission-row"><span>{move ||permission_name(p)}</span><select aria-label=move ||permission_name(p) prop:value=move ||if allow.get().contains(&p){"allow"}else if deny.get().contains(&p){"deny"}else{"inherit"} on:change=move |e|{let v=event_target_value(&e);allow.update(|a|{a.remove(&p);if v=="allow"{a.insert(p);}});deny.update(|d|{d.remove(&p);if v=="deny"{d.insert(p);}});} ><option value="inherit">{move || crate::i18n::t("Inherit")}</option><option value="allow">{move || crate::i18n::t("Allow")}</option><option value="deny">{move || crate::i18n::t("Deny")}</option></select></label>}).collect_view()}
                     <div class="settings-actions mt-5"><button type="button" class="settings-secondary" disabled=move ||!ui.settings_dirty.get() on:click=move |_|reset()>{move || crate::i18n::t("Reset")}</button><button class="settings-primary" disabled=move ||!ui.settings_dirty.get()>{move || crate::i18n::t("Save permissions")}</button></div>
-                    <button type="button" class="settings-link mt-4" on:click=move |_|if let (Ok(channel_id),Some(target))=(channel.get_untracked().parse(),target()){editor.change(GuildChange::DeleteOverride{channel_id,target});}>{move || crate::i18n::t("Remove this override")}</button>
+                    <button type="button" class="settings-link mt-4" on:click=move |_|super::dialog::confirm(ui,super::dialog::Confirmation::new(crate::i18n::t("Remove this override?"),crate::i18n::t("This role or member goes back to the server-wide permissions in this channel."),crate::i18n::t("Remove override"),editor.confirmed(move ||channel.get_untracked().parse().ok().zip(target()).map(|(channel_id,target)|GuildChange::DeleteOverride{channel_id,target})))) >{move || crate::i18n::t("Remove this override")}</button>
                 </form></Show>
                 <details><summary>{move || crate::i18n::t("Check a member’s access")}</summary><label class="settings-field"><span>{move || crate::i18n::t("Member")}</span><select prop:value=move ||preview_member.get() on:change=move |e|preview_member.set(event_target_value(&e))>{move ||editor.state.get().map(|s|s.members.into_iter().map(|m|view!{<option value=m.account_id.to_string()>{m.display_name().to_owned()}</option>}).collect_view())}</select></label><button class="settings-secondary mt-3" on:click=move |_|if let (Some(s),Ok(account_id),Ok(channel_id))=(editor.state.get_untracked(),preview_member.get_untracked().parse::<AccountId>(),channel.get_untracked().parse()){editor.request(PermissionRequest::Preview{guild_id:s.guild.id,account_id,channel_id:Some(channel_id)});}>{move || crate::i18n::t("Check access")}</button><p class="settings-hint mt-3" role="status">{move ||editor.preview.get()}</p></details>
-                <Show when=move ||editor.allowed(Permission::ManageChannels)><super::settings::ConfirmButton ui=ui label="Delete channel" title="Delete this channel?" detail="The channel and its messages will be permanently deleted." on_confirm=Callback::new(move |()|if let Ok(channel_id)=channel.get_untracked().parse(){editor.change(GuildChange::DeleteChannel{channel_id});channel.set(String::new());})/></Show>
+                <Show when=move ||editor.allowed(Permission::ManageChannels)><super::settings::ConfirmButton ui=ui label="Delete channel" title="Delete this channel?" detail="Its messages, attachments, pins, reactions and permission overrides are permanently deleted. This cannot be undone." target=Signal::derive(move ||editor.state.get().and_then(|s|s.channels.into_iter().find(|c|c.id.to_string()==channel.get()).map(|c|c.name)).unwrap_or_default()) action=editor.confirmed_then(move ||channel.get_untracked().parse().ok().map(|channel_id|GuildChange::DeleteChannel{channel_id}),Callback::new(move |()|channel.set(String::new())))/></Show>
             </Show>
         </section>
     }
@@ -496,8 +701,8 @@ fn Ownership(editor: Editor) -> impl IntoView {
     };
     view! {<Show when=move ||editor.state.get().is_some_and(|s|ui.account.get().is_some_and(|a|a.id==s.guild.owner))>
         <div class="settings-card"><h3>{move || crate::i18n::t("Before you continue")}</h3><p class="settings-hint">{move || crate::i18n::t("Ownership changes and deletion require a recent identity confirmation.")}</p><button class="settings-secondary" on:click=move |_|super::settings::navigate(ui,"reauthenticate")>{move || crate::i18n::t("Confirm identity")}</button></div>
-        <section class="settings-card settings-danger-zone"><h3>{move || crate::i18n::t("Transfer ownership")}</h3><p class="settings-hint">{move || crate::i18n::t("The new owner gets full control. You remain a member and lose owner privileges.")}</p><label class="settings-field"><span>{move || crate::i18n::t("New owner")}</span><select prop:value=move ||member.get() on:change=move |e|member.set(event_target_value(&e))><option value="">{move || crate::i18n::t("Choose a member")}</option>{move ||editor.state.get().map(|s|s.members.into_iter().filter(|m|m.account_id!=s.guild.owner).map(|m|view!{<option value=m.account_id.to_string()>{m.display_name().to_owned()}</option>}).collect_view())}</select></label><super::settings::ConfirmButton ui=ui label="Transfer ownership" title="Transfer this server’s ownership?" detail="You will lose owner privileges. This requires recent authentication." disabled=Signal::derive(move ||member.get().is_empty()) on_confirm=Callback::new(move |()|if let Ok(account_id)=member.get_untracked().parse(){editor.change(GuildChange::TransferOwner{account_id});})/></section>
-        <section class="settings-card settings-danger-zone"><h3>{move || crate::i18n::t("Delete server")}</h3><p class="settings-hint">{move || crate::i18n::t("Permanently deletes this server, its channels and all messages. This cannot be undone.")}</p><p class="settings-hint">{move ||editor.state.get().map(|s|thiscord_frontend::localized_format!(crate::i18n::language(), "Type {} to confirm.",s.guild.name))}</p><Field label="Server name" value=confirmation/><super::settings::ConfirmButton ui=ui label="Delete server" title="Permanently delete this server?" detail="All channels, messages and memberships will be removed. This cannot be undone." disabled=Signal::derive(move ||!confirmed()) on_confirm=Callback::new(move |()|editor.change(GuildChange::Delete{}))/></section>
+        <section class="settings-card settings-danger-zone"><h3>{move || crate::i18n::t("Transfer ownership")}</h3><p class="settings-hint">{move || crate::i18n::t("The new owner gets full control. You remain a member and lose owner privileges.")}</p><label class="settings-field"><span>{move || crate::i18n::t("New owner")}</span><select prop:value=move ||member.get() on:change=move |e|member.set(event_target_value(&e))><option value="">{move || crate::i18n::t("Choose a member")}</option>{move ||editor.state.get().map(|s|s.members.into_iter().filter(|m|m.account_id!=s.guild.owner).map(|m|view!{<option value=m.account_id.to_string()>{m.display_name().to_owned()}</option>}).collect_view())}</select></label><super::settings::ConfirmButton ui=ui label="Transfer ownership" title="Transfer this server’s ownership?" detail="The selected member becomes the owner with full control. You stay a member but lose owner privileges. This requires recent authentication." disabled=Signal::derive(move ||member.get().is_empty()) target=Signal::derive(move ||editor.state.get().and_then(|s|s.members.into_iter().find(|m|m.account_id.to_string()==member.get()).map(|m|m.display_name().to_owned())).unwrap_or_default()) action=editor.confirmed(move ||member.get_untracked().parse().ok().map(|account_id|GuildChange::TransferOwner{account_id}))/></section>
+        <section class="settings-card settings-danger-zone"><h3>{move || crate::i18n::t("Delete server")}</h3><p class="settings-hint">{move || crate::i18n::t("Permanently deletes this server, its channels and all messages. This cannot be undone.")}</p><p class="settings-hint">{move ||editor.state.get().map(|s|thiscord_frontend::localized_format!(crate::i18n::language(), "Type {} to confirm.",s.guild.name))}</p><Field label="Server name" value=confirmation/><super::settings::ConfirmButton ui=ui label="Delete server" title="Permanently delete this server?" detail="All channels, messages, attachments, roles, invites, soundboard sounds, bots and memberships will be removed. This cannot be undone." disabled=Signal::derive(move ||!confirmed()) target=Signal::derive(move ||editor.state.get().map(|s|s.guild.name).unwrap_or_default()) action=editor.confirmed(||Some(GuildChange::Delete{}))/></section>
     </Show>}
 }
 
@@ -695,7 +900,7 @@ fn InstancePolicies(
         </div>
         <Show when=move ||policy.get().is_some_and(|p|!p.builtin)>
             <p class="settings-hint">{move ||crate::i18n::t("Only unused custom roles can be deleted. Assign every account using this role to another role first.")}</p>
-            <super::settings::ConfirmButton ui=ui label="Delete role" title="Delete this instance role?" detail="Only custom roles with no assigned accounts can be deleted. This cannot be undone." disabled=Signal::derive(move ||changed()||blocked.get()) on_confirm=Callback::new(move |()|if owner() && let Some(p)=policy.get_untracked().filter(|p|!p.builtin){editor.request(PermissionRequest::DeleteInstanceRole{role_id:p.id,revision:p.revision});})/>
+            <super::settings::ConfirmButton ui=ui label="Delete role" title="Delete this instance role?" detail="Only custom roles with no assigned accounts can be deleted. This cannot be undone." disabled=Signal::derive(move ||changed()||blocked.get()) target=Signal::derive(move ||policy.get().map(|p|p.name).unwrap_or_default()) action=editor.confirmed_request(move ||owner().then(||policy.get_untracked().filter(|p|!p.builtin)).flatten().map(|p|PermissionRequest::DeleteInstanceRole{role_id:p.id,revision:p.revision}))/>
         </Show>
         <Show when=move ||policy.get().is_some()>
             <InstanceAssignees editor=editor blocked=Signal::derive(move ||changed()||blocked.get()) select_assignee=select_assignee/>
@@ -817,7 +1022,7 @@ pub(super) fn InstanceSettings(ui: Ui) -> impl IntoView {
                 <div class="settings-actions"><button class="settings-secondary" disabled=move ||!assignable() on:click=move |_|if owner() && assignable() && let (Ok(account_id),Ok(role_id))=(target.get_untracked().trim().parse::<AccountId>(),assigned_role.get_untracked().parse::<InstanceRoleId>()){editor.request(PermissionRequest::SetInstanceRole{account_id,role_id});}>{move ||crate::i18n::t("Assign role")}</button>
                 <button class="settings-secondary" disabled=move ||!assignment_dirty.get() on:click=move |_|reset_assignment()>{move ||crate::i18n::t("Reset")}</button></div>
                 <details class="settings-danger-zone"><summary>{move ||crate::i18n::t("Transfer instance ownership")}</summary><p class="settings-hint">{move ||crate::i18n::t("Requires recent authentication. You will become a regular instance member. Type TRANSFER INSTANCE to continue.")}</p><Field label="Confirmation" value=confirmation/>
-                    <super::settings::ConfirmButton ui=ui label="Transfer instance" title="Transfer instance ownership?" detail="The selected account becomes the instance owner. You lose owner privileges." disabled=Signal::derive(move ||policy_dirty.get()||confirmation.get()!="TRANSFER INSTANCE"||target.get().trim().parse::<AccountId>().ok().is_none_or(|id|editor.access.get().is_none_or(|a|a.owner==Some(id)))) on_confirm=Callback::new(move |()|if owner() && let Ok(account_id)=target.get_untracked().trim().parse(){editor.request(PermissionRequest::TransferInstance{account_id});})/>
+                    <super::settings::ConfirmButton ui=ui label="Transfer instance" title="Transfer instance ownership?" detail="The selected account becomes the instance owner. You lose owner privileges." disabled=Signal::derive(move ||policy_dirty.get()||confirmation.get()!="TRANSFER INSTANCE"||target.get().trim().parse::<AccountId>().ok().is_none_or(|id|editor.access.get().is_none_or(|a|a.owner==Some(id)))) target=Signal::derive(move ||target.get().trim().to_owned()) action=editor.confirmed_request(move ||owner().then(||target.get_untracked().trim().parse().ok()).flatten().map(|account_id|PermissionRequest::TransferInstance{account_id}))/>
                 </details>
             </fieldset>
         </section></Show>

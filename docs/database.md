@@ -25,6 +25,16 @@ The database pool is synchronous Diesel/r2d2. HTTP queries and startup migration
 work run inside `spawn_blocking`. A configured but inaccessible database fails
 startup; an unset URL allows liveness-only mode with readiness 503.
 
+`DATABASE_POOL_SIZE` optionally sets the number of pooled connections, an integer
+from 1 to 32 (default 5); any other value fails startup. Checkout still waits at
+most two seconds, and each connection keeps the two-second statement and one-second
+lock timeouts. HTTP, sockets, notifications and diagnostics share this pool, and
+blocking work is additionally limited by per-feature worker semaphores, so more
+connections help only when **Database pool checkout** in `/admin` is slow while
+queries are quick (see [performance audit](performance-audit.md)). Every backend
+process, `--migrate-only` run and `psql` session counts toward PostgreSQL's
+`max_connections`. Integration tests always use the default size.
+
 ## Windows startup troubleshooting
 
 Run `.\run-wsl.ps1` from `backend/` in PowerShell, or select **Backend: run in WSL**

@@ -6,6 +6,7 @@ mod appearance;
 mod audio;
 mod browser_media;
 mod camera;
+mod camera_select;
 mod chat;
 mod context_menu;
 mod diagnostics;
@@ -15,7 +16,9 @@ mod emoji;
 mod friends;
 mod icons;
 mod invites;
+mod keyboard;
 mod login;
+mod members;
 mod message_content;
 mod moderation;
 mod notifications;
@@ -30,6 +33,7 @@ mod servers;
 mod settings;
 mod shortcuts;
 mod soundboard;
+mod status;
 mod tooltip;
 mod updates;
 mod voice_bots;
@@ -66,10 +70,13 @@ fn draft_signal(ui: Ui, key: Draft, paused: impl Fn() -> bool + 'static) -> RwSi
 
 #[derive(Clone, Copy)]
 struct Ui {
+    confirm: dialog::Confirmations,
+    keyboard: keyboard::State,
     invites: invites::State,
     bot_target: RwSignal<Option<voice_bots::Target>>,
     notifications: notifications::State,
     friends: friends::State,
+    members: members::State,
     audio_control: crate::audio_control::AudioControl,
     updates: RwSignal<thiscord_shared::update::UpdateStatus>,
     update_error: RwSignal<String>,
@@ -178,12 +185,37 @@ async fn clear_local(ui: Ui) {
     }
 }
 fn run(ui: Ui, command: AccountRequest) {
+    if let Some(outcome) = perform(ui, command) {
+        leptos::task::spawn_local(async move {
+            let _ = outcome.await;
+        });
+    }
+}
+/// Account command for a confirmation dialog: its error stays in the dialog.
+fn confirmed(ui: Ui, command: impl Fn() -> AccountRequest + 'static) -> dialog::Action {
+    dialog::Action::new(move |_| {
+        let outcome = perform(ui, command());
+        async move {
+            match outcome {
+                Some(outcome) => outcome.await,
+                None => Err(dialog::busy_error()),
+            }
+        }
+    })
+}
+/// Starts an account command unless another one is running; resolves with the
+/// error that was also reported in the status bar.
+fn perform(
+    ui: Ui,
+    command: AccountRequest,
+) -> Option<impl std::future::Future<Output = Result<(), String>> + 'static> {
     if ui.busy.get_untracked() {
-        return;
+        return None;
     }
     ui.busy.set(true);
     ui.status.set("Working…".into());
-    leptos::task::spawn_local(async move {
+    Some(async move {
+        let mut outcome = Ok(());
         let clears = matches!(
             command,
             AccountRequest::Logout
@@ -213,6 +245,7 @@ fn run(ui: Ui, command: AccountRequest) {
                 }
             }
             Err(error) => {
+                outcome = Err(error.clone());
                 ui.status.set(error.clone());
                 if matches!(command, AccountRequest::Logout) {
                     clear_local(ui).await;
@@ -225,7 +258,8 @@ fn run(ui: Ui, command: AccountRequest) {
             }
         }
         ui.busy.set(false);
-    });
+        outcome
+    })
 }
 fn device_name() -> &'static str {
     if client::desktop() {
@@ -421,9 +455,12 @@ fn StatusNotice(ui: Ui) -> impl IntoView {
 #[component]
 pub fn App() -> impl IntoView {
     let ui = Ui {
+        confirm: dialog::Confirmations::new(),
+        keyboard: keyboard::State::new(),
         invites: invites::State::new(),
         bot_target: RwSignal::new(None),
         friends: friends::State::new(),
+        members: members::State::new(),
         notifications: notifications::State::new(),
         audio_control: Default::default(),
         updates: RwSignal::new(Default::default()),
@@ -471,7 +508,7 @@ pub fn App() -> impl IntoView {
     };
     if crate::account_client::admin_page() {
         return view! {
-            <tooltip::Host/><context_menu::Host ui=ui/><voice_bots::Host ui=ui/>
+            <tooltip::Host/><context_menu::Host ui=ui/><voice_bots::Host ui=ui/><dialog::ConfirmHost ui=ui/>
             <Show when=move ||ui.account.get().is_some() fallback=move ||view!{<login::Login ui=ui admin=true/>}>
                 <admin::Dashboard ui=ui/>
             </Show>
@@ -549,7 +586,7 @@ pub fn App() -> impl IntoView {
         }
     });
     view! {
-        <tooltip::Host/><context_menu::Host ui=ui/><voice_bots::Host ui=ui/>
+        <tooltip::Host/><context_menu::Host ui=ui/><voice_bots::Host ui=ui/><dialog::ConfirmHost ui=ui/>
         <invites::Host ui=ui/>
         <updates::Host ui=ui/>
         <notifications::Host ui=ui/>
@@ -561,12 +598,19 @@ pub fn App() -> impl IntoView {
                 </main>
             </Show>
         }>
+        <a class="skip-link" href="#app-content" on:click=move |e| {
+            // Focus the region instead of navigating, so the URL fragment stays free for invites.
+            e.prevent_default();
+            if let Some(main) = document().get_element_by_id("app-content").and_then(|m| wasm_bindgen::JsCast::dyn_into::<web_sys::HtmlElement>(m).ok()) { let _ = main.focus(); }
+        }>{move || crate::i18n::t("Skip to content")}</a>
         <div class="app-shell" class:in-voice=move ||ui.voice.get().channel_id.is_some() class:mobile-content=move ||mobile_content(ui)>
+        <h1 class="sr-only">"Thiscord"</h1>
+        <keyboard::Host ui=ui/>
         <servers::ServerRail ui=ui/>
         <audio::AudioHost ui=ui/>
         <chat::ChatHost ui=ui/>
         <friends::Host ui=ui/>
-        <main class="app-main">
+        <main id="app-content" tabindex="-1" class="app-main">
             <StatusNotice ui=ui/>
             <div class="min-h-0 min-w-0 flex-1"><servers::ServerHome ui=ui/></div>
         </main>

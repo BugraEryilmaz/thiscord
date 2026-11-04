@@ -18,7 +18,7 @@ pub(super) fn Login(ui: Ui, #[prop(default = false)] admin: bool) -> impl IntoVi
         reset_code.set(String::new());
         ui.status.set(String::new());
         if let Some(dialog) = dialog.get() {
-            let _ = dialog.show_modal();
+            super::dialog::open(&dialog);
         }
     };
     let sign_in = move |event: leptos::ev::SubmitEvent| {

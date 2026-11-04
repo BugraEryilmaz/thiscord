@@ -20,6 +20,10 @@ mod attachments;
 mod bots;
 #[path = "chat/friends.rs"]
 mod friends;
+#[path = "chat/guild_updates.rs"]
+mod guild_updates;
+#[path = "chat/members.rs"]
+mod members;
 #[path = "chat/mentions.rs"]
 mod mentions;
 #[path = "chat/notifications.rs"]
@@ -41,9 +45,18 @@ impl Drop for Database {
         if std::thread::panicking() {
             self.connection.batch_execute("ROLLBACK").ok();
         }
-        self.connection
-            .batch_execute(&format!("DROP SCHEMA {} CASCADE", self.schema))
-            .unwrap();
+        // Sockets from the finished test may still be refreshing (member lists,
+        // friends snapshots), so the DROP can be chosen as a deadlock victim.
+        let drop = format!("DROP SCHEMA {} CASCADE", self.schema);
+        for attempt in 1.. {
+            match self.connection.batch_execute(&drop) {
+                Ok(()) => break,
+                Err(error) if attempt < 5 && error.to_string().contains("deadlock detected") => {
+                    std::thread::sleep(std::time::Duration::from_millis(200 * attempt));
+                }
+                Err(error) => panic!("{error:?}"),
+            }
+        }
     }
 }
 fn database() -> Database {

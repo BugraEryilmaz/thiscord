@@ -99,6 +99,19 @@ pub(super) fn Dashboard(ui: Ui) -> impl IntoView {
         });
     };
     refresh();
+    // Rooms re-render only when their telemetry changes, not on every refresh of
+    // host and performance values. Idle instances keep the empty state as is.
+    let rooms = Memo::new(move |_| {
+        data.with(|d| {
+            d.as_ref().map(|d| {
+                (
+                    d.rooms.clone(),
+                    (!d.rooms.is_empty()).then_some(d.sampled_at),
+                    d.role == thiscord_shared::permissions::InstanceRole::Owner,
+                )
+            })
+        })
+    });
     let (abort, registration) = futures_util::future::AbortHandle::new_pair();
     on_cleanup(move || abort.abort());
     leptos::task::spawn_local(async move {
@@ -144,15 +157,19 @@ pub(super) fn Dashboard(ui: Ui) -> impl IntoView {
                         </section>
                         <BackendPerformance current=d.performance previous=previous.get_untracked() sampled_at=d.sampled_at/>
                         <details class="rounded-xl border border-slate-800 p-5"><summary class="cursor-pointer text-sm">{move || crate::i18n::t("This admin browser's UI measurements")}</summary><UiPerformance measurements=crate::performance::snapshot()/></details>
+                    }
+                })}
+                {move ||rooms.get().map(|(rooms, sampled_at, owner)| {
+                    let sampled_at = sampled_at.unwrap_or_default();
+                    view! {
                         <section class="space-y-4" aria-labelledby="rooms-title">
                             <h2 id="rooms-title" class="text-xl font-semibold">{move || crate::i18n::t("Active rooms")}</h2>
                             <p class="max-w-4xl text-sm leading-relaxed text-slate-400">{move ||crate::i18n::t("Latency is the user ↔ server transport round trip. Jitter is microphone packet arrival variation at the server. Values are milliseconds; — means no recent measurement. Muted users may have no microphone samples.")}</p>
-                            {if d.rooms.is_empty() {view!{<div class="rounded-xl border border-dashed border-slate-700 p-12 text-center"><p class="font-medium">{move || crate::i18n::t("No active voice rooms")}</p><p class="mt-2 text-sm text-slate-400">{move || crate::i18n::t("Rooms appear here when someone connects.")}</p></div>}.into_any()} else {
-                                let rooms=d.rooms;
+                            {if rooms.is_empty() {view!{<div class="rounded-xl border border-dashed border-slate-700 p-12 text-center"><p class="font-medium">{move || crate::i18n::t("No active voice rooms")}</p><p class="mt-2 text-sm text-slate-400">{move || crate::i18n::t("Rooms appear here when someone connects.")}</p></div>}.into_any()} else {
                                 view!{{move || {
                                     let query=filter.get().to_lowercase();
                                     let visible:Vec<_>=rooms.iter().filter(|r|format!("{} {} {}",r.guild_name,r.channel_name,r.participants.iter().map(|p|format!("{} {}",p.participant.username,p.participant.display_name)).collect::<Vec<_>>().join(" ")).to_lowercase().contains(&query)).cloned().collect();
-                                    if visible.is_empty() {view!{<p class="py-8 text-slate-400">{move || crate::i18n::t("No rooms match your search.")}</p>}.into_any()} else {visible.into_iter().map(|room|view!{<Room room=room sampled_at=d.sampled_at selected=selected ui=ui owner=d.role==thiscord_shared::permissions::InstanceRole::Owner/>}).collect_view().into_any()}
+                                    if visible.is_empty() {view!{<p class="py-8 text-slate-400">{move || crate::i18n::t("No rooms match your search.")}</p>}.into_any()} else {visible.into_iter().map(|room|view!{<Room room=room sampled_at=sampled_at selected=selected ui=ui owner=owner/>}).collect_view().into_any()}
                                 }}}.into_any()
                             }}
                         </section>
@@ -220,7 +237,7 @@ fn RemoteAudioPanel(ui: Ui, selection: Selection, close: Callback<()>) -> impl I
     let dialog = NodeRef::<leptos::html::Dialog>::new();
     Effect::new(move |_| {
         if let Some(dialog) = dialog.get() {
-            let _ = dialog.show_modal();
+            super::dialog::open(&dialog);
         }
     });
     let content = selection.connection.map(|connection| {
@@ -283,8 +300,8 @@ fn RemoteAudioPanel(ui: Ui, selection: Selection, close: Callback<()>) -> impl I
         }.into_any()
     });
     view! {
-        <dialog node_ref=dialog on:cancel=move |_: web_sys::Event| close.run(()) class="fixed inset-0 m-auto max-h-[90vh] w-full max-w-3xl overflow-auto rounded-xl border border-slate-700 bg-slate-950 p-6 text-slate-100 backdrop:bg-black/70">
-            <header class="mb-5 flex items-center justify-between gap-4"><h2 class="text-xl font-semibold">{move || thiscord_frontend::localized_format!(crate::i18n::language(), "Desktop support · {}", selection.name)}</h2><button autofocus class="rounded bg-slate-800 px-4 py-2" on:click=move |_| close.run(())>{move || crate::i18n::t("Close")}</button></header>
+        <dialog node_ref=dialog aria-labelledby="desktop-support-title" on:cancel=move |_: web_sys::Event| close.run(()) class="fixed inset-0 m-auto max-h-[90vh] w-full max-w-3xl overflow-auto rounded-xl border border-slate-700 bg-slate-950 p-6 text-slate-100 backdrop:bg-black/70">
+            <header class="mb-5 flex items-center justify-between gap-4"><h2 id="desktop-support-title" class="text-xl font-semibold">{move || thiscord_frontend::localized_format!(crate::i18n::language(), "Desktop support · {}", selection.name)}</h2><button autofocus class="rounded bg-slate-800 px-4 py-2" on:click=move |_| close.run(())>{move || crate::i18n::t("Close")}</button></header>
             {content.unwrap_or_else(|| view! {<p>{move || crate::i18n::t("Remote audio is unavailable for this connection. Update the user's desktop app and reconnect to voice.")}</p>}.into_any())}
         </dialog>
     }

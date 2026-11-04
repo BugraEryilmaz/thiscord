@@ -47,7 +47,8 @@ media compatibility spike can happen before chat to expose platform constraints.
 - [x] Backend for the `/app` web client: HttpOnly cookie sessions with Origin-based CSRF rules, cookie socket authentication, bundle hosting/deploy and browser Opus microphone publishers in the SFU (docs/web.md).
 - [ ] Accept the `/app` web client and browser voice interactively in desktop and mobile Chrome, Safari and Firefox.
 - [x] Prioritized performance audit with bounded backend timings and automatic desktop UI counters accessible through `/admin` (docs/performance-audit.md).
-- [ ] Confirm performance audit priorities under production load before changing polling, pool sizing or frontend snapshot updates.
+- [x] Follow-up performance changes: friends history reuse, configurable pool size, shorter SFU locked fan-out, capped unread counts, indexed friend rows and lighter admin room names (docs/performance-audit.md).
+- [ ] Measure the 2026-11-03 performance follow-ups under production load (friends, pool checkout, SFU fan-out, unread, UI lookup counters) and record results.
 - [ ] Deploy the admin bundle to the VPS and verify production password/Google login and real-client telemetry.
 
 - [x] Three-package workspace with shared Serde communication contracts.
@@ -128,7 +129,8 @@ and single-process chat/media enforcement.
 
 - [x] Create/edit/delete guild HTTP commands, list memberships, join by ID/password and leave.
 - [x] Joined-server rail with circular initials avatars, names on hover, create/join dialogs.
-- [ ] Custom server images and password-change settings UI.
+- [x] Custom server icons: upload/replace/remove with ManageGuild, live rail/header/banner updates.
+- [ ] Server password-change settings UI.
 - [x] Invite links with optional expiry/use limits, revocation and join validation.
 - [x] Browser invite landing with desktop handoff, web client handoff, installer links and unlimited invite copying.
 - [ ] Validate installed invite activation on Windows, macOS and Linux (cold start, running/tray and signed out).
@@ -137,7 +139,12 @@ and single-process chat/media enforcement.
 - [x] Guild moderation audit events and reasons (1000-row retention, authorized keyset history).
 - [x] Create/edit/delete/reorder text and voice channels and organizational categories.
 - [ ] Guild navigation, channel/member lists and settings views.
-- [ ] Cascade/archive behavior and confirmation UX for destructive operations.
+- [x] Live guild member list (online/offline, presence, custom status, block filtering) with profile cards, member menus and a phone/tablet drawer.
+- [x] Account custom status with emoji, expiry presets, cross-device sync and friend/guild/DM/voice-tooltip display.
+- [ ] Role display/hoist settings for member list grouping and colours.
+- [ ] Accept the member list drawer, profile cards and custom status dialog interactively on Windows/macOS/Linux and mobile browsers.
+- [x] Shared confirmation dialog for destructive operations; current cascades documented.
+- [ ] Archive (soft-delete/restore) behavior for destructive operations.
 - [ ] Transaction and authorization tests for management operations.
 
 ## 4. Text chat and real-time transport
@@ -151,7 +158,7 @@ and single-process chat/media enforcement.
 - [x] History/composer UI with pending/failed/retry states and scroll behavior.
 - [x] Unread markers, mentions, typing indicators and online presence.
 - [x] Guild mention autocomplete by public profile name or username, showing both names with keyboard and pointer selection.
-- [ ] Measure unread fan-out with large backlogs; evaluate maintained sequence-bucket aggregates (see docs/unread-performance.md).
+- [ ] Measure unread fan-out under production subscriber counts with capped counts; re-evaluate maintained aggregates only if it remains costly (see docs/unread-performance.md).
 - [x] Safe message rendering, bounded payloads and spam controls.
 - [x] Clickable web links in guild/private messages, opening in the default desktop browser.
 - [x] Reconnect, duplicate delivery, channel isolation and channel deletion tests.
@@ -461,7 +468,11 @@ Personalized speaker isolation and physical acoustic acceptance remain future wo
 - [x] Simultaneous camera/screen grid, self previews, fullscreen, hide/restore and contextual audio controls.
 - [x] Camera epochs, viewer leases, permission fences and independent recovery/bitrate feedback.
 - [ ] Physical camera/WebView acceptance on Windows/macOS/Linux and measured eight-person mixed-media capacity.
-- [ ] In-app webcam selection (currently the system default).
+- [x] In-app webcam selection for the desktop app and `/app`: device-local choice,
+  settings preview, voice-bar quick switch, in-call track replacement and a
+  one-time missing-camera fallback notice (docs/cameras.md#choosing-a-camera).
+- [ ] Physically verify camera selection, hot-plug and in-call switching on
+  Windows/macOS/Linux WebViews and browsers (device IDs, WebKit single-capture).
 
 See [screen-sharing.md](docs/screen-sharing.md) for limits and remaining platform checks.
 
@@ -499,5 +510,11 @@ See [screen-sharing.md](docs/screen-sharing.md) for limits and remaining platfor
 - [ ] Configure GitHub signing secrets and run the first installer release pipeline.
 - [ ] Windows Authenticode and Apple Developer ID/notarization configuration.
 - [ ] Initial-install and version-to-version update acceptance on all three OSes.
-- [ ] Accessibility, keyboard navigation, failure recovery and platform smoke tests.
+- [x] Keyboard navigation and accessibility: Ctrl/⌘+K quick switcher, channel/unread/server
+  shortcuts, Esc to mark read, shortcut reference, roving focus in lists/grids, focus-managed
+  modal dialogs, landmarks, live announcements, focus rings, reduced motion and muted-text
+  contrast checks (docs/accessibility.md).
+- [ ] Screen-reader acceptance with NVDA (Windows), VoiceOver (macOS, iOS Safari) and Orca
+  (Linux), plus keyboard-only passes in all three desktop WebViews and non-US layouts.
+- [ ] Failure recovery and platform smoke tests.
 - [ ] Review session security, authorization, file access and media permissions.

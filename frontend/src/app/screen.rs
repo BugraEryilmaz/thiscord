@@ -80,7 +80,7 @@ pub(super) fn ScreenControls(ui: Ui) -> impl IntoView {
         if picking.get()
             && let Some(d) = dialog.get()
         {
-            let _ = d.show_modal();
+            super::dialog::open(&d);
         }
     });
     let (abort, registration) = futures_util::future::AbortHandle::new_pair();
@@ -240,6 +240,10 @@ pub(super) fn ScreenViewer(ui: Ui, guild: GuildId, channel: ChannelId) -> impl I
     });
     let escape = window_event_listener(leptos::ev::keydown, move |e| {
         if e.key() == "Escape" {
+            // Handled here, so Escape does not also mark the channel read.
+            if menu.with_untracked(Option::is_some) || expanded.with_untracked(Option::is_some) {
+                e.prevent_default();
+            }
             menu.set(None);
             expanded.set(None);
         }

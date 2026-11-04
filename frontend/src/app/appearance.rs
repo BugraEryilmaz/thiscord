@@ -31,12 +31,13 @@ pub(super) fn Panel() -> impl IntoView {
         <section class="settings-card">
             <h3>{move || t("Theme")}</h3>
             <p class="settings-hint">{move || t("A starting point for backgrounds and text. Choosing one replaces your custom background and text colors.")}</p>
-            <div class="appearance-themes" role="radiogroup" aria-label=move || t("Theme")>
+            <div class="appearance-themes" role="radiogroup" aria-label=move || t("Theme") on:keydown=move |e| super::keyboard::rove_radio(&e)>
                 {Theme::ALL.into_iter().map(|choice| {
                     let palette = choice.palette();
                     view! {
                         <button type="button" role="radio" class="appearance-theme"
                             aria-checked=move || (theme::current().theme == choice).to_string()
+                            tabindex=move || if theme::current().theme == choice { "0" } else { "-1" }
                             on:click=move |_| save(theme::current_untracked().with_theme(choice))>
                             <span class="appearance-theme-swatch" aria-hidden="true">
                                 <i style:background-color=palette.get(Token::Rail).hex()></i>
@@ -56,9 +57,10 @@ pub(super) fn Panel() -> impl IntoView {
         <section class="settings-card">
             <h3>{move || t("Accent color")}</h3>
             <p class="settings-hint">{move || t("Used for buttons, highlights, selections and focus outlines.")}</p>
-            <div class="appearance-accents" role="radiogroup" aria-label=move || t("Accent color")>
+            <div class="appearance-accents" role="radiogroup" aria-label=move || t("Accent color") on:keydown=move |e| super::keyboard::rove_radio(&e)>
                 {ACCENTS.map(|(label, color)| view! {
                     <button type="button" role="radio" class="appearance-accent"
+                        tabindex=move || if theme::current().accent() == color || (custom_accent() && color == ACCENTS[0].1) { "0" } else { "-1" }
                         style:background-color=color.hex()
                         aria-label=move || t(label) data-tip=move || t(label)
                         aria-checked=move || (theme::current().accent() == color).to_string()

@@ -162,6 +162,7 @@ mod tests {
                 name: String::new(),
                 owner: id(1),
                 revision: 1,
+                icon_id: None,
             },
             roles: vec![Role {
                 id: id(8),

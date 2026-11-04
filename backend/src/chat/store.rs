@@ -213,7 +213,9 @@ pub(super) fn dispatch(
         ),
     )?;
     let (guild, channel, need) = match &command {
-        ChatRequest::Unread { guild_id } => (*guild_id, None, None),
+        ChatRequest::Unread { guild_id } | ChatRequest::MemberProfile { guild_id, .. } => {
+            (*guild_id, None, None)
+        }
         ChatRequest::Pins {
             guild_id,
             channel_id,
@@ -575,6 +577,9 @@ pub(super) fn dispatch(
                 }
                 ChatRequest::Unread { .. } => Ok(ChatResponse::Unread {
                     channels: unread(c, guild, actor, state)?,
+                }),
+                ChatRequest::MemberProfile { account_id, .. } => Ok(ChatResponse::MemberProfile {
+                    profile: super::members::profile(c, guild, actor, account_id)?,
                 }),
             }?;
             if let ChatResponse::Message { message } = &mut response {

@@ -29,6 +29,7 @@ pub mod voice_bots;
 pub use error::{ApiError, ErrorCode};
 pub use ids::AttachmentId;
 pub use ids::AvatarId;
+pub use ids::GuildIconId;
 pub use ids::SoundId;
 pub use ids::{
     AccountId, ChannelId, GuildId, InstanceId, InstanceRoleId, RequestId, RoleId, SessionId,

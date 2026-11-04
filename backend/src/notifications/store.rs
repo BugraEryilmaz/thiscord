@@ -241,6 +241,10 @@ pub(super) fn alert(
         let prefs = preferences(c, actor)?;
         let Some(delivery) = prefs.delivery(candidate.target, candidate.kind, chrono::Utc::now()) else { return Ok(None); };
         if !delivery.accepts(candidate.mentions.contains(&actor)) { return Ok(None); }
-        Ok(Some(Alert { id: candidate.id, target: candidate.target, kind: candidate.kind, title: candidate.title, delivery, actor: candidate.actor, call_id: candidate.call_id, version: candidate.version }))
+        let guild_icon_id = match candidate.target {
+            Target::Channel { guild_id, .. } => query(c, "SELECT to_jsonb(id) AS data FROM guild_icons WHERE guild_id=$1::uuid", &[&guild_id.to_string()])?.pop(),
+            _ => None,
+        };
+        Ok(Some(Alert { id: candidate.id, target: candidate.target, kind: candidate.kind, title: candidate.title, delivery, actor: candidate.actor, call_id: candidate.call_id, version: candidate.version, guild_icon_id }))
     })
 }

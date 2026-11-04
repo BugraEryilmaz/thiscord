@@ -18,6 +18,9 @@ use thiscord_shared::{
 #[derive(Clone, Copy)]
 pub(super) struct State {
     pub snapshot: RwSignal<Snapshot>,
+    /// Friends by conversation, without history. Rows read this index instead of
+    /// cloning and searching the whole snapshot.
+    pub by_id: Memo<std::collections::HashMap<ConversationId, Friend>>,
     pub selected: RwSignal<Option<ConversationId>>,
     pub before: RwSignal<Option<thiscord_shared::pagination::PageCursor>>,
     pub typing_at: RwSignal<f64>,
@@ -29,8 +32,17 @@ pub(super) struct State {
 }
 impl State {
     pub fn new() -> Self {
+        let snapshot = RwSignal::<Snapshot>::new(Default::default());
         Self {
-            snapshot: RwSignal::new(Default::default()),
+            snapshot,
+            by_id: Memo::new(move |_| {
+                snapshot.with(|s| {
+                    s.friends
+                        .iter()
+                        .map(|f| (f.conversation_id, f.clone()))
+                        .collect()
+                })
+            }),
             selected: RwSignal::new(None),
             before: RwSignal::new(None),
             typing_at: RwSignal::new(0.0),
@@ -49,6 +61,18 @@ impl State {
                 .filter(|f| f.relationship == Relationship::Incoming)
                 .count() as u32
         })
+    }
+
+    /// One row by conversation: a map lookup plus a clone of that row only.
+    /// Counted as "Friend row snapshot lookup" in the UI performance monitor.
+    pub fn friend(self, id: ConversationId) -> Option<Friend> {
+        let _timing = crate::performance::start(0);
+        self.by_id.with(|m| m.get(&id).cloned())
+    }
+
+    /// Whether any private call is listed, without cloning the snapshot.
+    pub fn has_calls(self) -> bool {
+        self.snapshot.with(|s| !s.calls.is_empty())
     }
 
     pub fn unread_count(self) -> u32 {
@@ -88,6 +112,16 @@ async fn request(ui: Ui, command: &Request) -> Result<Response, String> {
         return Err("Session changed".into());
     }
     response
+}
+/// Ends a friendship; the error is also reported in the status bar.
+pub(super) async fn remove(ui: Ui, account_id: thiscord_shared::AccountId) -> Result<(), String> {
+    match request(ui, &Request::Remove { account_id }).await {
+        Ok(_) => Ok(()),
+        Err(error) => {
+            ui.status.set(error.clone());
+            Err(error)
+        }
+    }
 }
 pub(super) fn action(ui: Ui, command: Request) {
     leptos::task::spawn_local(async move {
@@ -179,15 +213,15 @@ pub(super) fn Host(ui: Ui) -> impl IntoView {
         <For each=move ||{
             let voice_channel = ui.voice.get().channel_id;
             let account = ui.account.get().map(|a|a.id);
-            ui.friends.snapshot.get().calls.into_iter().filter(|c| {
+            ui.friends.snapshot.with(|s| s.calls.iter().filter(|c| {
                 // The bottom-left voice dock already owns controls for the joined call.
                 Some(c.voice_channel()) != voice_channel
                     && (c.state != CallState::Ringing || account == Some(c.caller))
-            }).collect::<Vec<_>>()
+            }).cloned().collect::<Vec<_>>())
         } key=|c|c.id children=move |initial| {
             let id=initial.id;
-            let call=Signal::derive(move ||ui.friends.snapshot.get().calls.into_iter().find(|c|c.id==id).unwrap_or_else(||initial.clone()));
-            let label=move ||ui.friends.snapshot.get().friends.into_iter().find(|f|f.conversation_id==call.get().conversation_id).map(|f|f.person.display_name).unwrap_or_else(||crate::i18n::t("Friend").into());
+            let call=Memo::new(move |_|ui.friends.snapshot.with(|s|s.calls.iter().find(|c|c.id==id).cloned()).unwrap_or_else(||initial.clone()));
+            let label=move ||{let conversation=call.with(|c|c.conversation_id);ui.friends.by_id.with(|m|m.get(&conversation).map(|f|f.person.display_name.clone())).unwrap_or_else(||crate::i18n::t("Friend").into())};
             let incoming=move ||call.get().state==CallState::Ringing && ui.account.get().is_some_and(|a|a.id==call.get().callee);
             view! {<section class="rounded-xl border border-white/15 bg-surface p-4 shadow-2xl">
                 <button class="font-semibold hover:underline" on:click=move |_|open(ui,call.get_untracked().conversation_id)>{label}</button>
@@ -200,7 +234,7 @@ pub(super) fn Host(ui: Ui) -> impl IntoView {
                         if ui.friends.intent.get_untracked()==Some(id) {ui.friends.intent.set(None);ui.friends.joined.set(None);super::audio::leave(ui);}
                     }>{move ||if incoming(){crate::i18n::t("Decline")}else{crate::i18n::t("End call")}}</button>
                 </div>
-                <Show when=move ||!available(ui)><p class="mt-2 text-xs text-white/50">{move || crate::i18n::t("Open the desktop app to use voice.")}</p></Show>
+                <Show when=move ||!available(ui)><p class="mt-2 text-xs text-white/60">{move || crate::i18n::t("Open the desktop app to use voice.")}</p></Show>
             </section>}
         }/>
     </div>}
@@ -213,11 +247,12 @@ fn join_call(ui: Ui, call: Call) {
     let name = ui
         .friends
         .snapshot
-        .get_untracked()
-        .friends
-        .into_iter()
-        .find(|f| f.conversation_id == call.conversation_id)
-        .map(|f| f.person.display_name)
+        .with_untracked(|s| {
+            s.friends
+                .iter()
+                .find(|f| f.conversation_id == call.conversation_id)
+                .map(|f| f.person.display_name.clone())
+        })
         .unwrap_or_else(|| crate::i18n::t("Friend").into());
     super::audio::join_location(
         ui,
@@ -231,9 +266,15 @@ fn join_call(ui: Ui, call: Call) {
 }
 async fn connected(ui: Ui, token: &str) -> Result<(), ()> {
     let base = account_client::socket_base();
-    let (mut sink, mut stream) = WebSocket::open(&format!("{base}{FRIENDS_SOCKET_PATH}"))
-        .map_err(|_| ())?
-        .split();
+    // Older servers ignore the query and keep sending history in every snapshot.
+    let (mut sink, mut stream) = WebSocket::open(&format!(
+        "{base}{FRIENDS_SOCKET_PATH}?{RETAINED_HISTORY_QUERY}"
+    ))
+    .map_err(|_| ())?
+    .split();
+    // History last received on this socket. The server omits an unchanged history
+    // only after delivering it on the same socket for the same selection and page.
+    let mut received: thiscord_frontend::direct_history::Received = None;
     sink.send(Message::Text(
         serde_json::to_string(&ClientFrame {
             version: VERSION,
@@ -262,6 +303,7 @@ async fn connected(ui: Ui, token: &str) -> Result<(), ()> {
             match frame.event {
                 ServerEvent::Snapshot { mut snapshot } => {
                     ui.friends.connected.set(true);
+                    thiscord_frontend::direct_history::retain(&mut snapshot, &mut received);
                     // A late selection response must never appear in another DM.
                     if snapshot.conversation_id != ui.friends.selected.get_untracked() {
                         snapshot.history = None;
@@ -279,6 +321,8 @@ async fn connected(ui: Ui, token: &str) -> Result<(), ()> {
                     }) {
                         ui.friends.selected.set(None);
                     }
+                    // The account's own status, set on this or another device.
+                    super::status::apply(ui, snapshot.own_status.clone());
                     ui.friends.snapshot.set(snapshot);
                     if let Some(call) = active {
                         if call.state == CallState::Active {
@@ -360,6 +404,18 @@ async fn connected(ui: Ui, token: &str) -> Result<(), ()> {
 #[component]
 pub(super) fn Home(ui: Ui) -> impl IntoView {
     let filter = RwSignal::new("online");
+    let roving = super::keyboard::Roving::new(
+        move || {
+            ui.friends.snapshot.with(|s| {
+                s.friends
+                    .iter()
+                    .filter(|f| f.relationship == Relationship::Friend)
+                    .map(|f| f.conversation_id)
+                    .collect()
+            })
+        },
+        move || ui.friends.selected.get(),
+    );
     view! {<section class="flex h-full min-h-0 flex-col pb-[var(--dock-height)] lg:pb-0">
         <header class="friends-home-header flex flex-wrap items-center gap-4 border-b border-white/10 px-6 py-4">
             <button class="flex items-center gap-2 text-lg font-bold" on:click=move |_|ui.friends.selected.set(None)><Icon kind=Glyph::Person/>{move || crate::i18n::t("Friends")}</button>
@@ -371,14 +427,15 @@ pub(super) fn Home(ui: Ui) -> impl IntoView {
             <div class="ml-auto"><AddFriend ui=ui/></div>
         </header>
         <div class="flex min-h-0 flex-1">
-            <aside class="hidden w-[var(--sidebar-width)] shrink-0 overflow-y-auto border-r border-white/10 bg-sidebar p-4 pb-[var(--dock-height)] lg:block" aria-label=move || crate::i18n::t("Direct messages")>
-                <h3 class="mb-3 flex items-center gap-2 text-xs font-semibold uppercase tracking-wider text-white/40">{move || crate::i18n::t("Direct messages")}<CountBubble count=Signal::derive(move ||ui.friends.unread_count()) label="unread messages"/></h3>
-                <For each=move ||{ui.friends.snapshot.get().friends.into_iter().filter(|f|f.relationship==Relationship::Friend).collect::<Vec<_>>()} key=|f|f.conversation_id children=move |f| {
+            <nav class="hidden w-[var(--sidebar-width)] shrink-0 overflow-y-auto border-r border-white/10 bg-sidebar p-4 pb-[var(--dock-height)] lg:block" aria-label=move || crate::i18n::t("Direct messages")
+                data-rove-list on:keydown=move |e| super::keyboard::rove(&e)>
+                <h3 class="mb-3 flex items-center gap-2 text-xs font-semibold uppercase tracking-wider text-white/60">{move || crate::i18n::t("Direct messages")}<CountBubble count=Signal::derive(move ||ui.friends.unread_count()) label="unread messages"/></h3>
+                <For each=move ||{ui.friends.snapshot.with(|s|s.friends.iter().filter(|f|f.relationship==Relationship::Friend).cloned().collect::<Vec<_>>())} key=|f|f.conversation_id children=move |f| {
                     let id=f.conversation_id;
-                    let friend=Signal::derive(move ||{let _timing=crate::performance::start(0);ui.friends.snapshot.get().friends.into_iter().find(|f|f.conversation_id==id).unwrap_or_else(||f.clone())});
-                    view!{<button data-context-conversation=id.to_string() class="mb-1 flex w-full items-center gap-2 rounded-lg p-2 text-left hover:bg-white/5" class=("bg-white/10",move ||ui.friends.selected.get()==Some(id)) on:click=move |_|open(ui,id)><span class="size-2 shrink-0 rounded-full" class:bg-emerald-400=move ||friend.get().online class=("bg-white/30",move ||!friend.get().online)></span><span class="min-w-0 flex-1 truncate">{move ||friend.get().person.display_name}</span><Show when=move ||super::notifications::muted(ui,thiscord_shared::notifications::Target::Conversation {conversation_id:id})><span aria-label=move || crate::i18n::t("Notifications muted")><Icon kind=Glyph::BellOff/></span></Show><CountBubble count=Signal::derive(move ||friend.get().unread_count) label="unread messages"/></button>}
+                    let friend=Memo::new(move |_|ui.friends.friend(id).unwrap_or_else(||f.clone()));
+                    view!{<button data-rove tabindex=roving.tabindex(id) on:focus=move |_|roving.focus(id) aria-current=move ||(ui.friends.selected.get()==Some(id)).then_some("page") aria-haspopup="menu" data-context-conversation=id.to_string() class="mb-1 flex w-full items-center gap-2 rounded-lg p-2 text-left hover:bg-white/5" class=("bg-white/10",move ||ui.friends.selected.get()==Some(id)) on:click=move |_|open(ui,id)><span class="sr-only">{move ||if friend.get().online{crate::i18n::t("Online")}else{crate::i18n::t("Offline")}}</span><span class="size-2 shrink-0 rounded-full" class:bg-emerald-400=move ||friend.get().online class=("bg-white/30",move ||!friend.get().online)></span><span class="min-w-0 flex-1 truncate">{move ||friend.get().person.display_name}</span><Show when=move ||super::notifications::muted(ui,thiscord_shared::notifications::Target::Conversation {conversation_id:id})><span role="img" aria-label=move || crate::i18n::t("Notifications muted")><Icon kind=Glyph::BellOff/></span></Show><CountBubble count=Signal::derive(move ||friend.get().unread_count) label="unread messages"/></button>}
                 }/>
-            </aside>
+            </nav>
             <div class="min-h-0 min-w-0 flex-1">
                 <Show when=move ||ui.friends.selected.get().is_some() fallback=move ||view!{<FriendList ui=ui filter=filter/>}>
                     <For each=move ||{ui.friends.selected.get().into_iter().collect::<Vec<_>>()} key=|id|*id children=move |id|view!{<Conversation ui=ui id=id/>}/>
@@ -390,37 +447,40 @@ pub(super) fn Home(ui: Ui) -> impl IntoView {
 #[component]
 fn FriendList(ui: Ui, filter: RwSignal<&'static str>) -> impl IntoView {
     let friends = Memo::new(move |_| {
-        ui.friends
-            .snapshot
-            .get()
-            .friends
-            .into_iter()
-            .filter(|f| match filter.get() {
-                "online" => f.relationship == Relationship::Friend && f.online,
-                "all" | "messages" => f.relationship == Relationship::Friend,
-                _ => f.relationship != Relationship::Friend,
-            })
-            .collect::<Vec<_>>()
+        let filter = filter.get();
+        ui.friends.snapshot.with(|s| {
+            s.friends
+                .iter()
+                .filter(|f| match filter {
+                    "online" => f.relationship == Relationship::Friend && f.online,
+                    "all" | "messages" => f.relationship == Relationship::Friend,
+                    _ => f.relationship != Relationship::Friend,
+                })
+                .cloned()
+                .collect::<Vec<_>>()
+        })
     });
-    view! {<div class="h-full overflow-y-auto p-6">
-        <p class="mb-5 text-xs font-semibold uppercase tracking-wider text-white/45">{move ||format!("{} — {}",if filter.get()=="pending"{crate::i18n::t("Requests")}else if filter.get()=="online"{crate::i18n::t("Online friends")}else if filter.get()=="messages"{crate::i18n::t("Direct messages")}else{crate::i18n::t("All friends")},friends.get().len())}</p>
+    let calling = Memo::new(move |_| ui.friends.has_calls());
+    view! {<div class="h-full overflow-y-auto p-6" data-rove-list on:keydown=move |e| super::keyboard::rove(&e)>
+        <p class="mb-5 text-xs font-semibold uppercase tracking-wider text-white/60">{move ||format!("{} — {}",if filter.get()=="pending"{crate::i18n::t("Requests")}else if filter.get()=="online"{crate::i18n::t("Online friends")}else if filter.get()=="messages"{crate::i18n::t("Direct messages")}else{crate::i18n::t("All friends")},friends.get().len())}</p>
         <Show when=move ||!ui.friends.connected.get()><p role="status" class="mb-4 text-sm text-amber-200">{move || crate::i18n::t("Connecting to friends…")}</p></Show>
-        <Show when=move ||friends.get().is_empty()><div class="flex min-h-60 flex-col items-center justify-center gap-3 text-center"><span class="rounded-full bg-brand/10 p-5 text-brand"><Icon kind=Glyph::Person/></span><h2 class="text-xl font-semibold">{move ||if filter.get()=="pending"{crate::i18n::t("No pending requests")}else if filter.get()=="online"{crate::i18n::t("No friends online right now")}else{crate::i18n::t("Make yourself at home")}}</h2><p class="max-w-sm text-sm text-white/50">{move || crate::i18n::t("Use Add friend to find someone by display name or username. Your conversations will appear here.")}</p></div></Show>
+        <Show when=move ||friends.get().is_empty()><div class="flex min-h-60 flex-col items-center justify-center gap-3 text-center"><span class="rounded-full bg-brand/10 p-5 text-brand"><Icon kind=Glyph::Person/></span><h2 class="text-xl font-semibold">{move ||if filter.get()=="pending"{crate::i18n::t("No pending requests")}else if filter.get()=="online"{crate::i18n::t("No friends online right now")}else{crate::i18n::t("Make yourself at home")}}</h2><p class="max-w-sm text-sm text-white/60">{move || crate::i18n::t("Use Add friend to find someone by display name or username. Your conversations will appear here.")}</p></div></Show>
         <For each=move ||friends.get() key=|f|f.conversation_id children=move |initial| {
             let id=initial.conversation_id;let person=initial.person.id;
-            let f=Signal::derive(move ||{let _timing=crate::performance::start(0);ui.friends.snapshot.get().friends.into_iter().find(|f|f.conversation_id==id).unwrap_or_else(||initial.clone())});
-            view!{<div data-context-conversation=id.to_string() tabindex="0" aria-haspopup="menu" class="flex flex-wrap items-center gap-4 border-t border-white/10 py-4">
+            let f=Memo::new(move |_|ui.friends.friend(id).unwrap_or_else(||initial.clone()));
+            view!{<div data-rove data-context-conversation=id.to_string() tabindex="0" aria-haspopup="menu" aria-label=move ||f.get().person.display_name class="flex flex-wrap items-center gap-4 border-t border-white/10 py-4">
                 <crate::avatar::Avatar class="size-10 text-sm" name=Signal::derive(move ||f.get().person.display_name) avatar_id=Signal::derive(move ||f.get().person.avatar_id)/>
-                <div class="min-w-0 flex-1"><p class="truncate font-semibold">{move ||f.get().person.display_name}<span class="ml-2 text-sm font-normal text-white/40">{move ||format!("@{}",f.get().person.username)}</span></p><p class="text-xs text-white/50">{move ||match f.get().relationship {Relationship::Incoming=>crate::i18n::t("Incoming request"),Relationship::Outgoing=>crate::i18n::t("Request sent"),Relationship::Friend if f.get().online=>crate::i18n::t("Online"),Relationship::Friend=>crate::i18n::t("Offline")}}</p></div>
+                <div class="min-w-0 flex-1"><p class="truncate font-semibold">{move ||f.get().person.display_name}<span class="ml-2 text-sm font-normal text-white/60">{move ||format!("@{}",f.get().person.username)}</span></p><p class="truncate text-xs text-white/60">{move ||match f.get().relationship {Relationship::Incoming=>crate::i18n::t("Incoming request"),Relationship::Outgoing=>crate::i18n::t("Request sent"),Relationship::Friend if f.get().online=>crate::i18n::t("Online"),Relationship::Friend=>crate::i18n::t("Offline")}}{move ||f.get().person.custom_status.as_ref().map(|s|format!(" · {}",thiscord_frontend::member_list::status_text(s)))}</p></div>
                 <Show when=move ||f.get().relationship==Relationship::Friend>
                     <CountBubble count=Signal::derive(move ||f.get().unread_count) label="unread messages"/>
                     <button class="icon-button" aria-label=move || crate::i18n::t("Message friend") data-tip=move || crate::i18n::t("Message") on:click=move |_|open(ui,id)><Icon kind=Glyph::Send/></button>
-                    <button class="icon-button disabled:opacity-40" aria-label=move || crate::i18n::t("Call friend") data-tip=move || crate::i18n::t("Voice call (desktop)") disabled=move ||!available(ui) || !ui.friends.connected.get() || !ui.friends.snapshot.get().calls.is_empty() on:click=move |_|action(ui,Request::StartCall {conversation_id:id})><Icon kind=Glyph::Headphones/></button>
+                    <button class="icon-button disabled:opacity-40" aria-label=move || crate::i18n::t("Call friend") data-tip=move || crate::i18n::t("Voice call (desktop)") disabled=move ||!available(ui) || !ui.friends.connected.get() || calling.get() on:click=move |_|action(ui,Request::StartCall {conversation_id:id})><Icon kind=Glyph::Headphones/></button>
                 </Show>
                 <Show when=move ||f.get().relationship==Relationship::Incoming><button class="rounded-lg bg-emerald-600 px-3 py-2 text-sm" on:click=move |_|action(ui,Request::Accept {account_id:person})>{move || crate::i18n::t("Accept")}</button></Show>
                 <super::safety::PersonActions ui account_id=person/>
-                <button class="rounded-lg px-3 py-2 text-sm text-white/50 hover:bg-red-500/10 hover:text-red-200" on:click=move |_|{
-                    if f.get_untracked().relationship!=Relationship::Friend || window().confirm_with_message(crate::i18n::t("Remove this friend? Private messages and calls will be unavailable until you become friends again.")).unwrap_or(false) {action(ui,Request::Remove {account_id:person});}
+                <button class="rounded-lg px-3 py-2 text-sm text-white/60 hover:bg-red-500/10 hover:text-red-200" on:click=move |_|{
+                    if f.get_untracked().relationship!=Relationship::Friend {action(ui,Request::Remove {account_id:person});return;}
+                    super::dialog::confirm(ui,super::dialog::Confirmation::new(crate::i18n::t("Remove this friend?"),crate::i18n::t("Private messages and calls will be unavailable until you become friends again."),crate::i18n::t("Remove friend"),super::dialog::Action::new(move |_|remove(ui,person))).target(f.get_untracked().person.display_name));
                 }>{move ||match f.get().relationship {Relationship::Incoming=>crate::i18n::t("Decline"),Relationship::Outgoing=>crate::i18n::t("Cancel"),Relationship::Friend=>crate::i18n::t("Remove")}}</button>
             </div>}
         }/>
@@ -464,18 +524,18 @@ fn AddFriend(ui: Ui) -> impl IntoView {
             }
         });
     };
-    view! {<button class="flex items-center gap-2 rounded-lg bg-brand px-4 py-2 text-sm font-semibold" on:click=move |_|{if let Some(d)=dialog.get(){let _=d.show_modal();}}><Icon kind=Glyph::Plus/>{move || crate::i18n::t("Add friend")}</button>
+    view! {<button class="flex items-center gap-2 rounded-lg bg-brand px-4 py-2 text-sm font-semibold" on:click=move |_|{if let Some(d)=dialog.get(){super::dialog::open(&d);}}><Icon kind=Glyph::Plus/>{move || crate::i18n::t("Add friend")}</button>
         <dialog node_ref=dialog aria-labelledby="add-friend-title" class="m-auto w-[calc(100%-2rem)] max-w-lg rounded-2xl border border-white/15 bg-surface p-6 text-white shadow-2xl backdrop:bg-black/70" on:click=move |ev|super::dialog::dismiss_outside(ev,dialog,false)>
             <header class="mb-2 flex items-center justify-between"><h2 id="add-friend-title" class="text-xl font-bold">{move || crate::i18n::t("Add friend")}</h2><button class="icon-button" aria-label=move || crate::i18n::t("Close add friend") on:click=move |_|if let Some(d)=dialog.get(){d.close();}><Icon kind=Glyph::Close/></button></header>
-            <p class="mb-5 text-sm text-white/50">{move || crate::i18n::t("Enter part of a display name or username (at least 2 characters) and send a friend request.")}</p>
+            <p class="mb-5 text-sm text-white/60">{move || crate::i18n::t("Enter part of a display name or username (at least 2 characters) and send a friend request.")}</p>
             <Show when=move ||ui.account.get().is_some_and(|a|!a.email_verified)><p class="mb-4 text-sm text-amber-200">{move || crate::i18n::t("Verify your email in account settings before sending friend requests.")}</p></Show>
             <form class="flex items-end gap-3" on:submit=submit><div class="min-w-0 flex-1"><Field label="Display name or username" value=query/></div><button class="rounded-lg bg-brand px-4 py-3 disabled:opacity-50" disabled=move ||busy.get()>{move ||if busy.get(){crate::i18n::t("Searching…")}else{crate::i18n::t("Search")}}</button></form>
             <p role="status" class="my-3 text-sm text-red-200">{move ||crate::i18n::message(error.get())}</p>
-            <Show when=move ||searched.get() && people.get().is_empty() && error.get().is_empty()><p class="py-4 text-sm text-white/50">{move || crate::i18n::t("No matching people. Try part of their display name or username.")}</p></Show>
+            <Show when=move ||searched.get() && people.get().is_empty() && error.get().is_empty()><p class="py-4 text-sm text-white/60">{move || crate::i18n::t("No matching people. Try part of their display name or username.")}</p></Show>
             <ul class="max-h-80 space-y-3 overflow-y-auto"><For each=move ||people.get() key=|p|p.id children=move |person| {
                 let id=person.id;let sending=RwSignal::new(false);let sent=RwSignal::new(false);
-                let relation=move ||ui.friends.snapshot.get().friends.into_iter().find(|f|f.person.id==id).map(|f|f.relationship);
-                view!{<li class="flex items-center gap-3 rounded-lg bg-white/5 p-3"><div class="min-w-0 flex-1"><p class="truncate font-semibold">{person.display_name}</p><p class="text-xs text-white/40">{format!("@{}",person.username)}</p></div><button class="rounded-lg bg-brand px-3 py-2 text-sm disabled:bg-white/10 disabled:text-white/50" disabled=move ||sending.get() || sent.get() || relation().is_some() || !ui.account.get().is_some_and(|a|a.email_verified) on:click=move |_|{
+                let relation=move ||ui.friends.snapshot.with(|s|s.friends.iter().find(|f|f.person.id==id).map(|f|f.relationship));
+                view!{<li class="flex items-center gap-3 rounded-lg bg-white/5 p-3"><div class="min-w-0 flex-1"><p class="truncate font-semibold">{person.display_name}</p><p class="text-xs text-white/60">{format!("@{}",person.username)}</p></div><button class="rounded-lg bg-brand px-3 py-2 text-sm disabled:bg-white/10 disabled:text-white/60" disabled=move ||sending.get() || sent.get() || relation().is_some() || !ui.account.get().is_some_and(|a|a.email_verified) on:click=move |_|{
                     sending.set(true);leptos::task::spawn_local(async move{let result=request(ui,&Request::Add {account_id:id}).await;if sending.is_disposed(){return;}sending.set(false);match result {Ok(_)=>sent.set(true),Err(e)=>error.set(e)}});
                 }>{move ||match relation(){Some(Relationship::Friend)=>crate::i18n::t("Friends"),Some(Relationship::Incoming)=>crate::i18n::t("Incoming request"),Some(Relationship::Outgoing)=>crate::i18n::t("Request sent"),None if sent.get()=>crate::i18n::t("Request sent"),None if sending.get()=>crate::i18n::t("Sending…"),None=>crate::i18n::t("Add friend")}}</button><super::safety::PersonActions ui account_id=id/></li>}
             }/></ul>
@@ -585,20 +645,16 @@ fn Conversation(ui: Ui, id: ConversationId) -> impl IntoView {
     });
     // The owner drops this browser-local timer when the conversation unmounts.
     StoredValue::new_local(read_timer);
-    let friend = Signal::derive(move || {
-        ui.friends
-            .snapshot
-            .get()
-            .friends
-            .into_iter()
-            .find(|f| f.conversation_id == id)
-    });
+    let friend = Memo::new(move |_| ui.friends.friend(id));
     Effect::new(move |_| {
-        let snapshot = ui.friends.snapshot.get();
-        if snapshot.conversation_id != Some(id) || snapshot.before != ui.friends.before.get() {
-            return;
-        }
-        if let Some(mut history) = snapshot.history {
+        let before = ui.friends.before.get();
+        // Clone only this conversation's history, never the friends list.
+        let history = ui.friends.snapshot.with(|s| {
+            (s.conversation_id == Some(id) && s.before == before)
+                .then(|| s.history.clone())
+                .flatten()
+        });
+        if let Some(mut history) = history {
             loading.set(false);
             messages.with_untracked(|current| {
                 thiscord_frontend::direct_history::preserve_revisions(
@@ -784,13 +840,13 @@ fn Conversation(ui: Ui, id: ConversationId) -> impl IntoView {
         }
     };
     view! {<section class="flex h-full min-h-0 flex-col">
-        <header data-context-conversation=id.to_string() class="flex items-center gap-3 border-b border-white/10 px-6 py-4"><button class="icon-button lg:hidden" aria-label=move || crate::i18n::t("Back to friends") on:click=move |_|{ui.mobile_content.set(false);ui.friends.selected.set(None);}><Icon kind=Glyph::Back/></button><h2 class="min-w-0 flex-1 truncate font-semibold">{move ||friend.get().map(|f|f.person.display_name).unwrap_or_default()}</h2><span class="text-xs text-white/50">{move ||if friend.get().is_some_and(|f|f.online){crate::i18n::t("Online")}else{crate::i18n::t("Offline")}}</span><button class="icon-button disabled:opacity-40" aria-label=move || crate::i18n::t("Start private voice call") data-tip=move || crate::i18n::t("Voice call (desktop)") disabled=move ||!available(ui) || !ui.friends.snapshot.get().calls.is_empty() on:click=move |_|action(ui,Request::StartCall {conversation_id:id})><Icon kind=Glyph::Headphones/></button><super::search::Launcher state=search/></header>
+        <header data-context-conversation=id.to_string() class="flex items-center gap-3 border-b border-white/10 px-6 py-4"><button class="icon-button lg:hidden" aria-label=move || crate::i18n::t("Back to friends") on:click=move |_|{ui.mobile_content.set(false);ui.friends.selected.set(None);}><Icon kind=Glyph::Back/></button><div class="min-w-0 flex-1"><h2 class="truncate font-semibold">{move ||friend.get().map(|f|f.person.display_name).unwrap_or_default()}</h2><Show when=move ||friend.get().is_some_and(|f|f.person.custom_status.is_some())><p class="truncate text-xs text-white/60">{move ||friend.get().and_then(|f|f.person.custom_status).map(|s|thiscord_frontend::member_list::status_text(&s))}</p></Show></div><span class="text-xs text-white/60">{move ||if friend.get().is_some_and(|f|f.online){crate::i18n::t("Online")}else{crate::i18n::t("Offline")}}</span><button class="icon-button disabled:opacity-40" aria-label=move || crate::i18n::t("Start private voice call") data-tip=move || crate::i18n::t("Voice call (desktop)") disabled=move ||!available(ui) || ui.friends.has_calls() on:click=move |_|action(ui,Request::StartCall {conversation_id:id})><Icon kind=Glyph::Headphones/></button><super::search::Launcher state=search/></header>
         <super::search::Bar state=search/>
         <super::search::Results state=search on_jump=jump/>
-        <For each=move ||{ui.friends.snapshot.get().calls.into_iter().filter(|c|c.conversation_id==id && c.state==CallState::Ringing && ui.account.get().is_some_and(|a|a.id==c.callee)).collect::<Vec<_>>()} key=|c|c.id children=move |call|view!{
+        <For each=move ||{let me=ui.account.with(|a|a.as_ref().map(|a|a.id));ui.friends.snapshot.with(|s|s.calls.iter().filter(|c|c.conversation_id==id && c.state==CallState::Ringing && me==Some(c.callee)).cloned().collect::<Vec<_>>())} key=|c|c.id children=move |call|view!{
             <div class="flex items-center gap-3 border-b border-white/10 px-6 py-3" aria-label=move || crate::i18n::t("Incoming call controls")><span class="flex-1">{move || crate::i18n::t("Incoming voice call")}</span><button class="rounded bg-emerald-600 px-4 py-2 disabled:opacity-50" disabled=move ||!available(ui)||ui.voice_joining.get() on:click=move |_|action(ui,Request::AcceptCall {call_id:call.id})>{move || crate::i18n::t("Accept")}</button><button class="rounded bg-red-500/20 px-4 py-2" on:click=move |_|action(ui,Request::EndCall {call_id:call.id})>{move || crate::i18n::t("Decline")}</button></div>
         }/>
-        <For each=move ||{ui.friends.snapshot.get().calls.into_iter().filter(|c|c.conversation_id==id && ui.voice.get().connected && ui.voice.get().channel_id==Some(c.voice_channel())).collect::<Vec<_>>()} key=|c|c.id children=move |call|view!{
+        <For each=move ||{let (connected,channel)=ui.voice.with(|v|(v.connected,v.channel_id));ui.friends.snapshot.with(|s|s.calls.iter().filter(|c|c.conversation_id==id && connected && channel==Some(c.voice_channel())).cloned().collect::<Vec<_>>())} key=|c|c.id children=move |call|view!{
             <div class="private-call-media"><super::screen::ScreenViewer ui=ui guild=call.voice_scope() channel=call.voice_channel()/></div>
         }/>
         <div node_ref=list class="private-messages min-h-0 flex-1 overflow-y-auto px-6 py-4" style:display=move ||if search.active.get(){"none"}else{""} on:scroll=move |_|if !search.active.get_untracked() && let Some(node)=list.get(){saved_top.set_value(node.scroll_top());bottom.set(node.scroll_height()-node.scroll_top()-node.client_height()<80);}>
@@ -800,17 +856,17 @@ fn Conversation(ui: Ui, id: ConversationId) -> impl IntoView {
                 leptos::task::spawn_local(async move {let result=request(ui,&Request::History {conversation_id:id,before:before.clone(),limit:Default::default()}).await;if loading.is_disposed(){return;}loading.set(false);if ui.friends.before.get_untracked()!=before{return;}match result {Ok(Response::History {mut history})=>{messages.with_untracked(|current|thiscord_frontend::direct_history::preserve_revisions(&mut history.messages,current));past.set(true);older.set(history.older);messages.set(history.messages);request_animation_frame(move ||if let Some(n)=list.get_untracked(){n.set_scroll_top(0);});},Err(e)=>error.set(e),_=>{}}});
             }>{move ||if loading.get(){crate::i18n::t("Loading…")}else{crate::i18n::t("Older messages")}}</button></Show>
             <Show when=move ||past.get()><button class="mb-4 ml-4 text-sm text-brand" on:click=move |_|{pending_jump.set(None);highlight.set(None);bottom.set(true);past.set(false);ui.friends.before.set(None);}>{move || crate::i18n::t("Jump to latest")}</button></Show>
-            <p class="text-sm text-white/50" role="status">{move ||if loading.get(){crate::i18n::t("Loading…")}else{""}}</p>
-            <Show when=move ||messages.get().is_empty() && !loading.get()><div class="private-empty py-12 text-center"><h3 class="text-xl font-semibold">{move || crate::i18n::t("Start a conversation")}</h3><p class="mt-2 text-sm text-white/45">{move || crate::i18n::t("Only you and your friend can access this conversation.")}</p></div></Show>
-            <ol aria-label=move ||crate::i18n::t("Private messages")><For each=move ||messages.get() key=|m|m.id children=move |m|view!{<DirectRow ui id message=m messages friend highlight edit_request first_unread/>}/></ol>
+            <p class="text-sm text-white/60" role="status">{move ||if loading.get(){crate::i18n::t("Loading…")}else{""}}</p>
+            <Show when=move ||messages.get().is_empty() && !loading.get()><div class="private-empty py-12 text-center"><h3 class="text-xl font-semibold">{move || crate::i18n::t("Start a conversation")}</h3><p class="mt-2 text-sm text-white/60">{move || crate::i18n::t("Only you and your friend can access this conversation.")}</p></div></Show>
+            <ol aria-label=move ||crate::i18n::t("Private messages")><For each=move ||messages.get() key=|m|m.id children=move |m|view!{<DirectRow ui id message=m messages friend=friend.into() highlight edit_request first_unread/>}/></ol>
         </div>
-        <p class="px-6 text-xs text-white/50" role="status">{move ||if ui.friends.connected.get() && ui.friends.snapshot.with(|s|s.conversation_id==Some(id) && !s.typing.is_empty()) {crate::i18n::t("Typing…")}else{""}}</p>
+        <p class="px-6 text-xs text-white/60" role="status">{move ||if ui.friends.connected.get() && ui.friends.snapshot.with(|s|s.conversation_id==Some(id) && !s.typing.is_empty()) {crate::i18n::t("Typing…")}else{""}}</p>
         <form class="shrink-0 border-t border-white/10 p-4" style:display=move ||if search.active.get(){"none"}else{""} on:submit=move |ev|{ev.prevent_default();send();}>
             <p role="alert" class="mb-2 text-sm text-red-200">{move ||crate::i18n::message(error.get())}</p>
             <super::direct_attachments::Composer uploads locked=Signal::derive(move ||busy.get()||retry.get().is_some())/>
-            <div class="flex items-end gap-3 rounded-xl bg-white/5 p-3"><textarea node_ref=input on:paste=move |ev: leptos::ev::ClipboardEvent| { if !busy.get_untracked() && retry.with_untracked(Option::is_none) && let Some(file) = ev.clipboard_data().and_then(|d| d.files()).and_then(|f| f.get(0)) { ev.prevent_default(); uploads.add(file); } } class="max-h-40 min-h-12 flex-1 resize-y bg-transparent p-2 outline-none read-only:opacity-50" aria-label=move || crate::i18n::t("Private message") aria-describedby="private-message-hint" placeholder=move || crate::i18n::t("Message your friend…") maxlength="4000" prop:value=move ||draft.get() readonly=move ||busy.get() || retry.get().is_some() on:keydown=keydown on:input=move |ev|{let text=event_target_value(&ev);ui.friends.typing_at.set(if text.trim().is_empty(){0.0}else{js_sys::Date::now()});draft.set(text);}></textarea><super::emoji::ComposerEmoji input draft disabled=Signal::derive(move ||busy.get() || retry.get().is_some())/><button class="rounded-lg bg-brand p-3 disabled:opacity-40" aria-label=move || crate::i18n::t("Send private message") disabled=move ||busy.get() || uploads.busy.get() || !ui.friends.connected.get() || (draft.get().trim().is_empty() && uploads.files.get().is_empty())>{move ||if busy.get(){crate::i18n::t("Sending…")}else if retry.get().is_some(){crate::i18n::t("Retry")}else{crate::i18n::t("Send")}}</button></div>
-            <p id="private-message-hint" class="mt-2 text-xs text-white/40">{move || crate::i18n::t("Enter to send · Shift+Enter for a new line")}</p>
-            <Show when=move ||retry.get().is_some() && !busy.get()><button type="button" class="mt-2 text-xs text-white/50" on:click=move |_|{retry.set(None);error.set(String::new());}>{move || crate::i18n::t("Discard retry and edit draft")}</button></Show>
+            <div class="flex items-end gap-3 rounded-xl bg-white/5 p-3"><textarea node_ref=input id="private-composer" on:paste=move |ev: leptos::ev::ClipboardEvent| { if !busy.get_untracked() && retry.with_untracked(Option::is_none) && let Some(file) = ev.clipboard_data().and_then(|d| d.files()).and_then(|f| f.get(0)) { ev.prevent_default(); uploads.add(file); } } class="max-h-40 min-h-12 flex-1 resize-y rounded-lg bg-transparent p-2 outline-none focus:ring-2 focus:ring-brand read-only:opacity-50" aria-label=move || crate::i18n::t("Private message") aria-describedby="private-message-hint" placeholder=move || crate::i18n::t("Message your friend…") maxlength="4000" prop:value=move ||draft.get() readonly=move ||busy.get() || retry.get().is_some() on:keydown=keydown on:input=move |ev|{let text=event_target_value(&ev);ui.friends.typing_at.set(if text.trim().is_empty(){0.0}else{js_sys::Date::now()});draft.set(text);}></textarea><super::emoji::ComposerEmoji input draft disabled=Signal::derive(move ||busy.get() || retry.get().is_some())/><button class="rounded-lg bg-brand p-3 disabled:opacity-40" aria-label=move || crate::i18n::t("Send private message") disabled=move ||busy.get() || uploads.busy.get() || !ui.friends.connected.get() || (draft.get().trim().is_empty() && uploads.files.get().is_empty())>{move ||if busy.get(){crate::i18n::t("Sending…")}else if retry.get().is_some(){crate::i18n::t("Retry")}else{crate::i18n::t("Send")}}</button></div>
+            <p id="private-message-hint" class="mt-2 text-xs text-white/60">{move || crate::i18n::t("Enter to send · Shift+Enter for a new line")}</p>
+            <Show when=move ||retry.get().is_some() && !busy.get()><button type="button" class="mt-2 text-xs text-white/60" on:click=move |_|{retry.set(None);error.set(String::new());}>{move || crate::i18n::t("Discard retry and edit draft")}</button></Show>
         </form>
     </section>}
 }
@@ -924,15 +980,6 @@ fn DirectRow(
         if busy.get_untracked() {
             return;
         }
-        if delete
-            && !window()
-                .confirm_with_message(crate::i18n::t(
-                    "Delete this private message and its attachments?",
-                ))
-                .unwrap_or(false)
-        {
-            return;
-        }
         let m = message.get();
         let command = if delete {
             Request::Delete {
@@ -983,19 +1030,22 @@ fn DirectRow(
         </div>
         <div class="min-w-0 flex-1">
         <Show when=move ||!grouped.get()><div class="flex items-baseline gap-2"><button class="text-sm font-semibold hover:underline" aria-haspopup="menu" data-context-user=message.get().author_id.to_string() data-context-name=name>{name}</button>
-        <time class="text-xs text-white/35" datetime=message.get().created_at.to_rfc3339() title=full_time>{move ||crate::i18n::message_time(message.get().created_at)}</time></div></Show>
+        <time class="text-xs text-white/60" datetime=message.get().created_at.to_rfc3339() title=full_time>{move ||crate::i18n::message_time(message.get().created_at)}</time></div></Show>
         <Show when=move ||!editing.get() fallback=move ||view!{<form class="space-y-2" on:submit=move |ev|{ev.prevent_default();apply(false);}>
             <textarea node_ref=editor class="w-full rounded bg-white/10 p-2" aria-label=move ||crate::i18n::t("Edit private message") maxlength="4000" prop:value=move ||draft.get() on:input=move |ev|draft.set(event_target_value(&ev))
                 on:keydown=move |ev| {
                     if ev.key() == "Escape" { ev.prevent_default(); editing.set(false); }
                     else if ev.key() == "Enter" && !ev.shift_key() && !ev.is_composing() && ev.key_code() != 229 { ev.prevent_default(); if !ev.repeat() { apply(false); } }
                 }/>
-            <p class="text-xs text-white/50">{move ||crate::i18n::t("Escape to cancel · Enter to save")}</p>
+            <p class="text-xs text-white/60">{move ||crate::i18n::t("Escape to cancel · Enter to save")}</p>
             <button class="mr-3 text-brand" disabled=move ||busy.get()>{move ||crate::i18n::t("Save")}</button><button type="button" disabled=move ||busy.get() on:click=move |_|editing.set(false)>{move ||crate::i18n::t("Cancel")}</button>
-        </form>}><div class="whitespace-pre-wrap break-words text-white/85">{move ||{let m=message.get();super::message_content::render(if m.deleted {crate::i18n::t("Message deleted")}else{&m.content},ui)}}<Show when=move ||message.get().edited_at.is_some()&&!message.get().deleted><span class="ml-1 text-xs text-white/40">{move ||format!("({})",crate::i18n::t("edited"))}</span></Show></div></Show>
+        </form>}><div class="whitespace-pre-wrap break-words text-white/85">{move ||{let m=message.get();super::message_content::render(if m.deleted {crate::i18n::t("Message deleted")}else{&m.content},ui)}}<Show when=move ||message.get().edited_at.is_some()&&!message.get().deleted><span class="ml-1 text-xs text-white/60">{move ||format!("({})",crate::i18n::t("edited"))}</span></Show></div></Show>
         <Show when=move ||!message.get().deleted>
             <For each=move ||message.get().attachments key=|a|a.id children=move |attachment|view!{<super::direct_attachments::Card ui id attachment/>}/>
-            <div class="direct-actions flex gap-3 text-xs text-white/60"><Show when=move ||own><button disabled=move ||busy.get() on:click=move |_|start_edit()>{move ||crate::i18n::t("Edit")}</button><button disabled=move ||busy.get() on:click=move |_|apply(true)>{move ||crate::i18n::t("Delete")}</button></Show>
+            <div class="direct-actions flex gap-3 text-xs text-white/60"><Show when=move ||own><button disabled=move ||busy.get() on:click=move |_|start_edit()>{move ||crate::i18n::t("Edit")}</button><button disabled=move ||busy.get() title=move ||crate::i18n::t("Shift-click to delete without confirming") on:click=move |ev:leptos::ev::MouseEvent|{
+                if ev.shift_key() { apply(true); return; }
+                super::dialog::confirm(ui,super::dialog::Confirmation::new(crate::i18n::t("Delete this message?"),crate::i18n::t("The private message and its attachments are deleted for both of you. This cannot be undone."),crate::i18n::t("Delete"),super::dialog::Action::tracked(move ||apply(true),busy,error)));
+            }>{move ||crate::i18n::t("Delete")}</button></Show>
             <Show when=move ||!own><super::safety::ReportButton ui target=thiscord_shared::safety::ReportTarget::DirectMessage {conversation_id:id,message_id:message.get().id}/></Show></div>
         </Show><p role="alert" class="text-xs text-red-200">{move ||crate::i18n::message(error.get())}</p>
         </div>

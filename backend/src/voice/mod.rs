@@ -293,6 +293,15 @@ pub(crate) async fn diagnostics()
 -> HashMap<ChannelId, Vec<thiscord_shared::admin::ParticipantDiagnostics>> {
     diagnostics::snapshot().await
 }
+/// Channels with a live room, used only to look up diagnostic room names.
+pub(crate) async fn live_channels() -> Vec<ChannelId> {
+    let rooms = ROOMS.get_or_init(Default::default).lock().await;
+    rooms
+        .iter()
+        .filter(|(_, room)| room.strong_count() > 0)
+        .map(|(id, _)| *id)
+        .collect()
+}
 pub(crate) fn router_with_limit(
     origins: Vec<HeaderValue>,
     connections: usize,
@@ -1356,6 +1365,13 @@ async fn serve(mut socket: logging::Socket, pool: DbPool, id: RequestId, upgrade
                 if sampled {
                     crate::performance::SFU_QUEUE.observe(arrived.elapsed());
                 }
+                // Packet-only parsing needs no room state; keep it outside the lock.
+                // A browser-chosen SSRC can equal the native low-layer SSRC.
+                let layer = usize::from(
+                    !relay_browser.enabled()
+                        && packet.header.ssrc == thiscord_shared::screen::LOW_LAYER_SSRC,
+                );
+                let layer_packet = thiscord_shared::screen::LayerPacket::parse(&packet.header.csrc);
                 let lock_timing = sampled.then(|| crate::performance::SFU_LOCK.start());
                 let members = relay_room.members.read().await;
                 drop(lock_timing);
@@ -1375,12 +1391,6 @@ async fn serve(mut socket: logging::Socket, pool: DbPool, id: RequestId, upgrade
                 {
                     continue;
                 }
-                // A browser-chosen SSRC can equal the native low-layer SSRC.
-                let layer = usize::from(
-                    !relay_browser.enabled()
-                        && packet.header.ssrc == thiscord_shared::screen::LOW_LAYER_SSRC,
-                );
-                let layer_packet = thiscord_shared::screen::LayerPacket::parse(&packet.header.csrc);
                 if kind == MediaKind::ScreenVideo
                     && ((layer == 1 && !source.screen_layers)
                         || (source.screen_layers
@@ -1417,6 +1427,9 @@ async fn serve(mut socket: logging::Socket, pool: DbPool, id: RequestId, upgrade
                 } else {
                     Default::default()
                 };
+                // Admission (authorization, filtering, permits, route and budget
+                // state) happens under the lock; queue sends happen after it.
+                let mut admitted = Vec::with_capacity(ROOM_CAPACITY);
                 let mut recovery = Vec::new();
                 for (&other, m) in members.iter() {
                     if other != slot {
@@ -1455,39 +1468,54 @@ async fn serve(mut socket: logging::Socket, pool: DbPool, id: RequestId, upgrade
                         };
                         let tx = &m.outgoing[kind as usize];
                         for (selected, queued_at) in packets.into_iter().chain(single) {
-                            if tx
-                                .forward(
-                                    source,
-                                    m,
-                                    Delivery {
-                                        epoch,
-                                        receiver_epoch,
-                                        source_access: relay_access.clone(),
-                                        slot: kind.track_index(slot),
-                                        source: source_id,
-                                        source_active: relay_active.clone(),
-                                        packet: selected,
-                                        screen_layer: layered.then_some(layer),
-                                        queued_at,
-                                    },
-                                )
-                                .is_err()
-                                && kind.is_video()
-                            {
-                                m.metrics[2].fetch_add(1, Ordering::Relaxed);
-                                recovery.push((
-                                    other,
-                                    source.info.video_epoch(kind),
-                                    m.active.clone(),
-                                ));
+                            let result = tx.admit(
+                                source,
+                                m,
+                                Delivery {
+                                    epoch,
+                                    receiver_epoch,
+                                    source_access: relay_access.clone(),
+                                    slot: kind.track_index(slot),
+                                    source: source_id,
+                                    source_active: relay_active.clone(),
+                                    packet: selected,
+                                    screen_layer: layered.then_some(layer),
+                                    queued_at,
+                                },
+                            );
+                            // Video congestion asks the publisher for a keyframe.
+                            let congested = || {
+                                kind.is_video().then(|| {
+                                    (
+                                        other,
+                                        source.info.video_epoch(kind),
+                                        m.active.clone(),
+                                        m.metrics.clone(),
+                                    )
+                                })
+                            };
+                            match result {
+                                Ok(Some(delivery)) => admitted.push((delivery, congested())),
+                                Ok(None) => {}
+                                Err(()) => recovery.extend(congested()),
                             }
                         }
                     }
                 }
                 drop(members);
                 drop(fanout_timing);
+                // No await until these enqueues finish: the source permit and the
+                // per-delivery permits still hold off access-mutation drains.
+                for (delivery, congested) in admitted {
+                    if delivery.send().is_err() {
+                        recovery.extend(congested);
+                    }
+                }
+                for (_, _, _, metrics) in &recovery {
+                    metrics[2].fetch_add(1, Ordering::Relaxed);
+                }
                 drop(_permit);
-                for (viewer, epoch, viewer_active) in recovery {
+                for (viewer, epoch, viewer_active, _) in recovery {
                     request_keyframe(&relay_room, viewer, slot, kind, epoch, &viewer_active).await;
                 }
             }

@@ -72,12 +72,12 @@ fn Panel(ui: Ui, target: Target) -> impl IntoView {
     command.run(Command::List {});
     Effect::new(move |_| {
         if let Some(dialog) = dialog.get() {
-            let _ = dialog.show_modal();
+            super::dialog::open(&dialog);
         }
     });
     view! {
-        <dialog node_ref=dialog on:cancel=move |_:web_sys::Event|ui.bot_target.set(None) class="fixed inset-0 m-auto max-h-[90vh] w-full max-w-3xl overflow-auto rounded-xl border border-slate-700 bg-slate-950 p-6 text-slate-100 backdrop:bg-black/70">
-            <header class="mb-4 flex items-center justify-between gap-4"><h2 class="text-xl font-semibold">{move || thiscord_frontend::localized_format!(crate::i18n::language(), "Voice test bots · {}",target.name)}</h2><button autofocus class="rounded bg-slate-800 px-4 py-2" on:click=move |_|ui.bot_target.set(None)>{move || crate::i18n::t("Close")}</button></header>
+        <dialog node_ref=dialog aria-labelledby="voice-bots-title" on:cancel=move |_:web_sys::Event|ui.bot_target.set(None) class="fixed inset-0 m-auto max-h-[90vh] w-full max-w-3xl overflow-auto rounded-xl border border-slate-700 bg-slate-950 p-6 text-slate-100 backdrop:bg-black/70">
+            <header class="mb-4 flex items-center justify-between gap-4"><h2 id="voice-bots-title" class="text-xl font-semibold">{move || thiscord_frontend::localized_format!(crate::i18n::language(), "Voice test bots · {}",target.name)}</h2><button autofocus class="rounded bg-slate-800 px-4 py-2" on:click=move |_|ui.bot_target.set(None)>{move || crate::i18n::t("Close")}</button></header>
             <p class="mb-4 text-sm text-slate-400">{move || crate::i18n::t("Bots join as separate voice participants and play a repeating microphone loop. They use channel slots and leave after one hour, when your session ends, or when access is revoked.")}</p>
             <p role="status" class="my-3 text-amber-300">{move ||crate::i18n::message(error.get())}</p>
             <div class="mb-4 flex items-center gap-3"><button class="rounded bg-slate-800 px-4 py-2 disabled:opacity-50" disabled=move ||busy.get() on:click=move |_|command.run(Command::List {})>{move || crate::i18n::t("Refresh")}</button><span role="status" class="text-sm text-slate-400">{move ||if busy.get(){crate::i18n::t("Working…").into()}else{thiscord_frontend::localized_format!(crate::i18n::language(), "{} test bots",bots.get().len())}}</span></div>

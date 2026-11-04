@@ -262,7 +262,7 @@ pub(super) fn Suggestions(picker: Picker) -> impl IntoView {
     view! {
         <Show when=move || picker.expanded()>
             <div class="absolute bottom-full left-0 z-20 mb-2 w-full rounded-lg border border-white/15 bg-zinc-900 p-2 shadow-xl">
-                <p class="px-2 py-1 text-xs text-white/50">{move || crate::i18n::t("Mention a member · ↑↓ to navigate · Enter or Tab to select")}</p>
+                <p class="px-2 py-1 text-xs text-white/60">{move || crate::i18n::t("Mention a member · ↑↓ to navigate · Enter or Tab to select")}</p>
                 <ul id="mention-suggestions" role="listbox" aria-label=move || crate::i18n::t("Mention suggestions") class="max-h-64 overflow-y-auto">
                     {move || picker.members().into_iter().enumerate().map(|(index, member)| {
                         let name = if member.display_name.trim().is_empty() { member.username.clone() } else { member.display_name };
@@ -273,7 +273,7 @@ pub(super) fn Suggestions(picker: Picker) -> impl IntoView {
                                     on:mousedown=move |event| event.prevent_default()
                                     on:click=move |_| picker.choose(index)>
                                     <span class="truncate font-medium">{name}</span>
-                                    <span class="truncate text-sm text-white/50">{format!("@{}", member.username)}</span>
+                                    <span class="truncate text-sm text-white/60">{format!("@{}", member.username)}</span>
                                 </button>
                             </li>
                         }

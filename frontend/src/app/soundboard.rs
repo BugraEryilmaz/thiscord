@@ -165,7 +165,7 @@ pub(super) fn SoundboardControls(ui: Ui) -> impl IntoView {
                         } else {
                             crate::i18n::t("This server has no sounds yet.")
                         }}</p>}.into_any(),
-                        Some(Ok(state)) => view! {<div class="soundboard-grid">{state.sounds.into_iter().map(|sound| {
+                        Some(Ok(state)) => view! {<div class="soundboard-grid" on:keydown=move |e| super::keyboard::rove_grid(&e, ".soundboard-sound")>{state.sounds.into_iter().map(|sound| {
                             let id = sound.id;
                             let name = label(&sound);
                             let title = name.clone();
@@ -347,7 +347,7 @@ fn GuildSounds(ui: Ui, guild: GuildId) -> impl IntoView {
                     {if sound.builtin {
                         view! {<span class="settings-badge">{move || crate::i18n::t("Built-in")}</span>}.into_any()
                     } else {
-                        view! {<ConfirmButton ui=ui label="Delete" title="Delete this sound?" detail="Everyone in this server will lose access to it." on_confirm=Callback::new(move |()| run(SoundboardRequest::Delete { guild_id: guild, revision, sound_id: id }))/>}.into_any()
+                        view! {<ConfirmButton ui=ui label="Delete" title="Delete this sound?" detail="Everyone in this server will lose access to it. This cannot be undone." target=Signal::stored(label(&sound)) on_confirm=Callback::new(move |()| run(SoundboardRequest::Delete { guild_id: guild, revision, sound_id: id }))/>}.into_any()
                     }}
                 </li>}
             }).collect_view())}</ul>
