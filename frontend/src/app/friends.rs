@@ -540,7 +540,7 @@ fn FriendList(ui: Ui, filter: RwSignal<&'static str>) -> impl IntoView {
                 <Show when=move ||f.get().relationship==Relationship::Friend>
                     <CountBubble count=Signal::derive(move ||f.get().unread_count) label="unread messages"/>
                     <button class="icon-button" aria-label=move || crate::i18n::t("Message friend") data-tip=move || crate::i18n::t("Message") on:click=move |_|open(ui,id)><Icon kind=Glyph::Message/></button>
-                    <button class="icon-button disabled:opacity-40" aria-label=move || crate::i18n::t("Call friend") data-tip=move || crate::i18n::t("Voice call (desktop)") disabled=move ||!available(ui) || !ui.friends.connected.get() || calling.get() on:click=move |_|action(ui,Request::StartCall {conversation_id:id})><Icon kind=Glyph::Phone/></button>
+                    <button class="icon-button friend-call disabled:opacity-40" aria-label=move || crate::i18n::t("Call friend") data-tip=move || crate::i18n::t("Voice call (desktop)") disabled=move ||!available(ui) || !ui.friends.connected.get() || calling.get() on:click=move |_|action(ui,Request::StartCall {conversation_id:id})><Icon kind=Glyph::Phone/></button>
                 </Show>
                 <Show when=move ||f.get().relationship==Relationship::Incoming><button class="btn btn-primary min-h-9 px-3.5" on:click=move |_|action(ui,Request::Accept {account_id:person})>{move || crate::i18n::t("Accept")}</button></Show>
                 <div class="row-menu" data-row-menu=id.to_string()>
@@ -550,6 +550,7 @@ fn FriendList(ui: Ui, filter: RwSignal<&'static str>) -> impl IntoView {
                 <Show when=move ||menu_open.get()==Some(id)>
                     <div class="row-menu-panel message-options" role="menu" aria-label=move || crate::i18n::t("More options")
                         on:keydown=move |e| super::keyboard::rove_items(&e, "[role=menuitem]") on:click=move |_|menu_open.set(None)>
+                        <Show when=move ||f.get().relationship==Relationship::Friend><button type="button" role="menuitem" class="context-item friend-call-item" disabled=move ||!available(ui) || !ui.friends.connected.get() || calling.get() on:click=move |_|action(ui,Request::StartCall {conversation_id:id})><Icon kind=Glyph::Phone/>{move ||crate::i18n::t("Voice call")}</button></Show>
                         <button type="button" role="menuitem" class="context-item" on:click=move |_|ui.friends.report_target.set(Some(thiscord_shared::safety::ReportTarget::User {account_id:person}))><Icon kind=Glyph::Flag/>{move ||crate::i18n::t("Report")}</button>
                         <button type="button" role="menuitem" class="context-item context-danger" on:click=move |_|super::safety::block(ui,person)><Icon kind=Glyph::Ban/>{move ||crate::i18n::t("Block")}</button>
                         <button type="button" role="menuitem" class="context-item context-danger" on:click=move |_|{

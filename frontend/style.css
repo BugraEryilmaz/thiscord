@@ -248,7 +248,7 @@ select.field-input, .settings-content select { padding-right: 34px; }
 .select-compact, select.field-input, .settings-content select { appearance: none; -webkit-appearance: none; background-image: linear-gradient(45deg, transparent calc(50% - .75px), currentColor calc(50% - .75px), currentColor calc(50% + .75px), transparent calc(50% + .75px)), linear-gradient(-45deg, transparent calc(50% - .75px), currentColor calc(50% - .75px), currentColor calc(50% + .75px), transparent calc(50% + .75px)); background-position: calc(100% - 17px) 55%, calc(100% - 12px) 55%; background-size: 6px 6px, 6px 6px; background-repeat: no-repeat; cursor: pointer; }
 .select-compact:hover { border-color: var(--tint-15); background-color: var(--tint-8); }
 .select-compact option, select.field-input option, .settings-content select option { background: var(--color-popover); color: var(--color-content); }
-@media (max-width: 767px) { .row-menu-panel { position: fixed; top: auto; right: 8px; left: 8px; bottom: calc(var(--dock-height, 0px) + 16px + env(safe-area-inset-bottom, 0px)); min-width: 0; padding: 8px; border-radius: var(--radius-xl); box-shadow: var(--shadow-3); } .row-menu-panel .context-item { min-height: 48px; font-size: 16px; } }
+@media (max-width: 767px) { .row-menu > .row-menu-panel { position: fixed; top: auto; right: 8px; left: 8px; bottom: calc(var(--dock-height, 0px) + 16px + env(safe-area-inset-bottom, 0px)); min-width: 0; padding: 8px; border-radius: var(--radius-xl); box-shadow: var(--shadow-3); } .row-menu > .row-menu-panel .context-item { min-height: 48px; font-size: 16px; } .friend-row .friend-call { display: none; } .row-menu > .row-menu-panel.message-options .friend-call-item { display: flex; } }
 @media (max-width: 767px) { .friends-home-header [data-add-friend] { width: 44px; min-height: 44px; padding: 0; } .friends-home-header .add-friend-label { position: absolute; width: 1px; height: 1px; overflow: hidden; clip-path: inset(50%); white-space: nowrap; } }
 @media (max-width: 767px) { .app-shell:not(.mobile-content) .app-toast { left: calc(84px + env(safe-area-inset-left, 0px)); } .app-toast { right: 12px; left: auto !important; max-width: calc(100vw - 96px); padding: 4px 4px 4px 12px; border-radius: 999px; font-size: 14px; } }
 
@@ -288,7 +288,8 @@ dialog header > button.icon-button:last-child svg { width: 18px; height: 18px; }
 .friend-list > * { max-width: 920px; margin-inline: auto; }
 .friend-list > .friend-row { max-width: 944px; margin-inline: max(-12px, calc((100% - 944px) / 2)); }
 /* Names keep room: on narrow rows the actions wrap under them instead of squeezing them. */
-.friend-row-name { min-width: 9.5rem; }
+.friend-row-name { min-width: 7rem; }
+.row-menu-panel.message-options .friend-call-item { display: none; }
 .friend-row-name + * { margin-left: auto; }
 /* "More reactions" uses the app chevron, not the browser's disclosure marker. */
 .message-reaction-more summary { display: flex; align-items: center; gap: 6px; list-style: none; }
