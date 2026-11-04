@@ -69,6 +69,8 @@ pub(crate) static BLOCKING: Metric = Metric::new("Chat/friends/notification work
 pub(crate) static ROSTER: Metric = Metric::new("Voice roster authorization", 50_000);
 pub(crate) static FRIENDS: Metric = Metric::new("Friends snapshot", 50_000);
 pub(crate) static REFRESH: Metric = Metric::new("Chat refresh", 50_000);
+pub(crate) static REFRESH_GRANTED: Metric =
+    Metric::new("Chat refresh (reused authorization)", 50_000);
 pub(crate) static UNREAD: Metric = Metric::new("Unread authorization + counts", 50_000);
 pub(crate) static AUTHORIZATION: Metric = Metric::new("Focused permission inputs", 20_000);
 pub(crate) static ADMIN: Metric = Metric::new("Admin diagnostics collection", 200_000);
@@ -102,6 +104,7 @@ pub(crate) fn snapshot() -> BackendPerformance {
             &ROSTER,
             &FRIENDS,
             &REFRESH,
+            &REFRESH_GRANTED,
             &UNREAD,
             &AUTHORIZATION,
             &ADMIN,

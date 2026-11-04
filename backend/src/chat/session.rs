@@ -11,6 +11,7 @@ struct Snapshot {
     history: Option<History>,
     permissions: Permissions,
     unread: Vec<Unread>,
+    grant: store::Grant,
 }
 fn snapshot(pool: &DbPool, token: &str, sub: Subscription) -> Result<Snapshot, Failure> {
     store::checked(pool, token, sub.guild, None, None, |c, actor, state| {
@@ -25,11 +26,22 @@ fn snapshot(pool: &DbPool, token: &str, sub: Subscription) -> Result<Snapshot, F
                 .transpose()?,
             permissions,
             unread: store::unread(c, sub.guild, actor, state)?,
+            grant: store::grant(state, actor),
         })
     })
 }
 /// Matches the socket maintenance cadence for expiry-only authorization changes.
 const VOICE_VISIBILITY_RECHECK: Duration = Duration::from_secs(10);
+/// Message, presence and unread delivery reuse the last full database check
+/// for at most this long, and only while the access epochs captured before
+/// that check are current. Access-changing commits close those epochs (and
+/// this socket); time-based changes such as session expiry wait at most this.
+const CHAT_AUTHORIZATION_RECHECK: Duration = Duration::from_secs(10);
+/// Unread badges coalesce guild-wide message and read commits: the first change
+/// after a quiet period recounts after a short debounce, later ones at most once
+/// per interval. Messages in the open channel are delivered without this delay.
+const UNREAD_DEBOUNCE: Duration = Duration::from_millis(75);
+const UNREAD_INTERVAL: Duration = Duration::from_secs(1);
 /// Member lists reload on commit notifications and status expiry; this bounds
 /// staleness from writes outside those paths (unchanged lists are not resent).
 const MEMBER_REFRESH: Duration = Duration::from_secs(60);
@@ -110,6 +122,8 @@ pub(super) async fn serve(
     let mut presence_dirty = false;
     let mut unread_dirty = false;
     let mut unread_due = None::<Instant>;
+    // When this socket last recounted unread, for UNREAD_INTERVAL coalescing.
+    let mut unread_at = None::<Instant>;
     let mut typing_expiry = None::<Instant>;
     let mut maintenance = tokio::time::interval(Duration::from_secs(10));
     maintenance.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
@@ -118,6 +132,11 @@ pub(super) async fn serve(
     let mut watch_voice = false;
     let mut last_roster = None;
     let mut voice_visibility = None::<(Instant, access::Snapshot, Vec<ChannelId>)>;
+    // The last full chat authorization: when it ran, the epochs captured before
+    // it and what it established. Cleared on every subscription change.
+    let mut grant = None::<(Instant, access::Snapshot, store::Grant)>;
+    // The open channel's shared event reads, held while subscribed to it.
+    let mut feed = None::<std::sync::Arc<super::feed::Feed>>;
     // Opt-in member list: the authorized DB rows with the epochs captured before
     // reading them. Online flags are in-memory and refresh every second.
     let mut watch_members = false;
@@ -156,6 +175,8 @@ pub(super) async fn serve(
                         roster_tick.reset_immediately();
                         watch_members = member_roster; members_dirty = false; members_due = None;
                         member_list = None; last_member_list = None; last_online.clear();
+                        grant = None;
+                        feed = guild_id.zip(channel_id).map(|(guild, channel)| super::feed::subscribe(guild, channel));
                         if channel_id.is_some() && guild_id.is_none() {
                             let _ = send(&mut socket, error(id, ErrorCode::BadRequest, "A channel requires a guild")).await; break;
                         }
@@ -165,6 +186,7 @@ pub(super) async fn serve(
                         guild_revoked = guild_access.as_ref().map(|scope| scope.subscribe());
                         let Some(authorized) = account_access.snapshot(guild_access.as_ref(), member_access.as_ref()) else { let _ = send(&mut socket, ServerEvent::Revoked {}).await; break; };
                         if let Some(guild) = guild_id {
+                            let checked_at = Instant::now();
                             let sub = Subscription { id: serial, guild, channel: channel_id };
                             let p = pool.clone(); let t = token.clone();
                             let route = notifications().subscribe(guild, channel_id, account);
@@ -177,6 +199,7 @@ pub(super) async fn serve(
                                 let _ = update(&mut socket, sub, error(id, ErrorCode::Forbidden, "Session or channel access is unavailable")).await;
                                 continue;
                             };
+                            grant = Some((checked_at, authorized.clone(), ready.grant));
                             let Some(_delivery) = authorized.deliver() else { let _ = send(&mut socket, ServerEvent::Revoked {}).await; break; };
                             cursor = ready.history.as_ref().map_or(0, |h| h.event_cursor);
                             last_unread = ready.unread.clone();
@@ -207,7 +230,11 @@ pub(super) async fn serve(
                 let next = *listener.as_mut().unwrap().receiver.borrow_and_update();
                 messages_dirty |= next.messages != versions.messages;
                 presence_dirty |= next.presence != versions.presence;
-                if next.unread != versions.unread { unread_due.get_or_insert_with(|| Instant::now() + Duration::from_millis(75)); }
+                if next.unread != versions.unread {
+                    // A short debounce after quiet periods; busy guilds recount at most once per interval.
+                    let earliest = unread_at.map_or(Instant::now(), |at| at + UNREAD_INTERVAL);
+                    unread_due.get_or_insert_with(|| earliest.max(Instant::now() + UNREAD_DEBOUNCE));
+                }
                 members_dirty |= watch_members && next.members != versions.members;
                 versions = next;
             }
@@ -251,19 +278,41 @@ pub(super) async fn serve(
                 }
             }
             _ = async { if let Some(at) = unread_due { tokio::time::sleep_until(at.into()).await; } else { std::future::pending::<()>().await; } } => {
-                unread_due = None; unread_dirty = true;
+                unread_due = None; unread_dirty = true; unread_at = Some(Instant::now());
             }
             _ = async {}, if messages_dirty || presence_dirty || unread_dirty => {
                 let Some(sub) = subscription else { continue; };
-                let Some(authorized) = account_access.snapshot(guild_access.as_ref(), member_access.as_ref()) else { let _ = send(&mut socket, ServerEvent::Revoked {}).await; break; };
                 if revoked.has_changed().unwrap_or(true) || session_revoked.has_changed().unwrap_or(true) { let _ = send(&mut socket, ServerEvent::Revoked {}).await; break; }
-                let p = pool.clone(); let t = token.clone();
-                let read_messages = std::mem::take(&mut messages_dirty);
-                let read_presence = std::mem::take(&mut presence_dirty);
-                let read_unread = std::mem::take(&mut unread_dirty);
-                let result = crate::performance::blocking(move || {
-                    store::refresh(&p, &t, sub.guild, sub.channel, cursor, store::Refresh { messages: read_messages, presence: read_presence, unread: read_unread })
-                }).await;
+                let p = pool.clone();
+                let work = store::Refresh {
+                    messages: std::mem::take(&mut messages_dirty),
+                    presence: std::mem::take(&mut presence_dirty),
+                    unread: std::mem::take(&mut unread_dirty),
+                };
+                // Fan-out reuses the last full check while its epochs are current;
+                // otherwise authenticate and re-evaluate grants under the guild lock.
+                let reusable = grant.as_ref()
+                    .filter(|(at, authorized, _)| at.elapsed() < CHAT_AUTHORIZATION_RECHECK && authorized.current())
+                    .map(|(_, authorized, granted)| (authorized.clone(), granted.clone()));
+                let (authorized, result) = if let Some((authorized, granted)) = reusable {
+                    let shared = feed.clone();
+                    let result = crate::performance::blocking(move || {
+                        store::refresh_granted(&p, sub.guild, sub.channel, cursor, work, &granted, shared.as_deref())
+                    }).await;
+                    (authorized, result)
+                } else {
+                    let Some(authorized) = account_access.snapshot(guild_access.as_ref(), member_access.as_ref()) else { let _ = send(&mut socket, ServerEvent::Revoked {}).await; break; };
+                    let checked_at = Instant::now();
+                    let t = token.clone();
+                    let result = crate::performance::blocking(move || {
+                        store::refresh(&p, &t, sub.guild, sub.channel, cursor, work)
+                    }).await;
+                    let result = result.map(|r| r.map(|(refreshed, granted)| {
+                        grant = Some((checked_at, authorized.clone(), granted));
+                        refreshed
+                    }));
+                    (authorized, result)
+                };
                 let Ok(Ok((unread, poll))) = result else { let _ = send(&mut socket, ServerEvent::Revoked {}).await; break; };
                 let Some(_delivery) = authorized.deliver() else { let _ = send(&mut socket, ServerEvent::Revoked {}).await; break; };
                 let delivery = async {
@@ -277,7 +326,7 @@ pub(super) async fn serve(
                             update(&mut socket, sub, ServerEvent::Message { message: Box::new(message), cursor: sequence }).await?;
                             cursor = sequence;
                         }
-                        if read_presence && poll.members != last_members {
+                        if work.presence && poll.members != last_members {
                             last_members = poll.members.clone();
                             update(&mut socket, sub, ServerEvent::Presence { members: poll.members }).await?;
                         }

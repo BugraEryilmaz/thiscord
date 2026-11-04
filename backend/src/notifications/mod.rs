@@ -143,11 +143,13 @@ pub(crate) fn guild_recipients(
         ],
     )
 }
-pub fn router(origins: Vec<HeaderValue>) -> Router<Option<DbPool>> {
+/// `sockets` bounds concurrently connected sockets of this type (see `limits`).
+pub fn router(origins: Vec<HeaderValue>, sockets: usize) -> Router<Option<DbPool>> {
     Router::new()
         .route(PATH, post(handle))
         .route(SOCKET_PATH, get(upgrade))
         .layer(Extension(Arc::new(origins)))
+        .layer(Extension(crate::limits::SocketSlots::new(sockets)))
         .layer(DefaultBodyLimit::max(16 * 1024))
 }
 async fn handle(
@@ -180,6 +182,11 @@ async fn handle(
         .insert("cache-control", "no-store".parse().unwrap());
     response
 }
+/// Alert fan-out reuses a recipient's full check for at most this long, and only
+/// while the epochs captured before it are current. Matches socket maintenance.
+const ALERT_AUTHORIZATION_RECHECK: Duration = Duration::from_secs(10);
+/// Bounds the per-socket grant cache; one entry per recently alerted target/kind.
+const MAX_ALERT_GRANTS: usize = 64;
 fn workers() -> Arc<Semaphore> {
     static WORKERS: OnceLock<Arc<Semaphore>> = OnceLock::new();
     WORKERS.get_or_init(|| Arc::new(Semaphore::new(8))).clone()
@@ -200,6 +207,7 @@ async fn upgrade(
     State(pool): State<Option<DbPool>>,
     Extension(id): Extension<RequestId>,
     Extension(origins): Extension<Arc<Vec<HeaderValue>>>,
+    Extension(slots): Extension<crate::limits::SocketSlots>,
     headers: HeaderMap,
     ws: Result<WebSocketUpgrade, WebSocketUpgradeRejection>,
 ) -> Response {
@@ -212,12 +220,7 @@ async fn upgrade(
     let Ok(ws) = ws else {
         return Failure::Invalid("Invalid WebSocket upgrade").response(id);
     };
-    static SOCKETS: OnceLock<Arc<Semaphore>> = OnceLock::new();
-    let Ok(permit) = SOCKETS
-        .get_or_init(|| Arc::new(Semaphore::new(128)))
-        .clone()
-        .try_acquire_owned()
-    else {
+    let Ok(permit) = slots.0.clone().try_acquire_owned() else {
         return Failure::Limited.response(id);
     };
     // Web client: cookie-derived bearer, used only when the frame token is empty.
@@ -314,6 +317,9 @@ async fn serve(mut socket: WebSocket, pool: DbPool, upgrade_token: String) {
     let mut count = 0;
     let mut maintenance = tokio::time::interval(Duration::from_secs(10));
     maintenance.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+    // Recent full alert checks per (target, kind), with the epochs captured before
+    // each. Guild message fan-out reuses them instead of one transaction per alert.
+    let mut grants = Vec::<(Target, Kind, Instant, access::Snapshot, store::AlertGrant)>::new();
     loop {
         tokio::select! { biased;
             _ = revoked.changed() => break,
@@ -378,9 +384,25 @@ async fn serve(mut socket: WebSocket, pool: DbPool, upgrade_token: String) {
                     if delivered_calls.contains(&id) { continue; }
                     let Some(scoped) = epoch.including(&call_scope) else { refresh = true; continue; }; epoch = scoped;
                 }
+                let key = (candidate.target, candidate.kind);
+                let reusable = store::reusable(&candidate);
+                if reusable && let Some((_, _, _, authorized, grant)) = grants.iter().find(|(target, kind, at, authorized, _)| {
+                    (*target, *kind) == key && at.elapsed() < ALERT_AUTHORIZATION_RECHECK && authorized.current()
+                }) {
+                    let (authorized, alert) = (authorized.clone(), store::granted(candidate, session.account_id, grant));
+                    let Some(_delivery) = authorized.deliver() else { continue; };
+                    if let Some(alert) = alert && send(&mut socket, ServerEvent::Alert { alert }).await.is_err() { break; }
+                    continue;
+                }
                 let Ok(permit) = worker(&mut revoked, &mut ended).await else { break; };
                 let p = pool.clone(); let t = token.clone();
-                let Ok(Ok(alert)) = crate::performance::blocking(move || { let _permit = permit; store::alert(&p, &t, candidate) }).await else { break; };
+                let checked_at = Instant::now();
+                let Ok(Ok((alert, grant))) = crate::performance::blocking(move || { let _permit = permit; store::alert(&p, &t, candidate) }).await else { break; };
+                if let Some(grant) = grant {
+                    grants.retain(|(target, kind, at, _, _)| (*target, *kind) != key && at.elapsed() < ALERT_AUTHORIZATION_RECHECK);
+                    if grants.len() >= MAX_ALERT_GRANTS { grants.clear(); }
+                    grants.push((key.0, key.1, checked_at, epoch.clone(), grant));
+                }
                 let Some(_delivery) = epoch.deliver() else { continue; };
                 if let Some(alert) = alert {
                     if send(&mut socket, ServerEvent::Alert { alert }).await.is_err() { break; }

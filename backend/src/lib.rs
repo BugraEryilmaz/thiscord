@@ -6,6 +6,7 @@ pub mod bots;
 pub mod chat;
 pub mod db;
 pub mod friends;
+pub mod limits;
 pub mod notifications;
 mod performance;
 pub mod permissions;

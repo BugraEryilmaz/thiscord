@@ -125,6 +125,11 @@ impl Default for Room {
 }
 /// Minimum spacing between one connection's soundboard plays.
 const SOUNDBOARD_INTERVAL: Duration = Duration::from_millis(1000);
+/// Periodic database reauthorization for expiry-only changes (session expiry,
+/// profile edits). Every access-changing commit closes this connection's epoch
+/// and triggers an immediate check, so the per-second roster reuses the last
+/// authorized result while that epoch is current (as chat voice rosters do).
+const VOICE_AUTHORIZATION_RECHECK: Duration = Duration::from_secs(10);
 struct VoiceAccess {
     bot: Option<bots::Context>,
     access: Arc<access::Access>,
@@ -287,7 +292,7 @@ async fn room(guild: GuildId, id: ChannelId) -> Arc<Room> {
     room
 }
 pub fn router(origins: Vec<HeaderValue>) -> Router<Option<DbPool>> {
-    router_with_limit(origins, 64)
+    router_with_limit(origins, crate::limits::DEFAULT_VOICE)
 }
 pub(crate) async fn diagnostics()
 -> HashMap<ChannelId, Vec<thiscord_shared::admin::ParticipantDiagnostics>> {
@@ -1576,6 +1581,8 @@ async fn serve(mut socket: logging::Socket, pool: DbPool, id: RequestId, upgrade
         let mut audio_reply_budget = 0;
         let mut route_logged = false;
         let mut diagnostic_tick = 0;
+        // Join authorized against the database just before negotiation.
+        let mut authorized_at = Instant::now();
         loop {
             tokio::select! {biased;
                 _ = async { let _ = replaced.wait_for(|value| *value).await; } => break,
@@ -1590,6 +1597,7 @@ async fn serve(mut socket: logging::Socket, pool: DbPool, id: RequestId, upgrade
                         access.failed(&mut resume.socket, request_id, error).await;
                         break;
                     }
+                    authorized_at = Instant::now();
                     if socket.recovery_expired() {
                         let _ = send(&mut resume.socket, ServerEvent::ResumeUnavailable {}).await;
                         break;
@@ -1618,6 +1626,7 @@ async fn serve(mut socket: logging::Socket, pool: DbPool, id: RequestId, upgrade
                         access.failed(&mut socket,id,error).await;
                         break;
                     }
+                    authorized_at = Instant::now();
                 },
                 Some((kind, epoch, layer))=keyframe_rx.recv()=>{
                     // Revalidate the publisher and generation after queued feedback.
@@ -1712,9 +1721,14 @@ async fn serve(mut socket: logging::Socket, pool: DbPool, id: RequestId, upgrade
                     if socket.recovery_expired(){socket.end("signaling_recovery_expired");break;}
                     if socket.silent_for()>Duration::from_secs(20){socket.detach();}
                     if !active.load(Ordering::Acquire){socket.end("media_inactive");break;}
-                    let members=match access.refresh(&room,slot,&mut changed).await {
-                        Ok(members)=>members,
-                        Err(error)=>{access.failed(&mut socket,id,error).await;break;}
+                    // Reuse the current epoch's database result between rechecks.
+                    let reused = if authorized_at.elapsed() < VOICE_AUTHORIZATION_RECHECK { access.current_roster(&room).await } else { None };
+                    let members=match reused {
+                        Some(members)=>members,
+                        None=>match access.refresh(&room,slot,&mut changed).await {
+                            Ok(members)=>{authorized_at = Instant::now(); members},
+                            Err(error)=>{access.failed(&mut socket,id,error).await;break;}
+                        }
                     };
                     for kind in [MediaKind::ScreenVideo, MediaKind::Camera] {
                         if let Some((epoch, bitrate)) = viewing::target(&room, slot, kind).await
@@ -1755,7 +1769,7 @@ async fn serve(mut socket: logging::Socket, pool: DbPool, id: RequestId, upgrade
                     let members = match access.current_roster(&room).await {
                         Some(members) => members,
                         None => match access.refresh(&room,slot,&mut changed).await {
-                            Ok(members)=>members,
+                            Ok(members)=>{authorized_at = Instant::now(); members},
                             Err(error)=>{access.failed(&mut socket,id,error).await;break;}
                         }
                     };

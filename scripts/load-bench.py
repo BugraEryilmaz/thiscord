@@ -34,6 +34,25 @@ def cpu_seconds(pids):
     return total / TICKS
 
 
+def postgres_cgroup_seconds():
+    """PostgreSQL's service cgroup CPU, including backends that exit mid-run."""
+    try:
+        with open(f"/proc/{postgres_pids()[0]}/cgroup") as f:
+            path = f.read().strip().split("::", 1)[1]
+        with open(f"/sys/fs/cgroup{path}/cpu.stat") as f:
+            for line in f:
+                if line.startswith("usage_usec"):
+                    return int(line.split()[1]) / 1e6
+    except (OSError, IndexError):
+        pass
+    return None
+
+
+def postgres_cpu(pids):
+    cgroup = postgres_cgroup_seconds()
+    return cgroup if cgroup is not None else cpu_seconds(pids)
+
+
 def postgres_pids():
     pids = []
     for entry in os.listdir("/proc"):
@@ -105,7 +124,8 @@ def main():
         samples = {}
 
         def finish():
-            samples["end"] = (time.monotonic(), cpu_seconds([server.pid]), cpu_seconds(pg))
+            samples["end"] = (time.monotonic(), cpu_seconds([server.pid]), postgres_cpu(pg),
+                              cpu_seconds([proc.pid]))
             samples["rss"] = rss_mib(server.pid)
 
         timer = None
@@ -114,7 +134,8 @@ def main():
             if start is None and "Measuring" in line:
                 # Generators start sending about one second after this line.
                 time.sleep(1)
-                start = (time.monotonic(), cpu_seconds([server.pid]), cpu_seconds(pg))
+                start = (time.monotonic(), cpu_seconds([server.pid]), postgres_cpu(pg),
+                         cpu_seconds([proc.pid]))
                 timer = threading.Timer(seconds - 1, finish)
                 timer.start()
         proc.wait()
@@ -130,6 +151,8 @@ def main():
                 "measured_wall_s": round(wall, 2),
                 "server_cpu_percent": round((end[1] - start[1]) / wall * 100, 1),
                 "postgres_cpu_percent": round((end[2] - start[2]) / wall * 100, 1),
+                # A saturated generator core makes loss/latency a client-side limit.
+                "generator_cpu_percent": round((end[3] - start[3]) / wall * 100, 1),
             })
         try:
             with open(args.output) as f:

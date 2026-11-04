@@ -38,7 +38,9 @@ impl Args {
         let mut values = BTreeMap::new();
         while let Some(key) = args.next() {
             let value = match key.as_str() {
-                "--help" | "--allow-insecure" | "--relay" | "--tls" => "true".into(),
+                "--help" | "--allow-insecure" | "--relay" | "--tls" | "--chat-only" => {
+                    "true".into()
+                }
                 _ if key.starts_with("--") => args.next().ok_or("Missing option value")?,
                 _ => return Err("Expected --option value; see --help"),
             };

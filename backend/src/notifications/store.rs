@@ -218,33 +218,85 @@ pub(super) fn initial(pool: &DbPool, token: &str) -> Result<Initial, Failure> {
         })
     })
 }
+/// The target-level outcome of one full alert check for one recipient: target
+/// authorization, preferences and guild icon. Reusable only with the access
+/// epochs captured before that check (see `mod.rs`); account, session,
+/// preference, guild and membership commits close those epochs.
+#[derive(Clone)]
+pub(super) struct AlertGrant {
+    authorized: bool,
+    preferences: Preferences,
+    guild_icon_id: Option<thiscord_shared::GuildIconId>,
+}
+/// Guild channel alerts without a call. Private calls and ringing calls always
+/// recheck the database, because their state changes without an access commit.
+pub(super) fn reusable(candidate: &Candidate) -> bool {
+    candidate.call_id.is_none()
+        && matches!(candidate.target, Target::Channel { guild_id, channel_id } if guild_id.as_uuid() != channel_id.as_uuid())
+}
+/// Applies a target-level grant to one candidate; delivery preferences are
+/// evaluated at this time (do-not-disturb and snoozes expire without writes).
+pub(super) fn granted(candidate: Candidate, actor: AccountId, grant: &AlertGrant) -> Option<Alert> {
+    if !grant.authorized
+        || candidate.actor == Some(actor)
+        || candidate
+            .recipients
+            .as_ref()
+            .is_some_and(|ids| !ids.contains(&actor))
+    {
+        return None;
+    }
+    let delivery =
+        grant
+            .preferences
+            .delivery(candidate.target, candidate.kind, chrono::Utc::now())?;
+    if !delivery.accepts(candidate.mentions.contains(&actor)) {
+        return None;
+    }
+    Some(Alert {
+        id: candidate.id,
+        target: candidate.target,
+        kind: candidate.kind,
+        title: candidate.title,
+        delivery,
+        actor: candidate.actor,
+        call_id: candidate.call_id,
+        version: candidate.version,
+        guild_icon_id: grant.guild_icon_id,
+    })
+}
+/// Full check. Also returns the reusable grant for `reusable` candidates.
 pub(super) fn alert(
     pool: &DbPool,
     token: &str,
     mut candidate: Candidate,
-) -> Result<Option<Alert>, Failure> {
+) -> Result<(Option<Alert>, Option<AlertGrant>), Failure> {
     let mut c = connection(pool)?;
     let session = auth::authenticate(&mut c, token)?;
     c.transaction(|c| {
         auth::read_session(c, token, &session)?;
         let actor = session.account_id;
-        if candidate.actor == Some(actor) || candidate.recipients.as_ref().is_some_and(|ids| !ids.contains(&actor)) { return Ok(None); }
+        if candidate.actor == Some(actor) || candidate.recipients.as_ref().is_some_and(|ids| !ids.contains(&actor)) { return Ok((None, None)); }
+        let reuse = reusable(&candidate);
         if let Target::Channel { guild_id, channel_id } = candidate.target && guild_id.as_uuid() == channel_id.as_uuid() {
             let conversation = query(c, "SELECT to_jsonb(conversation_id) AS data FROM friend_calls WHERE id=$1::uuid AND $2::uuid IN (caller,callee) AND state='active' AND expires_at>now()", &[&channel_id.to_string(), &actor.to_string()])?.pop();
-            let Some(conversation_id) = conversation else { return Ok(None); };
+            let Some(conversation_id) = conversation else { return Ok((None, None)); };
             candidate.target = Target::Conversation { conversation_id };
         }
-        if authorize(c, actor, candidate.target, Some(candidate.kind)).is_err() { return Ok(None); }
+        if authorize(c, actor, candidate.target, Some(candidate.kind)).is_err() {
+            // An unauthorized target stays unauthorized until an access commit.
+            let grant = AlertGrant { authorized: false, preferences: Preferences::default(), guild_icon_id: None };
+            return Ok((None, reuse.then_some(grant)));
+        }
         // A call accepted, declined or expired while queued must not ring.
         if let Some(id) = candidate.call_id
-            && query::<bool>(c, "SELECT to_jsonb(TRUE) AS data FROM friend_calls WHERE id=$1::uuid AND callee=$2::uuid AND state='ringing' AND expires_at>now()", &[&id.to_string(), &actor.to_string()])? != [true] { return Ok(None); }
-        let prefs = preferences(c, actor)?;
-        let Some(delivery) = prefs.delivery(candidate.target, candidate.kind, chrono::Utc::now()) else { return Ok(None); };
-        if !delivery.accepts(candidate.mentions.contains(&actor)) { return Ok(None); }
+            && query::<bool>(c, "SELECT to_jsonb(TRUE) AS data FROM friend_calls WHERE id=$1::uuid AND callee=$2::uuid AND state='ringing' AND expires_at>now()", &[&id.to_string(), &actor.to_string()])? != [true] { return Ok((None, None)); }
+        let preferences = preferences(c, actor)?;
         let guild_icon_id = match candidate.target {
             Target::Channel { guild_id, .. } => query(c, "SELECT to_jsonb(id) AS data FROM guild_icons WHERE guild_id=$1::uuid", &[&guild_id.to_string()])?.pop(),
             _ => None,
         };
-        Ok(Some(Alert { id: candidate.id, target: candidate.target, kind: candidate.kind, title: candidate.title, delivery, actor: candidate.actor, call_id: candidate.call_id, version: candidate.version, guild_icon_id }))
+        let grant = AlertGrant { authorized: true, preferences, guild_icon_id };
+        Ok((granted(candidate, actor, &grant), reuse.then_some(grant)))
     })
 }

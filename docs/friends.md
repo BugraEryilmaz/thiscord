@@ -87,7 +87,7 @@ data. Startup applies the migration; `schema.rs` is generated with Diesel.
 
 ## Sockets and authorization
 
-`/api/v1/friends/socket` accepts only configured Origins, at most 128 sockets, and
+`/api/v1/friends/socket` accepts only configured Origins, at most `THISCORD_MAX_SOCKETS` (default 512) sockets, and
 16 KiB client frames. The first frame is a versioned `connect` carrying the bearer
 token; credentials never appear in the URL. `select` chooses an optional conversation,
 and `ping` keeps the socket alive. This separate account-wide socket leaves the

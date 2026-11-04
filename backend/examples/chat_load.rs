@@ -1,7 +1,7 @@
 //! Headless text-chat load generator for the disposable `voice_load_server`.
 //! Opens each simulated user's chat, friends and notification sockets like the
 //! client does, posts messages over HTTP at a fixed rate and measures delivery
-//! to every subscribed socket. See docs/chat-load.md.
+//! to every subscribed socket. See docs/load-benchmarks.md.
 #[path = "voice_load/common.rs"]
 mod common;
 // Shared bitmap/percentile helpers; the voice-only stream types stay unused here.
@@ -469,7 +469,7 @@ async fn run() -> Result<bool> {
     let mut args = Args::parse()?;
     if args.flag("--help") {
         println!(
-            "chat_load --url http://127.0.0.1:3001 --allow-insecure --users 64 --rate 4 --seconds 60\nOptions: --users 2..500 (64), --text-channels 1..16 (1, must match the server),\n--rate 0..250 messages/s across all users (4; at most users/2 for the 30/min account limit),\n--seconds 1..3600 (60), --late-ms 1..10000 (1000), --chat-only (skip friends/notification sockets),\n--output report.json. Requires THISCORD_LOAD_SECRET matching voice_load_server. See docs/chat-load.md."
+            "chat_load --url http://127.0.0.1:3001 --allow-insecure --users 64 --rate 4 --seconds 60\nOptions: --users 2..500 (64), --text-channels 1..16 (1, must match the server),\n--rate 0..250 messages/s across all users (4; at most users/2 for the 30/min account limit),\n--seconds 1..3600 (60), --late-ms 1..10000 (1000), --chat-only (skip friends/notification sockets),\n--output report.json. Requires THISCORD_LOAD_SECRET matching voice_load_server. See docs/load-benchmarks.md."
         );
         return Ok(true);
     }

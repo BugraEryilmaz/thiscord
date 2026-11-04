@@ -30,11 +30,13 @@ use tokio::sync::{Semaphore, watch};
 /// least this often (session expiry, writes outside this module).
 const REFRESH: Duration = Duration::from_secs(10);
 
-pub fn router(origins: Vec<HeaderValue>) -> Router<Option<DbPool>> {
+/// `sockets` bounds concurrently connected sockets of this type (see `limits`).
+pub fn router(origins: Vec<HeaderValue>, sockets: usize) -> Router<Option<DbPool>> {
     Router::new()
         .route(FRIENDS_PATH, post(handle))
         .route(FRIENDS_SOCKET_PATH, get(upgrade))
         .layer(Extension(Arc::new(origins)))
+        .layer(Extension(crate::limits::SocketSlots::new(sockets)))
         .layer(DefaultBodyLimit::max(32 * 1024))
         .merge(attachments::router())
 }
@@ -124,6 +126,7 @@ async fn upgrade(
     State(pool): State<Option<DbPool>>,
     Extension(id): Extension<RequestId>,
     Extension(origins): Extension<Arc<Vec<HeaderValue>>>,
+    Extension(slots): Extension<crate::limits::SocketSlots>,
     RawQuery(query): RawQuery,
     headers: HeaderMap,
     ws: Result<WebSocketUpgrade, WebSocketUpgradeRejection>,
@@ -137,12 +140,7 @@ async fn upgrade(
     let Ok(ws) = ws else {
         return Failure::Invalid("Invalid WebSocket upgrade").response(id);
     };
-    static SOCKETS: OnceLock<Arc<Semaphore>> = OnceLock::new();
-    let Ok(permit) = SOCKETS
-        .get_or_init(|| Arc::new(Semaphore::new(128)))
-        .clone()
-        .try_acquire_owned()
-    else {
+    let Ok(permit) = slots.0.clone().try_acquire_owned() else {
         return Failure::Limited.response(id);
     };
     // Web client: cookie-derived bearer, used only when the frame token is empty.

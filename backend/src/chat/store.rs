@@ -695,18 +695,46 @@ fn poll_checked(
     messages: bool,
     presence: bool,
 ) -> Result<Poll, Failure> {
-    let guild = state.guild.id;
     check_channel(state, actor, Some(channel), Some(Permission::ReadHistory))?;
-    let mut events: Vec<(i64, ChatMessage)> = if messages {
-        query(
-            c,
-            "SELECT jsonb_build_array(e.sequence,to_jsonb(m)||jsonb_build_object('author_avatar_id',av.id,'username',COALESCE(a.username,'Deleted account'),'display_name',COALESCE(NULLIF(a.display_name,''),a.username,'Deleted account'))) AS data FROM message_events e JOIN messages m ON m.id=e.message_id LEFT JOIN accounts a ON a.id=m.author_id LEFT JOIN account_avatars av ON av.account_id=m.author_id WHERE e.guild_id=$1::uuid AND e.channel_id=$2::uuid AND e.sequence>$3::bigint ORDER BY e.sequence LIMIT 100",
-            &[
-                &guild.to_string(),
-                &channel.to_string(),
-                &cursor.to_string(),
-            ],
-        )?
+    poll_read(
+        c,
+        actor,
+        state.guild.id,
+        channel,
+        cursor,
+        messages,
+        presence,
+    )
+}
+/// One page of message events after `cursor`, before per-account hydration.
+pub(super) fn events(
+    c: &mut PgConnection,
+    guild: GuildId,
+    channel: ChannelId,
+    cursor: i64,
+) -> Result<Vec<(i64, ChatMessage)>, Failure> {
+    query(
+        c,
+        "SELECT jsonb_build_array(e.sequence,to_jsonb(m)||jsonb_build_object('author_avatar_id',av.id,'username',COALESCE(a.username,'Deleted account'),'display_name',COALESCE(NULLIF(a.display_name,''),a.username,'Deleted account'))) AS data FROM message_events e JOIN messages m ON m.id=e.message_id LEFT JOIN accounts a ON a.id=m.author_id LEFT JOIN account_avatars av ON av.account_id=m.author_id WHERE e.guild_id=$1::uuid AND e.channel_id=$2::uuid AND e.sequence>$3::bigint ORDER BY e.sequence LIMIT 100",
+        &[
+            &guild.to_string(),
+            &channel.to_string(),
+            &cursor.to_string(),
+        ],
+    )
+}
+/// Events and presence for a subscriber whose channel access the caller verified.
+fn poll_read(
+    c: &mut PgConnection,
+    actor: AccountId,
+    guild: GuildId,
+    channel: ChannelId,
+    cursor: i64,
+    messages: bool,
+    presence: bool,
+) -> Result<Poll, Failure> {
+    let mut events = if messages {
+        events(c, guild, channel, cursor)?
     } else {
         Vec::new()
     };
@@ -748,6 +776,37 @@ fn poll_checked(
     })
 }
 
+/// What one subscriber's last full database check established: the actor and
+/// every text channel it may view and read. Only reusable together with the
+/// access epochs captured before that check (see `session.rs`); any access
+/// commit for the account, session, guild or membership closes those epochs.
+#[derive(Clone)]
+pub(super) struct Grant {
+    pub actor: AccountId,
+    pub readable: std::sync::Arc<[ChannelId]>,
+}
+pub(super) fn grant(state: &GuildState, actor: AccountId) -> Grant {
+    Grant {
+        actor,
+        readable: readable(state, actor).into(),
+    }
+}
+fn readable(state: &GuildState, actor: AccountId) -> Vec<ChannelId> {
+    state
+        .channels
+        .iter()
+        .filter(|ch| {
+            let p = effective(state, actor, Some(ch.id));
+            ch.kind == ChannelKind::Text
+                && p.contains(&Permission::ViewChannel)
+                && p.contains(&Permission::ReadHistory)
+        })
+        .map(|ch| ch.id)
+        .collect()
+}
+pub(super) type Refreshed = (Option<Vec<Unread>>, Option<Poll>);
+
+/// Full check: authenticate, lock the session and guild, evaluate current grants.
 pub(super) fn refresh(
     pool: &DbPool,
     token: &str,
@@ -755,15 +814,14 @@ pub(super) fn refresh(
     channel: Option<ChannelId>,
     cursor: i64,
     work: Refresh,
-) -> Result<(Option<Vec<Unread>>, Option<Poll>), Failure> {
+) -> Result<(Refreshed, Grant), Failure> {
     let _timing = crate::performance::REFRESH.start();
-    // Guild-wide grants are needed only for unread counts.
-    let scope = if work.unread { None } else { channel };
+    // Guild-wide grants: unread counts need them and they form the reusable grant.
     checked(
         pool,
         token,
         guild,
-        scope,
+        None,
         Some(Permission::ReadHistory),
         |c, actor, state| {
             let unread = work
@@ -774,9 +832,83 @@ pub(super) fn refresh(
                 .filter(|_| work.messages || work.presence)
                 .map(|ch| poll_checked(c, actor, state, ch, cursor, work.messages, work.presence))
                 .transpose()?;
-            Ok((unread, poll))
+            Ok(((unread, poll), grant(state, actor)))
         },
     )
+}
+
+/// Delivery between full checks, for a caller holding a fresh epoch-fenced
+/// grant. Reads one consistent read-only snapshot without session or guild row
+/// locks; a concurrent access commit closes the caller's epochs before delivery.
+pub(super) fn refresh_granted(
+    pool: &DbPool,
+    guild: GuildId,
+    channel: Option<ChannelId>,
+    cursor: i64,
+    mut work: Refresh,
+    grant: &Grant,
+    feed: Option<&super::feed::Feed>,
+) -> Result<Refreshed, Failure> {
+    let _timing = crate::performance::REFRESH_GRANTED.start();
+    // New messages come from the channel's shared read when possible.
+    let mut shared = None;
+    if work.messages
+        && let (Some(ch), Some(feed)) = (channel, feed)
+        && grant.readable.contains(&ch)
+    {
+        shared = feed.events(pool, guild, ch, cursor)?;
+        work.messages &= shared.is_none();
+    }
+    if !(work.messages || work.presence || work.unread) {
+        return Ok((
+            None,
+            shared.map(|events| Poll {
+                events,
+                members: Vec::new(),
+            }),
+        ));
+    }
+    let mut c = connection(pool)?;
+    c.build_transaction()
+        .read_only()
+        .repeatable_read()
+        .run(|c| {
+            let unread = work
+                .unread
+                .then(|| unread_readable(c, guild, grant.actor, &grant.readable))
+                .transpose()?;
+            let poll = channel
+                .filter(|_| work.messages || work.presence)
+                .map(|ch| {
+                    if !grant.readable.contains(&ch) {
+                        return Err(Failure::Forbidden);
+                    }
+                    poll_read(
+                        c,
+                        grant.actor,
+                        guild,
+                        ch,
+                        cursor,
+                        work.messages,
+                        work.presence,
+                    )
+                })
+                .transpose()?;
+            Ok((unread, poll))
+        })
+        .map(|(unread, poll)| match shared {
+            Some(events) => (
+                unread,
+                Some(Poll {
+                    events,
+                    ..poll.unwrap_or(Poll {
+                        events: Vec::new(),
+                        members: Vec::new(),
+                    })
+                }),
+            ),
+            None => (unread, poll),
+        })
 }
 fn members(
     c: &mut PgConnection,
@@ -912,20 +1044,19 @@ pub(super) fn unread(
     actor: AccountId,
     state: &GuildState,
 ) -> Result<Vec<Unread>, Failure> {
-    let _timing = crate::performance::UNREAD.start();
     // Authorize before touching message history, using the state loaded under
     // the guild lock by checked(). Never scan inaccessible channels.
-    let channels: Vec<_> = state
-        .channels
-        .iter()
-        .filter(|ch| {
-            let p = effective(state, actor, Some(ch.id));
-            ch.kind == ChannelKind::Text
-                && p.contains(&Permission::ViewChannel)
-                && p.contains(&Permission::ReadHistory)
-        })
-        .map(|ch| ch.id.to_string())
-        .collect();
+    unread_readable(c, guild, actor, &readable(state, actor))
+}
+/// Unread counts for channels the caller has authorized for `actor`.
+fn unread_readable(
+    c: &mut PgConnection,
+    guild: GuildId,
+    actor: AccountId,
+    readable: &[ChannelId],
+) -> Result<Vec<Unread>, Failure> {
+    let _timing = crate::performance::UNREAD.start();
+    let channels: Vec<_> = readable.iter().map(ToString::to_string).collect();
     if channels.is_empty() {
         return Ok(Vec::new());
     }

@@ -96,7 +96,7 @@ without disconnecting media. Initial snapshots and subsequent preference updates
 use the same fence. Backend authority remains mandatory even when the UI hides a
 control. No message body or bearer token is included in diagnostic logging.
 
-Limits: 128 notification sockets, 64 queued candidates per socket, eight blocking
+Limits: `THISCORD_MAX_SOCKETS` (default 512) notification sockets, 64 queued candidates per socket, eight blocking
 notification workers, 512 source overrides per account, 4 KiB socket frames and
 16 KiB HTTP requests. A slow/full subscriber disconnects rather than accumulating
 an unlimited backlog. Established sockets wait fairly for a worker (one waiter

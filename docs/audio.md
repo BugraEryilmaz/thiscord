@@ -1284,8 +1284,9 @@ for transport admission or deactivate voice on failure; video losses request
 keyframe recovery. See [screen-sharing.md](screen-sharing.md)
 for video budgets and the limits of the shared WebRTC transport.
 
-Current sessions are rechecked every second and immediately after matching access
-changes. Each participant registers its account, session and guild before an
+Current sessions are rechecked against the database at least every ten seconds
+and immediately after matching access changes; between checks the one-second
+roster reuses the last result only while the connection's access epoch is current. Each participant registers its account, session and guild before an
 authoritative database check. Account-wide changes affect that account; rotation,
 replay and logout affect one session; member changes affect that account in one
 guild; role/channel changes affect that guild. Other connections retain their
