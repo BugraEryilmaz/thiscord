@@ -14,6 +14,7 @@ use thiscord_shared::{
     friends::*,
     ids::{CallId, ConversationId},
 };
+use wasm_bindgen::JsCast;
 
 #[derive(Clone, Copy)]
 pub(super) struct State {
@@ -471,7 +472,8 @@ fn FriendList(ui: Ui, filter: RwSignal<&'static str>) -> impl IntoView {
     view! {<div class="h-full overflow-y-auto p-6" data-rove-list on:keydown=move |e| super::keyboard::rove(&e)>
         <p class="sidebar-section-title mb-3">{move ||format!("{} — {}",if filter.get()=="pending"{crate::i18n::t("Requests")}else if filter.get()=="online"{crate::i18n::t("Online friends")}else if filter.get()=="messages"{crate::i18n::t("Direct messages")}else{crate::i18n::t("All friends")},friends.get().len())}</p>
         <Show when=move ||!ui.friends.connected.get()><p role="status" class="mb-4 text-sm text-amber-200">{move || crate::i18n::t("Connecting to friends…")}</p></Show>
-        <Show when=move ||friends.get().is_empty()><div class="empty-state min-h-72"><span class="empty-state-icon"><Icon kind=Glyph::Friends/></span><h2 class="empty-state-title">{move ||if filter.get()=="pending"{crate::i18n::t("No pending requests")}else if filter.get()=="online"{crate::i18n::t("No friends online right now")}else{crate::i18n::t("Make yourself at home")}}</h2><p class="max-w-sm text-sm text-white/60">{move || crate::i18n::t("Use Add friend to find someone by display name or username. Your conversations will appear here.")}</p></div></Show>
+        <Show when=move ||friends.get().is_empty()><div class="empty-state min-h-72"><span class="empty-state-icon"><Icon kind=Glyph::Friends/></span><h2 class="empty-state-title">{move ||if filter.get()=="pending"{crate::i18n::t("No pending requests")}else if filter.get()=="online"{crate::i18n::t("No friends online right now")}else{crate::i18n::t("Make yourself at home")}}</h2><p class="max-w-sm">{move ||if filter.get()=="pending"{crate::i18n::t("Friend requests you send or receive will appear here.")}else if filter.get()=="online"{crate::i18n::t("When your friends come online, they’ll show up here.")}else{crate::i18n::t("Use Add friend to find someone by display name or username. Your conversations will appear here.")}}</p>
+            <button type="button" class="btn btn-secondary mt-2" on:click=move |_|{if let Some(button)=document().query_selector("[data-add-friend]").ok().flatten().and_then(|b|b.dyn_into::<web_sys::HtmlElement>().ok()){button.click();}}><Icon kind=Glyph::Plus/>{move || crate::i18n::t("Add friend")}</button></div></Show>
         <For each=move ||friends.get() key=|f|f.conversation_id children=move |initial| {
             let id=initial.conversation_id;let person=initial.person.id;
             let f=Memo::new(move |_|ui.friends.friend(id).unwrap_or_else(||initial.clone()));
@@ -484,11 +486,24 @@ fn FriendList(ui: Ui, filter: RwSignal<&'static str>) -> impl IntoView {
                     <button class="icon-button disabled:opacity-40" aria-label=move || crate::i18n::t("Call friend") data-tip=move || crate::i18n::t("Voice call (desktop)") disabled=move ||!available(ui) || !ui.friends.connected.get() || calling.get() on:click=move |_|action(ui,Request::StartCall {conversation_id:id})><Icon kind=Glyph::Phone/></button>
                 </Show>
                 <Show when=move ||f.get().relationship==Relationship::Incoming><button class="btn btn-primary min-h-9 px-3.5" on:click=move |_|action(ui,Request::Accept {account_id:person})>{move || crate::i18n::t("Accept")}</button></Show>
+                <details class="row-menu" on:click=move |ev: leptos::ev::MouseEvent| {
+                    // Choosing an item closes the menu; the summary itself toggles it.
+                    if let Some(target) = ev.target().and_then(|t| t.dyn_into::<web_sys::Element>().ok())
+                        && target.closest("summary").ok().flatten().is_none()
+                        && let Some(menu) = ev.current_target().and_then(|t| t.dyn_into::<web_sys::Element>().ok())
+                    {
+                        let _ = menu.remove_attribute("open");
+                    }
+                }>
+                <summary class="icon-button" aria-label=move || crate::i18n::t("More options") data-tip=move || crate::i18n::t("More options")><Icon kind=Glyph::More/></summary>
+                <div class="row-menu-panel" role="group" aria-label=move || crate::i18n::t("More options")>
                 <super::safety::PersonActions ui account_id=person/>
                 <button class="row-action" on:click=move |_|{
                     if f.get_untracked().relationship!=Relationship::Friend {action(ui,Request::Remove {account_id:person});return;}
                     super::dialog::confirm(ui,super::dialog::Confirmation::new(crate::i18n::t("Remove this friend?"),crate::i18n::t("Private messages and calls will be unavailable until you become friends again."),crate::i18n::t("Remove friend"),super::dialog::Action::new(move |_|remove(ui,person))).target(f.get_untracked().person.display_name));
                 }>{move ||match f.get().relationship {Relationship::Incoming=>crate::i18n::t("Decline"),Relationship::Outgoing=>crate::i18n::t("Cancel"),Relationship::Friend=>crate::i18n::t("Remove")}}</button>
+                </div>
+                </details>
             </div>}
         }/>
     </div>}
@@ -531,7 +546,7 @@ fn AddFriend(ui: Ui) -> impl IntoView {
             }
         });
     };
-    view! {<button class="btn btn-primary min-h-9 px-3.5" on:click=move |_|{if let Some(d)=dialog.get(){super::dialog::open(&d);}}><Icon kind=Glyph::Plus/>{move || crate::i18n::t("Add friend")}</button>
+    view! {<button class="btn btn-primary min-h-9 px-3.5" data-add-friend="" on:click=move |_|{if let Some(d)=dialog.get(){super::dialog::open(&d);}}><Icon kind=Glyph::Plus/>{move || crate::i18n::t("Add friend")}</button>
         <dialog node_ref=dialog aria-labelledby="add-friend-title" class="app-dialog max-w-lg" on:click=move |ev|super::dialog::dismiss_outside(ev,dialog,false)>
             <header class="mb-2 flex items-center justify-between"><h2 id="add-friend-title" class="dialog-title">{move || crate::i18n::t("Add friend")}</h2><button class="icon-button" aria-label=move || crate::i18n::t("Close add friend") on:click=move |_|if let Some(d)=dialog.get(){d.close();}><Icon kind=Glyph::Close/></button></header>
             <p class="dialog-description mb-5">{move || crate::i18n::t("Enter part of a display name or username (at least 2 characters) and send a friend request.")}</p>
@@ -856,7 +871,7 @@ fn Conversation(ui: Ui, id: ConversationId) -> impl IntoView {
         <For each=move ||{let (connected,channel)=ui.voice.with(|v|(v.connected,v.channel_id));ui.friends.snapshot.with(|s|s.calls.iter().filter(|c|c.conversation_id==id && connected && channel==Some(c.voice_channel())).cloned().collect::<Vec<_>>())} key=|c|c.id children=move |call|view!{
             <div class="private-call-media"><super::screen::ScreenViewer ui=ui guild=call.voice_scope() channel=call.voice_channel()/></div>
         }/>
-        <div node_ref=list class="private-messages min-h-0 flex-1 overflow-y-auto px-6 py-4" style:display=move ||if search.active.get(){"none"}else{""} on:scroll=move |_|if !search.active.get_untracked() && let Some(node)=list.get(){saved_top.set_value(node.scroll_top());bottom.set(node.scroll_height()-node.scroll_top()-node.client_height()<80);}>
+        <div node_ref=list class="private-messages min-h-0 flex-1 overflow-y-auto p-4" style:display=move ||if search.active.get(){"none"}else{""} on:scroll=move |_|if !search.active.get_untracked() && let Some(node)=list.get(){saved_top.set_value(node.scroll_top());bottom.set(node.scroll_height()-node.scroll_top()-node.client_height()<80);}>
             <Show when=move ||older.get().is_some()><button class="mb-4 text-sm text-brand disabled:opacity-50" disabled=move ||loading.get() on:click=move |_| {
                 let before=older.get_untracked();if loading.get_untracked(){return;}pending_jump.set(None);highlight.set(None);loading.set(true);past.set(true);ui.friends.before.set(before.clone());
 
