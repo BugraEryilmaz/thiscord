@@ -116,7 +116,6 @@ pub(super) fn ScreenViewer(ui: Ui, guild: GuildId, channel: ChannelId) -> impl I
     let rates = RwSignal::new(HashMap::<Key, f64>::new());
     let announcement = RwSignal::new(String::new());
     let last_move = StoredValue::new(0.0f64);
-    let drag_origin = StoredValue::new(None::<(Vec<Key>, bool)>);
     // Until the user rearranges, tiles follow a shape-aware automatic order.
     let arranged = RwSignal::new(false);
     let menu_place = RwSignal::new((false, None::<f64>));
@@ -176,73 +175,9 @@ pub(super) fn ScreenViewer(ui: Ui, guild: GuildId, channel: ChannelId) -> impl I
             .map(|(_, a)| *a as f64 / 100.0)
             .unwrap_or(media_layout::DEFAULT_ASPECT)
     };
-    // Until the user rearranges, the order is chosen to pack shapes well. It
-    // settles once every stream has a shape (from the area at that moment, so
-    // resizing never reshuffles); afterwards a stream that joins or is shown
-    // again is placed where it fits best, and the others keep their order.
-    let auto = RwSignal::new(Vec::<Key>::new());
-    let settled = StoredValue::new(false);
-    let placed = StoredValue::new(Vec::<Key>::new());
-    let hidden_before = StoredValue::new(0usize);
-    Effect::new(move |_| {
-        if arranged.get() {
-            return;
-        }
-        let keys: Vec<Key> = tiles.with(|t| t.iter().map(key_of).collect::<Vec<_>>());
-        let keys: Vec<Key> = hidden.with(|h| keys.into_iter().filter(|k| !h.contains(k)).collect());
-        let shapes_now = shapes.get();
-        let known = |k: &Key| shapes_now.iter().any(|(s, _)| s == k);
-        let hidden_now = hidden.with(Vec::len);
-        if hidden_now > hidden_before.get_value() {
-            settled.set_value(false);
-        }
-        hidden_before.set_value(hidden_now);
-        let (width, height) = size.get_untracked();
-        let gap = if width < 600.0 { 8.0 } else { 12.0 };
-        let mut current = auto.get_untracked();
-        current.retain(|k| keys.contains(k));
-        let mut done = placed.get_value();
-        done.retain(|k| keys.contains(k));
-        if !settled.get_value() {
-            if !keys.is_empty() && width > 0.0 && keys.iter().all(known) {
-                let aspects: Vec<f64> = keys.iter().map(|k| aspect_of(&shapes_now, k)).collect();
-                current = media_layout::arrange(width, height, gap, &aspects)
-                    .into_iter()
-                    .map(|i| keys[i])
-                    .collect();
-                done = keys.clone();
-                settled.set_value(true);
-            } else {
-                current = keys.clone();
-            }
-        } else {
-            for k in &keys {
-                if !current.contains(k) {
-                    current.push(*k);
-                }
-            }
-            let newcomers: Vec<Key> = keys
-                .iter()
-                .filter(|k| known(k) && !done.contains(k))
-                .copied()
-                .collect();
-            for k in &newcomers {
-                if let Some(from) = current.iter().position(|c| c == k) {
-                    let aspects: Vec<f64> =
-                        current.iter().map(|c| aspect_of(&shapes_now, c)).collect();
-                    let at = media_layout::insertion(width, height, gap, &aspects, from);
-                    let item = current.remove(from);
-                    current.insert(at.min(current.len()), item);
-                }
-                done.push(*k);
-            }
-        }
-        placed.set_value(done);
-        if current != auto.get_untracked() {
-            auto.set(current);
-        }
-    });
-    // The user's order first; streams that start later join at the end.
+    // The user's order first; streams that start later join at the end. Until
+    // the user rearranges, the order is chosen to pack shapes well (from the
+    // area at that moment, so resizing alone never reshuffles tiles).
     let visible = Memo::new(move |_| {
         let tiles = tiles.get();
         let hidden = hidden.get();
@@ -255,15 +190,11 @@ pub(super) fn ScreenViewer(ui: Ui, guild: GuildId, channel: ChannelId) -> impl I
         keys.extend(tiles.iter().map(key_of).filter(|k| !order.contains(k)));
         keys.retain(|k| !hidden.contains(k));
         if !arranged.get() {
-            let mut ordered: Vec<Key> =
-                auto.with(|a| a.iter().copied().filter(|k| keys.contains(k)).collect());
-            ordered.extend(
-                keys.iter()
-                    .filter(|k| !ordered.contains(k))
-                    .copied()
-                    .collect::<Vec<_>>(),
-            );
-            keys = ordered;
+            let (width, height) = size.get_untracked();
+            let aspects: Vec<f64> = shapes.with(|s| keys.iter().map(|k| aspect_of(s, k)).collect());
+            let gap = if width < 600.0 { 8.0 } else { 12.0 };
+            let auto = media_layout::arrange(width, height, gap, &aspects);
+            keys = auto.into_iter().map(|i| keys[i]).collect();
         }
         keys.into_iter()
             .filter_map(|k| tiles.iter().find(|t| key_of(t) == k).cloned())
@@ -385,10 +316,7 @@ pub(super) fn ScreenViewer(ui: Ui, guild: GuildId, channel: ChannelId) -> impl I
                         d.insert(key, size);
                     });
                 }
-                let quality = video.get_video_playback_quality();
-                let frames = quality
-                    .total_video_frames()
-                    .saturating_sub(quality.dropped_video_frames());
+                let frames = video.get_video_playback_quality().total_video_frames();
                 match samples.get(&key).copied() {
                     Some((before, then)) if at - then >= 950.0 => {
                         let fps = frames.saturating_sub(before) as f64 * 1000.0 / (at - then);
@@ -570,10 +498,12 @@ pub(super) fn ScreenViewer(ui: Ui, guild: GuildId, channel: ChannelId) -> impl I
             e.prevent_default();
             exit_full();
         } else if focus.with_untracked(Option::is_some)
-            && document().active_element().is_none_or(|a| {
-                a.tag_name() == "BODY"
-                    || a.closest(".channel-streams").ok().flatten().is_some()
-                        && !matches!(a.tag_name().as_str(), "INPUT" | "TEXTAREA" | "SELECT")
+            && !document().active_element().is_some_and(|a| {
+                matches!(a.tag_name().as_str(), "INPUT" | "TEXTAREA" | "SELECT")
+                    || a.closest("[contenteditable='true'], dialog")
+                        .ok()
+                        .flatten()
+                        .is_some()
             })
         {
             e.prevent_default();
@@ -681,9 +611,7 @@ pub(super) fn ScreenViewer(ui: Ui, guild: GuildId, channel: ChannelId) -> impl I
             else if !tiles.get().is_empty() { crate::i18n::t("All streams are hidden. Choose one above to show it again.") }
             else { crate::i18n::t("No cameras or screen shares are active.") }
         }}</p></Show>
-        <div node_ref=stage class="media-stage"
-            on:dragover=move |e: web_sys::DragEvent|{if dragging.get_untracked().is_some(){e.prevent_default();}}
-            on:drop=move |e: web_sys::DragEvent|e.prevent_default() class:empty=move ||visible.get().is_empty() class:scrolls=move ||arrangement.with(|a|a.scrolls) class:dragging=move ||dragging.get().is_some() class:focus-mode=focused>
+        <div node_ref=stage class="media-stage" class:empty=move ||visible.get().is_empty() class:scrolls=move ||arrangement.with(|a|a.scrolls) class:dragging=move ||dragging.get().is_some() class:focus-mode=focused>
             <div class="media-stage-content" style:height=move ||arrangement.with(|a| if a.scrolls {format!("{:.0}px", a.height)} else {"100%".into()})>
             <For each=move ||visible.get() key=|t|(t.0.account_id,t.0.slot,t.1,t.2) children=move |(member,kind,epoch)| {
                 let owner=member.account_id;
@@ -699,17 +627,9 @@ pub(super) fn ScreenViewer(ui: Ui, guild: GuildId, channel: ChannelId) -> impl I
                 // A keyed row moved in the DOM loses its CSS transition and
                 // would jump; animate it from where it was instead (FLIP).
                 let shown_at=StoredValue::new(None::<Rect>);
-                let fresh=RwSignal::new(true);
                 Effect::new(move |_| {
                     let Some(next)=rect.get() else {return;};
-                    let Some(previous)=shown_at.get_value() else {
-                        shown_at.set_value(Some(next));
-                        leptos::task::spawn_local(async move {
-                            gloo_timers::future::TimeoutFuture::new(60).await;
-                            fresh.try_set(false);
-                        });
-                        return;
-                    };
+                    let Some(previous)=shown_at.get_value() else {shown_at.set_value(Some(next));return;};
                     shown_at.set_value(Some(next));
                     if expanded.get_untracked()==Some(key) || ((previous.x-next.x).abs()<1.0 && (previous.y-next.y).abs()<1.0) {return;}
                     leptos::task::spawn_local(async move {
@@ -765,14 +685,13 @@ pub(super) fn ScreenViewer(ui: Ui, guild: GuildId, channel: ChannelId) -> impl I
                 view!{<figure node_ref=figure class="media-tile" data-media-key=key_text(key)
                     class:expanded=is_expanded class:stage=move ||on_stage.get() class:unplaced=move ||rect.get().is_none()
                     class:dragging=move ||dragging.get()==Some(key) class:drop-stage=move ||on_stage.get() && drop_stage.get()
-                    class:menu-open=move ||menu.get()==Some(key) class:fresh=move ||fresh.get()
+                    class:menu-open=move ||menu.get()==Some(key)
                     style:left=placed(|r|format!("{:.1}px",r.x)) style:top=placed(|r|format!("{:.1}px",r.y))
                     style:width=placed(|r|format!("{:.1}px",r.w)) style:height=placed(|r|format!("{:.1}px",r.h))
                     draggable=move ||if menu.get()==Some(key) || is_expanded() || on_stage.get() || !several() {"false"} else {"true"}
                     on:contextmenu=move |e|{e.prevent_default();e.stop_propagation();open_menu();}
                     on:dragstart=move |e: web_sys::DragEvent|{
                         if let Some(transfer)=e.data_transfer(){let _=transfer.set_data("text/plain",&name);transfer.set_effect_allowed("move");}
-                        drag_origin.set_value(Some((order.get_untracked(),arranged.get_untracked())));
                         menu.set(None);dragging.set(Some(key));
                     }
                     on:dragover=move |e: web_sys::DragEvent|{
@@ -795,14 +714,9 @@ pub(super) fn ScreenViewer(ui: Ui, guild: GuildId, channel: ChannelId) -> impl I
                         if let Some(source)=dragging.get_untracked() && on_stage.get_untracked() && source!=key {set_focus(Some(source));}
                         drop_stage.set(false);
                     }
-                    on:dragend=move |e: web_sys::DragEvent|{
-                        let cancelled=e.data_transfer().is_some_and(|t|t.drop_effect()=="none");
-                        if let Some((previous,was_arranged))=drag_origin.get_value() && cancelled {
-                            order.set(previous);arranged.set(was_arranged);
-                        }
-                        drag_origin.set_value(None);
+                    on:dragend=move |_|{
                         drop_stage.set(false);
-                        if let Some(source)=dragging.get_untracked(){dragging.set(None);used();if !cancelled && focus.get_untracked()!=Some(source){announce_position(source);}}
+                        if let Some(source)=dragging.get_untracked(){dragging.set(None);used();if focus.get_untracked()!=Some(source){announce_position(source);}}
                     }>
                     <div class="media-tile-content" role="button" tabindex="0" aria-label=label.clone() aria-describedby=format!("{hint} {quality_id}")
                         aria-pressed=move ||several().then(||on_stage.get().to_string())
@@ -829,9 +743,7 @@ pub(super) fn ScreenViewer(ui: Ui, guild: GuildId, channel: ChannelId) -> impl I
                             else {view!{<super::screen::ScreenVideo watch=watch/>}.into_any()}}
                         </Show>
                     </div>
-                    <figcaption class="media-tile-caption"><Icon kind=if camera {Glyph::Camera} else {Glyph::Screen}/>
-                        <crate::avatar::Avatar class="media-tile-avatar size-5 text-[10px]" name=member.display_name().to_owned() avatar_id=member.avatar_id/>
-                        <span class="media-tile-name truncate">{member.display_name().to_owned()}</span></figcaption>
+                    <figcaption class="media-tile-caption"><Icon kind=if camera {Glyph::Camera} else {Glyph::Screen}/><span class="truncate">{member.display_name().to_owned()}</span></figcaption>
                     <div class="media-tile-actions">
                         <Show when=several>
                             <button type="button" class="media-tile-button media-tile-focus" tabindex="-1" aria-pressed=move ||on_stage.get().to_string()
@@ -849,8 +761,7 @@ pub(super) fn ScreenViewer(ui: Ui, guild: GuildId, channel: ChannelId) -> impl I
                             on:click=move |_|if menu.get_untracked()==Some(key) {menu.set(None);} else {open_menu();}><Icon kind=Glyph::More/></button>
                     </div>
                     <Show when=move ||quality.get().is_some()>
-                        <span class="media-quality" id=quality_id.clone()>
-                            <span class="media-quality-tip" aria-hidden="true">{move ||quality.get().map(|q|q.2).unwrap_or_default()}</span>
+                        <span class="media-quality" id=quality_id.clone() data-tip=move ||quality.get().map(|q|q.2).unwrap_or_default()>
                             <span class="sr-only">{move ||quality.get().map(|q|q.2).unwrap_or_default()}</span>
                             <span class="media-quality-full" aria-hidden="true">{move ||quality.get().map(|q|q.0).unwrap_or_default()}
                                 {move ||quality.get().and_then(|q|q.1).map(|rate|view!{" · "{rate}})}</span>
