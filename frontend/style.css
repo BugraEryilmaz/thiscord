@@ -137,7 +137,7 @@ time, .tabular-nums { font-variant-numeric: tabular-nums; }
 .inline-code { padding: 1px 5px; border: 1px solid var(--hairline); border-radius: 5px; background: var(--tint-4); font-family: ui-monospace, "Cascadia Mono", Consolas, monospace; font-size: .875em; }
 .code-block { margin: 8px 0; max-height: 24rem; overflow: auto; padding: 12px; border: 1px solid var(--hairline); border-radius: var(--radius-md); background: color-mix(in srgb, var(--color-rail) 70%, transparent); font-family: ui-monospace, "Cascadia Mono", Consolas, monospace; font-size: 14px; white-space: pre; }
 .message-quote { margin: 4px 0; padding-left: 12px; border-left: 3px solid var(--tint-15); color: color-mix(in srgb, var(--color-content) 80%, var(--color-muted)); }
-.jump-latest { flex-shrink: 0; align-self: center; margin: 0 16px 4px; padding: 6px 14px; border-radius: 999px; background: var(--color-brand); color: var(--color-on-brand); font-size: 14px; font-weight: 600; box-shadow: var(--shadow-2); }
+.jump-latest { flex-shrink: 0; align-self: center; margin: 8px 16px 4px; padding: 6px 14px; border-radius: 999px; background: var(--color-brand); color: var(--color-on-brand); font-size: 14px; font-weight: 600; box-shadow: var(--shadow-2); }
 .jump-latest:hover { background: color-mix(in srgb, var(--color-brand) 88%, var(--color-white)); }
 
 /* Composer: one rounded field with its tools inside, shared by channels and DMs. */
@@ -187,8 +187,8 @@ time, .tabular-nums { font-variant-numeric: tabular-nums; }
 .btn-secondary { border: 1px solid var(--tint-10); background: var(--tint-4); color: var(--color-content); }
 .btn-secondary:hover:not(:disabled) { background: var(--tint-8); border-color: var(--tint-15); }
 .btn:disabled { background: var(--tint-6); color: color-mix(in srgb, var(--color-muted) 85%, transparent); border-color: transparent; box-shadow: none; cursor: default; }
-.btn-primary:disabled, .settings-primary:disabled { background: var(--brand-soft) !important; color: var(--brand-ink) !important; }
-.btn-secondary:disabled, .settings-secondary:disabled { background: transparent !important; border: 1px solid var(--tint-10) !important; }
+.btn-primary:disabled, .settings-primary:disabled { background: color-mix(in srgb, var(--color-brand) 10%, transparent) !important; color: color-mix(in srgb, var(--brand-ink) 72%, transparent) !important; cursor: not-allowed !important; }
+.btn-secondary:disabled, .settings-secondary:disabled { background: transparent !important; border: 1px dashed var(--tint-15) !important; color: color-mix(in srgb, var(--color-muted) 90%, transparent) !important; cursor: not-allowed !important; }
 .btn-block { width: 100%; min-height: 44px; }
 .text-link { color: var(--brand-ink); font-weight: 500; text-underline-offset: 3px; cursor: pointer; }
 .text-link:hover, .text-link:focus-visible { text-decoration: underline; }
@@ -200,7 +200,7 @@ time, .tabular-nums { font-variant-numeric: tabular-nums; }
 .dialog-description { color: color-mix(in srgb, var(--color-muted) 95%, transparent); font-size: 14px; line-height: 1.55; }
 
 /* Channel rows. */
-.channel-glyph { display: grid; place-items: center; flex-shrink: 0; width: 20px; color: color-mix(in srgb, var(--color-muted) 75%, transparent); }
+.channel-glyph { display: grid; place-items: center; flex-shrink: 0; width: 20px; color: var(--color-muted); }
 .channel-glyph svg { width: 18px; height: 18px; }
 .channel-item.channel-selected .channel-glyph, .channel-item:hover .channel-glyph { color: color-mix(in srgb, var(--color-muted) 100%, transparent); }
 .channel-badge { flex-shrink: 0; min-width: 20px; padding: 0 6px; border-radius: 999px; background: var(--tint-10); color: var(--color-content); font-size: 12px; font-weight: 700; line-height: 18px; text-align: center; font-variant-numeric: tabular-nums; }
@@ -234,7 +234,7 @@ time, .tabular-nums { font-variant-numeric: tabular-nums; }
 .empty-state-title { font-family: var(--font-display); color: var(--color-white); font-size: 20px; font-weight: 700; letter-spacing: -.015em; }
 
 /* Reply previews and the mention picker use brand tokens and the popover surface. */
-.reply-preview { display: flex; align-items: center; gap: 6px; max-width: 100%; margin: 2px 0 4px; padding: 2px 8px 2px 6px; border-radius: var(--radius-sm); color: color-mix(in srgb, var(--color-content) 70%, var(--color-muted)); font-size: 14px; text-align: left; }
+.reply-preview { position: relative; display: flex; align-items: center; gap: 6px; max-width: 100%; margin: 2px 0 4px; padding: 2px 8px 2px 6px; border-radius: var(--radius-sm); color: var(--color-muted); font-size: 14px; text-align: left; }
 .reply-preview:hover:not(:disabled) { background: var(--tint-4); color: var(--color-content); }
 .reply-preview svg { width: 14px; height: 14px; flex-shrink: 0; color: var(--brand-ink); transform: scaleX(-1); }
 .reply-author { flex-shrink: 0; color: var(--brand-ink); font-weight: 600; }
@@ -285,8 +285,8 @@ dialog header > button.icon-button:last-child svg { width: 18px; height: 18px; }
 .conversation-start .avatar-initials { box-shadow: 0 0 0 4px var(--brand-soft); }
 .conversation-start h3 { margin-top: 8px; }
 /* Friend list: one centred column so actions stay near names. */
-.friend-list > * { max-width: 920px; margin-inline: auto; }
-.friend-list > .friend-row { max-width: 944px; margin-inline: max(-12px, calc((100% - 944px) / 2)); }
+.friend-list > * { max-width: 920px; }
+.friend-list > .friend-row { max-width: 944px; margin-inline: -12px 0; }
 /* Names keep room: on narrow rows the actions wrap under them instead of squeezing them. */
 .friend-row-name { min-width: 7rem; }
 @media (max-width: 767px) { .friend-row { flex-wrap: nowrap; gap: 8px; } .friend-row-name { min-width: 5.5rem; } }
@@ -300,6 +300,22 @@ dialog header > button.icon-button:last-child svg { width: 18px; height: 18px; }
 .voice-dock .icon-button.danger { width: 34px; height: 34px; background: color-mix(in srgb, var(--color-danger) 12%, transparent); }
 .voice-dock .icon-button.danger:hover { background: color-mix(in srgb, var(--color-danger) 22%, transparent); }
 
+/* Phones: friend row menus are bottom sheets with a scrim, grab handle and title. */
+.row-menu-scrim { display: none; }
+@media (max-width: 767px) {
+  .row-menu-scrim { position: fixed; inset: 0; z-index: 39; display: block; background: color-mix(in srgb, var(--color-black, #000) 45%, transparent); }
+  .row-menu > .row-menu-panel::before { content: ""; align-self: center; width: 36px; height: 4px; margin: 2px 0 6px; border-radius: 2px; background: var(--tint-19); }
+}
+/* Coarse pointers: inline targets (author names, reply previews) and buttons get 44px hit areas. */
+@media (hover: none), (pointer: coarse) {
+  .btn, .friends-home-header > .pane-title { min-height: 44px; }
+  .message-author, .reply-preview { position: relative; }
+  .message-author::after { content: ""; position: absolute; inset: -10px -4px; }
+  .reply-preview::after { content: ""; position: absolute; inset: -10px 0; }
+}
+/* Messages are focusable only so taps reveal their tools; they never show a keyboard ring. */
+.message-body[tabindex="-1"]:focus-visible { outline: none !important; }
+/* Friend list aligns to the header gutter. */
 /* Sign-in: the brand mark, display type and a soft accent glow. */
 .auth-page { position: relative; display: flex; min-height: 100dvh; align-items: center; justify-content: center; padding: 72px 20px 40px; overflow: hidden; background: radial-gradient(1200px 600px at 50% -10%, color-mix(in srgb, var(--color-brand) 22%, transparent), transparent 60%), radial-gradient(700px 420px at 100% 100%, color-mix(in srgb, var(--color-brand) 10%, transparent), transparent 70%), var(--color-rail); }
 .auth-language { position: absolute; top: calc(16px + env(safe-area-inset-top, 0px)); right: 16px; }

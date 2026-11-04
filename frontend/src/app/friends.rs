@@ -525,7 +525,7 @@ fn FriendList(ui: Ui, filter: RwSignal<&'static str>) -> impl IntoView {
         })
     });
     view! {<div class="friend-list h-full overflow-y-auto p-6" data-rove-list on:keydown=move |e| super::keyboard::rove(&e)>
-        <p class="sidebar-section-title mb-3">{move ||format!("{} — {}",if filter.get()=="pending"{crate::i18n::t("Requests")}else if filter.get()=="online"{crate::i18n::t("Online friends")}else if filter.get()=="messages"{crate::i18n::t("Direct messages")}else{crate::i18n::t("All friends")},friends.get().len())}</p>
+        <Show when=move ||!friends.get().is_empty()><p class="sidebar-section-title mb-3">{move ||format!("{} — {}",if filter.get()=="pending"{crate::i18n::t("Requests")}else if filter.get()=="online"{crate::i18n::t("Online friends")}else if filter.get()=="messages"{crate::i18n::t("Direct messages")}else{crate::i18n::t("All friends")},friends.get().len())}</p></Show>
         <Show when=move ||!ui.friends.connected.get()><p role="status" class="mb-4 text-sm text-amber-200">{move || crate::i18n::t("Connecting to friends…")}</p></Show>
         <Show when=move ||friends.get().is_empty()><div class="empty-state min-h-72"><span class="empty-state-icon"><Icon kind=Glyph::Friends/></span><h2 class="empty-state-title">{move ||if filter.get()=="pending"{crate::i18n::t("No pending requests")}else if filter.get()=="online"{crate::i18n::t("No friends online right now")}else{crate::i18n::t("Make yourself at home")}}</h2><p class="max-w-sm">{move ||if filter.get()=="pending"{crate::i18n::t("Friend requests you send or receive will appear here.")}else if filter.get()=="online"{crate::i18n::t("When your friends come online, they’ll show up here.")}else{crate::i18n::t("Use Add friend to find someone by display name or username. Your conversations will appear here.")}}</p>
             <Show when=move ||filter.get()=="online" && has_friends.get() fallback=move ||view!{
@@ -548,8 +548,10 @@ fn FriendList(ui: Ui, filter: RwSignal<&'static str>) -> impl IntoView {
                     aria-label=move || crate::i18n::t("More options") data-tip=move || crate::i18n::t("More options")
                     on:click=move |_|menu_open.update(|open| *open = if *open==Some(id) {None} else {Some(id)})><Icon kind=Glyph::More/></button>
                 <Show when=move ||menu_open.get()==Some(id)>
-                    <div class="row-menu-panel message-options" role="menu" aria-label=move || crate::i18n::t("More options")
+                    <div class="row-menu-scrim" aria-hidden="true" on:click=move |_|menu_open.set(None)></div>
+                    <div class="row-menu-panel message-options" role="menu" aria-label=move ||f.get().person.display_name
                         on:keydown=move |e| super::keyboard::rove_items(&e, "[role=menuitem]") on:click=move |_|menu_open.set(None)>
+                        <p class="context-heading" aria-hidden="true">{move ||f.get().person.display_name}</p>
                         <Show when=move ||f.get().relationship==Relationship::Friend && window().inner_width().ok().and_then(|w|w.as_f64()).is_some_and(|w|w<768.0)><button type="button" role="menuitem" class="context-item friend-call-item" disabled=move ||!available(ui) || !ui.friends.connected.get() || calling.get() on:click=move |_|action(ui,Request::StartCall {conversation_id:id})><Icon kind=Glyph::Phone/>{move ||crate::i18n::t("Voice call")}</button></Show>
                         <button type="button" role="menuitem" class="context-item" on:click=move |_|ui.friends.report_target.set(Some(thiscord_shared::safety::ReportTarget::User {account_id:person}))><Icon kind=Glyph::Flag/>{move ||crate::i18n::t("Report")}</button>
                         <button type="button" role="menuitem" class="context-item context-danger" on:click=move |_|super::safety::block(ui,person)><Icon kind=Glyph::Ban/>{move ||crate::i18n::t("Block")}</button>
