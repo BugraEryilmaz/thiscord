@@ -548,14 +548,14 @@ fn FriendList(ui: Ui, filter: RwSignal<&'static str>) -> impl IntoView {
                     aria-label=move || crate::i18n::t("More options") data-tip=move || crate::i18n::t("More options")
                     on:click=move |_|menu_open.update(|open| *open = if *open==Some(id) {None} else {Some(id)})><Icon kind=Glyph::More/></button>
                 <Show when=move ||menu_open.get()==Some(id)>
-                    <div class="row-menu-panel" role="menu" aria-label=move || crate::i18n::t("More options")
+                    <div class="row-menu-panel message-options" role="menu" aria-label=move || crate::i18n::t("More options")
                         on:keydown=move |e| super::keyboard::rove_items(&e, "[role=menuitem]") on:click=move |_|menu_open.set(None)>
-                        <button type="button" role="menuitem" class="context-item context-danger" on:click=move |_|super::safety::block(ui,person)>{move ||crate::i18n::t("Block")}</button>
-                        <button type="button" role="menuitem" class="context-item" on:click=move |_|ui.friends.report_target.set(Some(thiscord_shared::safety::ReportTarget::User {account_id:person}))>{move ||crate::i18n::t("Report")}</button>
+                        <button type="button" role="menuitem" class="context-item" on:click=move |_|ui.friends.report_target.set(Some(thiscord_shared::safety::ReportTarget::User {account_id:person}))><Icon kind=Glyph::Flag/>{move ||crate::i18n::t("Report")}</button>
+                        <button type="button" role="menuitem" class="context-item context-danger" on:click=move |_|super::safety::block(ui,person)><Icon kind=Glyph::Ban/>{move ||crate::i18n::t("Block")}</button>
                         <button type="button" role="menuitem" class="context-item context-danger" on:click=move |_|{
                     if f.get_untracked().relationship!=Relationship::Friend {action(ui,Request::Remove {account_id:person});return;}
                     super::dialog::confirm(ui,super::dialog::Confirmation::new(crate::i18n::t("Remove this friend?"),crate::i18n::t("Private messages and calls will be unavailable until you become friends again."),crate::i18n::t("Remove friend"),super::dialog::Action::new(move |_|remove(ui,person))).target(f.get_untracked().person.display_name));
-                }>{move ||match f.get().relationship {Relationship::Incoming=>crate::i18n::t("Decline"),Relationship::Outgoing=>crate::i18n::t("Cancel"),Relationship::Friend=>crate::i18n::t("Remove")}}</button>
+                }><Icon kind=Glyph::UserMinus/>{move ||match f.get().relationship {Relationship::Incoming=>crate::i18n::t("Decline"),Relationship::Outgoing=>crate::i18n::t("Cancel"),Relationship::Friend=>crate::i18n::t("Remove")}}</button>
                     </div>
                 </Show>
                 </div>
@@ -1119,11 +1119,11 @@ fn DirectRow(
         </form>}><div class="message-text whitespace-pre-wrap break-words">{move ||{let m=message.get();super::message_content::render(if m.deleted {crate::i18n::t("Message deleted")}else{&m.content},ui)}}<Show when=move ||message.get().edited_at.is_some()&&!message.get().deleted><span class="ml-1 text-xs text-white/60">{move ||format!("({})",crate::i18n::t("edited"))}</span></Show></div></Show>
         <Show when=move ||!message.get().deleted>
             <For each=move ||message.get().attachments key=|a|a.id children=move |attachment|view!{<super::direct_attachments::Card ui id attachment/>}/>
-            <div class="direct-actions flex gap-3 text-xs text-white/60"><Show when=move ||own><button disabled=move ||busy.get() on:click=move |_|start_edit()>{move ||crate::i18n::t("Edit")}</button><button disabled=move ||busy.get() title=move ||crate::i18n::t("Shift-click to delete without confirming") on:click=move |ev:leptos::ev::MouseEvent|{
+            <div class="direct-actions" role="group" aria-label=move ||crate::i18n::t("Message actions")><Show when=move ||own><button type="button" class="icon-button" aria-label=move ||crate::i18n::t("Edit message") data-tip=move ||crate::i18n::t("Edit") disabled=move ||busy.get() on:click=move |_|start_edit()><Icon kind=Glyph::Edit/></button><button type="button" class="icon-button" aria-label=move ||crate::i18n::t("Delete message") data-tip=move ||format!("{}\n{}",crate::i18n::t("Delete"),crate::i18n::t("Shift-click to delete without confirming")) disabled=move ||busy.get() on:click=move |ev:leptos::ev::MouseEvent|{
                 if ev.shift_key() { apply(true); return; }
                 super::dialog::confirm(ui,super::dialog::Confirmation::new(crate::i18n::t("Delete this message?"),crate::i18n::t("The private message and its attachments are deleted for both of you. This cannot be undone."),crate::i18n::t("Delete"),super::dialog::Action::tracked(move ||apply(true),busy,error)));
-            }>{move ||crate::i18n::t("Delete")}</button></Show>
-            <Show when=move ||!own><super::safety::ReportButton ui target=thiscord_shared::safety::ReportTarget::DirectMessage {conversation_id:id,message_id:message.get().id}/></Show></div>
+            }><Icon kind=Glyph::Trash/></button></Show>
+            <Show when=move ||!own><super::safety::ReportButton ui icon=true target=thiscord_shared::safety::ReportTarget::DirectMessage {conversation_id:id,message_id:message.get().id}/></Show></div>
         </Show><p role="alert" class="text-xs text-red-200">{move ||crate::i18n::message(error.get())}</p>
         </div>
         </div>

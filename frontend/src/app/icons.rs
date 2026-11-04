@@ -48,6 +48,8 @@ pub(super) enum Glyph {
     Status,
     Message,
     Phone,
+    Ban,
+    UserMinus,
     Voice,
     Badge,
     Power,
@@ -131,6 +133,8 @@ pub(super) fn Icon(kind: Glyph) -> impl IntoView {
         Glyph::Globe => {
             "M21 12a9 9 0 1 1-18 0 9 9 0 0 1 18 0ZM3.5 9h17M3.5 15h17M12 3c-2.5 2.5-3.5 5.5-3.5 9s1 6.5 3.5 9c2.5-2.5 3.5-5.5 3.5-9s-1-6.5-3.5-9Z"
         }
+        Glyph::Ban => "M21 12a9 9 0 1 1-18 0 9 9 0 0 1 18 0ZM5.6 5.6l12.8 12.8",
+        Glyph::UserMinus => "M14 8a4 4 0 1 1-8 0 4 4 0 0 1 8 0ZM2 21v-1a7 7 0 0 1 12-4.9M16 18h6",
         Glyph::Phone => {
             "M5 3h4l2 5-2.5 1.5a11 11 0 0 0 6 6L16 13l5 2v4a2 2 0 0 1-2 2A16 16 0 0 1 3 5a2 2 0 0 1 2-2Z"
         }

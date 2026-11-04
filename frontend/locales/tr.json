@@ -583,6 +583,8 @@
   "Friend requests you send or receive will appear here.": "Gönderdiğin veya aldığın arkadaşlık istekleri burada görünecek.",
   "More options": "Diğer seçenekler",
   "Show all friends": "Tüm arkadaşları göster",
+  "You’re in {}": "{} kanalındasın",
+  "Choose a text channel to chat while you talk.": "Konuşurken sohbet etmek için bir metin kanalı seç.",
   "No channel selected": "Kanal seçilmedi",
   "No matching people. Try part of their display name or username.": "Eşleşen kişi yok. Görünen adının veya kullanıcı adının bir bölümünü dene.",
   "No pending requests": "Bekleyen istek yok",

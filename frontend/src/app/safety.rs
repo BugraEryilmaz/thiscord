@@ -46,9 +46,20 @@ pub(super) fn block(ui: Ui, account_id: AccountId) {
     super::dialog::confirm(ui, block_prompt(ui, account_id));
 }
 #[component]
-pub(super) fn ReportButton(ui: Ui, target: ReportTarget) -> impl IntoView {
+pub(super) fn ReportButton(
+    ui: Ui,
+    target: ReportTarget,
+    /// Render as a toolbar icon button (message hover tools).
+    #[prop(optional)]
+    icon: bool,
+) -> impl IntoView {
     let target = StoredValue::new(target);
-    view! {<button type="button" class="text-xs text-white/60 hover:text-white" on:click=move |_|ui.friends.report_target.set(Some(target.get_value()))>{move ||crate::i18n::t("Report")}</button>}
+    let report = move |_| ui.friends.report_target.set(Some(target.get_value()));
+    if icon {
+        view! {<button type="button" class="icon-button" aria-label=move ||crate::i18n::t("Report") data-tip=move ||crate::i18n::t("Report") on:click=report><super::icons::Icon kind=super::icons::Glyph::Flag/></button>}.into_any()
+    } else {
+        view! {<button type="button" class="text-xs text-white/60 hover:text-white" on:click=report>{move ||crate::i18n::t("Report")}</button>}.into_any()
+    }
 }
 #[component]
 pub(super) fn PersonActions(ui: Ui, account_id: AccountId) -> impl IntoView {

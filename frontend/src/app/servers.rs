@@ -717,7 +717,10 @@ pub(super) fn ServerHome(ui: Ui) -> impl IntoView {
                     </nav>
                 })}
                 <div class="server-content">
-                    <Show when=move||selected.get().is_some() fallback=move||view!{<div class="flex h-full flex-col"><div class="pane-header"><span class="pane-header-icon" aria-hidden="true">"#"</span><p class="pane-title text-muted">{move || crate::i18n::t("No channel selected")}</p></div><div class="empty-state flex-1"><span class="empty-state-icon"><Icon kind=Glyph::Hash/></span><p>{move || crate::i18n::t("Choose a channel to get started.")}</p></div></div>}>
+                    <Show when=move||selected.get().is_some() fallback=move||view!{<div class="flex h-full flex-col"><div class="pane-header"><p class="pane-title">{move ||ui.server.get().map(|s|s.guild.name).unwrap_or_default()}</p></div><div class="empty-state flex-1">{move ||match ui.server.get().and_then(|s|s.channels.into_iter().find(|c|Some(c.id)==ui.voice.get().channel_id)).map(|c|c.name) {
+                        Some(room) => view!{<span class="empty-state-icon"><Icon kind=Glyph::Voice/></span><h2 class="empty-state-title">{thiscord_frontend::localized_format!(crate::i18n::language(), "You’re in {}", room)}</h2><p>{crate::i18n::t("Choose a text channel to chat while you talk.")}</p>}.into_any(),
+                        None => view!{<span class="empty-state-icon"><Icon kind=Glyph::Hash/></span><p>{crate::i18n::t("Choose a channel to get started.")}</p>}.into_any(),
+                    }}</div></div>}>
                         <For each={move ||panel.get().into_iter().collect::<Vec<_>>()} key=|(guild, channel, _)|(*guild, *channel) children=move |(guild, channel, kind)| {
                             let name = Signal::derive(move || selected.get().filter(|ch|ch.id==channel).map(|ch|ch.name).unwrap_or_default());
                             if kind==ChannelKind::Voice {view!{<MobileBack ui=ui/><super::audio::VoiceChannel ui=ui guild=guild channel=channel name=name/>}.into_any()}else{view!{<super::chat::ChatPanel ui=ui guild=guild channel=channel name=name/>}.into_any()}

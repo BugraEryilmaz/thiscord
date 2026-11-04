@@ -70,7 +70,7 @@ pub(super) fn Login(ui: Ui, #[prop(default = false)] admin: bool) -> impl IntoVi
                 <div class="auth-divider" aria-hidden="true">{move || crate::i18n::t("or")}</div>
                 <button class="btn btn-secondary btn-block" disabled=move ||ui.busy.get() on:click=move |_|google(ui,GooglePurpose::Login)><GoogleMark/>{move || crate::i18n::t("Continue with Google")}</button>
                 <p class="text-center text-sm text-muted">{move || crate::i18n::t("New to Thiscord?")}" "<button class="text-link" disabled=move ||ui.busy.get() on:click=move |_|open("register")>{move || crate::i18n::t("Create an account")}</button></p>
-                <p class="auth-status" role="status" aria-live="polite">{move ||crate::i18n::message(ui.status.get())}</p>
+                <p class="auth-status" class:sr-only=move ||ui.status.with(|s|s=="Welcome to Thiscord") role="status" aria-live="polite">{move ||crate::i18n::message(ui.status.get())}</p>
                 <Show when=move ||ui.ticket.get().is_some()>
                     <div class="flex flex-wrap items-center justify-center gap-4 text-sm">
                         {move ||ui.authorization_url.get().map(|url|view!{<a class="text-link" href=url target="_blank" rel="noopener noreferrer">{move || crate::i18n::t("Continue in Google")}</a>})}
