@@ -36,6 +36,7 @@ pub mod web_notifications;
 pub mod web_shortcuts;
 
 pub mod audio_quality;
+pub mod media_layout;
 pub mod sidebar;
 pub mod stream_ui;
 pub mod touch;

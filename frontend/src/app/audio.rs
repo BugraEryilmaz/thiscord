@@ -661,7 +661,7 @@ pub(super) fn VoiceChannel(
     name: Signal<String>,
 ) -> impl IntoView {
     view! {<section class="voice-channel-view">
-        <header class="voice-channel-header"><Icon kind=Glyph::Voice/><h2>{move ||name.get()}</h2></header>
+        <header class="pane-header voice-channel-header"><Icon kind=Glyph::Voice/><h2 class="pane-title truncate">{move ||name.get()}</h2></header>
         <Show when=move ||desktop() || ui.audio_control.is_remote() || browser_voice(ui) fallback=move ||view!{<p class="voice-channel-empty">{move ||crate::i18n::t("Open the desktop app to use voice and watch streams.")}</p>}>
             <super::screen::ScreenViewer ui=ui guild=guild channel=channel/>
         </Show>

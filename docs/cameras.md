@@ -9,14 +9,16 @@ screen sharing.
 
 Cameras and screen shares appear together in a grid, including local previews.
 Only active media gets a tile; voice-only participants remain in the sidebar.
-The grid fills the available call area and adapts its columns to the tile count
-and window width. Clicking your connected voice channel opens its room view
+The grid fills the available call area and sizes each tile to its stream's
+shape (see [screen sharing](screen-sharing.md) for focus, rearranging and the
+quality label). Clicking your connected voice channel opens its room view
 without reconnecting. Private calls keep a compact video area above the chat,
 leaving message history and the composer visible.
-Click a tile for fullscreen; Escape restores the grid. Right-click to hide an
-item or change the participant's voice/shared-screen audio levels. Hiding a
-remote tile unsubscribes its media; hiding your own tile keeps publishing. Use
-Show hidden items to restore it. Clicking a camera/screen participant in a guild
+Click a tile to focus it; its Full screen button or F fills the screen and Escape
+restores the grid. Right-click a tile, or use its ⋯ button, to hide it, move it or
+change the participant's voice/shared-screen audio levels. Hiding a remote tile
+unsubscribes its media; hiding your own tile keeps publishing. Click a hidden
+stream in the bar above the grid to show it again. Clicking a camera/screen participant in a guild
 sidebar opens that room's grid. Private-call grids appear in their conversation.
 
 Small overlapping avatars on each video show its current remote viewers. Hover
