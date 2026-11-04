@@ -105,6 +105,7 @@ time, .tabular-nums { font-variant-numeric: tabular-nums; }
 .pane-status { flex-shrink: 1; min-width: 0; margin-left: 8px; overflow: hidden; padding: 2px 8px; border-radius: 999px; background: color-mix(in srgb, var(--color-warning) 14%, transparent); color: color-mix(in srgb, var(--color-warning) 55%, var(--color-white)); font-size: 12px; font-weight: 500; white-space: nowrap; text-overflow: ellipsis; }
 .chat-pane { background: var(--color-surface); }
 .sidebar-header { display: flex; align-items: center; gap: 10px; min-height: var(--header-height); margin: -20px -12px 0; padding: 0 8px 0 16px; border-bottom: 1px solid var(--hairline); box-shadow: 0 1px 0 #00000012; }
+.sidebar-header .icon-button { width: 32px; }
 .sidebar-header h2 { font-family: var(--font-display); font-size: 18px; font-weight: 700; letter-spacing: -.015em; line-height: 1.2; }
 .sidebar-section-title { color: color-mix(in srgb, var(--color-muted) 92%, transparent); font-size: 11px; font-weight: 700; letter-spacing: .08em; text-transform: uppercase; }
 .channel-item { display: flex; align-items: center; gap: 8px; width: 100%; min-height: 34px; padding: 6px 8px; border-radius: var(--radius-md); color: color-mix(in srgb, var(--color-muted) 96%, transparent); text-align: left; transition: background .12s, color .12s; }
@@ -236,6 +237,15 @@ select.field-input, .settings-content select { padding-right: 34px; }
 .select-compact option, select.field-input option, .settings-content select option { background: var(--color-popover); color: var(--color-content); }
 @media (max-width: 767px) { .app-shell:not(.mobile-content) .app-toast { left: calc(84px + env(safe-area-inset-left, 0px)); } }
 
+/* Friend rows: actions are quiet ghost buttons until hovered. */
+.friend-row { display: flex; flex-wrap: wrap; align-items: center; gap: 12px; margin: 0 -12px; padding: 12px; border-top: 1px solid var(--hairline); border-radius: var(--radius-md); transition: background .12s; }
+.friend-row:hover, .friend-row:focus-within { background: var(--tint-3); }
+.friend-row:focus-visible { outline-offset: -2px !important; }
+.person-actions { display: flex; gap: 2px; }
+.row-action, .person-actions button { min-height: 34px; padding: 0 10px; border-radius: var(--radius-md); color: color-mix(in srgb, var(--color-muted) 98%, transparent); font-size: 14px; font-weight: 500; cursor: pointer; transition: background .12s, color .12s; }
+.row-action:hover, .person-actions button:hover { background: var(--tint-6); color: var(--color-white); }
+.row-action-danger:hover { background: color-mix(in srgb, var(--color-danger) 14%, transparent); color: color-mix(in srgb, var(--color-danger) 55%, var(--color-white)); }
+
 /* Sign-in: the brand mark, display type and a soft accent glow. */
 .auth-page { position: relative; display: flex; min-height: 100dvh; align-items: center; justify-content: center; padding: 72px 20px 40px; overflow: hidden; background: radial-gradient(1200px 600px at 50% -10%, color-mix(in srgb, var(--color-brand) 22%, transparent), transparent 60%), radial-gradient(700px 420px at 100% 100%, color-mix(in srgb, #9a7cf0 12%, transparent), transparent 70%), var(--color-rail); }
 .auth-language { position: absolute; top: calc(16px + env(safe-area-inset-top, 0px)); right: 16px; }
@@ -254,7 +264,7 @@ select.field-input, .settings-content select { padding-right: 34px; }
 .select-compact { min-height: 36px; padding: 6px 30px 6px 10px; border: 1px solid var(--tint-10); border-radius: var(--radius-md); background-color: var(--tint-4); color: var(--color-content); font-size: 14px; }
 
 /* The account ribbon spans the rail and channel list; content keeps its height. */
-.app-shell { --sidebar-width: 248px; --dock-height: 84px; height: 100dvh; padding: env(safe-area-inset-top, 0px) env(safe-area-inset-right, 0px) 0 env(safe-area-inset-left, 0px); }
+.app-shell { --sidebar-width: 256px; --dock-height: 84px; height: 100dvh; padding: env(safe-area-inset-top, 0px) env(safe-area-inset-right, 0px) 0 env(safe-area-inset-left, 0px); }
 .app-shell.in-voice { --dock-height: 186px; }
 .app-shell:has(.user-dock button.bg-red-700) { --dock-height: 218px; }
 .app-main { margin-left: 80px; height: 100%; display: flex; flex-direction: column; min-width: 0; overflow: hidden; }

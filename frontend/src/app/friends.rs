@@ -475,7 +475,7 @@ fn FriendList(ui: Ui, filter: RwSignal<&'static str>) -> impl IntoView {
         <For each=move ||friends.get() key=|f|f.conversation_id children=move |initial| {
             let id=initial.conversation_id;let person=initial.person.id;
             let f=Memo::new(move |_|ui.friends.friend(id).unwrap_or_else(||initial.clone()));
-            view!{<div data-rove data-context-conversation=id.to_string() tabindex="0" aria-haspopup="menu" aria-label=move ||f.get().person.display_name class="flex flex-wrap items-center gap-4 border-t border-white/10 py-4">
+            view!{<div data-rove data-context-conversation=id.to_string() tabindex="0" aria-haspopup="menu" aria-label=move ||f.get().person.display_name class="friend-row">
                 <crate::avatar::Avatar class="size-10 text-sm" name=Signal::derive(move ||f.get().person.display_name) avatar_id=Signal::derive(move ||f.get().person.avatar_id)/>
                 <div class="min-w-0 flex-1"><p class="truncate font-semibold">{move ||f.get().person.display_name}<span class="ml-2 text-sm font-normal text-white/60">{move ||format!("@{}",f.get().person.username)}</span></p><p class="truncate text-xs text-white/60">{move ||match f.get().relationship {Relationship::Incoming=>crate::i18n::t("Incoming request"),Relationship::Outgoing=>crate::i18n::t("Request sent"),Relationship::Friend if f.get().online=>crate::i18n::t("Online"),Relationship::Friend=>crate::i18n::t("Offline")}}{move ||f.get().person.custom_status.as_ref().map(|s|format!(" · {}",thiscord_frontend::member_list::status_text(s)))}</p></div>
                 <Show when=move ||f.get().relationship==Relationship::Friend>
@@ -483,9 +483,9 @@ fn FriendList(ui: Ui, filter: RwSignal<&'static str>) -> impl IntoView {
                     <button class="icon-button" aria-label=move || crate::i18n::t("Message friend") data-tip=move || crate::i18n::t("Message") on:click=move |_|open(ui,id)><Icon kind=Glyph::Message/></button>
                     <button class="icon-button disabled:opacity-40" aria-label=move || crate::i18n::t("Call friend") data-tip=move || crate::i18n::t("Voice call (desktop)") disabled=move ||!available(ui) || !ui.friends.connected.get() || calling.get() on:click=move |_|action(ui,Request::StartCall {conversation_id:id})><Icon kind=Glyph::Phone/></button>
                 </Show>
-                <Show when=move ||f.get().relationship==Relationship::Incoming><button class="rounded-lg bg-emerald-600 px-3 py-2 text-sm" on:click=move |_|action(ui,Request::Accept {account_id:person})>{move || crate::i18n::t("Accept")}</button></Show>
+                <Show when=move ||f.get().relationship==Relationship::Incoming><button class="btn btn-primary min-h-9 px-3.5" on:click=move |_|action(ui,Request::Accept {account_id:person})>{move || crate::i18n::t("Accept")}</button></Show>
                 <super::safety::PersonActions ui account_id=person/>
-                <button class="rounded-lg px-3 py-2 text-sm text-white/60 hover:bg-red-500/10 hover:text-red-200" on:click=move |_|{
+                <button class="row-action" on:click=move |_|{
                     if f.get_untracked().relationship!=Relationship::Friend {action(ui,Request::Remove {account_id:person});return;}
                     super::dialog::confirm(ui,super::dialog::Confirmation::new(crate::i18n::t("Remove this friend?"),crate::i18n::t("Private messages and calls will be unavailable until you become friends again."),crate::i18n::t("Remove friend"),super::dialog::Action::new(move |_|remove(ui,person))).target(f.get_untracked().person.display_name));
                 }>{move ||match f.get().relationship {Relationship::Incoming=>crate::i18n::t("Decline"),Relationship::Outgoing=>crate::i18n::t("Cancel"),Relationship::Friend=>crate::i18n::t("Remove")}}</button>

@@ -52,7 +52,7 @@ pub(super) fn ReportButton(ui: Ui, target: ReportTarget) -> impl IntoView {
 }
 #[component]
 pub(super) fn PersonActions(ui: Ui, account_id: AccountId) -> impl IntoView {
-    view! {<div class="flex gap-3 text-xs"><button type="button" class="text-red-200" on:click=move |_|block(ui,account_id)>{move ||crate::i18n::t("Block")}</button><ReportButton ui target=ReportTarget::User {account_id}/></div>}
+    view! {<div class="person-actions"><button type="button" class="row-action row-action-danger" on:click=move |_|block(ui,account_id)>{move ||crate::i18n::t("Block")}</button><ReportButton ui target=ReportTarget::User {account_id}/></div>}
 }
 #[component]
 pub(super) fn ReportHost(ui: Ui) -> impl IntoView {
