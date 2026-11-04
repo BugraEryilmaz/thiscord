@@ -55,6 +55,13 @@ struct Arrangement {
 /// Frames counted at the last sample, for measuring the received frame rate.
 type Samples = Rc<RefCell<HashMap<Key, (u32, f64)>>>;
 
+const TIPS_KEY: &str = "thiscord.media-tips";
+const TIP_USES: u32 = 3;
+
+fn storage() -> Option<web_sys::Storage> {
+    window().local_storage().ok().flatten()
+}
+
 static NEXT_GRID: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(1);
 
 fn observe_size(element: &web_sys::Element, callback: impl FnMut() + 'static) {
@@ -70,15 +77,13 @@ fn now() -> f64 {
     window().performance().map(|p| p.now()).unwrap_or_default()
 }
 
-fn focus_selector(selector: &str) {
-    if let Some(element) = document()
+fn focus_selector(selector: &str) -> bool {
+    document()
         .query_selector(selector)
         .ok()
         .flatten()
         .and_then(|e| e.dyn_into::<web_sys::HtmlElement>().ok())
-    {
-        let _ = element.focus();
-    }
+        .is_some_and(|element| element.focus().is_ok())
 }
 
 #[component]
@@ -99,6 +104,22 @@ pub(super) fn ScreenViewer(ui: Ui, guild: GuildId, channel: ChannelId) -> impl I
     let last_move = StoredValue::new(0.0f64);
     let stage = NodeRef::<leptos::html::Div>::new();
     let announce = move |text: String| announcement.set(text);
+    // The gesture hint retires after a few uses; it is remembered per device.
+    let tips = RwSignal::new(
+        storage()
+            .and_then(|s| s.get_item(TIPS_KEY).ok().flatten())
+            .and_then(|v| v.parse::<u32>().ok())
+            .unwrap_or(0),
+    );
+    let used = move || {
+        let next = tips.get_untracked().saturating_add(1);
+        if next <= TIP_USES {
+            tips.set(next);
+            if let Some(s) = storage() {
+                let _ = s.set_item(TIPS_KEY, &next.to_string());
+            }
+        }
+    };
 
     let tiles = Memo::new(move |_| {
         let voice = ui.voice.get();
@@ -307,6 +328,9 @@ pub(super) fn ScreenViewer(ui: Ui, guild: GuildId, channel: ChannelId) -> impl I
         if let Some(stage) = stage.get_untracked() {
             stage.set_scroll_top(0);
         }
+        if next.is_some() {
+            used();
+        }
         match next {
             Some(key) => announce(localized_format!(
                 crate::i18n::language(),
@@ -348,19 +372,43 @@ pub(super) fn ScreenViewer(ui: Ui, guild: GuildId, channel: ChannelId) -> impl I
             ));
         }
     };
-    let move_by = move |key: Key, delta: isize| {
+    // Keyed rows move their DOM node, which drops focus; put it back on the
+    // control that was used so repeated moves keep working.
+    let refocus = move |key: Key, item: Option<&'static str>| {
+        leptos::task::spawn_local(async move {
+            gloo_timers::future::TimeoutFuture::new(0).await;
+            let tile = format!("[data-media-key='{}']", key_text(key));
+            let done = item.is_some_and(|item| {
+                focus_selector(&format!("{tile} [data-move='{item}']:not(:disabled)"))
+                    || focus_selector(&format!("{tile} [data-move]:not(:disabled)"))
+            });
+            if !done {
+                focus_selector(&format!("{tile} .media-tile-content"));
+            }
+        });
+    };
+    // Moves `key` to `index` in the visible order.
+    let move_index = move |key: Key, index: usize, item: Option<&'static str>| {
         let keys = visible_keys.get_untracked();
-        let Some(index) = keys.iter().position(|k| *k == key) else {
+        let (Some(current), Some(target)) = (
+            keys.iter().position(|k| *k == key),
+            keys.get(index).copied(),
+        ) else {
             return;
         };
-        let Some(target) = index
-            .checked_add_signed(delta)
-            .and_then(|i| keys.get(i).copied())
-        else {
+        if current == index {
             return;
-        };
+        }
         move_to(key, target);
         announce_position(key);
+        refocus(key, item);
+        used();
+    };
+    let move_by = move |key: Key, delta: isize, item: Option<&'static str>| {
+        let current = visible_keys.with_untracked(|v| v.iter().position(|k| *k == key));
+        if let Some(index) = current.and_then(|i| i.checked_add_signed(delta)) {
+            move_index(key, index, item);
+        }
     };
     let restore = move |key: Key| {
         hidden.update(|h| h.retain(|k| *k != key));
@@ -392,7 +440,7 @@ pub(super) fn ScreenViewer(ui: Ui, guild: GuildId, channel: ChannelId) -> impl I
             close_menu(true);
         } else if expanded.with_untracked(Option::is_some) {
             e.prevent_default();
-            expanded.set(None);
+            exit_full();
         } else if focus.with_untracked(Option::is_some)
             && document()
                 .active_element()
@@ -463,7 +511,8 @@ pub(super) fn ScreenViewer(ui: Ui, guild: GuildId, channel: ChannelId) -> impl I
                         </Show>
                     </div>
                 </Show>
-                <span class="media-bar-hint" id=hint_id() class:hidden=move ||!several()>{move ||crate::i18n::t("Click to focus · Drag to rearrange")}</span>
+                <span class="media-bar-hint" class:hidden=move ||{!several() || tips.get() >= TIP_USES}>{move ||if focused() {crate::i18n::t("Click a stream to put it on the stage · Esc returns to the grid")} else {crate::i18n::t("Click to focus · Drag to rearrange")}}</span>
+                <span class="sr-only" id=hint_id()>{move ||crate::i18n::t("Enter to focus, F for full screen, Alt and arrow keys to move, Shift+F10 for options.")}</span>
                 <Show when=focused>
                     <button type="button" class="media-bar-grid" on:click=move |_|set_focus(None)><Icon kind=Glyph::Grid/>{move ||crate::i18n::t("Back to grid")}</button>
                 </Show>
@@ -513,12 +562,13 @@ pub(super) fn ScreenViewer(ui: Ui, guild: GuildId, channel: ChannelId) -> impl I
                     let resolution=media_layout::resolution_label(w,h);
                     let nominal=media_layout::nominal_fps(fps);
                     let language=crate::i18n::language();
-                    let short=if nominal==0 {resolution} else {localized_format!(language, "{} · {} fps", resolution, nominal)};
-                    let detail=if own {localized_format!(language, "Your capture: {} × {} at {} frames per second", w, h, format!("{fps:.1}"))}
-                        else {localized_format!(language, "Receiving {} × {} at {} frames per second", w, h, format!("{fps:.1}"))};
-                    Some((short,detail))
+                    let rate=(nominal>0).then(||localized_format!(language, "{} fps", nominal));
+                    let detail=if own {localized_format!(language, "{}×{} · {} fps (your capture)", w, h, format!("{fps:.1}"))}
+                        else {localized_format!(language, "{}×{} · {} fps received", w, h, format!("{fps:.1}"))};
+                    Some((resolution,rate,detail))
                 });
                 let hint=hint_id();
+                let quality_id=format!("media-quality-{grid_id}-{}",key_text(key));
                 let label_menu=label.clone();
                 let label_heading=label.clone();
                 view!{<figure node_ref=figure class="media-tile" data-media-key=key_text(key)
@@ -555,9 +605,9 @@ pub(super) fn ScreenViewer(ui: Ui, guild: GuildId, channel: ChannelId) -> impl I
                     }
                     on:dragend=move |_|{
                         drop_stage.set(false);
-                        if let Some(source)=dragging.get_untracked(){dragging.set(None);if focus.get_untracked()!=Some(source){announce_position(source);}}
+                        if let Some(source)=dragging.get_untracked(){dragging.set(None);used();if focus.get_untracked()!=Some(source){announce_position(source);}}
                     }>
-                    <div class="media-tile-content" role="button" tabindex="0" aria-label=label.clone() aria-describedby=hint
+                    <div class="media-tile-content" role="button" tabindex="0" aria-label=label.clone() aria-describedby=format!("{hint} {quality_id}")
                         aria-pressed=move ||several().then(||on_stage.get().to_string())
                         on:click=move |_|toggle_focus()
                         on:keydown=move |e|{
@@ -566,8 +616,10 @@ pub(super) fn ScreenViewer(ui: Ui, guild: GuildId, channel: ChannelId) -> impl I
                             match key_name.as_str() {
                                 "Enter"|" " if plain && !e.shift_key() => {e.prevent_default();toggle_focus();}
                                 "f"|"F" if plain => {e.prevent_default();full();}
-                                "ArrowLeft"|"ArrowUp" if e.alt_key() => {e.prevent_default();move_by(key,-1);}
-                                "ArrowRight"|"ArrowDown" if e.alt_key() => {e.prevent_default();move_by(key,1);}
+                                "ArrowLeft"|"ArrowUp" if e.alt_key() => {e.prevent_default();move_by(key,-1,None);}
+                                "ArrowRight"|"ArrowDown" if e.alt_key() => {e.prevent_default();move_by(key,1,None);}
+                                "Home" if e.alt_key() => {e.prevent_default();move_index(key,0,None);}
+                                "End" if e.alt_key() => {e.prevent_default();move_index(key,visible_keys.with_untracked(Vec::len).saturating_sub(1),None);}
                                 "ContextMenu" => {e.prevent_default();open_menu();}
                                 "F10" if e.shift_key() => {e.prevent_default();open_menu();}
                                 _ => {}
@@ -582,12 +634,12 @@ pub(super) fn ScreenViewer(ui: Ui, guild: GuildId, channel: ChannelId) -> impl I
                     <figcaption class="media-tile-caption"><Icon kind=if camera {Glyph::Camera} else {Glyph::Screen}/><span class="truncate">{member.display_name().to_owned()}</span></figcaption>
                     <div class="media-tile-actions">
                         <Show when=several>
-                            <button type="button" class="media-tile-button media-tile-focus" aria-pressed=move ||on_stage.get().to_string()
+                            <button type="button" class="media-tile-button media-tile-focus" tabindex="-1" aria-pressed=move ||on_stage.get().to_string()
                                 aria-label=move ||if on_stage.get() {crate::i18n::t("Back to grid")} else {crate::i18n::t("Focus")}
                                 data-tip=move ||if on_stage.get() {crate::i18n::t("Back to grid")} else {crate::i18n::t("Focus")}
                                 on:click=move |_|toggle_focus()>{move ||view!{<Icon kind=if on_stage.get() {Glyph::Grid} else {Glyph::Spotlight}/>}}</button>
                         </Show>
-                        <button type="button" class="media-tile-button media-tile-full"
+                        <button type="button" class="media-tile-button media-tile-full" tabindex="-1"
                             aria-label=move ||if is_expanded() {crate::i18n::t("Exit full screen")} else {crate::i18n::t("Full screen")}
                             data-tip=move ||if is_expanded() {crate::i18n::t("Exit full screen")} else {crate::i18n::t("Full screen")}
                             on:click=move |_|full()>{move ||view!{<Icon kind=if is_expanded() {Glyph::Shrink} else {Glyph::Expand}/>}}</button>
@@ -597,9 +649,11 @@ pub(super) fn ScreenViewer(ui: Ui, guild: GuildId, channel: ChannelId) -> impl I
                             on:click=move |_|if menu.get_untracked()==Some(key) {menu.set(None);} else {open_menu();}><Icon kind=Glyph::More/></button>
                     </div>
                     <Show when=move ||quality.get().is_some()>
-                        <span class="media-quality" tabindex="0" role="note"
-                            aria-label=move ||quality.get().map(|q|q.1).unwrap_or_default()
-                            data-tip=move ||quality.get().map(|q|q.1).unwrap_or_default()>{move ||quality.get().map(|q|q.0).unwrap_or_default()}</span>
+                        <span class="media-quality" id=quality_id.clone() data-tip=move ||quality.get().map(|q|q.2).unwrap_or_default()>
+                            <span class="sr-only">{move ||quality.get().map(|q|q.2).unwrap_or_default()}</span>
+                            <span aria-hidden="true">{move ||quality.get().map(|q|q.0).unwrap_or_default()}</span>
+                            {move ||quality.get().and_then(|q|q.1).map(|rate|view!{<span class="media-quality-fps" aria-hidden="true">" · "{rate}</span>})}
+                        </span>
                     </Show>
                     <super::screen::StreamWatchers ui=ui owner=owner kind=kind epoch=epoch/>
                     <Show when=move ||menu.get()==Some(key)>
@@ -615,8 +669,10 @@ pub(super) fn ScreenViewer(ui: Ui, guild: GuildId, channel: ChannelId) -> impl I
                             </Show>
                             <button type="button" role="menuitem" class="context-item" on:click=move |_|full()><Icon kind=Glyph::Expand/>{move ||crate::i18n::t("Full screen")}<kbd class="context-shortcut">"F"</kbd></button>
                             <Show when=several>
-                                <button type="button" role="menuitem" class="context-item" disabled=first on:click=move |_|move_by(key,-1)><Icon kind=Glyph::ArrowLeft/>{move ||crate::i18n::t("Move earlier")}<kbd class="context-shortcut">"Alt+←"</kbd></button>
-                                <button type="button" role="menuitem" class="context-item" disabled=last on:click=move |_|move_by(key,1)><Icon kind=Glyph::ArrowRight/>{move ||crate::i18n::t("Move later")}<kbd class="context-shortcut">"Alt+→"</kbd></button>
+                                <button type="button" role="menuitem" class="context-item" data-move="start" disabled=first on:click=move |_|move_index(key,0,Some("start"))><Icon kind=Glyph::First/>{move ||crate::i18n::t("Move to start")}<kbd class="context-shortcut">"Alt+Home"</kbd></button>
+                                <button type="button" role="menuitem" class="context-item" data-move="earlier" disabled=first on:click=move |_|move_by(key,-1,Some("earlier"))><Icon kind=Glyph::ArrowLeft/>{move ||crate::i18n::t("Move earlier")}<kbd class="context-shortcut">"Alt+←"</kbd></button>
+                                <button type="button" role="menuitem" class="context-item" data-move="later" disabled=last on:click=move |_|move_by(key,1,Some("later"))><Icon kind=Glyph::ArrowRight/>{move ||crate::i18n::t("Move later")}<kbd class="context-shortcut">"Alt+→"</kbd></button>
+                                <button type="button" role="menuitem" class="context-item" data-move="end" disabled=last on:click=move |_|move_index(key,visible_keys.with_untracked(Vec::len).saturating_sub(1),Some("end"))><Icon kind=Glyph::Last/>{move ||crate::i18n::t("Move to end")}<kbd class="context-shortcut">"Alt+End"</kbd></button>
                             </Show>
                             <button type="button" role="menuitem" class="context-item" on:click=move |_|{
                                 close_menu(false);exit_full();

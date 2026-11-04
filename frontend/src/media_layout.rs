@@ -253,8 +253,6 @@ pub fn focus(width: f64, height: f64, gap: f64, aspects: &[f64], focused: usize)
         placement.stage = (!placement.tiles.is_empty()).then_some(0);
         return placement;
     }
-    let side = (width * 0.22).clamp(150.0, 300.0);
-    let below = (height * 0.24).clamp(96.0, 190.0);
     let fit = |w: f64, h: f64| {
         let (fw, fh) = if w / h > main {
             (h * main, h)
@@ -268,42 +266,76 @@ pub fn focus(width: f64, height: f64, gap: f64, aspects: &[f64], focused: usize)
             h: fh,
         }
     };
-    let right_stage = fit((width - side - gap).max(0.0), height);
-    let bottom_stage = fit(width, (height - below - gap).max(0.0));
-    // A side strip needs room for a usable stage; phones use the bottom strip.
-    let use_side = width - side - gap >= 320.0 && right_stage.area() >= bottom_stage.area();
-    if !use_side {
-        let strip = best_rows(width, below, gap, &others);
-        // Phones: thumbnails this small are unreadable, so the stage sits on
-        // top and the others follow in two scrolling columns.
-        if strip.iter().any(|r| r.area().sqrt() < 110.0) {
-            return stacked_focus(width, height, gap, main, &others, focused);
-        }
-    }
-    let (stage, strip_origin, strip) = if use_side {
-        (
-            right_stage,
-            (width - side, 0.0),
-            best_rows(side, height, gap, &others),
-        )
-    } else {
-        (
-            bottom_stage,
-            (0.0, height - below),
-            best_rows(width, below, gap, &others),
-        )
+    let typical = |rects: &[Rect]| {
+        rects.iter().map(|r| r.area().sqrt()).sum::<f64>() / rects.len().max(1) as f64
     };
+    // Try strips of a few sizes beside and below the stage. The stage's area
+    // dominates; a larger strip wins only where the stage would not grow (a
+    // portrait stage leaves width to spare), and unreadable thumbnails lose.
+    let mut best: Option<(f64, bool, Rect, Vec<Rect>)> = None;
+    for fraction in [0.2, 0.26, 0.33, 0.4] {
+        let side = (width * fraction).clamp(150.0, width * 0.45);
+        if width - side - gap < 320.0 {
+            continue;
+        }
+        let stage = fit(width - side - gap, height);
+        let strip = best_rows(side, height, gap, &others);
+        consider_strip(&mut best, true, stage, strip, typical);
+    }
+    for fraction in [0.22, 0.3, 0.38] {
+        let below = (height * fraction).clamp(90.0, height * 0.45);
+        if height - below - gap < 160.0 {
+            continue;
+        }
+        let stage = fit(width, height - below - gap);
+        let strip = best_rows(width, below, gap, &others);
+        consider_strip(&mut best, false, stage, strip, typical);
+    }
+    let Some((_, use_side, stage, strip)) = best else {
+        return stacked_focus(width, height, gap, main, &others, focused);
+    };
+    // Phones: thumbnails this small are unreadable, so the stage sits on top
+    // and the others follow in two scrolling columns.
+    if width < 600.0 && strip.iter().any(|r| r.area().sqrt() < 110.0) {
+        return stacked_focus(width, height, gap, main, &others, focused);
+    }
+    let (mut stage, mut strip) = (stage, strip);
+    // The stage and its strip are centred together, so no gap opens between them.
+    let start = |rects: &[Rect], x: bool| {
+        rects
+            .iter()
+            .map(|r| if x { r.x } else { r.y })
+            .fold(f64::INFINITY, f64::min)
+    };
+    let end = |rects: &[Rect], x: bool| {
+        rects
+            .iter()
+            .map(|r| if x { r.x + r.w } else { r.y + r.h })
+            .fold(0.0, f64::max)
+    };
+    let (strip_start, strip_end) = (start(&strip, use_side), end(&strip, use_side));
+    let (stage_size, total) = if use_side {
+        (stage.w, width)
+    } else {
+        (stage.h, height)
+    };
+    let block = stage_size + gap + (strip_end - strip_start);
+    let lead = ((total - block) / 2.0).max(0.0);
+    let strip_shift = lead + stage_size + gap - strip_start;
+    if use_side {
+        stage.x = lead;
+        strip.iter_mut().for_each(|r| r.x += strip_shift);
+    } else {
+        stage.y = lead;
+        strip.iter_mut().for_each(|r| r.y += strip_shift);
+    }
     let mut tiles = Vec::with_capacity(aspects.len());
     let mut strip_tiles = strip.into_iter();
     for i in 0..aspects.len() {
         if i == focused {
             tiles.push(stage);
         } else if let Some(r) = strip_tiles.next() {
-            tiles.push(Rect {
-                x: r.x + strip_origin.0,
-                y: r.y + strip_origin.1,
-                ..r
-            });
+            tiles.push(r);
         }
     }
     Placement {
@@ -311,6 +343,21 @@ pub fn focus(width: f64, height: f64, gap: f64, aspects: &[f64], focused: usize)
         stage: Some(focused),
         height,
         scrolls: false,
+    }
+}
+
+fn consider_strip(
+    best: &mut Option<(f64, bool, Rect, Vec<Rect>)>,
+    side: bool,
+    stage: Rect,
+    strip: Vec<Rect>,
+    typical: impl Fn(&[Rect]) -> f64,
+) {
+    let strip_area: f64 = strip.iter().map(Rect::area).sum();
+    let readable = (typical(&strip) / 100.0).min(1.0);
+    let score = (stage.area() + 0.3 * strip_area) * readable;
+    if best.as_ref().is_none_or(|(s, ..)| score > *s + 1e-6) {
+        *best = Some((score, side, stage, strip));
     }
 }
 
@@ -322,7 +369,7 @@ fn stacked_focus(
     others: &[f64],
     focused: usize,
 ) -> Placement {
-    let stage_height = (width / main).min(height * 0.62);
+    let stage_height = (width / main).min(height * if main < 1.0 { 0.72 } else { 0.62 });
     let stage = Rect {
         x: (width - stage_height * main) / 2.0,
         y: 0.0,
@@ -517,8 +564,18 @@ mod tests {
         );
         no_overlap(&p.tiles);
         inside(&p, 1600.0);
-        // A wide area keeps a side strip; on a phone the strip goes below.
+        // A wide area keeps a side strip right next to the stage; on a phone
+        // the strip goes below.
         assert!(p.tiles[0].x > stage.x + stage.w - 1.0);
+        assert!(p.tiles[0].x - (stage.x + stage.w) < 12.5);
+        let call = focus(1080.0, 300.0, 8.0, &[WIDE, WIDE, WIDE], 0);
+        let (s, t) = (call.tiles[0], call.tiles[1]);
+        assert!(
+            (t.x - (s.x + s.w) - 8.0).abs() < 0.5 && s.x > 100.0,
+            "{call:?}"
+        );
+        no_overlap(&call.tiles);
+        inside(&call, 1080.0);
         let phone = focus(366.0, 600.0, 8.0, &[WIDE; 7], 0);
         assert!(phone.tiles[1].y > phone.tiles[0].y + phone.tiles[0].h - 1.0);
         assert!((phone.tiles[0].w - 366.0).abs() < 0.5);
@@ -529,6 +586,39 @@ mod tests {
         let alone = focus(800.0, 600.0, 12.0, &[WIDE], 0);
         assert_eq!(alone.stage, Some(0));
         assert_eq!(focus(800.0, 600.0, 12.0, &[WIDE], 3).stage, None);
+    }
+
+    #[test]
+    fn focus_handles_portrait_streams_on_desktop() {
+        let call = [WIDE, 0.5625, 2.39, 4.0 / 3.0, WIDE, WIDE, WIDE];
+        // A portrait thumbnail never throws a desktop into the phone layout.
+        let p = focus(1080.0, 790.0, 12.0, &call, 0);
+        assert!(!p.scrolls);
+        assert!(p.tiles[0].w > 700.0, "{p:?}");
+        // A portrait stage leaves width to spare: the strip takes it, right beside the stage.
+        let p = focus(1080.0, 790.0, 12.0, &call, 1);
+        let stage = p.tiles[1];
+        assert!((stage.h - 790.0).abs() < 0.5);
+        let strip_left = p
+            .tiles
+            .iter()
+            .enumerate()
+            .filter(|(i, _)| *i != 1)
+            .map(|(_, t)| t.x)
+            .fold(f64::INFINITY, f64::min);
+        assert!(
+            (strip_left - (stage.x + stage.w) - 12.0).abs() < 0.5,
+            "{p:?}"
+        );
+        assert!(
+            p.tiles
+                .iter()
+                .enumerate()
+                .all(|(i, t)| i == 1 || t.w > 150.0),
+            "{p:?}"
+        );
+        no_overlap(&p.tiles);
+        inside(&p, 1080.0);
     }
 
     #[test]

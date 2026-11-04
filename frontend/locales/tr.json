@@ -1662,9 +1662,6 @@
   "Showing {}": "Gösteriliyor: {}",
   "{} streams": "{} yayın",
   "Show {}": "Göster: {}",
-  "{} · {} fps": "{} · {} fps",
-  "Your capture: {} × {} at {} frames per second": "Yakaladığın görüntü: {} × {}, saniyede {} kare",
-  "Receiving {} × {} at {} frames per second": "Alınan görüntü: {} × {}, saniyede {} kare",
   "Hidden: {}": "Gizlendi: {}",
   "Showing all streams": "Tüm yayınlar gösteriliyor",
   "1 stream": "1 yayın",
@@ -1681,5 +1678,12 @@
   "Stream options": "Yayın seçenekleri",
   "Move earlier": "Öne taşı",
   "Move later": "Arkaya taşı",
-  "Hide this stream": "Bu yayını gizle"
+  "Hide this stream": "Bu yayını gizle",
+  "Move to start": "Başa taşı",
+  "Move to end": "Sona taşı",
+  "{}×{} · {} fps (your capture)": "{}×{} · {} fps (senin yakaladığın)",
+  "{}×{} · {} fps received": "{}×{} · {} fps alınıyor",
+  "{} fps": "{} fps",
+  "Click a stream to put it on the stage · Esc returns to the grid": "Sahneye almak için bir yayına tıkla · Izgaraya dönmek için Esc",
+  "Enter to focus, F for full screen, Alt and arrow keys to move, Shift+F10 for options.": "Odaklamak için Enter, tam ekran için F, taşımak için Alt ve ok tuşları, seçenekler için Shift+F10."
 }
