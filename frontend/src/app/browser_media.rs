@@ -165,7 +165,7 @@ pub(super) fn BrowserCameraControls(ui: Ui) -> impl IntoView {
         })
     });
     view! {
-        <button class="icon-button" class:active=active disabled=move ||busy.get() || (!active() && !super::audio::media_publish_allowed(ui))
+        <button class="icon-button voice-action" class:active=active disabled=move ||busy.get() || (!active() && !super::audio::media_publish_allowed(ui))
             aria-label=move ||crate::i18n::t("Camera")
             data-tip=move ||if active(){crate::i18n::t("Turn camera off")}else if !super::audio::media_publish_allowed(ui){crate::i18n::t("Undeafen to share")}else{crate::i18n::t("Turn camera on")} aria-pressed=move ||active().to_string() on:click=toggle>
             {move ||view!{<Icon kind=if active(){Glyph::Camera}else{Glyph::CameraOff}/>}}

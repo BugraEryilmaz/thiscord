@@ -510,17 +510,15 @@ pub(super) fn ServerRail(ui: Ui) -> impl IntoView {
             </div>
         </nav>
         <dialog node_ref=dialog on:click=move |e|super::dialog::dismiss_outside(e,dialog,ui.busy.get_untracked()) aria-labelledby="server-dialog-title" class="app-dialog max-w-md" on:close=move |_|password.set(String::new()) on:cancel=move |ev: web_sys::Event|{if ui.busy.get_untracked(){ev.prevent_default();}}>
-            <header class="mb-6 flex items-center justify-between"><h2 id="server-dialog-title" class="dialog-title">{move ||if creating.get(){crate::i18n::t("Create a server")}else{crate::i18n::t("Join a server")}}</h2><button aria-label=move || crate::i18n::t("Close dialog") class="icon-button -mr-2" disabled=move ||ui.busy.get() on:click=move |_|if let Some(dialog)=dialog.get(){dialog.close();}><Icon kind=Glyph::Close/></button></header>
+            <header class="mb-6 flex items-start justify-between gap-4"><span class="dialog-mark"><Icon kind=Glyph::Server/></span><h2 id="server-dialog-title" class="dialog-title mr-auto self-center">{move ||if creating.get(){crate::i18n::t("Create a server")}else{crate::i18n::t("Join a server")}}</h2><button aria-label=move || crate::i18n::t("Close dialog") class="icon-button -mr-2" disabled=move ||ui.busy.get() on:click=move |_|if let Some(dialog)=dialog.get(){dialog.close();}><Icon kind=Glyph::Close/></button></header>
             <form class="space-y-5" on:submit=submit>
-                <Show when=move ||creating.get()><p class="settings-hint">{move ||ui.instance_access.get().map(|a|super::permissions::allocation_summary(&a))}</p>
-                    <Show when=quota_reached><p class="settings-hint text-amber-300">{move ||crate::i18n::t("Owned server limit reached; transfer or delete a server, or ask the instance owner to review your limits")}</p></Show>
-                    <button type="button" class="settings-secondary" disabled=move ||ui.busy.get() on:click=move |_|{ui.busy.set(true);leptos::task::spawn_local(async move{refresh(ui).await;ui.busy.set(false);});}>{move ||crate::i18n::t("Refresh limits")}</button>
-                </Show>
+                <Show when=quota_reached><p class="dialog-notice" role="status">{move ||crate::i18n::t("Owned server limit reached; transfer or delete a server, or ask the instance owner to review your limits")}</p></Show>
                 <Show when=move ||creating.get() fallback=move ||view!{<Field label="Server ID, invite code or invite link" value=server_id/>}><Field label="Server name" value=name/></Show>
                 <Show when=move ||{creating.get() || server_id.get().trim().parse::<GuildId>().is_ok()}><Field label="Server password (optional)" value=password kind="password" autocomplete="off"/></Show>
                 <p class="dialog-description">{move ||if creating.get(){crate::i18n::t("Leave the password empty to let verified accounts join using your server ID.")}else{crate::i18n::t("Paste an invite link to join. No server password is needed for an invite.")}}</p>
-                <p class="text-sm text-red-300" role="alert">{move ||crate::i18n::message(error.get())}</p>
+                <p class="composer-error" role="alert">{move ||crate::i18n::message(error.get())}</p>
                 <button class="btn btn-primary btn-block" disabled=move ||ui.busy.get()||(creating.get()&&(quota_reached()||name.get().trim().is_empty()))||(!creating.get()&&server_id.get().trim().is_empty())>{move ||if ui.busy.get(){crate::i18n::t("Please wait…")}else if creating.get(){crate::i18n::t("Create server")}else{crate::i18n::t("Join server")}}</button>
+                <Show when=move ||creating.get()><p class="dialog-footnote"><span>{move ||ui.instance_access.get().map(|a|super::permissions::allocation_summary(&a))}</span>" "<button type="button" class="text-link" disabled=move ||ui.busy.get() on:click=move |_|{ui.busy.set(true);leptos::task::spawn_local(async move{refresh(ui).await;ui.busy.set(false);});}>{move ||crate::i18n::t("Refresh limits")}</button></p></Show>
             </form>
         </dialog>
     }
@@ -719,7 +717,7 @@ pub(super) fn ServerHome(ui: Ui) -> impl IntoView {
                     </nav>
                 })}
                 <div class="server-content">
-                    <Show when=move||selected.get().is_some() fallback=move||view!{<div class="empty-state"><span class="empty-state-icon"><Icon kind=Glyph::Hash/></span><p>{move || crate::i18n::t("Choose a channel to get started.")}</p></div>}>
+                    <Show when=move||selected.get().is_some() fallback=move||view!{<div class="flex h-full flex-col"><div class="pane-header"><span class="pane-header-icon" aria-hidden="true">"#"</span><p class="pane-title text-muted">{move || crate::i18n::t("No channel selected")}</p></div><div class="empty-state flex-1"><span class="empty-state-icon"><Icon kind=Glyph::Hash/></span><p>{move || crate::i18n::t("Choose a channel to get started.")}</p></div></div>}>
                         <For each={move ||panel.get().into_iter().collect::<Vec<_>>()} key=|(guild, channel, _)|(*guild, *channel) children=move |(guild, channel, kind)| {
                             let name = Signal::derive(move || selected.get().filter(|ch|ch.id==channel).map(|ch|ch.name).unwrap_or_default());
                             if kind==ChannelKind::Voice {view!{<MobileBack ui=ui/><super::audio::VoiceChannel ui=ui guild=guild channel=channel name=name/>}.into_any()}else{view!{<super::chat::ChatPanel ui=ui guild=guild channel=channel name=name/>}.into_any()}
@@ -730,7 +728,7 @@ pub(super) fn ServerHome(ui: Ui) -> impl IntoView {
             </section>
         </Show>
         <dialog node_ref=dialog on:click=move |e|super::dialog::dismiss_outside(e,dialog,ui.busy.get_untracked()) aria-labelledby="channel-dialog-title" class="app-dialog max-w-md" on:cancel=move |ev: web_sys::Event|{if ui.busy.get_untracked(){ev.prevent_default();}}>
-            <header class="mb-5 flex items-center justify-between"><h2 id="channel-dialog-title" class="dialog-title">{move || crate::i18n::t("Create channel")}</h2><button class="icon-button -mr-2" aria-label=move || crate::i18n::t("Close dialog") disabled=move ||ui.busy.get() on:click=move |_|if let Some(dialog)=dialog.get(){dialog.close();}><Icon kind=Glyph::Close/></button></header>
+            <header class="mb-6 flex items-start justify-between gap-4"><span class="dialog-mark"><Icon kind=Glyph::Hash/></span><h2 id="channel-dialog-title" class="dialog-title mr-auto self-center">{move || crate::i18n::t("Create channel")}</h2><button class="icon-button -mr-2" aria-label=move || crate::i18n::t("Close dialog") disabled=move ||ui.busy.get() on:click=move |_|if let Some(dialog)=dialog.get(){dialog.close();}><Icon kind=Glyph::Close/></button></header>
             <form class="space-y-5" on:submit=submit>
                 <Field label="Channel name" value=name/>
                 <label class="field"><span class="field-label">{move || crate::i18n::t("Channel type")}</span><select class="field-input" prop:value=move ||if voice.get(){"voice"}else{"text"} on:change=move |ev|voice.set(event_target_value(&ev)=="voice")><option value="text">{move || crate::i18n::t("Text")}</option><option value="voice">{move || crate::i18n::t("Voice")}</option></select></label>

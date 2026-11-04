@@ -87,7 +87,8 @@ pub(super) fn Login(ui: Ui, #[prop(default = false)] admin: bool) -> impl IntoVi
                     if x<bounds.left() || x>bounds.right() || y<bounds.top() || y>bounds.bottom() {dialog.close();}
                 }}>
                 <header class="mb-5 flex items-start justify-between gap-4">
-                    <h2 id="account-dialog-title" class="dialog-title">{move ||match mode.get(){"register"=>crate::i18n::t("Create an account"),"reset"=>crate::i18n::t("Reset password"),_=>crate::i18n::t("Forgot password?")}}</h2>
+                    <span class="dialog-mark"><crate::brand::BrandMark class="h-6 w-6"/></span>
+                    <h2 id="account-dialog-title" class="dialog-title mr-auto self-center">{move ||match mode.get(){"register"=>crate::i18n::t("Create an account"),"reset"=>crate::i18n::t("Reset password"),_=>crate::i18n::t("Forgot password?")}}</h2>
                     <button type="button" aria-label=move || crate::i18n::t("Close dialog") class="icon-button -mr-2 -mt-1" on:click=move |_|if let Some(dialog)=dialog.get(){dialog.close();}><super::icons::Icon kind=super::icons::Glyph::Close/></button>
                 </header>
                 <p class="dialog-description mb-5">{move ||match mode.get(){"register"=>crate::i18n::t("We’ll email you a link to verify your address."),"reset"=>crate::i18n::t("Enter your backup reset code and choose a new password."),_=>crate::i18n::t("We’ll email you a link to choose a new password in your browser, plus a backup code.")}}</p>
