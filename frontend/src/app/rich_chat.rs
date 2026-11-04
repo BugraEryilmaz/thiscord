@@ -443,7 +443,7 @@ pub(super) fn Pins(chat: Chat) -> impl IntoView {
                     <p class="px-4 py-2 text-xs text-white/60" role="status">{move ||crate::i18n::t("Loading pinned messages…")}</p>
                 </Show>
                 <Show when=move ||chat.rich.with(|r|!r.pins_open() && !r.pins_loading())>
-                    <button class="m-3 rounded px-3 py-2 text-sm text-sky-300 hover:bg-white/5" on:click=move |_|chat.load_pins()>{move ||crate::i18n::t("Retry pinned messages")}</button>
+                    <button class="m-3 rounded px-3 py-2 text-sm text-link hover:bg-white/5" on:click=move |_|chat.load_pins()>{move ||crate::i18n::t("Retry pinned messages")}</button>
                 </Show>
                 <For each=move ||chat.rich.with(|r|r.pins().iter().map(|m|m.id).collect::<Vec<_>>()) key=|id|*id
                     children=move |id|view!{<PinnedMessage chat id/>}/>
@@ -476,7 +476,7 @@ fn PinnedMessage(chat: Chat, id: MessageId) -> impl IntoView {
             </div>
             <div class="pl-7 text-sm text-content">{move ||message.with(|m|super::super::message_content::render(m.as_ref().map(|m|m.content.as_str()).unwrap_or_default(),chat.ui))}</div>
             <For each=move ||message.with(|m|m.as_ref().map(|m|m.attachments.clone()).unwrap_or_default()) key=|a|a.id children=move |attachment|view!{
-                <button class="ml-7 mt-2 block max-w-full truncate text-sm text-sky-300 hover:underline" title=move ||crate::i18n::t("Jump to pinned message") on:click=move |_|chat.jump(id)>{attachment.filename}</button>
+                <button class="ml-7 mt-2 block max-w-full truncate text-sm text-link hover:underline" title=move ||crate::i18n::t("Jump to pinned message") on:click=move |_|chat.jump(id)>{attachment.filename}</button>
             }/>
         </article>
     }.into_any()

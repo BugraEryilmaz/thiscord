@@ -204,9 +204,9 @@ const fn hex(value: u32) -> Rgb {
     Rgb((value >> 16) as u8, (value >> 8) as u8, value as u8)
 }
 
-pub const DEFAULT_ACCENT: Rgb = hex(0x7a50f5);
+pub const DEFAULT_ACCENT: Rgb = hex(0x7f4af5);
 /// Text, secondary text and links for dark themes.
-const LIGHT_TEXT: [u32; 3] = [0xeceef3, 0xb4b7c3, 0x8aa4ff];
+const LIGHT_TEXT: [u32; 3] = [0xeceef3, 0xb4b7c3, 0xb49cff];
 /// Accent and status colors shared by every theme.
 const ACCENT_DEFAULTS: [Rgb; 5] = [
     DEFAULT_ACCENT,
@@ -321,7 +321,7 @@ impl Theme {
                 [
                     0xffffff, 0xf4f5f8, 0xe8eaf0, 0xeef0f4, 0xf7f8fa, 0xffffff, 0xe1e4eb,
                 ],
-                [0x1d2027, 0x545864, 0x2449d8],
+                [0x1d2027, 0x545864, 0x5b2fd6],
             ),
         }
     }
@@ -678,8 +678,8 @@ mod tests {
 
     #[test]
     fn parses_only_six_digit_hex() {
-        assert_eq!(Rgb::parse("#7A50F5"), Some(DEFAULT_ACCENT));
-        assert_eq!(DEFAULT_ACCENT.hex(), "#7a50f5");
+        assert_eq!(Rgb::parse("#7F4AF5"), Some(DEFAULT_ACCENT));
+        assert_eq!(DEFAULT_ACCENT.hex(), "#7f4af5");
         for bad in [
             "",
             "5865f2",
@@ -718,7 +718,7 @@ mod tests {
             .with(Token::Surface, Some(hex(0x101010)));
         let code = custom.encode();
         assert_eq!(code, "slate;surface=#101010;accent=#14a394");
-        assert_eq!(Theme::Graphite.palette().get(Token::Link), hex(0x8aa4ff));
+        assert_eq!(Theme::Graphite.palette().get(Token::Link), hex(0xb49cff));
         assert_eq!(Appearance::decode(&code), Some(custom));
         assert_eq!(
             Appearance::decode(" slate ; ACCENT=#14A394 ;\n"),

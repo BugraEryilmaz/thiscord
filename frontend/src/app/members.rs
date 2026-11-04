@@ -307,7 +307,7 @@ pub(super) fn Panel(ui: Ui, guild: GuildId) -> impl IntoView {
                 close();
             }>
             <header class="member-panel-header">
-                <h2 class="pane-title min-w-0 flex-1 truncate text-[15px]">{move || crate::i18n::t("Members")}</h2>
+                <h2 class="pane-title min-w-0 flex-1 truncate">{move || crate::i18n::t("Members")}</h2>
                 <button node_ref=close_button type="button" class="icon-button member-drawer-close" aria-label=move || crate::i18n::t("Close member list")
                     on:click=move |_| close()><Icon kind=Glyph::Close/></button>
             </header>

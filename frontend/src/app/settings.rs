@@ -158,7 +158,7 @@ pub(super) fn Host(ui: Ui) -> impl IntoView {
                             <NavItem ui=ui page="language" label="Language" icon=Glyph::Globe/>
                             <Show when=client::desktop><NavItem ui=ui page="shortcuts" label="Shortcuts & overlay" icon=Glyph::Keyboard/><NavItem ui=ui page="desktop" label="App behavior" icon=Glyph::Screen/></Show>
                             <Show when=client::web_app><NavItem ui=ui page="shortcuts" label="Keyboard shortcuts" icon=Glyph::Keyboard/></Show>
-                            <NavItem ui=ui page="updates" label="Updates" icon=Glyph::Refresh/>
+                            <NavItem ui=ui page="updates" label="Updates" icon=Glyph::Update/>
                             <NavItem ui=ui page="notifications" label="Notifications" icon=Glyph::Bell/>
                             <NavItem ui=ui page="safety" label="Safety & reports" icon=Glyph::Shield/>
                             <NavItem ui=ui page="administration" label="Instance access" icon=Glyph::Key/>
