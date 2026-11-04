@@ -54,7 +54,7 @@ fn test_database_url() -> Result<String> {
         .ok_or("Set TEST_DATABASE_URL to a dedicated database ending in _test")
 }
 
-fn fixture(secret: &str, users: usize, room_size: usize) -> Result<Fixture> {
+fn fixture(secret: &str, users: usize, room_size: usize, texts: usize) -> Result<Fixture> {
     let value = test_database_url()?;
     let mut url = validated_test_url(&value)?;
     let mut admin =
@@ -62,7 +62,7 @@ fn fixture(secret: &str, users: usize, room_size: usize) -> Result<Fixture> {
     admin
         .batch_execute("SET lock_timeout='5s'; SET statement_timeout='10s'")
         .map_err(|_| "Cannot configure fixture connection timeouts")?;
-    seed_fixture(&mut url, admin, secret, users, room_size)
+    seed_fixture(&mut url, admin, secret, users, room_size, texts)
 }
 
 fn validated_test_url(value: &str) -> Result<url::Url> {
@@ -86,6 +86,7 @@ fn seed_fixture(
     secret: &str,
     users: usize,
     room_size: usize,
+    texts: usize,
 ) -> Result<Fixture> {
     let schema = format!("voice_load_{}", uuid::Uuid::new_v4().simple());
     admin
@@ -112,12 +113,16 @@ fn seed_fixture(
         }
         let guild = common::id("guild", 0).to_string();
         execute(c, "INSERT INTO guilds(id,name,owner) VALUES($1::uuid,'Disposable voice load',$2::uuid)", &[guild.clone(), common::id("account", 0).to_string()])?;
-        execute(c, "INSERT INTO guild_roles(guild_id,name,position,everyone,permissions) VALUES($1::uuid,'Everyone',0,TRUE,'[\"view_channel\",\"join_voice\",\"speak\"]'::jsonb)", std::slice::from_ref(&guild))?;
+        execute(c, "INSERT INTO guild_roles(guild_id,name,position,everyone,permissions) VALUES($1::uuid,'Everyone',0,TRUE,'[\"view_channel\",\"read_history\",\"send_messages\",\"join_voice\",\"speak\"]'::jsonb)", std::slice::from_ref(&guild))?;
         for index in 0..users {
             execute(c, "INSERT INTO guild_members(guild_id,account_id) VALUES($1::uuid,$2::uuid)", &[guild.clone(), common::id("account", index).to_string()])?;
         }
         for room in 0..users.div_ceil(room_size) {
             execute(c, "INSERT INTO channels(guild_id,id,name,kind) VALUES($1::uuid,$2::uuid,$3,'voice')", &[guild.clone(), common::id("channel", room).to_string(), format!("load-{room}")])?;
+        }
+        // Text channels for chat_load; chat sockets and voice rosters share the guild.
+        for text in 0..texts {
+            execute(c, "INSERT INTO channels(guild_id,id,name,kind) VALUES($1::uuid,$2::uuid,$3,'text')", &[guild.clone(), common::id("text", text).to_string(), format!("text-{text}")])?;
         }
         Ok(())
     }).map_err(|_| "Cannot seed benchmark fixtures")?;
@@ -129,7 +134,7 @@ async fn run() -> Result<()> {
     let mut args = Args::parse()?;
     if args.flag("--help") {
         println!(
-            "voice_load_server --bind 0.0.0.0:3001 --users 64 --room-size 8 --allow-insecure\nUsers: 2..500; room size: 2..8. Use --tls instead of --allow-insecure for TLS_CERT_PATH/TLS_KEY_PATH.\nRequires TEST_DATABASE_URL (*_test) and THISCORD_LOAD_SECRET. See docs/voice-load.md."
+            "voice_load_server --bind 0.0.0.0:3001 --users 64 --room-size 8 --allow-insecure\nUsers: 2..500; room size: 2..8; --text-channels 1..16 (1) for chat_load. Use --tls instead of --allow-insecure for TLS_CERT_PATH/TLS_KEY_PATH.\nRequires TEST_DATABASE_URL (*_test) and THISCORD_LOAD_SECRET. See docs/voice-load.md."
         );
         return Ok(());
     }
@@ -139,6 +144,7 @@ async fn run() -> Result<()> {
         .map_err(|_| "Invalid bind address")?;
     let users = args.number("--users", 64, 2, 500)?;
     let room_size = args.number("--room-size", 8, 2, 8)?;
+    let texts = args.number("--text-channels", 1, 1, 16)?;
     let insecure = args.flag("--allow-insecure");
     let tls = args.flag("--tls");
     args.finish()?;
@@ -156,7 +162,7 @@ async fn run() -> Result<()> {
     } else {
         None
     };
-    let fixture = tokio::task::spawn_blocking(move || fixture(&secret, users, room_size))
+    let fixture = tokio::task::spawn_blocking(move || fixture(&secret, users, room_size, texts))
         .await
         .map_err(|_| "Fixture task failed")??;
     println!("Disposable schema: {}", fixture.schema);
@@ -225,7 +231,7 @@ mod tests {
     #[test]
     #[ignore = "requires TEST_DATABASE_URL"]
     fn disposable_fixtures_have_hashed_sessions_and_voice_permissions() {
-        let f = fixture(&"a".repeat(64), 16, 8).unwrap();
+        let f = fixture(&"a".repeat(64), 16, 8, 1).unwrap();
         let mut c = f.pool.as_ref().unwrap().get().unwrap();
         use thiscord_backend::schema::{accounts, session_tokens};
         assert_eq!(

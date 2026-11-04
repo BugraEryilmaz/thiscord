@@ -34,6 +34,12 @@ use webrtc::{
 type Socket = WebSocketStream<MaybeTlsStream<tokio::net::TcpStream>>;
 const PERIOD: Duration = Duration::from_millis(20);
 const WARMUP: u32 = u32::MAX;
+/// Synthetic camera frames per second; each frame is split into equal RTP packets.
+const VIDEO_FPS: u32 = 30;
+const VIDEO_PACKET_BYTES: usize = 1100;
+/// Forced camera keyframe spacing, so new or recovering viewers resynchronize.
+const KEYFRAME_FRAMES: u32 = VIDEO_FPS;
+const MAGIC: &[u8; 8] = b"TCLDv001";
 
 struct Config {
     endpoint: String,
@@ -45,8 +51,28 @@ struct Config {
     bytes: usize,
     late_ms: u64,
     relay: bool,
+    /// Camera publication bitrate (bits/s); 0 disables the video workload.
+    camera_bitrate: usize,
     epoch: Instant,
     run: [u8; 8],
+}
+impl Config {
+    fn video(&self) -> bool {
+        self.camera_bitrate > 0
+    }
+    /// Equal RTP packets per synthetic camera frame (at least one).
+    fn video_packets_per_frame(&self) -> usize {
+        (self.camera_bitrate / 8 / VIDEO_FPS as usize)
+            .div_ceil(VIDEO_PACKET_BYTES)
+            .max(1)
+    }
+    fn video_packet_bytes(&self) -> usize {
+        (self.camera_bitrate / 8 / VIDEO_FPS as usize / self.video_packets_per_frame())
+            .clamp(40, VIDEO_PACKET_BYTES)
+    }
+    fn video_packets(&self) -> usize {
+        self.seconds * VIDEO_FPS as usize * self.video_packets_per_frame()
+    }
 }
 
 fn endpoint(base: &str, insecure: bool) -> Result<String> {
@@ -107,14 +133,24 @@ impl PeerConnectionEventHandler for Handler {
 }
 
 fn receive(config: &Config, index: usize, stats: &mut Stats, payload: &[u8]) {
-    if payload.len() != config.bytes || &payload[..8] != b"TCLDv001" || payload[8..16] != config.run
-    {
+    // Video payloads carry one H.264 NAL header byte before the measurement header.
+    let video =
+        config.video() && payload.len() == config.video_packet_bytes() && &payload[1..9] == MAGIC;
+    let header = if video {
+        &payload[1..]
+    } else if payload.len() == config.bytes && &payload[..8] == MAGIC {
+        payload
+    } else {
+        stats.invalid += 1;
+        return;
+    };
+    if header[8..16] != config.run {
         stats.invalid += 1;
         return;
     }
-    let source = u32::from_be_bytes(payload[16..20].try_into().unwrap()) as usize;
-    let sequence = u32::from_be_bytes(payload[20..24].try_into().unwrap());
-    let sent_us = u64::from_be_bytes(payload[24..32].try_into().unwrap());
+    let source = u32::from_be_bytes(header[16..20].try_into().unwrap()) as usize;
+    let sequence = u32::from_be_bytes(header[20..24].try_into().unwrap());
+    let sent_us = u64::from_be_bytes(header[24..32].try_into().unwrap());
     let now = config.epoch.elapsed().as_micros() as u64;
     if source >= config.users
         || source == index
@@ -124,12 +160,22 @@ fn receive(config: &Config, index: usize, stats: &mut Stats, payload: &[u8]) {
         stats.invalid += 1;
         return;
     }
-    let stream = &mut stats.streams[source % config.room_size];
+    let (stream, limit) = if video {
+        (
+            &mut stats.video_streams[source % config.room_size],
+            config.video_packets(),
+        )
+    } else {
+        (
+            &mut stats.streams[source % config.room_size],
+            config.seconds * 50,
+        )
+    };
     if sequence == WARMUP {
         stream.warm = true;
         return;
     }
-    if sequence as usize >= config.seconds * 50 {
+    if sequence as usize >= limit {
         stats.invalid += 1;
         return;
     }
@@ -175,6 +221,7 @@ struct Peer {
     socket: Socket,
     connection: Connection,
     track: Arc<TrackLocalStaticRTP>,
+    camera: Option<Arc<TrackLocalStaticRTP>>,
 }
 struct Connection {
     pc: Arc<dyn PeerConnection>,
@@ -251,6 +298,21 @@ async fn join(config: Arc<Config>, index: usize, stats: Arc<Mutex<Stats>>) -> Re
     let gathered = Arc::new(Notify::new());
     let (stop_tx, stop) = watch::channel(false);
     let mut media = MediaEngine::default();
+    // Match the SFU's H.264 offer exactly, as the native clients and voice bots do.
+    media
+        .register_codec(
+            RTCRtpCodecParameters {
+                rtp_codec: RTCRtpCodec {
+                    mime_type: "video/H264".into(),
+                    clock_rate: 90_000,
+                    sdp_fmtp_line: thiscord_shared::screen::H264_FMTP.into(),
+                    ..Default::default()
+                },
+                payload_type: voice::MediaKind::Camera.payload_type(),
+            },
+            RtpCodecKind::Video,
+        )
+        .map_err(|_| "Media engine setup failed")?;
     media
         .register_default_codecs()
         .map_err(|_| "Media engine setup failed")?;
@@ -322,6 +384,34 @@ async fn join(config: Arc<Config>, index: usize, stats: Arc<Mutex<Stats>>) -> Re
         pc.add_track(track.clone() as Arc<dyn TrackLocal>)
             .await
             .map_err(|_| "Cannot add sender")?;
+        let camera = if config.video() {
+            let ssrc = voice::MediaKind::Camera.publisher_ssrc();
+            let camera = Arc::new(TrackLocalStaticRTP::new(MediaStreamTrack::new(
+                format!("camera-{ssrc}"),
+                format!("camera-{ssrc}"),
+                format!("camera-{ssrc}"),
+                RtpCodecKind::Video,
+                vec![RTCRtpEncodingParameters {
+                    rtp_coding_parameters: RTCRtpCodingParameters {
+                        ssrc: Some(ssrc),
+                        ..Default::default()
+                    },
+                    codec: RTCRtpCodec {
+                        mime_type: "video/H264".into(),
+                        clock_rate: 90_000,
+                        sdp_fmtp_line: thiscord_shared::screen::H264_FMTP.into(),
+                        ..Default::default()
+                    },
+                    ..Default::default()
+                }],
+            )));
+            pc.add_track(camera.clone() as Arc<dyn TrackLocal>)
+                .await
+                .map_err(|_| "Cannot add camera sender")?;
+            Some(camera)
+        } else {
+            None
+        };
         pc.set_local_description(
             pc.create_answer(None)
                 .await
@@ -336,8 +426,9 @@ async fn join(config: Arc<Config>, index: usize, stats: Arc<Mutex<Stats>>) -> Re
                 browser_publisher: false,
                 packet_redundancy: false,
                 remote_audio: false,
-                screen_feedback: false,
-                screen_subscriptions: false,
+                // Camera views are leased subscriptions; feedback carries keyframe requests.
+                screen_feedback: config.video(),
+                screen_subscriptions: config.video(),
                 screen_layers: false,
                 screen_profiles: false,
                 video_diagnostics: false,
@@ -347,18 +438,41 @@ async fn join(config: Arc<Config>, index: usize, stats: Arc<Mutex<Stats>>) -> Re
             },
         )
         .await?;
-        Ok(track)
+        if camera.is_some() {
+            send(&mut socket, ClientEvent::Camera { active: true }).await?;
+        }
+        Ok((track, camera))
     })
     .await
     .unwrap_or(Err("ICE negotiation timed out"));
     match result {
-        Ok(track) => Ok(Peer {
+        Ok((track, camera)) => Ok(Peer {
             socket,
             connection,
             track,
+            camera,
         }),
         Err(e) => Err(e),
     }
+}
+
+/// Leased camera subscriptions for every other active camera in the room.
+fn camera_views(
+    members: &[voice::Participant],
+    own: usize,
+) -> Vec<thiscord_shared::screen::Subscription> {
+    members
+        .iter()
+        .filter(|m| m.slot != own && m.camera_active)
+        .map(|m| thiscord_shared::screen::Subscription {
+            kind: voice::MediaKind::Camera,
+            slot: m.slot,
+            owner: m.account_id,
+            epoch: m.camera_epoch,
+            bitrate: thiscord_shared::screen::MAX_VIEW_BITRATE,
+            h264_high: false,
+        })
+        .collect()
 }
 
 async fn exercise(
@@ -376,6 +490,17 @@ async fn exercise(
     let mut timestamp = 0_u32;
     let mut last_measured = None;
     let mut last_pong = Instant::now();
+    let video_period = Duration::from_secs(1) / VIDEO_FPS;
+    let mut video_tick = tokio::time::interval(video_period);
+    video_tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+    let mut video_sequence = 0_u16;
+    let mut video_frame = 0_u32;
+    let mut last_video_frame = None;
+    let mut keyframe = true;
+    let mut views = Vec::new();
+    let mut views_renewed = Instant::now();
+    let own_account = thiscord_shared::AccountId::from_uuid(common::id("account", index));
+    let ppf = config.video_packets_per_frame();
     loop {
         tokio::select! {
             _ = stop.changed() => return Err("Cancelled"),
@@ -391,6 +516,7 @@ async fn exercise(
                 // jitter across a grid boundary into a skipped/duplicate send slot.
                 if let Some(begin) = *start.borrow() {
                     tick.reset_at(tokio::time::Instant::from_std(begin));
+                    video_tick.reset_at(tokio::time::Instant::from_std(begin));
                 }
             },
             _ = heartbeat.tick() => {
@@ -399,8 +525,57 @@ async fn exercise(
             },
             incoming = event(&mut peer.socket) => match incoming? {
                 ServerEvent::Pong {} => last_pong = Instant::now(),
-                ServerEvent::Participants { .. } => {},
+                ServerEvent::Participants { members } => {
+                    if peer.camera.is_some() {
+                        let own = members.iter().find(|m| m.account_id == own_account).map(|m| m.slot);
+                        let next = own.map(|s| camera_views(&members, s)).unwrap_or_default();
+                        // Renew before the server's view lease expires, and on any change.
+                        if next != views || views_renewed.elapsed() >= Duration::from_secs(1) {
+                            views = next;
+                            views_renewed = Instant::now();
+                            send(&mut peer.socket, ClientEvent::ScreenViews { views: views.clone() }).await?;
+                        }
+                    }
+                },
+                ServerEvent::ScreenKeyframe { .. } => keyframe = true,
+                ServerEvent::ScreenTarget { .. } | ServerEvent::MediaDiagnostics { .. } => {},
                 _ => return Err("Server revoked or rejected voice session"),
+            },
+            _ = video_tick.tick(), if peer.camera.is_some() => {
+                let now = Instant::now();
+                let start_time = *start.borrow();
+                let measured = start_time.and_then(|s| now.checked_duration_since(s));
+                if let Some(elapsed) = measured && elapsed >= Duration::from_secs(config.seconds as u64) {
+                    continue;
+                }
+                let frame = measured.map_or(WARMUP, |d| (d.as_micros() / video_period.as_micros()) as u32);
+                if frame != WARMUP && last_video_frame == Some(frame) { continue; }
+                video_frame = video_frame.wrapping_add(1);
+                let idr = keyframe || video_frame.is_multiple_of(KEYFRAME_FRAMES);
+                keyframe = false;
+                let rtp_timestamp = video_frame.wrapping_mul(90_000 / VIDEO_FPS);
+                let camera = peer.camera.clone().unwrap();
+                let bytes = config.video_packet_bytes();
+                for part in 0..ppf {
+                    let number = if frame == WARMUP { WARMUP } else { frame * ppf as u32 + part as u32 };
+                    let mut payload = vec![0_u8; bytes];
+                    // Single NAL unit packets: IDR slices for keyframes, else non-IDR.
+                    payload[0] = if idr { 0x65 } else { 0x41 };
+                    payload[1..9].copy_from_slice(MAGIC);
+                    payload[9..17].copy_from_slice(&config.run);
+                    payload[17..21].copy_from_slice(&(index as u32).to_be_bytes());
+                    payload[21..25].copy_from_slice(&number.to_be_bytes());
+                    payload[25..33].copy_from_slice(&(config.epoch.elapsed().as_micros() as u64).to_be_bytes());
+                    video_sequence = video_sequence.wrapping_add(1);
+                    let packet = rtp::Packet { header: rtp::header::Header { version: 2, payload_type: voice::MediaKind::Camera.payload_type(), ssrc: voice::MediaKind::Camera.publisher_ssrc(), sequence_number: video_sequence, timestamp: rtp_timestamp, marker: part + 1 == ppf, ..Default::default() }, payload: payload.into() };
+                    let result = tokio::time::timeout(Duration::from_millis(100), camera.write_rtp(packet)).await;
+                    if frame != WARMUP {
+                        let mut stats = stats.lock().unwrap();
+                        stats.video_attempted += 1;
+                        if matches!(result, Ok(Ok(_))) { stats.video_sent.insert(number as usize); } else { stats.send_errors += 1; }
+                    }
+                }
+                if frame != WARMUP { last_video_frame = Some(frame); }
             },
             _ = tick.tick() => {
                 let now = Instant::now();
@@ -459,8 +634,11 @@ fn warmed(config: &Config, stats: &[Arc<Mutex<Stats>>]) -> bool {
     stats.iter().enumerate().all(|(index, s)| {
         let s = s.lock().unwrap();
         let first = index / config.room_size * config.room_size;
-        (first..(first + config.room_size).min(config.users))
-            .all(|source| source == index || s.streams[source % config.room_size].warm)
+        (first..(first + config.room_size).min(config.users)).all(|source| {
+            source == index
+                || (s.streams[source % config.room_size].warm
+                    && (!config.video() || s.video_streams[source % config.room_size].warm))
+        })
     })
 }
 
@@ -472,7 +650,9 @@ fn report(
 ) -> (serde_json::Value, bool) {
     let stats: Vec<_> = stats.iter().map(|s| s.lock().unwrap()).collect();
     let mut deliveries = Vec::new();
+    let mut video_deliveries = Vec::new();
     let mut histogram = vec![0; 1002];
+    let mut video_histogram = vec![0; 1002];
     for (receiver, s) in stats.iter().enumerate() {
         let first = receiver / config.room_size * config.room_size;
         for (sender, source_stats) in stats
@@ -499,6 +679,23 @@ fn report(
                 reordered: stream.reordered,
                 path_p99_ms: percentile(&stream.histogram, 99),
             });
+            if config.video() {
+                let stream = &s.video_streams[sender % config.room_size];
+                for (total, count) in video_histogram.iter_mut().zip(&stream.histogram) {
+                    *total += count;
+                }
+                video_deliveries.push(Delivery {
+                    receiver,
+                    sender,
+                    expected: source_stats.video_sent.count(),
+                    missing: source_stats.video_sent.missing_from(&stream.received),
+                    received_unique: stream.received.count(),
+                    late: stream.late,
+                    duplicates: stream.duplicates,
+                    reordered: stream.reordered,
+                    path_p99_ms: percentile(&stream.histogram, 99),
+                });
+            }
         }
     }
     let expected: u64 = deliveries.iter().map(|s| s.expected).sum();
@@ -510,6 +707,16 @@ fn report(
     let send_errors: u64 = stats.iter().map(|s| s.send_errors).sum();
     let invalid: u64 = stats.iter().map(|s| s.invalid).sum();
     let skipped = scheduled.saturating_sub(attempted);
+    let video_scheduled = if config.video() {
+        (config.users * config.video_packets()) as u64
+    } else {
+        0
+    };
+    let video_attempted: u64 = stats.iter().map(|s| s.video_attempted).sum();
+    let video_skipped = video_scheduled.saturating_sub(video_attempted);
+    let video_expected: u64 = video_deliveries.iter().map(|s| s.expected).sum();
+    let video_missing: u64 = video_deliveries.iter().map(|s| s.missing).sum();
+    let video_late: u64 = video_deliveries.iter().map(|s| s.late).sum();
     // This is a configurable workload's conservative transport check, not a capacity guarantee.
     let passed = complete
         && failures == 0
@@ -519,7 +726,25 @@ fn report(
         && expected > 0
         && deliveries
             .iter()
-            .all(|s| s.expected > 0 && (s.missing + s.late) * 1000 <= s.expected);
+            .all(|s| s.expected > 0 && (s.missing + s.late) * 1000 <= s.expected)
+        && (!config.video()
+            || (video_skipped * 1000 <= video_scheduled
+                && video_expected > 0
+                && video_deliveries
+                    .iter()
+                    .all(|s| s.expected > 0 && (s.missing + s.late) * 1000 <= s.expected)));
+    // Built separately: one json! literal this large exceeds the macro recursion limit.
+    let video = config.video().then(|| {
+        json!({
+            "fps": VIDEO_FPS, "packets_per_frame": config.video_packets_per_frame(),
+            "packet_bytes": config.video_packet_bytes(), "scheduled": video_scheduled,
+            "attempted": video_attempted, "generator_skipped": video_skipped,
+            "expected_deliveries": video_expected, "missing": video_missing, "late": video_late,
+            "missing_percent": if video_expected == 0 { None } else { Some(video_missing as f64 * 100.0 / video_expected as f64) },
+            "path_p50_ms": percentile(&video_histogram, 50), "path_p95_ms": percentile(&video_histogram, 95), "path_p99_ms": percentile(&video_histogram, 99),
+            "streams": video_deliveries,
+        })
+    });
     (
         json!({
             "format_version": 1, "complete": complete, "passed": passed,
@@ -534,6 +759,8 @@ fn report(
             "missing_percent": if expected == 0 { None } else { Some(missing as f64 * 100.0 / expected as f64) },
             "path_p50_ms": percentile(&histogram, 50), "path_p95_ms": percentile(&histogram, 95), "path_p99_ms": percentile(&histogram, 99),
         "latency_note": "Generator send to generator receive via SFU, single monotonic clock; includes both network legs, queues and client processing. 1001 means >=1001ms. Not server-only delay.",
+        "camera_bitrate": config.camera_bitrate,
+        "video": video,
         "routes": stats.iter().enumerate().map(|(index, s)| json!({"client": index, "local_candidate": s.local_candidate, "remote_candidate": s.remote_candidate})).collect::<Vec<_>>(),
         "streams": deliveries
         }),
@@ -545,7 +772,7 @@ async fn run() -> Result<bool> {
     let mut args = Args::parse()?;
     if args.flag("--help") {
         println!(
-            "voice_load --url http://DESKTOP:3001 --bind MAC_LAN_IP:0 --users 8 --seconds 60 --allow-insecure\nOptions: --room-size 2..8 (8), --users 2..500 (8), --seconds 1..3600 (60),\n--payload-bytes 32..1200 (80), --late-ms 1..1000 (100), --relay, --output report.json.\nRequires THISCORD_LOAD_SECRET matching voice_load_server. Synthetic RTP, no microphones. See docs/voice-load.md."
+            "voice_load --url http://DESKTOP:3001 --bind MAC_LAN_IP:0 --users 8 --seconds 60 --allow-insecure\nOptions: --room-size 2..8 (8), --users 2..500 (8), --seconds 1..3600 (60),\n--payload-bytes 32..1200 (80), --late-ms 1..1000 (100), --camera-kbps 0..4000 (0, off), --relay, --output report.json.\nRequires THISCORD_LOAD_SECRET matching voice_load_server. Synthetic RTP, no microphones. See docs/voice-load.md."
         );
         return Ok(true);
     }
@@ -567,6 +794,7 @@ async fn run() -> Result<bool> {
     let seconds = args.number("--seconds", 60, 1, 3600)?;
     let bytes = args.number("--payload-bytes", 80, 32, 1200)?;
     let late_ms = args.number("--late-ms", 100, 1, 1000)? as u64;
+    let camera_bitrate = args.number("--camera-kbps", 0, 0, 4000)? * 1000;
     let relay = args.flag("--relay");
     let insecure = args.flag("--allow-insecure");
     let output = args.text("--output", "");
@@ -594,11 +822,18 @@ async fn run() -> Result<bool> {
         bytes,
         late_ms,
         relay,
+        camera_bitrate,
         epoch: Instant::now(),
         run: uuid::Uuid::new_v4().as_bytes()[..8].try_into().unwrap(),
     });
     let stats: Vec<_> = (0..users)
-        .map(|_| Arc::new(Mutex::new(Stats::new(seconds * 50, room_size))))
+        .map(|_| {
+            Arc::new(Mutex::new(Stats::new(
+                seconds * 50,
+                config.video_packets(),
+                room_size,
+            )))
+        })
         .collect();
     let (stop_tx, stop_rx) = watch::channel(false);
     let (start_tx, start_rx) = watch::channel(None);
@@ -713,6 +948,18 @@ async fn run() -> Result<bool> {
         report["generator_skipped"],
         report["path_p99_ms"]
     );
+    if config.video() {
+        let video = &report["video"];
+        println!(
+            "Video: expected deliveries={}, missing={}, late={}, generator skipped={}, path p50={}ms p99={}ms",
+            video["expected_deliveries"],
+            video["missing"],
+            video["late"],
+            video["generator_skipped"],
+            video["path_p50_ms"],
+            video["path_p99_ms"]
+        );
+    }
     if let Some(file) = &mut output {
         serde_json::to_writer_pretty(file, &report).map_err(|_| "Cannot write report")?;
     }
@@ -756,6 +1003,7 @@ mod tests {
             bytes: 80,
             late_ms: 100,
             relay: false,
+            camera_bitrate: 0,
             epoch: Instant::now(),
             run: [1; 8],
         }
@@ -765,7 +1013,7 @@ mod tests {
     fn report_cannot_pass_a_missing_stream_or_an_underdriven_generator() {
         let c = config();
         let stats: Vec<_> = (0..4)
-            .map(|_| Arc::new(Mutex::new(Stats::new(50, 2))))
+            .map(|_| Arc::new(Mutex::new(Stats::new(50, 0, 2))))
             .collect();
         for s in &stats {
             let mut s = s.lock().unwrap();
@@ -793,7 +1041,7 @@ mod tests {
     #[test]
     fn receive_rejects_cross_room_self_and_old_run_payloads() {
         let c = config();
-        let mut stats = Stats::new(50, 2);
+        let mut stats = Stats::new(50, 0, 2);
         let mut payload = vec![0; 80];
         payload[..8].copy_from_slice(b"TCLDv001");
         payload[8..16].copy_from_slice(&c.run);
