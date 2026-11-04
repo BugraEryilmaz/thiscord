@@ -288,7 +288,8 @@ pub fn focus(width: f64, height: f64, gap: f64, aspects: &[f64], focused: usize)
     // portrait stage leaves width to spare), and unreadable thumbnails lose.
     let mut best: Option<(f64, bool, Rect, Vec<Rect>)> = None;
     for fraction in [0.2, 0.26, 0.33, 0.4] {
-        let side = (width * fraction).clamp(150.0, width * 0.45);
+        // Never clamp with min > max: tiny areas (a phone call strip) would panic.
+        let side = (width * fraction).max(150.0).min(width * 0.45);
         if width - side - gap < 320.0 {
             continue;
         }
@@ -297,7 +298,7 @@ pub fn focus(width: f64, height: f64, gap: f64, aspects: &[f64], focused: usize)
         consider_strip(&mut best, true, stage, strip, typical);
     }
     for fraction in [0.22, 0.3, 0.38] {
-        let below = (height * fraction).clamp(90.0, height * 0.45);
+        let below = (height * fraction).max(90.0).min(height * 0.45);
         if height - below - gap < 160.0 {
             continue;
         }
@@ -863,6 +864,28 @@ mod tests {
             .map(|y| p.tiles.iter().filter(|t| t.y.round() == *y).count())
             .collect();
         assert!(counts.iter().all(|c| *c == counts[0]), "{counts:?}");
+    }
+
+    #[test]
+    fn tiny_areas_never_panic() {
+        for (w, h) in [
+            (0.0, 0.0),
+            (40.0, 30.0),
+            (300.0, 120.0),
+            (366.0, 150.0),
+            (150.0, 900.0),
+            (2000.0, 60.0),
+        ] {
+            for n in 1..9 {
+                let aspects: Vec<f64> = (0..n).map(|i| [WIDE, 0.5625, 2.39, 1.0][i % 4]).collect();
+                let _ = grid(w, h, 8.0, &aspects);
+                for f in 0..n {
+                    let _ = focus(w, h, 8.0, &aspects, f);
+                }
+                let _ = arrange(w, h, 8.0, &aspects);
+                let _ = insertion(w, h, 8.0, &aspects, n - 1);
+            }
+        }
     }
 
     #[test]
