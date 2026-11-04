@@ -370,6 +370,7 @@ select.field-input, .settings-content select { padding-right: 34px; }
 .message-popover { position: fixed; z-index: 120; width: 220px; max-width: calc(100vw - 16px); max-height: calc(100dvh - 16px); overflow-y: auto; padding: 6px; border: 1px solid var(--tint-8); border-radius: var(--radius-lg); background: var(--color-popover); color: var(--color-content); box-shadow: var(--shadow-2); }
 .message-options .context-item { display: flex; align-items: center; gap: 10px; }
 .message-options .context-danger { margin-top: 4px; border-top: 1px solid var(--tint-6); border-radius: 0 0 5px 5px; }
+.message-options .context-danger + .context-danger { margin-top: 0; border-top: 0; border-radius: var(--radius-sm); }
 .message-reaction-picker { display: grid; grid-template-columns: repeat(5, minmax(0, 1fr)); gap: 2px; }
 .message-reaction-picker button { display: grid; place-items: center; height: 36px; border: 1px solid transparent; border-radius: 6px; font-size: 20px; cursor: pointer; }
 .message-reaction-picker button:hover { background: var(--tint-7); }
