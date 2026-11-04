@@ -489,7 +489,7 @@ pub(super) fn VoiceBar(ui: Ui) -> impl IntoView {
                     <super::browser_media::BrowserScreenControls ui=ui/>
                 </Show>
                 <super::soundboard::SoundboardControls ui=ui/>
-                <button class="icon-button voice-action" aria-label=move || crate::i18n::t("Audio settings") data-tip=move || crate::i18n::t("Audio settings") on:click=move |_|ui.page.set("audio")><Icon kind=Glyph::Volume/></button>
+                <button class="icon-button voice-action" aria-label=move || crate::i18n::t("Audio settings") data-tip=move || crate::i18n::t("Audio settings") on:click=move |_|ui.page.set("audio")><Icon kind=Glyph::Sliders/></button>
                 <Show when=move||!ui.audio_control.is_remote() && ui.audio.get().mode==TransmitMode::PushToTalk><button class="icon-button voice-action touch-none select-none" aria-label=move || crate::i18n::t("Hold to talk") data-tip=move || crate::i18n::t("Hold to talk") on:pointerdown=move |_|pressed(true) on:pointerup=move |_|pressed(false) on:pointerleave=move |_|pressed(false) on:pointercancel=move |_|pressed(false) on:keydown=move|e|{if matches!(e.key().as_str()," "|"Enter"){e.prevent_default();pressed(true);}} on:keyup=move|_|pressed(false) on:blur=move |_|pressed(false)><Icon kind=Glyph::Mic/></button></Show>
             </div>
         <Show when=move ||browser_voice(ui)><BrowserVoiceNotice/><super::browser_media::BrowserMediaError/></Show>
@@ -661,7 +661,7 @@ pub(super) fn VoiceChannel(
     name: Signal<String>,
 ) -> impl IntoView {
     view! {<section class="voice-channel-view">
-        <header class="voice-channel-header"><Icon kind=Glyph::Volume/><h2>{move ||name.get()}</h2></header>
+        <header class="voice-channel-header"><Icon kind=Glyph::Voice/><h2>{move ||name.get()}</h2></header>
         <Show when=move ||desktop() || ui.audio_control.is_remote() || browser_voice(ui) fallback=move ||view!{<p class="voice-channel-empty">{move ||crate::i18n::t("Open the desktop app to use voice and watch streams.")}</p>}>
             <super::screen::ScreenViewer ui=ui guild=guild channel=channel/>
         </Show>

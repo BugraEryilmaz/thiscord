@@ -3,7 +3,7 @@
   <head>
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover, interactive-widget=resizes-content" />
-    <meta name="theme-color" content="#202127" />
+    <meta name="theme-color" content="#131418" />
     <meta name="mobile-web-app-capable" content="yes" />
     <meta name="apple-mobile-web-app-capable" content="yes" />
     <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent" />
@@ -12,6 +12,8 @@
     <link data-trunk rel="rust" data-bin="thiscord-ui" data-cargo-no-default-features />
     <link data-trunk rel="tailwind-css" href="style.css" />
     <link data-trunk rel="copy-dir" href="assets/brand" data-target-path="brand-assets" />
+    <!-- Display face shared with the website; style.css loads it from welcome-assets/. -->
+    <link data-trunk rel="copy-file" href="welcome/assets/bricolage-grotesque.ttf" data-target-path="welcome-assets" />
     <link data-trunk rel="copy-file" href="assets/web/manifest.webmanifest" />
     <link data-trunk rel="copy-file" href="icons/icon.png" />
     <link data-trunk rel="icon" href="assets/brand/favicon.png" />

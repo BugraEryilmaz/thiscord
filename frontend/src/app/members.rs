@@ -123,7 +123,7 @@ pub(super) fn Toggle(ui: Ui) -> impl IntoView {
         <button type="button" class="icon-button shrink-0" aria-controls="member-list"
             aria-expanded=move || ui.members.open().to_string()
             aria-label=move || crate::i18n::t("Member list") data-tip=move || crate::i18n::t("Member list")
-            on:click=move |_| ui.members.toggle()><Icon kind=Glyph::Person/></button>
+            on:click=move |_| ui.members.toggle()><Icon kind=Glyph::Users/></button>
     }
 }
 
@@ -307,7 +307,7 @@ pub(super) fn Panel(ui: Ui, guild: GuildId) -> impl IntoView {
                 close();
             }>
             <header class="member-panel-header">
-                <h2 class="min-w-0 flex-1 truncate text-sm font-semibold">{move || crate::i18n::t("Members")}</h2>
+                <h2 class="pane-title min-w-0 flex-1 truncate">{move || crate::i18n::t("Members")}</h2>
                 <button node_ref=close_button type="button" class="icon-button member-drawer-close" aria-label=move || crate::i18n::t("Close member list")
                     on:click=move |_| close()><Icon kind=Glyph::Close/></button>
             </header>

@@ -211,8 +211,10 @@ full-screen with a scrolling section bar. From 768 px the desktop layout applies
 - A still ~500 ms touch (10 px slop) opens the same context menus as right-click
   (`frontend/src/touch.rs`, unit-tested); on other controls it focuses the
   control so its `data-tip` hint shows. The release click is swallowed and Android's
-  native long-press `contextmenu` does not open a second menu. Message actions are
-  always visible on touch screens.
+  native long-press `contextmenu` does not open a second menu. On touch screens a
+  message's actions appear in a row under it once the message is tapped (the
+  tap focuses it); until then they stay visually hidden but reachable by screen
+  readers, and sticky `:hover` never reveals them.
 
 ### Web app manifest
 

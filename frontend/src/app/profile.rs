@@ -87,8 +87,9 @@ pub(super) fn ProfilePicture(ui: Ui) -> impl IntoView {
                             type="file" accept="image/png,image/jpeg,image/webp" disabled=move || ui.busy.get()
                             on:change=choose/>
                     </label>
-                    <button type="button" class="settings-link disabled:opacity-50"
-                        disabled=move || ui.busy.get() || ui.account.get().is_none_or(|a| a.avatar_id.is_none())
+                    <Show when=move || ui.account.get().is_some_and(|a| a.avatar_id.is_some())>
+                    <button type="button" class="settings-link"
+                        disabled=move || ui.busy.get()
                         on:click=move |_| super::dialog::confirm(ui, super::dialog::Confirmation::new(
                             crate::i18n::t("Remove your profile picture?"),
                             crate::i18n::t("Your initials are shown instead. Copies others already downloaded cannot be recalled."),
@@ -108,6 +109,7 @@ pub(super) fn ProfilePicture(ui: Ui) -> impl IntoView {
                                 }
                             }),
                         ))>{move || crate::i18n::t("Remove picture")}</button>
+                    </Show>
                 </div>
             </div>
             <p class="text-sm text-white/60">{move || crate::i18n::t("PNG, JPEG or WebP, up to 2 MiB. Pictures are cropped to a square and save immediately.")}</p>

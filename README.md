@@ -430,7 +430,18 @@ from `--color-brand` through `color-mix`, and text on solid `bg-brand` fills
 uses `--color-on-brand`. `--color-white` is the strongest text color, so
 `text-white` and `bg-white/10` darken on light themes. Tailwind's red, amber,
 emerald, sky, indigo and slate shades are only remapped once a related color
-changes, so the default look keeps Tailwind's own shades.
+changes, except the status text utilities below.
+
+The design-system block near the top of `style.css` defines the shared corner
+radii, elevation (`--shadow-1` to `--shadow-3`, softened on light themes), the
+56 px pane header height and per-theme status inks (`--success-ink`,
+`--speaking-ink`, `--warning-ink`, `--danger-ink`). `text-emerald-*`,
+`text-amber-*`, `text-red-*` and `text-white/50`–`/70` render with those inks or
+the secondary text color, so status and secondary text meet WCAG AA on every
+preset. Titles use the bundled Bricolage Grotesque display face
+(`font-display`, shared with the website); UI text stays on the system face.
+The default accent is Iris (`#9a48ec`); Blurple and the other presets remain in
+Settings → Appearance.
 
 See [Tailwind source detection](https://tailwindcss.com/docs/detecting-classes-in-source-files)
 and [Trunk's asset pipeline](https://github.com/trunk-rs/trunk/blob/v0.21.14/guide/src/assets/index.md).

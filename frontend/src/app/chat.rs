@@ -957,8 +957,8 @@ fn MessageRow(
             <Show when=divider>
                 <div class="unread-divider" role="separator"><span>{move || crate::i18n::t("New messages")}</span></div>
             </Show>
-            <article aria-label=move || format!("{}, {}", name.get(), full_time()) class=move || if message.with(|m| chat.ui.account.with(|a| a.as_ref().is_some_and(|a| m.mentions.contains(&a.id)))) {
-                "message-body bg-brand/10"
+            <article tabindex="-1" aria-label=move || format!("{}, {}", name.get(), full_time()) class=move || if message.with(|m| chat.ui.account.with(|a| a.as_ref().is_some_and(|a| m.mentions.contains(&a.id)))) {
+                "message-body message-mentioned"
             } else { "message-body" } class:ring-2=move || chat.highlight.get()==Some(id) class:ring-brand=move || chat.highlight.get()==Some(id) class:message-editing=move || composer.editing.get()==Some(id)>
                 <div class="message-gutter">
                     <Show when=move || !grouped.get() fallback=move || view! {
@@ -972,12 +972,12 @@ fn MessageRow(
                 <div class="min-w-0 flex-1">
                     <Show when=move || !grouped.get()>
                         <div class="flex flex-wrap items-baseline gap-x-2">
-                            <button class="font-semibold hover:underline" aria-haspopup="menu" data-context-user=author data-context-name=name>{name}</button>
-                            <time class="text-xs text-white/60" title=full_time>{move || message.with(|m| crate::i18n::message_time(m.created_at))}</time>
+                            <button class="message-author" aria-haspopup="menu" data-context-user=author data-context-name=name>{name}</button>
+                            <time class="message-time" title=full_time>{move || message.with(|m| crate::i18n::message_time(m.created_at))}</time>
                         </div>
                     </Show>
                     <rich::Reply chat message/>
-                    <div class="whitespace-pre-wrap break-words text-white/85">
+                    <div class="message-text whitespace-pre-wrap break-words">
                         {move || message.with(|m| super::message_content::render(if m.deleted { "Message deleted" } else { &m.content }, chat.ui))}
                         <Show when=edited><span class="ml-1 text-xs text-white/60">{move || format!("({})", crate::i18n::t("edited"))}</span></Show>
                     </div>
@@ -1018,13 +1018,13 @@ fn OnlineMembers(chat: Chat) -> impl IntoView {
                         view! {
                             <span class="stream-watcher" tabindex="0" role="img" data-tip=move ||names.get()
                                 aria-label=move ||thiscord_frontend::localized_format!(crate::i18n::language(), "Online here: {}", name.get())>
-                                <crate::avatar::Avatar class="size-6 text-[10px]" name avatar_id=Signal::derive(move ||chat.online.with(|members|members.iter().find(|m|m.account_id==id).and_then(|m|m.avatar_id)))/>
+                                <crate::avatar::Avatar class="size-6 text-xs" name avatar_id=Signal::derive(move ||chat.online.with(|members|members.iter().find(|m|m.account_id==id).and_then(|m|m.avatar_id)))/>
                             </span>
                         }
                     }/>
                 <Show when=move ||chat.online.with(|members| members.len() > VISIBLE)>
                     <span class="stream-watcher" tabindex="0" role="img" data-tip=move ||names.get() aria-label=move ||names.get()>
-                        <span class="inline-grid size-6 place-items-center rounded-full text-[10px] font-semibold" aria-hidden="true">
+                        <span class="inline-grid size-6 place-items-center rounded-full text-xs font-semibold" aria-hidden="true">
                             {move ||format!("+{}",chat.online.with(Vec::len).saturating_sub(VISIBLE))}
                         </span>
                     </span>
@@ -1314,19 +1314,21 @@ pub(super) fn ChatPanel(
     };
     view! {
         <div class="chat-layout">
-        <section class="flex h-full min-h-0 min-w-0 flex-1 flex-col overflow-hidden rounded-xl border border-white/10 bg-white/5" aria-label=move || crate::i18n::t("Text chat")
+        <section class="chat-pane flex h-full min-h-0 min-w-0 flex-1 flex-col overflow-hidden" aria-label=move || crate::i18n::t("Text chat")
             on:dragover=move |ev: leptos::ev::DragEvent| { ev.prevent_default(); if let Some(data) = ev.data_transfer() { data.set_drop_effect(if editing.get_untracked().is_some() { "none" } else { "copy" }); } }
             on:drop=move |ev: leptos::ev::DragEvent| { ev.prevent_default(); if editing.get_untracked().is_none() && let Some(files) = ev.data_transfer().and_then(|d| d.files()) { queue.add(files); } }>
             <attachments::DownloadHost chat/>
-            <header class="shrink-0 border-b border-white/10 p-4">
-                <div class="flex min-w-0 items-center gap-3">
+            <header class="pane-header">
+                <div class="flex min-w-0 flex-1 items-center gap-2">
                     <super::servers::BackButton ui/>
-                    <h2 class="min-w-0 flex-1 truncate text-lg font-semibold">{move ||format!("# {}",name.get())}</h2>
+                    <span class="pane-header-icon" aria-hidden="true">"#"</span>
+                    <h2 class="pane-title min-w-0 truncate"><span class="sr-only">"# "</span>{move ||name.get()}</h2>
+                    <p class="pane-status" class:sr-only=move ||chat.status.with(|s|s=="Connected") role="status">{move||crate::i18n::message(chat.status.get())}</p>
+                    <span class="flex-1"></span>
                     <OnlineMembers chat/>
                     <super::search::Launcher state=search/>
                     <super::members::Toggle ui/>
                 </div>
-                <p class="break-words text-xs text-white/60" role="status">{move||crate::i18n::message(chat.status.get())}</p>
             </header>
             <rich::Pins chat/>
             <super::search::Bar state=search/>
@@ -1375,25 +1377,25 @@ pub(super) fn ChatPanel(
                 </ul>
             </div>
             <Show when=move || !search.active.get() && (!chat.bottom.get() || chat.messages.with(|m| m.newer))>
-                <button class="bg-brand/20 py-2 text-sm" on:click=move |_| chat.latest()>{move || crate::i18n::t("Jump to latest / mark read")}</button>
+                <button class="jump-latest" on:click=move |_| chat.latest()>{move || crate::i18n::t("Jump to latest / mark read")}</button>
             </Show>
-            <footer class="flex shrink-0 flex-col gap-2 border-t border-white/10 p-3" style:display=move ||if search.active.get(){"none"}else{""}>
-                <p class="text-xs text-white/60" class:sr-only=move ||typing_notice.with(String::is_empty) aria-live="polite" aria-atomic="true">{move ||typing_notice.get()}</p>
-                <Show when=move||editing.get().is_some()><p class="text-xs text-white/60"><button class="text-sm text-brand underline" on:click=move |_|composer.end_edit()>{move || crate::i18n::t("Cancel edit")}</button>" · "{move || crate::i18n::t("Escape to cancel · Enter to save")}</p></Show>
-                <Show when=move ||chat.reply_to.get().is_some()><div class="flex gap-3 text-sm text-sky-300"><span class="max-w-80 truncate">{move || chat.reply_to.get().map(|id|chat.messages.with(|cache|cache.get(id).map(|m|m.with(|m|thiscord_frontend::localized_format!(crate::i18n::language(), "Reply to {}: {}",m.display_name(),m.content.chars().take(80).collect::<String>()))).unwrap_or_else(||crate::i18n::t("Reply selected").into())))}</span><button on:click=move |_|chat.reply_to.set(None)>{move ||crate::i18n::t("Cancel reply")}</button></div></Show>
+            <footer class="composer-area" style:display=move ||if search.active.get(){"none"}else{""}>
+                <p class="composer-hint" class:sr-only=move ||typing_notice.with(String::is_empty) aria-live="polite" aria-atomic="true">{move ||typing_notice.get()}</p>
+                <Show when=move||editing.get().is_some()><p class="composer-banner"><button class="composer-banner-action" on:click=move |_|composer.end_edit()>{move || crate::i18n::t("Cancel edit")}</button>" · "{move || crate::i18n::t("Escape to cancel · Enter to save")}</p></Show>
+                <Show when=move ||chat.reply_to.get().is_some()><div class="composer-banner"><Icon kind=Glyph::Reply/><span class="min-w-0 flex-1 truncate">{move || chat.reply_to.get().map(|id|chat.messages.with(|cache|cache.get(id).map(|m|m.with(|m|thiscord_frontend::localized_format!(crate::i18n::language(), "Reply to {}: {}",m.display_name(),m.content.chars().take(80).collect::<String>()))).unwrap_or_else(||crate::i18n::t("Reply selected").into())))}</span><button class="composer-banner-action" on:click=move |_|chat.reply_to.set(None)>{move ||crate::i18n::t("Cancel reply")}</button></div></Show>
                 <attachments::QueuedFiles queue/>
-                <form class="flex items-center gap-2" on:submit=submit>
-                    <div class="relative min-w-0 flex-1">
+                <form class="composer" on:submit=submit>
+                    <div class="relative min-w-0 flex-1 self-stretch">
                         <mentions::Suggestions picker=mentions/>
                         <label class="block"><span class="sr-only">{move || crate::i18n::t("Message")}</span>
-                            <textarea node_ref=mentions.input id="chat-composer" class="block w-full resize-none rounded-lg bg-black/20 p-3 outline-none focus:ring-2 focus:ring-brand"
+                            <textarea node_ref=mentions.input id="chat-composer" class="composer-input block w-full resize-none"
                                 aria-autocomplete="list" aria-controls="mention-suggestions" aria-expanded=move || mentions.expanded().to_string()
                                 aria-activedescendant=move || mentions.active_descendant()
                                 on:keydown=keydown on:click=move |_| mentions.refresh() on:select=move |_| mentions.refresh()
                                 on:keyup=move |ev| if matches!(ev.key().as_str(), "ArrowLeft" | "ArrowRight" | "Home" | "End") { mentions.refresh(); }
                                 on:blur=move |_| mentions.dismiss()
                                 on:compositionstart=move |_| mentions.composition(true) on:compositionend=move |_| mentions.composition(false)
-                                rows="2" maxlength="4000" placeholder=move || crate::i18n::t("Message this channel · @ to mention") prop:value=move||draft.get()
+                                rows="1" maxlength="4000" placeholder=move || thiscord_frontend::localized_format!(crate::i18n::language(), "Message #{}", name.get()) prop:value=move||draft.get()
                                 disabled=move||!chat.permissions.with(|p|p.contains(&Permission::SendMessages))
                                 on:paste=move |ev: leptos::ev::ClipboardEvent| {
                                     // Screenshots and copied files become attachments; text pastes normally.
@@ -1408,10 +1410,10 @@ pub(super) fn ChatPanel(
                                 on:input=move|ev|{draft.set(event_target_value(&ev));chat.typing.set(true);mentions.input();}/>
                         </label>
                     </div>
-                    <div class="flex shrink-0 items-center gap-1">
+                    <div class="composer-tools">
                         <super::emoji::ComposerEmoji input=mentions.input draft disabled=Signal::derive(move ||!chat.permissions.with(|p|p.contains(&Permission::SendMessages)))/>
                         <attachments::Picker queue editing/>
-                        <button class="icon-button bg-brand" aria-label=move ||if editing.get().is_some(){crate::i18n::t("Save message")}else{crate::i18n::t("Send message")} data-tip=move ||if editing.get().is_some(){crate::i18n::t("Save")}else{crate::i18n::t("Send")} disabled=move||loading.get()||!composer_ready()||!chat.permissions.with(|p|p.contains(&Permission::SendMessages))><Icon kind=Glyph::Send/></button>
+                        <button class="composer-send" aria-label=move ||if editing.get().is_some(){crate::i18n::t("Save message")}else{crate::i18n::t("Send message")} data-tip=move ||if editing.get().is_some(){crate::i18n::t("Save")}else{crate::i18n::t("Send")} disabled=move||loading.get()||!composer_ready()||!chat.permissions.with(|p|p.contains(&Permission::SendMessages))><Icon kind=Glyph::Send/></button>
                     </div>
                 </form>
             </footer>

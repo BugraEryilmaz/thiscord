@@ -37,6 +37,17 @@ pub(super) fn Host() -> impl IntoView {
             clear();
             return;
         };
+        // Rows whose label is already visible only explain truncated names.
+        if element.has_attribute("data-tip-overflow")
+            && !element
+                .query_selector(".truncate")
+                .ok()
+                .flatten()
+                .is_some_and(|text| text.scroll_width() > text.client_width())
+        {
+            clear();
+            return;
+        }
         if active.get_value().as_ref() != Some(&element) {
             clear();
         }

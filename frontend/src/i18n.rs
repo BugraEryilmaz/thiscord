@@ -140,13 +140,17 @@ pub fn initialize() {
 }
 
 #[component]
-pub fn LanguageSelector() -> impl IntoView {
+pub fn LanguageSelector(
+    /// A small select without a visible label, for corners of full-page screens.
+    #[prop(optional)]
+    compact: bool,
+) -> impl IntoView {
     let failed = RwSignal::new(false);
     view! {
         <div class="space-y-2">
             <label class="flex flex-wrap items-center justify-between gap-3 text-sm">
-                <span>{move || t("Language")}</span>
-                <select class="rounded-md border border-white/20 bg-surface px-3 py-2 text-white"
+                <span class:sr-only=compact>{move || t("Language")}</span>
+                <select class="select-compact"
                     aria-label=move || t("Language")
                     prop:value=move || language().code()
                     on:change=move |event| {

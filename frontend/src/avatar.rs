@@ -10,8 +10,9 @@ pub fn Avatar(
 ) -> impl IntoView {
     let failed = RwSignal::new(None::<AvatarId>);
     let source = Memo::new(move |_| avatar_id.get().filter(|id| failed.get() != Some(*id)));
+    let tint = move || TINTS[tint_index(&name.get())];
     view! {
-        <span class=format!("relative inline-grid shrink-0 place-items-center overflow-hidden rounded-full bg-white/10 font-semibold {class}") aria-hidden="true">
+        <span class=move || format!("avatar-initials relative inline-grid shrink-0 place-items-center overflow-hidden rounded-full font-semibold {} {class}", tint()) aria-hidden="true">
             {move || name.get().chars().next().unwrap_or('?').to_uppercase().to_string()}
             {move || source.get().map(|id| {
                 let base = option_env!("THISCORD_API_URL").unwrap_or("http://localhost:3000");
@@ -23,6 +24,26 @@ pub fn Avatar(
             })}
         </span>
     }
+}
+
+/// Complete class names so the stylesheet scanner can see them.
+const TINTS: [&str; 8] = [
+    "avatar-tint-0",
+    "avatar-tint-1",
+    "avatar-tint-2",
+    "avatar-tint-3",
+    "avatar-tint-4",
+    "avatar-tint-5",
+    "avatar-tint-6",
+    "avatar-tint-7",
+];
+
+/// A stable tint for a person's initials, so the same name always gets the same color.
+pub fn tint_index(name: &str) -> usize {
+    let hash = name.chars().fold(2_166_136_261_u32, |hash, c| {
+        (hash ^ u32::from(c)).wrapping_mul(16_777_619)
+    });
+    (hash % TINTS.len() as u32) as usize
 }
 
 /// Up to two initials, as shown in the server rail when a guild has no icon.

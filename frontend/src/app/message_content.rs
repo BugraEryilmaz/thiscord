@@ -9,7 +9,7 @@ fn highlighted_mentions(text: &str) -> impl IntoView + use<> {
         .map(|span| match span {
             Span::Text(text) => Either::Left(text.to_owned()),
             Span::Mention(text) => Either::Right(view! {
-                <span class="rounded bg-brand/20 px-1 font-medium text-[#c7ccff]">{text.to_owned()}</span>
+                <span class="mention-chip">{text.to_owned()}</span>
             }),
         })
         .collect_view()
@@ -26,7 +26,7 @@ fn plain(text: &str, ui: Ui) -> impl IntoView + use<> {
                     let url = href.clone();
                     Either::Right(view! {
                         <a href=href target="_blank" rel="noopener noreferrer"
-                            class="text-sky-400 underline decoration-sky-400/50 underline-offset-2 hover:text-sky-300 focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-sky-400"
+                            class="message-link"
                             on:click=move |event| {
                                 if account_client::desktop() {
                                     event.prevent_default();
@@ -63,15 +63,15 @@ fn nodes(items: Vec<thiscord_frontend::markdown::Node>, ui: Ui, literal: bool) -
                 Kind::Strong=>view!{<strong>{inner}</strong>}.into_any(),
                 Kind::Emphasis=>view!{<em>{inner}</em>}.into_any(),
                 Kind::Strike=>view!{<s>{inner}</s>}.into_any(),
-                Kind::Code=>view!{<code class="rounded bg-black/30 px-1 font-mono text-sm">{inner}</code>}.into_any(),
-                Kind::CodeBlock=>view!{<pre class="my-2 max-h-96 overflow-auto rounded bg-black/30 p-3 whitespace-pre font-mono text-sm"><code>{inner}</code></pre>}.into_any(),
-                Kind::Quote=>view!{<blockquote class="my-1 border-l-2 border-white/30 pl-3">{inner}</blockquote>}.into_any(),
+                Kind::Code=>view!{<code class="inline-code">{inner}</code>}.into_any(),
+                Kind::CodeBlock=>view!{<pre class="code-block"><code>{inner}</code></pre>}.into_any(),
+                Kind::Quote=>view!{<blockquote class="message-quote">{inner}</blockquote>}.into_any(),
                 Kind::List=>view!{<ul class="list-disc pl-6">{inner}</ul>}.into_any(),
                 Kind::Item=>view!{<li>{inner}</li>}.into_any(),
                 Kind::Paragraph=>view!{<div class="whitespace-pre-wrap break-words">{inner}</div>}.into_any(),
                 Kind::Link(href)=>{
                     let url=href.clone();
-                    view!{<a href=href target="_blank" rel="noopener noreferrer" class="text-sky-400 underline underline-offset-2" on:click=move |event| {
+                    view!{<a href=href target="_blank" rel="noopener noreferrer" class="message-link" on:click=move |event| {
                         if account_client::desktop() { event.prevent_default();let url=url.clone();leptos::task::spawn_local(async move {
                             if let Err(error)=account_client::native::<()>("open_external_url",serde_json::json!({"url":url})).await {ui.status.set(error);}
                         }); }
