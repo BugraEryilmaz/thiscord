@@ -288,7 +288,7 @@ pub fn focus(width: f64, height: f64, gap: f64, aspects: &[f64], focused: usize)
             continue;
         }
         let stage = fit(width, height - below - gap);
-        let strip = best_rows(width, below, gap, &others);
+        let strip = strip_rows(width, below, gap, &others);
         consider_strip(&mut best, false, stage, strip, typical);
     }
     let Some((_, use_side, stage, strip)) = best else {
@@ -344,6 +344,25 @@ pub fn focus(width: f64, height: f64, gap: f64, aspects: &[f64], focused: usize)
         height,
         scrolls: false,
     }
+}
+
+/// A strip under the stage: one row, or two rows of balanced length, so no
+/// thumbnail sits alone in a row.
+fn strip_rows(width: f64, height: f64, gap: f64, aspects: &[f64]) -> Vec<Rect> {
+    let mut best: Option<(f64, Vec<Rect>)> = None;
+    let mut options = vec![vec![aspects.len()]];
+    if aspects.len() >= 4 {
+        let first = aspects.len().div_ceil(2);
+        options.push(vec![first, aspects.len() - first]);
+    }
+    for rows in options {
+        let tiles = place_rows(width, height, gap, aspects, &rows, true);
+        let area: f64 = tiles.iter().map(Rect::area).sum();
+        if best.as_ref().is_none_or(|(a, _)| area > *a + 1e-6) {
+            best = Some((area, tiles));
+        }
+    }
+    best.map(|(_, tiles)| tiles).unwrap_or_default()
 }
 
 fn consider_strip(
@@ -619,6 +638,24 @@ mod tests {
         );
         no_overlap(&p.tiles);
         inside(&p, 1080.0);
+    }
+
+    #[test]
+    fn bottom_strips_never_leave_a_thumbnail_alone_in_a_row() {
+        let p = focus(
+            1080.0,
+            790.0,
+            12.0,
+            &[2.39, WIDE, WIDE, 0.5625, WIDE, WIDE, WIDE],
+            0,
+        );
+        let mut rows: Vec<f64> = p.tiles[1..].iter().map(|t| t.y.round()).collect();
+        rows.dedup();
+        let counts: Vec<usize> = rows
+            .iter()
+            .map(|y| p.tiles[1..].iter().filter(|t| t.y.round() == *y).count())
+            .collect();
+        assert!(counts.iter().all(|c| *c >= 2), "{counts:?} {p:?}");
     }
 
     #[test]
