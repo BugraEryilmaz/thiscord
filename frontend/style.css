@@ -259,7 +259,7 @@ select.field-input, .settings-content select { padding-right: 34px; }
 .row-menu-panel { position: absolute; z-index: 40; top: calc(100% + 4px); right: 0; display: flex; flex-direction: column; min-width: 180px; padding: 6px; border: 1px solid var(--tint-8); border-radius: var(--radius-lg); background: var(--color-popover); box-shadow: var(--shadow-2); }
 .row-menu-panel .person-actions { flex-direction: column; gap: 0; }
 .row-menu-panel .row-action, .row-menu-panel .person-actions button { width: 100%; min-height: 36px; text-align: left; font-size: 14px; color: color-mix(in srgb, var(--color-content) 85%, var(--color-muted)); }
-.row-menu-panel .person-actions .row-action-danger, .row-menu-panel .row-action-danger { color: color-mix(in srgb, var(--color-danger) 60%, var(--color-white)); }
+.row-menu-panel .row-action-danger { color: color-mix(in srgb, var(--color-danger) 60%, var(--color-white)); }
 /* Dialog brand mark, notices and footnotes. */
 .dialog-mark { display: grid; place-items: center; flex-shrink: 0; width: 44px; height: 44px; border-radius: 14px; background: linear-gradient(145deg, color-mix(in srgb, var(--color-brand) 80%, #9a7cf0), var(--color-brand)); color: var(--color-on-brand); box-shadow: 0 6px 18px -6px color-mix(in srgb, var(--color-brand) 60%, transparent); }
 .dialog-mark svg { width: 22px; height: 22px; }
