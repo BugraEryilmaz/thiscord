@@ -88,7 +88,7 @@ time, .tabular-nums { font-variant-numeric: tabular-nums; }
    mix with the theme so they work on dark and light surfaces alike. */
 .avatar-tint-0 { --avatar: #4762f5; } .avatar-tint-1 { --avatar: #9a7cf0; } .avatar-tint-2 { --avatar: #f08a5d; } .avatar-tint-3 { --avatar: #2fb39a; }
 .avatar-tint-4 { --avatar: #e2a93b; } .avatar-tint-5 { --avatar: #e2608d; } .avatar-tint-6 { --avatar: #3aa7e0; } .avatar-tint-7 { --avatar: #7fae3e; }
-.avatar-initials { background: color-mix(in srgb, var(--avatar, var(--color-brand)) 24%, var(--color-raised)); color: color-mix(in srgb, var(--avatar, var(--color-brand)) 40%, var(--color-white)); }
+.avatar-initials { background: color-mix(in srgb, var(--avatar, var(--color-brand)) 36%, var(--color-raised)); color: color-mix(in srgb, var(--avatar, var(--color-brand)) 30%, var(--color-white)); }
 
 /* Server rail: a rounded pill marks the open server; hover previews it. */
 .server-rail li { position: relative; display: flex; justify-content: center; width: 100%; }
@@ -245,7 +245,6 @@ time, .tabular-nums { font-variant-numeric: tabular-nums; }
 .server-content > section { border-radius: 0; border-width: 0; }
 .guild-button { width: 48px; height: 48px; flex-shrink: 0; border-radius: 16px; background: var(--color-raised); color: color-mix(in srgb, var(--color-content) 70%, var(--color-muted)); font-weight: 650; transition: background .15s, border-radius .15s, color .15s; }
 .guild-button:hover, .guild-button.selected { background: var(--color-brand); color: var(--color-on-brand); border-radius: 13px; }
-.guild-button.selected { box-shadow: -32px 0 0 -20px var(--color-white); }
 .user-dock { position: fixed; bottom: calc(8px + env(safe-area-inset-bottom, 0px)); left: calc(8px + env(safe-area-inset-left, 0px)); z-index: 30; width: calc(64px + var(--sidebar-width)); border: 1px solid var(--tint-6); border-radius: var(--radius-lg); background: var(--color-dock); box-shadow: var(--shadow-2); }
 .voice-dock { padding: 12px; border-bottom: 1px solid var(--tint-5); }
 .connection-dot { position: absolute; right: -1px; bottom: -1px; width: 13px; height: 13px; border: 3px solid var(--color-dock); border-radius: 50%; background: color-mix(in srgb, var(--color-muted) 70%, transparent); }
@@ -464,7 +463,7 @@ html:has(.notification-window), body:has(.notification-window) { margin: 0; back
 /* Available updates interrupt startup at most once per version per session. */
 .update-dialog { margin: auto; padding: 0; width: min(960px, 80vw); height: min(720px, 80dvh); max-width: none; max-height: none; border: 1px solid var(--tint-8); border-radius: 18px; background: var(--color-surface); color: var(--color-content); box-shadow: 0 24px 90px #0009; overflow: hidden; }
 .update-dialog::backdrop { background: #08090dd9; backdrop-filter: blur(6px); }
-.settings-window { display: grid; grid-template-columns: 224px minmax(0, 1fr); height: 100%; }
+.settings-window { display: grid; grid-template-columns: 248px minmax(0, 1fr); height: 100%; }
 .settings-sidebar { display: flex; flex-direction: column; min-height: 0; padding: 28px 16px 16px; background: var(--color-sidebar); border-right: 1px solid var(--tint-3); }
 .settings-brand { padding: 0 12px 24px; }
 .settings-kicker { color: var(--brand-ink); font-size: 11px; font-weight: 750; letter-spacing: .16em; }
@@ -972,7 +971,7 @@ html:has(.welcome-page) { scroll-behavior: smooth; scroll-padding-top: 28px; bac
   .chat-online { display: none; }
   .friends-home-header { gap: 8px; padding: 10px 12px; }
   .friends-home-header > nav { flex-wrap: nowrap; order: 3; width: 100%; overflow-x: auto; scrollbar-width: none; }
-  .friends-home-header > nav > button { flex-shrink: 0; }
+  .friends-home-header > nav > button { flex: 1 0 auto; justify-content: center; padding: 0 8px; font-size: 13px; }
   .app-shell.mobile-content { --dock-height: 0px !important; }
   .mobile-content .server-rail, .mobile-content .user-dock, .mobile-content .channel-sidebar, .mobile-content .friends-home-header { display: none; }
   .mobile-content .app-main { margin-left: 0; }

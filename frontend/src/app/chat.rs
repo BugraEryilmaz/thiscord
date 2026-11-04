@@ -1395,7 +1395,7 @@ pub(super) fn ChatPanel(
                                 on:keyup=move |ev| if matches!(ev.key().as_str(), "ArrowLeft" | "ArrowRight" | "Home" | "End") { mentions.refresh(); }
                                 on:blur=move |_| mentions.dismiss()
                                 on:compositionstart=move |_| mentions.composition(true) on:compositionend=move |_| mentions.composition(false)
-                                rows="1" maxlength="4000" placeholder=move || crate::i18n::t("Message this channel · @ to mention") prop:value=move||draft.get()
+                                rows="1" maxlength="4000" placeholder=move || thiscord_frontend::localized_format!(crate::i18n::language(), "Message #{}", name.get()) prop:value=move||draft.get()
                                 disabled=move||!chat.permissions.with(|p|p.contains(&Permission::SendMessages))
                                 on:paste=move |ev: leptos::ev::ClipboardEvent| {
                                     // Screenshots and copied files become attachments; text pastes normally.
