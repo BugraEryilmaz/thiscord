@@ -954,7 +954,7 @@ button.stream-live-badge:hover { background: color-mix(in srgb, var(--color-dang
 }
 @media (max-width: 767px) {
   /* Calls on phones: the media strip takes less of the conversation. */
-  .private-call-media:has(.media-tile) { flex-basis: clamp(150px, 24dvh, 220px); min-height: 150px; }
+  .private-call-media:has(.media-tile) { flex-basis: clamp(170px, 30dvh, 260px); min-height: 170px; }
   /* The view already stops at the dock; clear its rounded top edge. */
   .voice-channel-view .channel-streams { padding-bottom: 28px; }
   .media-menu-scrim { position: fixed; inset: 0; z-index: 70; display: block; background: color-mix(in srgb, var(--color-black, #000) 45%, transparent); }
