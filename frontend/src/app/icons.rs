@@ -122,7 +122,7 @@ pub(super) fn Icon(kind: Glyph) -> impl IntoView {
             "M12 3a9 9 0 0 0 0 18 2 2 0 0 0 1.5-3.3 2 2 0 0 1 1.5-3.3h2.4A4.6 4.6 0 0 0 21 9.8C21 6 17 3 12 3ZM7.5 11.5h.01M10 7.5h.01M14.5 7.5h.01M17 11h.01"
         }
         Glyph::Friends => {
-            "M15 8a3.5 3.5 0 1 1-7 0 3.5 3.5 0 0 1 7 0ZM4 20v-1a7 7 0 0 1 11-5.7M17 11a3 3 0 1 0-1.2-5.75M17.5 14.5A5 5 0 0 1 21 19.5V20"
+            "M14 8a4 4 0 1 1-8 0 4 4 0 0 1 8 0ZM2 21v-1a7 7 0 0 1 10.5-6M19 21l-3.3-3.2a2 2 0 0 1 3.3-2.3 2 2 0 0 1 3.3 2.3L19 21Z"
         }
         Glyph::Globe => {
             "M21 12a9 9 0 1 1-18 0 9 9 0 0 1 18 0ZM3.5 9h17M3.5 15h17M12 3c-2.5 2.5-3.5 5.5-3.5 9s1 6.5 3.5 9c2.5-2.5 3.5-5.5 3.5-9s-1-6.5-3.5-9Z"
@@ -130,7 +130,7 @@ pub(super) fn Icon(kind: Glyph) -> impl IntoView {
         Glyph::Emoji => {
             "M21 12a9 9 0 1 1-18 0 9 9 0 0 1 18 0ZM8 14a4 4 0 0 0 8 0M9 9.5h.01M15 9.5h.01"
         }
-        Glyph::Status => "M12 3a9 9 0 1 0 9 9M16 3.5a5 5 0 0 0 4.5 4.5M12 12h.01",
+        Glyph::Status => "M21 12a9 9 0 1 1-18 0 9 9 0 0 1 18 0ZM15 12a3 3 0 1 1-6 0 3 3 0 0 1 6 0Z",
         Glyph::Message => "M4 5h16v11H9l-5 4V5ZM8 9.5h8M8 12.5h5",
         Glyph::Update => "M21 12a9 9 0 1 1-18 0 9 9 0 0 1 18 0ZM12 16V8M8.5 11.5 12 8l3.5 3.5",
         Glyph::Server => "M4 4h16v6H4V4ZM4 14h16v6H4v-6ZM8 7h.01M8 17h.01",
@@ -141,7 +141,7 @@ pub(super) fn Icon(kind: Glyph) -> impl IntoView {
         Glyph::Devices => "M2 5h14v10H2V5ZM6 19h6M9 15v4M18 9h4v11h-4V9ZM20 17h.01",
         Glyph::Hash => "M5 9h15M4 15h15M10 3 8 21M16 3l-2 18",
         Glyph::Users => {
-            "M16 7a4 4 0 1 1-8 0 4 4 0 0 1 8 0ZM3 21v-1a7 7 0 0 1 7-7h4a7 7 0 0 1 7 7v1"
+            "M15 8a3.5 3.5 0 1 1-7 0 3.5 3.5 0 0 1 7 0ZM4 20v-1a7 7 0 0 1 11-5.7M17 11a3 3 0 1 0-1.2-5.75M17.5 14.5A5 5 0 0 1 21 19.5V20"
         }
         Glyph::Sliders => "M4 6h9M17 6h3M4 12h3M11 12h9M4 18h11M19 18h1M15 4v4M9 10v4M17 16v4",
         Glyph::Bot => "M5 8h14v11H5V8ZM12 8V4M9 13h.01M15 13h.01M9 16h6M2 12v3M22 12v3",
