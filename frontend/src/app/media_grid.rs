@@ -303,6 +303,10 @@ pub(super) fn ScreenViewer(ui: Ui, guild: GuildId, channel: ChannelId) -> impl I
     let set_focus = move |next: Option<Key>| {
         let previous = focus.get_untracked();
         focus.set(next);
+        // A scrolled phone list would otherwise hide the new stage.
+        if let Some(stage) = stage.get_untracked() {
+            stage.set_scroll_top(0);
+        }
         match next {
             Some(key) => announce(localized_format!(
                 crate::i18n::language(),

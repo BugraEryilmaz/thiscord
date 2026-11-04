@@ -32,8 +32,9 @@ pub struct Placement {
 
 /// Width/height of a stream before its first frame arrives.
 pub const DEFAULT_ASPECT: f64 = 16.0 / 9.0;
-/// Tiles smaller than this square (by area) are unusable; the grid scrolls instead.
-pub const MIN_TILE_SIDE: f64 = 150.0;
+/// When tiles average less than this square (by area) they are unusable and
+/// the grid scrolls instead. A single narrow portrait tile does not count alone.
+pub const MIN_TILE_SIDE: f64 = 140.0;
 /// Narrowest column when the grid scrolls.
 const MIN_COLUMN: f64 = 320.0;
 /// Arrangements are searched exhaustively up to this many tiles.
@@ -59,7 +60,8 @@ pub fn grid(width: f64, height: f64, gap: f64, aspects: &[f64]) -> Placement {
     }
     let best = best_rows(width, height, gap, &aspects);
     let floor = MIN_TILE_SIDE.min(width.min(height) * 0.5);
-    if best.iter().all(|r| r.area().sqrt() >= floor) {
+    let typical = best.iter().map(|r| r.area().sqrt()).sum::<f64>() / best.len() as f64;
+    if typical >= floor && best.iter().all(|r| r.w.max(r.h) >= floor * 0.75) {
         return Placement {
             tiles: best,
             stage: None,
@@ -468,6 +470,15 @@ mod tests {
         // Portrait streams never exceed the screen.
         let p = grid(366.0, 560.0, 8.0, &[0.5625, WIDE, WIDE, WIDE, WIDE]);
         assert!(p.tiles[0].h <= 560.0 * 0.8 + 0.5);
+    }
+
+    #[test]
+    fn a_laptop_fits_a_mixed_call_without_scrolling() {
+        let aspects = [WIDE, WIDE, 2.39, 0.5625, 4.0 / 3.0, WIDE, WIDE];
+        let p = grid(640.0, 640.0, 8.0, &aspects);
+        assert!(!p.scrolls, "{p:?}");
+        no_overlap(&p.tiles);
+        inside(&p, 640.0);
     }
 
     #[test]
