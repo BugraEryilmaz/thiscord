@@ -96,7 +96,8 @@ impl State {
         })
     }
     fn toggle(self) {
-        if narrow() {
+        // Same layout source as `open`, so the button always flips what is shown.
+        if self.narrow.get_untracked() {
             self.drawer.update(|open| *open = !*open);
         } else {
             let open = !self.panel.get_untracked();
@@ -243,6 +244,8 @@ fn Group(
 /// narrow ones show it as an overlay drawer with a backdrop.
 #[component]
 pub(super) fn Panel(ui: Ui, guild: GuildId) -> impl IntoView {
+    // Resizes while no channel was open were not observed; resync on mount.
+    ui.members.narrow.set(narrow());
     let resize = window_event_listener(leptos::ev::resize, move |_| {
         let now = narrow();
         if ui.members.narrow.get_untracked() != now {
