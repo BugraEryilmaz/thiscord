@@ -524,7 +524,7 @@ fn FriendList(ui: Ui, filter: RwSignal<&'static str>) -> impl IntoView {
                 .any(|f| f.relationship == Relationship::Friend)
         })
     });
-    view! {<div class="friend-list h-full overflow-y-auto p-6" data-rove-list on:keydown=move |e| super::keyboard::rove(&e)>
+    view! {<div class="h-full overflow-y-auto p-6" data-rove-list on:keydown=move |e| super::keyboard::rove(&e)>
         <p class="sidebar-section-title mb-3">{move ||format!("{} — {}",if filter.get()=="pending"{crate::i18n::t("Requests")}else if filter.get()=="online"{crate::i18n::t("Online friends")}else if filter.get()=="messages"{crate::i18n::t("Direct messages")}else{crate::i18n::t("All friends")},friends.get().len())}</p>
         <Show when=move ||!ui.friends.connected.get()><p role="status" class="mb-4 text-sm text-amber-200">{move || crate::i18n::t("Connecting to friends…")}</p></Show>
         <Show when=move ||friends.get().is_empty()><div class="empty-state min-h-72"><span class="empty-state-icon"><Icon kind=Glyph::Friends/></span><h2 class="empty-state-title">{move ||if filter.get()=="pending"{crate::i18n::t("No pending requests")}else if filter.get()=="online"{crate::i18n::t("No friends online right now")}else{crate::i18n::t("Make yourself at home")}}</h2><p class="max-w-sm">{move ||if filter.get()=="pending"{crate::i18n::t("Friend requests you send or receive will appear here.")}else if filter.get()=="online"{crate::i18n::t("When your friends come online, they’ll show up here.")}else{crate::i18n::t("Use Add friend to find someone by display name or username. Your conversations will appear here.")}}</p>
@@ -536,7 +536,7 @@ fn FriendList(ui: Ui, filter: RwSignal<&'static str>) -> impl IntoView {
             let f=Memo::new(move |_|ui.friends.friend(id).unwrap_or_else(||initial.clone()));
             view!{<div data-rove data-context-conversation=id.to_string() tabindex="0" aria-haspopup="menu" aria-label=move ||f.get().person.display_name class="friend-row">
                 <crate::avatar::Avatar class="size-10 text-sm" name=Signal::derive(move ||f.get().person.display_name) avatar_id=Signal::derive(move ||f.get().person.avatar_id)/>
-                <div class="min-w-0 flex-1"><p class="truncate font-semibold">{move ||f.get().person.display_name}<span class="ml-2 text-xs font-normal text-white/60">{move ||format!("@{}",f.get().person.username)}</span></p><p class="truncate text-xs text-white/60">{move ||match f.get().relationship {Relationship::Incoming=>crate::i18n::t("Incoming request"),Relationship::Outgoing=>crate::i18n::t("Request sent"),Relationship::Friend if f.get().online=>crate::i18n::t("Online"),Relationship::Friend=>crate::i18n::t("Offline")}}{move ||f.get().person.custom_status.as_ref().map(|s|format!(" · {}",thiscord_frontend::member_list::status_text(s)))}</p></div>
+                <div class="min-w-0 flex-1"><p class="truncate font-semibold">{move ||f.get().person.display_name}<span class="ml-2 text-sm font-normal text-white/60">{move ||format!("@{}",f.get().person.username)}</span></p><p class="truncate text-xs text-white/60">{move ||match f.get().relationship {Relationship::Incoming=>crate::i18n::t("Incoming request"),Relationship::Outgoing=>crate::i18n::t("Request sent"),Relationship::Friend if f.get().online=>crate::i18n::t("Online"),Relationship::Friend=>crate::i18n::t("Offline")}}{move ||f.get().person.custom_status.as_ref().map(|s|format!(" · {}",thiscord_frontend::member_list::status_text(s)))}</p></div>
                 <Show when=move ||f.get().relationship==Relationship::Friend>
                     <CountBubble count=Signal::derive(move ||f.get().unread_count) label="unread messages"/>
                     <button class="icon-button" aria-label=move || crate::i18n::t("Message friend") data-tip=move || crate::i18n::t("Message") on:click=move |_|open(ui,id)><Icon kind=Glyph::Message/></button>
@@ -935,13 +935,6 @@ fn Conversation(ui: Ui, id: ConversationId) -> impl IntoView {
             <Show when=move ||past.get()><button class="mb-4 ml-4 text-sm text-brand" on:click=move |_|{pending_jump.set(None);highlight.set(None);bottom.set(true);past.set(false);ui.friends.before.set(None);}>{move || crate::i18n::t("Jump to latest")}</button></Show>
             <p class="text-sm text-white/60" role="status">{move ||if loading.get(){crate::i18n::t("Loading…")}else{""}}</p>
             <Show when=move ||messages.get().is_empty() && !loading.get()><div class="private-empty empty-state"><span class="empty-state-icon"><Icon kind=Glyph::Lock/></span><h3 class="empty-state-title">{move || crate::i18n::t("Start a conversation")}</h3><p class="mt-2 text-sm text-white/60">{move || crate::i18n::t("Only you and your friend can access this conversation.")}</p></div></Show>
-            <Show when=move ||older.get().is_none() && !messages.get().is_empty()>
-                <div class="conversation-start">
-                    <crate::avatar::Avatar class="size-16 text-2xl" name=Signal::derive(move ||friend.get().map(|f|f.person.display_name).unwrap_or_default()) avatar_id=Signal::derive(move ||friend.get().and_then(|f|f.person.avatar_id))/>
-                    <h3 class="empty-state-title">{move ||friend.get().map(|f|f.person.display_name).unwrap_or_default()}</h3>
-                    <p>{move ||thiscord_frontend::localized_format!(crate::i18n::language(), "This is the beginning of your private conversation with {}.", friend.get().map(|f|f.person.display_name).unwrap_or_default())}</p>
-                </div>
-            </Show>
             <ol aria-label=move ||crate::i18n::t("Private messages")><For each=move ||messages.get() key=|m|m.id children=move |m|view!{<DirectRow ui id message=m messages friend=friend.into() highlight edit_request first_unread/>}/></ol>
         </div>
         <p class="px-6 text-xs text-white/60" role="status">{move ||if ui.friends.connected.get() && ui.friends.snapshot.with(|s|s.conversation_id==Some(id) && !s.typing.is_empty()) {crate::i18n::t("Typing…")}else{""}}</p>

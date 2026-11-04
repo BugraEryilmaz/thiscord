@@ -319,7 +319,7 @@ impl Theme {
             ),
             Self::Daylight => palette(
                 [
-                    0xffffff, 0xf4f5f8, 0xe2e5ec, 0xeef0f4, 0xf7f8fa, 0xffffff, 0xd3d7e1,
+                    0xffffff, 0xf4f5f8, 0xe2e5ec, 0xeef0f4, 0xf7f8fa, 0xffffff, 0xe1e4eb,
                 ],
                 [0x1d2027, 0x545864, 0x6a2bc8],
             ),

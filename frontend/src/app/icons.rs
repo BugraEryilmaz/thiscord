@@ -144,7 +144,7 @@ pub(super) fn Icon(kind: Glyph) -> impl IntoView {
         Glyph::Emoji => {
             "M21 12a9 9 0 1 1-18 0 9 9 0 0 1 18 0ZM8 14a4 4 0 0 0 8 0M9 9.5h.01M15 9.5h.01"
         }
-        Glyph::Status => "M4 5h16v11H9l-5 4V5ZM9 9.5h.01M15 9.5h.01M9.5 12a3 3 0 0 0 5 0",
+        Glyph::Status => "M21 12a9 9 0 1 1-18 0 9 9 0 0 1 18 0ZM15 12a3 3 0 1 1-6 0 3 3 0 0 1 6 0Z",
         Glyph::Message => "M4 5h16v11H9l-5 4V5ZM8 9.5h8M8 12.5h5",
         Glyph::Update => "M21 12a9 9 0 1 1-18 0 9 9 0 0 1 18 0ZM12 16V8M8.5 11.5 12 8l3.5 3.5",
         Glyph::Server => "M4 4h16v6H4V4ZM4 14h16v6H4v-6ZM8 7h.01M8 17h.01",
