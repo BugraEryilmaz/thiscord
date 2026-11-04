@@ -19,27 +19,35 @@ the tiles into rows and keeps the one that shows the most video while keeping ro
 a similar height: two wide shares stack in a squarish window and sit side by side
 in a wide one. Until you rearrange tiles yourself, it also orders them by shape
 (for example pairing a portrait phone with wide screens) when that shows clearly
-more video. It reflows when the window resizes, a stream starts or stops, or a
-stream's received resolution changes. When tiles would become too small (phones,
-very large calls) the area scrolls in readable columns instead.
+more video. That order settles once every stream has shown a frame; after that a
+stream that starts, or that you show again, is placed where it fits best without
+moving the others, and hiding a stream repacks the rest. The layout reflows when
+the window resizes, a stream starts or stops, or a stream's shape changes (a
+quality change of the same shape does not move anything). When tiles would
+become too small (phones, very large calls) the area scrolls in readable columns
+instead.
 
-Each tile shows the sharer, a screen or camera icon, live quality such as
-**1080p · 30 fps** or **4K · 60 fps** (the resolution and frame rate you are
-actually receiving, which adapt to your connection and the tile size; hover for
-exact pixels and frame rate) and the avatars of its viewers. Hover or focus a tile
-for **Focus**, **Full screen** and **Stream options**; on touch screens tap a tile
-to focus it and use its ⋯ button for the rest. Small tiles show a compact label
-such as **720p30**.
+Each tile shows the sharer's avatar and name, a screen or camera icon, live
+quality such as **1080p · 30 fps** or **4K · 60 fps** (the resolution and frame
+rate you are actually receiving, which adapt to your connection and the tile
+size; hover for exact pixels) and the avatars of its viewers. Small tiles show a
+compact label such as **720p30**, and very narrow ones keep just the avatar and
+icon. Hover or focus a tile for **Focus**, **Full screen** and **Stream
+options**; on touch screens tap a tile to focus it and use its ⋯ button for the
+rest. The bar above the grid shows a short gesture hint until you have used
+focus or rearranging a few times.
 
 - **Focus** (click a tile, or Enter) puts it on a large stage with the other
   streams in a strip beside or below it; click a strip tile or drop it on the
-  stage to swap. Click the stage again, press Escape (anywhere in the view except
-  a text field) or choose **Back to grid** to return. With a single stream there
-  is nothing to focus, so clicking it opens full screen.
-- **Rearrange** by dragging a tile onto another (mouse or pen), or with **Move to
-  start**, **Move earlier**, **Move later** and **Move to end** in its options
-  (Alt+Home/←/→/End from the keyboard; on touch screens use the options). Your
-  order is kept while the view is open; new streams join at the end.
+  stage to swap. Click the stage again, press Escape (while the media view or
+  nothing has keyboard focus) or choose **Back to grid** to return. With a
+  single stream there is nothing to focus, so clicking it opens full screen.
+- **Rearrange** by dragging a tile onto another (mouse or pen); the grid makes
+  room as you drag, and pressing Escape or dropping outside the grid puts
+  everything back. **Move to start**, **Move earlier**, **Move later** and
+  **Move to end** in its options do the same without dragging (Alt+Home/←/→/End
+  from the keyboard; on touch screens use the options). Your order is kept while
+  the view is open; new streams join at the end.
 - **Full screen** (button, options or F) fills the screen; Escape restores the
   grid. WebViews without DOM fullscreen use an expanded app view.
 - **Hide this stream** removes a tile; the bar above the grid lists hidden
