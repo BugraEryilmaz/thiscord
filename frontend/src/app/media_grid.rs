@@ -175,9 +175,67 @@ pub(super) fn ScreenViewer(ui: Ui, guild: GuildId, channel: ChannelId) -> impl I
             .map(|(_, a)| *a as f64 / 100.0)
             .unwrap_or(media_layout::DEFAULT_ASPECT)
     };
-    // The user's order first; streams that start later join at the end. Until
-    // the user rearranges, the order is chosen to pack shapes well (from the
-    // area at that moment, so resizing alone never reshuffles tiles).
+    // Until the user rearranges, the order is chosen to pack shapes well. It
+    // settles once every stream has a shape (from the area at that moment, so
+    // resizing never reshuffles); afterwards a stream that joins or is shown
+    // again is placed where it fits best, and the others keep their order.
+    let auto = RwSignal::new(Vec::<Key>::new());
+    let settled = StoredValue::new(false);
+    let placed = StoredValue::new(Vec::<Key>::new());
+    Effect::new(move |_| {
+        if arranged.get() {
+            return;
+        }
+        let keys: Vec<Key> = tiles.with(|t| t.iter().map(key_of).collect::<Vec<_>>());
+        let keys: Vec<Key> = hidden.with(|h| keys.into_iter().filter(|k| !h.contains(k)).collect());
+        let shapes_now = shapes.get();
+        let known = |k: &Key| shapes_now.iter().any(|(s, _)| s == k);
+        let (width, height) = size.get_untracked();
+        let gap = if width < 600.0 { 8.0 } else { 12.0 };
+        let mut current = auto.get_untracked();
+        current.retain(|k| keys.contains(k));
+        let mut done = placed.get_value();
+        done.retain(|k| keys.contains(k));
+        if !settled.get_value() {
+            if !keys.is_empty() && width > 0.0 && keys.iter().all(known) {
+                let aspects: Vec<f64> = keys.iter().map(|k| aspect_of(&shapes_now, k)).collect();
+                current = media_layout::arrange(width, height, gap, &aspects)
+                    .into_iter()
+                    .map(|i| keys[i])
+                    .collect();
+                done = keys.clone();
+                settled.set_value(true);
+            } else {
+                current = keys.clone();
+            }
+        } else {
+            for k in &keys {
+                if !current.contains(k) {
+                    current.push(*k);
+                }
+            }
+            let newcomers: Vec<Key> = keys
+                .iter()
+                .filter(|k| known(k) && !done.contains(k))
+                .copied()
+                .collect();
+            for k in &newcomers {
+                if let Some(from) = current.iter().position(|c| c == k) {
+                    let aspects: Vec<f64> =
+                        current.iter().map(|c| aspect_of(&shapes_now, c)).collect();
+                    let at = media_layout::insertion(width, height, gap, &aspects, from);
+                    let item = current.remove(from);
+                    current.insert(at.min(current.len()), item);
+                }
+                done.push(*k);
+            }
+        }
+        placed.set_value(done);
+        if current != auto.get_untracked() {
+            auto.set(current);
+        }
+    });
+    // The user's order first; streams that start later join at the end.
     let visible = Memo::new(move |_| {
         let tiles = tiles.get();
         let hidden = hidden.get();
@@ -190,11 +248,15 @@ pub(super) fn ScreenViewer(ui: Ui, guild: GuildId, channel: ChannelId) -> impl I
         keys.extend(tiles.iter().map(key_of).filter(|k| !order.contains(k)));
         keys.retain(|k| !hidden.contains(k));
         if !arranged.get() {
-            let (width, height) = size.get_untracked();
-            let aspects: Vec<f64> = shapes.with(|s| keys.iter().map(|k| aspect_of(s, k)).collect());
-            let gap = if width < 600.0 { 8.0 } else { 12.0 };
-            let auto = media_layout::arrange(width, height, gap, &aspects);
-            keys = auto.into_iter().map(|i| keys[i]).collect();
+            let mut ordered: Vec<Key> =
+                auto.with(|a| a.iter().copied().filter(|k| keys.contains(k)).collect());
+            ordered.extend(
+                keys.iter()
+                    .filter(|k| !ordered.contains(k))
+                    .copied()
+                    .collect::<Vec<_>>(),
+            );
+            keys = ordered;
         }
         keys.into_iter()
             .filter_map(|k| tiles.iter().find(|t| key_of(t) == k).cloned())
