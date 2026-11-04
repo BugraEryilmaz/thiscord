@@ -101,11 +101,11 @@ time, .tabular-nums { font-variant-numeric: tabular-nums; }
 /* Pane headers: one height and divider across sidebar, chat, DMs and members. */
 .pane-header { display: flex; flex-shrink: 0; align-items: center; gap: 8px; min-height: var(--header-height); padding: 0 12px 0 16px; border-bottom: 1px solid var(--hairline); box-shadow: 0 1px 0 #00000012; }
 .pane-header-icon { flex-shrink: 0; color: color-mix(in srgb, var(--color-muted) 80%, transparent); font-size: 20px; font-weight: 500; line-height: 1; }
-.pane-title { font-family: var(--font-display); font-size: 16px; font-weight: 600; letter-spacing: -.01em; color: var(--color-white); }
+.pane-title { font-family: var(--font-display); font-size: 18px; font-weight: 700; letter-spacing: -.01em; color: var(--color-white); }
 .pane-status { flex-shrink: 1; min-width: 0; margin-left: 8px; overflow: hidden; padding: 2px 8px; border-radius: 999px; background: color-mix(in srgb, var(--color-warning) 14%, transparent); color: color-mix(in srgb, var(--color-warning) 55%, var(--color-white)); font-size: 12px; font-weight: 500; white-space: nowrap; text-overflow: ellipsis; }
 .chat-pane { background: var(--color-surface); }
 .sidebar-header { display: flex; align-items: center; gap: 10px; min-height: var(--header-height); margin: -20px -12px 0; padding: 0 8px 0 16px; border-bottom: 1px solid var(--hairline); box-shadow: 0 1px 0 #00000012; }
-.sidebar-header h2 { font-family: var(--font-display); font-size: 16px; font-weight: 700; letter-spacing: -.015em; line-height: 1.2; }
+.sidebar-header h2 { font-family: var(--font-display); font-size: 18px; font-weight: 700; letter-spacing: -.015em; line-height: 1.2; }
 .sidebar-section-title { color: color-mix(in srgb, var(--color-muted) 92%, transparent); font-size: 11px; font-weight: 700; letter-spacing: .08em; text-transform: uppercase; }
 .channel-item { display: flex; align-items: center; gap: 8px; width: 100%; min-height: 34px; padding: 6px 8px; border-radius: var(--radius-md); color: color-mix(in srgb, var(--color-muted) 96%, transparent); text-align: left; transition: background .12s, color .12s; }
 .channel-item:hover { background: var(--tint-4); color: var(--color-content); }
@@ -144,7 +144,7 @@ time, .tabular-nums { font-variant-numeric: tabular-nums; }
 .composer-send.composer-send-text { padding: 0 14px; }
 .composer-hint { color: color-mix(in srgb, var(--color-muted) 90%, transparent); font-size: 12px; }
 #private-message-hint { position: absolute; width: 1px; height: 1px; overflow: hidden; clip-path: inset(50%); white-space: nowrap; }
-@media (hover: none), (pointer: coarse) { .settings-close span { display: none; } }
+@media (hover: none), (pointer: coarse) { .settings-close span, .mention-popover-hint { display: none; } }
 @media (max-width: 767px) { .pane-header .presence-pill { display: none; } }
 .composer-error { color: color-mix(in srgb, var(--color-danger) 55%, var(--color-white)); font-size: 14px; }
 .composer-error:empty { display: none; }
@@ -231,7 +231,7 @@ time, .tabular-nums { font-variant-numeric: tabular-nums; }
 .mention-option[aria-selected="true"] { background: var(--tint-8); box-shadow: inset 3px 0 0 var(--color-brand); }
 /* Compact selects (language) get the app's own chevron. */
 select.field-input, .settings-content select { padding-right: 34px; }
-.select-compact, select.field-input, .settings-content select { appearance: none; -webkit-appearance: none; background-image: linear-gradient(45deg, transparent 50%, currentColor 50%), linear-gradient(135deg, currentColor 50%, transparent 50%); background-position: calc(100% - 15px) 52%, calc(100% - 10px) 52%; background-size: 5px 5px, 5px 5px; background-repeat: no-repeat; cursor: pointer; }
+.select-compact, select.field-input, .settings-content select { appearance: none; -webkit-appearance: none; background-image: linear-gradient(45deg, transparent calc(50% - .75px), currentColor calc(50% - .75px), currentColor calc(50% + .75px), transparent calc(50% + .75px)), linear-gradient(-45deg, transparent calc(50% - .75px), currentColor calc(50% - .75px), currentColor calc(50% + .75px), transparent calc(50% + .75px)); background-position: calc(100% - 17px) 55%, calc(100% - 12px) 55%; background-size: 6px 6px, 6px 6px; background-repeat: no-repeat; cursor: pointer; }
 .select-compact:hover { border-color: var(--tint-15); background-color: var(--tint-8); }
 .select-compact option, select.field-input option, .settings-content select option { background: var(--color-popover); color: var(--color-content); }
 @media (max-width: 767px) { .app-shell:not(.mobile-content) .app-toast { left: calc(84px + env(safe-area-inset-left, 0px)); } }
@@ -278,13 +278,15 @@ select.field-input, .settings-content select { padding-right: 34px; }
 .icon-button[aria-pressed="true"], .icon-button.danger { color: color-mix(in srgb, var(--color-danger) 60%, var(--color-white)); }
 .icon-button[aria-pressed="true"] { background: color-mix(in srgb, var(--color-danger) 8%, transparent); }
 .icon-button:disabled { opacity: .45; cursor: not-allowed; }
-.pane-header .icon-button[aria-expanded="true"], .composer .icon-button[aria-expanded="true"] { background: var(--tint-8); color: var(--color-white); }
+.pane-header .icon-button[aria-expanded="true"], .composer .icon-button[aria-expanded="true"] { background: var(--brand-soft); color: var(--brand-ink); box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--color-brand) 30%, transparent); }
 /* One focus indicator for every interactive element. The ring mixes the accent
    toward the strongest text color (--color-white), so custom and light themes
    keep contrast. Text fields with their own ring/border focus style keep it. */
 :root { --focus-ring: var(--brand-lighter); }
 :where(a[href], button, input, select, textarea, summary, [tabindex], [role="option"], [contenteditable="true"]):not([class*="focus:ring"]):not([class*="focus:border"]):focus-visible { outline: 2px solid var(--focus-ring); outline-offset: 2px; }
 #app-content:focus-visible { outline: none; }
+/* Items inside scrolling lists draw their ring inside the row, so the scroller cannot clip it. */
+.channel-item:focus-visible, .settings-nav-item:focus-visible, .quick-switcher-option:focus-visible, .settings-item-list button:focus-visible, .context-item:focus-visible { outline-offset: -2px !important; }
 .skip-link { position: fixed; left: 8px; top: calc(8px + env(safe-area-inset-top, 0px)); z-index: 200; padding: 8px 14px; border-radius: 8px; background: var(--color-brand); color: var(--color-on-brand); font-weight: 600; transform: translateY(-300%); }
 .skip-link:focus { transform: none; }
 /* Message tools stay out of the transcript until the row is being used. */
@@ -507,7 +509,7 @@ html:has(.notification-window), body:has(.notification-window) { margin: 0; back
 .settings-nav-item { display: flex; align-items: center; gap: 10px; width: 100%; padding: 7px 12px; margin-bottom: 1px; border-radius: var(--radius-md); color: color-mix(in srgb, var(--color-muted) 98%, transparent); text-align: left; font-size: 14px; font-weight: 500; cursor: pointer; transition: background .12s, color .12s; }
 .settings-nav-item svg { width: 18px; height: 18px; }
 .settings-nav-item:hover { color: var(--color-content); background: var(--tint-4); }
-.settings-nav-item[aria-current="page"] { color: var(--color-white); background: var(--tint-8); font-weight: 600; }
+.settings-nav-item[aria-current="page"] { color: var(--color-white); background: color-mix(in srgb, var(--color-brand) 14%, var(--tint-6)); box-shadow: inset 2px 0 0 var(--brand-ink); font-weight: 600; }
 .settings-nav-item[aria-current="page"] svg { color: var(--brand-ink); }
 .settings-nav-item:disabled { opacity: .5; cursor: wait; }
 .settings-signout { display: flex; align-items: center; gap: 10px; padding: 10px 12px; margin-top: 4px; border-top: 1px solid var(--tint-6); color: color-mix(in srgb, var(--color-danger) 60%, var(--color-white)); font-size: 14px; font-weight: 500; cursor: pointer; }
@@ -1024,7 +1026,7 @@ html:has(.welcome-page) { scroll-behavior: smooth; scroll-padding-top: 28px; bac
 }
 @media (pointer: coarse) {
   .icon-button { min-width: 44px; min-height: 44px; }
-  .user-dock .icon-button { min-width: 40px; min-height: 40px; }
+  .user-dock .icon-button { min-width: 44px; min-height: 44px; }
   .context-item, .settings-nav-item, .settings-item-list button { min-height: 44px; }
   .context-item { padding-block: 12px; font-size: 16px; }
   .channel-sidebar li > button { min-height: 44px; }

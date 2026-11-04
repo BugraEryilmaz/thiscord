@@ -166,10 +166,10 @@ pub(super) fn Host(ui: Ui) -> impl IntoView {
                             <NavItem ui=ui page="security" label="Password & security" icon=Glyph::Lock/>
                             <NavItem ui=ui page="devices" label="Devices & connections" icon=Glyph::Devices/>
                             <p class="settings-nav-label">{move || crate::i18n::t("Your app")}</p>
-                            <NavItem ui=ui page="audio" label="Voice & audio" icon=Glyph::Headphones/>
+                            <NavItem ui=ui page="audio" label="Voice & audio" icon=Glyph::Sliders/>
                             <NavItem ui=ui page="appearance" label="Appearance" icon=Glyph::Palette/>
                             <NavItem ui=ui page="language" label="Language" icon=Glyph::Globe/>
-                            <Show when=client::desktop><NavItem ui=ui page="shortcuts" label="Shortcuts & overlay" icon=Glyph::Keyboard/><NavItem ui=ui page="desktop" label="App behavior" icon=Glyph::Screen/></Show>
+                            <Show when=client::desktop><NavItem ui=ui page="shortcuts" label="Shortcuts & overlay" icon=Glyph::Keyboard/><NavItem ui=ui page="desktop" label="App behavior" icon=Glyph::Power/></Show>
                             <Show when=client::web_app><NavItem ui=ui page="shortcuts" label="Keyboard shortcuts" icon=Glyph::Keyboard/></Show>
                             <NavItem ui=ui page="updates" label="Updates" icon=Glyph::Update/>
                             <NavItem ui=ui page="notifications" label="Notifications" icon=Glyph::Bell/>
@@ -182,8 +182,8 @@ pub(super) fn Host(ui: Ui) -> impl IntoView {
                         <nav class="settings-nav" aria-label=move || crate::i18n::t("Server settings") data-rove-list on:keydown=move |e| super::keyboard::rove(&e)>
                             <p class="settings-nav-label">{move || crate::i18n::t("Community")}</p>
                             <Show when=move ||ui.server.get().is_some_and(|s|s.can_manage_roles)>
-                                <NavItem ui=ui page="server_overview" label="Overview" icon=Glyph::Sliders/>
-                                <NavItem ui=ui page="server_roles" label="Roles" icon=Glyph::Shield/>
+                                <NavItem ui=ui page="server_overview" label="Overview" icon=Glyph::Server/>
+                                <NavItem ui=ui page="server_roles" label="Roles" icon=Glyph::Badge/>
                                 <NavItem ui=ui page="server_members" label="Members" icon=Glyph::Users/>
                                 <NavItem ui=ui page="server_channels" label="Channels & permissions" icon=Glyph::Hash/>
                             </Show>
@@ -295,7 +295,7 @@ fn Security(ui: Ui) -> impl IntoView {
 fn Devices(ui: Ui) -> impl IntoView {
     view! {
         <section class="settings-card"><h3>{move || crate::i18n::t("Signed-in devices")}</h3><p class="settings-hint">{move || crate::i18n::t("Remove access for devices you no longer use.")}</p><Show when=move ||ui.sessions.get().is_empty()><p class="settings-hint">{move ||if ui.busy.get(){crate::i18n::t("Loading devices…")}else{crate::i18n::t("No devices to display.")}}</p></Show>
-            <ul class="settings-device-list">{move ||ui.sessions.get().into_iter().map(|s|{let id=s.id;let device=s.device.clone();view!{<li><div class="settings-device-icon"><Icon kind=Glyph::Screen/></div><div class="min-w-0 flex-1"><strong>{s.device}</strong><Show when=move ||s.current><span class="settings-badge">{move || crate::i18n::t("This device")}</span></Show><p>{move || thiscord_frontend::localized_format!(crate::i18n::language(), "Last active {}",crate::i18n::datetime(s.last_seen_at))}</p></div><ConfirmButton ui=ui label="Sign out" title="Sign out this device?" detail="Its current session will end." target=Signal::stored(device.clone()) action=super::confirmed(ui,move ||AccountRequest::RevokeSession{session_id:id})/></li>}}).collect_view()}</ul>
+            <ul class="settings-device-list">{move ||ui.sessions.get().into_iter().map(|s|{let id=s.id;let device=s.device.clone();view!{<li><div class="settings-device-icon"><Icon kind=Glyph::Devices/></div><div class="min-w-0 flex-1"><strong>{s.device}</strong><Show when=move ||s.current><span class="settings-badge">{move || crate::i18n::t("This device")}</span></Show><p>{move || thiscord_frontend::localized_format!(crate::i18n::language(), "Last active {}",crate::i18n::datetime(s.last_seen_at))}</p></div><ConfirmButton ui=ui label="Sign out" title="Sign out this device?" detail="Its current session will end." target=Signal::stored(device.clone()) action=super::confirmed(ui,move ||AccountRequest::RevokeSession{session_id:id})/></li>}}).collect_view()}</ul>
             <ConfirmButton ui=ui label="Sign out all devices" title="Sign out everywhere?" detail="You’ll need to sign in again on every device, including this one." action=super::confirmed(ui,||AccountRequest::LogoutAll)/>
         </section>
         <section class="settings-card"><h3>{move || crate::i18n::t("Login methods")}</h3><p class="settings-hint">{move || crate::i18n::t("Confirm your identity in Password & security before changing login methods. Keep at least one method.")}</p>{move ||ui.account.get().map(|a|a.identities.into_iter().map(|provider|view!{<div class="settings-info-row"><strong>{match provider{IdentityProvider::Google=>"Google",IdentityProvider::Password=>crate::i18n::t("Password")}}</strong><ConfirmButton ui=ui label="Remove" title="Remove this login method?" detail="Make sure you can sign in with another method before continuing." target=Signal::stored(match provider{IdentityProvider::Google=>"Google".to_owned(),IdentityProvider::Password=>crate::i18n::t("Password").to_owned()}) action=super::confirmed(ui,move ||AccountRequest::UnlinkIdentity{provider})/></div>}).collect_view())}<button class="settings-secondary" disabled=move ||ui.busy.get() on:click=move |_|super::google(ui,GooglePurpose::Link)>{move || crate::i18n::t("Connect Google")}</button><button class="settings-link" on:click=move |_|navigate(ui,"security")>{move || crate::i18n::t("Password & security")}</button></section>
