@@ -860,7 +860,7 @@ button.stream-live-badge:hover { background: color-mix(in srgb, var(--color-dang
 .media-bar-count { color: color-mix(in srgb, var(--color-muted) 100%, transparent); font-size: 12px; font-weight: 700; letter-spacing: .04em; text-transform: uppercase; }
 .media-bar-hidden { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; min-width: 0; padding-left: 12px; border-left: 1px solid var(--tint-8); }
 .media-bar-label { color: color-mix(in srgb, var(--color-muted) 100%, transparent); font-size: 12px; }
-.media-chip { display: inline-flex; align-items: center; gap: 6px; max-width: 220px; min-height: 28px; padding: 0 10px; border: 1px dashed var(--tint-19); border-radius: 999px; color: color-mix(in srgb, var(--color-content) 90%, var(--color-muted)); font-size: 12px; font-weight: 600; cursor: pointer; transition: background .12s, border-color .12s; }
+.media-chip { display: inline-flex; align-items: center; gap: 6px; max-width: 220px; min-height: 28px; padding: 0 12px; border: 1px dashed var(--tint-19); border-radius: 999px; color: color-mix(in srgb, var(--color-content) 90%, var(--color-muted)); font-size: 12px; font-weight: 600; cursor: pointer; transition: background .12s, border-color .12s; }
 .media-chip:hover { border-style: solid; border-color: color-mix(in srgb, var(--brand-light) 45%, transparent); background: var(--brand-soft); }
 .media-chip svg { width: 14px; height: 14px; }
 .media-chip svg:last-child { color: color-mix(in srgb, var(--color-muted) 100%, transparent); }
@@ -894,7 +894,7 @@ button.stream-live-badge:hover { background: color-mix(in srgb, var(--color-dang
 .media-tile .stream-placeholder { height: 100%; min-height: 0; padding: 12px; font-size: 12px; text-align: center; color: #c9cbd3; }
 /* Overlay chips: one dark glass on any picture, in every theme. */
 .media-tile-caption, .media-quality, .media-tile-button { background: rgb(10 11 15 / .74); color: #fff; backdrop-filter: blur(8px); -webkit-backdrop-filter: blur(8px); }
-.media-tile-caption { position: absolute; left: 8px; top: 8px; display: inline-flex; align-items: center; gap: 6px; max-width: calc(100% - 16px); min-height: 28px; padding: 0 10px 0 8px; border-radius: 999px; font-size: 12px; font-weight: 600; pointer-events: none; }
+.media-tile-caption { position: absolute; left: 8px; top: 8px; display: inline-flex; align-items: center; gap: 6px; max-width: calc(100% - 16px); min-height: 28px; padding: 0 12px 0 8px; border-radius: 999px; font-size: 12px; font-weight: 600; pointer-events: none; }
 .media-tile-caption svg { width: 14px; height: 14px; color: #d8dae2; }
 .media-tile-caption .media-tile-avatar { box-shadow: 0 0 0 1px rgb(255 255 255 / .25); }
 .media-tile-actions { position: absolute; right: 8px; top: 8px; display: flex; gap: 4px; opacity: 0; transition: opacity .15s; }
@@ -907,13 +907,13 @@ button.stream-live-badge:hover { background: color-mix(in srgb, var(--color-dang
 .media-tile-button svg { width: 18px; height: 18px; }
 .media-quality-tip { position: absolute; left: 0; bottom: calc(100% + 6px); display: none; width: max-content; max-width: 260px; padding: 7px 10px; border: 1px solid var(--tint-8); border-radius: var(--radius-md); background: var(--color-popover); color: var(--color-content); box-shadow: var(--shadow-2); font-size: 14px; font-weight: 500; line-height: 1.45; white-space: nowrap; pointer-events: none; backdrop-filter: none; }
 .media-quality:hover .media-quality-tip { display: block; }
-.media-quality { position: absolute; left: 8px; bottom: 8px; padding: 3px 8px; border-radius: 999px; font-size: 12px; font-weight: 600; line-height: 18px; font-variant-numeric: tabular-nums; white-space: nowrap; cursor: default; }
+.media-quality { position: absolute; left: 8px; bottom: 8px; padding: 4px 8px; border-radius: 999px; font-size: 12px; font-weight: 600; line-height: 16px; font-variant-numeric: tabular-nums; white-space: nowrap; cursor: default; }
 .media-tile .stream-watchers { right: 8px; bottom: 8px; }
 .media-tile .stream-player-status { font-size: 12px; }
 @container (max-width: 300px) { .media-tile:hover .media-tile-caption, .media-tile:focus-within .media-tile-caption, .media-tile.menu-open .media-tile-caption { max-width: calc(100% - 56px); } .media-tile-actions > :not(.media-tile-more) { display: none; } }
-@container (max-width: 150px) or (max-height: 96px) { .media-tile-actions { top: 4px; right: 4px; } .media-tile-actions > :not(.media-tile-more) { display: none; } .media-tile-caption { max-width: calc(100% - 16px); min-height: 24px; padding: 0 8px 0 6px; } .media-tile:hover .media-tile-caption, .media-tile:focus-within .media-tile-caption, .media-tile.menu-open .media-tile-caption { max-width: calc(100% - 44px); } }
+@container (max-width: 150px) or (max-height: 96px) { .media-tile-actions { top: 4px; right: 4px; } .media-tile-actions > :not(.media-tile-more) { display: none; } .media-tile-caption { max-width: calc(100% - 16px); min-height: 24px; padding: 0 8px 0 4px; } .media-tile:hover .media-tile-caption, .media-tile:focus-within .media-tile-caption, .media-tile.menu-open .media-tile-caption { max-width: calc(100% - 44px); } }
 .media-quality-compact { display: none; }
-@container (max-width: 240px) or (max-height: 130px) { .media-quality-full, .media-tile .stream-watchers { display: none; } .media-quality-compact { display: inline; } .media-quality { left: 4px; bottom: 4px; padding: 1px 6px; } }
+@container (max-width: 240px) or (max-height: 130px) { .media-quality-full, .media-tile .stream-watchers { display: none; } .media-quality-compact { display: inline; } .media-quality { left: 4px; bottom: 4px; padding: 0 8px; line-height: 20px; } }
 @container (max-width: 96px) or (max-height: 60px) { .media-quality { display: none; } }
 @container (max-height: 90px) { .media-tile-actions { top: 4px; right: 4px; } }
 @container (max-width: 130px) or (max-height: 100px) { .media-tile-name { display: none; } .media-tile-caption { padding: 0 4px; } }

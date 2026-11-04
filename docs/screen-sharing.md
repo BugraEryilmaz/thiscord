@@ -25,7 +25,8 @@ moving the others, and hiding a stream repacks the rest. The layout reflows when
 the window resizes, a stream starts or stops, or a stream's shape changes (a
 quality change of the same shape does not move anything). When tiles would
 become too small (phones, very large calls) the area scrolls in readable columns
-instead.
+instead. Portrait streams never shrink to slivers: an arrangement that keeps every
+tile at least about 96px wide wins.
 
 Each tile shows the sharer's avatar and name, a screen or camera icon, live
 quality such as **1080p · 30 fps** or **4K · 60 fps** (the resolution and frame
@@ -60,8 +61,9 @@ keyboard icon in the bar keeps the gestures and shortcuts one hover away.
 
 Private calls show the media as a strip above the chat. On a narrow screen its
 tiles keep their full height in one row that scrolls sideways (the next tile
-peeks in at the edge), and focus keeps the other streams in a column beside the
-stage, so none is hidden.
+peeks in at the edge). Focusing a stream there moves it to the front of that row
+at the same full height, so it never gets smaller, and the others stay reachable
+by scrolling sideways.
 
 Players stay mounted while tiles move, focus or expand, and all other tiles keep
 playing. Moves and focus changes are announced to screen readers.

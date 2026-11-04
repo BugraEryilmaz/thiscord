@@ -35,6 +35,9 @@ pub const DEFAULT_ASPECT: f64 = 16.0 / 9.0;
 /// When tiles average less than this square (by area) they are unusable and
 /// the grid scrolls instead. A single narrow portrait tile does not count alone.
 pub const MIN_TILE_SIDE: f64 = 140.0;
+/// No tile, including a portrait one, should be narrower than this when an
+/// arrangement can avoid it (its caption and quality need the room).
+pub const MIN_TILE_WIDTH: f64 = 96.0;
 /// Narrowest column when the grid scrolls.
 const MIN_COLUMN: f64 = 320.0;
 /// Arrangements are searched exhaustively up to this many tiles.
@@ -61,7 +64,8 @@ pub fn grid(width: f64, height: f64, gap: f64, aspects: &[f64]) -> Placement {
     let best = best_rows(width, height, gap, &aspects);
     let floor = MIN_TILE_SIDE.min(width.min(height) * 0.5);
     let typical = best.iter().map(|r| r.area().sqrt()).sum::<f64>() / best.len() as f64;
-    if typical >= floor && best.iter().all(|r| r.w.max(r.h) >= floor * 0.75) {
+    let narrowest = MIN_TILE_WIDTH.min(width * 0.5);
+    if typical >= floor && best.iter().all(|r| r.w >= narrowest) {
         return Placement {
             tiles: best,
             stage: None,
@@ -108,11 +112,20 @@ fn column(width: f64, height: f64, gap: f64, aspects: &[f64], min_column: f64) -
 /// The best row arrangement that fits the area, without scrolling.
 fn best_rows(width: f64, height: f64, gap: f64, aspects: &[f64]) -> Vec<Rect> {
     let n = aspects.len();
+    let narrowest = MIN_TILE_WIDTH.min(width * 0.65);
+    // Arrangements that keep every tile at least `narrowest` wide win over any
+    // that squeeze a portrait tile into a sliver.
     let mut best: Option<(f64, Vec<Rect>)> = None;
+    let mut best_wide: Option<(f64, Vec<Rect>)> = None;
     let mut consider = |rows: &[usize]| {
         for uniform in [false, true] {
             let tiles = place_rows(width, height, gap, aspects, rows, uniform);
             let score = score(&tiles, rows);
+            if tiles.iter().all(|t| t.w >= narrowest)
+                && best_wide.as_ref().is_none_or(|(s, _)| score > *s + 1e-6)
+            {
+                best_wide = Some((score, tiles.clone()));
+            }
             if best.as_ref().is_none_or(|(s, _)| score > *s + 1e-6) {
                 best = Some((score, tiles));
             }
@@ -139,7 +152,10 @@ fn best_rows(width: f64, height: f64, gap: f64, aspects: &[f64]) -> Vec<Rect> {
             consider(&balanced(aspects, count));
         }
     }
-    best.map(|(_, tiles)| tiles).unwrap_or_default()
+    best_wide
+        .or(best)
+        .map(|(_, tiles)| tiles)
+        .unwrap_or_default()
 }
 
 /// Splits tiles into `count` rows of similar total aspect (greedy, in order).
@@ -415,7 +431,10 @@ fn consider_strip(
     typical: impl Fn(&[Rect]) -> f64,
 ) {
     let strip_area: f64 = strip.iter().map(Rect::area).sum();
-    let readable = (typical(&strip) / 100.0).min(1.0);
+    let mut readable = (typical(&strip) / 100.0).min(1.0);
+    if strip.iter().any(|t| t.w < MIN_TILE_WIDTH) {
+        readable *= 0.5;
+    }
     let score = (stage.area() + 0.3 * strip_area) * readable;
     if best.as_ref().is_none_or(|(s, ..)| score > *s + 1e-6) {
         *best = Some((score, side, stage, strip));
@@ -812,9 +831,13 @@ mod tests {
             1080.0,
             790.0,
             12.0,
-            &[2.39, WIDE, WIDE, 0.5625, WIDE, WIDE, WIDE],
+            &[2.39, WIDE, WIDE, 4.0 / 3.0, WIDE, WIDE, WIDE],
             0,
         );
+        let below = p.tiles[1..]
+            .iter()
+            .all(|t| t.y >= p.tiles[0].y + p.tiles[0].h - 0.5);
+        assert!(below, "an ultrawide stage takes a strip below: {p:?}");
         let mut rows: Vec<f64> = p.tiles[1..].iter().map(|t| t.y.round()).collect();
         rows.dedup();
         let counts: Vec<usize> = rows
@@ -938,6 +961,32 @@ mod tests {
         assert!(r.tiles.iter().all(|t| (t.h - 190.0).abs() < 0.5));
         assert!(r.tiles[1].x > r.tiles[0].x + r.tiles[0].w);
         no_overlap(&r.tiles);
+    }
+
+    #[test]
+    fn portrait_tiles_never_become_slivers() {
+        let call = [WIDE, WIDE, 2.39, 0.5625, 4.0 / 3.0, WIDE, WIDE];
+        for (w, h) in [(640.0, 640.0), (1080.0, 790.0), (664.0, 610.0)] {
+            let p = grid(w, h, 12.0, &call);
+            assert!(
+                p.tiles.iter().all(|t| t.w >= MIN_TILE_WIDTH - 0.5),
+                "{w}x{h} {p:?}"
+            );
+            let mut twelve = call.to_vec();
+            twelve.extend([WIDE, WIDE, WIDE, 0.5625, WIDE]);
+            let p = grid(w, h, 12.0, &twelve);
+            assert!(
+                p.tiles.iter().all(|t| t.w >= MIN_TILE_WIDTH - 0.5),
+                "{w}x{h} {p:?}"
+            );
+        }
+        for f in 0..call.len() {
+            let p = focus(1080.0, 790.0, 12.0, &call, f);
+            assert!(
+                p.tiles.iter().all(|t| t.w >= MIN_TILE_WIDTH - 0.5),
+                "focus {f} {p:?}"
+            );
+        }
     }
 
     #[test]

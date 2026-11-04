@@ -337,13 +337,19 @@ pub(super) fn ScreenViewer(
             None => media_layout::grid(width, height, gap, &aspects),
         };
         // A narrow call strip would shrink tiles below readable height.
-        if compact
-            && focused.is_none()
-            && width < 600.0
-            && keys.len() > 1
-            && placement.tiles.iter().any(|t| t.h < 120.0)
-        {
-            placement = media_layout::row(height, gap, &aspects);
+        let mut keys = keys;
+        if compact && width < 600.0 && keys.len() > 1 {
+            if let Some(i) = focused {
+                // Focus never makes the stream smaller: it leads a full-height row.
+                let key = keys.remove(i);
+                keys.insert(0, key);
+                let mut ordered = aspects.clone();
+                let aspect = ordered.remove(i);
+                ordered.insert(0, aspect);
+                placement = media_layout::row(height, gap, &ordered);
+            } else if placement.tiles.iter().any(|t| t.h < 120.0) {
+                placement = media_layout::row(height, gap, &aspects);
+            }
         }
         let content_width = placement
             .tiles
@@ -352,7 +358,7 @@ pub(super) fn ScreenViewer(
             .fold(width, f64::max);
         Arrangement {
             rects: keys.iter().copied().zip(placement.tiles).collect(),
-            stage: focused.map(|i| keys[i]),
+            stage: focus.get_untracked().filter(|_| focused.is_some()),
             height: placement.height,
             width,
             scrolls: placement.scrolls,
@@ -470,6 +476,7 @@ pub(super) fn ScreenViewer(
         // A scrolled phone list would otherwise hide the new stage.
         if let Some(stage) = stage.get_untracked() {
             stage.set_scroll_top(0);
+            stage.set_scroll_left(0);
         }
         if next.is_some() {
             used();
@@ -594,6 +601,7 @@ pub(super) fn ScreenViewer(
         }
     };
 
+    let pointer_inside = StoredValue::new(false);
     let escape = window_event_listener(leptos::ev::keydown, move |e| {
         if e.key() != "Escape" {
             return;
@@ -607,7 +615,7 @@ pub(super) fn ScreenViewer(
             exit_full();
         } else if focus.with_untracked(Option::is_some)
             && document().active_element().is_none_or(|a| {
-                a.tag_name() == "BODY"
+                a.tag_name() == "BODY" && pointer_inside.get_value()
                     || a.closest(".channel-streams").ok().flatten().is_some()
                         && !matches!(a.tag_name().as_str(), "INPUT" | "TEXTAREA" | "SELECT")
             })
@@ -621,7 +629,14 @@ pub(super) fn ScreenViewer(
             expanded.set(None);
         }
     });
-    let outside = window_event_listener(leptos::ev::pointerdown, move |_| close_menu(false));
+    let outside = window_event_listener(leptos::ev::pointerdown, move |e| {
+        pointer_inside.set_value(
+            e.target()
+                .and_then(|t| t.dyn_into::<web_sys::Element>().ok())
+                .is_some_and(|t| t.closest(".channel-streams").ok().flatten().is_some()),
+        );
+        close_menu(false);
+    });
     on_cleanup(move || {
         escape.remove();
         fullscreen.remove();
@@ -630,37 +645,57 @@ pub(super) fn ScreenViewer(
             handle.clear();
         }
     });
-    // Opening a menu keeps it inside the window, then moves keyboard focus to
-    // its first item.
+    // An open menu stays inside the window: placed from its tile's target
+    // position (not the animating one), again whenever that tile moves.
+    Effect::new(move |_| {
+        let Some(key) = menu.get() else {
+            menu_place.set((false, None));
+            return;
+        };
+        let Some(target) =
+            arrangement.with(|a| a.rects.iter().find(|(k, _)| *k == key).map(|(_, r)| *r))
+        else {
+            return;
+        };
+        leptos::task::spawn_local(async move {
+            leptos::task::tick().await;
+            let size = |v: Result<wasm_bindgen::JsValue, _>| {
+                v.ok().and_then(|v| v.as_f64()).unwrap_or(0.0)
+            };
+            let viewport = size(window().inner_height());
+            let Some(root) = stage.get_untracked() else {
+                return;
+            };
+            if size(window().inner_width()) < 768.0 {
+                return;
+            }
+            let Some(popover) = document()
+                .query_selector(&format!(
+                    "[data-media-key='{}'] .media-item-menu",
+                    key_text(key)
+                ))
+                .ok()
+                .flatten()
+            else {
+                return;
+            };
+            let top = root.get_bounding_client_rect().top() + target.y - root.scroll_top() as f64;
+            let needed = popover.scroll_height() as f64;
+            let below = viewport - (top + 48.0) - 8.0;
+            let above = top + target.h - 48.0 - 8.0;
+            let up = needed > below && above > below;
+            let room = if up { above } else { below };
+            let next = (up, (needed > room).then_some(room.max(160.0)));
+            if menu_place.try_get_untracked().is_some_and(|p| p != next) {
+                menu_place.set(next);
+            }
+        });
+    });
+    // Opening a menu moves keyboard focus to its first item.
     Effect::new(move |_| {
         if let Some(key) = menu.get() {
-            menu_place.set((false, None));
             leptos::task::spawn_local(async move {
                 leptos::task::tick().await;
-                let tile = format!("[data-media-key='{}']", key_text(key));
-                let size = |v: Result<wasm_bindgen::JsValue, _>| {
-                    v.ok().and_then(|v| v.as_f64()).unwrap_or(0.0)
-                };
-                let viewport = size(window().inner_height());
-                if size(window().inner_width()) >= 768.0
-                    && let (Some(figure), Some(popover)) = (
-                        document().query_selector(&tile).ok().flatten(),
-                        document()
-                            .query_selector(&format!("{tile} .media-item-menu"))
-                            .ok()
-                            .flatten(),
-                    )
-                {
-                    let (bounds, needed) = (
-                        figure.get_bounding_client_rect(),
-                        popover.scroll_height() as f64,
-                    );
-                    let below = viewport - (bounds.top() + 48.0) - 8.0;
-                    let above = bounds.bottom() - 48.0 - 8.0;
-                    let up = needed > below && above > below;
-                    let room = if up { above } else { below };
-                    menu_place.set((up, (needed > room).then_some(room.max(160.0))));
-                }
                 focus_selector(&format!(
                     "[data-media-key='{}'] [role=menuitem]",
                     key_text(key)
