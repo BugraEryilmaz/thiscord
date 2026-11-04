@@ -74,29 +74,31 @@ pub fn grid(width: f64, height: f64, gap: f64, aspects: &[f64]) -> Placement {
 
 /// Too many tiles for the area: columns at least `min_column` wide that scroll.
 fn column(width: f64, height: f64, gap: f64, aspects: &[f64], min_column: f64) -> Placement {
-    let columns =
-        (((width + gap) / (min_column + gap)).floor() as usize).clamp(1, aspects.len().max(1));
+    let columns = (((width + gap) / (min_column + gap)).floor() as usize).max(1);
     let tile_width = (width - gap * (columns as f64 - 1.0)) / columns as f64;
     // Portrait streams would be taller than the screen; cap them.
     let cap = (height * 0.8).max(160.0);
-    // Each tile joins the shortest column, so mixed shapes leave no holes.
-    let mut bottoms = vec![0.0f64; columns];
     let mut tiles = Vec::with_capacity(aspects.len());
-    for aspect in aspects {
-        let column = (0..columns)
-            .min_by(|a, b| bottoms[*a].total_cmp(&bottoms[*b]))
-            .unwrap_or(0);
-        let h = (tile_width / aspect).min(cap);
-        let w = h * aspect;
-        tiles.push(Rect {
-            x: column as f64 * (tile_width + gap) + (tile_width - w) / 2.0,
-            y: bottoms[column],
-            w,
-            h,
-        });
-        bottoms[column] += h + gap;
+    let mut y = 0.0;
+    for row in aspects.chunks(columns) {
+        let row_height = row
+            .iter()
+            .map(|a| (tile_width / a).min(cap))
+            .fold(0.0, f64::max);
+        for (i, aspect) in row.iter().enumerate() {
+            let h = (tile_width / aspect).min(cap);
+            let w = h * aspect;
+            let cell_x = i as f64 * (tile_width + gap);
+            tiles.push(Rect {
+                x: cell_x + (tile_width - w) / 2.0,
+                y: y + (row_height - h) / 2.0,
+                w,
+                h,
+            });
+        }
+        y += row_height + gap;
     }
-    let content = (bottoms.iter().fold(0.0f64, |a, b| a.max(*b)) - gap).max(0.0);
+    let content = (y - gap).max(0.0);
     Placement {
         tiles,
         stage: None,
@@ -230,23 +232,7 @@ fn score(tiles: &[Rect], rows: &[usize]) -> f64 {
         high = high.max(h);
         start += len;
     }
-    if high <= 0.0 {
-        return 0.0;
-    }
-    // Among similar arrangements, prefer rows of similar width, so no tile
-    // sits alone in a mostly empty row.
-    let mut start = 0;
-    let (mut narrow, mut wide) = (f64::INFINITY, 0.0f64);
-    for len in rows {
-        let row = &tiles[start..start + len];
-        let span = row.iter().map(|r| r.x + r.w).fold(0.0, f64::max)
-            - row.iter().map(|r| r.x).fold(f64::INFINITY, f64::min);
-        narrow = narrow.min(span);
-        wide = wide.max(span);
-        start += len;
-    }
-    let balance = if wide > 0.0 { narrow / wide } else { 1.0 };
-    area * low / high * (0.85 + 0.15 * balance)
+    if high <= 0.0 { 0.0 } else { area * low / high }
 }
 
 /// One tile on the stage and the rest in a strip on the side that leaves the
@@ -314,25 +300,6 @@ pub fn focus(width: f64, height: f64, gap: f64, aspects: &[f64], focused: usize)
         return stacked_focus(width, height, gap, main, &others, focused);
     }
     let (mut stage, mut strip) = (stage, strip);
-    if use_side {
-        let side = strip.iter().map(|r| r.x + r.w).fold(0.0, f64::max);
-        let spare = width - gap - stage.w - side;
-        if spare > 4.0 {
-            let wider = best_rows((side + spare).min(width * 0.5), height, gap, &others);
-            if typical(&wider) > typical(&strip) {
-                strip = wider;
-            }
-        }
-    } else {
-        let below = strip.iter().map(|r| r.y + r.h).fold(0.0, f64::max);
-        let spare = height - gap - stage.h - below;
-        if spare > 4.0 {
-            let taller = strip_rows(width, below + spare, gap, &others);
-            if typical(&taller) > typical(&strip) {
-                strip = taller;
-            }
-        }
-    }
     // The stage and its strip are centred together, so no gap opens between them.
     let start = |rects: &[Rect], x: bool| {
         rects
@@ -542,37 +509,6 @@ pub fn arrange(width: f64, height: f64, gap: f64, aspects: &[f64]) -> Vec<usize>
     best.1
 }
 
-/// Where a newly shaped tile fits best among tiles whose order stays fixed.
-/// Returns an index into `aspects` (which includes the new tile at `new`).
-pub fn insertion(width: f64, height: f64, gap: f64, aspects: &[f64], new: usize) -> usize {
-    if new >= aspects.len() || width <= 0.0 || height <= 0.0 {
-        return new.min(aspects.len());
-    }
-    let others: Vec<f64> = aspects
-        .iter()
-        .enumerate()
-        .filter(|(i, _)| *i != new)
-        .map(|(_, a)| *a)
-        .collect();
-    let shown = |at: usize| {
-        let mut ordered = others.clone();
-        ordered.insert(at, aspects[new]);
-        let p = grid(width, height, gap, &ordered);
-        let area: f64 = p.tiles.iter().map(Rect::area).sum();
-        if p.scrolls { area / 2.0 } else { area }
-    };
-    // Joining at the end wins unless another place shows clearly more video.
-    let end = others.len();
-    let mut best = (shown(end) * 1.03, end);
-    for at in 0..end {
-        let area = shown(at);
-        if area > best.0 {
-            best = (area, at);
-        }
-    }
-    best.1
-}
-
 fn next_permutation(items: &mut [usize]) -> bool {
     let Some(pivot) = (1..items.len()).rev().find(|i| items[i - 1] < items[*i]) else {
         return false;
@@ -723,7 +659,10 @@ mod tests {
         assert!(p.tiles[0].x - (stage.x + stage.w) < 12.5);
         let call = focus(1080.0, 300.0, 8.0, &[WIDE, WIDE, WIDE], 0);
         let (s, t) = (call.tiles[0], call.tiles[1]);
-        assert!((t.x - (s.x + s.w) - 8.0).abs() < 0.5, "{call:?}");
+        assert!(
+            (t.x - (s.x + s.w) - 8.0).abs() < 0.5 && s.x > 100.0,
+            "{call:?}"
+        );
         no_overlap(&call.tiles);
         inside(&call, 1080.0);
         let phone = focus(366.0, 600.0, 8.0, &[WIDE; 7], 0);
@@ -807,62 +746,6 @@ mod tests {
         assert!(area(&order) >= area(&[0, 1, 2, 3, 4]));
         assert!(area(&order) / (1080.0 * 790.0) > 0.6, "{order:?}");
         assert_eq!(arrange(1080.0, 790.0, 12.0, &[WIDE; 5]), [0, 1, 2, 3, 4]);
-    }
-
-    #[test]
-    fn a_joining_stream_is_placed_without_moving_the_others() {
-        // Wide tiles in a wide area: a portrait newcomer goes where it fits best.
-        let aspects = [WIDE, WIDE, WIDE, WIDE, 0.5625];
-        let at = insertion(1080.0, 790.0, 12.0, &aspects, 4);
-        assert!(at <= 4);
-        let mut ordered = aspects[..4].to_vec();
-        ordered.insert(at, 0.5625);
-        let area = |a: &[f64]| {
-            grid(1080.0, 790.0, 12.0, a)
-                .tiles
-                .iter()
-                .map(Rect::area)
-                .sum::<f64>()
-        };
-        assert!(area(&ordered) >= area(&aspects) - 1.0);
-        // Same shapes: it simply joins at the end.
-        assert_eq!(insertion(1080.0, 790.0, 12.0, &[WIDE; 5], 4), 4);
-    }
-
-    #[test]
-    fn phone_columns_leave_no_holes() {
-        let p = focus(
-            366.0,
-            560.0,
-            8.0,
-            &[WIDE, 0.5625, WIDE, WIDE, 2.39, WIDE, 4.0 / 3.0],
-            0,
-        );
-        assert!(p.scrolls);
-        no_overlap(&p.tiles);
-        // In each column, a tile starts right below the previous one.
-        let rest: Vec<Rect> = p.tiles[1..].to_vec();
-        for t in &rest {
-            let above: Vec<&Rect> = rest
-                .iter()
-                .filter(|o| (o.x + o.w / 2.0 - (t.x + t.w / 2.0)).abs() < 1.0 && o.y < t.y)
-                .collect();
-            if let Some(nearest) = above.iter().map(|o| o.y + o.h).reduce(f64::max) {
-                assert!(t.y - nearest <= 8.5, "{t:?} {rest:?}");
-            }
-        }
-    }
-
-    #[test]
-    fn equally_large_grids_prefer_even_rows() {
-        let p = grid(1080.0, 790.0, 12.0, &[WIDE; 6]);
-        let mut rows: Vec<f64> = p.tiles.iter().map(|t| t.y.round()).collect();
-        rows.dedup();
-        let counts: Vec<usize> = rows
-            .iter()
-            .map(|y| p.tiles.iter().filter(|t| t.y.round() == *y).count())
-            .collect();
-        assert!(counts.iter().all(|c| *c == counts[0]), "{counts:?}");
     }
 
     #[test]
