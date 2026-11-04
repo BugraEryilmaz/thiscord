@@ -822,7 +822,7 @@ fn QuickSwitcher(ui: Ui) -> impl IntoView {
             <ul id="quick-switcher-results" role="listbox" class="quick-switcher-results" aria-label=move || crate::i18n::t("Results")>
                 {move || results.get().into_iter().enumerate().map(|(index, (candidate, _))| {
                     let icon = match candidate.kind {
-                        Kind::Server => view! {<Icon kind=Glyph::Compass/>}.into_any(),
+                        Kind::Server => view! {<Icon kind=Glyph::Server/>}.into_any(),
                         Kind::TextChannel => view! {<span class="w-5 text-center text-lg" aria-hidden="true">"#"</span>}.into_any(),
                         Kind::VoiceChannel => view! {<Icon kind=Glyph::Volume/>}.into_any(),
                         Kind::Conversation => view! {<Icon kind=Glyph::Person/>}.into_any(),

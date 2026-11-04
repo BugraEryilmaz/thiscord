@@ -141,9 +141,10 @@ impl Chat {
 #[component]
 pub(super) fn Reply(chat: Chat, message: RwSignal<ChatMessage>) -> impl IntoView {
     view! {<Show when=move ||message.with(|m|m.reply.is_some())>
-        <button class="my-1 block max-w-full truncate border-l-2 border-sky-400 pl-2 text-sm text-sky-300" disabled=move ||message.with(|m|m.reply.as_ref().is_none_or(|r|r.preview.is_none())) on:click=move |_|{
+        <button class="reply-preview" disabled=move ||message.with(|m|m.reply.as_ref().is_none_or(|r|r.preview.is_none())) on:click=move |_|{
             if let Some(id)=message.with_untracked(|m|m.reply.as_ref().map(|r|r.id)) {chat.jump(id);}
-        }>{move ||message.with(|m|m.reply.as_ref().map(|r|r.preview.clone().filter(|s|!s.is_empty()).unwrap_or_else(||if r.preview.is_some(){crate::i18n::t("Attachment message").into()}else{crate::i18n::t("Original message unavailable").into()})).unwrap_or_default())}</button>
+        }><Icon kind=Glyph::Reply/>{move ||message.with(|m|m.reply.as_ref().and_then(|r|chat.messages.with(|cache|cache.get(r.id).map(|o|o.with(|o|o.display_name().to_owned())))))
+            .map(|author|view!{<span class="reply-author">{author}</span>})}<span class="min-w-0 truncate">{move ||message.with(|m|m.reply.as_ref().map(|r|r.preview.clone().filter(|s|!s.is_empty()).unwrap_or_else(||if r.preview.is_some(){crate::i18n::t("Attachment message").into()}else{crate::i18n::t("Original message unavailable").into()})).unwrap_or_default())}</span></button>
     </Show>}
 }
 /// A small button panel with the same surface as the app's context menus.

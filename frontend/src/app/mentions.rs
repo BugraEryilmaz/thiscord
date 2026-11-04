@@ -261,19 +261,20 @@ impl Picker {
 pub(super) fn Suggestions(picker: Picker) -> impl IntoView {
     view! {
         <Show when=move || picker.expanded()>
-            <div class="absolute bottom-full left-0 z-20 mb-2 w-full rounded-lg border border-white/15 bg-zinc-900 p-2 shadow-xl">
-                <p class="px-2 py-1 text-xs text-white/60">{move || crate::i18n::t("Mention a member · ↑↓ to navigate · Enter or Tab to select")}</p>
+            <div class="mention-popover">
+                <p class="mention-popover-hint">{move || crate::i18n::t("Mention a member · ↑↓ to navigate · Enter or Tab to select")}</p>
                 <ul id="mention-suggestions" role="listbox" aria-label=move || crate::i18n::t("Mention suggestions") class="max-h-64 overflow-y-auto">
                     {move || picker.members().into_iter().enumerate().map(|(index, member)| {
                         let name = if member.display_name.trim().is_empty() { member.username.clone() } else { member.display_name };
                         view! {
                             <li id=format!("mention-option-{index}") role="option" aria-selected=move || (picker.selected.get() == index).to_string()
-                                class=move || if picker.selected.get() == index { "rounded-md bg-brand/25" } else { "rounded-md hover:bg-white/10" }>
-                                <button type="button" tabindex="-1" class="flex w-full min-w-0 items-center justify-between gap-3 px-3 py-2 text-left"
+                                class="mention-option">
+                                <button type="button" tabindex="-1" class="flex w-full min-w-0 items-center gap-3 px-2.5 py-1.5 text-left"
                                     on:mousedown=move |event| event.prevent_default()
                                     on:click=move |_| picker.choose(index)>
-                                    <span class="truncate font-medium">{name}</span>
-                                    <span class="truncate text-sm text-white/60">{format!("@{}", member.username)}</span>
+                                    <crate::avatar::Avatar class="size-7 text-xs" name=name.clone() avatar_id=Signal::stored(None)/>
+                                    <span class="min-w-0 flex-1 truncate font-semibold">{name}</span>
+                                    <span class="truncate text-sm text-muted">{format!("@{}", member.username)}</span>
                                 </button>
                             </li>
                         }

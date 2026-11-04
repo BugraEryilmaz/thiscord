@@ -204,7 +204,7 @@ const fn hex(value: u32) -> Rgb {
     Rgb((value >> 16) as u8, (value >> 8) as u8, value as u8)
 }
 
-pub const DEFAULT_ACCENT: Rgb = hex(0x4762f5);
+pub const DEFAULT_ACCENT: Rgb = hex(0x7a50f5);
 /// Text, secondary text and links for dark themes.
 const LIGHT_TEXT: [u32; 3] = [0xeceef3, 0xb4b7c3, 0x8aa4ff];
 /// Accent and status colors shared by every theme.
@@ -396,8 +396,8 @@ const BLACK: Rgb = Rgb(0, 0, 0);
 const INK: Rgb = Rgb(0x11, 0x12, 0x16);
 
 /// Preset accents; labels are English and translated at the call site.
-pub const ACCENTS: [(&str, Rgb); 9] = [
-    ("Cobalt", DEFAULT_ACCENT),
+pub const ACCENTS: [(&str, Rgb); 8] = [
+    ("Iris", DEFAULT_ACCENT),
     ("Blurple", Rgb(0x58, 0x65, 0xf2)),
     ("Ocean", Rgb(0x25, 0x82, 0xeb)),
     ("Teal", Rgb(0x14, 0xa3, 0x94)),
@@ -405,7 +405,6 @@ pub const ACCENTS: [(&str, Rgb); 9] = [
     ("Amber", Rgb(0xf0, 0xa0, 0x20)),
     ("Coral", Rgb(0xf0, 0x5d, 0x4f)),
     ("Pink", Rgb(0xe0, 0x4f, 0x9b)),
-    ("Violet", Rgb(0x90, 0x61, 0xf9)),
 ];
 
 /// WCAG minimum for body text.
@@ -679,8 +678,8 @@ mod tests {
 
     #[test]
     fn parses_only_six_digit_hex() {
-        assert_eq!(Rgb::parse("#4762F5"), Some(DEFAULT_ACCENT));
-        assert_eq!(DEFAULT_ACCENT.hex(), "#4762f5");
+        assert_eq!(Rgb::parse("#7A50F5"), Some(DEFAULT_ACCENT));
+        assert_eq!(DEFAULT_ACCENT.hex(), "#7a50f5");
         for bad in [
             "",
             "5865f2",

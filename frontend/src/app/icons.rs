@@ -42,6 +42,7 @@ pub(super) enum Glyph {
     Palette,
     Chevron,
     Friends,
+    Server,
     Globe,
     Bell,
     Lock,
@@ -122,6 +123,7 @@ pub(super) fn Icon(kind: Glyph) -> impl IntoView {
         Glyph::Globe => {
             "M21 12a9 9 0 1 1-18 0 9 9 0 0 1 18 0ZM3.5 9h17M3.5 15h17M12 3c-2.5 2.5-3.5 5.5-3.5 9s1 6.5 3.5 9c2.5-2.5 3.5-5.5 3.5-9s-1-6.5-3.5-9Z"
         }
+        Glyph::Server => "M4 4h16v6H4V4ZM4 14h16v6H4v-6ZM8 7h.01M8 17h.01",
         Glyph::Bell => "M6 9a6 6 0 0 1 12 0c0 6 2.5 8 2.5 8h-17S6 15 6 9ZM10 21h4",
         Glyph::Lock => "M5 11h14v10H5V11ZM8 11V7a4 4 0 0 1 8 0v4M12 15v2",
         Glyph::Key => "M14.5 9.5a5 5 0 1 1-1.4 3.5L3 23M7 19l2 2M10 16l2 2M17 7h.01",

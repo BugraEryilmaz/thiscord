@@ -416,28 +416,34 @@ pub(super) fn Home(ui: Ui) -> impl IntoView {
         },
         move || ui.friends.selected.get(),
     );
-    view! {<section class="flex h-full min-h-0 flex-col pb-[var(--dock-height)] lg:pb-0">
-        <header class="pane-header friends-home-header flex-wrap gap-x-4 gap-y-2">
-            <button class="pane-title flex items-center gap-2" on:click=move |_|ui.friends.selected.set(None)><span class="text-muted"><Icon kind=Glyph::Friends/></span>{move || crate::i18n::t("Friends")}</button>
-            <span class="hidden h-6 w-px bg-white/10 md:block" aria-hidden="true"></span>
-            <nav class="segmented" aria-label=move || crate::i18n::t("Friend filters")>
-                {[("online","Online"),("all","All"),("pending","Requests"),("messages","Messages")].into_iter().map(|(value,label)|view!{<button class="segmented-item" aria-pressed=move ||filter.get()==value && ui.friends.selected.get().is_none() on:click=move |_|{filter.set(value);ui.friends.selected.set(None);}>{move || crate::i18n::t(label)}
-                    <CountBubble count=Signal::derive(move ||match value {"pending"=>ui.friends.pending_count(),"messages"=>ui.friends.unread_count(),_=>0}) label=if value=="pending" {"incoming requests"}else{"unread messages"}/>
-                </button>}).collect_view()}
-            </nav>
-            <div class="ml-auto py-2"><AddFriend ui=ui/></div>
-        </header>
-        <div class="flex min-h-0 flex-1">
-            <nav class="dm-sidebar hidden w-[var(--sidebar-width)] shrink-0 overflow-y-auto bg-sidebar px-3 pb-[var(--dock-height)] pt-4 lg:block" aria-label=move || crate::i18n::t("Direct messages")
+    view! {<section class="flex h-full min-h-0 pb-[var(--dock-height)] lg:pb-0">
+            <nav class="dm-sidebar hidden w-[var(--sidebar-width)] shrink-0 flex-col bg-sidebar lg:flex" aria-label=move || crate::i18n::t("Direct messages")
                 data-rove-list on:keydown=move |e| super::keyboard::rove(&e)>
-                <h3 class="sidebar-section-title mb-2 flex items-center gap-2 px-2">{move || crate::i18n::t("Direct messages")}<CountBubble count=Signal::derive(move ||ui.friends.unread_count()) label="unread messages"/></h3>
+                <div class="pane-header"><h2 class="pane-title flex-1 text-[15px]">{move || crate::i18n::t("Home")}</h2></div>
+                <div class="min-h-0 flex-1 overflow-y-auto px-3 pb-[var(--dock-height)] pt-3">
+                <button class="channel-item mb-2 gap-3" class:channel-selected=move ||ui.friends.selected.get().is_none() aria-current=move ||ui.friends.selected.get().is_none().then_some("page") on:click=move |_|ui.friends.selected.set(None)><span class="channel-glyph"><Icon kind=Glyph::Friends/></span><span class="min-w-0 flex-1 truncate text-[15px]">{move || crate::i18n::t("Friends")}</span><CountBubble count=Signal::derive(move ||ui.friends.pending_count()) label="incoming requests"/></button>
+                <h3 class="sidebar-section-title mb-1.5 flex items-center gap-2 px-2">{move || crate::i18n::t("Direct messages")}<CountBubble count=Signal::derive(move ||ui.friends.unread_count()) label="unread messages"/></h3>
                 <For each=move ||{ui.friends.snapshot.with(|s|s.friends.iter().filter(|f|f.relationship==Relationship::Friend).cloned().collect::<Vec<_>>())} key=|f|f.conversation_id children=move |f| {
                     let id=f.conversation_id;
                     let friend=Memo::new(move |_|ui.friends.friend(id).unwrap_or_else(||f.clone()));
                     view!{<button data-rove tabindex=roving.tabindex(id) on:focus=move |_|roving.focus(id) aria-current=move ||(ui.friends.selected.get()==Some(id)).then_some("page") aria-haspopup="menu" data-context-conversation=id.to_string() class="channel-item mb-0.5 gap-3 py-1.5" class:channel-selected=move ||ui.friends.selected.get()==Some(id) on:click=move |_|open(ui,id)><span class="sr-only">{move ||if friend.get().online{crate::i18n::t("Online")}else{crate::i18n::t("Offline")}}</span><span class="relative shrink-0"><crate::avatar::Avatar class="size-8 text-xs" name=Signal::derive(move ||friend.get().person.display_name) avatar_id=Signal::derive(move ||friend.get().person.avatar_id)/><span class="presence-dot" class:online=move ||friend.get().online></span></span><span class="min-w-0 flex-1 truncate text-[15px]">{move ||friend.get().person.display_name}</span><Show when=move ||super::notifications::muted(ui,thiscord_shared::notifications::Target::Conversation {conversation_id:id})><span role="img" aria-label=move || crate::i18n::t("Notifications muted")><Icon kind=Glyph::BellOff/></span></Show><CountBubble count=Signal::derive(move ||friend.get().unread_count) label="unread messages"/></button>}
                 }/>
+                </div>
             </nav>
-            <div class="min-h-0 min-w-0 flex-1">
+        <div class="flex min-h-0 min-w-0 flex-1 flex-col">
+            <Show when=move ||ui.friends.selected.get().is_none()>
+            <header class="pane-header friends-home-header flex-wrap gap-x-4 gap-y-2">
+            <button class="pane-title flex items-center gap-2" on:click=move |_|ui.friends.selected.set(None)><span class="text-muted"><Icon kind=Glyph::Friends/></span>{move || crate::i18n::t("Friends")}</button>
+            <span class="hidden h-6 w-px bg-white/10 md:block" aria-hidden="true"></span>
+            <nav class="segmented" aria-label=move || crate::i18n::t("Friend filters")>
+                {[("online","Online"),("all","All"),("pending","Requests"),("messages","Messages")].into_iter().map(|(value,label)|view!{<button class="segmented-item" aria-pressed=move ||(filter.get()==value && ui.friends.selected.get().is_none()).to_string() on:click=move |_|{filter.set(value);ui.friends.selected.set(None);}>{move || crate::i18n::t(label)}
+                    <CountBubble count=Signal::derive(move ||match value {"pending"=>ui.friends.pending_count(),"messages"=>ui.friends.unread_count(),_=>0}) label=if value=="pending" {"incoming requests"}else{"unread messages"}/>
+                </button>}).collect_view()}
+            </nav>
+            <div class="ml-auto py-2"><AddFriend ui=ui/></div>
+            </header>
+            </Show>
+            <div class="min-h-0 flex-1">
                 <Show when=move ||ui.friends.selected.get().is_some() fallback=move ||view!{<FriendList ui=ui filter=filter/>}>
                     <For each=move ||{ui.friends.selected.get().into_iter().collect::<Vec<_>>()} key=|id|*id children=move |id|view!{<Conversation ui=ui id=id/>}/>
                 </Show>
@@ -841,7 +847,7 @@ fn Conversation(ui: Ui, id: ConversationId) -> impl IntoView {
         }
     };
     view! {<section class="flex h-full min-h-0 flex-col">
-        <header data-context-conversation=id.to_string() class="pane-header gap-3"><button class="icon-button lg:hidden" aria-label=move || crate::i18n::t("Back to friends") on:click=move |_|{ui.mobile_content.set(false);ui.friends.selected.set(None);}><Icon kind=Glyph::Back/></button><span class="relative shrink-0"><crate::avatar::Avatar class="size-8 text-xs" name=Signal::derive(move ||friend.get().map(|f|f.person.display_name).unwrap_or_default()) avatar_id=Signal::derive(move ||friend.get().and_then(|f|f.person.avatar_id))/><span class="presence-dot header" class:online=move ||friend.get().is_some_and(|f|f.online)></span></span><div class="min-w-0 flex-1"><h2 class="pane-title truncate">{move ||friend.get().map(|f|f.person.display_name).unwrap_or_default()}</h2><Show when=move ||friend.get().is_some_and(|f|f.person.custom_status.is_some())><p class="truncate text-xs text-muted">{move ||friend.get().and_then(|f|f.person.custom_status).map(|s|thiscord_frontend::member_list::status_text(&s))}</p></Show></div><span class="presence-pill" class:online=move ||friend.get().is_some_and(|f|f.online)>{move ||if friend.get().is_some_and(|f|f.online){crate::i18n::t("Online")}else{crate::i18n::t("Offline")}}</span><button class="icon-button disabled:opacity-40" aria-label=move || crate::i18n::t("Start private voice call") data-tip=move || crate::i18n::t("Voice call (desktop)") disabled=move ||!available(ui) || ui.friends.has_calls() on:click=move |_|action(ui,Request::StartCall {conversation_id:id})><Icon kind=Glyph::Headphones/></button><super::search::Launcher state=search/></header>
+        <header data-context-conversation=id.to_string() class="pane-header gap-3"><button class="icon-button lg:hidden" aria-label=move || crate::i18n::t("Back to friends") on:click=move |_|{ui.mobile_content.set(false);ui.friends.selected.set(None);}><Icon kind=Glyph::Back/></button><span class="relative shrink-0"><crate::avatar::Avatar class="size-8 text-xs" name=Signal::derive(move ||friend.get().map(|f|f.person.display_name).unwrap_or_default()) avatar_id=Signal::derive(move ||friend.get().and_then(|f|f.person.avatar_id))/><span class="presence-dot header" class:online=move ||friend.get().is_some_and(|f|f.online)></span></span><div class="min-w-0 flex-1"><h2 class="pane-title truncate">{move ||friend.get().map(|f|f.person.display_name).unwrap_or_default()}</h2><Show when=move ||friend.get().is_some_and(|f|f.person.custom_status.is_some())><p class="truncate text-xs text-muted">{move ||friend.get().and_then(|f|f.person.custom_status).map(|s|thiscord_frontend::member_list::status_text(&s))}</p></Show></div><span class="presence-pill hidden md:inline-flex" class:online=move ||friend.get().is_some_and(|f|f.online)>{move ||if friend.get().is_some_and(|f|f.online){crate::i18n::t("Online")}else{crate::i18n::t("Offline")}}</span><button class="icon-button disabled:opacity-40" aria-label=move || crate::i18n::t("Start private voice call") data-tip=move || crate::i18n::t("Voice call (desktop)") disabled=move ||!available(ui) || ui.friends.has_calls() on:click=move |_|action(ui,Request::StartCall {conversation_id:id})><Icon kind=Glyph::Headphones/></button><super::search::Launcher state=search/></header>
         <super::search::Bar state=search/>
         <super::search::Results state=search on_jump=jump/>
         <For each=move ||{let me=ui.account.with(|a|a.as_ref().map(|a|a.id));ui.friends.snapshot.with(|s|s.calls.iter().filter(|c|c.conversation_id==id && c.state==CallState::Ringing && me==Some(c.callee)).cloned().collect::<Vec<_>>())} key=|c|c.id children=move |call|view!{
