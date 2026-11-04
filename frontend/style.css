@@ -254,6 +254,7 @@ select.field-input, .settings-content select { padding-right: 34px; }
 
 /* Row overflow menus (friends) share the popover surface. */
 .row-menu { position: relative; }
+.row-menu > .icon-button svg { stroke-width: 2.8; }
 .row-menu > .icon-button[aria-expanded="true"] { background: var(--tint-8); color: var(--color-white); }
 .row-menu-panel { position: absolute; z-index: 40; top: -4px; right: calc(100% + 6px); display: flex; flex-direction: column; min-width: 180px; padding: 6px; border: 1px solid var(--tint-8); border-radius: var(--radius-lg); background: var(--color-popover); box-shadow: var(--shadow-2); }
 /* Dialog brand mark, notices and footnotes. */
