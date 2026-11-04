@@ -315,7 +315,6 @@ dialog header > button.icon-button:last-child svg { width: 18px; height: 18px; }
 }
 /* Messages are focusable only so taps reveal their tools; they never show a keyboard ring. */
 .message-body[tabindex="-1"]:focus-visible { outline: none !important; }
-/* Friend list aligns to the header gutter. */
 /* Sign-in: the brand mark, display type and a soft accent glow. */
 .auth-page { position: relative; display: flex; min-height: 100dvh; align-items: center; justify-content: center; padding: 72px 20px 40px; overflow: hidden; background: radial-gradient(1200px 600px at 50% -10%, color-mix(in srgb, var(--color-brand) 22%, transparent), transparent 60%), radial-gradient(700px 420px at 100% 100%, color-mix(in srgb, var(--color-brand) 10%, transparent), transparent 70%), var(--color-rail); }
 .auth-language { position: absolute; top: calc(16px + env(safe-area-inset-top, 0px)); right: 16px; }
