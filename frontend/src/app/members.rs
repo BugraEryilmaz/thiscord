@@ -324,7 +324,7 @@ pub(super) fn Panel(ui: Ui, guild: GuildId) -> impl IntoView {
     }
 }
 
-/// Profile card for a member selected in the list. Mounted once per chat view.
+/// Profile card for a member selected in the list. Mounted once per server view.
 #[component]
 pub(super) fn ProfileHost(ui: Ui) -> impl IntoView {
     let dialog = NodeRef::<leptos::html::Dialog>::new();

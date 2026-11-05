@@ -1436,8 +1436,6 @@ pub(super) fn ChatPanel(
                 </form>
             </footer>
         </section>
-        <super::members::Panel ui guild/>
-        <super::members::ProfileHost ui/>
         </div>
     }
 }

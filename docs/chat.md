@@ -371,8 +371,9 @@ isolation and variable-height viewport/anchor calculations without a browser.
 
 ## Member list and profile cards
 
-The person button in a text channel header shows or hides the server's member
-list. Wide windows show it as a right-side panel; the choice is stored per device
+The person button in the server view's header shows or hides the server's member
+list: in text channels, voice channels and before a channel is chosen. The list
+arrives on the guild subscription, which does not need an open text channel. Wide windows show it as a right-side panel; the choice is stored per device
 (`thiscord.member_panel.v1` in local storage, no account data). Below 1024 px
 (phones, tablets, narrow windows) it opens as an overlay drawer with a backdrop
 and close button; Escape or the backdrop closes it and returns focus to the
