@@ -117,24 +117,6 @@ pub(super) fn Host() -> impl IntoView {
             visible.set(true);
         });
     });
-    // Labels can change while shown (live stream quality); follow them.
-    let live = set_interval_with_handle(
-        move || {
-            if !visible.try_get_untracked().unwrap_or(false) {
-                return;
-            }
-            if let Some(label) = active
-                .try_get_value()
-                .flatten()
-                .and_then(|e| e.get_attribute("data-tip"))
-                && text.try_get_untracked().is_some_and(|t| t != label)
-            {
-                text.set(label);
-            }
-        },
-        std::time::Duration::from_millis(400),
-    )
-    .ok();
     let over = window_event_listener(leptos::ev::mouseover, move |e| show(trigger(e.target())));
     let focus = window_event_listener(leptos::ev::focusin, move |e| show(trigger(e.target())));
     let out = window_event_listener(leptos::ev::mouseout, move |e| {
@@ -154,9 +136,6 @@ pub(super) fn Host() -> impl IntoView {
     let fullscreen = window_event_listener(leptos::ev::fullscreenchange, move |_| clear());
     let wheel = window_event_listener(leptos::ev::wheel, move |_| clear());
     on_cleanup(move || {
-        if let Some(live) = live {
-            live.clear();
-        }
         over.remove();
         focus.remove();
         out.remove();
