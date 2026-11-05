@@ -34,6 +34,7 @@ async fn main() -> Result<(), BoxError> {
 
     // A configured database must connect and migrate before serving requests.
     // Without a URL, liveness stays available but readiness returns 503.
+    let limits = thiscord_backend::limits::Limits::from_env()?;
     let pool_size = match env::var(db::POOL_SIZE_VAR) {
         Ok(value) => db::pool_size(Some(&value))?,
         Err(env::VarError::NotPresent) => db::pool_size(None)?,
@@ -77,7 +78,7 @@ async fn main() -> Result<(), BoxError> {
         thiscord_backend::chat::start_attachment_cleanup(pool.clone());
         thiscord_backend::friends::start_attachment_cleanup(pool.clone());
     }
-    let mut app = api::router(pool, origins);
+    let mut app = api::router_with_limits(pool, origins, limits);
     // Production bundles live beside the executable. An explicit path must exist.
     let configured = env::var_os("ADMIN_DIST_DIR");
     let directory = configured.clone().map(std::path::PathBuf::from).unwrap_or(

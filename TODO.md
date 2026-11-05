@@ -352,6 +352,12 @@ Personalized speaker isolation and physical acoustic acceptance remain future wo
 - [ ] Sustained multi-party load tests and measured capacity/congestion budgets.
 - [x] Opt-in Rust voice load generator and disposable benchmark server; per-stream
   delivery/latency reports and loopback smoke checks (docs/voice-load.md).
+- [x] Camera video and text chat load generators with single-host VPS capacity
+  measurements, epoch-fenced authorization reuse, shared channel reads and
+  configurable connection limits (docs/load-benchmarks.md).
+- [ ] Measure with chat clients off the server host as well (only voice generators
+  ran off-host; chat sockets cannot share one SSH tunnel), over TURN, and with
+  real clients and networks (see docs/load-benchmarks.md caveats).
 - [ ] Production metrics and coordinated graceful room draining on shutdown.
 
 ## 8. Voice channels end to end

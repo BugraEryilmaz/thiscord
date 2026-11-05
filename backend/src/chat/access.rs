@@ -162,6 +162,12 @@ impl Snapshot {
         }
     }
 
+    /// Whether every captured epoch is still current. A hint for reusing work
+    /// derived under these epochs; delivery must still go through `deliver`.
+    pub(crate) fn current(&self) -> bool {
+        self.0.iter().all(|(scope, epoch)| scope.current(*epoch))
+    }
+
     // SeqCst orders registration against mutation admission: either the writer
     // drains this send, or this send observes the active mutation/new epoch.
     pub(crate) fn deliver(self) -> Option<Vec<Delivery>> {

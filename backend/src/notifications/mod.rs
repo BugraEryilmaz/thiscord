@@ -115,7 +115,12 @@ pub(crate) fn publish(event: Candidate) {
             return true;
         }
         // A slow subscriber is detached. No unbounded buffers or replay storm.
-        route.sender.try_send(event.clone()).is_ok()
+        // A full queue drops this alert, not the subscriber: disconnecting under
+        // load would turn overload into a reconnect storm. Closed routes go.
+        !matches!(
+            route.sender.try_send(event.clone()),
+            Err(mpsc::error::TrySendError::Closed(_))
+        )
     });
 }
 // Only connected accounts are routing hints. The guild lock held by the send
@@ -143,11 +148,13 @@ pub(crate) fn guild_recipients(
         ],
     )
 }
-pub fn router(origins: Vec<HeaderValue>) -> Router<Option<DbPool>> {
+/// `sockets` bounds concurrently connected sockets of this type (see `limits`).
+pub fn router(origins: Vec<HeaderValue>, sockets: usize) -> Router<Option<DbPool>> {
     Router::new()
         .route(PATH, post(handle))
         .route(SOCKET_PATH, get(upgrade))
         .layer(Extension(Arc::new(origins)))
+        .layer(Extension(crate::limits::SocketSlots::new(sockets)))
         .layer(DefaultBodyLimit::max(16 * 1024))
 }
 async fn handle(
@@ -180,26 +187,44 @@ async fn handle(
         .insert("cache-control", "no-store".parse().unwrap());
     response
 }
+/// Alert fan-out reuses a recipient's full check for at most this long, and only
+/// while the epochs captured before it are current. Matches socket maintenance.
+const ALERT_AUTHORIZATION_RECHECK: Duration = Duration::from_secs(10);
+/// Bounds the per-socket grant cache; one entry per recently alerted target/kind.
+const MAX_ALERT_GRANTS: usize = 64;
+/// A refresh skipped because every worker stayed busy is retried after this.
+const BUSY_RETRY: Duration = Duration::from_millis(500);
 fn workers() -> Arc<Semaphore> {
     static WORKERS: OnceLock<Arc<Semaphore>> = OnceLock::new();
     WORKERS.get_or_init(|| Arc::new(Semaphore::new(8))).clone()
 }
+/// Why no worker was obtained.
+#[derive(Debug, PartialEq)]
+enum NoWorker {
+    /// The account or session was revoked while waiting: close the socket.
+    Revoked,
+    /// Every worker stayed busy for the overload deadline: skip or retry the work.
+    Busy,
+}
 async fn worker(
     revoked: &mut tokio::sync::watch::Receiver<u64>,
     ended: &mut tokio::sync::watch::Receiver<u64>,
-) -> Result<tokio::sync::OwnedSemaphorePermit, ()> {
-    // At most one waiter per admitted socket (128 total). FIFO acquisition
-    // absorbs normal fanout without detaching healthy clients on contention.
+) -> Result<tokio::sync::OwnedSemaphorePermit, NoWorker> {
+    // At most one waiter per admitted socket. FIFO acquisition absorbs normal
+    // fanout without detaching healthy clients on contention.
     tokio::select! { biased;
-        _ = revoked.changed() => Err(()),
-        _ = ended.changed() => Err(()),
-        permit = tokio::time::timeout(Duration::from_secs(10), workers().acquire_owned()) => permit.map_err(|_| ())?.map_err(|_| ()),
+        _ = revoked.changed() => Err(NoWorker::Revoked),
+        _ = ended.changed() => Err(NoWorker::Revoked),
+        permit = tokio::time::timeout(Duration::from_secs(10), workers().acquire_owned()) => {
+            permit.map_err(|_| NoWorker::Busy)?.map_err(|_| NoWorker::Revoked)
+        }
     }
 }
 async fn upgrade(
     State(pool): State<Option<DbPool>>,
     Extension(id): Extension<RequestId>,
     Extension(origins): Extension<Arc<Vec<HeaderValue>>>,
+    Extension(slots): Extension<crate::limits::SocketSlots>,
     headers: HeaderMap,
     ws: Result<WebSocketUpgrade, WebSocketUpgradeRejection>,
 ) -> Response {
@@ -212,12 +237,7 @@ async fn upgrade(
     let Ok(ws) = ws else {
         return Failure::Invalid("Invalid WebSocket upgrade").response(id);
     };
-    static SOCKETS: OnceLock<Arc<Semaphore>> = OnceLock::new();
-    let Ok(permit) = SOCKETS
-        .get_or_init(|| Arc::new(Semaphore::new(128)))
-        .clone()
-        .try_acquire_owned()
-    else {
+    let Ok(permit) = slots.0.clone().try_acquire_owned() else {
         return Failure::Limited.response(id);
     };
     // Web client: cookie-derived bearer, used only when the frame token is empty.
@@ -263,7 +283,9 @@ async fn serve(mut socket: WebSocket, pool: DbPool, upgrade_token: String) {
         return;
     }
     let Ok(Ok(permit)) =
-        tokio::time::timeout(Duration::from_secs(10), workers().acquire_owned()).await
+        // Connect storms (such as every client reconnecting after a restart)
+        // queue here; the socket limit already bounds how many wait.
+        tokio::time::timeout(Duration::from_secs(30), workers().acquire_owned()).await
     else {
         return;
     };
@@ -314,6 +336,16 @@ async fn serve(mut socket: WebSocket, pool: DbPool, upgrade_token: String) {
     let mut count = 0;
     let mut maintenance = tokio::time::interval(Duration::from_secs(10));
     maintenance.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+    // Recent full alert checks per (target, kind), with the epochs captured before
+    // each. Guild message fan-out reuses them instead of one transaction per alert.
+    let mut grants = Vec::<(Target, Kind, Instant, access::Snapshot, store::AlertGrant)>::new();
+    // Transient database trouble (`Failure::transient`) skips the affected alert
+    // or retries the refresh with backoff; the socket closes (without `revoked`)
+    // only after `retry::GRACE` without success.
+    let mut trouble = crate::retry::Backoff::default();
+    let mut retry_at = None::<tokio::time::Instant>;
+    // Every exit reports revocation except giving up on database trouble.
+    let mut revoke = true;
     loop {
         tokio::select! { biased;
             _ = revoked.changed() => break,
@@ -335,12 +367,25 @@ async fn serve(mut socket: WebSocket, pool: DbPool, upgrade_token: String) {
                     _ => break,
                 }
             }
-            _ = async {}, if refresh => {
+            _ = async { match retry_at { Some(at) => tokio::time::sleep_until(at).await, None => std::future::pending().await } } => { retry_at = None; }
+            _ = async {}, if refresh && retry_at.is_none() => {
                 refresh = false;
                 let Some(epoch) = access::snapshot(&account, Some(&session_scope)).and_then(|e| e.including(&preference_scope)).and_then(|e| e.including(&call_scope)) else { refresh = true; tokio::task::yield_now().await; continue; };
-                let Ok(permit) = worker(&mut revoked, &mut ended).await else { break; };
+                let permit = match worker(&mut revoked, &mut ended).await {
+                    Ok(permit) => permit,
+                    Err(NoWorker::Busy) => { refresh = true; retry_at = Some(tokio::time::Instant::now() + BUSY_RETRY); continue; }
+                    Err(NoWorker::Revoked) => break,
+                };
                 let p = pool.clone(); let t = token.clone();
-                let Ok(Ok(state)) = crate::performance::blocking(move || { let _permit = permit; store::initial(&p, &t) }).await else { break; };
+                let result = crate::performance::blocking(move || { let _permit = permit; store::initial(&p, &t) }).await;
+                if matches!(&result, Ok(Err(error)) if error.transient()) {
+                    let Some(delay) = trouble.failed() else { revoke = false; break; };
+                    refresh = true;
+                    retry_at = Some(tokio::time::Instant::now() + delay);
+                    continue;
+                }
+                let Ok(Ok(state)) = result else { break; };
+                trouble.clear();
                 // Anchor after the DB result: query/return latency can delay
                 // expiry, but cannot wake early or depend on application UTC.
                 let received_at = tokio::time::Instant::now();
@@ -378,9 +423,37 @@ async fn serve(mut socket: WebSocket, pool: DbPool, upgrade_token: String) {
                     if delivered_calls.contains(&id) { continue; }
                     let Some(scoped) = epoch.including(&call_scope) else { refresh = true; continue; }; epoch = scoped;
                 }
-                let Ok(permit) = worker(&mut revoked, &mut ended).await else { break; };
+                let key = (candidate.target, candidate.kind);
+                let reusable = store::reusable(&candidate);
+                if reusable && let Some((_, _, _, authorized, grant)) = grants.iter().find(|(target, kind, at, authorized, _)| {
+                    (*target, *kind) == key && at.elapsed() < ALERT_AUTHORIZATION_RECHECK && authorized.current()
+                }) {
+                    let (authorized, alert) = (authorized.clone(), store::granted(candidate, session.account_id, grant));
+                    let Some(_delivery) = authorized.deliver() else { continue; };
+                    if let Some(alert) = alert && send(&mut socket, ServerEvent::Alert { alert }).await.is_err() { break; }
+                    continue;
+                }
+                // Overload skips this alert (like one missed while offline), never the socket.
+                let permit = match worker(&mut revoked, &mut ended).await {
+                    Ok(permit) => permit,
+                    Err(NoWorker::Busy) => continue,
+                    Err(NoWorker::Revoked) => break,
+                };
                 let p = pool.clone(); let t = token.clone();
-                let Ok(Ok(alert)) = crate::performance::blocking(move || { let _permit = permit; store::alert(&p, &t, candidate) }).await else { break; };
+                let checked_at = Instant::now();
+                let result = crate::performance::blocking(move || { let _permit = permit; store::alert(&p, &t, candidate) }).await;
+                if matches!(&result, Ok(Err(error)) if error.transient()) {
+                    // Fail closed: this alert is skipped, like one missed while offline.
+                    if trouble.failed().is_none() { revoke = false; break; }
+                    continue;
+                }
+                let Ok(Ok((alert, grant))) = result else { break; };
+                trouble.clear();
+                if let Some(grant) = grant {
+                    grants.retain(|(target, kind, at, _, _)| (*target, *kind) != key && at.elapsed() < ALERT_AUTHORIZATION_RECHECK);
+                    if grants.len() >= MAX_ALERT_GRANTS { grants.clear(); }
+                    grants.push((key.0, key.1, checked_at, epoch.clone(), grant));
+                }
                 let Some(_delivery) = epoch.deliver() else { continue; };
                 if let Some(alert) = alert {
                     if send(&mut socket, ServerEvent::Alert { alert }).await.is_err() { break; }
@@ -389,13 +462,27 @@ async fn serve(mut socket: WebSocket, pool: DbPool, upgrade_token: String) {
             }
             _ = maintenance.tick() => {
                 if last_seen.elapsed() > Duration::from_secs(35) { break; }
-                let Ok(permit) = worker(&mut revoked, &mut ended).await else { break; };
+                let permit = match worker(&mut revoked, &mut ended).await {
+                    Ok(permit) => permit,
+                    // The next maintenance tick checks again.
+                    Err(NoWorker::Busy) => continue,
+                    Err(NoWorker::Revoked) => break,
+                };
                 let p = pool.clone(); let t = token.clone();
-                if !matches!(crate::performance::blocking(move || { let _permit = permit; auth::store::authenticate(&mut *auth::store::connection(&p)?, &t) }).await, Ok(Ok(_))) { break; }
+                let result = crate::performance::blocking(move || { let _permit = permit; auth::store::authenticate(&mut *auth::store::connection(&p)?, &t) }).await;
+                match result {
+                    Ok(Ok(_)) => trouble.clear(),
+                    Ok(Err(error)) if error.transient() => {
+                        if trouble.failed().is_none() { revoke = false; break; }
+                    }
+                    _ => break,
+                }
             }
         }
     }
-    let _ = send(&mut socket, ServerEvent::Revoked {}).await;
+    if revoke {
+        let _ = send(&mut socket, ServerEvent::Revoked {}).await;
+    }
 }
 
 #[cfg(test)]
@@ -472,7 +559,10 @@ mod tests {
         while target.receiver.try_recv().is_ok() {
             received += 1;
         }
+        // The backlog is bounded; later alerts were dropped, not the subscriber.
         assert_eq!(received, 64);
-        assert!(target.receiver.is_closed());
+        assert!(!target.receiver.is_closed());
+        publish(event.clone());
+        assert!(target.receiver.try_recv().is_ok());
     }
 }

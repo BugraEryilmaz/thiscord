@@ -30,11 +30,13 @@ use tokio::sync::{Semaphore, watch};
 /// least this often (session expiry, writes outside this module).
 const REFRESH: Duration = Duration::from_secs(10);
 
-pub fn router(origins: Vec<HeaderValue>) -> Router<Option<DbPool>> {
+/// `sockets` bounds concurrently connected sockets of this type (see `limits`).
+pub fn router(origins: Vec<HeaderValue>, sockets: usize) -> Router<Option<DbPool>> {
     Router::new()
         .route(FRIENDS_PATH, post(handle))
         .route(FRIENDS_SOCKET_PATH, get(upgrade))
         .layer(Extension(Arc::new(origins)))
+        .layer(Extension(crate::limits::SocketSlots::new(sockets)))
         .layer(DefaultBodyLimit::max(32 * 1024))
         .merge(attachments::router())
 }
@@ -124,6 +126,7 @@ async fn upgrade(
     State(pool): State<Option<DbPool>>,
     Extension(id): Extension<RequestId>,
     Extension(origins): Extension<Arc<Vec<HeaderValue>>>,
+    Extension(slots): Extension<crate::limits::SocketSlots>,
     RawQuery(query): RawQuery,
     headers: HeaderMap,
     ws: Result<WebSocketUpgrade, WebSocketUpgradeRejection>,
@@ -137,12 +140,7 @@ async fn upgrade(
     let Ok(ws) = ws else {
         return Failure::Invalid("Invalid WebSocket upgrade").response(id);
     };
-    static SOCKETS: OnceLock<Arc<Semaphore>> = OnceLock::new();
-    let Ok(permit) = SOCKETS
-        .get_or_init(|| Arc::new(Semaphore::new(128)))
-        .clone()
-        .try_acquire_owned()
-    else {
+    let Ok(permit) = slots.0.clone().try_acquire_owned() else {
         return Failure::Limited.response(id);
     };
     // Web client: cookie-derived bearer, used only when the frame token is empty.
@@ -227,6 +225,12 @@ async fn serve(mut socket: WebSocket, pool: DbPool, upgrade_token: String, retai
     let readers = READERS.get_or_init(|| Arc::new(Semaphore::new(8)));
     let mut tick = tokio::time::interval(Duration::from_secs(1));
     tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+    // Transient database trouble keeps the socket, delivers nothing new and
+    // retries with backoff; it gives up (without `revoked`) after `retry::GRACE`.
+    let mut trouble = crate::retry::Backoff::default();
+    let mut retry_after = None::<Instant>;
+    // Every exit reports revocation except giving up on database trouble.
+    let mut revoke = true;
     loop {
         tokio::select! {biased;
             _=changed.changed()=>break,
@@ -253,6 +257,8 @@ async fn serve(mut socket: WebSocket, pool: DbPool, upgrade_token: String, retai
             }
             _=tick.tick()=>{
                 if last_seen.elapsed()>Duration::from_secs(35) {break;}
+                // Backing off from database trouble: nothing to deliver until a read succeeds.
+                if retry_after.is_some_and(|at| Instant::now()<at) {continue;}
                 if cached.is_none() || Instant::now()>=refresh_at {
                     let Ok(permit)=readers.clone().try_acquire_owned() else {crate::performance::FRIENDS_SKIPPED.fetch_add(1, std::sync::atomic::Ordering::Relaxed);continue;};
                     // Commits from here on wake the loop again, even during this read.
@@ -261,7 +267,15 @@ async fn serve(mut socket: WebSocket, pool: DbPool, upgrade_token: String, retai
                     let plan=history.plan(selected,&before);
                     let Some(epoch)=crate::chat::access::snapshot(&account,Some(&session_scope)) else {break;};
                     let p=pool.clone();let t=token.clone();let page=before.clone();let load=plan.load;
-                    let Ok(Ok((mut snapshot,expiry)))=crate::performance::blocking(move ||{let _permit=permit;store::snapshot(&p,&t,selected,page,load)}).await else {break;};
+                    let result=crate::performance::blocking(move ||{let _permit=permit;store::snapshot(&p,&t,selected,page,load)}).await;
+                    if matches!(&result,Ok(Err(error)) if error.transient()) {
+                        let Some(delay)=trouble.failed() else {revoke=false;break;};
+                        retry_after=Some(Instant::now()+delay);
+                        cached=None;
+                        continue;
+                    }
+                    let Ok(Ok((mut snapshot,expiry)))=result else {break;};
+                    trouble.clear();
                     history.finish(plan,&mut snapshot);
                     if last.as_ref()==Some(&snapshot) && !history.pending(&snapshot) { crate::performance::FRIENDS_UNCHANGED.fetch_add(1, std::sync::atomic::Ordering::Relaxed); }
                     refresh_at=checked+expiry.map_or(REFRESH,|e|e.min(REFRESH));
@@ -279,7 +293,9 @@ async fn serve(mut socket: WebSocket, pool: DbPool, upgrade_token: String, retai
             }
         }
     }
-    let _ = send(&mut socket, ServerEvent::Revoked {}).await;
+    if revoke {
+        let _ = send(&mut socket, ServerEvent::Revoked {}).await;
+    }
     let _ = tokio::time::timeout(Duration::from_secs(1), socket.send(Message::Close(None))).await;
 }
 

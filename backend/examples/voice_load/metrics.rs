@@ -13,6 +13,12 @@ impl Bits {
         *word |= bit;
         fresh
     }
+    #[allow(dead_code)] // Used by chat_load only.
+    pub fn contains(&self, n: usize) -> bool {
+        self.0
+            .get(n / 64)
+            .is_some_and(|word| word & (1 << (n % 64)) != 0)
+    }
     pub fn count(&self) -> u64 {
         self.0.iter().map(|w| u64::from(w.count_ones())).sum()
     }
@@ -70,9 +76,13 @@ pub struct Stats {
     pub max_scheduling_lag_us: u64,
     pub invalid: u64,
     pub streams: Vec<Stream>,
+    /// Synthetic camera packets; empty when the video workload is disabled.
+    pub video_sent: Bits,
+    pub video_attempted: u64,
+    pub video_streams: Vec<Stream>,
 }
 impl Stats {
-    pub fn new(packets: usize, room_size: usize) -> Self {
+    pub fn new(packets: usize, video_packets: usize, room_size: usize) -> Self {
         Self {
             local_candidate: None,
             remote_candidate: None,
@@ -83,6 +93,9 @@ impl Stats {
             max_scheduling_lag_us: 0,
             invalid: 0,
             streams: (0..room_size).map(|_| Stream::new(packets)).collect(),
+            video_sent: Bits::new(video_packets),
+            video_attempted: 0,
+            video_streams: (0..room_size).map(|_| Stream::new(video_packets)).collect(),
         }
     }
 }

@@ -69,6 +69,8 @@ pub(crate) static BLOCKING: Metric = Metric::new("Chat/friends/notification work
 pub(crate) static ROSTER: Metric = Metric::new("Voice roster authorization", 50_000);
 pub(crate) static FRIENDS: Metric = Metric::new("Friends snapshot", 50_000);
 pub(crate) static REFRESH: Metric = Metric::new("Chat refresh", 50_000);
+pub(crate) static REFRESH_GRANTED: Metric =
+    Metric::new("Chat refresh (reused authorization)", 50_000);
 pub(crate) static UNREAD: Metric = Metric::new("Unread authorization + counts", 50_000);
 pub(crate) static AUTHORIZATION: Metric = Metric::new("Focused permission inputs", 20_000);
 pub(crate) static ADMIN: Metric = Metric::new("Admin diagnostics collection", 200_000);
@@ -80,15 +82,38 @@ pub(crate) static ROSTER_UNCHANGED: AtomicU64 = AtomicU64::new(0);
 pub(crate) static FRIENDS_UNCHANGED: AtomicU64 = AtomicU64::new(0);
 pub(crate) static FRIENDS_SKIPPED: AtomicU64 = AtomicU64::new(0);
 
-pub(crate) fn blocking<F, R>(f: F) -> tokio::task::JoinHandle<R>
+/// Runs socket and maintenance database work on a blocking thread. Callers
+/// first queue asynchronously for one of as many permits as the pool has
+/// connections, so a fan-out of hundreds of sockets parks tasks, not blocking
+/// threads waiting for a connection. The permit lives until the work ends, even
+/// if the caller is cancelled. The queue time counts toward this measurement.
+pub(crate) async fn blocking<F, R>(f: F) -> Result<R, tokio::task::JoinError>
 where
     F: FnOnce() -> R + Send + 'static,
     R: Send + 'static,
 {
     let queued = Instant::now();
+    let permit = database_permits()
+        .clone()
+        .acquire_owned()
+        .await
+        .expect("database permits are never closed");
     tokio::task::spawn_blocking(move || {
+        let _permit = permit;
         BLOCKING.observe(queued.elapsed());
         f()
+    })
+    .await
+}
+
+/// One permit per pool connection (`DATABASE_POOL_SIZE`, default 5).
+fn database_permits() -> &'static std::sync::Arc<tokio::sync::Semaphore> {
+    static PERMITS: std::sync::OnceLock<std::sync::Arc<tokio::sync::Semaphore>> =
+        std::sync::OnceLock::new();
+    PERMITS.get_or_init(|| {
+        let size = crate::db::pool_size(std::env::var(crate::db::POOL_SIZE_VAR).ok().as_deref())
+            .unwrap_or(crate::db::DEFAULT_POOL_SIZE);
+        std::sync::Arc::new(tokio::sync::Semaphore::new(size as usize))
     })
 }
 
@@ -102,6 +127,7 @@ pub(crate) fn snapshot() -> BackendPerformance {
             &ROSTER,
             &FRIENDS,
             &REFRESH,
+            &REFRESH_GRANTED,
             &UNREAD,
             &AUTHORIZATION,
             &ADMIN,

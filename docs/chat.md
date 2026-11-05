@@ -214,15 +214,51 @@ cancelled while the transaction was running. Failed transactions publish nothing
 Message changes wake message delivery only in that channel and unread delivery in
 that guild. Presence/typing changes wake only that channel's presence readers.
 Read acknowledgements wake only that account's subscriptions in the affected guild.
-Unread work is coalesced over a fixed 75 ms window; message/presence delivery does
-not wait for that window and never performs an unread query. Unchanged read markers,
+Unread work is coalesced: the first change after a quiet second recounts after
+75 ms, later changes at most once per second per subscription. Message/presence
+delivery does not wait for that window and never waits behind an unread query.
+Presence lists are sent whole, so presence/typing deliveries are coalesced the
+same way (50 ms, then at most once per second per subscription). Unchanged read markers,
 exact send retries and unchanged edits do not publish notifications. Presence writers
 compare combined account state, suppressing unchanged heartbeats/typing refreshes;
 snapshot readers never publish notifications. Subscriptions unregister on switch or
-close. Subscribers capture account/guild access epochs before querying authorized
-state and validate those epochs when admitting delivery. No delivery permit is held
-during database work. Event batches are capped at 100 and drained without waiting
-for a polling interval. Join/leave/typing transitions
+close. Subscribers capture account/session/guild/member access epochs before
+querying authorized state and validate those epochs when admitting delivery. No
+delivery permit is held during database work. Event batches are capped at 100 and
+drained without waiting for a polling interval.
+
+A full delivery check authenticates the session, takes the shared session and
+guild locks and evaluates the subscriber's grants. Its result (the account and
+every text channel it may view and read) is reused for later message, presence
+and unread deliveries for at most ten seconds, and only while the epochs captured
+before that check are current; such deliveries read one read-only snapshot without
+row locks. Every committed account, session, guild or membership change closes
+those epochs (and the socket) before commit, so reuse never outlives an access
+change; time-only changes such as session expiry wait at most ten seconds, like
+the maintenance check. New events of a channel are read once and shared by that
+channel's subscribers: publication increments a per-channel counter after commit
+and before waking anyone, and a read covers every publication counted before its
+snapshot. Pages of 100 events and events with reactions (whose `mine` flag is per
+account) fall back to a private read. The presence list is shared the same way:
+its filter depends only on each listed member's own ViewChannel grant. Subscribe,
+lease renewal and typing expiry count changed rows instead of comparing the whole
+list and take no channel lock; typing changes still compare under it.
+
+Database trouble is not an authorization result. Only genuinely transient
+errors count (pool checkout timeout, lost connection, statement or lock timeout,
+deadlock, serialization failure); any other database error fails as before.
+Chat, friends and notification sockets deliver nothing that needs the failed
+read and retry with jittered exponential backoff (about 250 ms doubling to 4 s,
+±50%), closing with `service_unavailable` (never `revoked`) after 30 seconds
+without a successful check; a skipped alert is not replayed. Voice connections
+keep their current, epoch-fenced media and roster through failed rechecks, also
+backed off, for up to 30 seconds since the last successful one; an access commit
+during that time still pauses media until a check succeeds. Subscribers waiting
+for a channel's shared read wait asynchronously: only the one performing the
+read uses a blocking thread and a pool connection. Notification sockets likewise reuse a
+recipient's full alert check per guild channel and kind for ten seconds under the
+same epochs; private and ringing calls always recheck the database. Measurements:
+[load benchmarks](load-benchmarks.md). Join/leave/typing transitions
 also wake presence delivery; unchanged snapshots are not resent. Initial history
 and its event cursor are read under a shared channel lock that excludes channel writes. Reconnect subscribes again
 and reloads a fresh snapshot, recovering missed sends, edits and deletions.
@@ -280,7 +316,8 @@ need shared invalidation and are not supported.
   local account operations per process. Google discovery has a separate 4-request
   budget and holds no access barrier during provider I/O. Excess requests return 429.
 - Per-account chat HTTP budget: 180 requests/minute, at most 30 writes.
-- 30 socket events per ten seconds; 128 live/pending sockets per process.
+- 30 socket events per ten seconds; `THISCORD_MAX_SOCKETS` (default 512) live/pending
+  chat sockets per process (see [load benchmarks](load-benchmarks.md)).
 - Database checkout/queries and socket writes have deadlines. Blocking Diesel
   runs off async workers. Slow sockets close rather than buffer without a bound.
 - Frontend HTTP requests time out after 15 seconds; failed sends retain retry IDs.

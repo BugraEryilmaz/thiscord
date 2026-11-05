@@ -147,7 +147,7 @@ async fn diagnostics_rejects_revocations_during_collection_without_blocking_muta
     let diagnostics = get(&app, &owner, StatusCode::OK).await;
     let measurements: thiscord_shared::performance::BackendPerformance =
         serde_json::from_value(diagnostics["performance"].clone()).unwrap();
-    assert_eq!(measurements.timings.len(), 13);
+    assert_eq!(measurements.timings.len(), 14);
     let pool_metric = measurements
         .timings
         .iter()

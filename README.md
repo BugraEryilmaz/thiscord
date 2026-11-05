@@ -52,6 +52,9 @@ same controls as the desktop app, or download their technical diagnostic logs.
 See [admin build, access and deployment](docs/admin.md).
 Automatic backend and desktop UI counters support the prioritized
 [performance audit](docs/performance-audit.md), without collecting user content.
+Voice, camera video and chat capacity on the 2-vCPU VPS, the load tools that
+measure it and the connection limits (`THISCORD_MAX_SOCKETS`,
+`THISCORD_MAX_VOICE_CONNECTIONS`) are in [load benchmarks](docs/load-benchmarks.md).
 
 A personal Discord-style application built with Rust: Leptos/WASM inside Tauri,
 an Axum backend running in WSL, and locally hosted PostgreSQL managed by Diesel.

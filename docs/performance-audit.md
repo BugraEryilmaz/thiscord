@@ -172,6 +172,31 @@ Compare the same monitors before and after deploying them.
   `app/chat.rs` are unchanged: no change was found that clearly avoids a forced
   layout without changing scroll anchoring behavior.
 
+## Load-tested changes (2026-11-05)
+
+Measured on the VPS with the load generators; method, tables and caveats are in
+[load benchmarks](load-benchmarks.md).
+
+- **Finding 1, voice roster authorization.** Voice connections no longer run a
+  database authorization every second: the one-second roster reuses the last
+  check while the connection's epoch is current, with a full check at least every
+  ten seconds and after every access commit.
+- **Finding 2, shared pool.** Application SQL is kept as per-connection prepared
+  statements, so repeated statements skip parsing and usually planning (see
+  [database](database.md)). The default pool stays at five connections; ten did
+  not help the measured connect storms.
+- **Chat fan-out (new).** Each subscriber of a channel previously re-authenticated,
+  locked the guild and read the same new events. Deliveries now reuse an
+  epoch-fenced full check for up to ten seconds and share one event read and one
+  presence read per channel and publication; unread and presence deliveries are
+  coalesced to once per second per subscription. Notification alerts reuse a
+  recipient's check per channel. **Chat refresh (reused authorization)** times the
+  reuse path separately from **Chat refresh**.
+- **Connection limits (new).** `THISCORD_MAX_SOCKETS` (default 512, per socket type)
+  and `THISCORD_MAX_VOICE_CONNECTIONS` (default 96) replace fixed 128/64 limits.
+- **Database trouble (new).** Pool exhaustion and statement/lock timeouts no longer
+  reach clients as revocation; see [chat](chat.md).
+
 ## Reading the monitors
 
 Open `/admin` as the instance owner or an instance admin. **Performance monitors**

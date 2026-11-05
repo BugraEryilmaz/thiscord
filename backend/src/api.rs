@@ -17,38 +17,57 @@ use tower_http::cors::CorsLayer;
 use tracing::Instrument;
 use uuid::Uuid;
 
-use crate::db::{self, DbPool};
+use crate::{
+    db::{self, DbPool},
+    limits::Limits,
+};
 
+/// The application router with the default connection limits.
 pub fn router(pool: Option<DbPool>, origins: Vec<HeaderValue>) -> Router {
-    routes(pool, origins.clone(), crate::voice::router(origins))
+    router_with_limits(pool, origins, Limits::default())
 }
 
-/// For the disposable load-test server only. Does not change production limits.
-#[cfg(feature = "load-test")]
-pub fn load_test_router(pool: DbPool, origins: Vec<HeaderValue>, connections: usize) -> Router {
-    assert!((2..=500).contains(&connections));
-    routes(
-        Some(pool),
-        origins.clone(),
-        crate::voice::router_with_limit(origins, connections),
-    )
-}
-
-fn routes(
+pub fn router_with_limits(
     pool: Option<DbPool>,
     origins: Vec<HeaderValue>,
-    voice: Router<Option<DbPool>>,
+    limits: Limits,
 ) -> Router {
+    routes(pool, origins, limits)
+}
+
+/// For the disposable load-test server only: voice admits exactly the fixture's
+/// users, sockets at least that many. Production limits come from `Limits`.
+#[cfg(feature = "load-test")]
+pub fn load_test_router(
+    pool: DbPool,
+    origins: Vec<HeaderValue>,
+    connections: usize,
+    sockets: Option<usize>,
+) -> Router {
+    // The disposable fixture's account range; production limits are `Limits`.
+    assert!((2..=512).contains(&connections));
+    let limits = Limits {
+        sockets: sockets.unwrap_or(connections.max(crate::limits::DEFAULT_SOCKETS)),
+        voice: connections,
+    };
+    routes(Some(pool), origins, limits)
+}
+
+fn routes(pool: Option<DbPool>, origins: Vec<HeaderValue>, limits: Limits) -> Router {
+    let voice = crate::voice::router_with_limit(origins.clone(), limits.voice);
     let cookie_origins = std::sync::Arc::new(origins.clone());
     Router::new()
         .route(HEALTH_PATH, get(health))
         .route(READY_PATH, get(ready))
-        .merge(crate::chat::router(origins.clone()))
+        .merge(crate::chat::router(origins.clone(), limits.sockets))
         .merge(crate::bots::router(origins.clone()))
         .merge(crate::search::router())
-        .merge(crate::friends::router(origins.clone()))
+        .merge(crate::friends::router(origins.clone(), limits.sockets))
         .merge(crate::safety::router())
-        .merge(crate::notifications::router(origins.clone()))
+        .merge(crate::notifications::router(
+            origins.clone(),
+            limits.sockets,
+        ))
         .merge(voice)
         .merge(crate::auth::router())
         .merge(crate::permissions::router())

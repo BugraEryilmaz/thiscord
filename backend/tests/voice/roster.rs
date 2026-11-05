@@ -180,3 +180,152 @@ async fn visible_rosters_without_join_permission_follow_membership_and_revoke() 
     let _ = denied.close(None).await;
     serving.abort();
 }
+
+#[tokio::test]
+#[ignore = "requires TEST_DATABASE_URL; CI runs with --include-ignored"]
+async fn transient_database_errors_keep_admitted_voice_users_connected() {
+    let db = database();
+    let (_, ot) = user(&db, "transient_owner");
+    let (guest_id, gt) = user(&db, "transient_guest");
+    permissions::bootstrap_owner(&db.pool, "transient_owner").unwrap();
+    let app = api::router(
+        Some(db.pool.clone()),
+        vec!["http://localhost:1420".parse().unwrap()],
+    );
+    let mut state = command(
+        &app,
+        &ot,
+        json!({"action":"create_guild","name":"Transient test"}),
+        StatusCode::OK,
+    )
+    .await["state"]
+        .clone();
+    let guild = state["guild"]["id"].clone();
+    change(
+        &app,
+        &ot,
+        &mut state,
+        json!({"action":"add_member","username":"transient_guest"}),
+        StatusCode::OK,
+    )
+    .await;
+    change(
+        &app,
+        &ot,
+        &mut state,
+        json!({"action":"create_channel","name":"voice","kind":"voice"}),
+        StatusCode::OK,
+    )
+    .await;
+    let channel = state["channels"][0]["id"].clone();
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let address = listener.local_addr().unwrap();
+    let serving = tokio::spawn(axum::serve(listener, app.clone()).into_future());
+    let mut owner = Peer::new(join(address, &ot, guild.clone(), channel.clone()).await).await;
+    let mut guest = Peer::new(join(address, &gt, guild.clone(), channel.clone()).await).await;
+    forwarded(&mut owner, &mut guest).await;
+    // Hold the guild row: every full voice check now hits the one-second lock
+    // timeout, a database error that says nothing about authorization.
+    let mut blocker = db.pool.get().unwrap();
+    blocker
+        .batch_execute(&format!(
+            "BEGIN; SELECT id FROM guilds WHERE id='{}' FOR UPDATE",
+            guild.as_str().unwrap()
+        ))
+        .unwrap();
+    // Past the ten-second recheck, both stay connected and media still flows
+    // on their current, unrevoked access epochs.
+    let until = std::time::Instant::now() + Duration::from_secs(13);
+    while std::time::Instant::now() < until {
+        still_connected(&mut owner.socket).await;
+        still_connected(&mut guest.socket).await;
+        tokio::time::sleep(Duration::from_millis(500)).await;
+    }
+    forwarded(&mut owner, &mut guest).await;
+    blocker.batch_execute("ROLLBACK").unwrap();
+    drop(blocker);
+    // Rechecks succeed again once the database recovers.
+    tokio::time::sleep(Duration::from_secs(2)).await;
+    still_connected(&mut guest.socket).await;
+    forwarded(&mut guest, &mut owner).await;
+    // Between rechecks the roster reuses the last result; an access commit still
+    // revokes immediately and leaves the other participant connected.
+    change(&app, &ot, &mut state, json!({"action":"set_override","channel_id":channel,"target":{"kind":"member","id":guest_id},"allow":[],"deny":["join_voice"]}), StatusCode::OK).await;
+    loop {
+        match event(&mut guest.socket).await {
+            ServerEvent::Revoked {} => break,
+            ServerEvent::Participants { .. }
+            | ServerEvent::MediaDiagnostics { .. }
+            | ServerEvent::ScreenTarget { .. }
+            | ServerEvent::Pong {} => {}
+            _ => panic!("expected revocation"),
+        }
+    }
+    still_connected(&mut owner.socket).await;
+    owner.close().await;
+    serving.abort();
+}
+
+#[tokio::test]
+#[ignore = "requires TEST_DATABASE_URL; CI runs with --include-ignored"]
+async fn session_expiry_inside_the_reuse_window_ends_voice_within_the_recheck() {
+    let db = database();
+    let (_, ot) = user(&db, "expiry_owner");
+    let (guest_id, gt) = user(&db, "expiry_guest");
+    permissions::bootstrap_owner(&db.pool, "expiry_owner").unwrap();
+    let app = api::router(
+        Some(db.pool.clone()),
+        vec!["http://localhost:1420".parse().unwrap()],
+    );
+    let mut state = command(
+        &app,
+        &ot,
+        json!({"action":"create_guild","name":"Expiry test"}),
+        StatusCode::OK,
+    )
+    .await["state"]
+        .clone();
+    let guild = state["guild"]["id"].clone();
+    change(
+        &app,
+        &ot,
+        &mut state,
+        json!({"action":"add_member","username":"expiry_guest"}),
+        StatusCode::OK,
+    )
+    .await;
+    change(
+        &app,
+        &ot,
+        &mut state,
+        json!({"action":"create_channel","name":"voice","kind":"voice"}),
+        StatusCode::OK,
+    )
+    .await;
+    let channel = state["channels"][0]["id"].clone();
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let address = listener.local_addr().unwrap();
+    let serving = tokio::spawn(axum::serve(listener, app.clone()).into_future());
+    let mut owner = Peer::new(join(address, &ot, guild.clone(), channel.clone()).await).await;
+    let mut guest = Peer::new(join(address, &gt, guild.clone(), channel.clone()).await).await;
+    forwarded(&mut owner, &mut guest).await;
+    // Expiry commits no access change: the ten-second recheck must find it.
+    diesel::sql_query("UPDATE sessions SET expires_at=now() WHERE account_id=$1::uuid")
+        .bind::<Text, _>(guest_id.to_string())
+        .execute(&mut db.pool.get().unwrap())
+        .unwrap();
+    tokio::time::timeout(Duration::from_secs(12), async {
+        loop {
+            match event(&mut guest.socket).await {
+                ServerEvent::Revoked {} => break,
+                ServerEvent::Error { .. } => break,
+                _ => {}
+            }
+        }
+    })
+    .await
+    .expect("an expired session must lose voice within the recheck");
+    still_connected(&mut owner.socket).await;
+    owner.close().await;
+    serving.abort();
+}

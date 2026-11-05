@@ -9,8 +9,11 @@ The server seeds distinct test accounts, hashed bearer tokens, one guild and
 voice channels. It grants no instance ownership/admin rights. Authentication,
 permission checks, the five-connection database pool, SFU queues and eight-person
 room limit remain active. Only the benchmark router's connection limit changes
-to the requested fixture size (2–500). A normal backend still admits at most 64
-voice connections, even when compiled with the `load-test` feature.
+to the requested fixture size (2–512), and socket limits to at least that size.
+A normal backend admits `THISCORD_MAX_VOICE_CONNECTIONS` (default 96) voice
+connections, even when compiled with the `load-test` feature. `--camera-kbps`
+adds synthetic camera video; `chat_load` and the single-host VPS method are in
+[load benchmarks](load-benchmarks.md).
 
 This measures steady-state **voice transport**, not codec quality, login hashing,
 text-chat throughput or real microphone/device performance. The payload is
@@ -149,7 +152,7 @@ Additional options:
 
 | Option | Default | Range / purpose |
 | --- | --- | --- |
-| `--users` | 8 | 2–500 simulated accounts |
+| `--users` | 8 | 2–512 simulated accounts |
 | `--room-size` | 8 | 2–8 users per room; match server fixture layout |
 | `--seconds` | 60 | 1–3600 measured seconds, excludes joins/warmup/drain |
 | `--payload-bytes` | 80 | 32–1200; 80 models 32 kbit/s encoded payload |

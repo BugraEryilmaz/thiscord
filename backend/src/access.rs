@@ -190,7 +190,7 @@ pub(crate) async fn identify(
 ) -> Result<(Identity, Arc<Access>), crate::auth::Failure> {
     let pool = pool.clone();
     let token = token.to_owned();
-    let session = tokio::task::spawn_blocking(move || {
+    let session = crate::performance::blocking(move || {
         crate::auth::store::authenticate_actor(&mut *crate::auth::store::connection(&pool)?, &token)
     })
     .await

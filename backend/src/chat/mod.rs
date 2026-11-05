@@ -1,5 +1,6 @@
 pub(crate) mod access;
 pub(crate) mod attachments;
+mod feed;
 pub(crate) mod members;
 pub use attachments::start_cleanup as start_attachment_cleanup;
 mod notifications;
@@ -41,11 +42,13 @@ pub(crate) fn guild_updated(guild: thiscord_shared::GuildId) {
     let _ = guild_updates().send(guild);
 }
 
-pub fn router(origins: Vec<HeaderValue>) -> Router<Option<DbPool>> {
+/// `sockets` bounds concurrently connected sockets of this type (see `limits`).
+pub fn router(origins: Vec<HeaderValue>, sockets: usize) -> Router<Option<DbPool>> {
     Router::new()
         .route(CHAT_PATH, post(handle))
         .route(SOCKET_PATH, get(upgrade))
         .layer(Extension(Arc::new(origins)))
+        .layer(Extension(crate::limits::SocketSlots::new(sockets)))
         .layer(DefaultBodyLimit::max(32 * 1024))
         .merge(attachments::router())
 }
@@ -92,6 +95,7 @@ async fn upgrade(
     State(pool): State<Option<DbPool>>,
     Extension(id): Extension<RequestId>,
     Extension(origins): Extension<Arc<Vec<HeaderValue>>>,
+    Extension(slots): Extension<crate::limits::SocketSlots>,
     headers: HeaderMap,
     ws: Result<WebSocketUpgrade, WebSocketUpgradeRejection>,
 ) -> Response {
@@ -104,12 +108,7 @@ async fn upgrade(
     let Ok(ws) = ws else {
         return Failure::Invalid("Invalid WebSocket upgrade").response(id);
     };
-    static SOCKETS: OnceLock<Arc<Semaphore>> = OnceLock::new();
-    let Ok(permit) = SOCKETS
-        .get_or_init(|| Arc::new(Semaphore::new(128)))
-        .clone()
-        .try_acquire_owned()
-    else {
+    let Ok(permit) = slots.0.clone().try_acquire_owned() else {
         return Failure::Limited.response(id);
     };
     // Web client: cookie-derived bearer, used only when the frame token is empty.

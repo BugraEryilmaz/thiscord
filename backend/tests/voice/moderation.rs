@@ -194,6 +194,10 @@ async fn moderator_flags_fence_both_media_directions_preserve_self_state_and_mov
     change(&app,&ot,&mut state,json!({"action":"set_override","channel_id":destination,"target":{"kind":"member","id":member},"allow":[],"deny":["join_voice"]}),StatusCode::OK).await;
     change(&app,&ot,&mut state,json!({"action":"move_voice","account_id":member,"source_channel_id":source,"channel_id":destination}),StatusCode::FORBIDDEN).await;
     change(&app,&ot,&mut state,json!({"action":"delete_override","channel_id":destination,"target":{"kind":"member","id":member}}),StatusCode::OK).await;
+    // A move needs the member's connection to have reauthorized after that
+    // guild change; until then the server answers "conflict, retry". The voice
+    // loop handles the pending access change before answering this ping.
+    still_connected(&mut b.socket).await;
     change(&app,&ot,&mut state,json!({"action":"move_voice","account_id":member,"source_channel_id":source,"channel_id":destination}),StatusCode::OK).await;
     tokio::time::timeout(Duration::from_secs(5), async {
         loop {

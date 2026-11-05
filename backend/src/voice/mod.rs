@@ -125,6 +125,15 @@ impl Default for Room {
 }
 /// Minimum spacing between one connection's soundboard plays.
 const SOUNDBOARD_INTERVAL: Duration = Duration::from_millis(1000);
+/// Periodic database reauthorization for expiry-only changes (session expiry,
+/// profile edits). Every access-changing commit closes this connection's epoch
+/// and triggers an immediate check, so the per-second roster reuses the last
+/// authorized result while that epoch is current (as chat voice rosters do).
+const VOICE_AUTHORIZATION_RECHECK: Duration = Duration::from_secs(10);
+/// Transient database trouble during a recheck keeps the connection only while
+/// its last successful check is this recent. Packets still need a current epoch,
+/// so an access commit during the trouble pauses media until a check succeeds.
+const VOICE_TRANSIENT_GRACE: Duration = Duration::from_secs(30);
 struct VoiceAccess {
     bot: Option<bots::Context>,
     access: Arc<access::Access>,
@@ -141,7 +150,7 @@ impl VoiceAccess {
         let pool = self.pool.clone();
         let token = self.token.clone();
         let (guild, channel, revision) = (self.guild, self.channel, self.voice_revision);
-        let destination = tokio::task::spawn_blocking(move || {
+        let destination = crate::performance::blocking(move || {
             moderation::destination(&pool, &token, guild, channel, revision)
         })
         .await
@@ -177,7 +186,7 @@ impl VoiceAccess {
                 let (guild, channel) = (self.guild, self.channel);
                 let bot = self.bot.clone();
                 async move {
-                    tokio::task::spawn_blocking(move || {
+                    crate::performance::blocking(move || {
                         bots::authorize(&pool, &token, guild, channel, bot.as_ref())
                     })
                     .await
@@ -234,13 +243,24 @@ impl VoiceAccess {
             }
             Ok(viewing::participants(&members))
         });
-        if result.is_err() {
+        if result.as_ref().is_err_and(|error| !error.transient()) {
             self.active.store(false, Ordering::Release);
         }
         result
     }
 }
 static ROOMS: OnceLock<Mutex<HashMap<ChannelId, Weak<Room>>>> = OnceLock::new();
+fn profile_hints() -> &'static tokio::sync::broadcast::Sender<thiscord_shared::AccountId> {
+    static HINTS: OnceLock<tokio::sync::broadcast::Sender<thiscord_shared::AccountId>> =
+        OnceLock::new();
+    HINTS.get_or_init(|| tokio::sync::broadcast::channel(64).0)
+}
+/// Call after a profile (name, avatar) commit. That account's voice connections
+/// recheck now, so rosters show the change within a second instead of waiting
+/// for the ten-second recheck. A hint only; it carries no authorization.
+pub(crate) fn profile_changed(account: thiscord_shared::AccountId) {
+    let _ = profile_hints().send(account);
+}
 /// Callers must authorize channel visibility and fence delivery against revocation.
 pub(crate) async fn roster(channels: Vec<ChannelId>) -> Vec<thiscord_shared::voice::ChannelRoster> {
     let rooms: Vec<_> = {
@@ -286,8 +306,26 @@ async fn room(guild: GuildId, id: ChannelId) -> Arc<Room> {
     rooms.insert(id, Arc::downgrade(&room));
     room
 }
+/// Voice connections run on their own Tokio runtime: signaling, the SFU relay
+/// and egress writers, and the webrtc-rs tasks they spawn. A chat message wakes
+/// hundreds of socket tasks at once; on shared workers those queued ahead of
+/// packet forwarding and stretched audio latency while the CPU was far from
+/// busy. Database work still goes through each runtime's blocking pool and the
+/// shared connection pool; access fences and room state are runtime-agnostic.
+fn media_runtime() -> &'static tokio::runtime::Handle {
+    static MEDIA: OnceLock<tokio::runtime::Runtime> = OnceLock::new();
+    MEDIA
+        .get_or_init(|| {
+            tokio::runtime::Builder::new_multi_thread()
+                .thread_name("thiscord-media")
+                .enable_all()
+                .build()
+                .expect("media runtime")
+        })
+        .handle()
+}
 pub fn router(origins: Vec<HeaderValue>) -> Router<Option<DbPool>> {
-    router_with_limit(origins, 64)
+    router_with_limit(origins, crate::limits::DEFAULT_VOICE)
 }
 pub(crate) async fn diagnostics()
 -> HashMap<ChannelId, Vec<thiscord_shared::admin::ParticipantDiagnostics>> {
@@ -339,7 +377,11 @@ async fn upgrade(
         .on_upgrade(move |socket| async move {
             let mut socket = logging::Socket::new(socket, id);
             socket.permit = Some(permit);
-            serve(socket, pool, id, upgrade_token).await
+            // The connection, its relay/egress tasks and its webrtc-rs tasks all
+            // live on the media runtime from here on.
+            let _ = media_runtime()
+                .spawn(serve(socket, pool, id, upgrade_token))
+                .await;
         })
         .into_response()
 }
@@ -1028,7 +1070,7 @@ async fn serve(mut socket: logging::Socket, pool: DbPool, id: RequestId, upgrade
             let t = token.clone();
             let bot = bot.clone();
             async move {
-                tokio::task::spawn_blocking(move || {
+                crate::performance::blocking(move || {
                     bots::authorize(&p, &t, guild_id, channel_id, bot.as_ref())
                 })
                 .await
@@ -1046,7 +1088,7 @@ async fn serve(mut socket: logging::Socket, pool: DbPool, id: RequestId, upgrade
     // Rate-limit once per join, not once per optimistic authorization retry.
     let p = pool.clone();
     let account = info.account_id;
-    match tokio::task::spawn_blocking(move || {
+    match crate::performance::blocking(move || {
         crate::auth::store::rate_limit(
             &p,
             &format!("voice:{account}"),
@@ -1576,6 +1618,13 @@ async fn serve(mut socket: logging::Socket, pool: DbPool, id: RequestId, upgrade
         let mut audio_reply_budget = 0;
         let mut route_logged = false;
         let mut diagnostic_tick = 0;
+        // Join authorized against the database just before negotiation.
+        let mut authorized_at = Instant::now();
+        let mut profiles = profile_hints().subscribe();
+        // Jittered backoff for rechecks during transient database trouble.
+        let mut trouble = crate::retry::Backoff::default();
+        let mut recheck_after = None::<Instant>;
+        let profile_account = info.account_id;
         loop {
             tokio::select! {biased;
                 _ = async { let _ = replaced.wait_for(|value| *value).await; } => break,
@@ -1590,6 +1639,7 @@ async fn serve(mut socket: logging::Socket, pool: DbPool, id: RequestId, upgrade
                         access.failed(&mut resume.socket, request_id, error).await;
                         break;
                     }
+                    authorized_at = Instant::now();
                     if socket.recovery_expired() {
                         let _ = send(&mut resume.socket, ServerEvent::ResumeUnavailable {}).await;
                         break;
@@ -1612,11 +1662,27 @@ async fn serve(mut socket: logging::Socket, pool: DbPool, id: RequestId, upgrade
                     if let Some(challenge) = challenge
                         && send(&mut socket, ServerEvent::MicrophoneRefreshRequired { challenge }).await.is_err() { break; }
                 },
+                hint = profiles.recv() => {
+                    use tokio::sync::broadcast::error::RecvError;
+                    // Missed hints are covered by rechecking now as well.
+                    if matches!(hint, Ok(account) if account == profile_account) || matches!(hint, Err(RecvError::Lagged(_))) {
+                        match access.refresh(&room,slot,&mut changed).await {
+                            Ok(_) => authorized_at = Instant::now(),
+                            Err(error) if error.transient() && authorized_at.elapsed() < VOICE_TRANSIENT_GRACE => {}
+                            Err(error) => { access.failed(&mut socket,id,error).await; break; }
+                        }
+                    }
+                },
                 result=changed.changed()=>{
                     if result.is_err(){socket.end("access_watcher_closed");break;}
-                    if let Err(error)=access.refresh(&room,slot,&mut changed).await {
-                        access.failed(&mut socket,id,error).await;
-                        break;
+                    match access.refresh(&room,slot,&mut changed).await {
+                        Ok(_) => { authorized_at = Instant::now(); trouble.clear(); recheck_after = None; }
+                        // Media for the old epoch is already refused; the tick retries
+                        // after the backoff.
+                        Err(error) if error.transient() && authorized_at.elapsed() < VOICE_TRANSIENT_GRACE => {
+                            recheck_after = trouble.failed().map(|delay| Instant::now() + delay);
+                        }
+                        Err(error) => { access.failed(&mut socket,id,error).await; break; }
                     }
                 },
                 Some((kind, epoch, layer))=keyframe_rx.recv()=>{
@@ -1670,7 +1736,7 @@ async fn serve(mut socket: logging::Socket, pool: DbPool, id: RequestId, upgrade
                             _ => continue,
                         };
                         let (pool, token) = (access.pool.clone(), access.token.clone());
-                        let authorized = tokio::task::spawn_blocking(move || {
+                        let authorized = crate::performance::blocking(move || {
                             crate::soundboard::authorize_play(&pool, &token, guild_id, channel_id, sound_id)
                         }).await.unwrap_or(Err(Failure::Unavailable));
                         // Revocation during the check closes this epoch; the access
@@ -1712,9 +1778,23 @@ async fn serve(mut socket: logging::Socket, pool: DbPool, id: RequestId, upgrade
                     if socket.recovery_expired(){socket.end("signaling_recovery_expired");break;}
                     if socket.silent_for()>Duration::from_secs(20){socket.detach();}
                     if !active.load(Ordering::Acquire){socket.end("media_inactive");break;}
-                    let members=match access.refresh(&room,slot,&mut changed).await {
-                        Ok(members)=>members,
-                        Err(error)=>{access.failed(&mut socket,id,error).await;break;}
+                    // Reuse the current epoch's database result between rechecks.
+                    // Database trouble backs rechecks off; an epoch closed meanwhile
+                    // keeps media paused until a recheck succeeds.
+                    let backing_off = recheck_after.is_some_and(|at| Instant::now() < at);
+                    let reused = if authorized_at.elapsed() < VOICE_AUTHORIZATION_RECHECK || backing_off { access.current_roster(&room).await } else { None };
+                    let members=match reused {
+                        Some(members)=>members,
+                        None if backing_off => continue,
+                        None=>match access.refresh(&room,slot,&mut changed).await {
+                            Ok(members)=>{authorized_at = Instant::now(); trouble.clear(); recheck_after = None; members},
+                            Err(error) if error.transient() && authorized_at.elapsed() < VOICE_TRANSIENT_GRACE => {
+                                recheck_after = trouble.failed().map(|delay| Instant::now() + delay);
+                                // Keep the fenced roster while the database recovers.
+                                match access.current_roster(&room).await { Some(members) => members, None => continue }
+                            }
+                            Err(error)=>{access.failed(&mut socket,id,error).await;break;}
+                        }
                     };
                     for kind in [MediaKind::ScreenVideo, MediaKind::Camera] {
                         if let Some((epoch, bitrate)) = viewing::target(&room, slot, kind).await
@@ -1755,7 +1835,8 @@ async fn serve(mut socket: logging::Socket, pool: DbPool, id: RequestId, upgrade
                     let members = match access.current_roster(&room).await {
                         Some(members) => members,
                         None => match access.refresh(&room,slot,&mut changed).await {
-                            Ok(members)=>members,
+                            Ok(members)=>{authorized_at = Instant::now(); members},
+                            Err(error) if error.transient() && authorized_at.elapsed() < VOICE_TRANSIENT_GRACE => continue,
                             Err(error)=>{access.failed(&mut socket,id,error).await;break;}
                         }
                     };
@@ -1884,13 +1965,27 @@ where
 {
     use std::{future::Future, task::Poll};
     let mut send = std::pin::pin!(send);
-    let mut lock = Box::pin(room.members.read());
+    // A queued read only when the lock is contended: an uncontended packet takes
+    // it synchronously without allocating a waiter. `try_read` fails while a
+    // writer is queued, so writers keep their priority.
+    let mut lock = None;
     std::future::poll_fn(|cx| {
-        let members = match lock.as_mut().poll(cx) {
-            Poll::Pending => return Poll::Pending,
-            Poll::Ready(members) => members,
+        let members = match room.members.try_read() {
+            Ok(members) => {
+                lock = None;
+                members
+            }
+            Err(_) => {
+                let read = lock.get_or_insert_with(|| Box::pin(room.members.read()));
+                match read.as_mut().poll(cx) {
+                    Poll::Pending => return Poll::Pending,
+                    Poll::Ready(members) => {
+                        lock = None;
+                        members
+                    }
+                }
+            }
         };
-        lock = Box::pin(room.members.read());
         let Some(_permit) = permit() else {
             return Poll::Ready(Err(()));
         };
