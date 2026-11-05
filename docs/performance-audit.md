@@ -193,7 +193,7 @@ Measured on the VPS with the load generators; method, tables and caveats are in
   recipient's check per channel. **Chat refresh (reused authorization)** times the
   reuse path separately from **Chat refresh**.
 - **Connection limits (new).** `THISCORD_MAX_SOCKETS` (default 512, per socket type)
-  and `THISCORD_MAX_VOICE_CONNECTIONS` (default 128) replace fixed 128/64 limits.
+  and `THISCORD_MAX_VOICE_CONNECTIONS` (default 96) replace fixed 128/64 limits.
 - **Database trouble (new).** Pool exhaustion and statement/lock timeouts no longer
   reach clients as revocation; see [chat](chat.md).
 

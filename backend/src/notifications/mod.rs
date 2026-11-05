@@ -192,10 +192,8 @@ async fn handle(
 const ALERT_AUTHORIZATION_RECHECK: Duration = Duration::from_secs(10);
 /// Bounds the per-socket grant cache; one entry per recently alerted target/kind.
 const MAX_ALERT_GRANTS: usize = 64;
-/// Transient database trouble (`Failure::transient`) skips the affected alert or
-/// retries the refresh; the socket closes only after this long without success.
-const TRANSIENT_GRACE: Duration = Duration::from_secs(30);
-const TRANSIENT_RETRY: Duration = Duration::from_millis(500);
+/// A refresh skipped because every worker stayed busy is retried after this.
+const BUSY_RETRY: Duration = Duration::from_millis(500);
 fn workers() -> Arc<Semaphore> {
     static WORKERS: OnceLock<Arc<Semaphore>> = OnceLock::new();
     WORKERS.get_or_init(|| Arc::new(Semaphore::new(8))).clone()
@@ -341,7 +339,10 @@ async fn serve(mut socket: WebSocket, pool: DbPool, upgrade_token: String) {
     // Recent full alert checks per (target, kind), with the epochs captured before
     // each. Guild message fan-out reuses them instead of one transaction per alert.
     let mut grants = Vec::<(Target, Kind, Instant, access::Snapshot, store::AlertGrant)>::new();
-    let mut trouble = None::<Instant>;
+    // Transient database trouble (`Failure::transient`) skips the affected alert
+    // or retries the refresh with backoff; the socket closes (without `revoked`)
+    // only after `retry::GRACE` without success.
+    let mut trouble = crate::retry::Backoff::default();
     let mut retry_at = None::<tokio::time::Instant>;
     // Every exit reports revocation except giving up on database trouble.
     let mut revoke = true;
@@ -372,19 +373,19 @@ async fn serve(mut socket: WebSocket, pool: DbPool, upgrade_token: String) {
                 let Some(epoch) = access::snapshot(&account, Some(&session_scope)).and_then(|e| e.including(&preference_scope)).and_then(|e| e.including(&call_scope)) else { refresh = true; tokio::task::yield_now().await; continue; };
                 let permit = match worker(&mut revoked, &mut ended).await {
                     Ok(permit) => permit,
-                    Err(NoWorker::Busy) => { refresh = true; retry_at = Some(tokio::time::Instant::now() + TRANSIENT_RETRY); continue; }
+                    Err(NoWorker::Busy) => { refresh = true; retry_at = Some(tokio::time::Instant::now() + BUSY_RETRY); continue; }
                     Err(NoWorker::Revoked) => break,
                 };
                 let p = pool.clone(); let t = token.clone();
                 let result = crate::performance::blocking(move || { let _permit = permit; store::initial(&p, &t) }).await;
                 if matches!(&result, Ok(Err(error)) if error.transient()) {
-                    if trouble.get_or_insert_with(Instant::now).elapsed() >= TRANSIENT_GRACE { revoke = false; break; }
+                    let Some(delay) = trouble.failed() else { revoke = false; break; };
                     refresh = true;
-                    retry_at = Some(tokio::time::Instant::now() + TRANSIENT_RETRY);
+                    retry_at = Some(tokio::time::Instant::now() + delay);
                     continue;
                 }
                 let Ok(Ok(state)) = result else { break; };
-                trouble = None;
+                trouble.clear();
                 // Anchor after the DB result: query/return latency can delay
                 // expiry, but cannot wake early or depend on application UTC.
                 let received_at = tokio::time::Instant::now();
@@ -443,11 +444,11 @@ async fn serve(mut socket: WebSocket, pool: DbPool, upgrade_token: String) {
                 let result = crate::performance::blocking(move || { let _permit = permit; store::alert(&p, &t, candidate) }).await;
                 if matches!(&result, Ok(Err(error)) if error.transient()) {
                     // Fail closed: this alert is skipped, like one missed while offline.
-                    if trouble.get_or_insert_with(Instant::now).elapsed() >= TRANSIENT_GRACE { revoke = false; break; }
+                    if trouble.failed().is_none() { revoke = false; break; }
                     continue;
                 }
                 let Ok(Ok((alert, grant))) = result else { break; };
-                trouble = None;
+                trouble.clear();
                 if let Some(grant) = grant {
                     grants.retain(|(target, kind, at, _, _)| (*target, *kind) != key && at.elapsed() < ALERT_AUTHORIZATION_RECHECK);
                     if grants.len() >= MAX_ALERT_GRANTS { grants.clear(); }
@@ -470,9 +471,9 @@ async fn serve(mut socket: WebSocket, pool: DbPool, upgrade_token: String) {
                 let p = pool.clone(); let t = token.clone();
                 let result = crate::performance::blocking(move || { let _permit = permit; auth::store::authenticate(&mut *auth::store::connection(&p)?, &t) }).await;
                 match result {
-                    Ok(Ok(_)) => trouble = None,
+                    Ok(Ok(_)) => trouble.clear(),
                     Ok(Err(error)) if error.transient() => {
-                        if trouble.get_or_insert_with(Instant::now).elapsed() >= TRANSIENT_GRACE { revoke = false; break; }
+                        if trouble.failed().is_none() { revoke = false; break; }
                     }
                     _ => break,
                 }

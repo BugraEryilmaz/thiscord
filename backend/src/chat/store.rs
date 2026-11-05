@@ -843,42 +843,12 @@ pub(super) fn refresh_granted(
     guild: GuildId,
     channel: Option<ChannelId>,
     cursor: i64,
-    mut work: Refresh,
+    work: Refresh,
     grant: &Grant,
-    feed: Option<&super::feed::Feed>,
 ) -> Result<Refreshed, Failure> {
     let _timing = crate::performance::REFRESH_GRANTED.start();
-    // New messages and the presence list come from the channel's shared reads
-    // when possible.
-    let mut shared = None;
-    let mut shared_members = None;
-    if let (Some(ch), Some(feed)) = (channel, feed)
-        && grant.readable.contains(&ch)
-    {
-        if work.messages {
-            shared = feed.events(pool, guild, ch, cursor)?;
-            work.messages &= shared.is_none();
-        }
-        if work.presence {
-            shared_members = Some(feed.presence(pool, guild, ch)?);
-            work.presence = false;
-        }
-    }
-    let shared_poll = |poll: Option<Poll>| -> Option<Poll> {
-        if shared.is_none() && shared_members.is_none() {
-            return poll;
-        }
-        let poll = poll.unwrap_or(Poll {
-            events: Vec::new(),
-            members: Vec::new(),
-        });
-        Some(Poll {
-            events: shared.clone().unwrap_or(poll.events),
-            members: shared_members.clone().unwrap_or(poll.members),
-        })
-    };
     if !(work.messages || work.presence || work.unread) {
-        return Ok((None, shared_poll(None)));
+        return Ok((None, None));
     }
     let mut c = connection(pool)?;
     c.build_transaction()
@@ -908,7 +878,6 @@ pub(super) fn refresh_granted(
                 .transpose()?;
             Ok((unread, poll))
         })
-        .map(|(unread, poll)| (unread, shared_poll(poll)))
 }
 fn members(
     c: &mut PgConnection,

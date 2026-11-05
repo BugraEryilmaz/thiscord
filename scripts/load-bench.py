@@ -153,10 +153,64 @@ def seconds_of(arguments):
     return float(arguments[arguments.index("--seconds") + 1]) if "--seconds" in arguments else 60.0
 
 
+def serve(args):
+    """Server only, for generators on another host (scripts/load-remote.py).
+
+    stdin: the benchmark secret on the first line (never in arguments), then
+    "start" and "stop" around the measured window. stdout: "READY", then one JSON
+    summary per stop. EOF stops the server. Signaling binds loopback only; reach
+    it through an SSH tunnel. Media binds --media-bind.
+    """
+    secret = sys.stdin.readline().strip()
+    if len(secret) != 64:
+        raise SystemExit("expected the 64-hex benchmark secret on stdin")
+    _, hard = resource.getrlimit(resource.RLIMIT_NOFILE)
+    resource.setrlimit(resource.RLIMIT_NOFILE, (hard, hard))
+    examples = os.path.join(args.target, "release", "examples")
+    env = dict(os.environ, THISCORD_LOAD_SECRET=secret, THISCORD_VOICE_BIND=args.media_bind)
+    database = os.environ.get("TEST_DATABASE_URL")
+    server = subprocess.Popen([
+        "taskset", "-c", args.server_cpus, os.path.join(examples, "voice_load_server"),
+        "--bind", f"127.0.0.1:{args.port}", "--users", str(args.fixture_users or args.users),
+        "--room-size", "8", "--allow-insecure"], env=env,
+        stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    try:
+        wait_port(args.port)
+        print("READY", flush=True)
+        pg = postgres_pids()
+        sample = lambda: (time.monotonic(), cpu_seconds([server.pid]), postgres_cpu(pg),
+                          transactions(database))
+        start = None
+        for line in sys.stdin:
+            command = line.strip()
+            if command == "start":
+                start = sample()
+            elif command == "stop" and start:
+                end = sample()
+                wall = end[0] - start[0]
+                print(json.dumps({
+                    "server_cpus": args.server_cpus, "measured_wall_s": round(wall, 2),
+                    "server_cpu_percent": round((end[1] - start[1]) / wall * 100, 1),
+                    "postgres_cpu_percent": round((end[2] - start[2]) / wall * 100, 1),
+                    "postgres_transactions_per_second": None if start[3] is None or end[3] is None
+                    else round((end[3] - start[3]) / wall, 1),
+                    "server_rss_mib": rss_mib(server.pid),
+                }), flush=True)
+                start = None
+    finally:
+        server.send_signal(2)
+        try:
+            server.wait(timeout=20)
+        except subprocess.TimeoutExpired:
+            server.kill()
+
+
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--target", required=True, help="Cargo target dir with release examples")
-    parser.add_argument("--kind", choices=["voice", "chat", "mixed"], required=True)
+    parser.add_argument("--kind", choices=["voice", "chat", "mixed", "serve"], required=True)
+    parser.add_argument("--media-bind", default="127.0.0.1:0",
+                        help="serve: THISCORD_VOICE_BIND for off-host generators (public IP:0)")
     parser.add_argument("--users", type=int, required=True,
                         help="generator users; for mixed, the voice users")
     parser.add_argument("--fixture-users", type=int,
@@ -172,6 +226,8 @@ def main():
     parser.add_argument("generator_args", nargs=argparse.REMAINDER,
                         help="voice_load or chat_load arguments (mixed: voice_load)")
     args = parser.parse_args()
+    if args.kind == "serve":
+        return serve(args)
     if args.kind == "mixed" and not args.chat_users:
         raise SystemExit("--kind mixed needs --chat-users")
     # Hundreds of users hold three sockets each on both sides; the deployed

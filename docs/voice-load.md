@@ -10,7 +10,7 @@ voice channels. It grants no instance ownership/admin rights. Authentication,
 permission checks, the five-connection database pool, SFU queues and eight-person
 room limit remain active. Only the benchmark router's connection limit changes
 to the requested fixture size (2–500), and socket limits to at least that size.
-A normal backend admits `THISCORD_MAX_VOICE_CONNECTIONS` (default 128) voice
+A normal backend admits `THISCORD_MAX_VOICE_CONNECTIONS` (default 96) voice
 connections, even when compiled with the `load-test` feature. `--camera-kbps`
 adds synthetic camera video; `chat_load` and the single-host VPS method are in
 [load benchmarks](load-benchmarks.md).

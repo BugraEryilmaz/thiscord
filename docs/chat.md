@@ -244,14 +244,18 @@ its filter depends only on each listed member's own ViewChannel grant. Subscribe
 lease renewal and typing expiry count changed rows instead of comparing the whole
 list and take no channel lock; typing changes still compare under it.
 
-Database trouble (pool exhaustion, statement or lock timeouts) is not an
-authorization result. Chat, friends and notification sockets deliver nothing
-that needs the failed read, retry after 500 ms, and close with
-`service_unavailable` (never `revoked`) after 30 seconds without a successful
-check; a skipped alert is not replayed. Voice connections keep their current,
-epoch-fenced media and roster through failed rechecks for up to 30 seconds since
-the last successful one; an access commit during that time still pauses media
-until a check succeeds. Notification sockets likewise reuse a
+Database trouble is not an authorization result. Only genuinely transient
+errors count (pool checkout timeout, lost connection, statement or lock timeout,
+deadlock, serialization failure); any other database error fails as before.
+Chat, friends and notification sockets deliver nothing that needs the failed
+read and retry with jittered exponential backoff (about 250 ms doubling to 4 s,
+±50%), closing with `service_unavailable` (never `revoked`) after 30 seconds
+without a successful check; a skipped alert is not replayed. Voice connections
+keep their current, epoch-fenced media and roster through failed rechecks, also
+backed off, for up to 30 seconds since the last successful one; an access commit
+during that time still pauses media until a check succeeds. Subscribers waiting
+for a channel's shared read wait asynchronously: only the one performing the
+read uses a blocking thread and a pool connection. Notification sockets likewise reuse a
 recipient's full alert check per guild channel and kind for ten seconds under the
 same epochs; private and ringing calls always recheck the database. Measurements:
 [load benchmarks](load-benchmarks.md). Join/leave/typing transitions

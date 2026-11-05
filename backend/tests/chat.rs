@@ -30,6 +30,8 @@ mod mentions;
 mod notifications;
 #[path = "chat/private_safety.rs"]
 mod private_safety;
+#[path = "chat/resilience.rs"]
+mod resilience;
 #[path = "chat/rich.rs"]
 mod rich;
 #[path = "chat/unread.rs"]

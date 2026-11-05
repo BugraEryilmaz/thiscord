@@ -1599,6 +1599,9 @@ async fn serve(mut socket: logging::Socket, pool: DbPool, id: RequestId, upgrade
         // Join authorized against the database just before negotiation.
         let mut authorized_at = Instant::now();
         let mut profiles = profile_hints().subscribe();
+        // Jittered backoff for rechecks during transient database trouble.
+        let mut trouble = crate::retry::Backoff::default();
+        let mut recheck_after = None::<Instant>;
         let profile_account = info.account_id;
         loop {
             tokio::select! {biased;
@@ -1751,12 +1754,17 @@ async fn serve(mut socket: logging::Socket, pool: DbPool, id: RequestId, upgrade
                     if socket.silent_for()>Duration::from_secs(20){socket.detach();}
                     if !active.load(Ordering::Acquire){socket.end("media_inactive");break;}
                     // Reuse the current epoch's database result between rechecks.
-                    let reused = if authorized_at.elapsed() < VOICE_AUTHORIZATION_RECHECK { access.current_roster(&room).await } else { None };
+                    // Database trouble backs rechecks off; an epoch closed meanwhile
+                    // keeps media paused until a recheck succeeds.
+                    let backing_off = recheck_after.is_some_and(|at| Instant::now() < at);
+                    let reused = if authorized_at.elapsed() < VOICE_AUTHORIZATION_RECHECK || backing_off { access.current_roster(&room).await } else { None };
                     let members=match reused {
                         Some(members)=>members,
+                        None if backing_off => continue,
                         None=>match access.refresh(&room,slot,&mut changed).await {
-                            Ok(members)=>{authorized_at = Instant::now(); members},
+                            Ok(members)=>{authorized_at = Instant::now(); trouble.clear(); recheck_after = None; members},
                             Err(error) if error.transient() && authorized_at.elapsed() < VOICE_TRANSIENT_GRACE => {
+                                recheck_after = trouble.failed().map(|delay| Instant::now() + delay);
                                 // Keep the fenced roster while the database recovers.
                                 match access.current_roster(&room).await { Some(members) => members, None => continue }
                             }

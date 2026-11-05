@@ -10,6 +10,7 @@ pub mod limits;
 pub mod notifications;
 mod performance;
 pub mod permissions;
+mod retry;
 pub mod safety;
 pub mod schema;
 pub mod soundboard;

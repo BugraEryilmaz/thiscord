@@ -1,0 +1,15 @@
+# unread::unread_ranges_scan_backlog_instead_of_history on the VPS (PostgreSQL 18.6)
+#
+# Base commit 6add51e (before this work), release profile, TEST_DATABASE_URL=thiscord_bench_test:
+#   cargo test -p thiscord-backend --release --locked --test chat -- --include-ignored unread_ranges
+
+test unread::unread_ranges_scan_backlog_instead_of_history ... FAILED
+small backlog: original: median_elapsed_ms=61.333, message_rows=0, cost=9760.39, jit=false
+small backlog: range: median_elapsed_ms=30.273, message_rows=0, cost=252.07, jit=false
+thread 'unread::unread_ranges_scan_backlog_instead_of_history' (2515961) panicked at backend/tests/chat/unread.rs:326:17:
+test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 50 filtered out; finished in 10.52s
+
+
+# Current branch: the same assertion (backend/tests/chat/unread.rs:326) fails identically;
+# every other test in the suite passes. The test checks a plan-row count of
+# EXPLAIN output, which differs on this PostgreSQL version and data layout.

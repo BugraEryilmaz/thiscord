@@ -411,6 +411,7 @@ fn report(
     receivers: &[Arc<Mutex<Receiver>>],
     sends: &Sends,
     connected: u64,
+    connect_seconds: f64,
     complete: bool,
 ) -> (serde_json::Value, bool) {
     let receivers: Vec<_> = receivers.iter().map(|r| r.lock().unwrap()).collect();
@@ -472,7 +473,7 @@ fn report(
             "sockets_per_user": if config.full_client { 3 } else { 1 },
             "rate_messages_per_second": config.rate, "duration_seconds": config.seconds,
             "late_threshold_ms": config.late_ms,
-            "connected_users": connected, "rejected_users": rejected_users, "failed_users": failures, "failure_reasons": reasons,
+            "connected_users": connected, "connect_seconds": (connect_seconds * 10.0).round() / 10.0, "rejected_users": rejected_users, "failed_users": failures, "failure_reasons": reasons,
             "scheduled_messages": scheduled, "attempted_messages": sends.attempted,
             "accepted_messages": sends.ok.count(), "send_errors": sends.errors,
             "send_p50_ms": p(&sends.histogram, 50), "send_p95_ms": p(&sends.histogram, 95), "send_p99_ms": p(&sends.histogram, 99),
@@ -591,6 +592,7 @@ the connection limit are reported, not failures; the rest are measured),\n--outp
         tokio::time::sleep(Duration::from_millis(100)).await;
     }
     let all = connected.load(Relaxed);
+    let connect_seconds = started.elapsed().as_secs_f64();
     println!(
         "Connected {all}/{users} users in {:.1}s ({refused} refused at the limit)",
         started.elapsed().as_secs_f64()
@@ -638,6 +640,7 @@ the connection limit are reported, not failures; the rest are measured),\n--outp
         &receivers,
         &sends.lock().unwrap(),
         connected.load(Relaxed),
+        connect_seconds,
         complete,
     );
     println!(
@@ -740,7 +743,7 @@ mod tests {
         let receivers: Vec<_> = (0..4)
             .map(|_| Arc::new(Mutex::new(Receiver::new(4))))
             .collect();
-        let (report, passed) = report(&c, &receivers, &sends, 4, true);
+        let (report, passed) = report(&c, &receivers, &sends, 4, 0.0, true);
         assert!(!passed);
         assert_eq!(report["expected_deliveries"], 8);
         assert_eq!(report["missing"], 8);
@@ -749,8 +752,12 @@ mod tests {
                 receiver.lock().unwrap().received.insert(n);
             }
         }
-        assert!(super::report(&c, &receivers, &sends, 4, true).1);
+        assert!(super::report(&c, &receivers, &sends, 4, 0.0, true).1);
+        // Deliveries later than the threshold fail the run like missing ones.
+        receivers[1].lock().unwrap().late = 1;
+        assert!(!super::report(&c, &receivers, &sends, 4, 0.0, true).1);
+        receivers[1].lock().unwrap().late = 0;
         receivers[0].lock().unwrap().failed = Some("revoked");
-        assert!(!super::report(&c, &receivers, &sends, 4, true).1);
+        assert!(!super::report(&c, &receivers, &sends, 4, 0.0, true).1);
     }
 }

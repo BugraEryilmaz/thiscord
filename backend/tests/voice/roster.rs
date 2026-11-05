@@ -265,3 +265,67 @@ async fn transient_database_errors_keep_admitted_voice_users_connected() {
     owner.close().await;
     serving.abort();
 }
+
+#[tokio::test]
+#[ignore = "requires TEST_DATABASE_URL; CI runs with --include-ignored"]
+async fn session_expiry_inside_the_reuse_window_ends_voice_within_the_recheck() {
+    let db = database();
+    let (_, ot) = user(&db, "expiry_owner");
+    let (guest_id, gt) = user(&db, "expiry_guest");
+    permissions::bootstrap_owner(&db.pool, "expiry_owner").unwrap();
+    let app = api::router(
+        Some(db.pool.clone()),
+        vec!["http://localhost:1420".parse().unwrap()],
+    );
+    let mut state = command(
+        &app,
+        &ot,
+        json!({"action":"create_guild","name":"Expiry test"}),
+        StatusCode::OK,
+    )
+    .await["state"]
+        .clone();
+    let guild = state["guild"]["id"].clone();
+    change(
+        &app,
+        &ot,
+        &mut state,
+        json!({"action":"add_member","username":"expiry_guest"}),
+        StatusCode::OK,
+    )
+    .await;
+    change(
+        &app,
+        &ot,
+        &mut state,
+        json!({"action":"create_channel","name":"voice","kind":"voice"}),
+        StatusCode::OK,
+    )
+    .await;
+    let channel = state["channels"][0]["id"].clone();
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let address = listener.local_addr().unwrap();
+    let serving = tokio::spawn(axum::serve(listener, app.clone()).into_future());
+    let mut owner = Peer::new(join(address, &ot, guild.clone(), channel.clone()).await).await;
+    let mut guest = Peer::new(join(address, &gt, guild.clone(), channel.clone()).await).await;
+    forwarded(&mut owner, &mut guest).await;
+    // Expiry commits no access change: the ten-second recheck must find it.
+    diesel::sql_query("UPDATE sessions SET expires_at=now() WHERE account_id=$1::uuid")
+        .bind::<Text, _>(guest_id.to_string())
+        .execute(&mut db.pool.get().unwrap())
+        .unwrap();
+    tokio::time::timeout(Duration::from_secs(12), async {
+        loop {
+            match event(&mut guest.socket).await {
+                ServerEvent::Revoked {} => break,
+                ServerEvent::Error { .. } => break,
+                _ => {}
+            }
+        }
+    })
+    .await
+    .expect("an expired session must lose voice within the recheck");
+    still_connected(&mut owner.socket).await;
+    owner.close().await;
+    serving.abort();
+}

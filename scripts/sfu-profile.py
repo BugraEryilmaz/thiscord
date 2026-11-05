@@ -40,6 +40,24 @@ def classify(frame, table, default):
     return default
 
 
+def short(frame):
+    """A frame's symbol: DSO and turbofish arguments dropped, bounded for display."""
+    symbol = re.sub(r"\s+\(.*\)$", "", frame)
+    while True:
+        simpler = re.sub(r"::<[^<>]*>", "", symbol)
+        if simpler == symbol:
+            break
+        symbol = simpler
+    return symbol[:120]
+
+
+def leaf_name(stack):
+    """Unsymbolized libc leaves are named after their caller."""
+    if "[unknown]" in stack[0] and len(stack) > 1:
+        return "libc, called from " + short(stack[1])
+    return short(stack[0])
+
+
 def samples(lines):
     stack = []
     for line in lines:
@@ -59,6 +77,7 @@ def main():
     stage_count = collections.Counter()
     leaf_count = collections.Counter()
     matrix = collections.Counter()
+    own_leaves = collections.defaultdict(collections.Counter)
     total = 0
     for stack in samples(sys.stdin):
         total += 1
@@ -70,6 +89,8 @@ def main():
         stage_count[stage] += 1
         leaf_count[leaf] += 1
         matrix[(stage, leaf)] += 1
+        if stage.startswith("our "):
+            own_leaves[stage][leaf_name(stack)] += 1
     if not total:
         sys.exit("no samples")
     pct = lambda n: f"{100 * n / total:5.1f}%"
@@ -79,6 +100,12 @@ def main():
     print("\nBy leaf activity:")
     for name, n in leaf_count.most_common():
         print(f"  {pct(n)}  {name}")
+    own = sum(n for name, n in stage_count.items() if name.startswith("our "))
+    print(f"\nThis project's own stages: {pct(own)} of samples. Hottest leaf frames:")
+    for stage, leaves in sorted(own_leaves.items(), key=lambda kv: -sum(kv[1].values())):
+        print(f"  {stage} ({pct(sum(leaves.values()))}):")
+        for name, n in leaves.most_common(8):
+            print(f"    {pct(n)}  {name}")
     print("\nStage x leaf (>= 1%):")
     for (stage, leaf), n in matrix.most_common():
         if n * 100 >= total:

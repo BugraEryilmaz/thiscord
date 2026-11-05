@@ -56,11 +56,26 @@ impl From<diesel::result::Error> for Failure {
     }
 }
 impl Failure {
-    /// Pool exhaustion, timeouts and other database errors say nothing about
-    /// authorization. Long-lived connections retry them (delivering nothing
-    /// meanwhile) instead of reporting revocation.
+    /// Pool exhaustion, lost connections, statement/lock timeouts, deadlocks and
+    /// serialization failures say nothing about authorization and may succeed
+    /// on retry. Long-lived connections retry them (delivering nothing
+    /// meanwhile); every other database error is deterministic and fails fast.
     pub(crate) fn transient(&self) -> bool {
-        matches!(self, Self::Unavailable | Self::Database(_))
+        use diesel::result::{DatabaseErrorKind as Kind, Error};
+        match self {
+            Self::Unavailable => true,
+            Self::Database(Error::DatabaseError(
+                Kind::SerializationFailure | Kind::ClosedConnection | Kind::UnableToSendCommand,
+                _,
+            )) => true,
+            Self::Database(Error::DatabaseError(Kind::Unknown, info)) => {
+                let message = info.message();
+                message.starts_with("canceling statement due to")
+                    || message.starts_with("deadlock detected")
+                    || message.starts_with("terminating connection")
+            }
+            _ => false,
+        }
     }
     pub(crate) fn response(self, request_id: RequestId) -> Response {
         let (status, code, message) = match self {
@@ -307,6 +322,37 @@ async fn handle(
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn only_retryable_database_errors_are_transient() {
+        use diesel::result::{DatabaseErrorKind as Kind, Error};
+        let database = |kind, message: &str| {
+            Failure::Database(Error::DatabaseError(kind, Box::new(message.to_owned())))
+        };
+        for failure in [
+            Failure::Unavailable,
+            database(Kind::Unknown, "canceling statement due to lock timeout"),
+            database(
+                Kind::Unknown,
+                "canceling statement due to statement timeout",
+            ),
+            database(Kind::Unknown, "deadlock detected"),
+            database(Kind::SerializationFailure, "could not serialize access"),
+            database(Kind::ClosedConnection, "server closed the connection"),
+        ] {
+            assert!(failure.transient(), "{failure:?}");
+        }
+        for failure in [
+            Failure::Forbidden,
+            Failure::Unauthorized,
+            Failure::Database(Error::NotFound),
+            Failure::Database(Error::DeserializationError("bad row".into())),
+            database(Kind::ForeignKeyViolation, "violates foreign key"),
+            database(Kind::Unknown, "syntax error at or near"),
+        ] {
+            assert!(!failure.transient(), "{failure:?}");
+        }
+    }
+
     use super::*;
 
     #[test]

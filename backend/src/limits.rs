@@ -14,7 +14,7 @@ pub const VOICE_VAR: &str = "THISCORD_MAX_VOICE_CONNECTIONS";
 /// A signed-in desktop or browser client holds one of each.
 pub const DEFAULT_SOCKETS: usize = 512;
 /// Concurrent voice/video connections (SFU peers), including test bots.
-pub const DEFAULT_VOICE: usize = 128;
+pub const DEFAULT_VOICE: usize = 96;
 const SOCKET_RANGE: std::ops::RangeInclusive<usize> = 16..=4096;
 const VOICE_RANGE: std::ops::RangeInclusive<usize> = 2..=1024;
 

@@ -22,6 +22,9 @@ use std::{
         atomic::{AtomicU64, Ordering::SeqCst},
     },
 };
+/// Subscribers wait for a shared read asynchronously; only the subscriber that
+/// performs it uses a blocking thread and a database connection.
+type Shared<T> = tokio::sync::Mutex<Option<T>>;
 use thiscord_shared::{
     AccountId, ChannelId, GuildId,
     chat::{ChatMessage, OnlineMember},
@@ -33,10 +36,10 @@ const PAGE: usize = 100;
 pub(super) struct Feed {
     key: (GuildId, ChannelId),
     published: AtomicU64,
-    read: Mutex<Option<Read>>,
+    read: Shared<Read>,
     /// The same protocol for presence/typing publications and the shared list.
     presence_published: AtomicU64,
-    presence: Mutex<Option<(u64, Vec<OnlineMember>)>>,
+    presence: Shared<(u64, Vec<OnlineMember>)>,
 }
 struct Read {
     /// `published` before this read's snapshot: every counted event is included.
@@ -98,9 +101,9 @@ pub(super) fn subscribe(guild: GuildId, channel: ChannelId) -> Arc<Feed> {
     let feed = Arc::new(Feed {
         key: (guild, channel),
         published: AtomicU64::new(0),
-        read: Mutex::new(None),
+        read: Shared::const_new(None),
         presence_published: AtomicU64::new(0),
-        presence: Mutex::new(None),
+        presence: Shared::const_new(None),
     });
     feeds.insert((guild, channel), Arc::downgrade(&feed));
     feed
@@ -140,9 +143,9 @@ impl Feed {
 
     /// Events after `cursor` for an authorized subscriber of this channel, or
     /// `None` when they need a private read: more than one page, or reactions
-    /// (whose `mine` flag is per account). Subscribers of a busy channel wait on
-    /// one read instead of each checking out a database connection.
-    pub(super) fn events(
+    /// (whose `mine` flag is per account). Subscribers of a busy channel wait,
+    /// asynchronously, on one read instead of each reading the database.
+    pub(super) async fn events(
         &self,
         pool: &DbPool,
         guild: GuildId,
@@ -150,15 +153,19 @@ impl Feed {
         cursor: i64,
     ) -> Result<Option<Vec<(i64, ChatMessage)>>, Failure> {
         let needed = self.published.load(SeqCst);
-        let mut read = self.read.lock().unwrap();
+        let mut read = self.read.lock().await;
         if !read.as_ref().is_some_and(|r| r.covers(needed, cursor)) {
             let covered = self.published.load(SeqCst);
-            let mut c = connection(pool)?;
-            let events = c
-                .build_transaction()
-                .read_only()
-                .repeatable_read()
-                .run(|c| shared_events(c, guild, channel, cursor))?;
+            let pool = pool.clone();
+            let events = crate::performance::blocking(move || {
+                connection(&pool)?
+                    .build_transaction()
+                    .read_only()
+                    .repeatable_read()
+                    .run(|c| shared_events(c, guild, channel, cursor))
+            })
+            .await
+            .map_err(|_| Failure::Unavailable)??;
             *read = Some(Read {
                 covered,
                 after: cursor,
@@ -172,22 +179,26 @@ impl Feed {
 impl Feed {
     /// The channel's presence list for an authorized subscriber, read at most
     /// once per publication.
-    pub(super) fn presence(
+    pub(super) async fn presence(
         &self,
         pool: &DbPool,
         guild: GuildId,
         channel: ChannelId,
     ) -> Result<Vec<OnlineMember>, Failure> {
         let needed = self.presence_published.load(SeqCst);
-        let mut read = self.presence.lock().unwrap();
+        let mut read = self.presence.lock().await;
         if !read.as_ref().is_some_and(|(covered, _)| *covered >= needed) {
             let covered = self.presence_published.load(SeqCst);
-            let mut c = connection(pool)?;
-            let members = c
-                .build_transaction()
-                .read_only()
-                .repeatable_read()
-                .run(|c| super::store::presence_list(c, guild, channel))?;
+            let pool = pool.clone();
+            let members = crate::performance::blocking(move || {
+                connection(&pool)?
+                    .build_transaction()
+                    .read_only()
+                    .repeatable_read()
+                    .run(|c| super::store::presence_list(c, guild, channel))
+            })
+            .await
+            .map_err(|_| Failure::Unavailable)??;
             *read = Some((covered, members));
         }
         Ok(read.as_ref().unwrap().1.clone())
@@ -280,7 +291,7 @@ mod tests {
         let (guild, channel) = ids();
         let feed = subscribe(guild, channel);
         assert!(feed.cached(0).is_none());
-        *feed.read.lock().unwrap() = Some(Read {
+        *feed.read.try_lock().unwrap() = Some(Read {
             covered: 0,
             after: 0,
             events: vec![message(1, false)],
@@ -289,7 +300,7 @@ mod tests {
         // A newer publication needs a new read; so does a read in progress.
         published(guild, channel);
         assert!(feed.cached(0).is_none());
-        let held = feed.read.lock().unwrap();
+        let held = feed.read.try_lock().unwrap();
         assert!(feed.cached(0).is_none());
         drop(held);
     }

@@ -553,3 +553,45 @@ async fn notification_grant_reuse_stops_at_channel_access_changes() {
     quiet(&mut guest_socket).await;
     server.abort();
 }
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[ignore = "requires TEST_DATABASE_URL"]
+async fn notification_session_expiry_inside_the_reuse_window_ends_the_socket() {
+    let _lock = TEST_LOCK.lock().await;
+    let db = database();
+    let (app, owner, guest, guest_id, state, channel) = setup(&db).await;
+    let guild = state["guild"]["id"].clone();
+    let (address, server) = server(&app).await;
+    let mut guest_socket = socket(address, &guest, json!(["guild_message"])).await;
+    let sent = chat(&app,&owner,json!({"action":"send","guild_id":guild,"channel_id":channel,"client_id":Uuid::new_v4(),"content":"granted"}),StatusCode::OK).await;
+    assert_eq!(
+        next(&mut guest_socket).await["alert"]["id"],
+        sent["message"]["id"]
+    );
+    // Time-only: the reused alert grant survives no commit, so the ten-second
+    // maintenance check is what ends the socket.
+    diesel::sql_query("UPDATE sessions SET expires_at=now() WHERE account_id=$1::uuid")
+        .bind::<Text, _>(guest_id.to_string())
+        .execute(&mut db.pool.get().unwrap())
+        .unwrap();
+    let ended = tokio::time::timeout(std::time::Duration::from_secs(12), async {
+        loop {
+            match guest_socket.next().await {
+                Some(Ok(WsMessage::Text(text))) => {
+                    let frame: Value = serde_json::from_str(&text).unwrap();
+                    if frame["event"]["type"] == "revoked" {
+                        return;
+                    }
+                }
+                Some(Ok(_)) => {}
+                _ => return,
+            }
+        }
+    })
+    .await;
+    assert!(
+        ended.is_ok(),
+        "an expired session must end within the recheck"
+    );
+    server.abort();
+}

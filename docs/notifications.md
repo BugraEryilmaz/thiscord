@@ -112,7 +112,8 @@ member epochs captured before that check are current; at most 64 such grants
 are kept per socket. Delivery preferences such as snoozes and Do Not Disturb are
 still evaluated at delivery time. Ringing calls, private calls and anything
 other than a guild channel are always checked against the database. Database
-trouble skips the affected alert and retries later; the socket closes (without
+trouble skips the affected alert and retries with jittered exponential backoff;
+the socket closes (without
 `revoked`) only after 30 seconds without a successful check. A connecting socket
 waits up to 30 seconds for a worker, so reconnect storms queue instead of failing.
 Heartbeats and session-expiry checks are maintenance, not
