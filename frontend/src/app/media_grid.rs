@@ -130,6 +130,7 @@ pub(super) fn ScreenViewer(
     // Until the user rearranges, tiles follow a shape-aware automatic order.
     let arranged = RwSignal::new(false);
     let menu_place = RwSignal::new((false, None::<f64>));
+    let help = RwSignal::new(false);
     let stage = NodeRef::<leptos::html::Div>::new();
     let announce = move |text: String| announcement.set(text);
     // The gesture hint retires after a few uses; it is remembered per device.
@@ -583,11 +584,20 @@ pub(super) fn ScreenViewer(
     };
     let restore = move |key: Key| {
         hidden.update(|h| h.retain(|k| *k != key));
-        announce(localized_format!(
-            crate::i18n::language(),
-            "Showing {}",
-            tile_name(key)
-        ));
+        leptos::task::spawn_local(async move {
+            gloo_timers::future::TimeoutFuture::new(0).await;
+            let tile = format!("[data-media-key='{}'] .media-tile-content", key_text(key));
+            if let Some(content) = document().query_selector(&tile).ok().flatten() {
+                let _ = content.set_attribute("data-keyboard", "");
+            }
+            if !focus_selector(&tile) {
+                focus_selector(".media-bar-hidden .media-chip");
+            }
+        });
+        leptos::task::spawn_local(async move {
+            gloo_timers::future::TimeoutFuture::new(0).await;
+            announce_position(key);
+        });
     };
     let close_menu = move |return_focus: bool| {
         if let Some(key) = menu.get_untracked() {
@@ -607,7 +617,10 @@ pub(super) fn ScreenViewer(
             return;
         }
         // Handled here, so Escape does not also mark the channel read.
-        if menu.with_untracked(Option::is_some) {
+        if help.get_untracked() {
+            e.prevent_default();
+            help.set(false);
+        } else if menu.with_untracked(Option::is_some) {
             e.prevent_default();
             close_menu(true);
         } else if expanded.with_untracked(Option::is_some) {
@@ -630,6 +643,7 @@ pub(super) fn ScreenViewer(
         }
     });
     let outside = window_event_listener(leptos::ev::pointerdown, move |e| {
+        help.set(false);
         pointer_inside.set_value(
             e.target()
                 .and_then(|t| t.dyn_into::<web_sys::Element>().ok())
@@ -727,7 +741,7 @@ pub(super) fn ScreenViewer(
                             let label = tile_label(tile.0.display_name(), tile.1);
                             let short = tile.0.display_name().to_owned();
                             let camera = tile.1 == MediaKind::Camera;
-                            view!{<button type="button" class="media-chip" data-tip=move ||crate::i18n::t("Show again")
+                            view!{<button type="button" class="media-chip" data-chip-key=key_text(key) data-tip=move ||crate::i18n::t("Show again")
                                 aria-label=move ||localized_format!(crate::i18n::language(), "Show {}", label)
                                 on:click=move |_|restore(key)>
                                 <Icon kind=if camera {Glyph::Camera} else {Glyph::Screen}/><span class="truncate">{short}</span><Icon kind=Glyph::Eye/>
@@ -739,9 +753,20 @@ pub(super) fn ScreenViewer(
                     </div>
                 </Show>
                 <span class="media-bar-hint" class:hidden=move ||{!several() || tips.get() >= TIP_USES}>{move ||if focused() {crate::i18n::t("Click a stream to put it on the stage · Esc returns to the grid")} else {crate::i18n::t("Click to focus · Drag to rearrange")}}</span>
+                <span class="media-bar-hint-touch" class:hidden=move ||{!several() || tips.get() >= TIP_USES}>{move ||if focused() {crate::i18n::t("Tap a stream to put it on the stage")} else {crate::i18n::t("Tap to focus · ⋯ to move or hide")}}</span>
                 <Show when=move ||{several() && tips.get() >= TIP_USES}>
-                    <button type="button" class="icon-button media-bar-help" aria-label=move ||crate::i18n::t("Grid gestures")
-                        data-tip=move ||crate::i18n::t("Click a stream to focus it · Drag to rearrange · Right-click or ⋯ for options · On a focused stream: Enter, F, Alt+arrows")><Icon kind=Glyph::Keyboard/></button>
+                    <div class="media-bar-help-wrap">
+                        <button type="button" class="icon-button media-bar-help" aria-label=move ||crate::i18n::t("Grid gestures")
+                            aria-expanded=move ||help.get().to_string() aria-controls=format!("media-help-{grid_id}")
+                            on:pointerdown=move |e|e.stop_propagation()
+                            on:click=move |_|help.set(!help.get_untracked())><Icon kind=Glyph::Help/></button>
+                        <Show when=move ||help.get()>
+                            <p class="media-help-popover" id=format!("media-help-{grid_id}") role="note" on:pointerdown=move |e|e.stop_propagation()>
+                                <span class="media-help-pointer">{move ||crate::i18n::t("Click a stream to focus it · Drag to rearrange · Right-click or ⋯ for options · On a focused stream: Enter, F, Alt+arrows")}</span>
+                                <span class="media-help-touch">{move ||crate::i18n::t("Tap a stream to focus it · Tap ⋯ to move, hide or go full screen")}</span>
+                            </p>
+                        </Show>
+                    </div>
                 </Show>
                 <span class="sr-only" id=hint_id()>{move ||crate::i18n::t("Enter to focus, F for full screen, Alt and arrow keys to move, Shift+F10 for options.")}</span>
                 <Show when=focused>
@@ -836,6 +861,7 @@ pub(super) fn ScreenViewer(
                 });
                 let hint=hint_id();
                 let quality_id=format!("media-quality-{grid_id}-{}",key_text(key));
+                let watchers_id=format!("media-watchers-{grid_id}-{}",key_text(key));
                 let label_menu=label.clone();
                 let label_heading=label.clone();
                 view!{<figure node_ref=figure class="media-tile" data-media-key=key_text(key)
@@ -880,7 +906,7 @@ pub(super) fn ScreenViewer(
                         drop_stage.set(false);
                         if let Some(source)=dragging.get_untracked(){dragging.set(None);used();if !cancelled && focus.get_untracked()!=Some(source){announce_position(source);}}
                     }>
-                    <div class="media-tile-content" role="button" tabindex="0" aria-label=label.clone() aria-describedby=format!("{hint} {quality_id}")
+                    <div class="media-tile-content" role="button" tabindex="0" aria-label=label.clone() aria-describedby=format!("{hint} {quality_id} {watchers_id}")
                         aria-pressed=move ||several().then(||on_stage.get().to_string())
                         on:click=move |_|toggle_focus()
                         on:blur=move |e|{if let Some(t)=e.target().and_then(|t|t.dyn_into::<web_sys::Element>().ok()){let _=t.remove_attribute("data-keyboard");}}
@@ -925,40 +951,50 @@ pub(super) fn ScreenViewer(
                             on:click=move |_|if menu.get_untracked()==Some(key) {menu.set(None);} else {open_menu();}><Icon kind=Glyph::More/></button>
                     </div>
                     <Show when=move ||quality.get().is_some()>
-                        <span class="media-quality" id=quality_id.clone()>
-                            <span class="media-quality-tip" aria-hidden="true">{move ||quality.get().map(|q|q.2).unwrap_or_default()}</span>
+                        <span class="media-quality" id=quality_id.clone() data-tip=move ||quality.get().map(|q|q.2).unwrap_or_default()>
                             <span class="sr-only">{move ||quality.get().map(|q|q.2).unwrap_or_default()}</span>
                             <span class="media-quality-full" aria-hidden="true">{move ||quality.get().map(|q|q.0).unwrap_or_default()}
                                 {move ||quality.get().and_then(|q|q.1).map(|rate|view!{" · "{rate}})}</span>
                             <span class="media-quality-compact" aria-hidden="true">{move ||quality.get().map(|q|q.3).unwrap_or_default()}</span>
                         </span>
                     </Show>
-                    <super::screen::StreamWatchers ui=ui owner=owner kind=kind epoch=epoch/>
+                    <super::screen::StreamWatchers ui=ui owner=owner kind=kind epoch=epoch id=watchers_id.clone()/>
                     <Show when=move ||menu.get()==Some(key)>
                         <div class="media-menu-scrim" aria-hidden="true" on:pointerdown=move |e|e.stop_propagation() on:click=move |_|close_menu(true)></div>
                         <div class="media-item-menu message-options" class:up=menu_up class:start=menu_start
                             style:max-height=move ||menu_place.get().1.map(|h|format!("{h:.0}px")).unwrap_or_default()
-                            on:pointerdown=move |e|e.stop_propagation() on:click=move |e|e.stop_propagation()>
+                            on:pointerdown=move |e|e.stop_propagation() on:click=move |e|e.stop_propagation()
+                            on:focusout=move |e: web_sys::FocusEvent|{
+                                // A DOM move briefly drops focus (no related target); only a
+                                // real move of focus elsewhere closes the menu.
+                                let Some(next)=e.related_target().and_then(|t|t.dyn_into::<web_sys::Element>().ok()) else {return;};
+                                if next.closest(".media-item-menu, .media-tile-more").ok().flatten().is_none() {close_menu(false);}
+                            }>
                             <p class="context-heading" aria-hidden="true">{label_heading.clone()}
                                 {move ||quality.get().map(|q|view!{<span class="context-heading-detail">{q.2}</span>})}</p>
                             <div class="media-menu-items" role="menu" aria-label=label_menu.clone() on:keydown=move |e|super::keyboard::rove_items(&e,"[role=menuitem]")>
                             <Show when=several>
-                                <button type="button" role="menuitem" class="context-item" on:click=move |_|{toggle_focus();close_menu(false);}>
+                                <button type="button" role="menuitem" aria-keyshortcuts="Enter" class="context-item" on:click=move |_|{toggle_focus();close_menu(false);}>
                                     {move ||view!{<Icon kind=if on_stage.get() {Glyph::Grid} else {Glyph::Spotlight}/>}}
-                                    {move ||if on_stage.get() {crate::i18n::t("Back to grid")} else {crate::i18n::t("Focus")}}<kbd class="context-shortcut">"Enter"</kbd></button>
+                                    {move ||if on_stage.get() {crate::i18n::t("Back to grid")} else if focus.get().is_some() {crate::i18n::t("Put on stage")} else {crate::i18n::t("Focus")}}<kbd class="context-shortcut" aria-hidden="true">"Enter"</kbd></button>
                             </Show>
-                            <button type="button" role="menuitem" class="context-item" on:click=move |_|full()><Icon kind=Glyph::Expand/>{move ||crate::i18n::t("Full screen")}<kbd class="context-shortcut">"F"</kbd></button>
+                            <button type="button" role="menuitem" aria-keyshortcuts="F" class="context-item" on:click=move |_|full()><Icon kind=Glyph::Expand/>{move ||crate::i18n::t("Full screen")}<kbd class="context-shortcut" aria-hidden="true">"F"</kbd></button>
                             <Show when=several>
-                                <button type="button" role="menuitem" class="context-item" data-move="start" aria-disabled=move ||first().to_string() on:click=move |_|if !first() {move_index(key,0,Some("start"))}><Icon kind=Glyph::First/>{move ||crate::i18n::t("Move to start")}<kbd class="context-shortcut">"Alt+Home"</kbd></button>
-                                <button type="button" role="menuitem" class="context-item" data-move="earlier" aria-disabled=move ||first().to_string() on:click=move |_|if !first() {move_by(key,-1,Some("earlier"))}><Icon kind=Glyph::ArrowLeft/>{move ||crate::i18n::t("Move earlier")}<kbd class="context-shortcut">"Alt+←"</kbd></button>
-                                <button type="button" role="menuitem" class="context-item" data-move="later" aria-disabled=move ||last().to_string() on:click=move |_|if !last() {move_by(key,1,Some("later"))}><Icon kind=Glyph::ArrowRight/>{move ||crate::i18n::t("Move later")}<kbd class="context-shortcut">"Alt+→"</kbd></button>
-                                <button type="button" role="menuitem" class="context-item" data-move="end" aria-disabled=move ||last().to_string() on:click=move |_|if !last() {move_index(key,visible_keys.with_untracked(Vec::len).saturating_sub(1),Some("end"))}><Icon kind=Glyph::Last/>{move ||crate::i18n::t("Move to end")}<kbd class="context-shortcut">"Alt+End"</kbd></button>
+                                <button type="button" role="menuitem" aria-keyshortcuts="Alt+Home" class="context-item" data-move="start" aria-disabled=move ||first().to_string() on:click=move |_|if !first() {move_index(key,0,Some("start"))}><Icon kind=Glyph::First/>{move ||crate::i18n::t("Move to start")}<kbd class="context-shortcut" aria-hidden="true">"Alt+Home"</kbd></button>
+                                <button type="button" role="menuitem" aria-keyshortcuts="Alt+ArrowLeft" class="context-item" data-move="earlier" aria-disabled=move ||first().to_string() on:click=move |_|if !first() {move_by(key,-1,Some("earlier"))}><Icon kind=Glyph::ArrowLeft/>{move ||crate::i18n::t("Move earlier")}<kbd class="context-shortcut" aria-hidden="true">"Alt+←"</kbd></button>
+                                <button type="button" role="menuitem" aria-keyshortcuts="Alt+ArrowRight" class="context-item" data-move="later" aria-disabled=move ||last().to_string() on:click=move |_|if !last() {move_by(key,1,Some("later"))}><Icon kind=Glyph::ArrowRight/>{move ||crate::i18n::t("Move later")}<kbd class="context-shortcut" aria-hidden="true">"Alt+→"</kbd></button>
+                                <button type="button" role="menuitem" aria-keyshortcuts="Alt+End" class="context-item" data-move="end" aria-disabled=move ||last().to_string() on:click=move |_|if !last() {move_index(key,visible_keys.with_untracked(Vec::len).saturating_sub(1),Some("end"))}><Icon kind=Glyph::Last/>{move ||crate::i18n::t("Move to end")}<kbd class="context-shortcut" aria-hidden="true">"Alt+End"</kbd></button>
                             </Show>
                             <button type="button" role="menuitem" class="context-item" on:click=move |_|{
                                 close_menu(false);exit_full();
                                 hidden.update(|h|h.push(key));
                                 announce(localized_format!(crate::i18n::language(), "Hidden: {}", tile_name(key)));
-                                focus_selector(".media-bar-hidden .media-chip");
+                                leptos::task::spawn_local(async move {
+                                    gloo_timers::future::TimeoutFuture::new(0).await;
+                                    if !focus_selector(&format!(".media-chip[data-chip-key='{}']", key_text(key))) {
+                                        focus_selector(".media-bar-hidden .media-chip");
+                                    }
+                                });
                             }><Icon kind=Glyph::EyeOff/>{move ||crate::i18n::t("Hide this stream")}</button>
                             </div>
                             {(!own).then(||view!{<div class="media-menu-volume" role="group" aria-label=move ||crate::i18n::t("Volume")><super::context_menu::ParticipantVolume ui=ui guild=guild channel=channel member=owner/></div>})}

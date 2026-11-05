@@ -75,6 +75,7 @@ pub(super) enum Glyph {
     Shrink,
     First,
     Last,
+    Help,
 }
 
 #[component]
@@ -188,6 +189,9 @@ pub(super) fn Icon(kind: Glyph) -> impl IntoView {
             "m3 3 18 18M10.6 5.1Q11.3 5 12 5c6 0 10 7 10 7a17 17 0 0 1-3.2 3.9M6.6 6.6C3.8 8.4 2 12 2 12s4 7 10 7a9.6 9.6 0 0 0 5.4-1.6M9.9 9.9a3 3 0 0 0 4.2 4.2"
         }
         Glyph::Shrink => "M3 8h5V3M21 8h-5V3M21 16h-5v5M3 16h5v5",
+        Glyph::Help => {
+            "M21 12a9 9 0 1 1-18 0 9 9 0 0 1 18 0ZM9.5 9.5a2.5 2.5 0 1 1 3.4 2.3c-.6.3-.9.8-.9 1.5V14M12 17h.01"
+        }
         Glyph::First => "M5 5v14M19 12H9m5-6-6 6 6 6",
         Glyph::Last => "M19 5v14M5 12h10m-5-6 6 6-6 6",
         Glyph::Keyboard => {
