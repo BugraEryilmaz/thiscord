@@ -61,17 +61,24 @@ pub fn grid(width: f64, height: f64, gap: f64, aspects: &[f64]) -> Placement {
             ..Default::default()
         };
     }
-    let best = best_rows(width, height, gap, &aspects);
     let floor = MIN_TILE_SIDE.min(width.min(height) * 0.5);
-    let typical = best.iter().map(|r| r.area().sqrt()).sum::<f64>() / best.len() as f64;
     let narrowest = MIN_TILE_WIDTH.min(width * 0.5);
-    if typical >= floor && best.iter().all(|r| r.w >= narrowest * 0.6) {
-        return Placement {
-            tiles: best,
-            stage: None,
-            height,
-            scrolls: false,
-        };
+    let fits = |tiles: &[Rect]| {
+        let typical = tiles.iter().map(|r| r.area().sqrt()).sum::<f64>() / tiles.len() as f64;
+        typical >= floor && tiles.iter().all(|r| r.w >= narrowest * 0.6)
+    };
+    // The soft floor first; if that would scroll, the strict one, before
+    // giving up and scrolling.
+    for strict in [false, true] {
+        let best = search_rows(width, height, gap, &aspects, strict);
+        if fits(&best) {
+            return Placement {
+                tiles: best,
+                stage: None,
+                height,
+                scrolls: false,
+            };
+        }
     }
     column(width, height, gap, &aspects, MIN_COLUMN)
 }
@@ -110,19 +117,28 @@ fn column(width: f64, height: f64, gap: f64, aspects: &[f64], min_column: f64) -
 }
 
 /// The best row arrangement that fits the area, without scrolling.
-fn best_rows(width: f64, height: f64, gap: f64, aspects: &[f64]) -> Vec<Rect> {
+/// `strict` drops every arrangement with a tile under the width floor (when
+/// any arrangement can avoid it) instead of only scoring it lower.
+fn search_rows(width: f64, height: f64, gap: f64, aspects: &[f64], strict: bool) -> Vec<Rect> {
     let n = aspects.len();
     let narrowest = MIN_TILE_WIDTH.min(width * 0.65);
     // A tile below the width floor costs score in proportion to the shortfall
     // (to the sixth power): a portrait sliver loses, but a couple of pixels never outweigh
     // badly uneven rows.
     let mut best: Option<(f64, Vec<Rect>)> = None;
+    let mut best_strict: Option<(f64, Vec<Rect>)> = None;
     let mut consider = |rows: &[usize]| {
         for mode in [Rows::Justified, Rows::Uniform, Rows::Capped] {
             let tiles = place_rows(width, height, gap, aspects, rows, mode);
             let thinnest = tiles.iter().map(|t| t.w).fold(f64::INFINITY, f64::min);
             let floor = (thinnest / narrowest).min(1.0).powi(6);
             let score = score(&tiles, rows) * floor;
+            if strict
+                && thinnest >= narrowest
+                && best_strict.as_ref().is_none_or(|(s, _)| score > *s + 1e-6)
+            {
+                best_strict = Some((score, tiles.clone()));
+            }
             if best.as_ref().is_none_or(|(s, _)| score > *s + 1e-6) {
                 best = Some((score, tiles));
             }
@@ -149,7 +165,10 @@ fn best_rows(width: f64, height: f64, gap: f64, aspects: &[f64]) -> Vec<Rect> {
             consider(&balanced(aspects, count));
         }
     }
-    best.map(|(_, tiles)| tiles).unwrap_or_default()
+    best_strict
+        .or(best)
+        .map(|(_, tiles)| tiles)
+        .unwrap_or_default()
 }
 
 /// Splits tiles into `count` rows of similar total aspect (greedy, in order).
