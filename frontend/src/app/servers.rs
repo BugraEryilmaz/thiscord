@@ -550,6 +550,10 @@ pub(super) fn ServerHome(ui: Ui) -> impl IntoView {
             selected.get().as_ref(),
         )
     });
+    let guild_id = Memo::new(move |_| {
+        ui.server
+            .with(|home| home.as_ref().map(|home| home.guild.id))
+    });
     let dialog = NodeRef::<leptos::html::Dialog>::new();
     let target = RwSignal::new(None::<Guild>);
     let name = RwSignal::new(String::new());
@@ -716,8 +720,10 @@ pub(super) fn ServerHome(ui: Ui) -> impl IntoView {
                         }).collect_view()}}</ul>
                     </nav>
                 })}
-                <div class="server-content">
-                    <Show when=move||selected.get().is_some() fallback=move||view!{<div class="flex h-full flex-col"><div class="pane-header"><p class="pane-title">{move ||ui.server.get().map(|s|s.guild.name).unwrap_or_default()}</p></div><div class="empty-state flex-1">{move ||match ui.server.get().and_then(|s|s.channels.into_iter().find(|c|Some(c.id)==ui.voice.get().channel_id)).map(|c|c.name) {
+                // The member list belongs to the server, not a channel: it stays
+                // available in voice channels and before a channel is chosen.
+                <div class="server-content"><div class="server-row"><div class="server-main">
+                    <Show when=move||selected.get().is_some() fallback=move||view!{<div class="flex h-full flex-col"><div class="pane-header"><p class="pane-title min-w-0 flex-1 truncate">{move ||ui.server.get().map(|s|s.guild.name).unwrap_or_default()}</p><super::members::Toggle ui/></div><div class="empty-state flex-1">{move ||match ui.server.get().and_then(|s|s.channels.into_iter().find(|c|Some(c.id)==ui.voice.get().channel_id)).map(|c|c.name) {
                         Some(room) => view!{<span class="empty-state-icon"><Icon kind=Glyph::Voice/></span><h2 class="empty-state-title">{thiscord_frontend::localized_format!(crate::i18n::language(), "You’re in {}", room)}</h2><p>{crate::i18n::t("Choose a text channel to chat while you talk.")}</p>}.into_any(),
                         None => view!{<span class="empty-state-icon"><Icon kind=Glyph::Hash/></span><p>{crate::i18n::t("Choose a channel to get started.")}</p>}.into_any(),
                     }}</div></div>}>
@@ -728,6 +734,9 @@ pub(super) fn ServerHome(ui: Ui) -> impl IntoView {
 
                     </Show>
                 </div>
+                {move ||guild_id.get().map(|guild|view!{<super::members::Panel ui guild/>})}
+                </div></div>
+                <super::members::ProfileHost ui/>
             </section>
         </Show>
         <dialog node_ref=dialog on:click=move |e|super::dialog::dismiss_outside(e,dialog,ui.busy.get_untracked()) aria-labelledby="channel-dialog-title" class="app-dialog max-w-md" on:cancel=move |ev: web_sys::Event|{if ui.busy.get_untracked(){ev.prevent_default();}}>

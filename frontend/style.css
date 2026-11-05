@@ -137,7 +137,7 @@ time, .tabular-nums { font-variant-numeric: tabular-nums; }
 .inline-code { padding: 1px 5px; border: 1px solid var(--hairline); border-radius: 5px; background: var(--tint-4); font-family: ui-monospace, "Cascadia Mono", Consolas, monospace; font-size: .875em; }
 .code-block { margin: 8px 0; max-height: 24rem; overflow: auto; padding: 12px; border: 1px solid var(--hairline); border-radius: var(--radius-md); background: color-mix(in srgb, var(--color-rail) 70%, transparent); font-family: ui-monospace, "Cascadia Mono", Consolas, monospace; font-size: 14px; white-space: pre; }
 .message-quote { margin: 4px 0; padding-left: 12px; border-left: 3px solid var(--tint-15); color: color-mix(in srgb, var(--color-content) 80%, var(--color-muted)); }
-.jump-latest { flex-shrink: 0; align-self: center; margin: 8px 16px 4px; padding: 6px 14px; border-radius: 999px; background: var(--color-brand); color: var(--color-on-brand); font-size: 14px; font-weight: 600; box-shadow: var(--shadow-2); }
+.jump-latest { position: absolute; bottom: 8px; left: 50%; z-index: 4; transform: translateX(-50%); white-space: nowrap; padding: 6px 14px; border-radius: 999px; background: var(--color-brand); color: var(--color-on-brand); font-size: 14px; font-weight: 600; box-shadow: var(--shadow-2); }
 .jump-latest:hover { background: color-mix(in srgb, var(--color-brand) 88%, var(--color-white)); }
 
 /* Composer: one rounded field with its tools inside, shared by channels and DMs. */
@@ -342,8 +342,10 @@ dialog header > button.icon-button:last-child svg { width: 18px; height: 18px; }
 .server-layout { display: grid; grid-template-columns: var(--sidebar-width) minmax(0, 1fr); height: 100%; min-height: 0; }
 .channel-sidebar { display: flex; flex-direction: column; gap: 18px; min-height: 0; min-width: 0; background: var(--color-sidebar); padding: 20px 12px var(--dock-height); }
 .server-content { display: flex; flex-direction: column; min-width: 0; min-height: 0; }
-.server-content > :not(.mobile-back-bar) { flex: 1 1 0; height: auto; min-height: 0; }
-.server-content > section { border-radius: 0; border-width: 0; }
+.server-row { display: flex; flex: 1 1 0; min-width: 0; min-height: 0; }
+.server-main { display: flex; flex: 1 1 0; flex-direction: column; min-width: 0; min-height: 0; }
+.server-main > :not(.mobile-back-bar) { flex: 1 1 0; height: auto; min-height: 0; }
+.server-main > section { border-radius: 0; border-width: 0; }
 .guild-button { width: 48px; height: 48px; flex-shrink: 0; border-radius: 16px; background: var(--color-raised); color: color-mix(in srgb, var(--color-content) 70%, var(--color-muted)); font-weight: 600; transition: background .15s, border-radius .15s, color .15s; }
 .guild-button:hover, .guild-button.selected { background: var(--color-brand); color: var(--color-on-brand); border-radius: 13px; }
 .user-dock { position: fixed; bottom: calc(8px + env(safe-area-inset-bottom, 0px)); left: calc(8px + env(safe-area-inset-left, 0px)); z-index: 30; width: calc(64px + var(--sidebar-width)); border: 1px solid var(--tint-6); border-radius: var(--radius-lg); background: var(--color-dock); box-shadow: var(--shadow-2); }
@@ -572,6 +574,11 @@ html:has(.notification-window), body:has(.notification-window) { margin: 0; back
 .context-submenu { position: fixed; z-index: 121; width: 200px; max-width: calc(100vw - 16px); max-height: calc(100dvh - 16px); overflow-y: auto; padding: 6px; border: 1px solid var(--tint-8); border-radius: var(--radius-lg); background: var(--color-popover); box-shadow: var(--shadow-2); }
 .context-dialog { margin: auto; width: min(480px, calc(100vw - 32px)); max-height: 85dvh; overflow-y: auto; border: 1px solid var(--tint-8); border-radius: var(--radius-xl); padding: 28px; background: var(--color-surface); color: var(--color-content); box-shadow: var(--shadow-3); }
 .context-dialog::backdrop { background: color-mix(in srgb, var(--color-rail) 70%, #000000a0); backdrop-filter: blur(6px); }
+.avatar-zoomable { cursor: zoom-in; }
+.avatar-viewer { margin: auto; max-width: none; max-height: none; overflow: visible; border: 0; padding: 0; background: transparent; color: var(--color-content); cursor: zoom-out; outline: none; }
+.avatar-viewer::backdrop { background: color-mix(in srgb, var(--color-rail) 70%, #000000c0); backdrop-filter: blur(6px); cursor: zoom-out; }
+.avatar-viewer-image { display: block; width: min(420px, 80vw, 70dvh); aspect-ratio: 1; border-radius: 50%; object-fit: cover; box-shadow: var(--shadow-3); }
+.avatar-viewer-name { margin-top: 14px; text-align: center; font-size: 16px; font-weight: 600; color: var(--color-white); }
 .channel-indicator svg { width: 13px; height: 13px; opacity: .6; }
 [data-context-member]:focus-visible { outline: 2px solid var(--brand-lighter); outline-offset: 2px; }
 

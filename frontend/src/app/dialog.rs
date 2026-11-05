@@ -357,3 +357,32 @@ pub(super) fn ConfirmHost(ui: Ui) -> impl IntoView {
         </dialog>
     }
 }
+
+/// Shows a clicked profile picture enlarged. Any click or Escape closes it.
+#[component]
+pub(super) fn AvatarHost(enlarge: crate::avatar::Enlarge) -> impl IntoView {
+    let dialog = NodeRef::<leptos::html::Dialog>::new();
+    let field = move |get: fn(&crate::avatar::Enlarged) -> String| {
+        move || enlarge.0.with(|e| e.as_ref().map(get).unwrap_or_default())
+    };
+    Effect::new(move |_| {
+        let open = enlarge.0.with(Option::is_some);
+        let Some(element) = dialog.get() else {
+            return;
+        };
+        if open {
+            self::open(&element);
+        } else if element.open() {
+            element.close();
+        }
+    });
+    view! {
+        <dialog node_ref=dialog class="avatar-viewer" aria-label=field(|e| e.name.clone())
+            on:close=move |_| enlarge.0.set(None) on:click=move |_| enlarge.0.set(None)>
+            <Show when=move || enlarge.0.with(Option::is_some)>
+                <img class="avatar-viewer-image" src=field(|e| e.url.clone()) alt=field(|e| e.name.clone()) draggable="false" referrerpolicy="no-referrer"/>
+                <p class="avatar-viewer-name">{field(|e| e.name.clone())}</p>
+            </Show>
+        </dialog>
+    }
+}

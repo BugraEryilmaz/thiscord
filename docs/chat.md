@@ -51,7 +51,12 @@ spacers represent unmounted rows, and history prepends preserve a message anchor
 Pages merge once and share scroll work after reactive DOM updates. User scrolling
 supersedes a pending correction, and unchanged row measurements do not schedule
 another one. Measured anchors are normalized to the row actually on screen so
-later edits/resizing cannot restore an outdated estimated position.
+later edits/resizing cannot restore an outdated estimated position. Anchors use
+the live layout position rather than the last scroll event, and corrections write
+the scroll offset only when it must move, so they do not interrupt wheel scrolling.
+Image and video previews reserve their box while they load (image aspect ratios
+are remembered per attachment), so rows keep their height when they remount.
+Jump to latest overlays the list instead of resizing it.
 Edits update existing row state.
 Following live chat evicts the oldest rows and preserves a cursor to reload them.
 Paging back evicts the newest rows; when a full window is being read, newer live
@@ -366,8 +371,9 @@ isolation and variable-height viewport/anchor calculations without a browser.
 
 ## Member list and profile cards
 
-The person button in a text channel header shows or hides the server's member
-list. Wide windows show it as a right-side panel; the choice is stored per device
+The person button in the server view's header shows or hides the server's member
+list: in text channels, voice channels and before a channel is chosen. The list
+arrives on the guild subscription, which does not need an open text channel. Wide windows show it as a right-side panel; the choice is stored per device
 (`thiscord.member_panel.v1` in local storage, no account data). Below 1024 px
 (phones, tablets, narrow windows) it opens as an overlay drawer with a backdrop
 and close button; Escape or the backdrop closes it and returns focus to the

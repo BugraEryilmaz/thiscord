@@ -507,9 +507,11 @@ pub fn App() -> impl IntoView {
         authorization_url: RwSignal::new(None),
         mobile_content: RwSignal::new(false),
     };
+    let enlarge = crate::avatar::Enlarge(RwSignal::new(None));
+    provide_context(enlarge);
     if crate::account_client::admin_page() {
         return view! {
-            <tooltip::Host/><context_menu::Host ui=ui/><voice_bots::Host ui=ui/><dialog::ConfirmHost ui=ui/>
+            <tooltip::Host/><context_menu::Host ui=ui/><voice_bots::Host ui=ui/><dialog::ConfirmHost ui=ui/><dialog::AvatarHost enlarge/>
             <Show when=move ||ui.account.get().is_some() fallback=move ||view!{<login::Login ui=ui admin=true/>}>
                 <admin::Dashboard ui=ui/>
             </Show>
@@ -587,7 +589,7 @@ pub fn App() -> impl IntoView {
         }
     });
     view! {
-        <tooltip::Host/><context_menu::Host ui=ui/><voice_bots::Host ui=ui/><dialog::ConfirmHost ui=ui/>
+        <tooltip::Host/><context_menu::Host ui=ui/><voice_bots::Host ui=ui/><dialog::ConfirmHost ui=ui/><dialog::AvatarHost enlarge/>
         <invites::Host ui=ui/>
         <updates::Host ui=ui/>
         <notifications::Host ui=ui/>
