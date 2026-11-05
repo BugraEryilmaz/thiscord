@@ -1,7 +1,25 @@
 use leptos::prelude::*;
 use thiscord_shared::{AvatarId, account::AVATAR_PATH};
 
+/// A profile picture shown enlarged by the app's viewer host.
+#[derive(Clone)]
+pub struct Enlarged {
+    pub name: String,
+    pub url: String,
+}
+
+/// Provided by app roots that render a viewer; avatars elsewhere (such as the
+/// voice overlay window) stay plain images.
+#[derive(Clone, Copy)]
+pub struct Enlarge(pub RwSignal<Option<Enlarged>>);
+
+pub fn avatar_url(id: AvatarId) -> String {
+    let base = option_env!("THISCORD_API_URL").unwrap_or("http://localhost:3000");
+    format!("{}{AVATAR_PATH}/{id}", base.trim_end_matches('/'))
+}
+
 /// Initials remain visible if an image is unavailable or fails to load.
+/// Clicking a loaded picture opens it enlarged, ahead of any parent action.
 #[component]
 pub fn Avatar(
     #[prop(into)] name: Signal<String>,
@@ -11,14 +29,26 @@ pub fn Avatar(
     let failed = RwSignal::new(None::<AvatarId>);
     let source = Memo::new(move |_| avatar_id.get().filter(|id| failed.get() != Some(*id)));
     let tint = move || TINTS[tint_index(&name.get())];
+    let enlarge = use_context::<Enlarge>();
+    let zoomable = move || enlarge.is_some() && source.with(Option::is_some);
+    let open = move |event: leptos::ev::MouseEvent| {
+        if let (Some(enlarge), Some(id)) = (enlarge, source.get_untracked()) {
+            event.prevent_default();
+            event.stop_propagation();
+            enlarge.0.set(Some(Enlarged {
+                name: name.get_untracked(),
+                url: avatar_url(id),
+            }));
+        }
+    };
     view! {
-        <span class=move || format!("avatar-initials relative inline-grid shrink-0 place-items-center overflow-hidden rounded-full font-semibold {} {class}", tint()) aria-hidden="true">
+        <span class=move || format!("avatar-initials relative inline-grid shrink-0 place-items-center overflow-hidden rounded-full font-semibold {} {class}", tint()) aria-hidden="true"
+            class:avatar-zoomable=zoomable on:click=open>
             {move || name.get().chars().next().unwrap_or('?').to_uppercase().to_string()}
             {move || source.get().map(|id| {
-                let base = option_env!("THISCORD_API_URL").unwrap_or("http://localhost:3000");
                 view! {
                     <img class="absolute inset-0 size-full object-cover" alt="" draggable="false"
-                        referrerpolicy="no-referrer" src=format!("{}{AVATAR_PATH}/{id}", base.trim_end_matches('/'))
+                        referrerpolicy="no-referrer" src=avatar_url(id)
                         on:error=move |_| failed.set(Some(id))/>
                 }
             })}

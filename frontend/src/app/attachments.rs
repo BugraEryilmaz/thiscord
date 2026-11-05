@@ -19,6 +19,32 @@ use wasm_bindgen_futures::JsFuture;
 thread_local! {
     static BUDGET: RefCell<FetchBudget> = RefCell::default();
     static DOWNLOADS: RefCell<HashMap<String, Download>> = RefCell::default();
+    /// Width/height of image previews already shown. Rows leave the virtual
+    /// window and refetch on return; reserving the same box keeps their
+    /// height stable, so the chat does not shift while scrolling.
+    static IMAGE_RATIOS: RefCell<HashMap<thiscord_shared::AttachmentId, f64>> = RefCell::default();
+}
+
+/// Bounded: entries are a few bytes, and clearing only costs a re-measure.
+const IMAGE_RATIO_LIMIT: usize = 4096;
+/// Placeholder ratio before an image was ever shown (typical screenshot).
+const DEFAULT_IMAGE_RATIO: f64 = 16.0 / 9.0;
+
+fn image_ratio(id: thiscord_shared::AttachmentId) -> Option<f64> {
+    IMAGE_RATIOS.with_borrow(|ratios| ratios.get(&id).copied())
+}
+
+fn remember_image_ratio(id: thiscord_shared::AttachmentId, image: &web_sys::HtmlImageElement) {
+    let (width, height) = (image.natural_width(), image.natural_height());
+    if width == 0 || height == 0 {
+        return;
+    }
+    IMAGE_RATIOS.with_borrow_mut(|ratios| {
+        if ratios.len() >= IMAGE_RATIO_LIMIT && !ratios.contains_key(&id) {
+            ratios.clear();
+        }
+        ratios.insert(id, f64::from(width) / f64::from(height));
+    });
 }
 
 struct Download {
@@ -777,15 +803,40 @@ pub(super) fn Card(
     }
     view! {
         <div class="my-2 max-w-sm space-y-2 rounded-lg border border-white/10 bg-black/20 p-2">
-            <Show when=move || kind != PreviewKind::File && url.get().is_some()>
-                <button type="button" class="relative block w-full rounded focus:ring-2 focus:ring-brand" aria-label=move || thiscord_frontend::localized_format!(crate::i18n::language(), "Open {} fullscreen", attachment.get_value().filename)
-                    on:click=move |_| { if valid() { viewer.set(true); } }>
-                    {move || url.get().map(|url| if kind == PreviewKind::Image {
-                        view! { <img class="max-h-64 w-full rounded object-contain" src=url alt=attachment.get_value().filename on:error=move |_| error.set("Image preview unavailable; download the original file".into())/> }.into_any()
-                    } else {
-                        view! { <Thumbnail url error/> }.into_any()
-                    })}
-                </button>
+            // Media reserves its final box while loading (and before the image
+            // decodes), so mounting a row does not change its measured height.
+            <Show when=move || kind != PreviewKind::File && (url.get().is_some() || error.with(String::is_empty))>
+                {move || match url.get() {
+                    Some(url) => view! {
+                        <button type="button" class="relative block w-full rounded focus:ring-2 focus:ring-brand" aria-label=move || thiscord_frontend::localized_format!(crate::i18n::language(), "Open {} fullscreen", attachment.get_value().filename)
+                            on:click=move |_| { if valid() { viewer.set(true); } }>
+                            {if kind == PreviewKind::Image {
+                                let id = attachment.get_value().id;
+                                // Before decode, keep the placeholder's box; `auto` then switches
+                                // to the natural ratio once the image loads.
+                                let ratio = image_ratio(id).map_or_else(|| format!("auto {DEFAULT_IMAGE_RATIO}"), |r| r.to_string());
+                                view! { <img class="max-h-64 w-full rounded object-contain" style:aspect-ratio=ratio src=url alt=attachment.get_value().filename
+                                    on:load=move |e| { if let Some(image) = e.target().and_then(|t| t.dyn_into::<web_sys::HtmlImageElement>().ok()) { remember_image_ratio(id, &image); } }
+                                    on:error=move |_| error.set("Image preview unavailable; download the original file".into())/> }.into_any()
+                            } else {
+                                view! { <Thumbnail url error/> }.into_any()
+                            }}
+                        </button>
+                    }.into_any(),
+                    None => {
+                        let class = if kind == PreviewKind::Image {
+                            "flex max-h-64 w-full items-center justify-center rounded bg-white/5 text-xs text-white/60"
+                        } else {
+                            "flex h-48 w-full items-center justify-center rounded bg-black text-xs text-white/60"
+                        };
+                        let ratio = if kind == PreviewKind::Image { image_ratio(attachment.get_value().id).unwrap_or(DEFAULT_IMAGE_RATIO).to_string() } else { "auto".to_owned() };
+                        view! {
+                            <div class=class style:aspect-ratio=ratio role="status">
+                                <Show when=move || busy.get()>{move || crate::i18n::t("Loading attachment…")}</Show>
+                            </div>
+                        }.into_any()
+                    }
+                }}
             </Show>
             <div class="flex items-center gap-3 text-sm">
                 <button type="button" class="min-w-0 flex-1 truncate text-left text-brand underline disabled:opacity-50" disabled=move || busy.get() || download.get().is_some()
@@ -796,7 +847,7 @@ pub(super) fn Card(
                     disabled=move || busy.get() || download.get().is_some() on:click=move |_| fetch(true)>{move || crate::i18n::t("↓ Download")}</button>
             </div>
             <p class="text-xs text-white/60">{format!("{:.1} MiB", attachment.get_value().size_bytes as f64 / 1048576.0)}</p>
-            <Show when=move || busy.get()><p class="text-xs" role="status">{move || crate::i18n::t("Loading attachment…")}</p></Show>
+            <Show when=move || busy.get() && kind == PreviewKind::File><p class="text-xs" role="status">{move || crate::i18n::t("Loading attachment…")}</p></Show>
             <Show when=move || !error.get().is_empty()><p class="text-xs text-amber-300" role="status">{move || crate::i18n::message(error.get())}</p><button type="button" class="text-xs text-brand underline" on:click=move |_| { error.set(String::new()); fetch(kind == PreviewKind::File); }>{move || crate::i18n::t("Retry")}</button></Show>
             <Show when=move || viewer.get() && url.get().is_some()>
                 <Viewer url=url.get_untracked().unwrap_or_default() kind filename=attachment.get_value().filename download=start_download close=move || viewer.set(false)/>

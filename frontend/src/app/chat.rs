@@ -145,9 +145,15 @@ impl Chat {
             // Retain the same message across subsequent measurement passes.
             // Recapturing after a prepend can anchor a newly inserted row and
             // shift the original message when that row's estimate is corrected.
+            // Read the live position: the viewport signal only advances on the
+            // next scroll event, and anchoring to it would pull an in-progress
+            // wheel scroll back to where the previous event left it.
+            let top = self
+                .content_top()
+                .unwrap_or_else(|| self.viewport.get_untracked().0);
             self.anchor.set(
                 self.messages
-                    .with_untracked(|messages| messages.anchor(self.viewport.get_untracked().0)),
+                    .with_untracked(|messages| messages.anchor(top)),
             );
         }
     }
@@ -169,27 +175,37 @@ impl Chat {
                 return;
             }
             if let Some(node) = self.list.get_untracked() {
-                let target = if self.bottom.get_untracked() {
-                    Some(node.scroll_height())
+                // Write the scroll position only when it must move. Rewriting an
+                // unchanged offset still cancels or clobbers an in-progress
+                // smooth wheel scroll, which pulled the view back while rows
+                // below it mounted and measured.
+                if self.bottom.get_untracked() {
+                    if node.scroll_height() - node.client_height() - node.scroll_top() > 1 {
+                        node.set_scroll_top(node.scroll_height());
+                        self.programmatic_top.set(Some(node.scroll_top()));
+                    }
                 } else {
-                    self.anchor.get_untracked().and_then(|anchor| {
-                        let position = self.messages.with_untracked(|m| {
+                    let position = self.anchor.get_untracked().and_then(|anchor| {
+                        self.messages.with_untracked(|m| {
                             let anchor = m.normalize_anchor(anchor)?;
                             Some((anchor, m.anchor_top(anchor)?))
-                        });
-                        position.map(|(anchor, top)| {
-                            self.anchor.set(Some(anchor));
-                            (top + self.rows_offset()).round() as i32
                         })
-                    })
-                };
-                if let Some(top) = target {
-                    node.set_scroll_top(top);
-                    self.programmatic_top.set(Some(node.scroll_top()));
-                } else {
-                    // User input superseded this correction, or its row was
-                    // evicted. Keep the current position rather than jumping to 0.
-                    self.anchor.set(None);
+                    });
+                    match (position, self.content_top()) {
+                        (Some((anchor, top)), Some(current)) => {
+                            self.anchor.set(Some(anchor));
+                            let delta = top - current;
+                            if delta.abs() >= 0.5 {
+                                node.set_scroll_top(
+                                    (f64::from(node.scroll_top()) + delta).round() as i32
+                                );
+                                self.programmatic_top.set(Some(node.scroll_top()));
+                            }
+                        }
+                        // User input superseded this correction, or its row was
+                        // evicted. Keep the current position rather than jumping to 0.
+                        _ => self.anchor.set(None),
+                    }
                 }
                 self.update_viewport();
             }
@@ -216,25 +232,22 @@ impl Chat {
             }
         }
     }
-    fn rows_offset(self) -> f64 {
-        match (self.list.get_untracked(), self.rows.get_untracked()) {
-            (Some(list), Some(rows)) => {
-                rows.get_bounding_client_rect().top() - list.get_bounding_client_rect().top()
-                    + f64::from(list.scroll_top())
-            }
-            _ => 0.0,
-        }
+    /// The visible top edge in row coordinates (0 = first resident row). Uses
+    /// layout rectangles, so it is current even before the scroll event fires
+    /// and keeps the fractional offsets of non-integer display scaling, which
+    /// the integer `scrollTop` binding truncates.
+    fn content_top(self) -> Option<f64> {
+        let list = self.list.get_untracked()?;
+        let rows = self.rows.get_untracked()?;
+        Some(list.get_bounding_client_rect().top() - rows.get_bounding_client_rect().top())
     }
     fn update_viewport(self) {
         if self.searching.get_untracked() {
             return;
         }
         let _timing = crate::performance::start(2);
-        if let Some(node) = self.list.get_untracked() {
-            let viewport = (
-                f64::from(node.scroll_top()) - self.rows_offset(),
-                f64::from(node.client_height()),
-            );
+        if let (Some(node), Some(top)) = (self.list.get_untracked(), self.content_top()) {
+            let viewport = (top, f64::from(node.client_height()));
             if self.viewport.get_untracked() != viewport {
                 self.viewport.set(viewport);
             }
@@ -1335,7 +1348,11 @@ pub(super) fn ChatPanel(
             <super::search::Results state=search on_jump=Callback::new(move |hit: thiscord_shared::search::Hit| {
                 ui.chat_jump.set(Some((channel, hit.id)));
             })/>
-            <div node_ref=chat.list role="region" tabindex="0" aria-label=move || crate::i18n::t("Messages") class="min-h-0 flex-1 overflow-x-hidden overflow-y-auto overscroll-contain p-4 [overflow-anchor:none]" style:display=move ||if search.active.get(){"none"}else{""} on:scroll=move |_|chat.scrolled()>
+            // The jump button overlays the list: toggling it must not resize the
+            // scroller, or reaching the live edge would shift the content.
+            <div class="relative flex min-h-0 flex-1 flex-col" style:display=move ||if search.active.get(){"none"}else{""}>
+            <div node_ref=chat.list role="region" tabindex="0" aria-label=move || crate::i18n::t("Messages") class="min-h-0 flex-1 overflow-x-hidden overflow-y-auto overscroll-contain p-4 [overflow-anchor:none]"
+                style:padding-bottom=move || chat.messages.with(|m| m.newer).then_some("3.5rem") on:scroll=move |_|chat.scrolled()>
                 <div class="h-10">
                     <Show when=move || chat.messages.with(|m| m.older.is_some())>
                         <button class="text-sm text-brand underline" disabled=move || chat.history_loading.get()
@@ -1379,6 +1396,7 @@ pub(super) fn ChatPanel(
             <Show when=move || !search.active.get() && (!chat.bottom.get() || chat.messages.with(|m| m.newer))>
                 <button class="jump-latest" on:click=move |_| chat.latest()>{move || crate::i18n::t("Jump to latest / mark read")}</button>
             </Show>
+            </div>
             <footer class="composer-area" style:display=move ||if search.active.get(){"none"}else{""}>
                 <p class="composer-hint" class:sr-only=move ||typing_notice.with(String::is_empty) aria-live="polite" aria-atomic="true">{move ||typing_notice.get()}</p>
                 <Show when=move||editing.get().is_some()><p class="composer-banner"><button class="composer-banner-action" on:click=move |_|composer.end_edit()>{move || crate::i18n::t("Cancel edit")}</button>" · "{move || crate::i18n::t("Escape to cancel · Enter to save")}</p></Show>

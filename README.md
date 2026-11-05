@@ -67,6 +67,7 @@ emails default to ignored `backend/.mail/`; Resend, SMTP and Google use provider
 credentials configured in `backend/.env` (see `docs/accounts.md`).
 Everyone can upload or remove a profile picture in **Settings > Profile**. Pictures
 appear in voice chat and the desktop overlay, with initials when no picture is set.
+Click any profile picture in the app to view it enlarged.
 The bottom account ribbon spans the server rail and channel list, showing your
 profile, authenticated socket status, custom status, mute/deafen and settings controls. It expands
 during calls with the channel/server name, camera, screen sharing and disconnect controls.
