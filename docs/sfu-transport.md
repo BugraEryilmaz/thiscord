@@ -56,8 +56,11 @@ suite under both transports.
   receivers recover through their normal loss/keyframe path).
 - One UDP port per shard instead of per participant. Datagrams are routed by source
   address, learned only from a STUN Binding request carrying a live connection's local
-  ICE ufrag or from addresses the connection's own ICE agent sent to (at most 16 per
+  ICE ufrag (which may move an address between connections) or from addresses the
+  connection's own ICE agent sent to that no other connection owns (at most 16 per
   connection; `shard/demux.rs`). Unknown sources are dropped before any DTLS/SRTP work.
+- Keyframe requests after video drops are spawned at most once per viewer, publisher
+  and kind every 250 ms (the webrtc mode's relay and writers await each one instead).
 - Host candidates only, on the bind address (`THISCORD_VOICE_BIND`, or the default-route
   IPv4 address). The server does not gather STUN server-reflexive or TURN relay
   candidates itself; clients reach it directly or through their own TURN relay (the

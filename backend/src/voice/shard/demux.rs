@@ -7,6 +7,8 @@
 //! there. Anything else from an unknown address is dropped before it reaches a
 //! DTLS or SRTP stack. A Binding request is authoritative even from a known
 //! address, so a reused client port moves to the peer whose credentials it uses.
+//! Outbound traffic only claims addresses no peer owns: a client's SDP may list
+//! any candidate, including another member's address, which must not move it.
 use super::PeerId;
 use std::{collections::HashMap, net::SocketAddr};
 
@@ -73,7 +75,7 @@ impl Demux {
         if let Some(ufrag) = binding_request_ufrag(datagram)
             && let Some(&peer) = self.ufrags.get(ufrag)
         {
-            self.learn(from, peer);
+            self.learn(from, peer, true);
             // Over the per-peer bound the request still reaches its ICE agent
             // (which may answer it), but the address is not remembered.
             return Some(peer);
@@ -81,10 +83,11 @@ impl Demux {
         self.addresses.get(&from).copied()
     }
 
-    /// Records that `peer` uses `address`, moving it from any previous owner.
-    pub fn learn(&mut self, address: SocketAddr, peer: PeerId) {
+    /// Records that `peer` uses `address`. Only an `authoritative` (credential-
+    /// checked) sighting moves an address from a previous owner.
+    pub fn learn(&mut self, address: SocketAddr, peer: PeerId, authoritative: bool) {
         let owner = self.addresses.get(&address).copied();
-        if owner == Some(peer) {
+        if owner == Some(peer) || (owner.is_some() && !authoritative) {
             return;
         }
         let routes = self.peers.entry(peer).or_default();
@@ -204,12 +207,16 @@ mod tests {
         // A request with A's ufrag routes and learns the address for A.
         assert_eq!(demux.route(client, &binding(b"ua:c", true)), Some(a));
         assert_eq!(demux.route(client, &[0x80; 12]), Some(a));
+        // B's ICE agent sending there (B's client listed A's address as a
+        // candidate) does not take it over; only credentials do.
+        demux.learn(client, b, false);
+        assert_eq!(demux.route(client, &[0x80; 12]), Some(a));
         // The same port presenting B's credentials moves to B.
         assert_eq!(demux.route(client, &binding(b"ub:c", true)), Some(b));
         assert_eq!(demux.route(client, &[0x80; 12]), Some(b));
         // Learning is bounded per peer.
         for port in 0..MAX_ADDRESSES_PER_PEER as u16 + 4 {
-            demux.learn(SocketAddr::from(([198, 51, 100, 1], 5000 + port)), a);
+            demux.learn(SocketAddr::from(([198, 51, 100, 1], 5000 + port)), a, false);
         }
         assert_eq!(demux.peers[&a].addresses.len(), MAX_ADDRESSES_PER_PEER);
         let unlearned = SocketAddr::from(([198, 51, 100, 1], 5000 + MAX_ADDRESSES_PER_PEER as u16));

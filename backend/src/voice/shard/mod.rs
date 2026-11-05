@@ -414,8 +414,14 @@ struct Shard {
     outbound: Vec<(SocketAddr, BytesMut)>,
     media_reads: Vec<(MediaKind, rtp::Packet, Instant)>,
     recovery: Vec<Recovery>,
+    /// Last recovery spawned per (room, viewer, publisher, kind). The webrtc
+    /// relay and writers await each request; here they would pile up behind
+    /// the room's write lock, so each pair spawns at most one per interval.
+    recovered: HashMap<(usize, usize, usize, MediaKind), Instant>,
     now: Instant,
 }
+
+const RECOVERY_INTERVAL: Duration = Duration::from_millis(250);
 
 /// A connection by id, borrowing only the slot table.
 fn connection_mut(slots: &mut [Slot], id: PeerId) -> Option<&mut Connection> {
@@ -447,6 +453,7 @@ impl Shard {
             outbound: Vec::new(),
             media_reads: Vec::new(),
             recovery: Vec::new(),
+            recovered: HashMap::new(),
             now: Instant::now(),
         }
     }
@@ -785,7 +792,7 @@ impl Shard {
                 }
                 // Media to one peer goes to one address; learn each run once.
                 if learned != Some(to) {
-                    self.demux.learn(to, id);
+                    self.demux.learn(to, id, false);
                     learned = Some(to);
                 }
                 self.outbound.push((to, message.message));
@@ -795,7 +802,22 @@ impl Shard {
         let mut outputs = outputs;
         outputs.clear();
         self.outputs = outputs;
+        let now = self.now;
+        if !self.recovery.is_empty() {
+            self.recovered
+                .retain(|_, at| now.duration_since(*at) < RECOVERY_INTERVAL);
+        }
         for recovery in self.recovery.drain(..) {
+            let key = (
+                Arc::as_ptr(&recovery.room) as usize,
+                recovery.viewer,
+                recovery.publisher,
+                recovery.kind,
+            );
+            match self.recovered.entry(key) {
+                std::collections::hash_map::Entry::Occupied(_) => continue,
+                std::collections::hash_map::Entry::Vacant(entry) => entry.insert(now),
+            };
             self.media.spawn(async move {
                 request_keyframe(
                     &recovery.room,
