@@ -355,8 +355,9 @@ Personalized speaker isolation and physical acoustic acceptance remain future wo
 - [x] Camera video and text chat load generators with single-host VPS capacity
   measurements, epoch-fenced authorization reuse, shared channel reads and
   configurable connection limits (docs/load-benchmarks.md).
-- [ ] Repeat the capacity measurements with clients off the server host and real
-  networks (the VPS runs shared a 2-vCPU host between server, generator and PostgreSQL).
+- [ ] Measure with chat clients off the server host as well (only voice generators
+  ran off-host; chat sockets cannot share one SSH tunnel), over TURN, and with
+  real clients and networks (see docs/load-benchmarks.md caveats).
 - [ ] Production metrics and coordinated graceful room draining on shutdown.
 
 ## 8. Voice channels end to end

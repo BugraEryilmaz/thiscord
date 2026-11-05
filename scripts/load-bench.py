@@ -157,9 +157,11 @@ def serve(args):
     """Server only, for generators on another host (scripts/load-remote.py).
 
     stdin: the benchmark secret on the first line (never in arguments), then
-    "start" and "stop" around the measured window. stdout: "READY", then one JSON
-    summary per stop. EOF stops the server. Signaling binds loopback only; reach
-    it through an SSH tunnel. Media binds --media-bind.
+    "start" and "stop" around the measured window, or "chat ARGS..." to run
+    chat_load on this host (thousands of sockets do not fit through one SSH
+    tunnel) and measure its window. stdout: "READY", then one JSON summary per
+    window. EOF stops the server. Signaling binds loopback only; reach it through
+    an SSH tunnel. Media binds --media-bind.
     """
     secret = sys.stdin.readline().strip()
     if len(secret) != 64:
@@ -183,7 +185,37 @@ def serve(args):
         start = None
         for line in sys.stdin:
             command = line.strip()
-            if command == "start":
+            if command.startswith("chat "):
+                chat_args = command.split()[1:]
+                output = f"/tmp/load-serve-chat-{os.getpid()}-{int(time.time())}.json"
+                chat = Generator([os.path.join(examples, "chat_load"), "--url",
+                                  f"http://127.0.0.1:{args.port}", "--allow-insecure",
+                                  "--output", output, *chat_args], env)
+                chat.measuring.wait()
+                summary = {"server_cpus": args.server_cpus}
+                if chat.proc.poll() is None:
+                    time.sleep(1)
+                    first = sample() + (cpu_seconds([chat.proc.pid]),)
+                    deadline = time.monotonic() + seconds_of(chat_args) - 1
+                    while time.monotonic() < deadline and chat.proc.poll() is None:
+                        time.sleep(0.2)
+                    last = sample() + (cpu_seconds([chat.proc.pid]),)
+                    wall = last[0] - first[0]
+                    summary.update({
+                        "measured_wall_s": round(wall, 2),
+                        "server_cpu_percent": round((last[1] - first[1]) / wall * 100, 1),
+                        "postgres_cpu_percent": round((last[2] - first[2]) / wall * 100, 1),
+                        "postgres_transactions_per_second": None if first[3] is None or last[3] is None
+                        else round((last[3] - first[3]) / wall, 1),
+                        # An exited generator's counters are gone; report nothing then.
+                        "chat_generator_cpu_percent": round((last[4] - first[4]) / wall * 100, 1)
+                        if last[4] >= first[4] else None,
+                        "server_rss_mib": rss_mib(server.pid),
+                    })
+                chat.wait()
+                summary["chat"] = report_fields(output)
+                print(json.dumps(summary), flush=True)
+            elif command == "start":
                 start = sample()
             elif command == "stop" and start:
                 end = sample()

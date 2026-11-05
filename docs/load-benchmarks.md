@@ -1,8 +1,8 @@
-# Load benchmarks (VPS, single host)
+# Load benchmarks (VPS)
 
 How many concurrent users the backend serves for voice, camera video and text
 chat on the production VPS, how that was measured, and the connection limits
-derived from it. These are synthetic single-host measurements: read the
+derived from it. These are synthetic measurements: read the
 [caveats](#caveats) before quoting a number.
 
 ## Host and method
@@ -19,12 +19,17 @@ derived from it. These are synthetic single-host measurements: read the
   packets) and `chat_load` (each user holds the chat, friends and notification
   sockets a signed-in client opens, subscribes with voice roster and member list,
   and posts messages over HTTP). See [voice-load.md](voice-load.md).
-- Harness: `scripts/load-bench.py` pins the server to CPU 1 and the generator to
-  CPU 0 (loopback) and records server, generator and PostgreSQL CPU (the
-  PostgreSQL service cgroup, which also holds the idle production database),
-  database transactions/s and server RSS over the measured window.
-  `--server-cpus 0-1 --generator-cpus 0-1` is the production layout (everything
-  shares both vCPUs); `--kind mixed` runs audio/camera and chat at once.
+- On-host runs (`scripts/load-bench.py`): the server pinned to CPU 1 and the
+  generator to CPU 0 over loopback, or both on both vCPUs (`--server-cpus 0-1
+  --generator-cpus 0-1`, the production layout); `--kind mixed` runs voice and
+  chat at once. It records server, generator and PostgreSQL CPU (the PostgreSQL
+  service cgroup, which also holds the idle production database), database
+  transactions/s and server RSS over the measured window.
+- Off-host runs (`scripts/load-remote.py`): the server on the VPS using both
+  vCPUs; voice generators in WSL on a 12-core desktop, media over the internet
+  (77 Mbit/s up, 243 Mbit/s down, 27 ms RTT) and signaling through an SSH
+  tunnel. Thousands of chat sockets do not fit through one tunnel, so mixed runs
+  start the (light) chat generator on the VPS (`--chat-on-server`).
 - Workloads: rooms of eight. Audio: 80-byte payloads at 50 packets/s (32 kbit/s).
   Camera: 1 Mbit/s, 30 frames/s, every user publishing and watching the seven
   others in its room. Chat: **server-wide** messages/s in **one** text channel
@@ -32,13 +37,17 @@ derived from it. These are synthetic single-host measurements: read the
   by all users.
 - Verdicts: voice/video **pass** when every stream loses or delays (>100 ms end
   to end) at most 0.1% of what the generator sent and the generator kept its
-  schedule; **server-side pass** ignores generator scheduling slips. Chat passes
-  when every user connects, every send succeeds and at most 0.1% of deliveries
-  are missing or later than 1 s (from the HTTP send to socket receipt).
+  schedule; **server-side pass** ignores generator scheduling slips. Over the
+  internet, 16 users alone lose 0.1% (the path's baseline), so off-host runs
+  are judged by late packets and by loss above that baseline. Chat passes when
+  every user connects, every send succeeds and at most 0.1% of deliveries are
+  missing or later than 1 s (from the HTTP send to socket receipt).
 - Baseline: `6add51e` (before this work) built with the same load tools and run
   with the same script, interleaved with the current build.
-- Raw per-run JSON stays on the VPS under `~/bench-results`; the summaries below
-  are copied from them.
+- Every run's summary (64 runs: on-host matrix, repeats, extra runs and the
+  off-host series) is in
+  [benchmarks/load-runs-2026-11-05.jsonl](benchmarks/load-runs-2026-11-05.jsonl).
+  Ranges below cover every run of a configuration.
 
 Reproduce on the VPS (a checkout whose `backend/.env` has a `TEST_DATABASE_URL`
 ending in `_test`):
@@ -51,73 +60,82 @@ python3 scripts/load-bench.py --target "$CARGO_TARGET_DIR" --kind voice --users 
 python3 scripts/load-bench.py --target "$CARGO_TARGET_DIR" --kind chat --users 128 --output c128.json -- --seconds 30 --rate 8
 ```
 
+Off-host, from a machine that can `ssh vps` and has release builds of the
+generators (`--remote-dir` is the VPS checkout used above):
+
+```sh
+python3 scripts/load-remote.py --ssh vps --remote-dir thiscord-bench --target "$CARGO_TARGET_DIR" \
+  --media-ip 57.129.178.14 --bind LOCAL_IP --output v96 --voice "--users 96 --seconds 30"
+```
+
 ## Results (2026-11-05)
 
-CPU is percent of one core; on the pinned layout the server has exactly one.
+CPU is percent of one core. On the pinned layout the server has exactly one.
 
 ### Voice (audio)
 
 | Run | Build | Server CPU | PostgreSQL CPU | Result |
 | --- | --- | --- | --- | --- |
-| 64 users | baseline | 75.5% | 27.2% | no loss; generator skipped 0.9% of sends |
-| 64 users | current | 73.3% | 3.2% | pass, p99 23 ms |
-| 128 users | baseline | 84.3% | 56.3% | 3.7% missing, p50 127 ms |
-| 128 users | current | 98.7% (core saturated) | 3.7% | 1.8% missing, p50 89 ms |
-| 256 users | baseline | 81.0% | 67.8% | 19 clients disconnected by DB pressure |
-| 256 users | current | 96.0% | 6.3% | 0 clients disconnected; overloaded |
-| 128 users, 2 cores | current | 109% | 2.8% | 0.8% missing; generator 86%, host saturated |
+| 64 users, pinned (3 runs) | baseline | 64.0–75.5% | 25.0–27.2% | no server loss; generator slipped |
+| 64 users, pinned (3 runs) | current | 60.8–73.3% | 1.2–3.2% | server-side pass; p99 16–23 ms |
+| 128 users, pinned | baseline | 84.3% | 56.3% | 3.7% missing |
+| 128 users, pinned | current | 98.7% (core saturated) | 3.7% | 1.8% missing |
+| 256 users, pinned | baseline | 81.0% | 67.8% | 19 clients disconnected by DB pressure |
+| 256 users, pinned | current | 96.0% | 6.3% | 0 disconnected; overloaded |
+| 96 users, off-host (4 runs) | current | 103–119% | 2–4% | 3 runs: 0–539 late (≤0.05%), loss at the path baseline, p99 43–46 ms; 1 run during worse WAN loss: 0.4% missing, 0.5% late |
+| 128 users, off-host | current | 166% | 4.9% | 0.2% late, p99 68 ms: at the edge of the host |
 
 The per-second database reauthorization per voice user is gone (PostgreSQL
-27% → 3% at 64 users), which removed the client disconnections at 256 users. An
-earlier interleaved A/B at 64 users (two runs each) measured server CPU
-69.0/70.5% before and 67.3/64.5% after. Forwarding itself costs about 1.1–1.2% of
-a core per audio user.
+about 26% → 1–3% at 64 users), which removed the disconnections at 256 users.
+On loopback forwarding costs about 1.0–1.2% of a core per audio user; with real
+networking (off-host) about 1.15–1.3%.
 
 ### Video (camera, 1 Mbit/s)
 
 | Run | Build | Server CPU | Result |
 | --- | --- | --- | --- |
-| 16 users | baseline | 49.0% | pass, video p99 19 ms |
-| 16 users | current | 47.6% | pass, video p99 19 ms |
-| 32 users | baseline | 95.9% | 1.8% video missing, p99 253 ms |
-| 32 users | current | 87.7% | video 0.001% missing; some audio late |
-| 32 users, 2 cores | current | 87.2% | pass, video p99 24 ms |
+| 16 users, pinned (3 runs) | baseline | 48.6–53.2% | pass |
+| 16 users, pinned (3 runs) | current | 42.6–49.1% | pass, video p99 14–19 ms |
+| 32 users, pinned | baseline | 95.9% | 1.8% video missing, p99 253 ms |
+| 32 users, pinned | current | 87.7% | video 0.001% missing; 0.7% of audio late |
+| 32 users, both cores | current | 87.2% | pass, video p99 24 ms |
 
 About 3% of a core per camera user (publishing to and receiving from seven).
 
 ### Where SFU CPU goes
 
 `scripts/sfu-profile.py` attributes a frame-pointer `perf record -g` profile to
-stages; the output for 64 audio users and 16 camera users is in
+stages and breaks this project's own stages down to their hottest frames; the
+output for 64 audio users and 16 camera users is in
 [benchmarks/sfu-profile-2026-11-05.txt](benchmarks/sfu-profile-2026-11-05.txt).
 The webrtc-rs peer driver is 78–82% of server CPU: kernel UDP/IP sends and
 receives (one system call per packet, about 35%), its RTP/RTCP and interceptor
-logic (about 25%), allocation and copies inside it (about 11–12%), and SRTP
-crypto (2–3%). This project's code (ingress reader, relay fan-out with its
-authorization, egress writer with its revalidation, signaling) is 14–16%.
-Removing all of our per-packet work would therefore save at most about a
-sixth; larger gains need batching or a different transport inside webrtc-rs,
-which this work does not change.
+logic (about 25%), allocation and copies inside it (about 11–12%) and SRTP
+crypto (2–3%). This project's code is 14–16%: the egress writer (about 8%:
+revalidation under the room lock, channel hand-offs and webrtc-rs's own write
+path), the relay (about 6%: per-receiver access permits and queue sends) and
+the ingress reader (1%). No single own frame exceeds 1.6% of samples, so further
+own-code savings are small; larger gains need batching or a different transport
+inside webrtc-rs, which this work does not change.
 
 ### Chat
 
 | Run | Build | Server CPU | PostgreSQL CPU | Delivery p50 / p99 | Result |
 | --- | --- | --- | --- | --- | --- |
-| 128 users, idle | baseline | 8.9% | 21.3% | – | pass |
-| 128 users, idle | current | 6.6% | 8.1% | – | pass |
-| 128 users, 8 msg/s | baseline | 32.2% | 160.1% | 1693 / 2400 ms | fail: 79 sends got 429 |
-| 128 users, 8 msg/s | current | 29.0% | 25.6% | 24 / 135 ms | pass |
-| 128 users, 8 msg/s, cached delivery path | current | 27.8% | 29.5% | 22 / 162 ms | pass |
-| 500 users, idle | current | 23.4% | 31.5% | – | pass |
-| 500 users, 2 msg/s | current | 69.1% | 93.5% | 287 / 742 ms | pass |
+| 128 users, idle (3 runs) | baseline | 7.8–8.9% | 19.8–21.3% | – | pass |
+| 128 users, idle (3 runs) | current | 6.0–6.6% | 8.1–10.5% | – | pass |
+| 128 users, 8 msg/s (3 runs) | baseline | 31.9–32.3% | 159.6–160.1% | 1626–1693 / 2329–2415 ms | fail: 72–79 sends got 429 |
+| 128 users, 8 msg/s (4 runs) | current | 27.8–29.5% | 25.6–29.5% | 22–28 / 135–172 ms | pass |
+| 500 users, idle (3 runs) | current | 23.4–25.0% | 30.2–31.5% | – | pass |
+| 500 users, 2 msg/s (3 runs) | current | 64.7–69.1% | 90.9–93.5% | 265–294 / 657–747 ms | pass |
 | 500 users, 4 msg/s | current | 76.0% | 92.6% | 379 / 944 ms | no loss; 0.7% over 1 s |
 
 At 128 users and 8 msg/s, server plus PostgreSQL CPU per delivered message fell
-from 1.88 to 0.53 core-seconds per thousand deliveries (3.5×), and PostgreSQL
-alone from 1.56 to 0.25 (6×). Connecting 128 users took 15–16 s before and 2.3 s
-now; 500 users connect in 24–28 s with zero failures (16 concurrent joins, no
-login hashing). The 500-user runs at 2–4 msg/s use the whole host including the
-generator (about 190% of 200%).
+from about 1.87 to 0.55 core-seconds per thousand deliveries (3.4×), and
+PostgreSQL alone from 1.56 to 0.27 (5.8×). Connecting 128 users took 13–16 s
+before and 2.2–2.4 s now; 500 users connect in 24–28 s with zero failures
+(16 concurrent joins, no login hashing). The 500-user runs at 2–4 msg/s use the
+whole host including the generator (about 190% of 200%).
 
 ### Limits
 
@@ -128,48 +146,51 @@ generator (about 190% of 200%).
 
 ### Mixed load on the production layout
 
-Both vCPUs shared by the server, PostgreSQL and both generators. The voice
-generator runs for the whole window; the chat generator measures 30 s in it.
+Voice generators off-host, the chat generator on the VPS, the server on both
+vCPUs, chat at 2 msg/s. Voice keeps running through the chat window (including
+chat's connect storm); its verdict covers the whole 90 s.
 
-| Run | Server / PostgreSQL / generators CPU | Chat | Voice |
+| Run | Server / PostgreSQL CPU | Chat | Voice |
 | --- | --- | --- | --- |
-| 48 audio users alone | 48% / 2% / 36% | – | pass, p99 11 ms |
-| 48 audio + 192 chat users at 2 msg/s | 77% / 36% / 48% | pass, p50 67 ms, p99 263 ms | no client lost; 0.26% missing, 1.8% over 100 ms, p99 121 ms; generator skipped 671 sends |
-| 16 camera + 128 chat users at 2 msg/s | 71% / 27% / 42% | pass, p99 187 ms | video 0.0005% missing, 1.3% over 100 ms, p99 115 ms; audio p99 108 ms |
+| 32 audio + 128 chat users (2 runs) | 55–58% / 24–26% | pass, p99 81–88 ms | 0 late, p99 39–41 ms, loss at the path baseline |
+| 48 audio + 128 chat users | 72% / 30% | pass, p99 107 ms | 0.04% late, p99 68 ms |
+| 16 camera + 128 chat users | 74% / 27% | pass, p99 93 ms | video 0.24% late, audio 0.1% late, p99 59–64 ms |
+| 48 audio + 192 chat users | 88% / 37% | pass, p99 168 ms | 1.1% late, p99 104 ms |
+| 64 audio + 256 chat users | 111% / 49% | pass, p99 454 ms | 1.8% missing, 5.8% late |
+| 32 audio + 128 chat, before the media runtime | 54% / 28% | pass | 0.38% late, p99 85 ms |
 
-Chat holds up under concurrent media. Audio and camera stay delivered but their
-tail latency crosses the strict 100 ms threshold when chat bursts compete for the
-two vCPUs with PostgreSQL and the generators (which themselves slip, as the
-skipped sends show); the same audio load alone stays at 11 ms. These mixes did
-not pass the strict media verdict, so treat them as the practical upper end of
-combined load on this host rather than a comfortable operating point.
+The largest mixes that keep voice within the thresholds are 32–48 audio users
+with 128 chat users at 2 msg/s; a camera-heavy mix (16 cameras + 128 chat users)
+already stretches video tails. The last row shows why voice now runs on its own
+Tokio runtime: with chat fan-out sharing the workers, audio packets queued
+behind hundreds of woken socket tasks even with the CPU two-thirds idle.
 
 ### Memory
 
-Server RSS: about 2.5 MiB per voice user (320 MiB at 128, 622 MiB at 256) and
-about 1 MiB per connected chat user with three sockets (97 MiB at 128, 505 MiB
-at 500, mostly per-socket member and presence lists of the whole guild). At the
-default limits (512 sockets of each type, 128 voice connections) that is about
-0.85 GiB, beside PostgreSQL (about 0.3 GiB here) on the 3.7 GiB host. Every new
-cache is bounded: one chat grant per socket, at most 64 alert grants per
-notification socket (ten seconds each), and one shared event page (100 events)
-and presence list per channel while it has subscribers.
+Server RSS: about 2.5 MiB per voice user (247 MiB at 96, 320 MiB at 128,
+622 MiB at 256) and about 1 MiB per connected chat user with three sockets
+(97 MiB at 128, 470–505 MiB at 500, mostly per-socket member and presence lists
+of the whole guild). At the default limits (512 sockets of each type, 96 voice
+connections) that is about 0.75 GiB, beside PostgreSQL (about 0.3 GiB here) on
+the 3.7 GiB host. Every new cache is bounded: one chat grant per socket, at
+most 64 alert grants per notification socket (ten seconds each), and one shared
+event page (100 events) and presence list per channel while it has subscribers.
 
 ## Capacity and connection limits
 
 On the production layout (both vCPUs shared with PostgreSQL and the OS):
 
-- Audio: about 1.15% of a core per user, so roughly 130 audio-only users fit in
-  the CPU left beside a lightly loaded database. `THISCORD_MAX_VOICE_CONNECTIONS`
-  defaults to 128.
-- Camera video at 1 Mbit/s: about 3% of a core per camera user; 32 passed on two
-  cores. The voice limit counts connections, not cameras: rooms where most
-  people share cameras reach CPU saturation at roughly 50 camera users, well
-  below 128 connections. Lower the limit for camera-heavy communities.
-- Chat: `THISCORD_MAX_SOCKETS` defaults to 512 per socket type. 500 full clients
-  connect without failures, idle at about a quarter of the host, and receive
-  2 msg/s in one shared channel within a second. Higher message rates at that
-  size saturate the host.
+- Audio: 96 users run clean with real networking at about 110% of the host's
+  200% CPU; 128 reach the edge. `THISCORD_MAX_VOICE_CONNECTIONS` defaults to 96
+  (before this work: a fixed 64).
+- Camera video at 1 Mbit/s costs about 3% of a core per camera user; 32 passed
+  on two cores. The voice limit counts connections, not cameras: rooms where
+  most people share cameras saturate the host at roughly 40–50 camera users.
+  Lower the limit for camera-heavy communities.
+- Chat: `THISCORD_MAX_SOCKETS` defaults to 512 per socket type (before: a fixed
+  128). 500 full clients connect without failures, idle at about a quarter of
+  the host, and receive 2 msg/s in one shared channel within a second.
+- Combined: about 32–48 people in voice while 128 are active in chat at 2 msg/s.
 
 Both variables are validated at startup (`THISCORD_MAX_SOCKETS` 16–4096,
 `THISCORD_MAX_VOICE_CONNECTIONS` 2–1024; see `backend/.env.example`).
@@ -178,17 +199,17 @@ admitted users keep their capacity (the over-limit run above).
 
 ## Caveats
 
-- One host: the generators run on the same two vCPUs as the server and
-  PostgreSQL, so the largest runs saturate the host including the generator.
-  Off-host clients would leave more CPU for the server; the per-user costs above
-  are the server's own.
-- Loopback networking: no packet loss, jitter, NAT, TURN or Cloudflare, and no
-  bandwidth limit; the VPS uplink is not measured.
+- On-host runs share the two vCPUs between the server, PostgreSQL and the
+  generators; the largest of them saturate the host including the generator.
+  Off-host runs remove the voice generator but add internet loss and jitter;
+  chat generators stayed on the host.
 - Synthetic media: audio and camera payloads are not decoded; real encoders
   vary bitrate and keyframes. Screen sharing shares the video forwarding path
-  but was not measured separately.
+  but was not measured separately. No TURN relaying was measured.
 - Chat uses one channel with every user subscribed; real guilds spread users
   over channels, which costs less per message. Clients that mark messages read
   add HTTP requests not modeled here.
-- Each number is one 30–40 s run (the 64-user audio A/B is two runs each);
-  differences of a few percent are within run-to-run noise on this VPS.
+- Most configurations ran two to four times; run-to-run differences of up to
+  about 10% CPU are normal on this VPS.
+- The PostgreSQL unread-plan test fails on this host on the base commit too
+  ([log](benchmarks/unread-plan-test-pg18-2026-11-05.txt)).

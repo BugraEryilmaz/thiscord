@@ -306,6 +306,24 @@ async fn room(guild: GuildId, id: ChannelId) -> Arc<Room> {
     rooms.insert(id, Arc::downgrade(&room));
     room
 }
+/// Voice connections run on their own Tokio runtime: signaling, the SFU relay
+/// and egress writers, and the webrtc-rs tasks they spawn. A chat message wakes
+/// hundreds of socket tasks at once; on shared workers those queued ahead of
+/// packet forwarding and stretched audio latency while the CPU was far from
+/// busy. Database work still goes through each runtime's blocking pool and the
+/// shared connection pool; access fences and room state are runtime-agnostic.
+fn media_runtime() -> &'static tokio::runtime::Handle {
+    static MEDIA: OnceLock<tokio::runtime::Runtime> = OnceLock::new();
+    MEDIA
+        .get_or_init(|| {
+            tokio::runtime::Builder::new_multi_thread()
+                .thread_name("thiscord-media")
+                .enable_all()
+                .build()
+                .expect("media runtime")
+        })
+        .handle()
+}
 pub fn router(origins: Vec<HeaderValue>) -> Router<Option<DbPool>> {
     router_with_limit(origins, crate::limits::DEFAULT_VOICE)
 }
@@ -359,7 +377,11 @@ async fn upgrade(
         .on_upgrade(move |socket| async move {
             let mut socket = logging::Socket::new(socket, id);
             socket.permit = Some(permit);
-            serve(socket, pool, id, upgrade_token).await
+            // The connection, its relay/egress tasks and its webrtc-rs tasks all
+            // live on the media runtime from here on.
+            let _ = media_runtime()
+                .spawn(serve(socket, pool, id, upgrade_token))
+                .await;
         })
         .into_response()
 }

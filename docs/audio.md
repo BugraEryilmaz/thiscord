@@ -1284,6 +1284,11 @@ for transport admission or deactivate voice on failure; video losses request
 keyframe recovery. See [screen-sharing.md](screen-sharing.md)
 for video budgets and the limits of the shared WebRTC transport.
 
+Voice connections (signaling, the relay and egress writers, and the webrtc-rs
+tasks they start) run on a dedicated Tokio runtime, so bursts of chat fan-out
+cannot queue ahead of packet forwarding on shared workers; see
+[load benchmarks](load-benchmarks.md).
+
 Current sessions are rechecked against the database at least every ten seconds
 and immediately after matching access changes; between checks the one-second
 roster reuses the last result only while the connection's access epoch is current. Each participant registers its account, session and guild before an

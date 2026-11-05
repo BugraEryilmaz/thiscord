@@ -1,4 +1,4 @@
-##### prof-voice-64 (server pinned to one core; frame-pointer build of this commit)
+##### prof-voice-64 (server pinned to one core; frame-pointer build of commit bfb5e84)
 samples: 8326
 
 By stage (highest-priority stage on the stack):
@@ -21,6 +21,44 @@ By leaf activity:
     1.5%  allocation (malloc/free)
     0.0%  memory copy/zero
 
+This project's own stages:  16.4% of samples. Hottest leaf frames:
+  our egress writer (revalidate + write_rtp) (  8.5%):
+      1.6%  <thiscord_backend::voice::egress::Writer>::run::{closure#0}
+      0.5%  <webrtc::media_stream::track_local::static_rtp::TrackLocalStaticRTP as webrtc::media_stream::track_local::TrackLocal>::w
+      0.5%  <async_channel::Sender<webrtc::peer_connection::driver::PeerConnectionDriverEvent>>::try_send
+      0.5%  libc, called from <tokio::runtime::task::core::Core<<thiscord_backend::voice::egress::Writer>::run<thiscord_backend::voice::serve::{closur
+      0.5%  <futures_util::lock::mutex::MutexLockFuture<std::collections::hash::map::HashMap<alloc::string::String, webrtc::runtime:
+      0.4%  libc, called from clock_gettime
+      0.3%  <concurrent_queue::ConcurrentQueue<webrtc::peer_connection::driver::PeerConnectionDriverEvent>>::push
+      0.2%  <tokio::sync::batch_semaphore::Semaphore>::add_permits_locked
+  our relay (authorize + fan-out) (  6.2%):
+      1.1%  libc, called from <tungstenite::protocol::frame::FrameCodec>::read_frame::<tokio_tungstenite::compat::AllowStd<hyper_util::rt::tokio::Toki
+      0.6%  <tokio::sync::mpsc::bounded::Sender<thiscord_backend::voice::egress::Queued>>::try_send
+      0.5%  thiscord_backend::voice::serve::{closure#0}::{closure#8}
+      0.4%  libc, called from [unknown]
+      0.4%  <thiscord_backend::access::Access>::packet
+      0.3%  <thiscord_backend::voice::egress::Sender as core::clone::Clone>::clone
+      0.2%  libc, called from thiscord_backend::voice::serve::{closure#0}::{closure#8}
+      0.2%  core::ptr::drop_glue
+  our ingress reader (track poll + limits) (  1.0%):
+      0.2%  <concurrent_queue::ConcurrentQueue<webrtc::media_stream::track_remote::TrackRemoteEvent>>::pop
+      0.1%  <event_listener::Inner<()>>::with_inner::<usize, <event_listener::Inner<()>>::notify<event_listener::notify::Additional<
+      0.1%  <thiscord_backend::voice::Handler as webrtc::peer_connection::PeerConnectionEventHandler>::on_track::{closure#0}::{closu
+      0.1%  <webrtc::media_stream::track_remote::static_rtp::TrackRemoteStaticRTP as webrtc::media_stream::track_remote::TrackRemote
+      0.1%  <tokio::sync::mpsc::bounded::Sender<thiscord_backend::voice::Ingress>>::try_send
+      0.1%  libc, called from clock_gettime
+      0.1%  <async_channel::RecvInner<webrtc::media_stream::track_remote::TrackRemoteEvent> as event_listener_strategy::EventListene
+      0.1%  <tokio::sync::batch_semaphore::Semaphore>::try_acquire
+  our signaling/roster loop (  0.7%):
+      0.1%  _raw_spin_unlock_irqrestore
+      0.0%  thiscord_backend::voice::serve::{closure#0}
+      0.0%  fdget
+      0.0%  libc, called from [unknown]
+      0.0%  libc, called from <thiscord_shared::voice::Participant as core::clone::Clone>::clone
+      0.0%  serde_json::ser::format_escaped_str_contents::<&mut alloc::vec::Vec<u8>, serde_json::ser::CompactFormatter>
+      0.0%  apparmor_ip_localout
+      0.0%  __siphash_unaligned
+
 Stage x leaf (>= 1%):
    34.9%  webrtc-rs peer driver (RTP/RTCP, SRTP, ICE) :: kernel: UDP/IP/netfilter
    25.2%  webrtc-rs peer driver (RTP/RTCP, SRTP, ICE) :: other leaf (application logic)
@@ -35,7 +73,7 @@ Stage x leaf (>= 1%):
     1.5%  tokio runtime :: other leaf (application logic)
     1.1%  tokio runtime :: kernel: UDP/IP/netfilter
 
-##### prof-video-16 (server pinned to one core; frame-pointer build of this commit)
+##### prof-video-16 (server pinned to one core; frame-pointer build of commit bfb5e84)
 samples: 5563
 
 By stage (highest-priority stage on the stack):
@@ -57,6 +95,44 @@ By leaf activity:
     3.1%  SRTP crypto (AES-GCM/HMAC)
     1.6%  allocation (malloc/free)
     0.0%  memory copy/zero
+
+This project's own stages:  14.1% of samples. Hottest leaf frames:
+  our egress writer (revalidate + write_rtp) (  7.5%):
+      1.1%  <thiscord_backend::voice::egress::Writer>::run::{closure#0}
+      0.6%  <async_channel::Sender<webrtc::peer_connection::driver::PeerConnectionDriverEvent>>::try_send
+      0.5%  libc, called from <tokio::runtime::task::core::Core<<thiscord_backend::voice::egress::Writer>::run<thiscord_backend::voice::serve::{closur
+      0.4%  <futures_util::lock::mutex::MutexLockFuture<std::collections::hash::map::HashMap<alloc::string::String, webrtc::runtime:
+      0.4%  <tokio::time::timeout::Timeout<thiscord_backend::voice::authorized_write<thiscord_backend::voice::egress::write_media<th
+      0.4%  libc, called from clock_gettime
+      0.4%  <webrtc::media_stream::track_local::static_rtp::TrackLocalStaticRTP as webrtc::media_stream::track_local::TrackLocal>::w
+      0.3%  <concurrent_queue::ConcurrentQueue<webrtc::peer_connection::driver::PeerConnectionDriverEvent>>::push
+  our relay (authorize + fan-out) (  5.4%):
+      0.7%  <tokio::sync::mpsc::bounded::Sender<thiscord_backend::voice::egress::Queued>>::try_send
+      0.6%  thiscord_backend::voice::serve::{closure#0}::{closure#8}
+      0.4%  libc, called from <tungstenite::protocol::frame::FrameCodec>::read_frame::<tokio_tungstenite::compat::AllowStd<hyper_util::rt::tokio::Toki
+      0.4%  libc, called from [unknown]
+      0.3%  <thiscord_backend::access::Access>::packet
+      0.3%  <thiscord_backend::voice::egress::Sender as core::clone::Clone>::clone
+      0.2%  libc, called from clock_gettime
+      0.2%  libc, called from thiscord_backend::voice::serve::{closure#0}::{closure#8}
+  our ingress reader (track poll + limits) (  0.7%):
+      0.1%  <concurrent_queue::ConcurrentQueue<webrtc::media_stream::track_remote::TrackRemoteEvent>>::pop
+      0.1%  <tokio::sync::mpsc::bounded::Sender<thiscord_backend::voice::Ingress>>::try_send
+      0.1%  <async_channel::RecvInner<webrtc::media_stream::track_remote::TrackRemoteEvent> as event_listener_strategy::EventListene
+      0.1%  <webrtc::media_stream::track_remote::static_rtp::TrackRemoteStaticRTP as webrtc::media_stream::track_remote::TrackRemote
+      0.1%  <tokio::runtime::task::core::TaskIdGuard>::enter
+      0.0%  <thiscord_backend::voice::Handler as webrtc::peer_connection::PeerConnectionEventHandler>::on_track::{closure#0}::{closu
+      0.0%  <futures_util::lock::mutex::MutexGuard<std::collections::hash::map::HashMap<alloc::string::String, webrtc::runtime::prim
+      0.0%  <tokio::sync::batch_semaphore::Semaphore>::try_acquire
+  our signaling/roster loop (  0.5%):
+      0.0%  __inet_lookup_established
+      0.0%  thiscord_backend::voice::serve::{closure#0}
+      0.0%  realloc
+      0.0%  finish_task_switch.isra.0
+      0.0%  <tokio::runtime::blocking::pool::Spawner>::spawn_task
+      0.0%  <tokio::sync::watch::Receiver<u64>>::changed::{closure#0}
+      0.0%  <alloc::raw_vec::RawVecInner>::finish_grow
+      0.0%  <uuid::Uuid as serde_core::ser::Serialize>::serialize::<&mut serde_json::ser::Serializer<&mut alloc::vec::Vec<u8>>>
 
 Stage x leaf (>= 1%):
    37.9%  webrtc-rs peer driver (RTP/RTCP, SRTP, ICE) :: kernel: UDP/IP/netfilter

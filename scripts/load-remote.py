@@ -60,6 +60,8 @@ def main():
     parser.add_argument("--output", required=True, help="report prefix")
     parser.add_argument("--voice", default="", help="voice_load arguments (include --users)")
     parser.add_argument("--chat", default="", help="chat_load arguments (include --users)")
+    parser.add_argument("--chat-on-server", action="store_true",
+                        help="run chat_load on the server host (SSH tunnels do not carry thousands of sockets)")
     args = parser.parse_args()
     voice, chat = shlex.split(args.voice), shlex.split(args.chat)
     if not voice and not chat:
@@ -96,16 +98,23 @@ def main():
                 "--allow-insecure", "--output", outputs["voice"], *voice], env))
             if chat:
                 generators[-1].measuring.wait()
-        if chat:
+        summary = {"voice_args": voice or None, "chat_args": chat or None, "off_host": True,
+                   "chat_on_server": args.chat_on_server}
+        if chat and args.chat_on_server:
+            server.stdin.write("chat " + " ".join(chat) + "\n")
+            server.stdin.flush()
+            summary.update(json.loads(server.stdout.readline()))
+            measured = None
+        elif chat:
             outputs["chat"] = args.output + "-chat.json"
             generators.append(Generator([
                 os.path.join(examples, "chat_load"), "--url", url, "--allow-insecure",
                 "--output", outputs["chat"], *chat], env))
-        measured = generators[-1]
+        if not (chat and args.chat_on_server):
+            measured = generators[-1]
+            measured.measuring.wait()
         window = seconds(chat if chat else voice)
-        measured.measuring.wait()
-        summary = {"voice_args": voice or None, "chat_args": chat or None, "off_host": True}
-        if measured.proc.poll() is None:
+        if measured is not None and measured.proc.poll() is None:
             time.sleep(1)
             server.stdin.write("start\n")
             server.stdin.flush()
