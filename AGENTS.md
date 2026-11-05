@@ -70,6 +70,9 @@
 - Select Rust WebRTC/SFU libraries after a three-platform compatibility spike.
   Do not silently substitute a non-Rust application server. Document native codec,
   WebView and STUN/TURN infrastructure dependencies and encryption boundaries.
+- The SFU has two transports (`docs/sfu-transport.md`): forwarding and permission
+  rules exist in `voice/mod.rs`/`voice/egress.rs` and again in `voice/shard/forward.rs`;
+  change both and keep the voice integration suite passing under both.
 - Follow `docs/audio.md` for the native CPAL/Opus path, per-stream SPSC queues,
   optional Rust DSP and single-process SFU. Keep PCM out of Tauri IPC and avoid
   allocations, locks, codecs or networking in audio callbacks. Preserve bounded

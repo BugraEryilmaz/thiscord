@@ -59,6 +59,8 @@ def main():
     parser.add_argument("--media-ip", required=True, help="server host's public IP for media")
     parser.add_argument("--bind", required=True, help="local interface IP for generator media")
     parser.add_argument("--server-cpus", default="0-1")
+    parser.add_argument("--transport", choices=["webrtc", "shard"], default="webrtc",
+                        help="server SFU transport (docs/sfu-transport.md)")
     parser.add_argument("--port", type=int, default=3911)
     parser.add_argument("--output", required=True, help="report prefix")
     parser.add_argument("--voice", default="", help="voice_load arguments (include --users)")
@@ -72,6 +74,7 @@ def main():
     fixture = max([users(a) for a in (voice, chat) if a])
     secret = secrets.token_hex(32)
     remote = (f"cd {shlex.quote(args.remote_dir)} && export $(grep ^TEST_DATABASE_URL= backend/.env) && "
+              f"export THISCORD_VOICE_TRANSPORT={args.transport} && "
               f"exec python3 scripts/load-bench.py --kind serve --target {shlex.quote(args.remote_target)} "
               f"--users {fixture} --server-cpus {args.server_cpus} --port {args.port} "
               f"--media-bind {args.media_ip}:0 --output unused")
@@ -102,6 +105,7 @@ def main():
             if chat:
                 generators[-1].measuring.wait()
         summary = {"voice_args": voice or None, "chat_args": chat or None, "off_host": True,
+                   "transport": args.transport,
                    "chat_on_server": args.chat_on_server}
         if chat and args.chat_on_server:
             server.stdin.write("chat " + " ".join(chat) + "\n")

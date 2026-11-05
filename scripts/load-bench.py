@@ -333,6 +333,7 @@ def main():
         exits = {name: g.wait() for name, g in zip(outputs, generators)}
         summary = {"kind": args.kind, "users": args.users, "chat_users": args.chat_users,
                    "server_cpus": args.server_cpus, "generator_exit": exits,
+                   "transport": os.environ.get("THISCORD_VOICE_TRANSPORT", "webrtc"),
                    "generator_args": extra, "chat_args": chat_extra or None,
                    "server_rss_mib": rss or rss_mib(server.pid)}
         if start and end:

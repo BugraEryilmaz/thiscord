@@ -1,0 +1,2 @@
+Patched webrtc-rs crate (crates.io 0.21.0). Source, checksums, license and the
+list of changes: ../rtc/THISCORD_PATCH.txt; complete diff: ../rtc/thiscord.patch.

@@ -124,7 +124,8 @@ revalidation under the room lock, channel hand-offs and webrtc-rs's own write
 path), the relay (about 6%, of which about 1% is WebSocket reads of the
 signaling loop that the stage pattern also matches) and the ingress reader
 (1%). No single own frame exceeds 1.6% of samples; larger gains need batching
-or a different transport inside webrtc-rs, which this work does not change.
+or a different transport inside webrtc-rs, which this work does not change. The
+opt-in shard transport ([sfu-transport.md](sfu-transport.md)) is that change.
 
 ### Chat
 

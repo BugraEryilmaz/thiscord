@@ -35,6 +35,10 @@ async fn main() -> Result<(), BoxError> {
     // A configured database must connect and migrate before serving requests.
     // Without a URL, liveness stays available but readiness returns 503.
     let limits = thiscord_backend::limits::Limits::from_env()?;
+    let voice_transport = thiscord_backend::voice::configure_transport()?;
+    if voice_transport != thiscord_backend::voice::Transport::WebRtc {
+        tracing::info!(transport = ?voice_transport, "voice SFU transport selected");
+    }
     let pool_size = match env::var(db::POOL_SIZE_VAR) {
         Ok(value) => db::pool_size(Some(&value))?,
         Err(env::VarError::NotPresent) => db::pool_size(None)?,

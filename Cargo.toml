@@ -1,6 +1,6 @@
 [workspace]
 members = ["frontend", "backend", "shared"]
-exclude = ["vendor/sonora", "vendor/sonora-aec3", "vendor/opus", "vendor/deep-filter/libDF"]
+exclude = ["vendor/sonora", "vendor/sonora-aec3", "vendor/opus", "vendor/deep-filter/libDF", "vendor/rtc", "vendor/rtc-interceptor", "vendor/rtc-srtp"]
 default-members = ["shared"]
 resolver = "3"
 
@@ -8,6 +8,10 @@ resolver = "3"
 opus = { path = "vendor/opus" }
 sonora = { path = "vendor/sonora" }
 sonora-aec3 = { path = "vendor/sonora-aec3" }
+# webrtc-rs 0.21 hot-path allocation/copy fixes; see vendor/rtc/THISCORD_PATCH.txt.
+rtc = { path = "vendor/rtc" }
+rtc-interceptor = { path = "vendor/rtc-interceptor" }
+rtc-srtp = { path = "vendor/rtc-srtp" }
 
 [patch."https://github.com/Rikorose/DeepFilterNet"]
 deep_filter = { path = "vendor/deep-filter/libDF" }
