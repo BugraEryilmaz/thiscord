@@ -25,8 +25,11 @@ moving the others, and hiding a stream repacks the rest. The layout reflows when
 the window resizes, a stream starts or stops, or a stream's shape changes (a
 quality change of the same shape does not move anything). When tiles would
 become too small (phones, very large calls) the area scrolls in readable columns
-instead. Portrait streams never shrink to slivers: an arrangement that keeps every
-tile at least about 96px wide wins.
+instead. Portrait streams never shrink to slivers: arrangements that keep every tile
+at least about 96px wide are strongly preferred, though a few pixels less is
+accepted when it keeps rows even. In focus mode the stage comes first, so strip
+thumbnails may be smaller, though never under about 60px wide (a side column
+is used instead).
 
 Each tile shows the sharer's avatar and name, a screen or camera icon, live
 quality such as **1080p · 30 fps** or **4K · 60 fps** (the resolution and frame
@@ -42,9 +45,10 @@ keyboard icon in the bar keeps the gestures and shortcuts one hover away.
 
 - **Focus** (click a tile, or Enter) puts it on a large stage with the other
   streams in a strip beside or below it; click a strip tile or drop it on the
-  stage to swap. Click the stage again, press Escape (while the media view or
-  nothing has keyboard focus) or choose **Back to grid** to return. With a
-  single stream there is nothing to focus, so clicking it opens full screen.
+  stage to swap. Click the stage again, press Escape (while the media view has
+  keyboard focus, or nothing does and you last clicked in it) or choose **Back
+  to grid** to return. With a single stream there is nothing to focus, so
+  clicking it opens full screen.
 - **Rearrange** by dragging a tile onto another (mouse or pen); the grid makes
   room as you drag, and pressing Escape or dropping outside the grid puts
   everything back. **Move to start**, **Move earlier**, **Move later** and
