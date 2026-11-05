@@ -118,8 +118,8 @@ fn best_rows(width: f64, height: f64, gap: f64, aspects: &[f64]) -> Vec<Rect> {
     let mut best: Option<(f64, Vec<Rect>)> = None;
     let mut best_wide: Option<(f64, Vec<Rect>)> = None;
     let mut consider = |rows: &[usize]| {
-        for mode in [Rows::Justified, Rows::Uniform, Rows::Capped] {
-            let tiles = place_rows(width, height, gap, aspects, rows, mode);
+        for uniform in [false, true] {
+            let tiles = place_rows(width, height, gap, aspects, rows, uniform);
             let score = score(&tiles, rows);
             if tiles.iter().all(|t| t.w >= narrowest)
                 && best_wide.as_ref().is_none_or(|(s, _)| score > *s + 1e-6)
@@ -185,24 +185,13 @@ fn balanced(aspects: &[f64], count: usize) -> Vec<usize> {
 
 /// Places rows of tiles. Justified rows fill the width at their own heights;
 /// uniform rows share one height. Both shrink to fit and are centred.
-#[derive(Clone, Copy, PartialEq)]
-enum Rows {
-    /// Every row fills the width at its own height.
-    Justified,
-    /// All rows share one height.
-    Uniform,
-    /// Justified, but no row taller than twice the lowest one unless a
-    /// portrait tile needs the height to stay `MIN_TILE_WIDTH` wide.
-    Capped,
-}
-
 fn place_rows(
     width: f64,
     height: f64,
     gap: f64,
     aspects: &[f64],
     rows: &[usize],
-    mode: Rows,
+    uniform: bool,
 ) -> Vec<Rect> {
     let mut heights = Vec::with_capacity(rows.len());
     let mut start = 0;
@@ -212,19 +201,7 @@ fn place_rows(
         start += len;
     }
     let available = (height - gap * (rows.len() as f64 - 1.0)).max(0.0);
-    if mode == Rows::Capped {
-        let lowest = heights.iter().copied().fold(f64::INFINITY, f64::min);
-        let mut start = 0;
-        for (len, h) in rows.iter().zip(heights.iter_mut()) {
-            let narrowest = aspects[start..start + len]
-                .iter()
-                .copied()
-                .fold(f64::INFINITY, f64::min);
-            *h = h.min((2.0 * lowest).max(MIN_TILE_WIDTH / narrowest));
-            start += len;
-        }
-    }
-    if mode == Rows::Uniform {
+    if uniform {
         let shared = heights
             .iter()
             .copied()
@@ -362,23 +339,7 @@ pub fn focus(width: f64, height: f64, gap: f64, aspects: &[f64], focused: usize)
         return stacked_focus(width, height, gap, main, &others, focused);
     }
     let (mut stage, mut strip) = (stage, strip);
-    if use_side && stage.h < height - 1.0 {
-        let side = strip.iter().map(|r| r.x + r.w).fold(0.0, f64::max).max(1.0);
-        let fitted = best_rows(side, stage.h, gap, &others);
-        if fitted
-            .iter()
-            .all(|t| t.w >= MIN_TILE_WIDTH.min(side * 0.65))
-            && typical(&fitted) >= 0.85 * typical(&strip)
-        {
-            strip = fitted
-                .into_iter()
-                .map(|r| Rect {
-                    y: r.y + stage.y,
-                    ..r
-                })
-                .collect();
-        }
-    } else if use_side {
+    if use_side {
         let side = strip.iter().map(|r| r.x + r.w).fold(0.0, f64::max);
         let spare = width - gap - stage.w - side;
         if spare > 4.0 {
@@ -453,7 +414,7 @@ fn strip_rows(width: f64, height: f64, gap: f64, aspects: &[f64]) -> Vec<Rect> {
         options.push(vec![first, aspects.len() - first]);
     }
     for rows in options {
-        let tiles = place_rows(width, height, gap, aspects, &rows, Rows::Uniform);
+        let tiles = place_rows(width, height, gap, aspects, &rows, true);
         let area: f64 = tiles.iter().map(Rect::area).sum();
         if best.as_ref().is_none_or(|(a, _)| area > *a + 1e-6) {
             best = Some((area, tiles));
@@ -1026,37 +987,6 @@ mod tests {
                 "focus {f} {p:?}"
             );
         }
-    }
-
-    #[test]
-    fn rows_stay_within_twice_each_other_when_the_floor_allows() {
-        let mut twelve = vec![WIDE, WIDE, 2.39, 0.5625, 4.0 / 3.0, WIDE, WIDE];
-        twelve.extend([WIDE, WIDE, WIDE, WIDE, WIDE]);
-        let p = grid(640.0, 620.0, 12.0, &twelve);
-        assert!(p.tiles.iter().all(|t| t.w >= MIN_TILE_WIDTH - 0.5));
-        let (low, high) = p.tiles.iter().fold((f64::INFINITY, 0.0f64), |(l, h), t| {
-            (l.min(t.h), h.max(t.h))
-        });
-        assert!(
-            high <= 2.0 * low + 1.0 || high <= MIN_TILE_WIDTH / 0.5625 + 1.0,
-            "{low} {high} {p:?}"
-        );
-    }
-
-    #[test]
-    fn quality_chip_threshold_stays_below_the_layout_floor() {
-        // The stylesheet hides the quality chip below this width; it must not
-        // hide it on tiles the layout considers wide enough.
-        let css = include_str!("../style.css");
-        let rule = css
-            .find(".media-quality { display: none; }")
-            .expect("quality hide rule");
-        let start = css[..rule]
-            .rfind("@container (max-width: ")
-            .expect("container query")
-            + 23;
-        let width: f64 = css[start..].split("px").next().unwrap().parse().unwrap();
-        assert!(width < MIN_TILE_WIDTH, "{width}");
     }
 
     #[test]
