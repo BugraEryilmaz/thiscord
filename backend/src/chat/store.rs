@@ -744,36 +744,34 @@ fn poll_read(
         *message = rich;
     }
     let members = if presence {
-        members(c, guild, channel)?
+        presence_list(c, guild, channel)?
     } else {
         Vec::new()
     };
+    Ok(Poll { events, members })
+}
+/// Present members who may view the channel. The filter depends only on each
+/// listed member's own grants, so every authorized viewer of the channel gets
+/// the same list (a viewer is listed only when it, too, may view the channel).
+pub(super) fn presence_list(
+    c: &mut PgConnection,
+    guild: GuildId,
+    channel: ChannelId,
+) -> Result<Vec<OnlineMember>, Failure> {
+    let members = members(c, guild, channel)?;
     // Presence has its own bounded set of actors. Evaluate only those
-    // members and the selected channel, retaining per-recipient privacy.
-    let accounts: Vec<_> = members
-        .iter()
-        .filter(|m| m.account_id != actor)
-        .map(|m| m.account_id)
-        .collect();
-    let presence = if accounts.is_empty() {
-        None
-    } else {
-        Some(load(c, guild, &accounts, Some(channel))?)
-    };
-    Ok(Poll {
-        events,
-        members: members
-            .into_iter()
-            .filter(|m| {
-                // The caller's ViewChannel grant was already checked above.
-                m.account_id == actor
-                    || presence.as_ref().is_some_and(|state| {
-                        effective(state, m.account_id, Some(channel))
-                            .contains(&Permission::ViewChannel)
-                    })
-            })
-            .collect(),
-    })
+    // members and the selected channel.
+    let accounts: Vec<_> = members.iter().map(|m| m.account_id).collect();
+    if accounts.is_empty() {
+        return Ok(members);
+    }
+    let state = load(c, guild, &accounts, Some(channel))?;
+    Ok(members
+        .into_iter()
+        .filter(|m| {
+            effective(&state, m.account_id, Some(channel)).contains(&Permission::ViewChannel)
+        })
+        .collect())
 }
 
 /// What one subscriber's last full database check established: the actor and
@@ -850,23 +848,37 @@ pub(super) fn refresh_granted(
     feed: Option<&super::feed::Feed>,
 ) -> Result<Refreshed, Failure> {
     let _timing = crate::performance::REFRESH_GRANTED.start();
-    // New messages come from the channel's shared read when possible.
+    // New messages and the presence list come from the channel's shared reads
+    // when possible.
     let mut shared = None;
-    if work.messages
-        && let (Some(ch), Some(feed)) = (channel, feed)
+    let mut shared_members = None;
+    if let (Some(ch), Some(feed)) = (channel, feed)
         && grant.readable.contains(&ch)
     {
-        shared = feed.events(pool, guild, ch, cursor)?;
-        work.messages &= shared.is_none();
+        if work.messages {
+            shared = feed.events(pool, guild, ch, cursor)?;
+            work.messages &= shared.is_none();
+        }
+        if work.presence {
+            shared_members = Some(feed.presence(pool, guild, ch)?);
+            work.presence = false;
+        }
     }
+    let shared_poll = |poll: Option<Poll>| -> Option<Poll> {
+        if shared.is_none() && shared_members.is_none() {
+            return poll;
+        }
+        let poll = poll.unwrap_or(Poll {
+            events: Vec::new(),
+            members: Vec::new(),
+        });
+        Some(Poll {
+            events: shared.clone().unwrap_or(poll.events),
+            members: shared_members.clone().unwrap_or(poll.members),
+        })
+    };
     if !(work.messages || work.presence || work.unread) {
-        return Ok((
-            None,
-            shared.map(|events| Poll {
-                events,
-                members: Vec::new(),
-            }),
-        ));
+        return Ok((None, shared_poll(None)));
     }
     let mut c = connection(pool)?;
     c.build_transaction()
@@ -896,19 +908,7 @@ pub(super) fn refresh_granted(
                 .transpose()?;
             Ok((unread, poll))
         })
-        .map(|(unread, poll)| match shared {
-            Some(events) => (
-                unread,
-                Some(Poll {
-                    events,
-                    ..poll.unwrap_or(Poll {
-                        events: Vec::new(),
-                        members: Vec::new(),
-                    })
-                }),
-            ),
-            None => (unread, poll),
-        })
+        .map(|(unread, poll)| (unread, shared_poll(poll)))
 }
 fn members(
     c: &mut PgConnection,
@@ -933,18 +933,23 @@ fn presence_state(
     )
 }
 
-fn reap_presence(c: &mut PgConnection, guild: GuildId, channel: ChannelId) -> Result<(), Failure> {
-    execute(
+/// Removes expired leases and typing flags; returns whether any row changed.
+fn reap_presence(
+    c: &mut PgConnection,
+    guild: GuildId,
+    channel: ChannelId,
+) -> Result<bool, Failure> {
+    let reaped = execute(
         c,
         "DELETE FROM chat_presence WHERE guild_id=$1::uuid AND channel_id=$2::uuid AND expires_at<=now()",
         &[&guild.to_string(), &channel.to_string()],
     )?;
-    execute(
+    let expired = execute(
         c,
         "UPDATE chat_presence SET typing_until='-infinity' WHERE guild_id=$1::uuid AND channel_id=$2::uuid AND typing_until<>'-infinity' AND typing_until<=now()",
         &[&guild.to_string(), &channel.to_string()],
     )?;
-    Ok(())
+    Ok(reaped + expired > 0)
 }
 
 // Only writers publish presence hints. Reading/delivering a snapshot never does.
@@ -968,6 +973,30 @@ pub(super) fn presence(
             {
                 return Err(Failure::Forbidden);
             }
+            if typing.is_none() {
+                // Subscribe, lease renewal and typing expiry: the visible list can
+                // change only through a reaped lease, an expired typing flag or a
+                // new connection row. Count those instead of comparing the whole
+                // list, so no channel lock is needed: each writer publishes its own
+                // changes, and concurrent list comparisons at worst publish an
+                // extra wake-up (as does a new row of an already present account).
+                let changed = reap_presence(c, guild, channel)?;
+                let inserted = query::<bool>(
+                    c,
+                    "INSERT INTO chat_presence(id,guild_id,channel_id,account_id,typing_until) VALUES($1::uuid,$2::uuid,$3::uuid,$4::uuid,'-infinity') ON CONFLICT(id) DO UPDATE SET expires_at=now()+interval '35 seconds' RETURNING to_jsonb(xmax = 0) AS data",
+                    &[
+                        &connection_id.to_string(),
+                        &guild.to_string(),
+                        &channel.to_string(),
+                        &actor.to_string(),
+                    ],
+                )?;
+                return Ok((
+                    changed || inserted == [true],
+                    effective(state, actor, Some(channel)),
+                ));
+            }
+            // Typing changes compare the whole list, so they serialize on the channel.
             execute(
                 c,
                 "SELECT id FROM channels WHERE guild_id=$1::uuid AND id=$2::uuid FOR UPDATE",

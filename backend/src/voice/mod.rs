@@ -130,6 +130,10 @@ const SOUNDBOARD_INTERVAL: Duration = Duration::from_millis(1000);
 /// and triggers an immediate check, so the per-second roster reuses the last
 /// authorized result while that epoch is current (as chat voice rosters do).
 const VOICE_AUTHORIZATION_RECHECK: Duration = Duration::from_secs(10);
+/// Transient database trouble during a recheck keeps the connection only while
+/// its last successful check is this recent. Packets still need a current epoch,
+/// so an access commit during the trouble pauses media until a check succeeds.
+const VOICE_TRANSIENT_GRACE: Duration = Duration::from_secs(30);
 struct VoiceAccess {
     bot: Option<bots::Context>,
     access: Arc<access::Access>,
@@ -239,13 +243,24 @@ impl VoiceAccess {
             }
             Ok(viewing::participants(&members))
         });
-        if result.is_err() {
+        if result.as_ref().is_err_and(|error| !error.transient()) {
             self.active.store(false, Ordering::Release);
         }
         result
     }
 }
 static ROOMS: OnceLock<Mutex<HashMap<ChannelId, Weak<Room>>>> = OnceLock::new();
+fn profile_hints() -> &'static tokio::sync::broadcast::Sender<thiscord_shared::AccountId> {
+    static HINTS: OnceLock<tokio::sync::broadcast::Sender<thiscord_shared::AccountId>> =
+        OnceLock::new();
+    HINTS.get_or_init(|| tokio::sync::broadcast::channel(64).0)
+}
+/// Call after a profile (name, avatar) commit. That account's voice connections
+/// recheck now, so rosters show the change within a second instead of waiting
+/// for the ten-second recheck. A hint only; it carries no authorization.
+pub(crate) fn profile_changed(account: thiscord_shared::AccountId) {
+    let _ = profile_hints().send(account);
+}
 /// Callers must authorize channel visibility and fence delivery against revocation.
 pub(crate) async fn roster(channels: Vec<ChannelId>) -> Vec<thiscord_shared::voice::ChannelRoster> {
     let rooms: Vec<_> = {
@@ -1583,6 +1598,8 @@ async fn serve(mut socket: logging::Socket, pool: DbPool, id: RequestId, upgrade
         let mut diagnostic_tick = 0;
         // Join authorized against the database just before negotiation.
         let mut authorized_at = Instant::now();
+        let mut profiles = profile_hints().subscribe();
+        let profile_account = info.account_id;
         loop {
             tokio::select! {biased;
                 _ = async { let _ = replaced.wait_for(|value| *value).await; } => break,
@@ -1620,13 +1637,25 @@ async fn serve(mut socket: logging::Socket, pool: DbPool, id: RequestId, upgrade
                     if let Some(challenge) = challenge
                         && send(&mut socket, ServerEvent::MicrophoneRefreshRequired { challenge }).await.is_err() { break; }
                 },
+                hint = profiles.recv() => {
+                    use tokio::sync::broadcast::error::RecvError;
+                    // Missed hints are covered by rechecking now as well.
+                    if matches!(hint, Ok(account) if account == profile_account) || matches!(hint, Err(RecvError::Lagged(_))) {
+                        match access.refresh(&room,slot,&mut changed).await {
+                            Ok(_) => authorized_at = Instant::now(),
+                            Err(error) if error.transient() && authorized_at.elapsed() < VOICE_TRANSIENT_GRACE => {}
+                            Err(error) => { access.failed(&mut socket,id,error).await; break; }
+                        }
+                    }
+                },
                 result=changed.changed()=>{
                     if result.is_err(){socket.end("access_watcher_closed");break;}
-                    if let Err(error)=access.refresh(&room,slot,&mut changed).await {
-                        access.failed(&mut socket,id,error).await;
-                        break;
+                    match access.refresh(&room,slot,&mut changed).await {
+                        Ok(_) => authorized_at = Instant::now(),
+                        // Media for the old epoch is already refused; the tick retries.
+                        Err(error) if error.transient() && authorized_at.elapsed() < VOICE_TRANSIENT_GRACE => {}
+                        Err(error) => { access.failed(&mut socket,id,error).await; break; }
                     }
-                    authorized_at = Instant::now();
                 },
                 Some((kind, epoch, layer))=keyframe_rx.recv()=>{
                     // Revalidate the publisher and generation after queued feedback.
@@ -1727,6 +1756,10 @@ async fn serve(mut socket: logging::Socket, pool: DbPool, id: RequestId, upgrade
                         Some(members)=>members,
                         None=>match access.refresh(&room,slot,&mut changed).await {
                             Ok(members)=>{authorized_at = Instant::now(); members},
+                            Err(error) if error.transient() && authorized_at.elapsed() < VOICE_TRANSIENT_GRACE => {
+                                // Keep the fenced roster while the database recovers.
+                                match access.current_roster(&room).await { Some(members) => members, None => continue }
+                            }
                             Err(error)=>{access.failed(&mut socket,id,error).await;break;}
                         }
                     };
@@ -1770,6 +1803,7 @@ async fn serve(mut socket: logging::Socket, pool: DbPool, id: RequestId, upgrade
                         Some(members) => members,
                         None => match access.refresh(&room,slot,&mut changed).await {
                             Ok(members)=>{authorized_at = Instant::now(); members},
+                            Err(error) if error.transient() && authorized_at.elapsed() < VOICE_TRANSIENT_GRACE => continue,
                             Err(error)=>{access.failed(&mut socket,id,error).await;break;}
                         }
                     };
@@ -1898,13 +1932,27 @@ where
 {
     use std::{future::Future, task::Poll};
     let mut send = std::pin::pin!(send);
-    let mut lock = Box::pin(room.members.read());
+    // A queued read only when the lock is contended: an uncontended packet takes
+    // it synchronously without allocating a waiter. `try_read` fails while a
+    // writer is queued, so writers keep their priority.
+    let mut lock = None;
     std::future::poll_fn(|cx| {
-        let members = match lock.as_mut().poll(cx) {
-            Poll::Pending => return Poll::Pending,
-            Poll::Ready(members) => members,
+        let members = match room.members.try_read() {
+            Ok(members) => {
+                lock = None;
+                members
+            }
+            Err(_) => {
+                let read = lock.get_or_insert_with(|| Box::pin(room.members.read()));
+                match read.as_mut().poll(cx) {
+                    Poll::Pending => return Poll::Pending,
+                    Poll::Ready(members) => {
+                        lock = None;
+                        members
+                    }
+                }
+            }
         };
-        lock = Box::pin(room.members.read());
         let Some(_permit) = permit() else {
             return Poll::Ready(Err(()));
         };

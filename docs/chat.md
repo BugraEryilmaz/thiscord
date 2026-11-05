@@ -216,7 +216,9 @@ that guild. Presence/typing changes wake only that channel's presence readers.
 Read acknowledgements wake only that account's subscriptions in the affected guild.
 Unread work is coalesced: the first change after a quiet second recounts after
 75 ms, later changes at most once per second per subscription. Message/presence
-delivery does not wait for that window and never performs an unread query. Unchanged read markers,
+delivery does not wait for that window and never waits behind an unread query.
+Presence lists are sent whole, so presence/typing deliveries are coalesced the
+same way (50 ms, then at most once per second per subscription). Unchanged read markers,
 exact send retries and unchanged edits do not publish notifications. Presence writers
 compare combined account state, suppressing unchanged heartbeats/typing refreshes;
 snapshot readers never publish notifications. Subscriptions unregister on switch or
@@ -237,7 +239,19 @@ the maintenance check. New events of a channel are read once and shared by that
 channel's subscribers: publication increments a per-channel counter after commit
 and before waking anyone, and a read covers every publication counted before its
 snapshot. Pages of 100 events and events with reactions (whose `mine` flag is per
-account) fall back to a private read. Notification sockets likewise reuse a
+account) fall back to a private read. The presence list is shared the same way:
+its filter depends only on each listed member's own ViewChannel grant. Subscribe,
+lease renewal and typing expiry count changed rows instead of comparing the whole
+list and take no channel lock; typing changes still compare under it.
+
+Database trouble (pool exhaustion, statement or lock timeouts) is not an
+authorization result. Chat, friends and notification sockets deliver nothing
+that needs the failed read, retry after 500 ms, and close with
+`service_unavailable` (never `revoked`) after 30 seconds without a successful
+check; a skipped alert is not replayed. Voice connections keep their current,
+epoch-fenced media and roster through failed rechecks for up to 30 seconds since
+the last successful one; an access commit during that time still pauses media
+until a check succeeds. Notification sockets likewise reuse a
 recipient's full alert check per guild channel and kind for ten seconds under the
 same epochs; private and ringing calls always recheck the database. Measurements:
 [load benchmarks](load-benchmarks.md). Join/leave/typing transitions

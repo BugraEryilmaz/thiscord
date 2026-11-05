@@ -79,8 +79,10 @@ impl Notifications {
     // Routing metadata is only a wake hint; delivery still authorizes in the DB.
     pub fn publish(&self, change: Change) {
         // Before any wake-up, so woken readers know which shared read covers it.
-        if let Change::Message(guild, channel) = change {
-            super::feed::published(guild, channel);
+        match change {
+            Change::Message(guild, channel) => super::feed::published(guild, channel),
+            Change::Presence(guild, channel) => super::feed::presence_published(guild, channel),
+            _ => {}
         }
         for route in self.0.lock().unwrap().values() {
             route.sender.send_if_modified(|v| match change {

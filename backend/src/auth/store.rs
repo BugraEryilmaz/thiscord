@@ -28,22 +28,65 @@ pub(crate) fn query<T: DeserializeOwned>(
     params: &[&str],
 ) -> Result<Vec<T>, Failure> {
     let _timing = crate::performance::QUERY.start();
-    let mut q = diesel::sql_query(sql).into_boxed::<Pg>();
-    for p in params {
-        q = q.bind::<Text, _>(*p);
-    }
-    q.load::<Row>(c)?
+    Prepared { sql, params }
+        .load::<Row>(c)?
         .into_iter()
         .map(|r| serde_json::from_value(r.data).map_err(|_| Failure::Unavailable))
         .collect()
 }
 pub(crate) fn execute(c: &mut PgConnection, sql: &str, params: &[&str]) -> Result<usize, Failure> {
     let _timing = crate::performance::EXECUTE.start();
-    let mut q = diesel::sql_query(sql).into_boxed::<Pg>();
-    for p in params {
-        q = q.bind::<Text, _>(*p);
+    Ok(Prepared { sql, params }.execute(c)?)
+}
+
+/// Fixed SQL whose `$n` parameters become Diesel text binds in order of use.
+/// Unlike `sql_query`, Diesel may keep it as a prepared statement per pooled
+/// connection, keyed by its text, so repeated queries skip parsing and, after
+/// PostgreSQL's custom-plan trials, planning. That cache stays bounded because
+/// only the fixed set of SQL strings in this crate reaches these helpers.
+struct Prepared<'a> {
+    sql: &'a str,
+    params: &'a [&'a str],
+}
+impl diesel::query_builder::QueryId for Prepared<'_> {
+    type QueryId = ();
+    const HAS_STATIC_QUERY_ID: bool = false;
+}
+impl diesel::query_builder::Query for Prepared<'_> {
+    type SqlType = diesel::sql_types::Untyped;
+}
+impl RunQueryDsl<PgConnection> for Prepared<'_> {}
+impl diesel::query_builder::QueryFragment<Pg> for Prepared<'_> {
+    fn walk_ast<'b>(
+        &'b self,
+        mut out: diesel::query_builder::AstPass<'_, 'b, Pg>,
+    ) -> QueryResult<()> {
+        let mut rest = self.sql;
+        while let Some(at) = rest.find('$') {
+            let digits = rest[at + 1..]
+                .bytes()
+                .take_while(u8::is_ascii_digit)
+                .count();
+            if digits == 0 {
+                out.push_sql(&rest[..=at]);
+                rest = &rest[at + 1..];
+                continue;
+            }
+            out.push_sql(&rest[..at]);
+            let param = rest[at + 1..at + 1 + digits]
+                .parse::<usize>()
+                .ok()
+                .and_then(|n| n.checked_sub(1))
+                .and_then(|n| self.params.get(n))
+                .ok_or_else(|| {
+                    diesel::result::Error::QueryBuilderError("missing SQL parameter".into())
+                })?;
+            out.push_bind_param::<Text, str>(param)?;
+            rest = &rest[at + 1 + digits..];
+        }
+        out.push_sql(rest);
+        Ok(())
     }
-    Ok(q.execute(c)?)
 }
 pub(crate) fn secret() -> String {
     let mut b = [0u8; 32];
@@ -631,6 +674,11 @@ pub(super) fn dispatch(
                 change.finish(result.is_ok());
             }
             if result.is_ok() {
+                // Profile edits commit without an access change; voice reuses its
+                // last check between rechecks, so wake this account's connections.
+                if !related.is_empty() || !guilds.is_empty() {
+                    crate::voice::profile_changed(session.account_id);
+                }
                 crate::friends::changed(related);
                 crate::chat::members::changed(guilds);
             }
@@ -701,4 +749,31 @@ fn consume_code(
         change.finish(result.is_ok());
     }
     result
+}
+
+#[cfg(test)]
+mod prepared_tests {
+    use super::*;
+    use diesel::query_builder::QueryFragment;
+
+    #[test]
+    fn parameters_become_ordered_binds_including_repeats() {
+        let params = ["a", "b"];
+        let query = Prepared {
+            sql: "SELECT $2::text, $1, $2 WHERE note='$'",
+            params: &params,
+        };
+        let text = diesel::debug_query::<Pg, _>(&query).to_string();
+        assert!(
+            text.starts_with("SELECT $1::text, $2, $3 WHERE note='$'"),
+            "{text}"
+        );
+        assert!(text.contains(r#"["b", "a", "b"]"#), "{text}");
+        let missing = Prepared {
+            sql: "SELECT $3",
+            params: &params,
+        };
+        let mut builder = diesel::pg::PgQueryBuilder::default();
+        assert!(missing.to_sql(&mut builder, &Pg).is_err());
+    }
 }

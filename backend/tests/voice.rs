@@ -1770,6 +1770,7 @@ async fn sfu_forwarding_permissions_isolation_and_cleanup() {
     // Hold the guild row without changing access. Wait until a periodic voice
     // check actually blocks in PostgreSQL, then require media while it is held.
     // Previously that check held the global write gate and stalled every stream.
+    // Rosters reuse the last check between rechecks, which run every ten seconds.
     let mut blocker = db.pool.get().unwrap();
     blocker.batch_execute("BEGIN").unwrap();
     diesel::sql_query("SELECT id FROM guilds WHERE id=$1::uuid FOR UPDATE")
@@ -1781,7 +1782,7 @@ async fn sfu_forwarding_permissions_isolation_and_cleanup() {
         #[diesel(sql_type = diesel::sql_types::Bool)]
         waiting: bool,
     }
-    tokio::time::timeout(Duration::from_secs(3), async {
+    tokio::time::timeout(Duration::from_secs(12), async {
         loop {
             let waiting: Waiting = diesel::sql_query(
                 "SELECT EXISTS (SELECT 1 FROM pg_stat_activity WHERE pg_backend_pid() = ANY(pg_blocking_pids(pid))) AS waiting",

@@ -56,6 +56,12 @@ impl From<diesel::result::Error> for Failure {
     }
 }
 impl Failure {
+    /// Pool exhaustion, timeouts and other database errors say nothing about
+    /// authorization. Long-lived connections retry them (delivering nothing
+    /// meanwhile) instead of reporting revocation.
+    pub(crate) fn transient(&self) -> bool {
+        matches!(self, Self::Unavailable | Self::Database(_))
+    }
     pub(crate) fn response(self, request_id: RequestId) -> Response {
         let (status, code, message) = match self {
             Self::NotFound => (

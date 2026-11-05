@@ -35,6 +35,14 @@ queries are quick (see [performance audit](performance-audit.md)). Every backend
 process, `--migrate-only` run and `psql` session counts toward PostgreSQL's
 `max_connections`. Integration tests always use the default size.
 
+Application SQL goes through `auth::store::query`/`execute`, which bind `$n`
+parameters as text and let each pooled connection keep the statement prepared
+(keyed by its fixed SQL text). Repeated statements skip parsing and, after
+PostgreSQL's five custom-plan trials, may use a cached generic plan
+(`plan_cache_mode = auto`). Only fixed SQL strings, never interpolated values,
+reach these helpers, which keeps the per-connection cache bounded. If a query
+regresses under a generic plan, compare `EXPLAIN EXECUTE` with a custom plan.
+
 ## Windows startup troubleshooting
 
 Run `.\run-wsl.ps1` from `backend/` in PowerShell, or select **Backend: run in WSL**

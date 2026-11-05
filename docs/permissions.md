@@ -382,6 +382,16 @@ reconnection. Chat sockets are invalidated after commits; eligible readers recon
 On timeout expiry, the ten-second session maintenance check refreshes composer
 permissions through reconnection (or selecting the channel reloads them immediately).
 
+Between full database checks, chat delivery, alert fan-out and voice rosters reuse
+the last check's result for at most ten seconds and only while the account,
+session, guild and member epochs captured before that check are current. Every
+access-changing commit closes those epochs before it commits, so reuse never
+outlives a grant change. Only time-based changes (session expiry or idle
+lifetime, timeout expiry) can be observed up to ten seconds late; during
+database trouble, voice may keep its current epoch for up to 30 seconds. Private
+calls and ringing calls are always rechecked. See [chat](chat.md) and
+[audio](audio.md).
+
 Tests cover DTO compatibility, hierarchy/self/owner/foreign targets, delegated
 moderators without ManageRoles, stale requests, timeout bounds/expiry/removal and
 rejoin persistence, chat restrictions, both banned join paths, unban, socket expiry,

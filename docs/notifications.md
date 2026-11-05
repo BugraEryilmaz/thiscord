@@ -103,6 +103,16 @@ an unlimited backlog. Established sockets wait fairly for a worker (one waiter
 per socket, cancelled on revocation, with a ten-second overload deadline).
 Guild sends narrow routing to connected guild members before per-recipient
 authorization; unrelated guilds do not consume their delivery queues.
+A socket reuses a recipient's full alert check (target authorization,
+preferences and guild icon) for later alerts of the same guild channel and kind
+for at most ten seconds, only while the account, session, preference, guild and
+member epochs captured before that check are current; at most 64 such grants
+are kept per socket. Delivery preferences such as snoozes and Do Not Disturb are
+still evaluated at delivery time. Ringing calls, private calls and anything
+other than a guild channel are always checked against the database. Database
+trouble skips the affected alert and retries later; the socket closes (without
+`revoked`) only after 30 seconds without a successful check. A connecting socket
+waits up to 30 seconds for a worker, so reconnect storms queue instead of failing.
 Heartbeats and session-expiry checks are maintenance, not
 notification polling. Clients reconnect with bounded exponential backoff/jitter,
 restore preferences and deduplicate up to 256 recent event IDs. Missed transient

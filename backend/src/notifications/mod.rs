@@ -187,6 +187,10 @@ async fn handle(
 const ALERT_AUTHORIZATION_RECHECK: Duration = Duration::from_secs(10);
 /// Bounds the per-socket grant cache; one entry per recently alerted target/kind.
 const MAX_ALERT_GRANTS: usize = 64;
+/// Transient database trouble (`Failure::transient`) skips the affected alert or
+/// retries the refresh; the socket closes only after this long without success.
+const TRANSIENT_GRACE: Duration = Duration::from_secs(30);
+const TRANSIENT_RETRY: Duration = Duration::from_millis(500);
 fn workers() -> Arc<Semaphore> {
     static WORKERS: OnceLock<Arc<Semaphore>> = OnceLock::new();
     WORKERS.get_or_init(|| Arc::new(Semaphore::new(8))).clone()
@@ -266,7 +270,9 @@ async fn serve(mut socket: WebSocket, pool: DbPool, upgrade_token: String) {
         return;
     }
     let Ok(Ok(permit)) =
-        tokio::time::timeout(Duration::from_secs(10), workers().acquire_owned()).await
+        // Connect storms (such as every client reconnecting after a restart)
+        // queue here; the socket limit already bounds how many wait.
+        tokio::time::timeout(Duration::from_secs(30), workers().acquire_owned()).await
     else {
         return;
     };
@@ -320,6 +326,10 @@ async fn serve(mut socket: WebSocket, pool: DbPool, upgrade_token: String) {
     // Recent full alert checks per (target, kind), with the epochs captured before
     // each. Guild message fan-out reuses them instead of one transaction per alert.
     let mut grants = Vec::<(Target, Kind, Instant, access::Snapshot, store::AlertGrant)>::new();
+    let mut trouble = None::<Instant>;
+    let mut retry_at = None::<tokio::time::Instant>;
+    // Every exit reports revocation except giving up on database trouble.
+    let mut revoke = true;
     loop {
         tokio::select! { biased;
             _ = revoked.changed() => break,
@@ -341,12 +351,21 @@ async fn serve(mut socket: WebSocket, pool: DbPool, upgrade_token: String) {
                     _ => break,
                 }
             }
-            _ = async {}, if refresh => {
+            _ = async { match retry_at { Some(at) => tokio::time::sleep_until(at).await, None => std::future::pending().await } } => { retry_at = None; }
+            _ = async {}, if refresh && retry_at.is_none() => {
                 refresh = false;
                 let Some(epoch) = access::snapshot(&account, Some(&session_scope)).and_then(|e| e.including(&preference_scope)).and_then(|e| e.including(&call_scope)) else { refresh = true; tokio::task::yield_now().await; continue; };
                 let Ok(permit) = worker(&mut revoked, &mut ended).await else { break; };
                 let p = pool.clone(); let t = token.clone();
-                let Ok(Ok(state)) = crate::performance::blocking(move || { let _permit = permit; store::initial(&p, &t) }).await else { break; };
+                let result = crate::performance::blocking(move || { let _permit = permit; store::initial(&p, &t) }).await;
+                if matches!(&result, Ok(Err(error)) if error.transient()) {
+                    if trouble.get_or_insert_with(Instant::now).elapsed() >= TRANSIENT_GRACE { revoke = false; break; }
+                    refresh = true;
+                    retry_at = Some(tokio::time::Instant::now() + TRANSIENT_RETRY);
+                    continue;
+                }
+                let Ok(Ok(state)) = result else { break; };
+                trouble = None;
                 // Anchor after the DB result: query/return latency can delay
                 // expiry, but cannot wake early or depend on application UTC.
                 let received_at = tokio::time::Instant::now();
@@ -397,7 +416,14 @@ async fn serve(mut socket: WebSocket, pool: DbPool, upgrade_token: String) {
                 let Ok(permit) = worker(&mut revoked, &mut ended).await else { break; };
                 let p = pool.clone(); let t = token.clone();
                 let checked_at = Instant::now();
-                let Ok(Ok((alert, grant))) = crate::performance::blocking(move || { let _permit = permit; store::alert(&p, &t, candidate) }).await else { break; };
+                let result = crate::performance::blocking(move || { let _permit = permit; store::alert(&p, &t, candidate) }).await;
+                if matches!(&result, Ok(Err(error)) if error.transient()) {
+                    // Fail closed: this alert is skipped, like one missed while offline.
+                    if trouble.get_or_insert_with(Instant::now).elapsed() >= TRANSIENT_GRACE { revoke = false; break; }
+                    continue;
+                }
+                let Ok(Ok((alert, grant))) = result else { break; };
+                trouble = None;
                 if let Some(grant) = grant {
                     grants.retain(|(target, kind, at, _, _)| (*target, *kind) != key && at.elapsed() < ALERT_AUTHORIZATION_RECHECK);
                     if grants.len() >= MAX_ALERT_GRANTS { grants.clear(); }
@@ -413,11 +439,20 @@ async fn serve(mut socket: WebSocket, pool: DbPool, upgrade_token: String) {
                 if last_seen.elapsed() > Duration::from_secs(35) { break; }
                 let Ok(permit) = worker(&mut revoked, &mut ended).await else { break; };
                 let p = pool.clone(); let t = token.clone();
-                if !matches!(crate::performance::blocking(move || { let _permit = permit; auth::store::authenticate(&mut *auth::store::connection(&p)?, &t) }).await, Ok(Ok(_))) { break; }
+                let result = crate::performance::blocking(move || { let _permit = permit; auth::store::authenticate(&mut *auth::store::connection(&p)?, &t) }).await;
+                match result {
+                    Ok(Ok(_)) => trouble = None,
+                    Ok(Err(error)) if error.transient() => {
+                        if trouble.get_or_insert_with(Instant::now).elapsed() >= TRANSIENT_GRACE { revoke = false; break; }
+                    }
+                    _ => break,
+                }
             }
         }
     }
-    let _ = send(&mut socket, ServerEvent::Revoked {}).await;
+    if revoke {
+        let _ = send(&mut socket, ServerEvent::Revoked {}).await;
+    }
 }
 
 #[cfg(test)]

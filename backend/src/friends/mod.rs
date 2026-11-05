@@ -176,6 +176,8 @@ async fn send(socket: &mut WebSocket, event: ServerEvent) -> Result<(), ()> {
     .map_err(|_| ())?
     .map_err(|_| ())
 }
+/// How long transient database trouble may last before the socket gives up.
+const TRANSIENT_GRACE: Duration = Duration::from_secs(30);
 async fn serve(mut socket: WebSocket, pool: DbPool, upgrade_token: String, retains: bool) {
     let Ok(Some(Ok(message))) = tokio::time::timeout(Duration::from_secs(5), socket.recv()).await
     else {
@@ -225,6 +227,9 @@ async fn serve(mut socket: WebSocket, pool: DbPool, upgrade_token: String, retai
     let readers = READERS.get_or_init(|| Arc::new(Semaphore::new(8)));
     let mut tick = tokio::time::interval(Duration::from_secs(1));
     tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+    let mut trouble = None::<Instant>;
+    // Every exit reports revocation except giving up on database trouble.
+    let mut revoke = true;
     loop {
         tokio::select! {biased;
             _=changed.changed()=>break,
@@ -259,7 +264,16 @@ async fn serve(mut socket: WebSocket, pool: DbPool, upgrade_token: String, retai
                     let plan=history.plan(selected,&before);
                     let Some(epoch)=crate::chat::access::snapshot(&account,Some(&session_scope)) else {break;};
                     let p=pool.clone();let t=token.clone();let page=before.clone();let load=plan.load;
-                    let Ok(Ok((mut snapshot,expiry)))=crate::performance::blocking(move ||{let _permit=permit;store::snapshot(&p,&t,selected,page,load)}).await else {break;};
+                    let result=crate::performance::blocking(move ||{let _permit=permit;store::snapshot(&p,&t,selected,page,load)}).await;
+                    // Transient database trouble is not revocation: keep the socket, deliver
+                    // nothing new (no current snapshot) and retry on the next tick.
+                    if matches!(&result,Ok(Err(error)) if error.transient()) {
+                        if trouble.get_or_insert_with(Instant::now).elapsed()>=TRANSIENT_GRACE {revoke=false;break;}
+                        cached=None;
+                        continue;
+                    }
+                    let Ok(Ok((mut snapshot,expiry)))=result else {break;};
+                    trouble=None;
                     history.finish(plan,&mut snapshot);
                     if last.as_ref()==Some(&snapshot) && !history.pending(&snapshot) { crate::performance::FRIENDS_UNCHANGED.fetch_add(1, std::sync::atomic::Ordering::Relaxed); }
                     refresh_at=checked+expiry.map_or(REFRESH,|e|e.min(REFRESH));
@@ -277,7 +291,9 @@ async fn serve(mut socket: WebSocket, pool: DbPool, upgrade_token: String, retai
             }
         }
     }
-    let _ = send(&mut socket, ServerEvent::Revoked {}).await;
+    if revoke {
+        let _ = send(&mut socket, ServerEvent::Revoked {}).await;
+    }
     let _ = tokio::time::timeout(Duration::from_secs(1), socket.send(Message::Close(None))).await;
 }
 

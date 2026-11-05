@@ -38,6 +38,12 @@ fn execute(c: &mut PgConnection, sql: &str, args: &[String]) -> QueryResult<usiz
     query.execute(c)
 }
 
+/// The benchmark pool follows `DATABASE_POOL_SIZE` like the backend (default 5).
+fn pool_size() -> Result<u32> {
+    db::pool_size(std::env::var(db::POOL_SIZE_VAR).ok().as_deref())
+        .map_err(|_| "DATABASE_POOL_SIZE must be an integer from 1 to 32")
+}
+
 fn test_database_url() -> Result<String> {
     if let Ok(value) = std::env::var("TEST_DATABASE_URL") {
         return Ok(value);
@@ -99,8 +105,8 @@ fn seed_fixture(
     };
     url.query_pairs_mut()
         .append_pair("options", &format!("-csearch_path={}", fixture.schema));
-    let pool =
-        db::connect_and_migrate(url.as_str()).map_err(|_| "Test schema migrations failed")?;
+    let pool = db::connect_and_migrate_sized(url.as_str(), pool_size()?)
+        .map_err(|_| "Test schema migrations failed")?;
     fixture.pool = Some(pool.clone());
     let mut c = pool.get().map_err(|_| "Test pool checkout failed")?;
     c.transaction::<_, diesel::result::Error, _>(|c| {
@@ -166,10 +172,18 @@ async fn run() -> Result<()> {
         .await
         .map_err(|_| "Fixture task failed")??;
     println!("Disposable schema: {}", fixture.schema);
+    // An explicit THISCORD_MAX_SOCKETS (validated like the backend's) lets a run
+    // exceed the socket limit; otherwise every fixture user fits.
+    let sockets = std::env::var(thiscord_backend::limits::SOCKETS_VAR)
+        .ok()
+        .map(|value| thiscord_backend::limits::Limits::parse(Some(&value), None).map(|l| l.sockets))
+        .transpose()
+        .map_err(|_| "Invalid THISCORD_MAX_SOCKETS")?;
     let app = api::load_test_router(
         fixture.pool.as_ref().unwrap().clone(),
         vec![common::ORIGIN.parse().unwrap()],
         users,
+        sockets,
     );
     let serving = tokio::spawn(async move {
         if let Some(tls) = tls {

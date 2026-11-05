@@ -703,6 +703,50 @@ async fn shared_fanout_keeps_per_account_reactions_and_closes_on_access_changes(
 
 #[tokio::test]
 #[ignore = "requires TEST_DATABASE_URL; CI runs with --include-ignored"]
+async fn session_expiry_inside_the_reuse_window_revokes_within_the_recheck() {
+    let _guard = TEST_LOCK.lock().await;
+    let db = database();
+    let (app, owner, guest, guest_id, state, channel) = setup(&db).await;
+    let guild = state["guild"]["id"].clone();
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let address = listener.local_addr().unwrap();
+    let router = app.clone();
+    let server = tokio::spawn(async move {
+        axum::serve(listener, router).await.unwrap();
+    });
+    let mut socket = session_socket(address, &guest).await;
+    event(&mut socket, "authenticated").await;
+    subscribe(&mut socket, 1, guild.clone(), channel.clone()).await;
+    chat(&app, &owner, json!({"action":"send","guild_id":guild,"channel_id":channel,"client_id":Uuid::new_v4(),"content":"granted"}), StatusCode::OK).await;
+    assert_eq!(
+        pushed(&mut socket, 1, "message").await["message"]["content"],
+        "granted"
+    );
+    // Expiry is time-based: no access commit closes the grant's epochs, so the
+    // ten-second maintenance check is what ends delivery.
+    diesel::sql_query("UPDATE sessions SET expires_at=now() WHERE account_id=$1::uuid")
+        .bind::<Text, _>(guest_id.to_string())
+        .execute(&mut db.pool.get().unwrap())
+        .unwrap();
+    tokio::time::timeout(std::time::Duration::from_secs(12), async {
+        loop {
+            let text = match socket.next().await {
+                Some(Ok(WsMessage::Text(text))) => text,
+                Some(_) => continue,
+                None => panic!("socket closed without revocation"),
+            };
+            if serde_json::from_str::<Value>(&text).unwrap()["event"]["type"] == "revoked" {
+                break;
+            }
+        }
+    })
+    .await
+    .expect("an expired session must stop delivery within the recheck");
+    server.abort();
+}
+
+#[tokio::test]
+#[ignore = "requires TEST_DATABASE_URL; CI runs with --include-ignored"]
 async fn timeout_revokes_chat_and_expiry_refreshes_composer_permissions() {
     let _guard = TEST_LOCK.lock().await;
     let db = database();

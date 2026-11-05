@@ -42,6 +42,50 @@ const CHAT_AUTHORIZATION_RECHECK: Duration = Duration::from_secs(10);
 /// per interval. Messages in the open channel are delivered without this delay.
 const UNREAD_DEBOUNCE: Duration = Duration::from_millis(75);
 const UNREAD_INTERVAL: Duration = Duration::from_secs(1);
+/// Presence/typing lists are sent whole, so joins in a busy channel are
+/// coalesced the same way: at most one presence delivery per interval.
+const PRESENCE_DEBOUNCE: Duration = Duration::from_millis(50);
+const PRESENCE_INTERVAL: Duration = Duration::from_secs(1);
+/// Transient database trouble (see `Failure::transient`) delivers nothing and is
+/// retried; the socket closes with a service error, not revocation, only after
+/// this long without a successful database check.
+const TRANSIENT_GRACE: Duration = Duration::from_secs(30);
+const TRANSIENT_RETRY: Duration = Duration::from_millis(500);
+
+/// When a coalesced delivery that last ran at `last` runs for a change seen at
+/// `now`: after `debounce` when quiet, otherwise no sooner than `interval` after
+/// its previous run. A pending due time absorbs later changes.
+fn coalesced(
+    last: Option<Instant>,
+    now: Instant,
+    debounce: Duration,
+    interval: Duration,
+) -> Instant {
+    last.map_or(now, |at| at + interval).max(now + debounce)
+}
+
+/// When transient database trouble began, if it is ongoing.
+#[derive(Default)]
+struct Trouble(Option<Instant>);
+impl Trouble {
+    /// Whether to keep retrying.
+    fn retry(&mut self) -> bool {
+        self.0.get_or_insert_with(Instant::now).elapsed() < TRANSIENT_GRACE
+    }
+    fn clear(&mut self) {
+        self.0 = None;
+    }
+}
+fn transient<T>(result: &Result<Result<T, Failure>, tokio::task::JoinError>) -> bool {
+    matches!(result, Ok(Err(error)) if error.transient())
+}
+fn unavailable(id: RequestId) -> ServerEvent {
+    error(
+        id,
+        ErrorCode::ServiceUnavailable,
+        "Chat is temporarily unavailable",
+    )
+}
 /// Member lists reload on commit notifications and status expiry; this bounds
 /// staleness from writes outside those paths (unchanged lists are not resent).
 const MEMBER_REFRESH: Duration = Duration::from_secs(60);
@@ -64,13 +108,17 @@ pub(super) async fn serve(
     token: String,
     guild_updates: bool,
 ) {
-    let Ok(account_access) = socket_access(&pool, &token).await else {
-        let _ = send(
-            &mut socket,
-            error(id, ErrorCode::Unauthorized, "Sign in again"),
-        )
-        .await;
-        return;
+    let account_access = match socket_access(&pool, &token).await {
+        Ok(access) => access,
+        Err(error) => {
+            let event = if error.transient() {
+                unavailable(id)
+            } else {
+                super::error(id, ErrorCode::Unauthorized, "Sign in again")
+            };
+            let _ = send(&mut socket, event).await;
+            return;
+        }
     };
     let mut revoked = account_access.account.subscribe();
     let mut session_revoked = account_access.session.subscribe();
@@ -92,13 +140,22 @@ pub(super) async fn serve(
         Ok::<_, Failure>(session.account_id)
     })
     .await;
-    let Ok(Ok(account)) = authenticated else {
-        let _ = send(
-            &mut socket,
-            error(id, ErrorCode::Unauthorized, "Sign in again"),
-        )
-        .await;
-        return;
+    let account = match authenticated {
+        Ok(Ok(account)) => account,
+        // Database trouble is not a credential failure: let the client retry
+        // instead of checking (and possibly clearing) its session.
+        Ok(Err(error)) if error.transient() => {
+            let _ = send(&mut socket, unavailable(id)).await;
+            return;
+        }
+        _ => {
+            let _ = send(
+                &mut socket,
+                error(id, ErrorCode::Unauthorized, "Sign in again"),
+            )
+            .await;
+            return;
+        }
     };
     let Some(delivery) = initial.deliver() else {
         return;
@@ -120,6 +177,8 @@ pub(super) async fn serve(
     let mut count = 0;
     let mut messages_dirty = false;
     let mut presence_dirty = false;
+    let mut presence_due = None::<Instant>;
+    let mut presence_at = None::<Instant>;
     let mut unread_dirty = false;
     let mut unread_due = None::<Instant>;
     // When this socket last recounted unread, for UNREAD_INTERVAL coalescing.
@@ -145,6 +204,9 @@ pub(super) async fn serve(
     let mut member_list = None::<(access::Snapshot, members::MemberList)>;
     let mut last_member_list = None::<Vec<thiscord_shared::chat::GuildMember>>;
     let mut last_online = Vec::new();
+    let mut trouble = Trouble::default();
+    // Delivery retry after transient database trouble; dirty flags stay set.
+    let mut retry_at = None::<Instant>;
     let mut member_tick = tokio::time::interval(Duration::from_secs(1));
     member_tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
     let mut guild_hints = guild_updates.then(|| super::guild_updates().subscribe());
@@ -169,7 +231,7 @@ pub(super) async fn serve(
                         listener = None;
                         versions = notifications::Versions::default();
                         subscription = None; typing_expiry = None;
-                        messages_dirty = false; presence_dirty = false; unread_dirty = false; unread_due = None;
+                        messages_dirty = false; presence_dirty = false; unread_dirty = false; unread_due = None; presence_due = None;
                         last_members.clear(); last_unread.clear();
                         watch_voice = voice_roster; last_roster = None; voice_visibility = None;
                         roster_tick.reset_immediately();
@@ -229,11 +291,12 @@ pub(super) async fn serve(
             _ = async { if let Some(route) = &mut listener { let _ = route.receiver.changed().await; } else { std::future::pending::<()>().await; } } => {
                 let next = *listener.as_mut().unwrap().receiver.borrow_and_update();
                 messages_dirty |= next.messages != versions.messages;
-                presence_dirty |= next.presence != versions.presence;
+                if next.presence != versions.presence {
+                    presence_due.get_or_insert_with(|| coalesced(presence_at, Instant::now(), PRESENCE_DEBOUNCE, PRESENCE_INTERVAL));
+                }
                 if next.unread != versions.unread {
                     // A short debounce after quiet periods; busy guilds recount at most once per interval.
-                    let earliest = unread_at.map_or(Instant::now(), |at| at + UNREAD_INTERVAL);
-                    unread_due.get_or_insert_with(|| earliest.max(Instant::now() + UNREAD_DEBOUNCE));
+                    unread_due.get_or_insert_with(|| coalesced(unread_at, Instant::now(), UNREAD_DEBOUNCE, UNREAD_INTERVAL));
                 }
                 members_dirty |= watch_members && next.members != versions.members;
                 versions = next;
@@ -247,7 +310,13 @@ pub(super) async fn serve(
                 let Some(authorized) = account_access.snapshot(guild_access.as_ref(), member_access.as_ref()) else { let _ = send(&mut socket, ServerEvent::Revoked {}).await; break; };
                 if revoked.has_changed().unwrap_or(true) || session_revoked.has_changed().unwrap_or(true) { let _ = send(&mut socket, ServerEvent::Revoked {}).await; break; }
                 let p = pool.clone(); let t = token.clone();
-                let Ok(Ok(list)) = crate::performance::blocking(move || members::snapshot(&p, &t, sub.guild)).await else {
+                let result = crate::performance::blocking(move || members::snapshot(&p, &t, sub.guild)).await;
+                if transient(&result) {
+                    if !trouble.retry() { let _ = send(&mut socket, unavailable(id)).await; break; }
+                    members_due = Some(Instant::now() + TRANSIENT_RETRY);
+                    continue;
+                }
+                let Ok(Ok(list)) = result else {
                     let _ = send(&mut socket, ServerEvent::Revoked {}).await; break;
                 };
                 let refresh = list.expiry(chrono::Utc::now()).map_or(MEMBER_REFRESH, |e| e.min(MEMBER_REFRESH));
@@ -277,23 +346,33 @@ pub(super) async fn serve(
                     if update(&mut socket, sub, ServerEvent::MemberPresence { online }).await.is_err() { break; }
                 }
             }
+            _ = async { if let Some(at) = presence_due { tokio::time::sleep_until(at.into()).await; } else { std::future::pending::<()>().await; } } => {
+                presence_due = None; presence_dirty = true; presence_at = Some(Instant::now());
+            }
             _ = async { if let Some(at) = unread_due { tokio::time::sleep_until(at.into()).await; } else { std::future::pending::<()>().await; } } => {
                 unread_due = None; unread_dirty = true; unread_at = Some(Instant::now());
             }
-            _ = async {}, if messages_dirty || presence_dirty || unread_dirty => {
+            _ = async { if let Some(at) = retry_at { tokio::time::sleep_until(at.into()).await; } else { std::future::pending::<()>().await; } } => {
+                retry_at = None;
+            }
+            _ = async {}, if (messages_dirty || presence_dirty || unread_dirty) && retry_at.is_none() => {
                 let Some(sub) = subscription else { continue; };
                 if revoked.has_changed().unwrap_or(true) || session_revoked.has_changed().unwrap_or(true) { let _ = send(&mut socket, ServerEvent::Revoked {}).await; break; }
                 let p = pool.clone();
-                let work = store::Refresh {
-                    messages: std::mem::take(&mut messages_dirty),
-                    presence: std::mem::take(&mut presence_dirty),
-                    unread: std::mem::take(&mut unread_dirty),
-                };
                 // Fan-out reuses the last full check while its epochs are current;
                 // otherwise authenticate and re-evaluate grants under the guild lock.
                 let reusable = grant.as_ref()
                     .filter(|(at, authorized, _)| at.elapsed() < CHAT_AUTHORIZATION_RECHECK && authorized.current())
                     .map(|(_, authorized, granted)| (authorized.clone(), granted.clone()));
+                // With a reusable grant, messages and presence come from shared reads;
+                // never make them wait behind this subscriber's unread query, which
+                // runs on the next pass instead.
+                let defer_unread = reusable.is_some() && (messages_dirty || presence_dirty);
+                let work = store::Refresh {
+                    messages: std::mem::take(&mut messages_dirty),
+                    presence: std::mem::take(&mut presence_dirty),
+                    unread: !defer_unread && std::mem::take(&mut unread_dirty),
+                };
                 let (authorized, result) = if let Some((authorized, granted)) = reusable {
                     let shared = feed.clone();
                     let result = crate::performance::blocking(move || {
@@ -313,7 +392,15 @@ pub(super) async fn serve(
                     }));
                     (authorized, result)
                 };
+                if transient(&result) {
+                    // Fail closed: deliver nothing, keep the work and retry shortly.
+                    if !trouble.retry() { let _ = send(&mut socket, unavailable(id)).await; break; }
+                    messages_dirty |= work.messages; presence_dirty |= work.presence; unread_dirty |= work.unread;
+                    retry_at = Some(Instant::now() + TRANSIENT_RETRY);
+                    continue;
+                }
                 let Ok(Ok((unread, poll))) = result else { let _ = send(&mut socket, ServerEvent::Revoked {}).await; break; };
+                trouble.clear();
                 let Some(_delivery) = authorized.deliver() else { let _ = send(&mut socket, ServerEvent::Revoked {}).await; break; };
                 let delivery = async {
                     if let Some(unread) = unread && unread != last_unread {
@@ -340,7 +427,11 @@ pub(super) async fn serve(
                 if let Some(sub) = subscription && let Some(channel) = sub.channel {
                     if revoked.has_changed().unwrap_or(true) || session_revoked.has_changed().unwrap_or(true) { let _ = send(&mut socket, ServerEvent::Revoked {}).await; break; }
                     let p = pool.clone(); let t = token.clone();
-                    if !matches!(crate::performance::blocking(move || store::presence(&p, &t, sub.guild, channel, connection, None)).await, Ok(Ok(_))) {
+                    let result = crate::performance::blocking(move || store::presence(&p, &t, sub.guild, channel, connection, None)).await;
+                    // Typing also expires server-side; a transient failure only delays clearing it.
+                    if transient(&result) {
+                        if !trouble.retry() { let _ = send(&mut socket, unavailable(id)).await; break; }
+                    } else if !matches!(result, Ok(Ok(_))) {
                         let _ = send(&mut socket, ServerEvent::Revoked {}).await; break;
                     }
                 }
@@ -356,7 +447,13 @@ pub(super) async fn serve(
                         let checked = Instant::now();
                         let Some(authorized) = account_access.snapshot(guild_access.as_ref(), member_access.as_ref()) else { let _ = send(&mut socket, ServerEvent::Revoked {}).await; break; };
                         let p = pool.clone(); let t = token.clone();
-                        let Ok(Ok(channels)) = crate::performance::blocking(move || store::visible_voice_channels(&p, &t, sub.guild)).await else {
+                        let result = crate::performance::blocking(move || store::visible_voice_channels(&p, &t, sub.guild)).await;
+                        if transient(&result) {
+                            // No roster without a current check; the next tick retries.
+                            if !trouble.retry() { let _ = send(&mut socket, unavailable(id)).await; break; }
+                            continue;
+                        }
+                        let Ok(Ok(channels)) = result else {
                             let _ = send(&mut socket, ServerEvent::Revoked {}).await; break;
                         };
                         voice_visibility = Some((checked, authorized.clone(), channels.clone()));
@@ -398,7 +495,11 @@ pub(super) async fn serve(
                 if let Some(sub) = subscription {
                     let p = pool.clone(); let t = token.clone();
                     match crate::performance::blocking(move || store::maintain(&p, &t, sub.guild, sub.channel, connection)).await {
+                        Ok(Err(error)) if error.transient() => {
+                            if !trouble.retry() { let _ = send(&mut socket, unavailable(id)).await; break; }
+                        }
                         Ok(Ok(permissions)) => {
+                            trouble.clear();
                             // Expiring timeouts change grants without a write. Reconnect
                             // to refresh the client composer from an authorized snapshot.
                             if permissions != last_permissions {
@@ -410,11 +511,51 @@ pub(super) async fn serve(
                     }
                 } else {
                     let p = pool.clone(); let t = token.clone();
-                    if !matches!(crate::performance::blocking(move || auth::store::authenticate(&mut *auth::store::connection(&p)?, &t)).await, Ok(Ok(_))) { break; }
+                    let result = crate::performance::blocking(move || auth::store::authenticate(&mut *auth::store::connection(&p)?, &t)).await;
+                    if transient(&result) {
+                        if !trouble.retry() { let _ = send(&mut socket, unavailable(id)).await; break; }
+                    } else if !matches!(result, Ok(Ok(_))) { break; }
                 }
             }
         }
     }
     let _ = tokio::time::timeout(Duration::from_secs(1), socket.send(Message::Close(None))).await;
     let _ = crate::performance::blocking(move || store::cleanup(&pool, connection)).await;
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn coalescing_debounces_quiet_changes_and_spaces_busy_ones() {
+        let now = Instant::now();
+        let ms = Duration::from_millis;
+        // Quiet: only the short debounce.
+        assert_eq!(coalesced(None, now, ms(75), ms(1000)), now + ms(75));
+        assert_eq!(
+            coalesced(Some(now - ms(5000)), now, ms(75), ms(1000)),
+            now + ms(75)
+        );
+        // Busy: no sooner than one interval after the previous run.
+        assert_eq!(
+            coalesced(Some(now - ms(200)), now, ms(75), ms(1000)),
+            now + ms(800)
+        );
+        assert_eq!(
+            coalesced(Some(now - ms(950)), now, ms(75), ms(1000)),
+            now + ms(75)
+        );
+    }
+
+    #[test]
+    fn database_trouble_retries_within_the_grace_period_only() {
+        let mut trouble = Trouble::default();
+        assert!(trouble.retry());
+        assert!(trouble.retry());
+        trouble.0 = Some(Instant::now() - TRANSIENT_GRACE);
+        assert!(!trouble.retry());
+        trouble.clear();
+        assert!(trouble.retry());
+    }
 }

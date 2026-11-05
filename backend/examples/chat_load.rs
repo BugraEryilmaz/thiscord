@@ -35,6 +35,8 @@ type Socket = WebSocketStream<MaybeTlsStream<tokio::net::TcpStream>>;
 const PREFIX: &str = "chatload";
 /// Same per-account send budget as the server's sensitive chat limiter (30/min).
 const MAX_SENDS_PER_ACCOUNT_PER_MINUTE: f64 = 30.0;
+/// A socket refused at the server's connection limit before any database work.
+const REJECTED: &str = "Refused at the server's connection limit (429)";
 
 struct Config {
     http: url::Url,
@@ -46,6 +48,8 @@ struct Config {
     seconds: usize,
     late_ms: u64,
     full_client: bool,
+    /// Users refused at the connection limit are expected, not failures.
+    allow_rejected: bool,
     epoch: Instant,
     run: String,
 }
@@ -127,7 +131,14 @@ async fn connect(config: &Config, path: &str) -> Result<Socket> {
     )
     .await
     .map_err(|_| "WebSocket connection timeout")?
-    .map_err(|_| "WebSocket connection failed (capacity, address or TLS)")?;
+    .map_err(|error| match error {
+        tokio_tungstenite::tungstenite::Error::Http(response)
+            if response.status() == reqwest::StatusCode::TOO_MANY_REQUESTS =>
+        {
+            REJECTED
+        }
+        _ => "WebSocket connection failed (capacity, address or TLS)",
+    })?;
     Ok(socket)
 }
 async fn send_json(socket: &mut Socket, value: serde_json::Value) -> Result<()> {
@@ -406,8 +417,20 @@ fn report(
     let mut histogram = vec![0; 10_002];
     let (mut expected, mut missing, mut late, mut duplicates, mut invalid) = (0, 0, 0, 0, 0);
     let mut worst_missing = 0.0_f64;
-    let failures = receivers.iter().filter(|r| r.failed.is_some()).count();
+    let rejected = |r: &Receiver| config.allow_rejected && r.failed == Some(REJECTED);
+    let rejected_users = receivers.iter().filter(|r| rejected(r)).count();
+    let failures = receivers
+        .iter()
+        .filter(|r| r.failed.is_some() && !rejected(r))
+        .count();
+    let mut reasons = std::collections::BTreeMap::<&str, u64>::new();
+    for reason in receivers.iter().filter_map(|r| r.failed) {
+        *reasons.entry(reason).or_default() += 1;
+    }
     for (index, r) in receivers.iter().enumerate() {
+        if rejected(r) {
+            continue;
+        }
         // Only messages posted to this receiver's channel; senders receive their own.
         let mut own = Bits::new(config.messages());
         for sequence in 0..config.messages() {
@@ -435,7 +458,7 @@ fn report(
     let scheduled = config.messages() as u64;
     let passed = complete
         && failures == 0
-        && connected == config.users as u64
+        && connected + rejected_users as u64 == config.users as u64
         && send_errors == 0
         && sends.attempted == scheduled
         && invalid == 0
@@ -449,7 +472,7 @@ fn report(
             "sockets_per_user": if config.full_client { 3 } else { 1 },
             "rate_messages_per_second": config.rate, "duration_seconds": config.seconds,
             "late_threshold_ms": config.late_ms,
-            "connected_users": connected, "failed_users": failures,
+            "connected_users": connected, "rejected_users": rejected_users, "failed_users": failures, "failure_reasons": reasons,
             "scheduled_messages": scheduled, "attempted_messages": sends.attempted,
             "accepted_messages": sends.ok.count(), "send_errors": sends.errors,
             "send_p50_ms": p(&sends.histogram, 50), "send_p95_ms": p(&sends.histogram, 95), "send_p99_ms": p(&sends.histogram, 99),
@@ -469,7 +492,8 @@ async fn run() -> Result<bool> {
     let mut args = Args::parse()?;
     if args.flag("--help") {
         println!(
-            "chat_load --url http://127.0.0.1:3001 --allow-insecure --users 64 --rate 4 --seconds 60\nOptions: --users 2..500 (64), --text-channels 1..16 (1, must match the server),\n--rate 0..250 messages/s across all users (4; at most users/2 for the 30/min account limit),\n--seconds 1..3600 (60), --late-ms 1..10000 (1000), --chat-only (skip friends/notification sockets),\n--output report.json. Requires THISCORD_LOAD_SECRET matching voice_load_server. See docs/load-benchmarks.md."
+            "chat_load --url http://127.0.0.1:3001 --allow-insecure --users 64 --rate 4 --seconds 60\nOptions: --users 2..500 (64), --text-channels 1..16 (1, must match the server),\n--rate 0..250 messages/s across all users (4; at most users/2 for the 30/min account limit),\n--seconds 1..3600 (60), --late-ms 1..10000 (1000), --chat-only (skip friends/notification sockets), --allow-rejected (users refused at
+the connection limit are reported, not failures; the rest are measured),\n--output report.json. Requires THISCORD_LOAD_SECRET matching voice_load_server. See docs/load-benchmarks.md."
         );
         return Ok(true);
     }
@@ -488,6 +512,7 @@ async fn run() -> Result<bool> {
     let seconds = args.number("--seconds", 60, 1, 3600)?;
     let late_ms = args.number("--late-ms", 1000, 1, 10_000)? as u64;
     let full_client = !args.flag("--chat-only");
+    let allow_rejected = args.flag("--allow-rejected");
     let insecure = args.flag("--allow-insecure");
     let output = args.text("--output", "");
     args.finish()?;
@@ -514,6 +539,7 @@ async fn run() -> Result<bool> {
         seconds,
         late_ms,
         full_client,
+        allow_rejected,
         epoch: Instant::now(),
         run: uuid::Uuid::new_v4().simple().to_string()[..12].to_owned(),
     });
@@ -545,15 +571,28 @@ async fn run() -> Result<bool> {
         });
     }
     let started = Instant::now();
-    while connected.load(Relaxed) < users as u64
-        && started.elapsed() < Duration::from_secs(120)
-        && receivers.iter().all(|r| r.lock().unwrap().failed.is_none())
-    {
+    let settled = || {
+        receivers.iter().map(|r| r.lock().unwrap().failed).fold(
+            (0, false),
+            |(refused, failed), reason| match reason {
+                Some(REJECTED) if allow_rejected => (refused + 1, failed),
+                Some(_) => (refused, true),
+                None => (refused, failed),
+            },
+        )
+    };
+    let mut refused = 0;
+    while started.elapsed() < Duration::from_secs(120) {
+        let (rejected, failed) = settled();
+        refused = rejected;
+        if failed || connected.load(Relaxed) + rejected >= users as u64 {
+            break;
+        }
         tokio::time::sleep(Duration::from_millis(100)).await;
     }
     let all = connected.load(Relaxed);
     println!(
-        "Connected {all}/{users} users in {:.1}s",
+        "Connected {all}/{users} users in {:.1}s ({refused} refused at the limit)",
         started.elapsed().as_secs_f64()
     );
     let sends = Arc::new(Mutex::new(Sends {
@@ -561,7 +600,7 @@ async fn run() -> Result<bool> {
         histogram: vec![0; 10_002],
         ..Default::default()
     }));
-    let complete = if all == users as u64 {
+    let complete = if all + refused == users as u64 && !settled().1 {
         // Let subscription snapshots, rosters and member lists settle first.
         tokio::time::sleep(Duration::from_secs(3)).await;
         println!(
@@ -647,6 +686,7 @@ mod tests {
             seconds: 2,
             late_ms: 100,
             full_client: false,
+            allow_rejected: false,
             epoch: Instant::now(),
             run: "abc".into(),
         }

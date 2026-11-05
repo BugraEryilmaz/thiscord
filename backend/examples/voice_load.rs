@@ -718,21 +718,24 @@ fn report(
     let video_missing: u64 = video_deliveries.iter().map(|s| s.missing).sum();
     let video_late: u64 = video_deliveries.iter().map(|s| s.late).sum();
     // This is a configurable workload's conservative transport check, not a capacity guarantee.
-    let passed = complete
-        && failures == 0
-        && send_errors == 0
-        && invalid == 0
-        && skipped * 1000 <= scheduled
-        && expected > 0
-        && deliveries
+    // Every packet the generator did send arrived on time on every stream. Loss
+    // is counted against successful sends, so generator skips are not loss.
+    let delivered = |streams: &[Delivery]| {
+        streams
             .iter()
             .all(|s| s.expected > 0 && (s.missing + s.late) * 1000 <= s.expected)
-        && (!config.video()
-            || (video_skipped * 1000 <= video_scheduled
-                && video_expected > 0
-                && video_deliveries
-                    .iter()
-                    .all(|s| s.expected > 0 && (s.missing + s.late) * 1000 <= s.expected)));
+    };
+    let server_side_passed = complete
+        && failures == 0
+        && invalid == 0
+        && expected > 0
+        && delivered(&deliveries)
+        && (!config.video() || (video_expected > 0 && delivered(&video_deliveries)));
+    // The full verdict also requires the generator to have kept its schedule.
+    let passed = server_side_passed
+        && send_errors == 0
+        && skipped * 1000 <= scheduled
+        && (!config.video() || video_skipped * 1000 <= video_scheduled);
     // Built separately: one json! literal this large exceeds the macro recursion limit.
     let video = config.video().then(|| {
         json!({
@@ -747,7 +750,7 @@ fn report(
     });
     (
         json!({
-            "format_version": 1, "complete": complete, "passed": passed,
+            "format_version": 1, "complete": complete, "passed": passed, "server_side_passed": server_side_passed,
             "users": config.users, "room_size": config.room_size, "duration_seconds": config.seconds,
             "payload_bytes": config.bytes, "packets_per_second_per_sender": 50,
             "late_threshold_ms": config.late_ms, "relay_required": config.relay,
@@ -1034,8 +1037,62 @@ mod tests {
         assert!(report(&c, &stats, 0, true).1);
         assert!(!report(&c, &stats, 1, true).1);
         assert!(!report(&c, &stats, 0, false).1);
+        // An underdriven generator fails the run but not the server-side verdict.
         stats[0].lock().unwrap().attempted = 0;
+        let (r, pass) = report(&c, &stats, 0, true);
+        assert!(!pass);
+        assert_eq!(r["server_side_passed"], true);
+    }
+
+    #[test]
+    fn video_streams_are_accounted_separately_and_gate_the_verdict() {
+        let mut c = config();
+        c.camera_bitrate = 1_000_000;
+        // 1 Mbit/s at 30 fps in equal packets of at most 1100 bytes.
+        assert_eq!(c.video_packets_per_frame(), 4);
+        assert_eq!(c.video_packet_bytes(), 1041);
+        let video = c.video_packets();
+        let stats: Vec<_> = (0..4)
+            .map(|_| Arc::new(Mutex::new(Stats::new(50, video, 2))))
+            .collect();
+        for (index, s) in stats.iter().enumerate() {
+            let mut s = s.lock().unwrap();
+            for n in 0..50 {
+                s.sent.insert(n);
+                s.streams[1 - index % 2].record(n, 5, 100);
+            }
+            s.attempted = 50;
+            for n in 0..video {
+                s.video_sent.insert(n);
+            }
+            s.video_attempted = video as u64;
+        }
+        // Audio alone is complete; every camera stream is still missing.
+        let (r, pass) = report(&c, &stats, 0, true);
+        assert!(!pass);
+        assert_eq!(r["video"]["expected_deliveries"], 4 * video);
+        assert_eq!(r["video"]["missing"], 4 * video);
+        for (index, s) in stats.iter().enumerate() {
+            for n in 0..video {
+                s.lock().unwrap().video_streams[1 - index % 2].record(n, 5, 100);
+            }
+        }
+        assert!(report(&c, &stats, 0, true).1);
+        // Late camera packets fail the run like missing ones.
+        stats[0].lock().unwrap().video_streams[1].late = video as u64;
         assert!(!report(&c, &stats, 0, true).1);
+        // A video payload carries its NAL byte before the measurement header.
+        let mut stats = Stats::new(50, video, 2);
+        let mut payload = vec![0; c.video_packet_bytes()];
+        payload[0] = 0x65;
+        payload[1..9].copy_from_slice(MAGIC);
+        payload[9..17].copy_from_slice(&c.run);
+        payload[17..21].copy_from_slice(&1_u32.to_be_bytes());
+        payload[21..25].copy_from_slice(&3_u32.to_be_bytes());
+        receive(&c, 0, &mut stats, &payload);
+        assert_eq!(stats.video_streams[1].received.count(), 1);
+        assert_eq!(stats.streams[1].received.count(), 0);
+        assert_eq!(stats.invalid, 0);
     }
 
     #[test]

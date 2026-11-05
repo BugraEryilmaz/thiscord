@@ -38,10 +38,16 @@ pub fn router_with_limits(
 /// For the disposable load-test server only: voice admits exactly the fixture's
 /// users, sockets at least that many. Production limits come from `Limits`.
 #[cfg(feature = "load-test")]
-pub fn load_test_router(pool: DbPool, origins: Vec<HeaderValue>, connections: usize) -> Router {
+pub fn load_test_router(
+    pool: DbPool,
+    origins: Vec<HeaderValue>,
+    connections: usize,
+    sockets: Option<usize>,
+) -> Router {
+    // The disposable fixture's account range; production limits are `Limits`.
     assert!((2..=500).contains(&connections));
     let limits = Limits {
-        sockets: connections.max(crate::limits::DEFAULT_SOCKETS),
+        sockets: sockets.unwrap_or(connections.max(crate::limits::DEFAULT_SOCKETS)),
         voice: connections,
     };
     routes(Some(pool), origins, limits)
