@@ -3,6 +3,7 @@
 //! elsewhere they fall back to one call per datagram.
 use bytes::BytesMut;
 use std::{io, net::SocketAddr};
+#[cfg(target_os = "linux")]
 use tokio::io::Interest;
 
 /// Datagrams per receive call. A full batch is drained again before the shard
