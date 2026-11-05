@@ -65,7 +65,7 @@ pub fn grid(width: f64, height: f64, gap: f64, aspects: &[f64]) -> Placement {
     let floor = MIN_TILE_SIDE.min(width.min(height) * 0.5);
     let typical = best.iter().map(|r| r.area().sqrt()).sum::<f64>() / best.len() as f64;
     let narrowest = MIN_TILE_WIDTH.min(width * 0.5);
-    if typical >= floor && best.iter().all(|r| r.w >= narrowest * 0.9) {
+    if typical >= floor && best.iter().all(|r| r.w >= narrowest * 0.6) {
         return Placement {
             tiles: best,
             stage: None,
@@ -114,14 +114,14 @@ fn best_rows(width: f64, height: f64, gap: f64, aspects: &[f64]) -> Vec<Rect> {
     let n = aspects.len();
     let narrowest = MIN_TILE_WIDTH.min(width * 0.65);
     // A tile below the width floor costs score in proportion to the shortfall
-    // (cubed): a portrait sliver loses, but a couple of pixels never outweigh
+    // (to the sixth power): a portrait sliver loses, but a couple of pixels never outweigh
     // badly uneven rows.
     let mut best: Option<(f64, Vec<Rect>)> = None;
     let mut consider = |rows: &[usize]| {
         for mode in [Rows::Justified, Rows::Uniform, Rows::Capped] {
             let tiles = place_rows(width, height, gap, aspects, rows, mode);
             let thinnest = tiles.iter().map(|t| t.w).fold(f64::INFINITY, f64::min);
-            let floor = (thinnest / narrowest).min(1.0).powi(3);
+            let floor = (thinnest / narrowest).min(1.0).powi(6);
             let score = score(&tiles, rows) * floor;
             if best.as_ref().is_none_or(|(s, _)| score > *s + 1e-6) {
                 best = Some((score, tiles));
@@ -1089,6 +1089,12 @@ mod tests {
         // The 7-stream call at 1024 (640x630): a balanced split leaves the
         // portrait just under 96px; it must still win over rows ~3x apart.
         let call = [WIDE, WIDE, 0.5625, WIDE, 2.39, 4.0 / 3.0, WIDE];
+        // Laptop-sized areas never fall back to scrolling for this call.
+        for h in [560.0, 590.0, 610.0, 630.0, 660.0] {
+            for w in [620.0, 640.0, 664.0] {
+                assert!(!grid(w, h, 12.0, &call).scrolls, "{w}x{h}");
+            }
+        }
         let p = grid(640.0, 630.0, 12.0, &call);
         let (low, high) = p.tiles.iter().fold((f64::INFINITY, 0.0f64), |(l, h), t| {
             (l.min(t.h), h.max(t.h))
