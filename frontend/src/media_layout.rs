@@ -341,7 +341,7 @@ pub fn focus(width: f64, height: f64, gap: f64, aspects: &[f64], focused: usize)
             continue;
         }
         let stage = fit(width - side - gap, height);
-        let strip = side_rows(side, height, gap, &others);
+        let strip = best_rows(side, height, gap, &others);
         consider_strip(&mut best, true, stage, strip, typical);
     }
     for fraction in [0.22, 0.3, 0.38] {
@@ -364,7 +364,7 @@ pub fn focus(width: f64, height: f64, gap: f64, aspects: &[f64], focused: usize)
     let (mut stage, mut strip) = (stage, strip);
     if use_side && stage.h < height - 1.0 {
         let side = strip.iter().map(|r| r.x + r.w).fold(0.0, f64::max).max(1.0);
-        let fitted = side_rows(side, stage.h, gap, &others);
+        let fitted = best_rows(side, stage.h, gap, &others);
         if fitted
             .iter()
             .all(|t| t.w >= MIN_TILE_WIDTH.min(side * 0.65))
@@ -382,7 +382,7 @@ pub fn focus(width: f64, height: f64, gap: f64, aspects: &[f64], focused: usize)
         let side = strip.iter().map(|r| r.x + r.w).fold(0.0, f64::max);
         let spare = width - gap - stage.w - side;
         if spare > 4.0 {
-            let wider = side_rows((side + spare).min(width * 0.5), height, gap, &others);
+            let wider = best_rows((side + spare).min(width * 0.5), height, gap, &others);
             if typical(&wider) > typical(&strip) {
                 strip = wider;
             }
@@ -441,36 +441,6 @@ pub fn focus(width: f64, height: f64, gap: f64, aspects: &[f64], focused: usize)
         height,
         scrolls: false,
     }
-}
-
-/// A strip beside the stage: one column, or two columns of paired tiles when a
-/// single column would not fit; never a ragged mix.
-fn side_rows(width: f64, height: f64, gap: f64, aspects: &[f64]) -> Vec<Rect> {
-    let n = aspects.len();
-    let mut options = vec![vec![1; n]];
-    if n >= 4 {
-        let mut pairs = vec![2; n / 2];
-        if n % 2 == 1 {
-            pairs.push(1);
-        }
-        options.push(pairs);
-    }
-    let narrowest = MIN_TILE_WIDTH.min(width * 0.65);
-    let mut best: Option<(bool, f64, Vec<Rect>)> = None;
-    for rows in options {
-        for mode in [Rows::Justified, Rows::Uniform] {
-            let tiles = place_rows(width, height, gap, aspects, &rows, mode);
-            let wide = tiles.iter().all(|t| t.w >= narrowest);
-            let area: f64 = tiles.iter().map(Rect::area).sum();
-            if best
-                .as_ref()
-                .is_none_or(|(w, a, _)| (wide, area) > (*w, *a + 1e-6))
-            {
-                best = Some((wide, area, tiles));
-            }
-        }
-    }
-    best.map(|(_, _, tiles)| tiles).unwrap_or_default()
 }
 
 /// A strip under the stage: one row, or two rows of balanced length, so no
