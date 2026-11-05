@@ -117,7 +117,8 @@ def report_fields(path):
     for key in ("passed", "server_side_passed", "missing_percent", "path_p50_ms", "path_p99_ms",
                 "delivery_p50_ms", "delivery_p99_ms", "send_p99_ms", "send_errors",
                 "accepted_messages", "scheduled_messages", "failed_clients", "failed_users",
-                "failure_reasons", "connected_users", "late", "missing", "generator_skipped"):
+                "failure_reasons", "connected_users", "connect_seconds", "late", "missing",
+                "generator_skipped"):
         if key in report:
             out[key] = report[key]
     if report.get("video"):

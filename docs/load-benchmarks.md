@@ -213,8 +213,10 @@ On the production layout (both vCPUs shared with PostgreSQL and the OS):
   most people share cameras saturate the host at roughly 40–50 camera users.
   Lower the limit for camera-heavy communities.
 - Chat: `THISCORD_MAX_SOCKETS` defaults to 512 per socket type (before: a fixed
-  128). 500 full clients connect without failures, idle at about a quarter of
-  the host, and receive 2 msg/s in one shared channel within a second.
+  128). 512 full clients connect without failures (in 28–30 s), idle at
+  about a third of the host (server plus PostgreSQL), and at 2 msg/s in one
+  shared channel are at the edge: one of two runs delivered everything within
+  a second, the other had 0.66% of deliveries later than that.
 - Combined: about 32 people in voice while 128 are active in chat at 2 msg/s.
   The defaults are sized for one workload at a time: 96 voice users and 512
   chat clients together overload the host (see the mixed-load table). A
