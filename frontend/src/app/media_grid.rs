@@ -741,7 +741,9 @@ pub(super) fn ScreenViewer(
                             let label = tile_label(tile.0.display_name(), tile.1);
                             let short = tile.0.display_name().to_owned();
                             let camera = tile.1 == MediaKind::Camera;
-                            view!{<button type="button" class="media-chip" data-chip-key=key_text(key) data-tip=move ||crate::i18n::t("Show again")
+                            view!{<button type="button" class="media-chip" data-chip-key=key_text(key)
+                                on:blur=move |e|{if let Some(t)=e.target().and_then(|t|t.dyn_into::<web_sys::Element>().ok()){let _=t.remove_attribute("data-keyboard");}}
+                                data-tip=move ||crate::i18n::t("Show again")
                                 aria-label=move ||localized_format!(crate::i18n::language(), "Show {}", label)
                                 on:click=move |_|restore(key)>
                                 <Icon kind=if camera {Glyph::Camera} else {Glyph::Screen}/><span class="truncate">{short}</span><Icon kind=Glyph::Eye/>
@@ -755,14 +757,17 @@ pub(super) fn ScreenViewer(
                 <span class="media-bar-hint" class:hidden=move ||{!several() || tips.get() >= TIP_USES}>{move ||if focused() {crate::i18n::t("Click a stream to put it on the stage · Esc returns to the grid")} else {crate::i18n::t("Click to focus · Drag to rearrange")}}</span>
                 <span class="media-bar-hint-touch" class:hidden=move ||{!several() || tips.get() >= TIP_USES}>{move ||if focused() {crate::i18n::t("Tap a stream to put it on the stage")} else {crate::i18n::t("Tap to focus · ⋯ to move or hide")}}</span>
                 <Show when=move ||{several() && tips.get() >= TIP_USES}>
-                    <div class="media-bar-help-wrap">
+                    <div class="media-bar-help-wrap" on:focusout=move |e: web_sys::FocusEvent|{
+                        let inside=e.related_target().and_then(|t|t.dyn_into::<web_sys::Element>().ok()).is_some_and(|t|t.closest(".media-bar-help-wrap").ok().flatten().is_some());
+                        if !inside {help.set(false);}
+                    }>
                         <button type="button" class="icon-button media-bar-help" aria-label=move ||crate::i18n::t("Grid gestures")
                             aria-expanded=move ||help.get().to_string() aria-controls=format!("media-help-{grid_id}")
                             on:pointerdown=move |e|e.stop_propagation()
                             on:click=move |_|help.set(!help.get_untracked())><Icon kind=Glyph::Help/></button>
                         <Show when=move ||help.get()>
                             <p class="media-help-popover" id=format!("media-help-{grid_id}") role="note" on:pointerdown=move |e|e.stop_propagation()>
-                                <span class="media-help-pointer">{move ||crate::i18n::t("Click a stream to focus it · Drag to rearrange · Right-click or ⋯ for options · On a focused stream: Enter, F, Alt+arrows")}</span>
+                                <span class="media-help-pointer">{move ||crate::i18n::t("Click a stream to focus it · Drag to rearrange · Right-click or ⋯ for options · On a focused tile: Enter focuses or puts it on the stage, F, Alt+arrows")}</span>
                                 <span class="media-help-touch">{move ||crate::i18n::t("Tap a stream to focus it · Tap ⋯ to move, hide or go full screen")}</span>
                             </p>
                         </Show>
@@ -956,6 +961,7 @@ pub(super) fn ScreenViewer(
                             <span class="media-quality-full" aria-hidden="true">{move ||quality.get().map(|q|q.0).unwrap_or_default()}
                                 {move ||quality.get().and_then(|q|q.1).map(|rate|view!{" · "{rate}})}</span>
                             <span class="media-quality-compact" aria-hidden="true">{move ||quality.get().map(|q|q.3).unwrap_or_default()}</span>
+                            <span class="media-quality-min" aria-hidden="true">{move ||quality.get().map(|q|q.0).unwrap_or_default()}</span>
                         </span>
                     </Show>
                     <super::screen::StreamWatchers ui=ui owner=owner kind=kind epoch=epoch id=watchers_id.clone()/>
@@ -991,7 +997,11 @@ pub(super) fn ScreenViewer(
                                 announce(localized_format!(crate::i18n::language(), "Hidden: {}", tile_name(key)));
                                 leptos::task::spawn_local(async move {
                                     gloo_timers::future::TimeoutFuture::new(0).await;
-                                    if !focus_selector(&format!(".media-chip[data-chip-key='{}']", key_text(key))) {
+                                    let chip = format!(".media-chip[data-chip-key='{}']", key_text(key));
+                                    if let Some(found) = document().query_selector(&chip).ok().flatten() {
+                                        let _ = found.set_attribute("data-keyboard", "");
+                                    }
+                                    if !focus_selector(&chip) {
                                         focus_selector(".media-bar-hidden .media-chip");
                                     }
                                 });

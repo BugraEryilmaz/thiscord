@@ -118,23 +118,31 @@ pub(super) fn Host() -> impl IntoView {
         });
     });
     // Labels can change while shown (live stream quality); follow them.
-    let live = set_interval_with_handle(
-        move || {
-            if !visible.try_get_untracked().unwrap_or(false) {
-                return;
+    let live = StoredValue::new_local(None::<IntervalHandle>);
+    Effect::new(move |_| {
+        if visible.get() {
+            if live.with_value(Option::is_none) {
+                let handle = set_interval_with_handle(
+                    move || {
+                        if let Some(label) = active
+                            .try_get_value()
+                            .flatten()
+                            .and_then(|e| e.get_attribute("data-tip"))
+                            && text.try_get_untracked().is_some_and(|t| t != label)
+                        {
+                            text.set(label);
+                        }
+                    },
+                    std::time::Duration::from_millis(400),
+                )
+                .ok();
+                live.set_value(handle);
             }
-            if let Some(label) = active
-                .try_get_value()
-                .flatten()
-                .and_then(|e| e.get_attribute("data-tip"))
-                && text.try_get_untracked().is_some_and(|t| t != label)
-            {
-                text.set(label);
-            }
-        },
-        std::time::Duration::from_millis(400),
-    )
-    .ok();
+        } else if let Some(handle) = live.get_value() {
+            handle.clear();
+            live.set_value(None);
+        }
+    });
     let over = window_event_listener(leptos::ev::mouseover, move |e| show(trigger(e.target())));
     let focus = window_event_listener(leptos::ev::focusin, move |e| show(trigger(e.target())));
     let out = window_event_listener(leptos::ev::mouseout, move |e| {
@@ -154,8 +162,8 @@ pub(super) fn Host() -> impl IntoView {
     let fullscreen = window_event_listener(leptos::ev::fullscreenchange, move |_| clear());
     let wheel = window_event_listener(leptos::ev::wheel, move |_| clear());
     on_cleanup(move || {
-        if let Some(live) = live {
-            live.clear();
+        if let Some(handle) = live.try_get_value().flatten() {
+            handle.clear();
         }
         over.remove();
         focus.remove();

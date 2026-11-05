@@ -58,7 +58,7 @@ Notes and conflict rules:
   soundboard sounds use the same arrow movement.
 - Theme and accent pickers are radio groups: arrows move and select.
 - Call media tiles are buttons with two Tab stops (the tile and its options
-  button, plus the viewer avatars as one group): Enter/Space focuses or unfocuses
+  button; viewer names are part of the tile's description): Enter/Space focuses or unfocuses
   a stream, F opens full screen, Alt+←/→ (or ↑/↓) moves it, Alt+Home/End moves it
   to the start or end, and Shift+F10 or the context-menu key opens its options.
   Focus stays on the tile (or the menu item) across repeated moves. The options
@@ -67,8 +67,9 @@ Notes and conflict rules:
   Hiding a stream moves focus to its chip in the bar; restoring it from the chip
   focuses the tile again. Tabbing out of an open options menu closes it.
   Escape leaves focus mode only while the media view has focus, or nothing
-  does and the last click was inside it. A polite live region announces moves, focus and hide/restore; tile animations
-  stop under reduced motion.
+  does and the last click was inside it. Focus the app moves (after hide or
+  restore) shows a visible ring. A polite live region announces moves, focus and
+  hide/restore; tile animations stop under reduced motion.
 
 ## Dialogs
 

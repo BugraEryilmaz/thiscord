@@ -1686,9 +1686,9 @@
   "Click a stream to put it on the stage · Esc returns to the grid": "Sahneye almak için bir yayına tıkla · Izgaraya dönmek için Esc",
   "Enter to focus, F for full screen, Alt and arrow keys to move, Shift+F10 for options.": "Odaklamak için Enter, tam ekran için F, taşımak için Alt ve ok tuşları, seçenekler için Shift+F10.",
   "Grid gestures": "Izgara hareketleri",
-  "Click a stream to focus it · Drag to rearrange · Right-click or ⋯ for options · On a focused stream: Enter, F, Alt+arrows": "Odaklamak için bir yayına tıkla · Yerini değiştirmek için sürükle · Seçenekler için sağ tıkla veya ⋯ · Seçili yayında: Enter, F, Alt+oklar",
   "Tap a stream to put it on the stage": "Sahneye almak için bir yayına dokun",
   "Tap to focus · ⋯ to move or hide": "Odaklamak için dokun · Taşımak veya gizlemek için ⋯",
   "Put on stage": "Sahneye al",
-  "Tap a stream to focus it · Tap ⋯ to move, hide or go full screen": "Odaklamak için bir yayına dokun · Taşımak, gizlemek veya tam ekran için ⋯ simgesine dokun"
+  "Tap a stream to focus it · Tap ⋯ to move, hide or go full screen": "Odaklamak için bir yayına dokun · Taşımak, gizlemek veya tam ekran için ⋯ simgesine dokun",
+  "Click a stream to focus it · Drag to rearrange · Right-click or ⋯ for options · On a focused tile: Enter focuses or puts it on the stage, F, Alt+arrows": "Odaklamak için bir yayına tıkla · Yerini değiştirmek için sürükle · Seçenekler için sağ tıkla veya ⋯ · Seçili kutucukta: Enter odaklar veya sahneye alır, F, Alt+oklar"
 }
