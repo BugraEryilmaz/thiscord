@@ -25,8 +25,10 @@ moving the others, and hiding a stream repacks the rest. The layout reflows when
 the window resizes, a stream starts or stops, or a stream's shape changes (a
 quality change of the same shape does not move anything). When tiles would
 become too small (phones, very large calls) the area scrolls in readable columns
-instead. Portrait streams never shrink to slivers: an arrangement that keeps every
-tile at least about 96px wide wins.
+instead. Portrait streams never shrink to slivers: arrangements that keep every tile
+at least about 96px wide are strongly preferred, though a few pixels less is
+accepted when it keeps rows even. In focus mode the stage comes first, so strip
+thumbnails may be smaller.
 
 Each tile shows the sharer's avatar and name, a screen or camera icon, live
 quality such as **1080p · 30 fps** or **4K · 60 fps** (the resolution and frame

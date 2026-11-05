@@ -914,7 +914,7 @@ button.stream-live-badge:hover { background: color-mix(in srgb, var(--color-dang
 @container (max-width: 150px) or (max-height: 96px) { .media-tile-actions { top: 4px; right: 4px; } .media-tile-actions > :not(.media-tile-more) { display: none; } .media-tile-caption { max-width: calc(100% - 16px); min-height: 24px; padding: 0 8px 0 4px; } .media-tile:hover .media-tile-caption, .media-tile:focus-within .media-tile-caption, .media-tile.menu-open .media-tile-caption { max-width: calc(100% - 44px); } }
 .media-quality-compact { display: none; }
 @container (max-width: 240px) or (max-height: 130px) { .media-quality-full, .media-tile .stream-watchers { display: none; } .media-quality-compact { display: inline; } .media-quality { left: 4px; bottom: 4px; padding: 0 8px; line-height: 20px; } }
-@container (max-width: 96px) or (max-height: 60px) { .media-quality { display: none; } }
+@container (max-width: 88px) or (max-height: 60px) { .media-quality { display: none; } }
 @container (max-height: 90px) { .media-tile-actions { top: 4px; right: 4px; } }
 @container (max-width: 130px) or (max-height: 100px) { .media-tile-name { display: none; } .media-tile-caption { padding: 0 4px; } }
 /* Fullscreen (or the expanded fallback where WebViews lack it) drops the layout box. */
