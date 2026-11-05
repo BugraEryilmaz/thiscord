@@ -8514,7 +8514,7 @@ dependencies = [
 
 [[package]]
 name = "thiscord-backend"
-version = "0.1.55"
+version = "0.1.56"
 dependencies = [
  "argon2",
  "async-trait",
@@ -8561,7 +8561,7 @@ dependencies = [
 
 [[package]]
 name = "thiscord-frontend"
-version = "0.1.55"
+version = "0.1.56"
 dependencies = [
  "ashpd",
  "async-trait",
@@ -8640,7 +8640,7 @@ dependencies = [
 
 [[package]]
 name = "thiscord-shared"
-version = "0.1.55"
+version = "0.1.56"
 dependencies = [
  "base64 0.22.1",
  "chrono",
