@@ -42,9 +42,10 @@ keyboard icon in the bar keeps the gestures and shortcuts one hover away.
 
 - **Focus** (click a tile, or Enter) puts it on a large stage with the other
   streams in a strip beside or below it; click a strip tile or drop it on the
-  stage to swap. Click the stage again, press Escape (while the media view or
-  nothing has keyboard focus) or choose **Back to grid** to return. With a
-  single stream there is nothing to focus, so clicking it opens full screen.
+  stage to swap. Click the stage again, press Escape (while the media view has
+  keyboard focus, or nothing does and you last clicked in it) or choose **Back
+  to grid** to return. With a single stream there is nothing to focus, so
+  clicking it opens full screen.
 - **Rearrange** by dragging a tile onto another (mouse or pen); the grid makes
   room as you drag, and pressing Escape or dropping outside the grid puts
   everything back. **Move to start**, **Move earlier**, **Move later** and

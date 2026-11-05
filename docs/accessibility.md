@@ -64,7 +64,8 @@ Notes and conflict rules:
   Focus stays on the tile (or the menu item) across repeated moves. The options
   menu holds only menu items (moves that are not possible stay focusable and are
   announced as unavailable); volume sliders follow it as a labelled group.
-  Escape leaves focus mode only while the media view, or nothing, has focus. A
+  Escape leaves focus mode only while the media view has focus, or nothing
+  does and the last click was inside it. A
   polite live region announces moves, focus and hide/restore; tile animations
   stop under reduced motion.
 

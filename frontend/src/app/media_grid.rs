@@ -482,11 +482,34 @@ pub(super) fn ScreenViewer(
             used();
         }
         match next {
-            Some(key) => announce(localized_format!(
-                crate::i18n::language(),
-                "Focused: {}",
-                tile_name(key)
-            )),
+            Some(key) => {
+                let quality = dims.with_untracked(|d| d.get(&key).copied()).map(|(w, h)| {
+                    let rate = media_layout::nominal_fps(
+                        rates
+                            .with_untracked(|r| r.get(&key).copied())
+                            .unwrap_or_default(),
+                    );
+                    let resolution = media_layout::resolution_label(w, h);
+                    if rate > 0 {
+                        format!(
+                            "{resolution} · {}",
+                            localized_format!(crate::i18n::language(), "{} fps", rate)
+                        )
+                    } else {
+                        resolution
+                    }
+                });
+                let name = tile_name(key);
+                let what = match quality {
+                    Some(quality) => format!("{name} ({quality})"),
+                    None => name,
+                };
+                announce(localized_format!(
+                    crate::i18n::language(),
+                    "Focused: {}",
+                    what
+                ))
+            }
             None if previous.is_some() => announce(crate::i18n::t("Showing all streams").into()),
             None => {}
         }
@@ -682,7 +705,7 @@ pub(super) fn ScreenViewer(
             let top = root.get_bounding_client_rect().top() + target.y - root.scroll_top() as f64;
             let needed = popover.scroll_height() as f64;
             let below = viewport - (top + 48.0) - 8.0;
-            let above = top + target.h - 48.0 - 8.0;
+            let above = top - 4.0 - 8.0;
             let up = needed > below && above > below;
             let room = if up { above } else { below };
             let next = (up, (needed > room).then_some(room.max(160.0)));
@@ -941,7 +964,7 @@ pub(super) fn ScreenViewer(
                             on:pointerdown=move |e|e.stop_propagation() on:click=move |e|e.stop_propagation()>
                             <p class="context-heading" aria-hidden="true">{label_heading.clone()}
                                 {move ||quality.get().map(|q|view!{<span class="context-heading-detail">{q.2}</span>})}</p>
-                            <div class="media-menu-items" role="menu" aria-label=label_menu.clone() on:keydown=move |e|super::keyboard::rove_items(&e,"[role=menuitem]")>
+                            <div class="media-menu-items" role="menu" aria-label={let name=label_menu.clone(); move ||match quality.get() {Some(q)=>format!("{name}, {}",q.2),None=>name.clone()}} on:keydown=move |e|super::keyboard::rove_items(&e,"[role=menuitem]")>
                             <Show when=several>
                                 <button type="button" role="menuitem" class="context-item" on:click=move |_|{toggle_focus();close_menu(false);}>
                                     {move ||view!{<Icon kind=if on_stage.get() {Glyph::Grid} else {Glyph::Spotlight}/>}}
