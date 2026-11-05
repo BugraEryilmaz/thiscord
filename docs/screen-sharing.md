@@ -28,9 +28,8 @@ become too small (phones, very large calls) the area scrolls in readable columns
 instead. Portrait streams never shrink to slivers: arrangements that keep every tile
 at least about 96px wide are strongly preferred, though a few pixels less is
 accepted when it keeps rows even. In focus mode the stage comes first, so strip
-thumbnails may be smaller, down to about 60px wide (a soft floor; otherwise a
-side column is used). Thumbnails narrower than about 88px show the resolution
-alone, and the narrowest keep the screen or camera icon over the avatar.
+thumbnails may be smaller, though never under about 60px wide (a side column
+is used instead).
 
 Each tile shows the sharer's avatar and name, a screen or camera icon, live
 quality such as **1080p · 30 fps** or **4K · 60 fps** (the resolution and frame
