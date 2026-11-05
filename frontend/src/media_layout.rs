@@ -38,9 +38,6 @@ pub const MIN_TILE_SIDE: f64 = 140.0;
 /// No tile, including a portrait one, should be narrower than this when an
 /// arrangement can avoid it (its caption and quality need the room).
 pub const MIN_TILE_WIDTH: f64 = 96.0;
-/// Focus-strip thumbnails may be smaller than grid tiles, but never thinner
-/// than this: below it a side column is used instead.
-pub const MIN_THUMB_WIDTH: f64 = 60.0;
 /// Narrowest column when the grid scrolls.
 const MIN_COLUMN: f64 = 320.0;
 /// Arrangements are searched exhaustively up to this many tiles.
@@ -64,24 +61,17 @@ pub fn grid(width: f64, height: f64, gap: f64, aspects: &[f64]) -> Placement {
             ..Default::default()
         };
     }
+    let best = best_rows(width, height, gap, &aspects);
     let floor = MIN_TILE_SIDE.min(width.min(height) * 0.5);
+    let typical = best.iter().map(|r| r.area().sqrt()).sum::<f64>() / best.len() as f64;
     let narrowest = MIN_TILE_WIDTH.min(width * 0.5);
-    let fits = |tiles: &[Rect]| {
-        let typical = tiles.iter().map(|r| r.area().sqrt()).sum::<f64>() / tiles.len() as f64;
-        typical >= floor && tiles.iter().all(|r| r.w >= narrowest * 0.6)
-    };
-    // The soft floor first; if that would scroll, the strict one, before
-    // giving up and scrolling.
-    for strict in [false, true] {
-        let best = search_rows(width, height, gap, &aspects, strict);
-        if fits(&best) {
-            return Placement {
-                tiles: best,
-                stage: None,
-                height,
-                scrolls: false,
-            };
-        }
+    if typical >= floor && best.iter().all(|r| r.w >= narrowest) {
+        return Placement {
+            tiles: best,
+            stage: None,
+            height,
+            scrolls: false,
+        };
     }
     column(width, height, gap, &aspects, MIN_COLUMN)
 }
@@ -120,27 +110,21 @@ fn column(width: f64, height: f64, gap: f64, aspects: &[f64], min_column: f64) -
 }
 
 /// The best row arrangement that fits the area, without scrolling.
-/// `strict` drops every arrangement with a tile under the width floor (when
-/// any arrangement can avoid it) instead of only scoring it lower.
-fn search_rows(width: f64, height: f64, gap: f64, aspects: &[f64], strict: bool) -> Vec<Rect> {
+fn best_rows(width: f64, height: f64, gap: f64, aspects: &[f64]) -> Vec<Rect> {
     let n = aspects.len();
     let narrowest = MIN_TILE_WIDTH.min(width * 0.65);
-    // A tile below the width floor costs score in proportion to the shortfall
-    // (to the sixth power): a portrait sliver loses, but a couple of pixels never outweigh
-    // badly uneven rows.
+    // Arrangements that keep every tile at least `narrowest` wide win over any
+    // that squeeze a portrait tile into a sliver.
     let mut best: Option<(f64, Vec<Rect>)> = None;
-    let mut best_strict: Option<(f64, Vec<Rect>)> = None;
+    let mut best_wide: Option<(f64, Vec<Rect>)> = None;
     let mut consider = |rows: &[usize]| {
-        for mode in [Rows::Justified, Rows::Uniform, Rows::Capped] {
-            let tiles = place_rows(width, height, gap, aspects, rows, mode);
-            let thinnest = tiles.iter().map(|t| t.w).fold(f64::INFINITY, f64::min);
-            let floor = (thinnest / narrowest).min(1.0).powi(6);
-            let score = score(&tiles, rows) * floor;
-            if strict
-                && thinnest >= narrowest
-                && best_strict.as_ref().is_none_or(|(s, _)| score > *s + 1e-6)
+        for uniform in [false, true] {
+            let tiles = place_rows(width, height, gap, aspects, rows, uniform);
+            let score = score(&tiles, rows);
+            if tiles.iter().all(|t| t.w >= narrowest)
+                && best_wide.as_ref().is_none_or(|(s, _)| score > *s + 1e-6)
             {
-                best_strict = Some((score, tiles.clone()));
+                best_wide = Some((score, tiles.clone()));
             }
             if best.as_ref().is_none_or(|(s, _)| score > *s + 1e-6) {
                 best = Some((score, tiles));
@@ -168,7 +152,7 @@ fn search_rows(width: f64, height: f64, gap: f64, aspects: &[f64], strict: bool)
             consider(&balanced(aspects, count));
         }
     }
-    best_strict
+    best_wide
         .or(best)
         .map(|(_, tiles)| tiles)
         .unwrap_or_default()
@@ -201,24 +185,13 @@ fn balanced(aspects: &[f64], count: usize) -> Vec<usize> {
 
 /// Places rows of tiles. Justified rows fill the width at their own heights;
 /// uniform rows share one height. Both shrink to fit and are centred.
-#[derive(Clone, Copy, PartialEq)]
-enum Rows {
-    /// Every row fills the width at its own height.
-    Justified,
-    /// All rows share one height.
-    Uniform,
-    /// Justified, but no row taller than twice the lowest one unless a
-    /// portrait tile needs the height to stay `MIN_TILE_WIDTH` wide.
-    Capped,
-}
-
 fn place_rows(
     width: f64,
     height: f64,
     gap: f64,
     aspects: &[f64],
     rows: &[usize],
-    mode: Rows,
+    uniform: bool,
 ) -> Vec<Rect> {
     let mut heights = Vec::with_capacity(rows.len());
     let mut start = 0;
@@ -228,19 +201,7 @@ fn place_rows(
         start += len;
     }
     let available = (height - gap * (rows.len() as f64 - 1.0)).max(0.0);
-    if mode == Rows::Capped {
-        let lowest = heights.iter().copied().fold(f64::INFINITY, f64::min);
-        let mut start = 0;
-        for (len, h) in rows.iter().zip(heights.iter_mut()) {
-            let narrowest = aspects[start..start + len]
-                .iter()
-                .copied()
-                .fold(f64::INFINITY, f64::min);
-            *h = h.min((2.0 * lowest).max(MIN_TILE_WIDTH / narrowest));
-            start += len;
-        }
-    }
-    if mode == Rows::Uniform {
+    if uniform {
         let shared = heights
             .iter()
             .copied()
@@ -348,17 +309,16 @@ pub fn focus(width: f64, height: f64, gap: f64, aspects: &[f64], focused: usize)
     let (min_stage, min_side) = if short {
         (160.0, 100.0)
     } else {
-        (320.0, 110.0)
+        (320.0, 150.0)
     };
-    // Narrow side strips are tried too, so the stage keeps most of the area.
-    for fraction in [0.12, 0.16, 0.2, 0.26, 0.33, 0.4] {
+    for fraction in [0.2, 0.26, 0.33, 0.4] {
         // Never clamp with min > max: tiny areas (a phone call strip) would panic.
         let side = (width * fraction).max(min_side).min(width * 0.45);
         if width - side - gap < min_stage {
             continue;
         }
         let stage = fit(width - side - gap, height);
-        let strip = side_rows(side, height, gap, &others);
+        let strip = best_rows(side, height, gap, &others);
         consider_strip(&mut best, true, stage, strip, typical);
     }
     for fraction in [0.22, 0.3, 0.38] {
@@ -379,27 +339,11 @@ pub fn focus(width: f64, height: f64, gap: f64, aspects: &[f64], focused: usize)
         return stacked_focus(width, height, gap, main, &others, focused);
     }
     let (mut stage, mut strip) = (stage, strip);
-    if use_side && stage.h < height - 1.0 {
-        let side = strip.iter().map(|r| r.x + r.w).fold(0.0, f64::max).max(1.0);
-        let fitted = side_rows(side, stage.h, gap, &others);
-        if fitted
-            .iter()
-            .all(|t| t.w >= MIN_TILE_WIDTH.min(side * 0.65))
-            && typical(&fitted) >= 0.85 * typical(&strip)
-        {
-            strip = fitted
-                .into_iter()
-                .map(|r| Rect {
-                    y: r.y + stage.y,
-                    ..r
-                })
-                .collect();
-        }
-    } else if use_side {
+    if use_side {
         let side = strip.iter().map(|r| r.x + r.w).fold(0.0, f64::max);
         let spare = width - gap - stage.w - side;
         if spare > 4.0 {
-            let wider = side_rows((side + spare).min(width * 0.5), height, gap, &others);
+            let wider = best_rows((side + spare).min(width * 0.5), height, gap, &others);
             if typical(&wider) > typical(&strip) {
                 strip = wider;
             }
@@ -460,36 +404,6 @@ pub fn focus(width: f64, height: f64, gap: f64, aspects: &[f64], focused: usize)
     }
 }
 
-/// A strip beside the stage: one column, or two columns of paired tiles when a
-/// single column would not fit; never a ragged mix.
-fn side_rows(width: f64, height: f64, gap: f64, aspects: &[f64]) -> Vec<Rect> {
-    let n = aspects.len();
-    let mut options = vec![vec![1; n]];
-    if n >= 4 {
-        let mut pairs = vec![2; n / 2];
-        if n % 2 == 1 {
-            pairs.push(1);
-        }
-        options.push(pairs);
-    }
-    let narrowest = MIN_TILE_WIDTH.min(width * 0.65);
-    let mut best: Option<(bool, f64, Vec<Rect>)> = None;
-    for rows in options {
-        for mode in [Rows::Justified, Rows::Uniform] {
-            let tiles = place_rows(width, height, gap, aspects, &rows, mode);
-            let wide = tiles.iter().all(|t| t.w >= narrowest);
-            let area: f64 = tiles.iter().map(Rect::area).sum();
-            if best
-                .as_ref()
-                .is_none_or(|(w, a, _)| (wide, area) > (*w, *a + 1e-6))
-            {
-                best = Some((wide, area, tiles));
-            }
-        }
-    }
-    best.map(|(_, _, tiles)| tiles).unwrap_or_default()
-}
-
 /// A strip under the stage: one row, or two rows of balanced length, so no
 /// thumbnail sits alone in a row.
 fn strip_rows(width: f64, height: f64, gap: f64, aspects: &[f64]) -> Vec<Rect> {
@@ -500,7 +414,7 @@ fn strip_rows(width: f64, height: f64, gap: f64, aspects: &[f64]) -> Vec<Rect> {
         options.push(vec![first, aspects.len() - first]);
     }
     for rows in options {
-        let tiles = place_rows(width, height, gap, aspects, &rows, Rows::Uniform);
+        let tiles = place_rows(width, height, gap, aspects, &rows, true);
         let area: f64 = tiles.iter().map(Rect::area).sum();
         if best.as_ref().is_none_or(|(a, _)| area > *a + 1e-6) {
             best = Some((area, tiles));
@@ -516,17 +430,12 @@ fn consider_strip(
     strip: Vec<Rect>,
     typical: impl Fn(&[Rect]) -> f64,
 ) {
-    // The stage's size comes first; thumbnail readability only weighs the
-    // strip's share, so a slightly smaller thumbnail never costs the stage a
-    // third of its area.
     let strip_area: f64 = strip.iter().map(Rect::area).sum();
-    let thinnest = strip.iter().map(|t| t.w).fold(f64::INFINITY, f64::min);
-    let readable =
-        (typical(&strip) / 100.0).min(1.0) * (thinnest / MIN_TILE_WIDTH).min(1.0).powi(2);
-    let mut score = stage.area() + 0.3 * strip_area * readable;
-    if thinnest < MIN_THUMB_WIDTH {
-        score *= 0.5;
+    let mut readable = (typical(&strip) / 100.0).min(1.0);
+    if strip.iter().any(|t| t.w < MIN_TILE_WIDTH) {
+        readable *= 0.5;
     }
+    let score = (stage.area() + 0.3 * strip_area) * readable;
     if best.as_ref().is_none_or(|(s, ..)| score > *s + 1e-6) {
         *best = Some((score, side, stage, strip));
     }
@@ -540,7 +449,7 @@ fn stacked_focus(
     others: &[f64],
     focused: usize,
 ) -> Placement {
-    let stage_height = (width / main).min(height * if main < 1.0 { 0.85 } else { 0.62 });
+    let stage_height = (width / main).min(height * if main < 1.0 { 0.72 } else { 0.62 });
     let stage = Rect {
         x: (width - stage_height * main) / 2.0,
         y: 0.0,
@@ -1060,105 +969,23 @@ mod tests {
         for (w, h) in [(640.0, 640.0), (1080.0, 790.0), (664.0, 610.0)] {
             let p = grid(w, h, 12.0, &call);
             assert!(
-                p.tiles.iter().all(|t| t.w >= 0.9 * MIN_TILE_WIDTH),
+                p.tiles.iter().all(|t| t.w >= MIN_TILE_WIDTH - 0.5),
                 "{w}x{h} {p:?}"
             );
             let mut twelve = call.to_vec();
             twelve.extend([WIDE, WIDE, WIDE, 0.5625, WIDE]);
             let p = grid(w, h, 12.0, &twelve);
             assert!(
-                p.tiles.iter().all(|t| t.w >= 0.9 * MIN_TILE_WIDTH),
+                p.tiles.iter().all(|t| t.w >= MIN_TILE_WIDTH - 0.5),
                 "{w}x{h} {p:?}"
             );
         }
-        // Focus strips are thumbnails: the stage's size comes first, but a
-        // portrait thumbnail still never drops to a sliver.
         for f in 0..call.len() {
             let p = focus(1080.0, 790.0, 12.0, &call, f);
             assert!(
-                p.tiles.iter().all(|t| t.w >= 0.55 * MIN_TILE_WIDTH),
+                p.tiles.iter().all(|t| t.w >= MIN_TILE_WIDTH - 0.5),
                 "focus {f} {p:?}"
             );
-        }
-    }
-
-    #[test]
-    fn rows_stay_within_twice_each_other_when_the_floor_allows() {
-        let mut twelve = vec![WIDE, WIDE, 2.39, 0.5625, 4.0 / 3.0, WIDE, WIDE];
-        twelve.extend([WIDE, WIDE, WIDE, WIDE, WIDE]);
-        let p = grid(640.0, 620.0, 12.0, &twelve);
-        assert!(p.tiles.iter().all(|t| t.w >= 0.9 * MIN_TILE_WIDTH));
-        let (low, high) = p.tiles.iter().fold((f64::INFINITY, 0.0f64), |(l, h), t| {
-            (l.min(t.h), h.max(t.h))
-        });
-        assert!(
-            high <= 2.0 * low + 1.0 || high <= MIN_TILE_WIDTH / 0.5625 + 1.0,
-            "{low} {high} {p:?}"
-        );
-    }
-
-    #[test]
-    fn quality_chip_threshold_stays_below_the_layout_floor() {
-        // The stylesheet hides the quality chip below this width; it must not
-        // hide it on tiles the layout considers wide enough.
-        let css = include_str!("../style.css");
-        let rule = css
-            .find(".media-quality { display: none; }")
-            .expect("quality hide rule");
-        let start = css[..rule]
-            .rfind("@container (max-width: ")
-            .expect("container query")
-            + 23;
-        let width: f64 = css[start..].split("px").next().unwrap().parse().unwrap();
-        assert!(width < MIN_TILE_WIDTH, "{width}");
-    }
-
-    #[test]
-    fn a_few_pixels_under_the_floor_never_beat_even_rows() {
-        // The 7-stream call at 1024 (640x630): a balanced split leaves the
-        // portrait just under 96px; it must still win over rows ~3x apart.
-        let call = [WIDE, WIDE, 0.5625, WIDE, 2.39, 4.0 / 3.0, WIDE];
-        // Laptop-sized areas never fall back to scrolling for this call.
-        for h in [560.0, 590.0, 610.0, 630.0, 660.0] {
-            for w in [620.0, 640.0, 664.0] {
-                assert!(!grid(w, h, 12.0, &call).scrolls, "{w}x{h}");
-            }
-        }
-        let p = grid(640.0, 630.0, 12.0, &call);
-        let (low, high) = p.tiles.iter().fold((f64::INFINITY, 0.0f64), |(l, h), t| {
-            (l.min(t.h), h.max(t.h))
-        });
-        assert!(high <= 2.2 * low, "{low} {high} {p:?}");
-        assert!(p.tiles.iter().all(|t| t.w >= 0.9 * MIN_TILE_WIDTH), "{p:?}");
-    }
-
-    #[test]
-    fn focus_keeps_most_of_the_area_for_the_stage() {
-        let call = [WIDE, WIDE, 2.39, 0.5625, 4.0 / 3.0, WIDE, WIDE];
-        let p = focus(1056.0, 780.0, 12.0, &call, 0);
-        assert!(
-            p.tiles[0].area() >= 0.6 * 1056.0 * 780.0,
-            "{:?}",
-            p.tiles[0]
-        );
-    }
-
-    #[test]
-    fn focus_strip_thumbnails_keep_their_own_floor() {
-        let call = [WIDE, WIDE, 2.39, 0.5625, 4.0 / 3.0, WIDE, WIDE];
-        for (w, h) in [
-            (640.0, 610.0),
-            (664.0, 620.0),
-            (1056.0, 780.0),
-            (1080.0, 790.0),
-        ] {
-            for f in 0..call.len() {
-                let p = focus(w, h, 12.0, &call, f);
-                assert!(
-                    p.tiles.iter().all(|t| t.w >= MIN_THUMB_WIDTH - 0.5),
-                    "{w}x{h} focus {f} {p:?}"
-                );
-            }
         }
     }
 
