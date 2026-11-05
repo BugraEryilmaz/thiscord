@@ -212,6 +212,9 @@ pub(super) fn StreamWatchers(
     owner: thiscord_shared::AccountId,
     kind: thiscord_shared::voice::MediaKind,
     epoch: u32,
+    /// Lets the tile reference the viewer names in its description.
+    #[prop(optional, into)]
+    id: Option<String>,
 ) -> impl IntoView {
     let viewers = Memo::new(move |_| {
         let voice = ui.voice.get();
@@ -240,7 +243,7 @@ pub(super) fn StreamWatchers(
     });
     view! {
         <Show when=move ||!viewers.get().is_empty()>
-            <div class="stream-watchers" role="img" tabindex="0"
+            <div class="stream-watchers" role="img" id=id.clone()
                 aria-label=move ||thiscord_frontend::localized_format!(crate::i18n::language(), "Watching: {}",viewer_names.get())
                 data-tip=move ||viewer_names.get()>
                 <For each=move ||viewers.get() key=|p|p.account_id children=move |initial| {
@@ -250,6 +253,7 @@ pub(super) fn StreamWatchers(
                         <crate::avatar::Avatar class="size-6 text-[10px]" name=Signal::derive(move ||person.get().display_name().to_owned()) avatar_id=Signal::derive(move ||person.get().avatar_id)/>
                     </span>}
                 }/>
+                <span class="stream-watchers-count" aria-hidden="true"><Icon kind=Glyph::Eye/>{move ||viewers.get().len()}</span>
             </div>
         </Show>
     }
