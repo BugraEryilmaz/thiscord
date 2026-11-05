@@ -204,129 +204,17 @@ pub(super) fn ShareDiagnostics() -> impl IntoView {
     view! { <DiagnosticsPanel label="Screen pipeline diagnostics" text=diagnostics/> }
 }
 
-#[component]
-pub(super) fn ScreenViewer(ui: Ui, guild: GuildId, channel: ChannelId) -> impl IntoView {
-    use thiscord_shared::screen::Watch;
-    use thiscord_shared::voice::MediaKind;
-    let hidden = RwSignal::new(Vec::<(thiscord_shared::AccountId, MediaKind, u32)>::new());
-    let menu = RwSignal::new(None::<(thiscord_shared::AccountId, MediaKind, u32)>);
-    let expanded = RwSignal::new(None::<(thiscord_shared::AccountId, MediaKind, u32)>);
-    let tiles = Memo::new(move |_| {
-        let voice = ui.voice.get();
-        if !voice.connected || voice.channel_id != Some(channel) {
-            return vec![];
-        }
-        voice
-            .participants
-            .into_iter()
-            .flat_map(|m| {
-                let mut tiles = vec![];
-                if m.camera_active {
-                    tiles.push((m.clone(), MediaKind::Camera, m.camera_epoch));
-                }
-                if m.sharing_screen {
-                    tiles.push((m.clone(), MediaKind::ScreenVideo, m.screen_epoch));
-                }
-                tiles
-            })
-            .collect::<Vec<_>>()
-    });
-    let visible = Memo::new(move |_| {
-        tiles
-            .get()
-            .into_iter()
-            .filter(|(m, kind, epoch)| !hidden.get().contains(&(m.account_id, *kind, *epoch)))
-            .collect::<Vec<_>>()
-    });
-    let escape = window_event_listener(leptos::ev::keydown, move |e| {
-        if e.key() == "Escape" {
-            // Handled here, so Escape does not also mark the channel read.
-            if menu.with_untracked(Option::is_some) || expanded.with_untracked(Option::is_some) {
-                e.prevent_default();
-            }
-            menu.set(None);
-            expanded.set(None);
-        }
-    });
-    let fullscreen = window_event_listener(leptos::ev::fullscreenchange, move |_| {
-        if document().fullscreen_element().is_none() {
-            expanded.set(None);
-        }
-    });
-    let outside = window_event_listener(leptos::ev::pointerdown, move |_| menu.set(None));
-    on_cleanup(move || {
-        escape.remove();
-        fullscreen.remove();
-        outside.remove();
-    });
-    Effect::new(move |_| {
-        let current = tiles.get();
-        hidden.update(|h| {
-            h.retain(|key| {
-                current
-                    .iter()
-                    .any(|(m, k, e)| *key == (m.account_id, *k, *e))
-            })
-        });
-        if expanded.get_untracked().is_some_and(|key| {
-            !current
-                .iter()
-                .any(|(m, k, e)| key == (m.account_id, *k, *e))
-        }) {
-            expanded.set(None);
-        }
-    });
-    view! {<div class="channel-streams">
-        <Show when=move ||!hidden.get().is_empty()><button class="stream-choice" on:click=move |_|hidden.set(vec![])>{move || crate::i18n::t("Show hidden items")}</button></Show>
-        <Show when=move ||visible.get().is_empty()><p class="voice-channel-empty">{move || {
-            let voice = ui.voice.get();
-            if !voice.connected || voice.channel_id != Some(channel) { crate::i18n::t("Join this call to see cameras and screen shares.") }
-            else if !tiles.get().is_empty() { crate::i18n::t("All media is hidden. Choose Show hidden items to restore it.") }
-            else { crate::i18n::t("No cameras or screen shares are active.") }
-        }}</p></Show>
-        <div class="media-grid" style:--media-columns=move ||match visible.get().len() {0|1=>"1",2..=4=>"2",5..=9=>"3",_=>"4"}>
-        <For each=move ||visible.get() key=|(m,k,e)|(m.account_id,m.slot,*k,*e) children=move |(member,kind,epoch)| {
-            let owner=member.account_id;
-            let key=(owner,kind,epoch);
-            let own=ui.account.get_untracked().is_some_and(|a|a.id==owner);
-            let watch=Watch{kind,slot:member.slot,owner,epoch,viewer:0};
-            let figure=NodeRef::<leptos::html::Figure>::new();
-            let full=move || {
-                if expanded.get_untracked()==Some(key) {expanded.set(None);document().exit_fullscreen();}
-                else {expanded.set(Some(key));if let Some(node)=figure.get_untracked(){let _=node.request_fullscreen();}}
-            };
-            view!{<figure node_ref=figure class="stream-view media-tile" class:expanded=move ||expanded.get()==Some(key)
-                on:contextmenu=move |e|{e.prevent_default();e.stop_propagation();ui.context_menu.set(None);menu.set(Some(key));}>
-                <figcaption class="stream-toolbar"><button class="stream-title" on:click=move |_|full()>{member.display_name().to_owned()}<span class="stream-live-badge">{move || if kind==MediaKind::Camera {crate::i18n::t("CAMERA")} else {crate::i18n::t("SCREEN")}}</span></button>
-                    <button class="icon-button" aria-label=move || crate::i18n::t("Toggle fullscreen") on:click=move |_|full()><Icon kind=Glyph::Expand/></button>
-                </figcaption>
-                <div class="media-tile-content" role="button" tabindex="0" aria-label=move || crate::i18n::t("View fullscreen") on:click=move |_|full() on:keydown=move |e|{if e.key()=="Enter" || e.key()==" "{e.prevent_default();full();}}>
-                    <Show when=move ||!super::audio::media_deafened(ui) fallback=||view!{<div class="stream-placeholder">{move || crate::i18n::t("Undeafen to view media")}</div>}>
-                        {move || if super::audio::browser_voice(ui) {view!{<super::browser_media::BrowserVideo watch=watch own=own/>}.into_any()}
-                        else if own && kind==MediaKind::Camera {view!{<super::camera::LocalCamera/>}.into_any()}
-
-                        else {view!{<ScreenVideo watch=watch/>}.into_any()}}
-                    </Show>
-                </div>
-                <StreamWatchers ui=ui owner=owner kind=kind epoch=epoch/>
-                <Show when=move ||menu.get()==Some(key)>
-                    <div class="media-item-menu" role="menu" aria-label=move || crate::i18n::t("Media options") on:pointerdown=move |e|e.stop_propagation() on:click=move |e|e.stop_propagation()>
-                        <button role="menuitem" class="stream-choice" on:click=move |_|{hidden.update(|h|h.push(key));menu.set(None);if expanded.get_untracked()==Some(key){expanded.set(None);document().exit_fullscreen();}}>{move || crate::i18n::t("Hide this item")}</button>
-                        {(!own).then(||view!{<super::context_menu::ParticipantVolume ui=ui guild=guild channel=channel member=owner/>})}
-                    </div>
-                </Show>
-            </figure>}
-        }/>
-        </div>
-    </div>}
-}
+pub(super) use super::media_grid::ScreenViewer;
 
 #[component]
-fn StreamWatchers(
+pub(super) fn StreamWatchers(
     ui: Ui,
     owner: thiscord_shared::AccountId,
     kind: thiscord_shared::voice::MediaKind,
     epoch: u32,
+    /// Lets the tile reference the viewer names in its description.
+    #[prop(optional, into)]
+    id: Option<String>,
 ) -> impl IntoView {
     let viewers = Memo::new(move |_| {
         let voice = ui.voice.get();
@@ -355,23 +243,24 @@ fn StreamWatchers(
     });
     view! {
         <Show when=move ||!viewers.get().is_empty()>
-            <div class="stream-watchers" role="group" aria-label=move || crate::i18n::t("Watching this stream")>
+            <div class="stream-watchers" role="img" id=id.clone()
+                aria-label=move ||thiscord_frontend::localized_format!(crate::i18n::language(), "Watching: {}",viewer_names.get())
+                data-tip=move ||viewer_names.get()>
                 <For each=move ||viewers.get() key=|p|p.account_id children=move |initial| {
                     let id=initial.account_id;
                     let person=Signal::derive(move ||ui.voice.get().participants.into_iter().find(|p|p.account_id==id).unwrap_or_else(||initial.clone()));
-                    view! {<span class="stream-watcher" tabindex="0" role="img"
-                        aria-label=move ||thiscord_frontend::localized_format!(crate::i18n::language(), "Watching: {}",person.get().display_name())
-                        data-tip=move ||viewer_names.get()>
+                    view! {<span class="stream-watcher" aria-hidden="true">
                         <crate::avatar::Avatar class="size-6 text-[10px]" name=Signal::derive(move ||person.get().display_name().to_owned()) avatar_id=Signal::derive(move ||person.get().avatar_id)/>
                     </span>}
                 }/>
+                <span class="stream-watchers-count" aria-hidden="true"><Icon kind=Glyph::Eye/>{move ||viewers.get().len()}</span>
             </div>
         </Show>
     }
 }
 
 #[component]
-fn ScreenVideo(watch: thiscord_shared::screen::Watch) -> impl IntoView {
+pub(super) fn ScreenVideo(watch: thiscord_shared::screen::Watch) -> impl IntoView {
     // Each mount owns a separate lease, including after undeafening the same share.
     let watch = thiscord_shared::screen::Watch {
         viewer: NEXT_VIEWER.fetch_add(1, std::sync::atomic::Ordering::Relaxed),

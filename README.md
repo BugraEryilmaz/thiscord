@@ -171,7 +171,8 @@ request IDs for correlation with backend logs; see [disconnect diagnostics](docs
 If an older voice client triggers a slot compatibility transition, updated desktops
 automatically reconnect after a brief interruption instead of requiring a manual join.
 Desktop calls and voice rooms show simultaneous webcams and screen shares in a
-grid, with local previews, click-to-fullscreen and right-click hide/restore.
+grid sized to each stream's shape, with local previews, live quality labels
+(e.g. 1080p · 30 fps), focus, drag-to-rearrange, fullscreen and hide/restore.
 The camera button uses the webcam chosen in Settings > Voice & audio > Camera or
 the chevron beside it (system default unless chosen; up to 720p/30); right-click a
 participant for separate voice and screen-audio volume/mute controls. Camera

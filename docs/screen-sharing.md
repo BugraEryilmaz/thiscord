@@ -13,20 +13,72 @@ may publish a camera and a screen simultaneously. Your camera and screen have
 local previews; the screen preview uses the same encoded frames without an SFU
 round trip. Self-preview alone does not upload screen video.
 
-Click any tile to enter fullscreen; Escape or its fullscreen button restores the
-grid. WebViews without DOM fullscreen use an expanded app view. Players remain
-mounted while expanding. Right-click a tile for **Hide this item**; **Show hidden
-items** restores it. Hiding a received screen unsubscribes its video and shared
-audio. Hidden state lasts while this grid is mounted and is scoped to the stream
-generation. Hiding your own tile does not stop publishing. All other tiles
-continue playing. Keyboard users can focus a tile and press Enter to expand.
+Tiles keep each stream's real shape (16:9, ultrawide, portrait phone, 4:3), so
+video is never letterboxed inside a tile. The layout tries every way of splitting
+the tiles into rows and keeps the one that shows the most video while keeping rows
+a similar height: two wide shares stack in a squarish window and sit side by side
+in a wide one. Until you rearrange tiles yourself, it also orders them by shape
+(for example pairing a portrait phone with wide screens) when that shows clearly
+more video. That order settles once every stream has shown a frame; after that a
+stream that starts, or that you show again, is placed where it fits best without
+moving the others, and hiding a stream repacks the rest. The layout reflows when
+the window resizes, a stream starts or stops, or a stream's shape changes (a
+quality change of the same shape does not move anything). When tiles would
+become too small (phones, very large calls) the area scrolls in readable columns
+instead. Portrait streams never shrink to slivers: arrangements that keep every tile
+at least about 96px wide are strongly preferred, though a few pixels less is
+accepted when it keeps rows even. In focus mode the stage comes first, so strip
+thumbnails may be smaller, though never under about 60px wide (a side column
+is used instead).
+
+Each tile shows the sharer's avatar and name, a screen or camera icon, live
+quality such as **1080p · 30 fps** or **4K · 60 fps** (the resolution and frame
+rate you are actually receiving, which adapt to your connection and the tile
+size; hover for exact pixels) and the avatars of its viewers. Small tiles show a
+compact label such as **720p30**, and very narrow ones keep just the avatar and
+icon. Hover or focus a tile for **Focus**, **Full screen** and **Stream
+options**; on touch screens tap a tile to focus it and use its ⋯ button for the
+rest. The options heading repeats the exact received pixels and frame rate, so
+touch screens can read them too. The bar above the grid shows a short gesture
+hint until you have used focus or rearranging a few times; after that a small
+help button in the bar opens them again (touch gestures on touch screens).
+
+- **Focus** (click a tile, or Enter) puts it on a large stage with the other
+  streams in a strip beside or below it; click a strip tile or drop it on the
+  stage to swap. Click the stage again, press Escape (while the media view has
+  keyboard focus, or nothing does and you last clicked in it) or choose **Back
+  to grid** to return. With a single stream there is nothing to focus, so
+  clicking it opens full screen.
+- **Rearrange** by dragging a tile onto another (mouse or pen); the grid makes
+  room as you drag, and pressing Escape or dropping outside the grid puts
+  everything back. **Move to start**, **Move earlier**, **Move later** and
+  **Move to end** in its options do the same without dragging (Alt+Home/←/→/End
+  from the keyboard; on touch screens use the options). Your order is kept while
+  the view is open; new streams join at the end.
+- **Full screen** (button, options or F) fills the screen, with the name and
+  controls on lighter glass chips over soft top and bottom shades; Escape restores the grid. WebViews
+  without DOM fullscreen use an expanded app view.
+- **Hide this stream** removes a tile; the bar above the grid lists hidden
+  streams, and clicking one shows it again. Hiding a received screen unsubscribes
+  its video and shared audio. Hidden state lasts while this view is mounted and is
+  scoped to the stream generation. Hiding your own tile does not stop publishing.
+
+Private calls show the media as a strip above the chat. On a narrow screen its
+tiles keep their full height in one row that scrolls sideways (the next tile
+peeks in at the edge). Focusing a stream there moves it to the front of that row
+at the same full height, so it never gets smaller, and the others stay reachable
+by scrolling sideways.
+
+Players stay mounted while tiles move, focus or expand, and all other tiles keep
+playing. Moves and focus changes are announced to screen readers.
 
 System audio captures all other applications, even for a single-window share.
 It excludes Thiscord's process tree on Windows and Linux and Thiscord's own
 process on macOS (see [platform backends](#platform-backends)). Microphone mute/PTT affects only the
 microphone. Stop sharing stops screen and shared audio. Deafen also stops local
 screen/camera publication and received media. Use a participant's right-click
-menu (sidebar or grid) for separate voice and **Stream audio** volume/mute.
+menu (sidebar, or a tile's **Stream options**) for separate voice and **Stream
+audio** volume/mute.
 Both levels persist locally per guild/account; shared audio defaults to 100%
 and is currently downmixed to mono. **Stop sharing** remains in the voice bar
 while reading text or settings.

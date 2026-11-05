@@ -18,6 +18,7 @@ mod icons;
 mod invites;
 mod keyboard;
 mod login;
+mod media_grid;
 mod members;
 mod message_content;
 mod moderation;
