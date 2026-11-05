@@ -926,6 +926,8 @@ button.stream-live-badge:hover { background: color-mix(in srgb, var(--color-dang
 /* Fullscreen: the overlays sit on a soft top and bottom shade, not floating on letterbox black. */
 .media-tile.expanded::before, .media-tile:fullscreen::before, .media-tile.expanded::after, .media-tile:fullscreen::after { content: ""; position: absolute; z-index: 1; left: 0; right: 0; height: 96px; pointer-events: none; }
 .media-tile-caption, .media-tile-actions, .media-quality, .media-tile .stream-watchers { z-index: 2; }
+/* On full-screen letterbox black, the glass lifts a step so chips stay visible. */
+:is(.media-tile.expanded, .media-tile:fullscreen) :is(.media-tile-caption, .media-quality, .media-tile-button, .stream-watchers) { background: rgb(44 46 56 / .84); box-shadow: 0 0 0 1px rgb(255 255 255 / .12); }
 .media-tile.expanded::before, .media-tile:fullscreen::before { top: 0; background: linear-gradient(rgb(0 0 0 / .55), transparent); }
 .media-tile.expanded::after, .media-tile:fullscreen::after { bottom: 0; background: linear-gradient(transparent, rgb(0 0 0 / .45)); }
 .media-tile.expanded .media-tile-caption, .media-tile:fullscreen .media-tile-caption { left: 16px; top: 16px; }
