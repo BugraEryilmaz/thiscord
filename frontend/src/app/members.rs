@@ -7,7 +7,7 @@ use super::{
 use leptos::prelude::*;
 use thiscord_frontend::member_list::{PANEL_KEY, apply_presence, grouped, status_text};
 use thiscord_shared::{
-    AccountId, AvatarId, GuildId,
+    AccountId, AvatarId, ChannelId, GuildId,
     chat::{CHAT_PATH, ChatRequest, ChatResponse, GuildMember, MemberProfile},
     friends::Relationship,
 };
@@ -24,7 +24,8 @@ pub(super) struct State {
     guild: RwSignal<Option<GuildId>>,
     /// Wide layouts: side panel, persisted on this device.
     panel: RwSignal<bool>,
-    /// Narrow layouts: temporary drawer, closed on navigation.
+    /// Narrow layouts: temporary drawer, closed when the shown channel or the
+    /// phone content view changes (see `Panel`).
     drawer: RwSignal<bool>,
     narrow: RwSignal<bool>,
     profile: RwSignal<Option<(GuildId, AccountId)>>,
@@ -257,6 +258,19 @@ pub(super) fn Panel(ui: Ui, guild: GuildId) -> impl IntoView {
         resize.remove();
         ui.members.drawer.set(false);
     });
+    // The panel outlives channel switches, so close the temporary drawer and any
+    // profile card on navigation, including the phone back button.
+    Effect::new(move |previous: Option<(Option<ChannelId>, bool)>| {
+        let shown = (
+            ui.selected_channel.with(|c| c.as_ref().map(|c| c.id)),
+            ui.mobile_content.get(),
+        );
+        if previous.is_some_and(|previous| previous != shown) {
+            ui.members.drawer.set(false);
+            ui.members.profile.set(None);
+        }
+        shown
+    });
     let list = Memo::new(move |_| {
         if ui.members.guild.get() == Some(guild) {
             ui.members.list.get()
@@ -331,7 +345,7 @@ pub(super) fn ProfileHost(ui: Ui) -> impl IntoView {
     let profile = RwSignal::new(None::<MemberProfile>);
     let error = RwSignal::new(String::new());
     let generation = RwSignal::new(0_u64);
-    // Switching channels remounts this host; never reopen a card there.
+    // Leaving the server unmounts this host; never reopen a card there.
     on_cleanup(move || ui.members.profile.set(None));
     Effect::new(move |_| {
         let target = ui.members.profile.get();
