@@ -373,7 +373,16 @@ pub(super) async fn serve(
                     presence: std::mem::take(&mut presence_dirty),
                     unread: !defer_unread && std::mem::take(&mut unread_dirty),
                 };
-                let (authorized, result) = if let Some((authorized, granted)) = reusable {
+                // Already read for this channel: deliver without a blocking hop or
+                // a database connection (the common case when a message wakes many).
+                let cached = reusable.as_ref()
+                    .filter(|_| work.messages && !work.presence && !work.unread)
+                    .and_then(|(_, granted)| sub.channel.filter(|ch| granted.readable.contains(ch)))
+                    .and(feed.as_ref())
+                    .and_then(|feed| feed.cached(cursor));
+                let (authorized, result) = if let (Some((authorized, _)), Some(events)) = (reusable.clone(), cached) {
+                    (authorized, Ok(Ok((None, Some(store::Poll { events, members: Vec::new() })))))
+                } else if let Some((authorized, granted)) = reusable {
                     let shared = feed.clone();
                     let result = crate::performance::blocking(move || {
                         store::refresh_granted(&p, sub.guild, sub.channel, cursor, work, &granted, shared.as_deref())

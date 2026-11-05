@@ -127,6 +127,17 @@ fn live(guild: GuildId, channel: ChannelId) -> Option<Arc<Feed>> {
 }
 
 impl Feed {
+    /// Like `events` without waiting or reading: `None` unless the last shared
+    /// read already covers every publication and this subscriber's cursor. Never
+    /// blocks, so async tasks may call it; a read in progress counts as a miss.
+    pub(super) fn cached(&self, cursor: i64) -> Option<Vec<(i64, ChatMessage)>> {
+        let needed = self.published.load(SeqCst);
+        let read = self.read.try_lock().ok()?;
+        read.as_ref()
+            .filter(|r| r.covers(needed, cursor))?
+            .after_cursor(cursor)
+    }
+
     /// Events after `cursor` for an authorized subscriber of this channel, or
     /// `None` when they need a private read: more than one page, or reactions
     /// (whose `mine` flag is per account). Subscribers of a busy channel wait on
@@ -262,6 +273,25 @@ mod tests {
             events: (1..=PAGE as i64).map(|n| message(n, false)).collect(),
         };
         assert!(full.after_cursor(0).is_none());
+    }
+
+    #[test]
+    fn cached_reads_serve_only_covered_publications_without_waiting() {
+        let (guild, channel) = ids();
+        let feed = subscribe(guild, channel);
+        assert!(feed.cached(0).is_none());
+        *feed.read.lock().unwrap() = Some(Read {
+            covered: 0,
+            after: 0,
+            events: vec![message(1, false)],
+        });
+        assert_eq!(feed.cached(0).map(|e| e.len()), Some(1));
+        // A newer publication needs a new read; so does a read in progress.
+        published(guild, channel);
+        assert!(feed.cached(0).is_none());
+        let held = feed.read.lock().unwrap();
+        assert!(feed.cached(0).is_none());
+        drop(held);
     }
 
     #[test]

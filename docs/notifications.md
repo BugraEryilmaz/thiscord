@@ -98,9 +98,11 @@ control. No message body or bearer token is included in diagnostic logging.
 
 Limits: `THISCORD_MAX_SOCKETS` (default 512) notification sockets, 64 queued candidates per socket, eight blocking
 notification workers, 512 source overrides per account, 4 KiB socket frames and
-16 KiB HTTP requests. A slow/full subscriber disconnects rather than accumulating
-an unlimited backlog. Established sockets wait fairly for a worker (one waiter
-per socket, cancelled on revocation, with a ten-second overload deadline).
+16 KiB HTTP requests. A slow subscriber's full queue drops further alerts (they
+are not replayed) instead of accumulating an unlimited backlog or disconnecting,
+which under load would turn into a reconnect storm. Established sockets wait
+fairly for a worker (one waiter per socket, cancelled on revocation); after a
+ten-second overload deadline the alert is skipped, not the socket.
 Guild sends narrow routing to connected guild members before per-recipient
 authorization; unrelated guilds do not consume their delivery queues.
 A socket reuses a recipient's full alert check (target authorization,

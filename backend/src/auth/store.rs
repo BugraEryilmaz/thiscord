@@ -428,20 +428,30 @@ pub(crate) fn rate_limit(
     if let Some(identifier) = identifier {
         keys.push((format!("account:{}", digest(identifier)), 6));
     }
-    execute(
-        &mut c,
-        "DELETE FROM auth_limits WHERE window_start < now()-interval '2 minutes'",
-        &[],
-    )?;
-    for (key, max) in keys {
-        let counts: Vec<i32> = query(
-            &mut c,
-            "INSERT INTO auth_limits(key) VALUES($1) ON CONFLICT(key) DO UPDATE SET attempts=CASE WHEN auth_limits.window_start<now()-interval '1 minute' THEN 1 ELSE auth_limits.attempts+1 END, window_start=CASE WHEN auth_limits.window_start<now()-interval '1 minute' THEN now() ELSE auth_limits.window_start END RETURNING to_jsonb(attempts) AS data",
-            &[&digest(&key)],
+    // One transaction: one commit (and WAL flush) per limited request. Every
+    // counter increment commits, including on a limited request, as before.
+    let limited = c.transaction(|c| {
+        execute(
+            c,
+            "DELETE FROM auth_limits WHERE window_start < now()-interval '2 minutes'",
+            &[],
         )?;
-        if counts[0] > max {
-            return Err(Failure::Limited);
+        let mut limited = false;
+        for (key, max) in keys {
+            let counts: Vec<i32> = query(
+                c,
+                "INSERT INTO auth_limits(key) VALUES($1) ON CONFLICT(key) DO UPDATE SET attempts=CASE WHEN auth_limits.window_start<now()-interval '1 minute' THEN 1 ELSE auth_limits.attempts+1 END, window_start=CASE WHEN auth_limits.window_start<now()-interval '1 minute' THEN now() ELSE auth_limits.window_start END RETURNING to_jsonb(attempts) AS data",
+                &[&digest(&key)],
+            )?;
+            if counts[0] > max {
+                limited = true;
+                break;
+            }
         }
+        Ok::<_, Failure>(limited)
+    })?;
+    if limited {
+        return Err(Failure::Limited);
     }
     Ok(())
 }

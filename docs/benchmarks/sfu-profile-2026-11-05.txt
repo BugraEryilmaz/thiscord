@@ -1,0 +1,73 @@
+##### prof-voice-64 (server pinned to one core; frame-pointer build of this commit)
+samples: 8326
+
+By stage (highest-priority stage on the stack):
+   78.5%  webrtc-rs peer driver (RTP/RTCP, SRTP, ICE)
+    8.5%  our egress writer (revalidate + write_rtp)
+    6.2%  our relay (authorize + fan-out)
+    3.0%  tokio runtime
+    1.8%  webrtc-rs track/interceptors
+    1.0%  our ingress reader (track poll + limits)
+    0.7%  our signaling/roster loop
+    0.3%  other/unattributed
+
+By leaf activity:
+   36.7%  kernel: UDP/IP/netfilter
+   35.9%  other leaf (application logic)
+   14.3%  libc, unsymbolized (mostly malloc/free/memcpy)
+    5.7%  locks/atomics/wakeups
+    3.8%  hash maps
+    1.9%  SRTP crypto (AES-GCM/HMAC)
+    1.5%  allocation (malloc/free)
+    0.0%  memory copy/zero
+
+Stage x leaf (>= 1%):
+   34.9%  webrtc-rs peer driver (RTP/RTCP, SRTP, ICE) :: kernel: UDP/IP/netfilter
+   25.2%  webrtc-rs peer driver (RTP/RTCP, SRTP, ICE) :: other leaf (application logic)
+   10.9%  webrtc-rs peer driver (RTP/RTCP, SRTP, ICE) :: libc, unsymbolized (mostly malloc/free/memcpy)
+    4.3%  our egress writer (revalidate + write_rtp) :: other leaf (application logic)
+    3.4%  our relay (authorize + fan-out) :: other leaf (application logic)
+    2.8%  webrtc-rs peer driver (RTP/RTCP, SRTP, ICE) :: hash maps
+    2.4%  our egress writer (revalidate + write_rtp) :: locks/atomics/wakeups
+    2.0%  webrtc-rs peer driver (RTP/RTCP, SRTP, ICE) :: locks/atomics/wakeups
+    2.0%  our relay (authorize + fan-out) :: libc, unsymbolized (mostly malloc/free/memcpy)
+    1.6%  webrtc-rs peer driver (RTP/RTCP, SRTP, ICE) :: SRTP crypto (AES-GCM/HMAC)
+    1.5%  tokio runtime :: other leaf (application logic)
+    1.1%  tokio runtime :: kernel: UDP/IP/netfilter
+
+##### prof-video-16 (server pinned to one core; frame-pointer build of this commit)
+samples: 5563
+
+By stage (highest-priority stage on the stack):
+   81.9%  webrtc-rs peer driver (RTP/RTCP, SRTP, ICE)
+    7.5%  our egress writer (revalidate + write_rtp)
+    5.4%  our relay (authorize + fan-out)
+    1.9%  tokio runtime
+    1.7%  webrtc-rs track/interceptors
+    0.7%  our ingress reader (track poll + limits)
+    0.5%  our signaling/roster loop
+    0.3%  other/unattributed
+
+By leaf activity:
+   39.3%  kernel: UDP/IP/netfilter
+   33.3%  other leaf (application logic)
+   14.7%  libc, unsymbolized (mostly malloc/free/memcpy)
+    4.4%  locks/atomics/wakeups
+    3.6%  hash maps
+    3.1%  SRTP crypto (AES-GCM/HMAC)
+    1.6%  allocation (malloc/free)
+    0.0%  memory copy/zero
+
+Stage x leaf (>= 1%):
+   37.9%  webrtc-rs peer driver (RTP/RTCP, SRTP, ICE) :: kernel: UDP/IP/netfilter
+   24.0%  webrtc-rs peer driver (RTP/RTCP, SRTP, ICE) :: other leaf (application logic)
+   12.0%  webrtc-rs peer driver (RTP/RTCP, SRTP, ICE) :: libc, unsymbolized (mostly malloc/free/memcpy)
+    3.7%  our egress writer (revalidate + write_rtp) :: other leaf (application logic)
+    3.3%  our relay (authorize + fan-out) :: other leaf (application logic)
+    2.8%  webrtc-rs peer driver (RTP/RTCP, SRTP, ICE) :: SRTP crypto (AES-GCM/HMAC)
+    2.5%  webrtc-rs peer driver (RTP/RTCP, SRTP, ICE) :: hash maps
+    1.9%  our egress writer (revalidate + write_rtp) :: locks/atomics/wakeups
+    1.7%  webrtc-rs peer driver (RTP/RTCP, SRTP, ICE) :: locks/atomics/wakeups
+    1.3%  our relay (authorize + fan-out) :: libc, unsymbolized (mostly malloc/free/memcpy)
+    1.1%  webrtc-rs peer driver (RTP/RTCP, SRTP, ICE) :: allocation (malloc/free)
+

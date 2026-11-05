@@ -115,7 +115,12 @@ pub(crate) fn publish(event: Candidate) {
             return true;
         }
         // A slow subscriber is detached. No unbounded buffers or replay storm.
-        route.sender.try_send(event.clone()).is_ok()
+        // A full queue drops this alert, not the subscriber: disconnecting under
+        // load would turn overload into a reconnect storm. Closed routes go.
+        !matches!(
+            route.sender.try_send(event.clone()),
+            Err(mpsc::error::TrySendError::Closed(_))
+        )
     });
 }
 // Only connected accounts are routing hints. The guild lock held by the send
@@ -195,16 +200,26 @@ fn workers() -> Arc<Semaphore> {
     static WORKERS: OnceLock<Arc<Semaphore>> = OnceLock::new();
     WORKERS.get_or_init(|| Arc::new(Semaphore::new(8))).clone()
 }
+/// Why no worker was obtained.
+#[derive(Debug, PartialEq)]
+enum NoWorker {
+    /// The account or session was revoked while waiting: close the socket.
+    Revoked,
+    /// Every worker stayed busy for the overload deadline: skip or retry the work.
+    Busy,
+}
 async fn worker(
     revoked: &mut tokio::sync::watch::Receiver<u64>,
     ended: &mut tokio::sync::watch::Receiver<u64>,
-) -> Result<tokio::sync::OwnedSemaphorePermit, ()> {
-    // At most one waiter per admitted socket (128 total). FIFO acquisition
-    // absorbs normal fanout without detaching healthy clients on contention.
+) -> Result<tokio::sync::OwnedSemaphorePermit, NoWorker> {
+    // At most one waiter per admitted socket. FIFO acquisition absorbs normal
+    // fanout without detaching healthy clients on contention.
     tokio::select! { biased;
-        _ = revoked.changed() => Err(()),
-        _ = ended.changed() => Err(()),
-        permit = tokio::time::timeout(Duration::from_secs(10), workers().acquire_owned()) => permit.map_err(|_| ())?.map_err(|_| ()),
+        _ = revoked.changed() => Err(NoWorker::Revoked),
+        _ = ended.changed() => Err(NoWorker::Revoked),
+        permit = tokio::time::timeout(Duration::from_secs(10), workers().acquire_owned()) => {
+            permit.map_err(|_| NoWorker::Busy)?.map_err(|_| NoWorker::Revoked)
+        }
     }
 }
 async fn upgrade(
@@ -355,7 +370,11 @@ async fn serve(mut socket: WebSocket, pool: DbPool, upgrade_token: String) {
             _ = async {}, if refresh && retry_at.is_none() => {
                 refresh = false;
                 let Some(epoch) = access::snapshot(&account, Some(&session_scope)).and_then(|e| e.including(&preference_scope)).and_then(|e| e.including(&call_scope)) else { refresh = true; tokio::task::yield_now().await; continue; };
-                let Ok(permit) = worker(&mut revoked, &mut ended).await else { break; };
+                let permit = match worker(&mut revoked, &mut ended).await {
+                    Ok(permit) => permit,
+                    Err(NoWorker::Busy) => { refresh = true; retry_at = Some(tokio::time::Instant::now() + TRANSIENT_RETRY); continue; }
+                    Err(NoWorker::Revoked) => break,
+                };
                 let p = pool.clone(); let t = token.clone();
                 let result = crate::performance::blocking(move || { let _permit = permit; store::initial(&p, &t) }).await;
                 if matches!(&result, Ok(Err(error)) if error.transient()) {
@@ -413,7 +432,12 @@ async fn serve(mut socket: WebSocket, pool: DbPool, upgrade_token: String) {
                     if let Some(alert) = alert && send(&mut socket, ServerEvent::Alert { alert }).await.is_err() { break; }
                     continue;
                 }
-                let Ok(permit) = worker(&mut revoked, &mut ended).await else { break; };
+                // Overload skips this alert (like one missed while offline), never the socket.
+                let permit = match worker(&mut revoked, &mut ended).await {
+                    Ok(permit) => permit,
+                    Err(NoWorker::Busy) => continue,
+                    Err(NoWorker::Revoked) => break,
+                };
                 let p = pool.clone(); let t = token.clone();
                 let checked_at = Instant::now();
                 let result = crate::performance::blocking(move || { let _permit = permit; store::alert(&p, &t, candidate) }).await;
@@ -437,7 +461,12 @@ async fn serve(mut socket: WebSocket, pool: DbPool, upgrade_token: String) {
             }
             _ = maintenance.tick() => {
                 if last_seen.elapsed() > Duration::from_secs(35) { break; }
-                let Ok(permit) = worker(&mut revoked, &mut ended).await else { break; };
+                let permit = match worker(&mut revoked, &mut ended).await {
+                    Ok(permit) => permit,
+                    // The next maintenance tick checks again.
+                    Err(NoWorker::Busy) => continue,
+                    Err(NoWorker::Revoked) => break,
+                };
                 let p = pool.clone(); let t = token.clone();
                 let result = crate::performance::blocking(move || { let _permit = permit; auth::store::authenticate(&mut *auth::store::connection(&p)?, &t) }).await;
                 match result {
@@ -529,7 +558,10 @@ mod tests {
         while target.receiver.try_recv().is_ok() {
             received += 1;
         }
+        // The backlog is bounded; later alerts were dropped, not the subscriber.
         assert_eq!(received, 64);
-        assert!(target.receiver.is_closed());
+        assert!(!target.receiver.is_closed());
+        publish(event.clone());
+        assert!(target.receiver.try_recv().is_ok());
     }
 }
