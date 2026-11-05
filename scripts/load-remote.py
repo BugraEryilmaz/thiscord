@@ -27,6 +27,8 @@ import time
 class Generator:
     def __init__(self, cmd, env):
         self.measuring = threading.Event()
+        # Only a "Measuring" line starts a window; exiting early also sets the event.
+        self.started = False
         self.proc = subprocess.Popen(cmd, env=env, stdout=subprocess.PIPE,
                                      stderr=subprocess.STDOUT, text=True)
         threading.Thread(target=self._read, daemon=True).start()
@@ -35,6 +37,7 @@ class Generator:
         for line in self.proc.stdout:
             print(line, end="", file=sys.stderr)
             if "Measuring" in line:
+                self.started = True
                 self.measuring.set()
         self.measuring.set()
 
@@ -114,7 +117,7 @@ def main():
             measured = generators[-1]
             measured.measuring.wait()
         window = seconds(chat if chat else voice)
-        if measured is not None and measured.proc.poll() is None:
+        if measured is not None and measured.started and measured.proc.poll() is None:
             time.sleep(1)
             server.stdin.write("start\n")
             server.stdin.flush()

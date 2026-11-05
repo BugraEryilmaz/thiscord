@@ -140,7 +140,7 @@ async fn run() -> Result<()> {
     let mut args = Args::parse()?;
     if args.flag("--help") {
         println!(
-            "voice_load_server --bind 0.0.0.0:3001 --users 64 --room-size 8 --allow-insecure\nUsers: 2..500; room size: 2..8; --text-channels 1..16 (1) for chat_load. Use --tls instead of --allow-insecure for TLS_CERT_PATH/TLS_KEY_PATH.\nRequires TEST_DATABASE_URL (*_test) and THISCORD_LOAD_SECRET. See docs/voice-load.md."
+            "voice_load_server --bind 0.0.0.0:3001 --users 64 --room-size 8 --allow-insecure\nUsers: 2..512; room size: 2..8; --text-channels 1..16 (1) for chat_load. Use --tls instead of --allow-insecure for TLS_CERT_PATH/TLS_KEY_PATH.\nRequires TEST_DATABASE_URL (*_test) and THISCORD_LOAD_SECRET. See docs/voice-load.md."
         );
         return Ok(());
     }
@@ -148,7 +148,7 @@ async fn run() -> Result<()> {
         .text("--bind", "127.0.0.1:3001")
         .parse()
         .map_err(|_| "Invalid bind address")?;
-    let users = args.number("--users", 64, 2, 500)?;
+    let users = args.number("--users", 64, 2, 512)?;
     let room_size = args.number("--room-size", 8, 2, 8)?;
     let texts = args.number("--text-channels", 1, 1, 16)?;
     let insecure = args.flag("--allow-insecure");

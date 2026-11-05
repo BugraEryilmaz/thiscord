@@ -775,7 +775,7 @@ async fn run() -> Result<bool> {
     let mut args = Args::parse()?;
     if args.flag("--help") {
         println!(
-            "voice_load --url http://DESKTOP:3001 --bind MAC_LAN_IP:0 --users 8 --seconds 60 --allow-insecure\nOptions: --room-size 2..8 (8), --users 2..500 (8), --seconds 1..3600 (60),\n--payload-bytes 32..1200 (80), --late-ms 1..1000 (100), --camera-kbps 0..4000 (0, off), --relay, --output report.json.\nRequires THISCORD_LOAD_SECRET matching voice_load_server. Synthetic RTP, no microphones. See docs/voice-load.md."
+            "voice_load --url http://DESKTOP:3001 --bind MAC_LAN_IP:0 --users 8 --seconds 60 --allow-insecure\nOptions: --room-size 2..8 (8), --users 2..512 (8), --seconds 1..3600 (60),\n--payload-bytes 32..1200 (80), --late-ms 1..1000 (100), --camera-kbps 0..4000 (0, off), --relay, --output report.json.\nRequires THISCORD_LOAD_SECRET matching voice_load_server. Synthetic RTP, no microphones. See docs/voice-load.md."
         );
         return Ok(true);
     }
@@ -787,7 +787,7 @@ async fn run() -> Result<bool> {
     if bind.port() != 0 || bind.ip().is_unspecified() {
         return Err("--bind requires a specific interface IP and port 0");
     }
-    let users = args.number("--users", 8, 2, 500)?;
+    let users = args.number("--users", 8, 2, 512)?;
     let room_size = args.number("--room-size", 8, 2, 8)?;
     if users % room_size == 1 {
         return Err(

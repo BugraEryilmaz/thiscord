@@ -216,3 +216,65 @@ async fn friends_socket_survives_database_unavailability_and_recovers() {
     .await;
     server.abort();
 }
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[ignore = "requires TEST_DATABASE_URL; CI runs with --include-ignored"]
+async fn sockets_beyond_each_limit_are_refused_before_database_work() {
+    let _guard = TEST_LOCK.lock().await;
+    let db = database();
+    let (_, token) = user(&db, "limited");
+    let limits = thiscord_backend::limits::Limits {
+        sockets: 1,
+        voice: 2,
+    };
+    let (address, server) = serve(api::router_with_limits(
+        Some(db.pool.clone()),
+        vec!["http://localhost:1420".parse().unwrap()],
+        limits,
+    ))
+    .await;
+    let open = |path: &str| {
+        let mut request = format!("ws://{address}{path}")
+            .into_client_request()
+            .unwrap();
+        request
+            .headers_mut()
+            .insert("origin", "http://localhost:1420".parse().unwrap());
+        connect_async(request)
+    };
+    for path in [
+        thiscord_shared::chat::SOCKET_PATH,
+        thiscord_shared::friends::FRIENDS_SOCKET_PATH,
+        thiscord_shared::notifications::SOCKET_PATH,
+    ] {
+        let (mut admitted, _) = open(path).await.unwrap();
+        match open(path).await {
+            Err(tokio_tungstenite::tungstenite::Error::Http(response)) => {
+                assert_eq!(response.status(), StatusCode::TOO_MANY_REQUESTS, "{path}")
+            }
+            other => panic!("{path}: expected 429, got {:?}", other.map(|_| ())),
+        }
+        // The admitted socket is unaffected by the refusal.
+        if path == thiscord_shared::chat::SOCKET_PATH {
+            admitted
+                .send(WsMessage::Text(
+                    json!({"version":1,"event":{"type":"connect","token":token}})
+                        .to_string()
+                        .into(),
+                ))
+                .await
+                .unwrap();
+            event(&mut admitted, "authenticated").await;
+        }
+        drop(admitted);
+        // Its slot frees when it closes.
+        tokio::time::timeout(Duration::from_secs(5), async {
+            while open(path).await.is_err() {
+                tokio::time::sleep(Duration::from_millis(100)).await;
+            }
+        })
+        .await
+        .expect("a closed socket releases its slot");
+    }
+    server.abort();
+}

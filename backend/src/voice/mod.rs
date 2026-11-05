@@ -150,7 +150,7 @@ impl VoiceAccess {
         let pool = self.pool.clone();
         let token = self.token.clone();
         let (guild, channel, revision) = (self.guild, self.channel, self.voice_revision);
-        let destination = tokio::task::spawn_blocking(move || {
+        let destination = crate::performance::blocking(move || {
             moderation::destination(&pool, &token, guild, channel, revision)
         })
         .await
@@ -186,7 +186,7 @@ impl VoiceAccess {
                 let (guild, channel) = (self.guild, self.channel);
                 let bot = self.bot.clone();
                 async move {
-                    tokio::task::spawn_blocking(move || {
+                    crate::performance::blocking(move || {
                         bots::authorize(&pool, &token, guild, channel, bot.as_ref())
                     })
                     .await
@@ -1070,7 +1070,7 @@ async fn serve(mut socket: logging::Socket, pool: DbPool, id: RequestId, upgrade
             let t = token.clone();
             let bot = bot.clone();
             async move {
-                tokio::task::spawn_blocking(move || {
+                crate::performance::blocking(move || {
                     bots::authorize(&p, &t, guild_id, channel_id, bot.as_ref())
                 })
                 .await
@@ -1088,7 +1088,7 @@ async fn serve(mut socket: logging::Socket, pool: DbPool, id: RequestId, upgrade
     // Rate-limit once per join, not once per optimistic authorization retry.
     let p = pool.clone();
     let account = info.account_id;
-    match tokio::task::spawn_blocking(move || {
+    match crate::performance::blocking(move || {
         crate::auth::store::rate_limit(
             &p,
             &format!("voice:{account}"),
@@ -1676,9 +1676,12 @@ async fn serve(mut socket: logging::Socket, pool: DbPool, id: RequestId, upgrade
                 result=changed.changed()=>{
                     if result.is_err(){socket.end("access_watcher_closed");break;}
                     match access.refresh(&room,slot,&mut changed).await {
-                        Ok(_) => authorized_at = Instant::now(),
-                        // Media for the old epoch is already refused; the tick retries.
-                        Err(error) if error.transient() && authorized_at.elapsed() < VOICE_TRANSIENT_GRACE => {}
+                        Ok(_) => { authorized_at = Instant::now(); trouble.clear(); recheck_after = None; }
+                        // Media for the old epoch is already refused; the tick retries
+                        // after the backoff.
+                        Err(error) if error.transient() && authorized_at.elapsed() < VOICE_TRANSIENT_GRACE => {
+                            recheck_after = trouble.failed().map(|delay| Instant::now() + delay);
+                        }
                         Err(error) => { access.failed(&mut socket,id,error).await; break; }
                     }
                 },
@@ -1733,7 +1736,7 @@ async fn serve(mut socket: logging::Socket, pool: DbPool, id: RequestId, upgrade
                             _ => continue,
                         };
                         let (pool, token) = (access.pool.clone(), access.token.clone());
-                        let authorized = tokio::task::spawn_blocking(move || {
+                        let authorized = crate::performance::blocking(move || {
                             crate::soundboard::authorize_play(&pool, &token, guild_id, channel_id, sound_id)
                         }).await.unwrap_or(Err(Failure::Unavailable));
                         // Revocation during the check closes this epoch; the access

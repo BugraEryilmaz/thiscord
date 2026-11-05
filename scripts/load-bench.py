@@ -131,6 +131,8 @@ class Generator:
 
     def __init__(self, cmd, env):
         self.measuring = threading.Event()
+        # Only a "Measuring" line starts a window; exiting early also sets the event.
+        self.started = False
         self.proc = subprocess.Popen(cmd, env=env, stdout=subprocess.PIPE,
                                      stderr=subprocess.STDOUT, text=True)
         self.reader = threading.Thread(target=self._read, daemon=True)
@@ -140,6 +142,7 @@ class Generator:
         for line in self.proc.stdout:
             print(line, end="", file=sys.stderr)
             if "Measuring" in line:
+                self.started = True
                 self.measuring.set()
         self.measuring.set()
 
@@ -193,7 +196,7 @@ def serve(args):
                                   "--output", output, *chat_args], env)
                 chat.measuring.wait()
                 summary = {"server_cpus": args.server_cpus}
-                if chat.proc.poll() is None:
+                if chat.started and chat.proc.poll() is None:
                     time.sleep(1)
                     first = sample() + (cpu_seconds([chat.proc.pid]),)
                     deadline = time.monotonic() + seconds_of(chat_args) - 1
@@ -317,7 +320,7 @@ def main():
 
         measured.measuring.wait()
         start = end = rss = None
-        if measured.proc.poll() is None:
+        if measured.started and measured.proc.poll() is None:
             # Generators start sending about one second after "Measuring".
             time.sleep(1)
             start = sample()

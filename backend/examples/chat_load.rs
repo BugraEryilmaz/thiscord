@@ -183,11 +183,16 @@ async fn chat_socket(config: &Config, user: usize) -> Result<Socket> {
     )
     .await?;
     let ready = |text: &str| serde_json::from_str::<chat::ServerFrame>(text).map(|f| f.event);
-    if !matches!(
-        ready(&next_text(&mut socket).await?),
-        Ok(chat::ServerEvent::Authenticated {})
-    ) {
-        return Err("Chat socket authentication rejected");
+    match ready(&next_text(&mut socket).await?) {
+        Ok(chat::ServerEvent::Authenticated {}) => {}
+        // The server could not check the session (database trouble): not a
+        // credential failure.
+        Ok(chat::ServerEvent::Error { error })
+            if error.code == thiscord_shared::ErrorCode::ServiceUnavailable =>
+        {
+            return Err("Chat socket service unavailable at connect");
+        }
+        _ => return Err("Chat socket authentication rejected"),
     }
     send_json(
         &mut socket,
@@ -493,13 +498,13 @@ async fn run() -> Result<bool> {
     let mut args = Args::parse()?;
     if args.flag("--help") {
         println!(
-            "chat_load --url http://127.0.0.1:3001 --allow-insecure --users 64 --rate 4 --seconds 60\nOptions: --users 2..500 (64), --text-channels 1..16 (1, must match the server),\n--rate 0..250 messages/s across all users (4; at most users/2 for the 30/min account limit),\n--seconds 1..3600 (60), --late-ms 1..10000 (1000), --chat-only (skip friends/notification sockets), --allow-rejected (users refused at
+            "chat_load --url http://127.0.0.1:3001 --allow-insecure --users 64 --rate 4 --seconds 60\nOptions: --users 2..512 (64), --text-channels 1..16 (1, must match the server),\n--rate 0..250 messages/s across all users (4; at most users/2 for the 30/min account limit),\n--seconds 1..3600 (60), --late-ms 1..10000 (1000), --chat-only (skip friends/notification sockets), --allow-rejected (users refused at
 the connection limit are reported, not failures; the rest are measured),\n--output report.json. Requires THISCORD_LOAD_SECRET matching voice_load_server. See docs/load-benchmarks.md."
         );
         return Ok(true);
     }
     let url = args.text("--url", "http://127.0.0.1:3001");
-    let users = args.number("--users", 64, 2, 500)?;
+    let users = args.number("--users", 64, 2, 512)?;
     let channels = args.number("--text-channels", 1, 1, 16)?;
     let rate: f64 = args
         .text("--rate", "4")

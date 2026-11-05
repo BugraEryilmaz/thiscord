@@ -55,7 +55,7 @@ pub(super) async fn attach(
                 let pool = pool.clone();
                 let token = token.clone();
                 async move {
-                    tokio::task::spawn_blocking(move || {
+                    crate::performance::blocking(move || {
                         store::authorize(&pool, &token, guild, channel)
                     })
                     .await
@@ -65,7 +65,7 @@ pub(super) async fn attach(
             .await?;
         let limit_pool = pool.clone();
         let limit_key = format!("voice-resume:{}", info.account_id);
-        tokio::task::spawn_blocking(move || {
+        crate::performance::blocking(move || {
             crate::auth::store::rate_limit(&limit_pool, &limit_key, None, true)
         })
         .await

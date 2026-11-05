@@ -45,7 +45,7 @@ pub fn load_test_router(
     sockets: Option<usize>,
 ) -> Router {
     // The disposable fixture's account range; production limits are `Limits`.
-    assert!((2..=500).contains(&connections));
+    assert!((2..=512).contains(&connections));
     let limits = Limits {
         sockets: sockets.unwrap_or(connections.max(crate::limits::DEFAULT_SOCKETS)),
         voice: connections,
