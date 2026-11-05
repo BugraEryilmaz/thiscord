@@ -70,6 +70,13 @@ jobs:
         # Each media fixture owns a five-connection pool plus schema management.
         # Bound concurrent fixtures as the integration suite grows.
         run: cargo test -p thiscord-shared -p thiscord-backend --locked -- --include-ignored --test-threads=4
+      - name: Voice integration tests on the shard SFU transport
+        # Both transports must keep identical forwarding and permission semantics
+        # (docs/sfu-transport.md); the transport is fixed per process.
+        env:
+          THISCORD_VOICE_TRANSPORT: shard
+          THISCORD_VOICE_SHARDS: "2"
+        run: cargo test -p thiscord-backend --test voice --locked -- --include-ignored --test-threads=4
       - name: Voice load generator tests and real-peer smoke checks
         shell: bash
         run: |

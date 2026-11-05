@@ -6,9 +6,9 @@ use tokio::sync::OwnedSemaphorePermit;
 
 const AUDIO_AGE: Duration = Duration::from_millis(100);
 const VIDEO_AGE: Duration = Duration::from_millis(150);
-const SCREEN_BACKOFF: Duration = Duration::from_millis(20);
+pub(super) const SCREEN_BACKOFF: Duration = Duration::from_millis(20);
 
-fn max_age(kind: MediaKind) -> Duration {
+pub(super) fn max_age(kind: MediaKind) -> Duration {
     if kind.is_video() {
         VIDEO_AGE
     } else {
@@ -21,7 +21,7 @@ pub(super) struct Sender {
     tx: mpsc::Sender<Queued>,
     bytes: Arc<Semaphore>,
     kind: MediaKind,
-    screen_budget: Arc<std::sync::Mutex<[viewing::ByteBudget; ROOM_CAPACITY]>>,
+    pub(super) screen_budget: Arc<std::sync::Mutex<[viewing::ByteBudget; ROOM_CAPACITY]>>,
 }
 
 /// A delivery admitted under the room lock. Its source and receiver access
@@ -37,6 +37,11 @@ impl Admitted {
     /// revocation drain waits at most for these synchronous enqueues.
     pub(super) fn send(self) -> Result<(), ()> {
         self.tx.try_send(self.delivery)
+    }
+    /// The shard transport writes in the loop that admitted the delivery,
+    /// holding these permits through the write instead of through a queue.
+    pub(super) fn into_parts(self) -> (Delivery, (access::Packet, access::Packet)) {
+        (self.delivery, self._permits)
     }
 }
 

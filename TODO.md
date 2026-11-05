@@ -350,6 +350,12 @@ Personalized speaker isolation and physical acoustic acceptance remain future wo
 - [x] Abandoned connection cleanup and account/session/guild-scoped access invalidation.
 - [x] Document bandwidth estimate and transport encryption versus E2EE.
 - [ ] Sustained multi-party load tests and measured capacity/congestion budgets.
+- [x] Opt-in sharded sans-I/O SFU transport (`THISCORD_VOICE_TRANSPORT=shard`) with
+  in-loop fan-out and batched UDP, plus vendored webrtc-rs hot-path patches; about
+  half the SFU CPU on the VPS (off-host: 128 audio users 68-69% vs 136-143% of one
+  vCPU, 160 users clean; docs/sfu-transport.md).
+- [ ] Before making the shard transport the default: TURN-relayed clients, browsers,
+  off-host video and mixed chat load on the VPS, and the 192-user onset (per-shard CPU).
 - [x] Opt-in Rust voice load generator and disposable benchmark server; per-stream
   delivery/latency reports and loopback smoke checks (docs/voice-load.md).
 - [x] Camera video and text chat load generators with single-host VPS capacity

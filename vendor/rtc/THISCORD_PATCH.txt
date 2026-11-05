@@ -1,0 +1,43 @@
+Thiscord webrtc-rs hot-path patches, 2026-11-05
+
+Source: crates.io releases of webrtc-rs's sans-I/O crates, https://github.com/webrtc-rs/webrtc
+  rtc 0.21.0             SHA-256 a0c5e4a8791908797789d63efd013d6987b1f87cce4255b94343d1fa9c69a81f
+  rtc-interceptor 0.21.0 SHA-256 b89c8484098eb9f7848152780df3450d704f371e4e930fda443a50b4434da3a3
+  rtc-srtp 0.21.0        SHA-256 2219abff4963802959a9fa8cff370f47ebbcdf92e783e5d8446b440414a8c76e
+License: MIT OR Apache-2.0; both notices retained in each crate directory (the
+interceptor and SRTP archives ship no license files; these are rtc 0.21.0's, the
+same project and license).
+
+Vendored: src/, the normalized Cargo.toml (explicit [[example]]/[[test]]/[[bench]]
+targets removed because their sources are not vendored) and README.md. These are
+patched third-party dependencies excluded from the three-package first-party
+workspace. Cargo [patch.crates-io] makes the backend and the desktop/bot clients use
+them; every other webrtc-rs crate still comes from the registry, pinned by Cargo.lock.
+
+All changes are marked THISCORD in the source and are allocation/copy removals with
+unchanged wire output and ordering. thiscord.patch (this directory) is the complete
+diff against the crates.io sources; re-apply it from vendor/ with `patch -p1` when
+upgrading, or drop the [patch.crates-io] entries if upstream has equivalent fixes.
+
+Changes:
+- rtc/src/peer_connection/handler/mod.rs, internal.rs: `poll_write` and `poll_event`
+  return already-produced output before running another 8-handler pass (draining N
+  outputs took N+1 passes; FIFO order unchanged). `handle_read`, `poll_write` and
+  `poll_event` reuse scratch queues instead of allocating one per call. New
+  crate-internal `handle_write_rtp` skips the per-packet track-id String.
+- rtc/src/rtp_transceiver/rtp_sender/mod.rs: `write_rtp` uses `handle_write_rtp`.
+- rtc/src/peer_connection/handler/srtp.rs: outgoing RTP is marshaled once into a
+  buffer with tag capacity and encrypted in place with the known header, instead of
+  marshal -> header re-parse (allocating CSRC/extension vectors) -> copy.
+- rtc-srtp/src/{cipher/mod.rs, cipher/cipher_aead_aes_gcm.rs,
+  cipher/cipher_aes_cm_hmac_sha1.rs, context/srtp.rs}: `encrypt_rtp_in_place` for
+  both cipher families and the context. context/srtp_test.rs adds a test that its
+  output is byte-identical to `encrypt_rtp` (both profiles, CSRCs, extension,
+  padding, sequence rollover) and decrypts.
+- rtc-interceptor/src/chain.rs: one reusable conveyor per chain instead of a
+  `VecDeque` allocation per packet per direction.
+
+Verification: the crates' own lib tests (rtc 279, rtc-interceptor 248, rtc-srtp 33)
+with these patches applied to each other; the backend voice integration suite under
+both SFU transports. Measured effect is small (about 4% of SFU CPU in the shard
+transport, within noise in the webrtc transport): see docs/sfu-transport.md.

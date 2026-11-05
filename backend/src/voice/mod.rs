@@ -12,8 +12,18 @@ mod membership;
 mod red;
 mod resumption;
 mod retransmission;
+mod shard;
 mod store;
 mod viewing;
+pub use shard::{SHARDS_VAR, TRANSPORT_VAR, Transport};
+
+/// Validates `THISCORD_VOICE_TRANSPORT`/`THISCORD_VOICE_SHARDS` and fixes the
+/// SFU transport for this process. Call at startup.
+pub fn configure_transport() -> Result<Transport, crate::BoxError> {
+    let transport = Transport::from_env()?;
+    shard::configure(transport)?;
+    Ok(transport)
+}
 use crate::{auth::Failure, db::DbPool};
 use axum::{
     Extension, Router,
@@ -625,10 +635,41 @@ fn local_bind() -> Result<String, String> {
         socket.local_addr().map_err(|e| e.to_string())?.ip()
     ))
 }
+/// Codecs and RTP interceptors, identical for both transports.
+fn media_setup() -> (MediaEngine, rtc::interceptor::Registry) {
+    let mut engine = MediaEngine::default();
+    engine
+        .register_codec(
+            rtc::rtp_transceiver::rtp_sender::RTCRtpCodecParameters {
+                rtp_codec: rtc::rtp_transceiver::rtp_sender::RTCRtpCodec {
+                    mime_type: "video/H264".into(),
+                    clock_rate: 90_000,
+                    sdp_fmtp_line: thiscord_shared::screen::H264_FMTP.into(),
+                    ..Default::default()
+                },
+                payload_type: MediaKind::ScreenVideo.payload_type(),
+            },
+            rtc::rtp_transceiver::rtp_sender::RtpCodecKind::Video,
+        )
+        .expect("valid screen codec");
+    let _ = engine.register_default_codecs();
+    red::register(&mut engine);
+    let registry = register_default_interceptors(rtc::interceptor::Registry::new(), &mut engine)
+        .expect("default RTP interceptors")
+        .with(
+            rtc::interceptor::Slot::NackResponder,
+            retransmission::Responder::default(),
+        );
+    (engine, registry)
+}
 fn local_track(slot: usize) -> Arc<TrackLocalStaticRTP> {
+    Arc::new(TrackLocalStaticRTP::new(local_media_track(slot)))
+}
+/// The relay track for a `MediaKind` track index, with its fixed SSRC and codec.
+fn local_media_track(slot: usize) -> MediaStreamTrack {
     let (kind, _) = MediaKind::from_track(slot).expect("negotiated track index");
     let video = kind.is_video();
-    Arc::new(TrackLocalStaticRTP::new(MediaStreamTrack::new(
+    MediaStreamTrack::new(
         format!("speaker-{slot}"),
         format!("speaker-{slot}"),
         format!("speaker-{slot}"),
@@ -656,7 +697,7 @@ fn local_track(slot: usize) -> Arc<TrackLocalStaticRTP> {
             },
             ..Default::default()
         }],
-    )))
+    )
 }
 fn media_ssrc(index: usize) -> u32 {
     let (kind, slot) = MediaKind::from_track(index).expect("negotiated track index");
@@ -990,6 +1031,73 @@ async fn request_keyframe(
     source.last_keyframe[kind.view_index(0) / ROOM_CAPACITY] = Some(Instant::now());
     let _ = source.keyframes.try_send((kind, epoch, layer));
 }
+/// One connection's media transport: a webrtc-rs `PeerConnection` with its own
+/// driver task and socket, or a connection inside a shard (see `shard`).
+enum MediaPeer {
+    WebRtc(Arc<dyn PeerConnection>),
+    Shard(shard::Peer),
+}
+enum StatsSource {
+    WebRtc(Arc<dyn PeerConnection>),
+    Shard(shard::Link),
+}
+impl StatsSource {
+    async fn sample(&self) -> Option<rtc::statistics::report::RTCStatsReport> {
+        let report = async {
+            match self {
+                Self::WebRtc(pc) => Some(
+                    pc.get_stats(Instant::now(), rtc::statistics::StatsSelector::None)
+                        .await,
+                ),
+                Self::Shard(link) => link.stats().await,
+            }
+        };
+        tokio::time::timeout(Duration::from_millis(100), report)
+            .await
+            .ok()
+            .flatten()
+    }
+}
+impl MediaPeer {
+    fn stats_source(&self) -> StatsSource {
+        match self {
+            Self::WebRtc(pc) => StatsSource::WebRtc(pc.clone()),
+            Self::Shard(peer) => StatsSource::Shard(peer.link()),
+        }
+    }
+    async fn log_selected_route(&self, id: RequestId) -> bool {
+        match self {
+            Self::WebRtc(pc) => log_selected_route(pc.as_ref(), id).await,
+            Self::Shard(peer) => {
+                let Some((local, remote)) = peer
+                    .link()
+                    .stats()
+                    .await
+                    .as_ref()
+                    .and_then(shard::selected_route)
+                else {
+                    return false;
+                };
+                tracing::info!(
+                    request_id = %id,
+                    local_candidate_type = %local,
+                    remote_candidate_type = %remote,
+                    "voice media route selected"
+                );
+                true
+            }
+        }
+    }
+    async fn close(self) {
+        match self {
+            Self::WebRtc(pc) => {
+                let _ = tokio::time::timeout(Duration::from_secs(2), pc.close()).await;
+            }
+            // Dropping the handle closes the connection on its shard.
+            Self::Shard(peer) => drop(peer),
+        }
+    }
+}
 async fn log_selected_route(pc: &dyn PeerConnection, id: RequestId) -> bool {
     for sender in pc.get_senders().await {
         if let Ok(Some(dtls)) = sender.transport().await
@@ -1192,51 +1300,50 @@ async fn serve(mut socket: logging::Socket, pool: DbPool, id: RequestId, upgrade
     let browser_publisher = Arc::new(browser::Publisher::default());
     let (in_tx, mut in_rx) = mpsc::channel::<Ingress>(8);
     let (media_in_tx, mut media_in_rx) = mpsc::channel::<Ingress>(4096);
-    let mut engine = MediaEngine::default();
-    engine
-        .register_codec(
-            rtc::rtp_transceiver::rtp_sender::RTCRtpCodecParameters {
-                rtp_codec: rtc::rtp_transceiver::rtp_sender::RTCRtpCodec {
-                    mime_type: "video/H264".into(),
-                    clock_rate: 90_000,
-                    sdp_fmtp_line: thiscord_shared::screen::H264_FMTP.into(),
-                    ..Default::default()
-                },
-                payload_type: MediaKind::ScreenVideo.payload_type(),
-            },
-            rtc::rtp_transceiver::rtp_sender::RtpCodecKind::Video,
-        )
-        .expect("valid screen codec");
-    let _ = engine.register_default_codecs();
-    red::register(&mut engine);
-    let registry = register_default_interceptors(Registry::new(), &mut engine)
-        .expect("default RTP interceptors")
-        .with(
-            rtc::interceptor::Slot::NackResponder,
-            retransmission::Responder::default(),
-        );
     socket.stage = "peer_build";
-    let built = PeerConnectionBuilder::new()
-        .with_configuration(ice::configuration(&ice_servers))
-        .with_interceptor_registry(registry)
-        .with_media_engine(engine)
-        .with_handler(Arc::new(Handler {
-            request_id: id,
-            metrics: metrics.clone(),
-            gathered: gathered.clone(),
-            packets: in_tx,
-            media_packets: media_in_tx,
-            active: active.clone(),
-            generation: generation.clone(),
-            track_seen: std::array::from_fn(|_| AtomicBool::new(false)),
-            screen_rate: Default::default(),
-            browser: browser_publisher.clone(),
-            slot,
-        }))
-        .with_udp_addrs(vec![local_bind().unwrap_or_else(|_| "127.0.0.1:0".into())])
-        .build()
-        .await;
-    let Ok(pc) = built else {
+    let built = match shard::transport() {
+        shard::Transport::WebRtc => {
+            let (engine, registry) = media_setup();
+            PeerConnectionBuilder::new()
+                .with_configuration(ice::configuration(&ice_servers))
+                .with_interceptor_registry(registry)
+                .with_media_engine(engine)
+                .with_handler(Arc::new(Handler {
+                    request_id: id,
+                    metrics: metrics.clone(),
+                    gathered: gathered.clone(),
+                    packets: in_tx,
+                    media_packets: media_in_tx,
+                    active: active.clone(),
+                    generation: generation.clone(),
+                    track_seen: std::array::from_fn(|_| AtomicBool::new(false)),
+                    screen_rate: Default::default(),
+                    browser: browser_publisher.clone(),
+                    slot,
+                }))
+                .with_udp_addrs(vec![local_bind().unwrap_or_else(|_| "127.0.0.1:0".into())])
+                .build()
+                .await
+                .map(|pc| MediaPeer::WebRtc(Arc::new(pc)))
+                .map_err(|_| ())
+        }
+        shard::Transport::Shard { .. } => shard::Peer::create(
+            channel_id,
+            shard::PeerContext {
+                request_id: id,
+                room: room.clone(),
+                slot,
+                source_id,
+                access: connection_access.clone(),
+                generation: generation.clone(),
+                active: active.clone(),
+                metrics: metrics.clone(),
+            },
+        )
+        .await
+        .map(MediaPeer::Shard),
+    };
+    let Ok(peer) = built else {
         active.store(false, Ordering::Release);
         release_member(&room, slot, source_id).await;
         if *replaced.borrow() {
@@ -1246,16 +1353,10 @@ async fn serve(mut socket: logging::Socket, pool: DbPool, id: RequestId, upgrade
         }
         return;
     };
-    let pc: Arc<dyn PeerConnection> = Arc::new(pc);
-    let stats_peer = pc.clone();
+    let stats_peer = peer.stats_source();
     let mut stats_task = diagnostics::Sampler(tokio::spawn(async move {
         loop {
-            if let Ok(report) = tokio::time::timeout(
-                Duration::from_millis(100),
-                stats_peer.get_stats(Instant::now(), rtc::statistics::StatsSelector::None),
-            )
-            .await
-            {
+            if let Some(report) = stats_peer.sample().await {
                 *network.write().await = diagnostics::network(&report);
             }
             tokio::time::sleep(Duration::from_secs(5)).await;
@@ -1272,22 +1373,32 @@ async fn serve(mut socket: logging::Socket, pool: DbPool, id: RequestId, upgrade
     let negotiation_started = Instant::now();
     let negotiated = async {
         tokio::time::timeout(Duration::from_secs(15), async {
-            socket.stage = "add_tracks";
-            for slot in 0..MediaKind::TRACK_COUNT {
-                let track = local_track(slot);
-                pc.add_track(track.clone() as Arc<dyn TrackLocal>)
-                    .await
-                    .map_err(|_| ())?;
-                tracks.push(track);
-            }
-            socket.stage = "create_offer";
-            let offer = pc.create_offer(None).await.map_err(|_| ())?;
-            socket.stage = "local_description";
-            pc.set_local_description(offer).await.map_err(|_| ())?;
-            socket.stage = "ice_gathering";
-            gathered.notified().await;
-            let local = pc.local_description().await.ok_or(())?;
-            browser_publisher.bind(&pc, &local.sdp);
+            let local = match &peer {
+                MediaPeer::WebRtc(pc) => {
+                    socket.stage = "add_tracks";
+                    for slot in 0..MediaKind::TRACK_COUNT {
+                        let track = local_track(slot);
+                        pc.add_track(track.clone() as Arc<dyn TrackLocal>)
+                            .await
+                            .map_err(|_| ())?;
+                        tracks.push(track);
+                    }
+                    socket.stage = "create_offer";
+                    let offer = pc.create_offer(None).await.map_err(|_| ())?;
+                    socket.stage = "local_description";
+                    pc.set_local_description(offer).await.map_err(|_| ())?;
+                    socket.stage = "ice_gathering";
+                    gathered.notified().await;
+                    let local = pc.local_description().await.ok_or(())?;
+                    browser_publisher.bind(pc, &local.sdp);
+                    local
+                }
+                // Tracks, offer and the shard's host candidate in one step.
+                MediaPeer::Shard(peer) => {
+                    socket.stage = "create_offer";
+                    peer.offer().await?
+                }
+            };
             let sdp = serde_json::to_string(&local).map_err(|_| ())?;
             socket.stage = "offer_send";
             send(
@@ -1348,7 +1459,10 @@ async fn serve(mut socket: logging::Socket, pool: DbPool, id: RequestId, upgrade
                 return Err(());
             }
             socket.stage = "remote_description";
-            pc.set_remote_description(answer).await.map_err(|_| ())?;
+            match &peer {
+                MediaPeer::WebRtc(pc) => pc.set_remote_description(answer).await.map_err(|_| ())?,
+                MediaPeer::Shard(peer) => peer.answer(answer, browser).await?,
+            }
             if let Some(member) = room
                 .members
                 .write()
@@ -1380,12 +1494,20 @@ async fn serve(mut socket: logging::Socket, pool: DbPool, id: RequestId, upgrade
         socket.recoverable = true;
         socket.stage = "active";
         tracing::info!(request_id = %id, "voice signaling negotiated");
+        // The shard transport relays and writes inside its own loop.
+        let shard_peer = match &peer {
+            MediaPeer::Shard(peer) => Some(peer),
+            MediaPeer::WebRtc(_) => None,
+        };
+        if let Some(peer) = shard_peer {
+            peer.activate();
+        }
         let relay_room = room.clone();
         let relay_active = active.clone();
         let relay_generation = generation.clone();
         let relay_access = connection_access.clone();
         let relay_browser = browser_publisher.clone();
-        let relay = tokio::spawn(async move {
+        let relay = shard_peer.is_none().then(|| tokio::spawn(async move {
             let mut performance_sample = 0_u64;
             while let Some(Ingress {
                 epoch,
@@ -1561,7 +1683,7 @@ async fn serve(mut socket: logging::Socket, pool: DbPool, id: RequestId, upgrade
                     request_keyframe(&relay_room, viewer, slot, kind, epoch, &viewer_active).await;
                 }
             }
-        });
+        }));
         let tracks = Arc::new(tracks);
         let mut writers = tokio::task::JoinSet::new();
         for (kind, rx) in [
@@ -1569,7 +1691,10 @@ async fn serve(mut socket: logging::Socket, pool: DbPool, id: RequestId, upgrade
             (MediaKind::ScreenVideo, video_rx),
             (MediaKind::SystemAudio, audio_rx),
             (MediaKind::Camera, camera_rx),
-        ] {
+        ]
+        .into_iter()
+        .filter(|_| shard_peer.is_none())
+        {
             let writer = egress::Writer {
                 access: connection_access.clone(),
                 room: room.clone(),
@@ -1691,7 +1816,10 @@ async fn serve(mut socket: logging::Socket, pool: DbPool, id: RequestId, upgrade
                         && room.members.read().await.get(&slot).is_some_and(|m| m.source_id == source_id && m.feedback_enabled && m.active.load(Ordering::Acquire) && m.info.video_active(kind) && m.info.video_epoch(kind) == epoch);
                     if allowed && browser_publisher.enabled() {
                         // Browsers answer RTCP PLI on their media SSRC with an IDR.
-                        browser_publisher.keyframe(kind, slot).await;
+                        match &peer {
+                            MediaPeer::WebRtc(_) => { browser_publisher.keyframe(kind, slot).await; }
+                            MediaPeer::Shard(peer) => peer.keyframe(kind),
+                        }
                     } else if allowed && send(&mut socket, ServerEvent::ScreenKeyframe { kind, epoch, layer }).await.is_err() { break; }
                 },
                 Some(call)=audio_requests.recv()=>{
@@ -1800,7 +1928,7 @@ async fn serve(mut socket: logging::Socket, pool: DbPool, id: RequestId, upgrade
                         if let Some((epoch, bitrate)) = viewing::target(&room, slot, kind).await
                             && send(&mut socket, ServerEvent::ScreenTarget { kind, epoch, bitrate, layers: viewing::layer_target(&room, slot, kind).await, profile: viewing::profile_target(&room, slot, kind).await }).await.is_err() { active.store(false, Ordering::Release); break; }
                     }
-                    if !route_logged { route_logged=log_selected_route(pc.as_ref(),id).await; }
+                    if !route_logged { route_logged=peer.log_selected_route(id).await; }
                 if send(&mut socket,ServerEvent::Participants{members}).await.is_err(){break;}
                 },
                 _=challenge_tick.tick()=>{
@@ -1845,9 +1973,13 @@ async fn serve(mut socket: logging::Socket, pool: DbPool, id: RequestId, upgrade
             }
         }
         active.store(false, Ordering::Release);
-        relay.abort();
+        if let Some(relay) = &relay {
+            relay.abort();
+        }
         writers.abort_all();
-        let _ = relay.await;
+        if let Some(relay) = relay {
+            let _ = relay.await;
+        }
         while writers.join_next().await.is_some() {}
     } else if !*replaced.borrow() {
         socket.end(if matches!(negotiated, Some(Err(_))) {
@@ -1864,7 +1996,7 @@ async fn serve(mut socket: logging::Socket, pool: DbPool, id: RequestId, upgrade
     tracing::info!(request_id = %id, "voice membership released");
     stats_task.0.abort();
     let _ = (&mut stats_task.0).await;
-    let _ = tokio::time::timeout(Duration::from_secs(2), pc.close()).await;
+    peer.close().await;
     if !*replaced.borrow() {
         let _ =
             tokio::time::timeout(Duration::from_secs(1), socket.send(Message::Close(None))).await;

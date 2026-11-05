@@ -49,6 +49,11 @@ hmac = "0.12"
 symphonia = { version = "0.5.4", default-features = false, features = ["wav", "pcm", "adpcm", "mp3", "ogg", "vorbis", "flac"] }
 rubato = "0.14.1"
 sha1 = "0.10"
+bytes = "1"
+
+# Batched UDP receive/send (recvmmsg/sendmmsg) for the shard SFU transport.
+[target.'cfg(target_os = "linux")'.dependencies]
+libc = "0.2"
 
 [dev-dependencies]
 opus = "0.4.0"

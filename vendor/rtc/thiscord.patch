@@ -1,0 +1,438 @@
+diff -ruN a/rtc/src/peer_connection/handler/mod.rs b/rtc/src/peer_connection/handler/mod.rs
+--- a/rtc/src/peer_connection/handler/mod.rs
++++ b/rtc/src/peer_connection/handler/mod.rs
+@@ -9,7 +9,7 @@
+ 
+ use crate::peer_connection::RTCPeerConnection;
+ use crate::peer_connection::event::RTCPeerConnectionEvent;
+-use crate::peer_connection::event::{RTCEventInternal, TaggedRTCEvent};
++use crate::peer_connection::event::{RTCEventInternal, TaggedRTCEvent, TaggedRTCEventInternal};
+ use crate::peer_connection::handler::datachannel::{DataChannelHandler, DataChannelHandlerContext};
+ use crate::peer_connection::handler::demuxer::{DemuxerHandler, DemuxerHandlerContext};
+ use crate::peer_connection::handler::dtls::{DtlsHandler, DtlsHandlerContext};
+@@ -119,6 +119,10 @@
+     /// data-channel consumer froze video on the same connection for as long as it stalled —
+     /// video that arrives over SRTP and is subject to none of SCTP's flow control.
+     pub(crate) media_read_outs: VecDeque<TaggedRTCMessage>,
++    /// THISCORD: reused intermediate queues for one pipeline pass, so a pass allocates
++    /// nothing in steady state. Always empty between passes.
++    pub(crate) scratch_messages: VecDeque<TaggedRTCMessageInternal>,
++    pub(crate) scratch_events: VecDeque<TaggedRTCEventInternal>,
+     /// Data-channel messages ready for the application.
+     ///
+     /// Its length *is* the back-pressure signal the SCTP handler bounds against, so a caller
+@@ -243,6 +247,21 @@
+     }
+ }
+ 
++impl RTCPeerConnection {
++    /// THISCORD: `handle_write` for one outgoing RTP packet without the application
++    /// message's track-id `String`, which `handle_write` discards (one allocation and
++    /// copy per sent packet).
++    pub(crate) fn handle_write_rtp(&mut self, now: Instant, rtp_packet: rtp::Packet) -> Result<(), Error> {
++        use sansio::Protocol as _;
++        let mut endpoint_handler = self.get_endpoint_handler();
++        endpoint_handler.handle_write(TaggedRTCMessageInternal {
++            now,
++            transport: Default::default(),
++            message: RTCMessageInternal::Rtp(RTPMessage::Packet(Packet::Rtp(rtp_packet))),
++        })
++    }
++}
++
+ impl sansio::Protocol<TaggedBytesMut, TaggedRTCMessage, TaggedRTCEvent> for RTCPeerConnection {
+     type Rout = TaggedRTCMessage;
+     type Wout = TaggedBytesMut;
+@@ -251,7 +270,7 @@
+     type Time = Instant;
+ 
+     fn handle_read(&mut self, msg: TaggedBytesMut) -> Result<(), Self::Error> {
+-        let mut intermediate_routs = VecDeque::new();
++        let mut intermediate_routs = std::mem::take(&mut self.pipeline_context.scratch_messages);
+         intermediate_routs.push_back(TaggedRTCMessageInternal {
+             now: msg.now,
+             transport: msg.transport,
+@@ -316,6 +335,7 @@
+             }
+         }
+ 
++        self.pipeline_context.scratch_messages = intermediate_routs;
+         Ok(())
+     }
+ 
+@@ -363,7 +383,13 @@
+     }
+ 
+     fn poll_write(&mut self) -> Option<Self::Wout> {
+-        let mut intermediate_wouts = VecDeque::new();
++        // THISCORD: drain what an earlier pass produced before running another. A pass
++        // moves everything every handler has queued, so re-running it per popped datagram
++        // made draining N datagrams cost N+1 full passes; FIFO order is unchanged.
++        if let Some(msg) = self.pipeline_context.write_outs.pop_front() {
++            return Some(msg);
++        }
++        let mut intermediate_wouts = std::mem::take(&mut self.pipeline_context.scratch_messages);
+ 
+         for_each_handler!(reverse: process_handler!(self, handler, {
+             while let Some(msg) = intermediate_wouts.pop_front() {
+@@ -387,6 +413,7 @@
+             }
+         }
+ 
++        self.pipeline_context.scratch_messages = intermediate_wouts;
+         self.pipeline_context.write_outs.pop_front()
+     }
+ 
+@@ -400,7 +427,11 @@
+     }
+ 
+     fn poll_event(&mut self) -> Option<Self::Eout> {
+-        let mut intermediate_eouts = VecDeque::new();
++        // THISCORD: as in `poll_write`, one pass per drained batch, not per event.
++        if let Some(evt) = self.pipeline_context.event_outs.pop_front() {
++            return Some(evt);
++        }
++        let mut intermediate_eouts = std::mem::take(&mut self.pipeline_context.scratch_events);
+ 
+         for_each_handler!(forward: process_handler!(self, handler, {
+             while let Some(evt) = intermediate_eouts.pop_front() {
+@@ -430,6 +461,7 @@
+             }
+         }
+ 
++        self.pipeline_context.scratch_events = intermediate_eouts;
+         self.pipeline_context.event_outs.pop_front()
+     }
+ 
+diff -ruN a/rtc/src/peer_connection/handler/srtp.rs b/rtc/src/peer_connection/handler/srtp.rs
+--- a/rtc/src/peer_connection/handler/srtp.rs
++++ b/rtc/src/peer_connection/handler/srtp.rs
+@@ -6,12 +6,16 @@
+ use interceptor::Packet;
+ use log::debug;
+ use shared::error::{Error, Result};
+-use shared::marshal::{Marshal, Unmarshal};
++use bytes::BytesMut;
++use shared::marshal::{Marshal, MarshalSize, Unmarshal};
+ use shared::util::is_rtcp;
+ use srtp::context::Context;
+ use std::collections::VecDeque;
+ use std::time::Instant;
+ 
++/// Largest SRTP auth tag among the supported profiles (AEAD GCM: 16, HMAC-SHA1-80: 10).
++const SRTP_MAX_TAG_LEN: usize = 16;
++
+ #[derive(Default)]
+ pub(crate) struct SrtpHandlerContext {
+     pub(crate) local_srtp_context: Option<Context>,
+@@ -125,8 +129,16 @@
+                 }
+                 RTPMessage::Packet(Packet::Rtp(rtp_message)) => {
+                     if let Some(context) = self.ctx.local_srtp_context.as_mut() {
+-                        let packet = rtp_message.marshal()?;
+-                        context.encrypt_rtp(&packet)?
++                        // THISCORD: marshal once into a buffer with room for the tag and
++                        // encrypt it in place with the header in hand, instead of
++                        // marshal -> re-parse the header -> copy into a second buffer.
++                        let size = rtp_message.marshal_size();
++                        let mut packet = BytesMut::with_capacity(size + SRTP_MAX_TAG_LEN);
++                        packet.resize(size, 0);
++                        let written = rtp_message.marshal_to(&mut packet)?;
++                        packet.truncate(written);
++                        context.encrypt_rtp_in_place(&mut packet, &rtp_message.header)?;
++                        packet
+                     } else {
+                         return Err(Error::Other(format!(
+                             "local_srtp_context is not set yet for rtp_packet {:?}",
+diff -ruN a/rtc/src/peer_connection/internal.rs b/rtc/src/peer_connection/internal.rs
+--- a/rtc/src/peer_connection/internal.rs
++++ b/rtc/src/peer_connection/internal.rs
+@@ -164,6 +164,8 @@
+             interceptor_handler_context: InterceptorHandlerContext::default(),
+             endpoint_handler_context: EndpointHandlerContext::default(),
+             media_read_outs: VecDeque::new(),
++            scratch_messages: VecDeque::new(),
++            scratch_events: VecDeque::new(),
+             data_read_outs: VecDeque::new(),
+             write_outs: VecDeque::new(),
+             event_outs: VecDeque::new(),
+diff -ruN a/rtc/src/rtp_transceiver/rtp_sender/mod.rs b/rtc/src/rtp_transceiver/rtp_sender/mod.rs
+--- a/rtc/src/rtp_transceiver/rtp_sender/mod.rs
++++ b/rtc/src/rtp_transceiver/rtp_sender/mod.rs
+@@ -466,11 +466,7 @@
+             return Err(Error::ErrHeaderExtensionNotFound);
+         }
+ 
+-        let track_id = sender.track().track_id().to_string();
+-        self.peer_connection.handle_write(TaggedRTCMessage {
+-            now,
+-            message: RTCMessage::RtpPacket(track_id, packet),
+-        })
++        self.peer_connection.handle_write_rtp(now, packet)
+     }
+ 
+     /// Writes RTCP packets to the network.
+diff -ruN a/rtc-interceptor/src/chain.rs b/rtc-interceptor/src/chain.rs
+--- a/rtc-interceptor/src/chain.rs
++++ b/rtc-interceptor/src/chain.rs
+@@ -61,6 +61,9 @@
+     interceptors: Vec<Box<dyn Interceptor>>,
+     read_outs: VecDeque<TaggedPacket>,
+     write_outs: VecDeque<TaggedPacket>,
++    /// THISCORD: the walk's conveyor, reused so a packet's pass allocates nothing.
++    /// Always empty between walks.
++    belt: VecDeque<TaggedPacket>,
+ }
+ 
+ impl Chain {
+@@ -95,10 +98,10 @@
+     /// bypass with.
+     fn walk<'a, T>(
+         interceptors: impl Iterator<Item = &'a mut Box<dyn Interceptor>>,
+-        mut belt: VecDeque<T>,
++        belt: &mut VecDeque<T>,
+         handle: fn(&mut dyn Interceptor, T) -> Result<(), Error>,
+         poll: fn(&mut dyn Interceptor) -> Option<T>,
+-    ) -> VecDeque<T> {
++    ) {
+         for interceptor in interceptors {
+             while let Some(next) = belt.pop_front() {
+                 // An interceptor takes the packet and decides what becomes of it: hold it, drop
+@@ -113,27 +116,26 @@
+                 belt.push_back(next);
+             }
+         }
+-        belt
+     }
+ 
+     fn drain_read(&mut self) {
+-        let belt = Self::walk(
++        Self::walk(
+             self.interceptors.iter_mut(),
+-            VecDeque::new(),
++            &mut self.belt,
+             |s, p| s.handle_read(p),
+             |s| s.poll_read(),
+         );
+-        self.read_outs.extend(belt);
++        self.read_outs.extend(self.belt.drain(..));
+     }
+ 
+     fn drain_write(&mut self) {
+-        let belt = Self::walk(
++        Self::walk(
+             self.interceptors.iter_mut().rev(),
+-            VecDeque::new(),
++            &mut self.belt,
+             |s, p| s.handle_write(p),
+             |s| s.poll_write(),
+         );
+-        self.write_outs.extend(belt);
++        self.write_outs.extend(self.belt.drain(..));
+     }
+ }
+ 
+@@ -145,13 +147,8 @@
+     type Time = Instant;
+ 
+     fn handle_read(&mut self, msg: TaggedPacket) -> Result<(), Self::Error> {
+-        let belt = Self::walk(
+-            self.interceptors.iter_mut(),
+-            VecDeque::from([msg]),
+-            |s, p| s.handle_read(p),
+-            |s| s.poll_read(),
+-        );
+-        self.read_outs.extend(belt);
++        self.belt.push_back(msg);
++        self.drain_read();
+         Ok(())
+     }
+ 
+@@ -165,13 +162,8 @@
+     }
+ 
+     fn handle_write(&mut self, msg: TaggedPacket) -> Result<(), Self::Error> {
+-        let belt = Self::walk(
+-            self.interceptors.iter_mut().rev(),
+-            VecDeque::from([msg]),
+-            |s, p| s.handle_write(p),
+-            |s| s.poll_write(),
+-        );
+-        self.write_outs.extend(belt);
++        self.belt.push_back(msg);
++        self.drain_write();
+         Ok(())
+     }
+ 
+diff -ruN a/rtc-srtp/src/cipher/cipher_aead_aes_gcm.rs b/rtc-srtp/src/cipher/cipher_aead_aes_gcm.rs
+--- a/rtc-srtp/src/cipher/cipher_aead_aes_gcm.rs
++++ b/rtc-srtp/src/cipher/cipher_aead_aes_gcm.rs
+@@ -57,6 +57,23 @@
+         Ok(writer)
+     }
+ 
++    fn encrypt_rtp_in_place(
++        &mut self,
++        packet: &mut BytesMut,
++        header: &rtp::Header,
++        roc: u32,
++    ) -> Result<()> {
++        let header_len = header.marshal_size();
++        let nonce = self.rtp_initialization_vector(header, roc);
++        let (aad, plaintext) = packet.split_at_mut(header_len);
++        let mut tag = [0; CIPHER_AEAD_AES_GCM_AUTH_TAG_LEN];
++        self.srtp_cipher
++            .seal_in_place(&nonce, aad, plaintext, &mut tag)
++            .map_err(crypto_error)?;
++        packet.extend_from_slice(&tag);
++        Ok(())
++    }
++
+     fn decrypt_rtp(
+         &mut self,
+         ciphertext: &[u8],
+diff -ruN a/rtc-srtp/src/cipher/cipher_aes_cm_hmac_sha1.rs b/rtc-srtp/src/cipher/cipher_aes_cm_hmac_sha1.rs
+--- a/rtc-srtp/src/cipher/cipher_aes_cm_hmac_sha1.rs
++++ b/rtc-srtp/src/cipher/cipher_aes_cm_hmac_sha1.rs
+@@ -197,6 +197,27 @@
+         Ok(writer)
+     }
+ 
++    fn encrypt_rtp_in_place(
++        &mut self,
++        packet: &mut BytesMut,
++        header: &rtp::Header,
++        roc: u32,
++    ) -> Result<()> {
++        let counter = generate_counter(
++            header.sequence_number,
++            roc,
++            header.ssrc,
++            &self.srtp_session_salt,
++        );
++        self.srtp_cipher
++            .apply_keystream(&counter, &mut packet[header.marshal_size()..])
++            .map_err(crypto_error)?;
++        let full_auth_tag = self.generate_srtp_auth_tag(packet, roc)?;
++        let tag_len = self.rtp_auth_tag_len();
++        packet.extend_from_slice(&full_auth_tag[..tag_len]);
++        Ok(())
++    }
++
+     fn decrypt_rtp(
+         &mut self,
+         encrypted: &[u8],
+diff -ruN a/rtc-srtp/src/cipher/mod.rs b/rtc-srtp/src/cipher/mod.rs
+--- a/rtc-srtp/src/cipher/mod.rs
++++ b/rtc-srtp/src/cipher/mod.rs
+@@ -53,6 +53,18 @@
+     /// Encrypt RTP payload.
+     fn encrypt_rtp(&mut self, payload: &[u8], header: &rtp::Header, roc: u32) -> Result<BytesMut>;
+ 
++    /// THISCORD: encrypts a marshaled packet (header and payload) in place and appends the
++    /// auth tag, instead of copying it into a new buffer. Same output as `encrypt_rtp`.
++    fn encrypt_rtp_in_place(
++        &mut self,
++        packet: &mut BytesMut,
++        header: &rtp::Header,
++        roc: u32,
++    ) -> Result<()> {
++        *packet = self.encrypt_rtp(packet, header, roc)?;
++        Ok(())
++    }
++
+     /// Decrypt RTP payload.
+     fn decrypt_rtp(&mut self, payload: &[u8], header: &rtp::Header, roc: u32) -> Result<BytesMut>;
+ 
+diff -ruN a/rtc-srtp/src/context/srtp.rs b/rtc-srtp/src/context/srtp.rs
+--- a/rtc-srtp/src/context/srtp.rs
++++ b/rtc-srtp/src/context/srtp.rs
+@@ -88,6 +88,29 @@
+         Ok(dst)
+     }
+ 
++    /// THISCORD: encrypts a marshaled RTP packet in place, appending the auth tag. `header`
++    /// must be the packet's own header. Reserve `len + 16` capacity to avoid a reallocation.
++    ///
++    /// # Errors
++    ///
++    /// As [`Self::encrypt_rtp_with_header`].
++    pub fn encrypt_rtp_in_place(&mut self, packet: &mut BytesMut, header: &rtp::Header) -> Result<()> {
++        let (roc, diff, ovf) = self
++            .get_srtp_ssrc_state(header.ssrc)
++            .next_rollover_count(header.sequence_number);
++        if ovf {
++            // See `encrypt_rtp_with_header` (RFC 3711 section 9.2).
++            return Err(Error::ErrExceededMaxPackets);
++        }
++
++        self.cipher.encrypt_rtp_in_place(packet, header, roc)?;
++
++        self.get_srtp_ssrc_state(header.ssrc)
++            .update_rollover_count(header.sequence_number, diff);
++
++        Ok(())
++    }
++
+     /// EncryptRTP marshals and encrypts an RTP packet, writing to the dst buffer provided.
+     /// If the dst buffer does not have the capacity to hold `len(plaintext) + 10` bytes, a new one will be allocated and returned.
+     pub fn encrypt_rtp(&mut self, plaintext: &[u8]) -> Result<BytesMut> {
+diff -ruN a/rtc-srtp/src/context/srtp_test.rs b/rtc-srtp/src/context/srtp_test.rs
+--- a/rtc-srtp/src/context/srtp_test.rs
++++ b/rtc-srtp/src/context/srtp_test.rs
+@@ -7,7 +7,7 @@
+     crypto::default_provider().expect("a built-in crypto provider must be enabled for tests")
+ }
+ 
+-use bytes::Bytes;
++use bytes::{Bytes, BytesMut};
+ use lazy_static::lazy_static;
+ 
+ struct RTPTestCase {
+@@ -178,3 +178,46 @@
+ //TODO: BenchmarkEncryptRTP
+ //TODO: BenchmarkEncryptRTPInPlace
+ //TODO: BenchmarkDecryptRTP
++
++/// THISCORD: in-place encryption must produce exactly what `encrypt_rtp` produces, for
++/// both cipher families, with CSRCs, a header extension, padding and a rollover.
++#[test]
++fn test_rtp_in_place_matches_copying_encryption() -> Result<()> {
++    for (profile, key_len, salt_len) in [
++        (ProtectionProfile::Aes128CmHmacSha1_80, 16, 14),
++        (ProtectionProfile::AeadAes128Gcm, 16, 12),
++    ] {
++        let key: Vec<u8> = (0..key_len as u8).collect();
++        let salt: Vec<u8> = (100..100 + salt_len as u8).collect();
++        let context = || {
++            Context::new(&key, &salt, profile, None, None, test_crypto_provider().crypto())
++        };
++        let (mut copying, mut in_place, mut decrypting) = (context()?, context()?, context()?);
++        for (index, sequence_number) in [65533u16, 65534, 65535, 0, 1, 2].into_iter().enumerate() {
++            let mut header = rtp::Header {
++                version: 2,
++                padding: index % 2 == 1,
++                marker: index == 3,
++                payload_type: 111,
++                sequence_number,
++                timestamp: 960 * index as u32,
++                ssrc: 0x1234_5678,
++                csrc: vec![7, 9],
++                ..Default::default()
++            };
++            header.set_extension(1, Bytes::from_static(&[0x30]))?;
++            let packet = rtp::Packet {
++                header: header.clone(),
++                payload: Bytes::from(vec![index as u8; 20 + index]),
++            };
++            let raw = packet.marshal()?;
++            let expected = copying.encrypt_rtp(&raw)?;
++            let mut buffer = BytesMut::with_capacity(raw.len() + 16);
++            buffer.extend_from_slice(&raw);
++            in_place.encrypt_rtp_in_place(&mut buffer, &header)?;
++            assert_eq!(buffer, expected, "{profile:?} seq {sequence_number}");
++            assert_eq!(decrypting.decrypt_rtp(&buffer)?, raw);
++        }
++    }
++    Ok(())
++}
