@@ -130,6 +130,7 @@ pub(super) fn ScreenViewer(
     // Until the user rearranges, tiles follow a shape-aware automatic order.
     let arranged = RwSignal::new(false);
     let menu_place = RwSignal::new((false, None::<f64>));
+    let help = RwSignal::new(false);
     let stage = NodeRef::<leptos::html::Div>::new();
     let announce = move |text: String| announcement.set(text);
     // The gesture hint retires after a few uses; it is remembered per device.
@@ -482,11 +483,34 @@ pub(super) fn ScreenViewer(
             used();
         }
         match next {
-            Some(key) => announce(localized_format!(
-                crate::i18n::language(),
-                "Focused: {}",
-                tile_name(key)
-            )),
+            Some(key) => {
+                let quality = dims.with_untracked(|d| d.get(&key).copied()).map(|(w, h)| {
+                    let rate = media_layout::nominal_fps(
+                        rates
+                            .with_untracked(|r| r.get(&key).copied())
+                            .unwrap_or_default(),
+                    );
+                    let resolution = media_layout::resolution_label(w, h);
+                    if rate > 0 {
+                        format!(
+                            "{resolution} · {}",
+                            localized_format!(crate::i18n::language(), "{} fps", rate)
+                        )
+                    } else {
+                        resolution
+                    }
+                });
+                let name = tile_name(key);
+                let what = match quality {
+                    Some(quality) => format!("{name} ({quality})"),
+                    None => name,
+                };
+                announce(localized_format!(
+                    crate::i18n::language(),
+                    "Focused: {}",
+                    what
+                ))
+            }
             None if previous.is_some() => announce(crate::i18n::t("Showing all streams").into()),
             None => {}
         }
@@ -583,6 +607,16 @@ pub(super) fn ScreenViewer(
     };
     let restore = move |key: Key| {
         hidden.update(|h| h.retain(|k| *k != key));
+        leptos::task::spawn_local(async move {
+            gloo_timers::future::TimeoutFuture::new(0).await;
+            let tile = format!("[data-media-key='{}'] .media-tile-content", key_text(key));
+            if let Some(content) = document().query_selector(&tile).ok().flatten() {
+                let _ = content.set_attribute("data-keyboard", "");
+            }
+            if !focus_selector(&tile) {
+                focus_selector(".media-bar-hidden .media-chip");
+            }
+        });
         announce(localized_format!(
             crate::i18n::language(),
             "Showing {}",
@@ -607,7 +641,10 @@ pub(super) fn ScreenViewer(
             return;
         }
         // Handled here, so Escape does not also mark the channel read.
-        if menu.with_untracked(Option::is_some) {
+        if help.get_untracked() {
+            e.prevent_default();
+            help.set(false);
+        } else if menu.with_untracked(Option::is_some) {
             e.prevent_default();
             close_menu(true);
         } else if expanded.with_untracked(Option::is_some) {
@@ -630,6 +667,7 @@ pub(super) fn ScreenViewer(
         }
     });
     let outside = window_event_listener(leptos::ev::pointerdown, move |e| {
+        help.set(false);
         pointer_inside.set_value(
             e.target()
                 .and_then(|t| t.dyn_into::<web_sys::Element>().ok())
@@ -682,7 +720,7 @@ pub(super) fn ScreenViewer(
             let top = root.get_bounding_client_rect().top() + target.y - root.scroll_top() as f64;
             let needed = popover.scroll_height() as f64;
             let below = viewport - (top + 48.0) - 8.0;
-            let above = top + target.h - 48.0 - 8.0;
+            let above = top - 4.0 - 8.0;
             let up = needed > below && above > below;
             let room = if up { above } else { below };
             let next = (up, (needed > room).then_some(room.max(160.0)));
@@ -727,7 +765,7 @@ pub(super) fn ScreenViewer(
                             let label = tile_label(tile.0.display_name(), tile.1);
                             let short = tile.0.display_name().to_owned();
                             let camera = tile.1 == MediaKind::Camera;
-                            view!{<button type="button" class="media-chip" data-tip=move ||crate::i18n::t("Show again")
+                            view!{<button type="button" class="media-chip" data-chip-key=key_text(key) data-tip=move ||crate::i18n::t("Show again")
                                 aria-label=move ||localized_format!(crate::i18n::language(), "Show {}", label)
                                 on:click=move |_|restore(key)>
                                 <Icon kind=if camera {Glyph::Camera} else {Glyph::Screen}/><span class="truncate">{short}</span><Icon kind=Glyph::Eye/>
@@ -740,8 +778,17 @@ pub(super) fn ScreenViewer(
                 </Show>
                 <span class="media-bar-hint" class:hidden=move ||{!several() || tips.get() >= TIP_USES}>{move ||if focused() {crate::i18n::t("Click a stream to put it on the stage · Esc returns to the grid")} else {crate::i18n::t("Click to focus · Drag to rearrange")}}</span>
                 <Show when=move ||{several() && tips.get() >= TIP_USES}>
-                    <button type="button" class="icon-button media-bar-help" aria-label=move ||crate::i18n::t("Grid gestures")
-                        data-tip=move ||crate::i18n::t("Click a stream to focus it · Drag to rearrange · Right-click or ⋯ for options · On a focused stream: Enter, F, Alt+arrows")><Icon kind=Glyph::Keyboard/></button>
+                    <div class="media-bar-help-wrap">
+                        <button type="button" class="icon-button media-bar-help" aria-label=move ||crate::i18n::t("Grid gestures")
+                            aria-expanded=move ||help.get().to_string() aria-controls=format!("media-help-{grid_id}")
+                            on:pointerdown=move |e|e.stop_propagation()
+                            on:click=move |_|help.set(!help.get_untracked())><Icon kind=Glyph::Keyboard/></button>
+                        <Show when=move ||help.get()>
+                            <p class="media-help-popover" id=format!("media-help-{grid_id}") role="note" on:pointerdown=move |e|e.stop_propagation()>
+                                {move ||crate::i18n::t("Click a stream to focus it · Drag to rearrange · Right-click or ⋯ for options · On a focused stream: Enter, F, Alt+arrows")}
+                            </p>
+                        </Show>
+                    </div>
                 </Show>
                 <span class="sr-only" id=hint_id()>{move ||crate::i18n::t("Enter to focus, F for full screen, Alt and arrow keys to move, Shift+F10 for options.")}</span>
                 <Show when=focused>
@@ -925,8 +972,7 @@ pub(super) fn ScreenViewer(
                             on:click=move |_|if menu.get_untracked()==Some(key) {menu.set(None);} else {open_menu();}><Icon kind=Glyph::More/></button>
                     </div>
                     <Show when=move ||quality.get().is_some()>
-                        <span class="media-quality" id=quality_id.clone()>
-                            <span class="media-quality-tip" aria-hidden="true">{move ||quality.get().map(|q|q.2).unwrap_or_default()}</span>
+                        <span class="media-quality" id=quality_id.clone() data-tip=move ||quality.get().map(|q|q.2).unwrap_or_default()>
                             <span class="sr-only">{move ||quality.get().map(|q|q.2).unwrap_or_default()}</span>
                             <span class="media-quality-full" aria-hidden="true">{move ||quality.get().map(|q|q.0).unwrap_or_default()}
                                 {move ||quality.get().and_then(|q|q.1).map(|rate|view!{" · "{rate}})}</span>
@@ -938,10 +984,16 @@ pub(super) fn ScreenViewer(
                         <div class="media-menu-scrim" aria-hidden="true" on:pointerdown=move |e|e.stop_propagation() on:click=move |_|close_menu(true)></div>
                         <div class="media-item-menu message-options" class:up=menu_up class:start=menu_start
                             style:max-height=move ||menu_place.get().1.map(|h|format!("{h:.0}px")).unwrap_or_default()
-                            on:pointerdown=move |e|e.stop_propagation() on:click=move |e|e.stop_propagation()>
+                            on:pointerdown=move |e|e.stop_propagation() on:click=move |e|e.stop_propagation()
+                            on:focusout=move |e: web_sys::FocusEvent|{
+                                // A DOM move briefly drops focus (no related target); only a
+                                // real move of focus elsewhere closes the menu.
+                                let Some(next)=e.related_target().and_then(|t|t.dyn_into::<web_sys::Element>().ok()) else {return;};
+                                if next.closest(".media-item-menu, .media-tile-more").ok().flatten().is_none() {close_menu(false);}
+                            }>
                             <p class="context-heading" aria-hidden="true">{label_heading.clone()}
                                 {move ||quality.get().map(|q|view!{<span class="context-heading-detail">{q.2}</span>})}</p>
-                            <div class="media-menu-items" role="menu" aria-label=label_menu.clone() on:keydown=move |e|super::keyboard::rove_items(&e,"[role=menuitem]")>
+                            <div class="media-menu-items" role="menu" aria-label={let name=label_menu.clone(); move ||match quality.get() {Some(q)=>format!("{name}, {}",q.2),None=>name.clone()}} on:keydown=move |e|super::keyboard::rove_items(&e,"[role=menuitem]")>
                             <Show when=several>
                                 <button type="button" role="menuitem" class="context-item" on:click=move |_|{toggle_focus();close_menu(false);}>
                                     {move ||view!{<Icon kind=if on_stage.get() {Glyph::Grid} else {Glyph::Spotlight}/>}}
@@ -958,7 +1010,12 @@ pub(super) fn ScreenViewer(
                                 close_menu(false);exit_full();
                                 hidden.update(|h|h.push(key));
                                 announce(localized_format!(crate::i18n::language(), "Hidden: {}", tile_name(key)));
-                                focus_selector(".media-bar-hidden .media-chip");
+                                leptos::task::spawn_local(async move {
+                                    gloo_timers::future::TimeoutFuture::new(0).await;
+                                    if !focus_selector(&format!(".media-chip[data-chip-key='{}']", key_text(key))) {
+                                        focus_selector(".media-bar-hidden .media-chip");
+                                    }
+                                });
                             }><Icon kind=Glyph::EyeOff/>{move ||crate::i18n::t("Hide this stream")}</button>
                             </div>
                             {(!own).then(||view!{<div class="media-menu-volume" role="group" aria-label=move ||crate::i18n::t("Volume")><super::context_menu::ParticipantVolume ui=ui guild=guild channel=channel member=owner/></div>})}

@@ -250,6 +250,7 @@ pub(super) fn StreamWatchers(
                         <crate::avatar::Avatar class="size-6 text-[10px]" name=Signal::derive(move ||person.get().display_name().to_owned()) avatar_id=Signal::derive(move ||person.get().avatar_id)/>
                     </span>}
                 }/>
+                <span class="stream-watchers-count" aria-hidden="true"><Icon kind=Glyph::Eye/>{move ||viewers.get().len()}</span>
             </div>
         </Show>
     }
