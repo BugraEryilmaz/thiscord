@@ -872,7 +872,7 @@ mod tests {
                 .collect();
             fields[11].parse::<u64>().unwrap() + fields[12].parse::<u64>().unwrap()
         };
-        let capture = Capture::start(&spec, -1, node, admit, on_frame).unwrap();
+        let capture = Capture::start(spec, -1, node, admit, on_frame).unwrap();
         std::thread::sleep(Duration::from_secs(1));
         let (offered_start, delivered_start, cpu_start) = (
             offered.load(Ordering::Relaxed),
