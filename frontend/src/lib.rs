@@ -15,6 +15,7 @@ pub mod browser_audio;
 pub mod browser_call;
 pub mod browser_video;
 pub mod camera_choice;
+pub mod changelog;
 pub mod chat_history;
 pub mod direct_history;
 pub mod downloads;

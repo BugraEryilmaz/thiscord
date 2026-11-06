@@ -117,6 +117,7 @@ async fn check(app: &tauri::AppHandle) -> Result<(), String> {
                 state.change(|s| {
                     s.phase = UpdatePhase::Available;
                     s.available_version = Some(update.version.clone());
+                    s.notes = update.body.as_deref().map(bounded_notes);
                     s.message =
                         "An update is ready to download. Install when you are ready to restart."
                             .into();
@@ -125,6 +126,7 @@ async fn check(app: &tauri::AppHandle) -> Result<(), String> {
                 state.change(|s| {
                     s.phase = UpdatePhase::Idle;
                     s.available_version = None;
+                    s.notes = None;
                     s.message = "Thiscord is up to date.".into();
                 });
             }
@@ -137,6 +139,17 @@ async fn check(app: &tauri::AppHandle) -> Result<(), String> {
         Err(()) => Err(state
             .failure("Could not check for updates. Check your connection and try again later.")),
     }
+}
+
+/// The manifest is fetched over HTTPS but not signed, so only bounded text crosses IPC.
+fn bounded_notes(notes: &str) -> String {
+    let mut end = notes
+        .len()
+        .min(thiscord_frontend::changelog::MAX_NOTES_BYTES);
+    while !notes.is_char_boundary(end) {
+        end -= 1;
+    }
+    notes[..end].to_owned()
 }
 
 fn valid_download(url: &url::Url, version: &str) -> bool {

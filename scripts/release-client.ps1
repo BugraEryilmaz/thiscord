@@ -39,6 +39,16 @@ if ($config.plugins.updater.endpoints[0] -cne "https://github.com/$repository/re
 if ($env:GITHUB_REPOSITORY -and $env:GITHUB_REPOSITORY -cne $repository) {
     throw 'Configure the updater endpoint and release repository before publishing a fork.'
 }
+# The changelog becomes the GitHub release body and the update manifest notes that
+# update screens show. Format and limits: docs/releases.md#changelog.
+$changelogPath = "changelog/$version.md"
+if (!(Test-Path -LiteralPath $changelogPath -PathType Leaf)) {
+    throw "Write $changelogPath before releasing; see docs/releases.md#changelog."
+}
+$changelog = (Get-Content -LiteralPath $changelogPath -Raw -Encoding utf8).Replace("`r`n", "`n").Trim()
+if ([Text.Encoding]::UTF8.GetByteCount($changelog) -gt 8KB -or $changelog -cnotmatch '(?m)^## Highlights\n+- \*\*') {
+    throw "$changelogPath must be at most 8 KiB and start its ## Highlights with a **Title.** bullet."
+}
 if ($Mode -eq 'Validate') { Write-Output "Validated $Tag"; return }
 
 $targets = @{
@@ -111,7 +121,7 @@ foreach ($record in $records) {
 }
 @{
     version = $version
-    notes = "Thiscord $version. Install when you are ready to restart."
+    notes = $changelog
     pub_date = [DateTime]::UtcNow.ToString('yyyy-MM-ddTHH:mm:ssZ')
     platforms = $platforms
 } | ConvertTo-Json -Depth 6 | Set-Content -LiteralPath (Join-Path $output.FullName 'latest.json')
@@ -135,7 +145,9 @@ $existing = @($releases | Where-Object tag_name -CEQ $Tag)
 if ($existing.Count -gt 0 -and !$existing[0].draft) { throw 'Published releases are immutable.' }
 $notes = Join-Path $output.FullName 'release-notes.md'
 @"
-Thiscord $version
+$changelog
+
+## Install
 
 - Windows x64: download the .exe installer.
 - macOS: download the .dmg matching Apple Silicon (aarch64) or Intel (x86_64).

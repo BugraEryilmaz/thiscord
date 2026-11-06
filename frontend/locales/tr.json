@@ -1737,5 +1737,12 @@
   "App shortcuts need Ctrl, Alt or Super, or a function key, so typing and list keys keep working.": "Uygulama kısayolları Ctrl, Alt veya Super ya da bir işlev tuşu gerektirir; böylece yazma ve liste tuşları çalışmaya devam eder.",
   "These work while Thiscord is focused, including in the message box, and save on this device.": "Bunlar Thiscord odaktayken, mesaj kutusunda da çalışır ve bu cihaza kaydedilir.",
   "Fixed keys": "Sabit tuşlar",
-  "Menus, lists and the message box always use these keys. Record the other shortcuts below.": "Menüler, listeler ve mesaj kutusu her zaman bu tuşları kullanır. Diğer kısayolları aşağıda kaydet."
+  "Menus, lists and the message box always use these keys. Record the other shortcuts below.": "Menüler, listeler ve mesaj kutusu her zaman bu tuşları kullanır. Diğer kısayolları aşağıda kaydet.",
+  "What's new": "Yenilikler",
+  "Show all changes ({})": "Tüm değişiklikleri göster ({})",
+  "Show fewer changes": "Daha az değişiklik göster",
+  "New": "Yeni",
+  "Improved": "İyileştirmeler",
+  "Fixed": "Düzeltmeler",
+  "Other changes": "Diğer değişiklikler"
 }
