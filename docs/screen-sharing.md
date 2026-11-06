@@ -15,8 +15,11 @@ round trip. Self-preview alone does not upload screen video. While only your own
 screen tile is open the encoder keeps the selected preset rather than a cheaper
 preview mode: the quality controller holds a 6 s dwell before upgrading, so a first
 remote viewer would otherwise start at the preview's quality, and the tile shows what
-viewers will receive. Closing or hiding your own tile with nobody watching pauses
-encoding (capture drops to one refresh per second).
+viewers will receive. The cost while alone is the full preset: a 20 s 4K60 HDR
+`screen_pipeline_probe` on an RTX 4070 Ti measured 6.0 ms of encoder service per
+frame (MFT, on the encoder thread) and 0.19 ms of GPU submission. Closing or hiding
+your own tile with nobody watching pauses encoding (capture drops to one refresh per
+second).
 
 Tiles keep each stream's real shape (16:9, ultrawide, portrait phone, 4:3), so
 video is never letterboxed inside a tile. The layout tries every way of splitting
