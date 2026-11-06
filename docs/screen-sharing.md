@@ -1089,8 +1089,11 @@ Viewing: other members' screen and camera m-lines are `recvonly`. The existing c
 grid, fullscreen, hide/restore, LIVE badges and viewer avatars are shared with the
 desktop app; only each tile's player differs. A mounted, visible tile registers a
 view: the client binds the received track to its `<video>`, renews `ScreenViews`
-on change and once per second otherwise (one subscription per stream, never for hidden tiles or a hidden page),
-keeps a per-view receiver budget with the native controller's thresholds
+on change and once per second otherwise (one subscription per stream, never for hidden
+tiles or a hidden page; a tile scrolled out of a scrolling grid or strip, seen by an
+`IntersectionObserver`, keeps its subscription so shared screen audio continues but
+asks for the minimum 200 kbit/s budget, so the SFU sends the low layer), keeps a
+per-view receiver budget with the native controller's thresholds
 (`thiscord_shared::video_feedback`, loss and decoder pressure from `getStats`), and
 sends `ScreenKeyframe` when a view starts and whenever packets arrive for 2 s
 without a decoded frame (at most once per second). Hiding, closing or unmounting a

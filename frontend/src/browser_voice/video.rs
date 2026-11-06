@@ -609,6 +609,9 @@ struct View {
     pressure: DecoderPressure,
     pressured: bool,
     recovery: Recovery,
+    /// Scrolled out of the grid: still subscribed (shared screen audio keeps
+    /// playing), but at the minimum budget so the SFU sends the cheap layer.
+    off_screen: bool,
 }
 /// Registers a mounted player. The call binds the received track and keeps
 /// the subscription alive while it is registered and the page is visible.
@@ -635,6 +638,7 @@ pub fn watch(element: HtmlVideoElement, watch: Watch) -> u32 {
             pressure: DecoderPressure::default(),
             pressured: false,
             recovery: Recovery::default(),
+            off_screen: false,
         })
     });
     if let Some(call) = super::current() {
@@ -653,6 +657,14 @@ pub fn unwatch(id: u32) {
                 true
             }
         })
+    });
+}
+/// Reported by the tile's IntersectionObserver.
+pub fn set_off_screen(id: u32, off_screen: bool) {
+    VIEWS.with(|views| {
+        for view in views.borrow_mut().iter_mut().filter(|v| v.id == id) {
+            view.off_screen = off_screen;
+        }
     });
 }
 /// The player has a received track attached.
@@ -912,16 +924,24 @@ pub(super) fn tick(call: &Call, stats: Option<InboundVideo>) {
                     slot: v.watch.slot,
                     owner: v.watch.owner,
                     epoch: v.watch.epoch,
-                    bitrate: v.budget.bitrate(),
+                    bitrate: if v.off_screen {
+                        v.budget
+                            .bitrate()
+                            .min(thiscord_shared::screen::MIN_VIEW_BITRATE)
+                    } else {
+                        v.budget.bitrate()
+                    },
                     h264_high: false,
                 })
                 .fold(Vec::<Subscription>::new(), |mut list, view| {
-                    // One subscription per stream, even with duplicate players.
-                    if !list
-                        .iter()
-                        .any(|s| s.kind == view.kind && s.slot == view.slot)
+                    // One subscription per stream, even with duplicate players;
+                    // an on-screen duplicate keeps an off-screen one's stream sharp.
+                    match list
+                        .iter_mut()
+                        .find(|s| s.kind == view.kind && s.slot == view.slot)
                     {
-                        list.push(view);
+                        Some(existing) => existing.bitrate = existing.bitrate.max(view.bitrate),
+                        None => list.push(view),
                     }
                     list
                 })

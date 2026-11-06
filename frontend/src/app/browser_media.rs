@@ -190,10 +190,20 @@ pub(super) fn BrowserVideo(watch: Watch, own: bool) -> impl IntoView {
     let video_node = NodeRef::<leptos::html::Video>::new();
     let message = RwSignal::new("Connecting video...".to_owned());
     let view_id = StoredValue::new(None::<u32>);
+    // Tiles scrolled out of a scrolling grid or strip ask for the minimum
+    // budget; the observer and its callback live as long as the tile.
+    type Observer = (
+        web_sys::IntersectionObserver,
+        wasm_bindgen::closure::Closure<dyn FnMut(js_sys::Array)>,
+    );
+    let observer = StoredValue::new_local(None::<Observer>);
     let (abort, registration) = futures_util::future::AbortHandle::new_pair();
     let registration = std::cell::RefCell::new(Some(registration));
     on_cleanup(move || {
         abort.abort();
+        if let Some((observer, _)) = observer.try_update_value(Option::take).flatten() {
+            observer.disconnect();
+        }
         if let Some(id) = view_id.get_value() {
             video::unwatch(id);
         }
@@ -207,7 +217,25 @@ pub(super) fn BrowserVideo(watch: Watch, own: bool) -> impl IntoView {
         };
         let element: HtmlVideoElement = element.clone();
         if !own {
-            view_id.set_value(Some(video::watch(element.clone(), watch)));
+            let id = video::watch(element.clone(), watch);
+            view_id.set_value(Some(id));
+            let changed = wasm_bindgen::closure::Closure::<dyn FnMut(js_sys::Array)>::new(
+                move |entries: js_sys::Array| {
+                    if let Some(entry) = entries
+                        .iter()
+                        .filter_map(|e| e.dyn_into::<web_sys::IntersectionObserverEntry>().ok())
+                        .next_back()
+                    {
+                        video::set_off_screen(id, !entry.is_intersecting());
+                    }
+                },
+            );
+            if let Ok(created) =
+                web_sys::IntersectionObserver::new(changed.as_ref().unchecked_ref())
+            {
+                created.observe(&element);
+                observer.set_value(Some((created, changed)));
+            }
         }
         leptos::task::spawn_local(async move {
             let _ = futures_util::future::Abortable::new(
