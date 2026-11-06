@@ -64,8 +64,8 @@ Signaling and negotiation:
   RED, remote audio admin, `screen_layers`, `screen_profiles` and video
   diagnostics stay false. Plain Opus
   publishers send no microphone boundary messages. Nothing is sent before the answer.
-- `State` is sent on every self mute/deafen change and every 2 s as the
-  signaling keepalive. A server silence of 20 s counts as a lost socket.
+- `State` is sent on every self mute/deafen change and every 5 s as the
+  signaling keepalive (the SFU detaches after 20 s of silence). A server silence of 20 s counts as a lost socket.
 - A lost socket resumes with `Resume` (same sequence rules, 20 s window) while the
   peer is alive. `ResumeUnavailable`, `Replaced` (event or close code 4001),
   `Revoked`, permission errors and protocol closes are final; transport,

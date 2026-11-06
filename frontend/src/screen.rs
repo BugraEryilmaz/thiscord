@@ -61,7 +61,7 @@ pub struct LayerOutput {
     pub force_keyframe: std::sync::Arc<std::sync::atomic::AtomicBool>,
 }
 
-use bytes::Bytes;
+use bytes::{BufMut, Bytes, BytesMut};
 use rtc::{
     media_stream::MediaStreamTrack,
     rtp,
@@ -111,15 +111,95 @@ impl Assembler {
     }
 }
 
+/// RTP payload size limit for screen and camera video.
+const VIDEO_MTU: usize = 1100;
+
+/// RFC 6184 packetization mode 1 payloads with the same output as webrtc-rs's
+/// `H264Payloader` (AUD/filler dropped, SPS+PPS sent as one STAP-A before the
+/// next NAL unit, FU-A above the MTU), but app-owned: NAL units that fit are
+/// zero-copy slices of the frame, and every STAP-A/FU-A payload is cut from one
+/// buffer reserved per frame instead of one allocation per fragment.
+fn payloads(frame: Bytes) -> Vec<Bytes> {
+    const FUA: u8 = 28;
+    let starts = thiscord_shared::h264::nal_units(&frame).next().is_some();
+    let nals: Vec<Bytes> = if starts {
+        thiscord_shared::h264::nal_units(&frame)
+            .filter(|nal| !nal.is_empty())
+            .map(|nal| frame.slice_ref(nal))
+            .collect()
+    } else {
+        vec![frame.clone()]
+    };
+    let fragments = nals
+        .iter()
+        .filter(|n| n.len() > VIDEO_MTU)
+        .map(|n| n.len() + 2 * (n.len() / (VIDEO_MTU - 2) + 1))
+        .sum::<usize>();
+    let mut buffer = BytesMut::with_capacity(fragments + 2 * VIDEO_MTU);
+    let mut out = Vec::with_capacity(nals.len() + fragments / VIDEO_MTU + 1);
+    let (mut sps, mut pps): (Option<Bytes>, Option<Bytes>) = (None, None);
+    for nal in nals {
+        let kind = nal[0] & 0x1f;
+        match kind {
+            9 | 12 => continue,
+            7 => {
+                sps = Some(nal);
+                continue;
+            }
+            8 => {
+                pps = Some(nal);
+                continue;
+            }
+            _ => {}
+        }
+        // Like the webrtc-rs payloader: a lone SPS or PPS waits for its pair;
+        // a pair too large for one STAP-A is dropped.
+        if let (Some(s), Some(p)) = (&sps, &pps)
+            && 5 + s.len() + p.len() <= VIDEO_MTU
+        {
+            buffer.put_u8(0x78);
+            buffer.put_u16(s.len() as u16);
+            buffer.put_slice(s);
+            buffer.put_u16(p.len() as u16);
+            buffer.put_slice(p);
+            out.push(buffer.split().freeze());
+        }
+        if sps.is_some() && pps.is_some() {
+            (sps, pps) = (None, None);
+        }
+        if nal.len() <= VIDEO_MTU {
+            out.push(nal);
+            continue;
+        }
+        let (indicator, kind) = (FUA | (nal[0] & 0x60), kind);
+        let mut chunks = nal[1..].chunks(VIDEO_MTU - 2).peekable();
+        let mut first = true;
+        while let Some(chunk) = chunks.next() {
+            let mut header = kind;
+            if first {
+                header |= 0x80;
+            } else if chunks.peek().is_none() {
+                header |= 0x40;
+            }
+            first = false;
+            buffer.put_u8(indicator);
+            buffer.put_u8(header);
+            buffer.put_slice(chunk);
+            out.push(buffer.split().freeze());
+        }
+    }
+    out
+}
+
 pub fn packetize(
     data: Vec<u8>,
     sequence: &mut u16,
     timestamp: u32,
 ) -> Result<Vec<rtp::Packet>, String> {
-    use rtp::packetizer::Payloader;
-    let payloads = rtp::codec::h264::H264Payloader::default()
-        .payload(1100, &Bytes::from(data))
-        .map_err(|_| "Cannot packetize screen frame")?;
+    if data.is_empty() {
+        return Ok(vec![]);
+    }
+    let payloads = payloads(Bytes::from(data));
     let count = payloads.len();
     Ok(payloads
         .into_iter()
@@ -148,6 +228,72 @@ pub use thiscord_shared::h264::{
 
 #[cfg(test)]
 mod tests {
+    /// The app-owned packetizer must emit exactly what the webrtc-rs payloader
+    /// it replaced emitted, including STAP-A pairing and FU-A boundaries.
+    #[test]
+    fn packetizer_matches_the_webrtc_rs_payloader() {
+        use rtc::rtp::packetizer::Payloader;
+        let mut state = 0x9e37_79b9_u32;
+        let mut byte = |zero_bias: bool| {
+            state ^= state << 13;
+            state ^= state >> 17;
+            state ^= state << 5;
+            if zero_bias && state.is_multiple_of(5) {
+                0
+            } else {
+                (state >> 8) as u8 | 2
+            }
+        };
+        let mut cases: Vec<Vec<u8>> = vec![
+            vec![0x65; 50],                           // no start code: one NAL unit
+            vec![0, 0, 1, 0x09, 0xf0],                // AUD only
+            vec![0, 0, 0, 1, 0x67, 1, 2, 3],          // SPS without PPS
+            vec![0, 0, 1, 0x68, 1, 0, 0, 1, 0x41, 9], // lone PPS before a slice
+        ];
+        for size in [
+            10, 1_099, 1_100, 1_101, 2_197, 2_198, 2_199, 25_000, 300_000,
+        ] {
+            for kinds in [
+                [0x09, 0x67, 0x68, 0x65],
+                [0x09, 0x41, 0x41, 0x41],
+                [0x67, 0x68, 0x06, 0x65],
+            ] {
+                let mut frame = Vec::new();
+                for (i, kind) in kinds.into_iter().enumerate() {
+                    frame.extend_from_slice(if i % 2 == 0 {
+                        &[0, 0, 0, 1][..]
+                    } else {
+                        &[0, 0, 1]
+                    });
+                    frame.push(kind);
+                    let length = match kind {
+                        0x67 | 0x68 | 0x09 | 0x06 => 6,
+                        _ => size,
+                    };
+                    frame.extend((0..length).map(|_| byte(true)));
+                    // Trailing zeros before the next start code belong to it.
+                    if frame.last() == Some(&0) {
+                        frame.push(5);
+                    }
+                }
+                cases.push(frame);
+            }
+        }
+        // A large SPS/PPS pair that cannot fit one STAP-A is dropped.
+        let mut big = vec![0, 0, 1, 0x67];
+        big.extend(std::iter::repeat_n(7, 600));
+        big.extend([0, 0, 1, 0x68]);
+        big.extend(std::iter::repeat_n(8, 600));
+        big.extend([0, 0, 1, 0x65, 4, 4]);
+        cases.push(big);
+        for frame in cases {
+            let expected = rtc::rtp::codec::h264::H264Payloader::default()
+                .payload(1100, &bytes::Bytes::from(frame.clone()))
+                .unwrap();
+            assert_eq!(super::payloads(bytes::Bytes::from(frame)), expected);
+        }
+    }
+
     #[test]
     fn sender_admission_reserves_space_for_unfinished_encodes() {
         for fps in [30, 60] {

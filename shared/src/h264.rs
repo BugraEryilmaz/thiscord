@@ -180,6 +180,47 @@ pub fn bounded_parameter_sets_with(data: &[u8], allow_high: bool) -> bool {
     parameter_set_profile(data, allow_high).is_ok()
 }
 
+/// Calls `unit` for each NAL unit up to and including the first slice (types
+/// 1–5), which is passed as its header byte only. Encoders emit SPS/PPS/SEI
+/// before the first slice, so this reads an encoded frame's parameter sets and
+/// picture type without scanning its slice data. For this process's own encoder
+/// output; received frames are validated with the full [`parameter_set_profile`].
+pub fn front_units(mut data: &[u8], mut unit: impl FnMut(&[u8])) {
+    while let Some(start) = start_code(data) {
+        data = &data[start + 3..];
+        let Some(&header) = data.first() else {
+            return;
+        };
+        if matches!(header & 31, 1..=5) {
+            unit(&data[..1]);
+            return;
+        }
+        let end = start_code(data).unwrap_or(data.len());
+        let mut nal = &data[..end];
+        while nal.last() == Some(&0) {
+            nal = &nal[..nal.len() - 1];
+        }
+        if !nal.is_empty() {
+            unit(nal);
+        }
+        data = &data[end..];
+    }
+}
+/// [`parameter_set_profile`] over [`front_units`]: own encoder output only.
+pub fn front_parameter_set_profile(
+    data: &[u8],
+    allow_high: bool,
+) -> Result<Option<Profile>, ParameterSetError> {
+    let mut result = Ok(None);
+    front_units(data, |nal| {
+        if result.is_ok() && nal[0] & 31 == 7 {
+            result = inspect_sps(nal, allow_high)
+                .ok_or(ParameterSetError::Malformed)
+                .and_then(|r| r.map(Some));
+        }
+    });
+    result
+}
 /// Safe diagnostic metadata only: never include encoded bytes or SDP.
 #[derive(Debug, PartialEq, Eq)]
 pub enum ParameterSetError {
@@ -517,6 +558,32 @@ mod tests {
             let expected = full && [5, 7, 8].into_iter().all(before_delta);
             assert_eq!(recovery_frame(&data), expected);
         }
+    }
+    #[test]
+    fn front_units_match_nal_units_up_to_the_first_slice() {
+        let mut frame = vec![
+            0, 0, 0, 1, 0x09, 0xf0, 0, 0, 1, 0x67, 66, 0, 0, 0, 1, 0x68, 7,
+        ];
+        frame.extend([0, 0, 1, 0x06, 5, 0, 0, 1, 0x65]);
+        frame.extend(std::iter::repeat_n(0x55, 10_000));
+        frame.extend([0, 0, 1, 0x67, 1]); // after the slice: not a front unit
+        let mut front = Vec::new();
+        front_units(&frame, |nal| front.push(nal.to_vec()));
+        let expected: Vec<Vec<u8>> = nal_units(&frame)
+            .take(4)
+            .map(<[u8]>::to_vec)
+            .chain([vec![0x65]])
+            .collect();
+        assert_eq!(front, expected);
+        assert_eq!(
+            front_parameter_set_profile(&frame[..10], false),
+            Err(ParameterSetError::Malformed),
+            "a truncated SPS is rejected"
+        );
+        assert_eq!(
+            front_parameter_set_profile(&[0, 0, 1, 0x41, 1], false),
+            Ok(None)
+        );
     }
     #[test]
     fn recovery_frames_need_idr_sps_and_pps_and_deltas_stop_early() {

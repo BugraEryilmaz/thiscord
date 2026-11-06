@@ -149,6 +149,11 @@ impl Media {
             ..Default::default()
         }
     }
+    /// A resumed socket gets the current views on the next tick.
+    pub(super) fn resend_views(&mut self) {
+        self.sent_views.clear();
+        self.views_at = 0.0;
+    }
 }
 pub(super) struct Remote {
     pub kind: MediaKind,

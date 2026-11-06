@@ -27,7 +27,7 @@ use web_sys::{
 const TICK_MS: f64 = 100.0;
 type FetchedStats = (Option<media::Stats>, Option<video::InboundVideo>);
 /// Self state doubles as the signaling keepalive the SFU expects within 20 s.
-const STATE_REFRESH_MS: f64 = 2_000.0;
+const STATE_REFRESH_MS: f64 = 5_000.0;
 const HEARTBEAT_MS: f64 = 20_000.0;
 const MEDIA_CONNECT_MS: f64 = 15_000.0;
 const RESUME_WINDOW_MS: f64 = 20_000.0;
@@ -1050,6 +1050,7 @@ async fn resume(
                     // The replaced socket closes without Leave: the session continues.
                     live.socket = socket;
                     live.sent_state = None;
+                    live.media.resend_views();
                 }
                 super::update_voice(call, |voice| {
                     if voice.connected {

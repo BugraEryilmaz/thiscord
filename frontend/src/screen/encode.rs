@@ -103,20 +103,19 @@ impl AccessUnits {
     pub fn finish(&mut self, mut bytes: Vec<u8>) -> Result<Vec<u8>, String> {
         let mut idr = false;
         let (mut has_sps, mut has_pps) = (false, false);
-        for nal in thiscord_shared::h264::nal_units(&bytes) {
-            match nal.first().map(|b| b & 31) {
-                Some(7) => {
-                    has_sps = true;
-                    self.sps = nal.to_vec();
-                }
-                Some(8) => {
-                    has_pps = true;
-                    self.pps = nal.to_vec();
-                }
-                Some(5) => idr = true,
-                _ => {}
+        // Parameter sets precede the first slice; never scan slice data.
+        thiscord_shared::h264::front_units(&bytes, |nal| match nal[0] & 31 {
+            7 => {
+                has_sps = true;
+                self.sps = nal.to_vec();
             }
-        }
+            8 => {
+                has_pps = true;
+                self.pps = nal.to_vec();
+            }
+            5 => idr = true,
+            _ => {}
+        });
         if idr && !(has_sps && has_pps) && !self.sps.is_empty() && !self.pps.is_empty() {
             let mut prefix = Vec::with_capacity(bytes.len() + self.sps.len() + self.pps.len() + 8);
             prefix.extend_from_slice(&[0, 0, 0, 1]);
@@ -132,7 +131,7 @@ impl AccessUnits {
                 bytes.len()
             ));
         }
-        thiscord_shared::h264::parameter_set_profile(&bytes, self.high)
+        thiscord_shared::h264::front_parameter_set_profile(&bytes, self.high)
             .map_err(|error| error.to_string())?;
         Ok(bytes)
     }

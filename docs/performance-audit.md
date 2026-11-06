@@ -229,6 +229,14 @@ lock-free quality window measured 231 ns (no faster uncontended), and the mixer
 callback is under 0.1% of its 20 ms budget. Every sent packet's RTP header still
 needs one small CSRC `Vec`, which the webrtc-rs `Header` type owns.
 
+`frontend/tests/hotpath_allocations.rs` turns the allocation counts into budgets
+that fail CI: RED receive 0, pooled Opus/RED payloads under 0.1, keyframe and
+front-unit scans 0, frame assembly at most 1, the mixer callback 0, and at most
+8 per packetized frame. That last one replaces the webrtc-rs `H264Payloader`, which
+allocated one buffer per FU-A fragment (274 for a 300 KB IDR); the app-owned
+packetizer emits identical payloads (pinned against the old payloader) from
+zero-copy NAL slices and one fragment buffer per frame (6 allocations measured).
+
 Other changes, pinned by tests rather than benchmarks:
 
 - Linux capture drops compositor frames above the active cadence at the
@@ -247,6 +255,14 @@ Other changes, pinned by tests rather than benchmarks:
   refresh, instead of every 500 ms; each one takes the SFU room write lock. The web
   client's views follow the same rule.
 - The native call loop's `select!` is biased toward ready outgoing media.
+- Encoder output (Windows MFT, Linux and software) reads parameter sets and the
+  picture type from the units before the first slice instead of two full-frame
+  scans, and the MFT path copies each frame once, IDR parameter-set prefix
+  included, instead of copying and then re-copying IDRs.
+- The receive relay keeps a running byte total instead of summing its queue per
+  frame, and writes each frame to the local preview peer under one deadline.
+- A sender held by backpressure wakes its encoder worker when budget frees
+  instead of the worker polling every 2 ms.
 - The audio worker wakes once per second outside a session instead of every
   100 ms, and periodic diagnostics JSON is built only while logging is on.
 - Web: an unboosted microphone is sent as a clone of the capture, skipping the

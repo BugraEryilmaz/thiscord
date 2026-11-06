@@ -16,10 +16,61 @@ pub struct Frame {
     pub reset: bool,
     pub timestamp: u32,
 }
+/// Frames with a running byte total, so admission and the peak metric do
+/// not sum the queue for every assembled frame.
+#[derive(Default)]
+struct Queue {
+    frames: VecDeque<Frame>,
+    bytes: usize,
+}
+impl Queue {
+    fn len(&self) -> usize {
+        self.frames.len()
+    }
+    fn bytes(&self) -> usize {
+        self.bytes
+    }
+    fn clear(&mut self) {
+        self.frames.clear();
+        self.bytes = 0;
+    }
+    fn push_back(&mut self, frame: Frame) {
+        self.bytes += frame.data.len();
+        self.frames.push_back(frame);
+        debug_assert_eq!(
+            self.bytes,
+            self.frames.iter().map(|f| f.data.len()).sum::<usize>()
+        );
+    }
+    fn pop_front(&mut self) -> Option<Frame> {
+        let frame = self.frames.pop_front()?;
+        self.bytes -= frame.data.len();
+        Some(frame)
+    }
+    /// Drops the `count` oldest frames.
+    fn discard_front(&mut self, count: usize) {
+        for frame in self.frames.drain(..count) {
+            self.bytes -= frame.data.len();
+        }
+    }
+    fn front(&self) -> Option<&Frame> {
+        self.frames.front()
+    }
+    fn front_mut(&mut self) -> Option<&mut Frame> {
+        self.frames.front_mut()
+    }
+    fn iter(&self) -> std::collections::vec_deque::Iter<'_, Frame> {
+        self.frames.iter()
+    }
+    #[cfg(test)]
+    fn is_empty(&self) -> bool {
+        self.frames.is_empty()
+    }
+}
 #[derive(Default)]
 struct State {
     assembler: Assembler,
-    frames: VecDeque<Frame>,
+    frames: Queue,
     sequence: Option<u16>,
     epoch: Option<u32>,
     timestamp: Option<u32>,
@@ -195,7 +246,7 @@ impl Sender {
         }
         let over_budget = |s: &State| {
             s.frames.len() >= QUEUE_FRAMES
-                || s.frames.iter().map(|f| f.data.len()).sum::<usize>() + data.len() > QUEUE_BYTES
+                || s.frames.bytes() + data.len() > QUEUE_BYTES
                 || s.frames
                     .front()
                     .is_some_and(|f| arrived.saturating_duration_since(f.arrived) > MAX_AGE)
@@ -206,7 +257,7 @@ impl Sender {
                 .iter()
                 .rposition(|f| super::recovery_frame(&f.data))
             {
-                s.frames.drain(..index);
+                s.frames.discard_front(index);
                 if let Some(f) = s.frames.front_mut() {
                     f.reset = true;
                 }
@@ -243,10 +294,10 @@ impl Sender {
             .0
             .metrics
             .peak("receive_peak_frames", s.frames.len() as u64);
-        self.inbox.0.metrics.peak(
-            "receive_peak_bytes",
-            s.frames.iter().map(|f| f.data.len() as u64).sum(),
-        );
+        self.inbox
+            .0
+            .metrics
+            .peak("receive_peak_bytes", s.frames.bytes() as u64);
         self.inbox.0.ready.notify_one();
         self.inbox.0.metrics.add("received_frames", 1);
         self.inbox

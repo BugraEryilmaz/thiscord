@@ -365,8 +365,9 @@ encryption, not end-to-end encryption against the server. See [audio.md](audio.m
 `screen_subscriptions` is negotiated in the voice offer/answer. Clients send a
 bounded, full replacement `screen_views` list while connected. Both clients send
 a changed list (at most every 500 ms) and otherwise only renew a non-empty list
-once per second, since each update takes the SFU room write lock. Its mute/deafen `state` likewise goes out on change, with a five-second
-refresh, and both are re-sent after a signaling resume.
+once per second, since each update takes the SFU room write lock. Mute/deafen
+`state` likewise goes out on change, with a five-second refresh on both clients,
+and both are re-sent after a signaling resume.
 Each entry binds a room slot, account ID and share epoch to a receiver bitrate
 budget. The server ignores stale identities/epochs and self-subscriptions;
 invalid bounds or duplicate slots reject signaling. Views expire after three
