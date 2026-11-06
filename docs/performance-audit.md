@@ -396,6 +396,11 @@ fake camera:
   other participant was muted (no test audio through real speakers), so native
   playback of received voice was not exercised here; it is covered by the encrypted
   loopback and voice-bot runs.
+- Native camera publish relay: with WebView2's fake capture device (no real
+  webcam), the desktop camera reached the browser participant at 1280×720, 20.1 fps
+  (200 decoded in 10 s, 0 dropped). After the viewer's tile was off-screen for 4 s,
+  its first frame came back 1,276 ms after it returned, then 19.8 fps; that includes
+  the WebView encoder resuming at its once-a-second keepalive.
 
 4K60 HDR pipeline probe A/B on the same machine, interleaved (base `0ae37e5` built in
 a private build directory, `screen_pipeline_probe --seconds=20 --assert`): base 59.00,
