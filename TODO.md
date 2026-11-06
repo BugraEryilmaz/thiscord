@@ -226,6 +226,7 @@ and single-process chat/media enforcement.
 - [x] Optional Rust echo cancellation, noise suppression and automatic gain processing.
 - [x] Optional global push-to-talk integration with conflict/error reporting; the key is configurable with the other shortcuts.
 - [x] Click-to-record shortcut controls (live modifier preview, Escape/Tab, clear) instead of typed combinations.
+- [x] Recordable navigation/app shortcuts (quick switcher, reference, search, channel/unread/server cycling) stored per device; the reference shows current keys.
 - [ ] Accept recording, global push-to-talk key changes during a call, and OS-consumed combinations on Windows/macOS/Linux/X11.
 - [x] Retire devices on leave/logout/window destruction and lease expiry; stop retired
   callbacks while potentially blocked driver cleanup runs separately.

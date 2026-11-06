@@ -17,6 +17,57 @@ use thiscord_shared::{
 };
 use wasm_bindgen::JsCast;
 
+thread_local! {
+    /// This device's recordable app shortcuts, loaded once and updated on save.
+    static BINDINGS: ArcRwSignal<nav::AppShortcuts> = ArcRwSignal::new(
+        storage()
+            .and_then(|s| s.get_item(nav::APP_SHORTCUTS_KEY).ok().flatten())
+            .and_then(|text| serde_json::from_str::<nav::AppShortcuts>(&text).ok())
+            .filter(|saved| saved.validate(&[]).is_ok())
+            .unwrap_or_default(),
+    );
+}
+
+fn storage() -> Option<web_sys::Storage> {
+    window().local_storage().ok().flatten()
+}
+
+/// Current app shortcuts (reactive).
+pub(super) fn bindings() -> nav::AppShortcuts {
+    BINDINGS.with(|b| b.get())
+}
+
+pub(super) fn bindings_untracked() -> nav::AppShortcuts {
+    BINDINGS.with(|b| b.get_untracked())
+}
+
+/// Saves validated app shortcuts on this device; they apply immediately.
+pub(super) fn save_bindings(shortcuts: nav::AppShortcuts) -> Result<(), String> {
+    let text = serde_json::to_string(&shortcuts).map_err(|_| "Cannot save shortcuts")?;
+    storage()
+        .and_then(|s| s.set_item(nav::APP_SHORTCUTS_KEY, &text).ok())
+        .ok_or("Cannot save shortcuts")?;
+    BINDINGS.with(|b| b.set(shortcuts));
+    Ok(())
+}
+
+/// The command a key press triggers with this device's bindings.
+pub(super) fn command(e: &web_sys::KeyboardEvent, typing: bool) -> Option<Command> {
+    let key = e.key();
+    let code = e.code();
+    bindings_untracked().command(
+        &Keys {
+            key: &key,
+            code: &code,
+            control: e.ctrl_key(),
+            shift: e.shift_key(),
+            alt: e.alt_key(),
+            meta: e.meta_key(),
+        },
+        typing,
+    )
+}
+
 /// Quick-switcher results shown at once; typing narrows the rest.
 const RESULT_LIMIT: usize = 50;
 /// Characters of a new message read aloud; the body stays in the transcript.
@@ -432,6 +483,8 @@ fn run(ui: Ui, command: Command) {
             state.switcher.set(false);
             state.help.update(|open| *open = !*open);
         }
+        // The conversation search listens for its own binding.
+        Command::Search => {}
         Command::PreviousChannel => cycle_channel(ui, false, false),
         Command::NextChannel => cycle_channel(ui, true, false),
         Command::PreviousUnread => cycle_channel(ui, false, true),
@@ -475,25 +528,17 @@ fn keydown(ui: Ui, e: &web_sys::KeyboardEvent) {
     }
     let code = e.code();
     let typing = super::audio::editable(e.target());
-    let keys = Keys {
-        key: &key,
-        code: &code,
-        control: e.ctrl_key(),
-        shift: e.shift_key(),
-        alt: e.alt_key(),
-        meta: e.meta_key(),
-    };
-    let Some(command) = Command::from_keys(&keys, typing) else {
+    let Some(command) = command(e, typing).filter(|c| *c != Command::Search) else {
         return;
     };
     // Mute/deafen bindings chosen in this browser take precedence.
     if crate::account_client::web_app() {
         let pressed = thiscord_frontend::web_shortcuts::Pressed {
             code: &code,
-            control: keys.control,
-            shift: keys.shift,
-            alt: keys.alt,
-            meta: keys.meta,
+            control: e.ctrl_key(),
+            shift: e.shift_key(),
+            alt: e.alt_key(),
+            meta: e.meta_key(),
         };
         if crate::browser_voice::shortcut_bindings()
             .action(&pressed, typing)
@@ -862,18 +907,37 @@ fn QuickSwitcher(ui: Ui) -> impl IntoView {
 
 /// The navigation and chat shortcut table (help dialog and settings page).
 #[component]
-pub(super) fn ShortcutReference() -> impl IntoView {
+pub(super) fn ShortcutReference(
+    /// Settings list only the keys that cannot be recorded; the recorders
+    /// cover the rest (including push-to-talk).
+    #[prop(default = false)]
+    fixed_only: bool,
+) -> impl IntoView {
     let apple = apple();
+    let keys = move |row: &'static nav::Shortcut| {
+        if row.commands.is_empty() {
+            return nav::display_keys(row.keys, apple);
+        }
+        let shortcuts = bindings();
+        row.commands
+            .iter()
+            .map(|&command| match shortcuts.get(command) {
+                "" => crate::i18n::t("Not set").to_owned(),
+                text => nav::display_binding(text, apple),
+            })
+            .collect::<Vec<_>>()
+            .join(" / ")
+    };
     view! {
         <div class="shortcut-reference">
-            {nav::SHORTCUTS.iter().enumerate().map(|(index, &(group, rows))| view! {
+            {nav::SHORTCUTS.iter().enumerate().filter(move |(_, (group, _))| !(fixed_only && *group == "Voice")).map(|(index, &(group, rows))| view! {
                 <section aria-labelledby=format!("shortcut-group-{index}")>
                     <h3 id=format!("shortcut-group-{index}") class="shortcut-group">{move || crate::i18n::t(group)}</h3>
                     <dl class="shortcut-list">
-                        {rows.iter().map(|row| view! {
+                        {rows.iter().filter(move |row| !(fixed_only && !row.commands.is_empty())).map(|row| view! {
                             <div class="shortcut-row">
                                 <dt>{move || crate::i18n::t(row.action)}</dt>
-                                <dd><kbd>{nav::display_keys(row.keys, apple)}</kbd></dd>
+                                <dd><kbd>{move || keys(row)}</kbd></dd>
                             </div>
                         }).collect_view()}
                     </dl>

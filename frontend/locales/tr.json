@@ -1726,5 +1726,16 @@
   "Your email is already verified": "E-postan zaten doğrulandı",
   "That email address is already in use": "Bu e-posta adresi zaten kullanılıyor",
   "Hold your push-to-talk key or the talk button in the voice bar. Browsers receive keys only while this Thiscord tab is focused; choose the push-to-talk, mute and deafen keys in Settings → Keyboard shortcuts.": "Bas konuş tuşunu veya ses çubuğundaki konuşma düğmesini basılı tut. Tarayıcılar tuşları yalnızca bu Thiscord sekmesi odaktayken alır; bas konuş, susturma ve sağırlaştırma tuşlarını Ayarlar → Klavye kısayolları bölümünden seç.",
-  "Push to talk (hold; default key, change it in Settings)": "Bas konuş (basılı tut; varsayılan tuş, Ayarlar'dan değiştir)"
+  "Push to talk (hold; default key, change it in Settings)": "Bas konuş (basılı tut; varsayılan tuş, Ayarlar'dan değiştir)",
+  "Previous text channel": "Önceki metin kanalı",
+  "Next text channel": "Sonraki metin kanalı",
+  "Previous unread channel": "Önceki okunmamış kanal",
+  "Next unread channel": "Sonraki okunmamış kanal",
+  "Previous server": "Önceki sunucu",
+  "Next server": "Sonraki sunucu",
+  "Previous or next server": "Önceki veya sonraki sunucu",
+  "App shortcuts need Ctrl, Alt or Super, or a function key, so typing and list keys keep working.": "Uygulama kısayolları Ctrl, Alt veya Super ya da bir işlev tuşu gerektirir; böylece yazma ve liste tuşları çalışmaya devam eder.",
+  "These work while Thiscord is focused, including in the message box, and save on this device.": "Bunlar Thiscord odaktayken, mesaj kutusunda da çalışır ve bu cihaza kaydedilir.",
+  "Fixed keys": "Sabit tuşlar",
+  "Menus, lists and the message box always use these keys. Record the other shortcuts below.": "Menüler, listeler ve mesaj kutusu her zaman bu tuşları kullanır. Diğer kısayolları aşağıda kaydet."
 }

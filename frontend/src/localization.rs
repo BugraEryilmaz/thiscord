@@ -276,6 +276,8 @@ mod tests {
             .chain(
                 crate::member_list::StatusExpiry::ALL.map(crate::member_list::StatusExpiry::label),
             )
+            .chain(crate::keyboard::Command::ALL.map(crate::keyboard::Command::label))
+            .chain([crate::keyboard::COMMAND_KEY])
             .chain(crate::keyboard::SHORTCUTS.iter().flat_map(|(group, rows)| {
                 std::iter::once(*group).chain(rows.iter().map(|row| row.action))
             }))

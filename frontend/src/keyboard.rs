@@ -20,12 +20,15 @@ pub struct Keys<'a> {
     pub meta: bool,
 }
 
-/// App-wide navigation commands. Each has Control/Command or Alt, so all of
-/// them are safe while typing in the composer (like Discord).
+/// App-wide commands with recordable shortcuts (Settings → Shortcuts). Each
+/// binding has Control, Alt, Super or is a function key, so all of them are
+/// safe while typing in the composer (like Discord).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Command {
     QuickSwitcher,
     ShortcutHelp,
+    /// Handled by the conversation search, not the navigation host.
+    Search,
     PreviousChannel,
     NextChannel,
     PreviousUnread,
@@ -35,50 +38,216 @@ pub enum Command {
 }
 
 impl Command {
-    /// The command for a key press. Control and Command (Meta) are both the
-    /// primary modifier on every platform; pressing both never matches.
-    /// `typing` (focus in a text field) disables only the Ctrl+Shift+↑/↓
-    /// fallback, which text fields use to select by paragraph.
+    pub const ALL: [Self; 9] = [
+        Self::QuickSwitcher,
+        Self::ShortcutHelp,
+        Self::Search,
+        Self::PreviousChannel,
+        Self::NextChannel,
+        Self::PreviousUnread,
+        Self::NextUnread,
+        Self::PreviousServer,
+        Self::NextServer,
+    ];
+
+    /// English UI catalog key.
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::QuickSwitcher => "Open the quick switcher",
+            Self::ShortcutHelp => "Show keyboard shortcuts",
+            Self::Search => "Search this conversation",
+            Self::PreviousChannel => "Previous text channel",
+            Self::NextChannel => "Next text channel",
+            Self::PreviousUnread => "Previous unread channel",
+            Self::NextUnread => "Next unread channel",
+            Self::PreviousServer => "Previous server",
+            Self::NextServer => "Next server",
+        }
+    }
+
+    /// The command for a key press with the default bindings.
     pub fn from_keys(keys: &Keys, typing: bool) -> Option<Self> {
-        let primary = keys.control != keys.meta;
-        let vertical = match keys.key {
-            "ArrowUp" => Some(false),
-            "ArrowDown" => Some(true),
-            _ => None,
-        };
-        if let Some(forward) = vertical {
-            let pick = |back, next| Some(if forward { next } else { back });
-            return match (keys.control, keys.meta, keys.alt, keys.shift) {
-                (false, false, true, false) => pick(Self::PreviousChannel, Self::NextChannel),
-                (false, false, true, true) => pick(Self::PreviousUnread, Self::NextUnread),
-                // Ctrl+Alt is the documented chord; Ctrl+Shift is the fallback
-                // where the OS reserves Ctrl+Alt+Arrow (display rotation).
-                (true, false, true, false) => pick(Self::PreviousServer, Self::NextServer),
-                (true, false, false, true) if !typing => {
-                    pick(Self::PreviousServer, Self::NextServer)
-                }
-                _ => None,
-            };
-        }
-        if !primary || keys.alt {
-            return None;
-        }
-        if keys.code == "KeyK" && !keys.shift {
-            return Some(Self::QuickSwitcher);
-        }
-        // Layouts such as Turkish Q produce "/" with Shift; accept either key.
-        if keys.code == "Slash" || keys.key == "/" {
-            return Some(Self::ShortcutHelp);
-        }
-        None
+        AppShortcuts::default().command(keys, typing)
     }
 }
 
-/// One row in the keyboard shortcut reference: key chords (already in display
-/// form, joined with " / " for alternatives) and an untranslated description.
+/// Device-local storage key for [`AppShortcuts`]. Contains no account data.
+pub const APP_SHORTCUTS_KEY: &str = "thiscord.app-shortcuts.v1";
+
+/// Why a recorded key cannot be an app shortcut.
+pub const COMMAND_KEY: &str = "App shortcuts need Ctrl, Alt or Super, or a function key, so typing and list keys keep working.";
+
+/// Recordable app shortcuts in the binding syntax of `web_shortcuts`. Empty
+/// disables a command. Matched by physical key (`KeyboardEvent.code`).
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(default)]
+pub struct AppShortcuts {
+    pub quick_switcher: String,
+    pub shortcut_help: String,
+    pub search: String,
+    pub previous_channel: String,
+    pub next_channel: String,
+    pub previous_unread: String,
+    pub next_unread: String,
+    pub previous_server: String,
+    pub next_server: String,
+}
+
+impl Default for AppShortcuts {
+    fn default() -> Self {
+        Self {
+            quick_switcher: "CmdOrCtrl+K".into(),
+            shortcut_help: "CmdOrCtrl+Slash".into(),
+            search: "CmdOrCtrl+F".into(),
+            previous_channel: "Alt+ArrowUp".into(),
+            next_channel: "Alt+ArrowDown".into(),
+            previous_unread: "Alt+Shift+ArrowUp".into(),
+            next_unread: "Alt+Shift+ArrowDown".into(),
+            previous_server: "Control+Alt+ArrowUp".into(),
+            next_server: "Control+Alt+ArrowDown".into(),
+        }
+    }
+}
+
+impl AppShortcuts {
+    pub fn get(&self, command: Command) -> &str {
+        match command {
+            Command::QuickSwitcher => &self.quick_switcher,
+            Command::ShortcutHelp => &self.shortcut_help,
+            Command::Search => &self.search,
+            Command::PreviousChannel => &self.previous_channel,
+            Command::NextChannel => &self.next_channel,
+            Command::PreviousUnread => &self.previous_unread,
+            Command::NextUnread => &self.next_unread,
+            Command::PreviousServer => &self.previous_server,
+            Command::NextServer => &self.next_server,
+        }
+    }
+
+    pub fn get_mut(&mut self, command: Command) -> &mut String {
+        match command {
+            Command::QuickSwitcher => &mut self.quick_switcher,
+            Command::ShortcutHelp => &mut self.shortcut_help,
+            Command::Search => &mut self.search,
+            Command::PreviousChannel => &mut self.previous_channel,
+            Command::NextChannel => &mut self.next_channel,
+            Command::PreviousUnread => &mut self.previous_unread,
+            Command::NextUnread => &mut self.next_unread,
+            Command::PreviousServer => &mut self.previous_server,
+            Command::NextServer => &mut self.next_server,
+        }
+    }
+
+    /// Valid syntax, a command-safe chord ([`COMMAND_KEY`]) and no duplicates,
+    /// also against `others` (the voice and overlay shortcuts on this device).
+    pub fn validate(&self, others: &[&str]) -> Result<(), &'static str> {
+        use crate::web_shortcuts::{Chord, conflicts};
+        let mut seen: Vec<&str> = others
+            .iter()
+            .copied()
+            .filter(|o| !o.trim().is_empty())
+            .collect();
+        for command in Command::ALL {
+            let text = self.get(command).trim();
+            if text.is_empty() {
+                continue;
+            }
+            if text.len() > 128 {
+                return Err("Shortcut is too long");
+            }
+            let chord = Chord::parse(text)
+                .ok_or("Invalid shortcut. Use a combination such as Control+Shift+M.")?;
+            if !chord.while_typing() {
+                return Err(COMMAND_KEY);
+            }
+            if seen.iter().any(|other| conflicts(other, text)) {
+                return Err("Each action needs a different shortcut");
+            }
+            seen.push(text);
+        }
+        Ok(())
+    }
+
+    /// The command for a key press. A binding matches its exact physical
+    /// chord. Default bindings keep their compatibility aliases: Ctrl and
+    /// Command both act as the primary modifier, "/" from any key opens help
+    /// (Turkish Q types it with Shift), Ctrl+F matches by character, and
+    /// Ctrl+Shift+↑/↓ switches servers where the OS reserves Ctrl+Alt+Arrow,
+    /// except while `typing` (text fields select by paragraph with it).
+    pub fn command(&self, keys: &Keys, typing: bool) -> Option<Command> {
+        use crate::web_shortcuts::{Chord, Pressed};
+        let pressed = Pressed {
+            code: keys.code,
+            control: keys.control,
+            shift: keys.shift,
+            alt: keys.alt,
+            meta: keys.meta,
+        };
+        if let Some(command) = Command::ALL.into_iter().find(|&command| {
+            Chord::parse(self.get(command)).is_some_and(|chord| chord.matches(&pressed))
+        }) {
+            return Some(command);
+        }
+        let defaults = Self::default();
+        let default = |command| self.get(command) == defaults.get(command);
+        let primary = keys.control != keys.meta;
+        if default(Command::ShortcutHelp)
+            && primary
+            && !keys.alt
+            && (keys.code == "Slash" || keys.key == "/")
+        {
+            return Some(Command::ShortcutHelp);
+        }
+        if default(Command::Search)
+            && (keys.control || keys.meta)
+            && !keys.alt
+            && keys.key.eq_ignore_ascii_case("f")
+        {
+            return Some(Command::Search);
+        }
+        let forward = match keys.key {
+            "ArrowUp" => false,
+            "ArrowDown" => true,
+            _ => return None,
+        };
+        let server = if forward {
+            Command::NextServer
+        } else {
+            Command::PreviousServer
+        };
+        (default(server)
+            && !typing
+            && (keys.control, keys.meta, keys.alt, keys.shift) == (true, false, false, true))
+            .then_some(server)
+    }
+}
+
+/// A binding in display form: "Ctrl+K" or, on Apple platforms, "⌘K" (Command
+/// for CmdOrCtrl and Super, ⌃ for an explicit Control).
+pub fn display_binding(text: &str, apple: bool) -> String {
+    let labels =
+        crate::web_shortcuts::labels(text)
+            .into_iter()
+            .map(|label| match (label.as_str(), apple) {
+                ("Ctrl/⌘", false) => "Ctrl".to_owned(),
+                ("Ctrl/⌘" | "Super", true) => "⌘".to_owned(),
+                ("Ctrl", true) => "⌃".to_owned(),
+                ("Alt", true) => "⌥".to_owned(),
+                ("Shift", true) => "⇧".to_owned(),
+                _ => label,
+            });
+    labels
+        .collect::<Vec<_>>()
+        .join(if apple { "" } else { "+" })
+}
+
+/// One row in the keyboard shortcut reference: fixed key chords (already in
+/// display form, joined with " / " for alternatives) or recordable `commands`
+/// shown with their current bindings, and an untranslated description.
 pub struct Shortcut {
     pub keys: &'static str,
     pub action: &'static str,
+    pub commands: &'static [Command],
 }
 
 /// Groups of shortcuts for the help dialog and settings. Descriptions are
@@ -88,24 +257,29 @@ pub const SHORTCUTS: &[(&str, &[Shortcut])] = &[
         "Navigation",
         &[
             Shortcut {
-                keys: "Ctrl+K",
+                keys: "",
                 action: "Open the quick switcher",
+                commands: &[Command::QuickSwitcher],
             },
             Shortcut {
-                keys: "Alt+↑ / Alt+↓",
+                keys: "",
                 action: "Previous or next text channel",
+                commands: &[Command::PreviousChannel, Command::NextChannel],
             },
             Shortcut {
-                keys: "Alt+Shift+↑ / Alt+Shift+↓",
+                keys: "",
                 action: "Previous or next unread channel",
+                commands: &[Command::PreviousUnread, Command::NextUnread],
             },
             Shortcut {
-                keys: "Ctrl+Alt+↑ / Ctrl+Alt+↓",
-                action: "Previous or next server (Ctrl+Shift+↑ / ↓ also works)",
+                keys: "",
+                action: "Previous or next server",
+                commands: &[Command::PreviousServer, Command::NextServer],
             },
             Shortcut {
-                keys: "Ctrl+/",
+                keys: "",
                 action: "Show keyboard shortcuts",
+                commands: &[Command::ShortcutHelp],
             },
         ],
     ),
@@ -115,18 +289,22 @@ pub const SHORTCUTS: &[(&str, &[Shortcut])] = &[
             Shortcut {
                 keys: "Esc",
                 action: "Jump to latest and mark the channel read; closes menus and dialogs first",
+                commands: &[],
             },
             Shortcut {
-                keys: "Ctrl+F",
+                keys: "",
                 action: "Search this conversation",
+                commands: &[Command::Search],
             },
             Shortcut {
                 keys: "↑",
                 action: "Edit your last message (empty composer)",
+                commands: &[],
             },
             Shortcut {
                 keys: "Enter / Shift+Enter",
                 action: "Send message / new line",
+                commands: &[],
             },
         ],
     ),
@@ -136,18 +314,22 @@ pub const SHORTCUTS: &[(&str, &[Shortcut])] = &[
             Shortcut {
                 keys: "↑ ↓ Home End",
                 action: "Move between servers, channels, members, friends and menu items",
+                commands: &[],
             },
             Shortcut {
                 keys: "← → ↑ ↓",
                 action: "Move in emoji and reaction grids",
+                commands: &[],
             },
             Shortcut {
                 keys: "Shift+F10 / Menu",
                 action: "Open the context menu for the focused item",
+                commands: &[],
             },
             Shortcut {
                 keys: "Enter / Space",
                 action: "Activate the focused item",
+                commands: &[],
             },
         ],
     ),
@@ -156,6 +338,7 @@ pub const SHORTCUTS: &[(&str, &[Shortcut])] = &[
         &[Shortcut {
             keys: "Ctrl+Shift+Space",
             action: "Push to talk (hold; default key, change it in Settings)",
+            commands: &[],
         }],
     ),
 ];
@@ -441,10 +624,10 @@ mod tests {
             Some(Command::ShortcutHelp)
         );
 
-        // Ctrl+F (search) and Ctrl+Shift+Space (push-to-talk) stay unclaimed.
+        // Ctrl+F is search; Ctrl+Shift+Space (push-to-talk) stays unclaimed.
         let mut f = keys("f", "KeyF");
         f.control = true;
-        assert_eq!(Command::from_keys(&f, false), None);
+        assert_eq!(Command::from_keys(&f, false), Some(Command::Search));
         let mut ptt = keys(" ", "Space");
         ptt.control = true;
         ptt.shift = true;
@@ -502,6 +685,101 @@ mod tests {
             typing("ArrowDown", false, true, false),
             Some(Command::NextChannel)
         );
+    }
+
+    #[test]
+    fn recorded_bindings_replace_defaults_and_their_aliases() {
+        let press = |key, code, control, shift, alt| Keys {
+            key,
+            code,
+            control,
+            shift,
+            alt,
+            meta: false,
+        };
+        let mut custom = AppShortcuts {
+            quick_switcher: "Alt+P".into(),
+            next_server: "F6".into(),
+            shortcut_help: "Control+Alt+H".into(),
+            ..AppShortcuts::default()
+        };
+        assert_eq!(
+            custom.command(&press("p", "KeyP", false, false, true), false),
+            Some(Command::QuickSwitcher)
+        );
+        assert_eq!(
+            custom.command(&press("k", "KeyK", true, false, false), false),
+            None
+        );
+        assert_eq!(
+            custom.command(&press("F6", "F6", false, false, false), true),
+            Some(Command::NextServer)
+        );
+        // Aliases belong to defaults only: a moved binding releases them.
+        assert_eq!(
+            custom.command(&press("ArrowDown", "ArrowDown", true, true, false), false),
+            None
+        );
+        assert_eq!(
+            custom.command(&press("ArrowUp", "ArrowUp", true, true, false), false),
+            Some(Command::PreviousServer)
+        );
+        assert_eq!(
+            custom.command(&press("/", "Digit7", true, true, false), false),
+            None
+        );
+        // Cleared commands never match.
+        custom.search.clear();
+        assert_eq!(
+            custom.command(&press("f", "KeyF", true, false, false), false),
+            None
+        );
+    }
+
+    #[test]
+    fn app_bindings_validate_safety_and_conflicts() {
+        assert_eq!(AppShortcuts::default().validate(&[]), Ok(()));
+        let with = |command: Command, text: &str| {
+            let mut shortcuts = AppShortcuts::default();
+            *shortcuts.get_mut(command) = text.into();
+            shortcuts
+        };
+        for unsafe_key in ["K", "Shift+K", "ArrowUp", "Enter", "Escape"] {
+            assert_eq!(
+                with(Command::QuickSwitcher, unsafe_key).validate(&[]),
+                Err(COMMAND_KEY),
+                "{unsafe_key}"
+            );
+        }
+        assert!(with(Command::QuickSwitcher, "F2").validate(&[]).is_ok());
+        assert!(with(Command::QuickSwitcher, "").validate(&[]).is_ok());
+        assert_eq!(
+            with(Command::QuickSwitcher, "Ctrl+F").validate(&[]),
+            Err("Each action needs a different shortcut")
+        );
+        assert_eq!(
+            AppShortcuts::default().validate(&["Control+K"]),
+            Err("Each action needs a different shortcut")
+        );
+        assert!(
+            AppShortcuts::default()
+                .validate(&["Control+Shift+M", "", "Control+Shift+Space"])
+                .is_ok()
+        );
+        assert!(with(Command::Search, "nope+F").validate(&[]).is_err());
+        let saved: AppShortcuts = serde_json::from_str(r#"{"quick_switcher":"Alt+P"}"#).unwrap();
+        assert_eq!(saved.quick_switcher, "Alt+P");
+        assert_eq!(saved.search, "CmdOrCtrl+F");
+    }
+
+    #[test]
+    fn bindings_display_like_the_reference() {
+        assert_eq!(display_binding("CmdOrCtrl+K", false), "Ctrl+K");
+        assert_eq!(display_binding("CmdOrCtrl+K", true), "⌘K");
+        assert_eq!(display_binding("Alt+Shift+ArrowUp", false), "Alt+Shift+↑");
+        assert_eq!(display_binding("Control+Alt+ArrowDown", true), "⌃⌥↓");
+        assert_eq!(display_binding("Super+Shift+K", true), "⌘⇧K");
+        assert_eq!(display_binding("", false), "");
     }
 
     #[test]
