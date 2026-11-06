@@ -280,7 +280,7 @@ impl Sender {
                     now,
                 );
                 if local.sender.keyframe_request(now).is_some() {
-                    self.force_keyframe.store(true, Ordering::Release);
+                    self.demand.request_keyframe(&self.force_keyframe);
                 }
             }
             self.demand.delivered_encoder_frame(frame.bitrate);

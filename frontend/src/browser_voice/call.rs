@@ -421,7 +421,8 @@ impl Call {
         // Remote speaking: WebAudio meters while the graph runs (every tick),
         // else `getStats` inbound `audioLevel` (every stats pass).
         let mut metered = [false; PLAYBACK_SLOTS];
-        {
+        // One AudioContext state query per tick, not one per playback slot.
+        if self.output.running() {
             let mut remote = self.remote.borrow_mut();
             for (slot, activity) in remote.iter_mut().enumerate() {
                 if let Some(level) = self.output.level(slot) {

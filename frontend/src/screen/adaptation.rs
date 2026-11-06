@@ -50,6 +50,10 @@ impl Demand {
     pub fn set_wake(&self, wake: std::sync::Arc<dyn Fn() + Send + Sync>) {
         *self.2.lock().unwrap() = Some(wake);
     }
+    /// Drops the worker's wake when that worker ends; the `Demand` outlives it.
+    pub fn clear_wake(&self) {
+        *self.2.lock().unwrap() = None;
+    }
     /// A measured encoded burst cannot fit the receiver assembly deadline.
     /// Keep this signal local to the affected encoder; it is not viewer feedback.
     pub fn reject_encoder_frame(&self, bitrate: u32, keyframe: bool) {
@@ -68,6 +72,12 @@ impl Demand {
         if let Some(wake) = self.2.lock().unwrap().as_ref() {
             wake();
         }
+    }
+    /// Sets the layer's keyframe flag and wakes its encoder worker, so a request
+    /// on a static source is served now rather than at the next idle timeout.
+    pub fn request_keyframe(&self, force: &std::sync::atomic::AtomicBool) {
+        force.store(true, std::sync::atomic::Ordering::Release);
+        self.wake();
     }
     pub fn take_encoder_feedback(&self) -> EncoderFeedback {
         std::mem::take(&mut *self.1.lock().unwrap())

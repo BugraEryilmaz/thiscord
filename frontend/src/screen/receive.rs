@@ -10,6 +10,16 @@ const REORDER_AGE: Duration = Duration::from_millis(40);
 const REORDER_PACKETS: usize = 256;
 const QUEUE_FRAMES: usize = 8;
 const QUEUE_BYTES: usize = 8 * 1024 * 1024;
+// Per-packet and per-frame counters by compile-time slot (no name hashing).
+use super::metrics::counter_index;
+const RECEIVED_PACKETS: usize = counter_index("received_packets");
+const RECEIVED_BYTES: usize = counter_index("received_bytes");
+const LATE_OR_DUPLICATE: usize = counter_index("late_or_duplicate");
+const REORDERED: usize = counter_index("reordered");
+const REORDER_PEAK: usize = counter_index("reorder_peak_packets");
+const RECEIVED_FRAMES: usize = counter_index("received_frames");
+const PEAK_FRAMES: usize = counter_index("receive_peak_frames");
+const PEAK_BYTES: usize = counter_index("receive_peak_bytes");
 pub struct Frame {
     pub data: Bytes,
     pub arrived: Instant,
@@ -118,11 +128,11 @@ impl Sender {
         if s.closed {
             return;
         }
-        self.inbox.0.metrics.add("received_packets", 1);
+        self.inbox.0.metrics.add_at(RECEIVED_PACKETS, 1);
         self.inbox
             .0
             .metrics
-            .add("received_bytes", packet.payload.len() as u64);
+            .add_at(RECEIVED_BYTES, packet.payload.len() as u64);
         Self::switch_epoch(s, epoch);
         let next = *s.next.get_or_insert(packet.header.sequence_number);
         let delta = packet.header.sequence_number.wrapping_sub(next) as i16;
@@ -131,17 +141,17 @@ impl Sender {
                 .iter()
                 .any(|(p, _)| p.header.sequence_number == packet.header.sequence_number)
         {
-            self.inbox.0.metrics.add("late_or_duplicate", 1);
+            self.inbox.0.metrics.add_at(LATE_OR_DUPLICATE, 1);
             return;
         }
         if delta > 0 {
-            self.inbox.0.metrics.add("reordered", 1);
+            self.inbox.0.metrics.add_at(REORDERED, 1);
         }
         s.reorder.push((packet, arrived));
         self.inbox
             .0
             .metrics
-            .peak("reorder_peak_packets", s.reorder.len() as u64);
+            .peak_at(REORDER_PEAK, s.reorder.len() as u64);
         self.drain(s, arrived);
     }
     fn switch_epoch(s: &mut State, epoch: u32) {
@@ -172,7 +182,7 @@ impl Sender {
             self.inbox
                 .0
                 .metrics
-                .add("received_bytes", data.len() as u64);
+                .add_at(RECEIVED_BYTES, data.len() as u64);
             Self::switch_epoch(&mut s, epoch);
             s.timestamp = Some(timestamp);
             s.arrived = Some(arrived);
@@ -332,13 +342,13 @@ impl Sender {
         self.inbox
             .0
             .metrics
-            .peak("receive_peak_frames", s.frames.len() as u64);
+            .peak_at(PEAK_FRAMES, s.frames.len() as u64);
         self.inbox
             .0
             .metrics
-            .peak("receive_peak_bytes", s.frames.bytes() as u64);
+            .peak_at(PEAK_BYTES, s.frames.bytes() as u64);
         self.inbox.0.ready.notify_one();
-        self.inbox.0.metrics.add("received_frames", 1);
+        self.inbox.0.metrics.add_at(RECEIVED_FRAMES, 1);
         self.inbox
             .0
             .metrics

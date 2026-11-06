@@ -281,10 +281,8 @@ impl Output {
     }
     /// Decoded peak of one mixer slot before local gain, while the graph
     /// runs; `None` means the caller should use `getStats` levels.
+    /// The slot's current peak; callers check [`Self::running`] once per pass.
     pub fn level(&self, slot: usize) -> Option<f32> {
-        if !self.running() {
-            return None;
-        }
         let slot = self.slots.get(slot)?;
         let meter = slot.meter.as_ref()?;
         slot.source.borrow().as_ref()?;

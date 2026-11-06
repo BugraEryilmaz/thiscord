@@ -333,6 +333,20 @@ Other changes, pinned by tests rather than benchmarks:
   relay that complete on their first poll build no timeout timer.
 - Web: a due voice-activation gate runs before an incoming signaling message is
   parsed.
+- A keyframe request on a static share wakes the encoder worker: served in about
+  1.4 ms in the static-source unit test, versus 37–46 ms when only the flag is set
+  (the worker otherwise sleeps up to 100 ms). The test now fails above 15 ms.
+- Desktop players wake on IntersectionObserver changes instead of a one-second
+  visibility poll, and skip the one-second reconnect backoff after a visibility
+  change (kept for failures and leases the desktop ended).
+- The audio worker skips its loop maintenance (about six clock reads) between the
+  packets of one receive batch and shares one arrival-age clock read per batch; the
+  native call tick reads two settings flags instead of cloning the settings.
+- Received screen packets update their counters by compile-time slot instead of a
+  hashed name lookup per counter.
+- Web: the grid's decoded-size and frame-rate sampler runs once a second (frame
+  rates need a full second anyway), and the call tick checks the AudioContext state
+  once instead of once per playback slot.
 
 Browser run (web client): the `/app` bundle from this branch, served by a local
 backend with its own database (`scripts/web-call-check-backend.sh`, WSL), in
@@ -383,7 +397,26 @@ fake camera:
 - Receive relay and WebView player: the camera played at 1280×720, 20 fps (200
   frames presented and decoded in 10 s, 0 dropped). Moving the tile out of view
   ended its lease (0 frames in the next 3 s); back in view, the first frame arrived
-  after 1,983 ms (a new local peer and keyframe), then 19.4 fps.
+  after 1,983 ms with the one-second visibility poll and backoff, and after 729,
+  1,268 and 1,204 ms once the observer wakes the player (a new local peer and the
+  publisher's keyframe remain), then 19.4 fps.
+- Native memory across cycles (private bytes, handles and threads of the app and its
+  WebView2 processes, and the `GPU Process Memory` dedicated-usage counter, with the
+  app driven over WebView2's DevTools port; 5 voice join/leave cycles then 5
+  share start/stop cycles while in the call): voice join/leave stayed flat (app
+  private 34–49 MB, 44 threads, 605–628 handles). Stopping a share released its
+  capture/encoder threads and GPU memory within a second (105 → 54 threads, GPU
+  238 → 40 MB), the same as base `0ae37e5`. An intermediate build of this branch
+  kept them (95 threads, 512 MB GPU) until the call ended, because a wake closure
+  registered on the binding's long-lived demand handle held the worker's mailbox
+  and its last captured frame; wakes now hold the mailbox weakly and the worker
+  unregisters on exit, pinned by the worker test (the mailbox's strong count is 1
+  after the worker ends). Each share start/stop still leaves about 40 MB of GPU
+  memory in the app process (one 3440×1440 FP16 surface), identically on base
+  (139.6 → 323.6 MB over five shares; this branch 146.8 → 319.9 MB): a pre-existing
+  retention below the app's capture code (`windows-capture` 2.0.1/WGC or the
+  driver) that this branch neither causes nor fixes. While sharing, app private
+  memory was 269 MB on this branch versus 422 MB on base.
 - Screen share of the 3440×1440 desktop at 1080p30 with system audio, both layers:
   the NVIDIA MFT encoded and sent 28.2 frames/s (0 dropped, 0 send timeouts, three
   capture textures); the own preview presented 21.9 fps at 1920×802 (231 decoded,
@@ -409,10 +442,21 @@ a private build directory, `screen_pipeline_probe --seconds=20 --assert`): base 
 59.2–59.9. One run of an intermediate build ended in a segmentation fault in about
 thirty runs of this branch; it did not recur and its cause is not established.
 
-Not measured: received voice on real speakers, browser main-thread profiles,
-total process VRAM, the Linux desktop app (WebKitGTK player and relay; Linux
-capture, encode, share audio and voice were run separately), Linux desktop-portal
-capture and the VA/CUDA families, and macOS.
+Linux desktop app (WSLg, debug build, driven through WebKitGTK's remote
+inspector, `WEBKIT_INSPECTOR_HTTP_SERVER`): the app aborts at startup because the
+hidden voice overlay requests cursor passthrough before GTK realizes its window
+(`native_overlay.rs`, unchanged by this branch; tao unwraps the missing
+`GdkWindow`). With that call skipped in an uncommitted local build, login, voice
+signaling, ICE/DTLS and the native audio devices came up, but WSL has no paced
+audio device: ALSA's `null` PCM (no sound card or PulseAudio/PipeWire ALSA plugin
+in this WSL) ran about 4,800 output callbacks in under a second, the audio worker's
+privacy-control queue filled and the call closed, as designed. The WebKitGTK relay
+and player were therefore not reached.
+
+Not measured: received voice on real speakers, browser main-thread profiles, the
+Linux desktop app's WebKitGTK player and relay (above; Linux capture, encode, share
+audio and voice were run separately), Linux desktop-portal capture and the VA/CUDA
+families, and macOS.
 
 ## Reading the monitors
 

@@ -389,7 +389,8 @@ pub(super) fn ScreenViewer(
         observe_size(&element, measure);
     });
 
-    // Sample each player's decoded size and frame rate.
+    // Sample each player's decoded size and frame rate once a second: the rate
+    // needs a full second of frames, and a new tile's size lands on its first tick.
     let samples: Samples = Rc::default();
     let players: Rc<RefCell<HashMap<Key, web_sys::HtmlVideoElement>>> = Rc::default();
     let sampler = set_interval_with_handle(
@@ -458,7 +459,7 @@ pub(super) fn ScreenViewer(
                 }
             }
         },
-        std::time::Duration::from_millis(500),
+        std::time::Duration::from_millis(1000),
     )
     .ok();
 

@@ -273,7 +273,7 @@ pub(super) fn ScreenVideo(watch: thiscord_shared::screen::Watch) -> impl IntoVie
     let (abort, registration) = futures_util::future::AbortHandle::new_pair();
     let registration = std::cell::RefCell::new(Some(registration));
     // Whether the tile is inside the viewport (scrolling grids and strips).
-    let on_screen = std::rc::Rc::new(std::cell::Cell::new(true));
+    let on_screen = super::screen_player::OnScreen::new();
     type Observer = (
         web_sys::IntersectionObserver,
         wasm_bindgen::closure::Closure<dyn FnMut(js_sys::Array)>,

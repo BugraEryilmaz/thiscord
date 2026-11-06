@@ -198,7 +198,13 @@ GStreamer plugins. Building needs `libgstreamer1.0-dev`,
   than callback arrival time. An asynchronous MFT event wakes the encoder worker;
   it does not wait for the next capture or a coarse timer to collect output.
   Without a capture or MFT wake, the worker sleeps until its next refresh is due
-  (at most 20 ms). A raw frame held only for its layer cadence sleeps until it is
+  (at most 20 ms; 100 ms once the source has been static for 200 ms). A viewer's
+  keyframe request (SFU recovery, the own preview or the low layer) sets the flag
+  and wakes the worker through its demand handle, so a static source serves it in
+  about 1.4 ms instead of after up to 100 ms (unit test; 37–46 ms without the wake).
+  Wake closures hold the worker's mailbox weakly and the worker unregisters on
+  exit, so the binding's demand handle never keeps the last captured frame (and
+  with it the GPU device) alive after a share ends. A raw frame held only for its layer cadence sleeps until it is
   due. One held by sender backpressure is woken by the paced sender when its byte
   budget falls back under the limit or a queued frame finishes (only while the
   worker is waiting), instead of a 2 ms poll; a 20 s 4K60 pipeline probe kept
@@ -352,7 +358,10 @@ GStreamer plugins. Building needs `libgstreamer1.0-dev`,
 - Viewers send control heartbeats every 250 ms while connecting and once per second
   once playing, expire after three seconds (tolerating short UI stalls), and close on
   unmount/document hiding; a desktop camera tile scrolled out of a scrolling grid or
-  strip (IntersectionObserver) also ends its lease and reconnects when it returns,
+  strip (IntersectionObserver) also ends its lease and reconnects when it returns.
+  The observer wakes the player directly, both ways, and reconnecting after a
+  visibility change skips the one-second backoff kept for failed attempts and
+  leases the desktop ended,
   while screen tiles stay subscribed for their shared audio. Replacement viewers have distinct leases. Roster/epoch,
   deafen and connection changes revoke forwarding and close the local peer;
   pending work checks its lease and arrival deadline. Negotiations are bounded.

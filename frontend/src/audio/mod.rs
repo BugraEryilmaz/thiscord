@@ -1690,62 +1690,70 @@ fn run(
     // A packet already dequeued while batching, handled before waiting again.
     let mut carried: Option<Command> = None;
     let mut batched = 0;
+    // One arrival-age clock for every packet of a batch.
+    let mut batch_now: Option<Instant> = None;
     loop {
-        probe.enter(worker_health::IDLE);
-        probe.active.store(session.is_some(), Ordering::Release);
-        if let Some(s) = &mut session {
-            s.capture_boundary(s.transmit_control.generation(), Instant::now());
-        }
-        if session
-            .as_ref()
-            .is_some_and(|s| s.connection.as_ref().is_some_and(|c| !c.active()))
-        {
-            stop.store(true, Ordering::Release);
-        }
-        debug.poll();
-        if debug_stop.swap(false, Ordering::AcqRel) {
-            debug.stop();
-        }
-        // Release requests and PTT key-up cannot be lost behind a full media queue.
-        if stop.swap(false, Ordering::AcqRel) {
-            if let Some(pending) = &mut pending {
-                pending.cancel("Audio stopped; pending settings were cancelled");
+        // Mid-batch (a packet carried from the previous admission), skip the
+        // per-iteration maintenance and its clock reads: no processing tick runs
+        // until the batch ends, and the end of a batch re-checks stop and the
+        // connection before returning here with nothing carried.
+        if carried.is_none() {
+            probe.enter(worker_health::IDLE);
+            probe.active.store(session.is_some(), Ordering::Release);
+            if let Some(s) = &mut session {
+                s.capture_boundary(s.transmit_control.generation(), Instant::now());
             }
-            debug.stop();
-            session = None;
-            pressed.store(false, Ordering::Release);
-            message = "Audio stopped; devices released".into();
-        }
-        if previous.elapsed() > Duration::from_secs(2) {
-            diagnostics::event(
-                "worker_scheduling_gap",
-                serde_json::json!({"elapsed_ms":previous.elapsed().as_millis(),"voice":session.as_ref().is_some_and(|s| s.connection.is_some())}),
-            );
-        }
-        if session
-            .as_ref()
-            .is_some_and(|s| lease_expired(s.connection.is_some(), lease.elapsed()))
-        {
-            diagnostics::event(
-                "audio_lease_expired",
-                serde_json::json!({"elapsed_ms":lease.elapsed().as_millis(),"voice":session.as_ref().is_some_and(|s|s.connection.is_some())}),
-            );
-            if let Some(pending) = &mut pending {
-                pending.cancel("Audio suspended; pending settings were cancelled");
+            if session
+                .as_ref()
+                .is_some_and(|s| s.connection.as_ref().is_some_and(|c| !c.active()))
+            {
+                stop.store(true, Ordering::Release);
             }
-            debug.stop();
-            session = None;
-            message = "Audio stopped after inactivity or suspend".into();
-        }
-        previous = Instant::now();
-        if last_snapshot.elapsed() >= Duration::from_secs(10) {
-            last_snapshot = Instant::now();
-            if let Some(s) = &session {
-                diagnostics::quality(|| s.quality());
-                diagnostics::event_with(
-                    "audio_snapshot",
-                    || serde_json::json!({"processing_resets":s.processing.resets,"processing_reset_causes":s.processing.reset_causes,"opus_decode":s.remotes.iter().flatten().map(|r| &r.decode_stats).collect::<Vec<_>>(),"verified_fec_frames":null,"playout":s.remotes.iter().flatten().map(|r|r.jitter.metrics()).collect::<Vec<_>>(),"receive":s.remotes.iter().flatten().map(|r|r.jitter.diagnostics()).collect::<Vec<_>>(),"health":s.devices.health.diagnostics(),"recovering":s.recovery.active(),"muted":s.settings.muted,"deafened":s.settings.deafened,"deep_redundancy":s.settings.deep_redundancy,"dred_bitrate_target":if s.settings.deep_redundancy { dred::BITRATE } else { 32_000 },"echo":s.settings.echo_cancellation,"neural_echo":s.settings.neural_echo,"suppression":s.settings.noise_suppression,"suppression_model":s.settings.noise_suppression_model,"suppression_strength":s.settings.noise_suppression_strength,"automatic_gain":s.settings.automatic_gain,"capture_overflow_samples":s.devices.control.dropped.load(Ordering::Relaxed),"playback_starvation_samples":s.devices.control.underruns.load(Ordering::Relaxed)}),
+            debug.poll();
+            if debug_stop.swap(false, Ordering::AcqRel) {
+                debug.stop();
+            }
+            // Release requests and PTT key-up cannot be lost behind a full media queue.
+            if stop.swap(false, Ordering::AcqRel) {
+                if let Some(pending) = &mut pending {
+                    pending.cancel("Audio stopped; pending settings were cancelled");
+                }
+                debug.stop();
+                session = None;
+                pressed.store(false, Ordering::Release);
+                message = "Audio stopped; devices released".into();
+            }
+            if previous.elapsed() > Duration::from_secs(2) {
+                diagnostics::event(
+                    "worker_scheduling_gap",
+                    serde_json::json!({"elapsed_ms":previous.elapsed().as_millis(),"voice":session.as_ref().is_some_and(|s| s.connection.is_some())}),
                 );
+            }
+            if session
+                .as_ref()
+                .is_some_and(|s| lease_expired(s.connection.is_some(), lease.elapsed()))
+            {
+                diagnostics::event(
+                    "audio_lease_expired",
+                    serde_json::json!({"elapsed_ms":lease.elapsed().as_millis(),"voice":session.as_ref().is_some_and(|s|s.connection.is_some())}),
+                );
+                if let Some(pending) = &mut pending {
+                    pending.cancel("Audio suspended; pending settings were cancelled");
+                }
+                debug.stop();
+                session = None;
+                message = "Audio stopped after inactivity or suspend".into();
+            }
+            previous = Instant::now();
+            if last_snapshot.elapsed() >= Duration::from_secs(10) {
+                last_snapshot = Instant::now();
+                if let Some(s) = &session {
+                    diagnostics::quality(|| s.quality());
+                    diagnostics::event_with(
+                        "audio_snapshot",
+                        || serde_json::json!({"processing_resets":s.processing.resets,"processing_reset_causes":s.processing.reset_causes,"opus_decode":s.remotes.iter().flatten().map(|r| &r.decode_stats).collect::<Vec<_>>(),"verified_fec_frames":null,"playout":s.remotes.iter().flatten().map(|r|r.jitter.metrics()).collect::<Vec<_>>(),"receive":s.remotes.iter().flatten().map(|r|r.jitter.diagnostics()).collect::<Vec<_>>(),"health":s.devices.health.diagnostics(),"recovering":s.recovery.active(),"muted":s.settings.muted,"deafened":s.settings.deafened,"deep_redundancy":s.settings.deep_redundancy,"dred_bitrate_target":if s.settings.deep_redundancy { dred::BITRATE } else { 32_000 },"echo":s.settings.echo_cancellation,"neural_echo":s.settings.neural_echo,"suppression":s.settings.noise_suppression,"suppression_model":s.settings.noise_suppression_model,"suppression_strength":s.settings.noise_suppression_strength,"automatic_gain":s.settings.automatic_gain,"capture_overflow_samples":s.devices.control.dropped.load(Ordering::Relaxed),"playback_starvation_samples":s.devices.control.underruns.load(Ordering::Relaxed)}),
+                    );
+                }
             }
         }
         // Control commands keep priority over queued media.
@@ -1872,11 +1880,12 @@ fn run(
                         | Command::Roster { .. }
                         | Command::ReceiveBoundary { .. }) => {
                             if let Some(s) = &mut session {
-                                s.receive_command(
-                                    command,
-                                    deafen.load(Ordering::Acquire),
-                                    Instant::now(),
-                                )?;
+                                let now = if media {
+                                    *batch_now.get_or_insert_with(Instant::now)
+                                } else {
+                                    Instant::now()
+                                };
+                                s.receive_command(command, deafen.load(Ordering::Acquire), now)?;
                             }
                         }
                         Command::Stop => {
@@ -2021,6 +2030,7 @@ fn run(
             continue;
         }
         batched = 0;
+        batch_now = None;
         // Commit only between complete processing ticks. Stop takes priority
         // even if it arrived while a replacement was finishing.
         if stop.load(Ordering::Acquire)

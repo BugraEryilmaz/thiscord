@@ -152,7 +152,15 @@ impl ScreenState {
         if let Ok(inner) = self.0.lock()
             && let Some(layer) = inner.binding.as_ref().and_then(|b| b.layers.as_ref())
         {
-            layer.force_keyframe.store(true, Ordering::Release);
+            layer.demand.request_keyframe(&layer.force_keyframe);
+        }
+    }
+    /// A viewer recovery request for the primary layer; wakes its encoder worker.
+    pub fn keyframe(&self) {
+        if let Ok(inner) = self.0.lock()
+            && let Some(binding) = &inner.binding
+        {
+            binding.demand.request_keyframe(&binding.force_keyframe);
         }
     }
     pub fn layer_target(&self, bitrate: u32, layers: Option<LayerTargets>, profile: VideoProfile) {
@@ -847,7 +855,7 @@ pub fn screen_view_keyframe(app: tauri::AppHandle, watch: Watch) -> bool {
     if let Some(binding) = &inner.binding
         && binding.own_slot == watch.slot
     {
-        binding.force_keyframe.store(true, Ordering::Release);
+        binding.demand.request_keyframe(&binding.force_keyframe);
     }
     if let Some(inbox) = &inner.inboxes[watch.slot] {
         inbox.request_keyframe();

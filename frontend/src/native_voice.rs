@@ -1353,7 +1353,7 @@ async fn run(
                     ServerEvent::MediaDiagnostics{counters}=>{ app.state::<crate::native_screen::ScreenState>().server_diagnostics(counters); },
                     ServerEvent::ScreenKeyframe{kind, epoch, layer}=>{
                         if kind == MediaKind::Camera { app.state::<crate::native_camera::CameraState>().keyframe(); continue; }
-                        if status.lock().ok().is_some_and(|s| s.participants.iter().any(|m| m.slot == own_slot && m.screen_epoch == epoch && m.sharing_screen)) { if layer != Some(1) { force_keyframe.store(true, Ordering::Release); }
+                        if status.lock().ok().is_some_and(|s| s.participants.iter().any(|m| m.slot == own_slot && m.screen_epoch == epoch && m.sharing_screen)) { if layer != Some(1) { app.state::<crate::native_screen::ScreenState>().keyframe(); }
                             if layer != Some(0) { app.state::<crate::native_screen::ScreenState>().layer_keyframe(); } }
                     },
                     ServerEvent::Moved {channel_id:destination}=>{
@@ -1400,7 +1400,8 @@ async fn run(
                         audio_control.start(move||crate::native_audio::start_voice(&audio_app,guild_id,connection,configuration,tx,can_speak));
                     }
                 }
-                let configuration=settings.lock().map_err(|_|"Settings unavailable")?.clone();
+                // Only two flags are needed per tick; no settings clone.
+                let (muted, self_deafened) = settings.lock().map(|s| (s.muted, s.deafened)).map_err(|_|"Settings unavailable")?;
                 // The worker's voice lease is 15 s; a keepalive every 2 s still
                 // catches a stalled worker quickly (each waits up to 10 s).
                 if audio_started && !audio_control.pending() && last_keepalive.elapsed() >= Duration::from_secs(2) {
@@ -1409,7 +1410,7 @@ async fn run(
                     let heartbeat_connection=attempt.connection.clone();
                     audio_control.start(move||e.command(Command::Keepalive(heartbeat_connection)));
                 }
-                let deafened = configuration.deafened || moderation.deafened();
+                let deafened = self_deafened || moderation.deafened();
                 let allowed = can_speak && moderation.can_publish() && !deafened;
                 let screen = app.state::<crate::native_screen::ScreenState>();
                 let camera = app.state::<crate::native_camera::CameraState>();
@@ -1420,11 +1421,11 @@ async fn run(
                     engine.notify_control(Command::ReceiveBoundary { connection: attempt.connection.clone(), generation: transmit_control.generation(), epoch: None })?;
                 }
                 let now = Instant::now();
-                if (!packet_redundancy || configuration.muted || configuration.deafened || boundary.ready())
+                if (!packet_redundancy || muted || self_deafened || boundary.ready())
                     && !signaling.recovering()
-                    && voice_state.due(&(configuration.muted, configuration.deafened), true, now)
+                    && voice_state.due(&(muted, self_deafened), true, now)
                 {
-                    signaling.send(ClientEvent::State{muted:configuration.muted,deafened:configuration.deafened});
+                    signaling.send(ClientEvent::State{muted,deafened:self_deafened});
                 }
                 if screen_subscriptions && !signaling.recovering() {
                     let mut views = if deafened { vec![] } else { app.state::<crate::native_screen::ScreenState>().subscriptions() };

@@ -22,11 +22,12 @@ use thiscord_shared::screen::Quality;
 /// Source validity (closed/minimized window) is a syscall; 100 ms is ample.
 pub const SOURCE_CHECK: Duration = Duration::from_millis(100);
 /// Longest encoder-worker sleep without a wake while captures are arriving. It
-/// bounds how long atomics (keyframe requests, stop) wait to be observed.
+/// bounds how long a stop flag waits to be observed (keyframe requests wake the
+/// worker through `Demand::request_keyframe`).
 const IDLE_WAIT: Duration = Duration::from_millis(20);
 /// The same bound once the source has been static for `STATIC_AFTER`: captures,
 /// encoder output, sender budget release, returning demand and rejected-frame
-/// feedback all still wake the worker, so only a keyframe request or stop on an
+/// feedback and keyframe requests all still wake the worker, so only a stop on an
 /// unchanging source waits this long (10 polls per second instead of 50).
 const STATIC_WAIT: Duration = Duration::from_millis(100);
 const STATIC_AFTER: Duration = Duration::from_millis(200);
@@ -82,11 +83,16 @@ pub fn close<F>(targets: &[Inbox<F>]) {
     }
 }
 /// Wakes the worker when asynchronous encoder output or input credit arrives.
+/// Holds the mailbox weakly: a wake registered on something that outlives the
+/// share (the binding's `Demand`) must not keep the last captured frame, and
+/// with it the GPU device, alive after the worker ends.
 pub fn waker<F: Send + 'static>(target: &Inbox<F>) -> Box<dyn Fn() + Send + Sync> {
-    let target = target.clone();
+    let target = Arc::downgrade(target);
     Box::new(move || {
-        target.0.lock().unwrap().encoder_event = true;
-        target.1.notify_one();
+        if let Some(target) = target.upgrade() {
+            target.0.lock().unwrap().encoder_event = true;
+            target.1.notify_one();
+        }
     })
 }
 
@@ -316,6 +322,14 @@ pub fn encode<P: Platform>(
         super::pacing::SendBudget::new(super::pacing::transport_bitrate(quality.bitrate()))
             .with_wake(std::sync::Arc::from(waker(mailbox)));
     demand.set_wake(std::sync::Arc::from(waker(mailbox)));
+    // The binding's `Demand` outlives this worker: unregister on every exit.
+    struct ClearWake<'a>(&'a Demand);
+    impl Drop for ClearWake<'_> {
+        fn drop(&mut self) {
+            self.0.clear_wake();
+        }
+    }
+    let _clear_wake = ClearWake(demand);
     metrics.label("sender_backlog_budget_ms", super::pacing::BACKLOG_BUDGET_MS);
     metrics.label("requested_fps", requested.fps);
     metrics.label("requested_height", requested.height);
@@ -1109,10 +1123,32 @@ mod tests {
             let before = metrics.snapshot().counters["worker_wakes"];
             std::thread::sleep(Duration::from_secs(1));
             let wakes = metrics.snapshot().counters["worker_wakes"] - before;
+            // A viewer's keyframe request on the static source wakes the worker
+            // at once instead of waiting out the 100 ms static timeout.
+            while rx.try_recv().is_ok() {}
+            let requested = Instant::now();
+            demand.request_keyframe(&force);
+            let mut served = None;
+            while requested.elapsed() < Duration::from_millis(500) {
+                if rx.try_recv().is_ok() {
+                    served = Some(requested.elapsed());
+                    break;
+                }
+                std::thread::sleep(Duration::from_millis(1));
+            }
             // Close before asserting, so a failure cannot leave the worker running.
             close(std::slice::from_ref(&mailbox));
             assert!(job.join().unwrap().is_err());
             assert!(wakes <= 20, "{wakes} wakes in a static second");
+            // The binding's `Demand` outlives the worker; it must not keep the
+            // mailbox (and its last captured frame, i.e. the GPU device) alive.
+            assert_eq!(std::sync::Arc::strong_count(&mailbox), 1);
+            let served = served.expect("keyframe request produced no frame");
+            eprintln!("keyframe served after {served:?}");
+            assert!(
+                served < Duration::from_millis(15),
+                "keyframe after {served:?}"
+            );
         });
     }
 

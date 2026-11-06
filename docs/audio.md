@@ -377,7 +377,9 @@ Its fallback timeout is 10 ms during a session (timers, recovery and
 devices that stop calling back) and one second otherwise (every command unparks
 it, and the watchdog's three-second stall threshold stays satisfied). Queued packets are admitted
 in batches of up to 32 before one processing tick, so refill work does not scale
-with packets times speakers. The worker joins the MMCSS "Audio" class on Windows
+with packets times speakers. Within a batch the worker skips its per-iteration maintenance
+(stop, lease, scheduling-gap and snapshot clocks), which runs again once the batch
+ends, and every packet of the batch shares one arrival-age clock read. The worker joins the MMCSS "Audio" class on Windows
 and user-interactive QoS on macOS; it is deliberately not realtime because it also
 opens devices and prepares models. `worker_priority` in diagnostics records the result.
 
