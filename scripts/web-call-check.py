@@ -22,6 +22,10 @@ HOOKS = r"""
     replace: [], contexts: 0, closed: 0, start: performance.now()};
   const now = () => performance.now();
   const md = navigator.mediaDevices;
+  if (md && md.getDisplayMedia) {
+    const gdm = md.getDisplayMedia.bind(md);
+    md.getDisplayMedia = async (c) => { const s = await gdm(c); (T.display = T.display || []).push({t: now(), video: s.getVideoTracks().length, audio: s.getAudioTracks().length}); return s; };
+  }
   if (md && md.getUserMedia) {
     const gum = md.getUserMedia.bind(md);
     md.getUserMedia = async (c) => {
@@ -254,6 +258,7 @@ def main():
                                "--use-fake-ui-for-media-stream", "--use-fake-device-for-media-stream",
                                *(["--use-file-for-fake-audio-capture=/tmp/hc-bursts.wav"] if os.path.exists("/tmp/hc-bursts.wav") else []),
                                "--autoplay-policy=no-user-gesture-required", "--no-first-run",
+                               "--auto-select-desktop-capture-source=Entire screen", "--enable-usermedia-screen-capturing",
                                "--user-data-dir=/tmp/hc-chrome", "--no-sandbox", "about:blank"],
                               stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
     try:
@@ -315,6 +320,51 @@ def main():
               return out; })()""")
             out["hcalice"]["tile_status"] = js(cdp, alice, "[...document.querySelectorAll('.stream-player-status')].map(e => e.innerText)")
             out["hcalice"]["players"] = js(cdp, alice, "[...document.querySelectorAll('video')].map(v => [v.videoWidth, v.videoHeight, v.readyState])")
+        elif scenario == "screen":
+            for user in ["hcalice", "hcbob"]:
+                join(cdp, sessions[user], guild, channel)
+            bob, alice = sessions["hcbob"], sessions["hcalice"]
+            visible_enabled = "[...document.querySelectorAll('button[aria-label=\"Share screen\"]')].find(b => b.offsetParent !== null && !b.disabled)"
+            wait(cdp, bob, "!!" + visible_enabled, 30)
+            js(cdp, bob, visible_enabled + ".click(), true")
+            go_live = "[...document.querySelectorAll('button')].find(b => b.innerText.trim() === 'Go live' && !b.disabled)"
+            wait(cdp, bob, "!!" + go_live, 15)
+            js(cdp, bob, go_live + ".click(), true")
+            wait(cdp, alice, "!!document.querySelector('button.voice-person.has-stream')", 30)
+            js(cdp, alice, "document.querySelector('button.voice-person.has-stream').click(), true")
+            wait(cdp, alice, "[...document.querySelectorAll('video')].some(v => v.readyState >= 2 && v.videoWidth > 0)", 30)
+            time.sleep(10)
+            out["hcalice"] = report(cdp, alice)
+            out["hcalice"]["views"] = js(cdp, alice, "window.__hc.views")
+            out["hcalice"]["video"] = js(cdp, alice, """(async () => { const out = [];
+              for (const pc of window.__hcPcs) { const r = await pc.getStats(); r.forEach(s => {
+                if (s.type === 'inbound-rtp' && s.kind === 'video' && s.framesDecoded) out.push({framesDecoded: s.framesDecoded, frameWidth: s.frameWidth, frameHeight: s.frameHeight, fps: s.framesPerSecond}); }); }
+              return out; })()""")
+            out["hcalice"]["tile_status"] = js(cdp, alice, "[...document.querySelectorAll('.stream-player-status')].map(e => e.innerText)")
+            out["hcbob"] = {"gum_display": js(cdp, bob, "window.__hc.display || []")}
+        elif scenario == "devicetest":
+            # Three microphone device tests outside a call, each started from a
+            # click and stopped: contexts and tracks must not accumulate.
+            s = sessions["hcalice"]
+            cdp.call("Page.navigate", {"url": f"{BASE}/app/"}, session=s)
+            time.sleep(3)
+            settings = "[...document.querySelectorAll('button[aria-label=\"Settings\"]')].find(b => b.offsetParent !== null)"
+            wait(cdp, s, "!!" + settings, 30)
+            js(cdp, s, settings + ".click(), true")
+            audio = "[...document.querySelectorAll('button, a')].find(b => b.innerText.trim() === 'Voice & audio')"
+            wait(cdp, s, "!!" + audio, 15)
+            js(cdp, s, audio + ".click(), true")
+            start = "[...document.querySelectorAll('button')].find(b => b.innerText.startsWith('Test microphone') && !b.disabled)"
+            stop = "[...document.querySelectorAll('button')].find(b => b.innerText.trim() === 'Stop test')"
+            for _ in range(3):
+                wait(cdp, s, "!!" + start, 30)
+                js(cdp, s, start + ".click(), true")
+                wait(cdp, s, "!!" + stop, 15)
+                time.sleep(3)
+                js(cdp, s, stop + ".click(), true")
+                wait(cdp, s, "!" + stop, 15)
+                time.sleep(1)
+            out["hcalice"] = report(cdp, s)
         print(json.dumps(out, indent=1))
     finally:
         chrome.send_signal(signal.SIGTERM)

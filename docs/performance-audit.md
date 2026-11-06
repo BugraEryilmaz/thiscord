@@ -334,8 +334,18 @@ and `state` every 5.0 s. Its `getStats` walks first came in pairs 200/800 ms apa
 due within half an interval, after which every walk was 1,004–1,008 ms apart. Moving
 the tile out of view sent an empty view list 420 ms later and no renewals while
 empty; bringing it back re-subscribed 142 ms later with a keyframe request right
-after the renewed view. Screen-share tiles in a browser were not exercised (the fake
-devices provide no display capture without a picker).
+after the renewed view. A screen-share run (`screen`: Chromium's fake display capture
+through the share picker) decoded 1920×1080 at 20 fps on the watcher with views renewed
+once per second and the tile status cleared by media events. Three microphone device
+tests outside a call (`devicetest`) created and closed three `AudioContext`s and
+stopped every capture, clone and processed track (three per test).
+
+Windows relay to a browser decoder: `screen_pipeline_probe --browser --seconds=20
+--assert` with headless Chrome negotiating the probe page over the DevTools protocol:
+the app packetizer and production `Preview` loopback peer delivered all 1,196 frames,
+which Chrome decoded at 3840×2160 with 0 dropped and 0 lost (PASS, 59.9 fps). The
+desktop app's own relay loop (`native_screen.rs`), WebView player and camera tile
+observer did not run (no desktop app session).
 
 4K60 HDR pipeline probe A/B on the same machine, interleaved (base `0ae37e5` built in
 a private build directory, `screen_pipeline_probe --seconds=20 --assert`): base 59.00,
