@@ -77,6 +77,7 @@ impl super::Remote {
 #[derive(Default)]
 pub struct Sender {
     history: Vec<EncodedFrame>,
+    arena: super::arena::PacketArena,
 }
 impl Sender {
     pub fn clear(&mut self) {
@@ -128,8 +129,15 @@ impl Sender {
                 payload: &old.payload,
             });
         }
-        match wire::encode(&frame.payload, &history) {
-            Some(payload) => (wire::PAYLOAD_TYPE, payload.into()),
+        match wire::encoded_len(&frame.payload, &history) {
+            Some(size) => (
+                wire::PAYLOAD_TYPE,
+                self.arena.write(size, |buffer| {
+                    wire::encode_with(&frame.payload, &history, |bytes| {
+                        buffer.extend_from_slice(bytes)
+                    });
+                }),
+            ),
             None => (wire::OPUS_PAYLOAD_TYPE, frame.payload.clone()),
         }
     }

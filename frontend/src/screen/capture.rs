@@ -135,7 +135,11 @@ impl GraphicsCaptureApiHandler for Capture {
         // Grow on demand up to the cap: a steady share usually holds only a
         // few surfaces at once (newest capture, the held refresh frame, one in
         // conversion), so unused full-resolution textures are never allocated.
-        let capacity = if self.flags.mailboxes.len() == 1 { 3 } else { 7 };
+        let capacity = if self.flags.mailboxes.len() == 1 {
+            3
+        } else {
+            7
+        };
         let free = self.textures.iter().position(|t| Arc::strong_count(t) == 1);
         let texture = match free {
             Some(index) => self.textures[index].clone(),

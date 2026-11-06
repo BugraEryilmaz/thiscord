@@ -1,5 +1,6 @@
 mod activity;
 pub mod adaptive_fec;
+pub mod arena;
 pub mod clips;
 mod codec;
 pub mod connection;
@@ -971,6 +972,8 @@ struct Session {
     reset_codec: bool,
     delivery: connection::Connection,
     outgoing: Option<tokio::sync::mpsc::Sender<outgoing::EncodedFrame>>,
+    /// Encoded frames are cut from pooled blocks, not allocated per frame.
+    send_arena: arena::PacketArena,
     media_clock: outgoing::MediaClock,
     transmit_control: Arc<outgoing::Control>,
     encoder_generation: u64,
@@ -1139,6 +1142,7 @@ impl Session {
             reset_codec: false,
             delivery: Default::default(),
             outgoing: None,
+            send_arena: Default::default(),
             media_clock: Default::default(),
             transmit_control: Default::default(),
             encoder_generation: 0,
@@ -1392,7 +1396,7 @@ impl Session {
                 let mut frame = outgoing::EncodedFrame {
                     packet_redundancy: self.settings.packet_redundancy,
                     accounted: false,
-                    payload: bytes::Bytes::copy_from_slice(&packet[..n]),
+                    payload: self.send_arena.copy(&packet[..n]),
                     media_position,
                     marker,
                     oldest_capture,

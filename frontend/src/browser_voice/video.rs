@@ -137,7 +137,8 @@ pub(super) struct Media {
     pub shared_audio: Vec<(usize, MediaStreamTrack)>,
     /// Members whose shared audio is currently stopped locally.
     audio_stopped: [bool; ROOM_CAPACITY],
-    sent_views: bool,
+    /// The last `ScreenViews` list sent (empty before the first one).
+    sent_views: Vec<thiscord_shared::screen::Subscription>,
     views_at: f64,
     stats_at: f64,
 }
@@ -953,10 +954,13 @@ pub(super) fn tick(call: &Call, stats: Option<InboundVideo>) {
             epoch: watch.epoch,
         });
     }
-    if time - live.media.views_at >= rules::VIEWS_MS && (!views.is_empty() || live.media.sent_views)
-    {
+    if rules::views_due(
+        views != live.media.sent_views,
+        views.is_empty(),
+        time - live.media.views_at,
+    ) {
         live.media.views_at = time;
-        live.media.sent_views = !views.is_empty();
+        live.media.sent_views = views.clone();
         live.send(ClientEvent::ScreenViews { views });
     }
 }

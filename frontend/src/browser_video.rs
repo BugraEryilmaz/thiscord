@@ -13,8 +13,16 @@ pub const CAMERA_MAX_BITRATE: u32 = 1_500_000;
 pub const CAMERA_WIDTH: u32 = 1280;
 pub const CAMERA_HEIGHT: u32 = 720;
 pub const CAMERA_FPS: u32 = 30;
-/// `ScreenViews` renewal; the SFU expires views after three seconds.
+/// Minimum gap between `ScreenViews` messages.
 pub const VIEWS_MS: f64 = 500.0;
+/// Unchanged views are renewed this often, inside the SFU's three-second lease.
+pub const VIEWS_RENEW_MS: f64 = 1_000.0;
+/// Changed views go out after `VIEWS_MS`; an unchanged non-empty list is only
+/// renewed (each message takes the SFU room write lock); an unchanged empty
+/// list, already sent once, is not repeated.
+pub fn views_due(changed: bool, empty: bool, since_ms: f64) -> bool {
+    since_ms >= VIEWS_MS && (changed || (!empty && since_ms >= VIEWS_RENEW_MS))
+}
 /// Viewer feedback and stall sampling, like the native receiver.
 pub const FEEDBACK_MS: f64 = 1_000.0;
 /// No decoded frame for this long while packets arrive requests an IDR.
@@ -294,6 +302,29 @@ pub struct VideoSupport {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn screen_views_go_out_on_change_and_renew_inside_the_lease() {
+        assert!(
+            !views_due(true, false, VIEWS_MS - 1.0),
+            "changes keep the minimum gap"
+        );
+        assert!(views_due(true, false, VIEWS_MS));
+        assert!(
+            views_due(true, true, VIEWS_MS),
+            "an emptied list is sent once"
+        );
+        assert!(
+            !views_due(false, true, 60_000.0),
+            "an unchanged empty list is not repeated"
+        );
+        assert!(!views_due(false, false, VIEWS_RENEW_MS - 1.0));
+        assert!(views_due(false, false, VIEWS_RENEW_MS));
+        const {
+            assert!(
+                VIEWS_RENEW_MS + 100.0 < thiscord_shared::screen::VIEW_LEASE_SECS as f64 * 1_000.0
+            )
+        };
+    }
 
     #[test]
     fn only_baseline_packetization_mode_1_h264_is_usable() {

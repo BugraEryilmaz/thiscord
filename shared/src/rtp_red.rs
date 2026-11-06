@@ -141,36 +141,47 @@ pub fn parse(payload: &[u8]) -> Option<Packet<'_>> {
     Some(Packet { primary, history })
 }
 
-/// Applies `parse`'s acceptance rules to the inputs, so every result parses
-/// without re-reading the encoded bytes.
-pub fn encode(primary: &[u8], history: &[Block<'_>]) -> Option<Vec<u8>> {
+/// Size of the encoded packet when `parse` would accept it, else None. Applies
+/// `parse`'s rules to the inputs, so every encoding parses without re-reading.
+pub fn encoded_len(primary: &[u8], history: &[Block<'_>]) -> Option<usize> {
     let size = 1 + primary.len() + history.iter().map(|b| 4 + b.payload.len()).sum::<usize>();
-    if primary.is_empty()
+    (!(primary.is_empty()
         || history.len() > DEPTH
         || size > MAX_PAYLOAD
         || (!history.is_empty() && !repeatable(primary))
         || history
             .iter()
             .any(|b| !valid_offset(b.offset) || !repeatable(b.payload))
-        || history.windows(2).any(|w| w[0].offset <= w[1].offset)
-    {
-        return None;
+        || history.windows(2).any(|w| w[0].offset <= w[1].offset)))
+    .then_some(size)
+}
+
+/// Writes the packet in order through `write` (for example into a pooled
+/// buffer). Returns false, writing nothing, when `encoded_len` is None.
+pub fn encode_with(primary: &[u8], history: &[Block<'_>], mut write: impl FnMut(&[u8])) -> bool {
+    if encoded_len(primary, history).is_none() {
+        return false;
     }
-    let mut result = Vec::with_capacity(size);
     for b in history {
         let n = b.payload.len();
-        result.extend_from_slice(&[
+        write(&[
             OPUS_PAYLOAD_TYPE | 0x80,
             (b.offset >> 6) as u8,
             ((b.offset & 0x3f) << 2) as u8 | (n >> 8) as u8,
             n as u8,
         ]);
     }
-    result.push(OPUS_PAYLOAD_TYPE);
+    write(&[OPUS_PAYLOAD_TYPE]);
     for b in history {
-        result.extend_from_slice(b.payload);
+        write(b.payload);
     }
-    result.extend_from_slice(primary);
+    write(primary);
+    true
+}
+
+pub fn encode(primary: &[u8], history: &[Block<'_>]) -> Option<Vec<u8>> {
+    let mut result = Vec::with_capacity(encoded_len(primary, history)?);
+    encode_with(primary, history, |bytes| result.extend_from_slice(bytes));
     debug_assert!(parse(&result).is_some());
     Some(result)
 }

@@ -336,6 +336,7 @@ mod tests {
                 reset_codec: false,
                 delivery: Default::default(),
                 outgoing: None,
+                send_arena: Default::default(),
                 media_clock: Default::default(),
                 transmit_control,
                 encoder_generation: 0,

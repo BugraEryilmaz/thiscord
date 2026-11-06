@@ -89,6 +89,52 @@ fn main() {
     measure("RED encode (2 history blocks)", 1_000_000, || {
         black_box(red::encode(black_box(&frame), black_box(&history)));
     });
+    // Per-frame quality accounting on the worker: the receive path's counts
+    // plus one stage timing, as recorded for every decoded 20 ms frame.
+    {
+        use std::time::Duration;
+        use thiscord_frontend::audio::quality::{Count, Metrics, Stage};
+        let metrics = Metrics::default();
+        measure("quality metrics: 5 counts + 1 timing", 1_000_000, || {
+            for count in [
+                Count::ReceivedPackets,
+                Count::DecodedSamples,
+                Count::PlcSamples,
+                Count::FecAttempts,
+                Count::PcmOverflowSamples,
+            ] {
+                metrics.add(count, black_box(1));
+            }
+            metrics.duration(Stage::Decode, black_box(Duration::from_micros(40)));
+        });
+    }
+    // ARENA-START (absent before the pooled send arena)
+    {
+        use thiscord_frontend::audio::arena::PacketArena;
+        let opus = [0x78_u8; 100];
+        measure("Opus payload: Bytes::copy_from_slice", 1_000_000, || {
+            black_box(bytes::Bytes::copy_from_slice(black_box(&opus)));
+        });
+        let mut arena = PacketArena::default();
+        // Hold the last two packets, as RED history does.
+        let mut held = std::collections::VecDeque::new();
+        measure("Opus payload: pooled arena", 1_000_000, || {
+            held.push_back(arena.copy(black_box(&opus)));
+            if held.len() > 2 {
+                held.pop_front();
+            }
+        });
+        measure("RED encode into pooled arena", 1_000_000, || {
+            let size = red::encoded_len(&frame, black_box(&history)).unwrap();
+            held.push_back(arena.write(size, |buffer| {
+                red::encode_with(&frame, &history, |bytes| buffer.extend_from_slice(bytes));
+            }));
+            if held.len() > 2 {
+                held.pop_front();
+            }
+        });
+    }
+    // ARENA-END
 
     // Encoded screen frames: a 25 KB delta (about 12 Mbit/s at 60 fps) and a
     // 300 KB IDR. Slice bytes avoid 0/1 so only real start codes match.

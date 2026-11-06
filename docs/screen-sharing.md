@@ -356,10 +356,9 @@ encryption, not end-to-end encryption against the server. See [audio.md](audio.m
 ## Viewing demand and adaptive quality
 
 `screen_subscriptions` is negotiated in the voice offer/answer. Clients send a
-bounded, full replacement `screen_views` list while connected. The web client
-sends it every 500 ms; the native client checks every 500 ms but sends only a
-changed list or a once-per-second renewal (each update takes the SFU room write
-lock). Its mute/deafen `state` likewise goes out on change, with a five-second
+bounded, full replacement `screen_views` list while connected. Both clients send
+a changed list (at most every 500 ms) and otherwise only renew a non-empty list
+once per second, since each update takes the SFU room write lock. Its mute/deafen `state` likewise goes out on change, with a five-second
 refresh, and both are re-sent after a signaling resume.
 Each entry binds a room slot, account ID and share epoch to a receiver bitrate
 budget. The server ignores stale identities/epochs and self-subscriptions;
@@ -1083,7 +1082,7 @@ Viewing: other members' screen and camera m-lines are `recvonly`. The existing c
 grid, fullscreen, hide/restore, LIVE badges and viewer avatars are shared with the
 desktop app; only each tile's player differs. A mounted, visible tile registers a
 view: the client binds the received track to its `<video>`, renews `ScreenViews`
-every 500 ms (one subscription per stream, never for hidden tiles or a hidden page),
+on change and once per second otherwise (one subscription per stream, never for hidden tiles or a hidden page),
 keeps a per-view receiver budget with the native controller's thresholds
 (`thiscord_shared::video_feedback`, loss and decoder pressure from `getStats`), and
 sends `ScreenKeyframe` when a view starts and whenever packets arrive for 2 s

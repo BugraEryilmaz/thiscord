@@ -197,6 +197,67 @@ Measured on the VPS with the load generators; method, tables and caveats are in
 - **Database trouble (new).** Pool exhaustion and statement/lock timeouts no longer
   reach clients as revocation; see [chat](chat.md).
 
+## Client media pipelines (2026-11-06)
+
+Voice and video-share hot paths on the Windows, Linux and web clients (macOS not
+covered). `media_hotpath_bench` measures the device- and network-free pieces with a
+counting allocator:
+
+```
+cargo run -p thiscord-frontend --example media_hotpath_bench --features native-audio --profile ci --locked
+```
+
+Windows x64, i7-13700K, `ci` profile. "Before" is commit `0ae37e5` built with a
+private `CARGO_BUILD_BUILD_DIR`: with the shared intermediate directory, another
+checkout's build links the newer `thiscord-shared` and measures the new code.
+
+| Operation (per packet or frame) | Before | After |
+| --- | ---: | ---: |
+| RED parse, two history blocks | 63 ns, 2 allocations | 11 ns, 0 |
+| RED receive (parse + payload slices) | 107 ns, 2 allocations + copies | 48 ns, 0 (zero-copy slices) |
+| RED encode | 97 ns, 3 allocations | 34 ns, 0.06 (pooled arena) |
+| Opus send payload | 38 ns, 1 allocation | 23 ns, 0.02 (pooled arena) |
+| H.264 keyframe check, 25 KB delta | 7.3 µs | 3 ns (header-only scan) |
+| H.264 keyframe check, 300 KB IDR | 87 µs | 6 ns |
+| H.264 NAL split, 25 KB | 7.3 µs | 2.4 µs (skipping start-code scan) |
+| H.264 frame assembly, 23 packets | 834 ns, 7 allocations | 437 ns, 1 |
+| Quality accounting, 5 counts + 1 timing | 216 ns | unchanged |
+| Mixer, 20 ms with 1 / 8 talkers | 7.6 / 16.4 µs | unchanged |
+
+Quality accounting and the mixer were measured and left alone: an atomic,
+lock-free quality window measured 231 ns (no faster uncontended), and the mixer
+callback is under 0.1% of its 20 ms budget. Every sent packet's RTP header still
+needs one small CSRC `Vec`, which the webrtc-rs `Header` type owns.
+
+Other changes, pinned by tests rather than benchmarks:
+
+- Linux capture drops compositor frames above the active cadence at the
+  `pipewiresrc` pad, before any copy or GPU upload (GStreamer test counts buffers
+  reaching the next element). Previously a 144–240 Hz display paid a full-frame copy
+  per refresh even while paused. Runtime capture on a PipeWire session is not
+  measured here.
+- A screen layer holding a frame for its cadence sleeps until it is due:
+  61 instead of 105 worker wakes per second in the unit test (Windows' default
+  timer granularity limited the old 2 ms poll; where 2 ms sleeps are honored it
+  was several hundred).
+- Windows capture textures are allocated on demand up to the 3/7 cap
+  (`capture_textures` reports the peak; a single-layer 4K60 HDR pipeline probe
+  still peaked at three, so a saving is expected only for layered shares).
+- Native mute/deafen state and screen views are sent on change, with a 5 s / 1 s
+  refresh, instead of every 500 ms; each one takes the SFU room write lock. The web
+  client's views follow the same rule.
+- The native call loop's `select!` is biased toward ready outgoing media.
+- The audio worker wakes once per second outside a session instead of every
+  100 ms, and periodic diagnostics JSON is built only while logging is on.
+- Web: an unboosted microphone is sent as a clone of the capture, skipping the
+  WebAudio limiter and destination; voice activation reads the meter every 20 ms
+  instead of every 100 ms; one `getStats` walk serves audio and video, runs in its
+  own task, and runs every second while WebAudio meters cover speaking (200 ms
+  otherwise); ready remote video tiles poll their state once per second.
+
+Not measured: real microphones and speakers, browser main-thread profiles, VRAM
+use of layered shares, and Linux/macOS runtime capture.
+
 ## Reading the monitors
 
 Open `/admin` as the instance owner or an instance admin. **Performance monitors**

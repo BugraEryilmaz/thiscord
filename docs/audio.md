@@ -1129,8 +1129,9 @@ Sequences advance on successful transport admission, while the 48 kHz media cloc
 advances through every omitted frame, as required by
 [RFC 7587](https://www.rfc-editor.org/rfc/rfc7587#section-4.1).
 
-Native leases, 500 ms signaling/state heartbeats and WebRTC ICE/RTCP traffic stay
-independent of microphone packets. The two-hop encrypted loopback test resumes
+Native leases, signaling/state messages (checked every 500 ms; mute/deafen state sent
+on change with a five-second refresh, screen views on change with a one-second
+renewal) and WebRTC ICE/RTCP traffic stay independent of microphone packets. The two-hop encrypted loopback test resumes
 after **31 seconds with no RTP**, beyond normal update gaps. This does not establish
 public NAT/TURN or multi-hour behavior. Deploy these clients together: older
 sequence-only receivers cannot play DTX gaps correctly, and older adaptive clients

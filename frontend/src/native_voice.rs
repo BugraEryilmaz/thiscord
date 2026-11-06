@@ -1125,7 +1125,63 @@ async fn run(
             }
         }
         tokio::select! {
+            // Biased: an encoded frame ready to send never waits behind
+            // signaling JSON parsing or maintenance. The privacy deadline stays
+            // first (its arm only re-runs the boundary checks above); audio
+            // arrives at 50 frames/s, so the other arms are never starved.
+            biased;
             _ = boundary.wait_deadline(), if packet_redundancy && audio_started && !signaling.recovering() => {},
+            Some(mut frame)=outgoing.recv()=>{
+                if !media_state.connected.load(Ordering::Acquire) {
+                    red_sender.clear();
+                    frame.finish(thiscord_frontend::audio::quality::Count::OutgoingFailedPackets);
+                    continue;
+                }
+                if let Err(reason) = transmit_control.check(&frame, &attempt.connection, Instant::now()) {
+                    red_sender.clear();
+                    transmit_control.dropped_frame(reason, &mut frame);
+                    continue;
+                }
+                if packet_redundancy {
+                    if boundary.frame(&frame)? {
+                        // Delivery/device gaps reset the codec even without a UI
+                        // setting change. Make their receive fence urgent too.
+                        transmit_control.invalidate();
+                        red_sender.clear();
+                        engine.notify_control(Command::ReceiveBoundary { connection: attempt.connection.clone(), generation: transmit_control.generation(), epoch: None })?;
+                    }
+                    if !boundary.ready() {
+                        red_sender.clear();
+                        transmit_control.dropped_frame(thiscord_frontend::audio::outgoing::DropReason::ControlInvalidated, &mut frame);
+                        continue;
+                    }
+                }
+                if !red_sender.within_budget(&frame) {
+                    frame.finish(thiscord_frontend::audio::quality::Count::OutgoingFailedPackets);
+                    continue;
+                }
+                let (sequence, timestamp) = rtp_clock.pending(frame.media_position);
+                let red_enabled = packet_redundancy && frame.packet_redundancy;
+                let (payload_type, payload) = red_sender.packet(&frame, red_enabled, Instant::now());
+                let payload_bytes = payload.len();
+                let packet=rtc::rtp::Packet{header:rtc::rtp::header::Header{version:2,payload_type,ssrc:MediaKind::Microphone.publisher_ssrc(),sequence_number:sequence,timestamp,marker:frame.marker,csrc:if packet_redundancy { boundary.csrc() } else { vec![] },..Default::default()},payload};
+                match transmit_control.guard_write_until(&frame, &attempt.connection, red_sender.deadline(&frame), track.write_rtp(packet)).await {
+                    Ok(result) => {
+                        use thiscord_frontend::audio::quality::Count;
+                        frame.finish(if result.is_ok() { Count::OutgoingSentPackets } else { Count::OutgoingFailedPackets });
+                        result.map_err(|_|Failure::temporary("Voice media connection failed").with_reason("media_send_failed"))?;
+                        // One admitted outer RTP packet. Source 0 belongs to this
+                        // unique Connection; privacy tags and RED copies do not
+                        // replace its stable FEC feedback identity.
+                        attempt.connection.uplink_sent(0, sequence);
+                        rtp_clock.next(frame.media_position);
+                        accepted_packets += 1;
+                        accepted_bytes += payload_bytes as u64;
+                        red_sender.admitted(frame, red_enabled);
+                    },
+                    Err(reason) => { red_sender.clear(); transmit_control.dropped_frame(reason, &mut frame); },
+                }
+            },
             result = audio_control.completed() => {
                 let audio = result?;
                 if !audio_started {
@@ -1272,57 +1328,6 @@ async fn run(
                         engine.notify_control(Command::Roster{connection:attempt.connection.clone(),members:roster.clone()})?;
                         if let Ok(mut s)=status.lock(){s.participants=members;s.own_slot=Some(own_slot);}
                     },ServerEvent::Replaced{}=>return Err(Failure::replaced()),ServerEvent::Error{error}=>return Err(server_failure(&attempt.connection,error)),ServerEvent::Revoked{}=>return Err("Voice access changed. Join again if you still have permission.".into()),_=>{},
-                }
-            },
-            Some(mut frame)=outgoing.recv()=>{
-                if !media_state.connected.load(Ordering::Acquire) {
-                    red_sender.clear();
-                    frame.finish(thiscord_frontend::audio::quality::Count::OutgoingFailedPackets);
-                    continue;
-                }
-                if let Err(reason) = transmit_control.check(&frame, &attempt.connection, Instant::now()) {
-                    red_sender.clear();
-                    transmit_control.dropped_frame(reason, &mut frame);
-                    continue;
-                }
-                if packet_redundancy {
-                    if boundary.frame(&frame)? {
-                        // Delivery/device gaps reset the codec even without a UI
-                        // setting change. Make their receive fence urgent too.
-                        transmit_control.invalidate();
-                        red_sender.clear();
-                        engine.notify_control(Command::ReceiveBoundary { connection: attempt.connection.clone(), generation: transmit_control.generation(), epoch: None })?;
-                    }
-                    if !boundary.ready() {
-                        red_sender.clear();
-                        transmit_control.dropped_frame(thiscord_frontend::audio::outgoing::DropReason::ControlInvalidated, &mut frame);
-                        continue;
-                    }
-                }
-                if !red_sender.within_budget(&frame) {
-                    frame.finish(thiscord_frontend::audio::quality::Count::OutgoingFailedPackets);
-                    continue;
-                }
-                let (sequence, timestamp) = rtp_clock.pending(frame.media_position);
-                let red_enabled = packet_redundancy && frame.packet_redundancy;
-                let (payload_type, payload) = red_sender.packet(&frame, red_enabled, Instant::now());
-                let payload_bytes = payload.len();
-                let packet=rtc::rtp::Packet{header:rtc::rtp::header::Header{version:2,payload_type,ssrc:MediaKind::Microphone.publisher_ssrc(),sequence_number:sequence,timestamp,marker:frame.marker,csrc:if packet_redundancy { boundary.csrc() } else { vec![] },..Default::default()},payload};
-                match transmit_control.guard_write_until(&frame, &attempt.connection, red_sender.deadline(&frame), track.write_rtp(packet)).await {
-                    Ok(result) => {
-                        use thiscord_frontend::audio::quality::Count;
-                        frame.finish(if result.is_ok() { Count::OutgoingSentPackets } else { Count::OutgoingFailedPackets });
-                        result.map_err(|_|Failure::temporary("Voice media connection failed").with_reason("media_send_failed"))?;
-                        // One admitted outer RTP packet. Source 0 belongs to this
-                        // unique Connection; privacy tags and RED copies do not
-                        // replace its stable FEC feedback identity.
-                        attempt.connection.uplink_sent(0, sequence);
-                        rtp_clock.next(frame.media_position);
-                        accepted_packets += 1;
-                        accepted_bytes += payload_bytes as u64;
-                        red_sender.admitted(frame, red_enabled);
-                    },
-                    Err(reason) => { red_sender.clear(); transmit_control.dropped_frame(reason, &mut frame); },
                 }
             },
             _=media_state.tick(&mut ticker)=>{

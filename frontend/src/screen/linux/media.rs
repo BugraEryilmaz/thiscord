@@ -826,7 +826,9 @@ mod tests {
         let offered = Arc::new(std::sync::atomic::AtomicU32::new(0));
         let counter = offered.clone();
         gate(&pipeline.by_name("src").unwrap(), move || {
-            counter.fetch_add(1, std::sync::atomic::Ordering::Relaxed) % 4 == 0
+            counter
+                .fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+                .is_multiple_of(4)
         })
         .unwrap();
         // Count what reaches the element after the gate, not only the sink.
