@@ -292,7 +292,11 @@ Other changes, pinned by tests rather than benchmarks:
   WebAudio limiter and destination; voice activation reads the meter every 20 ms
   instead of every 100 ms; one `getStats` walk serves audio and video, runs in its
   own task, and runs every second while WebAudio meters cover speaking (200 ms
-  otherwise); ready remote video tiles poll their state once per second.
+  otherwise); remote video tiles update their status from `<video>` media events
+  instead of a timer (only the own preview polls, to follow a camera switch).
+- Desktop players renew their three-second viewer lease and sample decoder
+  pressure once a second once playing (250 ms only while connecting) and set their
+  status signal only when it changes.
 
 Browser run (web client): the `/app` bundle from this branch, served by a local
 backend with its own database (`scripts/web-call-check-backend.sh`, WSL), in
