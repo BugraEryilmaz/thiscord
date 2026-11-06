@@ -11,8 +11,20 @@ tested natively); DOM wiring is in `frontend/src/app/keyboard.rs` and
 
 All shortcuts apply only while Thiscord has focus. They have a Control/Command
 or Alt modifier, so they also work in the message box. Press **Ctrl+/** (⌘/ on
-macOS) for the in-app reference; **Settings → Keyboard shortcuts** (desktop:
-**Shortcuts & overlay**) shows the same table.
+macOS) for the in-app reference, which shows the current keys.
+
+The app commands below (quick switcher, reference, search, channel, unread and
+server cycling) are recordable in **Settings → Keyboard shortcuts** (desktop:
+**Shortcuts & overlay**) under **Navigation**, like the voice and overlay
+shortcuts: click, press the keys, save. They are stored on the device
+(`thiscord.app-shortcuts.v1`), must use Ctrl, Alt or Super or be a function key,
+and may not repeat each other or a voice/overlay shortcut on that device; an
+empty value disables a command. The compatibility aliases (Ctrl or ⌘, `/` from
+any key, Ctrl+F by character, Ctrl+Shift+↑/↓ for servers) apply only while that
+command keeps its default. Esc, Enter, list arrows, Shift+F10 and ↑ to edit stay
+fixed; settings lists them under **Fixed keys**.
+
+Defaults:
 
 | Keys | Action |
 | --- | --- |

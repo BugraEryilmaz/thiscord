@@ -69,9 +69,8 @@ impl State {
             {
                 return;
             }
-            if (event.ctrl_key() || event.meta_key())
-                && !event.alt_key()
-                && event.key().eq_ignore_ascii_case("f")
+            if super::keyboard::command(&event, super::audio::editable(event.target()))
+                == Some(thiscord_frontend::keyboard::Command::Search)
             {
                 event.prevent_default();
                 state.open();

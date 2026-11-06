@@ -231,6 +231,15 @@ impl Chord {
     }
 }
 
+/// Whether two bindings can be triggered by the same key press (aliases such
+/// as Ctrl and Control, or CmdOrCtrl against Control). Invalid text never conflicts.
+pub fn conflicts(a: &str, b: &str) -> bool {
+    match (Chord::parse(a), Chord::parse(b)) {
+        (Some(a), Some(b)) => a.equivalent(&b) || b.equivalent(&a),
+        _ => false,
+    }
+}
+
 /// The result of one key press while recording a shortcut.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Recorded {
