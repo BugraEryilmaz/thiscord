@@ -293,7 +293,7 @@ pub async fn run(
     };
     loop {
         while !visible() {
-            gloo_timers::future::TimeoutFuture::new(250).await;
+            gloo_timers::future::TimeoutFuture::new(1000).await;
         }
         let trace = Trace::new(kind);
         match connect(video.clone(), watch, &trace).await {
@@ -321,11 +321,10 @@ pub async fn run(
                     if state == RtcPeerConnectionState::Connected {
                         let playing =
                             player.video.ready_state() >= HtmlMediaElement::HAVE_CURRENT_DATA;
-                        message.set(if playing {
-                            String::new()
-                        } else {
-                            "Waiting for video…".into()
-                        });
+                        let text = if playing { "" } else { "Waiting for video…" };
+                        if message.with_untracked(|m| m != text) {
+                            message.set(text.into());
+                        }
                         pending = 0;
                         let now = if playing {
                             Outcome::Playing
@@ -419,7 +418,18 @@ pub async fn run(
                         trace.push(Some(&player.pc)).await;
                         last_push = js_sys::Date::now();
                     }
-                    gloo_timers::future::TimeoutFuture::new(250).await;
+                    // Connecting is watched closely (its timeout counts these 250 ms
+                    // steps); a playing tile renews its 3 s viewer lease and samples
+                    // decoder pressure once a second.
+                    gloo_timers::future::TimeoutFuture::new(
+                        if reached == Outcome::Playing && state == RtcPeerConnectionState::Connected
+                        {
+                            1000
+                        } else {
+                            250
+                        },
+                    )
+                    .await;
                 }
                 // An attempt that played or connected keeps that result; the
                 // timeline records why it ended.

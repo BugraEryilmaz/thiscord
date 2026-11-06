@@ -313,6 +313,7 @@ def main():
               for (const pc of window.__hcPcs) { const r = await pc.getStats(); r.forEach(s => {
                 if (s.type === 'inbound-rtp' && s.kind === 'video' && s.framesDecoded) out.push({framesDecoded: s.framesDecoded, frameWidth: s.frameWidth, fps: s.framesPerSecond}); }); }
               return out; })()""")
+            out["hcalice"]["tile_status"] = js(cdp, alice, "[...document.querySelectorAll('.stream-player-status')].map(e => e.innerText)")
             out["hcalice"]["players"] = js(cdp, alice, "[...document.querySelectorAll('video')].map(v => [v.videoWidth, v.videoHeight, v.readyState])")
         print(json.dumps(out, indent=1))
     finally:
