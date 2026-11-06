@@ -349,7 +349,12 @@ pub(super) fn AudioHost(ui: Ui) -> impl IntoView {
                                     ui.voice.set(status);
                                 }
                             }
-                            gloo_timers::future::TimeoutFuture::new(500).await;
+                            // Without a call (joining fetches its own status) poll every
+                            // 2 s, like the audio-status loop; 500 ms while in a call.
+                            let idle = ui.voice.with_untracked(|v| v.channel_id.is_none())
+                                && !ui.voice_joining.get_untracked();
+                            gloo_timers::future::TimeoutFuture::new(if idle { 2000 } else { 500 })
+                                .await;
                         }
                     };
                     let audio = async move {

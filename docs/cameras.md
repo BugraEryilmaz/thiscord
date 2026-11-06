@@ -89,7 +89,10 @@ No new application server, JavaScript pipeline or camera library is used.
 The local main window's `main-commands` permission allows `camera_prepare`, `camera_open`,
 `camera_keepalive` and `camera_stop`. Notification and voice-overlay windows have
 no camera command access; camera transport still requires the active call's
-authoritative media permissions.
+authoritative media permissions. The WebView publisher renews its native lease with
+`camera_keepalive` as a long-poll: given the budget it last applied, the command
+answers when the viewer budget changes or after 1 s (the lease expires after 3 s),
+so a returning viewer's demand reaches the encoder without a polling delay.
 
 Camera tracks have separate publisher/relay SSRCs, publication epochs, viewer
 leases, recovery feedback and bounded SFU egress queues. Speak permission grants

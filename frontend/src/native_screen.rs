@@ -102,6 +102,18 @@ struct Inner {
     inboxes: [Option<Inbox>; ROOM_CAPACITY],
     receivers: [Option<thiscord_frontend::screen::metrics::Metrics>; ROOM_CAPACITY],
 }
+impl Inner {
+    /// Stop flags carry no wake of their own: nudge the encoder workers so a
+    /// stop is observed now rather than at their idle or paused timeout.
+    fn wake_workers(&self) {
+        if let Some(binding) = &self.binding {
+            binding.demand.wake();
+            if let Some(layer) = &binding.layers {
+                layer.demand.wake();
+            }
+        }
+    }
+}
 #[derive(Default)]
 struct Feedback {
     receiver: thiscord_frontend::screen::adaptation::Receiver,
@@ -414,6 +426,7 @@ impl ScreenState {
             if let Some(stop) = inner.stop.take() {
                 stop.store(true, Ordering::Release);
             }
+            inner.wake_workers();
             inner.binding = None;
             inner.local = None;
             inner.server.clear();
@@ -919,6 +932,7 @@ pub fn screen_stop(state: State<'_, ScreenState>) {
         if let Some(stop) = &inner.stop {
             stop.store(true, Ordering::Release);
         }
+        inner.wake_workers();
         inner.status.sharing = false;
         inner.status.message = "Screen sharing stopped".into();
     }

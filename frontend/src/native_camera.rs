@@ -151,6 +151,8 @@ pub struct CameraState {
     inner: Arc<Mutex<Inner>>,
     release: Arc<OnceLock<ReleaseCapture>>,
     released: Arc<Notify>,
+    /// Wakes long-polling publisher keepalives when the viewer budget changes.
+    demand_changed: Arc<Notify>,
     pub views: ScreenState,
 }
 impl Default for CameraState {
@@ -159,6 +161,7 @@ impl Default for CameraState {
             inner: Default::default(),
             release: Default::default(),
             released: Default::default(),
+            demand_changed: Default::default(),
             views: ScreenState::camera(),
         }
     }
@@ -346,8 +349,12 @@ impl CameraState {
             if b.demand.bitrate() == 0 && bitrate > 0 {
                 self.keyframe_locked(&inner);
             }
+            let before = b.demand.bitrate();
             b.demand
                 .update(bitrate.min(thiscord_shared::camera::MAX_BITRATE));
+            if b.demand.bitrate() != before {
+                self.demand_changed.notify_waiters();
+            }
         }
     }
     fn keyframe_locked(&self, inner: &Inner) {
@@ -514,28 +521,51 @@ impl PeerConnectionEventHandler for Handler {
         });
     }
 }
+/// Longest keepalive long-poll; the publisher lease expires after 3 s.
+const KEEPALIVE_WAIT: Duration = Duration::from_secs(1);
+/// Renews the WebView publisher's lease and reports its viewer budget. With
+/// `known` equal to the current budget it long-polls: it answers as soon as the
+/// budget changes (a returning viewer's demand reaches the publisher at once) or
+/// after `KEEPALIVE_WAIT`, which also bounds the lease renewal interval.
 #[tauri::command]
-pub fn camera_keepalive(
+pub async fn camera_keepalive(
     state: State<'_, CameraState>,
     session: u32,
-) -> thiscord_shared::camera::Status {
-    state.active(); // Expire stale leases before allowing a renewal.
-    let Ok(mut inner) = state.inner.lock() else {
-        return Default::default();
-    };
-    let bitrate = inner.binding.as_ref().map_or(0, |b| b.demand.bitrate());
-    if let Some(s) = inner
-        .session
-        .as_mut()
-        .filter(|s| s.id == session && s.ready && s.lease.active())
-    {
-        s.touched = Instant::now();
-        thiscord_shared::camera::Status {
-            alive: true,
-            bitrate,
+    known: Option<u32>,
+) -> Result<thiscord_shared::camera::Status, String> {
+    Ok(state.keepalive(session, known).await)
+}
+impl CameraState {
+    async fn keepalive(&self, session: u32, known: Option<u32>) -> thiscord_shared::camera::Status {
+        let changed = self.demand_changed.notified();
+        tokio::pin!(changed);
+        changed.as_mut().enable();
+        let status = self.renew(session);
+        if !status.alive || known != Some(status.bitrate) {
+            return status;
         }
-    } else {
-        Default::default()
+        let _ = tokio::time::timeout(KEEPALIVE_WAIT, changed).await;
+        self.renew(session)
+    }
+    fn renew(&self, session: u32) -> thiscord_shared::camera::Status {
+        self.active(); // Expire stale leases before allowing a renewal.
+        let Ok(mut inner) = self.inner.lock() else {
+            return Default::default();
+        };
+        let bitrate = inner.binding.as_ref().map_or(0, |b| b.demand.bitrate());
+        if let Some(s) = inner
+            .session
+            .as_mut()
+            .filter(|s| s.id == session && s.ready && s.lease.active())
+        {
+            s.touched = Instant::now();
+            thiscord_shared::camera::Status {
+                alive: true,
+                bitrate,
+            }
+        } else {
+            Default::default()
+        }
     }
 }
 #[tauri::command]
@@ -1124,6 +1154,54 @@ mod tests {
         assert!(!state.active());
         assert!(!lease.active());
         assert!(state.inner.lock().unwrap().capture.is_none());
+    }
+
+    #[tokio::test]
+    async fn keepalive_long_poll_answers_on_budget_change_and_renews_each_second() {
+        let state = CameraState::default();
+        state.bind(binding(thiscord_frontend::screen::track(903)));
+        state.prepare(1).await.unwrap();
+        state.inner.lock().unwrap().session = Some(Session {
+            id: 1,
+            lease: Connection::default(),
+            touched: Instant::now(),
+            peer: None,
+            force: Default::default(),
+            ready: true,
+            connected: Arc::new(AtomicBool::new(true)),
+        });
+        // Unknown budget: answers at once.
+        let first = state.keepalive(1, None).await;
+        assert!(first.alive);
+        // Known budget: waits until a viewer's demand changes it.
+        let waiting = tokio::spawn({
+            let state = state.clone();
+            async move {
+                let started = Instant::now();
+                (
+                    state.keepalive(1, Some(first.bitrate)).await,
+                    started.elapsed(),
+                )
+            }
+        });
+        tokio::time::sleep(Duration::from_millis(50)).await;
+        state.target(1_000_000);
+        let (status, waited) = waiting.await.unwrap();
+        assert!(status.alive);
+        assert_ne!(status.bitrate, first.bitrate);
+        assert!(
+            waited < Duration::from_millis(300),
+            "answered after {waited:?}"
+        );
+        // Unchanged: it still renews the 3 s lease within about a second.
+        let started = Instant::now();
+        let renewed = state.keepalive(1, Some(status.bitrate)).await;
+        assert!(renewed.alive);
+        let waited = started.elapsed();
+        assert!(
+            waited >= Duration::from_millis(900) && waited < Duration::from_millis(1500),
+            "renewed after {waited:?}"
+        );
     }
 
     #[tokio::test]

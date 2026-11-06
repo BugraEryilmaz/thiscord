@@ -237,8 +237,9 @@ pub(super) fn BrowserVideo(watch: Watch, own: bool) -> impl IntoView {
                 observer.set_value(Some((created, changed)));
             }
         }
-        // A remote tile follows its <video> media events (see `refresh`); only
-        // the own preview polls, to follow the live capture across a camera switch.
+        // Every tile's status follows its <video> media events (see `refresh`).
+        // The own preview also rebinds to the live capture when it changes (a
+        // camera switch), woken by that change rather than by a timer.
         if !own {
             return;
         }
@@ -247,6 +248,7 @@ pub(super) fn BrowserVideo(watch: Watch, own: bool) -> impl IntoView {
                 async move {
                     let mut shown: Option<String> = None;
                     loop {
+                        let seen = video::local_revision();
                         let playing = {
                             // Self-preview follows the live capture, including a
                             // camera switch; nothing is sent for it.
@@ -277,7 +279,9 @@ pub(super) fn BrowserVideo(watch: Watch, own: bool) -> impl IntoView {
                         if message.with_untracked(|m| *m != next) {
                             message.set(next);
                         }
-                        gloo_timers::future::TimeoutFuture::new(250).await;
+                        // Readiness then follows media events; 5 s is only a
+                        // safety net for a missed capture change.
+                        video::local_change_or(seen, 5000).await;
                     }
                 },
                 registration,
@@ -285,15 +289,20 @@ pub(super) fn BrowserVideo(watch: Watch, own: bool) -> impl IntoView {
             .await;
         });
     });
-    // Remote tiles: bound to a received track and showing a frame.
+    // Remote tiles: bound to a received track and showing a frame. The own
+    // preview: showing the live local capture.
     let refresh = move || {
         let Some(element) = video_node.get_untracked() else {
             return;
         };
-        let ready = view_id.get_value().is_some_and(video::bound)
-            && element.ready_state() >= HtmlMediaElement::HAVE_CURRENT_DATA;
+        let bound = if own {
+            video::local_track(watch.kind).is_some()
+        } else {
+            view_id.get_value().is_some_and(video::bound)
+        };
+        let ready = bound && element.ready_state() >= HtmlMediaElement::HAVE_CURRENT_DATA;
         let next = if ready { "" } else { "Waiting for video…" };
-        if !own && message.with_untracked(|m| m != next) {
+        if message.with_untracked(|m| m != next) {
             message.set(next.into());
         }
     };

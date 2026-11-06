@@ -22,6 +22,9 @@ HOOKS = r"""
 (() => {
   const T = window.__hc = {gum: [], clones: 0, stops: 0, enabled: [], onsets: [], stats: [],
     replace: [], contexts: 0, closed: 0, start: performance.now()};
+  // The onset probe uses the unhooked constructor: `contexts`/`closed` count only
+  // the app's AudioContexts.
+  const NativeAudioContext = window.AudioContext;
   const now = () => performance.now();
   const md = navigator.mediaDevices;
   if (md && md.getDisplayMedia) {
@@ -36,7 +39,7 @@ HOOKS = r"""
       T.gum.push({t: now(), audio: s.getAudioTracks().length, video: s.getVideoTracks().length});
       if (s.getAudioTracks().length && !T.probe) {
         // Independent onset probe on its own context: 256-sample window, 5 ms polls.
-        const ctx = new AudioContext();
+        const ctx = new NativeAudioContext();
         const src = ctx.createMediaStreamSource(new MediaStream([s.getAudioTracks()[0].clone()]));
         const an = ctx.createAnalyser(); an.fftSize = 256; src.connect(an);
         const buf = new Float32Array(256); let loud = false;

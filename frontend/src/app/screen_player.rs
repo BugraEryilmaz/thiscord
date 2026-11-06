@@ -176,13 +176,9 @@ async fn offer(pc: &RtcPeerConnection, trace: &Trace) -> Result<String, String> 
     JsFuture::from(pc.set_local_description(&offer))
         .await
         .map_err(|_| crate::i18n::t("Cannot initialize video player"))?;
-    // Only connection setup uses a timer; frames flow through WebRTC directly.
-    for _ in 0..100 {
-        if pc.ice_gathering_state() == RtcIceGatheringState::Complete {
-            break;
-        }
-        gloo_timers::future::TimeoutFuture::new(50).await;
-    }
+    // Gathering completion wakes this wait (5 s bound); frames flow through
+    // WebRTC directly.
+    crate::browser_voice::ice_gathered(pc, 5_000).await;
     trace.fact(
         "timing.gathering_ms",
         (js_sys::Date::now() - started) as u64,

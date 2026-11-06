@@ -31,8 +31,10 @@ const IDLE_WAIT: Duration = Duration::from_millis(20);
 /// unchanging source waits this long (10 polls per second instead of 50).
 const STATIC_WAIT: Duration = Duration::from_millis(100);
 const STATIC_AFTER: Duration = Duration::from_millis(200);
-/// Longest sleep while paused without demand; demand returning wakes it at once.
-const PAUSED_WAIT: Duration = Duration::from_millis(250);
+/// Longest sleep while paused without demand; returning demand and a stop (the
+/// native share state wakes the worker after setting it) end it at once, so this
+/// only bounds a stop that arrives without that wake (e.g. a lost connection).
+const PAUSED_WAIT: Duration = Duration::from_millis(1000);
 /// Raw captures older than this are never encoded.
 const RAW_MAX_AGE: Duration = Duration::from_millis(250);
 
@@ -1038,7 +1040,7 @@ mod tests {
             std::thread::sleep(Duration::from_secs(1));
             let paused_wakes = metrics.snapshot().counters["worker_wakes"];
             assert!(
-                paused_wakes <= 6,
+                paused_wakes <= 3,
                 "{paused_wakes} wakes in one paused second"
             );
             assert_eq!(metrics.snapshot().counters["encoded_frames"], 0);
@@ -1053,8 +1055,21 @@ mod tests {
                 std::thread::sleep(Duration::from_millis(1));
                 while rx.try_recv().is_ok() {}
             }
+            // Paused again: a stop with its wake (what the native share state
+            // does) ends the worker now, not at the 1 s paused fallback. A
+            // missing wake still returns, after about a second, and fails here.
+            demand.update(0);
+            std::thread::sleep(Duration::from_millis(300));
+            let stopped = Instant::now();
+            user.store(true, Ordering::Release);
+            demand.wake();
+            let _ = job.join().unwrap();
+            let elapsed = stopped.elapsed();
             close(std::slice::from_ref(&mailbox));
-            assert!(job.join().unwrap().is_err());
+            assert!(
+                elapsed < Duration::from_millis(100),
+                "stop observed after {elapsed:?}"
+            );
         });
     }
 

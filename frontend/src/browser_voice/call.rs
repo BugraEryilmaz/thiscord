@@ -823,14 +823,9 @@ async fn negotiate(
     JsFuture::from(pc.set_local_description(&answer))
         .await
         .map_err(|_| Failure::final_("Cannot set the voice answer"))?;
-    // The SFU does not trickle candidates: send the answer once gathering ends.
-    let started = now();
-    while pc.ice_gathering_state() != RtcIceGatheringState::Complete {
-        if now() - started > 8_000.0 {
-            break;
-        }
-        gloo_timers::future::TimeoutFuture::new(50).await;
-    }
+    // The SFU does not trickle candidates: send the answer once gathering ends
+    // (woken by the gathering-state event, not a poll).
+    super::ice_gathered(pc, 8_000).await;
     let local = pc
         .local_description()
         .ok_or_else(|| Failure::temporary("Missing voice answer"))?;

@@ -68,7 +68,8 @@ impl Demand {
     pub fn delivered_encoder_frame(&self, bitrate: u32) {
         self.1.lock().unwrap().delivered = Some(bitrate);
     }
-    fn wake(&self) {
+    /// Wakes the registered encoder worker, e.g. so it observes a stop flag now.
+    pub fn wake(&self) {
         if let Some(wake) = self.2.lock().unwrap().as_ref() {
             wake();
         }

@@ -30,6 +30,41 @@ use thiscord_shared::{
 };
 use wasm_bindgen::{JsCast, prelude::Closure};
 
+/// Waits until `pc` finishes ICE gathering or `timeout_ms` passes, woken by
+/// `icegatheringstatechange` instead of polling the state. The listener is
+/// removed and dropped before returning. Returns whether gathering completed.
+pub async fn ice_gathered(pc: &web_sys::RtcPeerConnection, timeout_ms: u32) -> bool {
+    use web_sys::RtcIceGatheringState::Complete;
+    if pc.ice_gathering_state() == Complete {
+        return true;
+    }
+    let resolve: Rc<RefCell<Option<js_sys::Function>>> = Rc::default();
+    let slot = resolve.clone();
+    let done = js_sys::Promise::new(&mut |ok, _| *slot.borrow_mut() = Some(ok));
+    let target = pc.clone();
+    let slot = resolve.clone();
+    let listener = Closure::<dyn FnMut()>::new(move || {
+        if target.ice_gathering_state() == Complete
+            && let Some(ok) = slot.borrow_mut().take()
+        {
+            let _ = ok.call0(&wasm_bindgen::JsValue::NULL);
+        }
+    });
+    let callback: &js_sys::Function = listener.as_ref().unchecked_ref();
+    let _ = pc.add_event_listener_with_callback("icegatheringstatechange", callback);
+    // Gathering may have completed between the first check and registration.
+    if pc.ice_gathering_state() != Complete {
+        futures_util::future::select(
+            wasm_bindgen_futures::JsFuture::from(done),
+            gloo_timers::future::TimeoutFuture::new(timeout_ms),
+        )
+        .await;
+    }
+    let _ = pc.remove_event_listener_with_callback("icegatheringstatechange", callback);
+    drop(listener);
+    pc.ice_gathering_state() == Complete
+}
+
 const SETTINGS_KEY: &str = "thiscord.browser-audio.v1";
 const VOLUMES_KEY: &str = "thiscord.browser-volumes.v1";
 const SHORTCUTS_KEY: &str = "thiscord.browser-shortcuts.v1";

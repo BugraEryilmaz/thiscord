@@ -1694,9 +1694,10 @@ fn run(
     let mut batch_now: Option<Instant> = None;
     loop {
         // Mid-batch (a packet carried from the previous admission), skip the
-        // per-iteration maintenance and its clock reads: no processing tick runs
-        // until the batch ends, and the end of a batch re-checks stop and the
-        // connection before returning here with nothing carried.
+        // per-iteration maintenance and its clock reads. Stop and a closed
+        // connection still gate the next processing tick, and that tick captures
+        // its own boundary. A control command handled mid-batch leaves the packet
+        // carried, so maintenance can wait one more batch (at most 32 packets).
         if carried.is_none() {
             probe.enter(worker_health::IDLE);
             probe.active.store(session.is_some(), Ordering::Release);

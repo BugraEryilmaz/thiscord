@@ -288,9 +288,11 @@ Other changes, pinned by tests rather than benchmarks:
   captures, encoder output, budget release, demand and rejected-frame feedback
   still waking it at once. The native call loop keeps its audio worker lease with a
   keepalive every two seconds instead of every 500 ms.
-- A share paused for lack of viewers sleeps until demand returns (which wakes it
-  directly), with a 250 ms fallback for stop, instead of polling every 20 ms
-  (unit test: at most 6 wakes in a paused second, encoding within 150 ms of demand).
+- A share paused for lack of viewers sleeps until demand returns or it is stopped
+  (the native share state wakes the worker after setting the stop flag), with a 1 s
+  fallback, instead of polling every 20 ms (unit test: at most 3 wakes in a paused
+  second, encoding within 150 ms of demand, stop observed within 100 ms; 739 ms
+  without the wake).
 - Linux encoder output is queued by buffer reference and copied once, after any
   keyframe parameter-set prefix, instead of copied and then re-copied for IDRs. The
   GStreamer layer test exercised this path at runtime in WSL with NVENC
@@ -304,7 +306,8 @@ Other changes, pinned by tests rather than benchmarks:
   instead of every 100 ms; one `getStats` walk serves audio and video, runs in its
   own task, and runs every second while WebAudio meters cover speaking (200 ms
   otherwise); remote video tiles update their status from `<video>` media events
-  instead of a timer (only the own preview polls, to follow a camera switch).
+  instead of a timer; the own preview rebinds when the local capture changes (a
+  start, stop or camera switch), woken by that change, with a 5 s safety net.
 - Desktop players renew their three-second viewer lease and sample decoder
   pressure once a second once playing (250 ms only while connecting) and set their
   status signal only when it changes.
@@ -347,6 +350,11 @@ Other changes, pinned by tests rather than benchmarks:
 - Web: the grid's decoded-size and frame-rate sampler runs once a second (frame
   rates need a full second anyway), and the call tick checks the AudioContext state
   once instead of once per playback slot.
+- The desktop camera publisher's keepalive is a long-poll: it returns as soon as the
+  viewer budget changes (or after 1 s, renewing the 3 s lease) instead of polling
+  every 500 ms. The desktop UI polls `voice_status` every 2 s without a call (joins
+  fetch it directly), 500 ms during one. Web and desktop ICE gathering waits wake on
+  `icegatheringstatechange` instead of 50 ms polls.
 
 Browser run (web client): the `/app` bundle from this branch, served by a local
 backend with its own database (`scripts/web-call-check-backend.sh`, WSL), in
@@ -406,7 +414,8 @@ fake camera:
   share start/stop cycles while in the call): voice join/leave stayed flat (app
   private 34–49 MB, 44 threads, 605–628 handles). Stopping a share released its
   capture/encoder threads and GPU memory within a second (105 → 54 threads, GPU
-  238 → 40 MB), the same as base `0ae37e5`. An intermediate build of this branch
+  238 → 40 MB), the same as base `0ae37e5`. With the stop now waking the encoder worker,
+  the share's threads were gone 9–59 ms after `screen_stop` (three shares). An intermediate build of this branch
   kept them (95 threads, 512 MB GPU) until the call ended, because a wake closure
   registered on the binding's long-lived demand handle held the worker's mailbox
   and its last captured frame; wakes now hold the mailbox weakly and the worker
@@ -415,8 +424,7 @@ fake camera:
   memory in the app process (one 3440×1440 FP16 surface), identically on base
   (139.6 → 323.6 MB over five shares; this branch 146.8 → 319.9 MB): a pre-existing
   retention below the app's capture code (`windows-capture` 2.0.1/WGC or the
-  driver) that this branch neither causes nor fixes. While sharing, app private
-  memory was 269 MB on this branch versus 422 MB on base.
+  driver) that this branch neither causes nor fixes.
 - Screen share of the 3440×1440 desktop at 1080p30 with system audio, both layers:
   the NVIDIA MFT encoded and sent 28.2 frames/s (0 dropped, 0 send timeouts, three
   capture textures); the own preview presented 21.9 fps at 1920×802 (231 decoded,
@@ -432,8 +440,10 @@ fake camera:
 - Native camera publish relay: with WebView2's fake capture device (no real
   webcam), the desktop camera reached the browser participant at 1280×720, 20.1 fps
   (200 decoded in 10 s, 0 dropped). After the viewer's tile was off-screen for 4 s,
-  its first frame came back 1,276 ms after it returned, then 19.8 fps; that includes
-  the WebView encoder resuming at its once-a-second keepalive.
+  its first frame came back 1,276 ms after it returned, then 19.8 fps. That included
+  the publisher learning the returned budget from its 500 ms keepalive poll; with the
+  keepalive a long-poll answered as soon as the budget changes (renewing the lease
+  at least once a second), the same test measured 689, 684 and 699 ms, then 20 fps.
 
 4K60 HDR pipeline probe A/B on the same machine, interleaved (base `0ae37e5` built in
 a private build directory, `screen_pipeline_probe --seconds=20 --assert`): base 59.00,
@@ -450,8 +460,24 @@ hidden voice overlay requests cursor passthrough before GTK realizes its window
 signaling, ICE/DTLS and the native audio devices came up, but WSL has no paced
 audio device: ALSA's `null` PCM (no sound card or PulseAudio/PipeWire ALSA plugin
 in this WSL) ran about 4,800 output callbacks in under a second, the audio worker's
-privacy-control queue filled and the call closed, as designed. The WebKitGTK relay
-and player were therefore not reached.
+privacy-control queue filled and the call closed, as designed.
+
+A second run used the same build plus the voice-bot virtual audio devices (paced,
+headless callbacks feeding the ordinary capture, DSP, jitter and mixer path) enabled
+at startup, again only in an uncommitted local build; both workarounds sit outside
+the changed paths. The production `native_voice` task then ran on Linux in the app:
+998 capture and 996 render callbacks in 10 s with no deadline misses, Opus encode
+p99 490 µs, 391 packets sent with none expired or failed, 0.32 ms SFU-hop RTT; the
+browser participant's stream arrived at about 48 packets/s (480 in 10 s, 3.29 M
+samples decoded, no sequence gaps, late packets or decode errors). Five voice
+join/leave cycles held the app at 70 threads and 63 file descriptors; its RSS rose
+from 388 to 415 MB on the first join (audio processing state) and then by about
+1.1 MB per cycle (415 → 420 MB), the WebKit process tree by about 4 MB per cycle.
+The WebKitGTK video player and relay still could not run: this distribution's
+`libwebkit2gtk-4.1` 2.52.6 links no GStreamer WebRTC backend, so
+`RTCPeerConnection` is undefined (the tile reports "This WebView cannot play WebRTC
+video"), matching the documented requirement of a WebKitGTK build with working
+WebRTC/H.264.
 
 Not measured: received voice on real speakers, browser main-thread profiles, the
 Linux desktop app's WebKitGTK player and relay (above; Linux capture, encode, share

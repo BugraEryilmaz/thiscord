@@ -257,7 +257,46 @@ pub fn clear_error() {
 fn fail(message: &str) {
     update_state(|s| s.error = message.to_owned());
 }
+thread_local! {
+    /// Local capture revision and the self-preview tasks waiting for a change.
+    static LOCAL_CHANGED: std::cell::RefCell<(u64, Vec<std::task::Waker>)> =
+        std::cell::RefCell::default();
+}
+/// Revision of the local camera/screen captures; see [`local_change_or`].
+pub fn local_revision() -> u64 {
+    LOCAL_CHANGED.with(|c| c.borrow().0)
+}
+/// Resolves once the local captures change from revision `seen` (a start,
+/// stop or camera switch), or after `ms` as a safety net.
+pub async fn local_change_or(seen: u64, ms: u32) {
+    let changed = std::future::poll_fn(|cx| {
+        LOCAL_CHANGED.with(|c| {
+            let mut c = c.borrow_mut();
+            if c.0 != seen {
+                std::task::Poll::Ready(())
+            } else {
+                // One entry per waiting task, even across timed-out waits.
+                if !c.1.iter().any(|w| w.will_wake(cx.waker())) {
+                    c.1.push(cx.waker().clone());
+                }
+                std::task::Poll::Pending
+            }
+        })
+    });
+    futures_util::future::select(
+        Box::pin(changed),
+        gloo_timers::future::TimeoutFuture::new(ms),
+    )
+    .await;
+}
 fn publishing_state(publishing: &Publishing) {
+    LOCAL_CHANGED.with(|c| {
+        let mut c = c.borrow_mut();
+        c.0 = c.0.wrapping_add(1);
+        for waker in c.1.drain(..) {
+            waker.wake();
+        }
+    });
     update_state(|s| {
         s.screen = publishing.screen.is_some();
         s.screen_audio = publishing

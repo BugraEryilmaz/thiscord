@@ -354,9 +354,15 @@ pub(super) fn CameraControls(ui: Ui) -> impl IntoView {
                     // The selection may have changed while connecting.
                     follow();
                     let mut last_budget = None;
-                    let mut disconnected = 0;
+                    let mut disconnected_since: Option<f64> = None;
                     loop {
-                        gloo_timers::future::TimeoutFuture::new(500).await;
+                        // Long-poll: with the applied budget the keepalive answers on
+                        // a budget change or after 1 s (its lease renewal), so a
+                        // returning viewer's demand is applied without a timer wait.
+                        if last_budget.is_none() {
+                            // First pass, or a failed budget fetch: do not spin.
+                            gloo_timers::future::TimeoutFuture::new(100).await;
+                        }
                         if generation.get() != session {
                             break;
                         }
@@ -372,7 +378,7 @@ pub(super) fn CameraControls(ui: Ui) -> impl IntoView {
                         });
                         let allowed = native::<thiscord_shared::camera::Status>(
                             "camera_keepalive",
-                            json!({"session":session}),
+                            json!({"session":session,"known":last_budget}),
                         )
                         .await
                         .unwrap_or_default();
@@ -389,9 +395,9 @@ pub(super) fn CameraControls(ui: Ui) -> impl IntoView {
                         }
                         if let Some(capture) = capture {
                             if capture.pc.connection_state() == RtcPeerConnectionState::Connected {
-                                disconnected = 0;
+                                disconnected_since = None;
                             } else {
-                                disconnected += 1;
+                                disconnected_since.get_or_insert_with(js_sys::Date::now);
                             }
                             if last_budget != Some(allowed.bitrate) {
                                 if let Err(e) = budget(&capture, allowed.bitrate).await {
@@ -407,7 +413,8 @@ pub(super) fn CameraControls(ui: Ui) -> impl IntoView {
                         if generation.get() != session {
                             break;
                         }
-                        if disconnected >= 20 {
+                        if disconnected_since.is_some_and(|at| js_sys::Date::now() - at >= 10_000.0)
+                        {
                             stop();
                             error.set(
                                 "Camera stopped. Check the device and your call connection.".into(),
