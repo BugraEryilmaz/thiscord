@@ -58,6 +58,7 @@ const COUNTERS: &[&str] = &[
     "receive_peak_frames",
     "receive_peak_bytes",
     "encoder_peak_pending",
+    "capture_textures",
     "sender_peak_frames",
     "sender_peak_bytes",
 ];

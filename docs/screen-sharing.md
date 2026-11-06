@@ -532,8 +532,12 @@ FP16 on HDR) to two latest-frame mailboxes. Both layers convert from that shared
 surface with their own processor: chaining the low layer from the primary's NV12
 output would couple two independently paused/rebuilt encoders to save one small
 SDR blit per low frame. Each encoder owns its MFT, NV12 processor, four-sample admission limit,
-200 ms frame queue and 100 ms unsent-byte budget. Capture owns seven bounded textures
-when layered (three for legacy capture), each processor at most six NV12 surfaces.
+200 ms frame queue and 100 ms unsent-byte budget. Capture owns at most seven textures
+when layered (three for legacy capture), allocated on demand when no pooled texture is
+free rather than all at once, so a share holds only the full-resolution surfaces it
+actually needed at one time (`capture_textures` reports the peak; a single-layer 4K60
+HDR pipeline probe still peaked at all three). Each processor holds at most six NV12
+surfaces.
 Low-layer input has its own FPS admission and never blocks primary queue admission.
 No raw readback or software fallback is introduced. A zero/expired low target drops
 its MFT and processor; the worker remains idle until renewed demand. Hardware unable

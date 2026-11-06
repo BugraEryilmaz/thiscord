@@ -791,6 +791,6 @@ mod tests {
         assert!(stats_interval_ms(true) >= 1_000.0);
         assert!(stats_interval_ms(false) <= 200.0);
         // Two gate samples per analyser window.
-        assert!(GATE_MS * 2.0 <= 2048.0 / 48.0);
+        const { assert!(GATE_MS * 2.0 <= 2048.0 / 48.0) };
     }
 }
