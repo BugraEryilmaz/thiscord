@@ -266,7 +266,9 @@ async fn handle(
         let identifier = match &command {
             AccountRequest::Login { login, .. } => Some(login.trim().to_lowercase()),
             AccountRequest::ForgotPassword { email } => Some(email.trim().to_lowercase()),
-            AccountRequest::Register { email, .. } => Some(email.trim().to_lowercase()),
+            AccountRequest::Register { email, .. } | AccountRequest::ChangeEmail { email } => {
+                Some(email.trim().to_lowercase())
+            }
             _ => None,
         };
         let sensitive = !matches!(

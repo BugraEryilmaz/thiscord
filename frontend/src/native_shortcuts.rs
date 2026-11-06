@@ -1,4 +1,6 @@
-//! Global self controls. Registration is transactional and independent of PTT.
+//! Global self controls. Registration is transactional. The push-to-talk key
+//! is validated here with the others but registered by `native_audio` only
+//! while a push-to-talk call uses it.
 use std::sync::{
     Arc, Mutex,
     atomic::{AtomicBool, Ordering},
@@ -16,9 +18,38 @@ struct Bindings {
     error: Option<String>,
 }
 
+/// The configured push-to-talk key; `None` when cleared (hold button only).
+fn parse_push_to_talk(settings: &AudioShortcuts) -> Result<Option<Shortcut>, String> {
+    let value = settings.push_to_talk.trim();
+    if value.is_empty() {
+        return Ok(None);
+    }
+    if value.len() > AudioShortcuts::MAX_LEN {
+        return Err("Shortcut is too long".into());
+    }
+    let chord = thiscord_frontend::web_shortcuts::Chord::parse(value);
+    if chord.as_ref().is_some_and(|c| c.blocks_typing()) {
+        return Err(thiscord_frontend::web_shortcuts::TYPING_KEY.into());
+    }
+    value
+        .parse()
+        .map(Some)
+        .map_err(|_| "Invalid shortcut. Use a combination such as Control+Shift+M.".into())
+}
+
+/// The saved push-to-talk key for `native_audio::register_ptt`.
+pub fn push_to_talk(app: &tauri::AppHandle) -> Result<Option<Shortcut>, String> {
+    let state = app.state::<ShortcutStateStore>();
+    let state = state
+        .0
+        .lock()
+        .map_err(|_| "Shortcut settings unavailable")?;
+    parse_push_to_talk(&state.settings)
+}
+
 fn parse(settings: &AudioShortcuts) -> Result<Vec<(Shortcut, ShortcutAction)>, String> {
     let mut keys = Vec::new();
-    let ptt: Shortcut = "Control+Shift+Space".parse().unwrap();
+    let ptt = parse_push_to_talk(settings)?;
     for (value, action) in settings.bindings() {
         if value.len() > AudioShortcuts::MAX_LEN {
             return Err("Shortcut is too long".into());
@@ -29,10 +60,7 @@ fn parse(settings: &AudioShortcuts) -> Result<Vec<(Shortcut, ShortcutAction)>, S
         let key: Shortcut = value
             .parse()
             .map_err(|_| "Invalid shortcut. Use a combination such as Control+Shift+M.")?;
-        if key == ptt {
-            return Err("Ctrl+Shift+Space is reserved for push-to-talk".into());
-        }
-        if keys.iter().any(|(existing, _)| *existing == key) {
+        if Some(key) == ptt || keys.iter().any(|(existing, _)| *existing == key) {
             return Err("Each action needs a different shortcut".into());
         }
         keys.push((key, action));
@@ -189,38 +217,143 @@ pub async fn audio_shortcuts_save(
             .lock()
             .map_err(|_| "Shortcut settings unavailable")?;
         let old = state.settings.clone();
-        install(&app, &mut state, settings.clone())?;
-        let result = (|| {
-            let directory = app
-                .path()
-                .app_config_dir()
-                .map_err(|_| "Settings directory unavailable")?;
-            std::fs::create_dir_all(&directory).map_err(|_| "Cannot create settings directory")?;
-            std::fs::write(
-                directory.join("shortcuts.json.tmp"),
-                serde_json::to_vec_pretty(&settings).map_err(|_| "Invalid shortcuts")?,
-            )
-            .map_err(|_| "Cannot save shortcuts")?;
-            std::fs::rename(
-                directory.join("shortcuts.json.tmp"),
-                directory.join("shortcuts.json"),
-            )
-            .map_err(|_| "Cannot save shortcuts".to_string())
-        })();
-        if result.is_err()
-            && let Err(error) = install(&app, &mut state, old)
-        {
-            state.error = Some(error);
+        // A call holding the push-to-talk key releases it first, so keys can be
+        // swapped between push-to-talk and the toggles; it is re-registered below.
+        let active = crate::native_audio::take_ptt_key(&app);
+        let result = install(&app, &mut state, settings.clone()).and_then(|()| {
+            write(&app, &settings).inspect_err(|_| {
+                if let Err(error) = install(&app, &mut state, old.clone()) {
+                    state.error = Some(error);
+                }
+            })
+        });
+        drop(state);
+        if !active {
+            // A call without a registered key (cleared or unavailable) picks up a new
+            // key now; failures stay visible in the panel and the save stands.
+            if result.is_ok()
+                && settings.push_to_talk != old.push_to_talk
+                && let Err(error) = crate::native_audio::refresh_ptt(&app)
+                && let Ok(mut state) = app.state::<ShortcutStateStore>().0.lock()
+            {
+                state.error = Some(error);
+            }
+            return result;
         }
-        result
+        if let Err(error) = result {
+            // The previous shortcuts stayed installed; restore their push-to-talk key.
+            let _ = crate::native_audio::refresh_ptt(&app);
+            return Err(error);
+        }
+        if let Err(error) = crate::native_audio::refresh_ptt(&app) {
+            // The new push-to-talk key is unavailable: keep the previous shortcuts.
+            let state = app.state::<ShortcutStateStore>();
+            let mut state = state
+                .0
+                .lock()
+                .map_err(|_| "Shortcut settings unavailable")?;
+            if let Err(error) =
+                install(&app, &mut state, old.clone()).and_then(|()| write(&app, &old))
+            {
+                state.error = Some(error);
+            }
+            drop(state);
+            let _ = crate::native_audio::refresh_ptt(&app);
+            return Err(error);
+        }
+        Ok(())
     })
     .await
     .map_err(|_| "Shortcut task failed")?
 }
 
+fn write(app: &tauri::AppHandle, settings: &AudioShortcuts) -> Result<(), String> {
+    let directory = app
+        .path()
+        .app_config_dir()
+        .map_err(|_| "Settings directory unavailable")?;
+    std::fs::create_dir_all(&directory).map_err(|_| "Cannot create settings directory")?;
+    std::fs::write(
+        directory.join("shortcuts.json.tmp"),
+        serde_json::to_vec_pretty(settings).map_err(|_| "Invalid shortcuts")?,
+    )
+    .map_err(|_| "Cannot save shortcuts")?;
+    std::fs::rename(
+        directory.join("shortcuts.json.tmp"),
+        directory.join("shortcuts.json"),
+    )
+    .map_err(|_| "Cannot save shortcuts".to_string())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn recorded_bindings_register_as_desktop_shortcuts() {
+        use thiscord_frontend::web_shortcuts::{Pressed, Recorded, record};
+        let mut codes: Vec<String> = ('A'..='Z').map(|c| format!("Key{c}")).collect();
+        codes.extend((0..=9).map(|d| format!("Digit{d}")));
+        codes.extend((0..=9).map(|d| format!("Numpad{d}")));
+        codes.extend((1..=24).map(|n| format!("F{n}")));
+        codes.extend(
+            [
+                "Space",
+                "Enter",
+                "Tab",
+                "Backspace",
+                "Delete",
+                "Insert",
+                "Home",
+                "End",
+                "PageUp",
+                "PageDown",
+                "ArrowUp",
+                "ArrowDown",
+                "ArrowLeft",
+                "ArrowRight",
+                "Minus",
+                "Equal",
+                "Comma",
+                "Period",
+                "Slash",
+                "Backslash",
+                "Semicolon",
+                "Quote",
+                "Backquote",
+                "BracketLeft",
+                "BracketRight",
+                "Pause",
+                "ScrollLock",
+                "PrintScreen",
+                "NumpadAdd",
+                "NumpadSubtract",
+                "NumpadMultiply",
+                "NumpadDivide",
+                "NumpadDecimal",
+                "NumpadEnter",
+            ]
+            .map(String::from),
+        );
+        for code in &codes {
+            for (control, shift, alt, meta) in [
+                (false, false, false, false),
+                (true, true, false, false),
+                (false, false, true, true),
+            ] {
+                let Recorded::Chord(text) = record(&Pressed {
+                    code,
+                    control,
+                    shift,
+                    alt,
+                    meta,
+                }) else {
+                    panic!("{code} was not recorded");
+                };
+                let parsed: Result<Shortcut, _> = text.parse();
+                assert!(parsed.is_ok(), "{text}");
+            }
+        }
+    }
     #[test]
     fn validates_alias_conflicts_ptt_and_disabled_bindings() {
         assert_eq!(parse(&AudioShortcuts::default()).unwrap().len(), 2);
@@ -238,6 +371,41 @@ mod tests {
                 ..Default::default()
             })
             .is_err()
+        );
+        // A moved push-to-talk key frees the old one and conflicts itself.
+        assert!(
+            parse(&AudioShortcuts {
+                overlay_unlock: "Ctrl+Shift+Space".into(),
+                push_to_talk: "F8".into(),
+                ..Default::default()
+            })
+            .is_ok()
+        );
+        assert!(
+            parse(&AudioShortcuts {
+                push_to_talk: "Control+Shift+M".into(),
+                ..Default::default()
+            })
+            .is_err()
+        );
+        for typing in ["V", "Space", "Shift+V"] {
+            assert!(
+                parse(&AudioShortcuts {
+                    push_to_talk: typing.into(),
+                    ..Default::default()
+                })
+                .is_err(),
+                "{typing}"
+            );
+        }
+        let cleared = AudioShortcuts {
+            push_to_talk: String::new(),
+            ..Default::default()
+        };
+        assert_eq!(parse_push_to_talk(&cleared).unwrap(), None);
+        assert_eq!(
+            parse_push_to_talk(&AudioShortcuts::default()).unwrap(),
+            Some("Control+Shift+Space".parse().unwrap())
         );
         assert!(
             parse(&AudioShortcuts {

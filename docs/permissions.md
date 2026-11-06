@@ -286,7 +286,10 @@ For the initial personal deployment, the service caps the installation at 100
 guilds, each with 500 members, 100 roles including Everyone, 200 channels and 1000 overrides. Lists
 are therefore bounded rather than silently truncated; larger installations need
 paginated management APIs. Only members with ManageRoles can inspect the full
-editor state (including hidden-channel configuration). Members may preview their
+editor state (including hidden-channel configuration). Every member's
+highest-ranked role name and rank are visible to fellow members through the member
+list (see [chat.md](chat.md#member-list-and-profile-cards)); permissions and other
+assigned roles are not. Members may preview their
 own effective permissions; role managers may preview other members.
 
 Open the account ribbon’s **Settings > Instance access** for installation-wide administration. Open the server-header gear for server settings. Overview, Roles, Members, Channels & permissions, Moderation, and Ownership & deletion are separate sections in the server modal. Only sections allowed by the current server snapshot are shown; the backend rechecks every action.

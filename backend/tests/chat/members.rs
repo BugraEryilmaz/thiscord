@@ -1,4 +1,4 @@
-use super::friends::{snapshot, social, socket as friends_socket};
+use super::friends::{event as friends_event, snapshot, social, socket as friends_socket};
 use super::*;
 use thiscord_shared::{account::ACCOUNT_PATH, safety::SAFETY_PATH};
 
@@ -233,6 +233,7 @@ async fn member_list_pushes_presence_status_blocks_and_removal_and_syncs_devices
     for entry in list["members"].as_array().unwrap() {
         assert!(entry.get("email").is_none() && entry.get("bio").is_none());
     }
+    assert!(own.get("role").is_none());
 
     // Account-wide presence (an authenticated friends socket) is pushed live.
     let mut guest_device = friends_socket(address, &guest).await;
@@ -303,6 +304,55 @@ async fn member_list_pushes_presence_status_blocks_and_removal_and_syncs_devices
     })
     .await;
 
+    // Live activities reach friends and fellow members while the reporting
+    // socket stays connected; they are never stored.
+    snapshot(&mut guest_device, |s| s["accepts_activity"] == true).await;
+    friends_event(
+        &mut guest_device,
+        json!({"type":"activity","activity":{"kind":"playing","name":"Factorio"}}),
+    )
+    .await;
+    let playing = update_where(&mut viewer, 1, "member_presence", |u| {
+        u["activities"].as_array().is_some_and(|a| {
+            a.contains(
+                &json!({"account_id":guest_id,"activity":{"kind":"playing","name":"Factorio"}}),
+            )
+        })
+    })
+    .await;
+    assert_eq!(playing["activities"].as_array().unwrap().len(), 1);
+    snapshot(&mut outsider_device, |s| {
+        s["friends"][0]["activity"]["name"] == "Factorio"
+    })
+    .await;
+    // Closing the reporting device clears it; the other device keeps the account online.
+    drop(guest_device);
+    update_where(&mut viewer, 1, "member_presence", |u| {
+        u["online"].as_array().unwrap().contains(&json!(guest_id)) && u.get("activities").is_none()
+    })
+    .await;
+    snapshot(&mut outsider_device, |s| {
+        s["friends"][0]["online"] == true && s["friends"][0].get("activity").is_none()
+    })
+    .await;
+    // Malformed names close the reporting socket instead of being shown.
+    let mut invalid = friends_socket(address, &second).await;
+    snapshot(&mut invalid, |_| true).await;
+    friends_event(
+        &mut invalid,
+        json!({"type":"activity","activity":{"kind":"playing","name":" padded"}}),
+    )
+    .await;
+    tokio::time::timeout(std::time::Duration::from_secs(3), async {
+        while let Some(Ok(message)) = invalid.next().await {
+            if matches!(message, WsMessage::Close(_)) {
+                break;
+            }
+        }
+    })
+    .await
+    .expect("invalid activities must close the socket");
+
     // Clearing propagates to devices and the member list.
     set_status(&app, &guest, Value::Null, StatusCode::OK).await;
     tokio::time::timeout(
@@ -351,6 +401,62 @@ async fn member_list_pushes_presence_status_blocks_and_removal_and_syncs_devices
         "Hidden"
     );
 
+    // Each row carries only the member's highest-ranked role (name and rank).
+    for (name, position) in [("agalar", 20), ("Lower", 5)] {
+        change(
+            &app,
+            &owner,
+            &mut state,
+            json!({"action":"create_role","name":name,"position":position,"permissions":["kick_members"]}),
+            StatusCode::OK,
+        )
+        .await;
+    }
+    let role_id = |state: &Value, name: &str| {
+        state["roles"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|r| r["name"] == name)
+            .unwrap()["id"]
+            .clone()
+    };
+    let (agalar, lower) = (role_id(&state, "agalar"), role_id(&state, "Lower"));
+    for role in [&lower, &agalar] {
+        change(
+            &app,
+            &owner,
+            &mut state,
+            json!({"action":"assign_role","account_id":guest_id,"role_id":role,"assigned":true}),
+            StatusCode::OK,
+        )
+        .await;
+    }
+    // Role changes may revoke subscriptions; reconnecting clients resubscribe.
+    let mut roles_view = session_socket(address, &owner).await;
+    event(&mut roles_view, "authenticated").await;
+    subscribe_members(&mut roles_view, 4, &guild, &channel).await;
+    let list = pushed(&mut roles_view, 4, "members").await;
+    assert_eq!(
+        member(&list, guest_id).unwrap()["role"],
+        json!({"id":agalar,"name":"agalar","position":20})
+    );
+    assert!(member(&list, owner_id).unwrap().get("role").is_none());
+    // Removing the top role falls back to the next one.
+    change(
+        &app,
+        &owner,
+        &mut state,
+        json!({"action":"delete_role","role_id":agalar}),
+        StatusCode::OK,
+    )
+    .await;
+    let mut roles_view = session_socket(address, &owner).await;
+    event(&mut roles_view, "authenticated").await;
+    subscribe_members(&mut roles_view, 5, &guild, &channel).await;
+    let list = pushed(&mut roles_view, 5, "members").await;
+    assert_eq!(member(&list, guest_id).unwrap()["role"]["id"], lower);
+
     // Removing a member refreshes lists without revoking other viewers.
     change(
         &app,
@@ -360,6 +466,9 @@ async fn member_list_pushes_presence_status_blocks_and_removal_and_syncs_devices
         StatusCode::OK,
     )
     .await;
-    update_where(&mut view, 3, "members", |u| member(u, guest_id).is_none()).await;
+    update_where(&mut roles_view, 5, "members", |u| {
+        member(u, guest_id).is_none()
+    })
+    .await;
     server.abort();
 }

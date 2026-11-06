@@ -240,6 +240,20 @@ pub(super) fn Host(ui: Ui) -> impl IntoView {
         }/>
     </div>}
 }
+/// A friend's live activity, otherwise their custom status.
+fn status_line(friend: &Friend) -> Option<String> {
+    friend
+        .activity
+        .as_ref()
+        .map(super::activity::label)
+        .or_else(|| {
+            friend
+                .person
+                .custom_status
+                .as_ref()
+                .map(thiscord_frontend::member_list::status_text)
+        })
+}
 fn join_call(ui: Ui, call: Call) {
     if ui.friends.joined.get_untracked() == Some(call.id) || ui.voice_joining.get_untracked() {
         return;
@@ -276,6 +290,8 @@ async fn connected(ui: Ui, token: &str) -> Result<(), ()> {
     // History last received on this socket. The server omits an unchanged history
     // only after delivering it on the same socket for the same selection and page.
     let mut received: thiscord_frontend::direct_history::Received = None;
+    // Set by the reader: older servers close sockets sending unknown events.
+    let accepts_activity = std::rc::Rc::new(std::cell::Cell::new(false));
     sink.send(Message::Text(
         serde_json::to_string(&ClientFrame {
             version: VERSION,
@@ -304,6 +320,7 @@ async fn connected(ui: Ui, token: &str) -> Result<(), ()> {
             match frame.event {
                 ServerEvent::Snapshot { mut snapshot } => {
                     ui.friends.connected.set(true);
+                    accepts_activity.set(snapshot.accepts_activity);
                     thiscord_frontend::direct_history::retain(&mut snapshot, &mut received);
                     // A late selection response must never appear in another DM.
                     if snapshot.conversation_id != ui.friends.selected.get_untracked() {
@@ -352,6 +369,8 @@ async fn connected(ui: Ui, token: &str) -> Result<(), ()> {
     };
     let writer = async {
         let mut selected = None;
+        // What this socket last shared; a new socket starts with nothing.
+        let mut shared_activity = None;
         let mut ticks = 0u32;
         let mut sent_typing = false;
         let mut typing_tick = 0u32;
@@ -379,6 +398,15 @@ async fn connected(ui: Ui, token: &str) -> Result<(), ()> {
                 sent_typing = active;
                 typing_tick = ticks;
                 Some(ClientEvent::Typing { active })
+            } else if accepts_activity.get()
+                && ui
+                    .activity
+                    .with_untracked(|s| s.activity != shared_activity)
+            {
+                shared_activity = ui.activity.with_untracked(|s| s.activity.clone());
+                Some(ClientEvent::Activity {
+                    activity: shared_activity.clone(),
+                })
             } else if ticks.is_multiple_of(100) {
                 Some(ClientEvent::Ping {})
             } else {
@@ -536,7 +564,7 @@ fn FriendList(ui: Ui, filter: RwSignal<&'static str>) -> impl IntoView {
             let f=Memo::new(move |_|ui.friends.friend(id).unwrap_or_else(||initial.clone()));
             view!{<div data-rove data-context-conversation=id.to_string() tabindex="0" aria-haspopup="menu" aria-label=move ||f.get().person.display_name class="friend-row">
                 <crate::avatar::Avatar class="size-10 text-sm" name=Signal::derive(move ||f.get().person.display_name) avatar_id=Signal::derive(move ||f.get().person.avatar_id)/>
-                <div class="friend-row-name min-w-0 flex-1"><p class="truncate font-semibold">{move ||f.get().person.display_name}</p><p class="truncate text-xs text-white/60">{move ||format!("@{} · ",f.get().person.username)}{move ||match f.get().relationship {Relationship::Incoming=>crate::i18n::t("Incoming request"),Relationship::Outgoing=>crate::i18n::t("Request sent"),Relationship::Friend if f.get().online=>crate::i18n::t("Online"),Relationship::Friend=>crate::i18n::t("Offline")}}{move ||f.get().person.custom_status.as_ref().map(|s|format!(" · {}",thiscord_frontend::member_list::status_text(s)))}</p></div>
+                <div class="friend-row-name min-w-0 flex-1"><p class="truncate font-semibold">{move ||f.get().person.display_name}</p><p class="truncate text-xs text-white/60">{move ||format!("@{} · ",f.get().person.username)}{move ||match f.get().relationship {Relationship::Incoming=>crate::i18n::t("Incoming request"),Relationship::Outgoing=>crate::i18n::t("Request sent"),Relationship::Friend if f.get().online=>crate::i18n::t("Online"),Relationship::Friend=>crate::i18n::t("Offline")}}{move ||status_line(&f.get()).map(|s|format!(" · {s}"))}</p></div>
                 <Show when=move ||f.get().relationship==Relationship::Friend>
                     <CountBubble count=Signal::derive(move ||f.get().unread_count) label="unread messages"/>
                     <button class="icon-button" aria-label=move || crate::i18n::t("Message friend") data-tip=move || crate::i18n::t("Message") on:click=move |_|open(ui,id)><Icon kind=Glyph::Message/></button>
@@ -608,7 +636,6 @@ fn AddFriend(ui: Ui) -> impl IntoView {
         <dialog node_ref=dialog aria-labelledby="add-friend-title" class="app-dialog max-w-lg" on:click=move |ev|super::dialog::dismiss_outside(ev,dialog,false)>
             <header class="mb-4 flex items-start justify-between gap-4"><span class="dialog-mark"><Icon kind=Glyph::Friends/></span><h2 id="add-friend-title" class="dialog-title mr-auto self-center">{move || crate::i18n::t("Add friend")}</h2><button class="icon-button" aria-label=move || crate::i18n::t("Close add friend") on:click=move |_|if let Some(d)=dialog.get(){d.close();}><Icon kind=Glyph::Close/></button></header>
             <p class="dialog-description mb-5">{move || crate::i18n::t("Enter part of a display name or username (at least 2 characters) and send a friend request.")}</p>
-            <Show when=move ||ui.account.get().is_some_and(|a|!a.email_verified)><p class="mb-4 text-sm text-amber-200">{move || crate::i18n::t("Verify your email in account settings before sending friend requests.")}</p></Show>
             <form class="flex items-end gap-3" on:submit=submit><div class="min-w-0 flex-1"><Field label="Display name or username" value=query/></div><button class="btn btn-primary min-h-11" disabled=move ||busy.get()>{move ||if busy.get(){crate::i18n::t("Searching…")}else{crate::i18n::t("Search")}}</button></form>
             <p role="status" class="my-3 text-sm text-red-200">{move ||crate::i18n::message(error.get())}</p>
             <Show when=move ||searched.get() && people.get().is_empty() && error.get().is_empty()><p class="py-4 text-sm text-white/60">{move || crate::i18n::t("No matching people. Try part of their display name or username.")}</p></Show>
@@ -920,7 +947,7 @@ fn Conversation(ui: Ui, id: ConversationId) -> impl IntoView {
         }
     };
     view! {<section class="flex h-full min-h-0 flex-col">
-        <header data-context-conversation=id.to_string() class="pane-header gap-3"><button class="icon-button lg:hidden" aria-label=move || crate::i18n::t("Back to friends") on:click=move |_|{ui.mobile_content.set(false);ui.friends.selected.set(None);}><Icon kind=Glyph::Back/></button><span class="relative shrink-0"><crate::avatar::Avatar class="size-8 text-xs" name=Signal::derive(move ||friend.get().map(|f|f.person.display_name).unwrap_or_default()) avatar_id=Signal::derive(move ||friend.get().and_then(|f|f.person.avatar_id))/><span class="presence-dot header" class:online=move ||friend.get().is_some_and(|f|f.online)></span></span><div class="min-w-0 flex-1"><h2 class="pane-title truncate">{move ||friend.get().map(|f|f.person.display_name).unwrap_or_default()}</h2><Show when=move ||friend.get().is_some_and(|f|f.person.custom_status.is_some())><p class="truncate text-xs text-muted">{move ||friend.get().and_then(|f|f.person.custom_status).map(|s|thiscord_frontend::member_list::status_text(&s))}</p></Show></div><span class="presence-pill hidden md:inline-flex" class:online=move ||friend.get().is_some_and(|f|f.online)>{move ||if friend.get().is_some_and(|f|f.online){crate::i18n::t("Online")}else{crate::i18n::t("Offline")}}</span><button class="icon-button disabled:opacity-40" aria-label=move || crate::i18n::t("Start private voice call") data-tip=move || crate::i18n::t("Voice call (desktop)") disabled=move ||!available(ui) || ui.friends.has_calls() on:click=move |_|action(ui,Request::StartCall {conversation_id:id})><Icon kind=Glyph::Phone/></button><super::search::Launcher state=search/></header>
+        <header data-context-conversation=id.to_string() class="pane-header gap-3"><button class="icon-button lg:hidden" aria-label=move || crate::i18n::t("Back to friends") on:click=move |_|{ui.mobile_content.set(false);ui.friends.selected.set(None);}><Icon kind=Glyph::Back/></button><span class="relative shrink-0"><crate::avatar::Avatar class="size-8 text-xs" name=Signal::derive(move ||friend.get().map(|f|f.person.display_name).unwrap_or_default()) avatar_id=Signal::derive(move ||friend.get().and_then(|f|f.person.avatar_id))/><span class="presence-dot header" class:online=move ||friend.get().is_some_and(|f|f.online)></span></span><div class="min-w-0 flex-1"><h2 class="pane-title truncate">{move ||friend.get().map(|f|f.person.display_name).unwrap_or_default()}</h2><Show when=move ||friend.get().is_some_and(|f|status_line(&f).is_some())><p class="truncate text-xs text-muted">{move ||friend.get().and_then(|f|status_line(&f))}</p></Show></div><span class="presence-pill hidden md:inline-flex" class:online=move ||friend.get().is_some_and(|f|f.online)>{move ||if friend.get().is_some_and(|f|f.online){crate::i18n::t("Online")}else{crate::i18n::t("Offline")}}</span><button class="icon-button disabled:opacity-40" aria-label=move || crate::i18n::t("Start private voice call") data-tip=move || crate::i18n::t("Voice call (desktop)") disabled=move ||!available(ui) || ui.friends.has_calls() on:click=move |_|action(ui,Request::StartCall {conversation_id:id})><Icon kind=Glyph::Phone/></button><super::search::Launcher state=search/></header>
         <super::search::Bar state=search/>
         <super::search::Results state=search on_jump=jump/>
         <For each=move ||{let me=ui.account.with(|a|a.as_ref().map(|a|a.id));ui.friends.snapshot.with(|s|s.calls.iter().filter(|c|c.conversation_id==id && c.state==CallState::Ringing && me==Some(c.callee)).cloned().collect::<Vec<_>>())} key=|c|c.id children=move |call|view!{

@@ -65,6 +65,12 @@ pub enum AccountRequest {
         session_id: SessionId,
     },
     SendVerification,
+    /// Corrects the address of a pending (unverified) account and emails a new
+    /// verification link; earlier links stop working. Requires recent
+    /// reauthentication. Verified addresses cannot be changed in this version.
+    ChangeEmail {
+        email: String,
+    },
     VerifyEmail {
         code: String,
     },
@@ -159,6 +165,47 @@ pub struct CustomStatus {
     pub expires_at: Option<Timestamp>,
 }
 
+/// Longest accepted activity name, in Unicode scalar values.
+pub const MAX_ACTIVITY_CHARS: usize = 64;
+
+/// What an activity describes. Only games are detected today.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ActivityKind {
+    Playing,
+}
+
+/// Live activity reported by a connected desktop client ("Playing Factorio").
+/// It exists only while that client's friends socket is connected, is never
+/// stored, and shares the online-presence audience (accepted friends and fellow
+/// guild members, never across a block). The name is client-reported plain text.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Activity {
+    pub kind: ActivityKind,
+    pub name: String,
+}
+
+impl Activity {
+    pub fn playing(name: impl Into<String>) -> Self {
+        Self {
+            kind: ActivityKind::Playing,
+            name: name.into(),
+        }
+    }
+    /// The name must already be trimmed, non-empty, single-line and bounded.
+    pub fn validate(&self) -> Result<(), &'static str> {
+        let name = &self.name;
+        if name.is_empty()
+            || name.trim() != name
+            || name.chars().count() > MAX_ACTIVITY_CHARS
+            || name.chars().any(char::is_control)
+        {
+            return Err("Activity names must be 1 to 64 characters on one line");
+        }
+        Ok(())
+    }
+}
+
 /// Requested custom status. The server computes the expiry with its own clock.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -242,6 +289,35 @@ pub enum AccountResponse {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn activities_are_bounded_single_line_and_stable_on_the_wire() {
+        let valid = Activity::playing("Teamfight Tactics");
+        assert_eq!(valid.validate(), Ok(()));
+        assert_eq!(
+            serde_json::to_value(&valid).unwrap(),
+            serde_json::json!({"kind":"playing","name":"Teamfight Tactics"})
+        );
+        assert!(
+            Activity::playing("ç".repeat(MAX_ACTIVITY_CHARS))
+                .validate()
+                .is_ok()
+        );
+        for invalid in [
+            String::new(),
+            " Factorio".into(),
+            "Factorio ".into(),
+            "two\nlines".into(),
+            "bell\u{7}".into(),
+            "x".repeat(MAX_ACTIVITY_CHARS + 1),
+        ] {
+            assert!(Activity::playing(invalid).validate().is_err());
+        }
+        assert!(
+            serde_json::from_value::<Activity>(serde_json::json!({"kind":"watching","name":"x"}))
+                .is_err()
+        );
+    }
 
     #[test]
     fn custom_status_is_validated_and_additive() {

@@ -155,7 +155,7 @@ pub const SHORTCUTS: &[(&str, &[Shortcut])] = &[
         "Voice",
         &[Shortcut {
             keys: "Ctrl+Shift+Space",
-            action: "Push to talk (hold)",
+            action: "Push to talk (hold; default key, change it in Settings)",
         }],
     ),
 ];

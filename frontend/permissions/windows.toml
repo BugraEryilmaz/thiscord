@@ -11,6 +11,8 @@ commands.allow = [
   "notification_sound",
   "window_close_to_tray",
   "window_set_close_to_tray",
+  "activity_status",
+  "activity_set_enabled",
   "take_pending_invite",
   "load_session",
   "save_session",

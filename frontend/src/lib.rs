@@ -18,6 +18,7 @@ pub mod camera_choice;
 pub mod chat_history;
 pub mod direct_history;
 pub mod downloads;
+pub mod game_activity;
 pub mod invites;
 pub mod localization;
 pub mod mentions;

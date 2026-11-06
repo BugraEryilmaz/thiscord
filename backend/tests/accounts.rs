@@ -663,6 +663,99 @@ async fn verification_links_are_single_use_and_expire() {
         .unwrap();
     assert_eq!(response.status(), StatusCode::BAD_REQUEST);
 }
+#[tokio::test]
+#[ignore = "requires TEST_DATABASE_URL; CI runs with --include-ignored"]
+async fn pending_accounts_can_correct_their_email_before_verifying() {
+    let _fixture = FIXTURES.acquire().await.unwrap();
+    let db = database();
+    let app = api::router(Some(db.pool.clone()), vec![]);
+    let password = "a long test password";
+    let session = token(&call(&app,json!({"action":"register","username":"pending_user","email":"typo@example.com","password":password,"device":"test"}),None,StatusCode::OK).await);
+    let mistyped = code(&db, "verify");
+    call(&app,json!({"action":"register","username":"pending_peer","email":"taken@example.com","password":password,"device":"test"}),None,StatusCode::OK).await;
+    let change = |email: &str| json!({"action":"change_email","email":email});
+    // Changing an identifier needs recent reauthentication.
+    call(
+        &app,
+        change("fixed@example.com"),
+        Some(&session),
+        StatusCode::FORBIDDEN,
+    )
+    .await;
+    call(
+        &app,
+        json!({"action":"reauthenticate","password":password}),
+        Some(&session),
+        StatusCode::OK,
+    )
+    .await;
+    call(
+        &app,
+        change("not an email"),
+        Some(&session),
+        StatusCode::BAD_REQUEST,
+    )
+    .await;
+    call(
+        &app,
+        change("taken@example.com"),
+        Some(&session),
+        StatusCode::BAD_REQUEST,
+    )
+    .await;
+    let changed = call(
+        &app,
+        change(" Fixed@Example.com "),
+        Some(&session),
+        StatusCode::OK,
+    )
+    .await;
+    assert_eq!(changed["account"]["email"], "fixed@example.com");
+    assert_eq!(changed["account"]["email_verified"], false);
+    #[derive(QueryableByName)]
+    struct Count {
+        #[diesel(sql_type = diesel::sql_types::BigInt)]
+        count: i64,
+    }
+    let withdrawn = diesel::sql_query(
+        "SELECT count(*) AS count FROM mail_outbox WHERE recipient='typo@example.com'",
+    )
+    .get_result::<Count>(&mut db.pool.get().unwrap())
+    .unwrap();
+    assert_eq!(withdrawn.count, 0);
+    // The link sent to the mistyped address no longer verifies anything.
+    call(
+        &app,
+        json!({"action":"verify_email","code":mistyped}),
+        None,
+        StatusCode::UNAUTHORIZED,
+    )
+    .await;
+    call(
+        &app,
+        json!({"action":"verify_email","code":code(&db, "verify")}),
+        None,
+        StatusCode::OK,
+    )
+    .await;
+    let current = call(
+        &app,
+        json!({"action":"current"}),
+        Some(&session),
+        StatusCode::OK,
+    )
+    .await;
+    assert_eq!(current["account"]["email"], "fixed@example.com");
+    assert_eq!(current["account"]["email_verified"], true);
+    // Verified addresses are not changeable in this version.
+    call(
+        &app,
+        change("other@example.com"),
+        Some(&session),
+        StatusCode::BAD_REQUEST,
+    )
+    .await;
+}
 fn sql(db: &Database, command: &str) {
     db.pool.get().unwrap().batch_execute(command).unwrap();
 }

@@ -57,6 +57,31 @@ async fn search_matches_partial_display_names_and_usernames() {
             assert!(person.get("avatar_id").is_some());
         }
     }
+    // Pending (unverified) accounts are neither found nor requestable.
+    diesel::sql_query("UPDATE accounts SET email_verified=FALSE WHERE id=$1::uuid")
+        .bind::<Text, _>(second_id.to_string())
+        .execute(&mut db.pool.get().unwrap())
+        .unwrap();
+    let result = social(
+        &app,
+        &actor,
+        json!({"action":"search","query":"Smith"}),
+        StatusCode::OK,
+    )
+    .await;
+    assert_eq!(result["people"].as_array().unwrap().len(), 1);
+    assert_eq!(result["people"][0]["id"], json!(first_id));
+    social(
+        &app,
+        &actor,
+        json!({"action":"add","account_id":second_id}),
+        StatusCode::FORBIDDEN,
+    )
+    .await;
+    diesel::sql_query("UPDATE accounts SET email_verified=TRUE WHERE id=$1::uuid")
+        .bind::<Text, _>(second_id.to_string())
+        .execute(&mut db.pool.get().unwrap())
+        .unwrap();
     // Username matching also works in the middle, with case ignored.
     let result = social(
         &app,

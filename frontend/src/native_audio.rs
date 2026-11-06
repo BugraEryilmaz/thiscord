@@ -17,7 +17,9 @@ impl Default for AudioState {
         }
     }
 }
-const HOTKEY: &str = "Control+Shift+Space";
+/// The push-to-talk key currently registered, so a changed key unregisters
+/// the old one. Held across unregister/register to serialize them.
+static PTT: Mutex<Option<tauri_plugin_global_shortcut::Shortcut>> = Mutex::new(None);
 #[tauri::command]
 pub async fn audio_diagnostics_enabled() -> Result<bool, String> {
     tauri::async_runtime::spawn_blocking(audio::diagnostics::enabled)
@@ -317,7 +319,7 @@ pub async fn audio_test(
     .await
     .map_err(|_| "Audio worker stopped")?;
     if result.is_err() {
-        let _ = app.global_shortcut().unregister(HOTKEY);
+        drop_ptt_key(&app);
     }
     result
 }
@@ -326,7 +328,7 @@ pub async fn audio_stop(
     app: tauri::AppHandle,
     state: State<'_, AudioState>,
 ) -> Result<AudioStatus, String> {
-    let _ = app.global_shortcut().unregister(HOTKEY);
+    drop_ptt_key(&app);
     command(state.engine.clone(), Command::Stop).await
 }
 #[tauri::command]
@@ -346,7 +348,7 @@ pub async fn audio_status(
     if !result.running
         && crate::native_voice::voice_status(app.state()).is_ok_and(|s| s.channel_id.is_none())
     {
-        let _ = app.global_shortcut().unregister(HOTKEY);
+        drop_ptt_key(&app);
     }
     Ok(result)
 }
@@ -479,15 +481,63 @@ pub async fn audio_webrtc_probe() -> Result<String, String> {
     result
 }
 
-pub fn unregister_ptt(app: &tauri::AppHandle) {
-    let _ = app.global_shortcut().unregister(HOTKEY);
+fn release_ptt(
+    app: &tauri::AppHandle,
+    current: &mut Option<tauri_plugin_global_shortcut::Shortcut>,
+) {
+    if let Some(key) = current.take() {
+        let _ = app.global_shortcut().unregister(key);
+    }
     app.state::<AudioState>()
         .engine
         .notify(Command::Pressed(false));
 }
+/// Unregisters the push-to-talk key without signaling a release.
+fn drop_ptt_key(app: &tauri::AppHandle) {
+    take_ptt_key(app);
+}
+/// Unregisters the push-to-talk key without signaling a release; true when one
+/// was registered (a running push-to-talk call that `refresh_ptt` restores).
+pub fn take_ptt_key(app: &tauri::AppHandle) -> bool {
+    let key = PTT.lock().unwrap_or_else(|e| e.into_inner()).take();
+    if let Some(key) = key {
+        let _ = app.global_shortcut().unregister(key);
+    }
+    key.is_some()
+}
+pub fn unregister_ptt(app: &tauri::AppHandle) {
+    release_ptt(app, &mut PTT.lock().unwrap_or_else(|e| e.into_inner()));
+}
+/// Re-registers push-to-talk for a running call after the key changed; a no-op
+/// without running audio or global push-to-talk.
+pub fn refresh_ptt(app: &tauri::AppHandle) -> Result<(), String> {
+    let state = app.state::<AudioState>();
+    if !state.engine.command(Command::Peek)?.running {
+        return Ok(());
+    }
+    let settings = app
+        .state::<crate::native_voice::VoiceState>()
+        .settings
+        .lock()
+        .map_err(|_| "Settings unavailable")?
+        .clone();
+    register_ptt(app, &settings)
+}
 pub fn register_ptt(app: &tauri::AppHandle, settings: &AudioSettings) -> Result<(), String> {
-    unregister_ptt(app);
-    if settings.global_push_to_talk && settings.mode == TransmitMode::PushToTalk {
+    let wanted = settings.global_push_to_talk && settings.mode == TransmitMode::PushToTalk;
+    // Only global push-to-talk depends on the configured key.
+    let key = if wanted {
+        crate::native_shortcuts::push_to_talk(app)?
+    } else {
+        None
+    };
+    let mut current = PTT.lock().unwrap_or_else(|e| e.into_inner());
+    release_ptt(app, &mut current);
+    // Without a key, push-to-talk uses the in-app hold button only.
+    let Some(key) = key else {
+        return Ok(());
+    };
+    {
         #[cfg(target_os = "linux")]
         if std::env::var_os("WAYLAND_DISPLAY").is_some() {
             return Err(
@@ -495,7 +545,8 @@ pub fn register_ptt(app: &tauri::AppHandle, settings: &AudioSettings) -> Result<
                     .into(),
             );
         }
-        app.global_shortcut().on_shortcut(HOTKEY,|app,_,event|{app.state::<AudioState>().engine.notify(Command::Pressed(event.state==ShortcutState::Pressed));}).map_err(|_|"Cannot register Ctrl+Shift+Space. Check OS shortcut permissions or another app using it.")?;
+        app.global_shortcut().on_shortcut(key,|app,_,event|{app.state::<AudioState>().engine.notify(Command::Pressed(event.state==ShortcutState::Pressed));}).map_err(|_|"Cannot register the push-to-talk key. Check OS shortcut permissions or another app using it.")?;
+        *current = Some(key);
     }
     Ok(())
 }

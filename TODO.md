@@ -95,6 +95,8 @@ media compatibility spike can happen before chat to expose platform constraints.
 - [ ] Verify browser handoff and OS-store prompts interactively on Windows/macOS/Linux.
   Windows credential-store round trip and Windows/Linux loopback tests pass locally;
   macOS execution remains a CI/manual check. See docs/accounts.md.
+- [x] Pending (unverified) accounts see only a verification screen with automatic detection, resend cooldown, address correction and sign-out; they are hidden from friend search and requests.
+- [ ] Accept the verification screen interactively (desktop and `/app`), including verifying on a phone while the desktop waits.
 - [ ] Future: confirmed email/username changes and account export.
 
 ## 2. Membership and detailed permissions
@@ -140,9 +142,13 @@ and single-process chat/media enforcement.
 - [x] Create/edit/delete/reorder text and voice channels and organizational categories.
 - [ ] Guild navigation, channel/member lists and settings views.
 - [x] Live guild member list (online/offline, presence, custom status, block filtering) with profile cards, member menus and a phone/tablet drawer.
+- [x] Member list groups by highest-ranked role (then Online, then Offline) with role tags on rows and profile cards.
 - [x] Account custom status with emoji, expiry presets, cross-device sync and friend/guild/DM/voice-tooltip display.
-- [ ] Role display/hoist settings for member list grouping and colours.
+- [ ] Role display settings: a per-role "show separately" toggle (every assigned role groups today) and role colours.
 - [ ] Accept the member list drawer, profile cards and custom status dialog interactively on Windows/macOS/Linux and mobile browsers.
+- [x] Desktop game activity ("Playing …") from local process detection, with League/TFT mode lookup, a device setting and live friend/member display (docs/activity.md).
+- [ ] Verify game detection with real games on Windows/macOS/Linux (including Proton and a TFT match) and compile/run the macOS libproc path.
+- [ ] Future: user-added games and broader game table.
 - [x] Shared confirmation dialog for destructive operations; current cascades documented.
 - [ ] Archive (soft-delete/restore) behavior for destructive operations.
 - [ ] Transaction and authorization tests for management operations.
@@ -218,7 +224,9 @@ and single-process chat/media enforcement.
   microphones on Windows/macOS/Linux, including quiet Turkish/English speech,
   typing, fans, TV voices and rapid mute/PTT transitions.
 - [x] Optional Rust echo cancellation, noise suppression and automatic gain processing.
-- [x] Optional global Ctrl+Shift+Space integration with conflict/error reporting.
+- [x] Optional global push-to-talk integration with conflict/error reporting; the key is configurable with the other shortcuts.
+- [x] Click-to-record shortcut controls (live modifier preview, Escape/Tab, clear) instead of typed combinations.
+- [ ] Accept recording, global push-to-talk key changes during a call, and OS-consumed combinations on Windows/macOS/Linux/X11.
 - [x] Retire devices on leave/logout/window destruction and lease expiry; stop retired
   callbacks while potentially blocked driver cleanup runs separately.
 - [ ] Physical microphone/headset, suspend and acoustic acceptance on all three OSes.

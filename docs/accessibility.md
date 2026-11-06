@@ -25,7 +25,7 @@ macOS) for the in-app reference; **Settings → Keyboard shortcuts** (desktop:
 | Ctrl/⌘+F | Search the open conversation (existing) |
 | ↑ in an empty message box | Edit your last message (existing) |
 | Shift+F10 or the Menu key | Context menu for the focused server, channel, member, message author or conversation |
-| Ctrl+Shift+Space | Push-to-talk (fixed, existing) |
+| Ctrl+Shift+Space | Push-to-talk (default; change it in Settings → Shortcuts) |
 
 Notes and conflict rules:
 

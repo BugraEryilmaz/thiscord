@@ -219,16 +219,18 @@ pub(super) fn editable(target: Option<web_sys::EventTarget>) -> bool {
         _ => false,
     }
 }
-/// Focused-page shortcuts in the browser: push-to-talk (Ctrl+Shift+Space)
+/// Focused-page shortcuts in the browser: the configured push-to-talk key
 /// during calls, and the configured mute/deafen toggles.
 fn browser_key(ui: Ui, e: &web_sys::KeyboardEvent, down: bool) {
-    use thiscord_frontend::web_shortcuts::{Chord, PUSH_TO_TALK, Pressed};
+    use thiscord_frontend::web_shortcuts::Pressed;
     let code = e.code();
-    let Some(ptt) = Chord::parse(PUSH_TO_TALK) else {
-        return;
-    };
+    let bindings = crate::browser_voice::shortcut_bindings();
     if !down {
-        if ptt.released_by(&code) {
+        if bindings
+            .push_to_talk
+            .as_ref()
+            .is_some_and(|ptt| ptt.released_by(&code))
+        {
             crate::browser_voice::pressed(false);
         }
         return;
@@ -240,7 +242,10 @@ fn browser_key(ui: Ui, e: &web_sys::KeyboardEvent, down: bool) {
         alt: e.alt_key(),
         meta: e.meta_key(),
     };
-    if ptt.matches(&pressed_keys)
+    if bindings
+        .push_to_talk
+        .as_ref()
+        .is_some_and(|ptt| ptt.matches(&pressed_keys))
         && ui
             .audio
             .with_untracked(|a| a.mode == TransmitMode::PushToTalk)
@@ -255,9 +260,7 @@ fn browser_key(ui: Ui, e: &web_sys::KeyboardEvent, down: bool) {
     if e.repeat() || e.default_prevented() {
         return;
     }
-    if let Some(action) =
-        crate::browser_voice::shortcut_bindings().action(&pressed_keys, editable(e.target()))
-    {
+    if let Some(action) = bindings.action(&pressed_keys, editable(e.target())) {
         e.prevent_default();
         toggle(ui, action);
     }
@@ -280,7 +283,7 @@ pub(super) fn AudioHost(ui: Ui) -> impl IntoView {
     let local = desktop() || browser_voice(ui);
     if browser_voice(ui) {
         // Browsers deliver keys only while this page has focus; there are no
-        // global shortcuts. Push-to-talk stays Ctrl+Shift+Space like desktop.
+        // global shortcuts. Push-to-talk uses the key from Settings → Shortcuts.
         let down = window_event_listener(leptos::ev::keydown, move |e| browser_key(ui, &e, true));
         let up = window_event_listener(leptos::ev::keyup, move |e| browser_key(ui, &e, false));
         on_cleanup(move || {
@@ -508,7 +511,7 @@ pub(super) fn VoiceBar(ui: Ui) -> impl IntoView {
         <div class="dock-account flex min-w-0 items-center gap-2 p-2">
             <button class="dock-profile flex min-w-0 flex-1 items-center gap-2 rounded-lg p-1 text-left hover:bg-white/5" aria-label=move || crate::i18n::t("Your profile") data-tip=move ||ui.account.get().map(|a|format!("{} (@{})",a.display_name,a.username)).unwrap_or_default() on:click=move |_|ui.page.set("profile")>
                 <span class="relative shrink-0"><crate::avatar::Avatar name=Signal::derive(move ||ui.account.get().map(|a|a.display_name).unwrap_or_default()) avatar_id=Signal::derive(move ||ui.account.get().and_then(|a|a.avatar_id))/><span class="connection-dot" class:dnd=move ||super::notifications::do_not_disturb(ui) class:connected=move ||ui.socket_status.get()==super::chat::ConnectionStatus::Connected class:connecting=move ||matches!(ui.socket_status.get(),super::chat::ConnectionStatus::Connecting|super::chat::ConnectionStatus::Reconnecting)></span></span>
-                <span class="min-w-0"><span class="block truncate text-sm font-semibold">{move ||ui.account.get().map(|a|if a.display_name.is_empty(){a.username}else{a.display_name})}</span><span class="block truncate text-xs text-white/60" role="status">{move ||match super::status::own(ui) {Some(status) if ui.socket_status.get()==super::chat::ConnectionStatus::Connected => status, _ if ui.socket_status.get()==super::chat::ConnectionStatus::Connected && super::notifications::do_not_disturb(ui) => crate::i18n::t("Do not disturb").to_owned(), _ => ui.socket_status.get().label().to_owned()}}</span></span>
+                <span class="min-w-0"><span class="block truncate text-sm font-semibold">{move ||ui.account.get().map(|a|if a.display_name.is_empty(){a.username}else{a.display_name})}</span><span class="block truncate text-xs text-white/60" role="status">{move ||match super::activity::own(ui).or_else(||super::status::own(ui)) {Some(status) if ui.socket_status.get()==super::chat::ConnectionStatus::Connected => status, _ if ui.socket_status.get()==super::chat::ConnectionStatus::Connected && super::notifications::do_not_disturb(ui) => crate::i18n::t("Do not disturb").to_owned(), _ => ui.socket_status.get().label().to_owned()}}</span></span>
             </button>
             <super::status::StatusButton ui=ui/>
             <VoiceControls ui=ui/>
@@ -767,8 +770,9 @@ pub(super) fn AudioSettingsPanel(ui: Ui) -> impl IntoView {
                 <label class="flex flex-wrap gap-3"><span>{move || crate::i18n::t("Microphone boost")}</span><output class="text-xs text-white/60">{move||format!("{:.1}×",ui.audio.get().input_gain)}</output><input type="range" min="1" max="10" step="0.1" disabled=move||ui.audio_saving.get() prop:value=move||ui.audio.get().input_gain.to_string() on:change=move|e|{if let Ok(v)=event_target_value(&e).parse::<f32>(){ui.audio.update(|s|s.input_gain=v);save(ui);}}/></label>
                 <p class="settings-hint">{move ||if browser {crate::i18n::t("Boosts your microphone after the browser’s processing and before voice activation. Start at 2× for a quiet microphone; reduce it if your voice distorts or background noise activates it. 1× leaves the level unchanged.")} else {crate::i18n::t("Boosts your microphone before voice activation and automatic gain. Start at 2× for a quiet microphone; reduce it if your voice distorts or background noise activates it. 1× leaves the level unchanged.")}}</p>
                 <label class="flex flex-wrap gap-3"><span>{move || crate::i18n::t("Activation threshold")}</span><input type="range" min="1" max="100" prop:value=move||(ui.audio.get().activation_threshold*1000.0).to_string() on:change=move|e|{if let Ok(v)=event_target_value(&e).parse::<f32>(){ui.audio.update(|s|s.activation_threshold=v/1000.0);save(ui);}}/></label>
-                <Show when=move ||browser><p class="settings-hint">{move || crate::i18n::t("Hold Ctrl+Shift+Space or the talk button in the voice bar. Browsers receive keys only while this Thiscord tab is focused; set mute and deafen keys in Settings → Keyboard shortcuts.")}</p></Show>
-                <Show when=move || !ui.audio_control.is_bot() && !browser><label class="flex items-center gap-3"><input type="checkbox" disabled=move||ui.audio_saving.get() prop:checked=move||ui.audio.get().global_push_to_talk on:change=move|e|{ui.audio.update(|s|s.global_push_to_talk=event_target_checked(&e));save(ui);}/>{move || crate::i18n::t("Global push-to-talk: Ctrl+Shift+Space (Windows, macOS, Linux/X11)")}</label></Show>
+                <Show when=move ||browser><p class="settings-hint">{move || crate::i18n::t("Hold your push-to-talk key or the talk button in the voice bar. Browsers receive keys only while this Thiscord tab is focused; choose the push-to-talk, mute and deafen keys in Settings → Keyboard shortcuts.")}</p></Show>
+                <Show when=move || !ui.audio_control.is_bot() && !browser><label class="flex items-center gap-3"><input type="checkbox" disabled=move||ui.audio_saving.get() prop:checked=move||ui.audio.get().global_push_to_talk on:change=move|e|{ui.audio.update(|s|s.global_push_to_talk=event_target_checked(&e));save(ui);}/>{move || crate::i18n::t("Global push-to-talk: works while other apps are focused (Windows, macOS, Linux/X11)")}</label></Show>
+                <Show when=move || ui.audio.get().mode==TransmitMode::PushToTalk && !ui.audio_control.is_remote() && !ui.audio_control.is_bot()><button type="button" class="settings-link text-left" on:click=move |_| super::settings::navigate(ui,"shortcuts")>{move || crate::i18n::t("Change push-to-talk key")}</button></Show>
                 <Show when=move ||voice_available(ui)>
                 <div class="settings-actions">                <button class="rounded bg-brand px-4 py-2 disabled:opacity-50" disabled=move||busy.get()||ui.voice.get().channel_id.is_some() on:click=move |_|test(false)>{move || crate::i18n::t("Test playback (5 seconds)")}</button>
                     <button class="rounded bg-white/10 px-4 py-2 disabled:opacity-50" disabled=move||busy.get()||ui.voice.get().channel_id.is_some() on:click=move |_|test(true)>{move || crate::i18n::t("Test microphone (60 seconds)")}</button>

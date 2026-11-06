@@ -31,12 +31,17 @@ everyone listing it. Snapshots are rebuilt at the earliest listed status expiry,
 like call expiry. Both fields are optional and omitted when unset. See
 [accounts.md](accounts.md#custom-status).
 
+Search and friend requests skip pending accounts (unverified email); they appear
+once verified ([accounts.md](accounts.md)).
+
 Accepted friends can open a private conversation and start a voice call without
 sharing a guild. Online means at least one authenticated friends socket is alive,
 regardless of the selected guild/channel. Multiple devices count as one person;
 pending requests do not disclose presence. Older clients without the friends socket
 do not advertise this presence. Disconnect removes its in-memory lease; silent
 connections are closed after 35 seconds. This remains a single-backend-process design.
+Online friends also carry the live game activity reported by one of their desktop
+sockets (`Friend.activity`); see [activity.md](activity.md).
 
 ## Contracts and storage
 
