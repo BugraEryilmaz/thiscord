@@ -314,7 +314,8 @@ GStreamer plugins. Building needs `libgstreamer1.0-dev`,
   reject duplicates/late packets. A deadline timer resolves gaps even if no more
   packets arrive: each video track sleeps until its oldest reordered packet's
   40 ms deadline or its next allowed recovery request (250 ms idle bound), instead
-  of waking every 10 ms for the whole call on all sixteen video tracks. Complete-frame queues allow eight frames, at most 8 MiB and
+  of waking every 10 ms for the whole call on all sixteen video tracks. The track
+  keeps one timer and re-arms it only when that deadline changes. Complete-frame queues allow eight frames, at most 8 MiB and
   250 ms age. Short backlogs drain in order; overflow can retain a newer queued
   keyframe and its suffix. Unrecoverable dependency loss requests a fresh IDR.
   Feedback is coalesced to one request per stream per 500 ms and per publisher
@@ -340,8 +341,9 @@ GStreamer plugins. Building needs `libgstreamer1.0-dev`,
   paced keyframe bursts. This deliberately trades some playback latency for
   consistent presentation; it is a target, not an end-to-end delay guarantee.
   Unsupported WebViews retain their native buffering. Diagnostics are sampled
-  once per second while the independent 250 ms viewer heartbeat continues.
-- Viewers send control heartbeats at 250 ms, expire after three seconds (tolerating short UI stalls), and close on
+  once per second alongside the viewer heartbeat.
+- Viewers send control heartbeats every 250 ms while connecting and once per second
+  once playing, expire after three seconds (tolerating short UI stalls), and close on
   unmount/document hiding. Replacement viewers have distinct leases. Roster/epoch,
   deafen and connection changes revoke forwarding and close the local peer;
   pending work checks its lease and arrival deadline. Negotiations are bounded.
