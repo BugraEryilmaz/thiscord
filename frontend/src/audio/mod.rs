@@ -625,12 +625,11 @@ impl Remote {
         let wanted = self.receive.update(
             now,
             self.decode_stats.normal_frames,
-            self.jitter.metrics().sequence_gaps,
+            self.jitter.sequence_gaps(),
         );
         if wanted != self.jitter.deep_redundancy {
-            let metrics = self.jitter.metrics();
             // Keep the desired state; apply it once the stream is quiet.
-            if wanted || metrics.dtx || metrics.inactive {
+            if wanted || self.jitter.quiet() {
                 return self.configure(writer, manual, true, now);
             }
         }
@@ -700,7 +699,6 @@ impl Remote {
                 return;
             }
         }
-        let metrics = self.jitter.metrics();
         writer
             .control
             .pending_media
@@ -708,7 +706,7 @@ impl Remote {
         writer
             .control
             .quiet
-            .store(metrics.dtx || metrics.inactive, Ordering::Release);
+            .store(self.jitter.quiet(), Ordering::Release);
         if !writer.ready() {
             return;
         }
@@ -775,7 +773,6 @@ impl Remote {
                 .quality
                 .add(Count::PcmOverflowSamples, (count - written) as u64);
         }
-        let metrics = self.jitter.metrics();
         writer
             .control
             .pending_media
@@ -783,7 +780,7 @@ impl Remote {
         writer
             .control
             .quiet
-            .store(metrics.dtx || metrics.inactive, Ordering::Release);
+            .store(self.jitter.quiet(), Ordering::Release);
     }
 }
 struct Devices {
@@ -1653,9 +1650,11 @@ type Request = (Command, Option<mpsc::Sender<Result<AudioStatus, String>>>);
 /// capture draining cannot starve behind a long backlog.
 const MEDIA_BATCH: usize = 32;
 /// Fallback wait when nothing unparks the worker. Device callbacks normally wake
-/// it every 10 ms during a session; without one there are no realtime deadlines.
+/// it every 10 ms during a session; without one there are no realtime deadlines,
+/// and every command unparks it. One second keeps the watchdog heartbeat (3 s
+/// stall threshold) fresh while the app sits outside calls.
 fn idle_wait(session: bool) -> Duration {
-    Duration::from_millis(if session { 10 } else { 100 })
+    Duration::from_millis(if session { 10 } else { 1000 })
 }
 fn lease_expired(voice: bool, elapsed: Duration) -> bool {
     elapsed > Duration::from_secs(if voice { 15 } else { 3 })
@@ -1738,9 +1737,9 @@ fn run(
             last_snapshot = Instant::now();
             if let Some(s) = &session {
                 diagnostics::quality(|| s.quality());
-                diagnostics::event(
+                diagnostics::event_with(
                     "audio_snapshot",
-                    serde_json::json!({"processing_resets":s.processing.resets,"processing_reset_causes":s.processing.reset_causes,"opus_decode":s.remotes.iter().flatten().map(|r| &r.decode_stats).collect::<Vec<_>>(),"verified_fec_frames":null,"playout":s.remotes.iter().flatten().map(|r|r.jitter.metrics()).collect::<Vec<_>>(),"receive":s.remotes.iter().flatten().map(|r|r.jitter.diagnostics()).collect::<Vec<_>>(),"health":s.devices.health.diagnostics(),"recovering":s.recovery.active(),"muted":s.settings.muted,"deafened":s.settings.deafened,"deep_redundancy":s.settings.deep_redundancy,"dred_bitrate_target":if s.settings.deep_redundancy { dred::BITRATE } else { 32_000 },"echo":s.settings.echo_cancellation,"neural_echo":s.settings.neural_echo,"suppression":s.settings.noise_suppression,"suppression_model":s.settings.noise_suppression_model,"suppression_strength":s.settings.noise_suppression_strength,"automatic_gain":s.settings.automatic_gain,"capture_overflow_samples":s.devices.control.dropped.load(Ordering::Relaxed),"playback_starvation_samples":s.devices.control.underruns.load(Ordering::Relaxed)}),
+                    || serde_json::json!({"processing_resets":s.processing.resets,"processing_reset_causes":s.processing.reset_causes,"opus_decode":s.remotes.iter().flatten().map(|r| &r.decode_stats).collect::<Vec<_>>(),"verified_fec_frames":null,"playout":s.remotes.iter().flatten().map(|r|r.jitter.metrics()).collect::<Vec<_>>(),"receive":s.remotes.iter().flatten().map(|r|r.jitter.diagnostics()).collect::<Vec<_>>(),"health":s.devices.health.diagnostics(),"recovering":s.recovery.active(),"muted":s.settings.muted,"deafened":s.settings.deafened,"deep_redundancy":s.settings.deep_redundancy,"dred_bitrate_target":if s.settings.deep_redundancy { dred::BITRATE } else { 32_000 },"echo":s.settings.echo_cancellation,"neural_echo":s.settings.neural_echo,"suppression":s.settings.noise_suppression,"suppression_model":s.settings.noise_suppression_model,"suppression_strength":s.settings.noise_suppression_strength,"automatic_gain":s.settings.automatic_gain,"capture_overflow_samples":s.devices.control.dropped.load(Ordering::Relaxed),"playback_starvation_samples":s.devices.control.underruns.load(Ordering::Relaxed)}),
                 );
             }
         }

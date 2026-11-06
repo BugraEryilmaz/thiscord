@@ -350,7 +350,11 @@ encryption, not end-to-end encryption against the server. See [audio.md](audio.m
 ## Viewing demand and adaptive quality
 
 `screen_subscriptions` is negotiated in the voice offer/answer. Clients send a
-bounded, full replacement `screen_views` list every 500 ms while connected.
+bounded, full replacement `screen_views` list while connected. The web client
+sends it every 500 ms; the native client checks every 500 ms but sends only a
+changed list or a once-per-second renewal (each update takes the SFU room write
+lock). Its mute/deafen `state` likewise goes out on change, with a five-second
+refresh, and both are re-sent after a signaling resume.
 Each entry binds a room slot, account ID and share epoch to a receiver bitrate
 budget. The server ignores stale identities/epochs and self-subscriptions;
 invalid bounds or duplicate slots reject signaling. Views expire after three
@@ -364,7 +368,7 @@ no viewers: native encoding and video sending pause, with capture reduced to one
 raw refresh per second so a static source can resume. Publisher demand also expires
 after three seconds if control feedback stops. The SFU immediately excludes
 unsubscribed receivers from video and shared-audio fanout, including already queued
-packets. Local close/hide reaches the SFU on the next 500 ms renewal; a stalled UI
+packets. Local close/hide reaches the SFU on the next 500 ms check; a stalled UI
 first loses its three-second local viewer lease. Publisher shared-audio capture
 continues until Stop sharing; it is not forwarded to non-viewers.
 

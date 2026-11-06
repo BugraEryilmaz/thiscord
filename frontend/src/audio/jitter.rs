@@ -687,6 +687,25 @@ impl Jitter {
     pub fn pending_media(&self) -> bool {
         self.playing && !self.dtx && !self.packets.is_empty()
     }
+    fn inactive(&self) -> bool {
+        self.cursor.is_none()
+            || (self.packets.is_empty() && self.missing >= MAX_GAP)
+            || (self.dtx
+                && self
+                    .latest
+                    .zip(self.last_service)
+                    .is_some_and(|((_, arrived), now)| {
+                        now.saturating_duration_since(arrived) >= Duration::from_secs(1)
+                    }))
+    }
+    /// `metrics().dtx || metrics().inactive`, without building the report;
+    /// read on every playback refill.
+    pub fn quiet(&self) -> bool {
+        self.dtx || self.inactive()
+    }
+    pub fn sequence_gaps(&self) -> u64 {
+        self.metrics.sequence_gaps
+    }
     pub fn metrics(&self) -> Metrics {
         Metrics {
             packets: self.packets.len(),
@@ -696,15 +715,7 @@ impl Jitter {
                 .expired
                 .saturating_sub(self.metrics.worker_queue_discards),
             dtx: self.dtx,
-            inactive: self.cursor.is_none()
-                || (self.packets.is_empty() && self.missing >= MAX_GAP)
-                || (self.dtx
-                    && self
-                        .latest
-                        .zip(self.last_service)
-                        .is_some_and(|((_, arrived), now)| {
-                            now.saturating_duration_since(arrived) >= Duration::from_secs(1)
-                        })),
+            inactive: self.inactive(),
             ..self.metrics.clone()
         }
     }

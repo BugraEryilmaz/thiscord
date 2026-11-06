@@ -126,6 +126,34 @@ impl ShareSignaling {
     }
 }
 
+/// Signaling that only needs re-sending when it changes, plus a slow refresh.
+/// Each State and ScreenViews message takes the SFU room write lock; resending
+/// unchanged values every 500 ms per member contended with packet fan-out.
+struct Refresh<T> {
+    last: Option<(T, Instant)>,
+    period: Duration,
+}
+impl<T: PartialEq + Clone> Refresh<T> {
+    fn new(period: Duration) -> Self {
+        Self { last: None, period }
+    }
+    /// Sends dropped during signaling recovery are repaired by invalidating
+    /// on `Resumed`.
+    fn invalidate(&mut self) {
+        self.last = None;
+    }
+    fn due(&mut self, value: &T, now: Instant) -> bool {
+        if let Some((last, at)) = &self.last
+            && last == value
+            && now.saturating_duration_since(*at) < self.period
+        {
+            return false;
+        }
+        self.last = Some((value.clone(), now));
+        true
+    }
+}
+
 #[derive(Default)]
 struct MediaState {
     connected: AtomicBool,
@@ -1007,6 +1035,10 @@ async fn run(
     let mut roster: Vec<Participant> = Vec::new();
     let mut roster_compatibility = thiscord_frontend::audio::red::RosterCompatibility::default();
     let mut ticker = tokio::time::interval(Duration::from_millis(500));
+    // Mute/deafen state has no lease; refresh it well inside the server's 20 s
+    // silence detach. Views expire after VIEW_LEASE_SECS (3 s) without renewal.
+    let mut voice_state = Refresh::new(Duration::from_secs(5));
+    let mut views_sent = Refresh::new(Duration::from_secs(1));
     ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
     let start = Instant::now();
     let mut shares = ShareSignaling {
@@ -1181,6 +1213,8 @@ async fn run(
                         red_sender.clear();
                         if packet_redundancy { engine.notify_control(Command::ReceiveBoundary { connection: attempt.connection.clone(), generation: transmit_control.generation(), epoch: None })?; }
                         shares.invalidate();
+                        voice_state.invalidate();
+                        views_sent.invalidate();
                         // An interrupted chunked admin reply cannot be replayed
                         // safely. The server rejects that request on reattachment.
                         remote_jobs.abort_all();
@@ -1327,13 +1361,19 @@ async fn run(
                     red_sender.clear();
                     engine.notify_control(Command::ReceiveBoundary { connection: attempt.connection.clone(), generation: transmit_control.generation(), epoch: None })?;
                 }
-                if !packet_redundancy || configuration.muted || configuration.deafened || boundary.ready() {
+                let now = Instant::now();
+                if (!packet_redundancy || configuration.muted || configuration.deafened || boundary.ready())
+                    && !signaling.recovering()
+                    && voice_state.due(&(configuration.muted, configuration.deafened), now)
+                {
                     signaling.send(ClientEvent::State{muted:configuration.muted,deafened:configuration.deafened});
                 }
-                if screen_subscriptions {
+                if screen_subscriptions && !signaling.recovering() {
                     let mut views = if deafened { vec![] } else { app.state::<crate::native_screen::ScreenState>().subscriptions() };
                     if !deafened { views.extend(camera.views.subscriptions()); }
-                    signaling.send(ClientEvent::ScreenViews { views });
+                    if views_sent.due(&views, now) {
+                        signaling.send(ClientEvent::ScreenViews { views });
+                    }
                 }
             }
         }
@@ -1343,6 +1383,32 @@ async fn run(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn unchanged_signaling_waits_for_refresh_and_changes_send_immediately() {
+        let start = Instant::now();
+        let mut state = Refresh::new(Duration::from_secs(5));
+        assert!(state.due(&(false, false), start));
+        for tick in 1..10 {
+            assert!(!state.due(&(false, false), start + Duration::from_millis(tick * 500)));
+        }
+        assert!(state.due(&(false, false), start + Duration::from_secs(5)));
+        assert!(state.due(&(true, false), start + Duration::from_millis(5500)));
+        assert!(!state.due(&(true, false), start + Duration::from_secs(6)));
+        state.invalidate();
+        assert!(state.due(&(true, false), start + Duration::from_millis(6500)));
+        // Views renew inside the server's lease even when unchanged.
+        let mut views = Refresh::new(Duration::from_secs(1));
+        let lease = Duration::from_secs(thiscord_shared::screen::VIEW_LEASE_SECS);
+        let mut last = start;
+        for tick in 0..20 {
+            let now = start + Duration::from_millis(tick * 500);
+            if views.due(&Vec::<u32>::new(), now) {
+                last = now;
+            }
+            assert!(now - last < lease);
+        }
+    }
 
     #[tokio::test]
     async fn peer_changes_wake_audio_without_waiting_for_the_status_interval() {

@@ -39,6 +39,10 @@ pub struct SampleCounter {
 }
 impl SampleCounter {
     pub fn add(&self, n: u64) {
+        // Most callback counts are zero; skip the shared-cache-line RMW.
+        if n == 0 {
+            return;
+        }
         if self
             .value
             .fetch_add(n, Ordering::Relaxed)
@@ -443,7 +447,9 @@ impl Mixer {
             };
             stream.control.counts.discarded.add(discard as u64);
             stream.queue.skip(discard);
-            stream.control.cleared.store(generation, Ordering::Release);
+            if stream.control.cleared.load(Ordering::Relaxed) != generation {
+                stream.control.cleared.store(generation, Ordering::Release);
+            }
         }
         let mut underruns = 0;
         let mut reference_dropped = 0;
