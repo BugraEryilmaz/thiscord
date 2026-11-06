@@ -546,8 +546,8 @@ SDR blit per low frame. Each encoder owns its MFT, NV12 processor, four-sample a
 200 ms frame queue and 100 ms unsent-byte budget. Capture owns at most seven textures
 when layered (three for legacy capture), allocated on demand when no pooled texture is
 free rather than all at once, so a share holds only the full-resolution surfaces it
-actually needed at one time (`capture_textures` reports the peak; a single-layer 4K60
-HDR pipeline probe still peaked at all three). Each processor holds at most six NV12
+actually needed at one time (`capture_textures` reports the peak: three for a
+single-layer 4K60 HDR pipeline probe, four instead of seven with both layers). Each processor holds at most six NV12
 surfaces.
 Low-layer input has its own FPS admission and never blocks primary queue admission.
 No raw readback or software fallback is introduced. A zero/expired low target drops

@@ -258,8 +258,11 @@ Other changes, pinned by tests rather than benchmarks:
   timer granularity limited the old 2 ms poll; where 2 ms sleeps are honored it
   was several hundred).
 - Windows capture textures are allocated on demand up to the 3/7 cap
-  (`capture_textures` reports the peak; a single-layer 4K60 HDR pipeline probe
-  still peaked at three, so a saving is expected only for layered shares).
+  (`capture_textures` reports the peak). A single-layer 4K60 HDR pipeline probe
+  still peaked at three. With both layers
+  (`screen_pipeline_probe --seconds=20 --assert --layers`, low layer encoding at
+  1 Mbit/s) it peaked at four instead of the seven allocated up front before: about
+  200 MB less VRAM for 4K FP16 (66 MB each), with no busy-surface drops.
 - Native mute/deafen state and screen views are sent on change, with a 5 s / 1 s
   refresh, instead of every 500 ms; each one takes the SFU room write lock. The web
   client's views follow the same rule.
@@ -319,8 +322,8 @@ empty; bringing it back re-subscribed 142 ms later with a keyframe request right
 after the renewed view. Screen-share tiles in a browser were not exercised (the fake
 devices provide no display capture without a picker).
 
-Not measured: real microphones and speakers, browser main-thread profiles, VRAM
-use of layered shares, Linux desktop-portal capture and the VA/CUDA families, and
+Not measured: real microphones and speakers, browser main-thread profiles, total
+process VRAM, Linux desktop-portal capture and the VA/CUDA families, and
 macOS.
 
 ## Reading the monitors

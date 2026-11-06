@@ -258,6 +258,22 @@ pub async fn run() -> Result<(), Box<dyn std::error::Error>> {
             let _ = task.join();
         })
     };
+    // `--layers` adds the low layer (its output is drained, not sent), so the
+    // capture texture pool runs with two encoders as in a layered share.
+    let low_demand = std::env::args()
+        .any(|arg| arg == "--layers")
+        .then(|| Arc::new(screen::adaptation::Demand::default()));
+    let low_metrics = screen::metrics::Metrics::default();
+    let low = low_demand.as_ref().map(|demand| {
+        let (low_tx, mut low_rx) = tokio::sync::mpsc::channel(64);
+        tokio::spawn(async move { while low_rx.recv().await.is_some() {} });
+        screen::LayerOutput {
+            metrics: low_metrics.clone(),
+            tx: low_tx,
+            demand: demand.clone(),
+            force_keyframe: Arc::default(),
+        }
+    });
     let started = Instant::now();
     let worker = {
         let (stop, connection, metrics, force_keyframe, demand) = (
@@ -279,7 +295,7 @@ pub async fn run() -> Result<(), Box<dyn std::error::Error>> {
                 metrics,
                 force_keyframe,
                 demand,
-                None,
+                low,
                 Arc::new(AtomicBool::new(high)),
                 |message| println!("{message}"),
             )
@@ -291,6 +307,9 @@ pub async fn run() -> Result<(), Box<dyn std::error::Error>> {
     let mut warm = None;
     for tick in 0..seconds * 2 {
         demand.update(controller.bitrate());
+        if let Some(low) = &low_demand {
+            low.update(1_000_000);
+        }
         tokio::time::sleep(Duration::from_millis(500)).await;
         if tick % 2 == 1 {
             let publisher = metrics.snapshot();
@@ -340,6 +359,14 @@ pub async fn run() -> Result<(), Box<dyn std::error::Error>> {
     receiver.close().await?;
     inbox.close();
     let (frames, high_frames) = relay.join().map_err(|_| "Receiver probe panicked")?;
+    if low_demand.is_some() {
+        let low = low_metrics.snapshot();
+        println!(
+            "Low layer: encoded_frames={} capture_textures_peak={}",
+            low.counters["encoded_frames"],
+            metrics.snapshot().counters["capture_textures"]
+        );
+    }
     println!("Profile: requested_high={high} high_frames={high_frames}/{frames}");
     println!(
         "Publisher diagnostics: {}",
