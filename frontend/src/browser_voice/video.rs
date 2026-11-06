@@ -609,9 +609,10 @@ struct View {
     pressure: DecoderPressure,
     pressured: bool,
     recovery: Recovery,
-    /// Scrolled out of the grid: still subscribed (shared screen audio keeps
-    /// playing), but at the minimum budget so the SFU sends the cheap layer.
+    /// Scrolled out of a scrolling grid or strip (IntersectionObserver).
     off_screen: bool,
+    /// A camera came back on screen; request a keyframe with the renewal.
+    resumed: bool,
 }
 /// Registers a mounted player. The call binds the received track and keeps
 /// the subscription alive while it is registered and the page is visible.
@@ -639,6 +640,7 @@ pub fn watch(element: HtmlVideoElement, watch: Watch) -> u32 {
             pressured: false,
             recovery: Recovery::default(),
             off_screen: false,
+            resumed: false,
         })
     });
     if let Some(call) = super::current() {
@@ -663,6 +665,7 @@ pub fn unwatch(id: u32) {
 pub fn set_off_screen(id: u32, off_screen: bool) {
     VIEWS.with(|views| {
         for view in views.borrow_mut().iter_mut().filter(|v| v.id == id) {
+            view.resumed |= view.off_screen && !off_screen && view.watch.kind == MediaKind::Camera;
             view.off_screen = off_screen;
         }
     });
@@ -918,19 +921,17 @@ pub(super) fn tick(call: &Call, stats: Option<InboundVideo>) {
             views
                 .iter()
                 .filter(|v| shown && v.bound.is_some() && Some(v.watch.slot) != own_slot)
+                // A camera scrolled out of view stops downloading and decoding. A
+                // screen keeps its subscription: it carries shared audio, and a
+                // publisher without layers is encoded for its lowest viewer budget.
+                .filter(|v| !(v.off_screen && v.watch.kind == MediaKind::Camera))
                 .filter(|v| current_source(&live.roster, &v.watch).is_some())
                 .map(|v| Subscription {
                     kind: v.watch.kind,
                     slot: v.watch.slot,
                     owner: v.watch.owner,
                     epoch: v.watch.epoch,
-                    bitrate: if v.off_screen {
-                        v.budget
-                            .bitrate()
-                            .min(thiscord_shared::screen::MIN_VIEW_BITRATE)
-                    } else {
-                        v.budget.bitrate()
-                    },
+                    bitrate: v.budget.bitrate(),
                     h264_high: false,
                 })
                 .fold(Vec::<Subscription>::new(), |mut list, view| {
@@ -982,6 +983,26 @@ pub(super) fn tick(call: &Call, stats: Option<InboundVideo>) {
         live.media.views_at = time;
         live.media.sent_views = views.clone();
         live.send(ClientEvent::ScreenViews { views });
+        // The SFU honors keyframe requests only from subscribed viewers, so a
+        // camera that scrolled back asks for one after its renewed view.
+        let resumed: Vec<Watch> = VIEWS.with(|views| {
+            views
+                .borrow_mut()
+                .iter_mut()
+                .filter(|v| v.resumed && v.bound.is_some())
+                .map(|v| {
+                    v.resumed = false;
+                    v.watch
+                })
+                .collect()
+        });
+        for watch in resumed {
+            live.send(ClientEvent::ScreenKeyframe {
+                kind: watch.kind,
+                slot: watch.slot,
+                epoch: watch.epoch,
+            });
+        }
     }
 }
 /// Whether the next tick should sample inbound video statistics.
