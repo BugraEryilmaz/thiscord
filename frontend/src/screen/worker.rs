@@ -24,7 +24,9 @@ pub const SOURCE_CHECK: Duration = Duration::from_millis(100);
 /// Longest encoder-worker sleep without a capture or encoder wake. It bounds how
 /// long atomics (demand, feedback, stop) can wait to be observed.
 const IDLE_WAIT: Duration = Duration::from_millis(20);
-/// Short poll while a raw frame waits on time, sender backpressure or credit.
+/// Short poll while a raw frame waits on sender backpressure or send credit,
+/// which have no wake. A frame waiting only for its cadence instead sleeps until
+/// it is due; captures and encoder output still wake the worker early.
 const PENDING_WAIT: Duration = Duration::from_millis(2);
 /// Raw captures older than this are never encoded.
 const RAW_MAX_AGE: Duration = Duration::from_millis(250);
@@ -294,6 +296,8 @@ pub fn encode<P: Platform>(
     let mut configured = None;
     let mut last_input: Option<<P::Encoder as LayerEncoder>::Input> = None;
     let mut pending_pixels: Option<Pixels<P::Frame>> = None;
+    // Set when `pending_pixels` waits only for time, not for backpressure.
+    let mut pending_due: Option<Instant> = None;
     let mut sequence = 0;
     let mut waiting_for_keyframe = true;
     let mut keyframe = KeyframePolicy::default();
@@ -389,7 +393,9 @@ pub fn encode<P: Platform>(
             // wakes the condvar early. Pending input polls briefly for time,
             // credit or sender drain; otherwise wait for the next static refresh.
             let timeout = if pending_pixels.is_some() {
-                PENDING_WAIT
+                pending_due.map_or(PENDING_WAIT, |at| {
+                    at.saturating_duration_since(now).min(IDLE_WAIT)
+                })
             } else if encoder.is_some() && last_input.is_some() {
                 keyframe
                     .next_refresh()
@@ -408,6 +414,7 @@ pub fn encode<P: Platform>(
                 })
                 .unwrap();
             guard.encoder_event = false;
+            metrics.add("worker_wakes", 1);
             if guard.closed {
                 return Err("The shared source closed; sharing stopped.".into());
             }
@@ -477,12 +484,18 @@ pub fn encode<P: Platform>(
         // it again on worker wake time loses frames when a previous submission
         // was delayed, even though the encoder has ample throughput. The second
         // cadence only limits refresh/feedback submissions of the held image.
-        if (pixels.is_none() && Instant::now() < refresh_after)
-            || (capture_fps(active_fps) > quality.fps && Instant::now() < input_after)
-        {
+        let now = Instant::now();
+        if pixels.is_none() && now < refresh_after {
+            pending_due = Some(refresh_after);
             pending_pixels = pixels;
             continue;
         }
+        if capture_fps(active_fps) > quality.fps && now < input_after {
+            pending_due = Some(input_after);
+            pending_pixels = pixels;
+            continue;
+        }
+        pending_due = None;
         let mut captured_at = Instant::now();
         let queued = tx.max_capacity() - tx.capacity();
         if !super::encoder_has_capacity(
@@ -917,6 +930,89 @@ mod tests {
             "first output is an IDR"
         );
         assert_eq!(created.load(Ordering::Acquire), 1);
+    }
+
+    /// A 15 fps low layer fed 60 fps captures holds most frames for cadence.
+    /// It must sleep until the next frame is due, not poll every 2 ms.
+    #[test]
+    fn cadence_held_frames_sleep_until_due_instead_of_polling() {
+        let connection = Connection::default();
+        let (user, session) = (AtomicBool::new(false), AtomicBool::new(false));
+        let stops = Stops {
+            user: &user,
+            session: &session,
+        };
+        let active_fps = [AtomicU32::new(60), AtomicU32::new(15)];
+        let high = AtomicBool::new(false);
+        let shared = Shared {
+            stops: &stops,
+            connection: &connection,
+            started: Instant::now(),
+            active_fps: &active_fps,
+            high_profile: &high,
+        };
+        let demand = Demand::default();
+        demand.update(5_000_000);
+        let force = AtomicBool::new(false);
+        let metrics = Metrics::default();
+        let mailbox = inbox::<u32>();
+        let (tx, mut rx) = tokio::sync::mpsc::channel(64);
+        let mut platform = Fake {
+            created: Arc::default(),
+        };
+        let quality = Quality {
+            height: 720,
+            fps: 15,
+        };
+        let run = Duration::from_secs(1);
+        std::thread::scope(|scope| {
+            let job = scope.spawn(|| {
+                encode(
+                    &mut platform,
+                    &mailbox,
+                    None,
+                    &shared,
+                    Layer {
+                        quality,
+                        tx,
+                        metrics: &metrics,
+                        force_keyframe: &force,
+                        demand: &demand,
+                        secondary: true,
+                    },
+                    &mut |_| {},
+                )
+            });
+            let start = Instant::now();
+            let mut frame = 0;
+            while start.elapsed() < run {
+                while rx.try_recv().is_ok() {}
+                frame += 1;
+                deliver(
+                    std::slice::from_ref(&mailbox),
+                    Pixels {
+                        frame,
+                        width: 1280,
+                        height: 720,
+                        arrived: Instant::now(),
+                    },
+                    &metrics,
+                );
+                std::thread::sleep(Duration::from_micros(16_667));
+            }
+            close(std::slice::from_ref(&mailbox));
+            assert!(job.join().unwrap().is_err());
+        });
+        let counters = metrics.snapshot().counters;
+        let (wakes, encoded) = (counters["worker_wakes"], counters["encoded_frames"]);
+        assert!(
+            (8..=20).contains(&encoded),
+            "encodes at the layer rate: {encoded}"
+        );
+        // Each ~60 Hz capture wakes the worker once (about 61 measured). The
+        // former 2 ms poll measured 105 on Windows, whose default timer rounds
+        // short waits up, and several hundred where 2 ms sleeps are honored.
+        assert!(wakes < 95, "{wakes} worker wakes in one second");
     }
 
     #[test]

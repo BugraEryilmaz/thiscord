@@ -15,6 +15,7 @@ const COUNTERS: &[&str] = &[
     "capture_events",
     "capture_throttled",
     "raw_replaced",
+    "worker_wakes",
     "encoded_frames",
     "encoded_bytes",
     "keyframes",

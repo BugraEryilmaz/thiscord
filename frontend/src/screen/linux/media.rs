@@ -71,7 +71,7 @@ impl Family {
 pub struct Spec {
     pub family: Family,
     /// Elements between `pipewiresrc` and the capture appsink. Empty means
-    /// `pipewiresrc always-copy=true` into system memory.
+    /// system memory: each admitted PipeWire buffer is deep-copied on receipt.
     capture: &'static str,
     /// Per-layer scaler/converter element.
     scaler: &'static str,
@@ -427,16 +427,21 @@ fn bus_failure(pipeline: &gst::Pipeline) -> Option<String> {
     })
 }
 
-/// `pipewiresrc` (portal remote) → family copy → appsink callback.
+/// `pipewiresrc` (portal remote) → cadence gate → family copy → appsink callback.
 pub struct Capture {
     pipeline: gst::Pipeline,
     failure: Failure,
 }
 impl Capture {
+    /// `admit` runs on PipeWire's streaming thread for every compositor frame,
+    /// before any copy; frames it rejects are dropped there. Compositors can
+    /// deliver at the display refresh rate (144–240 Hz) while the share needs
+    /// 30/60 fps, or one frame per second while paused.
     pub fn start(
         spec: &Spec,
         fd: std::os::fd::RawFd,
         node: u32,
+        admit: impl FnMut() -> bool + Send + 'static,
         mut on_frame: impl FnMut(Frame) + Send + 'static,
     ) -> Result<Self, String> {
         let copy = spec.capture.is_empty();
@@ -461,7 +466,11 @@ impl Capture {
         if !set(&src, "path", &node.to_string()) {
             set(&src, "target-object", &node.to_string());
         }
-        set(&src, "always-copy", if copy { "true" } else { "false" });
+        // Never let PipeWire copy every compositor frame: admitted CPU-family
+        // frames are deep-copied in the sink callback instead, so held frames
+        // still never pin PipeWire's few pool buffers.
+        set(&src, "always-copy", "false");
+        gate(&src, admit).ok_or("Cannot build the PipeWire capture pipeline.")?;
         // Static sources are refreshed by the encoder worker, not resent here.
         set(&src, "keepalive-time", "0");
         let sink = pipeline
@@ -481,6 +490,13 @@ impl Capture {
                     let sample = sink.pull_sample().map_err(|_| gst::FlowError::Eos)?;
                     if let (Some(buffer), Some(caps)) = (sample.buffer_owned(), sample.caps_owned())
                     {
+                        // System-memory families own a copy; the PipeWire buffer
+                        // returns to its pool as soon as this callback ends.
+                        let buffer = if copy {
+                            buffer.copy_deep().map_err(|_| gst::FlowError::Error)?
+                        } else {
+                            buffer
+                        };
                         on_frame(Frame { buffer, caps });
                     }
                     Ok(gst::FlowSuccess::Ok)
@@ -512,6 +528,21 @@ impl Capture {
     pub fn contexts(&self, spec: &Spec) -> Vec<gst::Context> {
         pipeline_contexts(&self.pipeline, spec)
     }
+}
+/// Drops buffers on `source`'s output pad unless `admit` accepts them, before
+/// any downstream copy or upload.
+fn gate(source: &gst::Element, admit: impl FnMut() -> bool + Send + 'static) -> Option<()> {
+    let admit = Mutex::new(admit);
+    source
+        .static_pad("src")?
+        .add_probe(gst::PadProbeType::BUFFER, move |_, _| {
+            if admit.lock().is_ok_and(|mut admit| admit()) {
+                gst::PadProbeReturn::Ok
+            } else {
+                gst::PadProbeReturn::Drop
+            }
+        })?;
+    Some(())
 }
 fn pipeline_contexts(pipeline: &gst::Pipeline, spec: &Spec) -> Vec<gst::Context> {
     let mut found = Vec::new();
@@ -782,6 +813,49 @@ impl LayerEncoder for Layer {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn source_gate_drops_rejected_frames_before_downstream_elements() {
+        init().unwrap();
+        let pipeline = gst::parse::launch(
+            "videotestsrc name=src num-buffers=40 ! video/x-raw,width=64,height=64 ! videoconvert name=copy ! appsink name=sink",
+        )
+        .unwrap()
+        .downcast::<gst::Pipeline>()
+        .unwrap();
+        let offered = Arc::new(std::sync::atomic::AtomicU32::new(0));
+        let counter = offered.clone();
+        gate(&pipeline.by_name("src").unwrap(), move || {
+            counter.fetch_add(1, std::sync::atomic::Ordering::Relaxed) % 4 == 0
+        })
+        .unwrap();
+        // Count what reaches the element after the gate, not only the sink.
+        let converted = Arc::new(std::sync::atomic::AtomicU32::new(0));
+        let seen = converted.clone();
+        pipeline
+            .by_name("copy")
+            .unwrap()
+            .static_pad("sink")
+            .unwrap()
+            .add_probe(gst::PadProbeType::BUFFER, move |_, _| {
+                seen.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                gst::PadProbeReturn::Ok
+            });
+        let sink = pipeline
+            .by_name("sink")
+            .unwrap()
+            .downcast::<gst_app::AppSink>()
+            .unwrap();
+        pipeline.set_state(gst::State::Playing).unwrap();
+        let mut received = 0;
+        while sink.pull_sample().is_ok() {
+            received += 1;
+        }
+        pipeline.set_state(gst::State::Null).unwrap();
+        assert_eq!(offered.load(std::sync::atomic::Ordering::Relaxed), 40);
+        assert_eq!(converted.load(std::sync::atomic::Ordering::Relaxed), 10);
+        assert_eq!(received, 10);
+    }
 
     #[test]
     fn families_prefer_zero_copy_gpu_and_keep_software_last() {

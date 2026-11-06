@@ -145,9 +145,12 @@ encoder families in order: VA (`vapostproc`, zero-copy DMA-BUF import on GStream
 scaling, then software x264/OpenH264. The software family is the only CPU encoder in
 the product: it is used only when no GPU encoder works, and the status line,
 `encoder_family` and `pixel_path` say "software". `THISCORD_SCREEN_ENCODER=<family>`
-forces a family for diagnostics. Capture copies each PipeWire buffer into the family's
-pooled GPU memory immediately, so frames held for refreshes or in-flight encodes never
-starve PipeWire. Each layer is `appsrc ! scaler ! NV12 ! encoder ! h264parse ! appsink`
+forces a family for diagnostics. A pad probe on `pipewiresrc` applies the capture
+cadence first, so compositor frames beyond the active rate (a 144–240 Hz display, or
+the one-per-second paused rate) are dropped before any copy or upload. Capture copies
+each admitted PipeWire buffer into the family's pooled GPU memory, or deep-copies it
+into system memory for CPU families, immediately, so frames held for refreshes or
+in-flight encodes never starve PipeWire. Each layer is `appsrc ! scaler ! NV12 ! encoder ! h264parse ! appsink`
 with CBR, no B-frames, the 200 ms CPB, the ten-second GOP and serialized ForceKeyUnit
 events. System audio creates a private, non-autoconnecting PipeWire capture stream and
 links every other application's `Stream/Output/Audio` ports to it (their speaker
@@ -182,8 +185,11 @@ GStreamer plugins. Building needs `libgstreamer1.0-dev`,
   than callback arrival time. An asynchronous MFT event wakes the encoder worker;
   it does not wait for the next capture or a coarse timer to collect output.
   Without a capture or MFT wake, the worker sleeps until its next refresh is due
-  (at most 20 ms; 2 ms while a raw frame waits on time, credit or sender drain)
-  instead of waking every 3 ms. Window validity is checked every 100 ms, and the
+  (at most 20 ms). A raw frame held only for its layer cadence sleeps until it is
+  due; 2 ms polling remains only while it waits on send credit or sender drain,
+  which have no wake. `worker_wakes` counts wakes (a 15 fps low layer fed 60 fps
+  captures measured 61 per second in a unit test, down from 105 with the former
+  2 ms poll on Windows' default timer resolution). Window validity is checked every 100 ms, and the
   display's SDR white/HDR state is refreshed once per second on its own thread,
   so `QueryDisplayConfig` no longer runs on the encoder threads. Encoder and pacer
   threads run under MMCSS "Capture" and the capture device requests GPU thread
