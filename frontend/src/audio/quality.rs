@@ -154,6 +154,7 @@ impl Window {
         }
         b
     }
+    #[cfg(test)]
     fn add(&mut self, second: u64, event: Count, n: u64) {
         self.total[event as usize] = self.total[event as usize].saturating_add(n);
         let b = self.bucket(second);
@@ -240,6 +241,11 @@ pub struct Metrics {
     start: Instant,
     window: Mutex<Window>,
     network: Mutex<Option<(Instant, HopStats)>>,
+    /// Counts recorded since the last merge, by any thread (the send task
+    /// records every packet's outcome). One relaxed add each; no lock or clock.
+    pending: [std::sync::atomic::AtomicU64; COUNT],
+    /// Second the pending counts belong to, advanced by [`Self::tick`].
+    pending_second: std::sync::atomic::AtomicU64,
 }
 impl Default for Metrics {
     fn default() -> Self {
@@ -247,16 +253,42 @@ impl Default for Metrics {
             start: Instant::now(),
             window: Mutex::new(Window::default()),
             network: Mutex::new(None),
+            pending: Default::default(),
+            pending_second: Default::default(),
         }
     }
 }
 impl Metrics {
     pub fn add(&self, event: Count, n: u64) {
-        if n == 0 {
-            return;
+        use std::sync::atomic::Ordering;
+        let cell = &self.pending[event as usize];
+        if n != 0
+            && cell
+                .fetch_add(n, Ordering::Relaxed)
+                .checked_add(n)
+                .is_none()
+        {
+            cell.store(u64::MAX, Ordering::Relaxed);
         }
-        if let Ok(mut w) = self.window.lock() {
-            w.add(self.start.elapsed().as_secs(), event, n);
+    }
+    /// Called with the audio worker's existing service time: once that enters
+    /// a new second, pending counts merge into the window under one lock.
+    pub fn tick(&self, now: Instant) {
+        use std::sync::atomic::Ordering;
+        let second = now.saturating_duration_since(self.start).as_secs();
+        let previous = self.pending_second.swap(second, Ordering::AcqRel);
+        if previous != second {
+            self.merge_pending(previous);
+        }
+    }
+    fn merge_pending(&self, second: u64) {
+        use std::sync::atomic::Ordering;
+        let counts: [u64; COUNT] =
+            std::array::from_fn(|i| self.pending[i].swap(0, Ordering::Relaxed));
+        if counts.iter().any(|n| *n != 0)
+            && let Ok(mut w) = self.window.lock()
+        {
+            w.merge(second, &counts, &Default::default());
         }
     }
     pub fn duration(&self, stage: Stage, elapsed: Duration) {
@@ -275,6 +307,7 @@ impl Metrics {
         }
     }
     pub fn snapshot(&self) -> QualityMetrics {
+        self.merge_pending(self.start.elapsed().as_secs());
         self.window
             .lock()
             .map(|mut w| w.snapshot(self.start.elapsed()))
@@ -365,7 +398,10 @@ impl Batched {
     pub fn new(metrics: std::sync::Arc<Metrics>) -> Self {
         Self {
             metrics,
-            ..Default::default()
+            counts: Default::default(),
+            timings: Default::default(),
+            pending: Default::default(),
+            second: Default::default(),
         }
     }
     /// The shared window this batch merges into.
@@ -375,6 +411,7 @@ impl Batched {
     /// Called with the worker's existing tick time; merges what accumulated
     /// during the previous second once that second is over.
     pub fn tick(&self, now: Instant) {
+        self.metrics.tick(now);
         let second = now.saturating_duration_since(self.metrics.start).as_secs();
         if second != self.second.get() {
             self.flush();
@@ -395,6 +432,12 @@ impl Batched {
     pub fn snapshot(&self) -> QualityMetrics {
         self.flush();
         self.metrics.snapshot()
+    }
+}
+impl Drop for Batched {
+    /// A torn-down stream or session keeps its last second of counts.
+    fn drop(&mut self) {
+        self.flush();
     }
 }
 pub struct BatchTimer<'a> {

@@ -221,9 +221,15 @@ checkout's build links the newer `thiscord-shared` and measures the new code.
 | H.264 keyframe check, 300 KB IDR | 87 µs | 6 ns |
 | H.264 NAL split, 25 KB | 7.3 µs | 2.4 µs (skipping start-code scan) |
 | H.264 frame assembly, 23 packets | 834 ns, 7 allocations | 437 ns, 1 |
-| Quality accounting, 5 counts + 1 timing | 216 ns (lock + clock read each) | 8.8 ns (worker-local batch) |
+| Quality accounting, 5 counts + 1 timing | 216 ns (lock + clock read each) | 9–16 ns worker batch; 56 ns shared (send task) |
 | Mixer, 20 ms with 1 / 8 talkers | 7.6 / 16.4 µs | unchanged |
 
+Shared quality counters (the send task records every packet's outcome) are one
+relaxed atomic add into pending cells, merged into the window by the worker's
+existing tick once per second; the adaptive-FEC sent-sequence record takes its lock
+only when the source generation changes. The mixer counts silence only for slots
+that have a stream (an empty slot's counts were never drained and would have been
+charged to the next stream to take it), and skips zero counter updates.
 Per-stream and per-session quality accounting on the audio worker is batched:
 counts and stage timings accumulate in worker-local cells and merge into the shared
 ten-second window once per second per stream (and before every snapshot), so the
@@ -277,6 +283,11 @@ Other changes, pinned by tests rather than benchmarks:
   Each video track uses one pinned timer re-armed only when its deadline changes,
   instead of a new tokio `Sleep` per RTP packet, and the inbox returns that deadline
   from the same lock as the push.
+- An active share of an unchanging source (no new captures for 200 ms) bounds its
+  worker sleep at 100 ms instead of 20 ms: 10 polls per second (unit test), with
+  captures, encoder output, budget release, demand and rejected-frame feedback
+  still waking it at once. The native call loop keeps its audio worker lease with a
+  keepalive every two seconds instead of every 500 ms.
 - A share paused for lack of viewers sleeps until demand returns (which wakes it
   directly), with a 250 ms fallback for stop, instead of polling every 20 ms
   (unit test: at most 6 wakes in a paused second, encoding within 150 ms of demand).
@@ -325,6 +336,13 @@ the tile out of view sent an empty view list 420 ms later and no renewals while
 empty; bringing it back re-subscribed 142 ms later with a keyframe request right
 after the renewed view. Screen-share tiles in a browser were not exercised (the fake
 devices provide no display capture without a picker).
+
+4K60 HDR pipeline probe A/B on the same machine, interleaved (base `0ae37e5` built in
+a private build directory, `screen_pipeline_probe --seconds=20 --assert`): base 59.00,
+59.19, 58.53, 59.72 fps (two runs below the probe's 59.0 acceptance), this branch
+59.60, 59.80, 59.36, 59.37 (all pass); six further layered runs passed at
+59.2–59.9. One run of an intermediate build ended in a segmentation fault in about
+thirty runs of this branch; it did not recur and its cause is not established.
 
 Not measured: real microphones and speakers, browser main-thread profiles, total
 process VRAM, Linux desktop-portal capture and the VA/CUDA families, and

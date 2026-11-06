@@ -136,11 +136,13 @@ impl AccessUnits {
         thiscord_shared::h264::front_units(bytes, |nal| match nal[0] & 31 {
             7 => {
                 has_sps = true;
-                self.sps = nal.to_vec();
+                self.sps.clear();
+                self.sps.extend_from_slice(nal);
             }
             8 => {
                 has_pps = true;
-                self.pps = nal.to_vec();
+                self.pps.clear();
+                self.pps.extend_from_slice(nal);
             }
             5 => idr = true,
             _ => {}

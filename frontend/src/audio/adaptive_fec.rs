@@ -2,7 +2,10 @@
 //! Pinned rtc 0.21 never calls its remote stats updater, so a narrow interceptor
 //! observes reports before the default chain consumes them.
 use std::{
-    sync::Mutex,
+    sync::{
+        Mutex,
+        atomic::{AtomicU64, Ordering},
+    },
     time::{Duration, Instant},
 };
 use thiscord_shared::{audio::AdaptiveFecDiagnostics, voice::MediaKind};
@@ -29,30 +32,62 @@ pub(crate) struct Sample {
 
 /// One fixed-size mailbox per peer. Only the owning authenticated DTLS-SRTP
 /// transport writes it; the audio worker reads it, never a device callback.
-#[derive(Default)]
-pub struct Feedback(Mutex<Mailbox>);
+/// The send task records every packet; within a source generation that is two
+/// atomic operations, and only a generation change takes the lock.
+pub struct Feedback {
+    state: Mutex<Mailbox>,
+    /// The mailbox's generation, readable without the lock (`NONE` before any).
+    generation: AtomicU64,
+    /// Extended highest sent sequence; bit 32 marks a value.
+    sent: AtomicU64,
+}
+impl Default for Feedback {
+    fn default() -> Self {
+        Self {
+            state: Mutex::default(),
+            generation: AtomicU64::new(NONE),
+            sent: AtomicU64::new(0),
+        }
+    }
+}
+const NONE: u64 = u64::MAX;
+fn unpack(packed: u64) -> Option<u32> {
+    (packed >> 32 == 1).then_some(packed as u32)
+}
+fn pack(extended: u32) -> u64 {
+    1 << 32 | u64::from(extended)
+}
+fn extend(old: Option<u32>, sequence: u16) -> u32 {
+    old.map_or(u32::from(sequence), |old| {
+        old.wrapping_add(u32::from(sequence.wrapping_sub(old as u16)))
+    })
+}
 #[derive(Default)]
 struct Mailbox {
     sample: Option<Sample>,
     generation: Option<u64>,
     first: u32,
-    sent: Option<u32>,
 }
 impl Feedback {
+    /// Single writer: the peer's send task.
     pub(super) fn sent(&self, generation: u64, sequence: u16) {
-        if let Ok(mut state) = self.0.lock() {
+        if self.generation.load(Ordering::Acquire) == generation {
+            let extended = extend(unpack(self.sent.load(Ordering::Acquire)), sequence);
+            self.sent.store(pack(extended), Ordering::Release);
+            return;
+        }
+        if let Ok(mut state) = self.state.lock() {
             if state.generation.is_some_and(|old| old > generation) {
                 return;
             }
-            let extended = state.sent.map_or(u32::from(sequence), |old| {
-                old.wrapping_add(u32::from(sequence.wrapping_sub(old as u16)))
-            });
+            let extended = extend(unpack(self.sent.load(Ordering::Acquire)), sequence);
             if state.generation != Some(generation) {
                 state.generation = Some(generation);
                 state.first = extended;
                 state.sample = None;
             }
-            state.sent = Some(extended);
+            self.sent.store(pack(extended), Ordering::Release);
+            self.generation.store(generation, Ordering::Release);
         }
     }
     pub(super) fn observe(
@@ -64,11 +99,11 @@ impl Feedback {
         if report.ssrc != MediaKind::Microphone.publisher_ssrc() || report.total_lost >= 0x7fffff {
             return;
         }
-        if let Ok(mut state) = self.0.lock() {
+        if let Ok(mut state) = self.state.lock() {
             let Some(generation) = state.generation else {
                 return;
             };
-            let Some(sent) = state.sent else {
+            let Some(sent) = unpack(self.sent.load(Ordering::Acquire)) else {
                 return;
             };
             // Report must acknowledge packets sent in this source generation,
@@ -102,7 +137,7 @@ impl Feedback {
         }
     }
     pub(crate) fn sample(&self, generation: u64) -> Option<Sample> {
-        self.0
+        self.state
             .lock()
             .ok()
             .and_then(|s| s.sample.filter(|sample| sample.generation == generation))

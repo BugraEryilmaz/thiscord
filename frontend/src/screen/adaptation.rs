@@ -58,9 +58,16 @@ impl Demand {
         if feedback.rejected.is_none_or(|(_, key)| !key) {
             feedback.rejected = Some((bitrate, keyframe));
         }
+        drop(feedback);
+        self.wake();
     }
     pub fn delivered_encoder_frame(&self, bitrate: u32) {
         self.1.lock().unwrap().delivered = Some(bitrate);
+    }
+    fn wake(&self) {
+        if let Some(wake) = self.2.lock().unwrap().as_ref() {
+            wake();
+        }
     }
     pub fn take_encoder_feedback(&self) -> EncoderFeedback {
         std::mem::take(&mut *self.1.lock().unwrap())

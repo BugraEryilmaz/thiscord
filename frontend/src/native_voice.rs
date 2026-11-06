@@ -126,6 +126,40 @@ impl ShareSignaling {
     }
 }
 
+/// A video track's single timer: wake at the inbox deadline, else after a
+/// 250 ms idle bound. Re-armed only when that wake time changes, so packets that
+/// leave the deadline unchanged register no timer.
+struct TrackWake {
+    deadline: Option<Instant>,
+    idle_at: Instant,
+    armed: Instant,
+}
+impl TrackWake {
+    const IDLE: Duration = Duration::from_millis(250);
+    fn new(now: Instant) -> Self {
+        let idle_at = now + Self::IDLE;
+        Self {
+            deadline: None,
+            idle_at,
+            armed: idle_at,
+        }
+    }
+    /// The new wake time when the timer must be reset.
+    fn rearm(&mut self) -> Option<Instant> {
+        let wake = self.deadline.unwrap_or(self.idle_at);
+        (wake != self.armed).then(|| {
+            self.armed = wake;
+            wake
+        })
+    }
+    /// The timer fired: it must be re-armed even if the next wake is unchanged.
+    fn fired(&mut self, now: Instant, deadline: Option<Instant>) {
+        self.deadline = deadline;
+        self.idle_at = now + Self::IDLE;
+        self.armed = now;
+    }
+}
+
 /// Signaling that only needs re-sending when it changes, plus a slow refresh.
 /// Each State and ScreenViews message takes the SFU room write lock; resending
 /// unchanged values every 500 ms per member contended with packet fan-out.
@@ -227,19 +261,15 @@ impl PeerConnectionEventHandler for Handler {
             // One pinned timer, re-armed only when the wake time changes: packets
             // usually leave the deadline unchanged, so no timer entry is
             // registered and dropped per RTP packet.
-            let mut deadline = None;
-            let mut idle_at = Instant::now() + Duration::from_millis(250);
-            let mut armed = idle_at;
-            let timer = tokio::time::sleep_until(armed.into());
+            let mut wake = TrackWake::new(Instant::now());
+            let timer = tokio::time::sleep_until(wake.armed.into());
             tokio::pin!(timer);
             loop {
                 if !connection.active() {
                     break;
                 }
-                let wake = deadline.unwrap_or(idle_at);
-                if wake != armed && screen_receiver.is_some() {
-                    armed = wake;
-                    timer.as_mut().reset(wake.into());
+                if let Some(at) = wake.rearm().filter(|_| screen_receiver.is_some()) {
+                    timer.as_mut().reset(at.into());
                 }
                 let event = tokio::select! { biased;
                     _ = closed.changed() => break,
@@ -248,10 +278,7 @@ impl PeerConnectionEventHandler for Handler {
                         let now = Instant::now();
                         receiver.tick(now);
                         if let Some(epoch) = receiver.keyframe_request(now) && let Some((kind, slot)) = MediaKind::from_relay_ssrc(ssrc) { let _ = keyframes.try_send((kind, slot, epoch)); }
-                        deadline = receiver.next_deadline();
-                        idle_at = now + Duration::from_millis(250);
-                        // Force a re-arm even if the next wake equals the old one.
-                        armed = now;
+                        wake.fired(now, receiver.next_deadline());
                         continue;
                     },
                     event = track.poll() => match event { Some(event) => event, None => break },
@@ -259,7 +286,7 @@ impl PeerConnectionEventHandler for Handler {
                 if let TrackRemoteEvent::OnRtpPacket(packet) = event {
                     let arrived = Instant::now();
                     if let Some(receiver) = &screen_receiver {
-                        deadline = receiver.push(packet, arrived);
+                        wake.deadline = receiver.push(packet, arrived);
                         continue;
                     }
                     let slot = MediaKind::from_relay_ssrc(packet.header.ssrc)
@@ -1054,6 +1081,7 @@ async fn run(
     // Mute/deafen state has no lease; refresh it well inside the server's 20 s
     // silence detach. Views expire after VIEW_LEASE_SECS (3 s) without renewal.
     let mut voice_state = Refresh::new(Duration::from_secs(5));
+    let mut last_keepalive = Instant::now();
     let mut views_sent = Refresh::new(Duration::from_secs(1));
     ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
     let start = Instant::now();
@@ -1367,7 +1395,10 @@ async fn run(
                     }
                 }
                 let configuration=settings.lock().map_err(|_|"Settings unavailable")?.clone();
-                if audio_started && !audio_control.pending() {
+                // The worker's voice lease is 15 s; a keepalive every 2 s still
+                // catches a stalled worker quickly (each waits up to 10 s).
+                if audio_started && !audio_control.pending() && last_keepalive.elapsed() >= Duration::from_secs(2) {
+                    last_keepalive = Instant::now();
                     let e=engine.clone();
                     let heartbeat_connection=attempt.connection.clone();
                     audio_control.start(move||e.command(Command::Keepalive(heartbeat_connection)));
@@ -1404,6 +1435,31 @@ async fn run(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn video_track_timer_rearms_only_when_its_wake_time_changes() {
+        let start = Instant::now();
+        let mut wake = TrackWake::new(start);
+        let mut rearms = 0;
+        // A steady stream with no reorder gap: the deadline stays unset.
+        for _ in 0..1_000 {
+            wake.deadline = None;
+            rearms += usize::from(wake.rearm().is_some());
+        }
+        assert_eq!(rearms, 0, "packets alone never re-arm the idle timer");
+        // A gap sets a 40 ms deadline; later packets keep the same deadline.
+        let gap = start + Duration::from_millis(40);
+        for _ in 0..100 {
+            wake.deadline = Some(gap);
+            rearms += usize::from(wake.rearm().is_some());
+        }
+        assert_eq!(rearms, 1, "one re-arm per deadline change");
+        // Firing always re-arms, even to an unchanged next wake.
+        wake.fired(gap, Some(gap + Duration::from_millis(40)));
+        assert_eq!(wake.rearm(), Some(gap + Duration::from_millis(40)));
+        wake.fired(gap, None);
+        assert_eq!(wake.rearm(), Some(gap + TrackWake::IDLE));
+    }
 
     #[test]
     fn unchanged_signaling_waits_for_refresh_and_changes_send_immediately() {

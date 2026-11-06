@@ -743,8 +743,14 @@ impl HardwareEncoder {
             // parameter-set prefix every recovery point needs for late joiners).
             let mut idr = false;
             thiscord_shared::h264::front_units(locked, |nal| match nal[0] & 31 {
-                7 => self.sps = nal.to_vec(),
-                8 => self.pps = nal.to_vec(),
+                7 => {
+                    self.sps.clear();
+                    self.sps.extend_from_slice(nal);
+                }
+                8 => {
+                    self.pps.clear();
+                    self.pps.extend_from_slice(nal);
+                }
                 5 => idr = true,
                 _ => {}
             });

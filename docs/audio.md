@@ -383,7 +383,8 @@ state independently of audio-worker status/settings, so slow audio initializatio
 does not delay connection/disconnection presentation. Device opening, processing
 initialization and network negotiation still contribute to actual join time.
 
-Live voice uses a native, connection-scoped heartbeat with a 15-second expiry;
+Live voice uses a native, connection-scoped heartbeat (sent every two seconds) with
+a 15-second expiry;
 background WebView polling no longer keeps the call alive. Local playback/microphone
 tests retain their three-second UI lease. A two-second scheduling gap is logged,
 not treated as suspension. Leave, window destruction and connection revocation
