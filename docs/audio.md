@@ -138,7 +138,8 @@ page, joining voice or **Stop test** ends it and releases the devices.
 Connection diagnostics: `getStats` runs once per second while WebAudio meters drive
 the speaking rings (every 200 ms otherwise, when inbound `audioLevel` is the speaking
 fallback), in its own task so a slow report never delays the gate or signaling. One
-report walk also yields the received-video counters when those are due. It provides the selected
+report walk also yields the received-video counters, and a due walk takes video
+feedback due within half an interval, so watching video adds no second walk. It provides the selected
 candidate-pair `currentRoundTripTime` (else the SFU's receiver-report
 `roundTripTime`), inbound audio `jitter`, `packetsReceived`/`packetsLost`, and the
 SFU's `remote-inbound-rtp` `jitter`/`fractionLost` for the microphone. Hovering

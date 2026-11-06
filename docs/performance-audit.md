@@ -307,9 +307,15 @@ and track `stop`:
 - Three join/leave cycles: three call `AudioContext`s created and three closed,
   and every capture, clone and processed track stopped (three per leave).
 
-The web camera and screen tiles (off-screen camera unsubscribe, combined video
-stats, change-driven views) were not exercised: the headless camera toggle did not
-start a capture in this setup.
+A camera run (one participant publishing the fake camera, the other watching its
+tile) decoded 1280×720 at 20 fps. The watcher renewed `ScreenViews` once per second
+and `state` every 5.0 s. Its `getStats` walks first came in pairs 200/800 ms apart
+(audio and video feedback had separate timers); a due walk now also serves feedback
+due within half an interval, after which every walk was 1,004–1,008 ms apart. Moving
+the tile out of view sent an empty view list 420 ms later and no renewals while
+empty; bringing it back re-subscribed 142 ms later with a keyframe request right
+after the renewed view. Screen-share tiles in a browser were not exercised (the fake
+devices provide no display capture without a picker).
 
 Not measured: real microphones and speakers, browser main-thread profiles, VRAM
 use of layered shares, Linux desktop-portal capture and the VA/CUDA families, and

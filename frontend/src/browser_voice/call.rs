@@ -946,13 +946,20 @@ async fn run(
             return Failure::temporary("Media connection timed out").into();
         }
         if !fetching.get() {
-            let audio = now() >= next_stats;
-            let video = video::stats_due(call);
+            // One walk serves both consumers: a due audio pass also takes video
+            // feedback that is at most half an interval away, and every walk
+            // refreshes the audio stats, so watching video keeps one walk per second.
+            let audio_due = now() >= next_stats;
+            let early = if audio_due {
+                thiscord_frontend::browser_video::FEEDBACK_MS / 2.0
+            } else {
+                0.0
+            };
+            let video = video::stats_due(call, early);
+            let audio = audio_due || video;
             let pc = call.live.borrow().as_ref().map(|live| live.pc.clone());
-            if let Some(pc) = pc.filter(|_| audio || video) {
-                if audio {
-                    next_stats = now() + rules::stats_interval_ms(call.output.running());
-                }
+            if let Some(pc) = pc.filter(|_| audio) {
+                next_stats = now() + rules::stats_interval_ms(call.output.running());
                 fetching.set(true);
                 let (fetched, fetching) = (fetched.clone(), fetching.clone());
                 wasm_bindgen_futures::spawn_local(async move {

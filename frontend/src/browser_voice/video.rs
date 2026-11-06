@@ -1011,12 +1011,14 @@ pub(super) fn tick(call: &Call, stats: Option<InboundVideo>) {
     }
 }
 /// Whether the next tick should sample inbound video statistics.
-pub(super) fn stats_due(call: &Call) -> bool {
+/// `early_ms` lets a stats walk that is happening anyway also serve video
+/// feedback that would be due within that margin, keeping both on one walk.
+pub(super) fn stats_due(call: &Call, early_ms: f64) -> bool {
     let mut live = call.live.borrow_mut();
     let Some(live) = live.as_mut() else {
         return false;
     };
-    if !wants_stats() || now() - live.media.stats_at < rules::FEEDBACK_MS {
+    if !wants_stats() || now() - live.media.stats_at < rules::FEEDBACK_MS - early_ms {
         return false;
     }
     live.media.stats_at = now();
