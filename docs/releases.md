@@ -8,6 +8,8 @@ Nothing downloads or installs until the user chooses to install.
 **Settings → App updates** also provides a manual check. Installation is blocked
 while connected to voice; joining voice is blocked during installation/download.
 The login screen has an Updates button too. Development builds disable updates.
+Every one of these update screens shows the new version's [changelog](#changelog):
+its highlights first, and every change behind **Show all changes**.
 
 Updates use Tauri's native Rust updater and an embedded Ed25519 public key.
 Downloads require HTTPS, the expected repository/tag, a valid artifact signature
@@ -85,6 +87,57 @@ installation and a running Docker daemon accessible
 to that account for the PostgreSQL service container. CI uses a dynamically
 assigned database port to avoid the locally hosted development PostgreSQL port.
 
+## Changelog
+
+Every client version has a reviewed `changelog/MAJOR.MINOR.PATCH.md` in English and
+its Turkish translation `changelog/MAJOR.MINOR.PATCH.tr.md`, written in the release
+PR together with the version bump. Publishing puts the English text at the top of
+the GitHub release with the Turkish one in a collapsed **Türkçe** section, and both
+into the `notes` of `latest.json`: English first, then `<!-- lang: tr -->` and the
+Turkish text. The updater hands these notes to the update prompt, **Settings → App
+updates** and the login screen's Updates dialog, which show the part in the app's
+language and fall back to English. Release validation fails without either file,
+and `cargo test -p thiscord-frontend --lib` (`changelog::tests`) checks both for the
+version being built, all other files, and that each translation has the same
+highlights, sections and bullet counts as its English original.
+
+To write one, read every PR merged since the previous `client-v` tag
+(`git log --merges --first-parent client-vPREVIOUS..HEAD` and the PR descriptions)
+and summarize what users will notice. Write for people using Thiscord, not for
+developers: plain sentences, no internal module names, no proof or CI notes.
+Leave out changes nobody can notice (refactors, CI, docs) unless they matter to users.
+
+```markdown
+## Highlights
+
+- **Short title.** One or two sentences on what changed and why it helps.
+- **Up to four of these.** The biggest, most visible changes come first.
+
+## New
+
+- One line per new feature or setting.
+
+## Improved
+
+- Changes to existing behavior, speed or looks.
+
+## Fixed
+
+- Bugs that no longer happen, described by their symptom.
+```
+
+`## Highlights` is required and holds 1–4 bullets that each start with a bold
+`**Title.**` and a sentence. `## New`, `## Improved` and `## Fixed` are optional;
+omit empty ones and use no other headings. Bullets are single paragraphs; `**bold**`
+and `` `code` `` are the only formatting shown, and links show only their label.
+Translations keep the English `## Highlights`, `## New`, `## Improved` and `## Fixed`
+headings (the app shows translated labels) and translate every bullet one-to-one,
+using the app's own Turkish terms from `frontend/locales/tr.json`.
+Keep each file under 8 KiB. Clients treat the notes as untrusted text: they parse
+this subset into text spans (`frontend/src/changelog.rs`) and never render HTML.
+The notes describe only the version being installed, so users who skipped versions
+see the newest changelog; earlier ones stay on their GitHub releases.
+
 ## Publish a version
 
 Installer jobs clear generated bundle archives/signatures before packaging while
@@ -100,7 +153,8 @@ must still be verified.
    `Cargo.lock`, because dependencies can have the same version as Thiscord.
    Run `./scripts/release-client.ps1 -Mode Validate -Tag client-vMAJOR.MINOR.PATCH`
    with the actual version to verify the complete locked dependency graph before
-   tagging, including optional and platform-specific dependencies.
+   tagging, including optional and platform-specific dependencies. Add
+   `changelog/MAJOR.MINOR.PATCH.md` as described in [Changelog](#changelog).
 2. Commit the changes on a branch, open a PR, and merge it after CI passes.
    Tag the merged main commit and push the tag:
 

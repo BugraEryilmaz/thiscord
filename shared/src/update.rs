@@ -22,4 +22,8 @@ pub struct UpdateStatus {
     pub downloaded: u64,
     pub total: Option<u64>,
     pub message: String,
+    /// The available release's changelog Markdown from the update manifest.
+    /// Untrusted text: clients parse it into plain spans and never render HTML.
+    #[serde(default)]
+    pub notes: Option<String>,
 }

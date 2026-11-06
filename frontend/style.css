@@ -590,6 +590,42 @@ html:has(.notification-window), body:has(.notification-window) { margin: 0; back
 /* Available updates interrupt startup at most once per version per session. */
 .update-dialog { margin: auto; padding: 0; width: min(960px, 80vw); height: min(720px, 80dvh); max-width: none; max-height: none; border: 1px solid var(--tint-8); border-radius: 18px; background: var(--color-surface); color: var(--color-content); box-shadow: 0 24px 90px #0009; overflow: hidden; }
 .update-dialog::backdrop { background: #08090dd9; backdrop-filter: blur(6px); }
+/* Update prompt and release changelog (updates.rs). Release notes render as text
+   only; colors mix toward --color-white so light themes keep contrast. */
+.update-hero-icon { display: grid; place-items: center; width: 56px; height: 56px; border-radius: 18px; color: var(--brand-lighter); background: radial-gradient(circle at 30% 25%, color-mix(in srgb, var(--color-brand) 34%, transparent), color-mix(in srgb, var(--color-brand) 12%, transparent)); box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--color-brand) 30%, transparent), 0 10px 30px color-mix(in srgb, var(--color-brand) 22%, transparent); }
+.update-version-step { display: inline-flex; align-items: center; gap: 10px; margin-top: 4px; color: var(--color-muted); }
+.update-version { padding: 3px 10px; border-radius: 999px; border: 1px solid var(--tint-10); background: var(--tint-4); font-size: 13px; font-weight: 600; font-variant-numeric: tabular-nums; }
+.update-version-new { color: var(--color-white); border-color: color-mix(in srgb, var(--color-brand) 55%, transparent); background: color-mix(in srgb, var(--color-brand) 20%, transparent); }
+.update-footer { display: flex; flex-direction: column; align-items: center; gap: 10px; padding: 16px 24px 18px; border-top: 1px solid var(--tint-6); background: color-mix(in srgb, var(--color-sidebar) 55%, var(--color-surface)); text-align: center; }
+.changelog { display: flex; flex-direction: column; gap: 12px; text-align: left; }
+.changelog .changelog-title { color: var(--brand-ink); font-size: 12px; font-weight: 750; letter-spacing: .14em; text-transform: uppercase; }
+.changelog-highlights { display: grid; gap: 8px; }
+.changelog-highlight { display: flex; gap: 14px; padding: 12px 16px; border: 1px solid var(--tint-6); border-radius: var(--radius-lg); background: var(--tint-3); }
+.changelog-highlight-icon { display: grid; place-items: center; flex: 0 0 32px; height: 32px; border-radius: 10px; color: var(--brand-lighter); background: color-mix(in srgb, var(--color-brand) 16%, transparent); }
+.changelog-highlight-title { color: var(--color-white); font-size: 15px; font-weight: 650; line-height: 1.4; }
+.changelog-highlight-text { margin-top: 2px; color: var(--color-muted); font-size: 14px; line-height: 1.55; overflow-wrap: anywhere; }
+.changelog-toggle { display: inline-flex; align-items: center; gap: 6px; align-self: flex-start; padding: 6px 12px; margin-left: -12px; border-radius: var(--radius-md); color: var(--brand-lighter); font-size: 14px; font-weight: 600; }
+.changelog-toggle:hover { background: color-mix(in srgb, var(--color-brand) 10%, transparent); }
+.changelog-toggle:focus-visible { outline: 2px solid var(--focus-ring); outline-offset: 2px; }
+.changelog-chevron { transition: transform .15s ease; }
+.changelog-toggle[aria-expanded="true"] .changelog-chevron { transform: rotate(180deg); }
+.changelog-details { display: flex; flex-direction: column; gap: 18px; padding: 18px 20px; border: 1px solid var(--tint-6); border-radius: var(--radius-lg); background: var(--tint-2); }
+.changelog-details[hidden] { display: none; }
+.changelog-group h4 { margin-bottom: 8px; }
+.changelog-badge { display: inline-block; padding: 2px 9px; border-radius: var(--radius-sm); font-size: 11px; font-weight: 750; letter-spacing: .08em; text-transform: uppercase; color: var(--color-muted); background: var(--tint-6); }
+.changelog-badge-new { color: color-mix(in srgb, var(--color-success) 60%, var(--color-white)); background: color-mix(in srgb, var(--color-success) 16%, transparent); }
+.changelog-badge-improved { color: var(--brand-lighter); background: color-mix(in srgb, var(--color-brand) 18%, transparent); }
+.changelog-badge-fixed { color: color-mix(in srgb, var(--color-warning) 62%, var(--color-white)); background: color-mix(in srgb, var(--color-warning) 15%, transparent); }
+.changelog-list { display: grid; gap: 6px; padding-left: 20px; list-style: disc; color: var(--color-content); font-size: 14px; line-height: 1.6; overflow-wrap: anywhere; }
+.changelog-list li::marker { color: var(--tint-40); }
+.changelog-entry-title { color: var(--color-white); font-weight: 650; }
+.changelog-code { padding: 1px 5px; border-radius: 4px; background: var(--tint-8); font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; font-size: .9em; }
+.changelog-panel { display: flex; flex-direction: column; gap: 14px; padding-top: 16px; border-top: 1px solid var(--tint-6); }
+.changelog-panel .update-version-step { margin-top: 0; }
+.update-dialog progress, .settings-card progress { appearance: none; -webkit-appearance: none; height: 8px; border: 0; border-radius: 999px; overflow: hidden; background: var(--tint-10); }
+.update-dialog progress::-webkit-progress-bar, .settings-card progress::-webkit-progress-bar { background: var(--tint-10); }
+.update-dialog progress::-webkit-progress-value, .settings-card progress::-webkit-progress-value { background: var(--color-brand); border-radius: 999px; transition: width .2s ease; }
+.update-dialog progress::-moz-progress-bar, .settings-card progress::-moz-progress-bar { background: var(--color-brand); border-radius: 999px; }
 .settings-window { display: grid; grid-template-columns: 248px minmax(0, 1fr); height: 100%; }
 .settings-sidebar { display: flex; flex-direction: column; min-height: 0; padding: 24px 12px 12px; background: var(--color-sidebar); border-right: 1px solid var(--tint-3); }
 .settings-brand { padding: 0 12px 16px; }
