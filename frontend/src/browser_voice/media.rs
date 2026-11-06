@@ -26,7 +26,9 @@ use std::{
 };
 use thiscord_frontend::{
     browser_audio::{self as rules, ConnectionStats, RemoteSource},
-    browser_call::{Capture, MicrophoneProblem as MicError, PLAYBACK_SLOTS},
+    browser_call::{
+        self as call_rules, Capture, MicrophoneProblem as MicError, PLAYBACK_SLOTS, SendRoute,
+    },
 };
 use thiscord_shared::{audio::AudioDevice, voice::IceServer};
 use wasm_bindgen::{JsCast, JsValue, prelude::Closure};
@@ -562,8 +564,10 @@ struct Send {
     limiter: DynamicsCompressorNode,
     makeup: GainNode,
     destination: MediaStreamAudioDestinationNode,
-    /// The processed track sent to the SFU while the graph runs.
+    /// The processed track sent to the SFU while the graph runs and boosts.
     track: MediaStreamTrack,
+    /// A clone of the capture, sent without boost; see `SendRoute::Direct`.
+    direct: Option<MediaStreamTrack>,
     raw_meter: AnalyserNode,
     meter: AnalyserNode,
     sink: GainNode,
@@ -618,17 +622,40 @@ impl Microphone {
             stop_stream(&stream);
             return Err(MicError::NotFound);
         };
-        let send = context.and_then(|context| send_graph(context, &stream));
+        let send = context
+            .and_then(|context| send_graph(context, &stream))
+            .map(|mut send| {
+                send.direct = call_optional(&raw, "clone", &Array::new())
+                    .and_then(Result::ok)
+                    .and_then(|track| track.dyn_into::<MediaStreamTrack>().ok());
+                send
+            });
         Ok(Self { stream, raw, send })
     }
     /// Whether meters and boost exist (they work while the context runs).
     pub fn metered(&self) -> bool {
         self.send.is_some()
     }
-    /// The track to send: processed while the graph runs, else the raw track.
-    pub fn track(&self, processed: bool) -> &MediaStreamTrack {
-        match &self.send {
-            Some(send) if processed => &send.track,
+    /// The route actually available: `Direct` needs the capture clone.
+    pub fn route(&self, running: bool, input_gain: f32) -> SendRoute {
+        match call_rules::send_route(self.send.is_some(), running, input_gain) {
+            SendRoute::Direct if self.send.as_ref().is_some_and(|s| s.direct.is_none()) => {
+                SendRoute::Processed
+            }
+            route => route,
+        }
+    }
+    /// The track to send on `route` (from [`Self::route`]).
+    pub fn track(&self, route: SendRoute) -> &MediaStreamTrack {
+        match (&self.send, route) {
+            (Some(send), SendRoute::Processed) => &send.track,
+            (
+                Some(Send {
+                    direct: Some(direct),
+                    ..
+                }),
+                SendRoute::Direct,
+            ) => direct,
             _ => &self.raw,
         }
     }
@@ -637,24 +664,23 @@ impl Microphone {
             set_param(&send.boost.gain(), rules::microphone_gain(input_gain));
         }
     }
-    /// The send gate. The processed route keeps the captured track enabled so
-    /// meters keep measuring; the raw route gates the captured track itself.
-    pub fn set_sending(&self, sending: bool, processed: bool) {
+    /// The send gate. Graph routes keep the captured track enabled so meters
+    /// keep measuring and gate only the sent track; the raw route gates the
+    /// captured track itself. Tracks not on the route stay disabled.
+    pub fn set_sending(&self, sending: bool, route: SendRoute) {
         let set = |track: &MediaStreamTrack, enabled: bool| {
             if track.enabled() != enabled {
                 track.set_enabled(enabled);
             }
         };
-        match &self.send {
-            Some(send) if processed => {
-                set(&self.raw, true);
-                set(&send.track, sending);
-            }
-            Some(send) => {
-                set(&send.track, false);
-                set(&self.raw, sending);
-            }
-            None => set(&self.raw, sending),
+        let Some(send) = &self.send else {
+            set(&self.raw, sending);
+            return;
+        };
+        let sent = self.track(route);
+        set(&self.raw, route != SendRoute::Raw || sending);
+        for track in std::iter::once(&send.track).chain(&send.direct) {
+            set(track, sending && track == sent);
         }
     }
     fn peak(&self, raw: bool) -> Option<f32> {
@@ -713,6 +739,9 @@ impl Microphone {
                 let _ = loopback.disconnect();
             }
             send.track.stop();
+            if let Some(direct) = &send.direct {
+                direct.stop();
+            }
         }
         stop_stream(&self.stream);
     }
@@ -767,6 +796,7 @@ fn send_graph(context: &AudioContext, stream: &MediaStream) -> Option<Send> {
         makeup,
         destination,
         track,
+        direct: None,
         raw_meter,
         meter,
         sink,
@@ -896,19 +926,27 @@ pub(super) struct Stats {
     pub levels: Vec<InboundLevel>,
     pub connection: ConnectionStats,
 }
-pub(super) async fn stats(pc: &RtcPeerConnection) -> Stats {
+/// One `getStats()` call and one walk of its report, for audio/connection
+/// stats, received-video counters, or both.
+pub(super) async fn stats(
+    pc: &RtcPeerConnection,
+    audio: bool,
+    video: bool,
+) -> (Option<Stats>, Option<super::video::InboundVideo>) {
     let mut stats = Stats {
         levels: vec![],
         connection: ConnectionStats::default(),
     };
+    let mut inbound_video = Vec::new();
+    let finish = |stats, inbound_video| (audio.then_some(stats), video.then_some(inbound_video));
     let Ok(report) = JsFuture::from(pc.get_stats()).await else {
-        return stats;
+        return finish(stats, inbound_video);
     };
     let Some(Ok(values)) = call_optional(&report, "values", &Array::new()) else {
-        return stats;
+        return finish(stats, inbound_video);
     };
     let Ok(Some(iterator)) = js_sys::try_iter(&values) else {
-        return stats;
+        return finish(stats, inbound_video);
     };
     let text = |stat: &JsValue, key: &str| {
         Reflect::get(stat, &key.into())
@@ -928,36 +966,42 @@ pub(super) async fn stats(pc: &RtcPeerConnection) -> Stats {
     };
     // Reports are bounded by the transceiver count; cap the walk anyway.
     for stat in iterator.filter_map(Result::ok).take(512) {
-        let audio = || text(&stat, "kind").as_deref() == Some("audio");
+        let kind = || text(&stat, "kind");
         match text(&stat, "type").as_deref() {
-            Some("candidate-pair") => stats.connection.candidate_pair(
+            Some("candidate-pair") if audio => stats.connection.candidate_pair(
                 text(&stat, "state").as_deref() == Some("succeeded"),
                 flag(&stat, "nominated") || flag(&stat, "selected"),
                 number(&stat, "currentRoundTripTime"),
             ),
-            Some("inbound-rtp") if audio() => {
-                stats.connection.inbound(
-                    number(&stat, "jitter"),
-                    number(&stat, "packetsReceived"),
-                    number(&stat, "packetsLost"),
-                );
-                if let Some(level) = number(&stat, "audioLevel")
-                    && stats.levels.len() < PLAYBACK_SLOTS * 2
-                {
-                    stats.levels.push((
-                        text(&stat, "trackIdentifier"),
-                        text(&stat, "mid"),
-                        level as f32,
-                    ));
+            Some("inbound-rtp") => match kind().as_deref() {
+                Some("audio") if audio => {
+                    stats.connection.inbound(
+                        number(&stat, "jitter"),
+                        number(&stat, "packetsReceived"),
+                        number(&stat, "packetsLost"),
+                    );
+                    if let Some(level) = number(&stat, "audioLevel")
+                        && stats.levels.len() < PLAYBACK_SLOTS * 2
+                    {
+                        stats.levels.push((
+                            text(&stat, "trackIdentifier"),
+                            text(&stat, "mid"),
+                            level as f32,
+                        ));
+                    }
                 }
+                Some("video") if video => super::video::inbound_entry(&stat, &mut inbound_video),
+                _ => {}
+            },
+            Some("remote-inbound-rtp") if audio && kind().as_deref() == Some("audio") => {
+                stats.connection.remote_inbound(
+                    number(&stat, "roundTripTime"),
+                    number(&stat, "jitter"),
+                    number(&stat, "fractionLost"),
+                )
             }
-            Some("remote-inbound-rtp") if audio() => stats.connection.remote_inbound(
-                number(&stat, "roundTripTime"),
-                number(&stat, "jitter"),
-                number(&stat, "fractionLost"),
-            ),
             _ => {}
         }
     }
-    stats
+    finish(stats, inbound_video)
 }

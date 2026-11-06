@@ -243,10 +243,17 @@ pub(super) fn BrowserVideo(watch: Watch, own: bool) -> impl IntoView {
                         if message.try_get_untracked().is_none() {
                             break;
                         }
-                        if message.get_untracked() != next {
+                        if message.with_untracked(|m| *m != next) {
                             message.set(next);
                         }
-                        gloo_timers::future::TimeoutFuture::new(250).await;
+                        // A playing remote tile only needs to notice a stall; the
+                        // own preview keeps 250 ms to follow a camera switch.
+                        gloo_timers::future::TimeoutFuture::new(if ready && !own {
+                            1_000
+                        } else {
+                            250
+                        })
+                        .await;
                     }
                 },
                 registration,

@@ -93,12 +93,17 @@ grid tile); hiding the tile, closing the grid or hiding the tab stops it locally
 and the SFU stops forwarding it with the next `ScreenViews` renewal.
 
 Send graph: microphone track → source → boost gain (Microphone boost 1×–10×) →
-limiter → `MediaStreamAudioDestinationNode`, whose track is sent. The browser's own
+limiter → `MediaStreamAudioDestinationNode`, whose track is sent while a boost above
+1× is set. At 1× (the default) there is nothing to boost or limit, so a clone of the
+captured track is sent instead, skipping the limiter look-ahead and the destination
+node's buffering; the meters still read the original capture. The browser's own
 processing runs before the boost (desktop boosts before automatic gain). Two
 `AnalyserNode`s read the capture (raw) and the boosted signal before the send gate,
 so the voice-activation meter keeps measuring while the gate is closed. Mute,
 push-to-talk release, deafen and server restrictions disable the sent track (silence);
-the captured track stays enabled for metering. If the AudioContext is not running
+the captured track stays enabled for metering. The meter is sampled every 20 ms (the
+2048-sample analyser window spans two reads), separately from the 100 ms call tick,
+and the gate is re-applied only when it opens or closes. If the AudioContext is not running
 (autoplay refused, interrupted), the raw capture is sent instead, gated directly,
 without boost; voice activation then fails open. The client swaps tracks with
 `replaceTrack` when that changes, without renegotiating.
@@ -127,7 +132,10 @@ constraints and boost, shows the level meter and, unless **Hear my microphone
 during the test** is off, plays it back through the selected output. Leaving the
 page, joining voice or **Stop test** ends it and releases the devices.
 
-Connection diagnostics: every 200 ms `getStats` provides the selected
+Connection diagnostics: `getStats` runs once per second while WebAudio meters drive
+the speaking rings (every 200 ms otherwise, when inbound `audioLevel` is the speaking
+fallback), in its own task so a slow report never delays the gate or signaling. One
+report walk also yields the received-video counters when those are due. It provides the selected
 candidate-pair `currentRoundTripTime` (else the SFU's receiver-report
 `roundTripTime`), inbound audio `jitter`, `packetsReceived`/`packetsLost`, and the
 SFU's `remote-inbound-rtp` `jitter`/`fractionLost` for the microphone. Hovering
@@ -358,7 +366,8 @@ changes, each completed 10 ms capture block and every 10 ms of rendered playback
 unpark it. Received packets do not wake it: they carry their network arrival time
 and are needed only by the next refill, which those device wakes already trigger.
 Its fallback timeout is 10 ms during a session (timers, recovery and
-devices that stop calling back) and 100 ms otherwise. Queued packets are admitted
+devices that stop calling back) and one second otherwise (every command unparks
+it, and the watchdog's three-second stall threshold stays satisfied). Queued packets are admitted
 in batches of up to 32 before one processing tick, so refill work does not scale
 with packets times speakers. The worker joins the MMCSS "Audio" class on Windows
 and user-interactive QoS on macOS; it is deliberately not realtime because it also

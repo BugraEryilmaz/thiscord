@@ -397,6 +397,13 @@ pub(super) fn ScreenViewer(
             let Some(root) = stage.get_untracked() else {
                 return;
             };
+            // Nothing is painted in a hidden page; resume sampling when shown.
+            if web_sys::window()
+                .and_then(|w| w.document())
+                .is_some_and(|d| d.hidden())
+            {
+                return;
+            }
             let Some(keys) = visible_keys.try_get_untracked() else {
                 return;
             };

@@ -439,6 +439,38 @@ impl Backoff {
     }
 }
 
+/// Which microphone track the browser sends.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SendRoute {
+    /// Boost and limiter through WebAudio (`MediaStreamAudioDestinationNode`).
+    Processed,
+    /// A clone of the captured track, gated on its own, so meters keep reading
+    /// the capture without the WebAudio hop (limiter look-ahead and the
+    /// destination node's buffering) when there is nothing to boost.
+    Direct,
+    /// The captured track itself, while WebAudio is not running.
+    Raw,
+}
+pub fn send_route(graph: bool, running: bool, input_gain: f32) -> SendRoute {
+    if !(graph && running) {
+        SendRoute::Raw
+    } else if crate::browser_audio::microphone_gain(input_gain) > 1.0 {
+        SendRoute::Processed
+    } else {
+        SendRoute::Direct
+    }
+}
+
+/// Voice-activation level sampling. The analyser window (2048 samples, about
+/// 43 ms) spans two samples, so short onsets cannot fall between reads.
+pub const GATE_MS: f64 = 20.0;
+/// `getStats` cadence. While WebAudio meters drive speaking rings, stats only
+/// feed connection diagnostics, which the UI reads every 500 ms; otherwise
+/// inbound `audioLevel` is the speaking fallback and needs a faster pass.
+pub fn stats_interval_ms(meters_running: bool) -> f64 {
+    if meters_running { 1_000.0 } else { 200.0 }
+}
+
 /// Delay before the next signaling-resume attempt (native recovery schedule).
 pub fn resume_delay_ms(failures: u32, jitter: u8) -> u32 {
     (250_u32 << failures.min(2)) + u32::from(jitter)
@@ -742,5 +774,23 @@ mod tests {
         };
         assert_ne!(volume_key(&target), volume_key(&shared));
         assert!(volume_key(&shared).ends_with(":1"));
+    }
+
+    #[test]
+    fn unboosted_microphones_skip_the_webaudio_send_hop() {
+        assert_eq!(send_route(true, true, 1.0), SendRoute::Direct);
+        assert_eq!(send_route(true, true, 0.5), SendRoute::Direct);
+        assert_eq!(send_route(true, true, f32::NAN), SendRoute::Direct);
+        assert_eq!(send_route(true, true, 1.5), SendRoute::Processed);
+        assert_eq!(send_route(true, false, 3.0), SendRoute::Raw);
+        assert_eq!(send_route(false, true, 3.0), SendRoute::Raw);
+    }
+
+    #[test]
+    fn stats_slow_down_only_while_meters_cover_speaking() {
+        assert!(stats_interval_ms(true) >= 1_000.0);
+        assert!(stats_interval_ms(false) <= 200.0);
+        // Two gate samples per analyser window.
+        assert!(GATE_MS * 2.0 <= 2048.0 / 48.0);
     }
 }

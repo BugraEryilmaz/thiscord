@@ -25,8 +25,8 @@ use thiscord_shared::{
 use wasm_bindgen::{JsCast, JsValue, prelude::Closure};
 use wasm_bindgen_futures::JsFuture;
 use web_sys::{
-    HtmlVideoElement, MediaStream, MediaStreamTrack, MediaStreamTrackState, RtcPeerConnection,
-    RtcRtpSender, RtcRtpTransceiver,
+    HtmlVideoElement, MediaStream, MediaStreamTrack, MediaStreamTrackState, RtcRtpSender,
+    RtcRtpTransceiver,
 };
 
 fn json(value: serde_json::Value) -> JsValue {
@@ -721,38 +721,23 @@ pub(super) type InboundVideo = Vec<(Option<String>, Option<String>, Inbound)>;
 pub(super) fn wants_stats() -> bool {
     VIEWS.with(|views| views.borrow().iter().any(|v| v.bound.is_some()))
 }
-pub(super) async fn inbound(pc: &RtcPeerConnection) -> InboundVideo {
-    let Ok(report) = JsFuture::from(pc.get_stats()).await else {
-        return vec![];
-    };
-    let Some(Ok(values)) = call_optional(&report, "values", &Array::new()) else {
-        return vec![];
-    };
-    let Ok(Some(iterator)) = js_sys::try_iter(&values) else {
-        return vec![];
-    };
-    let count = |stat: &JsValue, key: &str| number(stat, key).unwrap_or(0.0).max(0.0) as u64;
-    iterator
-        .filter_map(Result::ok)
-        .filter(|stat| {
-            text(stat, "type").as_deref() == Some("inbound-rtp")
-                && text(stat, "kind").as_deref() == Some("video")
-        })
-        .map(|stat| {
-            (
-                text(&stat, "mid"),
-                text(&stat, "trackIdentifier"),
-                Inbound {
-                    packets_received: count(&stat, "packetsReceived"),
-                    packets_lost: count(&stat, "packetsLost"),
-                    frames_received: count(&stat, "framesReceived"),
-                    frames_decoded: count(&stat, "framesDecoded"),
-                    decode_seconds: number(&stat, "totalDecodeTime").unwrap_or(0.0),
-                },
-            )
-        })
-        .take(ROOM_CAPACITY * 2)
-        .collect()
+/// One video `inbound-rtp` report, read during `media::stats`'s single walk.
+pub(super) fn inbound_entry(stat: &JsValue, into: &mut InboundVideo) {
+    if into.len() >= ROOM_CAPACITY * 2 {
+        return;
+    }
+    let count = |key: &str| number(stat, key).unwrap_or(0.0).max(0.0) as u64;
+    into.push((
+        text(stat, "mid"),
+        text(stat, "trackIdentifier"),
+        Inbound {
+            packets_received: count("packetsReceived"),
+            packets_lost: count("packetsLost"),
+            frames_received: count("framesReceived"),
+            frames_decoded: count("framesDecoded"),
+            decode_seconds: number(stat, "totalDecodeTime").unwrap_or(0.0),
+        },
+    ));
 }
 
 /// Applies `ScreenTarget`: the SFU's lowest viewer budget for our stream.

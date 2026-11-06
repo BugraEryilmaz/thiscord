@@ -4,7 +4,10 @@
 //! AudioContext may run.
 use super::media::{Microphone, Output};
 use std::cell::Cell;
-use thiscord_frontend::{browser_audio as rules, browser_call::Capture};
+use thiscord_frontend::{
+    browser_audio as rules,
+    browser_call::{Capture, SendRoute},
+};
 use thiscord_shared::audio::AudioSettings;
 use wasm_bindgen::JsCast;
 use web_sys::AudioBufferSourceNode;
@@ -47,7 +50,7 @@ impl DeviceTest {
             match opened {
                 Ok(microphone) => {
                     microphone.set_boost(settings.input_gain);
-                    microphone.set_sending(false, true);
+                    microphone.set_sending(false, SendRoute::Processed);
                     if loopback {
                         microphone.loopback(test.output.input());
                     }
