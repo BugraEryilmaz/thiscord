@@ -289,6 +289,26 @@ Other changes, pinned by tests rather than benchmarks:
   own task, and runs every second while WebAudio meters cover speaking (200 ms
   otherwise); ready remote video tiles poll their state once per second.
 
+Browser run (web client): the `/app` bundle from this branch, served by a local
+backend with its own database, in headless Chromium 150 with fake capture devices,
+two accounts in one voice channel, driven over the DevTools protocol with page
+hooks on `getUserMedia`, `replaceTrack`, `track.enabled`, `getStats`, `AudioContext`
+and track `stop`:
+
+- The unboosted microphone was sent as the capture clone (`replaceTrack` received
+  the capture-labelled track, not the `MediaStreamAudioDestinationNode` track).
+- `getStats` ran every 1,003–1,010 ms (meters running), from its own task.
+- Voice activation, measured from an independent 5 ms analyser probe on the same
+  capture to the sent track's `enabled = true`, with 120 ms tone bursts every 1.5 s:
+  median 10 ms, p90 16 ms, max 18 ms over 20 openings for one participant; 3–28 ms
+  over 4 openings for the other. The probe itself adds about ±5 ms.
+- Three join/leave cycles: three call `AudioContext`s created and three closed,
+  and every capture, clone and processed track stopped (three per leave).
+
+The web camera and screen tiles (off-screen camera unsubscribe, combined video
+stats, change-driven views) were not exercised: the headless camera toggle did not
+start a capture in this setup.
+
 Not measured: real microphones and speakers, browser main-thread profiles, VRAM
 use of layered shares, Linux desktop-portal capture and the VA/CUDA families, and
 macOS.
