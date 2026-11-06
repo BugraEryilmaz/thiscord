@@ -814,6 +814,93 @@ impl LayerEncoder for Layer {
 mod tests {
     use super::*;
 
+    /// Runtime check of the real capture path against a live PipeWire video
+    /// node, e.g. one published by
+    /// `gst-launch-1.0 videotestsrc is-live=true ! video/x-raw,width=1920,height=1080,framerate=144/1 ! pipewiresink mode=provide stream-properties="p,media.class=Video/Source"`
+    /// with `THISCORD_PIPEWIRE_NODE=<node id>`. Admits 30 of ~144 frames per
+    /// second at the source pad, and holding admitted frames must not starve
+    /// PipeWire's buffer pool (system-memory families deep-copy them).
+    #[test]
+    #[ignore = "needs a PipeWire video node; set THISCORD_PIPEWIRE_NODE"]
+    fn live_pipewire_capture_gates_before_copy_and_owns_admitted_frames() {
+        use std::sync::atomic::{AtomicU32, Ordering};
+        init().unwrap();
+        let node: u32 = std::env::var("THISCORD_PIPEWIRE_NODE")
+            .expect("THISCORD_PIPEWIRE_NODE")
+            .parse()
+            .unwrap();
+        let spec = select().expect("an encoder family");
+        let (offered, delivered) = (Arc::new(AtomicU32::new(0)), Arc::new(AtomicU32::new(0)));
+        let held = Arc::new(Mutex::new(VecDeque::new()));
+        // THISCORD_PIPEWIRE_GATE_AFTER_COPY=1 emulates the previous order (copy
+        // every frame, then throttle) for a CPU comparison.
+        let after_copy = std::env::var_os("THISCORD_PIPEWIRE_GATE_AFTER_COPY").is_some();
+        let cadence = Arc::new(Mutex::new(crate::screen::cadence::Cadence::new(
+            Duration::from_secs_f64(1.0 / 30.0),
+        )));
+        let admit = {
+            let (offered, cadence) = (offered.clone(), cadence.clone());
+            move || {
+                offered.fetch_add(1, Ordering::Relaxed);
+                after_copy || cadence.lock().unwrap().accept(Instant::now())
+            }
+        };
+        let on_frame = {
+            let (delivered, held) = (delivered.clone(), held.clone());
+            move |frame: Frame| {
+                if after_copy && !cadence.lock().unwrap().accept(Instant::now()) {
+                    return;
+                }
+                delivered.fetch_add(1, Ordering::Relaxed);
+                // Keep the newest eight, as worker mailboxes and in-flight
+                // encodes can; PipeWire pools are only a few buffers deep.
+                let mut held = held.lock().unwrap();
+                held.push_back(frame);
+                if held.len() > 8 {
+                    held.pop_front();
+                }
+            }
+        };
+        // Process CPU time (utime + stime clock ticks) from /proc/self/stat.
+        let cpu_ticks = || -> u64 {
+            let stat = std::fs::read_to_string("/proc/self/stat").unwrap();
+            let fields: Vec<&str> = stat
+                .rsplit(')')
+                .next()
+                .unwrap()
+                .split_whitespace()
+                .collect();
+            fields[11].parse::<u64>().unwrap() + fields[12].parse::<u64>().unwrap()
+        };
+        let capture = Capture::start(&spec, -1, node, admit, on_frame).unwrap();
+        std::thread::sleep(Duration::from_secs(1));
+        let (offered_start, delivered_start, cpu_start) = (
+            offered.load(Ordering::Relaxed),
+            delivered.load(Ordering::Relaxed),
+            cpu_ticks(),
+        );
+        std::thread::sleep(Duration::from_secs(4));
+        let cpu = (cpu_ticks() - cpu_start) as f64 / 4.0;
+        let offered = (offered.load(Ordering::Relaxed) - offered_start) as f64 / 4.0;
+        let delivered = (delivered.load(Ordering::Relaxed) - delivered_start) as f64 / 4.0;
+        let failure = capture.failure();
+        drop(capture);
+        eprintln!(
+            "family={} gate_after_copy={after_copy} offered={offered:.1}/s delivered={delivered:.1}/s cpu={cpu:.1} ticks/s (100 = one core) held={} failure={failure:?}",
+            spec.family.label(),
+            held.lock().unwrap().len()
+        );
+        assert!(failure.is_none());
+        assert!(
+            offered >= 100.0,
+            "the source keeps its full rate while frames are held"
+        );
+        assert!(
+            (24.0..=33.0).contains(&delivered),
+            "only the cadence reaches the copy"
+        );
+    }
+
     #[test]
     fn source_gate_drops_rejected_frames_before_downstream_elements() {
         init().unwrap();

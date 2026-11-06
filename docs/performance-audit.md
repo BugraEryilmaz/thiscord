@@ -242,8 +242,13 @@ Other changes, pinned by tests rather than benchmarks:
 - Linux capture drops compositor frames above the active cadence at the
   `pipewiresrc` pad, before any copy or GPU upload (GStreamer test counts buffers
   reaching the next element). Previously a 144–240 Hz display paid a full-frame copy
-  per refresh even while paused. Runtime capture on a PipeWire session is not
-  measured here.
+  per refresh even while paused. `scripts/linux-pipewire-capture-check.sh` runs the real capture
+  path against a live PipeWire node (WSL kali, no portal): a 1080p144 source shared at
+  30 fps offered 144 frames/s, admitted 30/s, and held eight admitted frames without
+  starving PipeWire's pool; process CPU was 3.5% of a core, versus 14.2–15.5% when
+  the same run copies every frame before throttling (the previous order). The NVENC
+  CPU-scale family was selected; VA/CUDA zero-copy families and a desktop portal
+  session were not available.
 - A screen layer holding a frame for its cadence sleeps until it is due:
   61 instead of 105 worker wakes per second in the unit test (Windows' default
   timer granularity limited the old 2 ms poll; where 2 ms sleeps are honored it
@@ -272,7 +277,8 @@ Other changes, pinned by tests rather than benchmarks:
   otherwise); ready remote video tiles poll their state once per second.
 
 Not measured: real microphones and speakers, browser main-thread profiles, VRAM
-use of layered shares, and Linux/macOS runtime capture.
+use of layered shares, Linux desktop-portal capture and the VA/CUDA families, and
+macOS.
 
 ## Reading the monitors
 
