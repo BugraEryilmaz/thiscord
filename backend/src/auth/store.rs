@@ -617,6 +617,21 @@ pub(super) fn dispatch(
                     AccountRequest::Sessions => Ok(AccountResponse::Sessions { sessions: query(c,"SELECT to_jsonb(s) || jsonb_build_object('current',id=$2::uuid) AS data FROM sessions s WHERE account_id=$1::uuid AND NOT revoked AND expires_at>now() AND last_seen_at>now()-interval '7 days' ORDER BY created_at DESC", &[&id.to_string(), &session.id.to_string()])? }),
                     AccountRequest::RevokeSession { session_id } => { if execute(c,"UPDATE sessions SET revoked=TRUE WHERE id=$1::uuid AND account_id=$2::uuid", &[&session_id.to_string(), &id.to_string()])? == 0 { scope = None; } Ok(done("Session revoked")) },
                     AccountRequest::SendVerification => { let a = account(c,id)?; if !a.email_verified { enqueue_code(c,&a,"verify")?; } Ok(done("Verification email queued")) },
+                    AccountRequest::ChangeEmail { email: address } => {
+                        recent(&session)?;
+                        let address = email(&address)?;
+                        if account(c,id)?.email_verified { return Err(Failure::Invalid("Your email is already verified")); }
+                        // Like registration, this reveals whether an address is taken
+                        // (bounded by the per-address rate limit); a race still fails as 409.
+                        if query::<bool>(c,"SELECT to_jsonb(EXISTS(SELECT 1 FROM accounts WHERE email=$1 AND id<>$2::uuid)) AS data", &[&address, &id.to_string()])? == [true] { return Err(Failure::Invalid("That email address is already in use")); }
+                        execute(c,"UPDATE accounts SET email=$2 WHERE id=$1::uuid", &[&id.to_string(), &address])?;
+                        // Unsent mail to the mistyped address is withdrawn; replacing
+                        // the code invalidates links already delivered there.
+                        execute(c,"DELETE FROM mail_outbox WHERE account_id=$1::uuid AND recipient<>$2", &[&id.to_string(), &address])?;
+                        let a = account(c,id)?;
+                        enqueue_code(c,&a,"verify")?;
+                        Ok(AccountResponse::Account { account: a })
+                    }
                     AccountRequest::Reauthenticate { password } => {
                         let hashes: Vec<String> = query(c,"SELECT to_jsonb(password_hash) AS data FROM identities WHERE account_id=$1::uuid AND provider='password'", &[&id.to_string()])?;
                         if !hashes.first().is_some_and(|h| verify(&password,h)) { return Err(Failure::Unauthorized); }

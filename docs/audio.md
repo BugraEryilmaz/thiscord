@@ -122,8 +122,8 @@ speaking rings use a pass-through `AnalyserNode` in each slot before its gain
 `audioLevel` remains the fallback while the context is not running. The local
 ring follows the gate.
 
-Keyboard: while the page has focus, Ctrl+Shift+Space is push-to-talk (also the
-voice-bar hold button) and the Settings → Keyboard shortcuts mute/deafen bindings
+Keyboard: while the page has focus, the Settings → Keyboard shortcuts push-to-talk
+key (default Ctrl+Shift+Space; also the voice-bar hold button) and mute/deafen bindings
 (defaults Ctrl+Shift+M/D, same syntax and validation as desktop, stored in
 `thiscord.browser-shortcuts.v1`) toggle self controls, also outside calls. In text
 fields only combinations with Control, Alt or Super, or function keys, apply.
@@ -450,20 +450,31 @@ permission/device errors point to OS privacy settings. The macOS bundle includes
 requires acceptance on a Mac.
 
 The in-app Hold to talk button handles pointer cancellation, key release and
-focus loss. Optional global Ctrl+Shift+Space uses the Tauri 2 Rust shortcut plugin
-on Windows/macOS/X11. Registration conflicts are reported. Wayland explicitly
+focus loss. Optional global push-to-talk uses the Tauri 2 Rust shortcut plugin
+on Windows/macOS/X11 with the key from Settings → Shortcuts (default
+Ctrl+Shift+Space; cleared means the hold button only). It is registered only while
+a push-to-talk call runs; saving a new key re-registers it immediately.
+Registration conflicts are reported. Wayland explicitly
 falls back to the in-app button; portal integration remains future work.
 
 ### Mute and deafen shortcuts
 
-Settings → Shortcuts & overlay → Keyboard shortcuts configures global toggle
-shortcuts. Defaults are Ctrl+Shift+M (mute) and Ctrl+Shift+D (deafen); the overlay
-shortcuts described above start disabled. Enter a modifier/key combination
-and choose Save shortcuts; an empty field disables that action. Reset to defaults
+Settings → Shortcuts & overlay → Keyboard shortcuts configures push-to-talk and
+the global toggle shortcuts. Defaults are Ctrl+Shift+Space (push-to-talk),
+Ctrl+Shift+M (mute) and Ctrl+Shift+D (deafen); the overlay shortcuts described
+above start disabled. Click a shortcut and press the combination: held modifiers
+preview live, Escape cancels, Tab moves on and × disables that action; then choose
+Save shortcuts. Recording uses `KeyboardEvent.code` (physical keys) and stores the
+same text syntax both parsers accept; unsupported keys (Caps Lock, media keys,
+mouse buttons) are refused. Push-to-talk cannot be a letter, number, space or
+punctuation key without Control, Alt or Super: global shortcuts consume their keys
+in every app and a held key would swallow typing. `push_to_talk` is omitted from
+`AudioShortcuts` while default, so older desktops (which deny unknown fields) still
+accept remote edits that keep the default key. Reset to defaults
 fills the default combinations for review before saving. Preferences persist in
 `shortcuts.json` in the local app configuration directory. Holding a key toggles
 once until released. Duplicate combinations (including aliases), invalid keys,
-and the reserved Ctrl+Shift+Space PTT binding are rejected. OS registration
+and a combination already used for push-to-talk are rejected. OS registration
 conflicts preserve the previous working bindings. Startup failures appear in the
 shortcut settings panel. Windows, macOS and Linux/X11 use the native shortcut
 plugin; Wayland requires disabling the global shortcuts and using the UI controls.

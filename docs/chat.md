@@ -377,12 +377,16 @@ arrives on the guild subscription, which does not need an open text channel. Wid
 (`thiscord.member_panel.v1` in local storage, no account data). Below 1024 px
 (phones, tablets, narrow windows) it opens as an overlay drawer with a backdrop
 and close button; Escape or the backdrop closes it and returns focus to the
-toggle, and it is closed again on navigation. Members are grouped **Online** and
-**Offline** (each a labelled list), sorted by display name then username, with
-avatar, presence dot, owner/bot badges and custom status. Roles have no display
-or hoist setting yet, so they do not create groups or colours. Every entry is a
+toggle, and it is closed again on navigation. Each member is listed once, in
+labelled groups: online members under their highest-ranked role (one group per
+role, highest rank first; equal ranks by name, then ID), then **Online** for online
+members without roles (Everyone only), then **Offline** for every offline member
+regardless of roles. Groups are sorted by display name then username; empty groups
+are hidden. Rows show avatar, presence dot, a tag with the highest-ranked role,
+owner/bot badges and custom status or activity. Roles have no colour or "show
+separately" setting yet, so every assigned role forms a group. Every entry is a
 keyboard-focusable button with a descriptive label. Click/Enter opens a profile
-card (display name, `@username`, owner/bot badge, custom status and bio) with
+card (display name, `@username`, role tag, owner/bot badge, custom status and bio) with
 **Send message** for accepted friends, **Edit profile** for yourself and **More
 actions…**. Right-click, long press, Shift+F10 or **More actions…** open the
 existing member menu: friend requests, block/report, role editing and the
@@ -395,11 +399,16 @@ For a guild subscription the server sends `update`/`members` with the complete
 list (at most `MAX_MEMBER_LIST` = 500, the per-guild member ceiling) and then
 `update`/`member_presence` with the complete set of members shown online. Lists
 require current guild membership only; channel permissions are not needed. They
-contain public profile fields (no email, bio, credentials or roles). `online` is
+contain public profile fields (no email, bio or credentials) and `role`: the
+member's highest-ranked assigned role as `{id,name,position}` (never Everyone,
+permissions or other roles). Role edits and assignments are guild mutations, so
+lists refresh after commit (existing subscriptions may be revoked and resubscribe). `online` is
 account-wide presence: at least one authenticated friends socket in this process.
 Do Not Disturb is never disclosed (the viewer's own row shows it locally). Across
 a block in either direction the member stays listed, but always offline and
-without custom status.
+without custom status. `member_presence` also carries `activities`, the live
+game activity of members in `online` ([activity.md](activity.md)); `members`
+rows include `activity`.
 
 The database list is read under the existing guild-locked authorization check
 and cached with the access epochs captured before the read. Presence is

@@ -754,7 +754,9 @@ async fn connected(ui: Ui, token: &str) -> Result<(), String> {
                         ServerEvent::Members { members } => {
                             ui.members.replace(desired(ui).guild, members)
                         }
-                        ServerEvent::MemberPresence { online } => ui.members.presence(&online),
+                        ServerEvent::MemberPresence { online, activities } => {
+                            ui.members.presence(&online, &activities)
+                        }
                         event => {
                             if let Some(chat) = ui
                                 .active_chat

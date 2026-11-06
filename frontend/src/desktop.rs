@@ -1,6 +1,7 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
 mod native_account;
+mod native_activity;
 mod native_audio;
 mod native_bots;
 mod native_camera;
@@ -86,6 +87,9 @@ fn main() {
             }
             native_update::start(app.handle());
             native_shortcuts::start(app.handle());
+            if native_activity::start(app.handle()).is_err() {
+                eprintln!("Game activity detection unavailable");
+            }
             Ok(())
         })
         .plugin(tauri_plugin_global_shortcut::Builder::new().build())
@@ -147,6 +151,8 @@ fn main() {
             native_performance::performance_report,
             native_window::window_close_to_tray,
             native_window::window_set_close_to_tray,
+            native_activity::activity_status,
+            native_activity::activity_set_enabled,
             native_invites::take_pending_invite,
             native_account::load_session,
             native_account::save_session,

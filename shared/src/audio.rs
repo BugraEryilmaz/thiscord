@@ -38,6 +38,14 @@ pub struct AudioShortcuts {
     pub overlay_corner: String,
     #[serde(skip_serializing_if = "String::is_empty")]
     pub overlay_unlock: String,
+    /// Held to talk in push-to-talk mode; empty leaves only the hold button.
+    /// Omitted while default so older desktops (which deny unknown fields and
+    /// always use the default) accept remote edits.
+    #[serde(skip_serializing_if = "is_default_push_to_talk")]
+    pub push_to_talk: String,
+}
+fn is_default_push_to_talk(value: &String) -> bool {
+    value == AudioShortcuts::DEFAULT_PUSH_TO_TALK
 }
 impl Default for AudioShortcuts {
     fn default() -> Self {
@@ -47,6 +55,7 @@ impl Default for AudioShortcuts {
             overlay_visibility: String::new(),
             overlay_corner: String::new(),
             overlay_unlock: String::new(),
+            push_to_talk: Self::DEFAULT_PUSH_TO_TALK.into(),
         }
     }
 }
@@ -59,6 +68,7 @@ pub enum ShortcutAction {
 }
 impl AudioShortcuts {
     pub const MAX_LEN: usize = 128;
+    pub const DEFAULT_PUSH_TO_TALK: &str = "Control+Shift+Space";
     pub fn bindings(&self) -> [(&str, ShortcutAction); 5] {
         use crate::overlay::OverlayAction;
         [
@@ -79,9 +89,11 @@ impl AudioShortcuts {
         ]
     }
     pub fn too_long(&self) -> bool {
-        self.bindings()
-            .iter()
-            .any(|(value, _)| value.len() > Self::MAX_LEN)
+        self.push_to_talk.len() > Self::MAX_LEN
+            || self
+                .bindings()
+                .iter()
+                .any(|(value, _)| value.len() > Self::MAX_LEN)
     }
 }
 
@@ -479,6 +491,34 @@ mod control_tests {
         );
         let defaults: AudioShortcuts = serde_json::from_str("{}").unwrap();
         assert_eq!(defaults, AudioShortcuts::default());
+        assert_eq!(defaults.push_to_talk, "Control+Shift+Space");
+        // The default push-to-talk key stays off the wire for older desktops.
+        assert!(
+            serde_json::to_value(&defaults)
+                .unwrap()
+                .get("push_to_talk")
+                .is_none()
+        );
+        let custom = AudioShortcuts {
+            push_to_talk: "F8".into(),
+            ..defaults
+        };
+        let wire = serde_json::to_value(&custom).unwrap();
+        assert_eq!(wire["push_to_talk"], "F8");
+        assert_eq!(
+            serde_json::from_value::<AudioShortcuts>(wire).unwrap(),
+            custom
+        );
+        let disabled = AudioShortcuts {
+            push_to_talk: String::new(),
+            ..AudioShortcuts::default()
+        };
+        let wire = serde_json::to_value(&disabled).unwrap();
+        assert_eq!(wire["push_to_talk"], "");
+        assert_eq!(
+            serde_json::from_value::<AudioShortcuts>(wire).unwrap(),
+            disabled
+        );
         assert_eq!(
             serde_json::to_string(&AudioToggle::Mute).unwrap(),
             "\"mute\""

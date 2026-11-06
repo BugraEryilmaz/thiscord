@@ -73,8 +73,12 @@ profile, authenticated socket status, custom status, mute/deafen and settings co
 during calls with the channel/server name, camera, screen sharing and disconnect controls.
 Set a custom status (emoji, short text and an optional expiry) from the ribbon; friends
 and fellow server members see it (see [custom status](docs/accounts.md#custom-status)).
+The desktop app also shows the game you are playing (for example "Playing Factorio")
+to the same audience while it runs; turn it off in Settings → Desktop (see
+[game activity](docs/activity.md)).
 Text channels have a toggleable member list (a drawer on phones and tablets) grouped
-online/offline, with profile cards and member actions (see
+by each online member's highest role, then Online and Offline, with role tags,
+profile cards and member actions (see
 [member list](docs/chat.md#member-list-and-profile-cards)).
 The UI works from the keyboard: **Ctrl/⌘+K** opens a quick switcher for servers,
 channels and friends, **Alt+↑/↓** (with Shift: unread only) moves between channels,

@@ -17,11 +17,20 @@ in shared models, logs or checked-in configuration.
 2. Within five seconds the email worker writes a `.txt` message to `backend/.mail/`.
    Open the verification URL in that local file. With Resend or SMTP configured, click the
    link directly in your email. It automatically verifies the address and opens a
-   confirmation page; there is no verification-code input. Return to Thiscord to
-   refresh your status automatically, or use **Refresh account**. Tokens are never
+   confirmation page; there is no verification-code input. Tokens are never
    printed in the terminal. The directory is ignored by Git. On Linux, newly
    created directories/files use 0700/0600; Windows-mounted files inherit Windows
    ACLs. Set `MAIL_DIRECTORY` to a private Linux directory if needed.
+   Until the address is verified the account is *pending*: it is signed in, but
+   the app shows only a **Check your email** screen instead of servers, friends and
+   voice. The screen checks every five seconds and on window focus (or **I've
+   verified my email**) and opens the app as soon as the link was used on any
+   device. It offers **Resend email** (a 60-second client cooldown on top of the
+   server rate limits), **Change email** for a mistyped address and **Sign out**.
+   The backend independently refuses pending accounts for creating/joining servers,
+   invites and friend requests, and hides them from friend search and requests, so
+   other people never see a half-created account. Google sign-in creates verified
+   accounts and never shows this step.
 3. **Forgot password** emails a link only for verified accounts, with the same
    response for absent accounts. Click **Reset password** to choose and confirm a
    new password directly in your browser; you do not need to reopen the app.
@@ -161,8 +170,16 @@ The backend never constructs links from untrusted request Host headers. HTTP is
 allowed only for localhost development. Exclude query strings on both routes from
 reverse-proxy logs. Both pages use no-store and no-referrer headers, block framing
 and third-party resources; reset forms submit only to the same origin.
-HEAD requests do not consume either link. Resend verification from the profile page
-to replace any older code-only email.
+HEAD requests do not consume either link. **Resend email** on the verification
+screen replaces any older code-only email.
+
+`change_email` on `POST /api/v1/account` corrects the address of a pending account
+only. It requires recent reauthentication (the screen asks for the current password
+and sends `reauthenticate` first), validates the address like registration and
+rejects one already in use (a concurrent race still fails as 409). It replaces the
+verification code, so links already sent to the mistyped address stop working,
+withdraws unsent mail to that address and emails a new link. Requests are limited
+per address like registration. Verified addresses remain immutable.
 
 ### Optional SMTP delivery
 

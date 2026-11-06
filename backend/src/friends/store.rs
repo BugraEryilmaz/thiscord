@@ -150,11 +150,12 @@ pub(super) fn dispatch(pool: &DbPool, token: &str, request: Request) -> Result<R
                 if !(2..=64).contains(&text.chars().count()) || text.chars().any(char::is_control) {
                     return Err(Failure::Invalid("Search with 2–64 display name or username characters, without control characters"));
                 }
-                let people=query(c,"SELECT jsonb_build_object('id',a.id,'username',a.username,'display_name',a.display_name,'avatar_id',v.id) AS data FROM accounts a LEFT JOIN account_avatars v ON v.account_id=a.id WHERE NOT a.is_bot AND a.id<>$1::uuid AND (strpos(lower(a.username),lower($2))>0 OR strpos(lower(a.display_name),lower($2))>0) ORDER BY a.username,a.id LIMIT 20", &[&actor.to_string(), text])?;
+                let people=query(c,"SELECT jsonb_build_object('id',a.id,'username',a.username,'display_name',a.display_name,'avatar_id',v.id) AS data FROM accounts a LEFT JOIN account_avatars v ON v.account_id=a.id WHERE NOT a.is_bot AND a.email_verified AND a.id<>$1::uuid AND (strpos(lower(a.username),lower($2))>0 OR strpos(lower(a.display_name),lower($2))>0) ORDER BY a.username,a.id LIMIT 20", &[&actor.to_string(), text])?;
                 Ok(Response::People {people})
             }
             Request::Add {account_id: other} => {
-                if query::<bool>(c,"SELECT to_jsonb(is_bot) AS data FROM accounts WHERE id=$1::uuid", &[&other.to_string()])? != [false] { return Err(Failure::Forbidden); }
+                // Bots and pending (unverified) accounts cannot receive requests.
+                if query::<bool>(c,"SELECT to_jsonb(is_bot OR NOT email_verified) AS data FROM accounts WHERE id=$1::uuid", &[&other.to_string()])? != [false] { return Err(Failure::Forbidden); }
                 if crate::safety::store::blocked(c,actor,other)? {return Err(Failure::Forbidden);}
                 if query::<bool>(c,"SELECT to_jsonb(email_verified) AS data FROM accounts WHERE id=$1::uuid", &[&actor.to_string()])? != [true] {return Err(Failure::Forbidden);}
                 let existing: Option<Pair> = query(c,"SELECT to_jsonb(f) AS data FROM friendships f WHERE low_id=LEAST($1::uuid,$2::uuid) AND high_id=GREATEST($1::uuid,$2::uuid) FOR UPDATE", &[&actor.to_string(),&other.to_string()])?.pop();
@@ -394,6 +395,10 @@ pub(super) fn live(snapshot: &mut Snapshot, actor: AccountId) {
     for friend in &mut snapshot.friends {
         friend.online =
             friend.relationship == Relationship::Friend && super::online(friend.person.id);
+        friend.activity = friend
+            .online
+            .then(|| super::activity(friend.person.id))
+            .flatten();
     }
     snapshot.typing = snapshot
         .conversation_id
@@ -426,7 +431,7 @@ pub(super) fn snapshot(
         // Calls and custom statuses expire without a write; rebuild then.
         let statuses=friends.iter().filter_map(|f|f.person.custom_status.as_ref()).chain(own_status.as_ref()).filter_map(|s|s.expires_at);
         let expiry=calls.iter().map(|v|v.expires_at).chain(statuses).min().map(|at|(at-chrono::Utc::now()).to_std().unwrap_or_default()+std::time::Duration::from_millis(50));
-        let mut snapshot=Snapshot {friends,calls:calls.into_iter().map(|v|v.call).collect(),conversation_id:selected,history,before,typing:vec![],own_status};
+        let mut snapshot=Snapshot {friends,calls:calls.into_iter().map(|v|v.call).collect(),conversation_id:selected,history,before,typing:vec![],own_status,accepts_activity:true};
         live(&mut snapshot,actor);
         Ok((snapshot,expiry))
     })

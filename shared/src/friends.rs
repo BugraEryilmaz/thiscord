@@ -49,6 +49,10 @@ pub struct Friend {
     pub person: Person,
     pub relationship: Relationship,
     pub online: bool,
+    /// What an online accepted friend is doing, reported live by one of their
+    /// desktop clients. Absent while offline, idle or from older servers.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub activity: Option<crate::account::Activity>,
     /// Incoming unread messages, capped at 100 (display as 99+).
     /// Defaults to zero when connected to an older server.
     #[serde(default)]
@@ -119,6 +123,10 @@ pub struct Snapshot {
     /// live across that account's devices. Absent when unset.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub own_status: Option<crate::account::CustomStatus>,
+    /// The server accepts [`ClientEvent::Activity`] on this socket. Older servers
+    /// omit it and close sockets that send unknown events, so clients wait for it.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub accepts_activity: bool,
 }
 #[derive(Clone, Serialize, Deserialize)]
 #[serde(tag = "action", rename_all = "snake_case", deny_unknown_fields)]
@@ -207,6 +215,11 @@ pub enum ClientEvent {
     Typing {
         active: bool,
     },
+    /// Replaces this socket's live activity; null clears it. It ends with the
+    /// socket. Send only after a snapshot with `accepts_activity`.
+    Activity {
+        activity: Option<crate::account::Activity>,
+    },
 }
 #[derive(Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -248,6 +261,13 @@ mod tests {
         assert!(snapshot.typing.is_empty());
         assert!(snapshot.before.is_none());
         assert!(snapshot.own_status.is_none());
+        assert!(!snapshot.accepts_activity);
+        assert!(
+            serde_json::to_value(&snapshot)
+                .unwrap()
+                .get("accepts_activity")
+                .is_none()
+        );
         let person: Person = serde_json::from_value(
             serde_json::json!({"id":id,"username":"u","display_name":"U","avatar_id":null}),
         )
@@ -270,6 +290,13 @@ mod tests {
         });
         let friend: Friend = serde_json::from_value(legacy.clone()).unwrap();
         assert_eq!(friend.unread_count, 0);
+        assert!(friend.activity.is_none());
+        assert!(
+            serde_json::to_value(&friend)
+                .unwrap()
+                .get("activity")
+                .is_none()
+        );
         legacy["unread_count"] = serde_json::json!(100);
         let friend: Friend = serde_json::from_value(legacy).unwrap();
         assert_eq!(serde_json::to_value(friend).unwrap()["unread_count"], 100);
@@ -280,6 +307,26 @@ mod tests {
             serde_json::from_value::<Request>(serde_json::json!({
                 "action":"read", "conversation_id":id, "through":"tomorrow"
             }))
+            .is_err()
+        );
+    }
+
+    #[test]
+    fn activity_events_are_typed() {
+        let wire =
+            serde_json::json!({"type":"activity","activity":{"kind":"playing","name":"Factorio"}});
+        let event: ClientEvent = serde_json::from_value(wire.clone()).unwrap();
+        assert!(
+            matches!(&event, ClientEvent::Activity { activity: Some(a) } if a.name == "Factorio")
+        );
+        assert_eq!(serde_json::to_value(event).unwrap(), wire);
+        let clear: ClientEvent =
+            serde_json::from_value(serde_json::json!({"type":"activity","activity":null})).unwrap();
+        assert!(matches!(clear, ClientEvent::Activity { activity: None }));
+        assert!(
+            serde_json::from_value::<ClientEvent>(
+                serde_json::json!({"type":"activity","activity":null,"account_id":"x"})
+            )
             .is_err()
         );
     }

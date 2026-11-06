@@ -249,7 +249,7 @@ pub(super) async fn serve(
     let mut members_due = None::<Instant>;
     let mut member_list = None::<(access::Snapshot, members::MemberList)>;
     let mut last_member_list = None::<Vec<thiscord_shared::chat::GuildMember>>;
-    let mut last_online = Vec::new();
+    let mut last_live = members::Live::default();
     // Transient database trouble delivers nothing that needs the failed read and
     // retries with backoff; the socket closes with a service error (never
     // `revoked`) only after `retry::GRACE` without success.
@@ -285,7 +285,7 @@ pub(super) async fn serve(
                         watch_voice = voice_roster; last_roster = None; voice_visibility = None;
                         roster_tick.reset_immediately();
                         watch_members = member_roster; members_dirty = false; members_due = None;
-                        member_list = None; last_member_list = None; last_online.clear();
+                        member_list = None; last_member_list = None; last_live = members::Live::default();
                         grant = None;
                         feed = guild_id.zip(channel_id).map(|(guild, channel)| super::feed::subscribe(guild, channel));
                         if channel_id.is_some() && guild_id.is_none() {
@@ -370,10 +370,10 @@ pub(super) async fn serve(
                 };
                 let refresh = list.expiry(chrono::Utc::now()).map_or(MEMBER_REFRESH, |e| e.min(MEMBER_REFRESH));
                 members_due = Some(Instant::now() + refresh);
-                let online = list.online(crate::friends::online);
-                let view = list.members(&online);
+                let live = list.live(crate::friends::online, crate::friends::activity);
+                let view = list.members(&live);
                 let Some(_delivery) = authorized.clone().deliver() else { let _ = send(&mut socket, ServerEvent::Revoked {}).await; break; };
-                last_online = online;
+                last_live = live;
                 member_list = Some((authorized, list));
                 if last_member_list.as_ref() != Some(&view) {
                     last_member_list = Some(view.clone());
@@ -383,16 +383,15 @@ pub(super) async fn serve(
             _ = member_tick.tick(), if member_list.is_some() && subscription.is_some() => {
                 let sub = subscription.unwrap();
                 let (authorized, list) = member_list.as_ref().unwrap();
-                let online = list.online(crate::friends::online);
-                if online != last_online {
+                let live = list.live(crate::friends::online, crate::friends::activity);
+                if live != last_live {
                     // Every access-changing commit for this viewer advances an epoch
                     // in this snapshot and closes the socket before reuse here.
                     let Some(_delivery) = authorized.clone().deliver() else { let _ = send(&mut socket, ServerEvent::Revoked {}).await; break; };
-                    last_online = online.clone();
-                    if let Some(view) = &mut last_member_list {
-                        for member in view.iter_mut() { member.online = online.contains(&member.account_id); }
-                    }
-                    if update(&mut socket, sub, ServerEvent::MemberPresence { online }).await.is_err() { break; }
+                    if let Some(view) = &mut last_member_list { live.apply(view); }
+                    let event = ServerEvent::MemberPresence { online: live.online.clone(), activities: live.activities.clone() };
+                    last_live = live;
+                    if update(&mut socket, sub, event).await.is_err() { break; }
                 }
             }
             _ = async { if let Some(at) = presence_due { tokio::time::sleep_until(at.into()).await; } else { std::future::pending::<()>().await; } } => {

@@ -27,8 +27,8 @@ pub struct Pressed<'a> {
     pub meta: bool,
 }
 
-/// Push-to-talk is fixed, as on the desktop.
-pub const PUSH_TO_TALK: &str = "Control+Shift+Space";
+/// Why a plain typing key cannot be push-to-talk (see [`Chord::blocks_typing`]).
+pub const TYPING_KEY: &str = "Add Ctrl, Alt or Super to letter, number, space and punctuation keys so they still type normally.";
 
 fn key_code(key: &str) -> Option<String> {
     let upper = key.to_ascii_uppercase();
@@ -180,6 +180,32 @@ impl Chord {
             || self.command_or_control
             || (self.code.starts_with('F') && self.code[1..].parse::<u8>().is_ok())
     }
+    /// A letter, number, space or punctuation key without Control, Alt or
+    /// Super. Global shortcuts consume their keys in every app, and a held
+    /// push-to-talk key would swallow typing, so these are not offered.
+    pub fn blocks_typing(&self) -> bool {
+        !(self.control || self.alt || self.meta || self.command_or_control)
+            && (self.code.starts_with("Key")
+                || self.code.starts_with("Digit")
+                || matches!(
+                    self.code.as_str(),
+                    "Space"
+                        | "Enter"
+                        | "Tab"
+                        | "Backspace"
+                        | "Minus"
+                        | "Equal"
+                        | "Comma"
+                        | "Period"
+                        | "Slash"
+                        | "Backslash"
+                        | "Semicolon"
+                        | "Quote"
+                        | "Backquote"
+                        | "BracketLeft"
+                        | "BracketRight"
+                ))
+    }
     /// Whether a released key ends this chord (for push-to-talk).
     pub fn released_by(&self, code: &str) -> bool {
         code == self.code
@@ -205,33 +231,134 @@ impl Chord {
     }
 }
 
-/// Parsed browser bindings for the self-control shortcuts.
+/// The result of one key press while recording a shortcut.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Recorded {
+    /// Only modifiers so far; the held ones in binding syntax (may be empty).
+    Pending(String),
+    /// Escape without modifiers.
+    Cancel,
+    /// A complete combination in binding syntax, accepted by both the browser
+    /// and the desktop parsers.
+    Chord(String),
+    /// A key neither parser supports (for example Caps Lock or media keys).
+    Unsupported,
+}
+
+/// Turns a key press into binding text for the click-to-record control.
+pub fn record(pressed: &Pressed) -> Recorded {
+    let modifiers: Vec<&str> = [
+        (pressed.control, "Control"),
+        (pressed.alt, "Alt"),
+        (pressed.shift, "Shift"),
+        (pressed.meta, "Super"),
+    ]
+    .into_iter()
+    .filter_map(|(held, name)| held.then_some(name))
+    .collect();
+    let code = pressed.code;
+    if ["Control", "Shift", "Alt", "Meta", "OS"]
+        .iter()
+        .any(|m| code.starts_with(m))
+    {
+        return Recorded::Pending(modifiers.join("+"));
+    }
+    if code == "Escape" && modifiers.is_empty() {
+        return Recorded::Cancel;
+    }
+    if key_code(code).as_deref() != Some(code) {
+        return Recorded::Unsupported;
+    }
+    let key = code
+        .strip_prefix("Key")
+        .or_else(|| code.strip_prefix("Digit"))
+        .unwrap_or(code);
+    let text = modifiers
+        .into_iter()
+        .chain(std::iter::once(key))
+        .collect::<Vec<_>>()
+        .join("+");
+    match Chord::parse(&text) {
+        Some(_) => Recorded::Chord(text),
+        None => Recorded::Unsupported,
+    }
+}
+
+/// Short key-cap labels for showing a binding ("Ctrl", "Shift", "M").
+pub fn labels(text: &str) -> Vec<String> {
+    if text.trim().is_empty() {
+        return Vec::new();
+    }
+    let parts: Vec<&str> = text.split('+').map(str::trim).collect();
+    let Some((key, modifiers)) = parts.split_last() else {
+        return Vec::new();
+    };
+    let mut labels: Vec<String> = modifiers
+        .iter()
+        .map(|m| {
+            match m.to_ascii_uppercase().as_str() {
+                "CONTROL" | "CTRL" => "Ctrl",
+                "SHIFT" => "Shift",
+                "ALT" | "OPTION" => "Alt",
+                "SUPER" | "META" | "CMD" | "COMMAND" => "Super",
+                _ => "Ctrl/⌘",
+            }
+            .to_owned()
+        })
+        .collect();
+    let code = key_code(key).unwrap_or_else(|| (*key).to_owned());
+    let symbol = match code.as_str() {
+        "ArrowUp" => Some("↑"),
+        "ArrowDown" => Some("↓"),
+        "ArrowLeft" => Some("←"),
+        "ArrowRight" => Some("→"),
+        "Backquote" => Some("`"),
+        "Minus" => Some("-"),
+        "Equal" => Some("="),
+        "Comma" => Some(","),
+        "Period" => Some("."),
+        "Slash" => Some("/"),
+        "Backslash" => Some("\\"),
+        "Semicolon" => Some(";"),
+        "Quote" => Some("'"),
+        "BracketLeft" => Some("["),
+        "BracketRight" => Some("]"),
+        _ => None,
+    };
+    labels.push(match symbol {
+        Some(symbol) => symbol.to_owned(),
+        None => code
+            .strip_prefix("Key")
+            .or_else(|| code.strip_prefix("Digit"))
+            .map(str::to_owned)
+            .or_else(|| code.strip_prefix("Numpad").map(|n| format!("Num {n}")))
+            .unwrap_or_else(|| code.clone()),
+    });
+    labels
+}
+
+/// Parsed browser bindings for push-to-talk and the self-control shortcuts.
 #[derive(Debug, Clone, Default)]
 pub struct Bindings {
+    pub push_to_talk: Option<Chord>,
     pub mute: Option<Chord>,
     pub deafen: Option<Chord>,
 }
 impl Bindings {
     /// Validates like the desktop: bounded length, valid syntax, unique keys
-    /// and no conflict with push-to-talk. Overlay bindings are kept but unused.
+    /// (push-to-talk included) and no plain typing key for push-to-talk.
+    /// Overlay bindings are kept but unused.
     pub fn from_settings(settings: &AudioShortcuts) -> Result<Self, &'static str> {
         if settings.too_long() {
             return Err("Shortcut is too long");
         }
-        let ptt = Chord::parse(PUSH_TO_TALK);
-        let mut seen: Vec<Chord> = ptt.into_iter().collect();
+        let mut seen: Vec<Chord> = Vec::new();
         let mut parse = |text: &str| -> Result<Option<Chord>, &'static str> {
             if text.trim().is_empty() {
                 return Ok(None);
             }
             let chord = Chord::parse(text)
                 .ok_or("Invalid shortcut. Use a combination such as Control+Shift+M.")?;
-            if seen
-                .first()
-                .is_some_and(|ptt| ptt.equivalent(&chord) || chord.equivalent(ptt))
-            {
-                return Err("Ctrl+Shift+Space is reserved for push-to-talk");
-            }
             if seen
                 .iter()
                 .any(|other| other.equivalent(&chord) || chord.equivalent(other))
@@ -241,7 +368,12 @@ impl Bindings {
             seen.push(chord.clone());
             Ok(Some(chord))
         };
+        let push_to_talk = parse(&settings.push_to_talk)?;
+        if push_to_talk.as_ref().is_some_and(Chord::blocks_typing) {
+            return Err(TYPING_KEY);
+        }
         Ok(Self {
+            push_to_talk,
             mute: parse(&settings.mute)?,
             deafen: parse(&settings.deafen)?,
         })
@@ -357,13 +489,14 @@ mod tests {
             })
         };
         assert!(with("", "").is_ok());
+        // Push-to-talk joins the conflict check like any other action.
         assert_eq!(
             with("Ctrl+Shift+Space", "").unwrap_err(),
-            "Ctrl+Shift+Space is reserved for push-to-talk"
+            "Each action needs a different shortcut"
         );
         assert_eq!(
             with("CmdOrCtrl+Shift+Space", "").unwrap_err(),
-            "Ctrl+Shift+Space is reserved for push-to-talk"
+            "Each action needs a different shortcut"
         );
         assert_eq!(
             with("Alt+M", "alt+m").unwrap_err(),
@@ -374,8 +507,115 @@ mod tests {
     }
 
     #[test]
+    fn push_to_talk_is_configurable_but_never_a_plain_typing_key() {
+        let with = |ptt: &str| {
+            Bindings::from_settings(&AudioShortcuts {
+                push_to_talk: ptt.into(),
+                ..AudioShortcuts::default()
+            })
+        };
+        let f8 = with("F8").unwrap().push_to_talk.unwrap();
+        assert!(f8.matches(&press("F8")));
+        assert!(with("").unwrap().push_to_talk.is_none());
+        assert!(with("Alt+V").is_ok());
+        assert!(with("Numpad0").is_ok());
+        for typing in ["V", "Space", "Shift+V", "Backquote", "Digit1"] {
+            assert_eq!(with(typing).unwrap_err(), TYPING_KEY, "{typing}");
+        }
+        assert_eq!(
+            with("Control+Shift+M").unwrap_err(),
+            "Each action needs a different shortcut"
+        );
+        // The old fixed key is free for other actions once push-to-talk moves.
+        assert!(
+            Bindings::from_settings(&AudioShortcuts {
+                push_to_talk: "F8".into(),
+                mute: "Control+Shift+Space".into(),
+                ..AudioShortcuts::default()
+            })
+            .is_ok()
+        );
+    }
+
+    #[test]
+    fn recording_produces_parseable_bindings() {
+        let key = |code, control, shift, alt, meta| {
+            record(&Pressed {
+                code,
+                control,
+                shift,
+                alt,
+                meta,
+            })
+        };
+        assert_eq!(
+            key("KeyM", true, true, false, false),
+            Recorded::Chord("Control+Shift+M".into())
+        );
+        assert_eq!(
+            key("Digit1", false, false, true, false),
+            Recorded::Chord("Alt+1".into())
+        );
+        assert_eq!(
+            key("F8", false, false, false, false),
+            Recorded::Chord("F8".into())
+        );
+        assert_eq!(
+            key("ArrowUp", true, false, false, true),
+            Recorded::Chord("Control+Super+ArrowUp".into())
+        );
+        assert_eq!(
+            key("ShiftLeft", true, true, false, false),
+            Recorded::Pending("Control+Shift".into())
+        );
+        assert_eq!(
+            key("MetaLeft", false, false, false, true),
+            Recorded::Pending("Super".into())
+        );
+        assert_eq!(key("Escape", false, false, false, false), Recorded::Cancel);
+        assert_eq!(
+            key("Escape", true, false, false, false),
+            Recorded::Chord("Control+Escape".into())
+        );
+        assert_eq!(
+            key("CapsLock", false, false, false, false),
+            Recorded::Unsupported
+        );
+        assert_eq!(
+            key("AudioVolumeUp", false, false, false, false),
+            Recorded::Unsupported
+        );
+        // Every recorded binding round-trips through the parser.
+        for code in [
+            "KeyZ",
+            "Digit0",
+            "Space",
+            "Numpad5",
+            "Backquote",
+            "F24",
+            "PageDown",
+        ] {
+            let Recorded::Chord(text) = key(code, true, false, false, false) else {
+                panic!("{code}");
+            };
+            let chord = Chord::parse(&text).unwrap();
+            assert_eq!(chord.code, code);
+            assert!(chord.matches(&Pressed {
+                code,
+                control: true,
+                ..Default::default()
+            }));
+        }
+        assert_eq!(labels("Control+Shift+M"), ["Ctrl", "Shift", "M"]);
+        assert_eq!(labels("Super+ArrowUp"), ["Super", "↑"]);
+        assert_eq!(labels("Numpad5"), ["Num 5"]);
+        assert_eq!(labels("CmdOrCtrl+K"), ["Ctrl/⌘", "K"]);
+        assert!(labels("").is_empty());
+    }
+
+    #[test]
     fn push_to_talk_releases_on_any_chord_key() {
-        let ptt = Chord::parse(PUSH_TO_TALK).unwrap();
+        let ptt = Chord::parse(AudioShortcuts::DEFAULT_PUSH_TO_TALK).unwrap();
         for code in ["Space", "ControlLeft", "ShiftRight"] {
             assert!(ptt.released_by(code));
         }

@@ -5,10 +5,10 @@ use super::{
     icons::{Glyph, Icon},
 };
 use leptos::prelude::*;
-use thiscord_frontend::member_list::{PANEL_KEY, apply_presence, grouped, status_text};
+use thiscord_frontend::member_list::{PANEL_KEY, Section, apply_presence, sections, status_text};
 use thiscord_shared::{
     AccountId, AvatarId, ChannelId, GuildId,
-    chat::{CHAT_PATH, ChatRequest, ChatResponse, GuildMember, MemberProfile},
+    chat::{CHAT_PATH, ChatRequest, ChatResponse, GuildMember, MemberActivity, MemberProfile},
     friends::Relationship,
 };
 use wasm_bindgen::JsCast;
@@ -71,8 +71,9 @@ impl State {
         self.guild.set(guild);
         self.list.set(members);
     }
-    pub(super) fn presence(self, online: &[AccountId]) {
-        self.list.update(|list| apply_presence(list, online));
+    pub(super) fn presence(self, online: &[AccountId], activities: &[MemberActivity]) {
+        self.list
+            .update(|list| apply_presence(list, online, activities));
     }
     /// Current status line of a listed member, for tooltips elsewhere.
     pub(super) fn status(self, guild: GuildId, id: AccountId) -> Option<String> {
@@ -82,8 +83,31 @@ impl State {
         self.list.with(|list| {
             list.iter()
                 .find(|m| m.account_id == id)
-                .and_then(|m| m.custom_status.as_ref())
-                .map(status_text)
+                .and_then(status_line)
+        })
+    }
+    /// Highest-ranked role name of a listed member, for the profile card.
+    fn role(self, guild: GuildId, id: AccountId) -> Option<String> {
+        if self.guild.get() != Some(guild) {
+            return None;
+        }
+        self.list.with(|list| {
+            list.iter()
+                .find(|m| m.account_id == id)
+                .and_then(|m| m.role.as_ref())
+                .map(|r| r.name.clone())
+        })
+    }
+    /// Live activity of a listed member, for the profile card.
+    fn activity(self, guild: GuildId, id: AccountId) -> Option<String> {
+        if self.guild.get() != Some(guild) {
+            return None;
+        }
+        self.list.with(|list| {
+            list.iter()
+                .find(|m| m.account_id == id)
+                .and_then(|m| m.activity.as_ref())
+                .map(super::activity::label)
         })
     }
     pub(super) fn name(self, guild: GuildId, id: AccountId) -> Option<String> {
@@ -134,6 +158,7 @@ type RowKey = (
     String,
     Option<AvatarId>,
     String,
+    Option<String>,
     bool,
     bool,
     bool,
@@ -143,15 +168,21 @@ fn row_key(member: &GuildMember) -> RowKey {
         member.account_id,
         member.display_name().to_owned(),
         member.avatar_id,
-        member
-            .custom_status
-            .as_ref()
-            .map(status_text)
-            .unwrap_or_default(),
+        status_line(member).unwrap_or_default(),
+        member.role.as_ref().map(|r| r.name.clone()),
         member.online,
         member.owner,
         member.bot,
     )
+}
+
+/// A member's live activity, otherwise their custom status.
+fn status_line(member: &GuildMember) -> Option<String> {
+    member
+        .activity
+        .as_ref()
+        .map(super::activity::label)
+        .or_else(|| member.custom_status.as_ref().map(status_text))
 }
 
 #[component]
@@ -163,11 +194,13 @@ fn Row(
 ) -> impl IntoView {
     let id = member.account_id;
     let name = member.display_name().to_owned();
-    let status = member.custom_status.as_ref().map(status_text);
+    let status = status_line(&member);
     let own = move || ui.account.with(|a| a.as_ref().is_some_and(|a| a.id == id));
     let online = member.online;
+    let role = member.role.as_ref().map(|r| r.name.clone());
     let label = {
         let name = name.clone();
+        let role = role.clone();
         let status = status.clone();
         move || {
             let presence = if own() && super::notifications::do_not_disturb(ui) {
@@ -180,6 +213,9 @@ fn Row(
             let mut label = format!("{name}, {presence}");
             if member.owner {
                 label = format!("{label}, {}", crate::i18n::t("Server owner"));
+            }
+            if let Some(role) = &role {
+                label = format!("{label}, {role}");
             }
             if let Some(status) = &status {
                 label = format!("{label}, {status}");
@@ -207,6 +243,7 @@ fn Row(
                 <span class="min-w-0 flex-1">
                     <span class="flex min-w-0 items-center gap-1">
                         <span class="truncate text-sm font-medium">{name}</span>
+                        {role.map(|role| view! {<span class="member-badge member-role-badge" title=role.clone()>{role.clone()}</span>})}
                         {member.owner.then(|| view! {<span class="member-badge">{move || crate::i18n::t("Owner")}</span>})}
                         {member.bot.then(|| view! {<span class="member-badge">{move || crate::i18n::t("Bot")}</span>})}
                     </span>
@@ -221,16 +258,16 @@ fn Row(
 fn Group(
     ui: Ui,
     guild: GuildId,
-    title: &'static str,
-    heading: &'static str,
+    title: Signal<String>,
+    heading: String,
     members: Memo<Vec<GuildMember>>,
     roving: super::keyboard::Roving<thiscord_shared::AccountId>,
 ) -> impl IntoView {
     view! {
         <Show when=move || members.with(|m| !m.is_empty())>
-            <section aria-labelledby=heading>
-                <h3 id=heading class="member-group-heading">
-                    {move || format!("{} — {}", crate::i18n::t(title), members.with(Vec::len))}
+            <section aria-labelledby=heading.clone()>
+                <h3 id=heading.clone() class="member-group-heading">
+                    {move || format!("{} — {}", title.get(), members.with(Vec::len))}
                 </h3>
                 <ul role="list" class="space-y-0.5">
                     <For each=move || members.get() key=row_key
@@ -278,14 +315,24 @@ pub(super) fn Panel(ui: Ui, guild: GuildId) -> impl IntoView {
             vec![]
         }
     });
-    let online =
-        Memo::new(move |_| list.with(|l| grouped(l).0.into_iter().cloned().collect::<Vec<_>>()));
-    let offline =
-        Memo::new(move |_| list.with(|l| grouped(l).1.into_iter().cloned().collect::<Vec<_>>()));
+    // Role groups (highest rank first), then Online without roles, then Offline.
+    let groups = Memo::new(move |_| {
+        list.with(|l| {
+            sections(l)
+                .into_iter()
+                .map(|(section, members)| (section, members.into_iter().cloned().collect()))
+                .collect::<Vec<(Section, Vec<GuildMember>)>>()
+        })
+    });
+    let keys =
+        Memo::new(move |_| groups.with(|g| g.iter().map(|(s, _)| s.key()).collect::<Vec<_>>()));
     let roving = super::keyboard::Roving::new(
         move || {
-            online
-                .with(|on| offline.with(|off| on.iter().chain(off).map(|m| m.account_id).collect()))
+            groups.with(|g| {
+                g.iter()
+                    .flat_map(|(_, m)| m.iter().map(|m| m.account_id))
+                    .collect()
+            })
         },
         || None,
     );
@@ -331,8 +378,22 @@ pub(super) fn Panel(ui: Ui, guild: GuildId) -> impl IntoView {
                         if ui.socket_status.get() == super::chat::ConnectionStatus::Connected { crate::i18n::t("Loading members…") }
                         else { ui.socket_status.get().label() }}</p>
                 </Show>
-                <Group ui guild title="Online" heading="member-group-online" members=online roving/>
-                <Group ui guild title="Offline" heading="member-group-offline" members=offline roving/>
+                <For each=move || keys.get() key=|key| key.clone() children=move |key| {
+                    let find = {
+                        let key = key.clone();
+                        move |g: &Vec<(Section, Vec<GuildMember>)>| g.iter().position(|(s, _)| s.key() == key)
+                    };
+                    let members = {
+                        let find = find.clone();
+                        Memo::new(move |_| groups.with(|g| find(g).map(|i| g[i].1.clone()).unwrap_or_default()))
+                    };
+                    let title = Signal::derive(move || groups.with(|g| match find(g).map(|i| &g[i].0) {
+                        Some(Section::Role(role)) => role.name.clone(),
+                        Some(Section::Online) => crate::i18n::t("Online").to_owned(),
+                        _ => crate::i18n::t("Offline").to_owned(),
+                    }));
+                    view! {<Group ui guild title heading=format!("member-group-{key}") members roving/>}
+                }/>
             </div>
         </aside>
     }
@@ -424,6 +485,12 @@ pub(super) fn ProfileHost(ui: Ui) -> impl IntoView {
                 .map(|f| f.conversation_id)
         })
     };
+    let card_role = move || {
+        ui.members
+            .profile
+            .get()
+            .and_then(|(guild, id)| ui.members.role(guild, id))
+    };
     let own = move || {
         ui.members
             .profile
@@ -440,8 +507,9 @@ pub(super) fn ProfileHost(ui: Ui) -> impl IntoView {
                 <div class="min-w-0 flex-1">
                     <h2 id="profile-card-name" class="break-words text-xl font-semibold">{move || profile.with(|p| p.as_ref().map(|p| p.display_name.clone()))}</h2>
                     <p class="break-all text-sm text-white/60">{move || profile.with(|p| p.as_ref().map(|p| format!("@{}", p.username)))}</p>
-                    <Show when=move || profile.with(|p| p.as_ref().is_some_and(|p| p.owner || p.bot))>
-                        <p class="mt-1 flex gap-1">
+                    <Show when=move || profile.with(|p| p.as_ref().is_some_and(|p| p.owner || p.bot)) || card_role().is_some()>
+                        <p class="mt-1 flex flex-wrap gap-1">
+                            {move || card_role().map(|role| view! {<span class="member-badge member-role-badge" title=role.clone()>{role.clone()}</span>})}
                             <Show when=move || profile.with(|p| p.as_ref().is_some_and(|p| p.owner))><span class="member-badge">{move || crate::i18n::t("Server owner")}</span></Show>
                             <Show when=move || profile.with(|p| p.as_ref().is_some_and(|p| p.bot))><span class="member-badge">{move || crate::i18n::t("Bot")}</span></Show>
                         </p>
@@ -453,6 +521,12 @@ pub(super) fn ProfileHost(ui: Ui) -> impl IntoView {
                 <p class="mt-4 text-sm text-white/60" role="status">{move || crate::i18n::t("Loading profile…")}</p>
             </Show>
             <p class="mt-4 text-sm text-red-300" role="alert" hidden=move || error.with(String::is_empty)>{move || crate::i18n::message(error.get())}</p>
+            {move || ui.members.profile.get().and_then(|(guild, id)| ui.members.activity(guild, id)).map(|activity| view! {
+                <section class="mt-4" aria-labelledby="profile-card-activity">
+                    <h3 id="profile-card-activity" class="text-xs font-semibold uppercase tracking-wider text-white/60">{move || crate::i18n::t("Activity")}</h3>
+                    <p class="mt-1 break-words text-sm">{activity}</p>
+                </section>
+            })}
             {move || profile.with(|p| p.as_ref().and_then(|p| p.custom_status.as_ref()).map(|status| {
                 let text = status_text(status);
                 view! {

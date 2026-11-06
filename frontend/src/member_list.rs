@@ -2,21 +2,76 @@
 use thiscord_shared::{
     AccountId,
     account::{CustomStatus, MAX_STATUS_SECONDS},
-    chat::GuildMember,
+    chat::{GuildMember, MemberActivity, MemberRole},
 };
 
 /// Device-local member panel visibility (wide layouts). Contains no account data.
 pub const PANEL_KEY: &str = "thiscord.member_panel.v1";
 
-/// Online members first, then offline, each keeping the server's display-name order.
-pub fn grouped(members: &[GuildMember]) -> (Vec<&GuildMember>, Vec<&GuildMember>) {
-    members.iter().partition(|member| member.online)
+/// A member list group heading.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum Section {
+    /// Online members whose highest-ranked role is this one.
+    Role(MemberRole),
+    /// Online members without roles (Everyone only).
+    Online,
+    Offline,
+}
+
+impl Section {
+    /// Stable identity for keyed rendering and element IDs; a renamed or
+    /// re-ranked role keeps its key.
+    pub fn key(&self) -> String {
+        match self {
+            Self::Role(role) => format!("role-{}", role.id),
+            Self::Online => "online".into(),
+            Self::Offline => "offline".into(),
+        }
+    }
+}
+
+/// Groups members once each: online members under their highest-ranked role
+/// (highest rank first, ties by name then ID), then online members without
+/// roles, then everyone offline. Members keep the server's display-name order.
+pub fn sections(members: &[GuildMember]) -> Vec<(Section, Vec<&GuildMember>)> {
+    let mut roles: Vec<(&MemberRole, Vec<&GuildMember>)> = Vec::new();
+    let (mut online, mut offline) = (Vec::new(), Vec::new());
+    for member in members {
+        match (member.online, &member.role) {
+            (false, _) => offline.push(member),
+            (true, None) => online.push(member),
+            (true, Some(role)) => match roles.iter_mut().find(|(r, _)| r.id == role.id) {
+                Some((_, group)) => group.push(member),
+                None => roles.push((role, vec![member])),
+            },
+        }
+    }
+    roles.sort_by(|(a, _), (b, _)| {
+        b.position
+            .cmp(&a.position)
+            .then_with(|| a.name.cmp(&b.name))
+            .then_with(|| a.id.cmp(&b.id))
+    });
+    roles
+        .into_iter()
+        .map(|(role, group)| (Section::Role(role.clone()), group))
+        .chain([(Section::Online, online), (Section::Offline, offline)])
+        .filter(|(_, group)| !group.is_empty())
+        .collect()
 }
 
 /// Applies a complete `member_presence` set to the last full list.
-pub fn apply_presence(members: &mut [GuildMember], online: &[AccountId]) {
+pub fn apply_presence(
+    members: &mut [GuildMember],
+    online: &[AccountId],
+    activities: &[MemberActivity],
+) {
     for member in members {
         member.online = online.contains(&member.account_id);
+        member.activity = activities
+            .iter()
+            .find(|a| a.account_id == member.account_id && member.online)
+            .map(|a| a.activity.clone());
     }
 }
 
@@ -105,31 +160,92 @@ mod tests {
             avatar_id: None,
             online,
             custom_status: None,
+            activity: None,
+            role: None,
             owner: false,
             bot: false,
         }
     }
 
+    fn role(id: u128, name: &str, position: i32) -> MemberRole {
+        MemberRole {
+            id: format!("00000000-0000-0000-0000-{id:012}").parse().unwrap(),
+            name: name.into(),
+            position,
+        }
+    }
+
+    fn names(group: &[&GuildMember]) -> Vec<String> {
+        group.iter().map(|m| m.username.clone()).collect()
+    }
+
+    #[test]
+    fn sections_group_online_members_by_highest_role_once() {
+        let agalar = role(90, "agalar", 20);
+        let mods = role(91, "mods", 10);
+        let tied = role(92, "aaa", 10);
+        let mut members: Vec<_> = (1..=7).map(|id| member(id, id != 6)).collect();
+        members[0].role = Some(mods.clone());
+        members[1].role = Some(agalar.clone());
+        members[3].role = Some(agalar.clone());
+        members[4].role = Some(tied.clone());
+        // Offline role holders are listed under Offline, not their role.
+        members[5].role = Some(agalar.clone());
+        let sections = sections(&members);
+        let summary: Vec<_> = sections
+            .iter()
+            .map(|(section, group)| (section.key(), names(group)))
+            .collect();
+        assert_eq!(
+            summary,
+            [
+                (
+                    format!("role-{}", agalar.id),
+                    vec!["user2".to_owned(), "user4".to_owned()]
+                ),
+                (format!("role-{}", tied.id), vec!["user5".to_owned()]),
+                (format!("role-{}", mods.id), vec!["user1".to_owned()]),
+                (
+                    "online".to_owned(),
+                    vec!["user3".to_owned(), "user7".to_owned()]
+                ),
+                ("offline".to_owned(), vec!["user6".to_owned()]),
+            ]
+        );
+        assert_eq!(sections[0].0, Section::Role(agalar));
+        // Everyone appears exactly once; empty groups are omitted.
+        assert_eq!(sections.iter().map(|(_, g)| g.len()).sum::<usize>(), 7);
+        let all_offline: Vec<_> = (1..=2).map(|id| member(id, false)).collect();
+        assert_eq!(
+            super::sections(&all_offline)
+                .iter()
+                .map(|(s, _)| s.key())
+                .collect::<Vec<_>>(),
+            ["offline"]
+        );
+        assert!(super::sections(&[]).is_empty());
+    }
+
     #[test]
     fn grouping_keeps_order_and_presence_replaces_previous_flags() {
         let mut members = vec![member(1, false), member(2, true), member(3, false)];
-        let (online, offline) = grouped(&members);
-        assert_eq!(online.len(), 1);
-        assert_eq!(
-            offline
-                .iter()
-                .map(|m| m.username.as_str())
-                .collect::<Vec<_>>(),
-            ["user1", "user3"]
-        );
         let ids = [members[0].account_id, members[2].account_id];
-        apply_presence(&mut members, &ids);
+        let playing = |member: &GuildMember| MemberActivity {
+            account_id: member.account_id,
+            activity: thiscord_shared::account::Activity::playing("Factorio"),
+        };
+        let activities = [playing(&members[0]), playing(&members[1])];
+        apply_presence(&mut members, &ids, &activities);
         assert_eq!(
-            members.iter().map(|m| m.online).collect::<Vec<_>>(),
-            [true, false, true]
+            members
+                .iter()
+                .map(|m| (m.online, m.activity.is_some()))
+                .collect::<Vec<_>>(),
+            // Activities never show on offline members.
+            [(true, true), (false, false), (true, false)]
         );
-        apply_presence(&mut members, &[]);
-        assert!(members.iter().all(|m| !m.online));
+        apply_presence(&mut members, &[], &[]);
+        assert!(members.iter().all(|m| !m.online && m.activity.is_none()));
     }
 
     #[test]

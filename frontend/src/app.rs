@@ -1,6 +1,7 @@
 use crate::account_client as client;
 use leptos::prelude::*;
 use thiscord_shared::account::*;
+mod activity;
 mod admin;
 mod appearance;
 mod audio;
@@ -37,6 +38,7 @@ mod soundboard;
 mod status;
 mod tooltip;
 mod updates;
+mod verify;
 mod voice_bots;
 mod window;
 
@@ -80,6 +82,8 @@ struct Ui {
     members: members::State,
     audio_control: crate::audio_control::AudioControl,
     updates: RwSignal<thiscord_shared::update::UpdateStatus>,
+    /// This device's game detection (desktop); shared over the friends socket.
+    activity: RwSignal<thiscord_frontend::game_activity::ActivityStatus>,
     update_error: RwSignal<String>,
     audio: RwSignal<thiscord_shared::audio::AudioSettings>,
     audio_saving: RwSignal<bool>,
@@ -465,6 +469,7 @@ pub fn App() -> impl IntoView {
         notifications: notifications::State::new(),
         audio_control: Default::default(),
         updates: RwSignal::new(Default::default()),
+        activity: RwSignal::new(Default::default()),
         update_error: RwSignal::new(String::new()),
         audio: RwSignal::new(Default::default()),
         audio_saving: RwSignal::new(false),
@@ -578,20 +583,15 @@ pub fn App() -> impl IntoView {
             ui.mobile_content.set(true);
         }
     });
-    window_event_listener(leptos::ev::focus, move |_| {
-        if !ui.busy.get_untracked()
-            && ui
-                .account
-                .get_untracked()
-                .is_some_and(|a| !a.email_verified)
-        {
-            run(ui, AccountRequest::Current);
-        }
+    // Pending accounts (unverified email) see only the verification step.
+    let verified = Memo::new(move |_| {
+        ui.account
+            .with(|a| a.as_ref().is_some_and(|a| a.email_verified))
     });
     view! {
         <tooltip::Host/><context_menu::Host ui=ui/><voice_bots::Host ui=ui/><dialog::ConfirmHost ui=ui/><dialog::AvatarHost enlarge/>
         <invites::Host ui=ui/>
-        <updates::Host ui=ui/>
+        <updates::Host ui=ui/><activity::Host ui=ui/>
         <notifications::Host ui=ui/>
         <Show when=move ||ui.account.get().is_some() fallback=move ||view!{
             <Show when=move ||restoring.get() fallback=move ||view!{<login::Login ui=ui/>}>
@@ -601,6 +601,7 @@ pub fn App() -> impl IntoView {
                 </main>
             </Show>
         }>
+        <Show when=move || verified.get() fallback=move || view! {<verify::Gate ui=ui/>}>
         <a class="skip-link" href="#app-content" on:click=move |e| {
             // Focus the region instead of navigating, so the URL fragment stays free for invites.
             e.prevent_default();
@@ -620,6 +621,7 @@ pub fn App() -> impl IntoView {
         <settings::Host ui=ui/>
         <audio::VoiceBar ui=ui/>
         </div>
+        </Show>
         </Show>
     }
     .into_any()

@@ -23,7 +23,7 @@ use std::{
     sync::{Arc, Mutex, OnceLock},
     time::{Duration, Instant},
 };
-use thiscord_shared::{AccountId, RequestId, friends::*};
+use thiscord_shared::{AccountId, RequestId, account::Activity, friends::*};
 use tokio::sync::{Semaphore, watch};
 
 /// Database snapshots are rebuilt on commit notifications, call expiry and at
@@ -73,28 +73,77 @@ async fn handle(
         .insert("cache-control", "no-store".parse().unwrap());
     response
 }
-fn presence() -> &'static Mutex<HashMap<AccountId, usize>> {
-    static PRESENCE: OnceLock<Mutex<HashMap<AccountId, usize>>> = OnceLock::new();
+/// One live friends socket and its activity, stamped so the most recently
+/// reported activity wins across an account's devices.
+struct Device {
+    key: u64,
+    activity: Option<(u64, Activity)>,
+}
+#[derive(Default)]
+struct Presence {
+    next: u64,
+    accounts: HashMap<AccountId, Vec<Device>>,
+}
+fn presence() -> &'static Mutex<Presence> {
+    static PRESENCE: OnceLock<Mutex<Presence>> = OnceLock::new();
     PRESENCE.get_or_init(Default::default)
 }
 /// Account-wide presence: at least one authenticated friends socket in this process.
 pub(crate) fn online(id: AccountId) -> bool {
-    presence().lock().unwrap().contains_key(&id)
+    presence().lock().unwrap().accounts.contains_key(&id)
 }
-struct Connected(AccountId);
+/// The account's most recently reported live activity in this process. Callers
+/// apply the online-presence audience (accepted friends, unblocked members).
+pub(crate) fn activity(id: AccountId) -> Option<Activity> {
+    presence()
+        .lock()
+        .unwrap()
+        .accounts
+        .get(&id)?
+        .iter()
+        .filter_map(|device| device.activity.as_ref())
+        .max_by_key(|(stamp, _)| *stamp)
+        .map(|(_, activity)| activity.clone())
+}
+struct Connected {
+    id: AccountId,
+    key: u64,
+}
 impl Connected {
     fn new(id: AccountId) -> Self {
-        *presence().lock().unwrap().entry(id).or_default() += 1;
-        Self(id)
+        let mut p = presence().lock().unwrap();
+        p.next += 1;
+        let key = p.next;
+        p.accounts.entry(id).or_default().push(Device {
+            key,
+            activity: None,
+        });
+        Self { id, key }
+    }
+    /// Replaces this socket's activity; it ends when the socket disconnects.
+    fn set_activity(&self, activity: Option<Activity>) {
+        let mut p = presence().lock().unwrap();
+        p.next += 1;
+        let stamp = p.next;
+        if let Some(device) = p
+            .accounts
+            .get_mut(&self.id)
+            .and_then(|devices| devices.iter_mut().find(|d| d.key == self.key))
+        {
+            // Re-reporting the same activity keeps its stamp (and its precedence).
+            if device.activity.as_ref().map(|(_, a)| a) != activity.as_ref() {
+                device.activity = activity.map(|a| (stamp, a));
+            }
+        }
     }
 }
 impl Drop for Connected {
     fn drop(&mut self) {
         let mut p = presence().lock().unwrap();
-        if let Some(count) = p.get_mut(&self.0) {
-            *count -= 1;
-            if *count == 0 {
-                p.remove(&self.0);
+        if let Some(devices) = p.accounts.get_mut(&self.id) {
+            devices.retain(|d| d.key != self.key);
+            if devices.is_empty() {
+                p.accounts.remove(&self.id);
             }
         }
     }
@@ -205,7 +254,7 @@ async fn serve(mut socket: WebSocket, pool: DbPool, upgrade_token: String, retai
     let session_scope = crate::chat::access::session(session.id);
     let mut changed = account.subscribe();
     let mut revoked = session_scope.subscribe();
-    let _presence = Connected::new(session.account_id);
+    let device = Connected::new(session.account_id);
     let mut selected = None;
     let mut before = None;
     let typing = typing::LeaseOwner::new();
@@ -243,6 +292,11 @@ async fn serve(mut socket: WebSocket, pool: DbPool, upgrade_token: String, retai
                 last_seen=Instant::now();
                 match frame(message) {
                     Some(ClientEvent::Ping {})=>{if send(&mut socket,ServerEvent::Pong {}).await.is_err() {break;}}
+                    // Shown only through `live`, under the presence audience rules.
+                    Some(ClientEvent::Activity {activity})=>{
+                        if activity.as_ref().is_some_and(|a|a.validate().is_err()) {break;}
+                        device.set_activity(activity);
+                    }
                     Some(ClientEvent::Select {conversation_id,before:page})=>{typing.clear();selected=conversation_id;before=page;last=None;cached=None;history.selected();tick.reset_immediately();}
                     Some(ClientEvent::Typing {active})=>{
                         let Some(id)=selected else {continue;};
@@ -311,6 +365,27 @@ mod tests {
         drop(a);
         assert!(online(id));
         drop(b);
+        assert!(!online(id));
+    }
+    #[test]
+    fn activity_follows_the_latest_live_device() {
+        let id = AccountId::from_uuid(uuid::Uuid::new_v4());
+        let a = Connected::new(id);
+        let b = Connected::new(id);
+        assert_eq!(activity(id), None);
+        a.set_activity(Some(Activity::playing("Factorio")));
+        b.set_activity(Some(Activity::playing("League of Legends")));
+        assert_eq!(activity(id), Some(Activity::playing("League of Legends")));
+        // Repeating an unchanged activity keeps the other device's newer one.
+        a.set_activity(Some(Activity::playing("Factorio")));
+        assert_eq!(activity(id), Some(Activity::playing("League of Legends")));
+        b.set_activity(None);
+        assert_eq!(activity(id), Some(Activity::playing("Factorio")));
+        b.set_activity(Some(Activity::playing("Teamfight Tactics")));
+        drop(b);
+        assert_eq!(activity(id), Some(Activity::playing("Factorio")));
+        drop(a);
+        assert_eq!(activity(id), None);
         assert!(!online(id));
     }
     #[test]

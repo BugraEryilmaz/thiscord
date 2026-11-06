@@ -91,10 +91,32 @@ pub struct GuildMember {
     pub online: bool,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub custom_status: Option<crate::account::CustomStatus>,
+    /// Live activity of an online member (see [`crate::account::Activity`]).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub activity: Option<crate::account::Activity>,
+    /// The member's highest-ranked assigned role (never Everyone). Absent
+    /// without roles and from older servers.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub role: Option<MemberRole>,
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub owner: bool,
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub bot: bool,
+}
+/// Display data of a member's highest-ranked role: its name and rank only,
+/// never its permissions or the member's other roles. Higher `position` ranks
+/// higher; ties order by name, then ID.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct MemberRole {
+    pub id: crate::RoleId,
+    pub name: String,
+    pub position: i32,
+}
+/// One online member's live activity in a `member_presence` update.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct MemberActivity {
+    pub account_id: AccountId,
+    pub activity: crate::account::Activity,
 }
 impl GuildMember {
     /// Profile label, falling back to the username.
@@ -422,6 +444,10 @@ pub enum ServerEvent {
     /// Complete set of members currently shown online; applies to the last list.
     MemberPresence {
         online: Vec<AccountId>,
+        /// Complete set of live activities, all for members in `online`. Older
+        /// servers omit it (no activities); older clients ignore it.
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        activities: Vec<MemberActivity>,
     },
     Pong {},
     Revoked {},
@@ -505,7 +531,14 @@ mod tests {
         let member: GuildMember =
             serde_json::from_value(json!({"account_id":id,"username":"user_1"})).unwrap();
         assert_eq!(member.display_name(), "user_1");
-        assert!(!member.online && !member.owner && !member.bot);
+        assert!(!member.online && !member.owner && !member.bot && member.role.is_none());
+        let ranked: GuildMember = serde_json::from_value(json!({"account_id":id,"username":"u",
+            "role":{"id":id,"name":"agalar","position":10}}))
+        .unwrap();
+        assert_eq!(
+            serde_json::to_value(ranked.role).unwrap(),
+            json!({"id":id,"name":"agalar","position":10})
+        );
         assert_eq!(
             serde_json::to_value(&member).unwrap(),
             json!({"account_id":id,"username":"user_1","display_name":"","online":false})
@@ -514,11 +547,21 @@ mod tests {
             subscription: 2,
             event: Box::new(ServerEvent::MemberPresence {
                 online: vec![member.account_id],
+                activities: vec![],
             }),
         };
         let wire = serde_json::to_value(&event).unwrap();
         assert_eq!(wire["event"]["type"], "member_presence");
         assert_eq!(wire["event"]["online"][0], id);
+        assert!(wire["event"].get("activities").is_none());
+        let playing: ServerEvent =
+            serde_json::from_value(json!({"type":"member_presence","online":[id],
+            "activities":[{"account_id":id,"activity":{"kind":"playing","name":"Factorio"}}]}))
+            .unwrap();
+        assert!(
+            matches!(playing, ServerEvent::MemberPresence { activities, .. }
+            if activities.len() == 1 && activities[0].activity.name == "Factorio")
+        );
         let request = json!({"action":"member_profile","guild_id":id,"account_id":id});
         let parsed: ChatRequest = serde_json::from_value(request.clone()).unwrap();
         assert_eq!(serde_json::to_value(parsed).unwrap(), request);

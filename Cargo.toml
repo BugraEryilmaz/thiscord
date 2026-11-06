@@ -17,7 +17,7 @@ rtc-srtp = { path = "vendor/rtc-srtp" }
 deep_filter = { path = "vendor/deep-filter/libDF" }
 
 [workspace.package]
-version = "0.1.57"
+version = "0.1.58"
 edition = "2024"
 rust-version = "1.98"
 publish = false
