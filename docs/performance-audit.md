@@ -278,7 +278,9 @@ Other changes, pinned by tests rather than benchmarks:
   directly), with a 250 ms fallback for stop, instead of polling every 20 ms
   (unit test: at most 6 wakes in a paused second, encoding within 150 ms of demand).
 - Linux encoder output is queued by buffer reference and copied once, after any
-  keyframe parameter-set prefix, instead of copied and then re-copied for IDRs.
+  keyframe parameter-set prefix, instead of copied and then re-copied for IDRs. The
+  GStreamer layer test exercised this path at runtime in WSL with NVENC
+  (`nvh264enc`, CPU-scale family): forced keyframes carried parameter sets and decoded.
 - A sender held by backpressure wakes its encoder worker when budget frees
   instead of the worker polling every 2 ms.
 - The audio worker wakes once per second outside a session instead of every
