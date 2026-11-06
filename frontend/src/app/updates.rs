@@ -2,7 +2,7 @@ use super::Ui;
 use crate::account_client::{desktop, native};
 use leptos::prelude::*;
 use serde_json::json;
-use thiscord_frontend::changelog::{Changelog, Kind, Span};
+use thiscord_frontend::changelog::{Changelog, Kind, Span, localized};
 use thiscord_shared::update::{UpdatePhase, UpdateStatus};
 
 fn busy(ui: Ui) -> bool {
@@ -123,7 +123,7 @@ fn Prompt(ui: Ui) -> impl IntoView {
                     </div>
                     <Show when=move||ui.voice.get().channel_id.is_some()><p class="text-sm text-white/60">{move || crate::i18n::t("Disconnect from voice before installing.")}</p></Show>
                     <p role="alert" class="text-sm text-red-300 empty:hidden">{move||crate::i18n::message(ui.update_error.get())}</p>
-                    <p class="max-w-xl text-xs text-white/60">{move || crate::i18n::t("Thiscord downloads and verifies the update, then restarts to finish installing. Nothing is installed until you choose Download and install.")}" "{move || crate::i18n::t("You can also install later from Settings → Updates.")}</p>
+                    <p class="max-w-3xl text-xs text-white/60">{move || crate::i18n::t("Thiscord downloads and verifies the update, then restarts to finish installing. Nothing is installed until you choose Download and install.")}" "{move || crate::i18n::t("You can also install later from Settings → Updates.")}</p>
                 </footer>
             </div>
         </dialog>
@@ -142,13 +142,18 @@ fn VersionStep(ui: Ui) -> impl IntoView {
     }
 }
 
-/// The available release's changelog. Download progress updates the status many
-/// times per second, so the notes are compared first and parsed only on change.
+/// The available release's changelog in the chosen language (English when that
+/// translation is missing). Download progress updates the status many times per
+/// second, so the notes are compared first and parsed only on change.
 fn changelog(ui: Ui) -> Memo<Option<Changelog>> {
     let notes = Memo::new(move |_| ui.updates.with(|s| s.notes.clone()));
     Memo::new(move |_| {
+        let language = crate::i18n::language().code();
         notes
-            .with(|n| n.as_deref().map(Changelog::parse))
+            .with(|n| {
+                n.as_deref()
+                    .map(|n| Changelog::parse(localized(n, language)))
+            })
             .filter(|log| !log.is_empty())
     })
 }

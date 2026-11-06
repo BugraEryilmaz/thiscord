@@ -89,12 +89,17 @@ assigned database port to avoid the locally hosted development PostgreSQL port.
 
 ## Changelog
 
-Every client version has a reviewed `changelog/MAJOR.MINOR.PATCH.md`, written in the
-release PR together with the version bump. Publishing puts it at the top of the
-GitHub release and into the `notes` of `latest.json`, which the updater hands to the
-update prompt, **Settings → App updates** and the login screen's Updates dialog.
-Release validation fails without it, and `cargo test -p thiscord-frontend --lib`
-(`changelog::tests`) checks the file for the version being built and all others.
+Every client version has a reviewed `changelog/MAJOR.MINOR.PATCH.md` in English and
+its Turkish translation `changelog/MAJOR.MINOR.PATCH.tr.md`, written in the release
+PR together with the version bump. Publishing puts the English text at the top of
+the GitHub release with the Turkish one in a collapsed **Türkçe** section, and both
+into the `notes` of `latest.json`: English first, then `<!-- lang: tr -->` and the
+Turkish text. The updater hands these notes to the update prompt, **Settings → App
+updates** and the login screen's Updates dialog, which show the part in the app's
+language and fall back to English. Release validation fails without either file,
+and `cargo test -p thiscord-frontend --lib` (`changelog::tests`) checks both for the
+version being built, all other files, and that each translation has the same
+highlights, sections and bullet counts as its English original.
 
 To write one, read every PR merged since the previous `client-v` tag
 (`git log --merges --first-parent client-vPREVIOUS..HEAD` and the PR descriptions)
@@ -125,7 +130,10 @@ Leave out changes nobody can notice (refactors, CI, docs) unless they matter to 
 `**Title.**` and a sentence. `## New`, `## Improved` and `## Fixed` are optional;
 omit empty ones and use no other headings. Bullets are single paragraphs; `**bold**`
 and `` `code` `` are the only formatting shown, and links show only their label.
-Keep the file under 8 KiB. Clients treat the notes as untrusted text: they parse
+Translations keep the English `## Highlights`, `## New`, `## Improved` and `## Fixed`
+headings (the app shows translated labels) and translate every bullet one-to-one,
+using the app's own Turkish terms from `frontend/locales/tr.json`.
+Keep each file under 8 KiB. Clients treat the notes as untrusted text: they parse
 this subset into text spans (`frontend/src/changelog.rs`) and never render HTML.
 The notes describe only the version being installed, so users who skipped versions
 see the newest changelog; earlier ones stay on their GitHub releases.

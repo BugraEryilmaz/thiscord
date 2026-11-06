@@ -120,7 +120,8 @@
   the repository, enforce signed versions, and publish a complete platform feed only
   after all checks/builds pass. Updates require explicit install/restart and must not
   interrupt voice. Keep the Cargo/Tauri versions and `client-v` release tag aligned.
-- Every client release ships `changelog/<version>.md`, shown on update screens and
-  as the GitHub release body. When asked for a release, read all PRs merged since
-  the previous `client-v` tag and summarize them for users in the format and tone
-  of `docs/releases.md#changelog`, in the same PR as the version bump.
+- Every client release ships `changelog/<version>.md` and its Turkish translation
+  `changelog/<version>.tr.md`, shown on update screens and in the GitHub release.
+  When asked for a release, read all PRs merged since the previous `client-v` tag
+  and summarize them for users in the format and tone of `docs/releases.md#changelog`,
+  in the same PR as the version bump.

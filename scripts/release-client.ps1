@@ -39,16 +39,22 @@ if ($config.plugins.updater.endpoints[0] -cne "https://github.com/$repository/re
 if ($env:GITHUB_REPOSITORY -and $env:GITHUB_REPOSITORY -cne $repository) {
     throw 'Configure the updater endpoint and release repository before publishing a fork.'
 }
-# The changelog becomes the GitHub release body and the update manifest notes that
-# update screens show. Format and limits: docs/releases.md#changelog.
-$changelogPath = "changelog/$version.md"
-if (!(Test-Path -LiteralPath $changelogPath -PathType Leaf)) {
-    throw "Write $changelogPath before releasing; see docs/releases.md#changelog."
+# The changelog and its translations become the GitHub release body and the update
+# manifest notes that update screens show. Format and limits: docs/releases.md#changelog.
+function Read-Changelog([string]$Path) {
+    if (!(Test-Path -LiteralPath $Path -PathType Leaf)) {
+        throw "Write $Path before releasing; see docs/releases.md#changelog."
+    }
+    $text = (Get-Content -LiteralPath $Path -Raw -Encoding utf8).Replace("`r`n", "`n").Trim()
+    if ([Text.Encoding]::UTF8.GetByteCount($text) -gt 8KB -or $text -cnotmatch '(?m)^## Highlights\n+- \*\*' -or $text.Contains('<!-- lang:')) {
+        throw "$Path must be at most 8 KiB, start its ## Highlights with a **Title.** bullet and contain no language marker."
+    }
+    $text
 }
-$changelog = (Get-Content -LiteralPath $changelogPath -Raw -Encoding utf8).Replace("`r`n", "`n").Trim()
-if ([Text.Encoding]::UTF8.GetByteCount($changelog) -gt 8KB -or $changelog -cnotmatch '(?m)^## Highlights\n+- \*\*') {
-    throw "$changelogPath must be at most 8 KiB and start its ## Highlights with a **Title.** bullet."
-}
+$changelog = Read-Changelog "changelog/$version.md"
+$changelogTurkish = Read-Changelog "changelog/$version.tr.md"
+# Clients show the part after `<!-- lang: tr -->` to Turkish users (frontend/src/changelog.rs).
+$manifestNotes = "$changelog`n`n<!-- lang: tr -->`n`n$changelogTurkish"
 if ($Mode -eq 'Validate') { Write-Output "Validated $Tag"; return }
 
 $targets = @{
@@ -121,7 +127,7 @@ foreach ($record in $records) {
 }
 @{
     version = $version
-    notes = $changelog
+    notes = $manifestNotes
     pub_date = [DateTime]::UtcNow.ToString('yyyy-MM-ddTHH:mm:ssZ')
     platforms = $platforms
 } | ConvertTo-Json -Depth 6 | Set-Content -LiteralPath (Join-Path $output.FullName 'latest.json')
@@ -146,6 +152,13 @@ if ($existing.Count -gt 0 -and !$existing[0].draft) { throw 'Published releases 
 $notes = Join-Path $output.FullName 'release-notes.md'
 @"
 $changelog
+
+<details>
+<summary>T&#252;rk&#231;e</summary>
+
+$changelogTurkish
+
+</details>
 
 ## Install
 

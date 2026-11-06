@@ -1,13 +1,28 @@
 //! Release changelogs shown on update screens.
 //!
-//! `changelog/<version>.md` is published as the GitHub release body and as the
-//! `notes` of the update manifest (`docs/releases.md`). The text comes from the
-//! network, so this parses a small Markdown subset into plain spans; nothing is
-//! ever rendered as HTML.
+//! `changelog/<version>.md` (English) and its translations such as
+//! `changelog/<version>.tr.md` are published in the GitHub release body and in
+//! the `notes` of the update manifest (`docs/releases.md`). The text comes from
+//! the network, so this parses a small Markdown subset into plain spans; nothing
+//! is ever rendered as HTML.
 
 /// Notes beyond this many bytes are ignored; release validation keeps them far smaller.
-pub const MAX_NOTES_BYTES: usize = 16 * 1024;
+pub const MAX_NOTES_BYTES: usize = 32 * 1024;
 const MAX_ENTRIES: usize = 80;
+/// Manifest notes hold English first, then each translation after this marker,
+/// e.g. `<!-- lang: tr -->`. GitHub hides the comment in rendered Markdown.
+pub const LANGUAGE_MARKER: &str = "<!-- lang:";
+
+/// The part of the notes written in `language` (a code like `tr`), or the
+/// English part when that translation is missing.
+pub fn localized<'a>(notes: &'a str, language: &str) -> &'a str {
+    let mut parts = notes.split(LANGUAGE_MARKER);
+    let english = parts.next().unwrap_or_default();
+    parts
+        .filter_map(|part| part.split_once("-->"))
+        .find(|(code, _)| code.trim() == language)
+        .map_or(english, |(_, text)| text)
+}
 
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct Changelog {
@@ -296,21 +311,61 @@ mod tests {
         assert_eq!(spans("****"), [Span::Text("****".into())]);
     }
 
-    /// Every committed changelog is well formed, and the version being built has one,
-    /// so a release PR cannot skip it (`docs/releases.md`).
+    #[test]
+    fn notes_select_the_translation_or_fall_back_to_english() {
+        let notes = "## Highlights\n- **Hello.** World.\n\n<!-- lang: tr -->\n\n## Highlights\n- **Merhaba.** Dünya.\n";
+        let title = |language| {
+            Changelog::parse(localized(notes, language)).highlights[0]
+                .title
+                .clone()
+        };
+        assert_eq!(title("en").as_deref(), Some("Hello"));
+        assert_eq!(title("tr").as_deref(), Some("Merhaba"));
+        assert_eq!(title("de").as_deref(), Some("Hello"));
+        assert_eq!(Changelog::parse(localized(notes, "en")).detail_count(), 0);
+        assert_eq!(localized("only English", "tr"), "only English");
+    }
+
+    /// Every committed changelog is well formed and matches its English original,
+    /// and the version being built has every translation, so a release PR cannot
+    /// skip one (`docs/releases.md`).
     #[test]
     fn committed_changelogs_are_well_formed() {
         let directory = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../changelog");
-        let current = directory.join(format!("{}.md", env!("CARGO_PKG_VERSION")));
-        assert!(
-            current.is_file(),
-            "add {} before releasing this version",
-            current.display()
-        );
+        for suffix in ["md", "tr.md"] {
+            let current = directory.join(format!("{}.{suffix}", env!("CARGO_PKG_VERSION")));
+            assert!(
+                current.is_file(),
+                "add {} before releasing this version",
+                current.display()
+            );
+        }
+        let shape = |log: &Changelog| {
+            (
+                log.highlights.len(),
+                log.sections
+                    .iter()
+                    .map(|s| (s.kind, s.entries.len()))
+                    .collect::<Vec<_>>(),
+            )
+        };
         for file in std::fs::read_dir(&directory).unwrap() {
             let path = file.unwrap().path();
             let notes = std::fs::read_to_string(&path).unwrap();
             let name = path.display();
+            assert!(
+                !notes.contains(LANGUAGE_MARKER),
+                "{name} contains a language marker"
+            );
+            if let Some(version) = path.to_str().unwrap().strip_suffix(".tr.md") {
+                let english = std::fs::read_to_string(format!("{version}.md"))
+                    .unwrap_or_else(|_| panic!("{name} has no English original"));
+                assert_eq!(
+                    shape(&Changelog::parse(&notes)),
+                    shape(&Changelog::parse(&english)),
+                    "{name} must translate the same highlights and bullets as the English file"
+                );
+            }
             assert!(notes.len() <= 8 * 1024, "{name} exceeds 8 KiB");
             assert!(
                 notes.contains("\n## Highlights\n") || notes.starts_with("## Highlights\n"),
