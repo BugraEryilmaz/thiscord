@@ -344,7 +344,9 @@ GStreamer plugins. Building needs `libgstreamer1.0-dev`,
   once per second alongside the viewer heartbeat.
 - Viewers send control heartbeats every 250 ms while connecting and once per second
   once playing, expire after three seconds (tolerating short UI stalls), and close on
-  unmount/document hiding. Replacement viewers have distinct leases. Roster/epoch,
+  unmount/document hiding; a desktop camera tile scrolled out of a scrolling grid or
+  strip (IntersectionObserver) also ends its lease and reconnects when it returns,
+  while screen tiles stay subscribed for their shared audio. Replacement viewers have distinct leases. Roster/epoch,
   deafen and connection changes revoke forwarding and close the local peer;
   pending work checks its lease and arrival deadline. Negotiations are bounded.
   No images, video or SDP are recorded/logged. A browser preview without Tauri

@@ -280,17 +280,22 @@ fn property_value(object: &JsValue, name: &str) -> JsValue {
     js_sys::Reflect::get(object, &JsValue::from_str(name)).unwrap_or(JsValue::UNDEFINED)
 }
 
+/// `on_screen` is the tile's IntersectionObserver state. A camera scrolled out
+/// of view ends its viewer lease (the publisher stops sending it) and reconnects
+/// when it returns; a screen keeps watching, since it can carry shared audio.
 pub async fn run(
     video: HtmlVideoElement,
     watch: Watch,
     message: RwSignal<String>,
     diagnostics: RwSignal<String>,
+    on_screen: std::rc::Rc<std::cell::Cell<bool>>,
 ) {
     let kind = if watch.kind == thiscord_shared::voice::MediaKind::Camera {
         Kind::Camera
     } else {
         Kind::Screen
     };
+    let visible = move || visible() && (kind != Kind::Camera || on_screen.get());
     loop {
         while !visible() {
             gloo_timers::future::TimeoutFuture::new(1000).await;
@@ -433,7 +438,8 @@ pub async fn run(
                 }
                 // An attempt that played or connected keeps that result; the
                 // timeline records why it ended.
-                let (outcome, reason) = ended.unwrap_or((Outcome::Closed, "document hidden"));
+                let (outcome, reason) =
+                    ended.unwrap_or((Outcome::Closed, "document hidden or tile scrolled away"));
                 let outcome = if reached == Outcome::Pending {
                     outcome
                 } else {
