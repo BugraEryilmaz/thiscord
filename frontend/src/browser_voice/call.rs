@@ -14,8 +14,9 @@ use std::{
 use thiscord_frontend::browser_audio::{ConnectionStats, RemoteSource};
 use thiscord_frontend::browser_call::{
     self as rules, Activity, Answering, Backoff, Failure, FailureKind, Gate, PLAYBACK_SLOTS,
+    SendRoute,
 };
-use thiscord_shared::{ChannelId, GuildId, RequestId, voice::*};
+use thiscord_shared::{ChannelId, GuildId, RequestId, audio::AudioSettings, voice::*};
 use wasm_bindgen::JsCast;
 use wasm_bindgen_futures::JsFuture;
 use web_sys::{
@@ -24,9 +25,9 @@ use web_sys::{
 };
 
 const TICK_MS: f64 = 100.0;
-const STATS_MS: f64 = 200.0;
+type FetchedStats = (Option<media::Stats>, Option<video::InboundVideo>);
 /// Self state doubles as the signaling keepalive the SFU expects within 20 s.
-const STATE_REFRESH_MS: f64 = 2_000.0;
+const STATE_REFRESH_MS: f64 = 5_000.0;
 const HEARTBEAT_MS: f64 = 20_000.0;
 const MEDIA_CONNECT_MS: f64 = 15_000.0;
 const RESUME_WINDOW_MS: f64 = 20_000.0;
@@ -104,12 +105,19 @@ pub(super) struct Call {
     reopening: Cell<u32>,
     /// Screen and camera capture; ends with the attempt, never restarted.
     pub publishing: RefCell<video::Publishing>,
-    /// Whether the sender carries the WebAudio-processed microphone (boost)
-    /// rather than the raw capture (used while the AudioContext cannot run).
-    sent_processed: Cell<Option<bool>>,
+    /// Which microphone track the sender carries: processed (boost), a direct
+    /// capture clone, or the raw capture while the AudioContext cannot run.
+    sent_route: Cell<Option<SendRoute>>,
     /// Latest `getStats` connection measurements.
     pub stats: Cell<Option<ConnectionStats>>,
     pub sounds: super::soundboard::Sounds,
+    /// Activation threshold and the (gate open, speaking) pair the last
+    /// `apply` used, so the 20 ms gate tick re-applies only on a change.
+    threshold: Cell<f32>,
+    applied_gate: Cell<(bool, bool)>,
+    /// Next periodic refresh of per-stream gains from the tick; commands that
+    /// change roster, volumes or settings apply them immediately.
+    gains_at: Cell<f64>,
 }
 impl Call {
     pub fn new(
@@ -138,9 +146,12 @@ impl Call {
             transmitting: Cell::new(false),
             reopening: Cell::new(0),
             publishing: RefCell::default(),
-            sent_processed: Cell::new(None),
+            sent_route: Cell::new(None),
             stats: Cell::new(None),
             sounds: Default::default(),
+            threshold: Cell::new(AudioSettings::default().activation_threshold),
+            applied_gate: Cell::new((false, false)),
+            gains_at: Cell::new(0.0),
         })
     }
     pub fn is_closed(&self) -> bool {
@@ -208,7 +219,7 @@ impl Call {
         self.output.detach_all();
         *self.remote.borrow_mut() = [Activity::default(); PLAYBACK_SLOTS];
         self.transmitting.set(false);
-        self.sent_processed.set(None);
+        self.sent_route.set(None);
         self.stats.set(None);
     }
     fn release_microphone(&self) {
@@ -233,7 +244,22 @@ impl Call {
     /// Applies self controls, server restrictions and volumes immediately and
     /// sends changed self state. Safe to call from commands at any time.
     pub fn apply(&self) {
+        self.apply_with(true);
+    }
+    /// `gains: false` skips the per-stream gain walk (16 roster lookups and
+    /// volume-key formatting) on routine ticks.
+    fn apply_with(&self, gains: bool) {
         let settings = super::settings();
+        self.threshold.set(settings.activation_threshold);
+        let time = now();
+        self.applied_gate.set((
+            self.activation
+                .get()
+                .active(rules::ACTIVATION_HOLD_MS, time),
+            self.local_speaking
+                .get()
+                .active(rules::SPEAKING_HANGOVER_MS, time),
+        ));
         let pressed = super::pressed_now();
         let hidden = web_sys::window()
             .and_then(|w| w.document())
@@ -243,10 +269,14 @@ impl Call {
         let microphone = self.microphone.borrow().clone();
         // The WebAudio send path (boost, meters) works only while the context
         // runs; otherwise the raw capture is sent and gated directly.
-        let processed = self.output.running() && microphone.as_ref().is_some_and(|m| m.metered());
+        let running = self.output.running();
+        let graph = running && microphone.as_ref().is_some_and(|m| m.metered());
+        let route = microphone
+            .as_ref()
+            .map_or(SendRoute::Raw, |m| m.route(running, settings.input_gain));
         // Hidden tabs run timers about once per second, too coarse to gate
         // speech, and a stopped meter cannot open the gate: both fail open.
-        let metered = !hidden && processed;
+        let metered = !hidden && graph;
         let voice_open = !metered
             || self
                 .activation
@@ -262,7 +292,7 @@ impl Call {
         let sending = gate.sending(&settings);
         if let Some(microphone) = &microphone {
             microphone.set_boost(settings.input_gain);
-            microphone.set_sending(sending, processed);
+            microphone.set_sending(sending, route);
         }
         // Without a meter the indicator follows the send gate alone.
         let speaking = !metered
@@ -273,7 +303,10 @@ impl Call {
         self.transmitting.set(sending && speaking);
         let deafened = settings.deafened || own.is_some_and(|m| m.server_deafened);
         self.output.set_master(settings.output_volume, deafened);
-        for slot in 0..PLAYBACK_SLOTS {
+        if gains {
+            self.gains_at.set(time + 1_000.0);
+        }
+        for slot in (0..PLAYBACK_SLOTS).filter(|_| gains) {
             let Some((source, member)) = RemoteSource::from_slot(slot) else {
                 continue;
             };
@@ -285,13 +318,14 @@ impl Call {
                 });
             self.output.set_stream_gain(source, member, gain);
         }
-        // Swap the sent track when the processed path starts or stops working.
+        // Swap the sent track when WebAudio starts or stops working or boost
+        // toggles between the processed and direct routes.
         if let (Some(microphone), Some(sender)) =
             (&microphone, live.as_ref().and_then(|l| l.sender.clone()))
-            && self.sent_processed.get() != Some(processed)
+            && self.sent_route.get() != Some(route)
         {
-            self.sent_processed.set(Some(processed));
-            let promise = sender.replace_track(Some(microphone.track(processed)));
+            self.sent_route.set(Some(route));
+            let promise = sender.replace_track(Some(microphone.track(route)));
             wasm_bindgen_futures::spawn_local(async move {
                 let _ = JsFuture::from(promise).await;
             });
@@ -335,11 +369,12 @@ impl Call {
                         .borrow()
                         .as_ref()
                         .and_then(|live| live.sender.clone());
-                    let processed = call.output.running() && microphone.metered();
+                    let route =
+                        microphone.route(call.output.running(), super::settings().input_gain);
                     if let Some(sender) = sender {
-                        let track = microphone.track(processed);
+                        let track = microphone.track(route);
                         let _ = JsFuture::from(sender.replace_track(Some(track))).await;
-                        call.sent_processed.set(Some(processed));
+                        call.sent_route.set(Some(route));
                     }
                     if call.closed.get() || call.reopening.get() != generation {
                         microphone.stop();
@@ -354,10 +389,10 @@ impl Call {
             }
         });
     }
-    fn tick(&self, stats: Option<media::Stats>) {
-        let settings = super::settings();
+    /// Voice activation, every `GATE_MS`: reads the boosted level and applies
+    /// the send gate only when it opens or closes (or the indicator changes).
+    fn gate_tick(&self) {
         let time = now();
-        self.output.check(time);
         let level = self
             .microphone
             .borrow()
@@ -365,17 +400,29 @@ impl Call {
             .and_then(|m| m.level())
             .unwrap_or(0.0);
         self.local_level.set(level);
-        let threshold = settings.activation_threshold;
+        let threshold = self.threshold.get();
         let mut activation = self.activation.get();
         activation.observe(level, threshold, rules::ACTIVATION_HOLD_MS, time);
         self.activation.set(activation);
         let mut speaking = self.local_speaking.get();
         speaking.observe(level, threshold, rules::SPEAKING_HANGOVER_MS, time);
         self.local_speaking.set(speaking);
+        let gate = (
+            activation.active(rules::ACTIVATION_HOLD_MS, time),
+            speaking.active(rules::SPEAKING_HANGOVER_MS, time),
+        );
+        if gate != self.applied_gate.get() {
+            self.apply_with(false);
+        }
+    }
+    fn tick(&self, stats: Option<media::Stats>) {
+        let time = now();
+        self.output.check(time);
         // Remote speaking: WebAudio meters while the graph runs (every tick),
         // else `getStats` inbound `audioLevel` (every stats pass).
         let mut metered = [false; PLAYBACK_SLOTS];
-        {
+        // One AudioContext state query per tick, not one per playback slot.
+        if self.output.running() {
             let mut remote = self.remote.borrow_mut();
             for (slot, activity) in remote.iter_mut().enumerate() {
                 if let Some(level) = self.output.level(slot) {
@@ -414,7 +461,7 @@ impl Call {
                 }
             }
         }
-        self.apply();
+        self.apply_with(time >= self.gains_at.get());
     }
 }
 
@@ -706,13 +753,12 @@ async fn negotiate(
             && let Some(microphone) = microphone
         {
             let track_sender = transceiver.sender();
-            // The processed (boosted) track while WebAudio runs; `apply` swaps
-            // tracks when that changes.
-            let processed = call.output.running() && microphone.metered();
-            JsFuture::from(track_sender.replace_track(Some(microphone.track(processed))))
+            // `apply` swaps tracks when the route changes.
+            let route = microphone.route(call.output.running(), super::settings().input_gain);
+            JsFuture::from(track_sender.replace_track(Some(microphone.track(route))))
                 .await
                 .map_err(|_| Failure::final_("Cannot attach the microphone"))?;
-            call.sent_processed.set(Some(processed));
+            call.sent_route.set(Some(route));
             sender = Some(track_sender);
         }
         if direction == rules::Direction::SendRecv
@@ -777,14 +823,9 @@ async fn negotiate(
     JsFuture::from(pc.set_local_description(&answer))
         .await
         .map_err(|_| Failure::final_("Cannot set the voice answer"))?;
-    // The SFU does not trickle candidates: send the answer once gathering ends.
-    let started = now();
-    while pc.ice_gathering_state() != RtcIceGatheringState::Complete {
-        if now() - started > 8_000.0 {
-            break;
-        }
-        gloo_timers::future::TimeoutFuture::new(50).await;
-    }
+    // The SFU does not trickle candidates: send the answer once gathering ends
+    // (woken by the gathering-state event, not a poll).
+    super::ice_gathered(pc, 8_000).await;
     let local = pc
         .local_description()
         .ok_or_else(|| Failure::temporary("Missing voice answer"))?;
@@ -804,11 +845,22 @@ async fn run(
     let answered = now();
     let mut heard = now();
     let mut next_tick = now();
+    let mut next_gate = now();
     let mut next_stats = now();
+    // `getStats` runs in its own task so a slow report never delays the gate,
+    // signaling or the tick; its result is consumed by the next tick.
+    let fetched: Rc<RefCell<Option<FetchedStats>>> = Rc::default();
+    let fetching = Rc::new(Cell::new(false));
     let mut sequence = 0_u64;
     loop {
-        let wait = (next_tick - now()).clamp(0.0, TICK_MS) as u32;
+        let wait = (next_tick.min(next_gate) - now()).clamp(0.0, TICK_MS) as u32;
         let incoming = socket::next(&inbox, wait).await;
+        // A due gate runs before parsing or handling a signaling message, so
+        // JSON work never delays a voice-activation change by a full message.
+        if now() >= next_gate {
+            next_gate = now() + rules::GATE_MS;
+            call.gate_tick();
+        }
         let mut failure = None;
         match incoming {
             Some(Incoming::Text(text)) => {
@@ -857,6 +909,10 @@ async fn run(
                 Err(failure) => return failure.into(),
             }
         }
+        if now() >= next_gate {
+            next_gate = now() + rules::GATE_MS;
+            call.gate_tick();
+        }
         if now() < next_tick {
             continue;
         }
@@ -891,25 +947,30 @@ async fn run(
         } else if connected_at.is_none() && now() - answered > MEDIA_CONNECT_MS {
             return Failure::temporary("Media connection timed out").into();
         }
-        let stats = if now() >= next_stats {
-            next_stats = now() + STATS_MS;
+        if !fetching.get() {
+            // One walk serves both consumers: a due audio pass also takes video
+            // feedback that is at most half an interval away, and every walk
+            // refreshes the audio stats, so watching video keeps one walk per second.
+            let audio_due = now() >= next_stats;
+            let early = if audio_due {
+                thiscord_frontend::browser_video::FEEDBACK_MS / 2.0
+            } else {
+                0.0
+            };
+            let video = video::stats_due(call, early);
+            let audio = audio_due || video;
             let pc = call.live.borrow().as_ref().map(|live| live.pc.clone());
-            match pc {
-                Some(pc) => Some(media::stats(&pc).await),
-                None => None,
+            if let Some(pc) = pc.filter(|_| audio) {
+                next_stats = now() + rules::stats_interval_ms(call.output.running());
+                fetching.set(true);
+                let (fetched, fetching) = (fetched.clone(), fetching.clone());
+                wasm_bindgen_futures::spawn_local(async move {
+                    *fetched.borrow_mut() = Some(media::stats(&pc, audio, video).await);
+                    fetching.set(false);
+                });
             }
-        } else {
-            None
-        };
-        let video_stats = if video::stats_due(call) {
-            let pc = call.live.borrow().as_ref().map(|live| live.pc.clone());
-            match pc {
-                Some(pc) => Some(video::inbound(&pc).await),
-                None => None,
-            }
-        } else {
-            None
-        };
+        }
+        let (stats, video_stats) = fetched.borrow_mut().take().unwrap_or_default();
         video::tick(call, video_stats);
         call.tick(stats);
     }
@@ -998,6 +1059,7 @@ async fn resume(
                     // The replaced socket closes without Leave: the session continues.
                     live.socket = socket;
                     live.sent_state = None;
+                    live.media.resend_views();
                 }
                 super::update_voice(call, |voice| {
                     if voice.connected {

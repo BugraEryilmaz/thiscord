@@ -64,8 +64,8 @@ Signaling and negotiation:
   RED, remote audio admin, `screen_layers`, `screen_profiles` and video
   diagnostics stay false. Plain Opus
   publishers send no microphone boundary messages. Nothing is sent before the answer.
-- `State` is sent on every self mute/deafen change and every 2 s as the
-  signaling keepalive. A server silence of 20 s counts as a lost socket.
+- `State` is sent on every self mute/deafen change and every 5 s as the
+  signaling keepalive (the SFU detaches after 20 s of silence). A server silence of 20 s counts as a lost socket.
 - A lost socket resumes with `Resume` (same sequence rules, 20 s window) while the
   peer is alive. `ResumeUnavailable`, `Replaced` (event or close code 4001),
   `Revoked`, permission errors and protocol closes are final; transport,
@@ -93,12 +93,21 @@ grid tile); hiding the tile, closing the grid or hiding the tab stops it locally
 and the SFU stops forwarding it with the next `ScreenViews` renewal.
 
 Send graph: microphone track → source → boost gain (Microphone boost 1×–10×) →
-limiter → `MediaStreamAudioDestinationNode`, whose track is sent. The browser's own
+limiter → `MediaStreamAudioDestinationNode`, whose track is sent while a boost above
+1× is set. At 1× (the default) a clone of the captured track is sent instead,
+skipping the limiter look-ahead and the destination node's buffering; the meters
+still read the original capture. Audible effect: unboosted peaks between -2 and
+0 dBFS are no longer compressed (the limiter is -2 dBFS, 20:1); the capture is
+already bounded at full scale, so this cannot clip beyond what the microphone track
+itself carries, and boosted input keeps the limiter. The browser's own
 processing runs before the boost (desktop boosts before automatic gain). Two
 `AnalyserNode`s read the capture (raw) and the boosted signal before the send gate,
 so the voice-activation meter keeps measuring while the gate is closed. Mute,
 push-to-talk release, deafen and server restrictions disable the sent track (silence);
-the captured track stays enabled for metering. If the AudioContext is not running
+the captured track stays enabled for metering. The meter is sampled every 20 ms (the
+2048-sample analyser window spans two reads), separately from the 100 ms call tick,
+and the gate is re-applied only when it opens or closes. A due gate check runs before an
+incoming signaling message is parsed or handled. If the AudioContext is not running
 (autoplay refused, interrupted), the raw capture is sent instead, gated directly,
 without boost; voice activation then fails open. The client swaps tracks with
 `replaceTrack` when that changes, without renegotiating.
@@ -127,7 +136,11 @@ constraints and boost, shows the level meter and, unless **Hear my microphone
 during the test** is off, plays it back through the selected output. Leaving the
 page, joining voice or **Stop test** ends it and releases the devices.
 
-Connection diagnostics: every 200 ms `getStats` provides the selected
+Connection diagnostics: `getStats` runs once per second while WebAudio meters drive
+the speaking rings (every 200 ms otherwise, when inbound `audioLevel` is the speaking
+fallback), in its own task so a slow report never delays the gate or signaling. One
+report walk also yields the received-video counters, and a due walk takes video
+feedback due within half an interval, so watching video adds no second walk. It provides the selected
 candidate-pair `currentRoundTripTime` (else the SFU's receiver-report
 `roundTripTime`), inbound audio `jitter`, `packetsReceived`/`packetsLost`, and the
 SFU's `remote-inbound-rtp` `jitter`/`fractionLost` for the microphone. Hovering
@@ -357,10 +370,16 @@ The audio worker sleeps until woken: queued commands, urgent mute/PTT/stop
 changes, each completed 10 ms capture block and every 10 ms of rendered playback
 unpark it. Received packets do not wake it: they carry their network arrival time
 and are needed only by the next refill, which those device wakes already trigger.
+Each queued packet carries a copyable connection id rather than a `Connection`
+clone (four reference counts per packet); the worker compares it with its session
+connection, and the receive task counts queue-overflow drops itself.
 Its fallback timeout is 10 ms during a session (timers, recovery and
-devices that stop calling back) and 100 ms otherwise. Queued packets are admitted
+devices that stop calling back) and one second otherwise (every command unparks
+it, and the watchdog's three-second stall threshold stays satisfied). Queued packets are admitted
 in batches of up to 32 before one processing tick, so refill work does not scale
-with packets times speakers. The worker joins the MMCSS "Audio" class on Windows
+with packets times speakers. Within a batch the worker skips its per-iteration maintenance
+(stop, lease, scheduling-gap and snapshot clocks), which runs again once the batch
+ends, and every packet of the batch shares one arrival-age clock read. The worker joins the MMCSS "Audio" class on Windows
 and user-interactive QoS on macOS; it is deliberately not realtime because it also
 opens devices and prepares models. `worker_priority` in diagnostics records the result.
 
@@ -370,7 +389,8 @@ state independently of audio-worker status/settings, so slow audio initializatio
 does not delay connection/disconnection presentation. Device opening, processing
 initialization and network negotiation still contribute to actual join time.
 
-Live voice uses a native, connection-scoped heartbeat with a 15-second expiry;
+Live voice uses a native, connection-scoped heartbeat (sent every two seconds) with
+a 15-second expiry;
 background WebView polling no longer keeps the call alive. Local playback/microphone
 tests retain their three-second UI lease. A two-second scheduling gap is logged,
 not treated as suspension. Leave, window destruction and connection revocation
@@ -677,6 +697,13 @@ enqueue. Packets reaching the budget are discarded before enqueue, at dequeue,
 and before every poll of a pending WebRTC write. The same deadline
 cancels blocked admission. Thus a stalled sender drains expired entries without
 replaying an arbitrarily old backlog; expiry alone does not disconnect the call.
+The guarded write checks the frame once and polls the write once first; a write
+that completes then (the normal case: `write_rtp` only enqueues for the peer's
+driver task) arms neither the invalidation waiter (a lock) nor the deadline timer.
+A pending write is bounded by that same frame deadline (the 100 ms capture-age
+budget plus the activation delay), so the biased send arm can hold the signaling
+arms for at most that long. The send arm reads the clock once for admission and
+RED history, and the guard once more before writing.
 Transport errors retain the existing disconnect behavior. Work and memory stay
 bounded by capture/packet capacities; this does not guarantee downstream WebRTC,
 network or receiver latency after admission.
@@ -1120,8 +1147,9 @@ Sequences advance on successful transport admission, while the 48 kHz media cloc
 advances through every omitted frame, as required by
 [RFC 7587](https://www.rfc-editor.org/rfc/rfc7587#section-4.1).
 
-Native leases, 500 ms signaling/state heartbeats and WebRTC ICE/RTCP traffic stay
-independent of microphone packets. The two-hop encrypted loopback test resumes
+Native leases, signaling/state messages (checked every 500 ms; mute/deafen state sent
+on change with a five-second refresh, screen views on change with a one-second
+renewal) and WebRTC ICE/RTCP traffic stay independent of microphone packets. The two-hop encrypted loopback test resumes
 after **31 seconds with no RTP**, beyond normal update gaps. This does not establish
 public NAT/TURN or multi-hour behavior. Deploy these clients together: older
 sequence-only receivers cannot play DTX gaps correctly, and older adaptive clients

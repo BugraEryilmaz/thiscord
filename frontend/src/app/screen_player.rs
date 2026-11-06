@@ -176,13 +176,9 @@ async fn offer(pc: &RtcPeerConnection, trace: &Trace) -> Result<String, String> 
     JsFuture::from(pc.set_local_description(&offer))
         .await
         .map_err(|_| crate::i18n::t("Cannot initialize video player"))?;
-    // Only connection setup uses a timer; frames flow through WebRTC directly.
-    for _ in 0..100 {
-        if pc.ice_gathering_state() == RtcIceGatheringState::Complete {
-            break;
-        }
-        gloo_timers::future::TimeoutFuture::new(50).await;
-    }
+    // Gathering completion wakes this wait (5 s bound); frames flow through
+    // WebRTC directly.
+    crate::browser_voice::ice_gathered(pc, 5_000).await;
     trace.fact(
         "timing.gathering_ms",
         (js_sys::Date::now() - started) as u64,
@@ -280,23 +276,74 @@ fn property_value(object: &JsValue, name: &str) -> JsValue {
     js_sys::Reflect::get(object, &JsValue::from_str(name)).unwrap_or(JsValue::UNDEFINED)
 }
 
+/// A tile's IntersectionObserver state. Setting a new value wakes the player
+/// task, so a tile scrolling back into view reconnects at once and one leaving
+/// view ends its lease at once, instead of on the player's next timer.
+pub struct OnScreen {
+    visible: std::cell::Cell<bool>,
+    waker: RefCell<Option<std::task::Waker>>,
+}
+impl OnScreen {
+    pub fn new() -> Rc<Self> {
+        Rc::new(Self {
+            visible: std::cell::Cell::new(true),
+            waker: RefCell::default(),
+        })
+    }
+    pub fn set(&self, visible: bool) {
+        if self.visible.replace(visible) != visible
+            && let Some(waker) = self.waker.borrow_mut().take()
+        {
+            waker.wake();
+        }
+    }
+    pub fn get(&self) -> bool {
+        self.visible.get()
+    }
+    /// Resolves when the state changes or after `ms`, whichever comes first.
+    async fn changed_or(&self, ms: u32) {
+        let start = self.visible.get();
+        let changed = std::future::poll_fn(|cx| {
+            if self.visible.get() == start {
+                *self.waker.borrow_mut() = Some(cx.waker().clone());
+                std::task::Poll::Pending
+            } else {
+                std::task::Poll::Ready(())
+            }
+        });
+        futures_util::future::select(
+            Box::pin(changed),
+            gloo_timers::future::TimeoutFuture::new(ms),
+        )
+        .await;
+    }
+}
+
+/// `on_screen` is the tile's IntersectionObserver state. A camera scrolled out
+/// of view ends its viewer lease (the publisher stops sending it) and reconnects
+/// when it returns; a screen keeps watching, since it can carry shared audio.
 pub async fn run(
     video: HtmlVideoElement,
     watch: Watch,
     message: RwSignal<String>,
     diagnostics: RwSignal<String>,
+    on_screen: Rc<OnScreen>,
 ) {
     let kind = if watch.kind == thiscord_shared::voice::MediaKind::Camera {
         Kind::Camera
     } else {
         Kind::Screen
     };
+    let shown = on_screen.clone();
+    let visible = move || visible() && (kind != Kind::Camera || shown.get());
     loop {
+        // A hidden document is rechecked once a second; the tile returning to
+        // view wakes this wait directly.
         while !visible() {
-            gloo_timers::future::TimeoutFuture::new(250).await;
+            on_screen.changed_or(1000).await;
         }
         let trace = Trace::new(kind);
-        match connect(video.clone(), watch, &trace).await {
+        let retry = match connect(video.clone(), watch, &trace).await {
             Ok(player) => {
                 let mut pending = 0;
                 let mut previous = thiscord_shared::screen::Diagnostics::default();
@@ -321,11 +368,10 @@ pub async fn run(
                     if state == RtcPeerConnectionState::Connected {
                         let playing =
                             player.video.ready_state() >= HtmlMediaElement::HAVE_CURRENT_DATA;
-                        message.set(if playing {
-                            String::new()
-                        } else {
-                            "Waiting for video…".into()
-                        });
+                        let text = if playing { "" } else { "Waiting for video…" };
+                        if message.with_untracked(|m| m != text) {
+                            message.set(text.into());
+                        }
                         pending = 0;
                         let now = if playing {
                             Outcome::Playing
@@ -419,11 +465,25 @@ pub async fn run(
                         trace.push(Some(&player.pc)).await;
                         last_push = js_sys::Date::now();
                     }
-                    gloo_timers::future::TimeoutFuture::new(250).await;
+                    // Connecting is watched closely (its timeout counts these 250 ms
+                    // steps); a playing tile renews its 3 s viewer lease and samples
+                    // decoder pressure once a second. Leaving view ends it at once.
+                    on_screen
+                        .changed_or(
+                            if reached == Outcome::Playing
+                                && state == RtcPeerConnectionState::Connected
+                            {
+                                1000
+                            } else {
+                                250
+                            },
+                        )
+                        .await;
                 }
                 // An attempt that played or connected keeps that result; the
                 // timeline records why it ended.
-                let (outcome, reason) = ended.unwrap_or((Outcome::Closed, "document hidden"));
+                let (outcome, reason) =
+                    ended.unwrap_or((Outcome::Closed, "document hidden or tile scrolled away"));
                 let outcome = if reached == Outcome::Pending {
                     outcome
                 } else {
@@ -437,19 +497,27 @@ pub async fn run(
                 if matches!(outcome, Outcome::TimedOut | Outcome::Failed) {
                     leptos::task::spawn_local(self_test());
                 }
+                // Any end other than visibility (failure, timeout, lease ended by
+                // the desktop) backs off before reconnecting.
+                ended.is_some()
             }
             Err(error) => {
                 trace.finish(Outcome::Error, Some(&error));
                 trace.push(None).await;
                 message.set(error);
+                true
             }
-        }
+        };
         let _ = native::<bool>(
             "screen_view_keepalive",
             json!({"watch":watch,"visible":false}),
         )
         .await;
-        gloo_timers::future::TimeoutFuture::new(1000).await;
+        // Back off only after a failed attempt; a tile that left view (or a
+        // hidden document) reconnects as soon as it is visible again.
+        if retry {
+            gloo_timers::future::TimeoutFuture::new(1000).await;
+        }
     }
 }
 fn video_facts(trace: &Trace, video: &HtmlVideoElement) {

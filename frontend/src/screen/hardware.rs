@@ -737,31 +737,42 @@ impl HardwareEncoder {
             }
             let mut data = ptr::null_mut();
             buffer.Lock(&mut data, None, None)?;
-            let mut bytes = std::slice::from_raw_parts(data, length).to_vec();
-            buffer.Unlock()?;
+            let locked = std::slice::from_raw_parts(data, length);
+            // Read parameter sets and the picture type from the units before the
+            // first slice, in place, then copy the frame once (after the
+            // parameter-set prefix every recovery point needs for late joiners).
             let mut idr = false;
-            for nal in openh264::nal_units(&bytes) {
-                let nal = nal.strip_prefix(&[0, 0, 1]).unwrap_or(nal);
-                match nal.first().map(|b| b & 31) {
-                    Some(7) => self.sps = nal.to_vec(),
-                    Some(8) => self.pps = nal.to_vec(),
-                    Some(5) => idr = true,
-                    _ => {}
+            thiscord_shared::h264::front_units(locked, |nal| match nal[0] & 31 {
+                7 => {
+                    self.sps.clear();
+                    self.sps.extend_from_slice(nal);
+                }
+                8 => {
+                    self.pps.clear();
+                    self.pps.extend_from_slice(nal);
+                }
+                5 => idr = true,
+                _ => {}
+            });
+            let prefix = idr && !self.sps.is_empty() && !self.pps.is_empty();
+            let mut bytes = Vec::with_capacity(
+                length
+                    + if prefix {
+                        self.sps.len() + self.pps.len() + 8
+                    } else {
+                        0
+                    },
+            );
+            if prefix {
+                for unit in [&self.sps, &self.pps] {
+                    bytes.extend_from_slice(&[0, 0, 0, 1]);
+                    bytes.extend_from_slice(unit);
                 }
             }
-            // Every recovery point must include parameter sets for late joiners.
-            if idr && !self.sps.is_empty() && !self.pps.is_empty() {
-                let mut prefix =
-                    Vec::with_capacity(bytes.len() + self.sps.len() + self.pps.len() + 8);
-                prefix.extend_from_slice(&[0, 0, 0, 1]);
-                prefix.extend_from_slice(&self.sps);
-                prefix.extend_from_slice(&[0, 0, 0, 1]);
-                prefix.extend_from_slice(&self.pps);
-                prefix.append(&mut bytes);
-                bytes = prefix;
-            }
+            bytes.extend_from_slice(locked);
+            buffer.Unlock()?;
             if bytes.len() > MAX_FRAME_BYTES
-                || !thiscord_shared::h264::bounded_parameter_sets_with(&bytes, self.high)
+                || thiscord_shared::h264::front_parameter_set_profile(&bytes, self.high).is_err()
             {
                 return Err(fail());
             }

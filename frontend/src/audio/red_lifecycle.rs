@@ -44,7 +44,7 @@ impl Session {
                 if !self
                     .connection
                     .as_ref()
-                    .is_some_and(|c| c.accepts(&connection))
+                    .is_some_and(|c| c.accepts_id(connection))
                     || deafened
                     || self.transmit_control.server_deafened()
                     || self.settings.deafened
@@ -336,6 +336,7 @@ mod tests {
                 reset_codec: false,
                 delivery: Default::default(),
                 outgoing: None,
+                send_arena: Default::default(),
                 media_clock: Default::default(),
                 transmit_control,
                 encoder_generation: 0,
@@ -387,7 +388,7 @@ mod tests {
             source_epoch: source,
             privacy_epoch: privacy,
             marker: false,
-            connection: s.connection.clone().unwrap(),
+            connection: s.connection.as_ref().unwrap().id(),
             slot: 0,
             sequence: 1,
             timestamp: 960,

@@ -197,6 +197,293 @@ Measured on the VPS with the load generators; method, tables and caveats are in
 - **Database trouble (new).** Pool exhaustion and statement/lock timeouts no longer
   reach clients as revocation; see [chat](chat.md).
 
+## Client media pipelines (2026-11-06)
+
+Voice and video-share hot paths on the Windows, Linux and web clients (macOS not
+covered). `media_hotpath_bench` measures the device- and network-free pieces with a
+counting allocator:
+
+```
+cargo run -p thiscord-frontend --example media_hotpath_bench --features native-audio --profile ci --locked
+```
+
+Windows x64, i7-13700K, `ci` profile. "Before" is commit `0ae37e5` built with a
+private `CARGO_BUILD_BUILD_DIR`: with the shared intermediate directory, another
+checkout's build links the newer `thiscord-shared` and measures the new code.
+
+| Operation (per packet or frame) | Before | After |
+| --- | ---: | ---: |
+| RED parse, two history blocks | 63 ns, 2 allocations | 11 ns, 0 |
+| RED receive (parse + payload slices) | 107 ns, 2 allocations + copies | 48 ns, 0 (zero-copy slices) |
+| RED encode | 97 ns, 3 allocations | 34 ns, 0.06 (pooled arena) |
+| Opus send payload | 38 ns, 1 allocation | 23 ns, 0.02 (pooled arena) |
+| H.264 keyframe check, 25 KB delta | 7.3 µs | 3 ns (header-only scan) |
+| H.264 keyframe check, 300 KB IDR | 87 µs | 6 ns |
+| H.264 NAL split, 25 KB | 7.3 µs | 2.4 µs (skipping start-code scan) |
+| H.264 frame assembly, 23 packets | 834 ns, 7 allocations | 437 ns, 1 |
+| Quality accounting, 5 counts + 1 timing | 216 ns (lock + clock read each) | 9–16 ns worker batch; 56 ns shared (send task) |
+| Mixer, 20 ms with 1 / 8 talkers | 7.6 / 16.4 µs | unchanged |
+
+Shared quality counters (the send task records every packet's outcome) are one
+relaxed atomic add into pending cells, merged into the window by the worker's
+existing tick once per second; the adaptive-FEC sent-sequence record takes its lock
+only when the source generation changes. The mixer counts silence only for slots
+that have a stream (an empty slot's counts were never drained and would have been
+charged to the next stream to take it), and skips zero counter updates.
+Per-stream and per-session quality accounting on the audio worker is batched:
+counts and stage timings accumulate in worker-local cells and merge into the shared
+ten-second window once per second per stream (and before every snapshot), so the
+worker takes no lock and reads no extra clock per packet or frame. An atomic,
+lock-free window was also tried and measured no faster (231 ns), because the cost
+was the per-call clock read. The mixer callback is under 0.1% of its 20 ms budget
+and was left alone. Every sent packet's RTP header still
+needs one small CSRC `Vec`, which the webrtc-rs `Header` type owns.
+
+`frontend/tests/hotpath_allocations.rs` turns the allocation counts into budgets
+that fail CI: RED receive 0, pooled Opus/RED payloads under 0.1, keyframe and
+front-unit scans 0, frame assembly at most 1, the mixer callback 0, and at most
+8 per packetized frame. That last one replaces the webrtc-rs `H264Payloader`, which
+allocated one buffer per FU-A fragment (274 for a 300 KB IDR); the app-owned
+packetizer emits identical payloads (pinned against the old payloader) from
+zero-copy NAL slices and one fragment buffer per frame (6 allocations measured).
+
+Other changes, pinned by tests rather than benchmarks:
+
+- Linux capture drops compositor frames above the active cadence at the
+  `pipewiresrc` pad, before any copy or GPU upload (GStreamer test counts buffers
+  reaching the next element). Previously a 144–240 Hz display paid a full-frame copy
+  per refresh even while paused. `scripts/linux-pipewire-capture-check.sh` runs the real capture
+  path against a live PipeWire node (WSL kali, no portal): a 1080p144 source shared at
+  30 fps offered 144 frames/s, admitted 30/s, and held eight admitted frames without
+  starving PipeWire's pool; process CPU was 3.5% of a core, versus 14.2–15.5% when
+  the same run copies every frame before throttling (the previous order). The NVENC
+  CPU-scale family was selected; VA/CUDA zero-copy families and a desktop portal
+  session were not available.
+- A screen layer holding a frame for its cadence sleeps until it is due:
+  61 instead of 105 worker wakes per second in the unit test (Windows' default
+  timer granularity limited the old 2 ms poll; where 2 ms sleeps are honored it
+  was several hundred).
+- Windows capture textures are allocated on demand up to the 3/7 cap
+  (`capture_textures` reports the peak). A single-layer 4K60 HDR pipeline probe
+  still peaked at three. With both layers
+  (`screen_pipeline_probe --seconds=20 --assert --layers`, low layer encoding at
+  1 Mbit/s) it peaked at four instead of the seven allocated up front before: about
+  200 MB less VRAM for 4K FP16 (66 MB each), with no busy-surface drops.
+- Native mute/deafen state and screen views are sent on change, with a 5 s / 1 s
+  refresh, instead of every 500 ms; each one takes the SFU room write lock. The web
+  client's views follow the same rule.
+- The native call loop's `select!` is biased toward ready outgoing media.
+- Encoder output (Windows MFT, Linux and software) reads parameter sets and the
+  picture type from the units before the first slice instead of two full-frame
+  scans, and the MFT path copies each frame once, IDR parameter-set prefix
+  included, instead of copying and then re-copying IDRs.
+- The receive relay keeps a running byte total instead of summing its queue per
+  frame, writes each frame to the local preview peer under one deadline, and
+  validates every SPS during the packetizer's own NAL split (one walk per frame).
+  Each video track uses one pinned timer re-armed only when its deadline changes,
+  instead of a new tokio `Sleep` per RTP packet, and the inbox returns that deadline
+  from the same lock as the push.
+- An active share of an unchanging source (no new captures for 200 ms) bounds its
+  worker sleep at 100 ms instead of 20 ms: 10 polls per second (unit test), with
+  captures, encoder output, budget release, demand and rejected-frame feedback
+  still waking it at once. The native call loop keeps its audio worker lease with a
+  keepalive every two seconds instead of every 500 ms.
+- A share paused for lack of viewers sleeps until demand returns or it is stopped
+  (the native share state wakes the worker after setting the stop flag), with a 1 s
+  fallback, instead of polling every 20 ms (unit test: at most 3 wakes in a paused
+  second, encoding within 150 ms of demand, stop observed within 100 ms; 739 ms
+  without the wake).
+- Linux encoder output is queued by buffer reference and copied once, after any
+  keyframe parameter-set prefix, instead of copied and then re-copied for IDRs. The
+  GStreamer layer test exercised this path at runtime in WSL with NVENC
+  (`nvh264enc`, CPU-scale family): forced keyframes carried parameter sets and decoded.
+- A sender held by backpressure wakes its encoder worker when budget frees
+  instead of the worker polling every 2 ms.
+- The audio worker wakes once per second outside a session instead of every
+  100 ms, and periodic diagnostics JSON is built only while logging is on.
+- Web: an unboosted microphone is sent as a clone of the capture, skipping the
+  WebAudio limiter and destination; voice activation reads the meter every 20 ms
+  instead of every 100 ms; one `getStats` walk serves audio and video, runs in its
+  own task, and runs every second while WebAudio meters cover speaking (200 ms
+  otherwise); remote video tiles update their status from `<video>` media events
+  instead of a timer; the own preview rebinds when the local capture changes (a
+  start, stop or camera switch), woken by that change, with a 5 s safety net.
+- Desktop players renew their three-second viewer lease and sample decoder
+  pressure once a second once playing (250 ms only while connecting) and set their
+  status signal only when it changes.
+- The own screen preview receives each fully paced frame whole (a reference to the
+  encoded buffer) instead of a cloned packet with a new CSRC `Vec` per RTP packet that
+  the inbox then reordered and reassembled (unit test: the queued frame is the
+  sender's buffer). The native viewer monitor wakes once a second instead of every
+  250 ms.
+- The native camera publish relay has no 250 ms tick: keyframe requests wake it
+  through an atomic waker and one pinned timer covers the ten-second fallback (unit
+  test: a request wakes the parked relay within 50 ms; nothing pending, no wake).
+- Linux shared audio: the PipeWire callback unparks the encoding thread after each
+  buffer instead of the thread polling every 5 ms. `scripts/linux-pipewire-audio-check.sh`
+  (private PipeWire + WirePlumber in WSL, null sink, `pw-play` tone, 2 s capture):
+  95 consumer wakes with the same 192,512 samples captured, versus 439 with the old
+  poll (the test now fails above 250).
+- Windows shared audio reads each WASAPI packet into one contiguous buffer and
+  downmixes whole 20 ms chunks, instead of pushing and popping a `VecDeque` one byte
+  at a time, and takes Opus payloads from the pooled arena instead of one allocation
+  per packet.
+- Native voice: a received packet carries a copyable connection id instead of a
+  `Connection` clone (four reference counts in and out per packet). A guarded send
+  checks once and polls the write once; only a pending write arms the invalidation
+  waiter (a lock) and the deadline timer. The send arm shares one clock read between
+  admission and RED history. RTP writes for screen video, shared audio and the camera
+  relay that complete on their first poll build no timeout timer.
+- Web: a due voice-activation gate runs before an incoming signaling message is
+  parsed.
+- A keyframe request on a static share wakes the encoder worker: served in about
+  1.4 ms in the static-source unit test, versus 37–46 ms when only the flag is set
+  (the worker otherwise sleeps up to 100 ms). The test now fails above 15 ms.
+- Desktop players wake on IntersectionObserver changes instead of a one-second
+  visibility poll, and skip the one-second reconnect backoff after a visibility
+  change (kept for failures and leases the desktop ended).
+- The audio worker skips its loop maintenance (about six clock reads) between the
+  packets of one receive batch and shares one arrival-age clock read per batch; the
+  native call tick reads two settings flags instead of cloning the settings.
+- Received screen packets update their counters by compile-time slot instead of a
+  hashed name lookup per counter.
+- Web: the grid's decoded-size and frame-rate sampler runs once a second (frame
+  rates need a full second anyway), and the call tick checks the AudioContext state
+  once instead of once per playback slot.
+- The desktop camera publisher's keepalive is a long-poll: it returns as soon as the
+  viewer budget changes (or after 1 s, renewing the 3 s lease) instead of polling
+  every 500 ms. The desktop UI polls `voice_status` every 2 s without a call (joins
+  fetch it directly), 500 ms during one. Web and desktop ICE gathering waits wake on
+  `icegatheringstatechange` instead of 50 ms polls.
+
+Browser run (web client): the `/app` bundle from this branch, served by a local
+backend with its own database (`scripts/web-call-check-backend.sh`, WSL), in
+headless Chromium 150 with fake capture devices, two accounts in one voice channel,
+driven over the DevTools protocol by `scripts/web-call-check.py voice|leak|camera`
+with page hooks on `getUserMedia`, `replaceTrack`, `track.enabled`, `getStats`,
+`AudioContext`, track `stop` and signaling sends:
+
+- The unboosted microphone was sent as the capture clone (`replaceTrack` received
+  the capture-labelled track, not the `MediaStreamAudioDestinationNode` track).
+- `getStats` ran every 1,003–1,010 ms (meters running), from its own task.
+- Voice activation, measured from an independent 5 ms analyser probe on the same
+  capture to the sent track's `enabled = true`, with 120 ms tone bursts every 1.5 s
+  (`WEBCHECK_HOLD=60 ... voice`, both participants in the call): hcalice median
+  7.9 ms, p95 16.2 ms, max 17.6 ms (n = 42); hcbob median 9.3 ms, p95 15.7 ms, max
+  17.5 ms (n = 42, `WEBCHECK_REVERSE=1`). Headless Chromium starves the second page's
+  probe timers (it caught 5 of about 40 onsets while that page's gate still opened on
+  every burst), so each participant is measured as the first page. The probe itself
+  adds about ±5 ms.
+- Three join/leave cycles: three call `AudioContext`s created and three closed,
+  and every capture, clone and processed track stopped (three per leave).
+
+A camera run (one participant publishing the fake camera, the other watching its
+tile) decoded 1280×720 at 20 fps. The watcher renewed `ScreenViews` once per second
+and `state` every 5.0 s. Its `getStats` walks first came in pairs 200/800 ms apart
+(audio and video feedback had separate timers); a due walk now also serves feedback
+due within half an interval, after which every walk was 1,004–1,008 ms apart. Moving
+the tile out of view sent an empty view list 420 ms later and no renewals while
+empty; bringing it back re-subscribed 142 ms later with a keyframe request right
+after the renewed view. A screen-share run (`screen`: Chromium's fake display capture
+through the share picker) decoded 1920×1080 at 20 fps on the watcher with views renewed
+once per second and the tile status cleared by media events. Three microphone device
+tests outside a call (`devicetest`) created and closed three `AudioContext`s and
+stopped every capture, clone and processed track (three per test).
+
+Windows relay to a browser decoder: `screen_pipeline_probe --browser --seconds=20
+--assert` with headless Chrome negotiating the probe page over the DevTools protocol:
+the app packetizer and production `Preview` loopback peer delivered all 1,196 frames,
+which Chrome decoded at 3840×2160 with 0 dropped and 0 lost (PASS, 59.9 fps).
+
+Desktop app run (Windows, debug build): the Tauri app under a separate identifier
+against a loopback Windows build of the backend (`thiscord-backend` on 127.0.0.1,
+the WSL test database through a local TCP forwarder; a WSL-hosted SFU is unreachable
+over UDP because WSL's Hyper-V firewall blocks inbound traffic by default), driven
+through WebView2's DevTools port, with a headless Chrome participant publishing its
+fake camera:
+
+- Receive relay and WebView player: the camera played at 1280×720, 20 fps (200
+  frames presented and decoded in 10 s, 0 dropped). Moving the tile out of view
+  ended its lease (0 frames in the next 3 s); back in view, the first frame arrived
+  after 1,983 ms with the one-second visibility poll and backoff, and after 729,
+  1,268 and 1,204 ms once the observer wakes the player (a new local peer and the
+  publisher's keyframe remain), then 19.4 fps.
+- Native memory across cycles (private bytes, handles and threads of the app and its
+  WebView2 processes, and the `GPU Process Memory` dedicated-usage counter, with the
+  app driven over WebView2's DevTools port; 5 voice join/leave cycles then 5
+  share start/stop cycles while in the call): voice join/leave stayed flat (app
+  private 34–49 MB, 44 threads, 605–628 handles). Stopping a share released its
+  capture/encoder threads and GPU memory within a second (105 → 54 threads, GPU
+  238 → 40 MB), the same as base `0ae37e5`. With the stop now waking the encoder worker,
+  the share's threads were gone 9–59 ms after `screen_stop` (three shares). An intermediate build of this branch
+  kept them (95 threads, 512 MB GPU) until the call ended, because a wake closure
+  registered on the binding's long-lived demand handle held the worker's mailbox
+  and its last captured frame; wakes now hold the mailbox weakly and the worker
+  unregisters on exit, pinned by the worker test (the mailbox's strong count is 1
+  after the worker ends). Each share start/stop still leaves about 40 MB of GPU
+  memory in the app process (one 3440×1440 FP16 surface), identically on base
+  (139.6 → 323.6 MB over five shares; this branch 146.8 → 319.9 MB): a pre-existing
+  retention below the app's capture code (`windows-capture` 2.0.1/WGC or the
+  driver) that this branch neither causes nor fixes.
+- Screen share of the 3440×1440 desktop at 1080p30 with system audio, both layers:
+  the NVIDIA MFT encoded and sent 28.2 frames/s (0 dropped, 0 send timeouts, three
+  capture textures); the own preview presented 21.9 fps at 1920×802 (231 decoded,
+  0 dropped) from the whole-frame path; the remote browser decoded 1920×802 at
+  26.4 fps (3 dropped of 280). WASAPI shared audio: 100 capture packets/s and 50.1
+  Opus frames/s sent, 0 failures, queue resets or silent packets.
+- Native voice on the real microphone and speakers: 966 capture and 966 render
+  callbacks in 9.7 s with no deadline misses (p99 50 µs), Opus encode p99 500 µs,
+  811 packets sent, none expired, invalidated or failed; 0.3 ms SFU-hop RTT. The
+  other participant was muted (no test audio through real speakers), so native
+  playback of received voice was not exercised here; it is covered by the encrypted
+  loopback and voice-bot runs.
+- Native camera publish relay: with WebView2's fake capture device (no real
+  webcam), the desktop camera reached the browser participant at 1280×720, 20.1 fps
+  (200 decoded in 10 s, 0 dropped). After the viewer's tile was off-screen for 4 s,
+  its first frame came back 1,276 ms after it returned, then 19.8 fps. That included
+  the publisher learning the returned budget from its 500 ms keepalive poll; with the
+  keepalive a long-poll answered as soon as the budget changes (renewing the lease
+  at least once a second), the same test measured 689, 684 and 699 ms, then 20 fps.
+
+4K60 HDR pipeline probe A/B on the same machine, interleaved (base `0ae37e5` built in
+a private build directory, `screen_pipeline_probe --seconds=20 --assert`): base 59.00,
+59.19, 58.53, 59.72 fps (two runs below the probe's 59.0 acceptance), this branch
+59.60, 59.80, 59.36, 59.37 (all pass); six further layered runs passed at
+59.2–59.9. One run of an intermediate build ended in a segmentation fault in about
+thirty runs of this branch; it did not recur and its cause is not established.
+
+Linux desktop app (WSLg, debug build, driven through WebKitGTK's remote
+inspector, `WEBKIT_INSPECTOR_HTTP_SERVER`): the app aborts at startup because the
+hidden voice overlay requests cursor passthrough before GTK realizes its window
+(`native_overlay.rs`, unchanged by this branch; tao unwraps the missing
+`GdkWindow`). With that call skipped in an uncommitted local build, login, voice
+signaling, ICE/DTLS and the native audio devices came up, but WSL has no paced
+audio device: ALSA's `null` PCM (no sound card or PulseAudio/PipeWire ALSA plugin
+in this WSL) ran about 4,800 output callbacks in under a second, the audio worker's
+privacy-control queue filled and the call closed, as designed.
+
+A second run used the same build plus the voice-bot virtual audio devices (paced,
+headless callbacks feeding the ordinary capture, DSP, jitter and mixer path) enabled
+at startup, again only in an uncommitted local build; both workarounds sit outside
+the changed paths. The production `native_voice` task then ran on Linux in the app:
+998 capture and 996 render callbacks in 10 s with no deadline misses, Opus encode
+p99 490 µs, 391 packets sent with none expired or failed, 0.32 ms SFU-hop RTT; the
+browser participant's stream arrived at about 48 packets/s (480 in 10 s, 3.29 M
+samples decoded, no sequence gaps, late packets or decode errors). Five voice
+join/leave cycles held the app at 70 threads and 63 file descriptors; its RSS rose
+from 388 to 415 MB on the first join (audio processing state) and then by about
+1.1 MB per cycle (415 → 420 MB), the WebKit process tree by about 4 MB per cycle.
+The WebKitGTK video player and relay still could not run: this distribution's
+`libwebkit2gtk-4.1` 2.52.6 links no GStreamer WebRTC backend, so
+`RTCPeerConnection` is undefined (the tile reports "This WebView cannot play WebRTC
+video"), matching the documented requirement of a WebKitGTK build with working
+WebRTC/H.264.
+
+Not measured: received voice on real speakers, browser main-thread profiles, the
+Linux desktop app's WebKitGTK player and relay (above; Linux capture, encode, share
+audio and voice were run separately), Linux desktop-portal capture and the VA/CUDA
+families, and macOS.
+
 ## Reading the monitors
 
 Open `/admin` as the instance owner or an instance admin. **Performance monitors**

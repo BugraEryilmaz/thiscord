@@ -55,7 +55,7 @@ impl super::Remote {
         if !self.push(
             sequence,
             timestamp,
-            bytes::Bytes::copy_from_slice(packet.primary),
+            payload.slice_ref(packet.primary),
             arrived,
             now,
         ) {
@@ -66,7 +66,7 @@ impl super::Remote {
                 self.jitter.redundant(
                     timestamp.wrapping_sub(u32::from(block.offset)),
                     arrived,
-                    bytes::Bytes::copy_from_slice(block.payload),
+                    payload.slice_ref(block.payload),
                 );
             }
         }
@@ -77,6 +77,7 @@ impl super::Remote {
 #[derive(Default)]
 pub struct Sender {
     history: Vec<EncodedFrame>,
+    arena: super::arena::PacketArena,
 }
 impl Sender {
     pub fn clear(&mut self) {
@@ -121,16 +122,22 @@ impl Sender {
         if !enabled {
             return (wire::OPUS_PAYLOAD_TYPE, frame.payload.clone());
         }
-        let history: Vec<_> = self
-            .history
-            .iter()
-            .map(|old| Block {
+        let mut history = wire::History::new();
+        for old in &self.history {
+            history.push(Block {
                 offset: (frame.media_position - old.media_position) as u16,
                 payload: &old.payload,
-            })
-            .collect();
-        match wire::encode(&frame.payload, &history) {
-            Some(payload) => (wire::PAYLOAD_TYPE, payload.into()),
+            });
+        }
+        match wire::encoded_len(&frame.payload, &history) {
+            Some(size) => (
+                wire::PAYLOAD_TYPE,
+                self.arena.write(size, |buffer| {
+                    wire::encode_with(&frame.payload, &history, |bytes| {
+                        buffer.extend_from_slice(bytes)
+                    });
+                }),
+            ),
             None => (wire::OPUS_PAYLOAD_TYPE, frame.payload.clone()),
         }
     }

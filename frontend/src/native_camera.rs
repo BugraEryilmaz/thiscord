@@ -124,7 +124,7 @@ struct Session {
     lease: Connection,
     touched: Instant,
     peer: Option<Arc<dyn PeerConnection>>,
-    force: Arc<AtomicBool>,
+    force: Arc<KeyframeFlag>,
     ready: bool,
     connected: Arc<AtomicBool>,
 }
@@ -151,6 +151,8 @@ pub struct CameraState {
     inner: Arc<Mutex<Inner>>,
     release: Arc<OnceLock<ReleaseCapture>>,
     released: Arc<Notify>,
+    /// Wakes long-polling publisher keepalives when the viewer budget changes.
+    demand_changed: Arc<Notify>,
     pub views: ScreenState,
 }
 impl Default for CameraState {
@@ -159,6 +161,7 @@ impl Default for CameraState {
             inner: Default::default(),
             release: Default::default(),
             released: Default::default(),
+            demand_changed: Default::default(),
             views: ScreenState::camera(),
         }
     }
@@ -346,20 +349,24 @@ impl CameraState {
             if b.demand.bitrate() == 0 && bitrate > 0 {
                 self.keyframe_locked(&inner);
             }
+            let before = b.demand.bitrate();
             b.demand
                 .update(bitrate.min(thiscord_shared::camera::MAX_BITRATE));
+            if b.demand.bitrate() != before {
+                self.demand_changed.notify_waiters();
+            }
         }
     }
     fn keyframe_locked(&self, inner: &Inner) {
         if let Some(s) = &inner.session {
-            s.force.store(true, Ordering::Release);
+            s.force.request();
         }
     }
     pub fn keyframe(&self) {
         if let Ok(inner) = self.inner.lock()
             && let Some(s) = &inner.session
         {
-            s.force.store(true, Ordering::Release);
+            s.force.request();
         }
     }
 }
@@ -369,8 +376,39 @@ impl CameraState {
 /// 9 dB PSNR drop at each forced boundary); the fallback now matches screens.
 pub const CAMERA_KEYFRAME_FALLBACK: Duration =
     thiscord_frontend::screen::keyframe::RECOVERY_INTERVAL;
-fn camera_keyframe_due(last: Instant, now: Instant, force: &AtomicBool) -> bool {
-    let forced = force.swap(false, Ordering::AcqRel);
+/// A pending keyframe request that also wakes the publish relay, so the relay
+/// sleeps until a request or its fallback deadline instead of ticking.
+#[derive(Default)]
+struct KeyframeFlag {
+    pending: AtomicBool,
+    waker: futures_util::task::AtomicWaker,
+}
+impl KeyframeFlag {
+    fn requested() -> Self {
+        let flag = Self::default();
+        flag.request();
+        flag
+    }
+    fn request(&self) {
+        self.pending.store(true, Ordering::Release);
+        self.waker.wake();
+    }
+    fn take(&self) -> bool {
+        self.pending.swap(false, Ordering::AcqRel)
+    }
+    /// Ready while a request is pending. Registering is atomic (no lock), so
+    /// the relay can poll it alongside every packet.
+    fn poll_pending(&self, cx: &mut std::task::Context<'_>) -> std::task::Poll<()> {
+        self.waker.register(cx.waker());
+        if self.pending.load(Ordering::Acquire) {
+            std::task::Poll::Ready(())
+        } else {
+            std::task::Poll::Pending
+        }
+    }
+}
+fn camera_keyframe_due(last: Instant, now: Instant, force: &KeyframeFlag) -> bool {
+    let forced = force.take();
     forced || now.saturating_duration_since(last) >= CAMERA_KEYFRAME_FALLBACK
 }
 #[tauri::command]
@@ -381,7 +419,7 @@ struct Handler {
     gathered: Arc<Notify>,
     binding: Binding,
     lease: Connection,
-    force: Arc<AtomicBool>,
+    force: Arc<KeyframeFlag>,
     seen: AtomicBool,
     connected: Arc<AtomicBool>,
 }
@@ -421,12 +459,15 @@ impl PeerConnectionEventHandler for Handler {
         let lease = self.lease.clone();
         let force = self.force.clone();
         tokio::spawn(async move {
-            let mut tick = tokio::time::interval(Duration::from_millis(250));
-            tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
             // Request one keyframe as soon as viewers exist, then only on demand.
+            // No periodic tick: requests wake the loop and one pinned timer
+            // covers the fallback; both are disabled while nobody watches.
             let mut last_keyframe = Instant::now()
                 .checked_sub(CAMERA_KEYFRAME_FALLBACK)
                 .unwrap_or_else(Instant::now);
+            let fallback =
+                tokio::time::sleep_until((last_keyframe + CAMERA_KEYFRAME_FALLBACK).into());
+            tokio::pin!(fallback);
             let mut timestamp_base = None;
             let mut last_sequence: Option<u16> = None;
             let mut count = 0;
@@ -436,21 +477,17 @@ impl PeerConnectionEventHandler for Handler {
                 if !lease.active() || !binding.connection.active() {
                     break;
                 }
-                tokio::select! {
-                    _ = tick.tick() => {
-                        if binding.demand.bitrate()>0 && camera_keyframe_due(last_keyframe, Instant::now(), &force) {
-                            last_keyframe = Instant::now();
-                            let pli = rtc::rtcp::payload_feedbacks::picture_loss_indication::PictureLossIndication { sender_ssrc: 1, media_ssrc: ssrc };
-                            let _ = tokio::time::timeout(Duration::from_millis(50), track.write_rtcp(vec![Box::new(pli)])).await;
-                        }
-                    }
+                let demanded = binding.demand.bitrate() > 0;
+                let keyframe = tokio::select! {
+                    () = std::future::poll_fn(|cx| force.poll_pending(cx)), if demanded => true,
+                    () = &mut fallback, if demanded => true,
                     event = track.poll() => {
                         let Some(event) = event else { lease.close(); break; };
                         if let TrackRemoteEvent::OnRtpPacket(mut packet) = event {
                             if period.elapsed() >= Duration::from_secs(1) { period = Instant::now(); count = 0; bytes = 0; }
                             count += 1; bytes += packet.payload.len();
                             if count > 2000 || bytes > 2_000_000 || packet.payload.len() > 1500 { lease.close(); break; }
-                            if binding.demand.bitrate()==0 {last_sequence=None;continue;}
+                            if !demanded {last_sequence=None;continue;}
                             // Preserve source gaps: a missing FU-A fragment must remain visible to receivers.
                             let advance=last_sequence.map_or(1,|old|packet.header.sequence_number.wrapping_sub(old));
                             if advance==0 || advance>32768 {continue;}
@@ -463,36 +500,72 @@ impl PeerConnectionEventHandler for Handler {
                             packet.header.csrc.clear();
                             packet.header.extension = false;
                             packet.header.extensions.clear();
-                            if !matches!(tokio::time::timeout(Duration::from_millis(50), binding.video.write_rtp(packet)).await, Ok(Ok(_))) { force.store(true, Ordering::Release); }
+                            if !matches!(thiscord_frontend::screen::ready_or_timeout(binding.video.write_rtp(packet), Duration::from_millis(50)).await, Some(Ok(_))) { force.request(); }
                         }
+                        false
                     }
+                };
+                if keyframe && camera_keyframe_due(last_keyframe, Instant::now(), &force) {
+                    last_keyframe = Instant::now();
+                    fallback
+                        .as_mut()
+                        .reset((last_keyframe + CAMERA_KEYFRAME_FALLBACK).into());
+                    let pli = rtc::rtcp::payload_feedbacks::picture_loss_indication::PictureLossIndication { sender_ssrc: 1, media_ssrc: ssrc };
+                    let _ = tokio::time::timeout(
+                        Duration::from_millis(50),
+                        track.write_rtcp(vec![Box::new(pli)]),
+                    )
+                    .await;
                 }
             }
         });
     }
 }
+/// Longest keepalive long-poll; the publisher lease expires after 3 s.
+const KEEPALIVE_WAIT: Duration = Duration::from_secs(1);
+/// Renews the WebView publisher's lease and reports its viewer budget. With
+/// `known` equal to the current budget it long-polls: it answers as soon as the
+/// budget changes (a returning viewer's demand reaches the publisher at once) or
+/// after `KEEPALIVE_WAIT`, which also bounds the lease renewal interval.
 #[tauri::command]
-pub fn camera_keepalive(
+pub async fn camera_keepalive(
     state: State<'_, CameraState>,
     session: u32,
-) -> thiscord_shared::camera::Status {
-    state.active(); // Expire stale leases before allowing a renewal.
-    let Ok(mut inner) = state.inner.lock() else {
-        return Default::default();
-    };
-    let bitrate = inner.binding.as_ref().map_or(0, |b| b.demand.bitrate());
-    if let Some(s) = inner
-        .session
-        .as_mut()
-        .filter(|s| s.id == session && s.ready && s.lease.active())
-    {
-        s.touched = Instant::now();
-        thiscord_shared::camera::Status {
-            alive: true,
-            bitrate,
+    known: Option<u32>,
+) -> Result<thiscord_shared::camera::Status, String> {
+    Ok(state.keepalive(session, known).await)
+}
+impl CameraState {
+    async fn keepalive(&self, session: u32, known: Option<u32>) -> thiscord_shared::camera::Status {
+        let changed = self.demand_changed.notified();
+        tokio::pin!(changed);
+        changed.as_mut().enable();
+        let status = self.renew(session);
+        if !status.alive || known != Some(status.bitrate) {
+            return status;
         }
-    } else {
-        Default::default()
+        let _ = tokio::time::timeout(KEEPALIVE_WAIT, changed).await;
+        self.renew(session)
+    }
+    fn renew(&self, session: u32) -> thiscord_shared::camera::Status {
+        self.active(); // Expire stale leases before allowing a renewal.
+        let Ok(mut inner) = self.inner.lock() else {
+            return Default::default();
+        };
+        let bitrate = inner.binding.as_ref().map_or(0, |b| b.demand.bitrate());
+        if let Some(s) = inner
+            .session
+            .as_mut()
+            .filter(|s| s.id == session && s.ready && s.lease.active())
+        {
+            s.touched = Instant::now();
+            thiscord_shared::camera::Status {
+                alive: true,
+                bitrate,
+            }
+        } else {
+            Default::default()
+        }
     }
 }
 #[tauri::command]
@@ -517,7 +590,7 @@ async fn open(state: &CameraState, session: u32, sdp: String) -> Result<ViewAnsw
     }
     let (sdp, codecs) = camera_offer(&sdp)?;
     let lease = Connection::default();
-    let force = Arc::new(AtomicBool::new(true));
+    let force = Arc::new(KeyframeFlag::requested());
     let connected = Arc::new(AtomicBool::new(false));
     let binding = {
         let mut inner = state.inner.lock().map_err(|_| "Camera unavailable")?;
@@ -892,7 +965,7 @@ mod tests {
     #[test]
     fn camera_keyframes_follow_requests_not_a_one_second_clock() {
         let start = Instant::now();
-        let force = AtomicBool::new(false);
+        let force = KeyframeFlag::default();
         // Between requests, no periodic one-second PLI is sent.
         for ms in [250, 1000, 1500, 5000, 9999] {
             assert!(!camera_keyframe_due(
@@ -901,26 +974,51 @@ mod tests {
                 &force
             ));
         }
-        force.store(true, Ordering::Release);
+        force.request();
         assert!(camera_keyframe_due(
             start,
             start + Duration::from_millis(250),
             &force
         ));
-        assert!(!force.load(Ordering::Acquire), "a request is consumed once");
+        assert!(
+            !force.pending.load(Ordering::Acquire),
+            "a request is consumed once"
+        );
         assert!(camera_keyframe_due(
             start,
             start + CAMERA_KEYFRAME_FALLBACK,
             &force
         ));
         // A due fallback also consumes a pending request: one PLI covers both.
-        force.store(true, Ordering::Release);
+        force.request();
         assert!(camera_keyframe_due(
             start,
             start + CAMERA_KEYFRAME_FALLBACK,
             &force
         ));
-        assert!(!force.load(Ordering::Acquire));
+        assert!(!force.pending.load(Ordering::Acquire));
+    }
+    #[tokio::test]
+    async fn keyframe_requests_wake_the_relay_without_a_tick() {
+        let force = Arc::new(KeyframeFlag::default());
+        let waiter = force.clone();
+        let woke = tokio::spawn(async move {
+            std::future::poll_fn(|cx| waiter.poll_pending(cx)).await;
+            Instant::now()
+        });
+        tokio::time::sleep(Duration::from_millis(30)).await;
+        assert!(
+            !woke.is_finished(),
+            "nothing pending: the relay stays asleep"
+        );
+        let requested = Instant::now();
+        force.request();
+        let woke = tokio::time::timeout(Duration::from_secs(1), woke)
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(woke.duration_since(requested) < Duration::from_millis(50));
+        assert!(force.take());
     }
     #[tokio::test]
     async fn synthetic_camera_crosses_local_bridge_and_stops_without_hardware() {
@@ -1056,6 +1154,54 @@ mod tests {
         assert!(!state.active());
         assert!(!lease.active());
         assert!(state.inner.lock().unwrap().capture.is_none());
+    }
+
+    #[tokio::test]
+    async fn keepalive_long_poll_answers_on_budget_change_and_renews_each_second() {
+        let state = CameraState::default();
+        state.bind(binding(thiscord_frontend::screen::track(903)));
+        state.prepare(1).await.unwrap();
+        state.inner.lock().unwrap().session = Some(Session {
+            id: 1,
+            lease: Connection::default(),
+            touched: Instant::now(),
+            peer: None,
+            force: Default::default(),
+            ready: true,
+            connected: Arc::new(AtomicBool::new(true)),
+        });
+        // Unknown budget: answers at once.
+        let first = state.keepalive(1, None).await;
+        assert!(first.alive);
+        // Known budget: waits until a viewer's demand changes it.
+        let waiting = tokio::spawn({
+            let state = state.clone();
+            async move {
+                let started = Instant::now();
+                (
+                    state.keepalive(1, Some(first.bitrate)).await,
+                    started.elapsed(),
+                )
+            }
+        });
+        tokio::time::sleep(Duration::from_millis(50)).await;
+        state.target(1_000_000);
+        let (status, waited) = waiting.await.unwrap();
+        assert!(status.alive);
+        assert_ne!(status.bitrate, first.bitrate);
+        assert!(
+            waited < Duration::from_millis(300),
+            "answered after {waited:?}"
+        );
+        // Unchanged: it still renews the 3 s lease within about a second.
+        let started = Instant::now();
+        let renewed = state.keepalive(1, Some(status.bitrate)).await;
+        assert!(renewed.alive);
+        let waited = started.elapsed();
+        assert!(
+            waited >= Duration::from_millis(900) && waited < Duration::from_millis(1500),
+            "renewed after {waited:?}"
+        );
     }
 
     #[tokio::test]

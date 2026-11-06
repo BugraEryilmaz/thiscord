@@ -67,13 +67,13 @@ impl Probe {
                     ticks += 1;
                     let now_stalled = probe.age() >= 3000;
                     if now_stalled != stalled || ticks.is_multiple_of(10) {
-                        diagnostics::event(
+                        diagnostics::event_with(
                             if now_stalled {
                                 "worker_stalled"
                             } else {
                                 "worker_heartbeat"
                             },
-                            probe.snapshot(),
+                            || probe.snapshot(),
                         );
                     }
                     stalled = now_stalled;

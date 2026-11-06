@@ -22,34 +22,72 @@ pub fn transport_budget(_encoder_bitrate: u32, demand: u32) -> u32 {
 /// count alone cannot distinguish a small delta from a 500 KB scene change.
 /// This is raw-input admission, not an encoded-frame size/drop limit.
 pub const BACKLOG_BUDGET_MS: u32 = 100;
+type Wake = Arc<dyn Fn() + Send + Sync>;
+/// The wake callback plus whether the encoder worker is currently held by
+/// backpressure; frames finishing while nobody waits wake no one.
+#[derive(Clone)]
+struct Waiter {
+    waiting: Arc<std::sync::atomic::AtomicBool>,
+    wake: Wake,
+}
+impl Waiter {
+    fn notify(&self) {
+        if self.waiting.swap(false, Ordering::AcqRel) {
+            (self.wake)();
+        }
+    }
+}
+fn byte_limit(bitrate: u32) -> usize {
+    (u64::from(bitrate) * u64::from(BACKLOG_BUDGET_MS) / 8 / 1000).max(1) as usize
+}
 pub struct SendBudget {
     outstanding: Arc<AtomicUsize>,
     bitrate: Arc<AtomicU32>,
-    limit: usize,
+    limit: Arc<AtomicUsize>,
+    wake: Option<Waiter>,
 }
 impl SendBudget {
     pub fn new(bitrate: u32) -> Self {
         Self {
             outstanding: Arc::default(),
             bitrate: Arc::new(AtomicU32::new(bitrate)),
-            limit: (u64::from(bitrate) * u64::from(BACKLOG_BUDGET_MS) / 8 / 1000).max(1) as usize,
+            limit: Arc::new(AtomicUsize::new(byte_limit(bitrate))),
+            wake: None,
+        }
+    }
+    /// Called when queued frames free capacity: the budget drops back under its
+    /// limit, or a frame finishes or is discarded. An encoder worker held by
+    /// backpressure then wakes on the event instead of polling.
+    pub fn with_wake(mut self, wake: Wake) -> Self {
+        self.wake = Some(Waiter {
+            waiting: Arc::default(),
+            wake,
+        });
+        self
+    }
+    /// The worker is about to wait for capacity; the next release wakes it.
+    pub fn wait_for_capacity(&self) {
+        if let Some(waiter) = &self.wake {
+            waiter.waiting.store(true, Ordering::Release);
         }
     }
     pub fn set_bitrate(&mut self, bitrate: u32) {
         self.bitrate.store(bitrate, Ordering::Release);
-        self.limit = (u64::from(bitrate) * u64::from(BACKLOG_BUDGET_MS) / 8 / 1000).max(1) as usize;
+        self.limit.store(byte_limit(bitrate), Ordering::Release);
     }
     pub fn bytes(&self) -> usize {
         self.outstanding.load(Ordering::Acquire)
     }
     pub fn has_capacity(&self) -> bool {
-        self.bytes() < self.limit
+        self.bytes() < self.limit.load(Ordering::Acquire)
     }
     pub fn track(&self, bytes: usize) -> PendingBytes {
         self.outstanding.fetch_add(bytes, Ordering::AcqRel);
         PendingBytes {
             outstanding: self.outstanding.clone(),
             bitrate: self.bitrate.clone(),
+            limit: self.limit.clone(),
+            wake: self.wake.clone(),
             remaining: bytes,
         }
     }
@@ -60,6 +98,8 @@ impl SendBudget {
 pub struct PendingBytes {
     outstanding: Arc<AtomicUsize>,
     bitrate: Arc<AtomicU32>,
+    limit: Arc<AtomicUsize>,
+    wake: Option<Waiter>,
     remaining: usize,
 }
 impl PendingBytes {
@@ -74,12 +114,22 @@ impl PendingBytes {
     pub fn sent(&mut self, bytes: usize) {
         assert!(bytes <= self.remaining);
         self.remaining -= bytes;
-        self.outstanding.fetch_sub(bytes, Ordering::AcqRel);
+        let before = self.outstanding.fetch_sub(bytes, Ordering::AcqRel);
+        let limit = self.limit.load(Ordering::Acquire);
+        if before >= limit
+            && before - bytes < limit
+            && let Some(waiter) = &self.wake
+        {
+            waiter.notify();
+        }
     }
 }
 impl Drop for PendingBytes {
     fn drop(&mut self) {
         self.outstanding.fetch_sub(self.remaining, Ordering::AcqRel);
+        if let Some(waiter) = &self.wake {
+            waiter.notify();
+        }
     }
 }
 /// Blocking sleeps for a dedicated pacing thread. On Windows this is a
@@ -225,6 +275,41 @@ mod tests {
     use crate::screen::{Outgoing, adaptation::QualityController};
     use thiscord_shared::screen::Quality;
 
+    #[test]
+    fn backlog_wakes_the_encoder_when_it_falls_under_budget_or_a_frame_ends() {
+        let wakes = Arc::new(AtomicUsize::new(0));
+        let counter = wakes.clone();
+        // 8 Mbit/s for 100 ms is a 100 KB budget.
+        let budget = SendBudget::new(8_000_000).with_wake(Arc::new(move || {
+            counter.fetch_add(1, Ordering::Relaxed);
+        }));
+        let unwatched = budget.track(1);
+        drop(unwatched);
+        assert_eq!(wakes.load(Ordering::Relaxed), 0, "nobody was waiting");
+        budget.wait_for_capacity();
+        let mut frame = budget.track(150_000);
+        assert!(!budget.has_capacity());
+        frame.sent(40_000);
+        assert_eq!(wakes.load(Ordering::Relaxed), 0, "still over budget");
+        frame.sent(20_000);
+        assert!(budget.has_capacity());
+        assert_eq!(
+            wakes.load(Ordering::Relaxed),
+            1,
+            "crossing under the limit wakes once"
+        );
+        frame.sent(20_000);
+        assert_eq!(wakes.load(Ordering::Relaxed), 1);
+        budget.wait_for_capacity();
+        drop(frame);
+        assert_eq!(
+            wakes.load(Ordering::Relaxed),
+            2,
+            "a finished frame frees queue space"
+        );
+        assert_eq!(budget.bytes(), 0);
+    }
+
     // Real packetization, byte ownership/admission and pacing, with deterministic
     // capture and scheduler clocks. The first frame is a ~140 KB wire burst at
     // 1080p30; later deltas offer the encoder's nominal bitrate during the hold.
@@ -256,13 +341,16 @@ mod tests {
                     };
                     let mut data = vec![1; size];
                     data[..5].copy_from_slice(&[0, 0, 0, 1, 0x61]);
-                    let packets = crate::screen::packetize(data, &mut sequence, captures).unwrap();
+                    let data = bytes::Bytes::from(data);
+                    let packets =
+                        crate::screen::packetize(data.clone(), &mut sequence, captures).unwrap();
                     let bytes = packets.iter().map(|p| p.payload.len() + 64).sum();
                     queue.push_back(Outgoing {
                         bitrate: quality.bitrate(),
                         captured_at: next_capture - Duration::from_millis(6),
                         enqueued_at: next_capture,
                         packets,
+                        frame: data,
                         keyframe: captures == 0,
                         budget: budget.track(bytes),
                     });

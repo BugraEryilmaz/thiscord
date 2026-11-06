@@ -1,5 +1,6 @@
 mod activity;
 pub mod adaptive_fec;
+pub mod arena;
 pub mod clips;
 mod codec;
 pub mod connection;
@@ -257,7 +258,7 @@ pub enum Command {
         source_epoch: Option<u32>,
         privacy_epoch: Option<u32>,
         marker: bool,
-        connection: connection::Connection,
+        connection: connection::ConnectionId,
         slot: usize,
         sequence: u16,
         timestamp: u32,
@@ -335,36 +336,32 @@ impl AudioEngine {
     pub fn diagnostic_snapshot(&self) {
         diagnostics::event("requested_worker_snapshot", self.probe.snapshot());
     }
-    pub fn notify(&self, command: Command) {
+    /// Returns `false` only when a media packet was dropped (queue full or
+    /// worker gone); the receive task counts that against its connection.
+    pub fn notify(&self, command: Command) -> bool {
         if matches!(
             command,
             Command::Roster { .. } | Command::ReceiveBoundary { .. }
         ) {
             let _ = self.notify_control(command);
-            return;
+            return true;
         }
         self.urgent(&command);
         if matches!(command, Command::Packet { .. }) {
-            if let Err(error) = self.media.try_send(command) {
-                let (mpsc::TrySendError::Full(Command::Packet { connection, .. })
-                | mpsc::TrySendError::Disconnected(Command::Packet { connection, .. })) = error
-                else {
-                    return;
-                };
-                connection
-                    .metrics
-                    .add(Count::IncomingQueueDroppedPackets, 1);
-                self.probe.packet_drops.fetch_add(1, Ordering::Relaxed);
-            }
             // Packets carry their arrival time and are only needed by the next
             // refill, which device callbacks already wake every 10 ms (with the
             // worker's 10 ms fallback). Waking per packet would add a context
             // switch per speaker packet, rarely letting batching coalesce them.
-            return;
+            if self.media.try_send(command).is_err() {
+                self.probe.packet_drops.fetch_add(1, Ordering::Relaxed);
+                return false;
+            }
+            return true;
         } else if self.sender.try_send((command, None)).is_err() {
             diagnostics::event("control_notification_dropped", self.probe.snapshot());
         }
         self.worker.unpark();
+        true
     }
     /// Privacy-critical controls may not be silently dropped. The caller must
     /// reconnect after an error; close this command's connection immediately.
@@ -625,12 +622,11 @@ impl Remote {
         let wanted = self.receive.update(
             now,
             self.decode_stats.normal_frames,
-            self.jitter.metrics().sequence_gaps,
+            self.jitter.sequence_gaps(),
         );
         if wanted != self.jitter.deep_redundancy {
-            let metrics = self.jitter.metrics();
             // Keep the desired state; apply it once the stream is quiet.
-            if wanted || metrics.dtx || metrics.inactive {
+            if wanted || self.jitter.quiet() {
                 return self.configure(writer, manual, true, now);
             }
         }
@@ -688,6 +684,7 @@ impl Remote {
         writer.discard();
     }
     fn refill(&mut self, writer: &mut StreamWriter, now: Instant) {
+        self.jitter.quality.tick(now);
         writer.control.counts.drain(&self.jitter.quality);
         self.jitter
             .output_callback(writer.callback_samples(), writer.callback_due(now));
@@ -700,7 +697,6 @@ impl Remote {
                 return;
             }
         }
-        let metrics = self.jitter.metrics();
         writer
             .control
             .pending_media
@@ -708,7 +704,7 @@ impl Remote {
         writer
             .control
             .quiet
-            .store(metrics.dtx || metrics.inactive, Ordering::Release);
+            .store(self.jitter.quiet(), Ordering::Release);
         if !writer.ready() {
             return;
         }
@@ -775,7 +771,6 @@ impl Remote {
                 .quality
                 .add(Count::PcmOverflowSamples, (count - written) as u64);
         }
-        let metrics = self.jitter.metrics();
         writer
             .control
             .pending_media
@@ -783,7 +778,7 @@ impl Remote {
         writer
             .control
             .quiet
-            .store(metrics.dtx || metrics.inactive, Ordering::Release);
+            .store(self.jitter.quiet(), Ordering::Release);
     }
 }
 struct Devices {
@@ -974,6 +969,8 @@ struct Session {
     reset_codec: bool,
     delivery: connection::Connection,
     outgoing: Option<tokio::sync::mpsc::Sender<outgoing::EncodedFrame>>,
+    /// Encoded frames are cut from pooled blocks, not allocated per frame.
+    send_arena: arena::PacketArena,
     media_clock: outgoing::MediaClock,
     transmit_control: Arc<outgoing::Control>,
     encoder_generation: u64,
@@ -1142,6 +1139,7 @@ impl Session {
             reset_codec: false,
             delivery: Default::default(),
             outgoing: None,
+            send_arena: Default::default(),
             media_clock: Default::default(),
             transmit_control: Default::default(),
             encoder_generation: 0,
@@ -1182,6 +1180,10 @@ impl Session {
         if self.processing.resets != resets {
             self.clear_gate();
         }
+        // One clock read per worker service for all streams' refill and batched
+        // accounting.
+        let now = Instant::now();
+        self.processing.metrics.tick(now);
         if self.outgoing.is_some() {
             for (remote, writer) in self.remotes.iter_mut().zip(self.devices.writers.iter_mut()) {
                 if let Some(remote) = remote {
@@ -1189,13 +1191,12 @@ impl Session {
                         writer,
                         self.devices.control.deafen.load(Ordering::Acquire)
                             || self.transmit_control.server_deafened(),
-                        Instant::now(),
+                        now,
                     );
                     // A failed reconfiguration poisons and deafens only that
                     // stream (see Remote::configure); other streams continue.
-                    let _ =
-                        remote.adapt_receive(writer, self.settings.deep_redundancy, Instant::now());
-                    remote.refill(writer, Instant::now());
+                    let _ = remote.adapt_receive(writer, self.settings.deep_redundancy, now);
+                    remote.refill(writer, now);
                 }
             }
         }
@@ -1395,7 +1396,7 @@ impl Session {
                 let mut frame = outgoing::EncodedFrame {
                     packet_redundancy: self.settings.packet_redundancy,
                     accounted: false,
-                    payload: bytes::Bytes::copy_from_slice(&packet[..n]),
+                    payload: self.send_arena.copy(&packet[..n]),
                     media_position,
                     marker,
                     oldest_capture,
@@ -1481,6 +1482,7 @@ impl Session {
     }
     fn collect_metrics(&self) {
         self.devices.control.counts.drain(&self.processing.metrics);
+        self.processing.metrics.flush();
         for (remote, writer) in self.remotes.iter().zip(&self.devices.writers) {
             if let Some(remote) = remote {
                 writer.control.counts.drain(&remote.jitter.quality);
@@ -1489,7 +1491,7 @@ impl Session {
     }
     fn quality(&self) -> AudioQuality {
         self.collect_metrics();
-        let metrics = &self.processing.metrics;
+        let metrics = self.processing.metrics.shared();
         let network = metrics.network();
         // These legacy cumulative counters are maintained separately; new
         // callback counters are drained exactly once on the worker.
@@ -1653,9 +1655,11 @@ type Request = (Command, Option<mpsc::Sender<Result<AudioStatus, String>>>);
 /// capture draining cannot starve behind a long backlog.
 const MEDIA_BATCH: usize = 32;
 /// Fallback wait when nothing unparks the worker. Device callbacks normally wake
-/// it every 10 ms during a session; without one there are no realtime deadlines.
+/// it every 10 ms during a session; without one there are no realtime deadlines,
+/// and every command unparks it. One second keeps the watchdog heartbeat (3 s
+/// stall threshold) fresh while the app sits outside calls.
 fn idle_wait(session: bool) -> Duration {
-    Duration::from_millis(if session { 10 } else { 100 })
+    Duration::from_millis(if session { 10 } else { 1000 })
 }
 fn lease_expired(voice: bool, elapsed: Duration) -> bool {
     elapsed > Duration::from_secs(if voice { 15 } else { 3 })
@@ -1686,62 +1690,71 @@ fn run(
     // A packet already dequeued while batching, handled before waiting again.
     let mut carried: Option<Command> = None;
     let mut batched = 0;
+    // One arrival-age clock for every packet of a batch.
+    let mut batch_now: Option<Instant> = None;
     loop {
-        probe.enter(worker_health::IDLE);
-        probe.active.store(session.is_some(), Ordering::Release);
-        if let Some(s) = &mut session {
-            s.capture_boundary(s.transmit_control.generation(), Instant::now());
-        }
-        if session
-            .as_ref()
-            .is_some_and(|s| s.connection.as_ref().is_some_and(|c| !c.active()))
-        {
-            stop.store(true, Ordering::Release);
-        }
-        debug.poll();
-        if debug_stop.swap(false, Ordering::AcqRel) {
-            debug.stop();
-        }
-        // Release requests and PTT key-up cannot be lost behind a full media queue.
-        if stop.swap(false, Ordering::AcqRel) {
-            if let Some(pending) = &mut pending {
-                pending.cancel("Audio stopped; pending settings were cancelled");
+        // Mid-batch (a packet carried from the previous admission), skip the
+        // per-iteration maintenance and its clock reads. Stop and a closed
+        // connection still gate the next processing tick, and that tick captures
+        // its own boundary. A control command handled mid-batch leaves the packet
+        // carried, so maintenance can wait one more batch (at most 32 packets).
+        if carried.is_none() {
+            probe.enter(worker_health::IDLE);
+            probe.active.store(session.is_some(), Ordering::Release);
+            if let Some(s) = &mut session {
+                s.capture_boundary(s.transmit_control.generation(), Instant::now());
             }
-            debug.stop();
-            session = None;
-            pressed.store(false, Ordering::Release);
-            message = "Audio stopped; devices released".into();
-        }
-        if previous.elapsed() > Duration::from_secs(2) {
-            diagnostics::event(
-                "worker_scheduling_gap",
-                serde_json::json!({"elapsed_ms":previous.elapsed().as_millis(),"voice":session.as_ref().is_some_and(|s| s.connection.is_some())}),
-            );
-        }
-        if session
-            .as_ref()
-            .is_some_and(|s| lease_expired(s.connection.is_some(), lease.elapsed()))
-        {
-            diagnostics::event(
-                "audio_lease_expired",
-                serde_json::json!({"elapsed_ms":lease.elapsed().as_millis(),"voice":session.as_ref().is_some_and(|s|s.connection.is_some())}),
-            );
-            if let Some(pending) = &mut pending {
-                pending.cancel("Audio suspended; pending settings were cancelled");
+            if session
+                .as_ref()
+                .is_some_and(|s| s.connection.as_ref().is_some_and(|c| !c.active()))
+            {
+                stop.store(true, Ordering::Release);
             }
-            debug.stop();
-            session = None;
-            message = "Audio stopped after inactivity or suspend".into();
-        }
-        previous = Instant::now();
-        if last_snapshot.elapsed() >= Duration::from_secs(10) {
-            last_snapshot = Instant::now();
-            if let Some(s) = &session {
-                diagnostics::quality(|| s.quality());
+            debug.poll();
+            if debug_stop.swap(false, Ordering::AcqRel) {
+                debug.stop();
+            }
+            // Release requests and PTT key-up cannot be lost behind a full media queue.
+            if stop.swap(false, Ordering::AcqRel) {
+                if let Some(pending) = &mut pending {
+                    pending.cancel("Audio stopped; pending settings were cancelled");
+                }
+                debug.stop();
+                session = None;
+                pressed.store(false, Ordering::Release);
+                message = "Audio stopped; devices released".into();
+            }
+            if previous.elapsed() > Duration::from_secs(2) {
                 diagnostics::event(
-                    "audio_snapshot",
-                    serde_json::json!({"processing_resets":s.processing.resets,"processing_reset_causes":s.processing.reset_causes,"opus_decode":s.remotes.iter().flatten().map(|r| &r.decode_stats).collect::<Vec<_>>(),"verified_fec_frames":null,"playout":s.remotes.iter().flatten().map(|r|r.jitter.metrics()).collect::<Vec<_>>(),"receive":s.remotes.iter().flatten().map(|r|r.jitter.diagnostics()).collect::<Vec<_>>(),"health":s.devices.health.diagnostics(),"recovering":s.recovery.active(),"muted":s.settings.muted,"deafened":s.settings.deafened,"deep_redundancy":s.settings.deep_redundancy,"dred_bitrate_target":if s.settings.deep_redundancy { dred::BITRATE } else { 32_000 },"echo":s.settings.echo_cancellation,"neural_echo":s.settings.neural_echo,"suppression":s.settings.noise_suppression,"suppression_model":s.settings.noise_suppression_model,"suppression_strength":s.settings.noise_suppression_strength,"automatic_gain":s.settings.automatic_gain,"capture_overflow_samples":s.devices.control.dropped.load(Ordering::Relaxed),"playback_starvation_samples":s.devices.control.underruns.load(Ordering::Relaxed)}),
+                    "worker_scheduling_gap",
+                    serde_json::json!({"elapsed_ms":previous.elapsed().as_millis(),"voice":session.as_ref().is_some_and(|s| s.connection.is_some())}),
                 );
+            }
+            if session
+                .as_ref()
+                .is_some_and(|s| lease_expired(s.connection.is_some(), lease.elapsed()))
+            {
+                diagnostics::event(
+                    "audio_lease_expired",
+                    serde_json::json!({"elapsed_ms":lease.elapsed().as_millis(),"voice":session.as_ref().is_some_and(|s|s.connection.is_some())}),
+                );
+                if let Some(pending) = &mut pending {
+                    pending.cancel("Audio suspended; pending settings were cancelled");
+                }
+                debug.stop();
+                session = None;
+                message = "Audio stopped after inactivity or suspend".into();
+            }
+            previous = Instant::now();
+            if last_snapshot.elapsed() >= Duration::from_secs(10) {
+                last_snapshot = Instant::now();
+                if let Some(s) = &session {
+                    diagnostics::quality(|| s.quality());
+                    diagnostics::event_with(
+                        "audio_snapshot",
+                        || serde_json::json!({"processing_resets":s.processing.resets,"processing_reset_causes":s.processing.reset_causes,"opus_decode":s.remotes.iter().flatten().map(|r| &r.decode_stats).collect::<Vec<_>>(),"verified_fec_frames":null,"playout":s.remotes.iter().flatten().map(|r|r.jitter.metrics()).collect::<Vec<_>>(),"receive":s.remotes.iter().flatten().map(|r|r.jitter.diagnostics()).collect::<Vec<_>>(),"health":s.devices.health.diagnostics(),"recovering":s.recovery.active(),"muted":s.settings.muted,"deafened":s.settings.deafened,"deep_redundancy":s.settings.deep_redundancy,"dred_bitrate_target":if s.settings.deep_redundancy { dred::BITRATE } else { 32_000 },"echo":s.settings.echo_cancellation,"neural_echo":s.settings.neural_echo,"suppression":s.settings.noise_suppression,"suppression_model":s.settings.noise_suppression_model,"suppression_strength":s.settings.noise_suppression_strength,"automatic_gain":s.settings.automatic_gain,"capture_overflow_samples":s.devices.control.dropped.load(Ordering::Relaxed),"playback_starvation_samples":s.devices.control.underruns.load(Ordering::Relaxed)}),
+                    );
+                }
             }
         }
         // Control commands keep priority over queued media.
@@ -1851,7 +1864,9 @@ fn run(
                             }
                             s.volumes = Some(volumes);
                             s.outgoing = Some(outgoing);
-                            s.processing.metrics = connection.metrics.clone();
+                            s.processing.metrics.flush();
+                            s.processing.metrics =
+                                quality::Batched::new(connection.metrics.clone());
                             s.transmit_control = probe.outgoing.clone();
                             let _ = s
                                 .devices
@@ -1866,11 +1881,12 @@ fn run(
                         | Command::Roster { .. }
                         | Command::ReceiveBoundary { .. }) => {
                             if let Some(s) = &mut session {
-                                s.receive_command(
-                                    command,
-                                    deafen.load(Ordering::Acquire),
-                                    Instant::now(),
-                                )?;
+                                let now = if media {
+                                    *batch_now.get_or_insert_with(Instant::now)
+                                } else {
+                                    Instant::now()
+                                };
+                                s.receive_command(command, deafen.load(Ordering::Acquire), now)?;
                             }
                         }
                         Command::Stop => {
@@ -2015,6 +2031,7 @@ fn run(
             continue;
         }
         batched = 0;
+        batch_now = None;
         // Commit only between complete processing ticks. Stop takes priority
         // even if it arrived while a replacement was finishing.
         if stop.load(Ordering::Acquire)

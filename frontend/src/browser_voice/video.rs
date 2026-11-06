@@ -25,8 +25,8 @@ use thiscord_shared::{
 use wasm_bindgen::{JsCast, JsValue, prelude::Closure};
 use wasm_bindgen_futures::JsFuture;
 use web_sys::{
-    HtmlVideoElement, MediaStream, MediaStreamTrack, MediaStreamTrackState, RtcPeerConnection,
-    RtcRtpSender, RtcRtpTransceiver,
+    HtmlVideoElement, MediaStream, MediaStreamTrack, MediaStreamTrackState, RtcRtpSender,
+    RtcRtpTransceiver,
 };
 
 fn json(value: serde_json::Value) -> JsValue {
@@ -137,7 +137,8 @@ pub(super) struct Media {
     pub shared_audio: Vec<(usize, MediaStreamTrack)>,
     /// Members whose shared audio is currently stopped locally.
     audio_stopped: [bool; ROOM_CAPACITY],
-    sent_views: bool,
+    /// The last `ScreenViews` list sent (empty before the first one).
+    sent_views: Vec<thiscord_shared::screen::Subscription>,
     views_at: f64,
     stats_at: f64,
 }
@@ -147,6 +148,11 @@ impl Media {
             support,
             ..Default::default()
         }
+    }
+    /// A resumed socket gets the current views on the next tick.
+    pub(super) fn resend_views(&mut self) {
+        self.sent_views.clear();
+        self.views_at = 0.0;
     }
 }
 pub(super) struct Remote {
@@ -251,7 +257,46 @@ pub fn clear_error() {
 fn fail(message: &str) {
     update_state(|s| s.error = message.to_owned());
 }
+thread_local! {
+    /// Local capture revision and the self-preview tasks waiting for a change.
+    static LOCAL_CHANGED: std::cell::RefCell<(u64, Vec<std::task::Waker>)> =
+        std::cell::RefCell::default();
+}
+/// Revision of the local camera/screen captures; see [`local_change_or`].
+pub fn local_revision() -> u64 {
+    LOCAL_CHANGED.with(|c| c.borrow().0)
+}
+/// Resolves once the local captures change from revision `seen` (a start,
+/// stop or camera switch), or after `ms` as a safety net.
+pub async fn local_change_or(seen: u64, ms: u32) {
+    let changed = std::future::poll_fn(|cx| {
+        LOCAL_CHANGED.with(|c| {
+            let mut c = c.borrow_mut();
+            if c.0 != seen {
+                std::task::Poll::Ready(())
+            } else {
+                // One entry per waiting task, even across timed-out waits.
+                if !c.1.iter().any(|w| w.will_wake(cx.waker())) {
+                    c.1.push(cx.waker().clone());
+                }
+                std::task::Poll::Pending
+            }
+        })
+    });
+    futures_util::future::select(
+        Box::pin(changed),
+        gloo_timers::future::TimeoutFuture::new(ms),
+    )
+    .await;
+}
 fn publishing_state(publishing: &Publishing) {
+    LOCAL_CHANGED.with(|c| {
+        let mut c = c.borrow_mut();
+        c.0 = c.0.wrapping_add(1);
+        for waker in c.1.drain(..) {
+            waker.wake();
+        }
+    });
     update_state(|s| {
         s.screen = publishing.screen.is_some();
         s.screen_audio = publishing
@@ -608,6 +653,10 @@ struct View {
     pressure: DecoderPressure,
     pressured: bool,
     recovery: Recovery,
+    /// Scrolled out of a scrolling grid or strip (IntersectionObserver).
+    off_screen: bool,
+    /// A camera came back on screen; request a keyframe with the renewal.
+    resumed: bool,
 }
 /// Registers a mounted player. The call binds the received track and keeps
 /// the subscription alive while it is registered and the page is visible.
@@ -634,6 +683,8 @@ pub fn watch(element: HtmlVideoElement, watch: Watch) -> u32 {
             pressure: DecoderPressure::default(),
             pressured: false,
             recovery: Recovery::default(),
+            off_screen: false,
+            resumed: false,
         })
     });
     if let Some(call) = super::current() {
@@ -652,6 +703,15 @@ pub fn unwatch(id: u32) {
                 true
             }
         })
+    });
+}
+/// Reported by the tile's IntersectionObserver.
+pub fn set_off_screen(id: u32, off_screen: bool) {
+    VIEWS.with(|views| {
+        for view in views.borrow_mut().iter_mut().filter(|v| v.id == id) {
+            view.resumed |= view.off_screen && !off_screen && view.watch.kind == MediaKind::Camera;
+            view.off_screen = off_screen;
+        }
     });
 }
 /// The player has a received track attached.
@@ -721,38 +781,23 @@ pub(super) type InboundVideo = Vec<(Option<String>, Option<String>, Inbound)>;
 pub(super) fn wants_stats() -> bool {
     VIEWS.with(|views| views.borrow().iter().any(|v| v.bound.is_some()))
 }
-pub(super) async fn inbound(pc: &RtcPeerConnection) -> InboundVideo {
-    let Ok(report) = JsFuture::from(pc.get_stats()).await else {
-        return vec![];
-    };
-    let Some(Ok(values)) = call_optional(&report, "values", &Array::new()) else {
-        return vec![];
-    };
-    let Ok(Some(iterator)) = js_sys::try_iter(&values) else {
-        return vec![];
-    };
-    let count = |stat: &JsValue, key: &str| number(stat, key).unwrap_or(0.0).max(0.0) as u64;
-    iterator
-        .filter_map(Result::ok)
-        .filter(|stat| {
-            text(stat, "type").as_deref() == Some("inbound-rtp")
-                && text(stat, "kind").as_deref() == Some("video")
-        })
-        .map(|stat| {
-            (
-                text(&stat, "mid"),
-                text(&stat, "trackIdentifier"),
-                Inbound {
-                    packets_received: count(&stat, "packetsReceived"),
-                    packets_lost: count(&stat, "packetsLost"),
-                    frames_received: count(&stat, "framesReceived"),
-                    frames_decoded: count(&stat, "framesDecoded"),
-                    decode_seconds: number(&stat, "totalDecodeTime").unwrap_or(0.0),
-                },
-            )
-        })
-        .take(ROOM_CAPACITY * 2)
-        .collect()
+/// One video `inbound-rtp` report, read during `media::stats`'s single walk.
+pub(super) fn inbound_entry(stat: &JsValue, into: &mut InboundVideo) {
+    if into.len() >= ROOM_CAPACITY * 2 {
+        return;
+    }
+    let count = |key: &str| number(stat, key).unwrap_or(0.0).max(0.0) as u64;
+    into.push((
+        text(stat, "mid"),
+        text(stat, "trackIdentifier"),
+        Inbound {
+            packets_received: count("packetsReceived"),
+            packets_lost: count("packetsLost"),
+            frames_received: count("framesReceived"),
+            frames_decoded: count("framesDecoded"),
+            decode_seconds: number(stat, "totalDecodeTime").unwrap_or(0.0),
+        },
+    ));
 }
 
 /// Applies `ScreenTarget`: the SFU's lowest viewer budget for our stream.
@@ -920,6 +965,10 @@ pub(super) fn tick(call: &Call, stats: Option<InboundVideo>) {
             views
                 .iter()
                 .filter(|v| shown && v.bound.is_some() && Some(v.watch.slot) != own_slot)
+                // A camera scrolled out of view stops downloading and decoding. A
+                // screen keeps its subscription: it carries shared audio, and a
+                // publisher without layers is encoded for its lowest viewer budget.
+                .filter(|v| !(v.off_screen && v.watch.kind == MediaKind::Camera))
                 .filter(|v| current_source(&live.roster, &v.watch).is_some())
                 .map(|v| Subscription {
                     kind: v.watch.kind,
@@ -930,12 +979,14 @@ pub(super) fn tick(call: &Call, stats: Option<InboundVideo>) {
                     h264_high: false,
                 })
                 .fold(Vec::<Subscription>::new(), |mut list, view| {
-                    // One subscription per stream, even with duplicate players.
-                    if !list
-                        .iter()
-                        .any(|s| s.kind == view.kind && s.slot == view.slot)
+                    // One subscription per stream, even with duplicate players;
+                    // an on-screen duplicate keeps an off-screen one's stream sharp.
+                    match list
+                        .iter_mut()
+                        .find(|s| s.kind == view.kind && s.slot == view.slot)
                     {
-                        list.push(view);
+                        Some(existing) => existing.bitrate = existing.bitrate.max(view.bitrate),
+                        None => list.push(view),
                     }
                     list
                 })
@@ -968,20 +1019,45 @@ pub(super) fn tick(call: &Call, stats: Option<InboundVideo>) {
             epoch: watch.epoch,
         });
     }
-    if time - live.media.views_at >= rules::VIEWS_MS && (!views.is_empty() || live.media.sent_views)
-    {
+    if rules::views_due(
+        views != live.media.sent_views,
+        views.is_empty(),
+        time - live.media.views_at,
+    ) {
         live.media.views_at = time;
-        live.media.sent_views = !views.is_empty();
+        live.media.sent_views = views.clone();
         live.send(ClientEvent::ScreenViews { views });
+        // The SFU honors keyframe requests only from subscribed viewers, so a
+        // camera that scrolled back asks for one after its renewed view.
+        let resumed: Vec<Watch> = VIEWS.with(|views| {
+            views
+                .borrow_mut()
+                .iter_mut()
+                .filter(|v| v.resumed && v.bound.is_some())
+                .map(|v| {
+                    v.resumed = false;
+                    v.watch
+                })
+                .collect()
+        });
+        for watch in resumed {
+            live.send(ClientEvent::ScreenKeyframe {
+                kind: watch.kind,
+                slot: watch.slot,
+                epoch: watch.epoch,
+            });
+        }
     }
 }
 /// Whether the next tick should sample inbound video statistics.
-pub(super) fn stats_due(call: &Call) -> bool {
+/// `early_ms` lets a stats walk that is happening anyway also serve video
+/// feedback that would be due within that margin, keeping both on one walk.
+pub(super) fn stats_due(call: &Call, early_ms: f64) -> bool {
     let mut live = call.live.borrow_mut();
     let Some(live) = live.as_mut() else {
         return false;
     };
-    if !wants_stats() || now() - live.media.stats_at < rules::FEEDBACK_MS {
+    if !wants_stats() || now() - live.media.stats_at < rules::FEEDBACK_MS - early_ms {
         return false;
     }
     live.media.stats_at = now();

@@ -89,7 +89,10 @@ No new application server, JavaScript pipeline or camera library is used.
 The local main window's `main-commands` permission allows `camera_prepare`, `camera_open`,
 `camera_keepalive` and `camera_stop`. Notification and voice-overlay windows have
 no camera command access; camera transport still requires the active call's
-authoritative media permissions.
+authoritative media permissions. The WebView publisher renews its native lease with
+`camera_keepalive` as a long-poll: given the budget it last applied, the command
+answers when the viewer budget changes or after 1 s (the lease expires after 3 s),
+so a returning viewer's demand reaches the encoder without a polling delay.
 
 Camera tracks have separate publisher/relay SSRCs, publication epochs, viewer
 leases, recovery feedback and bounded SFU egress queues. Speak permission grants
@@ -122,7 +125,10 @@ budget (reference frames/dimensions), without including encoded data or SDP.
 WebView encoders insert no periodic keyframes. Native Rust requests one keyframe
 (PLI) when viewers first exist, then only for joins, resumed demand, SFU recovery
 requests and local write failures, with a ten-second fallback matching screens. The
-former one-second PLI spent a large share of the 1.5 Mbit/s budget on IDRs.
+former one-second PLI spent a large share of the 1.5 Mbit/s budget on IDRs. The
+relay has no periodic tick: a request wakes it through an atomic waker (no lock),
+one pinned timer covers the fallback, and both are disabled while nobody watches.
+Per-packet relay writes that complete on their first poll arm no timeout timer.
 
 Camera negotiation selects baseline H.264 with packetization mode 1 explicitly.
 Equivalent baseline offer profiles are registered exactly as offered; incompatible

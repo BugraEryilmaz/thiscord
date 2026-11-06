@@ -144,6 +144,7 @@ impl Sender {
                 waiting = true;
                 continue;
             }
+            let timestamp = frame.packets.first().map_or(0, |p| p.header.timestamp);
             let wire_bytes: usize = frame.packets.iter().map(|p| p.payload.len() + 64).sum();
             let rate = frame.budget.pacing_bitrate(budget);
             if burst_duration(wire_bytes, rate) > BURST_BUDGET {
@@ -222,16 +223,6 @@ impl Sender {
                 }
                 packet.header.sequence_number =
                     self.sequence.fetch_add(1, Ordering::Relaxed) as u16;
-                if let Some(local) = &self.local
-                    && local.visible.load(Ordering::Acquire)
-                {
-                    let mut preview = packet.clone();
-                    preview.header.csrc = vec![local.epoch.load(Ordering::Acquire)];
-                    local.sender.push(preview, Instant::now());
-                    if local.sender.keyframe_request(Instant::now()).is_some() {
-                        self.force_keyframe.store(true, Ordering::Release);
-                    }
-                }
                 if self
                     .network_demand
                     .as_ref()
@@ -251,11 +242,12 @@ impl Sender {
                 let write_budget = BURST_DEADLINE
                     .saturating_sub(send_started.elapsed())
                     .min(Duration::from_millis(100));
-                let result = tokio::time::timeout(write_budget, self.video.write_rtp(packet)).await;
+                let result =
+                    super::ready_or_timeout(self.video.write_rtp(packet), write_budget).await;
                 self.metrics.time("rtp_write", write_started.elapsed());
-                if !matches!(result, Ok(Ok(_))) {
+                if !matches!(result, Some(Ok(_))) {
                     self.metrics.add(
-                        if result.is_err() {
+                        if result.is_none() {
                             "send_timeouts"
                         } else {
                             "send_errors"
@@ -274,6 +266,23 @@ impl Sender {
                 frame.budget.sent(bytes);
             }
             waiting = false;
+            // The own preview gets the whole encoded frame once every packet was
+            // paced (what remote viewers receive), without per-packet clones or
+            // reassembly. One lock and one recovery check per frame.
+            if let Some(local) = &self.local
+                && local.visible.load(Ordering::Acquire)
+            {
+                let now = Instant::now();
+                local.sender.push_frame(
+                    frame.frame,
+                    local.epoch.load(Ordering::Acquire),
+                    timestamp,
+                    now,
+                );
+                if local.sender.keyframe_request(now).is_some() {
+                    self.demand.request_keyframe(&self.force_keyframe);
+                }
+            }
             self.demand.delivered_encoder_frame(frame.bitrate);
             self.metrics.time("frame_send", send_started.elapsed());
             self.metrics.add("sent_frames", 1);
@@ -299,13 +308,15 @@ mod tests {
             vec![0, 0, 1, 0x61, 1]
         };
         data.resize(size, 1);
-        let packets = super::super::packetize(data, &mut 0, timestamp).unwrap();
+        let data = bytes::Bytes::from(data);
+        let packets = super::super::packetize(data.clone(), &mut 0, timestamp).unwrap();
         let bytes = packets.iter().map(|p| p.payload.len() + 64).sum();
         Outgoing {
             bitrate: quality.bitrate(),
             captured_at: Instant::now(),
             enqueued_at: Instant::now(),
             packets,
+            frame: data,
             keyframe: key,
             budget: budget.track(bytes),
         }

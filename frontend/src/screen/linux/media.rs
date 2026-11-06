@@ -71,7 +71,7 @@ impl Family {
 pub struct Spec {
     pub family: Family,
     /// Elements between `pipewiresrc` and the capture appsink. Empty means
-    /// `pipewiresrc always-copy=true` into system memory.
+    /// system memory: each admitted PipeWire buffer is deep-copied on receipt.
     capture: &'static str,
     /// Per-layer scaler/converter element.
     scaler: &'static str,
@@ -427,16 +427,21 @@ fn bus_failure(pipeline: &gst::Pipeline) -> Option<String> {
     })
 }
 
-/// `pipewiresrc` (portal remote) → family copy → appsink callback.
+/// `pipewiresrc` (portal remote) → cadence gate → family copy → appsink callback.
 pub struct Capture {
     pipeline: gst::Pipeline,
     failure: Failure,
 }
 impl Capture {
+    /// `admit` runs on PipeWire's streaming thread for every compositor frame,
+    /// before any copy; frames it rejects are dropped there. Compositors can
+    /// deliver at the display refresh rate (144–240 Hz) while the share needs
+    /// 30/60 fps, or one frame per second while paused.
     pub fn start(
         spec: &Spec,
         fd: std::os::fd::RawFd,
         node: u32,
+        admit: impl FnMut() -> bool + Send + 'static,
         mut on_frame: impl FnMut(Frame) + Send + 'static,
     ) -> Result<Self, String> {
         let copy = spec.capture.is_empty();
@@ -461,7 +466,11 @@ impl Capture {
         if !set(&src, "path", &node.to_string()) {
             set(&src, "target-object", &node.to_string());
         }
-        set(&src, "always-copy", if copy { "true" } else { "false" });
+        // Never let PipeWire copy every compositor frame: admitted CPU-family
+        // frames are deep-copied in the sink callback instead, so held frames
+        // still never pin PipeWire's few pool buffers.
+        set(&src, "always-copy", "false");
+        gate(&src, admit).ok_or("Cannot build the PipeWire capture pipeline.")?;
         // Static sources are refreshed by the encoder worker, not resent here.
         set(&src, "keepalive-time", "0");
         let sink = pipeline
@@ -481,6 +490,13 @@ impl Capture {
                     let sample = sink.pull_sample().map_err(|_| gst::FlowError::Eos)?;
                     if let (Some(buffer), Some(caps)) = (sample.buffer_owned(), sample.caps_owned())
                     {
+                        // System-memory families own a copy; the PipeWire buffer
+                        // returns to its pool as soon as this callback ends.
+                        let buffer = if copy {
+                            buffer.copy_deep().map_err(|_| gst::FlowError::Error)?
+                        } else {
+                            buffer
+                        };
                         on_frame(Frame { buffer, caps });
                     }
                     Ok(gst::FlowSuccess::Ok)
@@ -513,6 +529,21 @@ impl Capture {
         pipeline_contexts(&self.pipeline, spec)
     }
 }
+/// Drops buffers on `source`'s output pad unless `admit` accepts them, before
+/// any downstream copy or upload.
+fn gate(source: &gst::Element, admit: impl FnMut() -> bool + Send + 'static) -> Option<()> {
+    let admit = Mutex::new(admit);
+    source
+        .static_pad("src")?
+        .add_probe(gst::PadProbeType::BUFFER, move |_, _| {
+            if admit.lock().is_ok_and(|mut admit| admit()) {
+                gst::PadProbeReturn::Ok
+            } else {
+                gst::PadProbeReturn::Drop
+            }
+        })?;
+    Some(())
+}
 fn pipeline_contexts(pipeline: &gst::Pipeline, spec: &Spec) -> Vec<gst::Context> {
     let mut found = Vec::new();
     for element in pipeline.iterate_elements().into_iter().flatten() {
@@ -534,7 +565,9 @@ impl Drop for Capture {
     }
 }
 
-type Outputs = Arc<Mutex<VecDeque<(u64, Vec<u8>)>>>;
+/// Encoded buffers are queued by reference; `poll` copies each once, with any
+/// parameter-set prefix, into the frame it hands to the sender.
+type Outputs = Arc<Mutex<VecDeque<(u64, gst::Buffer)>>>;
 /// Maximum submitted inputs without output, as on Windows.
 const MAX_PENDING: usize = 4;
 const STALL: Duration = Duration::from_millis(500);
@@ -615,7 +648,7 @@ impl Layer {
             gst_app::AppSinkCallbacks::builder()
                 .new_sample(move |sink| {
                     let sample = sink.pull_sample().map_err(|_| gst::FlowError::Eos)?;
-                    let buffer = sample.buffer().ok_or(gst::FlowError::Error)?;
+                    let buffer = sample.buffer_owned().ok_or(gst::FlowError::Error)?;
                     // Encoders shift timestamps (x264/NVENC add a 1000 h
                     // min-PTS) and compensate in the segment; running time is
                     // the input timeline.
@@ -628,11 +661,10 @@ impl Layer {
                                 .and_then(|s| s.to_running_time(pts))
                         })
                         .map_or(0, gst::ClockTime::useconds);
-                    let map = buffer.map_readable().map_err(|_| gst::FlowError::Error)?;
-                    if map.len() > thiscord_shared::screen::MAX_FRAME_BYTES {
+                    if buffer.size() > thiscord_shared::screen::MAX_FRAME_BYTES {
                         return Err(gst::FlowError::Error);
                     }
-                    queue.lock().unwrap().push_back((pts, map.to_vec()));
+                    queue.lock().unwrap().push_back((pts, buffer));
                     wake();
                     Ok(gst::FlowSuccess::Ok)
                 })
@@ -709,7 +741,10 @@ impl LayerEncoder for Layer {
                     submitted = Some(at);
                 }
             }
-            let data = self.units.finish(data).map_err(|error| {
+            let map = data
+                .map_readable()
+                .map_err(|_| "Cannot read encoded H.264 output".to_owned())?;
+            let data = self.units.finish_slice(&map).map_err(|error| {
                 format!("Encoder produced an out-of-bounds H.264 access unit: {error}")
             })?;
             frames.push(Encoded {
@@ -782,6 +817,138 @@ impl LayerEncoder for Layer {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Runtime check of the real capture path against a live PipeWire video
+    /// node, e.g. one published by
+    /// `gst-launch-1.0 videotestsrc is-live=true ! video/x-raw,width=1920,height=1080,framerate=144/1 ! pipewiresink mode=provide stream-properties="p,media.class=Video/Source"`
+    /// with `THISCORD_PIPEWIRE_NODE=<node id>`. Admits 30 of ~144 frames per
+    /// second at the source pad, and holding admitted frames must not starve
+    /// PipeWire's buffer pool (system-memory families deep-copy them).
+    #[test]
+    #[ignore = "needs a PipeWire video node; set THISCORD_PIPEWIRE_NODE"]
+    fn live_pipewire_capture_gates_before_copy_and_owns_admitted_frames() {
+        use std::sync::atomic::{AtomicU32, Ordering};
+        init().unwrap();
+        let node: u32 = std::env::var("THISCORD_PIPEWIRE_NODE")
+            .expect("THISCORD_PIPEWIRE_NODE")
+            .parse()
+            .unwrap();
+        let spec = select().expect("an encoder family");
+        let (offered, delivered) = (Arc::new(AtomicU32::new(0)), Arc::new(AtomicU32::new(0)));
+        let held = Arc::new(Mutex::new(VecDeque::new()));
+        // THISCORD_PIPEWIRE_GATE_AFTER_COPY=1 emulates the previous order (copy
+        // every frame, then throttle) for a CPU comparison.
+        let after_copy = std::env::var_os("THISCORD_PIPEWIRE_GATE_AFTER_COPY").is_some();
+        let cadence = Arc::new(Mutex::new(crate::screen::cadence::Cadence::new(
+            Duration::from_secs_f64(1.0 / 30.0),
+        )));
+        let admit = {
+            let (offered, cadence) = (offered.clone(), cadence.clone());
+            move || {
+                offered.fetch_add(1, Ordering::Relaxed);
+                after_copy || cadence.lock().unwrap().accept(Instant::now())
+            }
+        };
+        let on_frame = {
+            let (delivered, held) = (delivered.clone(), held.clone());
+            move |frame: Frame| {
+                if after_copy && !cadence.lock().unwrap().accept(Instant::now()) {
+                    return;
+                }
+                delivered.fetch_add(1, Ordering::Relaxed);
+                // Keep the newest eight, as worker mailboxes and in-flight
+                // encodes can; PipeWire pools are only a few buffers deep.
+                let mut held = held.lock().unwrap();
+                held.push_back(frame);
+                if held.len() > 8 {
+                    held.pop_front();
+                }
+            }
+        };
+        // Process CPU time (utime + stime clock ticks) from /proc/self/stat.
+        let cpu_ticks = || -> u64 {
+            let stat = std::fs::read_to_string("/proc/self/stat").unwrap();
+            let fields: Vec<&str> = stat
+                .rsplit(')')
+                .next()
+                .unwrap()
+                .split_whitespace()
+                .collect();
+            fields[11].parse::<u64>().unwrap() + fields[12].parse::<u64>().unwrap()
+        };
+        let capture = Capture::start(spec, -1, node, admit, on_frame).unwrap();
+        std::thread::sleep(Duration::from_secs(1));
+        let (offered_start, delivered_start, cpu_start) = (
+            offered.load(Ordering::Relaxed),
+            delivered.load(Ordering::Relaxed),
+            cpu_ticks(),
+        );
+        std::thread::sleep(Duration::from_secs(4));
+        let cpu = (cpu_ticks() - cpu_start) as f64 / 4.0;
+        let offered = (offered.load(Ordering::Relaxed) - offered_start) as f64 / 4.0;
+        let delivered = (delivered.load(Ordering::Relaxed) - delivered_start) as f64 / 4.0;
+        let failure = capture.failure();
+        drop(capture);
+        eprintln!(
+            "family={} gate_after_copy={after_copy} offered={offered:.1}/s delivered={delivered:.1}/s cpu={cpu:.1} ticks/s (100 = one core) held={} failure={failure:?}",
+            spec.family.label(),
+            held.lock().unwrap().len()
+        );
+        assert!(failure.is_none());
+        assert!(
+            offered >= 100.0,
+            "the source keeps its full rate while frames are held"
+        );
+        assert!(
+            (24.0..=33.0).contains(&delivered),
+            "only the cadence reaches the copy"
+        );
+    }
+
+    #[test]
+    fn source_gate_drops_rejected_frames_before_downstream_elements() {
+        init().unwrap();
+        let pipeline = gst::parse::launch(
+            "videotestsrc name=src num-buffers=40 ! video/x-raw,width=64,height=64 ! videoconvert name=copy ! appsink name=sink",
+        )
+        .unwrap()
+        .downcast::<gst::Pipeline>()
+        .unwrap();
+        let offered = Arc::new(std::sync::atomic::AtomicU32::new(0));
+        let counter = offered.clone();
+        gate(&pipeline.by_name("src").unwrap(), move || {
+            counter
+                .fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+                .is_multiple_of(4)
+        })
+        .unwrap();
+        // Count what reaches the element after the gate, not only the sink.
+        let converted = Arc::new(std::sync::atomic::AtomicU32::new(0));
+        let seen = converted.clone();
+        pipeline
+            .by_name("copy")
+            .unwrap()
+            .static_pad("sink")
+            .unwrap()
+            .add_probe(gst::PadProbeType::BUFFER, move |_, _| {
+                seen.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                gst::PadProbeReturn::Ok
+            });
+        let sink = pipeline
+            .by_name("sink")
+            .unwrap()
+            .downcast::<gst_app::AppSink>()
+            .unwrap();
+        pipeline.set_state(gst::State::Playing).unwrap();
+        let mut received = 0;
+        while sink.pull_sample().is_ok() {
+            received += 1;
+        }
+        pipeline.set_state(gst::State::Null).unwrap();
+        assert_eq!(offered.load(std::sync::atomic::Ordering::Relaxed), 40);
+        assert_eq!(converted.load(std::sync::atomic::Ordering::Relaxed), 10);
+        assert_eq!(received, 10);
+    }
 
     #[test]
     fn families_prefer_zero_copy_gpu_and_keep_software_last() {

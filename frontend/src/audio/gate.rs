@@ -44,23 +44,43 @@ pub(super) struct Gate {
     mode: TransmitMode,
     threshold: f32,
 }
+impl Gate {
+    const EMPTY: Self = Self {
+        ring: [SILENCE; PRE_ROLL],
+        head: 0,
+        attack: 0,
+        release: 0,
+        open: false,
+        last: None,
+        mode: TransmitMode::VoiceActivity,
+        threshold: 0.015,
+    };
+}
 impl Default for Gate {
     fn default() -> Self {
-        Self {
-            ring: [SILENCE; PRE_ROLL],
-            head: 0,
-            attack: 0,
-            release: 0,
-            open: false,
-            last: None,
-            mode: TransmitMode::VoiceActivity,
-            threshold: 0.015,
-        }
+        Self::EMPTY
     }
 }
 impl Gate {
+    /// Equivalent to `*self = Self::default()`. Push-to-talk and restricted
+    /// frames reset every 20 ms; skip rewriting the 11.5 KB ring when it holds
+    /// no retained audio (only `reset` marks frames invalid, as silence).
     pub fn reset(&mut self) {
-        *self = Self::default();
+        if self.ring.iter().any(|frame| frame.valid) {
+            self.ring = [SILENCE; PRE_ROLL];
+        }
+        let Self {
+            ring: _,
+            head,
+            attack,
+            release,
+            open,
+            last,
+            mode,
+            threshold,
+        } = Self::EMPTY;
+        (self.head, self.attack, self.release, self.open) = (head, attack, release, open);
+        (self.last, self.mode, self.threshold) = (last, mode, threshold);
     }
     pub fn discontinuous(&self, at: Instant, gap: bool) -> bool {
         gap || self
@@ -362,6 +382,35 @@ mod tests {
             );
             assert_eq!(output.active, pressed);
             assert_eq!(output.pcm, if pressed { pcm } else { [0.0; 960] });
+        }
+    }
+
+    #[test]
+    fn reset_after_speech_matches_a_fresh_gate() {
+        let mut h = Harness::new();
+        for _ in 0..6 {
+            h.step(0.3);
+        }
+        assert!(h.gate.open && h.gate.ring.iter().all(|f| f.valid));
+        h.gate.reset();
+        let fresh = Gate::default();
+        assert!(
+            h.gate
+                .ring
+                .iter()
+                .all(|f| !f.valid && !f.active && f.pcm == SILENCE.pcm)
+        );
+        assert_eq!(
+            (h.gate.head, h.gate.attack, h.gate.release, h.gate.open),
+            (fresh.head, fresh.attack, fresh.release, fresh.open)
+        );
+        assert_eq!(
+            (h.gate.last, h.gate.mode, h.gate.threshold),
+            (fresh.last, fresh.mode, fresh.threshold)
+        );
+        // Nothing retained before the reset can be emitted afterwards.
+        for _ in 0..PRE_ROLL {
+            assert_eq!(h.step(0.0).pcm, SILENCE.pcm);
         }
     }
 

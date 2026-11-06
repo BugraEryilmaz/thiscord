@@ -192,6 +192,7 @@ mod tests {
             reset_codec: false,
             delivery: Default::default(),
             outgoing: Some(tokio::sync::mpsc::channel(2).0),
+            send_arena: Default::default(),
             media_clock: Default::default(),
             transmit_control: Default::default(),
             encoder_generation: 0,

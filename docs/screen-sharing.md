@@ -11,7 +11,18 @@ Click a participant's name or LIVE badge to open the room's grid; this joins tha
 voice channel if needed, using the current microphone settings. A participant
 may publish a camera and a screen simultaneously. Your camera and screen have
 local previews; the screen preview uses the same encoded frames without an SFU
-round trip. Self-preview alone does not upload screen video.
+round trip. Once a frame's packets have all been paced, the sender hands the
+preview inbox the whole encoded frame (a shared `Bytes`, not a copy), skipping
+per-packet clones, reordering and reassembly; the preview relay packetizes it
+for the WebView once, like a received frame. Self-preview alone does not upload screen video. While only your own
+screen tile is open the encoder keeps the selected preset rather than a cheaper
+preview mode: the quality controller holds a 6 s dwell before upgrading, so a first
+remote viewer would otherwise start at the preview's quality, and the tile shows what
+viewers will receive. The cost while alone is the full preset: a 20 s 4K60 HDR
+`screen_pipeline_probe` on an RTX 4070 Ti measured 6.0 ms of encoder service per
+frame (MFT, on the encoder thread) and 0.19 ms of GPU submission. Closing or hiding
+your own tile with nobody watching pauses encoding (capture drops to one refresh per
+second).
 
 Tiles keep each stream's real shape (16:9, ultrawide, portrait phone, 4:3), so
 video is never letterboxed inside a tile. The layout tries every way of splitting
@@ -145,15 +156,20 @@ encoder families in order: VA (`vapostproc`, zero-copy DMA-BUF import on GStream
 scaling, then software x264/OpenH264. The software family is the only CPU encoder in
 the product: it is used only when no GPU encoder works, and the status line,
 `encoder_family` and `pixel_path` say "software". `THISCORD_SCREEN_ENCODER=<family>`
-forces a family for diagnostics. Capture copies each PipeWire buffer into the family's
-pooled GPU memory immediately, so frames held for refreshes or in-flight encodes never
-starve PipeWire. Each layer is `appsrc ! scaler ! NV12 ! encoder ! h264parse ! appsink`
+forces a family for diagnostics. A pad probe on `pipewiresrc` applies the capture
+cadence first, so compositor frames beyond the active rate (a 144–240 Hz display, or
+the one-per-second paused rate) are dropped before any copy or upload. Capture copies
+each admitted PipeWire buffer into the family's pooled GPU memory, or deep-copies it
+into system memory for CPU families, immediately, so frames held for refreshes or
+in-flight encodes never starve PipeWire. Each layer is `appsrc ! scaler ! NV12 ! encoder ! h264parse ! appsink`
 with CBR, no B-frames, the 200 ms CPB, the ten-second GOP and serialized ForceKeyUnit
 events. System audio creates a private, non-autoconnecting PipeWire capture stream and
 links every other application's `Stream/Output/Audio` ports to it (their speaker
 links are untouched), excluding nodes whose PipeWire client PID or
 `application.process.id` belongs to Thiscord's process tree. The real-time callback
-only converts samples into a bounded lock-free queue.
+only converts samples into a bounded lock-free queue and unparks the encoding
+thread (a futex wake: no lock or allocation), which otherwise sleeps up to 50 ms
+between stop checks instead of polling every 5 ms.
 
 Linux runtime packages (Debian/Ubuntu names; the `.deb` declares them):
 `gstreamer1.0-pipewire`, `gstreamer1.0-plugins-base`, `-good`, `-bad` (VA and NVENC),
@@ -182,8 +198,19 @@ GStreamer plugins. Building needs `libgstreamer1.0-dev`,
   than callback arrival time. An asynchronous MFT event wakes the encoder worker;
   it does not wait for the next capture or a coarse timer to collect output.
   Without a capture or MFT wake, the worker sleeps until its next refresh is due
-  (at most 20 ms; 2 ms while a raw frame waits on time, credit or sender drain)
-  instead of waking every 3 ms. Window validity is checked every 100 ms, and the
+  (at most 20 ms; 100 ms once the source has been static for 200 ms). A viewer's
+  keyframe request (SFU recovery, the own preview or the low layer) sets the flag
+  and wakes the worker through its demand handle, so a static source serves it in
+  about 1.4 ms instead of after up to 100 ms (unit test; 37–46 ms without the wake).
+  Wake closures hold the worker's mailbox weakly and the worker unregisters on
+  exit, so the binding's demand handle never keeps the last captured frame (and
+  with it the GPU device) alive after a share ends. A raw frame held only for its layer cadence sleeps until it is
+  due. One held by sender backpressure is woken by the paced sender when its byte
+  budget falls back under the limit or a queued frame finishes (only while the
+  worker is waiting), instead of a 2 ms poll; a 20 s 4K60 pipeline probe kept
+  about 181 wakes per second with zero drops. `worker_wakes` counts wakes (a 15 fps low layer fed 60 fps
+  captures measured 61 per second in a unit test, down from 105 with the former
+  2 ms poll on Windows' default timer resolution). Window validity is checked every 100 ms, and the
   display's SDR white/HDR state is refreshed once per second on its own thread,
   so `QueryDisplayConfig` no longer runs on the encoder threads. Encoder and pacer
   threads run under MMCSS "Capture" and the capture device requests GPU thread
@@ -298,7 +325,8 @@ GStreamer plugins. Building needs `libgstreamer1.0-dev`,
   reject duplicates/late packets. A deadline timer resolves gaps even if no more
   packets arrive: each video track sleeps until its oldest reordered packet's
   40 ms deadline or its next allowed recovery request (250 ms idle bound), instead
-  of waking every 10 ms for the whole call on all sixteen video tracks. Complete-frame queues allow eight frames, at most 8 MiB and
+  of waking every 10 ms for the whole call on all sixteen video tracks. The track
+  keeps one timer and re-arms it only when that deadline changes. Complete-frame queues allow eight frames, at most 8 MiB and
   250 ms age. Short backlogs drain in order; overflow can retain a newer queued
   keyframe and its suffix. Unrecoverable dependency loss requests a fresh IDR.
   Feedback is coalesced to one request per stream per 500 ms and per publisher
@@ -324,9 +352,17 @@ GStreamer plugins. Building needs `libgstreamer1.0-dev`,
   paced keyframe bursts. This deliberately trades some playback latency for
   consistent presentation; it is a target, not an end-to-end delay guarantee.
   Unsupported WebViews retain their native buffering. Diagnostics are sampled
-  once per second while the independent 250 ms viewer heartbeat continues.
-- Viewers send control heartbeats at 250 ms, expire after three seconds (tolerating short UI stalls), and close on
-  unmount/document hiding. Replacement viewers have distinct leases. Roster/epoch,
+  once per second alongside the viewer heartbeat. The per-view monitor wakes once
+  per second (it only clears an expired lease and samples; the relay and demand
+  paths check the lease themselves).
+- Viewers send control heartbeats every 250 ms while connecting and once per second
+  once playing, expire after three seconds (tolerating short UI stalls), and close on
+  unmount/document hiding; a desktop camera tile scrolled out of a scrolling grid or
+  strip (IntersectionObserver) also ends its lease and reconnects when it returns.
+  The observer wakes the player directly, both ways, and reconnecting after a
+  visibility change skips the one-second backoff kept for failed attempts and
+  leases the desktop ended,
+  while screen tiles stay subscribed for their shared audio. Replacement viewers have distinct leases. Roster/epoch,
   deafen and connection changes revoke forwarding and close the local peer;
   pending work checks its lease and arrival deadline. Negotiations are bounded.
   No images, video or SDP are recorded/logged. A browser preview without Tauri
@@ -336,7 +372,10 @@ GStreamer plugins. Building needs `libgstreamer1.0-dev`,
   runs separately from video and microphone work. Shared audio uses 48 kHz mono
   Opus, 20 ms packets and 64 kbit/s. Capture drains available WASAPI packets before
   waiting for another event, including coalesced notifications after worker delays,
-  and zeros packets marked silent. No codec/network work enters CPAL callbacks.
+  and zeros packets marked silent. Packets are read into one contiguous buffer
+  (one copy per WASAPI packet) and downmixed in whole 20 ms chunks; Opus payloads
+  come from the pooled packet arena. RTP writes that complete on their first poll
+  (the normal case) build no timeout timer. No codec/network work enters CPAL callbacks.
 - Eight microphone, eight screen-video and eight shared-audio tracks are negotiated.
   Microphone queues and writers are separate from screen traffic. Video and shared
   audio require explicit viewer subscriptions. Negotiated screen publishers can
@@ -350,7 +389,11 @@ encryption, not end-to-end encryption against the server. See [audio.md](audio.m
 ## Viewing demand and adaptive quality
 
 `screen_subscriptions` is negotiated in the voice offer/answer. Clients send a
-bounded, full replacement `screen_views` list every 500 ms while connected.
+bounded, full replacement `screen_views` list while connected. Both clients send
+a changed list (at most every 500 ms) and otherwise only renew a non-empty list
+once per second, since each update takes the SFU room write lock. Mute/deafen
+`state` likewise goes out on change, with a five-second refresh on both clients,
+and both are re-sent after a signaling resume.
 Each entry binds a room slot, account ID and share epoch to a receiver bitrate
 budget. The server ignores stale identities/epochs and self-subscriptions;
 invalid bounds or duplicate slots reject signaling. Views expire after three
@@ -361,10 +404,12 @@ require a subscription-capable server to publish.
 
 The SFU sends `screen_target` once per second to opted-in publishers. Zero means
 no viewers: native encoding and video sending pause, with capture reduced to one
-raw refresh per second so a static source can resume. Publisher demand also expires
+raw refresh per second so a static source can resume. The paused encoder worker
+sleeps until demand returns or the share stops; both wake it directly (a 1 s
+fallback covers a stop without that wake). Publisher demand also expires
 after three seconds if control feedback stops. The SFU immediately excludes
 unsubscribed receivers from video and shared-audio fanout, including already queued
-packets. Local close/hide reaches the SFU on the next 500 ms renewal; a stalled UI
+packets. Local close/hide reaches the SFU on the next 500 ms check; a stalled UI
 first loses its three-second local viewer lease. Publisher shared-audio capture
 continues until Stop sharing; it is not forwarded to non-viewers.
 
@@ -522,8 +567,12 @@ FP16 on HDR) to two latest-frame mailboxes. Both layers convert from that shared
 surface with their own processor: chaining the low layer from the primary's NV12
 output would couple two independently paused/rebuilt encoders to save one small
 SDR blit per low frame. Each encoder owns its MFT, NV12 processor, four-sample admission limit,
-200 ms frame queue and 100 ms unsent-byte budget. Capture owns seven bounded textures
-when layered (three for legacy capture), each processor at most six NV12 surfaces.
+200 ms frame queue and 100 ms unsent-byte budget. Capture owns at most seven textures
+when layered (three for legacy capture), allocated on demand when no pooled texture is
+free rather than all at once, so a share holds only the full-resolution surfaces it
+actually needed at one time (`capture_textures` reports the peak: three for a
+single-layer 4K60 HDR pipeline probe, four instead of seven with both layers). Each processor holds at most six NV12
+surfaces.
 Low-layer input has its own FPS admission and never blocks primary queue admission.
 No raw readback or software fallback is introduced. A zero/expired low target drops
 its MFT and processor; the worker remains idle until renewed demand. Hardware unable
@@ -1069,8 +1118,12 @@ Viewing: other members' screen and camera m-lines are `recvonly`. The existing c
 grid, fullscreen, hide/restore, LIVE badges and viewer avatars are shared with the
 desktop app; only each tile's player differs. A mounted, visible tile registers a
 view: the client binds the received track to its `<video>`, renews `ScreenViews`
-every 500 ms (one subscription per stream, never for hidden tiles or a hidden page),
-keeps a per-view receiver budget with the native controller's thresholds
+on change and once per second otherwise (one subscription per stream, never for hidden
+tiles or a hidden page; a camera tile scrolled out of a scrolling grid or strip, seen
+by an `IntersectionObserver`, unsubscribes until it scrolls back and a keyframe
+arrives. Screen tiles stay subscribed while scrolled away: they carry shared audio,
+and a publisher without layers encodes for its lowest viewer budget), keeps a
+per-view receiver budget with the native controller's thresholds
 (`thiscord_shared::video_feedback`, loss and decoder pressure from `getStats`), and
 sends `ScreenKeyframe` when a view starts and whenever packets arrive for 2 s
 without a decoded frame (at most once per second). Hiding, closing or unmounting a

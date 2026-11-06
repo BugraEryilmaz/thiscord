@@ -14,9 +14,67 @@ pub struct Block<'a> {
     pub offset: u16,
     pub payload: &'a [u8],
 }
+const EMPTY: Block<'static> = Block {
+    offset: 0,
+    payload: &[],
+};
+
+/// At most [`DEPTH`] redundant blocks, oldest first, stored inline so parsing
+/// and re-encoding a packet never touches the heap. Dereferences to a slice.
+#[derive(Clone, Copy)]
+pub struct History<'a> {
+    blocks: [Block<'a>; DEPTH],
+    len: usize,
+}
+impl<'a> History<'a> {
+    pub const fn new() -> Self {
+        Self {
+            blocks: [EMPTY; DEPTH],
+            len: 0,
+        }
+    }
+    /// Returns false, leaving the history unchanged, once it holds DEPTH blocks.
+    pub fn push(&mut self, block: Block<'a>) -> bool {
+        let Some(slot) = self.blocks.get_mut(self.len) else {
+            return false;
+        };
+        *slot = block;
+        self.len += 1;
+        true
+    }
+    pub fn retain(&mut self, mut keep: impl FnMut(&Block<'a>) -> bool) {
+        let mut kept = 0;
+        for index in 0..self.len {
+            if keep(&self.blocks[index]) {
+                self.blocks[kept] = self.blocks[index];
+                kept += 1;
+            }
+        }
+        self.len = kept;
+    }
+}
+impl Default for History<'_> {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+impl<'a> std::ops::Deref for History<'a> {
+    type Target = [Block<'a>];
+    fn deref(&self) -> &Self::Target {
+        &self.blocks[..self.len]
+    }
+}
+impl<'a> IntoIterator for History<'a> {
+    type Item = Block<'a>;
+    type IntoIter = std::iter::Take<std::array::IntoIter<Block<'a>, DEPTH>>;
+    fn into_iter(self) -> Self::IntoIter {
+        self.blocks.into_iter().take(self.len)
+    }
+}
+
 pub struct Packet<'a> {
     pub primary: &'a [u8],
-    pub history: Vec<Block<'a>>,
+    pub history: History<'a>,
 }
 
 /// Padded Opus may carry DRED. Never multiply that history. Large VBR frames
@@ -25,12 +83,19 @@ pub fn repeatable(payload: &[u8]) -> bool {
     (3..=MAX_BLOCK).contains(&payload.len()) && !(payload[0] & 3 == 3 && payload[1] & 0x40 != 0)
 }
 
+fn valid_offset(offset: u16) -> bool {
+    offset == FRAME as u16 || offset == (2 * FRAME) as u16
+}
+
+/// Allocation-free; runs for every received RED packet on the audio worker and
+/// every forwarded RED packet in the SFU.
 pub fn parse(payload: &[u8]) -> Option<Packet<'_>> {
     if payload.len() > MAX_PAYLOAD {
         return None;
     }
     let mut index = 0;
-    let mut headers = Vec::with_capacity(DEPTH);
+    let mut headers = [(0u16, 0usize); DEPTH];
+    let mut count = 0;
     loop {
         let first = *payload.get(index)?;
         if first & 0x7f != OPUS_PAYLOAD_TYPE {
@@ -40,26 +105,25 @@ pub fn parse(payload: &[u8]) -> Option<Packet<'_>> {
         if first & 0x80 == 0 {
             break;
         }
-        if headers.len() == DEPTH {
+        if count == DEPTH {
             return None;
         }
         let h = payload.get(index..index + 3)?;
         let offset = (u16::from(h[0]) << 6) | u16::from(h[1] >> 2);
         let length = (usize::from(h[1] & 3) << 8) | usize::from(h[2]);
-        if ![FRAME as u16, (2 * FRAME) as u16].contains(&offset)
+        if !valid_offset(offset)
             || length == 0
             || length > MAX_BLOCK
-            || headers
-                .last()
-                .is_some_and(|(previous, _)| *previous <= offset)
+            || (count > 0 && headers[count - 1].0 <= offset)
         {
             return None;
         }
-        headers.push((offset, length));
+        headers[count] = (offset, length);
+        count += 1;
         index += 3;
     }
-    let mut history = Vec::with_capacity(DEPTH);
-    for (offset, length) in headers {
+    let mut history = History::new();
+    for &(offset, length) in &headers[..count] {
         let block = payload.get(index..index + length)?;
         if !repeatable(block) {
             return None;
@@ -77,27 +141,48 @@ pub fn parse(payload: &[u8]) -> Option<Packet<'_>> {
     Some(Packet { primary, history })
 }
 
-pub fn encode(primary: &[u8], history: &[Block<'_>]) -> Option<Vec<u8>> {
+/// Size of the encoded packet when `parse` would accept it, else None. Applies
+/// `parse`'s rules to the inputs, so every encoding parses without re-reading.
+pub fn encoded_len(primary: &[u8], history: &[Block<'_>]) -> Option<usize> {
     let size = 1 + primary.len() + history.iter().map(|b| 4 + b.payload.len()).sum::<usize>();
-    if primary.is_empty() || history.len() > DEPTH || size > MAX_PAYLOAD {
-        return None;
+    (!(primary.is_empty()
+        || history.len() > DEPTH
+        || size > MAX_PAYLOAD
+        || (!history.is_empty() && !repeatable(primary))
+        || history
+            .iter()
+            .any(|b| !valid_offset(b.offset) || !repeatable(b.payload))
+        || history.windows(2).any(|w| w[0].offset <= w[1].offset)))
+    .then_some(size)
+}
+
+/// Writes the packet in order through `write` (for example into a pooled
+/// buffer). Returns false, writing nothing, when `encoded_len` is None.
+pub fn encode_with(primary: &[u8], history: &[Block<'_>], mut write: impl FnMut(&[u8])) -> bool {
+    if encoded_len(primary, history).is_none() {
+        return false;
     }
-    let mut result = Vec::with_capacity(size);
     for b in history {
         let n = b.payload.len();
-        result.extend_from_slice(&[
+        write(&[
             OPUS_PAYLOAD_TYPE | 0x80,
             (b.offset >> 6) as u8,
             ((b.offset & 0x3f) << 2) as u8 | (n >> 8) as u8,
             n as u8,
         ]);
     }
-    result.push(OPUS_PAYLOAD_TYPE);
+    write(&[OPUS_PAYLOAD_TYPE]);
     for b in history {
-        result.extend_from_slice(b.payload);
+        write(b.payload);
     }
-    result.extend_from_slice(primary);
-    parse(&result)?;
+    write(primary);
+    true
+}
+
+pub fn encode(primary: &[u8], history: &[Block<'_>]) -> Option<Vec<u8>> {
+    let mut result = Vec::with_capacity(encoded_len(primary, history)?);
+    encode_with(primary, history, |bytes| result.extend_from_slice(bytes));
+    debug_assert!(parse(&result).is_some());
     Some(result)
 }
 
@@ -196,6 +281,93 @@ mod tests {
                     .is_empty()
             );
         }
+    }
+    /// `encode` validates its inputs instead of re-parsing its output; both
+    /// must accept exactly the same packets.
+    #[test]
+    fn encode_accepts_exactly_what_parse_accepts() {
+        fn naive(primary: &[u8], history: &[Block<'_>]) -> Vec<u8> {
+            let mut out = Vec::new();
+            for b in history {
+                let n = b.payload.len();
+                out.extend_from_slice(&[
+                    OPUS_PAYLOAD_TYPE | 0x80,
+                    (b.offset >> 6) as u8,
+                    ((b.offset & 0x3f) << 2) as u8 | (n >> 8) as u8,
+                    n as u8,
+                ]);
+            }
+            out.push(OPUS_PAYLOAD_TYPE);
+            for b in history {
+                out.extend_from_slice(b.payload);
+            }
+            out.extend_from_slice(primary);
+            out
+        }
+        let payloads: [Vec<u8>; 8] = [
+            vec![],
+            vec![0x78],
+            vec![0x78, 1],
+            vec![0x78, 1, 2],
+            vec![3, 0x40, 1],
+            vec![0x78; MAX_BLOCK],
+            vec![0x78; MAX_BLOCK + 1],
+            vec![0x78; 700],
+        ];
+        let offsets = [0u16, 960, 1920, 2880];
+        let mut checked = 0;
+        for primary in &payloads {
+            for depth in 0..=DEPTH + 1 {
+                let combos = (offsets.len() * payloads.len()).pow(depth as u32);
+                for mut code in 0..combos {
+                    let history: Vec<_> = (0..depth)
+                        .map(|_| {
+                            let choice = code % (offsets.len() * payloads.len());
+                            code /= offsets.len() * payloads.len();
+                            Block {
+                                offset: offsets[choice % offsets.len()],
+                                payload: &payloads[choice / offsets.len()],
+                            }
+                        })
+                        .collect();
+                    let reference = naive(primary, &history);
+                    let parses = depth <= DEPTH
+                        && history.iter().all(|b| b.payload.len() < 1024)
+                        && parse(&reference).is_some();
+                    match encode(primary, &history) {
+                        Some(encoded) => {
+                            assert!(parses);
+                            assert_eq!(encoded, reference);
+                        }
+                        None => assert!(!parses),
+                    }
+                    checked += 1;
+                }
+            }
+        }
+        assert!(checked > 10_000);
+    }
+    #[test]
+    fn inline_history_retains_order_and_bounds() {
+        let a = [0x78, 1, 2];
+        let mut history = History::new();
+        assert!(history.push(Block {
+            offset: 1920,
+            payload: &a
+        }));
+        assert!(history.push(Block {
+            offset: 960,
+            payload: &a
+        }));
+        assert!(!history.push(Block {
+            offset: 960,
+            payload: &a
+        }));
+        assert_eq!(history.len(), DEPTH);
+        history.retain(|b| b.offset == 960);
+        assert_eq!(history.len(), 1);
+        assert_eq!(history[0].offset, 960);
+        assert_eq!(history.into_iter().count(), 1);
     }
     #[test]
     fn fmtp_is_required_on_all_audio_sections() {

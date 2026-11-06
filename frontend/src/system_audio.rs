@@ -31,6 +31,8 @@ struct Uplink {
     encoder: opus::Encoder,
     runtime: tokio::runtime::Runtime,
     encoded: [u8; 4000],
+    /// Pooled payload storage: no allocation per 20 ms packet.
+    arena: thiscord_frontend::audio::arena::PacketArena,
     pcm: [f32; 960],
     fill: usize,
 }
@@ -52,6 +54,7 @@ impl Uplink {
             encoder,
             runtime,
             encoded: [0; 4000],
+            arena: Default::default(),
             pcm: [0.0; 960],
             fill: 0,
         })
@@ -94,14 +97,15 @@ impl Uplink {
                 timestamp: binding.audio_timestamp.fetch_add(960, Ordering::Relaxed),
                 ..Default::default()
             },
-            payload: bytes::Bytes::copy_from_slice(&self.encoded[..n]),
+            payload: self.arena.copy(&self.encoded[..n]),
         };
         if !matches!(
-            self.runtime.block_on(async {
-                tokio::time::timeout(Duration::from_millis(100), binding.audio.write_rtp(packet))
-                    .await
-            }),
-            Ok(Ok(_))
+            self.runtime
+                .block_on(thiscord_frontend::screen::ready_or_timeout(
+                    binding.audio.write_rtp(packet),
+                    Duration::from_millis(100),
+                )),
+            Some(Ok(_))
         ) {
             binding.metrics.add("audio_send_failures", 1);
             return Err("Shared audio sender stalled; sharing stopped".into());
@@ -134,7 +138,6 @@ fn capture(binding: &Binding, stop: &AtomicBool) -> Result<(), String> {
 
 #[cfg(target_os = "windows")]
 fn capture(binding: &Binding, stop: &AtomicBool) -> Result<(), String> {
-    use std::collections::VecDeque;
     use wasapi::*;
     initialize_mta()
         .ok()
@@ -166,7 +169,12 @@ fn capture(binding: &Binding, stop: &AtomicBool) -> Result<(), String> {
         .get_audiocaptureclient()
         .map_err(|_| "Cannot access system audio")?;
     let mut uplink = Uplink::new()?;
-    let mut queue = VecDeque::<u8>::with_capacity(48_000);
+    // Contiguous byte queue: WASAPI copies each packet in once and whole 20 ms
+    // chunks are downmixed in place (no per-byte deque pushes or pops).
+    const QUEUE_BYTES: usize = 48_000;
+    const CHUNK: usize = 960 * 8;
+    let mut queue = vec![0_u8; QUEUE_BYTES * 2];
+    let mut fill = 0;
     client
         .start_stream()
         .map_err(|_| "Cannot start system audio capture")?;
@@ -185,14 +193,16 @@ fn capture(binding: &Binding, stop: &AtomicBool) -> Result<(), String> {
                 return Err("System audio capture fell behind; sharing stopped".into());
             }
             if frames > 0 {
-                if queue.len() + frames * 8 > 48_000 {
-                    queue.clear();
+                if fill + frames * 8 > QUEUE_BYTES {
+                    fill = 0;
                     binding.metrics.add("audio_capture_queue_resets", 1);
                 }
-                let old_len = queue.len();
-                let info = capture
-                    .read_from_device_to_deque(&mut queue)
+                let old_len = fill;
+                // `fill <= QUEUE_BYTES`, so at least 6000 frames always fit.
+                let (read, info) = capture
+                    .read_from_device(&mut queue[fill..])
                     .map_err(|_| "Cannot read system audio")?;
+                fill += read as usize * 8;
                 binding.metrics.add("audio_capture_packets", 1);
                 if info.flags.data_discontinuity {
                     binding.metrics.add("audio_capture_discontinuities", 1);
@@ -200,25 +210,27 @@ fn capture(binding: &Binding, stop: &AtomicBool) -> Result<(), String> {
                 if info.flags.silent {
                     // WASAPI marks silence explicitly; do not encode the
                     // unspecified sample contents returned with this flag.
-                    queue.iter_mut().skip(old_len).for_each(|byte| *byte = 0);
+                    queue[old_len..fill].fill(0);
                     binding.metrics.add("audio_capture_silent_packets", 1);
                 }
             }
-            while queue.len() >= 960 * 8 {
-                for sample in &mut uplink.pcm {
-                    let mut pair = [0; 8];
-                    for byte in &mut pair {
-                        *byte = queue.pop_front().unwrap_or(0);
-                    }
-                    let left = f32::from_le_bytes(pair[..4].try_into().unwrap());
-                    let right = f32::from_le_bytes(pair[4..].try_into().unwrap());
+            let mut consumed = 0;
+            while fill - consumed >= CHUNK {
+                let chunk = &queue[consumed..consumed + CHUNK];
+                for (sample, pair) in uplink.pcm.iter_mut().zip(chunk.as_chunks::<8>().0) {
+                    let left = f32::from_le_bytes([pair[0], pair[1], pair[2], pair[3]]);
+                    let right = f32::from_le_bytes([pair[4], pair[5], pair[6], pair[7]]);
                     *sample = downmix(left, right);
                 }
+                consumed += CHUNK;
                 if stop.load(Ordering::Acquire) || !binding.connection.active() {
                     break;
                 }
                 uplink.send(binding)?;
             }
+            // Keep the partial tail (< 20 ms) at the front.
+            queue.copy_within(consumed..fill, 0);
+            fill -= consumed;
             // Silence produces no loopback packets. Poll with a bounded wait so
             // Stop, disconnect and permission revocation promptly release WASAPI.
             // Events can coalesce while this worker is encoding/sending. Drain

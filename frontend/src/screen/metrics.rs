@@ -7,6 +7,7 @@ use std::time::{Duration, Instant};
 use thiscord_shared::screen::{Diagnostics, Timing};
 const COUNTERS: &[&str] = &[
     "audio_capture_packets",
+    "audio_capture_wakes",
     "audio_capture_discontinuities",
     "audio_capture_queue_resets",
     "audio_capture_silent_packets",
@@ -15,6 +16,7 @@ const COUNTERS: &[&str] = &[
     "capture_events",
     "capture_throttled",
     "raw_replaced",
+    "worker_wakes",
     "encoded_frames",
     "encoded_bytes",
     "keyframes",
@@ -57,6 +59,7 @@ const COUNTERS: &[&str] = &[
     "receive_peak_frames",
     "receive_peak_bytes",
     "encoder_peak_pending",
+    "capture_textures",
     "sender_peak_frames",
     "sender_peak_bytes",
 ];
@@ -105,6 +108,31 @@ fn slot(
         .get_or_init(|| names.iter().enumerate().map(|(i, n)| (*n, i)).collect())
         .get(name)
         .copied()
+}
+/// Compile-time slot of a counter name, for per-packet paths: `add_at`/`peak_at`
+/// with a `const` index skip the hashed lookup. Unknown names fail the build.
+pub const fn counter_index(name: &str) -> usize {
+    let mut i = 0;
+    while i < COUNTERS.len() {
+        if bytes_eq(COUNTERS[i].as_bytes(), name.as_bytes()) {
+            return i;
+        }
+        i += 1;
+    }
+    panic!("unknown screen metrics counter");
+}
+const fn bytes_eq(a: &[u8], b: &[u8]) -> bool {
+    if a.len() != b.len() {
+        return false;
+    }
+    let mut i = 0;
+    while i < a.len() {
+        if a[i] != b[i] {
+            return false;
+        }
+        i += 1;
+    }
+    true
 }
 fn counter(name: &str) -> Option<usize> {
     static INDEX: std::sync::OnceLock<Index> = std::sync::OnceLock::new();
@@ -160,6 +188,14 @@ impl Metrics {
             .lock()
             .unwrap()
             .insert(name.to_owned(), value.to_string());
+    }
+    /// [`Self::add`] by a [`counter_index`] slot.
+    pub fn add_at(&self, index: usize, value: u64) {
+        self.0.counters[index].fetch_add(value, Ordering::Relaxed);
+    }
+    /// [`Self::peak`] by a [`counter_index`] slot.
+    pub fn peak_at(&self, index: usize, value: u64) {
+        self.0.counters[index].fetch_max(value, Ordering::Relaxed);
     }
     pub fn add(&self, name: &str, value: u64) {
         if let Some(i) = counter(name) {
@@ -272,6 +308,7 @@ mod tests {
     fn every_counter_and_timing_name_maps_to_its_own_slot() {
         for (i, name) in COUNTERS.iter().enumerate() {
             assert_eq!(counter(name), Some(i), "{name}");
+            assert_eq!(counter_index(name), i, "{name}");
         }
         for (i, name) in TIMINGS.iter().enumerate() {
             assert_eq!(timing(name), Some(i), "{name}");

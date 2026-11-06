@@ -113,7 +113,7 @@ pub fn run_layers(
     mailboxes.extend(low_mailbox.iter().cloned());
     let active_fps: Arc<[AtomicU32; 2]> = Arc::new(std::array::from_fn(|_| AtomicU32::new(0)));
     let session_stop = Arc::new(AtomicBool::new(false));
-    let capture = media::Capture::start(spec, portal.fd(), portal.node(), {
+    let admit = {
         let (stop, session, connection, active_fps, metrics) = (
             stop.clone(),
             session_stop.clone(),
@@ -123,6 +123,33 @@ pub fn run_layers(
         );
         let period = Duration::from_secs_f64(1.0 / f64::from(quality.fps));
         let mut throttle = (period, Cadence::new(period));
+        move || {
+            if stop.load(Ordering::Acquire)
+                || session.load(Ordering::Acquire)
+                || !connection.active()
+            {
+                return false;
+            }
+            let period = Duration::from_secs_f64(1.0 / f64::from(capture_fps(&active_fps)));
+            if period != throttle.0 {
+                throttle = (period, Cadence::new(period));
+            }
+            metrics.add("capture_events", 1);
+            // Rate-limit on compositor events before any copy; never sleep here.
+            let admitted = throttle.1.accept(Instant::now());
+            if !admitted {
+                metrics.add("capture_throttled", 1);
+            }
+            admitted
+        }
+    };
+    let capture = media::Capture::start(spec, portal.fd(), portal.node(), admit, {
+        let (stop, session, connection, metrics) = (
+            stop.clone(),
+            session_stop.clone(),
+            connection.clone(),
+            metrics.clone(),
+        );
         move |frame: media::Frame| {
             if stop.load(Ordering::Acquire)
                 || session.load(Ordering::Acquire)
@@ -130,17 +157,7 @@ pub fn run_layers(
             {
                 return;
             }
-            let period = Duration::from_secs_f64(1.0 / f64::from(capture_fps(&active_fps)));
-            if period != throttle.0 {
-                throttle = (period, Cadence::new(period));
-            }
             let now = Instant::now();
-            metrics.add("capture_events", 1);
-            // Rate-limit work on compositor events, never sleep in the callback.
-            if !throttle.1.accept(now) {
-                metrics.add("capture_throttled", 1);
-                return;
-            }
             let Some((width, height)) = frame.size() else {
                 return;
             };

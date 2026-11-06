@@ -180,14 +180,16 @@ async fn layer(
             if keyframe {
                 policy.observed(Instant::now());
             }
+            let data = bytes::Bytes::from(frame.data);
             let packets =
-                screen::packetize(frame.data, &mut 0, (timestamp * 90 / 1000) as u32).unwrap();
+                screen::packetize(data.clone(), &mut 0, (timestamp * 90 / 1000) as u32).unwrap();
             let bytes = packets.iter().map(|p| p.payload.len() + 64).sum();
             tx.send(Outgoing {
                 bitrate: quality.bitrate(),
                 captured_at: now,
                 enqueued_at: Instant::now(),
                 packets,
+                frame: data,
                 keyframe,
                 budget: budget.track(bytes),
             })

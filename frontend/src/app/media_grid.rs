@@ -389,7 +389,8 @@ pub(super) fn ScreenViewer(
         observe_size(&element, measure);
     });
 
-    // Sample each player's decoded size and frame rate.
+    // Sample each player's decoded size and frame rate once a second: the rate
+    // needs a full second of frames, and a new tile's size lands on its first tick.
     let samples: Samples = Rc::default();
     let players: Rc<RefCell<HashMap<Key, web_sys::HtmlVideoElement>>> = Rc::default();
     let sampler = set_interval_with_handle(
@@ -397,6 +398,13 @@ pub(super) fn ScreenViewer(
             let Some(root) = stage.get_untracked() else {
                 return;
             };
+            // Nothing is painted in a hidden page; resume sampling when shown.
+            if web_sys::window()
+                .and_then(|w| w.document())
+                .is_some_and(|d| d.hidden())
+            {
+                return;
+            }
             let Some(keys) = visible_keys.try_get_untracked() else {
                 return;
             };
@@ -451,7 +459,7 @@ pub(super) fn ScreenViewer(
                 }
             }
         },
-        std::time::Duration::from_millis(500),
+        std::time::Duration::from_millis(1000),
     )
     .ok();
 

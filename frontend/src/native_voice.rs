@@ -126,6 +126,70 @@ impl ShareSignaling {
     }
 }
 
+/// A video track's single timer: wake at the inbox deadline, else after a
+/// 250 ms idle bound. Re-armed only when that wake time changes, so packets that
+/// leave the deadline unchanged register no timer.
+struct TrackWake {
+    deadline: Option<Instant>,
+    idle_at: Instant,
+    armed: Instant,
+}
+impl TrackWake {
+    const IDLE: Duration = Duration::from_millis(250);
+    fn new(now: Instant) -> Self {
+        let idle_at = now + Self::IDLE;
+        Self {
+            deadline: None,
+            idle_at,
+            armed: idle_at,
+        }
+    }
+    /// The new wake time when the timer must be reset.
+    fn rearm(&mut self) -> Option<Instant> {
+        let wake = self.deadline.unwrap_or(self.idle_at);
+        (wake != self.armed).then(|| {
+            self.armed = wake;
+            wake
+        })
+    }
+    /// The timer fired: it must be re-armed even if the next wake is unchanged.
+    fn fired(&mut self, now: Instant, deadline: Option<Instant>) {
+        self.deadline = deadline;
+        self.idle_at = now + Self::IDLE;
+        self.armed = now;
+    }
+}
+
+/// Signaling that only needs re-sending when it changes, plus a slow refresh.
+/// Each State and ScreenViews message takes the SFU room write lock; resending
+/// unchanged values every 500 ms per member contended with packet fan-out.
+struct Refresh<T> {
+    last: Option<(T, Instant)>,
+    period: Duration,
+}
+impl<T: PartialEq + Clone> Refresh<T> {
+    fn new(period: Duration) -> Self {
+        Self { last: None, period }
+    }
+    /// Sends dropped during signaling recovery are repaired by invalidating
+    /// on `Resumed`.
+    fn invalidate(&mut self) {
+        self.last = None;
+    }
+    /// `renew: false` sends an unchanged value only once (an empty view list
+    /// holds no server lease, so it never needs renewal).
+    fn due(&mut self, value: &T, renew: bool, now: Instant) -> bool {
+        if let Some((last, at)) = &self.last
+            && last == value
+            && (!renew || now.saturating_duration_since(*at) < self.period)
+        {
+            return false;
+        }
+        self.last = Some((value.clone(), now));
+        true
+    }
+}
+
 #[derive(Default)]
 struct MediaState {
     connected: AtomicBool,
@@ -194,19 +258,27 @@ impl PeerConnectionEventHandler for Handler {
             // Every video track used to wake every 10 ms for the whole call,
             // shared or not. Sleep until the inbox's next gap/recovery deadline;
             // the 250 ms idle bound only picks up UI-initiated recovery requests.
-            let mut deadline = None;
+            // One pinned timer, re-armed only when the wake time changes: packets
+            // usually leave the deadline unchanged, so no timer entry is
+            // registered and dropped per RTP packet.
+            let mut wake = TrackWake::new(Instant::now());
+            let timer = tokio::time::sleep_until(wake.armed.into());
+            tokio::pin!(timer);
             loop {
                 if !connection.active() {
                     break;
                 }
-                let wake = deadline.unwrap_or_else(|| Instant::now() + Duration::from_millis(250));
+                if let Some(at) = wake.rearm().filter(|_| screen_receiver.is_some()) {
+                    timer.as_mut().reset(at.into());
+                }
                 let event = tokio::select! { biased;
                     _ = closed.changed() => break,
-                    _ = tokio::time::sleep_until(wake.into()), if screen_receiver.is_some() => {
+                    _ = &mut timer, if screen_receiver.is_some() => {
                         let receiver = screen_receiver.as_ref().unwrap();
-                        receiver.tick(Instant::now());
-                        if let Some(epoch) = receiver.keyframe_request(Instant::now()) && let Some((kind, slot)) = MediaKind::from_relay_ssrc(ssrc) { let _ = keyframes.try_send((kind, slot, epoch)); }
-                        deadline = receiver.next_deadline();
+                        let now = Instant::now();
+                        receiver.tick(now);
+                        if let Some(epoch) = receiver.keyframe_request(now) && let Some((kind, slot)) = MediaKind::from_relay_ssrc(ssrc) { let _ = keyframes.try_send((kind, slot, epoch)); }
+                        wake.fired(now, receiver.next_deadline());
                         continue;
                     },
                     event = track.poll() => match event { Some(event) => event, None => break },
@@ -214,8 +286,7 @@ impl PeerConnectionEventHandler for Handler {
                 if let TrackRemoteEvent::OnRtpPacket(packet) = event {
                     let arrived = Instant::now();
                     if let Some(receiver) = &screen_receiver {
-                        receiver.push(packet, Instant::now());
-                        deadline = receiver.next_deadline();
+                        wake.deadline = receiver.push(packet, arrived);
                         continue;
                     }
                     let slot = MediaKind::from_relay_ssrc(packet.header.ssrc)
@@ -224,7 +295,7 @@ impl PeerConnectionEventHandler for Handler {
                         if slot < ROOM_CAPACITY && !matches!(packet.header.csrc.len(), 0 | 2) {
                             continue;
                         }
-                        engine.notify(Command::Packet {
+                        let queued = engine.notify(Command::Packet {
                             payload_type: packet.header.payload_type,
                             source_epoch: (slot < ROOM_CAPACITY)
                                 .then(|| packet.header.csrc.first().copied())
@@ -232,13 +303,16 @@ impl PeerConnectionEventHandler for Handler {
                             privacy_epoch: (slot < ROOM_CAPACITY && packet.header.csrc.len() == 2)
                                 .then(|| packet.header.csrc[1]),
                             marker: packet.header.marker,
-                            connection: connection.clone(),
+                            connection: connection.id(),
                             slot,
                             sequence: packet.header.sequence_number,
                             timestamp: packet.header.timestamp,
                             received_at: arrived,
                             payload: packet.payload,
                         });
+                        if !queued {
+                            connection.metrics.add(thiscord_frontend::audio::quality::Count::IncomingQueueDroppedPackets, 1);
+                        }
                     }
                 }
             }
@@ -1007,6 +1081,11 @@ async fn run(
     let mut roster: Vec<Participant> = Vec::new();
     let mut roster_compatibility = thiscord_frontend::audio::red::RosterCompatibility::default();
     let mut ticker = tokio::time::interval(Duration::from_millis(500));
+    // Mute/deafen state has no lease; refresh it well inside the server's 20 s
+    // silence detach. Views expire after VIEW_LEASE_SECS (3 s) without renewal.
+    let mut voice_state = Refresh::new(Duration::from_secs(5));
+    let mut last_keepalive = Instant::now();
+    let mut views_sent = Refresh::new(Duration::from_secs(1));
     ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
     let start = Instant::now();
     let mut shares = ShareSignaling {
@@ -1093,7 +1172,66 @@ async fn run(
             }
         }
         tokio::select! {
+            // Biased: an encoded frame ready to send never waits behind
+            // signaling JSON parsing or maintenance. The privacy deadline stays
+            // first (its arm only re-runs the boundary checks above); audio
+            // arrives at 50 frames/s, so the other arms are never starved.
+            biased;
             _ = boundary.wait_deadline(), if packet_redundancy && audio_started && !signaling.recovering() => {},
+            Some(mut frame)=outgoing.recv()=>{
+                if !media_state.connected.load(Ordering::Acquire) {
+                    red_sender.clear();
+                    frame.finish(thiscord_frontend::audio::quality::Count::OutgoingFailedPackets);
+                    continue;
+                }
+                // One clock read for the admission check and RED history aging; the
+                // write guard reads it once more just before the write.
+                let now = Instant::now();
+                if let Err(reason) = transmit_control.check(&frame, &attempt.connection, now) {
+                    red_sender.clear();
+                    transmit_control.dropped_frame(reason, &mut frame);
+                    continue;
+                }
+                if packet_redundancy {
+                    if boundary.frame(&frame)? {
+                        // Delivery/device gaps reset the codec even without a UI
+                        // setting change. Make their receive fence urgent too.
+                        transmit_control.invalidate();
+                        red_sender.clear();
+                        engine.notify_control(Command::ReceiveBoundary { connection: attempt.connection.clone(), generation: transmit_control.generation(), epoch: None })?;
+                    }
+                    if !boundary.ready() {
+                        red_sender.clear();
+                        transmit_control.dropped_frame(thiscord_frontend::audio::outgoing::DropReason::ControlInvalidated, &mut frame);
+                        continue;
+                    }
+                }
+                if !red_sender.within_budget(&frame) {
+                    frame.finish(thiscord_frontend::audio::quality::Count::OutgoingFailedPackets);
+                    continue;
+                }
+                let (sequence, timestamp) = rtp_clock.pending(frame.media_position);
+                let red_enabled = packet_redundancy && frame.packet_redundancy;
+                let (payload_type, payload) = red_sender.packet(&frame, red_enabled, now);
+                let payload_bytes = payload.len();
+                let packet=rtc::rtp::Packet{header:rtc::rtp::header::Header{version:2,payload_type,ssrc:MediaKind::Microphone.publisher_ssrc(),sequence_number:sequence,timestamp,marker:frame.marker,csrc:if packet_redundancy { boundary.csrc() } else { vec![] },..Default::default()},payload};
+                match transmit_control.guard_write_until(&frame, &attempt.connection, red_sender.deadline(&frame), track.write_rtp(packet)).await {
+                    Ok(result) => {
+                        use thiscord_frontend::audio::quality::Count;
+                        frame.finish(if result.is_ok() { Count::OutgoingSentPackets } else { Count::OutgoingFailedPackets });
+                        result.map_err(|_|Failure::temporary("Voice media connection failed").with_reason("media_send_failed"))?;
+                        // One admitted outer RTP packet. Source 0 belongs to this
+                        // unique Connection; privacy tags and RED copies do not
+                        // replace its stable FEC feedback identity.
+                        attempt.connection.uplink_sent(0, sequence);
+                        rtp_clock.next(frame.media_position);
+                        accepted_packets += 1;
+                        accepted_bytes += payload_bytes as u64;
+                        red_sender.admitted(frame, red_enabled);
+                    },
+                    Err(reason) => { red_sender.clear(); transmit_control.dropped_frame(reason, &mut frame); },
+                }
+            },
             result = audio_control.completed() => {
                 let audio = result?;
                 if !audio_started {
@@ -1181,6 +1319,8 @@ async fn run(
                         red_sender.clear();
                         if packet_redundancy { engine.notify_control(Command::ReceiveBoundary { connection: attempt.connection.clone(), generation: transmit_control.generation(), epoch: None })?; }
                         shares.invalidate();
+                        voice_state.invalidate();
+                        views_sent.invalidate();
                         // An interrupted chunked admin reply cannot be replayed
                         // safely. The server rejects that request on reattachment.
                         remote_jobs.abort_all();
@@ -1213,7 +1353,7 @@ async fn run(
                     ServerEvent::MediaDiagnostics{counters}=>{ app.state::<crate::native_screen::ScreenState>().server_diagnostics(counters); },
                     ServerEvent::ScreenKeyframe{kind, epoch, layer}=>{
                         if kind == MediaKind::Camera { app.state::<crate::native_camera::CameraState>().keyframe(); continue; }
-                        if status.lock().ok().is_some_and(|s| s.participants.iter().any(|m| m.slot == own_slot && m.screen_epoch == epoch && m.sharing_screen)) { if layer != Some(1) { force_keyframe.store(true, Ordering::Release); }
+                        if status.lock().ok().is_some_and(|s| s.participants.iter().any(|m| m.slot == own_slot && m.screen_epoch == epoch && m.sharing_screen)) { if layer != Some(1) { app.state::<crate::native_screen::ScreenState>().keyframe(); }
                             if layer != Some(0) { app.state::<crate::native_screen::ScreenState>().layer_keyframe(); } }
                     },
                     ServerEvent::Moved {channel_id:destination}=>{
@@ -1240,57 +1380,6 @@ async fn run(
                     },ServerEvent::Replaced{}=>return Err(Failure::replaced()),ServerEvent::Error{error}=>return Err(server_failure(&attempt.connection,error)),ServerEvent::Revoked{}=>return Err("Voice access changed. Join again if you still have permission.".into()),_=>{},
                 }
             },
-            Some(mut frame)=outgoing.recv()=>{
-                if !media_state.connected.load(Ordering::Acquire) {
-                    red_sender.clear();
-                    frame.finish(thiscord_frontend::audio::quality::Count::OutgoingFailedPackets);
-                    continue;
-                }
-                if let Err(reason) = transmit_control.check(&frame, &attempt.connection, Instant::now()) {
-                    red_sender.clear();
-                    transmit_control.dropped_frame(reason, &mut frame);
-                    continue;
-                }
-                if packet_redundancy {
-                    if boundary.frame(&frame)? {
-                        // Delivery/device gaps reset the codec even without a UI
-                        // setting change. Make their receive fence urgent too.
-                        transmit_control.invalidate();
-                        red_sender.clear();
-                        engine.notify_control(Command::ReceiveBoundary { connection: attempt.connection.clone(), generation: transmit_control.generation(), epoch: None })?;
-                    }
-                    if !boundary.ready() {
-                        red_sender.clear();
-                        transmit_control.dropped_frame(thiscord_frontend::audio::outgoing::DropReason::ControlInvalidated, &mut frame);
-                        continue;
-                    }
-                }
-                if !red_sender.within_budget(&frame) {
-                    frame.finish(thiscord_frontend::audio::quality::Count::OutgoingFailedPackets);
-                    continue;
-                }
-                let (sequence, timestamp) = rtp_clock.pending(frame.media_position);
-                let red_enabled = packet_redundancy && frame.packet_redundancy;
-                let (payload_type, payload) = red_sender.packet(&frame, red_enabled, Instant::now());
-                let payload_bytes = payload.len();
-                let packet=rtc::rtp::Packet{header:rtc::rtp::header::Header{version:2,payload_type,ssrc:MediaKind::Microphone.publisher_ssrc(),sequence_number:sequence,timestamp,marker:frame.marker,csrc:if packet_redundancy { boundary.csrc() } else { vec![] },..Default::default()},payload};
-                match transmit_control.guard_write_until(&frame, &attempt.connection, red_sender.deadline(&frame), track.write_rtp(packet)).await {
-                    Ok(result) => {
-                        use thiscord_frontend::audio::quality::Count;
-                        frame.finish(if result.is_ok() { Count::OutgoingSentPackets } else { Count::OutgoingFailedPackets });
-                        result.map_err(|_|Failure::temporary("Voice media connection failed").with_reason("media_send_failed"))?;
-                        // One admitted outer RTP packet. Source 0 belongs to this
-                        // unique Connection; privacy tags and RED copies do not
-                        // replace its stable FEC feedback identity.
-                        attempt.connection.uplink_sent(0, sequence);
-                        rtp_clock.next(frame.media_position);
-                        accepted_packets += 1;
-                        accepted_bytes += payload_bytes as u64;
-                        red_sender.admitted(frame, red_enabled);
-                    },
-                    Err(reason) => { red_sender.clear(); transmit_control.dropped_frame(reason, &mut frame); },
-                }
-            },
             _=media_state.tick(&mut ticker)=>{
                 if last_audio_stats.elapsed() >= Duration::from_secs(5) {
                     attempt.connection.event("voice_transmit", serde_json::json!({
@@ -1311,13 +1400,17 @@ async fn run(
                         audio_control.start(move||crate::native_audio::start_voice(&audio_app,guild_id,connection,configuration,tx,can_speak));
                     }
                 }
-                let configuration=settings.lock().map_err(|_|"Settings unavailable")?.clone();
-                if audio_started && !audio_control.pending() {
+                // Only two flags are needed per tick; no settings clone.
+                let (muted, self_deafened) = settings.lock().map(|s| (s.muted, s.deafened)).map_err(|_|"Settings unavailable")?;
+                // The worker's voice lease is 15 s; a keepalive every 2 s still
+                // catches a stalled worker quickly (each waits up to 10 s).
+                if audio_started && !audio_control.pending() && last_keepalive.elapsed() >= Duration::from_secs(2) {
+                    last_keepalive = Instant::now();
                     let e=engine.clone();
                     let heartbeat_connection=attempt.connection.clone();
                     audio_control.start(move||e.command(Command::Keepalive(heartbeat_connection)));
                 }
-                let deafened = configuration.deafened || moderation.deafened();
+                let deafened = self_deafened || moderation.deafened();
                 let allowed = can_speak && moderation.can_publish() && !deafened;
                 let screen = app.state::<crate::native_screen::ScreenState>();
                 let camera = app.state::<crate::native_camera::CameraState>();
@@ -1327,13 +1420,19 @@ async fn run(
                     red_sender.clear();
                     engine.notify_control(Command::ReceiveBoundary { connection: attempt.connection.clone(), generation: transmit_control.generation(), epoch: None })?;
                 }
-                if !packet_redundancy || configuration.muted || configuration.deafened || boundary.ready() {
-                    signaling.send(ClientEvent::State{muted:configuration.muted,deafened:configuration.deafened});
+                let now = Instant::now();
+                if (!packet_redundancy || muted || self_deafened || boundary.ready())
+                    && !signaling.recovering()
+                    && voice_state.due(&(muted, self_deafened), true, now)
+                {
+                    signaling.send(ClientEvent::State{muted,deafened:self_deafened});
                 }
-                if screen_subscriptions {
+                if screen_subscriptions && !signaling.recovering() {
                     let mut views = if deafened { vec![] } else { app.state::<crate::native_screen::ScreenState>().subscriptions() };
                     if !deafened { views.extend(camera.views.subscriptions()); }
-                    signaling.send(ClientEvent::ScreenViews { views });
+                    if views_sent.due(&views, !views.is_empty(), now) {
+                        signaling.send(ClientEvent::ScreenViews { views });
+                    }
                 }
             }
         }
@@ -1343,6 +1442,71 @@ async fn run(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn video_track_timer_rearms_only_when_its_wake_time_changes() {
+        let start = Instant::now();
+        let mut wake = TrackWake::new(start);
+        let mut rearms = 0;
+        // A steady stream with no reorder gap: the deadline stays unset.
+        for _ in 0..1_000 {
+            wake.deadline = None;
+            rearms += usize::from(wake.rearm().is_some());
+        }
+        assert_eq!(rearms, 0, "packets alone never re-arm the idle timer");
+        // A gap sets a 40 ms deadline; later packets keep the same deadline.
+        let gap = start + Duration::from_millis(40);
+        for _ in 0..100 {
+            wake.deadline = Some(gap);
+            rearms += usize::from(wake.rearm().is_some());
+        }
+        assert_eq!(rearms, 1, "one re-arm per deadline change");
+        // Firing always re-arms, even to an unchanged next wake.
+        wake.fired(gap, Some(gap + Duration::from_millis(40)));
+        assert_eq!(wake.rearm(), Some(gap + Duration::from_millis(40)));
+        wake.fired(gap, None);
+        assert_eq!(wake.rearm(), Some(gap + TrackWake::IDLE));
+    }
+
+    #[test]
+    fn unchanged_signaling_waits_for_refresh_and_changes_send_immediately() {
+        let start = Instant::now();
+        let mut state = Refresh::new(Duration::from_secs(5));
+        assert!(state.due(&(false, false), true, start));
+        for tick in 1..10 {
+            assert!(!state.due(
+                &(false, false),
+                true,
+                start + Duration::from_millis(tick * 500)
+            ));
+        }
+        assert!(state.due(&(false, false), true, start + Duration::from_secs(5)));
+        assert!(state.due(&(true, false), true, start + Duration::from_millis(5500)));
+        assert!(!state.due(&(true, false), true, start + Duration::from_secs(6)));
+        state.invalidate();
+        assert!(state.due(&(true, false), true, start + Duration::from_millis(6500)));
+        // A non-empty view list renews inside the server's lease even when
+        // unchanged; an unchanged empty list is sent once.
+        let mut views = Refresh::new(Duration::from_secs(1));
+        let lease = Duration::from_secs(thiscord_shared::screen::VIEW_LEASE_SECS);
+        let mut last = start;
+        for tick in 0..20 {
+            let now = start + Duration::from_millis(tick * 500);
+            if views.due(&vec![1u32], true, now) {
+                last = now;
+            }
+            assert!(now - last < lease);
+        }
+        let later = start + Duration::from_secs(20);
+        assert!(views.due(&Vec::new(), false, later), "emptying is a change");
+        for tick in 1..20 {
+            assert!(!views.due(
+                &Vec::new(),
+                false,
+                later + Duration::from_millis(tick * 500)
+            ));
+        }
+    }
 
     #[tokio::test]
     async fn peer_changes_wake_audio_without_waiting_for_the_status_interval() {

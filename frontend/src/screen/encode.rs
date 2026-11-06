@@ -100,39 +100,63 @@ impl AccessUnits {
     /// Annex B access unit in, Annex B access unit out. Rejects output that
     /// exceeds the frame bound or violates the negotiated profile, naming the
     /// violated bound (safe metadata only, never encoded bytes).
-    pub fn finish(&mut self, mut bytes: Vec<u8>) -> Result<Vec<u8>, String> {
-        let mut idr = false;
-        let (mut has_sps, mut has_pps) = (false, false);
-        for nal in thiscord_shared::h264::nal_units(&bytes) {
-            match nal.first().map(|b| b & 31) {
-                Some(7) => {
-                    has_sps = true;
-                    self.sps = nal.to_vec();
-                }
-                Some(8) => {
-                    has_pps = true;
-                    self.pps = nal.to_vec();
-                }
-                Some(5) => idr = true,
-                _ => {}
+    pub fn finish(&mut self, bytes: Vec<u8>) -> Result<Vec<u8>, String> {
+        if self.needs_prefix(&bytes) {
+            return self.finish_slice(&bytes);
+        }
+        Self::checked(bytes, self.high)
+    }
+    /// [`Self::finish`] from borrowed encoder output (a mapped GStreamer
+    /// buffer): copies the access unit exactly once, after any parameter-set
+    /// prefix a recovery frame needs.
+    pub fn finish_slice(&mut self, bytes: &[u8]) -> Result<Vec<u8>, String> {
+        let prefix = self.needs_prefix(bytes);
+        let mut out = Vec::with_capacity(
+            bytes.len()
+                + if prefix {
+                    self.sps.len() + self.pps.len() + 8
+                } else {
+                    0
+                },
+        );
+        if prefix {
+            for unit in [&self.sps, &self.pps] {
+                out.extend_from_slice(&[0, 0, 0, 1]);
+                out.extend_from_slice(unit);
             }
         }
-        if idr && !(has_sps && has_pps) && !self.sps.is_empty() && !self.pps.is_empty() {
-            let mut prefix = Vec::with_capacity(bytes.len() + self.sps.len() + self.pps.len() + 8);
-            prefix.extend_from_slice(&[0, 0, 0, 1]);
-            prefix.extend_from_slice(&self.sps);
-            prefix.extend_from_slice(&[0, 0, 0, 1]);
-            prefix.extend_from_slice(&self.pps);
-            prefix.append(&mut bytes);
-            bytes = prefix;
-        }
+        out.extend_from_slice(bytes);
+        Self::checked(out, self.high)
+    }
+    /// Records parameter sets and reports whether this IDR lacks them.
+    fn needs_prefix(&mut self, bytes: &[u8]) -> bool {
+        let mut idr = false;
+        let (mut has_sps, mut has_pps) = (false, false);
+        // Parameter sets precede the first slice; never scan slice data.
+        thiscord_shared::h264::front_units(bytes, |nal| match nal[0] & 31 {
+            7 => {
+                has_sps = true;
+                self.sps.clear();
+                self.sps.extend_from_slice(nal);
+            }
+            8 => {
+                has_pps = true;
+                self.pps.clear();
+                self.pps.extend_from_slice(nal);
+            }
+            5 => idr = true,
+            _ => {}
+        });
+        idr && !(has_sps && has_pps) && !self.sps.is_empty() && !self.pps.is_empty()
+    }
+    fn checked(bytes: Vec<u8>, high: bool) -> Result<Vec<u8>, String> {
         if bytes.len() > thiscord_shared::screen::MAX_FRAME_BYTES {
             return Err(format!(
                 "encoded frame of {} bytes exceeds the frame bound",
                 bytes.len()
             ));
         }
-        thiscord_shared::h264::parameter_set_profile(&bytes, self.high)
+        thiscord_shared::h264::front_parameter_set_profile(&bytes, high)
             .map_err(|error| error.to_string())?;
         Ok(bytes)
     }
@@ -232,5 +256,16 @@ mod tests {
             assert_eq!(thiscord_shared::h264::nal_units(&recovery).count(), 3);
         }
         assert!(delta.is_ok());
+        // The borrowed path produces the same access units in one copy.
+        let mut borrowed = AccessUnits::new(false);
+        assert_eq!(
+            borrowed.finish_slice(&annex).ok(),
+            AccessUnits::new(false).finish(annex.clone()).ok()
+        );
+        let idr = [0, 0, 0, 1, 0x65, 0x88, 0x84];
+        assert_eq!(
+            borrowed.finish_slice(&idr).ok(),
+            units.finish(idr.to_vec()).ok()
+        );
     }
 }

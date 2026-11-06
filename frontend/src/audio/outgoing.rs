@@ -225,10 +225,25 @@ impl Control {
         now: impl Fn() -> Instant,
     ) -> Result<F::Output, DropReason> {
         let deadline = deadline.min(frame.deadline());
+        tokio::pin!(write);
+        // Fast path: an RTP write normally completes on its first poll (it only
+        // enqueues), so check once and poll once: one clock read, and neither
+        // the invalidation waiter (a lock) nor the deadline timer is armed.
+        let first = now();
+        self.check(frame, connection, first)?;
+        if first >= deadline {
+            return Err(DropReason::Expired);
+        }
+        if let std::task::Poll::Ready(output) =
+            std::future::poll_fn(|cx| std::task::Poll::Ready(write.as_mut().poll(cx))).await
+        {
+            return Ok(output);
+        }
+        // Pending: arm the waiter, then re-check on every poll, so a change
+        // that landed before `enable` is still seen by `check`.
         let changed = self.changed.notified();
         tokio::pin!(changed);
         changed.as_mut().enable();
-        tokio::pin!(write);
         let guarded = std::future::poll_fn(|cx| {
             if let Err(reason) = self.check(frame, connection, now()) {
                 return std::task::Poll::Ready(Err(reason));

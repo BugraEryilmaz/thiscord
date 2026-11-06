@@ -1,15 +1,27 @@
 //! Portable H.264 framing and decoder allocation bounds shared by real and test viewers.
 use crate::screen::{MAX_FRAME_BYTES, MAX_HEIGHT, MAX_WIDTH};
 
+/// Offset of the first `00 00 01` start code. Encoded frames are scanned several
+/// times per frame on the send and receive paths; inspecting every third byte
+/// skips most of the slice data (a byte above 1 rules out three positions).
+fn start_code(data: &[u8]) -> Option<usize> {
+    let mut i = 0;
+    while i + 2 < data.len() {
+        match data[i + 2] {
+            0 => i += 1,
+            1 if data[i] == 0 && data[i + 1] == 0 => return Some(i),
+            _ => i += 3,
+        }
+    }
+    None
+}
+
 /// Annex-B NAL units, without three- or four-byte start codes.
 pub fn nal_units(mut data: &[u8]) -> impl Iterator<Item = &[u8]> {
     std::iter::from_fn(move || {
-        let start = data.windows(3).position(|p| p == [0, 0, 1])? + 3;
+        let start = start_code(data)? + 3;
         data = &data[start..];
-        let end = data
-            .windows(3)
-            .position(|p| p == [0, 0, 1])
-            .unwrap_or(data.len());
+        let end = start_code(data).unwrap_or(data.len());
         let mut nal = &data[..end];
         data = &data[end..];
         while nal.last() == Some(&0) {
@@ -19,14 +31,28 @@ pub fn nal_units(mut data: &[u8]) -> impl Iterator<Item = &[u8]> {
     })
 }
 
-pub fn recovery_frame(data: &[u8]) -> bool {
+/// An IDR access unit with its SPS and PPS. Stops at the first non-IDR slice
+/// (an access unit cannot mix IDR and non-IDR slices) or once all three are
+/// seen, so delta frames are classified without scanning their slice data.
+pub fn recovery_frame(mut data: &[u8]) -> bool {
     let mut kinds = [false; 32];
-    for nal in nal_units(data) {
-        if let Some(byte) = nal.first() {
-            kinds[(byte & 31) as usize] = true;
+    // Only each NAL header byte is needed: resume the next start-code search at
+    // the header instead of first finding where the slice data ends.
+    while let Some(start) = start_code(data) {
+        data = &data[start + 3..];
+        let Some(byte) = data.first() else {
+            break;
+        };
+        match byte & 31 {
+            0 => {}
+            1 => return false,
+            kind => kinds[kind as usize] = true,
+        }
+        if kinds[5] && kinds[7] && kinds[8] {
+            return true;
         }
     }
-    kinds[5] && kinds[7] && kinds[8]
+    false
 }
 /// Drop an entire damaged frame. Do not accumulate unbounded FU-A fragments or
 /// decode a partial access unit after loss. The receive queue owns reordering
@@ -114,7 +140,13 @@ impl Assembler {
             return None;
         }
         if marker && !self.fragment {
-            return Some(std::mem::take(&mut self.data));
+            // The frame leaves with its buffer; start the next one at this
+            // size so it does not regrow through repeated reallocations.
+            let capacity = self.data.len();
+            return Some(std::mem::replace(
+                &mut self.data,
+                Vec::with_capacity(capacity),
+            ));
         }
         None
     }
@@ -148,6 +180,51 @@ pub fn bounded_parameter_sets_with(data: &[u8], allow_high: bool) -> bool {
     parameter_set_profile(data, allow_high).is_ok()
 }
 
+/// Calls `unit` for each NAL unit up to and including the first slice (types
+/// 1–5), which is passed as its header byte only. Encoders emit SPS/PPS/SEI
+/// before the first slice, so this reads an encoded frame's parameter sets and
+/// picture type without scanning its slice data. For this process's own encoder
+/// output; received frames are validated with the full [`parameter_set_profile`].
+pub fn front_units(mut data: &[u8], mut unit: impl FnMut(&[u8])) {
+    while let Some(start) = start_code(data) {
+        data = &data[start + 3..];
+        let Some(&header) = data.first() else {
+            return;
+        };
+        if matches!(header & 31, 1..=5) {
+            unit(&data[..1]);
+            return;
+        }
+        let end = start_code(data).unwrap_or(data.len());
+        let mut nal = &data[..end];
+        while nal.last() == Some(&0) {
+            nal = &nal[..nal.len() - 1];
+        }
+        if !nal.is_empty() {
+            unit(nal);
+        }
+        data = &data[end..];
+    }
+}
+/// Validates one SPS NAL unit (header byte included) like [`parameter_set_profile`].
+pub fn sps_profile(nal: &[u8], allow_high: bool) -> Result<Profile, ParameterSetError> {
+    inspect_sps(nal, allow_high).ok_or(ParameterSetError::Malformed)?
+}
+/// [`parameter_set_profile`] over [`front_units`]: own encoder output only.
+pub fn front_parameter_set_profile(
+    data: &[u8],
+    allow_high: bool,
+) -> Result<Option<Profile>, ParameterSetError> {
+    let mut result = Ok(None);
+    front_units(data, |nal| {
+        if result.is_ok() && nal[0] & 31 == 7 {
+            result = inspect_sps(nal, allow_high)
+                .ok_or(ParameterSetError::Malformed)
+                .and_then(|r| r.map(Some));
+        }
+    });
+    result
+}
 /// Safe diagnostic metadata only: never include encoded bytes or SDP.
 #[derive(Debug, PartialEq, Eq)]
 pub enum ParameterSetError {
@@ -435,6 +512,110 @@ impl Bits<'_> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    /// The skipping scan must split exactly like the original byte-window scan.
+    #[test]
+    fn skipping_start_code_scan_matches_window_scan() {
+        fn reference(mut data: &[u8]) -> Vec<&[u8]> {
+            let mut out = Vec::new();
+            while let Some(start) = data.windows(3).position(|p| p == [0, 0, 1]) {
+                data = &data[start + 3..];
+                let end = data
+                    .windows(3)
+                    .position(|p| p == [0, 0, 1])
+                    .unwrap_or(data.len());
+                let mut nal = &data[..end];
+                data = &data[end..];
+                while nal.last() == Some(&0) {
+                    nal = &nal[..nal.len() - 1];
+                }
+                out.push(nal);
+            }
+            out
+        }
+        // Deterministic bytes biased toward 0 and 1 so start codes, emulation
+        // patterns and runs of zeros are common.
+        let mut state = 0x2545_f491_u32;
+        for length in 0..600 {
+            let data: Vec<u8> = (0..length)
+                .map(|_| {
+                    state ^= state << 13;
+                    state ^= state >> 17;
+                    state ^= state << 5;
+                    match state % 8 {
+                        0..=3 => 0,
+                        4 | 5 => 1,
+                        _ => (state >> 8) as u8,
+                    }
+                })
+                .collect();
+            let nals = reference(&data);
+            assert_eq!(nal_units(&data).collect::<Vec<_>>(), nals);
+            // The former full-scan classification, except that a non-IDR
+            // slice now ends the scan as not recoverable.
+            let kinds: Vec<u8> = nals
+                .iter()
+                .filter_map(|n| n.first().map(|b| b & 31))
+                .collect();
+            let full = [5, 7, 8].iter().all(|k| kinds.contains(k));
+            let first_delta = kinds.iter().position(|k| *k == 1);
+            let before_delta = |k: u8| kinds[..first_delta.unwrap_or(kinds.len())].contains(&k);
+            let expected = full && [5, 7, 8].into_iter().all(before_delta);
+            assert_eq!(recovery_frame(&data), expected);
+        }
+    }
+    #[test]
+    fn front_units_match_nal_units_up_to_the_first_slice() {
+        let mut frame = vec![
+            0, 0, 0, 1, 0x09, 0xf0, 0, 0, 1, 0x67, 66, 0, 0, 0, 1, 0x68, 7,
+        ];
+        frame.extend([0, 0, 1, 0x06, 5, 0, 0, 1, 0x65]);
+        frame.extend(std::iter::repeat_n(0x55, 10_000));
+        frame.extend([0, 0, 1, 0x67, 1]); // after the slice: not a front unit
+        let mut front = Vec::new();
+        front_units(&frame, |nal| front.push(nal.to_vec()));
+        let expected: Vec<Vec<u8>> = nal_units(&frame)
+            .take(4)
+            .map(<[u8]>::to_vec)
+            .chain([vec![0x65]])
+            .collect();
+        assert_eq!(front, expected);
+        assert_eq!(
+            front_parameter_set_profile(&frame[..10], false),
+            Err(ParameterSetError::Malformed),
+            "a truncated SPS is rejected"
+        );
+        assert_eq!(
+            front_parameter_set_profile(&[0, 0, 1, 0x41, 1], false),
+            Ok(None)
+        );
+    }
+    #[test]
+    fn recovery_frames_need_idr_sps_and_pps_and_deltas_stop_early() {
+        let idr = [0, 0, 0, 1, 0x67, 66, 0, 0, 1, 0x68, 1, 0, 0, 1, 0x65, 1];
+        assert!(recovery_frame(&idr));
+        assert!(!recovery_frame(&idr[..10]), "no IDR slice");
+        assert!(
+            !recovery_frame(&[0, 0, 1, 0x65, 1]),
+            "IDR without parameter sets"
+        );
+        // Parameter sets after the first IDR slice still count.
+        assert!(recovery_frame(&[
+            0, 0, 1, 0x65, 1, 0, 0, 1, 0x67, 66, 0, 0, 1, 0x68, 1
+        ]));
+        let mut delta = vec![0, 0, 1, 0x09, 0xf0, 0, 0, 1, 0x41];
+        delta.extend(std::iter::repeat_n(0x55, 100_000));
+        assert!(!recovery_frame(&delta));
+    }
+    #[test]
+    fn assembled_frames_leave_with_their_buffer_and_the_next_starts_presized() {
+        let mut assembler = Assembler::default();
+        let payload = [0x41_u8; 900];
+        assert!(assembler.push(1, 1, false, &payload).is_none());
+        let frame = assembler.push(1, 2, true, &payload).unwrap();
+        assert_eq!(frame.len(), 2 * (4 + payload.len()));
+        assert!(assembler.data.is_empty());
+        assert!(assembler.data.capacity() >= frame.len());
+    }
     #[test]
     fn baseline_camera_picture_order_and_profiles_preserve_decoder_bounds() {
         fn ue(bits: &mut String, value: u32) {

@@ -272,8 +272,18 @@ pub(super) fn ScreenVideo(watch: thiscord_shared::screen::Watch) -> impl IntoVie
     let copied = RwSignal::new(false);
     let (abort, registration) = futures_util::future::AbortHandle::new_pair();
     let registration = std::cell::RefCell::new(Some(registration));
+    // Whether the tile is inside the viewport (scrolling grids and strips).
+    let on_screen = super::screen_player::OnScreen::new();
+    type Observer = (
+        web_sys::IntersectionObserver,
+        wasm_bindgen::closure::Closure<dyn FnMut(js_sys::Array)>,
+    );
+    let observer = StoredValue::new_local(None::<Observer>);
     on_cleanup(move || {
         abort.abort();
+        if let Some((observer, _)) = observer.try_update_value(Option::take).flatten() {
+            observer.disconnect();
+        }
         leptos::task::spawn_local(async move {
             let _ = native::<bool>(
                 "screen_view_keepalive",
@@ -290,9 +300,27 @@ pub(super) fn ScreenVideo(watch: thiscord_shared::screen::Watch) -> impl IntoVie
             return;
         };
         let video: web_sys::HtmlVideoElement = video.clone();
+        use wasm_bindgen::JsCast;
+        let flag = on_screen.clone();
+        let changed = wasm_bindgen::closure::Closure::<dyn FnMut(js_sys::Array)>::new(
+            move |entries: js_sys::Array| {
+                if let Some(entry) = entries
+                    .iter()
+                    .filter_map(|e| e.dyn_into::<web_sys::IntersectionObserverEntry>().ok())
+                    .next_back()
+                {
+                    flag.set(entry.is_intersecting());
+                }
+            },
+        );
+        if let Ok(created) = web_sys::IntersectionObserver::new(changed.as_ref().unchecked_ref()) {
+            created.observe(&video);
+            observer.set_value(Some((created, changed)));
+        }
+        let on_screen = on_screen.clone();
         leptos::task::spawn_local(async move {
             let _ = futures_util::future::Abortable::new(
-                super::screen_player::run(video, watch, message, diagnostics),
+                super::screen_player::run(video, watch, message, diagnostics, on_screen),
                 registration,
             )
             .await;

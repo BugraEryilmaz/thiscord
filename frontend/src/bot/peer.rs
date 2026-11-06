@@ -541,7 +541,7 @@ fn receive(
     if slot < ROOM_CAPACITY && !matches!(packet.header.csrc.len(), 0 | 2) {
         return;
     }
-    engine.notify(Command::Packet {
+    let queued = engine.notify(Command::Packet {
         payload_type: packet.header.payload_type,
         source_epoch: (slot < ROOM_CAPACITY)
             .then(|| packet.header.csrc.first().copied())
@@ -549,13 +549,18 @@ fn receive(
         privacy_epoch: (slot < ROOM_CAPACITY && packet.header.csrc.len() == 2)
             .then(|| packet.header.csrc[1]),
         marker: packet.header.marker,
-        connection: connection.clone(),
+        connection: connection.id(),
         slot,
         sequence: packet.header.sequence_number,
         timestamp: packet.header.timestamp,
         received_at: Instant::now(),
         payload: packet.payload,
     });
+    if !queued {
+        connection
+            .metrics
+            .add(Count::IncomingQueueDroppedPackets, 1);
+    }
     let mut bot = bot.lock().unwrap();
     bot.received_packets += 1;
     bot.received_system_audio_packets += u64::from(kind == MediaKind::SystemAudio);

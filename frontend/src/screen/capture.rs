@@ -128,29 +128,42 @@ impl GraphicsCaptureApiHandler for Capture {
             return Err("Screen source dimensions are unsupported".into());
         }
         if self.dimensions != (width, height) {
-            self.textures = (0..(if self.flags.mailboxes.len() == 1 {
-                3
-            } else {
-                7
-            }))
-                .map(|_| {
-                    gpu::texture(
-                        frame.device(),
-                        width,
-                        height,
-                        self.flags.format.dxgi(),
-                        self.flags.format.bind_flags(),
-                    )
-                    .map(Arc::new)
-                })
-                .collect::<windows::core::Result<_>>()
-                .map_err(|e| format!("Capture texture allocation failed: {}", e.code()))?;
+            // Frames still held by workers keep their old textures alive.
+            self.textures.clear();
             self.dimensions = (width, height);
         }
-        let Some(texture) = self.textures.iter().find(|t| Arc::strong_count(t) == 1) else {
-            self.flags.metrics.add("gpu_busy", 1);
-            self.flags.metrics.add("capture_surface_busy", 1);
-            return Ok(());
+        // Grow on demand up to the cap: a steady share usually holds only a
+        // few surfaces at once (newest capture, the held refresh frame, one in
+        // conversion), so unused full-resolution textures are never allocated.
+        let capacity = if self.flags.mailboxes.len() == 1 {
+            3
+        } else {
+            7
+        };
+        let free = self.textures.iter().position(|t| Arc::strong_count(t) == 1);
+        let texture = match free {
+            Some(index) => self.textures[index].clone(),
+            None if self.textures.len() < capacity => {
+                let texture = gpu::texture(
+                    frame.device(),
+                    width,
+                    height,
+                    self.flags.format.dxgi(),
+                    self.flags.format.bind_flags(),
+                )
+                .map(Arc::new)
+                .map_err(|e| format!("Capture texture allocation failed: {}", e.code()))?;
+                self.textures.push(texture.clone());
+                self.flags
+                    .metrics
+                    .peak("capture_textures", self.textures.len() as u64);
+                texture
+            }
+            None => {
+                self.flags.metrics.add("gpu_busy", 1);
+                self.flags.metrics.add("capture_surface_busy", 1);
+                return Ok(());
+            }
         };
         {
             let _guard = gpu::ContextGuard::lock(frame.device_context())

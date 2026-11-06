@@ -1,8 +1,5 @@
 //! Fixed-capacity SPSC queues. The device callback never allocates, locks or waits.
-use super::{
-    clips, cues, frames,
-    quality::{Count, Metrics},
-};
+use super::{clips, cues, frames, quality::Count};
 use ringbuf::{HeapCons, HeapProd, HeapRb, traits::*};
 use std::sync::{
     Arc, OnceLock,
@@ -39,6 +36,10 @@ pub struct SampleCounter {
 }
 impl SampleCounter {
     pub fn add(&self, n: u64) {
+        // Most callback counts are zero; skip the shared-cache-line RMW.
+        if n == 0 {
+            return;
+        }
         if self
             .value
             .fetch_add(n, Ordering::Relaxed)
@@ -68,7 +69,7 @@ pub struct CallbackCounts {
     pub output_clipped: SampleCounter,
 }
 impl CallbackCounts {
-    pub fn drain(&self, metrics: &Metrics) {
+    pub fn drain(&self, metrics: &impl super::quality::Sink) {
         for (counter, event) in [
             (&self.capture_overflow, Count::CaptureOverflowSamples),
             (&self.reference_overflow, Count::ReferenceOverflowSamples),
@@ -99,7 +100,7 @@ impl PlaybackCounts {
             counter.drain();
         }
     }
-    pub fn drain(&self, metrics: &Metrics) {
+    pub fn drain(&self, metrics: &impl super::quality::Sink) {
         for (counter, event) in [
             (&self.starvation, Count::StarvationSamples),
             (&self.unknown, Count::EmptyUnknownSamples),
@@ -423,6 +424,7 @@ impl Mixer {
         // most of the fixed slots are unused, and skipping them keeps the
         // mixing work proportional to actual sources.
         let mut live = [false; MAX_STREAMS];
+        let mut present = [false; MAX_STREAMS];
         // Keep the legacy local-test trim, but never trim the larger cushion
         // needed by a device callback. Hard resets still discard the whole ring.
         for (index, stream) in self.streams.iter_mut().enumerate() {
@@ -432,6 +434,7 @@ impl Mixer {
             let receive_blocked = index < thiscord_shared::voice::ROOM_CAPACITY
                 && guard.is_some_and(|guard| !guard.receive_allowed());
             let active = stream.control.active.load(Ordering::Acquire);
+            present[index] = active;
             live[index] = active && mask[index];
             let discard = if changed || deafened || receive_blocked || !active {
                 stream.queue.occupied_len()
@@ -443,7 +446,9 @@ impl Mixer {
             };
             stream.control.counts.discarded.add(discard as u64);
             stream.queue.skip(discard);
-            stream.control.cleared.store(generation, Ordering::Release);
+            if stream.control.cleared.load(Ordering::Relaxed) != generation {
+                stream.control.cleared.store(generation, Ordering::Release);
+            }
         }
         let mut underruns = 0;
         let mut reference_dropped = 0;
@@ -451,8 +456,10 @@ impl Mixer {
         let mut starvation = [0u64; MAX_STREAMS];
         let mut unknown = [0u64; MAX_STREAMS];
         let mut silence = [0u64; MAX_STREAMS];
+        // Only streams with a receiver count silence: an empty slot's counts
+        // were never drained and would land on the next stream to take it.
         for (index, live) in live.iter().enumerate() {
-            if !live {
+            if !live && present[index] {
                 silence[index] = count as u64;
             }
         }
@@ -625,16 +632,20 @@ impl Mixer {
             stream.control.counts.unknown.add(unknown[i]);
             stream.control.counts.silence.add(silence[i]);
         }
-        self.controls
-            .underruns
-            .fetch_add(underruns, Ordering::Relaxed);
+        if underruns != 0 {
+            self.controls
+                .underruns
+                .fetch_add(underruns, Ordering::Relaxed);
+        }
         self.controls
             .counts
             .reference_overflow
             .add(reference_dropped);
-        self.controls
-            .reference_dropped
-            .fetch_add(reference_dropped, Ordering::Relaxed);
+        if reference_dropped != 0 {
+            self.controls
+                .reference_dropped
+                .fetch_add(reference_dropped, Ordering::Relaxed);
+        }
         // Refill right after consumption; small callbacks wake every 10 ms.
         self.since_wake += count;
         if self.since_wake >= frames::SAMPLES {
@@ -724,6 +735,7 @@ impl Privacy {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::audio::quality::Metrics;
     #[test]
     fn server_deafen_discards_microphone_and_system_pcm_without_changing_self_state() {
         let controls = Arc::new(Controls::default());
@@ -763,7 +775,7 @@ mod tests {
         let (mut writers, mut mix) = mixer(controls.clone());
         let metrics = Metrics::default();
         let mut out = [0f32; 480];
-        mix.render(&mut out, 1); // inactive
+        mix.render(&mut out, 1); // no stream in the slot yet: nothing counted
         writers[0].control.active.store(true, Ordering::Release);
         mix.render(&mut out, 1); // empty, no evidence of pending media (DTX/inactivity)
         writers[0].write(&[0.0; 480]);
@@ -786,7 +798,7 @@ mod tests {
         let t = metrics.snapshot().total;
         assert_eq!(t.starvation_samples, 0);
         assert_eq!(t.empty_unknown_samples, 960);
-        assert_eq!(t.intentional_silence_samples, 1920);
+        assert_eq!(t.intentional_silence_samples, 1440);
         assert_eq!(controls.underruns.load(Ordering::Relaxed), 0);
         controls.master.store(1f32.to_bits(), Ordering::Relaxed);
         mix.render(&mut out, 1); // known buffered media, worker has not decoded it
@@ -797,7 +809,7 @@ mod tests {
         mix.render(&mut out, 1); // Explicit DTX silence overrides stale pending-media evidence.
         writers[0].control.counts.drain(&metrics);
         assert_eq!(metrics.snapshot().total.starvation_samples, 480);
-        assert_eq!(metrics.snapshot().total.intentional_silence_samples, 2400);
+        assert_eq!(metrics.snapshot().total.intentional_silence_samples, 1920);
     }
     #[test]
     fn clipping_reference_overflow_and_stream_counts_are_exact_and_distinct() {

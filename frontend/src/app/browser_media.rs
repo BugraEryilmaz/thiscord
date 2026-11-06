@@ -190,10 +190,20 @@ pub(super) fn BrowserVideo(watch: Watch, own: bool) -> impl IntoView {
     let video_node = NodeRef::<leptos::html::Video>::new();
     let message = RwSignal::new("Connecting video...".to_owned());
     let view_id = StoredValue::new(None::<u32>);
+    // Tiles scrolled out of a scrolling grid or strip ask for the minimum
+    // budget; the observer and its callback live as long as the tile.
+    type Observer = (
+        web_sys::IntersectionObserver,
+        wasm_bindgen::closure::Closure<dyn FnMut(js_sys::Array)>,
+    );
+    let observer = StoredValue::new_local(None::<Observer>);
     let (abort, registration) = futures_util::future::AbortHandle::new_pair();
     let registration = std::cell::RefCell::new(Some(registration));
     on_cleanup(move || {
         abort.abort();
+        if let Some((observer, _)) = observer.try_update_value(Option::take).flatten() {
+            observer.disconnect();
+        }
         if let Some(id) = view_id.get_value() {
             video::unwatch(id);
         }
@@ -207,14 +217,39 @@ pub(super) fn BrowserVideo(watch: Watch, own: bool) -> impl IntoView {
         };
         let element: HtmlVideoElement = element.clone();
         if !own {
-            view_id.set_value(Some(video::watch(element.clone(), watch)));
+            let id = video::watch(element.clone(), watch);
+            view_id.set_value(Some(id));
+            let changed = wasm_bindgen::closure::Closure::<dyn FnMut(js_sys::Array)>::new(
+                move |entries: js_sys::Array| {
+                    if let Some(entry) = entries
+                        .iter()
+                        .filter_map(|e| e.dyn_into::<web_sys::IntersectionObserverEntry>().ok())
+                        .next_back()
+                    {
+                        video::set_off_screen(id, !entry.is_intersecting());
+                    }
+                },
+            );
+            if let Ok(created) =
+                web_sys::IntersectionObserver::new(changed.as_ref().unchecked_ref())
+            {
+                created.observe(&element);
+                observer.set_value(Some((created, changed)));
+            }
+        }
+        // Every tile's status follows its <video> media events (see `refresh`).
+        // The own preview also rebinds to the live capture when it changes (a
+        // camera switch), woken by that change rather than by a timer.
+        if !own {
+            return;
         }
         leptos::task::spawn_local(async move {
             let _ = futures_util::future::Abortable::new(
                 async move {
                     let mut shown: Option<String> = None;
                     loop {
-                        let playing = if own {
+                        let seen = video::local_revision();
+                        let playing = {
                             // Self-preview follows the live capture, including a
                             // camera switch; nothing is sent for it.
                             let track = video::local_track(watch.kind);
@@ -230,8 +265,6 @@ pub(super) fn BrowserVideo(watch: Watch, own: bool) -> impl IntoView {
                                 }
                             }
                             shown.is_some()
-                        } else {
-                            view_id.get_value().is_some_and(video::bound)
                         };
                         let ready =
                             playing && element.ready_state() >= HtmlMediaElement::HAVE_CURRENT_DATA;
@@ -243,10 +276,12 @@ pub(super) fn BrowserVideo(watch: Watch, own: bool) -> impl IntoView {
                         if message.try_get_untracked().is_none() {
                             break;
                         }
-                        if message.get_untracked() != next {
+                        if message.with_untracked(|m| *m != next) {
                             message.set(next);
                         }
-                        gloo_timers::future::TimeoutFuture::new(250).await;
+                        // Readiness then follows media events; 5 s is only a
+                        // safety net for a missed capture change.
+                        video::local_change_or(seen, 5000).await;
                     }
                 },
                 registration,
@@ -254,6 +289,23 @@ pub(super) fn BrowserVideo(watch: Watch, own: bool) -> impl IntoView {
             .await;
         });
     });
+    // Remote tiles: bound to a received track and showing a frame. The own
+    // preview: showing the live local capture.
+    let refresh = move || {
+        let Some(element) = video_node.get_untracked() else {
+            return;
+        };
+        let bound = if own {
+            video::local_track(watch.kind).is_some()
+        } else {
+            view_id.get_value().is_some_and(video::bound)
+        };
+        let ready = bound && element.ready_state() >= HtmlMediaElement::HAVE_CURRENT_DATA;
+        let next = if ready { "" } else { "Waiting for video…" };
+        if message.with_untracked(|m| m != next) {
+            message.set(next.into());
+        }
+    };
     let label = if watch.kind == MediaKind::Camera {
         if own { "Your camera" } else { "Live video" }
     } else if own {
@@ -262,7 +314,9 @@ pub(super) fn BrowserVideo(watch: Watch, own: bool) -> impl IntoView {
         "Live video"
     };
     view! {
-        <div class="stream-player"><video node_ref=video_node autoplay muted playsinline aria-label=move || crate::i18n::t(label)/>
+        <div class="stream-player"><video node_ref=video_node autoplay muted playsinline aria-label=move || crate::i18n::t(label)
+            on:loadeddata=move |_| refresh() on:playing=move |_| refresh() on:waiting=move |_| refresh()
+            on:stalled=move |_| refresh() on:emptied=move |_| refresh()/>
             <Show when=move ||!message.get().is_empty()><p class="stream-player-status" role="status">{move ||crate::i18n::message(message.get())}</p></Show>
         </div>
     }

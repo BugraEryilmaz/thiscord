@@ -102,6 +102,18 @@ struct Inner {
     inboxes: [Option<Inbox>; ROOM_CAPACITY],
     receivers: [Option<thiscord_frontend::screen::metrics::Metrics>; ROOM_CAPACITY],
 }
+impl Inner {
+    /// Stop flags carry no wake of their own: nudge the encoder workers so a
+    /// stop is observed now rather than at their idle or paused timeout.
+    fn wake_workers(&self) {
+        if let Some(binding) = &self.binding {
+            binding.demand.wake();
+            if let Some(layer) = &binding.layers {
+                layer.demand.wake();
+            }
+        }
+    }
+}
 #[derive(Default)]
 struct Feedback {
     receiver: thiscord_frontend::screen::adaptation::Receiver,
@@ -152,7 +164,15 @@ impl ScreenState {
         if let Ok(inner) = self.0.lock()
             && let Some(layer) = inner.binding.as_ref().and_then(|b| b.layers.as_ref())
         {
-            layer.force_keyframe.store(true, Ordering::Release);
+            layer.demand.request_keyframe(&layer.force_keyframe);
+        }
+    }
+    /// A viewer recovery request for the primary layer; wakes its encoder worker.
+    pub fn keyframe(&self) {
+        if let Ok(inner) = self.0.lock()
+            && let Some(binding) = &inner.binding
+        {
+            binding.demand.request_keyframe(&binding.force_keyframe);
         }
     }
     pub fn layer_target(&self, bitrate: u32, layers: Option<LayerTargets>, profile: VideoProfile) {
@@ -406,6 +426,7 @@ impl ScreenState {
             if let Some(stop) = inner.stop.take() {
                 stop.store(true, Ordering::Release);
             }
+            inner.wake_workers();
             inner.binding = None;
             inner.local = None;
             inner.server.clear();
@@ -510,17 +531,22 @@ impl ScreenState {
                     }
                 }
                 // High is admitted only for a WebView that negotiated its decoder.
-                match thiscord_shared::h264::parameter_set_profile(
-                    &frame.data,
+                // Every SPS is validated during the packetizer's own NAL split.
+                let packets = match thiscord_frontend::screen::packetize_validated(
+                    frame.data,
+                    &mut sequence,
+                    frame.timestamp,
                     preview.decodes_high(),
                 ) {
-                    Ok(Some(current)) => {
-                        if current != profile {
-                            metrics.label("profile", format!("{current:?}"));
+                    Ok((packets, current)) => {
+                        if let Some(current) = current {
+                            if current != profile {
+                                metrics.label("profile", format!("{current:?}"));
+                            }
+                            profile = current;
                         }
-                        profile = current;
+                        packets
                     }
-                    Ok(None) => {}
                     Err(reason) => {
                         metrics.add("rejected_parameter_sets", 1);
                         metrics.label("last_parameter_set_rejection", &reason);
@@ -528,36 +554,25 @@ impl ScreenState {
                         rx.resync();
                         continue;
                     }
-                }
-                let Ok(packets) = thiscord_frontend::screen::packetize(
-                    frame.data,
-                    &mut sequence,
-                    frame.timestamp,
-                ) else {
-                    rx.resync();
-                    continue;
                 };
                 let submit = Instant::now();
+                // One deadline per frame (its remaining age budget) instead of a
+                // timer per packet; a stalled local write still drops the frame.
+                let deadline = tokio::time::Instant::from_std(frame.arrived + MAX_AGE);
                 let sent = tauri::async_runtime::block_on(async {
-                    for packet in packets {
-                        if !connection.active()
-                            || !lease.active()
-                            || frame.arrived.elapsed() > MAX_AGE
-                        {
-                            return false;
+                    tokio::time::timeout_at(deadline, async {
+                        for packet in packets {
+                            if !connection.active()
+                                || !lease.active()
+                                || preview.write_profile(packet, profile).await.is_err()
+                            {
+                                return false;
+                            }
                         }
-                        if !matches!(
-                            tokio::time::timeout(
-                                Duration::from_millis(50),
-                                preview.write_profile(packet, profile)
-                            )
-                            .await,
-                            Ok(Ok(_))
-                        ) {
-                            return false;
-                        }
-                    }
-                    true
+                        true
+                    })
+                    .await
+                    .unwrap_or(false)
                 });
                 metrics.time("preview_submit", submit.elapsed());
                 if sent {
@@ -697,17 +712,20 @@ pub async fn screen_view_open(
     tauri::async_runtime::spawn(async move {
         let started = Instant::now();
         let mut ticks = 0u32;
+        // One wake per second: the player renews every 1 s and the relay and
+        // demand paths check `VIEWER_LEASE` themselves, so this loop only
+        // clears an expired viewer (within 1 s of its 3 s lease) and samples.
         while lease.active() {
-            tokio::time::sleep(Duration::from_millis(250)).await;
+            tokio::time::sleep(Duration::from_secs(1)).await;
             ticks += 1;
             let Some(state) = weak.upgrade() else {
                 break;
             };
             // Dense samples while connecting, then a slow trickle for long views.
             let interval = if started.elapsed() < Duration::from_secs(15) {
-                4
+                1
             } else {
-                20
+                5
             };
             let stream = {
                 let Ok(mut inner) = state.lock() else {
@@ -850,7 +868,7 @@ pub fn screen_view_keyframe(app: tauri::AppHandle, watch: Watch) -> bool {
     if let Some(binding) = &inner.binding
         && binding.own_slot == watch.slot
     {
-        binding.force_keyframe.store(true, Ordering::Release);
+        binding.demand.request_keyframe(&binding.force_keyframe);
     }
     if let Some(inbox) = &inner.inboxes[watch.slot] {
         inbox.request_keyframe();
@@ -914,6 +932,7 @@ pub fn screen_stop(state: State<'_, ScreenState>) {
         if let Some(stop) = &inner.stop {
             stop.store(true, Ordering::Release);
         }
+        inner.wake_workers();
         inner.status.sharing = false;
         inner.status.message = "Screen sharing stopped".into();
     }
