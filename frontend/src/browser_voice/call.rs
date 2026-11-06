@@ -859,6 +859,12 @@ async fn run(
     loop {
         let wait = (next_tick.min(next_gate) - now()).clamp(0.0, TICK_MS) as u32;
         let incoming = socket::next(&inbox, wait).await;
+        // A due gate runs before parsing or handling a signaling message, so
+        // JSON work never delays a voice-activation change by a full message.
+        if now() >= next_gate {
+            next_gate = now() + rules::GATE_MS;
+            call.gate_tick();
+        }
         let mut failure = None;
         match incoming {
             Some(Incoming::Text(text)) => {

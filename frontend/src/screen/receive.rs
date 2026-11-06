@@ -1,4 +1,5 @@
 use super::Assembler;
+use bytes::Bytes;
 use std::{
     collections::VecDeque,
     sync::{Arc, Condvar, Mutex},
@@ -10,7 +11,7 @@ const REORDER_PACKETS: usize = 256;
 const QUEUE_FRAMES: usize = 8;
 const QUEUE_BYTES: usize = 8 * 1024 * 1024;
 pub struct Frame {
-    pub data: Vec<u8>,
+    pub data: Bytes,
     pub arrived: Instant,
     pub epoch: u32,
     pub reset: bool,
@@ -122,16 +123,7 @@ impl Sender {
             .0
             .metrics
             .add("received_bytes", packet.payload.len() as u64);
-        if s.epoch != Some(epoch) {
-            s.frames.clear();
-            s.assembler = Assembler::default();
-            s.synchronized = false;
-            s.timestamp = None;
-            s.reorder.clear();
-            s.next = None;
-            s.feedback_at = None;
-        }
-        s.epoch = Some(epoch);
+        Self::switch_epoch(s, epoch);
         let next = *s.next.get_or_insert(packet.header.sequence_number);
         let delta = packet.header.sequence_number.wrapping_sub(next) as i16;
         if delta < 0
@@ -151,6 +143,42 @@ impl Sender {
             .metrics
             .peak("reorder_peak_packets", s.reorder.len() as u64);
         self.drain(s, arrived);
+    }
+    fn switch_epoch(s: &mut State, epoch: u32) {
+        if s.epoch != Some(epoch) {
+            s.frames.clear();
+            s.assembler = Assembler::default();
+            s.synchronized = false;
+            s.timestamp = None;
+            s.reorder.clear();
+            s.next = None;
+            s.feedback_at = None;
+        }
+        s.epoch = Some(epoch);
+    }
+    /// The own preview: a whole encoded frame from this client's sender. It
+    /// skips reordering and reassembly (no packet clones, no copy) but keeps
+    /// the same age, byte and keyframe-synchronization admission as received
+    /// frames. Returns [`Self::next_deadline`].
+    pub fn push_frame(
+        &self,
+        data: Bytes,
+        epoch: u32,
+        timestamp: u32,
+        arrived: Instant,
+    ) -> Option<Instant> {
+        let mut s = self.inbox.0.state.lock().unwrap();
+        if !s.closed && !data.is_empty() {
+            self.inbox
+                .0
+                .metrics
+                .add("received_bytes", data.len() as u64);
+            Self::switch_epoch(&mut s, epoch);
+            s.timestamp = Some(timestamp);
+            s.arrived = Some(arrived);
+            self.queue(&mut s, data, arrived, arrived, timestamp);
+        }
+        Self::deadline(&s)
     }
     pub fn tick(&self, now: Instant) {
         self.drain(&mut self.inbox.0.state.lock().unwrap(), now);
@@ -245,6 +273,10 @@ impl Sender {
             return;
         };
         let at = s.arrived.unwrap_or(arrived);
+        self.queue(s, Bytes::from(data), at, arrived, packet.header.timestamp);
+    }
+    /// Admits one complete frame first seen at `at` (now `arrived`).
+    fn queue(&self, s: &mut State, data: Bytes, at: Instant, arrived: Instant, timestamp: u32) {
         // Keep a decodable prefix across packet loss. On actual backlog,
         // prefer the newest queued keyframe and its dependent suffix.
         let recovery = super::recovery_frame(&data);
@@ -295,7 +327,7 @@ impl Sender {
             arrived: at,
             epoch: s.epoch.unwrap(),
             reset,
-            timestamp: packet.header.timestamp,
+            timestamp,
         });
         self.inbox
             .0
@@ -375,6 +407,46 @@ impl Inbox {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn own_preview_frames_are_queued_whole_without_copies_and_wait_for_a_keyframe() {
+        let (tx, rx) = Inbox::channel();
+        let now = Instant::now();
+        let delta = Bytes::from_static(&[0, 0, 0, 1, 0x41, 1, 2]);
+        let idr = Bytes::from(vec![
+            0, 0, 0, 1, 0x67, 66, 0, 0, 1, 0x68, 1, 0, 0, 1, 0x65, 1, 2, 3,
+        ]);
+        // Unsynchronized: a delta frame is dropped and recovery is due now.
+        assert!(tx.push_frame(delta.clone(), 3, 900, now).unwrap() <= Instant::now());
+        assert_eq!(tx.keyframe_request(now), Some(3));
+        tx.push_frame(idr.clone(), 3, 1800, now);
+        tx.push_frame(delta.clone(), 3, 2700, now);
+        assert_eq!(
+            rx.metrics().snapshot().counters["received_frames"],
+            2,
+            "both queued"
+        );
+        let first = rx.next().unwrap();
+        assert!(first.reset);
+        assert_eq!(first.timestamp, 1800);
+        // The queued frame is the sender's buffer, not a reassembled copy.
+        assert_eq!(first.data.as_ptr(), idr.as_ptr());
+        let second = rx.next().unwrap();
+        assert!(!second.reset);
+        assert_eq!(second.data.as_ptr(), delta.as_ptr());
+        // A new source epoch drops the old stream state like received packets do.
+        tx.push_frame(delta, 4, 3600, now);
+        assert_eq!(tx.keyframe_request(now + Duration::from_secs(1)), Some(4));
+        let metrics = rx.metrics().snapshot();
+        assert_eq!(metrics.counters["received_frames"], 2);
+        assert_eq!(
+            metrics
+                .counters
+                .get("received_packets")
+                .copied()
+                .unwrap_or(0),
+            0
+        );
+    }
     #[test]
     fn idle_tracks_have_no_deadline_and_gaps_or_recovery_schedule_one() {
         let (tx, _rx) = Inbox::channel();

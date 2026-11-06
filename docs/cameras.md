@@ -122,7 +122,10 @@ budget (reference frames/dimensions), without including encoded data or SDP.
 WebView encoders insert no periodic keyframes. Native Rust requests one keyframe
 (PLI) when viewers first exist, then only for joins, resumed demand, SFU recovery
 requests and local write failures, with a ten-second fallback matching screens. The
-former one-second PLI spent a large share of the 1.5 Mbit/s budget on IDRs.
+former one-second PLI spent a large share of the 1.5 Mbit/s budget on IDRs. The
+relay has no periodic tick: a request wakes it through an atomic waker (no lock),
+one pinned timer covers the fallback, and both are disabled while nobody watches.
+Per-packet relay writes that complete on their first poll arm no timeout timer.
 
 Camera negotiation selects baseline H.264 with packetization mode 1 explicitly.
 Equivalent baseline offer profiles are registered exactly as offered; incompatible

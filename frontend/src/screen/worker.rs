@@ -753,7 +753,9 @@ pub(crate) fn send_frames(
             continue;
         }
         let recovery = super::recovery_frame(&frame.data);
-        let packets = super::packetize(frame.data, sequence, (frame.timestamp * 90 / 1000) as u32)?;
+        let data = bytes::Bytes::from(frame.data);
+        let packets =
+            super::packetize(data.clone(), sequence, (frame.timestamp * 90 / 1000) as u32)?;
         let budget = send_budget.track(packets.iter().map(|p| p.payload.len() + 64).sum());
         metrics.peak("sender_peak_bytes", send_budget.bytes() as u64);
         if tx
@@ -762,6 +764,7 @@ pub(crate) fn send_frames(
                 captured_at: at,
                 enqueued_at: Instant::now(),
                 packets,
+                frame: data,
                 keyframe: recovery,
                 budget,
             })

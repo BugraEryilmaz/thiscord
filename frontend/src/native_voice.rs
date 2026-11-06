@@ -295,7 +295,7 @@ impl PeerConnectionEventHandler for Handler {
                         if slot < ROOM_CAPACITY && !matches!(packet.header.csrc.len(), 0 | 2) {
                             continue;
                         }
-                        engine.notify(Command::Packet {
+                        let queued = engine.notify(Command::Packet {
                             payload_type: packet.header.payload_type,
                             source_epoch: (slot < ROOM_CAPACITY)
                                 .then(|| packet.header.csrc.first().copied())
@@ -303,13 +303,16 @@ impl PeerConnectionEventHandler for Handler {
                             privacy_epoch: (slot < ROOM_CAPACITY && packet.header.csrc.len() == 2)
                                 .then(|| packet.header.csrc[1]),
                             marker: packet.header.marker,
-                            connection: connection.clone(),
+                            connection: connection.id(),
                             slot,
                             sequence: packet.header.sequence_number,
                             timestamp: packet.header.timestamp,
                             received_at: arrived,
                             payload: packet.payload,
                         });
+                        if !queued {
+                            connection.metrics.add(thiscord_frontend::audio::quality::Count::IncomingQueueDroppedPackets, 1);
+                        }
                     }
                 }
             }
@@ -1181,7 +1184,10 @@ async fn run(
                     frame.finish(thiscord_frontend::audio::quality::Count::OutgoingFailedPackets);
                     continue;
                 }
-                if let Err(reason) = transmit_control.check(&frame, &attempt.connection, Instant::now()) {
+                // One clock read for the admission check and RED history aging; the
+                // write guard reads it once more just before the write.
+                let now = Instant::now();
+                if let Err(reason) = transmit_control.check(&frame, &attempt.connection, now) {
                     red_sender.clear();
                     transmit_control.dropped_frame(reason, &mut frame);
                     continue;
@@ -1206,7 +1212,7 @@ async fn run(
                 }
                 let (sequence, timestamp) = rtp_clock.pending(frame.media_position);
                 let red_enabled = packet_redundancy && frame.packet_redundancy;
-                let (payload_type, payload) = red_sender.packet(&frame, red_enabled, Instant::now());
+                let (payload_type, payload) = red_sender.packet(&frame, red_enabled, now);
                 let payload_bytes = payload.len();
                 let packet=rtc::rtp::Packet{header:rtc::rtp::header::Header{version:2,payload_type,ssrc:MediaKind::Microphone.publisher_ssrc(),sequence_number:sequence,timestamp,marker:frame.marker,csrc:if packet_redundancy { boundary.csrc() } else { vec![] },..Default::default()},payload};
                 match transmit_control.guard_write_until(&frame, &attempt.connection, red_sender.deadline(&frame), track.write_rtp(packet)).await {

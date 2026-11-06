@@ -30,6 +30,10 @@ use super::super::metrics::Metrics;
 const RATE: u32 = 48_000;
 /// 500 ms of interleaved stereo; overflow drops whole buffers.
 const RING_SAMPLES: usize = RATE as usize;
+/// Idle bound for the consumer: the realtime callback unparks it after each
+/// committed buffer, so this only paces stop/failure checks while silent
+/// (20 wakes/s instead of a 5 ms poll's 200).
+const IDLE_WAIT: Duration = Duration::from_millis(50);
 const UNAVAILABLE: &str = "System audio needs a running PipeWire session (pipewire and wireplumber). Video-only sharing is still available.";
 
 #[derive(Default)]
@@ -52,13 +56,14 @@ pub fn system_audio(
     let quit = Arc::new(AtomicBool::new(false));
     let counters = Arc::new(Counters::default());
     let (ready_tx, ready_rx) = mpsc::channel();
+    let consumer_thread = std::thread::current();
     let graph = {
         let quit = quit.clone();
         let counters = counters.clone();
         std::thread::Builder::new()
             .name("thiscord-system-audio-pw".into())
             .spawn(move || {
-                let result = run_graph(producer, &quit, &counters, &ready_tx);
+                let result = run_graph(producer, consumer_thread, &quit, &counters, &ready_tx);
                 if let Err(error) = result {
                     counters.failed.store(true, Ordering::Release);
                     let _ = ready_tx.send(Err(error));
@@ -81,13 +86,14 @@ pub fn system_audio(
     let (mut overflow, mut samples, mut links) = (0, 0, u32::MAX);
     let result = (|| {
         while !stop.load(Ordering::Acquire) && running() {
+            metrics.add("audio_capture_wakes", 1);
             if counters.failed.load(Ordering::Acquire) {
                 return Err("PipeWire system audio capture was interrupted.".into());
             }
             // Whole stereo frames only; the producer commits whole buffers.
             let available = consumer.occupied_len().min(buffer.len()) & !1;
             if available == 0 {
-                std::thread::sleep(Duration::from_millis(5));
+                std::thread::park_timeout(IDLE_WAIT);
             } else {
                 let n = consumer.pop_slice(&mut buffer[..available]);
                 sink(&buffer[..n & !1])?;
@@ -115,12 +121,15 @@ pub fn system_audio(
 
 struct Callback {
     producer: ringbuf::HeapProd<f32>,
+    /// The consumer; `unpark` is a futex wake (no lock or allocation).
+    consumer: std::thread::Thread,
     counters: Arc<Counters>,
 }
 
 /// Owns the PipeWire main loop for the duration of the capture.
 fn run_graph(
     producer: ringbuf::HeapProd<f32>,
+    consumer: std::thread::Thread,
     quit: &Arc<AtomicBool>,
     counters: &Arc<Counters>,
     ready: &mpsc::Sender<Result<(), String>>,
@@ -169,6 +178,7 @@ fn run_graph(
     let _stream_listener = stream
         .add_local_listener_with_user_data(Callback {
             producer,
+            consumer,
             counters: counters.clone(),
         })
         .process(|stream, callback| {
@@ -200,6 +210,7 @@ fn run_graph(
                 }
                 callback.producer.push_slice(&staging[..n]);
             }
+            callback.consumer.unpark();
             callback
                 .counters
                 .samples
@@ -602,10 +613,14 @@ mod tests {
         )
         .unwrap();
         let snapshot = metrics.snapshot();
+        let wakes = snapshot.counters["audio_capture_wakes"];
         eprintln!(
-            "captured {total} samples, peak {peak}, links {:?}",
+            "captured {total} samples, peak {peak}, links {:?}, consumer wakes {wakes} in 2 s",
             snapshot.labels.get("audio_capture_links")
         );
+        // Woken per committed PipeWire buffer (about 47/s at a 1024 quantum),
+        // not by a 5 ms poll (400 in 2 s).
+        assert!(wakes < 250, "consumer should wake per buffer, not poll");
         assert!(total > 48_000, "expected over 0.5 s of stereo audio");
         assert!(peak > 0.05, "captured audio should not be silent");
     }

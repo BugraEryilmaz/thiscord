@@ -308,6 +308,31 @@ Other changes, pinned by tests rather than benchmarks:
 - Desktop players renew their three-second viewer lease and sample decoder
   pressure once a second once playing (250 ms only while connecting) and set their
   status signal only when it changes.
+- The own screen preview receives each fully paced frame whole (a reference to the
+  encoded buffer) instead of a cloned packet with a new CSRC `Vec` per RTP packet that
+  the inbox then reordered and reassembled (unit test: the queued frame is the
+  sender's buffer). The native viewer monitor wakes once a second instead of every
+  250 ms.
+- The native camera publish relay has no 250 ms tick: keyframe requests wake it
+  through an atomic waker and one pinned timer covers the ten-second fallback (unit
+  test: a request wakes the parked relay within 50 ms; nothing pending, no wake).
+- Linux shared audio: the PipeWire callback unparks the encoding thread after each
+  buffer instead of the thread polling every 5 ms. `scripts/linux-pipewire-audio-check.sh`
+  (private PipeWire + WirePlumber in WSL, null sink, `pw-play` tone, 2 s capture):
+  95 consumer wakes with the same 192,512 samples captured, versus 439 with the old
+  poll (the test now fails above 250).
+- Windows shared audio reads each WASAPI packet into one contiguous buffer and
+  downmixes whole 20 ms chunks, instead of pushing and popping a `VecDeque` one byte
+  at a time, and takes Opus payloads from the pooled arena instead of one allocation
+  per packet.
+- Native voice: a received packet carries a copyable connection id instead of a
+  `Connection` clone (four reference counts in and out per packet). A guarded send
+  checks once and polls the write once; only a pending write arms the invalidation
+  waiter (a lock) and the deadline timer. The send arm shares one clock read between
+  admission and RED history. RTP writes for screen video, shared audio and the camera
+  relay that complete on their first poll build no timeout timer.
+- Web: a due voice-activation gate runs before an incoming signaling message is
+  parsed.
 
 Browser run (web client): the `/app` bundle from this branch, served by a local
 backend with its own database (`scripts/web-call-check-backend.sh`, WSL), in
@@ -320,9 +345,12 @@ with page hooks on `getUserMedia`, `replaceTrack`, `track.enabled`, `getStats`,
   the capture-labelled track, not the `MediaStreamAudioDestinationNode` track).
 - `getStats` ran every 1,003–1,010 ms (meters running), from its own task.
 - Voice activation, measured from an independent 5 ms analyser probe on the same
-  capture to the sent track's `enabled = true`, with 120 ms tone bursts every 1.5 s:
-  median 7–10 ms, p90 15–16 ms, max 15–18 ms over 20 openings per run for one
-  participant (two runs); 3–28 ms over 4 openings for the other. The probe itself
+  capture to the sent track's `enabled = true`, with 120 ms tone bursts every 1.5 s
+  (`WEBCHECK_HOLD=60 ... voice`, both participants in the call): hcalice median
+  7.9 ms, p95 16.2 ms, max 17.6 ms (n = 42); hcbob median 9.3 ms, p95 15.7 ms, max
+  17.5 ms (n = 42, `WEBCHECK_REVERSE=1`). Headless Chromium starves the second page's
+  probe timers (it caught 5 of about 40 onsets while that page's gate still opened on
+  every burst), so each participant is measured as the first page. The probe itself
   adds about ±5 ms.
 - Three join/leave cycles: three call `AudioContext`s created and three closed,
   and every capture, clone and processed track stopped (three per leave).
@@ -343,9 +371,31 @@ stopped every capture, clone and processed track (three per test).
 Windows relay to a browser decoder: `screen_pipeline_probe --browser --seconds=20
 --assert` with headless Chrome negotiating the probe page over the DevTools protocol:
 the app packetizer and production `Preview` loopback peer delivered all 1,196 frames,
-which Chrome decoded at 3840×2160 with 0 dropped and 0 lost (PASS, 59.9 fps). The
-desktop app's own relay loop (`native_screen.rs`), WebView player and camera tile
-observer did not run (no desktop app session).
+which Chrome decoded at 3840×2160 with 0 dropped and 0 lost (PASS, 59.9 fps).
+
+Desktop app run (Windows, debug build): the Tauri app under a separate identifier
+against a loopback Windows build of the backend (`thiscord-backend` on 127.0.0.1,
+the WSL test database through a local TCP forwarder; a WSL-hosted SFU is unreachable
+over UDP because WSL's Hyper-V firewall blocks inbound traffic by default), driven
+through WebView2's DevTools port, with a headless Chrome participant publishing its
+fake camera:
+
+- Receive relay and WebView player: the camera played at 1280×720, 20 fps (200
+  frames presented and decoded in 10 s, 0 dropped). Moving the tile out of view
+  ended its lease (0 frames in the next 3 s); back in view, the first frame arrived
+  after 1,983 ms (a new local peer and keyframe), then 19.4 fps.
+- Screen share of the 3440×1440 desktop at 1080p30 with system audio, both layers:
+  the NVIDIA MFT encoded and sent 28.2 frames/s (0 dropped, 0 send timeouts, three
+  capture textures); the own preview presented 21.9 fps at 1920×802 (231 decoded,
+  0 dropped) from the whole-frame path; the remote browser decoded 1920×802 at
+  26.4 fps (3 dropped of 280). WASAPI shared audio: 100 capture packets/s and 50.1
+  Opus frames/s sent, 0 failures, queue resets or silent packets.
+- Native voice on the real microphone and speakers: 966 capture and 966 render
+  callbacks in 9.7 s with no deadline misses (p99 50 µs), Opus encode p99 500 µs,
+  811 packets sent, none expired, invalidated or failed; 0.3 ms SFU-hop RTT. The
+  other participant was muted (no test audio through real speakers), so native
+  playback of received voice was not exercised here; it is covered by the encrypted
+  loopback and voice-bot runs.
 
 4K60 HDR pipeline probe A/B on the same machine, interleaved (base `0ae37e5` built in
 a private build directory, `screen_pipeline_probe --seconds=20 --assert`): base 59.00,
@@ -354,9 +404,10 @@ a private build directory, `screen_pipeline_probe --seconds=20 --assert`): base 
 59.2–59.9. One run of an intermediate build ended in a segmentation fault in about
 thirty runs of this branch; it did not recur and its cause is not established.
 
-Not measured: real microphones and speakers, browser main-thread profiles, total
-process VRAM, Linux desktop-portal capture and the VA/CUDA families, and
-macOS.
+Not measured: received voice on real speakers, browser main-thread profiles,
+total process VRAM, the Linux desktop app (WebKitGTK player and relay; Linux
+capture, encode, share audio and voice were run separately), Linux desktop-portal
+capture and the VA/CUDA families, and macOS.
 
 ## Reading the monitors
 

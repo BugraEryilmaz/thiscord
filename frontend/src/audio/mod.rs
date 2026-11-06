@@ -258,7 +258,7 @@ pub enum Command {
         source_epoch: Option<u32>,
         privacy_epoch: Option<u32>,
         marker: bool,
-        connection: connection::Connection,
+        connection: connection::ConnectionId,
         slot: usize,
         sequence: u16,
         timestamp: u32,
@@ -336,36 +336,32 @@ impl AudioEngine {
     pub fn diagnostic_snapshot(&self) {
         diagnostics::event("requested_worker_snapshot", self.probe.snapshot());
     }
-    pub fn notify(&self, command: Command) {
+    /// Returns `false` only when a media packet was dropped (queue full or
+    /// worker gone); the receive task counts that against its connection.
+    pub fn notify(&self, command: Command) -> bool {
         if matches!(
             command,
             Command::Roster { .. } | Command::ReceiveBoundary { .. }
         ) {
             let _ = self.notify_control(command);
-            return;
+            return true;
         }
         self.urgent(&command);
         if matches!(command, Command::Packet { .. }) {
-            if let Err(error) = self.media.try_send(command) {
-                let (mpsc::TrySendError::Full(Command::Packet { connection, .. })
-                | mpsc::TrySendError::Disconnected(Command::Packet { connection, .. })) = error
-                else {
-                    return;
-                };
-                connection
-                    .metrics
-                    .add(Count::IncomingQueueDroppedPackets, 1);
-                self.probe.packet_drops.fetch_add(1, Ordering::Relaxed);
-            }
             // Packets carry their arrival time and are only needed by the next
             // refill, which device callbacks already wake every 10 ms (with the
             // worker's 10 ms fallback). Waking per packet would add a context
             // switch per speaker packet, rarely letting batching coalesce them.
-            return;
+            if self.media.try_send(command).is_err() {
+                self.probe.packet_drops.fetch_add(1, Ordering::Relaxed);
+                return false;
+            }
+            return true;
         } else if self.sender.try_send((command, None)).is_err() {
             diagnostics::event("control_notification_dropped", self.probe.snapshot());
         }
         self.worker.unpark();
+        true
     }
     /// Privacy-critical controls may not be silently dropped. The caller must
     /// reconnect after an error; close this command's connection immediately.

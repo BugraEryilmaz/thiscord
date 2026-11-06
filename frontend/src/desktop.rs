@@ -131,7 +131,7 @@ fn main() {
                         "window_focus",
                         serde_json::json!({"focused":false}),
                     );
-                    engine.notify(thiscord_frontend::audio::Command::Pressed(false))
+                    engine.notify(thiscord_frontend::audio::Command::Pressed(false));
                 }
                 tauri::WindowEvent::Focused(true) => {
                     thiscord_frontend::audio::diagnostics::event(

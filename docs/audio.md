@@ -106,7 +106,8 @@ so the voice-activation meter keeps measuring while the gate is closed. Mute,
 push-to-talk release, deafen and server restrictions disable the sent track (silence);
 the captured track stays enabled for metering. The meter is sampled every 20 ms (the
 2048-sample analyser window spans two reads), separately from the 100 ms call tick,
-and the gate is re-applied only when it opens or closes. If the AudioContext is not running
+and the gate is re-applied only when it opens or closes. A due gate check runs before an
+incoming signaling message is parsed or handled. If the AudioContext is not running
 (autoplay refused, interrupted), the raw capture is sent instead, gated directly,
 without boost; voice activation then fails open. The client swaps tracks with
 `replaceTrack` when that changes, without renegotiating.
@@ -369,6 +370,9 @@ The audio worker sleeps until woken: queued commands, urgent mute/PTT/stop
 changes, each completed 10 ms capture block and every 10 ms of rendered playback
 unpark it. Received packets do not wake it: they carry their network arrival time
 and are needed only by the next refill, which those device wakes already trigger.
+Each queued packet carries a copyable connection id rather than a `Connection`
+clone (four reference counts per packet); the worker compares it with its session
+connection, and the receive task counts queue-overflow drops itself.
 Its fallback timeout is 10 ms during a session (timers, recovery and
 devices that stop calling back) and one second otherwise (every command unparks
 it, and the watchdog's three-second stall threshold stays satisfied). Queued packets are admitted
@@ -691,6 +695,13 @@ enqueue. Packets reaching the budget are discarded before enqueue, at dequeue,
 and before every poll of a pending WebRTC write. The same deadline
 cancels blocked admission. Thus a stalled sender drains expired entries without
 replaying an arbitrarily old backlog; expiry alone does not disconnect the call.
+The guarded write checks the frame once and polls the write once first; a write
+that completes then (the normal case: `write_rtp` only enqueues for the peer's
+driver task) arms neither the invalidation waiter (a lock) nor the deadline timer.
+A pending write is bounded by that same frame deadline (the 100 ms capture-age
+budget plus the activation delay), so the biased send arm can hold the signaling
+arms for at most that long. The send arm reads the clock once for admission and
+RED history, and the guard once more before writing.
 Transport errors retain the existing disconnect behavior. Work and memory stay
 bounded by capture/packet capacities; this does not guarantee downstream WebRTC,
 network or receiver latency after admission.

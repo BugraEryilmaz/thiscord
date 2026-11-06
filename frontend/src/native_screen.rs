@@ -691,17 +691,20 @@ pub async fn screen_view_open(
     tauri::async_runtime::spawn(async move {
         let started = Instant::now();
         let mut ticks = 0u32;
+        // One wake per second: the player renews every 1 s and the relay and
+        // demand paths check `VIEWER_LEASE` themselves, so this loop only
+        // clears an expired viewer (within 1 s of its 3 s lease) and samples.
         while lease.active() {
-            tokio::time::sleep(Duration::from_millis(250)).await;
+            tokio::time::sleep(Duration::from_secs(1)).await;
             ticks += 1;
             let Some(state) = weak.upgrade() else {
                 break;
             };
             // Dense samples while connecting, then a slow trickle for long views.
             let interval = if started.elapsed() < Duration::from_secs(15) {
-                4
+                1
             } else {
-                20
+                5
             };
             let stream = {
                 let Ok(mut inner) = state.lock() else {

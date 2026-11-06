@@ -341,13 +341,16 @@ mod tests {
                     };
                     let mut data = vec![1; size];
                     data[..5].copy_from_slice(&[0, 0, 0, 1, 0x61]);
-                    let packets = crate::screen::packetize(data, &mut sequence, captures).unwrap();
+                    let data = bytes::Bytes::from(data);
+                    let packets =
+                        crate::screen::packetize(data.clone(), &mut sequence, captures).unwrap();
                     let bytes = packets.iter().map(|p| p.payload.len() + 64).sum();
                     queue.push_back(Outgoing {
                         bitrate: quality.bitrate(),
                         captured_at: next_capture - Duration::from_millis(6),
                         enqueued_at: next_capture,
                         packets,
+                        frame: data,
                         keyframe: captures == 0,
                         budget: budget.track(bytes),
                     });

@@ -49,6 +49,10 @@ pub struct Outgoing {
     pub captured_at: std::time::Instant,
     pub enqueued_at: std::time::Instant,
     pub packets: Vec<rtc::rtp::Packet>,
+    /// The encoded Annex B frame the packets were cut from. Single-NAL packets
+    /// already share this buffer; the sender hands it to the own preview whole
+    /// (a reference count, not a copy) once the frame is fully paced.
+    pub frame: Bytes,
     pub keyframe: bool,
     pub budget: pacing::PendingBytes,
 }
@@ -199,16 +203,33 @@ fn payloads_from(nals: Vec<Bytes>) -> Vec<Bytes> {
     out
 }
 
+/// Awaits `future` for at most `limit`, but builds no timer when it completes
+/// on its first poll: an RTP write normally only enqueues for the peer's
+/// driver task, so per-packet writes skip the timeout's clock read and entry.
+pub async fn ready_or_timeout<F: std::future::Future>(
+    future: F,
+    limit: std::time::Duration,
+) -> Option<F::Output> {
+    let mut future = std::pin::pin!(future);
+    if let std::task::Poll::Ready(output) =
+        std::future::poll_fn(|cx| std::task::Poll::Ready(future.as_mut().poll(cx))).await
+    {
+        return Some(output);
+    }
+    tokio::time::timeout(limit, future).await.ok()
+}
+
 pub fn packetize(
-    data: Vec<u8>,
+    data: impl Into<Bytes>,
     sequence: &mut u16,
     timestamp: u32,
 ) -> Result<Vec<rtp::Packet>, String> {
+    let data = data.into();
     if data.is_empty() {
         return Ok(vec![]);
     }
     Ok(packets(
-        payloads_from(nal_slices(&Bytes::from(data)).0),
+        payloads_from(nal_slices(&data).0),
         sequence,
         timestamp,
     ))
@@ -219,12 +240,12 @@ pub fn packetize(
 /// the same NAL split the packetizer uses, so the relay walks a frame once.
 /// Returns the last SPS's profile; nothing is packetized when one is rejected.
 pub fn packetize_validated(
-    data: Vec<u8>,
+    data: impl Into<Bytes>,
     sequence: &mut u16,
     timestamp: u32,
     allow_high: bool,
 ) -> Result<(Vec<rtp::Packet>, Option<thiscord_shared::h264::Profile>), ParameterSetError> {
-    let (nals, annex_b) = nal_slices(&Bytes::from(data));
+    let (nals, annex_b) = nal_slices(&data.into());
     let mut profile = None;
     for nal in nals.iter().filter(|n| annex_b && n[0] & 0x1f == 7) {
         profile = Some(thiscord_shared::h264::sps_profile(nal, allow_high)?);

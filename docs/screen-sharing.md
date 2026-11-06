@@ -11,7 +11,10 @@ Click a participant's name or LIVE badge to open the room's grid; this joins tha
 voice channel if needed, using the current microphone settings. A participant
 may publish a camera and a screen simultaneously. Your camera and screen have
 local previews; the screen preview uses the same encoded frames without an SFU
-round trip. Self-preview alone does not upload screen video. While only your own
+round trip. Once a frame's packets have all been paced, the sender hands the
+preview inbox the whole encoded frame (a shared `Bytes`, not a copy), skipping
+per-packet clones, reordering and reassembly; the preview relay packetizes it
+for the WebView once, like a received frame. Self-preview alone does not upload screen video. While only your own
 screen tile is open the encoder keeps the selected preset rather than a cheaper
 preview mode: the quality controller holds a 6 s dwell before upgrading, so a first
 remote viewer would otherwise start at the preview's quality, and the tile shows what
@@ -164,7 +167,9 @@ events. System audio creates a private, non-autoconnecting PipeWire capture stre
 links every other application's `Stream/Output/Audio` ports to it (their speaker
 links are untouched), excluding nodes whose PipeWire client PID or
 `application.process.id` belongs to Thiscord's process tree. The real-time callback
-only converts samples into a bounded lock-free queue.
+only converts samples into a bounded lock-free queue and unparks the encoding
+thread (a futex wake: no lock or allocation), which otherwise sleeps up to 50 ms
+between stop checks instead of polling every 5 ms.
 
 Linux runtime packages (Debian/Ubuntu names; the `.deb` declares them):
 `gstreamer1.0-pipewire`, `gstreamer1.0-plugins-base`, `-good`, `-bad` (VA and NVENC),
@@ -341,7 +346,9 @@ GStreamer plugins. Building needs `libgstreamer1.0-dev`,
   paced keyframe bursts. This deliberately trades some playback latency for
   consistent presentation; it is a target, not an end-to-end delay guarantee.
   Unsupported WebViews retain their native buffering. Diagnostics are sampled
-  once per second alongside the viewer heartbeat.
+  once per second alongside the viewer heartbeat. The per-view monitor wakes once
+  per second (it only clears an expired lease and samples; the relay and demand
+  paths check the lease themselves).
 - Viewers send control heartbeats every 250 ms while connecting and once per second
   once playing, expire after three seconds (tolerating short UI stalls), and close on
   unmount/document hiding; a desktop camera tile scrolled out of a scrolling grid or
@@ -356,7 +363,10 @@ GStreamer plugins. Building needs `libgstreamer1.0-dev`,
   runs separately from video and microphone work. Shared audio uses 48 kHz mono
   Opus, 20 ms packets and 64 kbit/s. Capture drains available WASAPI packets before
   waiting for another event, including coalesced notifications after worker delays,
-  and zeros packets marked silent. No codec/network work enters CPAL callbacks.
+  and zeros packets marked silent. Packets are read into one contiguous buffer
+  (one copy per WASAPI packet) and downmixed in whole 20 ms chunks; Opus payloads
+  come from the pooled packet arena. RTP writes that complete on their first poll
+  (the normal case) build no timeout timer. No codec/network work enters CPAL callbacks.
 - Eight microphone, eight screen-video and eight shared-audio tracks are negotiated.
   Microphone queues and writers are separate from screen traffic. Video and shared
   audio require explicit viewer subscriptions. Negotiated screen publishers can

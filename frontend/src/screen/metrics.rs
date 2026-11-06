@@ -7,6 +7,7 @@ use std::time::{Duration, Instant};
 use thiscord_shared::screen::{Diagnostics, Timing};
 const COUNTERS: &[&str] = &[
     "audio_capture_packets",
+    "audio_capture_wakes",
     "audio_capture_discontinuities",
     "audio_capture_queue_resets",
     "audio_capture_silent_packets",

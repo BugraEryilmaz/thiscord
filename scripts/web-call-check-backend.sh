@@ -16,9 +16,11 @@ sudo -n -u postgres psql -q -f /tmp/thiscord-webcheck-db.sql 2>&1 | grep -v coll
 sudo -n -u postgres psql -Atc "SELECT 1 FROM pg_database WHERE datname='thiscord_webcheck'" 2>/dev/null | grep -q 1 \
   || sudo -n -u postgres psql -q -c "CREATE DATABASE thiscord_webcheck OWNER thiscord_webcheck TEMPLATE template0"
 export DATABASE_URL="postgres://thiscord_webcheck:webcheck-local-only@127.0.0.1/thiscord_webcheck"
-export BACKEND_BIND=127.0.0.1:3900
-export ALLOWED_ORIGINS=http://localhost:3900
-export PUBLIC_BACKEND_URL=http://localhost:3900
+PORT=${WEBCHECK_PORT:-3900}
+export BACKEND_BIND=127.0.0.1:$PORT
+# WEBCHECK_EXTRA_ORIGIN adds one origin, e.g. http://tauri.localhost for a local desktop build.
+export ALLOWED_ORIGINS=http://localhost:$PORT${WEBCHECK_EXTRA_ORIGIN:+,$WEBCHECK_EXTRA_ORIGIN}
+export PUBLIC_BACKEND_URL=http://localhost:$PORT
 export MAIL_MODE=file
 export MAIL_DIRECTORY=/tmp/hc-mail
 export RUST_LOG=info

@@ -7,12 +7,14 @@ Two Chromium contexts with fake media devices join one voice channel. Page
 hooks record: getUserMedia/clone tracks, which track each RTP sender carries,
 send-gate (`track.enabled`) changes, microphone onsets from an independent
 analyser, getStats calls, AudioContext lifetimes and track stops. Prints a JSON
-report. Usage: python3 scripts/web-call-check.py voice|leak|camera  (needs chromium and
-python3-websocket; prints a JSON report)
+report. Usage: python3 scripts/web-call-check.py voice|leak|camera|screen|devicetest|publish
+(needs chromium and python3-websocket; prints a JSON report). `publish` joins only hcbob,
+turns the camera on and holds for WEBCHECK_HOLD seconds, so a native desktop client
+logged in as hcalice against the same backend (WEBCHECK_BASE) can receive it.
 """
 import json, subprocess, sys, time, urllib.request, http.cookiejar, os, signal
 
-BASE = "http://localhost:3900"
+BASE = os.environ.get("WEBCHECK_BASE", "http://localhost:3900")
 PORT = 9333
 PASSWORD = "hill-climb-password-1"
 
@@ -128,6 +130,9 @@ def page(cdp, context):
     cdp.call("Runtime.enable", session=session)
     cdp.call("Log.enable", session=session)
     cdp.call("Emulation.setDeviceMetricsOverride", {"width": 1600, "height": 1000, "deviceScaleFactor": 1, "mobile": False}, session=session)
+    # Both participants act as focused, visible windows: a background page's
+    # throttled timers would distort the gate and onset-probe measurements.
+    cdp.call("Emulation.setFocusEmulationEnabled", {"enabled": True}, session=session)
     cdp.call("Page.addScriptToEvaluateOnNewDocument", {"source": HOOKS}, session=session)
     return session
 
@@ -182,7 +187,7 @@ def setup():
         time.sleep(0.5)
     for path in glob.glob("/tmp/hc-mail/*.txt"):
         text = open(path).read()
-        link = re.search(r"(http://localhost:3900/api/v1/account/verify-email\?token=\S+)", text)
+        link = re.search(r"(http://localhost:\d+/api/v1/account/verify-email\?token=\S+)", text)
         if link:
             try:
                 urllib.request.urlopen(link.group(1)).read()
@@ -228,10 +233,25 @@ def join(cdp, session, guild, channel, navigate=True):
 
 def report(cdp, session):
     return js(cdp, session, """(() => { const T = window.__hc; const s = T.stats;
-      return {elapsed: performance.now() - T.start, gum: T.gum, clones: T.clones, stops: T.stops,
-        contexts: T.contexts, closed: T.closed, replace: T.replace, enabled: T.enabled.slice(-40),
-        onsets: T.onsets.slice(-40), stats_calls: s.length,
+      return {elapsed: performance.now() - T.start, visibility: document.visibilityState, gum: T.gum, clones: T.clones, stops: T.stops,
+        contexts: T.contexts, closed: T.closed, replace: T.replace, enabled: T.enabled.slice(-160),
+        onsets: T.onsets.slice(-80), stats_calls: s.length,
         stats_intervals: s.slice(1).map((t, i) => Math.round(t - s[i])).slice(-20)}; })()""")
+
+
+def gate_latency(data):
+    """Onset (independent probe) to send-gate open, per participant."""
+    opens = [e["t"] for e in data["enabled"] if e["v"]]
+    lat = []
+    for onset in data["onsets"]:
+        after = [t - onset for t in opens if t >= onset - 5]
+        if after and after[0] < 400:
+            lat.append(after[0])
+    lat.sort()
+    if not lat:
+        return {"n": 0}
+    pick = lambda q: round(lat[min(len(lat) - 1, int(len(lat) * q))], 1)
+    return {"n": len(lat), "median": pick(0.5), "p95": pick(0.95), "max": round(lat[-1], 1)}
 
 
 def bursts(path="/tmp/hc-bursts.wav"):
@@ -270,17 +290,22 @@ def main():
                 time.sleep(0.2)
         cdp = Cdp(ws)
         sessions = {}
-        for user in ["hcalice", "hcbob"]:
+        # WEBCHECK_REVERSE=1 creates hcbob's page first. Headless Chromium serves the
+        # first page's timers best, so the voice gate is measured per participant by
+        # running once in each order (both participants are in the call either way).
+        users = ["hcbob", "hcalice"] if os.environ.get("WEBCHECK_REVERSE") else ["hcalice", "hcbob"]
+        for user in (["hcbob"] if scenario == "publish" else users):
             ctx = cdp.call("Target.createBrowserContext")["browserContextId"]
             sessions[user] = page(cdp, ctx)
             login(cdp, sessions[user], user)
         out = {"scenario": scenario}
         if scenario == "voice":
-            for user in ["hcalice", "hcbob"]:
+            for user in users:
                 join(cdp, sessions[user], guild, channel)
-            time.sleep(30)
+            time.sleep(int(os.environ.get("WEBCHECK_HOLD", "30")))
             for user, s in sessions.items():
                 out[user] = report(cdp, s)
+                out[user]["gate_ms"] = gate_latency(out[user])
         elif scenario == "leak":
             s = sessions["hcalice"]
             join(cdp, sessions["hcbob"], guild, channel)
@@ -320,6 +345,21 @@ def main():
               return out; })()""")
             out["hcalice"]["tile_status"] = js(cdp, alice, "[...document.querySelectorAll('.stream-player-status')].map(e => e.innerText)")
             out["hcalice"]["players"] = js(cdp, alice, "[...document.querySelectorAll('video')].map(v => [v.videoWidth, v.videoHeight, v.readyState])")
+        elif scenario == "publish":
+            bob = sessions["hcbob"]
+            join(cdp, bob, guild, channel)
+            camera = "[...document.querySelectorAll('button[aria-label=\"Camera\"]')].find(b => b.offsetParent !== null && !b.disabled)"
+            wait(cdp, bob, "!!" + camera, 30)
+            js(cdp, bob, camera + ".click(), true")
+            # Muted: the desktop receiver plays through real speakers.
+            js(cdp, bob, "[...document.querySelectorAll('button[aria-label=\"Mute\"]')].find(b => b.offsetParent !== null)?.click(), true")
+            print("publishing", flush=True)
+            time.sleep(int(os.environ.get("WEBCHECK_HOLD", "120")))
+            out["hcbob"] = report(cdp, bob)
+            out["hcbob"]["video_out"] = js(cdp, bob, """(async () => { const out = [];
+              for (const pc of window.__hcPcs) { const r = await pc.getStats(); r.forEach(s => {
+                if (s.type === 'outbound-rtp' && s.kind === 'video') out.push({framesEncoded: s.framesEncoded, frameWidth: s.frameWidth, fps: s.framesPerSecond}); }); }
+              return out; })()""")
         elif scenario == "screen":
             for user in ["hcalice", "hcbob"]:
                 join(cdp, sessions[user], guild, channel)

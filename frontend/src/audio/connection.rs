@@ -5,6 +5,11 @@ use std::sync::{
 };
 use thiscord_shared::RequestId;
 static NEXT_ID: AtomicU64 = AtomicU64::new(1);
+/// A connection's identity, carried by each received packet instead of a
+/// [`Connection`] clone (four reference counts per packet). Ids start at 1,
+/// so the default id matches no connection.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct ConnectionId(u64);
 #[derive(Clone)]
 pub struct Connection {
     alive: Arc<AtomicBool>,
@@ -69,6 +74,14 @@ impl Connection {
     }
     pub fn accepts(&self, other: &Self) -> bool {
         self.active() && other.active() && Arc::ptr_eq(&self.alive, &other.alive)
+    }
+    pub fn id(&self) -> ConnectionId {
+        ConnectionId(self.diagnostic_id)
+    }
+    /// [`Self::accepts`] for a packet's id: clones share one id and one
+    /// liveness flag, so this connection being active covers the packet's.
+    pub fn accepts_id(&self, id: ConnectionId) -> bool {
+        self.active() && self.diagnostic_id == id.0
     }
 }
 #[cfg(test)]
