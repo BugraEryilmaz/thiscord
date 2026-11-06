@@ -206,6 +206,10 @@ pub fn front_units(mut data: &[u8], mut unit: impl FnMut(&[u8])) {
         data = &data[end..];
     }
 }
+/// Validates one SPS NAL unit (header byte included) like [`parameter_set_profile`].
+pub fn sps_profile(nal: &[u8], allow_high: bool) -> Result<Profile, ParameterSetError> {
+    inspect_sps(nal, allow_high).ok_or(ParameterSetError::Malformed)?
+}
 /// [`parameter_set_profile`] over [`front_units`]: own encoder output only.
 pub fn front_parameter_set_profile(
     data: &[u8],

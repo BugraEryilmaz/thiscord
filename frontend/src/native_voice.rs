@@ -142,10 +142,12 @@ impl<T: PartialEq + Clone> Refresh<T> {
     fn invalidate(&mut self) {
         self.last = None;
     }
-    fn due(&mut self, value: &T, now: Instant) -> bool {
+    /// `renew: false` sends an unchanged value only once (an empty view list
+    /// holds no server lease, so it never needs renewal).
+    fn due(&mut self, value: &T, renew: bool, now: Instant) -> bool {
         if let Some((last, at)) = &self.last
             && last == value
-            && now.saturating_duration_since(*at) < self.period
+            && (!renew || now.saturating_duration_since(*at) < self.period)
         {
             return false;
         }
@@ -222,19 +224,34 @@ impl PeerConnectionEventHandler for Handler {
             // Every video track used to wake every 10 ms for the whole call,
             // shared or not. Sleep until the inbox's next gap/recovery deadline;
             // the 250 ms idle bound only picks up UI-initiated recovery requests.
+            // One pinned timer, re-armed only when the wake time changes: packets
+            // usually leave the deadline unchanged, so no timer entry is
+            // registered and dropped per RTP packet.
             let mut deadline = None;
+            let mut idle_at = Instant::now() + Duration::from_millis(250);
+            let mut armed = idle_at;
+            let timer = tokio::time::sleep_until(armed.into());
+            tokio::pin!(timer);
             loop {
                 if !connection.active() {
                     break;
                 }
-                let wake = deadline.unwrap_or_else(|| Instant::now() + Duration::from_millis(250));
+                let wake = deadline.unwrap_or(idle_at);
+                if wake != armed && screen_receiver.is_some() {
+                    armed = wake;
+                    timer.as_mut().reset(wake.into());
+                }
                 let event = tokio::select! { biased;
                     _ = closed.changed() => break,
-                    _ = tokio::time::sleep_until(wake.into()), if screen_receiver.is_some() => {
+                    _ = &mut timer, if screen_receiver.is_some() => {
                         let receiver = screen_receiver.as_ref().unwrap();
-                        receiver.tick(Instant::now());
-                        if let Some(epoch) = receiver.keyframe_request(Instant::now()) && let Some((kind, slot)) = MediaKind::from_relay_ssrc(ssrc) { let _ = keyframes.try_send((kind, slot, epoch)); }
+                        let now = Instant::now();
+                        receiver.tick(now);
+                        if let Some(epoch) = receiver.keyframe_request(now) && let Some((kind, slot)) = MediaKind::from_relay_ssrc(ssrc) { let _ = keyframes.try_send((kind, slot, epoch)); }
                         deadline = receiver.next_deadline();
+                        idle_at = now + Duration::from_millis(250);
+                        // Force a re-arm even if the next wake equals the old one.
+                        armed = now;
                         continue;
                     },
                     event = track.poll() => match event { Some(event) => event, None => break },
@@ -242,8 +259,7 @@ impl PeerConnectionEventHandler for Handler {
                 if let TrackRemoteEvent::OnRtpPacket(packet) = event {
                     let arrived = Instant::now();
                     if let Some(receiver) = &screen_receiver {
-                        receiver.push(packet, Instant::now());
-                        deadline = receiver.next_deadline();
+                        deadline = receiver.push(packet, arrived);
                         continue;
                     }
                     let slot = MediaKind::from_relay_ssrc(packet.header.ssrc)
@@ -1369,14 +1385,14 @@ async fn run(
                 let now = Instant::now();
                 if (!packet_redundancy || configuration.muted || configuration.deafened || boundary.ready())
                     && !signaling.recovering()
-                    && voice_state.due(&(configuration.muted, configuration.deafened), now)
+                    && voice_state.due(&(configuration.muted, configuration.deafened), true, now)
                 {
                     signaling.send(ClientEvent::State{muted:configuration.muted,deafened:configuration.deafened});
                 }
                 if screen_subscriptions && !signaling.recovering() {
                     let mut views = if deafened { vec![] } else { app.state::<crate::native_screen::ScreenState>().subscriptions() };
                     if !deafened { views.extend(camera.views.subscriptions()); }
-                    if views_sent.due(&views, now) {
+                    if views_sent.due(&views, !views.is_empty(), now) {
                         signaling.send(ClientEvent::ScreenViews { views });
                     }
                 }
@@ -1393,25 +1409,39 @@ mod tests {
     fn unchanged_signaling_waits_for_refresh_and_changes_send_immediately() {
         let start = Instant::now();
         let mut state = Refresh::new(Duration::from_secs(5));
-        assert!(state.due(&(false, false), start));
+        assert!(state.due(&(false, false), true, start));
         for tick in 1..10 {
-            assert!(!state.due(&(false, false), start + Duration::from_millis(tick * 500)));
+            assert!(!state.due(
+                &(false, false),
+                true,
+                start + Duration::from_millis(tick * 500)
+            ));
         }
-        assert!(state.due(&(false, false), start + Duration::from_secs(5)));
-        assert!(state.due(&(true, false), start + Duration::from_millis(5500)));
-        assert!(!state.due(&(true, false), start + Duration::from_secs(6)));
+        assert!(state.due(&(false, false), true, start + Duration::from_secs(5)));
+        assert!(state.due(&(true, false), true, start + Duration::from_millis(5500)));
+        assert!(!state.due(&(true, false), true, start + Duration::from_secs(6)));
         state.invalidate();
-        assert!(state.due(&(true, false), start + Duration::from_millis(6500)));
-        // Views renew inside the server's lease even when unchanged.
+        assert!(state.due(&(true, false), true, start + Duration::from_millis(6500)));
+        // A non-empty view list renews inside the server's lease even when
+        // unchanged; an unchanged empty list is sent once.
         let mut views = Refresh::new(Duration::from_secs(1));
         let lease = Duration::from_secs(thiscord_shared::screen::VIEW_LEASE_SECS);
         let mut last = start;
         for tick in 0..20 {
             let now = start + Duration::from_millis(tick * 500);
-            if views.due(&Vec::<u32>::new(), now) {
+            if views.due(&vec![1u32], true, now) {
                 last = now;
             }
             assert!(now - last < lease);
+        }
+        let later = start + Duration::from_secs(20);
+        assert!(views.due(&Vec::new(), false, later), "emptying is a change");
+        for tick in 1..20 {
+            assert!(!views.due(
+                &Vec::new(),
+                false,
+                later + Duration::from_millis(tick * 500)
+            ));
         }
     }
 

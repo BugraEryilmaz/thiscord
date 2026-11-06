@@ -1,8 +1,5 @@
 //! Fixed-capacity SPSC queues. The device callback never allocates, locks or waits.
-use super::{
-    clips, cues, frames,
-    quality::{Count, Metrics},
-};
+use super::{clips, cues, frames, quality::Count};
 use ringbuf::{HeapCons, HeapProd, HeapRb, traits::*};
 use std::sync::{
     Arc, OnceLock,
@@ -72,7 +69,7 @@ pub struct CallbackCounts {
     pub output_clipped: SampleCounter,
 }
 impl CallbackCounts {
-    pub fn drain(&self, metrics: &Metrics) {
+    pub fn drain(&self, metrics: &impl super::quality::Sink) {
         for (counter, event) in [
             (&self.capture_overflow, Count::CaptureOverflowSamples),
             (&self.reference_overflow, Count::ReferenceOverflowSamples),
@@ -103,7 +100,7 @@ impl PlaybackCounts {
             counter.drain();
         }
     }
-    pub fn drain(&self, metrics: &Metrics) {
+    pub fn drain(&self, metrics: &impl super::quality::Sink) {
         for (counter, event) in [
             (&self.starvation, Count::StarvationSamples),
             (&self.unknown, Count::EmptyUnknownSamples),
@@ -730,6 +727,7 @@ impl Privacy {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::audio::quality::Metrics;
     #[test]
     fn server_deafen_discards_microphone_and_system_pcm_without_changing_self_state() {
         let controls = Arc::new(Controls::default());

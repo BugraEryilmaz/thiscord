@@ -37,7 +37,8 @@ pub(super) struct ResetCauses {
 }
 
 pub struct Processing {
-    pub metrics: std::sync::Arc<super::quality::Metrics>,
+    /// Worker-local batch over the connection's shared window.
+    pub metrics: super::quality::Batched,
     apm: AudioProcessing,
     config: Config,
     render_at: Option<Instant>,
@@ -403,8 +404,13 @@ impl Processing {
         self.chain.delay_samples()
     }
     pub fn render(&mut self, frame: &[f32; 480]) -> Result<(), Failure> {
-        let metrics = self.metrics.clone();
-        let _timer = metrics.timed(super::quality::Stage::Render);
+        let started = std::time::Instant::now();
+        let result = self.render_untimed(frame);
+        self.metrics
+            .duration(super::quality::Stage::Render, started.elapsed());
+        result
+    }
+    fn render_untimed(&mut self, frame: &[f32; 480]) -> Result<(), Failure> {
         let _float_mode = denormals::Guard::new();
         let peak = frame.iter().fold(0.0_f32, |peak, v| peak.max(v.abs()));
         // Hold short peaks for the UI poll; silence makes old metrics unavailable.
@@ -523,8 +529,18 @@ impl Processing {
         delay_ms: i32,
         retain: bool,
     ) -> Result<f32, Failure> {
-        let metrics = self.metrics.clone();
-        let _timer = metrics.timed(super::quality::Stage::Capture);
+        let started = std::time::Instant::now();
+        let result = self.capture_frame_untimed(frame, delay_ms, retain);
+        self.metrics
+            .duration(super::quality::Stage::Capture, started.elapsed());
+        result
+    }
+    fn capture_frame_untimed(
+        &mut self,
+        frame: &mut [f32; 480],
+        delay_ms: i32,
+        retain: bool,
+    ) -> Result<f32, Failure> {
         let _float_mode = denormals::Guard::new();
         if frame.iter().any(|x| !x.is_finite()) {
             frame.fill(0.0);

@@ -108,6 +108,29 @@ fn main() {
             metrics.duration(Stage::Decode, black_box(Duration::from_micros(40)));
         });
     }
+    // BATCHED-START (absent before worker-local batching)
+    {
+        use std::time::{Duration, Instant};
+        use thiscord_frontend::audio::quality::{Batched, Count, Stage};
+        let batch = Batched::default();
+        let mut now = Instant::now();
+        measure("quality batched: 5 counts + 1 timing", 1_000_000, || {
+            // The worker's refill tick time, advanced one frame per call.
+            now += Duration::from_millis(20);
+            batch.tick(now);
+            for count in [
+                Count::ReceivedPackets,
+                Count::DecodedSamples,
+                Count::PlcSamples,
+                Count::FecAttempts,
+                Count::PcmOverflowSamples,
+            ] {
+                batch.add(count, black_box(1));
+            }
+            batch.duration(Stage::Decode, black_box(Duration::from_micros(40)));
+        });
+    }
+    // BATCHED-END
     // ARENA-START (absent before the pooled send arena)
     {
         use thiscord_frontend::audio::arena::PacketArena;

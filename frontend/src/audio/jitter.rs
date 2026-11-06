@@ -95,7 +95,8 @@ struct Counters {
     concealed_samples: u64,
 }
 pub struct Jitter {
-    pub quality: std::sync::Arc<quality::Metrics>,
+    /// Worker-local; merged into its window at most once per second.
+    pub quality: quality::Batched,
     packets: Vec<Packet>,
     redundant: Vec<(u32, Instant, bytes::Bytes)>,
     cursor: Option<u32>,

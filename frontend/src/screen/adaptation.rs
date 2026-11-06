@@ -8,7 +8,12 @@ use thiscord_shared::screen::{
 };
 
 #[derive(Default)]
-pub struct Demand(Mutex<Option<(u32, Instant)>>, Mutex<EncoderFeedback>);
+pub struct Demand(
+    Mutex<Option<(u32, Instant)>>,
+    Mutex<EncoderFeedback>,
+    /// Wakes a worker paused for lack of demand when demand returns.
+    Mutex<Option<std::sync::Arc<dyn Fn() + Send + Sync>>>,
+);
 
 /// Local, per-layer sender evidence. A rejection wins over delivery in the same
 /// poll; consuming feedback never erases the controller's recovery history.
@@ -33,7 +38,17 @@ impl Demand {
         } else {
             0
         };
+        let was = self.bitrate();
         *self.0.lock().unwrap() = Some((bitrate, Instant::now()));
+        if was == 0
+            && bitrate > 0
+            && let Some(wake) = self.2.lock().unwrap().as_ref()
+        {
+            wake();
+        }
+    }
+    pub fn set_wake(&self, wake: std::sync::Arc<dyn Fn() + Send + Sync>) {
+        *self.2.lock().unwrap() = Some(wake);
     }
     /// A measured encoded burst cannot fit the receiver assembly deadline.
     /// Keep this signal local to the affected encoder; it is not viewer feedback.

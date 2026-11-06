@@ -24,6 +24,8 @@ pub const SOURCE_CHECK: Duration = Duration::from_millis(100);
 /// Longest encoder-worker sleep without a capture or encoder wake. It bounds how
 /// long atomics (demand, feedback, stop) can wait to be observed.
 const IDLE_WAIT: Duration = Duration::from_millis(20);
+/// Longest sleep while paused without demand; demand returning wakes it at once.
+const PAUSED_WAIT: Duration = Duration::from_millis(250);
 /// Raw captures older than this are never encoded.
 const RAW_MAX_AGE: Duration = Duration::from_millis(250);
 
@@ -306,6 +308,7 @@ pub fn encode<P: Platform>(
     let mut send_budget =
         super::pacing::SendBudget::new(super::pacing::transport_bitrate(quality.bitrate()))
             .with_wake(std::sync::Arc::from(waker(mailbox)));
+    demand.set_wake(std::sync::Arc::from(waker(mailbox)));
     metrics.label("sender_backlog_budget_ms", super::pacing::BACKLOG_BUDGET_MS);
     metrics.label("requested_fps", requested.fps);
     metrics.label("requested_height", requested.height);
@@ -349,7 +352,18 @@ pub fn encode<P: Platform>(
                 metrics.label("video_paused", true);
             }
             paused = true;
-            std::thread::sleep(Duration::from_millis(20));
+            // Returning demand wakes this wait (`Demand::set_wake`); the timeout
+            // only bounds how long a stop or closed source goes unnoticed.
+            let guard = mailbox.0.lock().unwrap();
+            let (mut guard, _) = mailbox
+                .1
+                .wait_timeout_while(guard, PAUSED_WAIT, |m| !m.closed && !m.encoder_event)
+                .unwrap();
+            metrics.add("worker_wakes", 1);
+            if guard.closed {
+                return Err("The shared source closed; sharing stopped.".into());
+            }
+            guard.encoder_event = false;
             continue;
         };
         // A profile change rebuilds like a quality change: the new bitstream
@@ -931,6 +945,85 @@ mod tests {
             "first output is an IDR"
         );
         assert_eq!(created.load(Ordering::Acquire), 1);
+    }
+
+    /// Without demand the worker sleeps (no 20 ms polling); returning demand
+    /// wakes it immediately rather than at its fallback timeout.
+    #[test]
+    fn paused_worker_sleeps_until_demand_returns() {
+        let connection = Connection::default();
+        let (user, session) = (AtomicBool::new(false), AtomicBool::new(false));
+        let stops = Stops {
+            user: &user,
+            session: &session,
+        };
+        let active_fps = [AtomicU32::new(0), AtomicU32::new(0)];
+        let high = AtomicBool::new(false);
+        let shared = Shared {
+            stops: &stops,
+            connection: &connection,
+            started: Instant::now(),
+            active_fps: &active_fps,
+            high_profile: &high,
+        };
+        let demand = Demand::default();
+        let force = AtomicBool::new(false);
+        let metrics = Metrics::default();
+        let mailbox = inbox::<u32>();
+        let (tx, mut rx) = tokio::sync::mpsc::channel(64);
+        let mut platform = Fake {
+            created: Arc::default(),
+        };
+        let quality = Quality {
+            height: 720,
+            fps: 30,
+        };
+        std::thread::scope(|scope| {
+            let job = scope.spawn(|| {
+                encode(
+                    &mut platform,
+                    &mailbox,
+                    None,
+                    &shared,
+                    Layer {
+                        quality,
+                        tx,
+                        metrics: &metrics,
+                        force_keyframe: &force,
+                        demand: &demand,
+                        secondary: false,
+                    },
+                    &mut |_| {},
+                )
+            });
+            let frame = |n| Pixels {
+                frame: n,
+                width: 1280,
+                height: 720,
+                arrived: Instant::now(),
+            };
+            deliver(std::slice::from_ref(&mailbox), frame(1), &metrics);
+            std::thread::sleep(Duration::from_secs(1));
+            let paused_wakes = metrics.snapshot().counters["worker_wakes"];
+            assert!(
+                paused_wakes <= 6,
+                "{paused_wakes} wakes in one paused second"
+            );
+            assert_eq!(metrics.snapshot().counters["encoded_frames"], 0);
+            let resumed = Instant::now();
+            demand.update(5_000_000);
+            deliver(std::slice::from_ref(&mailbox), frame(2), &metrics);
+            while metrics.snapshot().counters["encoded_frames"] == 0 {
+                assert!(
+                    resumed.elapsed() < Duration::from_millis(150),
+                    "demand woke the worker"
+                );
+                std::thread::sleep(Duration::from_millis(1));
+                while rx.try_recv().is_ok() {}
+            }
+            close(std::slice::from_ref(&mailbox));
+            assert!(job.join().unwrap().is_err());
+        });
     }
 
     /// A 15 fps low layer fed 60 fps captures holds most frames for cadence.

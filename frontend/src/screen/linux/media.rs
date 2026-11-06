@@ -565,7 +565,9 @@ impl Drop for Capture {
     }
 }
 
-type Outputs = Arc<Mutex<VecDeque<(u64, Vec<u8>)>>>;
+/// Encoded buffers are queued by reference; `poll` copies each once, with any
+/// parameter-set prefix, into the frame it hands to the sender.
+type Outputs = Arc<Mutex<VecDeque<(u64, gst::Buffer)>>>;
 /// Maximum submitted inputs without output, as on Windows.
 const MAX_PENDING: usize = 4;
 const STALL: Duration = Duration::from_millis(500);
@@ -646,7 +648,7 @@ impl Layer {
             gst_app::AppSinkCallbacks::builder()
                 .new_sample(move |sink| {
                     let sample = sink.pull_sample().map_err(|_| gst::FlowError::Eos)?;
-                    let buffer = sample.buffer().ok_or(gst::FlowError::Error)?;
+                    let buffer = sample.buffer_owned().ok_or(gst::FlowError::Error)?;
                     // Encoders shift timestamps (x264/NVENC add a 1000 h
                     // min-PTS) and compensate in the segment; running time is
                     // the input timeline.
@@ -659,11 +661,10 @@ impl Layer {
                                 .and_then(|s| s.to_running_time(pts))
                         })
                         .map_or(0, gst::ClockTime::useconds);
-                    let map = buffer.map_readable().map_err(|_| gst::FlowError::Error)?;
-                    if map.len() > thiscord_shared::screen::MAX_FRAME_BYTES {
+                    if buffer.size() > thiscord_shared::screen::MAX_FRAME_BYTES {
                         return Err(gst::FlowError::Error);
                     }
-                    queue.lock().unwrap().push_back((pts, map.to_vec()));
+                    queue.lock().unwrap().push_back((pts, buffer));
                     wake();
                     Ok(gst::FlowSuccess::Ok)
                 })
@@ -740,7 +741,10 @@ impl LayerEncoder for Layer {
                     submitted = Some(at);
                 }
             }
-            let data = self.units.finish(data).map_err(|error| {
+            let map = data
+                .map_readable()
+                .map_err(|_| "Cannot read encoded H.264 output".to_owned())?;
+            let data = self.units.finish_slice(&map).map_err(|error| {
                 format!("Encoder produced an out-of-bounds H.264 access unit: {error}")
             })?;
             frames.push(Encoded {

@@ -159,6 +159,19 @@ impl Window {
         let b = self.bucket(second);
         b.counts[event as usize] = b.counts[event as usize].saturating_add(n);
     }
+    /// One lock for a whole batch of counts and timings from one second.
+    fn merge(&mut self, second: u64, counts: &[u64; COUNT], timings: &[Histogram; 4]) {
+        for (total, n) in self.total.iter_mut().zip(counts) {
+            *total = total.saturating_add(*n);
+        }
+        let b = self.bucket(second);
+        for (count, n) in b.counts.iter_mut().zip(counts) {
+            *count = count.saturating_add(*n);
+        }
+        for (timing, batch) in b.timings.iter_mut().zip(timings) {
+            timing.merge(batch);
+        }
+    }
     fn snapshot(&mut self, elapsed: Duration) -> QualityMetrics {
         self.bucket(elapsed.as_secs());
         let mut recent = [0u64; COUNT];
@@ -298,6 +311,103 @@ impl Drop for Timer<'_> {
     }
 }
 
+/// Anything that accepts quality counts: the shared window or a worker batch.
+pub trait Sink {
+    fn add(&self, event: Count, n: u64);
+}
+impl Sink for Metrics {
+    fn add(&self, event: Count, n: u64) {
+        Metrics::add(self, event, n);
+    }
+}
+
+/// Worker-local accounting for one received stream. Counts and stage timings
+/// accumulate without a lock or clock read, then merge into the shared window
+/// at most once per second (when the worker's tick time enters a new second)
+/// and before any snapshot. Not `Sync`: only the audio worker touches it.
+#[derive(Default)]
+pub struct Batched {
+    metrics: std::sync::Arc<Metrics>,
+    counts: [std::cell::Cell<u64>; COUNT],
+    timings: std::cell::RefCell<[Histogram; 4]>,
+    pending: std::cell::Cell<bool>,
+    second: std::cell::Cell<u64>,
+}
+impl Sink for Batched {
+    fn add(&self, event: Count, n: u64) {
+        Batched::add(self, event, n);
+    }
+}
+impl Batched {
+    pub fn add(&self, event: Count, n: u64) {
+        if n == 0 {
+            return;
+        }
+        let count = &self.counts[event as usize];
+        count.set(count.get().saturating_add(n));
+        self.pending.set(true);
+    }
+    pub fn duration(&self, stage: Stage, elapsed: Duration) {
+        self.timings.borrow_mut()[stage as usize].record(
+            elapsed.as_micros().min(u128::from(u64::MAX)) as u64,
+            stage.budget(),
+        );
+        self.pending.set(true);
+    }
+    pub fn timed(&self, stage: Stage) -> BatchTimer<'_> {
+        BatchTimer {
+            batch: self,
+            stage,
+            start: Instant::now(),
+        }
+    }
+    /// Batches into an existing shared window (for example a connection's).
+    pub fn new(metrics: std::sync::Arc<Metrics>) -> Self {
+        Self {
+            metrics,
+            ..Default::default()
+        }
+    }
+    /// The shared window this batch merges into.
+    pub fn shared(&self) -> &std::sync::Arc<Metrics> {
+        &self.metrics
+    }
+    /// Called with the worker's existing tick time; merges what accumulated
+    /// during the previous second once that second is over.
+    pub fn tick(&self, now: Instant) {
+        let second = now.saturating_duration_since(self.metrics.start).as_secs();
+        if second != self.second.get() {
+            self.flush();
+            self.second.set(second);
+        }
+    }
+    /// Merges pending data now (before reading the shared window directly).
+    pub fn flush(&self) {
+        if !self.pending.replace(false) {
+            return;
+        }
+        let counts = std::array::from_fn(|i| self.counts[i].take());
+        let timings = std::mem::take(&mut *self.timings.borrow_mut());
+        if let Ok(mut w) = self.metrics.window.lock() {
+            w.merge(self.second.get(), &counts, &timings);
+        }
+    }
+    pub fn snapshot(&self) -> QualityMetrics {
+        self.flush();
+        self.metrics.snapshot()
+    }
+}
+pub struct BatchTimer<'a> {
+    batch: &'a Batched,
+    stage: Stage,
+    start: Instant,
+}
+impl Drop for BatchTimer<'_> {
+    fn drop(&mut self) {
+        self.batch.duration(self.stage, self.start.elapsed());
+    }
+}
+
 /// Only numeric, hop-scoped fields; no addresses or report/transport identifiers.
 #[derive(Clone, Copy, Default)]
 pub struct HopStats {
@@ -413,6 +523,31 @@ mod tests {
         h.record(u64::MAX, 0);
         assert_eq!(h.calls, u64::MAX);
         assert!(h.percentile(99).is_some());
+    }
+    #[test]
+    fn batches_merge_once_per_second_and_before_snapshots() {
+        let batch = Batched::default();
+        let start = batch.metrics.start;
+        for packet in 0..50u64 {
+            batch.tick(start + Duration::from_millis(packet * 20));
+            batch.add(Count::ReceivedPackets, 1);
+            batch.duration(Stage::Decode, Duration::from_micros(40));
+        }
+        // Nothing has reached the shared window during the first second.
+        assert_eq!(batch.metrics.snapshot().total.received_packets, 0);
+        batch.tick(start + Duration::from_millis(1_000));
+        let merged = batch.metrics.snapshot();
+        assert_eq!(merged.total.received_packets, 50);
+        assert_eq!(merged.decode.calls, 50);
+        batch.add(Count::LatePackets, 2);
+        // A snapshot through the batch includes what is still pending.
+        let s = batch.snapshot();
+        assert_eq!((s.total.received_packets, s.total.late_packets), (50, 2));
+        assert_eq!(
+            batch.snapshot().total.late_packets,
+            2,
+            "flushed exactly once"
+        );
     }
     #[test]
     fn hop_values_expire_and_reconnect_has_no_previous_measurements() {

@@ -510,17 +510,22 @@ impl ScreenState {
                     }
                 }
                 // High is admitted only for a WebView that negotiated its decoder.
-                match thiscord_shared::h264::parameter_set_profile(
-                    &frame.data,
+                // Every SPS is validated during the packetizer's own NAL split.
+                let packets = match thiscord_frontend::screen::packetize_validated(
+                    frame.data,
+                    &mut sequence,
+                    frame.timestamp,
                     preview.decodes_high(),
                 ) {
-                    Ok(Some(current)) => {
-                        if current != profile {
-                            metrics.label("profile", format!("{current:?}"));
+                    Ok((packets, current)) => {
+                        if let Some(current) = current {
+                            if current != profile {
+                                metrics.label("profile", format!("{current:?}"));
+                            }
+                            profile = current;
                         }
-                        profile = current;
+                        packets
                     }
-                    Ok(None) => {}
                     Err(reason) => {
                         metrics.add("rejected_parameter_sets", 1);
                         metrics.label("last_parameter_set_rejection", &reason);
@@ -528,14 +533,6 @@ impl ScreenState {
                         rx.resync();
                         continue;
                     }
-                }
-                let Ok(packets) = thiscord_frontend::screen::packetize(
-                    frame.data,
-                    &mut sequence,
-                    frame.timestamp,
-                ) else {
-                    rx.resync();
-                    continue;
                 };
                 let submit = Instant::now();
                 // One deadline per frame (its remaining age budget) instead of a

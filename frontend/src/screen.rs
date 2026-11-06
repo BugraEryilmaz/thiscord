@@ -119,17 +119,25 @@ const VIDEO_MTU: usize = 1100;
 /// next NAL unit, FU-A above the MTU), but app-owned: NAL units that fit are
 /// zero-copy slices of the frame, and every STAP-A/FU-A payload is cut from one
 /// buffer reserved per frame instead of one allocation per fragment.
-fn payloads(frame: Bytes) -> Vec<Bytes> {
-    const FUA: u8 = 28;
-    let starts = thiscord_shared::h264::nal_units(&frame).next().is_some();
-    let nals: Vec<Bytes> = if starts {
-        thiscord_shared::h264::nal_units(&frame)
-            .filter(|nal| !nal.is_empty())
-            .map(|nal| frame.slice_ref(nal))
-            .collect()
+/// NAL units as zero-copy slices, and whether the frame had Annex B start
+/// codes (without any, the whole frame is sent as one unit).
+fn nal_slices(frame: &Bytes) -> (Vec<Bytes>, bool) {
+    let nals: Vec<Bytes> = thiscord_shared::h264::nal_units(frame)
+        .filter(|nal| !nal.is_empty())
+        .map(|nal| frame.slice_ref(nal))
+        .collect();
+    if nals.is_empty() && thiscord_shared::h264::nal_units(frame).next().is_none() {
+        (vec![frame.clone()], false)
     } else {
-        vec![frame.clone()]
-    };
+        (nals, true)
+    }
+}
+#[cfg(test)]
+fn payloads(frame: Bytes) -> Vec<Bytes> {
+    payloads_from(nal_slices(&frame).0)
+}
+fn payloads_from(nals: Vec<Bytes>) -> Vec<Bytes> {
+    const FUA: u8 = 28;
     let fragments = nals
         .iter()
         .filter(|n| n.len() > VIDEO_MTU)
@@ -199,9 +207,37 @@ pub fn packetize(
     if data.is_empty() {
         return Ok(vec![]);
     }
-    let payloads = payloads(Bytes::from(data));
+    Ok(packets(
+        payloads_from(nal_slices(&Bytes::from(data)).0),
+        sequence,
+        timestamp,
+    ))
+}
+
+/// [`packetize`] for frames received from other publishers: every SPS is
+/// validated (as [`thiscord_shared::h264::parameter_set_profile`] would) during
+/// the same NAL split the packetizer uses, so the relay walks a frame once.
+/// Returns the last SPS's profile; nothing is packetized when one is rejected.
+pub fn packetize_validated(
+    data: Vec<u8>,
+    sequence: &mut u16,
+    timestamp: u32,
+    allow_high: bool,
+) -> Result<(Vec<rtp::Packet>, Option<thiscord_shared::h264::Profile>), ParameterSetError> {
+    let (nals, annex_b) = nal_slices(&Bytes::from(data));
+    let mut profile = None;
+    for nal in nals.iter().filter(|n| annex_b && n[0] & 0x1f == 7) {
+        profile = Some(thiscord_shared::h264::sps_profile(nal, allow_high)?);
+    }
+    if nals.is_empty() {
+        return Ok((vec![], profile));
+    }
+    Ok((packets(payloads_from(nals), sequence, timestamp), profile))
+}
+
+fn packets(payloads: Vec<Bytes>, sequence: &mut u16, timestamp: u32) -> Vec<rtp::Packet> {
     let count = payloads.len();
-    Ok(payloads
+    payloads
         .into_iter()
         .enumerate()
         .map(|(i, payload)| {
@@ -219,7 +255,7 @@ pub fn packetize(
                 payload,
             }
         })
-        .collect())
+        .collect()
 }
 
 pub use thiscord_shared::h264::{
@@ -286,10 +322,23 @@ mod tests {
         big.extend(std::iter::repeat_n(8, 600));
         big.extend([0, 0, 1, 0x65, 4, 4]);
         cases.push(big);
+        // An SPS after the slice must still be validated by the relay.
+        cases.push(vec![0, 0, 1, 0x65, 9, 9, 0, 0, 1, 0x67, 66]);
         for frame in cases {
             let expected = rtc::rtp::codec::h264::H264Payloader::default()
                 .payload(1100, &bytes::Bytes::from(frame.clone()))
                 .unwrap();
+            // The relay's single walk agrees with the full parameter-set check.
+            let validated = super::packetize_validated(frame.clone(), &mut 0, 0, false);
+            match thiscord_shared::h264::parameter_set_profile(&frame, false) {
+                Ok(profile) => {
+                    let (packets, found) = validated.unwrap();
+                    assert_eq!(found, profile);
+                    let payloads: Vec<_> = packets.into_iter().map(|p| p.payload).collect();
+                    assert_eq!(payloads, expected);
+                }
+                Err(error) => assert_eq!(validated.err(), Some(error)),
+            }
             assert_eq!(super::payloads(bytes::Bytes::from(frame)), expected);
         }
     }

@@ -221,12 +221,16 @@ checkout's build links the newer `thiscord-shared` and measures the new code.
 | H.264 keyframe check, 300 KB IDR | 87 µs | 6 ns |
 | H.264 NAL split, 25 KB | 7.3 µs | 2.4 µs (skipping start-code scan) |
 | H.264 frame assembly, 23 packets | 834 ns, 7 allocations | 437 ns, 1 |
-| Quality accounting, 5 counts + 1 timing | 216 ns | unchanged |
+| Quality accounting, 5 counts + 1 timing | 216 ns (lock + clock read each) | 8.8 ns (worker-local batch) |
 | Mixer, 20 ms with 1 / 8 talkers | 7.6 / 16.4 µs | unchanged |
 
-Quality accounting and the mixer were measured and left alone: an atomic,
-lock-free quality window measured 231 ns (no faster uncontended), and the mixer
-callback is under 0.1% of its 20 ms budget. Every sent packet's RTP header still
+Per-stream and per-session quality accounting on the audio worker is batched:
+counts and stage timings accumulate in worker-local cells and merge into the shared
+ten-second window once per second per stream (and before every snapshot), so the
+worker takes no lock and reads no extra clock per packet or frame. An atomic,
+lock-free window was also tried and measured no faster (231 ns), because the cost
+was the per-call clock read. The mixer callback is under 0.1% of its 20 ms budget
+and was left alone. Every sent packet's RTP header still
 needs one small CSRC `Vec`, which the webrtc-rs `Header` type owns.
 
 `frontend/tests/hotpath_allocations.rs` turns the allocation counts into budgets
@@ -265,7 +269,16 @@ Other changes, pinned by tests rather than benchmarks:
   scans, and the MFT path copies each frame once, IDR parameter-set prefix
   included, instead of copying and then re-copying IDRs.
 - The receive relay keeps a running byte total instead of summing its queue per
-  frame, and writes each frame to the local preview peer under one deadline.
+  frame, writes each frame to the local preview peer under one deadline, and
+  validates every SPS during the packetizer's own NAL split (one walk per frame).
+  Each video track uses one pinned timer re-armed only when its deadline changes,
+  instead of a new tokio `Sleep` per RTP packet, and the inbox returns that deadline
+  from the same lock as the push.
+- A share paused for lack of viewers sleeps until demand returns (which wakes it
+  directly), with a 250 ms fallback for stop, instead of polling every 20 ms
+  (unit test: at most 6 wakes in a paused second, encoding within 150 ms of demand).
+- Linux encoder output is queued by buffer reference and copied once, after any
+  keyframe parameter-set prefix, instead of copied and then re-copied for IDRs.
 - A sender held by backpressure wakes its encoder worker when budget frees
   instead of the worker polling every 2 ms.
 - The audio worker wakes once per second outside a session instead of every

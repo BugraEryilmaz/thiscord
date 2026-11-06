@@ -101,14 +101,19 @@ impl Drop for Sender {
     }
 }
 impl Sender {
-    pub fn push(&self, packet: rtc::rtp::Packet, arrived: Instant) {
+    /// Returns [`Self::next_deadline`], computed under the same lock.
+    pub fn push(&self, packet: rtc::rtp::Packet, arrived: Instant) -> Option<Instant> {
+        let mut s = self.inbox.0.state.lock().unwrap();
+        self.admit(&mut s, packet, arrived);
+        Self::deadline(&s)
+    }
+    fn admit(&self, s: &mut State, packet: rtc::rtp::Packet, arrived: Instant) {
         if packet.payload.len() > 1500 {
             return;
         }
         let Some(epoch) = packet.header.csrc.first().copied() else {
             return;
         };
-        let mut s = self.inbox.0.state.lock().unwrap();
         if s.closed {
             return;
         }
@@ -145,7 +150,7 @@ impl Sender {
             .0
             .metrics
             .peak("reorder_peak_packets", s.reorder.len() as u64);
-        self.drain(&mut s, arrived);
+        self.drain(s, arrived);
     }
     pub fn tick(&self, now: Instant) {
         self.drain(&mut self.inbox.0.state.lock().unwrap(), now);
@@ -155,7 +160,9 @@ impl Sender {
     /// means idle (no queued gap, synchronized, nothing requested), so a video
     /// track without an active share needs no periodic timer at all.
     pub fn next_deadline(&self) -> Option<Instant> {
-        let s = self.inbox.0.state.lock().unwrap();
+        Self::deadline(&self.inbox.0.state.lock().unwrap())
+    }
+    fn deadline(s: &State) -> Option<Instant> {
         if s.closed {
             return None;
         }

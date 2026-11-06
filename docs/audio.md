@@ -94,9 +94,12 @@ and the SFU stops forwarding it with the next `ScreenViews` renewal.
 
 Send graph: microphone track → source → boost gain (Microphone boost 1×–10×) →
 limiter → `MediaStreamAudioDestinationNode`, whose track is sent while a boost above
-1× is set. At 1× (the default) there is nothing to boost or limit, so a clone of the
-captured track is sent instead, skipping the limiter look-ahead and the destination
-node's buffering; the meters still read the original capture. The browser's own
+1× is set. At 1× (the default) a clone of the captured track is sent instead,
+skipping the limiter look-ahead and the destination node's buffering; the meters
+still read the original capture. Audible effect: unboosted peaks between -2 and
+0 dBFS are no longer compressed (the limiter is -2 dBFS, 20:1); the capture is
+already bounded at full scale, so this cannot clip beyond what the microphone track
+itself carries, and boosted input keeps the limiter. The browser's own
 processing runs before the boost (desktop boosts before automatic gain). Two
 `AnalyserNode`s read the capture (raw) and the boosted signal before the send gate,
 so the voice-activation meter keeps measuring while the gate is closed. Mute,

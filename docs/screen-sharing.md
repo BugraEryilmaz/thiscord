@@ -381,7 +381,8 @@ require a subscription-capable server to publish.
 
 The SFU sends `screen_target` once per second to opted-in publishers. Zero means
 no viewers: native encoding and video sending pause, with capture reduced to one
-raw refresh per second so a static source can resume. Publisher demand also expires
+raw refresh per second so a static source can resume. The paused encoder worker
+sleeps until demand returns, which wakes it directly. Publisher demand also expires
 after three seconds if control feedback stops. The SFU immediately excludes
 unsubscribed receivers from video and shared-audio fanout, including already queued
 packets. Local close/hide reaches the SFU on the next 500 ms check; a stalled UI

@@ -688,6 +688,7 @@ impl Remote {
         writer.discard();
     }
     fn refill(&mut self, writer: &mut StreamWriter, now: Instant) {
+        self.jitter.quality.tick(now);
         writer.control.counts.drain(&self.jitter.quality);
         self.jitter
             .output_callback(writer.callback_samples(), writer.callback_due(now));
@@ -1183,6 +1184,10 @@ impl Session {
         if self.processing.resets != resets {
             self.clear_gate();
         }
+        // One clock read per worker service for all streams' refill and batched
+        // accounting.
+        let now = Instant::now();
+        self.processing.metrics.tick(now);
         if self.outgoing.is_some() {
             for (remote, writer) in self.remotes.iter_mut().zip(self.devices.writers.iter_mut()) {
                 if let Some(remote) = remote {
@@ -1190,13 +1195,12 @@ impl Session {
                         writer,
                         self.devices.control.deafen.load(Ordering::Acquire)
                             || self.transmit_control.server_deafened(),
-                        Instant::now(),
+                        now,
                     );
                     // A failed reconfiguration poisons and deafens only that
                     // stream (see Remote::configure); other streams continue.
-                    let _ =
-                        remote.adapt_receive(writer, self.settings.deep_redundancy, Instant::now());
-                    remote.refill(writer, Instant::now());
+                    let _ = remote.adapt_receive(writer, self.settings.deep_redundancy, now);
+                    remote.refill(writer, now);
                 }
             }
         }
@@ -1482,6 +1486,7 @@ impl Session {
     }
     fn collect_metrics(&self) {
         self.devices.control.counts.drain(&self.processing.metrics);
+        self.processing.metrics.flush();
         for (remote, writer) in self.remotes.iter().zip(&self.devices.writers) {
             if let Some(remote) = remote {
                 writer.control.counts.drain(&remote.jitter.quality);
@@ -1490,7 +1495,7 @@ impl Session {
     }
     fn quality(&self) -> AudioQuality {
         self.collect_metrics();
-        let metrics = &self.processing.metrics;
+        let metrics = self.processing.metrics.shared();
         let network = metrics.network();
         // These legacy cumulative counters are maintained separately; new
         // callback counters are drained exactly once on the worker.
@@ -1854,7 +1859,9 @@ fn run(
                             }
                             s.volumes = Some(volumes);
                             s.outgoing = Some(outgoing);
-                            s.processing.metrics = connection.metrics.clone();
+                            s.processing.metrics.flush();
+                            s.processing.metrics =
+                                quality::Batched::new(connection.metrics.clone());
                             s.transmit_control = probe.outgoing.clone();
                             let _ = s
                                 .devices

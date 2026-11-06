@@ -164,3 +164,19 @@ fn mixer_callbacks_do_not_allocate() {
     });
     assert_eq!(cost, 0.0);
 }
+
+#[test]
+fn per_stream_quality_accounting_does_not_allocate() {
+    use std::time::{Duration, Instant};
+    use thiscord_frontend::audio::quality::{Batched, Count, Stage};
+    let batch = Batched::default();
+    let mut now = Instant::now();
+    let cost = per_op(10_000, || {
+        now += Duration::from_millis(20);
+        batch.tick(now);
+        batch.add(Count::ReceivedPackets, 1);
+        batch.add(Count::DecodedSamples, 960);
+        batch.duration(Stage::Decode, Duration::from_micros(40));
+    });
+    assert_eq!(cost, 0.0);
+}
