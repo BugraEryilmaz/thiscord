@@ -24,10 +24,6 @@ pub const SOURCE_CHECK: Duration = Duration::from_millis(100);
 /// Longest encoder-worker sleep without a capture or encoder wake. It bounds how
 /// long atomics (demand, feedback, stop) can wait to be observed.
 const IDLE_WAIT: Duration = Duration::from_millis(20);
-/// Short poll while a raw frame waits on sender backpressure or send credit,
-/// which have no wake. A frame waiting only for its cadence instead sleeps until
-/// it is due; captures and encoder output still wake the worker early.
-const PENDING_WAIT: Duration = Duration::from_millis(2);
 /// Raw captures older than this are never encoded.
 const RAW_MAX_AGE: Duration = Duration::from_millis(250);
 
@@ -308,7 +304,8 @@ pub fn encode<P: Platform>(
     let mut last_source = None;
     let mut recovery_scale = 100;
     let mut send_budget =
-        super::pacing::SendBudget::new(super::pacing::transport_bitrate(quality.bitrate()));
+        super::pacing::SendBudget::new(super::pacing::transport_bitrate(quality.bitrate()))
+            .with_wake(std::sync::Arc::from(waker(mailbox)));
     metrics.label("sender_backlog_budget_ms", super::pacing::BACKLOG_BUDGET_MS);
     metrics.label("requested_fps", requested.fps);
     metrics.label("requested_height", requested.height);
@@ -393,7 +390,9 @@ pub fn encode<P: Platform>(
             // wakes the condvar early. Pending input polls briefly for time,
             // credit or sender drain; otherwise wait for the next static refresh.
             let timeout = if pending_pixels.is_some() {
-                pending_due.map_or(PENDING_WAIT, |at| {
+                // Held for cadence: sleep until due. Held for backpressure: the
+                // sender (budget or queue freed) or encoder output wakes it.
+                pending_due.map_or(IDLE_WAIT, |at| {
                     at.saturating_duration_since(now).min(IDLE_WAIT)
                 })
             } else if encoder.is_some() && last_input.is_some() {
@@ -511,6 +510,8 @@ pub fn encode<P: Platform>(
             // Retain the latest raw frame so a source that becomes static
             // during backpressure still delivers its final update. New capture
             // replaces this frame before it becomes an H.264 dependency.
+            // The sender wakes the worker when it frees budget or queue space.
+            send_budget.wait_for_capacity();
             pending_pixels = pixels;
             continue;
         }

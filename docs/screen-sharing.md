@@ -11,7 +11,12 @@ Click a participant's name or LIVE badge to open the room's grid; this joins tha
 voice channel if needed, using the current microphone settings. A participant
 may publish a camera and a screen simultaneously. Your camera and screen have
 local previews; the screen preview uses the same encoded frames without an SFU
-round trip. Self-preview alone does not upload screen video.
+round trip. Self-preview alone does not upload screen video. While only your own
+screen tile is open the encoder keeps the selected preset rather than a cheaper
+preview mode: the quality controller holds a 6 s dwell before upgrading, so a first
+remote viewer would otherwise start at the preview's quality, and the tile shows what
+viewers will receive. Closing or hiding your own tile with nobody watching pauses
+encoding (capture drops to one refresh per second).
 
 Tiles keep each stream's real shape (16:9, ultrawide, portrait phone, 4:3), so
 video is never letterboxed inside a tile. The layout tries every way of splitting
@@ -186,8 +191,10 @@ GStreamer plugins. Building needs `libgstreamer1.0-dev`,
   it does not wait for the next capture or a coarse timer to collect output.
   Without a capture or MFT wake, the worker sleeps until its next refresh is due
   (at most 20 ms). A raw frame held only for its layer cadence sleeps until it is
-  due; 2 ms polling remains only while it waits on send credit or sender drain,
-  which have no wake. `worker_wakes` counts wakes (a 15 fps low layer fed 60 fps
+  due. One held by sender backpressure is woken by the paced sender when its byte
+  budget falls back under the limit or a queued frame finishes (only while the
+  worker is waiting), instead of a 2 ms poll; a 20 s 4K60 pipeline probe kept
+  about 181 wakes per second with zero drops. `worker_wakes` counts wakes (a 15 fps low layer fed 60 fps
   captures measured 61 per second in a unit test, down from 105 with the former
   2 ms poll on Windows' default timer resolution). Window validity is checked every 100 ms, and the
   display's SDR white/HDR state is refreshed once per second on its own thread,

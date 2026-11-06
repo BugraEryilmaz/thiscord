@@ -538,26 +538,23 @@ impl ScreenState {
                     continue;
                 };
                 let submit = Instant::now();
+                // One deadline per frame (its remaining age budget) instead of a
+                // timer per packet; a stalled local write still drops the frame.
+                let deadline = tokio::time::Instant::from_std(frame.arrived + MAX_AGE);
                 let sent = tauri::async_runtime::block_on(async {
-                    for packet in packets {
-                        if !connection.active()
-                            || !lease.active()
-                            || frame.arrived.elapsed() > MAX_AGE
-                        {
-                            return false;
+                    tokio::time::timeout_at(deadline, async {
+                        for packet in packets {
+                            if !connection.active()
+                                || !lease.active()
+                                || preview.write_profile(packet, profile).await.is_err()
+                            {
+                                return false;
+                            }
                         }
-                        if !matches!(
-                            tokio::time::timeout(
-                                Duration::from_millis(50),
-                                preview.write_profile(packet, profile)
-                            )
-                            .await,
-                            Ok(Ok(_))
-                        ) {
-                            return false;
-                        }
-                    }
-                    true
+                        true
+                    })
+                    .await
+                    .unwrap_or(false)
                 });
                 metrics.time("preview_submit", submit.elapsed());
                 if sent {
