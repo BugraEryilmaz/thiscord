@@ -359,8 +359,8 @@ mod processes {
     #[cfg(target_os = "linux")]
     fn scan(own_programs: bool) -> Vec<String> {
         use std::os::unix::fs::MetadataExt;
-        // SAFETY: getuid has no preconditions and cannot fail.
-        let uid = unsafe { libc::getuid() };
+        // `/proc/<pid>` is owned by the process's user; compare with our own.
+        let uid = std::fs::metadata("/proc/self").map_or(u32::MAX, |m| m.uid());
         const SYSTEM: &[&str] = &[
             "/usr/lib/",
             "/usr/libexec/",

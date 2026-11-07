@@ -87,7 +87,7 @@ pub(super) fn AccountDetails(ui: Ui) -> impl IntoView {
         checking.set_value(true);
         leptos::task::spawn_local(async move {
             let result = client::request(&AccountRequest::Current, Some(&token)).await;
-            if checking.try_set_value(false).is_none()
+            if checking.try_set_value(false).is_some()
                 || ui.token.get_untracked().as_deref() != Some(&token)
             {
                 return;
@@ -155,7 +155,7 @@ pub(super) fn AccountDetails(ui: Ui) -> impl IntoView {
                     <button type="button" class="settings-secondary identity-edit" aria-expanded=move || (editing.get() == Some(Editing::Username)).to_string()
                         aria-controls="identity-username-editor" disabled=move || ui.busy.get()
                         on:click=move |_| toggle(Editing::Username)>
-                        <Icon kind=Glyph::Edit/><span>{move || if editing.get() == Some(Editing::Username) { crate::i18n::t("Close") } else { crate::i18n::t("Edit") }}</span>
+                        {move || if editing.get() == Some(Editing::Username) { view! {<Icon kind=Glyph::Close/>}.into_any() } else { view! {<Icon kind=Glyph::Edit/>}.into_any() }}<span>{move || if editing.get() == Some(Editing::Username) { crate::i18n::t("Close") } else { crate::i18n::t("Edit") }}</span>
                     </button>
                 </div>
                 <Show when=move || editing.get() == Some(Editing::Username)>
@@ -173,7 +173,7 @@ pub(super) fn AccountDetails(ui: Ui) -> impl IntoView {
                     <button type="button" class="settings-secondary identity-edit" aria-expanded=move || (editing.get() == Some(Editing::Email)).to_string()
                         aria-controls="identity-email-editor" disabled=move || ui.busy.get()
                         on:click=move |_| toggle(Editing::Email)>
-                        <Icon kind=Glyph::Edit/><span>{move || if editing.get() == Some(Editing::Email) { crate::i18n::t("Close") } else { crate::i18n::t("Edit") }}</span>
+                        {move || if editing.get() == Some(Editing::Email) { view! {<Icon kind=Glyph::Close/>}.into_any() } else { view! {<Icon kind=Glyph::Edit/>}.into_any() }}<span>{move || if editing.get() == Some(Editing::Email) { crate::i18n::t("Close") } else { crate::i18n::t("Edit") }}</span>
                     </button>
                 </div>
                 <Show when=move || pending.get().is_some()>

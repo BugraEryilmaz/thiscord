@@ -697,6 +697,7 @@ html:has(.notification-window), body:has(.notification-window) { margin: 0; back
 .identity-list { display: flex; flex-direction: column; }
 .identity-row { display: flex; align-items: center; justify-content: space-between; gap: 16px; padding: 14px 0; border-bottom: 1px solid var(--tint-6); }
 .identity-list > .identity-row:first-child { padding-top: 0; }
+.identity-list > .identity-row:last-child { border-bottom: 0; padding-bottom: 0; }
 .identity-value { display: flex; flex-direction: column; gap: 3px; min-width: 0; }
 .identity-value > span { color: color-mix(in srgb, var(--color-muted) 92%, transparent); font-size: 12px; font-weight: 700; letter-spacing: .06em; text-transform: uppercase; }
 .identity-value strong { font-size: 15px; font-weight: 500; overflow-wrap: anywhere; }

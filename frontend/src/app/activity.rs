@@ -79,7 +79,7 @@ fn save_games(
             json!({"games": games, "hidden": hidden}),
         )
         .await;
-        if busy.try_set(false).is_none() {
+        if busy.try_set(false).is_some() {
             return;
         }
         match result {
