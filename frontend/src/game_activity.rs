@@ -58,7 +58,9 @@ impl Default for Preferences {
 }
 
 impl Preferences {
-    /// Missing or damaged preferences keep detection on with no added games.
+    /// Missing or damaged files keep detection on with no added games. A damaged
+    /// or outdated list never changes the switch: unknown hidden names are dropped,
+    /// and invalid added games are discarded together.
     pub fn parse(data: &[u8]) -> Self {
         if let Ok(enabled) = serde_json::from_slice::<bool>(data) {
             return Self {
@@ -66,17 +68,22 @@ impl Preferences {
                 ..Self::default()
             };
         }
-        serde_json::from_slice::<Self>(data)
-            .ok()
-            .and_then(|p| {
-                let (games, hidden) = validate(p.games, p.hidden).ok()?;
-                Some(Self {
-                    enabled: p.enabled,
-                    games,
-                    hidden,
-                })
-            })
-            .unwrap_or_default()
+        let Ok(saved) = serde_json::from_slice::<Self>(data) else {
+            return Self::default();
+        };
+        let hidden: Vec<String> = saved
+            .hidden
+            .into_iter()
+            .filter(|name| builtin_names().any(|builtin| builtin == name))
+            .collect();
+        let (games, hidden) = validate(saved.games, hidden.clone())
+            .or_else(|_| validate(Vec::new(), hidden))
+            .unwrap_or_default();
+        Self {
+            enabled: saved.enabled,
+            games,
+            hidden,
+        }
     }
 }
 
@@ -547,10 +554,16 @@ mod tests {
         ] {
             assert!(validate(games, hidden).is_err());
         }
-        // Damaged lists are dropped rather than half-applied.
+        // Damaged or outdated lists never switch sharing back on.
         assert_eq!(
-            Preferences::parse(br#"{"enabled":false,"games":[{"name":"","process":"x"}]}"#),
-            Preferences::default()
+            Preferences::parse(
+                br#"{"enabled":false,"games":[{"name":"","process":"x"}],"hidden":["Factorio","Retired game"]}"#
+            ),
+            Preferences {
+                enabled: false,
+                games: vec![],
+                hidden: vec!["Factorio".into()],
+            }
         );
     }
 

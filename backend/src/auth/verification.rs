@@ -73,7 +73,8 @@ pub(super) async fn verify(
             "This link is no longer valid",
             "The link has expired or has already been used. Return to Thiscord to check your verification status or request a new email.",
         ),
-        Err(Failure::Invalid(_)) => (
+        // A concurrent claim after the availability check fails as a conflict.
+        Err(Failure::Invalid(_) | Failure::Conflict) => (
             StatusCode::CONFLICT,
             "This address is already in use",
             "Another account started using this email address. Open Settings in Thiscord to choose a different one.",

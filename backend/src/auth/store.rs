@@ -661,11 +661,11 @@ pub(super) fn dispatch(
                         recent(&session)?;
                         let address = email(&address)?;
                         let current = account(c,id)?;
-                        if current.email == address { return Err(Failure::Invalid("That is already your email address")); }
                         // Like registration, this reveals whether an address is taken
                         // (bounded by the per-address rate limit); a race still fails as 409.
                         if taken(c,"email",&address,id)? { return Err(Failure::Invalid("That email address is already in use")); }
                         if current.email_verified {
+                            if current.email == address { return Err(Failure::Invalid("That is already your email address")); }
                             // The verified address stays until the new one is confirmed.
                             enqueue_email_change(c,&current,&address)?;
                             return Ok(AccountResponse::Account { account: account(c,id)? });

@@ -98,10 +98,10 @@ fn run(app: tauri::AppHandle) {
             None
         };
         let mut inner = state.lock();
-        // Disabling during a scan wins; enabling or editing games sets `woken`
-        // for a rescan, so a result from the old lists is replaced right away.
-        let detected = detected.filter(|_| inner.status.enabled && !inner.woken);
-        let changed = (inner.status.activity != detected).then(|| {
+        // Disabling during a scan wins; enabling or editing games sets `woken`,
+        // so a result from the old lists is skipped and replaced by the rescan.
+        let detected = detected.filter(|_| inner.status.enabled);
+        let changed = (!inner.woken && inner.status.activity != detected).then(|| {
             inner.status.activity = detected;
             inner.status.clone()
         });
