@@ -270,7 +270,7 @@ fn Profile(ui: Ui) -> impl IntoView {
             <label class="settings-field"><span>{move || crate::i18n::t("Bio")}</span><textarea rows="4" maxlength="500" placeholder=move || crate::i18n::t("A little about you…") prop:value=move ||bio.get() on:input=move |e|bio.set(event_target_value(&e))/><small>{move ||format!("{}/500",bio.get().chars().count())}</small></label>
             <div class="settings-actions"><button class="settings-secondary" type="button" disabled=move ||ui.busy.get()||!ui.settings_dirty.get() on:click=move |_|reset()>{move || crate::i18n::t("Reset")}</button><button class="settings-primary" disabled=move ||ui.busy.get()||!ui.settings_dirty.get()>{move || crate::i18n::t("Save profile")}</button></div></fieldset>
         </form>
-        <section class="settings-card"><h3>{move || crate::i18n::t("Account details")}</h3><div class="settings-info-row"><span>{move || crate::i18n::t("Username")}</span><strong>{move ||ui.account.get().map(|a|format!("@{}",a.username))}</strong></div><div class="settings-info-row"><span>{move || crate::i18n::t("Email")}</span><strong>{move ||ui.account.get().map(|a|a.email)}</strong></div><p class="settings-hint">{move || crate::i18n::t("✓ Email verified")}</p></section>
+        <super::identity::AccountDetails ui=ui/>
     }
 }
 

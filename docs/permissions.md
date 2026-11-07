@@ -147,7 +147,15 @@ Join attempts are limited to six per account per minute, including failures, and
 hashing/verification runs on bounded blocking workers. Membership creation, the
 owner-based member capacity check and revision increment share the guild transaction lock.
 `ViewGuild` returns only channels where the current member has ViewChannel.
-Changing an existing server password is not yet exposed.
+
+ManageGuild changes or removes the password in **Server settings → Overview → Join
+password** (`GuildChange::SetPassword`, revision-checked under the guild lock like
+other changes). A non-empty password replaces the hash; `null` removes protection,
+and an empty string is rejected. Members, invite links and pending invites are not
+affected, and the change is not part of the moderation audit log. `GuildState`
+(sent only to ManageRoles holders) carries `password_protected` so the panel shows
+whether a password is set; the hash and the password itself never leave the backend,
+and `GuildPassword` redacts itself from `Debug` output.
 
 Everyone is implicit on every membership, cannot be assigned/deleted, and has rank
 zero. Default permissions are view, history, send, edit/delete own messages,

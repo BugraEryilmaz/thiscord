@@ -16,12 +16,19 @@ use uuid::Uuid;
 
 fn guild_password(password: Option<&str>) -> Result<Option<&str>, Failure> {
     let password = password.filter(|p| !p.is_empty());
-    if password.is_some_and(|p| p.len() > 1024) {
+    if password.is_some_and(|p| p.len() > MAX_GUILD_PASSWORD_BYTES) {
         return Err(Failure::Invalid(
             "Server password must be at most 1024 bytes",
         ));
     }
     Ok(password)
+}
+
+fn hash_guild_password(password: &str) -> Result<String, Failure> {
+    Argon2::default()
+        .hash_password(password.as_bytes(), &SaltString::generate(&mut OsRng))
+        .map(|h| h.to_string())
+        .map_err(|_| Failure::Unavailable)
 }
 
 fn name(value: &str) -> Result<&str, Failure> {
@@ -177,10 +184,19 @@ pub(super) fn bootstrap(pool: &DbPool, username: &str) -> Result<(), Failure> {
     })
 }
 pub(crate) fn load(c: &mut PgConnection, id: GuildId) -> Result<GuildState, Failure> {
+    #[derive(serde::Deserialize)]
+    struct Loaded {
+        #[serde(flatten)]
+        guild: Guild,
+        password_protected: bool,
+    }
     let id = id.to_string();
-    let guild: Guild = query(
+    let Loaded {
+        guild,
+        password_protected,
+    } = query(
         c,
-        "SELECT to_jsonb(g)||jsonb_build_object('icon_id',(SELECT i.id FROM guild_icons i WHERE i.guild_id=g.id)) AS data FROM guilds g WHERE id=$1::uuid",
+        "SELECT (to_jsonb(g)-'password_hash')||jsonb_build_object('icon_id',(SELECT i.id FROM guild_icons i WHERE i.guild_id=g.id),'password_protected',g.password_hash IS NOT NULL) AS data FROM guilds g WHERE id=$1::uuid",
         &[&id],
     )?
     .pop()
@@ -217,6 +233,7 @@ pub(crate) fn load(c: &mut PgConnection, id: GuildId) -> Result<GuildState, Fail
             &[&id],
         )?,
         overrides,
+        password_protected,
     })
 }
 fn member(state: &GuildState, id: AccountId) -> Result<(), Failure> {
@@ -462,7 +479,7 @@ pub(super) fn dispatch(
                 owned_slot(c,actor)?;
                 let count: i64 = query(c,"SELECT to_jsonb(count(*)) AS data FROM guilds", &[])?.pop().unwrap_or(0);
                 allocation(count<100,"Installation server capacity reached; contact the instance owner")?;
-                let hash=guild_password(password.as_deref())?.map(|p|Argon2::default().hash_password(p.as_bytes(),&SaltString::generate(&mut OsRng)).map(|h|h.to_string()).map_err(|_|Failure::Unavailable)).transpose()?;
+                let hash=guild_password(password.as_deref())?.map(hash_guild_password).transpose()?;
                 let id = GuildId::from_uuid(Uuid::new_v4());
                 execute(c,"INSERT INTO guilds(id,name,owner,password_hash) VALUES($1::uuid,$2,$3::uuid,NULLIF($4,''))", &[&id.to_string(),name,&actor.to_string(),hash.as_deref().unwrap_or("")])?;
                 execute(c,"INSERT INTO guild_members(guild_id,account_id) VALUES($1::uuid,$2::uuid)", &[&id.to_string(),&actor.to_string()])?;
@@ -641,6 +658,25 @@ fn change_guild(
                 c,
                 "UPDATE guilds SET name=$2 WHERE id=$1::uuid",
                 &[&guild, name(&value)?],
+            )?;
+        }
+        GuildChange::SetPassword { password } => {
+            need(Permission::ManageGuild)?;
+            let hash = match password {
+                None => None,
+                Some(GuildPassword(value)) => {
+                    if value.is_empty() {
+                        return Err(Failure::Invalid("Enter a server password, or remove it"));
+                    }
+                    let value = guild_password(Some(&value))?.unwrap_or_default();
+                    Some(hash_guild_password(value)?)
+                }
+            };
+            // Members and invite links are unaffected; only joining by ID changes.
+            execute(
+                c,
+                "UPDATE guilds SET password_hash=NULLIF($2,'') WHERE id=$1::uuid",
+                &[&guild, hash.as_deref().unwrap_or_default()],
             )?;
         }
         GuildChange::Delete {} => {

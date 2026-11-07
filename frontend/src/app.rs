@@ -16,6 +16,7 @@ mod direct_attachments;
 mod emoji;
 mod friends;
 mod icons;
+mod identity;
 mod invites;
 mod keyboard;
 mod login;

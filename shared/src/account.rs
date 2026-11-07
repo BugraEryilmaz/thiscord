@@ -65,11 +65,18 @@ pub enum AccountRequest {
         session_id: SessionId,
     },
     SendVerification,
-    /// Corrects the address of a pending (unverified) account and emails a new
-    /// verification link; earlier links stop working. Requires recent
-    /// reauthentication. Verified addresses cannot be changed in this version.
+    /// Requires recent reauthentication. A pending (unverified) account's address
+    /// is corrected directly and a new verification link is emailed; earlier links
+    /// stop working. A verified account keeps its address until the link emailed to
+    /// the new one is opened ([`Account::pending_email`] shows it meanwhile).
     ChangeEmail {
         email: String,
+    },
+    /// Withdraws a verified account's pending email change; its link stops working.
+    CancelEmailChange,
+    /// Requires recent reauthentication. Same rules as registration usernames.
+    ChangeUsername {
+        username: String,
     },
     VerifyEmail {
         code: String,
@@ -148,6 +155,24 @@ pub struct Account {
     /// Absent from older servers and while no unexpired status is set.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub custom_status: Option<CustomStatus>,
+    /// New address awaiting confirmation through the link emailed to it. Only
+    /// sent to the account itself; absent from older servers and when none.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pending_email: Option<String>,
+}
+
+/// Usernames are 3 to 32 lower-case ASCII letters, digits or underscores.
+/// Returns the normalized (trimmed, lower-cased) username.
+pub fn normalize_username(value: &str) -> Result<String, &'static str> {
+    let username = value.trim().to_ascii_lowercase();
+    if !(3..=32).contains(&username.len())
+        || !username
+            .bytes()
+            .all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'_')
+    {
+        return Err("Username must be 3 to 32 letters, numbers or underscores");
+    }
+    Ok(username)
 }
 
 /// Account-level custom status. Its audience matches the public profile (the
@@ -390,6 +415,52 @@ mod tests {
         assert_eq!(
             serde_json::to_value(&status).unwrap(),
             serde_json::json!({"text":"Away"})
+        );
+    }
+
+    #[test]
+    fn identifier_changes_are_validated_and_wire_stable() {
+        assert_eq!(
+            normalize_username("  New_Name1 ").as_deref(),
+            Ok("new_name1")
+        );
+        for invalid in ["ab", "has space", "dash-name", "ünï", &"x".repeat(33)] {
+            assert!(normalize_username(invalid).is_err(), "{invalid}");
+        }
+        for (request, wire) in [
+            (
+                AccountRequest::ChangeUsername {
+                    username: "new_name".into(),
+                },
+                serde_json::json!({"action":"change_username","username":"new_name"}),
+            ),
+            (
+                AccountRequest::CancelEmailChange,
+                serde_json::json!({"action":"cancel_email_change"}),
+            ),
+        ] {
+            assert_eq!(serde_json::to_value(&request).unwrap(), wire);
+            let decoded: AccountRequest = serde_json::from_value(wire.clone()).unwrap();
+            assert_eq!(serde_json::to_value(decoded).unwrap(), wire);
+        }
+        // Older servers omit the pending address; none stays off the wire.
+        let mut account: Account = serde_json::from_value(serde_json::json!({
+            "id":"00000000-0000-0000-0000-000000000001", "username":"user",
+            "email":"user@example.test", "email_verified":true, "display_name":"User",
+            "bio":"", "created_at":"2026-10-10T00:00:00Z", "identities":["password"]
+        }))
+        .unwrap();
+        assert!(account.pending_email.is_none());
+        assert!(
+            serde_json::to_value(&account)
+                .unwrap()
+                .get("pending_email")
+                .is_none()
+        );
+        account.pending_email = Some("new@example.test".into());
+        assert_eq!(
+            serde_json::to_value(&account).unwrap()["pending_email"],
+            "new@example.test"
         );
     }
 

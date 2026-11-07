@@ -269,6 +269,7 @@ async fn handle(
             AccountRequest::Register { email, .. } | AccountRequest::ChangeEmail { email } => {
                 Some(email.trim().to_lowercase())
             }
+            AccountRequest::ChangeUsername { username } => Some(username.trim().to_lowercase()),
             _ => None,
         };
         let sensitive = !matches!(
