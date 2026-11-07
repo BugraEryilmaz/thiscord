@@ -55,8 +55,9 @@ this user's processes outside system library directories (Steam's runtime stays)
 on macOS, executables outside the operating system's directories. Its process list
 reaches the settings page over Tauri IPC only while the picker is open and is never
 sent to the server or logged. `activity.json` stores `enabled`, `games` and `hidden`
-as JSON; older files containing only `true`/`false` still load, and a damaged list
-falls back to the defaults. Saving rescans immediately.
+as JSON, or only `true`/`false` while both lists are empty, which older versions
+also read. A damaged or outdated list is dropped without changing the switch.
+Saving rescans immediately.
 
 ## Wire and server
 

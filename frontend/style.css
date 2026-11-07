@@ -749,6 +749,7 @@ html:has(.notification-window), body:has(.notification-window) { margin: 0; back
 .game-list { display: flex; flex-direction: column; }
 .game-row { display: flex; align-items: center; gap: 12px; padding: 12px 0; border-bottom: 1px solid var(--tint-6); font-size: 14px; }
 .game-list .game-row:last-child { border-bottom: 0; padding-bottom: 0; }
+.game-row .settings-link { align-self: center; }
 .game-row strong, .game-option strong { display: block; font-weight: 600; overflow-wrap: anywhere; }
 .game-process { display: block; margin-top: 2px; color: color-mix(in srgb, var(--color-muted) 95%, transparent); font-family: ui-monospace, "Cascadia Mono", Consolas, monospace; font-size: 12px; overflow-wrap: anywhere; }
 .game-remove, .game-refresh { display: grid; place-items: center; flex-shrink: 0; width: 34px; height: 34px; border-radius: var(--radius-md); color: color-mix(in srgb, var(--color-muted) 95%, transparent); cursor: pointer; }
@@ -761,7 +762,7 @@ html:has(.notification-window), body:has(.notification-window) { margin: 0; back
 .game-search { display: flex; align-items: center; gap: 10px; padding: 0 12px; border: 1px solid var(--tint-10); border-radius: var(--radius-md); background: color-mix(in srgb, var(--color-rail) 55%, var(--color-panel)); color: color-mix(in srgb, var(--color-muted) 95%, transparent); }
 .game-search:focus-within { border-color: var(--brand-light); box-shadow: 0 0 0 2px color-mix(in srgb, var(--color-brand) 13%, transparent); }
 .game-search svg { width: 16px; height: 16px; flex-shrink: 0; }
-.settings-content .game-search input[type="search"] { border: 0; padding-left: 0; background: transparent; box-shadow: none; outline: none; }
+.settings-content .game-search input[type="search"]:not([type="checkbox"]):not([type="range"]):not([type="file"]):not([type="color"]) { border: 0; padding-left: 0; background: transparent; box-shadow: none; outline: none; }
 .game-picker-list { display: flex; flex-direction: column; gap: 2px; max-height: 248px; min-height: 64px; margin: 0 -6px; padding: 0 6px; overflow-y: auto; overscroll-behavior: contain; scrollbar-width: thin; }
 .game-picker-note { padding: 18px 8px; color: color-mix(in srgb, var(--color-muted) 95%, transparent); font-size: 14px; line-height: 1.55; text-align: center; }
 .game-option { display: flex; align-items: center; gap: 12px; width: 100%; padding: 8px 10px; border: 1px solid transparent; border-radius: var(--radius-md); text-align: left; font-size: 14px; cursor: pointer; transition: background .12s, border-color .12s; }

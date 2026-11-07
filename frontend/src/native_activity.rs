@@ -48,8 +48,14 @@ fn save(path: &std::path::Path, preferences: &Preferences) -> Result<(), String>
     let directory = path.parent().ok_or("Settings directory unavailable")?;
     std::fs::create_dir_all(directory).map_err(|_| "Cannot create settings directory")?;
     let temporary = path.with_extension("tmp");
-    let data =
-        serde_json::to_vec_pretty(preferences).map_err(|_| "Cannot save activity settings")?;
+    // Without lists, keep the bare switch older versions read, so going back to
+    // one never turns sharing on.
+    let data = if preferences.games.is_empty() && preferences.hidden.is_empty() {
+        serde_json::to_vec(&preferences.enabled)
+    } else {
+        serde_json::to_vec_pretty(preferences)
+    }
+    .map_err(|_| "Cannot save activity settings")?;
     std::fs::write(&temporary, data).map_err(|_| "Cannot save activity settings")?;
     std::fs::rename(temporary, path).map_err(|_| "Cannot save activity settings".into())
 }
@@ -479,6 +485,16 @@ mod tests {
         };
         save(&path, &saved).unwrap();
         assert_eq!(load(&path), saved);
+        // Without lists, the file stays the bare switch older versions read.
+        save(
+            &path,
+            &Preferences {
+                enabled: false,
+                ..Preferences::default()
+            },
+        )
+        .unwrap();
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), "false");
         // Files written by older versions hold only the switch.
         std::fs::write(&path, "false").unwrap();
         assert!(!load(&path).enabled);
