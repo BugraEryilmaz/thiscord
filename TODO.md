@@ -97,7 +97,8 @@ media compatibility spike can happen before chat to expose platform constraints.
   macOS execution remains a CI/manual check. See docs/accounts.md.
 - [x] Pending (unverified) accounts see only a verification screen with automatic detection, resend cooldown, address correction and sign-out; they are hidden from friend search and requests.
 - [ ] Accept the verification screen interactively (desktop and `/app`), including verifying on a phone while the desktop waits.
-- [ ] Future: confirmed email/username changes and account export.
+- [x] Reauthenticated username changes and link-confirmed email changes with resend/cancel and old-address notice.
+- [ ] Future: account export.
 
 ## 2. Membership and detailed permissions
 
@@ -132,7 +133,7 @@ and single-process chat/media enforcement.
 - [x] Create/edit/delete guild HTTP commands, list memberships, join by ID/password and leave.
 - [x] Joined-server rail with circular initials avatars, names on hover, create/join dialogs.
 - [x] Custom server icons: upload/replace/remove with ManageGuild, live rail/header/banner updates.
-- [ ] Server password-change settings UI.
+- [x] Server join-password change/removal in Overview (ManageGuild, revision-checked).
 - [x] Invite links with optional expiry/use limits, revocation and join validation.
 - [x] Browser invite landing with desktop handoff, web client handoff, installer links and unlimited invite copying.
 - [ ] Validate installed invite activation on Windows, macOS and Linux (cold start, running/tray and signed out).
@@ -140,7 +141,7 @@ and single-process chat/media enforcement.
 - [x] Timeouts with expiry/removal, chat/voice enforcement and join-bypass protection.
 - [x] Guild moderation audit events and reasons (1000-row retention, authorized keyset history).
 - [x] Create/edit/delete/reorder text and voice channels and organizational categories.
-- [ ] Guild navigation, channel/member lists and settings views.
+- [x] Guild navigation, channel/member lists and settings views.
 - [x] Live guild member list (online/offline, presence, custom status, block filtering) with profile cards, member menus and a phone/tablet drawer.
 - [x] Member list groups by highest-ranked role (then Online, then Offline) with role tags on rows and profile cards.
 - [x] Account custom status with emoji, expiry presets, cross-device sync and friend/guild/DM/voice-tooltip display.
@@ -148,7 +149,8 @@ and single-process chat/media enforcement.
 - [ ] Accept the member list drawer, profile cards and custom status dialog interactively on Windows/macOS/Linux and mobile browsers.
 - [x] Desktop game activity ("Playing …") from local process detection, with League/TFT mode lookup, a device setting and live friend/member display (docs/activity.md).
 - [ ] Verify game detection with real games on Windows/macOS/Linux (including Proton and a TFT match) and compile/run the macOS libproc path.
-- [ ] Future: user-added games and broader game table.
+- [x] Device-local added games (running-program picker or program name) and hidden built-in games.
+- [ ] Future: broader game table; validate the program picker on macOS/Linux hardware.
 - [x] Shared confirmation dialog for destructive operations; current cascades documented.
 - [ ] Archive (soft-delete/restore) behavior for destructive operations.
 - [ ] Transaction and authorization tests for management operations.
@@ -427,7 +429,7 @@ Personalized speaker isolation and physical acoustic acceptance remain future wo
 - [x] Overlay corner/display/offset settings, drag positioning mode, optional hide/show button and overlay shortcuts.
 - [ ] Native Windows/macOS/Linux acceptance of overlay dragging, corner rotation and per-display placement.
 - [x] Compact connection-quality UI with local failure attribution and unavailable values.
-- [ ] In-app remote speaking indicators.
+- [x] In-app remote speaking indicators in the voice sidebar.
 - [ ] Overlay runtime acceptance in games, mixed-DPI monitors, macOS Spaces and Linux compositors.
 - [x] Automatic media transport reconnection after failure; signaling recovery
   preserves existing media, while expired/missing sessions require an explicit join.

@@ -67,14 +67,17 @@ emails default to ignored `backend/.mail/`; Resend, SMTP and Google use provider
 credentials configured in `backend/.env` (see `docs/accounts.md`).
 Everyone can upload or remove a profile picture in **Settings > Profile**. Pictures
 appear in voice chat and the desktop overlay, with initials when no picture is set.
-Click any profile picture in the app to view it enlarged.
+Click any profile picture in the app to view it enlarged. **Account details** on the
+same page changes your username, or your email through a link sent to the new address
+(see [changing username or email](docs/accounts.md#changing-username-or-email)).
 The bottom account ribbon spans the server rail and channel list, showing your
 profile, authenticated socket status, custom status, mute/deafen and settings controls. It expands
 during calls with the channel/server name, camera, screen sharing and disconnect controls.
 Set a custom status (emoji, short text and an optional expiry) from the ribbon; friends
 and fellow server members see it (see [custom status](docs/accounts.md#custom-status)).
 The desktop app also shows the game you are playing (for example "Playing Factorio")
-to the same audience while it runs; turn it off in Settings → Desktop (see
+to the same audience while it runs. Settings → App behavior turns it off, adds games
+from a running-program picker and hides games on that computer (see
 [game activity](docs/activity.md)).
 Text channels have a toggleable member list (a drawer on phones and tablets) grouped
 by each online member's highest role, then Online and Offline, with role tags,

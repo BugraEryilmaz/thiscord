@@ -150,7 +150,50 @@ pub(super) fn device(value: &str) -> Result<&str, Failure> {
     Ok(value.trim())
 }
 pub(super) fn account(c: &mut PgConnection, id: AccountId) -> Result<Account, Failure> {
-    query(c, "SELECT to_jsonb(a) || jsonb_build_object('avatar_id', (SELECT id FROM account_avatars WHERE account_id=a.id), 'identities', (SELECT jsonb_agg(provider ORDER BY provider) FROM identities WHERE account_id=a.id), 'custom_status', (SELECT jsonb_strip_nulls(jsonb_build_object('emoji',s.emoji,'text',s.status_text,'expires_at',s.expires_at)) FROM account_custom_statuses s WHERE s.account_id=a.id AND (s.expires_at IS NULL OR s.expires_at>now()))) AS data FROM accounts a WHERE id=$1::uuid", &[&id.to_string()])?.pop().ok_or(Failure::Unauthorized)
+    query(c, "SELECT to_jsonb(a) || jsonb_build_object('avatar_id', (SELECT id FROM account_avatars WHERE account_id=a.id), 'identities', (SELECT jsonb_agg(provider ORDER BY provider) FROM identities WHERE account_id=a.id), 'custom_status', (SELECT jsonb_strip_nulls(jsonb_build_object('emoji',s.emoji,'text',s.status_text,'expires_at',s.expires_at)) FROM account_custom_statuses s WHERE s.account_id=a.id AND (s.expires_at IS NULL OR s.expires_at>now())), 'pending_email', (SELECT email FROM account_codes WHERE account_id=a.id AND purpose='email' AND expires_at>now())) AS data FROM accounts a WHERE id=$1::uuid", &[&id.to_string()])?.pop().ok_or(Failure::Unauthorized)
+}
+fn username(value: &str) -> Result<String, Failure> {
+    normalize_username(value).map_err(Failure::Invalid)
+}
+fn taken(c: &mut PgConnection, column: &str, value: &str, id: AccountId) -> Result<bool, Failure> {
+    let sql = if column == "email" {
+        "SELECT to_jsonb(EXISTS(SELECT 1 FROM accounts WHERE email=$1 AND id<>$2::uuid)) AS data"
+    } else {
+        "SELECT to_jsonb(EXISTS(SELECT 1 FROM accounts WHERE username=$1 AND id<>$2::uuid)) AS data"
+    };
+    Ok(query::<bool>(c, sql, &[value, &id.to_string()])? == [true])
+}
+/// Starts (or replaces) a verified account's email change: the address takes
+/// effect only once the link emailed to it is opened. Earlier links stop working.
+fn enqueue_email_change(c: &mut PgConnection, a: &Account, address: &str) -> Result<(), Failure> {
+    let code = secret();
+    let link = super::verification::link(&code)?;
+    let body = format!(
+        "Thiscord confirm your new email (valid for 30 minutes):\n\n{link}\n\nClick the link to make this the email address of your Thiscord account @{}. Until then, your current address stays in use. If you did not request this, ignore this email.",
+        a.username
+    );
+    // Withdraw unsent mail for an earlier pending address.
+    execute(
+        c,
+        "DELETE FROM mail_outbox WHERE account_id=$1::uuid AND recipient IN (SELECT email FROM account_codes WHERE account_id=$1::uuid AND purpose='email')",
+        &[&a.id.to_string()],
+    )?;
+    execute(
+        c,
+        "DELETE FROM account_codes WHERE account_id=$1::uuid AND purpose='email'",
+        &[&a.id.to_string()],
+    )?;
+    execute(
+        c,
+        "INSERT INTO account_codes(token_hash,account_id,purpose,email) VALUES($1,$2::uuid,'email',$3)",
+        &[&digest(&code), &a.id.to_string(), address],
+    )?;
+    execute(
+        c,
+        "INSERT INTO mail_outbox(account_id,recipient,body) VALUES($1::uuid,$2,$3)",
+        &[&a.id.to_string(), address, &body],
+    )?;
+    Ok(())
 }
 /// Replaces (or with `None`, clears) the account's custom status. The caller
 /// holds the account/session lock; expiry uses the database clock.
@@ -500,16 +543,7 @@ pub(super) fn dispatch(
             password,
             device: name,
         } => {
-            let username = username.trim().to_ascii_lowercase();
-            if !(3..=32).contains(&username.len())
-                || !username
-                    .bytes()
-                    .all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'_')
-            {
-                return Err(Failure::Invalid(
-                    "Username must be 3 to 32 letters, numbers or underscores",
-                ));
-            }
+            let username = self::username(&username)?;
             let address = email(&address)?;
             device(&name)?;
             let hash = password_hash(&password)?;
@@ -616,14 +650,26 @@ pub(super) fn dispatch(
                     }
                     AccountRequest::Sessions => Ok(AccountResponse::Sessions { sessions: query(c,"SELECT to_jsonb(s) || jsonb_build_object('current',id=$2::uuid) AS data FROM sessions s WHERE account_id=$1::uuid AND NOT revoked AND expires_at>now() AND last_seen_at>now()-interval '7 days' ORDER BY created_at DESC", &[&id.to_string(), &session.id.to_string()])? }),
                     AccountRequest::RevokeSession { session_id } => { if execute(c,"UPDATE sessions SET revoked=TRUE WHERE id=$1::uuid AND account_id=$2::uuid", &[&session_id.to_string(), &id.to_string()])? == 0 { scope = None; } Ok(done("Session revoked")) },
-                    AccountRequest::SendVerification => { let a = account(c,id)?; if !a.email_verified { enqueue_code(c,&a,"verify")?; } Ok(done("Verification email queued")) },
+                    AccountRequest::SendVerification => {
+                        let a = account(c,id)?;
+                        if !a.email_verified { enqueue_code(c,&a,"verify")?; }
+                        // A verified account resends its pending change, only to that address.
+                        else if let Some(address) = a.pending_email.clone() { enqueue_email_change(c,&a,&address)?; }
+                        Ok(done("Verification email queued"))
+                    },
                     AccountRequest::ChangeEmail { email: address } => {
                         recent(&session)?;
                         let address = email(&address)?;
-                        if account(c,id)?.email_verified { return Err(Failure::Invalid("Your email is already verified")); }
+                        let current = account(c,id)?;
                         // Like registration, this reveals whether an address is taken
                         // (bounded by the per-address rate limit); a race still fails as 409.
-                        if query::<bool>(c,"SELECT to_jsonb(EXISTS(SELECT 1 FROM accounts WHERE email=$1 AND id<>$2::uuid)) AS data", &[&address, &id.to_string()])? == [true] { return Err(Failure::Invalid("That email address is already in use")); }
+                        if taken(c,"email",&address,id)? { return Err(Failure::Invalid("That email address is already in use")); }
+                        if current.email_verified {
+                            if current.email == address { return Err(Failure::Invalid("That is already your email address")); }
+                            // The verified address stays until the new one is confirmed.
+                            enqueue_email_change(c,&current,&address)?;
+                            return Ok(AccountResponse::Account { account: account(c,id)? });
+                        }
                         execute(c,"UPDATE accounts SET email=$2 WHERE id=$1::uuid", &[&id.to_string(), &address])?;
                         // Unsent mail to the mistyped address is withdrawn; replacing
                         // the code invalidates links already delivered there.
@@ -631,6 +677,25 @@ pub(super) fn dispatch(
                         let a = account(c,id)?;
                         enqueue_code(c,&a,"verify")?;
                         Ok(AccountResponse::Account { account: a })
+                    }
+                    AccountRequest::CancelEmailChange => {
+                        execute(c,"DELETE FROM mail_outbox WHERE account_id=$1::uuid AND recipient IN (SELECT email FROM account_codes WHERE account_id=$1::uuid AND purpose='email')", &[&id.to_string()])?;
+                        execute(c,"DELETE FROM account_codes WHERE account_id=$1::uuid AND purpose='email'", &[&id.to_string()])?;
+                        Ok(AccountResponse::Account { account: account(c,id)? })
+                    }
+                    AccountRequest::ChangeUsername { username: value } => {
+                        recent(&session)?;
+                        let value = username(&value)?;
+                        if account(c,id)?.username == value { return Err(Failure::Invalid("That is already your username")); }
+                        // Reveals availability like registration, bounded by the
+                        // per-username rate limit; a concurrent claim still fails as 409.
+                        if taken(c,"username",&value,id)? { return Err(Failure::Invalid("That username is taken")); }
+                        execute(c,"UPDATE accounts SET username=$2 WHERE id=$1::uuid", &[&id.to_string(), &value])?;
+                        // Friends, member lists and this account's other devices show it.
+                        related = crate::friends::store::related(c,id)?;
+                        related.push(id);
+                        guilds = crate::chat::members::guilds_of(c,id)?;
+                        Ok(AccountResponse::Account { account: account(c,id)? })
                     }
                     AccountRequest::Reauthenticate { password } => {
                         let hashes: Vec<String> = query(c,"SELECT to_jsonb(password_hash) AS data FROM identities WHERE account_id=$1::uuid AND provider='password'", &[&id.to_string()])?;
@@ -757,10 +822,29 @@ fn consume_code(
 ) -> Result<AccountResponse, Failure> {
     let mut change = None;
     let result = c.transaction(|c| {
-        let purpose = if hash.is_some() {"reset"} else {"verify"};
-        let ids: Vec<AccountId> = query(c,"SELECT to_jsonb(a.id) AS data FROM accounts a JOIN account_codes t ON t.account_id=a.id WHERE t.token_hash=$1 AND t.purpose=$2 AND t.expires_at>now() FOR UPDATE OF a", &[&digest(code),purpose])?;
-        let id = *ids.first().ok_or(Failure::Unauthorized)?;
+        #[derive(Deserialize)]
+        struct Code {
+            id: AccountId,
+            #[serde(default)]
+            email: Option<String>,
+        }
+        // Verification links also confirm a verified account's email change.
+        let (first, second) = if hash.is_some() {("reset","reset")} else {("verify","email")};
+        let codes: Vec<Code> = query(c,"SELECT jsonb_build_object('id',a.id,'email',t.email) AS data FROM accounts a JOIN account_codes t ON t.account_id=a.id WHERE t.token_hash=$1 AND t.purpose IN ($2,$3) AND t.expires_at>now() FOR UPDATE OF a", &[&digest(code),first,second])?;
+        let Code { id, email: changed } = codes.into_iter().next().ok_or(Failure::Unauthorized)?;
         if execute(c,"DELETE FROM account_codes WHERE token_hash=$1 AND expires_at>now()", &[&digest(code)])?!=1 { return Err(Failure::Unauthorized); }
+        if let Some(address) = changed {
+            if taken(c,"email",&address,id)? { return Err(Failure::Invalid("That email address is already in use")); }
+            let previous = account(c,id)?;
+            execute(c,"UPDATE accounts SET email=$2, email_verified=TRUE WHERE id=$1::uuid", &[&id.to_string(), &address])?;
+            // Reset links went to the previous address; they stop working.
+            execute(c,"DELETE FROM account_codes WHERE account_id=$1::uuid AND purpose='reset'", &[&id.to_string()])?;
+            execute(c,"INSERT INTO mail_outbox(account_id,recipient,body) VALUES($1::uuid,$2,$3)", &[&id.to_string(), &previous.email, &format!(
+                "Thiscord email address changed\n\nThe email address of your Thiscord account @{} was changed, and this address is no longer used to sign in or recover it.\n\nIf you did not make this change, contact your Thiscord administrator right away.",
+                previous.username
+            )])?;
+            return Ok(done("Email changed"));
+        }
         if let Some(hash) = hash {
             set_password(c,id,&hash)?; revoke_all(c,id)?;
             change = Some(access::pause(Scope::Account(id)));

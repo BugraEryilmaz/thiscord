@@ -1,9 +1,10 @@
 //! Detects running games for the "Playing …" status (docs/activity.md).
 //!
 //! A background thread lists local process names every [`SCAN`] while detection
-//! is enabled and matches them with `game_activity`. Process names never leave
-//! this module; the UI receives only the matched game, and the preference is a
-//! device-local file (on unless switched off).
+//! is enabled and matches them with `game_activity`, after the games added on
+//! this device and without hidden ones. Process names never leave the device:
+//! the UI receives the matched game, and the running-program list only while
+//! adding a game. Preferences are a device-local file (on unless switched off).
 use std::{
     path::PathBuf,
     sync::{Condvar, Mutex, MutexGuard},
@@ -11,7 +12,8 @@ use std::{
 };
 use tauri::{Emitter, Manager};
 use thiscord_frontend::game_activity::{
-    self, ACTIVITY_EVENT, ActivityStatus, Detected, LEAGUE_OF_LEGENDS,
+    self, ACTIVITY_EVENT, ActivityStatus, CustomGame, Detected, LEAGUE_OF_LEGENDS, Preferences,
+    RunningProgram,
 };
 use thiscord_shared::account::Activity;
 
@@ -36,30 +38,42 @@ impl ActivityState {
 }
 
 /// Missing or damaged preferences keep detection on.
-fn load(path: &std::path::Path) -> bool {
+fn load(path: &std::path::Path) -> Preferences {
     std::fs::read(path)
-        .ok()
-        .and_then(|data| serde_json::from_slice::<bool>(&data).ok())
-        .unwrap_or(true)
+        .map(|data| Preferences::parse(&data))
+        .unwrap_or_default()
 }
 
-fn save(path: &std::path::Path, enabled: bool) -> Result<(), String> {
+fn save(path: &std::path::Path, preferences: &Preferences) -> Result<(), String> {
     let directory = path.parent().ok_or("Settings directory unavailable")?;
     std::fs::create_dir_all(directory).map_err(|_| "Cannot create settings directory")?;
     let temporary = path.with_extension("tmp");
-    std::fs::write(&temporary, if enabled { "true" } else { "false" })
-        .map_err(|_| "Cannot save activity settings")?;
+    // Without lists, keep the bare switch older versions read, so going back to
+    // one never turns sharing on.
+    let data = if preferences.games.is_empty() && preferences.hidden.is_empty() {
+        serde_json::to_vec(&preferences.enabled)
+    } else {
+        serde_json::to_vec_pretty(preferences)
+    }
+    .map_err(|_| "Cannot save activity settings")?;
+    std::fs::write(&temporary, data).map_err(|_| "Cannot save activity settings")?;
     std::fs::rename(temporary, path).map_err(|_| "Cannot save activity settings".into())
 }
 
 pub fn start(app: &tauri::AppHandle) -> tauri::Result<()> {
     let path = app.path().app_config_dir()?.join("activity.json");
-    let enabled = load(&path);
+    let Preferences {
+        enabled,
+        games,
+        hidden,
+    } = load(&path);
     app.manage(ActivityState {
         inner: Mutex::new(Inner {
             status: ActivityStatus {
                 enabled,
                 activity: None,
+                games,
+                hidden,
             },
             woken: false,
         }),
@@ -78,17 +92,22 @@ fn run(app: tauri::AppHandle) {
     // The League mode of the current match, once its live client API answered.
     let mut league = None;
     loop {
-        let enabled = state.lock().status.enabled;
+        let (enabled, games, hidden) = {
+            let inner = state.lock();
+            let status = &inner.status;
+            (status.enabled, status.games.clone(), status.hidden.clone())
+        };
         let detected = if enabled {
-            detect(&mut league)
+            detect(&mut league, &games, &hidden)
         } else {
             league = None;
             None
         };
         let mut inner = state.lock();
-        // Disabling during a scan wins; enabling sets `woken` for a rescan.
+        // Disabling during a scan wins; enabling or editing games sets `woken`,
+        // so a result from the old lists is skipped and replaced by the rescan.
         let detected = detected.filter(|_| inner.status.enabled);
-        let changed = (inner.status.activity != detected).then(|| {
+        let changed = (!inner.woken && inner.status.activity != detected).then(|| {
             inner.status.activity = detected;
             inner.status.clone()
         });
@@ -105,17 +124,23 @@ fn run(app: tauri::AppHandle) {
     }
 }
 
-fn detect(league: &mut Option<&'static str>) -> Option<Activity> {
-    match game_activity::detect(processes::names()) {
+fn detect(
+    league: &mut Option<&'static str>,
+    games: &[CustomGame],
+    hidden: &[String],
+) -> Option<Activity> {
+    match game_activity::detect_with(processes::names(), games, hidden) {
         Some(Detected::LeagueMatch) => {
             if league.is_none() {
                 *league = league_mode();
             }
-            Some(Activity::playing(league.unwrap_or(LEAGUE_OF_LEGENDS)))
+            let mode = league.unwrap_or(LEAGUE_OF_LEGENDS);
+            (!hidden.iter().any(|name| name == mode)).then(|| Activity::playing(mode))
         }
         detected => {
             *league = None;
             match detected? {
+                Detected::Custom(index) => Some(Activity::playing(games.get(index)?.name.clone())),
                 Detected::Game(name) => Some(Activity::playing(name)),
                 Detected::LeagueMatch => None,
             }
@@ -167,7 +192,14 @@ pub async fn activity_set_enabled(
         let status = {
             // Held across the write so concurrent changes save in order.
             let mut inner = state.lock();
-            save(&state.path, enabled)?;
+            save(
+                &state.path,
+                &Preferences {
+                    enabled,
+                    games: inner.status.games.clone(),
+                    hidden: inner.status.hidden.clone(),
+                },
+            )?;
             inner.status.enabled = enabled;
             if !enabled {
                 inner.status.activity = None;
@@ -183,10 +215,107 @@ pub async fn activity_set_enabled(
     .map_err(|_| "Activity settings task failed")?
 }
 
+/// Replaces the games added on this device and the hidden built-in games, and
+/// rescans right away.
+#[tauri::command]
+pub async fn activity_set_games(
+    app: tauri::AppHandle,
+    games: Vec<CustomGame>,
+    hidden: Vec<String>,
+) -> Result<ActivityStatus, String> {
+    let (games, hidden) = game_activity::validate(games, hidden).map_err(str::to_owned)?;
+    tauri::async_runtime::spawn_blocking(move || {
+        let state = app.state::<ActivityState>();
+        let status = {
+            // Held across the write so concurrent changes save in order.
+            let mut inner = state.lock();
+            save(
+                &state.path,
+                &Preferences {
+                    enabled: inner.status.enabled,
+                    games: games.clone(),
+                    hidden: hidden.clone(),
+                },
+            )?;
+            inner.status.games = games;
+            inner.status.hidden = hidden;
+            inner.woken = true;
+            inner.status.clone()
+        };
+        state.wake.notify_all();
+        let _ = app.emit(ACTIVITY_EVENT, status.clone());
+        Ok(status)
+    })
+    .await
+    .map_err(|_| "Activity settings task failed")?
+}
+
+/// Programs running in this user's session, for choosing a game to add. Only
+/// requested while the picker is open; the list stays on this device.
+#[tauri::command]
+pub async fn activity_programs() -> Result<Vec<RunningProgram>, String> {
+    tauri::async_runtime::spawn_blocking(|| {
+        let own = std::env::current_exe()
+            .ok()
+            .and_then(|path| path.file_name()?.to_str().map(game_activity::process_key))
+            .unwrap_or_default();
+        game_activity::running_programs(processes::programs(), &own)
+    })
+    .await
+    .map_err(|_| "Could not list running programs".to_owned())
+}
+
 /// Executable names or paths of running processes, as far as this user can see.
 mod processes {
     #[cfg(target_os = "windows")]
     pub fn names() -> Vec<String> {
+        entries().into_iter().map(|(_, name)| name).collect()
+    }
+
+    /// Programs with a visible, titled top-level window: what people see as
+    /// "running apps", including games, without background services.
+    #[cfg(target_os = "windows")]
+    pub fn programs() -> Vec<String> {
+        use std::collections::HashSet;
+        use windows::Win32::{
+            Foundation::{HWND, LPARAM},
+            UI::WindowsAndMessaging::{
+                EnumWindows, GW_OWNER, GetWindow, GetWindowTextLengthW, GetWindowThreadProcessId,
+                IsWindowVisible,
+            },
+        };
+        unsafe extern "system" fn visit(window: HWND, data: LPARAM) -> windows::core::BOOL {
+            // SAFETY: `data` points to the set below for the duration of EnumWindows.
+            let pids = unsafe { &mut *(data.0 as *mut HashSet<u32>) };
+            // SAFETY: plain queries on a window handle EnumWindows just provided.
+            unsafe {
+                if IsWindowVisible(window).as_bool()
+                    && GetWindow(window, GW_OWNER).is_err()
+                    && GetWindowTextLengthW(window) > 0
+                {
+                    let mut pid = 0;
+                    GetWindowThreadProcessId(window, Some(&mut pid));
+                    if pid != 0 {
+                        pids.insert(pid);
+                    }
+                }
+            }
+            true.into()
+        }
+        let mut pids = HashSet::new();
+        // SAFETY: the callback only dereferences the set, which outlives the call.
+        unsafe {
+            let _ = EnumWindows(Some(visit), LPARAM(&mut pids as *mut HashSet<u32> as isize));
+        }
+        entries()
+            .into_iter()
+            .filter(|(pid, _)| pids.contains(pid))
+            .map(|(_, name)| name)
+            .collect()
+    }
+
+    #[cfg(target_os = "windows")]
+    fn entries() -> Vec<(u32, String)> {
         use windows::Win32::{
             Foundation::CloseHandle,
             System::Diagnostics::ToolHelp::{
@@ -209,7 +338,10 @@ mod processes {
             while more {
                 let file = &entry.szExeFile;
                 let length = file.iter().position(|&c| c == 0).unwrap_or(file.len());
-                names.push(String::from_utf16_lossy(&file[..length]));
+                names.push((
+                    entry.th32ProcessID,
+                    String::from_utf16_lossy(&file[..length]),
+                ));
                 more = Process32NextW(snapshot, &mut entry).is_ok();
             }
             let _ = CloseHandle(snapshot);
@@ -221,6 +353,27 @@ mod processes {
     /// Windows path of the `.exe`).
     #[cfg(target_os = "linux")]
     pub fn names() -> Vec<String> {
+        scan(false)
+    }
+
+    /// This user's programs, without system services and helpers.
+    #[cfg(target_os = "linux")]
+    pub fn programs() -> Vec<String> {
+        scan(true)
+    }
+
+    #[cfg(target_os = "linux")]
+    fn scan(own_programs: bool) -> Vec<String> {
+        use std::os::unix::fs::MetadataExt;
+        // `/proc/<pid>` is owned by the process's user; compare with our own.
+        let uid = std::fs::metadata("/proc/self").map_or(u32::MAX, |m| m.uid());
+        const SYSTEM: &[&str] = &[
+            "/usr/lib/",
+            "/usr/libexec/",
+            "/usr/sbin/",
+            "/lib/",
+            "/sbin/",
+        ];
         let Ok(entries) = std::fs::read_dir("/proc") else {
             return Vec::new();
         };
@@ -234,6 +387,15 @@ mod processes {
                 continue;
             }
             let path = entry.path();
+            if own_programs {
+                let system = std::fs::read_link(path.join("exe")).map_or(true, |exe| {
+                    let exe = exe.to_string_lossy();
+                    SYSTEM.iter().any(|prefix| exe.starts_with(prefix)) && !exe.contains("steam")
+                });
+                if system || entry.metadata().map_or(true, |m| m.uid() != uid) {
+                    continue;
+                }
+            }
             if let Ok(command) = std::fs::read(path.join("cmdline"))
                 && let Some(first) = command.split(|&b| b == 0).next()
                 && !first.is_empty()
@@ -275,8 +437,30 @@ mod processes {
         names
     }
 
+    /// Programs outside the operating system's own directories.
+    #[cfg(target_os = "macos")]
+    pub fn programs() -> Vec<String> {
+        const SYSTEM: &[&str] = &[
+            "/System/",
+            "/usr/",
+            "/bin/",
+            "/sbin/",
+            "/Library/Apple/",
+            "/private/",
+        ];
+        names()
+            .into_iter()
+            .filter(|path| !SYSTEM.iter().any(|prefix| path.starts_with(prefix)))
+            .collect()
+    }
+
     #[cfg(not(any(target_os = "windows", target_os = "linux", target_os = "macos")))]
     pub fn names() -> Vec<String> {
+        Vec::new()
+    }
+
+    #[cfg(not(any(target_os = "windows", target_os = "linux", target_os = "macos")))]
+    pub fn programs() -> Vec<String> {
         Vec::new()
     }
 }
@@ -290,13 +474,32 @@ mod tests {
         let directory =
             std::env::temp_dir().join(format!("thiscord-activity-{}", rand::random::<u64>()));
         let path = directory.join("activity.json");
-        assert!(load(&path));
-        save(&path, false).unwrap();
-        assert!(!load(&path));
-        save(&path, true).unwrap();
-        assert!(load(&path));
+        assert_eq!(load(&path), Preferences::default());
+        let saved = Preferences {
+            enabled: false,
+            games: vec![CustomGame {
+                name: "Hollow Knight".into(),
+                process: "hollow_knight".into(),
+            }],
+            hidden: vec!["Factorio".into()],
+        };
+        save(&path, &saved).unwrap();
+        assert_eq!(load(&path), saved);
+        // Without lists, the file stays the bare switch older versions read.
+        save(
+            &path,
+            &Preferences {
+                enabled: false,
+                ..Preferences::default()
+            },
+        )
+        .unwrap();
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), "false");
+        // Files written by older versions hold only the switch.
+        std::fs::write(&path, "false").unwrap();
+        assert!(!load(&path).enabled);
         std::fs::write(&path, "invalid").unwrap();
-        assert!(load(&path));
+        assert_eq!(load(&path), Preferences::default());
         std::fs::remove_dir_all(directory).unwrap();
     }
 
@@ -305,6 +508,13 @@ mod tests {
         let names = processes::names();
         let own = std::env::current_exe().unwrap();
         let own = game_activity::process_key(own.file_name().unwrap().to_str().unwrap());
+        // Programs for the picker are a subset of what the scanner sees.
+        let programs = processes::programs();
+        assert!(programs.iter().all(|p| {
+            names
+                .iter()
+                .any(|n| game_activity::process_key(n) == game_activity::process_key(p))
+        }));
         assert!(
             names.iter().any(|n| game_activity::process_key(n) == own),
             "{own} missing from {} processes",

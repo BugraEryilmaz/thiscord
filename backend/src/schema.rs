@@ -22,6 +22,7 @@ diesel::table! {
         account_id -> Uuid,
         purpose -> Text,
         expires_at -> Timestamptz,
+        email -> Nullable<Text>,
     }
 }
 

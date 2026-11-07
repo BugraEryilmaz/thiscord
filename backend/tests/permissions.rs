@@ -1109,6 +1109,7 @@ fn combined_roles_overrides_and_admin_behavior() {
             },
         ],
         roles: vec![everyone, a, b],
+        password_protected: false,
     };
     let p = permissions::evaluator::effective(&state, member, Some(channel));
     assert!(p.contains(&Permission::SendMessages));
@@ -1314,4 +1315,101 @@ async fn password_protected_join_and_member_channel_visibility() {
         StatusCode::FORBIDDEN,
     )
     .await;
+}
+
+#[tokio::test]
+#[ignore = "requires TEST_DATABASE_URL; CI runs with --include-ignored"]
+async fn managers_change_or_remove_the_join_password() {
+    let db = database();
+    let (_, owner) = user(&db, "owner");
+    let (_, member) = user(&db, "member");
+    let (_, early) = user(&db, "early");
+    let (_, late) = user(&db, "late");
+    permissions::bootstrap_owner(&db.pool, "owner").unwrap();
+    let app = api::router(Some(db.pool.clone()), vec![]);
+    let mut state = command(
+        &app,
+        &owner,
+        json!({"action":"create_guild","name":"Locked","password":"first secret"}),
+        StatusCode::OK,
+    )
+    .await["state"]
+        .clone();
+    assert_eq!(state["password_protected"], true);
+    let guild = state["guild"]["id"].clone();
+    let join = |password: Option<&str>| json!({"action":"join_guild","guild_id":guild,"password":password});
+    command(&app, &member, join(Some("first secret")), StatusCode::OK).await;
+    let set = |password: Option<&str>| json!({"action":"set_password","password":password});
+    // Only ManageGuild may change it; the old revision is then stale.
+    change(
+        &app,
+        &member,
+        &mut state.clone(),
+        set(Some("mine")),
+        StatusCode::CONFLICT,
+    )
+    .await;
+    state = command(
+        &app,
+        &owner,
+        json!({"action":"inspect","guild_id":guild}),
+        StatusCode::OK,
+    )
+    .await["state"]
+        .clone();
+    change(
+        &app,
+        &member,
+        &mut state.clone(),
+        set(Some("mine")),
+        StatusCode::FORBIDDEN,
+    )
+    .await;
+    for invalid in [Some(String::new()), Some("x".repeat(1025))] {
+        change(
+            &app,
+            &owner,
+            &mut state,
+            set(invalid.as_deref()),
+            StatusCode::BAD_REQUEST,
+        )
+        .await;
+    }
+    let revision = state["guild"]["revision"].as_i64().unwrap();
+    let changed = change(
+        &app,
+        &owner,
+        &mut state,
+        set(Some("second secret")),
+        StatusCode::OK,
+    )
+    .await;
+    assert!(!changed.to_string().contains("second secret"));
+    assert_eq!(state["password_protected"], true);
+    assert_eq!(state["guild"]["revision"], revision + 1);
+    command(
+        &app,
+        &early,
+        join(Some("first secret")),
+        StatusCode::FORBIDDEN,
+    )
+    .await;
+    command(&app, &early, join(Some("second secret")), StatusCode::OK).await;
+    // Removing it opens joining by server ID; existing members stay.
+    let inspect = json!({"action":"inspect","guild_id":guild});
+    state = command(&app, &owner, inspect, StatusCode::OK).await["state"].clone();
+    change(&app, &owner, &mut state, set(None), StatusCode::OK).await;
+    assert_eq!(state["password_protected"], false);
+    command(&app, &late, join(None), StatusCode::OK).await;
+    let members = command(
+        &app,
+        &owner,
+        json!({"action":"inspect","guild_id":guild}),
+        StatusCode::OK,
+    )
+    .await["state"]["members"]
+        .as_array()
+        .unwrap()
+        .len();
+    assert_eq!(members, 4);
 }

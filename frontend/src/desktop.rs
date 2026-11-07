@@ -153,6 +153,8 @@ fn main() {
             native_window::window_set_close_to_tray,
             native_activity::activity_status,
             native_activity::activity_set_enabled,
+            native_activity::activity_set_games,
+            native_activity::activity_programs,
             native_invites::take_pending_invite,
             native_account::load_session,
             native_account::save_session,

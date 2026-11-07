@@ -287,6 +287,24 @@ pub struct GuildState {
     #[serde(default)]
     pub categories: Vec<Category>,
     pub overrides: Vec<ChannelOverride>,
+    /// Joining by server ID requires a password. Absent from older servers.
+    #[serde(default)]
+    pub password_protected: bool,
+}
+
+/// Longest accepted server join password, in bytes.
+pub const MAX_GUILD_PASSWORD_BYTES: usize = 1024;
+
+/// A server join password on the wire: a plain JSON string whose `Debug`
+/// output is redacted, so logging a [`GuildChange`] never reveals it.
+#[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(transparent)]
+pub struct GuildPassword(pub String);
+
+impl std::fmt::Debug for GuildPassword {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("GuildPassword(<redacted>)")
+    }
 }
 // Contains server passwords; deliberately does not implement Debug.
 #[derive(Clone, Serialize, Deserialize)]
@@ -423,6 +441,12 @@ pub enum GuildChange {
     },
     Rename {
         name: String,
+    },
+    /// Requires ManageGuild. A non-empty password (at most
+    /// [`MAX_GUILD_PASSWORD_BYTES`]) replaces the join password; null removes it.
+    /// Invite links keep working either way, and members are never affected.
+    SetPassword {
+        password: Option<GuildPassword>,
     },
     Delete {},
     AddMember {
@@ -702,5 +726,28 @@ mod tests {
             )
             .is_err()
         );
+    }
+
+    #[test]
+    fn server_passwords_are_plain_strings_and_redacted_in_debug() {
+        let set = GuildChange::SetPassword {
+            password: Some(GuildPassword("hunter2 secret".into())),
+        };
+        assert_eq!(
+            serde_json::to_value(&set).unwrap(),
+            json!({"action":"set_password","password":"hunter2 secret"})
+        );
+        assert!(!format!("{set:?}").contains("hunter2"));
+        let clear: GuildChange =
+            serde_json::from_value(json!({"action":"set_password","password":null})).unwrap();
+        assert!(matches!(clear, GuildChange::SetPassword { password: None }));
+        // Older servers omit the flag.
+        let state: GuildState = serde_json::from_value(json!({
+            "guild":{"id":"00000000-0000-0000-0000-000000000001","name":"G",
+                "owner":"00000000-0000-0000-0000-000000000002","revision":1},
+            "roles":[],"members":[],"channels":[],"overrides":[]
+        }))
+        .unwrap();
+        assert!(!state.password_protected);
     }
 }

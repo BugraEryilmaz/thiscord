@@ -7,7 +7,9 @@ use axum::{
     response::{Html, IntoResponse, Response},
 };
 use std::net::SocketAddr;
-use thiscord_shared::account::{AccountRequest, EMAIL_VERIFICATION_PATH, EmailVerificationQuery};
+use thiscord_shared::account::{
+    AccountRequest, AccountResponse, EMAIL_VERIFICATION_PATH, EmailVerificationQuery,
+};
 
 pub(super) fn link(token: &str) -> Result<String, Failure> {
     account_link(EMAIL_VERIFICATION_PATH, token)
@@ -56,6 +58,11 @@ pub(super) async fn verify(
     }
     .await;
     let (status, title, message) = match result {
+        Ok(AccountResponse::Done { message }) if message == "Email changed" => (
+            StatusCode::OK,
+            "Email address changed",
+            "Your new email address is confirmed. Use it to sign in to Thiscord from now on. You can close this tab.",
+        ),
         Ok(_) => (
             StatusCode::OK,
             "Email verified",
@@ -65,6 +72,12 @@ pub(super) async fn verify(
             StatusCode::BAD_REQUEST,
             "This link is no longer valid",
             "The link has expired or has already been used. Return to Thiscord to check your verification status or request a new email.",
+        ),
+        // A concurrent claim after the availability check fails as a conflict.
+        Err(Failure::Invalid(_) | Failure::Conflict) => (
+            StatusCode::CONFLICT,
+            "This address is already in use",
+            "Another account started using this email address. Open Settings in Thiscord to choose a different one.",
         ),
         Err(Failure::Limited) => (
             StatusCode::TOO_MANY_REQUESTS,

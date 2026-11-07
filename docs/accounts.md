@@ -109,8 +109,35 @@ profile cards, see [chat.md](chat.md#member-list-and-profile-cards)). A block in
 either direction withholds it in all of those places. Do Not Disturb remains
 private and is never part of the status.
 
-Username and email are immutable
-in this version; changing verified identifiers needs a separate confirmation flow.
+### Changing username or email
+
+**Settings → Profile → Account details** has **Edit** beside the username and the
+email. Each opens an inline form that asks for the new value and the current
+password (sent as `reauthenticate` first); Google-only accounts use **Confirm with
+Google** and then save within five minutes. Both changes need recent
+reauthentication and keep every session signed in.
+
+`change_username` validates like registration (3–32 lower-case letters, digits or
+underscores), rejects the current name and a taken one, and is limited per target
+name like registration. Friends, member lists and voice rosters refresh right away.
+The old username becomes available to others immediately; sign-in uses the new one.
+
+`change_email` on a verified account starts a confirmed change: the current address
+stays in use for sign-in and recovery, and a link (30 minutes, single use) goes to
+the new address. `Account.pending_email` shows the waiting address (only to the
+account itself), with **Resend link** (`send_verification`, to that address only)
+and **Cancel change** (`cancel_email_change`). A new request replaces the pending
+one and withdraws unsent mail to the earlier address. Opening the link, on any
+device, switches the address, marks it verified, revokes outstanding password-reset
+codes (they went to the old address) and emails the old address a notice without the
+new one. If another account took the address meanwhile, the link page reports it and
+nothing changes. The open settings page picks up the change when Thiscord regains
+focus. The pending address and its code hash live in `account_codes` (purpose
+`email`); migration `20261107000000_identifier_changes` rolls back by discarding
+pending changes.
+
+### Account deletion
+
 Permanent deletion requires recent reauthentication and typing the username. It
 deletes the profile, identities, sessions, codes, pending OAuth attempts and queued
 email through foreign-key cascades. Database backups and already delivered email
@@ -179,7 +206,8 @@ and sends `reauthenticate` first), validates the address like registration and
 rejects one already in use (a concurrent race still fails as 409). It replaces the
 verification code, so links already sent to the mistyped address stop working,
 withdraws unsent mail to that address and emails a new link. Requests are limited
-per address like registration. Verified addresses remain immutable.
+per address like registration. Verified addresses change through the confirmation
+link described in [Changing username or email](#changing-username-or-email).
 
 ### Optional SMTP delivery
 

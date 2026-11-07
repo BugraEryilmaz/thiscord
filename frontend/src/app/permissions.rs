@@ -1,6 +1,9 @@
 #[path = "organization.rs"]
 mod organization;
-use super::{Field, Ui};
+use super::{
+    Field, Ui,
+    icons::{Glyph, Icon},
+};
 use leptos::prelude::*;
 pub(super) use organization::{InvitesPanel, OrganizationPanel};
 use thiscord_shared::{
@@ -398,6 +401,74 @@ fn Overview(editor: Editor) -> impl IntoView {
         <div class="settings-card"><h3>{move || crate::i18n::t("Your community")}</h3><div class="settings-info-row"><span>{move || crate::i18n::t("Server")}</span><strong>{saved}</strong></div><div class="settings-info-row"><span>{move || crate::i18n::t("Members")}</span><strong>{move ||editor.state.get().map(|s|s.members.len())}</strong></div><div class="settings-info-row"><span>{move || crate::i18n::t("Channels")}</span><strong>{move ||editor.state.get().map(|s|s.channels.len())}</strong></div><div class="settings-info-row"><span>{move || crate::i18n::t("Server ID")}</span><strong class="text-xs">{move ||editor.state.get().map(|s|s.guild.id.to_string())}</strong></div><p class="settings-hint">{move || crate::i18n::t("Use Copy invite link beside the server name to invite people. Manage and revoke links in Invite links.")}</p></div>
         <Show when=move ||editor.allowed(Permission::ManageGuild)><ServerIcon editor=editor/></Show>
         <Show when=move ||editor.allowed(Permission::ManageGuild)><form class="settings-card" on:submit=move |e:leptos::ev::SubmitEvent|{e.prevent_default();editor.change(GuildChange::Rename{name:name.get_untracked()});}><h3>{move || crate::i18n::t("Server name")}</h3><Field label="Name" value=name/><div class="settings-actions"><button type="button" class="settings-secondary" disabled=move ||!ui.settings_dirty.get() on:click=move |_|name.set(saved.get_untracked())>{move || crate::i18n::t("Reset")}</button><button class="settings-primary" disabled=move ||!ui.settings_dirty.get()||name.get().trim().is_empty()>{move || crate::i18n::t("Save changes")}</button></div></form></Show>
+        <Show when=move ||editor.allowed(Permission::ManageGuild)><JoinPassword editor=editor/></Show>
+    }
+}
+
+/// The password people need to join by server ID. Invite links skip it.
+#[component]
+fn JoinPassword(editor: Editor) -> impl IntoView {
+    let ui = editor.ui;
+    let password = RwSignal::new(String::new());
+    let visible = RwSignal::new(false);
+    let protected = Memo::new(move |_| editor.state.get().is_some_and(|s| s.password_protected));
+    let too_long = move || password.with(|p| p.len() > MAX_GUILD_PASSWORD_BYTES);
+    let cleared = Callback::new(move |()| {
+        password.set(String::new());
+        visible.set(false);
+    });
+    let save = move |e: leptos::ev::SubmitEvent| {
+        e.prevent_default();
+        let value = password.get_untracked();
+        if value.is_empty() || too_long() {
+            return;
+        }
+        editor.change_then(
+            GuildChange::SetPassword {
+                password: Some(GuildPassword(value)),
+            },
+            Some(cleared),
+        );
+    };
+    view! {
+        <form class="settings-card" on:submit=save aria-labelledby="join-password-title">
+            <div class="join-password-head">
+                <span class="join-password-icon" class:protected=move || protected.get() aria-hidden="true"><Icon kind=Glyph::Lock/></span>
+                <div class="min-w-0 flex-1">
+                    <h3 id="join-password-title">{move || crate::i18n::t("Join password")}</h3>
+                    <p class="settings-hint">{move || if protected.get() {
+                        crate::i18n::t("On. People joining with the server ID must enter this password.")
+                    } else {
+                        crate::i18n::t("Off. Anyone with the server ID can join.")
+                    }}</p>
+                </div>
+            </div>
+            <label class="field">
+                <span class="field-label">{move || if protected.get() { crate::i18n::t("New password") } else { crate::i18n::t("Password") }}</span>
+                <div class="join-password-input">
+                    <input class="field-input" type=move || if visible.get() { "text" } else { "password" } autocomplete="new-password"
+                        spellcheck="false" autocapitalize="off" placeholder=move || if protected.get() { crate::i18n::t("Enter a new password") } else { crate::i18n::t("Choose a password") }
+                        prop:value=move || password.get() on:input=move |e| password.set(event_target_value(&e))/>
+                    <button type="button" class="join-password-reveal" aria-pressed=move || visible.get().to_string()
+                        aria-label=move || if visible.get() { crate::i18n::t("Hide password") } else { crate::i18n::t("Show password") }
+                        on:click=move |_| visible.update(|v| *v = !*v)>
+                        {move || if visible.get() { view! {<Icon kind=Glyph::EyeOff/>} } else { view! {<Icon kind=Glyph::Eye/>} }}
+                    </button>
+                </div>
+            </label>
+            <Show when=too_long><p class="identity-error" role="alert">{move || crate::i18n::t("Server password must be at most 1024 bytes")}</p></Show>
+            <p class="settings-hint">{move || crate::i18n::t("Share it only with people you want here. Invite links still work without it, and current members are never removed.")}</p>
+            <div class="settings-actions">
+                <Show when=move || protected.get()>
+                    <super::settings::ConfirmButton ui=ui label="Remove password" title="Remove the join password?" detail="Anyone with the server ID will be able to join. Invite links and current members are not affected."
+                        target=Signal::derive(move || editor.state.get().map(|s| s.guild.name).unwrap_or_default())
+                        action=editor.confirmed_then(|| Some(GuildChange::SetPassword { password: None }), cleared)/>
+                </Show>
+                <button type="submit" class="settings-primary" disabled=move || password.get().is_empty() || too_long()>
+                    {move || if protected.get() { crate::i18n::t("Change password") } else { crate::i18n::t("Turn on password") }}
+                </button>
+            </div>
+        </form>
     }
 }
 

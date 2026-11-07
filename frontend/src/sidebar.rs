@@ -186,6 +186,7 @@ mod tests {
                 .collect(),
             channels: vec![],
             overrides: vec![],
+            password_protected: false,
         };
         assert!(lower_member(&state, id(1), id(2)));
         assert!(lower_member(&state, id(2), id(4)));

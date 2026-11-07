@@ -712,17 +712,13 @@ async fn pending_accounts_can_correct_their_email_before_verifying() {
     .await;
     assert_eq!(changed["account"]["email"], "fixed@example.com");
     assert_eq!(changed["account"]["email_verified"], false);
-    #[derive(QueryableByName)]
-    struct Count {
-        #[diesel(sql_type = diesel::sql_types::BigInt)]
-        count: i64,
-    }
-    let withdrawn = diesel::sql_query(
-        "SELECT count(*) AS count FROM mail_outbox WHERE recipient='typo@example.com'",
-    )
-    .get_result::<Count>(&mut db.pool.get().unwrap())
-    .unwrap();
-    assert_eq!(withdrawn.count, 0);
+    assert_eq!(
+        count(
+            &db,
+            "SELECT count(*) AS count FROM mail_outbox WHERE recipient='typo@example.com'"
+        ),
+        0
+    );
     // The link sent to the mistyped address no longer verifies anything.
     call(
         &app,
@@ -747,12 +743,205 @@ async fn pending_accounts_can_correct_their_email_before_verifying() {
     .await;
     assert_eq!(current["account"]["email"], "fixed@example.com");
     assert_eq!(current["account"]["email_verified"], true);
-    // Verified addresses are not changeable in this version.
-    call(
+    // Verified addresses change only after confirmation (see below).
+    let pending = call(
         &app,
         change("other@example.com"),
         Some(&session),
-        StatusCode::BAD_REQUEST,
+        StatusCode::OK,
+    )
+    .await;
+    assert_eq!(pending["account"]["email"], "fixed@example.com");
+    assert_eq!(pending["account"]["pending_email"], "other@example.com");
+}
+
+#[derive(QueryableByName)]
+struct Count {
+    #[diesel(sql_type = diesel::sql_types::BigInt)]
+    count: i64,
+}
+fn count(db: &Database, query: &str) -> i64 {
+    diesel::sql_query(query)
+        .get_result::<Count>(&mut db.pool.get().unwrap())
+        .unwrap()
+        .count
+}
+/// The confirmation link most recently emailed for an email change.
+fn email_change_link(db: &Database) -> String {
+    let url = url::Url::parse(&mail_value(db, "confirm")).unwrap();
+    assert_eq!(url.path(), EMAIL_VERIFICATION_PATH);
+    format!("{}?{}", url.path(), url.query().unwrap())
+}
+async fn open_link(app: &Router, uri: &str) -> (StatusCode, String) {
+    let response = app
+        .clone()
+        .oneshot(Request::builder().uri(uri).body(Body::empty()).unwrap())
+        .await
+        .unwrap();
+    let status = response.status();
+    let html = to_bytes(response.into_body(), 8192).await.unwrap();
+    (status, String::from_utf8(html.to_vec()).unwrap())
+}
+
+#[tokio::test]
+#[ignore = "requires TEST_DATABASE_URL; CI runs with --include-ignored"]
+async fn verified_accounts_change_username_and_confirm_new_email() {
+    let _fixture = FIXTURES.acquire().await.unwrap();
+    let db = database();
+    let app = api::router(Some(db.pool.clone()), vec![]);
+    let password = "a long test password";
+    let register = |username: &str, email: &str| json!({"action":"register","username":username,"email":email,"password":password,"device":"test"});
+    let login =
+        |login: &str| json!({"action":"login","login":login,"password":password,"device":"test"});
+    let session = token(
+        &call(
+            &app,
+            register("rename_me", "old@example.com"),
+            None,
+            StatusCode::OK,
+        )
+        .await,
+    );
+    let verify = json!({"action":"verify_email","code":code(&db, "verify")});
+    call(&app, verify, None, StatusCode::OK).await;
+    call(
+        &app,
+        register("taken_name", "taken@example.com"),
+        None,
+        StatusCode::OK,
+    )
+    .await;
+    let rename = |username: &str| json!({"action":"change_username","username":username});
+    let change = |email: &str| json!({"action":"change_email","email":email});
+    // Both identifiers need recent reauthentication.
+    call(
+        &app,
+        rename("new_name"),
+        Some(&session),
+        StatusCode::FORBIDDEN,
+    )
+    .await;
+    call(
+        &app,
+        change("new@example.com"),
+        Some(&session),
+        StatusCode::FORBIDDEN,
+    )
+    .await;
+    let reauthenticate = json!({"action":"reauthenticate","password":password});
+    call(&app, reauthenticate, Some(&session), StatusCode::OK).await;
+
+    for invalid in ["x", "has space", "taken_name", "Rename_Me"] {
+        call(
+            &app,
+            rename(invalid),
+            Some(&session),
+            StatusCode::BAD_REQUEST,
+        )
+        .await;
+    }
+    let renamed = call(&app, rename(" New_Name "), Some(&session), StatusCode::OK).await;
+    assert_eq!(renamed["account"]["username"], "new_name");
+    call(&app, login("rename_me"), None, StatusCode::UNAUTHORIZED).await;
+    call(&app, login("new_name"), None, StatusCode::OK).await;
+
+    for invalid in ["not an email", "taken@example.com", "OLD@example.com"] {
+        call(
+            &app,
+            change(invalid),
+            Some(&session),
+            StatusCode::BAD_REQUEST,
+        )
+        .await;
+    }
+    // A reset requested now goes to the current address; confirming a change revokes it.
+    let forgot = json!({"action":"forgot_password","email":"old@example.com"});
+    call(&app, forgot, None, StatusCode::OK).await;
+    let reset = code(&db, "reset");
+    let pending = call(
+        &app,
+        change("First@Example.com"),
+        Some(&session),
+        StatusCode::OK,
+    )
+    .await;
+    assert_eq!(pending["account"]["email"], "old@example.com");
+    assert_eq!(pending["account"]["email_verified"], true);
+    assert_eq!(pending["account"]["pending_email"], "first@example.com");
+    let first = email_change_link(&db);
+    let unsent = "SELECT count(*) AS count FROM mail_outbox WHERE recipient='first@example.com'";
+    assert_eq!(count(&db, unsent), 1);
+    // Replacing the pending address withdraws unsent mail and the earlier link.
+    call(
+        &app,
+        change("second@example.com"),
+        Some(&session),
+        StatusCode::OK,
+    )
+    .await;
+    assert_eq!(count(&db, unsent), 0);
+    assert_eq!(open_link(&app, &first).await.0, StatusCode::BAD_REQUEST);
+    // Resending issues a new link to the pending address only.
+    let second = email_change_link(&db);
+    let resend = json!({"action":"send_verification"});
+    call(&app, resend, Some(&session), StatusCode::OK).await;
+    let resent = email_change_link(&db);
+    assert_ne!(second, resent);
+    assert_eq!(open_link(&app, &second).await.0, StatusCode::BAD_REQUEST);
+    // Cancelling withdraws the change.
+    let cancel = json!({"action":"cancel_email_change"});
+    let cancelled = call(&app, cancel, Some(&session), StatusCode::OK).await;
+    assert!(cancelled["account"].get("pending_email").is_none());
+    assert_eq!(open_link(&app, &resent).await.0, StatusCode::BAD_REQUEST);
+
+    // An address claimed by another account before confirmation is refused.
+    call(
+        &app,
+        change("race@example.com"),
+        Some(&session),
+        StatusCode::OK,
+    )
+    .await;
+    let raced = email_change_link(&db);
+    sql(
+        &db,
+        "UPDATE accounts SET email='race@example.com' WHERE username='taken_name'",
+    );
+    let (status, html) = open_link(&app, &raced).await;
+    assert_eq!(status, StatusCode::CONFLICT);
+    assert!(html.contains("already in use"));
+
+    call(
+        &app,
+        change("final@example.com"),
+        Some(&session),
+        StatusCode::OK,
+    )
+    .await;
+    let (status, html) = open_link(&app, &email_change_link(&db)).await;
+    assert_eq!(status, StatusCode::OK);
+    assert!(html.contains("Email address changed"));
+    let current = call(
+        &app,
+        json!({"action":"current"}),
+        Some(&session),
+        StatusCode::OK,
+    )
+    .await;
+    assert_eq!(current["account"]["email"], "final@example.com");
+    assert_eq!(current["account"]["email_verified"], true);
+    assert!(current["account"].get("pending_email").is_none());
+    // The previous address is told, and its reset code no longer works.
+    let notice = "SELECT count(*) AS count FROM mail_outbox WHERE recipient='old@example.com' AND body LIKE 'Thiscord email address changed%'";
+    assert_eq!(count(&db, notice), 1);
+    let reset = json!({"action":"reset_password","code":reset,"password":"another long password"});
+    call(&app, reset, None, StatusCode::UNAUTHORIZED).await;
+    call(&app, login("final@example.com"), None, StatusCode::OK).await;
+    call(
+        &app,
+        login("old@example.com"),
+        None,
+        StatusCode::UNAUTHORIZED,
     )
     .await;
 }

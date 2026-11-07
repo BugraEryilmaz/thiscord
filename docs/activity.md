@@ -30,11 +30,34 @@ certificate, which is not verified: nothing is sent, and only one of two fixed
 labels is derived from the reply. Until the match has loaded (and in the client,
 lobbies or queues) the status is **Playing League of Legends**.
 
-**Settings → Desktop → Activity status** turns detection off. The preference is
+**Settings → App behavior → Activity status** turns detection off. The preference is
 device-local (`activity.json` in the app config directory) and on by default.
 Turning it off stops scanning and clears the shared activity immediately. The
-browser `/app` client never detects or shares activities. Unknown games are not
-detected; extend `GAMES` (tests enforce normalized, unique process names).
+browser `/app` client never detects or shares activities. The built-in table is
+`GAMES` (tests enforce normalized, unique process names).
+
+### Added and hidden games
+
+The same page shows the game detected right now. A built-in game can be hidden with
+**Hide this game**; **Hidden games** lists those names with **Show again**. Hiding
+League of Legends or Teamfight Tactics hides that mode only.
+
+**Your games → Add a game** opens a picker of programs running in this user's
+session, with search and refresh, plus **Program** and **Shown as** fields. Choosing
+a program fills both with its process name and a readable suggestion
+("SonsOfTheForest.exe" → "Sons Of The Forest"); typing a program file name works for
+games that are not running. Added games match before the built-in table, so adding
+a known program under another name renames it. Up to 50 games; names follow the
+activity rules, process names are normalized like the scanner's and must be unique.
+
+The picker lists Windows programs with a visible, titled top-level window; on Linux,
+this user's processes outside system library directories (Steam's runtime stays);
+on macOS, executables outside the operating system's directories. Its process list
+reaches the settings page over Tauri IPC only while the picker is open and is never
+sent to the server or logged. `activity.json` stores `enabled`, `games` and `hidden`
+as JSON, or only `true`/`false` while both lists are empty, which older versions
+also read. A damaged or outdated list is dropped without changing the switch.
+Saving rescans immediately.
 
 ## Wire and server
 
@@ -62,7 +85,10 @@ involved. Like presence, this is per backend process.
 ## Limitations
 
 - The game table is curated by hand; process names of new releases or launchers
-  may differ. Games running as another user or inside sandboxes may be invisible.
+  may differ (add them under **Your games**). Games running as another user or
+  inside sandboxes may be invisible.
+- Added and hidden games are per device; they do not follow the account.
+- The macOS and Linux program pickers are unverified on hardware.
 - Teamfight Tactics is recognized only inside a loaded match.
 - macOS detection is unverified on hardware; Windows and Linux process listing is
   covered by tests on those hosts.
