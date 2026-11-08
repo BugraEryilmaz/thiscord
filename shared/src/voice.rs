@@ -8,6 +8,9 @@ pub const SSRC_BASE: u32 = 10_000;
 pub const REPLACED_CLOSE_CODE: u16 = 4001;
 /// A lost signaling transport may be reattached without renegotiating media.
 pub const SIGNALING_GRACE_SECS: u64 = 30;
+/// WebSocket close code for a planned server restart (RFC 6455 "Service Restart").
+/// Clients reconnect and rejoin after fresh admission; it never means revocation.
+pub const RESTART_CLOSE_CODE: u16 = 1012;
 #[derive(Debug, Clone, Copy, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct JoinAttempt {
@@ -80,6 +83,12 @@ pub enum ClientEvent {
         /// sent when the offer advertised `screen_profiles`.
         #[serde(default, skip_serializing_if = "is_false")]
         screen_profiles: bool,
+        /// Accepts `ServerEvent::Restarting`. Only sent when the offer advertised it.
+        #[serde(default, skip_serializing_if = "is_false")]
+        restart_notice: bool,
+        /// May send `ClientEvent::IceRestart`. Only sent when the offer advertised it.
+        #[serde(default, skip_serializing_if = "is_false")]
+        ice_restart: bool,
     },
     /// Plays a guild sound for everyone in this call. Requires a negotiated soundboard.
     Soundboard {
@@ -106,6 +115,14 @@ pub enum ClientEvent {
     },
     ScreenViews {
         views: Vec<crate::screen::Subscription>,
+    },
+    /// Asks for an ICE restart of the existing media session (path loss, network
+    /// change or relay credentials nearing expiry). Only after `ice_restart` was
+    /// negotiated; the server answers with `ServerEvent::IceRestart`.
+    IceRestart {},
+    /// The answer to `ServerEvent::IceRestart`, sent once local gathering ends.
+    IceRestartAnswer {
+        sdp: String,
     },
     Ping {},
     Leave {},
@@ -287,6 +304,12 @@ pub enum ServerEvent {
         /// stream-wide encoder profile from them (no per-viewer encodes).
         #[serde(default, skip_serializing_if = "is_false")]
         screen_profiles: bool,
+        /// The server announces planned restarts with `Restarting`.
+        #[serde(default, skip_serializing_if = "is_false")]
+        restart_notice: bool,
+        /// The server accepts `ClientEvent::IceRestart` on this session.
+        #[serde(default, skip_serializing_if = "is_false")]
+        ice_restart: bool,
         #[serde(default)]
         ice_servers: Vec<IceServer>,
         /// Secret capability bound to this media session; never persist or log it.
@@ -294,6 +317,21 @@ pub enum ServerEvent {
         resume_token: Option<String>,
     },
     Resumed {},
+    /// The server is restarting (a planned deploy or maintenance). The media
+    /// session ends; rejoin the same call with a fresh `Join` (full admission and
+    /// permission checks) after about `retry_after_ms`, keeping self mute/deafen.
+    /// Sent to sessions that negotiated `restart_notice`, and instead of
+    /// `ResumeUnavailable` to a resume that reaches a freshly restarted server.
+    Restarting {
+        retry_after_ms: u64,
+    },
+    /// An ICE restart offer for the existing session, with fresh relay
+    /// credentials. Only sent in reply to `ClientEvent::IceRestart`.
+    IceRestart {
+        sdp: String,
+        #[serde(default)]
+        ice_servers: Vec<IceServer>,
+    },
     /// The media session no longer exists. Only an explicit new join is allowed:
     /// absence can also mean a moderator ended the call while signaling was lost.
     ResumeUnavailable {},
@@ -323,6 +361,14 @@ pub struct VoiceStatus {
     /// The connected call negotiated soundboard playback.
     #[serde(default)]
     pub soundboard: bool,
+    /// Reconnecting after a server restart or a lost network path: a calm,
+    /// transient state, not an error. Self mute/deafen are kept.
+    #[serde(default)]
+    pub reconnecting: bool,
+    /// Publications a restart reconnection stopped that the UI may offer to
+    /// resume (`ScreenVideo` and/or `Camera`).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub resumable: Vec<MediaKind>,
 }
 // TURN credentials are short-lived secrets; deliberately no Debug.
 #[derive(Clone, Serialize, Deserialize)]
@@ -330,6 +376,10 @@ pub struct IceServer {
     pub urls: Vec<String>,
     pub username: String,
     pub credential: String,
+    /// Seconds until these relay credentials expire, counted from receipt.
+    /// Clients refresh them with an ICE restart before then. Absent for STUN.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub expires_in_secs: Option<u64>,
 }
 
 /// Media ordering is stable on the wire and in negotiated track slots.
@@ -528,6 +578,8 @@ mod media_tests {
             video_diagnostics: false,
             soundboard: false,
             screen_profiles: false,
+            restart_notice: false,
+            ice_restart: false,
         };
         let answer_wire = serde_json::to_value(&answer).unwrap();
         assert!(answer_wire.get("soundboard").is_none());
@@ -584,6 +636,83 @@ mod media_tests {
             serde_json::json!({"type":"soundboard","sound_id":id,"account_id":id})
         );
     }
+    #[test]
+    fn restart_and_ice_restart_are_opt_in_and_compatible_with_older_peers() {
+        // Older servers deny unknown answer fields: defaults stay omitted.
+        let answer = |restart_notice, ice_restart| ClientEvent::Answer {
+            browser_publisher: false,
+            packet_redundancy: false,
+            remote_audio: false,
+            sdp: "test".into(),
+            screen_feedback: false,
+            screen_subscriptions: false,
+            screen_layers: false,
+            video_diagnostics: false,
+            soundboard: false,
+            screen_profiles: false,
+            restart_notice,
+            ice_restart,
+        };
+        let legacy = serde_json::to_value(answer(false, false)).unwrap();
+        assert!(legacy.get("restart_notice").is_none() && legacy.get("ice_restart").is_none());
+        let opted = serde_json::to_value(answer(true, true)).unwrap();
+        assert_eq!(opted["restart_notice"], true);
+        assert_eq!(opted["ice_restart"], true);
+        // Older servers' offers decode without either capability.
+        let offer: ServerEvent = serde_json::from_value(serde_json::json!({
+            "type":"offer","sdp":"test","slot":0,"can_speak":true,
+            "ice_servers":[{"urls":["turn:example.test"],"username":"1:a","credential":"c"}]
+        }))
+        .unwrap();
+        let ServerEvent::Offer {
+            restart_notice,
+            ice_restart,
+            ice_servers,
+            ..
+        } = offer
+        else {
+            panic!("offer");
+        };
+        assert!(!restart_notice && !ice_restart);
+        assert_eq!(ice_servers[0].expires_in_secs, None);
+        let server = IceServer {
+            urls: vec!["turn:example.test".into()],
+            username: "1:a".into(),
+            credential: "c".into(),
+            expires_in_secs: Some(3600),
+        };
+        assert_eq!(
+            serde_json::to_value(&server).unwrap()["expires_in_secs"],
+            3600
+        );
+        assert_eq!(
+            serde_json::to_value(ServerEvent::Restarting {
+                retry_after_ms: 1500
+            })
+            .unwrap(),
+            serde_json::json!({"type":"restarting","retry_after_ms":1500})
+        );
+        let restart = serde_json::json!({"version":1,"event":{"type":"ice_restart"}});
+        let frame: ClientFrame = serde_json::from_value(restart.clone()).unwrap();
+        assert!(matches!(frame.event, ClientEvent::IceRestart {}));
+        assert_eq!(serde_json::to_value(frame).unwrap(), restart);
+        let reply =
+            serde_json::json!({"version":1,"event":{"type":"ice_restart_answer","sdp":"x"}});
+        let frame: ClientFrame = serde_json::from_value(reply).unwrap();
+        assert!(matches!(frame.event, ClientEvent::IceRestartAnswer { .. }));
+        // An unknown answer field is still rejected, as older servers do.
+        assert!(
+            serde_json::from_value::<ClientFrame>(serde_json::json!({"version":1,"event":{
+                "type":"ice_restart_answer","sdp":"x","extra":true}}))
+            .is_err()
+        );
+        let status: VoiceStatus = serde_json::from_value(serde_json::json!({
+            "connected":false,"channel_id":null,"message":"","participants":[]
+        }))
+        .unwrap();
+        assert!(!status.reconnecting && status.resumable.is_empty());
+    }
+
     #[test]
     fn media_mappings_round_trip_and_reject_unknown_sources() {
         assert_eq!(

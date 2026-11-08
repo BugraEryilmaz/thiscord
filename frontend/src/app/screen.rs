@@ -12,6 +12,22 @@ use thiscord_shared::{
 
 pub(super) type StreamTarget = thiscord_frontend::stream_ui::Selection;
 
+thread_local! {
+    /// The last started share (source, system audio, quality), so a share that a
+    /// server restart paused resumes in one click without the picker.
+    static LAST_SHARE: std::cell::RefCell<Option<serde_json::Value>> =
+        const { std::cell::RefCell::new(None) };
+}
+
+/// Resumes the share a restart paused: the same source, audio and quality.
+/// Falls back to an error message when that source is gone.
+pub(super) async fn resume_share() -> Result<(), String> {
+    let Some(request) = LAST_SHARE.with(|last| last.borrow().clone()) else {
+        return Err("Choose what to share again from the screen button.".into());
+    };
+    native::<()>("screen_start", request).await
+}
+
 pub(super) fn open_stream(ui: Ui, guild: GuildId, channel: ChannelId, member: Participant) {
     if !member.sharing_screen && !member.camera_active {
         return;
@@ -162,7 +178,9 @@ pub(super) fn ScreenControls(ui: Ui) -> impl IntoView {
                         let Some(source)=selected.get_untracked().and_then(|i|sources.get_untracked().get(i).cloned()) else{return;};
                         busy.set(true);error.set(String::new());let quality=quality.get_untracked();let audio=audio.get_untracked();
                         leptos::task::spawn_local(async move {
-                            let result=native::<()>("screen_start",json!({"source":source.id,"audio":audio,"quality":quality})).await;
+                            let request=json!({"source":source.id,"audio":audio,"quality":quality});
+                            let result=native::<()>("screen_start",request.clone()).await;
+                            if result.is_ok(){LAST_SHARE.with(|last|*last.borrow_mut()=Some(request));}
                             if busy.is_disposed(){return;}
                             match result{Ok(())=>{status.update(|s|s.sharing=true);picking.set(false);},Err(message)=>error.set(message)}
                             busy.set(false);

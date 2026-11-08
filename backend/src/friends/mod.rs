@@ -177,11 +177,14 @@ pub(crate) fn changed(accounts: impl IntoIterator<Item = AccountId>) {
         }
     }
 }
+// Each axum extractor is an argument.
+#[allow(clippy::too_many_arguments)]
 async fn upgrade(
     State(pool): State<Option<DbPool>>,
     Extension(id): Extension<RequestId>,
     Extension(origins): Extension<Arc<Vec<HeaderValue>>>,
     Extension(slots): Extension<crate::limits::SocketSlots>,
+    Extension(shutdown): Extension<crate::shutdown::Shutdown>,
     RawQuery(query): RawQuery,
     headers: HeaderMap,
     ws: Result<WebSocketUpgrade, WebSocketUpgradeRejection>,
@@ -189,7 +192,7 @@ async fn upgrade(
     if !headers.get("origin").is_some_and(|o| origins.contains(o)) {
         return Failure::Forbidden.response(id);
     }
-    let Some(pool) = pool else {
+    let Some(pool) = pool.filter(|_| !shutdown.draining()) else {
         return Failure::Unavailable.response(id);
     };
     let Ok(ws) = ws else {
@@ -207,7 +210,12 @@ async fn upgrade(
         .max_frame_size(16 * 1024)
         .on_upgrade(move |socket| async move {
             let _permit = permit;
-            serve(socket, pool, upgrade_token, retains).await
+            // A planned restart ends the socket; the client reconnects as after
+            // any drop and re-reads its bounded live window.
+            tokio::select! {
+                _ = serve(socket, pool, upgrade_token, retains) => {}
+                _ = shutdown.drained() => {}
+            }
         })
 }
 fn frame(message: Message) -> Option<ClientEvent> {

@@ -22,6 +22,7 @@ pub use shard::{SHARDS_VAR, TRANSPORT_VAR, Transport};
 pub fn configure_transport() -> Result<Transport, crate::BoxError> {
     let transport = Transport::from_env()?;
     shard::configure(transport)?;
+    ice::validate()?;
     Ok(transport)
 }
 use crate::{auth::Failure, db::DbPool};
@@ -144,6 +145,13 @@ const VOICE_AUTHORIZATION_RECHECK: Duration = Duration::from_secs(10);
 /// its last successful check is this recent. Packets still need a current epoch,
 /// so an access commit during the trouble pauses media until a check succeeds.
 const VOICE_TRANSIENT_GRACE: Duration = Duration::from_secs(30);
+/// Bounds an ICE restart offer's gathering (host candidates are kept, so the
+/// description is usually complete at once).
+const ICE_RESTART_GATHERING: Duration = Duration::from_secs(2);
+/// A client must answer an ICE restart offer within this time.
+const ICE_RESTART_ANSWER: Duration = Duration::from_secs(15);
+/// Minimum spacing between one session's ICE restarts.
+const ICE_RESTART_INTERVAL: Duration = Duration::from_secs(2);
 struct VoiceAccess {
     bot: Option<bots::Context>,
     access: Arc<access::Access>,
@@ -365,13 +373,16 @@ async fn upgrade(
     Extension(id): Extension<RequestId>,
     Extension(origins): Extension<Arc<Vec<HeaderValue>>>,
     Extension(limit): Extension<Arc<Semaphore>>,
+    Extension(shutdown): Extension<crate::shutdown::Shutdown>,
     headers: HeaderMap,
     ws: Result<WebSocketUpgrade, WebSocketUpgradeRejection>,
 ) -> Response {
     if !headers.get("origin").is_some_and(|v| origins.contains(v)) {
         return Failure::Forbidden.response(id);
     }
-    let Some(pool) = pool else {
+    // A restarting server admits nothing new; clients retry the 503 and reach
+    // the next process.
+    let Some(pool) = pool.filter(|_| !shutdown.draining()) else {
         return Failure::Unavailable.response(id);
     };
     let Ok(ws) = ws else {
@@ -390,7 +401,7 @@ async fn upgrade(
             // The connection, its relay/egress tasks and its webrtc-rs tasks all
             // live on the media runtime from here on.
             let _ = media_runtime()
-                .spawn(serve(socket, pool, id, upgrade_token))
+                .spawn(serve(socket, pool, id, upgrade_token, shutdown))
                 .await;
         })
         .into_response()
@@ -1088,6 +1099,33 @@ impl MediaPeer {
             }
         }
     }
+    /// An ICE restart offer for the negotiated session: fresh local ICE
+    /// credentials, with tracks, DTLS and SRTP unchanged. The session waits in
+    /// have-local-offer until `restart_answer`.
+    async fn restart_offer(&self, gathered: &Notify) -> Result<RTCSessionDescription, ()> {
+        match self {
+            Self::WebRtc(pc) => {
+                let offer = pc
+                    .create_offer(Some(rtc::peer_connection::configuration::RTCOfferOptions {
+                        ice_restart: true,
+                    }))
+                    .await
+                    .map_err(|_| ())?;
+                pc.set_local_description(offer).await.map_err(|_| ())?;
+                // Host candidates are kept across the restart; any re-gathering is
+                // bounded like the first offer's, and the description is used as is.
+                let _ = tokio::time::timeout(ICE_RESTART_GATHERING, gathered.notified()).await;
+                pc.local_description().await.ok_or(())
+            }
+            Self::Shard(peer) => peer.restart_offer().await,
+        }
+    }
+    async fn restart_answer(&self, answer: RTCSessionDescription, browser: bool) -> Result<(), ()> {
+        match self {
+            Self::WebRtc(pc) => pc.set_remote_description(answer).await.map_err(|_| ()),
+            Self::Shard(peer) => peer.answer(answer, browser).await,
+        }
+    }
     async fn close(self) {
         match self {
             Self::WebRtc(pc) => {
@@ -1116,7 +1154,15 @@ async fn log_selected_route(pc: &dyn PeerConnection, id: RequestId) -> bool {
     }
     false
 }
-async fn serve(mut socket: logging::Socket, pool: DbPool, id: RequestId, upgrade_token: String) {
+async fn serve(
+    mut socket: logging::Socket,
+    pool: DbPool,
+    id: RequestId,
+    upgrade_token: String,
+    shutdown: crate::shutdown::Shutdown,
+) {
+    // A restart waits (bounded) for every tracked connection to end.
+    let _tracked = shutdown.track();
     let bot = socket.bot.clone();
     let Ok(Some(Ok(first))) = tokio::time::timeout(Duration::from_secs(5), socket.recv()).await
     else {
@@ -1140,6 +1186,7 @@ async fn serve(mut socket: logging::Socket, pool: DbPool, id: RequestId, upgrade
             channel_id,
             resume_token,
             sequence,
+            shutdown.rejoining(),
         )
         .await;
         return;
@@ -1159,6 +1206,10 @@ async fn serve(mut socket: logging::Socket, pool: DbPool, id: RequestId, upgrade
         .await;
         return;
     };
+    if shutdown.draining() {
+        restarting_close(&mut socket, id, false).await;
+        return;
+    }
     let token = crate::auth::socket_token(token, &upgrade_token);
     socket.stage = "authorize";
     let connection_access = match access::identify(&pool, &token, Some(guild_id)).await {
@@ -1245,7 +1296,8 @@ async fn serve(mut socket: logging::Socket, pool: DbPool, id: RequestId, upgrade
     let (replaced_tx, mut replaced) = watch::channel(false);
     let (resume_handle, mut resumes) = resumption::channel(guild_id);
     let resume_token = resume_handle.secret.clone();
-    let slot = match membership::admit(
+    let rejoin = attempt.is_some_and(|a| a.reconnect);
+    let slot = match membership::admit_with(
         &room,
         Member {
             resumption: Some(resume_handle),
@@ -1278,7 +1330,8 @@ async fn serve(mut socket: logging::Socket, pool: DbPool, id: RequestId, upgrade
             metrics: metrics.clone(),
             active: active.clone(),
         },
-        attempt.is_some_and(|a| a.reconnect),
+        rejoin,
+        rejoin && shutdown.rejoining(),
     )
     .await
     {
@@ -1345,7 +1398,7 @@ async fn serve(mut socket: logging::Socket, pool: DbPool, id: RequestId, upgrade
     };
     let Ok(peer) = built else {
         active.store(false, Ordering::Release);
-        release_member(&room, slot, source_id).await;
+        release_member(&room, slot, source_id, false).await;
         if *replaced.borrow() {
             replaced_close(&mut socket).await;
         } else {
@@ -1370,6 +1423,9 @@ async fn serve(mut socket: logging::Socket, pool: DbPool, id: RequestId, upgrade
     // Guild channels only: private calls and synthetic bots have no soundboard.
     let soundboard_offered = bot.is_none() && guild_id.as_uuid() != channel_id.as_uuid();
     let mut soundboard = false;
+    let mut restart_notice = false;
+    let mut ice_restart = false;
+    let mut browser_session = false;
     let negotiation_started = Instant::now();
     let negotiated = async {
         tokio::time::timeout(Duration::from_secs(15), async {
@@ -1415,6 +1471,8 @@ async fn serve(mut socket: logging::Socket, pool: DbPool, id: RequestId, upgrade
                     screen_subscriptions: true,
                     screen_layers: true,
                     screen_profiles: true,
+                    restart_notice: true,
+                    ice_restart: true,
                     video_diagnostics: true,
                     soundboard: soundboard_offered,
                     ice_servers,
@@ -1439,6 +1497,8 @@ async fn serve(mut socket: logging::Socket, pool: DbPool, id: RequestId, upgrade
                 video_diagnostics: video_enabled,
                 soundboard: soundboard_enabled,
                 screen_profiles,
+                restart_notice: notice_enabled,
+                ice_restart: restart_enabled,
             }) = parse(answer)
             else {
                 return Err(());
@@ -1455,6 +1515,9 @@ async fn serve(mut socket: logging::Socket, pool: DbPool, id: RequestId, upgrade
             remote_audio = audio_enabled;
             video_diagnostics = video_enabled;
             soundboard = soundboard_offered && soundboard_enabled;
+            restart_notice = notice_enabled;
+            ice_restart = restart_enabled;
+            browser_session = browser;
             if answer.sdp_type != RTCSdpType::Answer {
                 return Err(());
             }
@@ -1486,8 +1549,10 @@ async fn serve(mut socket: logging::Socket, pool: DbPool, id: RequestId, upgrade
         })
         .await
     };
+    let mut restarting = false;
     let negotiated = tokio::select! { biased;
         _ = async { let _ = replaced.wait_for(|value| *value).await; } => None,
+        _ = shutdown.drained() => { restarting = true; None }
         result = negotiated => Some(result),
     };
     if matches!(negotiated, Some(Ok(Ok(())))) {
@@ -1750,9 +1815,14 @@ async fn serve(mut socket: logging::Socket, pool: DbPool, id: RequestId, upgrade
         let mut trouble = crate::retry::Backoff::default();
         let mut recheck_after = None::<Instant>;
         let profile_account = info.account_id;
+        // An offered ICE restart awaiting its answer, and the last one offered.
+        let mut ice_pending = None::<Instant>;
+        let mut ice_offered = None::<Instant>;
         loop {
             tokio::select! {biased;
                 _ = async { let _ = replaced.wait_for(|value| *value).await; } => break,
+                // Planned restart: the tail sends the notice and closes with 1012.
+                _ = shutdown.drained() => { restarting = true; break; },
                 Some(mut resume) = resumes.recv() => {
                     if socket.recovery_expired() {
                         let _ = send(&mut resume.socket, ServerEvent::ResumeUnavailable {}).await;
@@ -1878,6 +1948,31 @@ async fn serve(mut socket: logging::Socket, pool: DbPool, id: RequestId, upgrade
                         }
                         continue;
                     }
+                    if let Some(ClientEvent::IceRestart {}) = event {
+                        if !ice_restart { socket.end("ice_restart_not_negotiated"); break; }
+                        // One restart at a time; bursts of requests coalesce.
+                        if ice_pending.is_some() || ice_offered.is_some_and(|at| at.elapsed() < ICE_RESTART_INTERVAL) { continue; }
+                        // Fresh relay credentials: a restart also refreshes them.
+                        let Ok(ice_servers) = ice::servers(profile_account) else { socket.end("ice_configuration_failed"); break; };
+                        let Ok(sdp) = peer.restart_offer(&gathered).await.and_then(|local| serde_json::to_string(&local).map_err(|_| ())) else {
+                            socket.end("ice_restart_failed"); break;
+                        };
+                        ice_offered = Some(Instant::now());
+                        ice_pending = ice_offered;
+                        tracing::info!(request_id = %id, "voice ICE restart offered");
+                        if send(&mut socket, ServerEvent::IceRestart { sdp, ice_servers }).await.is_err() { break; }
+                        continue;
+                    }
+                    if let Some(ClientEvent::IceRestartAnswer { sdp }) = event {
+                        if ice_pending.take().is_none() { socket.end("unexpected_ice_restart_answer"); break; }
+                        let answer = serde_json::from_str::<RTCSessionDescription>(&sdp).ok().filter(|answer| answer.sdp_type == RTCSdpType::Answer);
+                        let Some(answer) = answer else { socket.end("invalid_ice_restart_answer"); break; };
+                        if peer.restart_answer(answer, browser_session).await.is_err() { socket.end("ice_restart_failed"); break; }
+                        tracing::info!(request_id = %id, elapsed_ms = ice_offered.map_or(0, |at| at.elapsed().as_millis()), "voice ICE restart answered");
+                        // Log the new route once it is selected.
+                        route_logged = false;
+                        continue;
+                    }
                     if let Err(reason)=handle_signal(&mut socket, &room, slot, event, &active).await { socket.end(reason); break; }
                 },
                 play = sound_plays.recv(), if soundboard => {
@@ -1904,6 +1999,9 @@ async fn serve(mut socket: logging::Socket, pool: DbPool, id: RequestId, upgrade
                     budget=0;
                     audio_reply_budget=0;
                     if socket.recovery_expired(){socket.end("signaling_recovery_expired");break;}
+                    // An unanswered restart leaves the session without a usable
+                    // path; end it so the client reconnects in full.
+                    if ice_pending.is_some_and(|at| at.elapsed() > ICE_RESTART_ANSWER) { socket.end("ice_restart_timeout"); break; }
                     if socket.silent_for()>Duration::from_secs(20){socket.detach();}
                     if !active.load(Ordering::Acquire){socket.end("media_inactive");break;}
                     // Reuse the current epoch's database result between rechecks.
@@ -1981,7 +2079,7 @@ async fn serve(mut socket: logging::Socket, pool: DbPool, id: RequestId, upgrade
             let _ = relay.await;
         }
         while writers.join_next().await.is_some() {}
-    } else if !*replaced.borrow() {
+    } else if !*replaced.borrow() && !restarting {
         socket.end(if matches!(negotiated, Some(Err(_))) {
             "negotiation_timeout"
         } else {
@@ -1990,20 +2088,28 @@ async fn serve(mut socket: logging::Socket, pool: DbPool, id: RequestId, upgrade
     }
     if *replaced.borrow() {
         replaced_close(&mut socket).await;
+    } else if restarting {
+        // Tell the client before releasing media, so it starts rejoining at once.
+        let notice = restart_notice && !socket.detached();
+        if notice {
+            shutdown.notified();
+        }
+        restarting_close(&mut socket, id, notice).await;
     }
     active.store(false, Ordering::Release);
-    release_member(&room, slot, source_id).await;
+    // A restart's departures are not announced: everyone rejoins shortly.
+    release_member(&room, slot, source_id, shutdown.draining()).await;
     tracing::info!(request_id = %id, "voice membership released");
     stats_task.0.abort();
     let _ = (&mut stats_task.0).await;
     peer.close().await;
-    if !*replaced.borrow() {
+    if !*replaced.borrow() && !restarting {
         let _ =
             tokio::time::timeout(Duration::from_secs(1), socket.send(Message::Close(None))).await;
     }
 }
 
-async fn release_member(room: &Room, slot: usize, source_id: uuid::Uuid) {
+async fn release_member(room: &Room, slot: usize, source_id: uuid::Uuid, quiet: bool) {
     moderation::remove(source_id);
     let mut members = room.members.write().await;
     if members
@@ -2012,12 +2118,14 @@ async fn release_member(room: &Room, slot: usize, source_id: uuid::Uuid) {
         && let Some(member) = members.remove(&slot)
     {
         room.changed.send_replace(());
-        voice_notification(
-            room,
-            &members,
-            &member.info,
-            thiscord_shared::notifications::Kind::VoiceLeave,
-        );
+        if !quiet {
+            voice_notification(
+                room,
+                &members,
+                &member.info,
+                thiscord_shared::notifications::Kind::VoiceLeave,
+            );
+        }
     }
 }
 
@@ -2054,6 +2162,37 @@ fn voice_notification(
             .collect(),
     );
     crate::notifications::publish(event);
+}
+
+/// Ends a connection for a planned restart, closing with `RESTART_CLOSE_CODE`.
+/// A session that negotiated `restart_notice` hears `Restarting` first; a join
+/// that has not negotiated gets a retryable service error, which older clients
+/// retry as well.
+async fn restarting_close(socket: &mut logging::Socket, id: RequestId, notice: bool) {
+    socket.end("server_restart");
+    let event = if notice {
+        ServerEvent::Restarting {
+            retry_after_ms: crate::shutdown::Shutdown::retry_after_ms(),
+        }
+    } else {
+        ServerEvent::Error {
+            error: thiscord_shared::ApiError {
+                code: thiscord_shared::ErrorCode::ServiceUnavailable,
+                message: "Thiscord is restarting. Reconnecting shortly.".into(),
+                request_id: id,
+                fields: vec![],
+            },
+        }
+    };
+    let _ = send(socket, event).await;
+    let _ = tokio::time::timeout(
+        Duration::from_secs(1),
+        socket.send(Message::Close(Some(axum::extract::ws::CloseFrame {
+            code: RESTART_CLOSE_CODE,
+            reason: "Server restarting".into(),
+        }))),
+    )
+    .await;
 }
 
 async fn replaced_close(socket: &mut logging::Socket) {

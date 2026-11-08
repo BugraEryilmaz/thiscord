@@ -7,6 +7,9 @@ use serde::{Deserialize, Serialize};
 pub const CHAT_PATH: &str = "/api/v1/chat";
 pub const SOCKET_PATH: &str = "/api/v1/socket";
 pub const SOCKET_VERSION: u8 = 1;
+/// Query flag on `SOCKET_PATH` opting in to `ServerEvent::Restarting`. A query,
+/// not a `connect` field: older servers deny unknown fields but ignore queries.
+pub const RESTART_NOTICE_QUERY: &str = "restart_notice=1";
 pub const MAX_MESSAGE_CHARS: usize = 4000;
 pub const MAX_MENTION_QUERY_CHARS: usize = 64;
 pub const MENTION_SUGGESTION_LIMIT: usize = 8;
@@ -549,6 +552,12 @@ pub enum ServerEvent {
     GuildUpdated {
         guild_id: GuildId,
     },
+    /// The server is restarting for a planned deploy or maintenance. Reconnect
+    /// after about `retry_after_ms`; this is not an error. Sent only to sockets
+    /// opened with `RESTART_NOTICE_QUERY`, before a close with code 1012.
+    Restarting {
+        retry_after_ms: u64,
+    },
 }
 
 #[cfg(test)]
@@ -652,6 +661,23 @@ mod tests {
         let hint = json!({"type":"guild_updated","guild_id":id});
         let parsed: ServerEvent = serde_json::from_value(hint.clone()).unwrap();
         assert_eq!(serde_json::to_value(parsed).unwrap(), hint);
+    }
+
+    #[test]
+    fn restart_notice_round_trips() {
+        let notice = json!({"type":"restarting","retry_after_ms":2000});
+        let parsed: ServerEvent = serde_json::from_value(notice.clone()).unwrap();
+        assert!(matches!(
+            parsed,
+            ServerEvent::Restarting {
+                retry_after_ms: 2000
+            }
+        ));
+        assert_eq!(serde_json::to_value(parsed).unwrap(), notice);
+        assert_eq!(
+            serde_json::to_value(crate::voice::RESTART_CLOSE_CODE).unwrap(),
+            json!(1012)
+        );
     }
 
     #[test]

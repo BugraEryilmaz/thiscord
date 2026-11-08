@@ -72,6 +72,9 @@ Signaling and negotiation:
   `Revoked`, permission errors and protocol closes are final; transport,
   ICE-failure and media-timeout (15 s) errors rejoin with the desktop backoff
   (1–30 s plus jitter; reset after 30 s connected). `Moved` rejoins the new channel.
+  A server restart (`Restarting`, close 1012) rejoins with the desktop's restart
+  pacing; a lost path, a return online or expiring relay credentials restart ICE
+  in place first ([restarts.md](restarts.md)).
   Each attempt sends `Leave` before it closes; `pagehide` leaves the call.
 
 Playback graph: one `AudioContext` per call, created inside the join click. Each
@@ -1440,10 +1443,16 @@ the client resends current mute/deafen, screen state and subscriptions instead o
 replaying commands queued during the outage. Leaving cancels recovery immediately.
 Missing/revoked/replaced sessions and exhausted recovery end the call and require
 an explicit join. In particular, an unavailable session must not automatically
-rejoin: a moderator may have disconnected it while signaling was lost.
+rejoin: a moderator may have disconnected it while signaling was lost. A server
+restart is the exception: the restarting server says so (`Restarting`, close code
+1012), and a freshly started server answers a resume for a session it never had
+with `Restarting`; the client then rejoins with full admission
+([restarts.md](restarts.md)).
 
-ICE/media-write failures and legacy-source slot compatibility transitions use
-full reconnection with fresh authorization,
+A lost ICE path first tries an in-place ICE restart on the same peer (fresh relay
+credentials, same tracks and DTLS); see [restarts.md](restarts.md). ICE/media-write
+failures, restarts that do not reconnect and legacy-source slot compatibility
+transitions use full reconnection with fresh authorization,
 offers and ICE/TURN configuration. The old media and devices close before a new
 peer starts. A recoverable ICE Disconnected state retains the existing peer.
 Full retries use 1/2/4/8/16/30-second backoff plus up to 500 ms jitter; 30 seconds
@@ -1552,8 +1561,8 @@ THISCORD_TURN_SECRET in backend/.env and restart the backend. No third-party
 service is assumed or silently contacted. The backend issues account-bound, one-hour
 [TURN REST credentials](https://github.com/coturn/coturn/blob/master/README.turnserver)
 using HMAC-SHA1; only the temporary credential goes to clients. The static secret
-stays on the backend. Long calls need rejoining before relay credentials expire
-until refresh/ICE restart is implemented. Router/firewall forwarding and off-site,
+stays on the backend. Relayed calls refresh their credentials with an ICE restart
+before expiry ([restarts.md](restarts.md)). Router/firewall forwarding and off-site,
 restrictive-NAT acceptance still require verification for each deployment.
 
 ## Native voice connection diagnostics

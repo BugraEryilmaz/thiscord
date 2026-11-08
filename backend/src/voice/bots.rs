@@ -294,7 +294,14 @@ async fn add(
         let connection_id = RequestId::from_uuid(uuid::Uuid::new_v4());
         bot.lock().unwrap().connection_id = Some(connection_id);
         let (socket, tx, rx) = logging::Socket::internal(connection_id, context);
-        let server = serve(socket, pool, connection_id, String::new());
+        // In-process test bots end with the process; they are not drained.
+        let server = serve(
+            socket,
+            pool,
+            connection_id,
+            String::new(),
+            crate::shutdown::Shutdown::default(),
+        );
         let client = peer::run(
             tx,
             rx,

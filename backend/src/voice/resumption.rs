@@ -36,6 +36,7 @@ pub(super) async fn current(room: &Room, slot: usize, source: uuid::Uuid, sequen
     })
 }
 
+#[allow(clippy::too_many_arguments)]
 pub(super) async fn attach(
     mut socket: logging::Socket,
     pool: &DbPool,
@@ -44,6 +45,7 @@ pub(super) async fn attach(
     channel: ChannelId,
     secret: String,
     sequence: u64,
+    rejoining: bool,
 ) {
     let id = socket.id;
     socket.stage = "resume_authorize";
@@ -77,7 +79,16 @@ pub(super) async fn attach(
             .values_mut()
             .find(|m| m.info.account_id == info.account_id)
         else {
-            return Ok(Err(ServerEvent::ResumeUnavailable {}));
+            // Resume tokens are per process. Shortly after a restart, an unknown
+            // session most likely belonged to the previous process: rejoin with
+            // full admission instead of ending the call.
+            return Ok(Err(if rejoining {
+                ServerEvent::Restarting {
+                    retry_after_ms: rand::random::<u64>() % 1_000,
+                }
+            } else {
+                ServerEvent::ResumeUnavailable {}
+            }));
         };
         let old_epoch = member.generation.load(Ordering::Acquire);
         let _original_access = member

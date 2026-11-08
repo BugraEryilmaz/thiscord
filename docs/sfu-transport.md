@@ -30,8 +30,8 @@ whole batch with one `sendmmsg`.
 
 - Signaling, offers (server offerer, `MediaKind::TRACK_COUNT` m-lines with fixed relay
   SSRCs), codecs and RTP interceptors (`media_setup` in `voice/mod.rs`), RED, layers,
-  views, byte budgets, keyframe requests, rosters, resumption and authorization
-  rechecks.
+  views, byte budgets, keyframe requests, rosters, resumption, restart drains,
+  in-place ICE restarts and authorization rechecks ([restarts.md](restarts.md)).
 - Track classification and ingress limits: `shard/peer.rs` `open_track`/`media` follow
   `Handler::on_track` and its reader task line by line.
 - Forwarding: `shard/forward.rs` runs the relay loop's checks and header rewrite, admits
@@ -59,6 +59,9 @@ suite under both transports.
   ICE ufrag (which may move an address between connections) or from addresses the
   connection's own ICE agent sent to that no other connection owns (at most 16 per
   connection; `shard/demux.rs`). Unknown sources are dropped before any DTLS/SRTP work.
+  An ICE restart registers the new local ufrag (the old one stops routing) and keeps
+  learned addresses until the new path is checked; a credential-checked request at
+  the bound replaces the oldest address.
 - Keyframe requests after video drops are spawned at most once per viewer, publisher
   and kind every 250 ms (the webrtc mode's relay and writers await each one instead).
 - Host candidates only, on the bind address (`THISCORD_VOICE_BIND`, or the default-route

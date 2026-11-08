@@ -100,6 +100,7 @@ async fn unreachable_ice_server_does_not_block_direct_voice_answer() {
         ],
         username: "fixture".into(),
         credential: "fixture".into(),
+        expires_in_secs: None,
     }])
     .await
     .unwrap();
@@ -377,7 +378,7 @@ async fn signaling_joins_restricted_and_refresh_closes_legacy_session() {
                                     can_speak: true, ice_servers: vec![], packet_redundancy: true,
                                     remote_audio: false, screen_video: false, camera_video: false,
                                     screen_feedback: false, screen_subscriptions: false, screen_layers: false,
-                                    video_diagnostics: false, soundboard: false, screen_profiles: false, resume_token: None,
+                                    video_diagnostics: false, soundboard: false, screen_profiles: false, restart_notice: false, ice_restart: false, resume_token: None,
                                 })
                             },
                             ClientEvent::Answer { sdp, packet_redundancy, remote_audio, .. } => {

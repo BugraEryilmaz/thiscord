@@ -431,6 +431,8 @@ async fn join(config: Arc<Config>, index: usize, stats: Arc<Mutex<Stats>>) -> Re
                 screen_subscriptions: config.video(),
                 screen_layers: false,
                 screen_profiles: false,
+                restart_notice: false,
+                ice_restart: false,
                 video_diagnostics: false,
                 soundboard: false,
                 sdp: serde_json::to_string(&pc.local_description().await.ok_or("Missing answer")?)

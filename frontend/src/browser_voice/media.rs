@@ -857,6 +857,12 @@ pub(super) async fn devices() -> Result<Vec<AudioDevice>, String> {
 
 /// The offer's STUN/TURN servers; credentials are never logged.
 pub(super) fn peer(servers: &[IceServer]) -> Result<RtcPeerConnection, JsValue> {
+    RtcPeerConnection::new_with_configuration(&configuration(servers))
+}
+
+/// A configuration carrying `servers`; an ICE restart applies fresh relay
+/// credentials with it before answering.
+pub(super) fn configuration(servers: &[IceServer]) -> RtcConfiguration {
     let list = Array::new();
     for server in servers {
         let urls = server
@@ -882,7 +888,42 @@ pub(super) fn peer(servers: &[IceServer]) -> Result<RtcPeerConnection, JsValue> 
     }
     let configuration = RtcConfiguration::new();
     configuration.set_ice_servers(&list);
-    RtcPeerConnection::new_with_configuration(&configuration)
+    configuration
+}
+
+/// Whether the selected candidate pair's local candidate is a TURN relay
+/// (`None` when the browser does not report it).
+pub(super) async fn relayed(pc: &RtcPeerConnection) -> Option<bool> {
+    let report = JsFuture::from(pc.get_stats()).await.ok()?;
+    let values = call_optional(&report, "values", &Array::new())?.ok()?;
+    let stats: Vec<JsValue> = js_sys::try_iter(&values)
+        .ok()??
+        .filter_map(Result::ok)
+        .take(512)
+        .collect();
+    let text = |stat: &JsValue, key: &str| {
+        Reflect::get(stat, &key.into())
+            .ok()
+            .and_then(|value| value.as_string())
+    };
+    let flag = |stat: &JsValue, key: &str| {
+        Reflect::get(stat, &key.into())
+            .ok()
+            .and_then(|value| value.as_bool())
+            .unwrap_or(false)
+    };
+    let local = stats.iter().find_map(|stat| {
+        (text(stat, "type").as_deref() == Some("candidate-pair")
+            && text(stat, "state").as_deref() == Some("succeeded")
+            && (flag(stat, "nominated") || flag(stat, "selected")))
+        .then(|| text(stat, "localCandidateId"))
+        .flatten()
+    })?;
+    stats.iter().find_map(|stat| {
+        (text(stat, "type").as_deref() == Some("local-candidate")
+            && text(stat, "id").as_deref() == Some(local.as_str()))
+        .then(|| text(stat, "candidateType").as_deref() == Some("relay"))
+    })
 }
 
 /// Browser Opus capabilities without RED or comfort noise, so the answer

@@ -209,6 +209,8 @@ pub(super) async fn run(
                 soundboard: false,
                 // Bots decode with OpenH264 (baseline only); never request High.
                 screen_profiles: false,
+                restart_notice: false,
+                ice_restart: false,
             },
         )
         .await?;
@@ -588,11 +590,13 @@ mod tests {
                     urls: vec![format!("stun:{address}")],
                     username: String::new(),
                     credential: String::new(),
+                    expires_in_secs: None,
                 },
                 IceServer {
                     urls: vec![format!("turn:{address}?transport=udp")],
                     username: "synthetic".into(),
                     credential: "synthetic".into(),
+                    expires_in_secs: None,
                 },
             ]))
             .with_media_engine(media)

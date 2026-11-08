@@ -187,6 +187,11 @@ Voice failures include safe transport error categories, audio processing stages 
 request IDs for correlation with backend logs; see [disconnect diagnostics](docs/audio.md#native-voice-connection-diagnostics).
 If an older voice client triggers a slot compatibility transition, updated desktops
 automatically reconnect after a brief interruption instead of requiring a manual join.
+Server deploys and restarts do not end calls: the server says it is restarting and
+desktop and web clients rejoin on their own with mute/deafen kept, showing a calm
+"Reconnecting…" and offering to resume a paused screen share or camera. A lost
+network path or expiring TURN credentials restart ICE in place first
+([restarts.md](docs/restarts.md)).
 Desktop calls and voice rooms show simultaneous webcams and screen shares in a
 grid sized to each stream's shape, with local previews, live quality labels
 (e.g. 1080p · 30 fps), focus, drag-to-rearrange, fullscreen and hide/restore.

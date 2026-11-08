@@ -16,6 +16,14 @@ use web_sys::{
     RtcSdpType, RtcSessionDescriptionInit,
 };
 static NEXT_SESSION: AtomicU32 = AtomicU32::new(1);
+thread_local! {
+    /// Counts "turn camera back on" requests from the restart notice.
+    static RESUME: ArcRwSignal<u32> = ArcRwSignal::new(0);
+}
+/// Asks the camera control to turn the camera back on after a restart.
+pub(super) fn request_resume() {
+    RESUME.with(|resume| resume.update(|count| *count = count.wrapping_add(1)));
+}
 #[derive(Default)]
 struct LocalPreview {
     stream: Option<MediaStream>,
@@ -300,7 +308,7 @@ pub(super) fn CameraControls(ui: Ui) -> impl IntoView {
         crate::cameras::revision();
         follow_selection();
     });
-    let toggle = move |_| {
+    let toggle = move |_: ()| {
         if !crate::account_client::desktop() {
             error.set("Open the desktop app to use your camera".into());
             return;
@@ -388,9 +396,13 @@ pub(super) fn CameraControls(ui: Ui) -> impl IntoView {
                         let capture = current.borrow().clone();
                         if !live || !allowed.alive {
                             stop();
-                            error.set(
-                                "Camera stopped. Check the device and your call connection.".into(),
-                            );
+                            // A restart reconnection offers to turn it back on instead.
+                            if !ui.voice.with_untracked(|v| v.reconnecting) {
+                                error.set(
+                                    "Camera stopped. Check the device and your call connection."
+                                        .into(),
+                                );
+                            }
                             break;
                         }
                         if let Some(capture) = capture {
@@ -416,9 +428,12 @@ pub(super) fn CameraControls(ui: Ui) -> impl IntoView {
                         if disconnected_since.is_some_and(|at| js_sys::Date::now() - at >= 10_000.0)
                         {
                             stop();
-                            error.set(
-                                "Camera stopped. Check the device and your call connection.".into(),
-                            );
+                            if !ui.voice.with_untracked(|v| v.reconnecting) {
+                                error.set(
+                                    "Camera stopped. Check the device and your call connection."
+                                        .into(),
+                                );
+                            }
                             break;
                         }
                     }
@@ -426,10 +441,23 @@ pub(super) fn CameraControls(ui: Ui) -> impl IntoView {
             }
         });
     };
+    let resume = toggle.clone();
+    let requests = RESUME.with(Clone::clone);
+    Effect::new(move |seen: Option<u32>| {
+        let count = requests.get();
+        if seen.is_some_and(|seen| seen != count)
+            && !active.get_untracked()
+            && !busy.get_untracked()
+            && super::audio::media_publish_allowed(ui)
+        {
+            resume(());
+        }
+        count
+    });
     view! {
         <button class="icon-button voice-action" class:active=move ||active.get() disabled=move ||!crate::account_client::desktop() || !super::audio::media_publish_allowed(ui)
             aria-label=move ||if busy.get(){crate::i18n::t("Cancel camera")}else{crate::i18n::t("Camera")}
-            data-tip=move ||if !crate::account_client::desktop(){crate::i18n::t("Available in the desktop app")}else if active.get(){crate::i18n::t("Turn camera off")}else{crate::i18n::t("Turn camera on")} aria-pressed=move ||active.get() on:click=toggle>
+            data-tip=move ||if !crate::account_client::desktop(){crate::i18n::t("Available in the desktop app")}else if active.get(){crate::i18n::t("Turn camera off")}else{crate::i18n::t("Turn camera on")} aria-pressed=move ||active.get() on:click=move |_|toggle(())>
             {move ||view!{<super::icons::Icon kind=if active.get(){super::icons::Glyph::Camera}else{super::icons::Glyph::CameraOff}/>}}
         </button>
         <super::camera_select::CameraMenu ui=ui/>

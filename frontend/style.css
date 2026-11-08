@@ -353,6 +353,11 @@ dialog header > button.icon-button:last-child svg { width: 18px; height: 18px; }
 .connection-dot { position: absolute; right: -1px; bottom: -1px; width: 13px; height: 13px; border: 3px solid var(--color-dock); border-radius: 50%; background: color-mix(in srgb, var(--color-muted) 70%, transparent); }
 .connection-dot.connected { background: var(--color-success); }
 .connection-dot.connecting { background: var(--color-warning); }
+/* Calm reconnection (server restart, lost path): a slow breath, not an alarm. */
+.voice-health.voice-reconnecting { animation: voice-breathe 1.8s ease-in-out infinite; }
+@keyframes voice-breathe { 50% { opacity: 0.6; } }
+.voice-resume { padding: 8px; border: 1px solid var(--tint-6); border-radius: var(--radius-md); background: var(--tint-5); animation: toast-in 160ms ease-out; }
+@media (prefers-reduced-motion: reduce) { .voice-health.voice-reconnecting, .voice-resume { animation: none; } }
 .connection-dot.connected.dnd { background: var(--color-danger); }
 .icon-button { position: relative; display: inline-flex; align-items: center; justify-content: center; width: 36px; height: 36px; border-radius: var(--radius-md); color: var(--color-muted); cursor: pointer; transition: background .12s, color .12s; }
 .icon-button:hover { background: var(--tint-7); color: var(--color-white); }

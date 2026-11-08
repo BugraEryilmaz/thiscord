@@ -20,6 +20,7 @@ use uuid::Uuid;
 use crate::{
     db::{self, DbPool},
     limits::Limits,
+    shutdown::Shutdown,
 };
 
 /// The application router with the default connection limits.
@@ -32,7 +33,17 @@ pub fn router_with_limits(
     origins: Vec<HeaderValue>,
     limits: Limits,
 ) -> Router {
-    routes(pool, origins, limits)
+    router_with_shutdown(pool, origins, limits, Shutdown::default())
+}
+
+/// The application router draining with `shutdown` (see `crate::shutdown`).
+pub fn router_with_shutdown(
+    pool: Option<DbPool>,
+    origins: Vec<HeaderValue>,
+    limits: Limits,
+    shutdown: Shutdown,
+) -> Router {
+    routes(pool, origins, limits, shutdown)
 }
 
 /// For the disposable load-test server only: voice admits exactly the fixture's
@@ -50,10 +61,15 @@ pub fn load_test_router(
         sockets: sockets.unwrap_or(connections.max(crate::limits::DEFAULT_SOCKETS)),
         voice: connections,
     };
-    routes(Some(pool), origins, limits)
+    routes(Some(pool), origins, limits, Shutdown::default())
 }
 
-fn routes(pool: Option<DbPool>, origins: Vec<HeaderValue>, limits: Limits) -> Router {
+fn routes(
+    pool: Option<DbPool>,
+    origins: Vec<HeaderValue>,
+    limits: Limits,
+    shutdown: Shutdown,
+) -> Router {
     let voice = crate::voice::router_with_limit(origins.clone(), limits.voice);
     let cookie_origins = std::sync::Arc::new(origins.clone());
     Router::new()
@@ -80,6 +96,7 @@ fn routes(pool: Option<DbPool>, origins: Vec<HeaderValue>, limits: Limits) -> Ro
         .layer(middleware::from_fn(move |request: Request, next: Next| {
             crate::auth::cookie::middleware(cookie_origins.clone(), request, next)
         }))
+        .layer(Extension(shutdown))
         .layer(
             CorsLayer::new()
                 .allow_origin(origins)
@@ -134,8 +151,11 @@ async fn health() -> Json<HealthResponse> {
 async fn ready(
     State(pool): State<Option<DbPool>>,
     Extension(request_id): Extension<RequestId>,
+    Extension(shutdown): Extension<Shutdown>,
 ) -> Response {
-    let Some(pool) = pool else {
+    // A draining process is alive but must not receive new work; liveness
+    // (`/health`) stays independent of this.
+    let Some(pool) = pool.filter(|_| !shutdown.draining()) else {
         return unavailable(request_id);
     };
     let probe = tokio::task::spawn_blocking(move || db::check_readiness(&pool));

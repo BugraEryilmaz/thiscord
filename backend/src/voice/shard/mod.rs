@@ -152,6 +152,11 @@ enum Command {
         peer: PeerId,
         reply: oneshot::Sender<Result<RTCSessionDescription, ()>>,
     },
+    /// An ICE restart offer for a negotiated connection (new local ufrag).
+    RestartIce {
+        peer: PeerId,
+        reply: oneshot::Sender<Result<RTCSessionDescription, ()>>,
+    },
     Answer {
         peer: PeerId,
         answer: Box<RTCSessionDescription>,
@@ -306,6 +311,17 @@ impl Peer {
     pub async fn offer(&self) -> Result<RTCSessionDescription, ()> {
         let (reply, response) = oneshot::channel();
         self.link.send(Command::Offer {
+            peer: self.link.id,
+            reply,
+        })?;
+        response.await.map_err(|_| ())?
+    }
+
+    /// Restarts ICE: a new local ufrag over the same shard socket and host
+    /// candidate. Applied with `answer`, like the first offer.
+    pub async fn restart_offer(&self) -> Result<RTCSessionDescription, ()> {
+        let (reply, response) = oneshot::channel();
+        self.link.send(Command::RestartIce {
             peer: self.link.id,
             reply,
         })?;
@@ -593,6 +609,23 @@ impl Shard {
                     self.demux.register(peer, ufrag);
                 }
                 self.input(peer);
+                let _ = reply.send(result);
+            }
+            Command::RestartIce { peer, reply } => {
+                let local = self.socket.local_addr();
+                let result = match self.get_mut(peer) {
+                    Some(connection) => connection.restart_offer(now, local),
+                    None => Err(()),
+                };
+                // The new ufrag routes from now on. Learned addresses stay, so
+                // the current path keeps working until the restart completes.
+                if let Ok(description) = &result
+                    && let Some(ufrag) = demux::sdp_ufrag(&description.sdp)
+                {
+                    self.demux.register(peer, ufrag);
+                }
+                self.input(peer);
+                self.output(peer);
                 let _ = reply.send(result);
             }
             Command::Answer {

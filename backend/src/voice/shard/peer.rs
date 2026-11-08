@@ -111,6 +111,43 @@ impl Connection {
         self.core
             .set_local_description(now, offer)
             .map_err(|_| ())?;
+        self.add_host_candidate(local)?;
+        let local = self.core.local_description().ok_or(())?;
+        self.mids = browser::mids(&local.sdp);
+        Ok(local)
+    }
+
+    /// An ICE restart offer: new local ICE credentials over the same shard
+    /// socket; tracks, DTLS and SRTP stay. The host candidate is kept by the
+    /// core and added again only if it was discarded.
+    pub fn restart_offer(
+        &mut self,
+        now: Instant,
+        local: std::net::SocketAddr,
+    ) -> Result<RTCSessionDescription, ()> {
+        if self.senders.is_empty() {
+            return Err(());
+        }
+        let offer = self
+            .core
+            .create_offer(Some(rtc::peer_connection::configuration::RTCOfferOptions {
+                ice_restart: true,
+            }))
+            .map_err(|_| ())?;
+        self.core
+            .set_local_description(now, offer)
+            .map_err(|_| ())?;
+        let has_candidate = self
+            .core
+            .local_description()
+            .is_some_and(|local| local.sdp.contains("a=candidate:"));
+        if !has_candidate {
+            self.add_host_candidate(local)?;
+        }
+        self.core.local_description().ok_or(())
+    }
+
+    fn add_host_candidate(&mut self, local: std::net::SocketAddr) -> Result<(), ()> {
         let candidate = CandidateHostConfig {
             base_config: CandidateConfig {
                 network: "udp".to_owned(),
@@ -130,10 +167,7 @@ impl Connection {
         // End of candidates: gathering completes, as the webrtc driver signals.
         self.core
             .add_local_candidate(RTCIceCandidateInit::default())
-            .map_err(|_| ())?;
-        let local = self.core.local_description().ok_or(())?;
-        self.mids = browser::mids(&local.sdp);
-        Ok(local)
+            .map_err(|_| ())
     }
 
     pub fn events(&mut self) {

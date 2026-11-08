@@ -583,6 +583,8 @@ pub(super) fn ChatHost(ui: Ui) -> impl IntoView {
             let _ = Abortable::new(
                 async move {
                     let mut delay = 1000;
+                    // After a restart notice: steady, quick retries for a while.
+                    let mut restart_until = 0.0;
                     loop {
                         if !window().navigator().on_line() {
                             ui.socket_status.set(ConnectionStatus::Offline);
@@ -591,7 +593,8 @@ pub(super) fn ChatHost(ui: Ui) -> impl IntoView {
                         }
                         ui.socket_status.set(ConnectionStatus::Connecting);
                         let started = js_sys::Date::now();
-                        let error = connected(ui, &token)
+                        let restart = std::cell::Cell::new(None::<u64>);
+                        let error = connected(ui, &token, &restart)
                             .await
                             .err()
                             .unwrap_or_else(|| "Disconnected".into());
@@ -603,22 +606,39 @@ pub(super) fn ChatHost(ui: Ui) -> impl IntoView {
                         ui.voice_roster.set(vec![]);
                         ui.members.clear();
                         ui.unread.set(vec![]);
+                        let restarting = restart.get();
+                        if restarting.is_some() {
+                            restart_until = js_sys::Date::now() + 180_000.0;
+                            delay = 1000;
+                        }
+                        let calm = js_sys::Date::now() < restart_until;
                         if let Some(chat) = ui.active_chat.get_untracked() {
                             chat.online.set(vec![]);
-                            chat.status.set(thiscord_frontend::localized_format!(
-                                crate::i18n::language(),
-                                "{error}. Retrying...",
-                                error = crate::i18n::message(error)
-                            ));
+                            // A planned restart is not an error: say so calmly.
+                            chat.status.set(if calm {
+                                crate::i18n::t("Thiscord is restarting. Reconnecting…").to_owned()
+                            } else {
+                                thiscord_frontend::localized_format!(
+                                    crate::i18n::language(),
+                                    "{error}. Retrying...",
+                                    error = crate::i18n::message(error)
+                                )
+                            });
                         }
                         if js_sys::Date::now() - started > 10000.0 {
                             delay = 1000;
                         }
-                        gloo_timers::future::TimeoutFuture::new(
-                            delay + (js_sys::Math::random() * 500.0) as u32,
-                        )
-                        .await;
-                        delay = (delay * 2).min(30000);
+                        let wait = match restarting {
+                            Some(hint) => {
+                                hint.min(30_000) as u32 + (js_sys::Math::random() * 250.0) as u32
+                            }
+                            None if calm => 1500 + (js_sys::Math::random() * 1000.0) as u32,
+                            None => delay + (js_sys::Math::random() * 500.0) as u32,
+                        };
+                        gloo_timers::future::TimeoutFuture::new(wait).await;
+                        if !calm {
+                            delay = (delay * 2).min(30000);
+                        }
                     }
                 },
                 registration,
@@ -628,10 +648,16 @@ pub(super) fn ChatHost(ui: Ui) -> impl IntoView {
     });
 }
 
-async fn connected(ui: Ui, token: &str) -> Result<(), String> {
+/// One chat socket session. A restart notice stores its retry hint in `restart`.
+async fn connected(
+    ui: Ui,
+    token: &str,
+    restart: &std::cell::Cell<Option<u64>>,
+) -> Result<(), String> {
     use std::{cell::Cell, rc::Rc};
     let base = crate::account_client::socket_base();
-    let socket = WebSocket::open(&format!("{base}{SOCKET_PATH}"))
+    // Older servers ignore the query; current ones then announce restarts.
+    let socket = WebSocket::open(&format!("{base}{SOCKET_PATH}?{RESTART_NOTICE_QUERY}"))
         .map_err(|_| crate::i18n::t("Cannot open chat connection"))?;
     let (mut sink, mut stream) = socket.split();
     sink.send(Message::Text(
@@ -671,6 +697,11 @@ async fn connected(ui: Ui, token: &str) -> Result<(), String> {
                     ui.socket_status.set(ConnectionStatus::Connected);
                 }
                 ServerEvent::Pong {} => {}
+                // A planned restart: reconnect after the hint, calmly.
+                ServerEvent::Restarting { retry_after_ms } => {
+                    restart.set(Some(retry_after_ms));
+                    return Err("Thiscord is restarting".into());
+                }
                 // Another member renamed the server or changed its icon. The
                 // hint carries no data; re-read guilds over authorized HTTP.
                 ServerEvent::GuildUpdated { .. } => {

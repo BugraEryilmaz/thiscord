@@ -338,7 +338,11 @@ Personalized speaker isolation and physical acoustic acceptance remain future wo
 - [x] Automatic full peer reconnection with fresh offers and relay credentials.
 - [x] Authenticated signaling reattachment preserves media across brief socket loss,
   with bounded grace, cancellation, sequence fencing and permission revalidation.
-- [ ] In-place ICE restart and proactive long-call relay credential refresh.
+- [x] In-place ICE restart (lost path, browser back online) with full-reconnect fallback
+  and proactive relayed-call TURN credential refresh, on both SFU transports and
+  desktop/web clients (docs/restarts.md).
+- [ ] Physical acceptance of ICE restarts, network changes and hour-long relayed calls
+  on Windows/macOS/Linux and browsers over a real off-site TURN path.
 - [x] Docker coturn deployment, shared-secret configuration and local relay tests.
 - [ ] Restrictive NAT, forced WebRTC relay fallback and off-site public UDP acceptance.
 - [x] Bounded local voice-quality metrics, separate transport/CPU/buffer causes,
@@ -382,7 +386,12 @@ Personalized speaker isolation and physical acoustic acceptance remain future wo
 - [ ] Measure with chat clients off the server host as well (only voice generators
   ran off-host; chat sockets cannot share one SSH tunnel), over TURN, and with
   real clients and networks (see docs/load-benchmarks.md caveats).
-- [ ] Production metrics and coordinated graceful room draining on shutdown.
+- [x] Coordinated graceful room draining on planned restarts: restart notices, 1012
+  closes, bounded drain, quiet automatic rejoin with fresh admission, graceful
+  systemd/deploy stop (docs/restarts.md).
+- [ ] Production metrics (beyond drain summary logs and the admin dashboard).
+- [ ] Observe a real VPS deploy with desktop and web clients in calls (rejoin time
+  is dominated by the pre-activation database backup).
 
 ## 8. Voice channels end to end
 
