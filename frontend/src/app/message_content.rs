@@ -61,6 +61,67 @@ fn plain(text: &str, ui: Ui, guild: Option<GuildId>) -> impl IntoView + use<> {
         .collect_view()
 }
 
+/// Hidden text: a keyboard-reachable button until revealed. While hidden the
+/// content is inert (links cannot be activated) and not exposed to assistive
+/// technology; each occurrence is revealed independently and stays revealed.
+fn spoiler(inner: AnyView) -> AnyView {
+    let revealed = RwSignal::new(false);
+    view! {
+        <span class="spoiler" class:spoiler-revealed=move || revealed.get()
+            role=move || (!revealed.get()).then_some("button")
+            tabindex=move || (!revealed.get()).then_some("0")
+            aria-label=move || (!revealed.get()).then(|| crate::i18n::t("Spoiler, press to reveal"))
+            on:click=move |event| {
+                if !revealed.get_untracked() {
+                    event.prevent_default();
+                    event.stop_propagation();
+                    revealed.set(true);
+                }
+            }
+            on:keydown=move |event: leptos::ev::KeyboardEvent| {
+                if !revealed.get_untracked() && (event.key() == "Enter" || event.key() == " ") {
+                    event.prevent_default();
+                    revealed.set(true);
+                }
+            }>
+            <span class="spoiler-content" inert=move || !revealed.get() aria-hidden=move || (!revealed.get()).then_some("true")>{inner}</span>
+        </span>
+    }
+    .into_any()
+}
+
+/// Covers a spoiler attachment (image, video, file or voice message) with a
+/// blurred "Spoiler" button until the viewer reveals it.
+#[component]
+pub(super) fn SpoilerCover(spoiler: bool, children: Children) -> impl IntoView {
+    if !spoiler {
+        return children().into_any();
+    }
+    let revealed = RwSignal::new(false);
+    let content = NodeRef::<leptos::html::Div>::new();
+    view! {
+        <div class="spoiler-cover" class:spoiler-cover-revealed=move || revealed.get()>
+            <div node_ref=content class="spoiler-cover-content" tabindex="-1" inert=move || !revealed.get() aria-hidden=move || (!revealed.get()).then_some("true")>{children()}</div>
+            <Show when=move || !revealed.get()>
+                <button type="button" class="spoiler-cover-button" aria-label=move || crate::i18n::t("Spoiler attachment, press to reveal")
+                    on:click=move |event| {
+                        event.stop_propagation();
+                        revealed.set(true);
+                        // Keep keyboard focus with the revealed attachment.
+                        request_animation_frame(move || {
+                            if let Some(node) = content.get_untracked() {
+                                let _ = node.focus();
+                            }
+                        });
+                    }>
+                    <span>{move || crate::i18n::t("Spoiler")}</span>
+                </button>
+            </Show>
+        </div>
+    }
+    .into_any()
+}
+
 /// Message markup; `guild` resolves mentions to that guild's members.
 pub(super) fn render(text: &str, ui: Ui, guild: Option<GuildId>) -> impl IntoView + use<> {
     nodes(thiscord_frontend::markdown::parse(text), ui, guild, false)
@@ -79,6 +140,7 @@ fn nodes(
         Node::Element(kind,children)=>{
             let inner=nodes(children,ui,guild,literal || matches!(kind,Kind::Code|Kind::CodeBlock|Kind::Link(_)));
             match kind {
+                Kind::Spoiler=>spoiler(inner),
                 Kind::Strong=>view!{<strong>{inner}</strong>}.into_any(),
                 Kind::Emphasis=>view!{<em>{inner}</em>}.into_any(),
                 Kind::Strike=>view!{<s>{inner}</s>}.into_any(),

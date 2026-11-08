@@ -13,6 +13,7 @@ mod context_menu;
 mod diagnostics;
 mod dialog;
 mod direct_attachments;
+mod edit_history;
 mod emoji;
 mod friends;
 mod icons;
@@ -42,6 +43,7 @@ mod tooltip;
 mod updates;
 mod verify;
 mod voice_bots;
+mod voice_message;
 mod window;
 
 #[derive(Clone, Copy, PartialEq, Eq, Hash)]
@@ -177,6 +179,10 @@ async fn apply(ui: Ui, response: AccountResponse) {
 }
 async fn clear_local(ui: Ui) {
     servers::reset_session(ui);
+    voice_message::stop_all();
+    if client::desktop() {
+        let _ = client::native::<()>("voice_message_reset", serde_json::json!({})).await;
+    }
     ui.drafts.update_value(std::collections::HashMap::clear);
     ui.guilds.set(vec![]);
     ui.voice_location.set(None);

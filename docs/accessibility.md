@@ -104,6 +104,14 @@ The confirmation dialog focuses Cancel first.
   and voice connection.
 - Chat history is a labelled list; each message is an `article` named by author
   and full local time. The scrollable history is a focusable region.
+- Spoilers are buttons ("Spoiler, press to reveal") until revealed; hidden
+  content is `inert` and `aria-hidden`. Spoiler attachments have a labelled
+  reveal button that moves focus to the revealed attachment.
+- Voice-message players are labelled groups with a play/pause button, a
+  `role=slider` waveform (arrows ±5 s, Page Up/Down ±15 s, Home/End) and a
+  speed button. The recorder starts with Enter/Space on the microphone button,
+  moves focus to Stop, and Escape discards. "(edited)" is a button that opens
+  the edit-history dialog.
 - A single polite live region announces navigation targets, "marked as read",
   connection changes (Connected/Reconnecting), voice connect/disconnect, and new
   messages from others **in the open channel only**: author plus at most 140

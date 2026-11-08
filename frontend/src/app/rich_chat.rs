@@ -406,7 +406,7 @@ pub(super) fn Actions(
                                         message.with_untracked(|m|chat.action(ChatRequest::Delete {guild_id:chat.guild,channel_id:chat.channel,message_id:m.id,revision:m.revision}));
                                         return;
                                     }
-                                    let preview = message.with_untracked(|m| m.content.chars().take(120).collect::<String>());
+                                    let preview = message.with_untracked(|m| thiscord_shared::chat::mask_spoilers(&m.content).chars().take(120).collect::<String>());
                                     crate::app::dialog::confirm(chat.ui, crate::app::dialog::Confirmation::new(
                                         crate::i18n::t("Delete this message?"),
                                         crate::i18n::t("The message, its attachments, reactions and pin are removed for everyone. Replies show it as deleted. This cannot be undone."),

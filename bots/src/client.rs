@@ -133,6 +133,7 @@ impl Client {
                     content: content.into(),
                     attachment_ids: vec![],
                     reply_to: None,
+                    spoilers: vec![],
                 },
             )
             .await?

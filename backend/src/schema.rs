@@ -61,6 +61,9 @@ diesel::table! {
         size_bytes -> Int8,
         data -> Bytea,
         expires_at -> Timestamptz,
+        voice_duration_ms -> Nullable<Int4>,
+        voice_waveform -> Nullable<Text>,
+        spoiler -> Bool,
     }
 }
 
@@ -136,6 +139,19 @@ diesel::table! {
         data -> Bytea,
         created_at -> Timestamptz,
         expires_at -> Timestamptz,
+        voice_duration_ms -> Nullable<Int4>,
+        voice_waveform -> Nullable<Text>,
+        spoiler -> Bool,
+    }
+}
+
+diesel::table! {
+    direct_message_edits (id) {
+        id -> Int8,
+        message_id -> Uuid,
+        content -> Text,
+        created_at -> Timestamptz,
+        replaced_at -> Timestamptz,
     }
 }
 
@@ -344,6 +360,16 @@ diesel::table! {
 }
 
 diesel::table! {
+    message_edits (id) {
+        id -> Int8,
+        message_id -> Uuid,
+        content -> Text,
+        created_at -> Timestamptz,
+        replaced_at -> Timestamptz,
+    }
+}
+
+diesel::table! {
     message_events (sequence) {
         sequence -> Int8,
         guild_id -> Uuid,
@@ -471,6 +497,7 @@ diesel::joinable!(channels -> guilds (guild_id));
 diesel::joinable!(direct_attachments -> accounts (owner_id));
 diesel::joinable!(direct_attachments -> direct_messages (message_id));
 diesel::joinable!(direct_attachments -> friendships (conversation_id));
+diesel::joinable!(direct_message_edits -> direct_messages (message_id));
 diesel::joinable!(direct_messages -> accounts (author_id));
 diesel::joinable!(direct_messages -> friendships (conversation_id));
 diesel::joinable!(friend_calls -> friendships (conversation_id));
@@ -491,6 +518,7 @@ diesel::joinable!(instance_admins -> accounts (account_id));
 diesel::joinable!(instance_role_assignments -> accounts (account_id));
 diesel::joinable!(instance_role_assignments -> instance_role_limits (role_id));
 diesel::joinable!(mail_outbox -> accounts (account_id));
+diesel::joinable!(message_edits -> messages (message_id));
 diesel::joinable!(message_events -> messages (message_id));
 diesel::joinable!(message_reactions -> accounts (account_id));
 diesel::joinable!(message_reactions -> messages (message_id));
@@ -517,6 +545,7 @@ diesel::allow_tables_to_appear_in_same_query!(
     channels,
     chat_presence,
     direct_attachments,
+    direct_message_edits,
     direct_messages,
     friend_calls,
     friendships,
@@ -535,6 +564,7 @@ diesel::allow_tables_to_appear_in_same_query!(
     instance_role_assignments,
     instance_role_limits,
     mail_outbox,
+    message_edits,
     message_events,
     message_reactions,
     messages,

@@ -78,7 +78,7 @@ Drop images, videos or other files onto an open text channel, or choose them wit
 the composer's attachment button. Review/remove queued files before sending;
 message text is optional when files are attached. A message accepts up to four
 files, each at most 25 MiB. Sending still requires the channel's SendMessages
-permission. Attachments are currently for guild text channels, not private messages.
+permission. Private messages use their own attachment pipeline ([friends.md](friends.md#private-attachments)).
 
 Supported pictures render as previews. Videos have a thumbnail with a play button;
 opening one starts playback in a full-window viewer with native playback controls.
@@ -117,6 +117,102 @@ attachment IDs, so retrying a message does not attach the same files to a second
 message. Abandoned staged uploads expire after one hour, with at most 16 staged
 files / 100 MiB per account. This bounded, buffered implementation is intended for
 the personal deployment; it does not transcode videos or provide resumable uploads.
+
+## Voice messages
+
+The composer's microphone button records a voice message in text channels and
+private conversations. Click it (or press Enter/Space on it) for a hands-free
+recording; press and hold to record and release to send. While holding, slide
+left to cancel or up to lock the recording hands-free. The bar that covers the
+composer shows a pulsing recording dot, the elapsed time (amber in the last 30
+seconds) and a live waveform. **Stop and review** opens a preview with play/pause,
+a scrubbable waveform and a spoiler toggle; **Send** uploads and sends it, the
+trash button or Escape discards it. Recordings shorter than 0.5 s are discarded
+with a hint; recording stops on its own at five minutes (`MAX_VOICE_MESSAGE_MS`).
+Voice messages are sent as their own message (with the current reply target);
+the draft and queued files stay in the composer.
+
+Received voice messages show an inline player: play/pause, a waveform that
+shows progress and can be clicked or dragged to seek (a keyboard slider:
+arrows ±5 s, Page Up/Down ±15 s, Home/End), elapsed/total time and a 1×/1.5×/2×
+speed button shared by all players. Starting one voice message stops any other.
+Playback stops when the channel or conversation closes, access changes or the
+session ends.
+
+Storage reuses the attachment pipelines and their ownership, consent, quota and
+expiry rules (guild: below; private: [friends.md](friends.md#private-attachments)).
+Uploads add `voice=true` and an optional `waveform` to the existing query. The
+backend accepts only a single-stream mono/stereo Ogg Opus file of at most 5 MiB
+(`MAX_VOICE_MESSAGE_BYTES`) and 0.5 s–5 min, verifying CRCs, page order, the Opus
+headers and every packet's TOC; the duration comes from the container, never the
+client. The waveform is 64 bytes of URL-safe base64 (`WAVEFORM_BARS`), computed by
+the recorder; an invalid one is rejected and a missing one is stored flat. Voice
+uploads are named `voice-message.ogg` with type `audio/ogg`, and
+`ChatAttachment.voice` carries `{duration_ms, waveform}`. Released clients ignore the
+new field and show an ordinary downloadable `.ogg` file. Container rules live in
+`shared/src/voice_message.rs`. Sending requires the same permission as attaching
+files (SendMessages; see [permissions.md](permissions.md)).
+
+Desktop recording and playback are native ([audio.md](audio.md#voice-messages));
+the WebView only receives levels, positions and metadata. The browser client
+records with MediaRecorder (Ogg or WebM Opus at 32 kbps, normalized to Ogg in Rust)
+and plays through one media element on the selected output device. Browsers whose
+media element cannot play Ogg get a remuxed WebM copy; browsers without Opus
+recording (older Safari) explain that recording is unavailable.
+
+## Spoilers
+
+Wrap text in `||double bars||` to hide it. Each spoiler shows as a solid bar
+until clicked (or focused and Enter/Space), then stays revealed; hidden content is
+inert, so links inside cannot be activated, and is not exposed to screen readers
+until revealed. Delimiters pair left to right inside one paragraph or inline
+container; code spans/blocks and link text never contain spoilers; an unpaired
+`||` stays literal. Escaped (`\|\|`) or entity-encoded pipes never form a spoiler.
+
+Plain-text previews never reveal spoilers: reply previews (server and client),
+the composer's reply banner and screen-reader announcements replace everything
+from the first to the last literal `||` with `▒▒▒▒▒` (`mask_spoilers`) before
+truncating. That range always covers every rendered spoiler. Search result
+snippets and the delete confirmation use the same placeholder. Notifications
+carry no message text. Pinned messages and edit history render spoilers hidden
+like messages.
+
+Attachments (images, videos, files and voice messages) can be marked as spoilers
+before sending: the eye button on a queued or staged file, or the spoiler toggle
+in the voice-message preview. `Send` gains `spoilers` (a subset of the message's
+attachment IDs, part of the send fingerprint so a retry with different marks
+conflicts). Marked attachments render blurred behind a **Spoiler** button until
+revealed per occurrence. `ChatAttachment.spoiler` is omitted when false; older
+clients show such attachments uncovered.
+
+## Edit history
+
+Editing a guild or private message keeps the replaced text: the last 20 versions
+(`MAX_EDIT_HISTORY`) per message, oldest pruned on the next edit. Unchanged edits
+add no version; reactions and pins change the revision but not the history. The
+"(edited)" marker shows the edit time on hover/focus and opens an **Edit history**
+dialog: the current text, then earlier versions newest first, each with the time
+it was sent or edited and when it was replaced, rendered with the safe Markdown
+renderer. Edits made before this feature have no stored versions.
+
+`ChatRequest::EditHistory { guild_id, channel_id, message_id }` and the private
+`Request::EditHistory { conversation_id, message_id }` return
+`EditHistory { message_id, versions }` (at most 20, newest first), a complete
+bounded snapshot like the permission editor's ([api.md](api.md)). Authorization is
+identical to reading the message: guild membership, ViewChannel and ReadHistory
+in a locked transaction (under a shared channel lock, so it serializes with
+edits), or current private pair access (accepted friendship, no block in either
+direction). Deleted messages return 403, and nothing is cached on the client.
+
+Deleting a message deletes its history in the same transaction as the tombstone.
+Channel/guild deletion cascades, and account deletion cascades private
+conversations (and so their history). Guild messages of deleted accounts keep
+their content anonymized, and so does their history. Blocking or unfriending
+denies private history like private messages; a newly accepted request restores
+it. History is not searchable and report evidence still copies only the current
+version. Migration `20261108400000_voice_spoilers_edit_history` adds the history
+tables and the attachment voice/spoiler columns; rollback discards history and
+the flags (voice messages remain ordinary Ogg files).
 
 ## Contracts and persistence
 
@@ -344,7 +440,8 @@ Each socket refresh shares one session/guild authorization transaction between
 unread counts and channel events. Commit notifications are scoped to the subscribed
 guild, channel and account.
 Event-log compaction, cross-process fanout, full-guild presence and load tests are
-future work. Message search is described in [search.md](search.md). Customizable alert subscriptions
+future work. Message search is described in [search.md](search.md). Voice messages, spoilers
+and edit history are described above. Customizable alert subscriptions
 and desktop banners are described in [notifications.md](notifications.md).
 Native voice uses a separate signaling socket and media admission/drain mechanism;
 see [audio.md](audio.md).

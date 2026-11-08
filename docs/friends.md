@@ -202,8 +202,10 @@ Deletion persists an empty tombstone at the original history position and remove
 private attachment bytes. Tombstones do not count as unread. The frontend refreshes
 both latest and selected older pages over the existing bounded snapshot socket,
 keys rows by message ID, applies revisions reactively without dropping edit drafts,
-and ignores older revisions. No edit history API
-is exposed. Reconnect reloads the selected page, including missed deletions.
+and ignores older revisions. Edits keep the last 20 replaced versions, readable
+with `edit_history` under the same pair access as history and deleted with the
+message (see [chat.md](chat.md#edit-history)). Reconnect reloads the selected page,
+including missed deletions.
 
 `select` optionally includes a `before` history cursor; older clients can omit it.
 `typing { active }` is scoped to the socket's authorized selection. Each socket
@@ -242,7 +244,9 @@ from bytes: PNG/JPEG/GIF/WebP and MP4/WebM can be previewed, everything else is 
 file download. Responses are `no-store`, `nosniff` and attachment disposition.
 
 The private composer supports file selection, removing staged attachments,
-attachment-only sends and retrying frozen text/file IDs. View/Download fetch through
+spoiler marks, voice messages ([chat.md](chat.md#voice-messages); uploads with
+`voice=true` follow the same consent and quota rules, at most 5 MiB),
+attachment-only sends and retrying frozen text/file IDs and spoiler marks. View/Download fetch through
 authenticated bounded browser transport (no token-bearing URLs). Images/video use
 Blob URLs; each explicit View/Download reauthorizes. Closing, switching conversations,
 deletion, logout or loss of the friends socket clears previews and aborts transfers.

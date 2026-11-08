@@ -20,6 +20,11 @@ pub struct DirectAttachmentUpload {
     pub conversation_id: ConversationId,
     pub filename: String,
     pub content_type: String,
+    /// Validate the body as an Ogg Opus voice message (see `AttachmentUpload`).
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub voice: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub waveform: Option<String>,
 }
 
 fn initial_revision() -> i32 {
@@ -158,6 +163,9 @@ pub enum Request {
         content: String,
         #[serde(default)]
         attachments: Vec<AttachmentId>,
+        /// Attachments among `attachments` to publish as spoilers.
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        spoilers: Vec<AttachmentId>,
     },
     Edit {
         conversation_id: ConversationId,
@@ -184,6 +192,11 @@ pub enum Request {
     EndCall {
         call_id: CallId,
     },
+    /// Previous versions of an undeleted message; requires current pair access.
+    EditHistory {
+        conversation_id: ConversationId,
+        message_id: MessageId,
+    },
 }
 #[derive(Clone, Serialize, Deserialize)]
 #[serde(tag = "result", rename_all = "snake_case")]
@@ -192,6 +205,7 @@ pub enum Response {
     History { history: History },
     Message { message: DirectMessage },
     Call { call: Call },
+    EditHistory { history: crate::chat::EditHistory },
     Done,
 }
 #[derive(Serialize, Deserialize)]
@@ -280,6 +294,37 @@ mod tests {
                 .is_none()
         );
     }
+    #[test]
+    fn spoilers_voice_uploads_and_edit_history_are_additive() {
+        let id = "00000000-0000-0000-0000-000000000001";
+        let send = Request::Send {
+            conversation_id: id.parse().unwrap(),
+            client_id: id.parse().unwrap(),
+            content: String::new(),
+            attachments: vec![],
+            spoilers: vec![],
+        };
+        assert!(
+            serde_json::to_value(&send)
+                .unwrap()
+                .get("spoilers")
+                .is_none()
+        );
+        let upload: DirectAttachmentUpload = serde_json::from_value(
+            serde_json::json!({"conversation_id":id,"filename":"f","content_type":"x"}),
+        )
+        .unwrap();
+        assert!(!upload.voice && upload.waveform.is_none());
+        let wire =
+            serde_json::json!({"action":"edit_history","conversation_id":id,"message_id":id});
+        let request: Request = serde_json::from_value(wire.clone()).unwrap();
+        assert_eq!(serde_json::to_value(request).unwrap(), wire);
+        let response =
+            serde_json::json!({"result":"edit_history","history":{"message_id":id,"versions":[]}});
+        let parsed: Response = serde_json::from_value(response.clone()).unwrap();
+        assert_eq!(serde_json::to_value(parsed).unwrap(), response);
+    }
+
     #[test]
     fn unread_counts_are_additive_and_read_commands_are_typed() {
         let id = "00000000-0000-0000-0000-000000000001";

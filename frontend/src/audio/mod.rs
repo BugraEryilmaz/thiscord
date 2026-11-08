@@ -109,6 +109,8 @@ macro_rules! pcm_stream {
         }
     };
 }
+// Declared after `pcm_stream!` so the module can dispatch sample formats.
+pub mod voice_message;
 fn output<T>(
     device: &cpal::Device,
     config: &cpal::StreamConfig,

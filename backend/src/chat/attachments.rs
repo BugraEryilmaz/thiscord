@@ -19,7 +19,7 @@ use axum::{
 };
 use diesel::{
     prelude::*,
-    sql_types::{Binary, Text, Uuid as SqlUuid},
+    sql_types::{Binary, Integer, Nullable, Text, Uuid as SqlUuid},
 };
 use std::{
     sync::{Arc, Mutex, OnceLock},
@@ -27,7 +27,7 @@ use std::{
 };
 use thiscord_shared::{
     AccountId, AttachmentId, ChannelId, GuildId, MessageId, RequestId, chat::*,
-    permissions::Permission,
+    permissions::Permission, voice_message::VOICE_MESSAGE_FILENAME,
 };
 use tokio::sync::{OwnedSemaphorePermit, Semaphore};
 use uuid::Uuid;
@@ -88,11 +88,12 @@ async fn upload(
         let permit = admission()?;
         let Query(upload) = query.map_err(|_| Failure::Invalid("Invalid attachment query"))?;
         validate_upload(&upload)?;
+        let limit = upload_limit(upload.voice);
         if let Some(length) = request.headers().get("content-length") {
             let length = length.to_str().ok().and_then(|v| v.parse::<usize>().ok())
                 .ok_or(Failure::Invalid("Invalid attachment length"))?;
-            if length == 0 || length > MAX_ATTACHMENT_BYTES {
-                return Err(Failure::Invalid("Attachment must contain 1 byte to 25 MiB"));
+            if length == 0 || length > limit {
+                return Err(Failure::Invalid("Attachment must contain 1 byte to 25 MiB (voice messages 5 MiB)"));
             }
         }
         let pool = pool.ok_or(Failure::Unavailable)?;
@@ -103,24 +104,30 @@ async fn upload(
             store::checked(&p, &t, u.guild_id, Some(u.channel_id), Some(Permission::SendMessages),
                 |c, actor, _| quota(c, actor, 0))
         }).await.map_err(|_| Failure::Unavailable)??;
-        let bytes = tokio::time::timeout(Duration::from_secs(30), to_bytes(request.into_body(), MAX_ATTACHMENT_BYTES))
+        let bytes = tokio::time::timeout(Duration::from_secs(30), to_bytes(request.into_body(), limit))
             .await.map_err(|_| Failure::Invalid("Attachment upload timed out"))?
             .map_err(|_| Failure::Invalid("Invalid attachment body; maximum is 25 MiB"))?;
         if bytes.is_empty() { return Err(Failure::Invalid("Attachment is empty")); }
         let metadata = tokio::task::spawn_blocking(move || {
             let _permit = permit;
+            // Parse before opening the transaction; no connection is held meanwhile.
+            let voice = voice_metadata(&upload, &bytes)?;
             store::checked(&pool, &token, upload.guild_id, Some(upload.channel_id), Some(Permission::SendMessages), |c, actor, _| {
                 // Serialize account-wide quota checks across channels without upgrading account locks.
                 execute(c, "SELECT pg_advisory_xact_lock(hashtextextended($1, 0))", &[&format!("attachment:{actor}")])?;
                 cleanup(c)?;
                 quota(c, actor, bytes.len())?;
                 let attachment = ChatAttachment { id: AttachmentId::from_uuid(Uuid::new_v4()),
-                    filename: upload.filename, content_type: classify(&bytes).into(), size_bytes: bytes.len() as u64 };
-                diesel::sql_query("INSERT INTO attachments(id,guild_id,channel_id,owner_id,filename,content_type,size_bytes,data) VALUES($1,$2,$3,$4,$5,$6,octet_length($7),$7)")
+                    filename: if voice.is_some() { VOICE_MESSAGE_FILENAME.into() } else { upload.filename },
+                    content_type: classify(&bytes).into(), size_bytes: bytes.len() as u64, voice, spoiler: false };
+                diesel::sql_query("INSERT INTO attachments(id,guild_id,channel_id,owner_id,filename,content_type,size_bytes,data,voice_duration_ms,voice_waveform) VALUES($1,$2,$3,$4,$5,$6,octet_length($7),$7,$8,$9)")
                     .bind::<SqlUuid,_>(attachment.id.as_uuid()).bind::<SqlUuid,_>(upload.guild_id.as_uuid())
                     .bind::<SqlUuid,_>(upload.channel_id.as_uuid()).bind::<SqlUuid,_>(actor.as_uuid())
                     .bind::<Text,_>(&attachment.filename).bind::<Text,_>(&attachment.content_type)
-                    .bind::<Binary,_>(bytes.as_ref()).execute(c)?;
+                    .bind::<Binary,_>(bytes.as_ref())
+                    .bind::<Nullable<Integer>,_>(attachment.voice.as_ref().map(|v| v.duration_ms as i32))
+                    .bind::<Nullable<Text>,_>(attachment.voice.as_ref().map(|v| v.waveform.as_str()))
+                    .execute(c)?;
                 Ok(attachment)
             })
         }).await.map_err(|_| Failure::Unavailable)??;
@@ -157,6 +164,81 @@ pub(super) fn validate_ids(ids: &[AttachmentId]) -> Result<(), Failure> {
     Ok(())
 }
 
+/// Spoiler marks must name distinct attachments of the same send.
+pub(crate) fn validate_spoilers(
+    ids: &[AttachmentId],
+    spoilers: &[AttachmentId],
+) -> Result<(), Failure> {
+    if spoilers
+        .iter()
+        .collect::<std::collections::BTreeSet<_>>()
+        .len()
+        != spoilers.len()
+        || spoilers.iter().any(|id| !ids.contains(id))
+    {
+        return Err(Failure::Invalid(
+            "Spoilers must be attachments of this message",
+        ));
+    }
+    Ok(())
+}
+
+pub(crate) fn upload_limit(voice: bool) -> usize {
+    if voice {
+        thiscord_shared::voice_message::MAX_VOICE_MESSAGE_BYTES
+    } else {
+        MAX_ATTACHMENT_BYTES
+    }
+}
+
+/// Voice uploads must be valid Ogg Opus within the length bounds; the duration
+/// comes from the file, never from the client. A waveform is optional (flat).
+pub(crate) fn voice_metadata(
+    upload_voice: &impl VoiceUpload,
+    bytes: &[u8],
+) -> Result<Option<VoiceMetadata>, Failure> {
+    use thiscord_shared::voice_message::{
+        WAVEFORM_BARS, decode_waveform, encode_waveform, validate_voice_message,
+    };
+    let (voice, waveform) = upload_voice.voice();
+    if !voice {
+        return if waveform.is_some() {
+            Err(Failure::Invalid("Only voice messages carry a waveform"))
+        } else {
+            Ok(None)
+        };
+    }
+    let duration_ms = validate_voice_message(bytes).map_err(|e| Failure::Invalid(e.0))?;
+    let waveform = match waveform {
+        Some(value) => {
+            decode_waveform(value).ok_or(Failure::Invalid("Invalid voice message waveform"))?;
+            value.to_owned()
+        }
+        None => encode_waveform(&[0; WAVEFORM_BARS]),
+    };
+    Ok(Some(VoiceMetadata {
+        duration_ms,
+        waveform,
+    }))
+}
+pub(crate) trait VoiceUpload {
+    fn voice(&self) -> (bool, Option<&str>);
+}
+impl VoiceUpload for AttachmentUpload {
+    fn voice(&self) -> (bool, Option<&str>) {
+        (self.voice, self.waveform.as_deref())
+    }
+}
+impl VoiceUpload for thiscord_shared::friends::DirectAttachmentUpload {
+    fn voice(&self) -> (bool, Option<&str>) {
+        (self.voice, self.waveform.as_deref())
+    }
+}
+
+/// Claim-time metadata copied into the message row; Option/false fields are
+/// omitted when serialized, so plain attachments keep their legacy JSON.
+pub(crate) const CLAIMED: &str = "jsonb_build_object('id',id,'filename',filename,'content_type',content_type,'size_bytes',size_bytes,'spoiler',spoiler,'voice',CASE WHEN voice_duration_ms IS NULL THEN NULL ELSE jsonb_build_object('duration_ms',voice_duration_ms,'waveform',voice_waveform) END)";
+
 pub(super) fn attach(
     c: &mut PgConnection,
     actor: AccountId,
@@ -164,18 +246,22 @@ pub(super) fn attach(
     channel: ChannelId,
     message: MessageId,
     ids: &[AttachmentId],
+    spoilers: &[AttachmentId],
 ) -> Result<(), Failure> {
+    static CLAIM: OnceLock<String> = OnceLock::new();
+    let sql = CLAIM.get_or_init(|| format!("UPDATE attachments SET message_id=$1::uuid,spoiler=$6::boolean WHERE id=$2::uuid AND owner_id=$3::uuid AND guild_id=$4::uuid AND channel_id=$5::uuid AND message_id IS NULL AND expires_at>now() RETURNING {CLAIMED} AS data"));
     let mut metadata = Vec::<ChatAttachment>::new();
     for id in ids {
         let mut rows = query(
             c,
-            "UPDATE attachments SET message_id=$1::uuid WHERE id=$2::uuid AND owner_id=$3::uuid AND guild_id=$4::uuid AND channel_id=$5::uuid AND message_id IS NULL AND expires_at>now() RETURNING jsonb_build_object('id',id,'filename',filename,'content_type',content_type,'size_bytes',size_bytes) AS data",
+            sql,
             &[
                 &message.to_string(),
                 &id.to_string(),
                 &actor.to_string(),
                 &guild.to_string(),
                 &channel.to_string(),
+                &spoilers.contains(id).to_string(),
             ],
         )?;
         metadata.push(rows.pop().ok_or(Failure::Forbidden)?);
@@ -338,6 +424,9 @@ pub(crate) fn classify(bytes: &[u8]) -> &'static str {
         )
     {
         "video/mp4"
+    } else if bytes.starts_with(b"OggS") {
+        // Downloads only; voice playback additionally requires `voice` metadata.
+        "audio/ogg"
     } else if bytes.starts_with(b"\x1a\x45\xdf\xa3")
         && bytes[..bytes.len().min(128)]
             .windows(4)
@@ -418,6 +507,8 @@ mod tests {
             channel_id: ChannelId::from_uuid(Uuid::nil()),
             filename: "image.png".into(),
             content_type: "image/png".into(),
+            voice: false,
+            waveform: None,
         };
         assert!(validate_upload(&upload).is_ok());
         for filename in ["../file", "a\\b", "\r\n", "..", &"x".repeat(256)] {

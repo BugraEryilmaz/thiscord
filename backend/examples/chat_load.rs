@@ -370,6 +370,7 @@ async fn send_message(
         content: format!("{PREFIX} {} {sequence} {sent_us}", config.run),
         attachment_ids: vec![],
         reply_to: None,
+        spoilers: vec![],
     })
     .unwrap();
     let mut url = config.http.clone();

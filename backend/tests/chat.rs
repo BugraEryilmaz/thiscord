@@ -36,6 +36,8 @@ mod resilience;
 mod rich;
 #[path = "chat/unread.rs"]
 mod unread;
+#[path = "chat/voice_edits.rs"]
+mod voice_edits;
 
 struct Database {
     connection: PgConnection,

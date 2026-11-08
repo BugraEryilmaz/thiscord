@@ -112,7 +112,7 @@ fn cleanup_preserves_attachment_claimed_by_uncommitted_send() {
     execute(&mut observer, "UPDATE direct_attachments SET expires_at=clock_timestamp()+interval '1 second' WHERE id=$1::uuid", &[&claimed.to_string()]).unwrap();
     std::thread::scope(|scope| {
         let (worker, blocked) = sender.transaction::<_, Failure, _>(|sender| {
-            attach(sender, owner, conversation, message, &[claimed])?;
+            attach(sender, owner, conversation, message, &[claimed], &[])?;
             assert!(wait_until(|| scalar(&mut observer, "SELECT to_jsonb(expires_at<=clock_timestamp()) AS data FROM direct_attachments WHERE id=$1::uuid", &[&claimed.to_string()])), "attachment did not expire before cleanup");
             let worker = scope.spawn(move || cleanup(&mut cleaner));
             let blocked = wait_until(|| scalar(&mut observer, "SELECT to_jsonb($1::integer=ANY(pg_blocking_pids($2::integer))) AS data", &[&sender_pid.to_string(), &cleaner_pid.to_string()]));

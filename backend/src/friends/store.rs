@@ -108,7 +108,10 @@ pub(super) fn dispatch(pool: &DbPool, token: &str, request: Request) -> Result<R
     // Read acknowledgements use the ordinary request budget, not the send budget.
     let write = !matches!(
         request,
-        Request::Search { .. } | Request::History { .. } | Request::Read { .. }
+        Request::Search { .. }
+            | Request::History { .. }
+            | Request::Read { .. }
+            | Request::EditHistory { .. }
     );
     auth::rate_limit(pool, &format!("friends:{actor}"), None, write)?;
     let mut c = connection(pool)?;
@@ -192,11 +195,11 @@ pub(super) fn dispatch(pool: &DbPool, token: &str, request: Request) -> Result<R
                 execute(c,"UPDATE friendships SET low_read_at=CASE WHEN low_id=$2::uuid THEN GREATEST(low_read_at,$3::timestamptz) ELSE low_read_at END,high_read_at=CASE WHEN high_id=$2::uuid THEN GREATEST(high_read_at,$3::timestamptz) ELSE high_read_at END WHERE id=$1::uuid", &[&conversation_id.to_string(),&actor.to_string(),&at.to_rfc3339()])?;
                 Ok(Response::Done)
             }
-            Request::Send {conversation_id,client_id,content,attachments} => {
+            Request::Send {conversation_id,client_id,content,attachments,spoilers} => {
                 let p = pair(c,conversation_id,actor,true)?;
                 changed.extend([actor,p.other(actor)?]);
                 let duplicate = !query::<bool>(c,"SELECT to_jsonb(TRUE) AS data FROM direct_messages WHERE author_id=$1::uuid AND client_id=$2::uuid", &[&actor.to_string(), &client_id.to_string()])?.is_empty();
-                let message = send(c,actor,conversation_id,client_id,content,attachments)?;
+                let message = send(c,actor,conversation_id,client_id,content,attachments,spoilers)?;
                 if !duplicate {
                     let mut event = crate::notifications::Candidate::new(thiscord_shared::notifications::Target::Conversation { conversation_id }, thiscord_shared::notifications::Kind::DirectMessage, "New direct message".into(), Some(actor));
                     event.id = message.id.to_string(); event.recipients = Some(vec![p.other(actor)?]); notification = Some(event);
@@ -214,7 +217,8 @@ pub(super) fn dispatch(pool: &DbPool, token: &str, request: Request) -> Result<R
                 if old.revision!=revision {return Err(Failure::Conflict);}
                 // Backfill the legacy send fingerprint before changing its content.
                 preserve_request(c,&old)?;
-                execute(c,"UPDATE direct_messages SET content=$2,revision=revision+1,edited_at=clock_timestamp() WHERE id=$1::uuid", &[&message_id.to_string(),&content])?;
+                let at=crate::chat::store::keep_version(c,"direct_message_edits","direct_messages",message_id)?;
+                execute(c,"UPDATE direct_messages SET content=$2,revision=revision+1,edited_at=$3::timestamptz WHERE id=$1::uuid", &[&message_id.to_string(),&content,&at])?;
                 Ok(Response::Message {message:message(c,conversation_id,message_id)?})
             }
             Request::Delete {conversation_id,message_id,revision} => {
@@ -227,8 +231,16 @@ pub(super) fn dispatch(pool: &DbPool, token: &str, request: Request) -> Result<R
                 preserve_request(c,&old)?;
                 execute(c,"UPDATE direct_messages SET content='',attachments='[]',deleted=true,revision=revision+1,edited_at=clock_timestamp() WHERE id=$1::uuid", &[&message_id.to_string()])?;
                 execute(c,"DELETE FROM direct_attachments WHERE message_id=$1::uuid", &[&message_id.to_string()])?;
+                execute(c,"DELETE FROM direct_message_edits WHERE message_id=$1::uuid", &[&message_id.to_string()])?;
                 call_guards.push(crate::chat::access::direct_message(message_id).pause());
                 Ok(Response::Message {message:message(c,conversation_id,message_id)?})
+            }
+            Request::EditHistory {conversation_id,message_id} => {
+                // Same consent as history: accepted friendship and no block.
+                pair(c,conversation_id,actor,false)?;
+                let current=message(c,conversation_id,message_id)?;
+                if current.deleted {return Err(Failure::Forbidden);}
+                Ok(Response::EditHistory {history:crate::chat::store::versions(c,"direct_message_edits",message_id)?})
             }
             Request::StartCall {conversation_id} => {
                 let p=pair(c,conversation_id,actor,true)?;
@@ -325,10 +337,24 @@ fn send(
     client: ClientMessageId,
     content: String,
     attachments: Vec<thiscord_shared::AttachmentId>,
+    mut spoilers: Vec<thiscord_shared::AttachmentId>,
 ) -> Result<DirectMessage, Failure> {
     text(&content, !attachments.is_empty())?;
     super::attachments::validate_ids(&attachments)?;
-    let hash = fingerprint(&content, &attachments);
+    crate::chat::attachments::validate_spoilers(&attachments, &spoilers)?;
+    spoilers.sort();
+    // Spoiler marks join the fingerprint; plain sends keep the original scheme.
+    let hash = if spoilers.is_empty() {
+        fingerprint(&content, &attachments)
+    } else {
+        format!(
+            "spoilers:{}",
+            auth::digest(
+                &serde_json::to_string(&(&content, &attachments, &spoilers))
+                    .expect("serializable send")
+            )
+        )
+    };
     if let Some(old)=query::<DirectMessage>(c,"SELECT to_jsonb(m) AS data FROM direct_messages m WHERE author_id=$1::uuid AND client_id=$2::uuid", &[&actor.to_string(),&client.to_string()])?.pop() {
         let saved:Option<String>=query(c,"SELECT COALESCE(to_jsonb(request_hash),'null'::jsonb) AS data FROM direct_messages WHERE id=$1::uuid", &[&old.id.to_string()])?.pop().ok_or(Failure::Unavailable)?;
         let saved=saved.unwrap_or_else(||fingerprint(&old.content,&old.attachments.iter().map(|a|a.id).collect::<Vec<_>>()));
@@ -349,7 +375,7 @@ fn send(
             &hash,
         ],
     )?;
-    super::attachments::attach(c, actor, conversation, id, &attachments)?;
+    super::attachments::attach(c, actor, conversation, id, &attachments, &spoilers)?;
     message(c, conversation, id)
 }
 fn history(

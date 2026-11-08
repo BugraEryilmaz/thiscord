@@ -320,6 +320,8 @@ struct Queued {
     progress: Option<u8>,
     attachment: Option<ChatAttachment>,
     error: String,
+    /// Published behind a spoiler cover; can change until the message is sent.
+    spoiler: bool,
 }
 #[derive(Clone, Copy)]
 pub(super) struct Queue {
@@ -363,12 +365,20 @@ impl Queue {
         self.items
             .with(|v| v.iter().all(|i| i.attachment.is_some()))
     }
-    pub(super) fn take(self) -> Vec<ChatAttachment> {
-        let items = self
-            .items
-            .with_untracked(|v| v.iter().filter_map(|i| i.attachment.clone()).collect());
+    /// Uploaded attachments and the IDs marked as spoilers.
+    pub(super) fn take(self) -> (Vec<ChatAttachment>, Vec<thiscord_shared::AttachmentId>) {
+        let items: Vec<(ChatAttachment, bool)> = self.items.with_untracked(|v| {
+            v.iter()
+                .filter_map(|i| i.attachment.clone().map(|a| (a, i.spoiler)))
+                .collect()
+        });
         self.clear();
-        items
+        let spoilers = items
+            .iter()
+            .filter(|(_, s)| *s)
+            .map(|(a, _)| a.id)
+            .collect();
+        (items.into_iter().map(|(a, _)| a).collect(), spoilers)
     }
     pub(super) fn add(self, files: web_sys::FileList) {
         if !self
@@ -418,6 +428,7 @@ impl Queue {
                 progress: None,
                 attachment: None,
                 error: String::new(),
+                spoiler: false,
             };
             self.files.update_value(|v| {
                 v.insert(key, file);
@@ -488,6 +499,8 @@ impl Queue {
                         channel_id: self.chat.channel,
                         filename: item.filename,
                         content_type: item.mime,
+                        voice: false,
+                        waveform: None,
                     };
                     let path = format!(
                         "{ATTACHMENTS_PATH}?guild_id={}&channel_id={}&filename={}&content_type={}",
@@ -582,18 +595,30 @@ pub(super) fn QueuedFiles(queue: Queue) -> impl IntoView {
             <ul class="flex max-h-48 flex-wrap gap-2 overflow-y-auto">
                 <For each=move || queue.items.with(|v| v.iter().map(|i| i.key).collect::<Vec<_>>()) key=|key| *key children=move |key| {
                     let item = move || queue.items.with(|v| v.iter().find(|i| i.key == key).cloned());
-                    view! { <li class="w-44 space-y-1 rounded-lg bg-black/20 p-2 text-xs">
-                        {move || item().and_then(|i| i.preview.map(|url| {
-                            if preview_kind(&i.mime) == PreviewKind::Image { view! { <img class="h-16 w-full object-contain" src=url alt=move ||crate::i18n::t("Queued image")/> }.into_any() }
-                            else { view! { <video class="h-16 w-full object-contain" src=format!("{url}#t=0.1") muted preload="metadata" aria-label=move || crate::i18n::t("Queued video")/> }.into_any() }
-                        }))}
+                    let spoiler = move || item().is_some_and(|i| i.spoiler);
+                    view! { <li class="queued-file w-44 space-y-1 rounded-lg bg-black/20 p-2 text-xs" class:queued-file-spoiler=spoiler>
+                        <div class="queued-preview">
+                            {move || item().and_then(|i| i.preview.map(|url| {
+                                if preview_kind(&i.mime) == PreviewKind::Image { view! { <img class="h-16 w-full object-contain" src=url alt=move ||crate::i18n::t("Queued image")/> }.into_any() }
+                                else { view! { <video class="h-16 w-full object-contain" src=format!("{url}#t=0.1") muted preload="metadata" aria-label=move || crate::i18n::t("Queued video")/> }.into_any() }
+                            }))}
+                            <Show when=spoiler><span class="queued-spoiler-badge">{move || crate::i18n::t("Spoiler")}</span></Show>
+                        </div>
                         <p class="truncate" title=move || item().map(|i| i.filename).unwrap_or_default()>{move || item().map(|i| i.filename).unwrap_or_default()}</p>
                         <p>{move || item().map(|i| format!("{:.1} MiB", i.size as f64 / 1048576.0)).unwrap_or_default()}</p>
                         <p role="status">{move || item().map(|i| if let Some(p) = i.progress { thiscord_frontend::localized_format!(crate::i18n::language(), "Uploading {p}%", p=p) } else if i.attachment.is_some() { crate::i18n::t("Ready to send").into() } else if i.error.is_empty() { crate::i18n::t("Queued").into() } else { crate::i18n::message(i.error) }).unwrap_or_default()}</p>
                         <Show when=move || item().is_some_and(|i| !i.error.is_empty())><button type="button" class="mr-3 text-brand underline" on:click=move |_| {
                             queue.items.update(|v| { if let Some(i) = v.iter_mut().find(|i| i.key == key) { i.error.clear(); } }); queue.start_next();
                         }>{move || crate::i18n::t("Retry upload")}</button></Show>
-                        <button type="button" class="text-white/70 underline" on:click=move |_| queue.remove(key)>{move || crate::i18n::t("Remove")}</button>
+                        <div class="flex items-center gap-1">
+                            <button type="button" class="queued-spoiler-toggle" class:queued-spoiler-on=spoiler aria-pressed=move || spoiler().to_string()
+                                aria-label=move || crate::i18n::t("Mark as spoiler") data-tip=move || crate::i18n::t("Mark as spoiler")
+                                on:click=move |_| queue.items.update(|v| { if let Some(i) = v.iter_mut().find(|i| i.key == key) { i.spoiler = !i.spoiler; } })>
+                                <super::super::icons::Icon kind=super::super::icons::Glyph::EyeOff/>
+                            </button>
+                            <span class="flex-1"></span>
+                            <button type="button" class="text-white/70 underline" on:click=move |_| queue.remove(key)>{move || crate::i18n::t("Remove")}</button>
+                        </div>
                     </li> }
                 }/>
             </ul>
@@ -607,6 +632,15 @@ pub(super) fn Card(
     message: thiscord_shared::MessageId,
     attachment: ChatAttachment,
 ) -> impl IntoView {
+    let spoiler = attachment.spoiler;
+    if super::super::voice_message::is_voice(&attachment) {
+        return view! {
+            <super::super::message_content::SpoilerCover spoiler>
+                <super::super::voice_message::Player ui=chat.ui attachment private=false/>
+            </super::super::message_content::SpoilerCover>
+        }
+        .into_any();
+    }
     let kind = preview_kind(&attachment.content_type);
     let attachment = StoredValue::new(attachment);
     let loaded = StoredValue::new_local(None::<Rc<Loaded>>);
@@ -802,6 +836,7 @@ pub(super) fn Card(
         fetch(false);
     }
     view! {
+        <super::super::message_content::SpoilerCover spoiler>
         <div class="my-2 max-w-sm space-y-2 rounded-lg border border-white/10 bg-black/20 p-2">
             // Media reserves its final box while loading (and before the image
             // decodes), so mounting a row does not change its measured height.
@@ -853,7 +888,9 @@ pub(super) fn Card(
                 <Viewer url=url.get_untracked().unwrap_or_default() kind filename=attachment.get_value().filename download=start_download close=move || viewer.set(false)/>
             </Show>
         </div>
+        </super::super::message_content::SpoilerCover>
     }
+    .into_any()
 }
 
 #[component]

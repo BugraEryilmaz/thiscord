@@ -15,6 +15,7 @@ pub fn preview_kind(mime: &str) -> PreviewKind {
     match mime {
         "image/png" | "image/jpeg" | "image/gif" | "image/webp" => PreviewKind::Image,
         "video/mp4" | "video/webm" | "video/ogg" => PreviewKind::Video,
+        // Ogg audio plays inline only with `voice` metadata; see `is_voice`.
         _ => PreviewKind::File,
     }
 }
@@ -39,6 +40,8 @@ pub struct PendingSend {
     pub reply_to: Option<thiscord_shared::MessageId>,
     pub content: String,
     pub attachment_ids: Vec<AttachmentId>,
+    /// Subset of `attachment_ids` published behind a spoiler cover.
+    pub spoilers: Vec<AttachmentId>,
     pub filenames: Vec<String>,
     pub failed: bool,
 }
@@ -51,6 +54,7 @@ impl PendingSend {
             reply_to: self.reply_to,
             content: self.content.clone(),
             attachment_ids: self.attachment_ids.clone(),
+            spoilers: self.spoilers.clone(),
         }
     }
 }
@@ -155,6 +159,7 @@ mod tests {
             reply_to: Some(id.parse().unwrap()),
             content: String::new(),
             attachment_ids: vec![id.parse().unwrap()],
+            spoilers: vec![id.parse().unwrap()],
             filenames: vec!["photo.png".into()],
             failed: true,
         };
@@ -167,6 +172,7 @@ mod tests {
         assert_eq!(original, retry);
         assert_eq!(retry["client_id"], id);
         assert_eq!(retry["attachment_ids"][0], id);
+        assert_eq!(retry["spoilers"][0], id);
         assert!(can_send(&pending.content, pending.attachment_ids.len()));
     }
     #[test]

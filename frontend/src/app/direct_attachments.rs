@@ -11,6 +11,8 @@ pub(super) struct Uploads {
     ui: Ui,
     id: ConversationId,
     pub files: RwSignal<Vec<ChatAttachment>>,
+    /// Staged files to publish behind a spoiler cover.
+    pub spoilers: RwSignal<Vec<thiscord_shared::AttachmentId>>,
     pub busy: RwSignal<bool>,
     error: RwSignal<String>,
     task: StoredValue<Option<AbortHandle>>,
@@ -21,6 +23,7 @@ impl Uploads {
             ui,
             id,
             files: RwSignal::new(vec![]),
+            spoilers: RwSignal::new(vec![]),
             busy: RwSignal::new(false),
             error: RwSignal::new(String::new()),
             task: StoredValue::new(None),
@@ -94,7 +97,7 @@ pub(super) fn Picker(uploads: Uploads, locked: Signal<bool>) -> impl IntoView {
 pub(super) fn Composer(uploads: Uploads, locked: Signal<bool>) -> impl IntoView {
     view! {<div class="composer-queue">
         <Show when=move ||uploads.busy.get()><span class="composer-chip" role="status">{move ||crate::i18n::t("Uploading…")}</span></Show>
-        <For each=move ||uploads.files.get() key=|a|a.id children=move |a|view!{<span class="composer-chip"><super::icons::Icon kind=super::icons::Glyph::Paperclip/><span class="min-w-0 truncate">{a.filename}</span><button type="button" class="composer-chip-remove" disabled=move ||locked.get() aria-label=move ||crate::i18n::t("Remove attachment") data-tip=move ||crate::i18n::t("Remove attachment") on:click=move |_|uploads.files.update(|files|files.retain(|f|f.id!=a.id))><super::icons::Icon kind=super::icons::Glyph::Close/></button></span>}/>
+        <For each=move ||uploads.files.get() key=|a|a.id children=move |a|{let file=a.id;let spoiler=move ||uploads.spoilers.with(|s|s.contains(&file));view!{<span class="composer-chip" class:composer-chip-spoiler=spoiler><super::icons::Icon kind=super::icons::Glyph::Paperclip/><span class="min-w-0 truncate">{a.filename}</span><button type="button" class="composer-chip-remove" class:queued-spoiler-on=spoiler disabled=move ||locked.get() aria-pressed=move ||spoiler().to_string() aria-label=move ||crate::i18n::t("Mark as spoiler") data-tip=move ||crate::i18n::t("Mark as spoiler") on:click=move |_|uploads.spoilers.update(|s|{if let Some(at)=s.iter().position(|x|*x==file){s.remove(at);}else{s.push(file);}})><super::icons::Icon kind=super::icons::Glyph::EyeOff/></button><button type="button" class="composer-chip-remove" disabled=move ||locked.get() aria-label=move ||crate::i18n::t("Remove attachment") data-tip=move ||crate::i18n::t("Remove attachment") on:click=move |_|{uploads.files.update(|files|files.retain(|f|f.id!=a.id));uploads.spoilers.update(|s|s.retain(|x|*x!=file));}><super::icons::Icon kind=super::icons::Glyph::Close/></button></span>}}/>
         <p role="alert" class="composer-error">{move ||crate::i18n::message(uploads.error.get())}</p>
     </div>}
 }
@@ -109,6 +112,15 @@ impl Drop for Asset {
 }
 #[component]
 pub(super) fn Card(ui: Ui, id: ConversationId, attachment: ChatAttachment) -> impl IntoView {
+    let spoiler = attachment.spoiler;
+    if super::voice_message::is_voice(&attachment) {
+        return view! {
+            <super::message_content::SpoilerCover spoiler>
+                <super::voice_message::Player ui attachment private=true/>
+            </super::message_content::SpoilerCover>
+        }
+        .into_any();
+    }
     let attachment = StoredValue::new(attachment);
     let asset = StoredValue::new_local(None::<Asset>);
     let url = RwSignal::new(None::<String>);
@@ -263,12 +275,13 @@ pub(super) fn Card(ui: Ui, id: ConversationId, attachment: ChatAttachment) -> im
         });
     };
     let kind = thiscord_frontend::attachments::preview_kind(&attachment.get_value().content_type);
-    view! {<div class="my-2 max-w-xl space-y-2 rounded border border-white/10 p-3">
+    view! {<super::message_content::SpoilerCover spoiler><div class="my-2 max-w-xl space-y-2 rounded border border-white/10 p-3">
         <p class="break-words text-sm">{attachment.get_value().filename}{format!(" · {:.1} MiB",attachment.get_value().size_bytes as f64/1048576.0)}</p>
         <div class="flex gap-3 text-sm"><Show when=move ||kind!=thiscord_frontend::attachments::PreviewKind::File><button type="button" class="text-brand" disabled=move ||busy.get()||!ui.friends.connected.get() on:click=move |_|fetch(false)>{move ||crate::i18n::t("View")}</button></Show>
         <button type="button" class="text-brand" disabled=move ||busy.get()||!ui.friends.connected.get() on:click=move |_|fetch(true)>{move ||crate::i18n::t("Download")}</button>
         <Show when=move ||url.get().is_some()><button type="button" on:click=move |_|clear()>{move ||crate::i18n::t("Close preview")}</button></Show></div>
         {move ||url.get().map(|url|match kind {thiscord_frontend::attachments::PreviewKind::Image=>view!{<img class="max-h-96 max-w-full object-contain" src=url alt=attachment.get_value().filename/>}.into_any(),thiscord_frontend::attachments::PreviewKind::Video=>view!{<video class="max-h-96 max-w-full" src=url controls=true preload="metadata"/>}.into_any(),_=>().into_any()})}
         <Show when=move ||busy.get()><p role="status">{move ||crate::i18n::t("Loading…")}</p></Show><p class="text-sm text-red-200" role="alert">{move ||crate::i18n::message(error.get())}</p>
-    </div>}
+    </div></super::message_content::SpoilerCover>}
+    .into_any()
 }

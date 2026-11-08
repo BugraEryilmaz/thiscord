@@ -4,7 +4,8 @@ Voice channels use native Rust capture/playback and a Rust SFU in the backend.
 Screen/window sharing with system audio is available on Windows; see
 [screen-sharing.md](screen-sharing.md) for the separate native capture/video path.
 Only settings, levels and participant metadata cross Tauri IPC. PCM and encoded
-audio never pass through WASM or handwritten JavaScript. The browser web client
+audio never pass through WASM or handwritten JavaScript; desktop voice messages
+also stay native ([Voice messages](#voice-messages)). The browser web client
 joins voice with the browser's own WebRTC engine; see [Browser voice](#browser-voice).
 Exactly three packages remain.
 
@@ -487,6 +488,46 @@ main view polls them so out-of-focus actions appear on return. Deafen blocks bot
 capture transmission and playback; undeafening preserves your manual mute choice.
 Shortcuts also work before joining voice. Backend speak restrictions remain
 independent and cannot be bypassed by unmuting.
+
+## Voice messages
+
+Desktop voice messages (see [chat.md](chat.md#voice-messages)) use dedicated
+CPAL streams on the selected input and output devices
+(`frontend/src/audio/voice_message.rs`), independent of the call engine, so they
+work in and out of calls without replacing the call session. Device selection,
+format choice, the resampler and the stream-cleanup reaper are shared with the
+engine; each recorder or player stream counts toward the same four live device
+sets.
+
+- **Recorder.** The input callback only downmixes to mono, pushes into a
+  preallocated SPSC ring (two seconds) and records an atomic peak; it never
+  allocates, locks, encodes or blocks. A worker thread drains the ring every
+  10 ms, applies the saved microphone gain, resamples to 48 kHz, encodes 20 ms
+  Opus frames (VoIP, 32 kbps, no FEC/DTX) and muxes Ogg pages in memory, and
+  reports the level and elapsed time about 20 times a second. The call
+  processing chain (noise suppression, echo cancellation, activation) is not
+  applied. Recording stops at five minutes; the finished file stays in memory
+  until it is sent, discarded, replaced or the session ends.
+- **Upload.** The desktop process uploads the recording itself with the session
+  token to the guild or private attachment endpoint and returns only the
+  attachment metadata to the WebView. Recordings and downloads never cross IPC.
+- **Player.** One worker owns playback: it downloads attachments with the session
+  token (at most 5 MiB, at most six parsed clips cached), decodes Opus packets on
+  demand, time-stretches 1.5×/2× with a pitch-preserving WSOLA
+  (`frontend/src/voice_clip.rs`) and keeps about 100 ms queued in an SPSC ring.
+  The output callback only pops samples, resamples to the device rate with a
+  preallocated converter and applies the output volume; pause and seek are
+  atomic flags (a seek drains the ring inside the callback, bounded by its
+  capacity). Seeking restarts decoding four packets early so the decoder
+  converges. The output stream closes after ten idle seconds.
+- Playback follows the output device and volume selected in Audio & voice
+  settings. It is a separate stream from call audio: the call's echo canceller
+  does not hear it, so use headphones when playing voice messages during a call.
+  Deafen does not pause explicitly started voice messages.
+- Microphone permission: macOS prompts on the first recording
+  (`NSMicrophoneUsageDescription` mentions voice messages); a denied permission,
+  a missing device or a busy device shows a translated reason in the composer.
+  Logs record no audio, recordings or attachment contents.
 
 ## Changing settings during a call
 

@@ -228,7 +228,7 @@ pub(super) fn Results(state: State, on_jump: Callback<Hit>) -> impl IntoView {
                                     <span class="font-semibold">{hit.with_value(|h|format!("@{}",h.username))}</span>
                                     <time class="text-xs text-white/60">{move ||hit.with_value(|h|crate::i18n::datetime(h.created_at))}</time>
                                 </span>
-                                <span class="mt-1 block whitespace-pre-wrap break-words text-sm text-content">{hit.with_value(|h|h.content.clone())}</span>
+                                <span class="mt-1 block whitespace-pre-wrap break-words text-sm text-content">{hit.with_value(|h|thiscord_shared::chat::mask_spoilers(&h.content).into_owned())}</span>
                             </button></li>
                         }
                     }/>

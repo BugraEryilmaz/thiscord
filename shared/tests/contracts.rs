@@ -29,6 +29,8 @@ fn attachments_are_additive_and_empty_sends_remain_legacy_compatible() {
         filename: "test.png".into(),
         content_type: "image/png".into(),
         size_bytes: 12,
+        voice: None,
+        spoiler: false,
     });
     let roundtrip: ChatMessage = from_value(to_value(&message).unwrap()).unwrap();
     assert!(roundtrip.attachments == message.attachments);

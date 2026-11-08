@@ -175,6 +175,8 @@ and single-process chat/media enforcement.
 - [x] Access-controlled text-channel attachments, drag/drop and file picker, image/video viewer and downloads.
 - [ ] Verify attachment drag/drop, downloads and media codec playback interactively on Windows/macOS/Linux clients.
 - [x] Guild replies, emoji reactions, safe Markdown/code blocks and moderator message pins.
+- [x] Voice messages in channels and DMs (native CPAL/Opus recorder and player, browser MediaRecorder), `||spoiler||` text and spoiler attachments, bounded edit history.
+- [ ] Verify voice-message recording/playback, microphone permission prompts and output-device routing interactively on macOS and Linux, and in Safari/Firefox.
 - [x] Authorized guild/private search API with filters; inline Ctrl+F conversation search, keyset result pages and jumps to original messages in channel/DM history.
 - [x] Integrate private search with DM deletion/blocking and pair_access; validate combined block/unblock, renewed consent, deletion and revocation behavior (docs/search.md).
 - [x] Per-channel/DM in-memory drafts, pasted attachments, emoji picker and Unicode reaction palette (20 kinds per message).

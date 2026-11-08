@@ -75,5 +75,6 @@ pub mod audio;
 pub mod rtp_red;
 pub mod update;
 pub mod voice;
+pub mod voice_message;
 
 pub mod remote_audio;

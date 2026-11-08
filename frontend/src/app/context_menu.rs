@@ -1048,8 +1048,8 @@ fn focus_menu_item(menu: &web_sys::Element, key: &str) {
 const CONTEXT_TARGETS: &str =
     "[data-context-server],[data-context-conversation],[data-context-user]";
 /// Long presses also reveal `data-tip` hints, which have no hover on touch screens.
-const LONG_PRESS_TARGETS: &str =
-    "[data-context-server],[data-context-conversation],[data-context-user],[data-tip]";
+/// The voice-message microphone is held to record, so it shows no hint.
+const LONG_PRESS_TARGETS: &str = "[data-context-server],[data-context-conversation],[data-context-user],[data-tip]:not(.voice-mic)";
 
 /// Opens the element's context menu below it, as Shift+F10 would.
 pub(super) fn open_for(ui: Ui, element: web_sys::Element) {

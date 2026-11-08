@@ -106,7 +106,7 @@ pub(super) fn CountBubble(count: Signal<u32>, label: &'static str) -> impl IntoV
         </Show>
     }
 }
-async fn request(ui: Ui, command: &Request) -> Result<Response, String> {
+pub(super) async fn request(ui: Ui, command: &Request) -> Result<Response, String> {
     let token = ui.token.get_untracked();
     let response = account_client::api_request(FRIENDS_PATH, command, token.as_deref()).await;
     if token != ui.token.get_untracked() {
@@ -682,8 +682,18 @@ fn Conversation(ui: Ui, id: ConversationId) -> impl IntoView {
     let error = RwSignal::new(String::new());
     let busy = RwSignal::new(false);
     let loading = RwSignal::new(false);
-    let retry =
-        RwSignal::new(None::<(ClientMessageId, String, Vec<thiscord_shared::AttachmentId>)>);
+    // Frozen payload of a failed send: ID, text, attachments, spoilers and
+    // whether it was a voice message (which leaves the draft untouched).
+    #[allow(clippy::type_complexity)]
+    let retry = RwSignal::new(
+        None::<(
+            ClientMessageId,
+            String,
+            Vec<thiscord_shared::AttachmentId>,
+            Vec<thiscord_shared::AttachmentId>,
+            bool,
+        )>,
+    );
     let uploads = super::direct_attachments::Uploads::new(ui, id);
     on_cleanup(move || {
         ui.friends.typing_at.set(0.0);
@@ -841,38 +851,23 @@ fn Conversation(ui: Ui, id: ConversationId) -> impl IntoView {
         // exact bounded history page after the jump, including on reconnect.
         ui.friends.before.set(Some(before));
     });
-    let send = move || {
-        if busy.get_untracked()
-            || uploads.busy.get_untracked()
-            || !ui.friends.connected.get_untracked()
-        {
-            return;
-        }
-        let payload = retry.get_untracked().or_else(|| {
-            window()
-                .crypto()
-                .ok()?
-                .random_uuid()
-                .parse()
-                .ok()
-                .map(|id| {
-                    (
-                        id,
-                        draft.get_untracked(),
-                        uploads.files.get_untracked().iter().map(|a| a.id).collect(),
-                    )
-                })
-        });
-        let Some((client_id, content, attachments)) = payload else {
-            error.set("Could not create a message ID".into());
-            return;
-        };
+    let submit = move |client_id: ClientMessageId,
+                       content: String,
+                       attachments: Vec<thiscord_shared::AttachmentId>,
+                       spoilers: Vec<thiscord_shared::AttachmentId>,
+                       voice: bool| {
         if content.trim().is_empty() && attachments.is_empty() {
             return;
         }
         busy.set(true);
         error.set(String::new());
-        retry.set(Some((client_id, content.clone(), attachments.clone())));
+        retry.set(Some((
+            client_id,
+            content.clone(),
+            attachments.clone(),
+            spoilers.clone(),
+            voice,
+        )));
         ui.friends.typing_at.set(0.0);
         leptos::task::spawn_local(async move {
             let result = request(
@@ -882,6 +877,7 @@ fn Conversation(ui: Ui, id: ConversationId) -> impl IntoView {
                     client_id,
                     content,
                     attachments,
+                    spoilers,
                 },
             )
             .await;
@@ -901,8 +897,11 @@ fn Conversation(ui: Ui, id: ConversationId) -> impl IntoView {
                     });
                     past.set(false);
                     ui.friends.before.set(None);
-                    uploads.files.set(vec![]);
-                    draft.set(String::new());
+                    if !voice {
+                        uploads.files.set(vec![]);
+                        uploads.spoilers.set(vec![]);
+                        draft.set(String::new());
+                    }
                     retry.set(None);
                     bottom.set(true);
                     request_animation_frame(move || {
@@ -916,6 +915,62 @@ fn Conversation(ui: Ui, id: ConversationId) -> impl IntoView {
             }
         });
     };
+    let send = move || {
+        if busy.get_untracked()
+            || uploads.busy.get_untracked()
+            || !ui.friends.connected.get_untracked()
+        {
+            return;
+        }
+        let payload = retry.get_untracked().or_else(|| {
+            window()
+                .crypto()
+                .ok()?
+                .random_uuid()
+                .parse()
+                .ok()
+                .map(|id| {
+                    let files: Vec<_> =
+                        uploads.files.get_untracked().iter().map(|a| a.id).collect();
+                    let spoilers = uploads
+                        .spoilers
+                        .get_untracked()
+                        .into_iter()
+                        .filter(|s| files.contains(s))
+                        .collect();
+                    (id, draft.get_untracked(), files, spoilers, false)
+                })
+        });
+        let Some((client_id, content, attachments, spoilers, voice)) = payload else {
+            error.set("Could not create a message ID".into());
+            return;
+        };
+        submit(client_id, content, attachments, spoilers, voice);
+    };
+    // Voice messages go out alone; the draft and staged files stay.
+    let send_voice = Callback::new(move |recorded: super::voice_message::Recorded| {
+        // Never replace a text send in flight or its frozen retry payload.
+        if busy.get_untracked() || retry.with_untracked(Option::is_some) {
+            error.set("Send or discard the pending message first".into());
+            return;
+        }
+        let Some(client_id) = window()
+            .crypto()
+            .ok()
+            .and_then(|c| c.random_uuid().parse().ok())
+        else {
+            error.set("Could not create a message ID".into());
+            return;
+        };
+        let attachment = recorded.attachment.id;
+        let spoilers = if recorded.spoiler {
+            vec![attachment]
+        } else {
+            vec![]
+        };
+        submit(client_id, String::new(), vec![attachment], spoilers, true);
+    });
+    on_cleanup(super::voice_message::stop_all);
     let keydown = move |ev: leptos::ev::KeyboardEvent| {
         // Up in an empty composer edits your newest message in this window.
         if ev.key() == "ArrowUp"
@@ -978,7 +1033,7 @@ fn Conversation(ui: Ui, id: ConversationId) -> impl IntoView {
         <form class="composer-area" style:display=move ||if search.active.get(){"none"}else{""} on:submit=move |ev|{ev.prevent_default();send();}>
             <p role="alert" class="composer-error">{move ||crate::i18n::message(error.get())}</p>
             <super::direct_attachments::Composer uploads locked=Signal::derive(move ||busy.get()||retry.get().is_some())/>
-            <div class="composer"><textarea node_ref=input id="private-composer" on:paste=move |ev: leptos::ev::ClipboardEvent| { if !busy.get_untracked() && retry.with_untracked(Option::is_none) && let Some(file) = ev.clipboard_data().and_then(|d| d.files()).and_then(|f| f.get(0)) { ev.prevent_default(); uploads.add(file); } } class="composer-input max-h-40 read-only:opacity-50" aria-label=move || crate::i18n::t("Private message") aria-describedby="private-message-hint" placeholder=move || crate::i18n::t("Message your friend…") maxlength="4000" prop:value=move ||draft.get() readonly=move ||busy.get() || retry.get().is_some() on:keydown=keydown on:input=move |ev|{let text=event_target_value(&ev);ui.friends.typing_at.set(if text.trim().is_empty(){0.0}else{js_sys::Date::now()});draft.set(text);}></textarea><div class="composer-tools"><super::emoji::ComposerEmoji input draft disabled=Signal::derive(move ||busy.get() || retry.get().is_some())/><super::direct_attachments::Picker uploads locked=Signal::derive(move ||busy.get()||retry.get().is_some())/><button class="composer-send" class:composer-send-text=move ||retry.get().is_some() aria-label=move || crate::i18n::t("Send private message") data-tip=move ||if busy.get(){crate::i18n::t("Sending…")}else{crate::i18n::t("Send")} disabled=move ||busy.get() || uploads.busy.get() || !ui.friends.connected.get() || (draft.get().trim().is_empty() && uploads.files.get().is_empty())>{move ||if retry.get().is_some(){view!{<span>{crate::i18n::t("Retry")}</span>}.into_any()}else{view!{<Icon kind=Glyph::Send/>}.into_any()}}</button></div></div>
+            <div class="composer"><textarea node_ref=input id="private-composer" on:paste=move |ev: leptos::ev::ClipboardEvent| { if !busy.get_untracked() && retry.with_untracked(Option::is_none) && let Some(file) = ev.clipboard_data().and_then(|d| d.files()).and_then(|f| f.get(0)) { ev.prevent_default(); uploads.add(file); } } class="composer-input max-h-40 read-only:opacity-50" aria-label=move || crate::i18n::t("Private message") aria-describedby="private-message-hint" placeholder=move || crate::i18n::t("Message your friend…") maxlength="4000" prop:value=move ||draft.get() readonly=move ||busy.get() || retry.get().is_some() on:keydown=keydown on:input=move |ev|{let text=event_target_value(&ev);ui.friends.typing_at.set(if text.trim().is_empty(){0.0}else{js_sys::Date::now()});draft.set(text);}></textarea><div class="composer-tools"><super::emoji::ComposerEmoji input draft disabled=Signal::derive(move ||busy.get() || retry.get().is_some())/><super::direct_attachments::Picker uploads locked=Signal::derive(move ||busy.get()||retry.get().is_some())/><super::voice_message::Recorder ui target=super::voice_message::Target::Direct { conversation: id } disabled=Signal::derive(move ||busy.get() || retry.get().is_some() || !ui.friends.connected.get()) on_send=send_voice/><button class="composer-send" class:composer-send-text=move ||retry.get().is_some() aria-label=move || crate::i18n::t("Send private message") data-tip=move ||if busy.get(){crate::i18n::t("Sending…")}else{crate::i18n::t("Send")} disabled=move ||busy.get() || uploads.busy.get() || !ui.friends.connected.get() || (draft.get().trim().is_empty() && uploads.files.get().is_empty())>{move ||if retry.get().is_some(){view!{<span>{crate::i18n::t("Retry")}</span>}.into_any()}else{view!{<Icon kind=Glyph::Send/>}.into_any()}}</button></div></div>
             <p id="private-message-hint" class="composer-hint">{move || crate::i18n::t("Enter to send · Shift+Enter for a new line")}</p>
             <Show when=move ||retry.get().is_some() && !busy.get()><button type="button" class="mt-2 text-xs text-white/60" on:click=move |_|{retry.set(None);error.set(String::new());}>{move || crate::i18n::t("Discard retry and edit draft")}</button></Show>
         </form>
@@ -1153,7 +1208,7 @@ fn DirectRow(
                 }/>
             <p class="text-xs text-white/60">{move ||crate::i18n::t("Escape to cancel · Enter to save")}</p>
             <button class="mr-3 text-brand" disabled=move ||busy.get()>{move ||crate::i18n::t("Save")}</button><button type="button" disabled=move ||busy.get() on:click=move |_|editing.set(false)>{move ||crate::i18n::t("Cancel")}</button>
-        </form>}><div class="message-text whitespace-pre-wrap break-words">{move ||{let m=message.get();super::message_content::render(if m.deleted {crate::i18n::t("Message deleted")}else{&m.content},ui,None)}}<Show when=move ||message.get().edited_at.is_some()&&!message.get().deleted><span class="ml-1 text-xs text-white/60">{move ||format!("({})",crate::i18n::t("edited"))}</span></Show></div></Show>
+        </form>}><div class="message-text whitespace-pre-wrap break-words">{move ||{let m=message.get();super::message_content::render(if m.deleted {crate::i18n::t("Message deleted")}else{&m.content},ui,None)}}<Show when=move ||message.get().edited_at.is_some()&&!message.get().deleted><super::edit_history::Edited ui scope=super::edit_history::Scope::Direct(id) message=initial.get_value().id edited_at=Signal::derive(move ||message.get().edited_at) created_at=Signal::derive(move ||message.get().created_at) content=Signal::derive(move ||message.get().content)/></Show></div></Show>
         <Show when=move ||!message.get().deleted>
             <For each=move ||message.get().attachments key=|a|a.id children=move |attachment|view!{<super::direct_attachments::Card ui id attachment/>}/>
             <div class="direct-actions" role="group" aria-label=move ||crate::i18n::t("Message actions")><Show when=move ||own><button type="button" class="icon-button" aria-label=move ||crate::i18n::t("Edit message") data-tip=move ||crate::i18n::t("Edit") disabled=move ||busy.get() on:click=move |_|start_edit()><Icon kind=Glyph::Edit/></button><button type="button" class="icon-button" aria-label=move ||crate::i18n::t("Delete message") data-tip=move ||format!("{}\n{}",crate::i18n::t("Delete"),crate::i18n::t("Shift-click to delete without confirming")) disabled=move ||busy.get() on:click=move |ev:leptos::ev::MouseEvent|{
