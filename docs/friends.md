@@ -273,7 +273,8 @@ Released clients ignore these fields and never see groups (see
 
 - A group holds **2–8 members including its creator** (`MAX_GROUP_MEMBERS`), the
   SFU's eight-person room capacity, so every member can always join its call.
-  Each account belongs to at most 100 groups (`MAX_GROUPS`).
+  Each account belongs to at most 100 groups (`MAX_GROUPS`), a soft cap that
+  concurrent additions can briefly exceed by a few.
 - Only **accepted friends of the adder** can be added, at creation or later; each
   addition rechecks that friendship under its row lock. Pending requests, removed
   friendships, bots and pending (unverified) accounts cannot be added. Once
@@ -310,9 +311,10 @@ any write, `FOR SHARE` for reads), check current membership/ownership and run th
 write in the same transaction. Metadata commands (rename, add, remove, transfer)
 submit the group `revision` they viewed; every metadata change increments it and a
 stale submission returns 409 without automatic retry. Creation and additions also
-share-lock every involved account in UUID order. That conflicts with the
-exclusive account locks blocks and friend removal take, so neither can interleave
-with the checks, without waiting on other members' ordinary session locks.
+share-lock the added accounts in UUID order. Every checked pair includes one, and
+blocks and friend removal take exclusive locks on both accounts, so neither can
+interleave with the checks; existing members' account rows are never locked under
+the group lock, which keeps additions deadlock-free.
 Account deletion locks its groups before the membership cascade. Creation carries
 a client-generated UUID: an exact retry (even a concurrent one) returns the same
 group, a different payload under the same UUID conflicts.

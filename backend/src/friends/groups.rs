@@ -114,8 +114,8 @@ pub(crate) fn blocked_with(
     )?;
     Ok(blocked.into_iter().collect())
 }
-/// Share-locks every involved account in UUID order, then checks that each added account is an accepted friend
-/// of the adder with no block towards anyone in the resulting group.
+/// Share-locks the added accounts in UUID order, then checks that each is an
+/// accepted friend of the adder with no block towards anyone in the group.
 fn admit(
     c: &mut PgConnection,
     actor: AccountId,
@@ -133,15 +133,18 @@ fn admit(
         return Err(Failure::Invalid("A group can have at most 8 members"));
     }
     let all: Vec<AccountId> = existing.iter().chain(added).copied().collect();
+    // Every pair the friendship and block checks cover includes an added account,
+    // and block, unblock and unfriend take NO KEY UPDATE on both accounts, so a
+    // SHARE lock on the added accounts alone serializes those checks. Existing
+    // members' rows stay unlocked under the group lock: requests that lock their
+    // own account before this group (deletion, notification and report commands)
+    // cannot deadlock with an addition.
     let locked: Vec<AccountId> = query(
         c,
-        // SHARE conflicts with the NO KEY UPDATE locks that block, unblock and
-        // unfriend take on both accounts, so those checks stay serialized, yet it
-        // never waits on other members' session locks (no deadlock with sends).
         "SELECT to_jsonb(id) AS data FROM accounts WHERE id IN (SELECT value::uuid FROM jsonb_array_elements_text($1::jsonb)) ORDER BY id FOR SHARE",
-        &[&json(&all)?],
+        &[&json(&added)?],
     )?;
-    if locked.len() != all.len() {
+    if locked.len() != added.len() {
         return Err(Failure::Invalid("Choose friends to add"));
     }
     let friends: Vec<AccountId> = query(
