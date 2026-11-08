@@ -12,6 +12,8 @@ use thiscord_shared::{AccountId, ChannelId, GuildId, RoleId, permissions::*};
 use tower::ServiceExt;
 use uuid::Uuid;
 
+#[path = "permissions/display.rs"]
+mod display;
 #[path = "permissions/icons.rs"]
 mod icons;
 #[path = "permissions/limits.rs"]
@@ -1045,6 +1047,8 @@ fn combined_roles_overrides_and_admin_behavior() {
         position,
         everyone: position == 0,
         permissions,
+        color: None,
+        hoist: false,
     };
     let everyone = role(
         0,
@@ -1074,6 +1078,7 @@ fn combined_roles_overrides_and_admin_behavior() {
                 account_id: owner,
                 username: "owner".into(),
                 display_name: String::new(),
+                nickname: None,
                 timeout_until: None,
                 roles: vec![],
             },
@@ -1081,6 +1086,7 @@ fn combined_roles_overrides_and_admin_behavior() {
                 account_id: member,
                 username: "member".into(),
                 display_name: String::new(),
+                nickname: None,
                 timeout_until: None,
                 roles: vec![a.id, b.id],
             },

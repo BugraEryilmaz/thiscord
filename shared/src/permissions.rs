@@ -36,9 +36,13 @@ pub enum Permission {
     MoveMembers,
     /// See and play a guild's soundboard sounds in a voice channel.
     UseSoundboard,
+    /// Set or clear one's own nickname in this guild.
+    ChangeNickname,
+    /// Set or clear lower-ranked members' nicknames (audited).
+    ManageNicknames,
 }
 impl Permission {
-    pub const ALL: [Self; 20] = [
+    pub const ALL: [Self; 22] = [
         Self::Administrator,
         Self::ManageGuild,
         Self::ManageChannels,
@@ -59,8 +63,88 @@ impl Permission {
         Self::DeafenMembers,
         Self::MoveMembers,
         Self::UseSoundboard,
+        Self::ChangeNickname,
+        Self::ManageNicknames,
     ];
+
+    /// The [permission set](PERMISSION_SET) that introduced this name. Released
+    /// clients reject unknown names, so servers only send a permission to
+    /// clients that declare a set at least this new.
+    pub const fn set(self) -> u8 {
+        match self {
+            Self::ChangeNickname | Self::ManageNicknames => 2,
+            _ => 1,
+        }
+    }
 }
+
+/// Newest permission set this build understands. Set 1 is every name known to
+/// client 0.1.61; set 2 adds the nickname permissions.
+pub const PERMISSION_SET: u8 = 2;
+/// Query parameter on [`PERMISSIONS_PATH`] declaring the client's permission set.
+/// Omitted means set 1. A query (unlike a header) needs no CORS change and is
+/// ignored by older servers.
+pub const PERMISSION_SET_QUERY: &str = "permission_set";
+
+/// [`PERMISSIONS_PATH`] declaring this build's [`PERMISSION_SET`].
+pub fn permissions_path() -> String {
+    format!("{PERMISSIONS_PATH}?{PERMISSION_SET_QUERY}={PERMISSION_SET}")
+}
+
+/// Removes names newer than a client's permission set before sending.
+pub fn restrict(permissions: &mut Permissions, set: u8) {
+    permissions.retain(|p| p.set() <= set);
+}
+
+/// Stored names a client of this set cannot see. Its full-replacement writes
+/// (role edits, channel overrides) must preserve them.
+pub fn hidden(permissions: &Permissions, set: u8) -> impl Iterator<Item = Permission> + '_ {
+    permissions.iter().copied().filter(move |p| p.set() > set)
+}
+
+/// Opaque sRGB role colour, `0xRRGGBB` as a JSON integer.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(try_from = "u32", into = "u32")]
+pub struct RoleColor(u32);
+impl RoleColor {
+    pub const fn new(rgb: u32) -> Option<Self> {
+        if rgb <= 0xff_ffff {
+            Some(Self(rgb))
+        } else {
+            None
+        }
+    }
+    pub const fn rgb(self) -> (u8, u8, u8) {
+        ((self.0 >> 16) as u8, (self.0 >> 8) as u8, self.0 as u8)
+    }
+    /// Lowercase `#rrggbb`.
+    pub fn hex(self) -> String {
+        format!("#{:06x}", self.0)
+    }
+}
+impl TryFrom<u32> for RoleColor {
+    type Error = &'static str;
+    fn try_from(value: u32) -> Result<Self, Self::Error> {
+        Self::new(value).ok_or("role colour must be 0xRRGGBB")
+    }
+}
+impl From<RoleColor> for u32 {
+    fn from(value: RoleColor) -> Self {
+        value.0
+    }
+}
+
+/// How a role is shown: an optional name colour, and whether its members get
+/// their own member-list section ("show separately"). Everyone is never hoisted.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct RoleAppearance {
+    pub color: Option<RoleColor>,
+    pub hoist: bool,
+}
+
+/// Longest guild nickname, in Unicode scalar values (the display-name limit).
+pub const MAX_NICKNAME_CHARS: usize = crate::account::MAX_DISPLAY_NAME_CHARS;
 pub type Permissions = BTreeSet<Permission>;
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -150,13 +234,31 @@ pub struct Role {
     pub position: i32,
     pub permissions: Permissions,
     pub everyone: bool,
+    /// Absent when uncoloured and from older servers.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub color: Option<RoleColor>,
+    /// Its members get their own member-list section. Absent means false.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub hoist: bool,
+}
+impl Role {
+    pub fn appearance(&self) -> RoleAppearance {
+        RoleAppearance {
+            color: self.color,
+            hoist: self.hoist,
+        }
+    }
 }
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Member {
     pub account_id: AccountId,
     pub username: String,
+    /// The member's name in this guild: their nickname when one is set.
     #[serde(default)]
     pub display_name: String,
+    /// The guild nickname, if set. Absent from older servers.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub nickname: Option<String>,
     pub roles: Vec<RoleId>,
     #[serde(default)]
     pub timeout_until: Option<crate::Timestamp>,
@@ -477,12 +579,18 @@ pub enum GuildChange {
         name: String,
         position: i32,
         permissions: Permissions,
+        /// Absent (older clients): no colour, not shown separately.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        appearance: Option<RoleAppearance>,
     },
     EditRole {
         role_id: RoleId,
         name: String,
         position: i32,
         permissions: Permissions,
+        /// Absent (older clients) keeps the role's current appearance.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        appearance: Option<RoleAppearance>,
     },
     DeleteRole {
         role_id: RoleId,
@@ -508,6 +616,13 @@ pub enum GuildChange {
     DeleteOverride {
         channel_id: ChannelId,
         target: OverrideTarget,
+    },
+    /// Sets, or with `null` clears, a guild nickname. Your own needs
+    /// ChangeNickname; another member's needs ManageNicknames and a strictly
+    /// lower-ranked target, and is audited. Validated like display names.
+    SetNickname {
+        account_id: AccountId,
+        nickname: Option<String>,
     },
 }
 // Invite creation returns a bearer capability once; never derive Debug.
@@ -575,6 +690,33 @@ pub struct GuildHome {
     pub can_manage_channels: bool,
     #[serde(default)]
     pub can_moderate: bool,
+    /// The viewer may set their own nickname here. Absent from older servers.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub can_change_nickname: bool,
+}
+
+impl PermissionResponse {
+    /// Removes permission names newer than the client's set (see [`Permission::set`]).
+    pub fn restrict(&mut self, set: u8) {
+        match self {
+            Self::State { state } => {
+                for role in &mut state.roles {
+                    restrict(&mut role.permissions, set);
+                }
+                for o in &mut state.overrides {
+                    restrict(&mut o.allow, set);
+                    restrict(&mut o.deny, set);
+                }
+            }
+            Self::Effective { permissions, .. } => restrict(permissions, set),
+            Self::Moderation { state } => {
+                for member in &mut state.members {
+                    restrict(&mut member.actions, set);
+                }
+            }
+            _ => {}
+        }
+    }
 }
 
 #[cfg(test)]
@@ -749,5 +891,70 @@ mod tests {
         }))
         .unwrap();
         assert!(!state.password_protected);
+    }
+
+    #[test]
+    fn nickname_permissions_only_reach_clients_that_declare_their_set() {
+        assert_eq!(
+            serde_json::to_value(Permission::ChangeNickname).unwrap(),
+            "change_nickname"
+        );
+        assert_eq!(
+            serde_json::to_value(Permission::ManageNicknames).unwrap(),
+            "manage_nicknames"
+        );
+        // Every name a 0.1.61 client knows stays in set 1.
+        assert_eq!(Permission::ALL.iter().filter(|p| p.set() == 1).count(), 20);
+        assert!(Permission::ALL.iter().all(|p| p.set() <= PERMISSION_SET));
+        assert_eq!(permissions_path(), "/api/v1/permissions?permission_set=2");
+        let id = "00000000-0000-0000-0000-000000000001";
+        let mut response = PermissionResponse::Effective {
+            permissions: Permission::ALL.into_iter().collect(),
+            revision: 1,
+        };
+        response.restrict(1);
+        let PermissionResponse::Effective { permissions, .. } = &response else {
+            unreachable!()
+        };
+        assert!(!permissions.contains(&Permission::ChangeNickname));
+        assert_eq!(permissions.len(), 20);
+        let stored: Permissions = [Permission::SendMessages, Permission::ManageNicknames].into();
+        assert_eq!(
+            hidden(&stored, 1).collect::<Vec<_>>(),
+            [Permission::ManageNicknames]
+        );
+        assert_eq!(hidden(&stored, PERMISSION_SET).count(), 0);
+        // Older clients' role edits omit appearance; the server keeps it.
+        let legacy =
+            json!({"action":"edit_role","role_id":id,"name":"Mods","position":3,"permissions":[]});
+        let GuildChange::EditRole { appearance, .. } =
+            serde_json::from_value(legacy.clone()).unwrap()
+        else {
+            unreachable!()
+        };
+        assert!(appearance.is_none());
+        let styled = json!({"action":"create_role","name":"Mods","position":3,"permissions":[],
+            "appearance":{"color":0xe04f9b,"hoist":true}});
+        let parsed: GuildChange = serde_json::from_value(styled.clone()).unwrap();
+        assert_eq!(serde_json::to_value(parsed).unwrap(), styled);
+        let nick = json!({"action":"set_nickname","account_id":id,"nickname":null});
+        let parsed: GuildChange = serde_json::from_value(nick.clone()).unwrap();
+        assert_eq!(serde_json::to_value(parsed).unwrap(), nick);
+        let role: Role = serde_json::from_value(
+            json!({"id":id,"name":"Old","position":1,"permissions":[],"everyone":false}),
+        )
+        .unwrap();
+        assert_eq!(role.appearance(), RoleAppearance::default());
+        assert!(RoleColor::new(0xff_ffff).is_some() && RoleColor::new(0x100_0000).is_none());
+        assert_eq!(RoleColor::new(0x0a0b0c).unwrap().rgb(), (10, 11, 12));
+        let home: GuildHome =
+            serde_json::from_value(json!({"guild":{"id":id,"name":"G","owner":id,"revision":1},
+            "channels":[],"can_manage_roles":false}))
+            .unwrap();
+        assert!(!home.can_change_nickname);
+        assert!(crate::account::valid_display_name(" Ada "));
+        for bad in ["", "   ", "a\u{7}b", &"x".repeat(MAX_NICKNAME_CHARS + 1)] {
+            assert!(!crate::account::valid_display_name(bad), "{bad:?}");
+        }
     }
 }

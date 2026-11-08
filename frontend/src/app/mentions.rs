@@ -266,6 +266,8 @@ pub(super) fn Suggestions(picker: Picker) -> impl IntoView {
                 <ul id="mention-suggestions" role="listbox" aria-label=move || crate::i18n::t("Mention suggestions") class="max-h-64 overflow-y-auto">
                     {move || picker.members().into_iter().enumerate().map(|(index, member)| {
                         let name = if member.display_name.trim().is_empty() { member.username.clone() } else { member.display_name };
+                        let id = member.account_id;
+                        let color = move || picker.chat.ui.members.identity(picker.chat.guild, id).and_then(|i| super::super::members::name_color(i.color));
                         view! {
                             <li id=format!("mention-option-{index}") role="option" aria-selected=move || (picker.selected.get() == index).to_string()
                                 class="mention-option">
@@ -273,7 +275,7 @@ pub(super) fn Suggestions(picker: Picker) -> impl IntoView {
                                     on:mousedown=move |event| event.prevent_default()
                                     on:click=move |_| picker.choose(index)>
                                     <crate::avatar::Avatar class="size-7 text-xs" name=name.clone() avatar_id=Signal::stored(None)/>
-                                    <span class="min-w-0 flex-1 truncate font-semibold">{name}</span>
+                                    <span class="min-w-0 flex-1 truncate font-semibold" style:color=color>{name}</span>
                                     <span class="truncate text-sm text-muted">{format!("@{}", member.username)}</span>
                                 </button>
                             </li>

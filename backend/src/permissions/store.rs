@@ -208,7 +208,7 @@ pub(crate) fn load(c: &mut PgConnection, id: GuildId) -> Result<GuildState, Fail
     )?;
     let members = query(
         c,
-        "SELECT jsonb_build_object('account_id',m.account_id,'username',a.username,'display_name',a.display_name,'timeout_until',(SELECT timeout_until FROM guild_moderation x WHERE x.guild_id=m.guild_id AND x.account_id=m.account_id),'roles',COALESCE((SELECT jsonb_agg(role_id ORDER BY role_id) FROM guild_member_roles r WHERE r.guild_id=m.guild_id AND r.account_id=m.account_id),'[]'::jsonb)) AS data FROM guild_members m JOIN accounts a ON a.id=m.account_id WHERE m.guild_id=$1::uuid ORDER BY m.account_id",
+        "SELECT jsonb_build_object('account_id',m.account_id,'username',a.username,'display_name',COALESCE(m.nickname,a.display_name),'nickname',m.nickname,'timeout_until',(SELECT timeout_until FROM guild_moderation x WHERE x.guild_id=m.guild_id AND x.account_id=m.account_id),'roles',COALESCE((SELECT jsonb_agg(role_id ORDER BY role_id) FROM guild_member_roles r WHERE r.guild_id=m.guild_id AND r.account_id=m.account_id),'[]'::jsonb)) AS data FROM guild_members m JOIN accounts a ON a.id=m.account_id WHERE m.guild_id=$1::uuid ORDER BY m.account_id",
         &[&id],
     )?;
     let channels = query(
@@ -261,6 +261,7 @@ pub(super) fn dispatch(
     pool: &DbPool,
     token: &str,
     command: PermissionRequest,
+    set: u8,
 ) -> Result<PermissionResponse, Failure> {
     let (command, reason) = match command {
         PermissionRequest::Moderate {
@@ -319,8 +320,22 @@ pub(super) fn dispatch(
         } => Some(*guild_id),
         _ => None,
     };
+    // Nicknames change presentation, not access: no access pause, just
+    // member-list and voice-roster refreshes after commit.
+    let nicknamed = match &command {
+        PermissionRequest::Change {
+            guild_id,
+            change: GuildChange::SetNickname { account_id, .. },
+            ..
+        } => Some((*guild_id, *account_id)),
+        _ => None,
+    };
     let mut c = connection(pool)?;
     let scope = match &command {
+        PermissionRequest::Change {
+            change: GuildChange::SetNickname { .. },
+            ..
+        } => None,
         PermissionRequest::Change {
             guild_id, change, ..
         } => Some(match change {
@@ -483,7 +498,7 @@ pub(super) fn dispatch(
                 let id = GuildId::from_uuid(Uuid::new_v4());
                 execute(c,"INSERT INTO guilds(id,name,owner,password_hash) VALUES($1::uuid,$2,$3::uuid,NULLIF($4,''))", &[&id.to_string(),name,&actor.to_string(),hash.as_deref().unwrap_or("")])?;
                 execute(c,"INSERT INTO guild_members(guild_id,account_id) VALUES($1::uuid,$2::uuid)", &[&id.to_string(),&actor.to_string()])?;
-                let defaults: Permissions = [Permission::ViewChannel,Permission::ReadHistory,Permission::SendMessages,Permission::EditOwnMessages,Permission::DeleteOwnMessages,Permission::JoinVoice,Permission::Speak,Permission::UseSoundboard].into_iter().collect();
+                let defaults: Permissions = [Permission::ViewChannel,Permission::ReadHistory,Permission::SendMessages,Permission::EditOwnMessages,Permission::DeleteOwnMessages,Permission::JoinVoice,Permission::Speak,Permission::UseSoundboard,Permission::ChangeNickname].into_iter().collect();
                 execute(c,"INSERT INTO guild_roles(guild_id,name,position,everyone,permissions) VALUES($1::uuid,'Everyone',0,TRUE,$2::jsonb)", &[&id.to_string(),&json(&defaults)?])?;
                 Ok(PermissionResponse::State { state: load(c,id)? })
             }
@@ -524,7 +539,7 @@ pub(super) fn dispatch(
                     PermissionRequest::ViewGuild {..} => {
                         let channels: Vec<Channel>=state.channels.iter().filter(|ch|effective(&state,actor,Some(ch.id)).contains(&Permission::ViewChannel)).cloned().collect();
                         let categories=state.categories.iter().filter(|cat|channels.iter().any(|ch|ch.category_id==Some(cat.id))).cloned().collect();
-                        Ok(PermissionResponse::Home {home:GuildHome {categories,can_manage_invites:effective(&state,actor,None).contains(&Permission::ManageInvites),can_moderate:can_moderate(&state,actor),can_manage_bots:effective(&state,actor,None).contains(&Permission::ManageGuild),can_manage_roles:effective(&state,actor,None).contains(&Permission::ManageRoles),can_manage_channels:effective(&state,actor,None).contains(&Permission::ManageChannels),guild:state.guild,channels}})
+                        Ok(PermissionResponse::Home {home:GuildHome {categories,can_manage_invites:effective(&state,actor,None).contains(&Permission::ManageInvites),can_moderate:can_moderate(&state,actor),can_manage_bots:effective(&state,actor,None).contains(&Permission::ManageGuild),can_manage_roles:effective(&state,actor,None).contains(&Permission::ManageRoles),can_manage_channels:effective(&state,actor,None).contains(&Permission::ManageChannels),can_change_nickname:effective(&state,actor,None).contains(&Permission::ChangeNickname),guild:state.guild,channels}})
                     }
                     command @ (PermissionRequest::ListInvites { .. } | PermissionRequest::CreateInvite { .. } | PermissionRequest::RevokeInvite { .. } | PermissionRequest::InspectOrganization { .. } | PermissionRequest::AuditLog { .. }) => organization::request(c,&state,actor,command),
                     PermissionRequest::InspectModeration {..} => Ok(PermissionResponse::Moderation {state:moderation(c,&state,actor)?}),
@@ -543,10 +558,12 @@ pub(super) fn dispatch(
                         if matches!(change,GuildChange::TransferOwner{..}|GuildChange::Delete {}) { auth::recent(&session)?; }
                         let moderation_change=organization::moderation_target(&change).is_some() && !matches!(change,GuildChange::RemoveMember {..});
                         let audit_change=change.clone();
-                        let gone=change_guild(c,&state,actor,change)?;
+                        let gone=change_guild(c,&state,actor,change,set)?;
                         if gone { return Ok(PermissionResponse::Done); }
                         organization::audit(c,&state,actor,&audit_change,&reason)?;
                         execute(c,"UPDATE guilds SET revision=revision+1 WHERE id=$1::uuid", &[&guild_id.to_string()])?;
+                        // Members without moderation or role-editor access may set their own.
+                        if matches!(audit_change,GuildChange::SetNickname{..}) { return Ok(PermissionResponse::Done); }
                         // Assignments can remove the actor's editor access; never return privileged state then.
                         let state=load(c,guild_id)?;
                         if moderation_change { return Ok(PermissionResponse::Moderation {state:moderation(c,&state,actor)?}); }
@@ -573,6 +590,12 @@ pub(super) fn dispatch(
     {
         crate::chat::guild_updated(guild);
     }
+    if result.is_ok()
+        && let Some((guild, account)) = nicknamed
+    {
+        crate::chat::members::changed([guild]);
+        crate::voice::profile_changed(account);
+    }
     result
 }
 
@@ -581,6 +604,7 @@ fn change_guild(
     state: &GuildState,
     actor: AccountId,
     change: GuildChange,
+    set: u8,
 ) -> Result<bool, Failure> {
     let guild = state.guild.id.to_string();
     let permissions = effective(state, actor, None);
@@ -848,6 +872,7 @@ fn change_guild(
             name: value,
             position,
             permissions: grants,
+            appearance,
         } => {
             need(Permission::ManageRoles)?;
             allocation(
@@ -856,14 +881,17 @@ fn change_guild(
             )?;
             require(position > 0 && position <= 10000 && position < actor_rank)?;
             grantable(state, actor, &grants)?;
+            let appearance = appearance.unwrap_or_default();
             execute(
                 c,
-                "INSERT INTO guild_roles(guild_id,name,position,permissions) VALUES($1::uuid,$2,$3::integer,$4::jsonb)",
+                "INSERT INTO guild_roles(guild_id,name,position,permissions,color,hoist) VALUES($1::uuid,$2,$3::integer,$4::jsonb,NULLIF($5,'')::integer,$6::boolean)",
                 &[
                     &guild,
                     name(&value)?,
                     &position.to_string(),
                     &json(&grants)?,
+                    &color(appearance),
+                    &appearance.hoist.to_string(),
                 ],
             )?;
         }
@@ -871,7 +899,8 @@ fn change_guild(
             role_id,
             name: value,
             position,
-            permissions: grants,
+            permissions: mut grants,
+            appearance,
         } => {
             need(Permission::ManageRoles)?;
             let r = role(state, role_id)?;
@@ -881,17 +910,25 @@ fn change_guild(
                     && (0..=10000).contains(&position)
                     && r.everyone == (position == 0),
             )?;
+            // Older clients neither see nor send newer permission names or
+            // display settings; keep what they could not have edited.
+            grants.extend(hidden(&r.permissions, set));
+            let appearance = appearance.unwrap_or(r.appearance());
+            // Everyone applies to every member: no colour, never its own section.
+            require(!(r.everyone && appearance != RoleAppearance::default()))?;
             grantable(state, actor, &grants)?;
             grantable(state, actor, &r.permissions)?;
             execute(
                 c,
-                "UPDATE guild_roles SET name=$3,position=$4::integer,permissions=$5::jsonb WHERE guild_id=$1::uuid AND id=$2::uuid",
+                "UPDATE guild_roles SET name=$3,position=$4::integer,permissions=$5::jsonb,color=NULLIF($6,'')::integer,hoist=$7::boolean WHERE guild_id=$1::uuid AND id=$2::uuid",
                 &[
                     &guild,
                     &role_id.to_string(),
                     name(&value)?,
                     &position.to_string(),
                     &json(&grants)?,
+                    &color(appearance),
+                    &appearance.hoist.to_string(),
                 ],
             )?;
         }
@@ -982,10 +1019,18 @@ fn change_guild(
         GuildChange::SetOverride {
             channel_id,
             target,
-            allow,
-            deny,
+            mut allow,
+            mut deny,
         } => {
             need(Permission::ManageRoles)?;
+            if let Some(old) = state
+                .overrides
+                .iter()
+                .find(|o| o.channel_id == channel_id && o.target == target)
+            {
+                allow.extend(hidden(&old.allow, set).filter(|p| !deny.contains(p)));
+                deny.extend(hidden(&old.deny, set).filter(|p| !allow.contains(p)));
+            }
             require(
                 state.overrides.len() < 1000
                     || state
@@ -1043,8 +1088,40 @@ fn change_guild(
             }
             delete_override(c, &guild, &channel_id.to_string(), target)?;
         }
+        GuildChange::SetNickname {
+            account_id,
+            nickname,
+        } => {
+            if account_id == actor {
+                need(Permission::ChangeNickname)?;
+            } else {
+                need(Permission::ManageNicknames)?;
+                below(state, actor, account_id)?;
+            }
+            let nickname = match nickname.as_deref() {
+                None => "",
+                Some(value) if thiscord_shared::account::valid_display_name(value) => value.trim(),
+                Some(_) => {
+                    return Err(Failure::Invalid(
+                        "Nickname must be 1 to 64 characters without control characters",
+                    ));
+                }
+            };
+            execute(
+                c,
+                "UPDATE guild_members SET nickname=NULLIF($3,'') WHERE guild_id=$1::uuid AND account_id=$2::uuid",
+                &[&guild, &account_id.to_string(), nickname],
+            )?;
+        }
     }
     Ok(false)
+}
+/// Role colour as a nullable integer parameter.
+fn color(appearance: RoleAppearance) -> String {
+    appearance
+        .color
+        .map(|c| u32::from(c).to_string())
+        .unwrap_or_default()
 }
 fn override_target(
     state: &GuildState,
@@ -1081,13 +1158,14 @@ fn delete_override(
     Ok(())
 }
 
-const MODERATION_PERMISSIONS: [Permission; 6] = [
+const MODERATION_PERMISSIONS: [Permission; 7] = [
     Permission::KickMembers,
     Permission::BanMembers,
     Permission::ModerateMembers,
     Permission::MoveMembers,
     Permission::MuteMembers,
     Permission::DeafenMembers,
+    Permission::ManageNicknames,
 ];
 fn disconnect_voice(c: &mut PgConnection, guild: &str, account: AccountId) -> Result<(), Failure> {
     execute(

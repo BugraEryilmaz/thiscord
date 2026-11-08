@@ -407,6 +407,27 @@ pub const ACCENTS: [(&str, Rgb); 8] = [
     ("Pink", Rgb(0xe0, 0x4f, 0x9b)),
 ];
 
+/// Preset role colours, picked to stay distinct from each other and to read well
+/// on the built-in themes; labels are English and translated at the call site.
+pub const ROLE_COLORS: [(&str, Rgb); 12] = [
+    ("Coral", Rgb(0xf0, 0x5d, 0x4f)),
+    ("Amber", Rgb(0xf0, 0xa0, 0x20)),
+    ("Gold", Rgb(0xe3, 0xc0, 0x3b)),
+    ("Lime", Rgb(0x84, 0xcc, 0x16)),
+    ("Green", Rgb(0x2f, 0xa8, 0x5a)),
+    ("Teal", Rgb(0x14, 0xa3, 0x94)),
+    ("Sky", Rgb(0x38, 0xbd, 0xf8)),
+    ("Ocean", Rgb(0x25, 0x82, 0xeb)),
+    ("Iris", Rgb(0x7c, 0x6c, 0xf2)),
+    ("Violet", Rgb(0xb0, 0x61, 0xf0)),
+    ("Pink", Rgb(0xe0, 0x4f, 0x9b)),
+    ("Slate", Rgb(0x94, 0xa3, 0xb8)),
+];
+
+/// Backgrounds that member names are drawn on: chat, sidebars, the member
+/// panel and popovers (profile cards, mention suggestions).
+const NAME_BACKGROUNDS: [Token; 4] = [Token::Surface, Token::Sidebar, Token::Panel, Token::Popover];
+
 /// WCAG minimum for body text.
 pub const MIN_TEXT_CONTRAST: f64 = 4.5;
 /// WCAG minimum for large text and interface components; also used for
@@ -500,6 +521,47 @@ impl Appearance {
     /// Whether the accent may be hard to read as text on this theme.
     pub fn low_contrast(&self) -> bool {
         self.accent().contrast(self.color(Token::Surface)) < MIN_ACCENT_CONTRAST
+    }
+
+    /// A role colour as drawn for member names on this theme: unchanged when it
+    /// already reaches body-text contrast on every name background, otherwise
+    /// blended toward the text colour just far enough to do so. Light, dark and
+    /// custom themes therefore keep the hue where possible and never show an
+    /// unreadable name. With an unreadable text colour, that colour is used.
+    pub fn readable_name(&self, color: Rgb) -> Rgb {
+        self.readable_on(color, &NAME_BACKGROUNDS.map(|bg| self.color(bg)))
+    }
+
+    /// A mention chip for a coloured role: a light tint of the colour behind
+    /// the name, which is drawn in the colour where that stays readable.
+    /// Returns (text, background).
+    pub fn mention_chip(&self, color: Rgb) -> (Rgb, Rgb) {
+        let background = color.mix(self.color(Token::Surface), 0.18);
+        (self.readable_on(color, &[background]), background)
+    }
+
+    fn readable_on(&self, color: Rgb, backgrounds: &[Rgb]) -> Rgb {
+        let readable = |c: Rgb| {
+            backgrounds
+                .iter()
+                .all(|&bg| c.contrast(bg) >= MIN_TEXT_CONTRAST)
+        };
+        let text = self.color(Token::Text);
+        if readable(color) || !readable(text) {
+            return if readable(color) { color } else { text };
+        }
+        // Smallest share of the text colour that reads well; contrast changes
+        // monotonically along the blend from a failing to a passing colour.
+        let (mut low, mut high) = (0.0, 1.0);
+        for _ in 0..16 {
+            let mid = (low + high) / 2.0;
+            if readable(text.mix(color, mid)) {
+                high = mid;
+            } else {
+                low = mid;
+            }
+        }
+        text.mix(color, high)
     }
 
     /// Color pairs that fall below their minimum contrast.
@@ -859,6 +921,55 @@ mod tests {
                 );
             }
         }
+    }
+
+    #[test]
+    fn role_names_stay_readable_and_keep_readable_colors() {
+        for theme in Theme::ALL {
+            let appearance = Appearance::new(theme);
+            for (label, color) in ROLE_COLORS.into_iter().chain([
+                ("black", hex(0x000000)),
+                ("white", hex(0xffffff)),
+                ("navy", hex(0x101060)),
+                ("yellow", hex(0xffff00)),
+            ]) {
+                let shown = appearance.readable_name(color);
+                for bg in NAME_BACKGROUNDS {
+                    let ratio = shown.contrast(appearance.color(bg));
+                    assert!(
+                        ratio >= MIN_TEXT_CONTRAST - 0.01,
+                        "{label} on {} {}: {ratio}",
+                        theme.id(),
+                        bg.id()
+                    );
+                }
+                if NAME_BACKGROUNDS
+                    .iter()
+                    .all(|&bg| color.contrast(appearance.color(bg)) >= MIN_TEXT_CONTRAST)
+                {
+                    assert_eq!(shown, color, "{label} on {}", theme.id());
+                }
+            }
+        }
+        let graphite = Appearance::default();
+        for theme in Theme::ALL {
+            let appearance = Appearance::new(theme);
+            for (label, color) in ROLE_COLORS {
+                let (text, background) = appearance.mention_chip(color);
+                assert!(
+                    text.contrast(background) >= MIN_TEXT_CONTRAST - 0.01,
+                    "{label} chip on {}",
+                    theme.id()
+                );
+            }
+        }
+        // A custom theme with unreadable text falls back to its text colour.
+        let broken = Appearance::default().with(Token::Text, Some(graphite.color(Token::Surface)));
+        assert_eq!(
+            broken.readable_name(hex(0x101060)),
+            broken.color(Token::Text)
+        );
+        assert_eq!(broken.readable_name(hex(0x2fa85a)), hex(0x2fa85a));
     }
 
     #[test]

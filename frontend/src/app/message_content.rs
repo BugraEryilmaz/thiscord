@@ -1,27 +1,40 @@
 use super::Ui;
 use crate::account_client;
 use leptos::{either::Either, prelude::*};
+use thiscord_shared::GuildId;
 
-fn highlighted_mentions(text: &str) -> impl IntoView + use<> {
+/// Mentions of listed guild members show their guild name (nickname or profile
+/// name) in their role colour, with the `@username` as the tooltip. Other
+/// mentions, and every mention outside guilds, show the text as written.
+fn highlighted_mentions(text: &str, ui: Ui, guild: Option<GuildId>) -> impl IntoView + use<> {
     use thiscord_frontend::mentions::Span;
     thiscord_frontend::mentions::spans(text)
         .into_iter()
         .map(|span| match span {
             Span::Text(text) => Either::Left(text.to_owned()),
-            Span::Mention(text) => Either::Right(view! {
-                <span class="mention-chip">{text.to_owned()}</span>
-            }),
+            Span::Mention(text) => {
+                let member = guild.and_then(|g| ui.members.mention(g, &text[1..]));
+                let colors = member
+                    .as_ref()
+                    .and_then(|m| super::members::mention_colors(m.color));
+                let shown = member.map_or_else(|| text.to_owned(), |m| format!("@{}", m.name));
+                Either::Right(view! {
+                    <span class="mention-chip" title=text.to_owned()
+                        style:color=colors.as_ref().map(|c| c.0.clone())
+                        style:background-color=colors.map(|c| c.1)>{shown}</span>
+                })
+            }
         })
         .collect_view()
 }
 
-fn plain(text: &str, ui: Ui) -> impl IntoView + use<> {
+fn plain(text: &str, ui: Ui, guild: Option<GuildId>) -> impl IntoView + use<> {
     thiscord_frontend::message_links::spans(text)
         .into_iter()
         .map(|span| {
             let text = span.text.to_owned();
             match span.href {
-                None => Either::Left(highlighted_mentions(&text)),
+                None => Either::Left(highlighted_mentions(&text, ui, guild)),
                 Some(href) => {
                     let url = href.clone();
                     Either::Right(view! {
@@ -48,17 +61,23 @@ fn plain(text: &str, ui: Ui) -> impl IntoView + use<> {
         .collect_view()
 }
 
-pub(super) fn render(text: &str, ui: Ui) -> impl IntoView + use<> {
-    nodes(thiscord_frontend::markdown::parse(text), ui, false)
+/// Message markup; `guild` resolves mentions to that guild's members.
+pub(super) fn render(text: &str, ui: Ui, guild: Option<GuildId>) -> impl IntoView + use<> {
+    nodes(thiscord_frontend::markdown::parse(text), ui, guild, false)
 }
-fn nodes(items: Vec<thiscord_frontend::markdown::Node>, ui: Ui, literal: bool) -> AnyView {
+fn nodes(
+    items: Vec<thiscord_frontend::markdown::Node>,
+    ui: Ui,
+    guild: Option<GuildId>,
+    literal: bool,
+) -> AnyView {
     use thiscord_frontend::markdown::{Kind, Node};
     items.into_iter().map(|node| match node {
-        Node::Text(text)|Node::Literal(text) if !literal => plain(&text,ui).into_any(),
+        Node::Text(text)|Node::Literal(text) if !literal => plain(&text,ui,guild).into_any(),
         Node::Text(text)|Node::Literal(text)=>text.into_any(),
         Node::Break=>view!{<br/>}.into_any(),
         Node::Element(kind,children)=>{
-            let inner=nodes(children,ui,literal || matches!(kind,Kind::Code|Kind::CodeBlock|Kind::Link(_)));
+            let inner=nodes(children,ui,guild,literal || matches!(kind,Kind::Code|Kind::CodeBlock|Kind::Link(_)));
             match kind {
                 Kind::Strong=>view!{<strong>{inner}</strong>}.into_any(),
                 Kind::Emphasis=>view!{<em>{inner}</em>}.into_any(),

@@ -98,6 +98,9 @@ snapshots within enforced installation/guild capacity limits, described in
 `POST /api/v1/permissions` uses `PermissionRequest`/`PermissionResponse` from
 `shared/src/permissions.rs`. Every command requires an active bearer session. Guild
 changes include the last viewed revision; stale revisions return `409 Conflict`.
+Current clients append `?permission_set=2` (`permissions_path()`); permission names
+newer than a request's set are omitted from responses, because released clients
+reject unknown names (see [permissions.md](permissions.md#role-colors-sections-and-nicknames)).
 Guild icons use `POST /api/v1/guild-icons` (`SetGuildIcon`, returns `Guild`) and
 `GET /api/v1/guild-icons/{icon_id}`; see [permissions.md](permissions.md#server-icons).
 See [permissions.md](permissions.md) for bootstrap, hierarchy, override precedence

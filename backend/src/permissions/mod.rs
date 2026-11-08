@@ -9,7 +9,7 @@ use crate::{
 };
 use axum::{
     Extension, Json, Router,
-    extract::{DefaultBodyLimit, State, rejection::JsonRejection},
+    extract::{DefaultBodyLimit, RawQuery, State, rejection::JsonRejection},
     http::HeaderMap,
     response::{IntoResponse, Response},
     routing::{get, post},
@@ -30,8 +30,10 @@ async fn handle(
     State(pool): State<Option<DbPool>>,
     Extension(id): Extension<RequestId>,
     headers: HeaderMap,
+    RawQuery(query): RawQuery,
     body: Result<Json<PermissionRequest>, JsonRejection>,
 ) -> Response {
+    let set = permission_set(query.as_deref());
     let result = async {
         let Json(command) = body.map_err(|_| Failure::Invalid("Invalid permission request"))?;
         let pool = pool.ok_or(Failure::Unavailable)?;
@@ -45,12 +47,16 @@ async fn handle(
             .map_err(|_| Failure::Limited)?;
         tokio::task::spawn_blocking(move || {
             let _permit = permit;
-            store::dispatch(&pool, &token, command)
+            store::dispatch(&pool, &token, command, set)
         })
         .await
         .map_err(|_| Failure::Unavailable)?
     }
-    .await;
+    .await
+    .map(|mut body| {
+        body.restrict(set);
+        body
+    });
     let mut response = match result {
         Ok(body) => Json(body).into_response(),
         Err(error) => error.response(id),
@@ -61,7 +67,33 @@ async fn handle(
     response
 }
 
+/// The client's declared permission set; anything else (including released
+/// 0.1.61 clients, which send no query) is set 1. Never an authorization input.
+fn permission_set(query: Option<&str>) -> u8 {
+    query
+        .into_iter()
+        .flat_map(|q| q.split('&'))
+        .filter_map(|pair| pair.split_once('='))
+        .find(|(key, _)| *key == PERMISSION_SET_QUERY)
+        .and_then(|(_, value)| value.parse::<u8>().ok())
+        .map_or(1, |set| set.clamp(1, PERMISSION_SET))
+}
+
 /// Only the local backend CLI exposes initial ownership; never first signup or HTTP.
 pub fn bootstrap_owner(pool: &DbPool, username: &str) -> Result<(), crate::BoxError> {
     store::bootstrap(pool, username).map_err(|_| "Owner bootstrap failed: use an existing verified username; the instance must have no owner".into())
+}
+
+#[cfg(test)]
+mod tests {
+    #[test]
+    fn missing_or_malformed_permission_sets_mean_the_released_set() {
+        use super::permission_set;
+        assert_eq!(permission_set(None), 1);
+        assert_eq!(permission_set(Some("permission_set=x")), 1);
+        assert_eq!(permission_set(Some("other=2")), 1);
+        assert_eq!(permission_set(Some("permission_set=0")), 1);
+        assert_eq!(permission_set(Some("a=1&permission_set=2")), 2);
+        assert_eq!(permission_set(Some("permission_set=200")), 2);
+    }
 }

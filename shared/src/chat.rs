@@ -98,19 +98,28 @@ pub struct GuildMember {
     /// without roles and from older servers.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub role: Option<MemberRole>,
+    /// Highest-ranked assigned role shown separately ("hoisted"): the list
+    /// section of an online member. Absent without one and from older servers.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub hoisted_role: Option<MemberRole>,
+    /// Name colour: the colour of the highest-ranked coloured assigned role.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub color: Option<crate::permissions::RoleColor>,
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub owner: bool,
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub bot: bool,
 }
-/// Display data of a member's highest-ranked role: its name and rank only,
-/// never its permissions or the member's other roles. Higher `position` ranks
+/// Display data of one of a member's roles: name, rank and colour only, never
+/// its permissions or the member's other roles. Higher `position` ranks
 /// higher; ties order by name, then ID.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub struct MemberRole {
     pub id: crate::RoleId,
     pub name: String,
     pub position: i32,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub color: Option<crate::permissions::RoleColor>,
 }
 /// One online member's live activity in a `member_presence` update.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -134,7 +143,12 @@ impl GuildMember {
 pub struct MemberProfile {
     pub account_id: AccountId,
     pub username: String,
+    /// The account-wide profile name, unlike guild member lists and messages.
     pub display_name: String,
+    /// Nickname in the requested guild, shown instead of the profile name
+    /// there. Absent when unset and from older servers.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub nickname: Option<String>,
     #[serde(default)]
     pub bio: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -381,6 +395,10 @@ pub enum ClientEvent {
         /// Opt in to `guild_updated` hints so older clients never receive them.
         #[serde(default, skip_serializing_if = "std::ops::Not::not")]
         guild_updates: bool,
+        /// The client's [`crate::permissions::PERMISSION_SET`]; newer names are
+        /// removed from `subscribed` permissions. Omitted means set 1.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        permission_set: Option<u8>,
     },
     Subscribe {
         subscription: u64,
@@ -479,6 +497,7 @@ mod tests {
         let event = ClientEvent::Connect {
             token: "t".into(),
             guild_updates: false,
+            permission_set: None,
         };
         assert_eq!(serde_json::to_value(event).unwrap(), legacy);
         let opted = json!({"type":"connect","token":"t","guild_updates":true});
@@ -656,5 +675,43 @@ mod tests {
         assert_eq!(roundtrip.display_name(), "Büğra 🎮");
         member.display_name = "   ".into();
         assert_eq!(member.display_name(), "user_123");
+    }
+
+    #[test]
+    fn role_display_and_nickname_fields_are_additive() {
+        let id = "00000000-0000-0000-0000-000000000001";
+        // A 0.1.61 client ignores the new member-list fields; a new client
+        // reads lists from older servers without them.
+        let current = json!({"account_id":id,"username":"u","display_name":"Nick","online":false,
+            "role":{"id":id,"name":"Mods","position":5,"color":0x2fa85a},
+            "hoisted_role":{"id":id,"name":"Mods","position":5,"color":0x2fa85a},
+            "color":0x2fa85a});
+        let member: GuildMember = serde_json::from_value(current.clone()).unwrap();
+        assert_eq!(member.color.unwrap().hex(), "#2fa85a");
+        assert_eq!(serde_json::to_value(&member).unwrap(), current);
+        let legacy: GuildMember = serde_json::from_value(json!({"account_id":id,"username":"u",
+                "role":{"id":id,"name":"Mods","position":5}}))
+        .unwrap();
+        assert!(legacy.hoisted_role.is_none() && legacy.color.is_none());
+        assert!(legacy.role.unwrap().color.is_none());
+        assert!(
+            serde_json::from_value::<MemberRole>(
+                json!({"id":id,"name":"x","position":1,"color":0x1000000})
+            )
+            .is_err()
+        );
+        let profile: MemberProfile = serde_json::from_value(
+            json!({"account_id":id,"username":"u","display_name":"Profile","nickname":"Nick"}),
+        )
+        .unwrap();
+        assert_eq!(profile.nickname.as_deref(), Some("Nick"));
+        let connect = json!({"type":"connect","token":"t","permission_set":2});
+        assert!(matches!(
+            serde_json::from_value(connect).unwrap(),
+            ClientEvent::Connect {
+                permission_set: Some(2),
+                ..
+            }
+        ));
     }
 }

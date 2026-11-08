@@ -79,10 +79,12 @@ The desktop app also shows the game you are playing (for example "Playing Factor
 to the same audience while it runs. Settings → App behavior turns it off, adds games
 from a running-program picker and hides games on that computer (see
 [game activity](docs/activity.md)).
-Text channels have a toggleable member list (a drawer on phones and tablets) grouped
-by each online member's highest role, then Online and Offline, with role tags,
-profile cards and member actions (see
-[member list](docs/chat.md#member-list-and-profile-cards)).
+Text channels have a toggleable member list (a drawer on phones and tablets) with a
+section for each role set to show separately, then Online and Offline, with role
+colours and tags, profile cards and member actions (see
+[member list](docs/chat.md#member-list-and-profile-cards)). Members can set a
+per-server nickname, and role colours tint names in chat, voice and mentions
+([role colors and nicknames](docs/permissions.md#role-colors-sections-and-nicknames)).
 The UI works from the keyboard: **Ctrl/⌘+K** opens a quick switcher for servers,
 channels and friends, **Alt+↑/↓** (with Shift: unread only) moves between channels,
 **Ctrl+Alt+↑/↓** between servers, **Esc** marks the open channel read and **Ctrl/⌘+/**

@@ -5,11 +5,18 @@ use super::{
     icons::{Glyph, Icon},
 };
 use leptos::prelude::*;
-use thiscord_frontend::member_list::{PANEL_KEY, Section, apply_presence, sections, status_text};
+use thiscord_frontend::{
+    appearance::Rgb,
+    member_list::{Directory, Identity, PANEL_KEY, Section, apply_presence, sections, status_text},
+};
 use thiscord_shared::{
     AccountId, AvatarId, ChannelId, GuildId,
-    chat::{CHAT_PATH, ChatRequest, ChatResponse, GuildMember, MemberActivity, MemberProfile},
+    chat::{
+        CHAT_PATH, ChatRequest, ChatResponse, GuildMember, MemberActivity, MemberProfile,
+        MemberRole,
+    },
     friends::Relationship,
+    permissions::RoleColor,
 };
 use wasm_bindgen::JsCast;
 
@@ -21,7 +28,11 @@ const DRAWER_BELOW: f64 = 1024.0;
 pub(super) struct State {
     /// The latest authorized list for `guild`, as delivered by the socket.
     list: RwSignal<Vec<GuildMember>>,
+    /// Guild names and colours from `list`; unchanged by presence updates.
+    directory: Memo<Directory>,
     guild: RwSignal<Option<GuildId>>,
+    /// Member whose nickname dialog is open (see `nickname::Host`).
+    pub(super) nickname: RwSignal<Option<(GuildId, AccountId)>>,
     /// Wide layouts: side panel, persisted on this device.
     panel: RwSignal<bool>,
     /// Narrow layouts: temporary drawer, closed when the shown channel or the
@@ -49,9 +60,12 @@ impl State {
         let panel = storage()
             .and_then(|s| s.get_item(PANEL_KEY).ok().flatten())
             .is_none_or(|value| value != "0");
+        let list = RwSignal::new(vec![]);
         Self {
-            list: RwSignal::new(vec![]),
+            list,
+            directory: Memo::new(move |_| list.with(|l| Directory::new(l))),
             guild: RwSignal::new(None),
+            nickname: RwSignal::new(None),
             panel: RwSignal::new(panel),
             drawer: RwSignal::new(false),
             narrow: RwSignal::new(narrow()),
@@ -86,17 +100,31 @@ impl State {
                 .and_then(status_line)
         })
     }
-    /// Highest-ranked role name of a listed member, for the profile card.
-    fn role(self, guild: GuildId, id: AccountId) -> Option<String> {
+    /// Highest-ranked role of a listed member, for the profile card.
+    fn role(self, guild: GuildId, id: AccountId) -> Option<MemberRole> {
         if self.guild.get() != Some(guild) {
             return None;
         }
         self.list.with(|list| {
             list.iter()
                 .find(|m| m.account_id == id)
-                .and_then(|m| m.role.as_ref())
-                .map(|r| r.name.clone())
+                .and_then(|m| m.role.clone())
         })
+    }
+    /// A listed member's name and colour in this guild (tracked). Rows keep
+    /// their own snapshot, so nickname and role edits apply without a reload.
+    pub(super) fn identity(self, guild: GuildId, id: AccountId) -> Option<Identity> {
+        if self.guild.get() != Some(guild) {
+            return None;
+        }
+        self.directory.with(|d| d.get(id).cloned())
+    }
+    /// The listed member a `@username` mention refers to (tracked).
+    pub(super) fn mention(self, guild: GuildId, username: &str) -> Option<Identity> {
+        if self.guild.get() != Some(guild) {
+            return None;
+        }
+        self.directory.with(|d| d.username(username).cloned())
     }
     /// Live activity of a listed member, for the profile card.
     fn activity(self, guild: GuildId, id: AccountId) -> Option<String> {
@@ -141,6 +169,32 @@ impl State {
     }
 }
 
+/// CSS colour of a member name: the role colour, adjusted to stay readable on
+/// the current theme (light, dark or custom). Tracks theme changes.
+pub(super) fn name_color(color: Option<RoleColor>) -> Option<String> {
+    let (r, g, b) = color?.rgb();
+    Some(crate::theme::current().readable_name(Rgb(r, g, b)).hex())
+}
+
+/// Text and background colours of a mention chip for a coloured member.
+pub(super) fn mention_colors(color: Option<RoleColor>) -> Option<(String, String)> {
+    let (r, g, b) = color?.rgb();
+    let (text, background) = crate::theme::current().mention_chip(Rgb(r, g, b));
+    Some((text.hex(), background.hex()))
+}
+
+/// A role tag: a dot in the role's own colour (decorative) and its name.
+#[component]
+pub(super) fn RoleBadge(role: MemberRole) -> impl IntoView {
+    let title = role.name.clone();
+    view! {
+        <span class="member-badge member-role-badge" title=title>
+            {role.color.map(|color| view! {<span class="role-dot" style:background-color=color.hex() aria-hidden="true"></span>})}
+            <span class="truncate">{role.name}</span>
+        </span>
+    }
+}
+
 /// Header button showing or hiding the member list.
 #[component]
 pub(super) fn Toggle(ui: Ui) -> impl IntoView {
@@ -158,7 +212,8 @@ type RowKey = (
     String,
     Option<AvatarId>,
     String,
-    Option<String>,
+    Option<MemberRole>,
+    Option<RoleColor>,
     bool,
     bool,
     bool,
@@ -169,7 +224,8 @@ fn row_key(member: &GuildMember) -> RowKey {
         member.display_name().to_owned(),
         member.avatar_id,
         status_line(member).unwrap_or_default(),
-        member.role.as_ref().map(|r| r.name.clone()),
+        member.role.clone(),
+        member.color,
         member.online,
         member.owner,
         member.bot,
@@ -197,6 +253,8 @@ fn Row(
     let status = status_line(&member);
     let own = move || ui.account.with(|a| a.as_ref().is_some_and(|a| a.id == id));
     let online = member.online;
+    let color = member.color;
+    let badge = member.role.clone();
     let role = member.role.as_ref().map(|r| r.name.clone());
     let label = {
         let name = name.clone();
@@ -242,8 +300,8 @@ fn Row(
                 </span>
                 <span class="min-w-0 flex-1">
                     <span class="flex min-w-0 items-center gap-1">
-                        <span class="truncate text-sm font-medium">{name}</span>
-                        {role.map(|role| view! {<span class="member-badge member-role-badge" title=role.clone()>{role.clone()}</span>})}
+                        <span class="truncate text-sm font-medium" style:color=move || name_color(color)>{name}</span>
+                        {badge.map(|role| view! {<RoleBadge role/>})}
                         {member.owner.then(|| view! {<span class="member-badge">{move || crate::i18n::t("Owner")}</span>})}
                         {member.bot.then(|| view! {<span class="member-badge">{move || crate::i18n::t("Bot")}</span>})}
                     </span>
@@ -497,19 +555,42 @@ pub(super) fn ProfileHost(ui: Ui) -> impl IntoView {
             .get()
             .is_some_and(|(_, id)| ui.account.with(|a| a.as_ref().is_some_and(|a| a.id == id)))
     };
+    // The guild name (nickname when set) leads; the profile name follows it.
+    let heading = move || {
+        profile.with(|p| {
+            p.as_ref()
+                .map(|p| p.nickname.clone().unwrap_or_else(|| p.display_name.clone()))
+        })
+    };
+    let color = move || {
+        ui.members
+            .profile
+            .get()
+            .and_then(|(guild, id)| ui.members.identity(guild, id))
+            .and_then(|i| name_color(i.color))
+    };
+    let can_rename = move || {
+        own()
+            && ui
+                .server
+                .with(|s| s.as_ref().is_some_and(|s| s.can_change_nickname))
+    };
     view! {
         <dialog node_ref=dialog class="context-dialog profile-card" aria-labelledby="profile-card-name"
             on:click=move |e| super::dialog::dismiss_outside(e, dialog, false) on:close=move |_| closed()>
             <div class="flex items-start gap-4">
                 <crate::avatar::Avatar class="size-16 text-2xl"
-                    name=Signal::derive(move || profile.with(|p| p.as_ref().map(|p| p.display_name.clone()).unwrap_or_default()))
+                    name=Signal::derive(move || heading().unwrap_or_default())
                     avatar_id=Signal::derive(move || profile.with(|p| p.as_ref().and_then(|p| p.avatar_id)))/>
                 <div class="min-w-0 flex-1">
-                    <h2 id="profile-card-name" class="break-words text-xl font-semibold">{move || profile.with(|p| p.as_ref().map(|p| p.display_name.clone()))}</h2>
-                    <p class="break-all text-sm text-white/60">{move || profile.with(|p| p.as_ref().map(|p| format!("@{}", p.username)))}</p>
+                    <h2 id="profile-card-name" class="break-words text-xl font-semibold" style:color=color>{heading}</h2>
+                    <p class="break-all text-sm text-white/60">{move || profile.with(|p| p.as_ref().map(|p| match &p.nickname {
+                        Some(_) => format!("{} · @{}", p.display_name, p.username),
+                        None => format!("@{}", p.username),
+                    }))}</p>
                     <Show when=move || profile.with(|p| p.as_ref().is_some_and(|p| p.owner || p.bot)) || card_role().is_some()>
                         <p class="mt-1 flex flex-wrap gap-1">
-                            {move || card_role().map(|role| view! {<span class="member-badge member-role-badge" title=role.clone()>{role.clone()}</span>})}
+                            {move || card_role().map(|role| view! {<RoleBadge role/>})}
                             <Show when=move || profile.with(|p| p.as_ref().is_some_and(|p| p.owner))><span class="member-badge">{move || crate::i18n::t("Server owner")}</span></Show>
                             <Show when=move || profile.with(|p| p.as_ref().is_some_and(|p| p.bot))><span class="member-badge">{move || crate::i18n::t("Bot")}</span></Show>
                         </p>
@@ -550,6 +631,18 @@ pub(super) fn ProfileHost(ui: Ui) -> impl IntoView {
                             super::friends::open(ui, id);
                         }
                     }>{move || crate::i18n::t("Send message")}</button>
+                </Show>
+                <Show when=can_rename>
+                    <button type="button" class="rounded bg-white/10 px-4 py-2 text-sm" aria-haspopup="dialog" on:click=move |_| {
+                        // Return focus to the list row, not this closing card.
+                        let target = ui.members.profile.get_untracked();
+                        refocus.set_value(false);
+                        close();
+                        if let Some(opener) = ui.members.opener.get_value().filter(|o| o.is_connected()) {
+                            let _ = opener.focus();
+                        }
+                        ui.members.nickname.set(target);
+                    }>{move || crate::i18n::t("Change nickname")}</button>
                 </Show>
                 <Show when=move || own()>
                     <button type="button" class="rounded bg-white/10 px-4 py-2 text-sm" on:click=move |_| {

@@ -143,9 +143,11 @@ and single-process chat/media enforcement.
 - [x] Create/edit/delete/reorder text and voice channels and organizational categories.
 - [x] Guild navigation, channel/member lists and settings views.
 - [x] Live guild member list (online/offline, presence, custom status, block filtering) with profile cards, member menus and a phone/tablet drawer.
-- [x] Member list groups by highest-ranked role (then Online, then Offline) with role tags on rows and profile cards.
+- [x] Member list sections for roles shown separately (highest-ranked first, then Online, then Offline) with role tags on rows and profile cards.
 - [x] Account custom status with emoji, expiry presets, cross-device sync and friend/guild/DM/voice-tooltip display.
-- [ ] Role display settings: a per-role "show separately" toggle (every assigned role groups today) and role colours.
+- [x] Role display settings: colours (presets, custom picker, none) with theme-readable names, and a per-role "show separately" toggle (docs/permissions.md#role-colors-sections-and-nicknames).
+- [x] Per-server nicknames (ChangeNickname/ManageNicknames, hierarchy, audit) shown in chat, member list, voice, mentions and profile cards.
+- [ ] Accept role colours, member sections and nickname editing interactively on Windows/macOS/Linux and mobile browsers.
 - [ ] Accept the member list drawer, profile cards and custom status dialog interactively on Windows/macOS/Linux and mobile browsers.
 - [x] Desktop game activity ("Playing …") from local process detection, with League/TFT mode lookup, a device setting and live friend/member display (docs/activity.md).
 - [ ] Verify game detection with real games on Windows/macOS/Linux (including Proton and a TFT match) and compile/run the macOS libproc path.

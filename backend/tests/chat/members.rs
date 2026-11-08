@@ -472,3 +472,122 @@ async fn member_list_pushes_presence_status_blocks_and_removal_and_syncs_devices
     .await;
     server.abort();
 }
+
+#[tokio::test]
+#[ignore = "requires TEST_DATABASE_URL; CI runs with --include-ignored"]
+async fn role_display_and_nicknames_reach_member_lists_mentions_and_messages_live() {
+    let _guard = TEST_LOCK.lock().await;
+    let db = database();
+    let (app, owner, guest, guest_id, mut state, channel) = setup(&db).await;
+    let guild = state["guild"]["id"].clone();
+    let owner_id: AccountId = serde_json::from_value(state["guild"]["owner"].clone()).unwrap();
+    // Highest role "Quiet" has no colour and no section; "Painted" is the
+    // highest coloured role; "Crew" is the only role shown separately.
+    for (name, position, appearance) in [
+        ("Crew", 10, json!({"color":0x2fa85a,"hoist":true})),
+        ("Painted", 15, json!({"color":0xe04f9b,"hoist":false})),
+        ("Quiet", 20, json!({"color":null,"hoist":false})),
+    ] {
+        change(&app,&owner,&mut state,json!({"action":"create_role","name":name,"position":position,"permissions":[],"appearance":appearance}),StatusCode::OK).await;
+        let id = state["roles"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|r| r["name"] == name)
+            .unwrap()["id"]
+            .clone();
+        change(
+            &app,
+            &owner,
+            &mut state,
+            json!({"action":"assign_role","account_id":guest_id,"role_id":id,"assigned":true}),
+            StatusCode::OK,
+        )
+        .await;
+    }
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let address = listener.local_addr().unwrap();
+    let router = app.clone();
+    let server = tokio::spawn(async move {
+        axum::serve(listener, router).await.unwrap();
+    });
+    let mut viewer = session_socket(address, &owner).await;
+    event(&mut viewer, "authenticated").await;
+    // Released clients declare no permission set and never see newer names,
+    // even as the owner holding every permission.
+    viewer.send(WsMessage::Text(json!({"version":1,"event":{"type":"subscribe","subscription":1,"guild_id":guild,"channel_id":channel,"members":true}}).to_string().into())).await.unwrap();
+    let subscribed = event(&mut viewer, "subscribed").await;
+    let names = subscribed["permissions"].as_array().unwrap();
+    assert!(
+        names.contains(&json!("send_messages")) && !names.contains(&json!("change_nickname")),
+        "{subscribed}"
+    );
+    let list = pushed(&mut viewer, 1, "members").await;
+    let row = member(&list, guest_id).unwrap();
+    assert_eq!(row["role"]["name"], "Quiet");
+    assert!(row["role"].get("color").is_none());
+    assert_eq!(row["hoisted_role"]["name"], "Crew");
+    assert_eq!(row["hoisted_role"]["color"], 0x2fa85a);
+    assert_eq!(row["color"], 0xe04f9b);
+    let owner_row = member(&list, owner_id).unwrap();
+    assert!(owner_row.get("hoisted_role").is_none() && owner_row.get("color").is_none());
+
+    // A nickname refreshes open lists without revoking the subscription.
+    let home = command(
+        &app,
+        &guest,
+        json!({"action":"view_guild","guild_id":guild}),
+        StatusCode::OK,
+    )
+    .await;
+    let (status, body) = call(&app, &permissions_path(), &guest, json!({"action":"change","guild_id":guild,
+        "revision":home["home"]["guild"]["revision"],"change":{"action":"set_nickname","account_id":guest_id,"nickname":"Gezgin"}})).await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let list = update_where(&mut viewer, 1, "members", |u| {
+        member(u, guest_id).is_some_and(|m| m["display_name"] == "Gezgin")
+    })
+    .await;
+    assert_eq!(member(&list, guest_id).unwrap()["username"], "guest");
+    connected(&mut viewer).await;
+
+    // Mentions match nicknames as well as profile names and usernames, and
+    // messages carry the guild name.
+    let (status, body) = call(&app, CHAT_PATH, &owner, json!({"action":"mention_suggestions","guild_id":guild,"channel_id":channel,"query":"gezg"})).await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert_eq!(
+        body["members"],
+        json!([{"account_id":guest_id,"username":"guest","display_name":"Gezgin"}])
+    );
+    let (_, body) = call(&app, CHAT_PATH, &owner, json!({"action":"mention_suggestions","guild_id":guild,"channel_id":channel,"query":"gues"})).await;
+    assert_eq!(body["members"][0]["display_name"], "Gezgin");
+    let (status, body) = call(
+        &app,
+        CHAT_PATH,
+        &guest,
+        json!({"action":"send","guild_id":guild,"channel_id":channel,
+        "client_id":uuid::Uuid::new_v4(),"content":"hi"}),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert_eq!(body["message"]["display_name"], "Gezgin");
+
+    // Current clients that declare the set receive the new names.
+    let mut request = format!("ws://{address}{SOCKET_PATH}")
+        .into_client_request()
+        .unwrap();
+    request
+        .headers_mut()
+        .insert("origin", "http://localhost:1420".parse().unwrap());
+    let (mut current, _) = connect_async(request).await.unwrap();
+    current.send(WsMessage::Text(json!({"version":1,"event":{"type":"connect","token":owner,"permission_set":PERMISSION_SET}}).to_string().into())).await.unwrap();
+    event(&mut current, "authenticated").await;
+    current.send(WsMessage::Text(json!({"version":1,"event":{"type":"subscribe","subscription":2,"guild_id":guild,"channel_id":channel}}).to_string().into())).await.unwrap();
+    let subscribed = event(&mut current, "subscribed").await;
+    assert!(
+        subscribed["permissions"]
+            .as_array()
+            .unwrap()
+            .contains(&json!("change_nickname"))
+    );
+    server.abort();
+}

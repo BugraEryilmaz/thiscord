@@ -98,7 +98,7 @@ pub(super) fn visible_voice_channels(
     })
 }
 pub(super) fn message(c: &mut PgConnection, id: MessageId) -> Result<ChatMessage, Failure> {
-    query(c,"SELECT to_jsonb(m)||jsonb_build_object('author_avatar_id',av.id,'username',COALESCE(a.username,'Deleted account'),'display_name',COALESCE(NULLIF(a.display_name,''),a.username,'Deleted account')) AS data FROM messages m LEFT JOIN accounts a ON a.id=m.author_id LEFT JOIN account_avatars av ON av.account_id=m.author_id WHERE m.id=$1::uuid", &[&id.to_string()])?.pop().ok_or(Failure::Forbidden)
+    query(c,"SELECT to_jsonb(m)||jsonb_build_object('author_avatar_id',av.id,'username',COALESCE(a.username,'Deleted account'),'display_name',COALESCE(gm.nickname,NULLIF(a.display_name,''),a.username,'Deleted account')) AS data FROM messages m LEFT JOIN accounts a ON a.id=m.author_id LEFT JOIN guild_members gm ON gm.guild_id=m.guild_id AND gm.account_id=m.author_id LEFT JOIN account_avatars av ON av.account_id=m.author_id WHERE m.id=$1::uuid", &[&id.to_string()])?.pop().ok_or(Failure::Forbidden)
 }
 fn text(value: &str, has_attachments: bool) -> Result<(), Failure> {
     if (!has_attachments && value.trim().is_empty())
@@ -164,7 +164,7 @@ pub(super) fn history(
         .unwrap_or_else(|| ("infinity".into(), Uuid::nil().to_string()));
     let mut messages: Vec<ChatMessage> = query(
         c,
-        "SELECT to_jsonb(m)||jsonb_build_object('author_avatar_id',av.id,'username',COALESCE(a.username,'Deleted account'),'display_name',COALESCE(NULLIF(a.display_name,''),a.username,'Deleted account')) AS data FROM messages m LEFT JOIN accounts a ON a.id=m.author_id LEFT JOIN account_avatars av ON av.account_id=m.author_id WHERE m.guild_id=$1::uuid AND m.channel_id=$2::uuid AND (m.created_at,m.id)<($3::timestamptz,$4::uuid) ORDER BY m.created_at DESC,m.id DESC LIMIT $5::integer",
+        "SELECT to_jsonb(m)||jsonb_build_object('author_avatar_id',av.id,'username',COALESCE(a.username,'Deleted account'),'display_name',COALESCE(gm.nickname,NULLIF(a.display_name,''),a.username,'Deleted account')) AS data FROM messages m LEFT JOIN accounts a ON a.id=m.author_id LEFT JOIN guild_members gm ON gm.guild_id=m.guild_id AND gm.account_id=m.author_id LEFT JOIN account_avatars av ON av.account_id=m.author_id WHERE m.guild_id=$1::uuid AND m.channel_id=$2::uuid AND (m.created_at,m.id)<($3::timestamptz,$4::uuid) ORDER BY m.created_at DESC,m.id DESC LIMIT $5::integer",
         &[
             &guild.to_string(),
             &channel.to_string(),
@@ -306,7 +306,7 @@ pub(super) fn dispatch(
                     // membership. The requester passed current channel checks above.
                     let members = query(
                         c,
-                        "SELECT jsonb_build_object('account_id',a.id,'username',a.username,'display_name',COALESCE(NULLIF(a.display_name,''),a.username)) AS data FROM accounts a JOIN guild_members m ON m.account_id=a.id WHERE m.guild_id=$1::uuid AND (strpos(lower(a.display_name),lower($2))>0 OR strpos(a.username,lower($2))>0) ORDER BY (strpos(lower(a.display_name),lower($2))=1 OR strpos(a.username,lower($2))=1) DESC, lower(COALESCE(NULLIF(a.display_name,''),a.username)), a.username, a.id LIMIT $3::integer",
+                        "SELECT jsonb_build_object('account_id',a.id,'username',a.username,'display_name',COALESCE(m.nickname,NULLIF(a.display_name,''),a.username)) AS data FROM accounts a JOIN guild_members m ON m.account_id=a.id WHERE m.guild_id=$1::uuid AND (strpos(lower(COALESCE(m.nickname,'')),lower($2))>0 OR strpos(lower(a.display_name),lower($2))>0 OR strpos(a.username,lower($2))>0) ORDER BY (strpos(lower(COALESCE(m.nickname,a.display_name)),lower($2))=1 OR strpos(a.username,lower($2))=1) DESC, lower(COALESCE(m.nickname,NULLIF(a.display_name,''),a.username)), a.username, a.id LIMIT $3::integer",
                         &[
                             &guild.to_string(),
                             search.trim(),
@@ -715,7 +715,7 @@ pub(super) fn events(
 ) -> Result<Vec<(i64, ChatMessage)>, Failure> {
     query(
         c,
-        "SELECT jsonb_build_array(e.sequence,to_jsonb(m)||jsonb_build_object('author_avatar_id',av.id,'username',COALESCE(a.username,'Deleted account'),'display_name',COALESCE(NULLIF(a.display_name,''),a.username,'Deleted account'))) AS data FROM message_events e JOIN messages m ON m.id=e.message_id LEFT JOIN accounts a ON a.id=m.author_id LEFT JOIN account_avatars av ON av.account_id=m.author_id WHERE e.guild_id=$1::uuid AND e.channel_id=$2::uuid AND e.sequence>$3::bigint ORDER BY e.sequence LIMIT 100",
+        "SELECT jsonb_build_array(e.sequence,to_jsonb(m)||jsonb_build_object('author_avatar_id',av.id,'username',COALESCE(a.username,'Deleted account'),'display_name',COALESCE(gm.nickname,NULLIF(a.display_name,''),a.username,'Deleted account'))) AS data FROM message_events e JOIN messages m ON m.id=e.message_id LEFT JOIN accounts a ON a.id=m.author_id LEFT JOIN guild_members gm ON gm.guild_id=m.guild_id AND gm.account_id=m.author_id LEFT JOIN account_avatars av ON av.account_id=m.author_id WHERE e.guild_id=$1::uuid AND e.channel_id=$2::uuid AND e.sequence>$3::bigint ORDER BY e.sequence LIMIT 100",
         &[
             &guild.to_string(),
             &channel.to_string(),
@@ -897,7 +897,7 @@ fn presence_state(
 ) -> Result<Vec<OnlineMember>, Failure> {
     query(
         c,
-        "SELECT jsonb_build_object('account_id',p.account_id,'username',a.username,'display_name',a.display_name,'typing',bool_or(p.typing_until>CASE WHEN $3::boolean THEN now() ELSE '-infinity'::timestamptz END),'avatar_id',(SELECT v.id FROM account_avatars v WHERE v.account_id=p.account_id)) AS data FROM chat_presence p JOIN accounts a ON a.id=p.account_id WHERE p.guild_id=$1::uuid AND p.channel_id=$2::uuid AND (NOT $3::boolean OR p.expires_at>now()) GROUP BY p.account_id,a.username,a.display_name ORDER BY a.username",
+        "SELECT jsonb_build_object('account_id',p.account_id,'username',a.username,'display_name',COALESCE(gm.nickname,a.display_name),'typing',bool_or(p.typing_until>CASE WHEN $3::boolean THEN now() ELSE '-infinity'::timestamptz END),'avatar_id',(SELECT v.id FROM account_avatars v WHERE v.account_id=p.account_id)) AS data FROM chat_presence p JOIN accounts a ON a.id=p.account_id LEFT JOIN guild_members gm ON gm.guild_id=p.guild_id AND gm.account_id=p.account_id WHERE p.guild_id=$1::uuid AND p.channel_id=$2::uuid AND (NOT $3::boolean OR p.expires_at>now()) GROUP BY p.account_id,a.username,a.display_name,gm.nickname ORDER BY a.username",
         &[&guild.to_string(), &channel.to_string(), &live.to_string()],
     )
 }

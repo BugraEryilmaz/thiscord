@@ -144,7 +144,7 @@ pub(super) fn pins(
 ) -> Result<Vec<ChatMessage>, Failure> {
     let mut rows = query(
         c,
-        "SELECT to_jsonb(m)||jsonb_build_object('author_avatar_id',av.id,'username',COALESCE(a.username,'Deleted account'),'display_name',COALESCE(a.display_name,'')) AS data FROM messages m LEFT JOIN accounts a ON a.id=m.author_id LEFT JOIN account_avatars av ON av.account_id=m.author_id WHERE guild_id=$1::uuid AND channel_id=$2::uuid AND pinned AND NOT deleted ORDER BY m.created_at DESC,m.id DESC LIMIT 50",
+        "SELECT to_jsonb(m)||jsonb_build_object('author_avatar_id',av.id,'username',COALESCE(a.username,'Deleted account'),'display_name',COALESCE(gm.nickname,a.display_name,'')) AS data FROM messages m LEFT JOIN accounts a ON a.id=m.author_id LEFT JOIN guild_members gm ON gm.guild_id=m.guild_id AND gm.account_id=m.author_id LEFT JOIN account_avatars av ON av.account_id=m.author_id WHERE m.guild_id=$1::uuid AND m.channel_id=$2::uuid AND m.pinned AND NOT m.deleted ORDER BY m.created_at DESC,m.id DESC LIMIT 50",
         &[&guild.to_string(), &channel.to_string()],
     )?;
     hydrate(c, actor, &mut rows)?;
@@ -173,7 +173,7 @@ pub(super) fn context(
           (SELECT * FROM messages WHERE guild_id=$1::uuid AND channel_id=$2::uuid AND (created_at,id)<($3::timestamptz,$4::uuid) ORDER BY created_at DESC,id DESC LIMIT 25)
           UNION ALL
           (SELECT * FROM messages WHERE guild_id=$1::uuid AND channel_id=$2::uuid AND (created_at,id)>=($3::timestamptz,$4::uuid) ORDER BY created_at,id LIMIT 26)
-        ) SELECT to_jsonb(m)||jsonb_build_object('author_avatar_id',av.id,'username',COALESCE(a.username,'Deleted account'),'display_name',COALESCE(a.display_name,'')) AS data FROM nearby m LEFT JOIN accounts a ON a.id=m.author_id LEFT JOIN account_avatars av ON av.account_id=m.author_id ORDER BY m.created_at,m.id
+        ) SELECT to_jsonb(m)||jsonb_build_object('author_avatar_id',av.id,'username',COALESCE(a.username,'Deleted account'),'display_name',COALESCE(gm.nickname,a.display_name,'')) AS data FROM nearby m LEFT JOIN accounts a ON a.id=m.author_id LEFT JOIN guild_members gm ON gm.guild_id=m.guild_id AND gm.account_id=m.author_id LEFT JOIN account_avatars av ON av.account_id=m.author_id ORDER BY m.created_at,m.id
     "#,
         &[
             &guild.to_string(),

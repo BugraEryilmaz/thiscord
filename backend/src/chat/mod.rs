@@ -27,7 +27,11 @@ use std::{
     sync::{Arc, OnceLock},
     time::{Duration, Instant},
 };
-use thiscord_shared::{ApiError, ErrorCode, RequestId, chat::*, permissions::Permission};
+use thiscord_shared::{
+    ApiError, ErrorCode, RequestId,
+    chat::*,
+    permissions::{PERMISSION_SET, Permission},
+};
 use tokio::sync::Semaphore;
 use uuid::Uuid;
 
@@ -175,10 +179,13 @@ async fn serve(mut socket: WebSocket, pool: DbPool, id: RequestId, upgrade_token
     if let Some(ClientEvent::Connect {
         token,
         guild_updates,
+        permission_set,
     }) = event
     {
         let token = auth::socket_token(token, &upgrade_token);
-        session::serve(socket, pool, id, token, guild_updates).await;
+        // Released clients send no set and reject newer permission names.
+        let set = permission_set.unwrap_or(1).clamp(1, PERMISSION_SET);
+        session::serve(socket, pool, id, token, guild_updates, set).await;
         return;
     }
     let Some(ClientEvent::Authenticate {

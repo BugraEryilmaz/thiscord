@@ -159,7 +159,7 @@ and `GuildPassword` redacts itself from `Debug` output.
 
 Everyone is implicit on every membership, cannot be assigned/deleted, and has rank
 zero. Default permissions are view, history, send, edit/delete own messages,
-voice join/speak and use soundboard (see [soundboard](soundboard.md)). Other roles have ranks 1–10000; equal rank grants no authority
+voice join/speak, use soundboard (see [soundboard](soundboard.md)) and change own nickname. Other roles have ranks 1–10000; equal rank grants no authority
 over one another. Base permissions are the union of Everyone and all assigned roles.
 
 Guild owners and members with Administrator receive every permission and bypass
@@ -204,6 +204,70 @@ within the actor's base grants. Guild management operations always use base
 permissions; putting ManageGuild/ManageRoles in a channel override does not grant
 guild administration. The evaluator is authoritative in
 `backend/src/permissions/evaluator.rs`; the frontend only renders its result.
+
+## Role colors, sections and nicknames
+
+**Server settings > Roles** has a **Display** group for every role except Everyone:
+a color (twelve presets, a custom color picker or **No color**), a live preview, and
+**Show members separately**. Colors and the toggle are saved with the rest of the
+role by `create_role`/`edit_role`, so they follow the existing ManageRoles rules:
+only roles strictly below your highest role can be created, recolored or toggled,
+in the same guild-locked, revision-checked transaction. Everyone can have neither
+(it applies to every member); the database enforces this as well.
+
+- **Name color**: a member's name uses the color of their highest-ranked *colored*
+  assigned role. Names in chat, the member list, voice rosters, mention chips and
+  suggestions, and profile cards use it. Clients blend the color toward the theme's
+  text color just enough to reach 4.5:1 contrast on chat, sidebar, panel and popover
+  backgrounds, so preset, light, dark and custom themes stay readable; role-tag dots
+  show the color unchanged.
+- **Show separately** (hoist): online members are listed under their highest-ranked
+  role with the setting on; everyone else is listed under Online, and offline
+  members under Offline. The `20261108200000_role_display_nicknames` migration turns
+  it on for every existing non-Everyone role, so existing servers look exactly as
+  before (every assigned role used to form a section). New roles start with it off.
+- The member list exposes, per member, only the highest role (tag), the highest
+  role shown separately (section) and the name color, never permissions or the other
+  assigned roles.
+
+**Nicknames** are per membership. **Change nickname…** in your member menu, the
+server menu, your profile card, or (for moderators) another member's menu and the
+moderation panel opens a dialog with the current nickname, a character count,
+**Reset nickname**, Escape/Cancel and Enter to save. `GuildChange::SetNickname
+{ account_id, nickname }` sets a trimmed name validated like display names
+(1–64 characters, no control characters); `null` clears it.
+
+- Your own nickname requires **Change own nickname** (`change_nickname`), which new
+  servers and the migration grant to Everyone; a timeout removes it like other
+  writes. Removing it from Everyone stops self-service; owners and Administrator keep it.
+- Another member's nickname requires **Manage nicknames** (`manage_nicknames`, not
+  granted by default) and a strictly lower-ranked target, never the owner. The
+  permission makes the moderation panel available and appears in
+  `InspectModeration` actions. Moderator changes write a `set_nickname` audit row
+  with the new and previous nickname (and an optional reason through `moderate`);
+  self-changes are not audited.
+- The nickname replaces the display name in that server only: messages, member list,
+  voice rosters, typing/online indicators, mention suggestions (which also match
+  nicknames) and notifications. Friends, private messages and other servers keep the
+  profile name. Profile cards show the nickname with the profile name and
+  `@username`. Leaving or removal drops it.
+- A nickname change is presentation, not access: it bumps the guild revision but
+  pauses no media or chat access. After commit, member lists refresh and the
+  member's voice connections recheck within a second.
+
+Wire compatibility: `Role.color`/`hoist`, the `appearance` field of role commands,
+`GuildMember.hoisted_role`/`color`, `MemberRole.color`, `MemberProfile.nickname`,
+`Member.nickname` and `GuildHome.can_change_nickname` are additive. Role edits
+without `appearance` (released clients) keep the stored colour and toggle.
+Released clients reject unknown permission names, so the backend only sends
+`change_nickname`/`manage_nicknames` to clients that declare permission set 2
+(`?permission_set=2` on `POST /api/v1/permissions`, `permission_set` on the chat
+socket's `connect`); others receive role, override, preview, moderation and
+`subscribed` permission sets without them. Their full-replacement role and override
+edits preserve the hidden names. Server-substituted names (messages, rosters,
+suggestions) already show nicknames in released clients; they do not show colors,
+sections or the dialog. Rollback removes nicknames, colors, the toggle and both
+permission names.
 
 ## Server icons
 

@@ -7,19 +7,25 @@ open in a new tab. Surrounding punctuation stays outside the link. Markdown supp
 Raw HTML is displayed as text; image Markdown displays its alt text without remote
 image requests. Parsing is limited to 4000 characters, 16 levels and 16000 events. Non-web schemes and
 URLs containing credentials are not linked or accepted by the desktop opener.
-Type `@` in the guild chat composer to search members by public profile name or
-username, including offline members. Suggestions show both the profile name and
-unique `@username`; selecting one inserts the username used by existing mentions.
+Type `@` in the guild chat composer to search members by server nickname, public
+profile name or username, including offline members. Suggestions show the server
+name (nickname or profile name) in the member's role color and the unique
+`@username`; selecting one inserts the username used by existing mentions.
+Mention chips of listed members show `@` and their server name in a tint of their
+role color, with the `@username` as tooltip; other mentions show the text as written.
 Use Up/Down and Enter/Tab, or click a suggestion; Escape dismisses the picker.
 Shift+Enter still inserts a newline. Completion also works when editing messages
-and at the caret in the middle of a draft. Server views show profile display names;
-older server responses fall back to usernames.
+and at the caret in the middle of a draft. Server views show server names (the
+nickname when set, otherwise the profile display name); older server responses fall
+back to usernames. Message authors are shown with their current server name and
+role color from the member list, so nickname and role edits apply to loaded history
+without a reload; each message also carries the name at delivery time.
 
 The `mention_suggestions` chat action takes `guild_id`, `channel_id` and `query`
 (at most 64 characters). It requires current guild membership and channel view/send
 permissions. It returns at most eight public identities, matching literal,
-case-insensitive substrings of profile names or usernames, with prefix matches
-first. Queries are debounced and stale responses are discarded on draft, channel,
+case-insensitive substrings of nicknames, profile names or usernames, with prefix
+matches of the shown name or username first. Queries are debounced and stale responses are discarded on draft, channel,
 session or access changes. Deploy the backend before the new client.
 Mentioned messages are highlighted; channel badges show unread counts and
 an `@` for unread mentions. Online/typing indicators describe people viewing the
@@ -378,20 +384,23 @@ arrives on the guild subscription, which does not need an open text channel. Wid
 (phones, tablets, narrow windows) it opens as an overlay drawer with a backdrop
 and close button; Escape or the backdrop closes it and returns focus to the
 toggle, and it is closed again on navigation. Each member is listed once, in
-labelled groups: online members under their highest-ranked role (one group per
-role, highest rank first; equal ranks by name, then ID), then **Online** for online
-members without roles (Everyone only), then **Offline** for every offline member
-regardless of roles. Groups are sorted by display name then username; empty groups
-are hidden. Rows show avatar, presence dot, a tag with the highest-ranked role,
-owner/bot badges and custom status or activity. Roles have no colour or "show
-separately" setting yet, so every assigned role forms a group. Every entry is a
+labelled groups: online members under their highest-ranked role that is set to
+**show separately** (one group per role, highest rank first; equal ranks by name,
+then ID), then **Online** for every other online member, then **Offline** for every
+offline member regardless of roles. Groups are sorted by server name (nickname or
+profile name) then username; empty groups are hidden. Rows show avatar, presence
+dot, the name in the member's role color, a tag with the highest-ranked role (its
+color as a dot), owner/bot badges and custom status or activity. Every entry is a
 keyboard-focusable button with a descriptive label. Click/Enter opens a profile
-card (display name, `@username`, role tag, owner/bot badge, custom status and bio) with
-**Send message** for accepted friends, **Edit profile** for yourself and **More
-actions…**. Right-click, long press, Shift+F10 or **More actions…** open the
-existing member menu: friend requests, block/report, role editing and the
-moderation actions returned by `InspectModeration`, without voice-only items.
-Voice roster tooltips append a member's status when the list is loaded.
+card (server name in the role color, then the profile name when a nickname is set
+and `@username`, role tag, owner/bot badge, custom status and bio) with
+**Send message** for accepted friends, **Change nickname** and **Edit profile** for
+yourself and **More actions…**. Right-click, long press, Shift+F10 or **More
+actions…** open the existing member menu: friend requests, block/report, role
+editing, **Change nickname…** and the moderation actions returned by
+`InspectModeration`, without voice-only items. Voice roster tooltips append a
+member's status when the list is loaded. Role colors and nicknames are described in
+[permissions.md](permissions.md#role-colors-sections-and-nicknames).
 
 Clients opt in with `members: true` on `subscribe` (omitted means false, so older
 clients receive no new event variants; deploy the backend before this frontend).
@@ -400,9 +409,14 @@ list (at most `MAX_MEMBER_LIST` = 500, the per-guild member ceiling) and then
 `update`/`member_presence` with the complete set of members shown online. Lists
 require current guild membership only; channel permissions are not needed. They
 contain public profile fields (no email, bio or credentials) and `role`: the
-member's highest-ranked assigned role as `{id,name,position}` (never Everyone,
-permissions or other roles). Role edits and assignments are guild mutations, so
-lists refresh after commit (existing subscriptions may be revoked and resubscribe). `online` is
+member's highest-ranked assigned role as `{id,name,position,color?}` (never
+Everyone, permissions or other roles). Additive fields carry `hoisted_role` (the
+highest-ranked assigned role shown separately: the row's section) and `color`
+(the colour of the highest-ranked coloured assigned role); `display_name` is the
+server name, the nickname when one is set. Older clients ignore these fields and
+keep grouping by `role`. Role edits and assignments are guild mutations, so
+lists refresh after commit (existing subscriptions may be revoked and resubscribe).
+Nickname changes refresh lists after commit without revoking any subscription. `online` is
 account-wide presence: at least one authenticated friends socket in this process.
 Do Not Disturb is never disclosed (the viewer's own row shows it locally). Across
 a block in either direction the member stays listed, but always offline and

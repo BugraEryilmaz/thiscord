@@ -170,12 +170,15 @@ mod tests {
                 position: 10,
                 permissions: Default::default(),
                 everyone: false,
+                color: None,
+                hoist: false,
             }],
             members: (1..=4)
                 .map(|n| Member {
                     account_id: id(n),
                     username: String::new(),
                     display_name: String::new(),
+                    nickname: None,
                     roles: if n == 2 || n == 3 {
                         vec![id(8)]
                     } else {

@@ -711,7 +711,7 @@ pub(super) fn dispatch(
                         Ok(done("Password changed. Sign in again on each device"))
                     }
                     AccountRequest::UpdateProfile { display_name, bio } => {
-                        if display_name.trim().is_empty() || display_name.chars().count()>64 || bio.chars().count()>500 || display_name.chars().any(char::is_control) { return Err(Failure::Invalid("Display name must be 1 to 64 characters; bio at most 500")); }
+                        if !thiscord_shared::account::valid_display_name(&display_name) || bio.chars().count()>500 { return Err(Failure::Invalid("Display name must be 1 to 64 characters; bio at most 500")); }
                         execute(c,"UPDATE accounts SET display_name=$2,bio=$3 WHERE id=$1::uuid", &[&id.to_string(),display_name.trim(),&bio])?;
                         related = crate::friends::store::related(c,id)?;
                         guilds = crate::chat::members::guilds_of(c,id)?;
