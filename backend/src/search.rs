@@ -132,7 +132,9 @@ fn private_access(
 ) -> Result<Vec<ConversationId>, Failure> {
     let ids: Vec<ConversationId> = query(
         c,
-        "SELECT to_jsonb(id) AS data FROM friendships WHERE state='accepted' AND $1::uuid IN (low_id,high_id) AND ($2='' OR id=NULLIF($2,'')::uuid) ORDER BY id LIMIT 501 FOR SHARE",
+        // Accepted friendships and current groups; `pair_access` below locks
+        // each in UUID order and applies the current consent/membership rules.
+        "SELECT to_jsonb(id) AS data FROM (SELECT id FROM friendships WHERE state='accepted' AND $1::uuid IN (low_id,high_id) UNION ALL SELECT group_id FROM group_members WHERE account_id=$1::uuid) private WHERE ($2='' OR id=NULLIF($2,'')::uuid) ORDER BY id LIMIT 501",
         &[
             &actor.to_string(),
             &selected.map(|id| id.to_string()).unwrap_or_default(),

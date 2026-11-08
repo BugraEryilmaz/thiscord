@@ -370,6 +370,17 @@ open it with `?groups=1` (`notifications::GROUPS_QUERY`), which older servers
 ignore. New clients connected to older servers simply see no groups; the group
 commands are backend-first.
 
+PostgreSQL/socket tests (`backend/tests/chat/groups.rs`) cover friend-only
+additions, block refusals, the member cap, idempotent creation and sends, revision
+conflicts, outsider isolation for history/send/upload/download/select/search,
+removal revoking the friends socket, history, files, search and reports, owner
+transfer and hand-off, unfriending without removal, last-member deletion, hidden
+presence/unread/rings across a block, account deletion, and the call lifecycle
+(ring, join, decline, leave, removal, end with the last member). A loopback WebRTC
+test (`backend/tests/voice/friends.rs`) admits only joined members, forwards media
+among three peers and revokes only the removed or departing peer, under both SFU
+transports. Shared tests pin the additive wire format.
+
 Group storage is in migration `20261108300000_group_conversations`. Messages and
 private attachments keep their tables; their conversation foreign key becomes a
 trigger-maintained reference to either a friendship or a group (deleting either

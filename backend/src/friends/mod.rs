@@ -1,4 +1,5 @@
 mod attachments;
+pub(crate) mod groups;
 mod history;
 pub(crate) mod store;
 mod typing;
@@ -161,6 +162,11 @@ fn watch(id: AccountId) -> watch::Receiver<u64> {
         .or_insert_with(|| watch::channel(0).0)
         .subscribe()
 }
+/// Call after a commit that changed a private conversation's messages outside
+/// the friends commands (such as an account-deletion cascade), before `changed`.
+pub(crate) fn history_changed(id: thiscord_shared::ids::ConversationId) {
+    history::changed(id);
+}
 /// Call after commit. Wakes these accounts' friends sockets in this process to
 /// rebuild their authorized snapshots; carries no data or authorization.
 pub(crate) fn changed(accounts: impl IntoIterator<Item = AccountId>) {
@@ -267,7 +273,7 @@ async fn serve(mut socket: WebSocket, pool: DbPool, upgrade_token: String, retai
     // The last database snapshot with the access epochs captured before reading it.
     // Presence and typing are in-memory and refresh on every tick. History is
     // kept separately and reloaded only after message writes or selection changes.
-    let mut cached = None::<(Snapshot, crate::chat::access::Snapshot)>;
+    let mut cached = None::<(Snapshot, crate::chat::access::Snapshot, store::Hidden)>;
     let mut history = history::Cache::default();
     let mut refresh_at = Instant::now();
     static READERS: OnceLock<Arc<Semaphore>> = OnceLock::new();
@@ -328,21 +334,21 @@ async fn serve(mut socket: WebSocket, pool: DbPool, upgrade_token: String, retai
                         cached=None;
                         continue;
                     }
-                    let Ok(Ok((mut snapshot,expiry)))=result else {break;};
+                    let Ok(Ok((mut snapshot,expiry,hidden)))=result else {break;};
                     trouble.clear();
                     history.finish(plan,&mut snapshot);
                     if last.as_ref()==Some(&snapshot) && !history.pending(&snapshot) { crate::performance::FRIENDS_UNCHANGED.fetch_add(1, std::sync::atomic::Ordering::Relaxed); }
                     refresh_at=checked+expiry.map_or(REFRESH,|e|e.min(REFRESH));
-                    cached=Some((snapshot,epoch));
+                    cached=Some((snapshot,epoch,hidden));
                 }
-                let (snapshot,epoch)=cached.as_mut().unwrap();
-                store::live(snapshot,session.account_id);
+                let (snapshot,epoch,hidden)=cached.as_mut().unwrap();
+                store::live(snapshot,session.account_id,hidden);
                 let Some(_delivery)=epoch.clone().deliver() else {break;};
                 if last.as_ref()!=Some(&*snapshot) || history.pending(snapshot) || last_sent.elapsed()>=REFRESH {
                     last_sent=Instant::now();
                     last=Some(snapshot.clone());
                     let outgoing=history.outgoing(snapshot,retains);
-                    if send(&mut socket,ServerEvent::Snapshot {snapshot:outgoing}).await.is_err() {break;}
+                    if send(&mut socket,ServerEvent::Snapshot {snapshot:Box::new(outgoing)}).await.is_err() {break;}
                 }
             }
         }

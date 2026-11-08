@@ -80,6 +80,7 @@ pub(super) enum Glyph {
     Pause,
     Stop,
     History,
+    Crown,
 }
 
 #[component]
@@ -105,6 +106,7 @@ pub(super) fn Icon(kind: Glyph) -> impl IntoView {
             "m10 13 4-4M8 16l-1 1a4 4 0 0 1-6-6l4-4a4 4 0 0 1 6 0M16 8l1-1a4 4 0 0 1 6 6l-4 4a4 4 0 0 1-6 0"
         }
         Glyph::Plus => "M12 5v14M5 12h14",
+        Glyph::Crown => "M3 8l4.5 4L12 5l4.5 7L21 8l-2 11H5L3 8Z",
         Glyph::Search => "M19 10a7 7 0 1 1-14 0 7 7 0 0 1 14 0Zm-2 5 5 6",
         Glyph::Pin => "M9 3h6l-1 7 4 4v2H6v-2l4-4-1-7ZM12 16v6",
         Glyph::BellOff => "m3 3 18 18M9 4a6 6 0 0 1 9 5v4M6 6v6l-3 5h14M10 21h4",

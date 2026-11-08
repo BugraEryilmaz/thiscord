@@ -142,6 +142,7 @@ mod tests {
             deleted: false,
             edited_at: None,
             attachments: vec![],
+            system: None,
         };
         History {
             messages: vec![message],

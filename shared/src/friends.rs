@@ -13,6 +13,18 @@ pub const RETAINED_HISTORY_QUERY: &str = "history=retained";
 pub const VERSION: u8 = 1;
 pub const MAX_RELATIONSHIPS: usize = 200;
 pub const DIRECT_ATTACHMENTS_PATH: &str = "/api/v1/direct-attachments";
+/// Members of one group conversation, including its creator. Equal to the SFU
+/// room capacity so every member can always join the group's call.
+pub const MAX_GROUP_MEMBERS: usize = crate::voice::ROOM_CAPACITY;
+/// Group conversations one account can belong to.
+pub const MAX_GROUPS: usize = 100;
+/// Unicode characters in a group name; empty names fall back to member names.
+pub const MAX_GROUP_NAME: usize = 100;
+
+/// Trimmed group name rules shared by the client form and the server.
+pub fn valid_group_name(name: &str) -> bool {
+    name.chars().count() <= MAX_GROUP_NAME && !name.chars().any(char::is_control)
+}
 
 #[derive(Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -79,6 +91,86 @@ pub struct DirectMessage {
     pub edited_at: Option<Timestamp>,
     #[serde(default)]
     pub attachments: Vec<crate::chat::ChatAttachment>,
+    /// Group membership/metadata notices; their `content` is empty. Only group
+    /// conversations contain them, so older clients never receive one.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub system: Option<SystemMessage>,
+}
+/// An account named by a system message, with the display name it had then.
+#[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Named {
+    pub id: AccountId,
+    pub display_name: String,
+}
+#[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SystemMessage {
+    /// The author's display name when the event happened.
+    pub actor_name: String,
+    #[serde(flatten)]
+    pub event: SystemEvent,
+}
+#[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "type", rename_all = "snake_case")]
+pub enum SystemEvent {
+    Created {},
+    Added { people: Vec<Named> },
+    Left {},
+    Removed { person: Named },
+    Renamed { name: String },
+    OwnerChanged { person: Named },
+}
+#[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct GroupMember {
+    /// Never carries a custom status.
+    pub person: Person,
+    #[serde(default)]
+    pub owner: bool,
+    /// Live presence, hidden across a block in either direction.
+    #[serde(default)]
+    pub online: bool,
+}
+/// A private group conversation the connected account belongs to.
+#[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Group {
+    pub conversation_id: ConversationId,
+    /// Empty when unnamed; clients derive a title from member names.
+    pub name: String,
+    /// Submitted with metadata commands; stale submissions conflict.
+    pub revision: i32,
+    /// Including the connected account, in join order.
+    pub members: Vec<GroupMember>,
+    /// Incoming unread messages, capped at 100 (display as 99+).
+    #[serde(default)]
+    pub unread_count: u32,
+}
+impl Group {
+    pub fn owner(&self) -> Option<AccountId> {
+        self.members.iter().find(|m| m.owner).map(|m| m.person.id)
+    }
+    pub fn member(&self, id: AccountId) -> Option<&GroupMember> {
+        self.members.iter().find(|m| m.person.id == id)
+    }
+}
+/// The live call of a group conversation, as seen by one member.
+#[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct GroupCall {
+    pub id: CallId,
+    pub conversation_id: ConversationId,
+    pub started_by: Option<AccountId>,
+    /// Members holding a current call lease, sorted by account ID.
+    pub participants: Vec<AccountId>,
+    /// Whether this call is ringing for the connected account.
+    #[serde(default)]
+    pub ringing: bool,
+}
+impl GroupCall {
+    /// The same equal scope/room namespace as [`Call::voice_scope`].
+    pub fn voice_scope(&self) -> crate::GuildId {
+        crate::GuildId::from_uuid(self.id.as_uuid())
+    }
+    pub fn voice_channel(&self) -> crate::ChannelId {
+        crate::ChannelId::from_uuid(self.id.as_uuid())
+    }
 }
 #[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct History {
@@ -132,6 +224,12 @@ pub struct Snapshot {
     /// omit it and close sockets that send unknown events, so clients wait for it.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub accepts_activity: bool,
+    /// Group conversations; older clients ignore them. A selected group's
+    /// history, `before` and `typing` use the fields above.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub groups: Vec<Group>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub group_calls: Vec<GroupCall>,
 }
 #[derive(Clone, Serialize, Deserialize)]
 #[serde(tag = "action", rename_all = "snake_case", deny_unknown_fields)]
@@ -183,19 +281,56 @@ pub enum Request {
         conversation_id: ConversationId,
         through: MessageId,
     },
+    /// In a group, joins its live call or starts one ringing the other members.
     StartCall {
         conversation_id: ConversationId,
     },
+    /// In a group call, joins it (also from a ringing invitation).
     AcceptCall {
         call_id: CallId,
     },
+    /// In a group call, declines or leaves it; it continues for the others.
     EndCall {
         call_id: CallId,
     },
-    /// Previous versions of an undeleted message; requires current pair access.
+    /// Previous versions of an undeleted message; requires current private
+    /// access (an accepted, unblocked friendship or current group membership).
     EditHistory {
         conversation_id: ConversationId,
         message_id: MessageId,
+    },
+    /// `client_id` makes lost-response retries return the same group.
+    CreateGroup {
+        client_id: ClientMessageId,
+        /// Accepted friends to add besides the creator.
+        members: Vec<AccountId>,
+        #[serde(default)]
+        name: String,
+    },
+    AddGroupMembers {
+        conversation_id: ConversationId,
+        revision: i32,
+        members: Vec<AccountId>,
+    },
+    /// Owner only.
+    RemoveGroupMember {
+        conversation_id: ConversationId,
+        revision: i32,
+        account_id: AccountId,
+    },
+    /// Owner only.
+    TransferGroup {
+        conversation_id: ConversationId,
+        revision: i32,
+        account_id: AccountId,
+    },
+    RenameGroup {
+        conversation_id: ConversationId,
+        revision: i32,
+        name: String,
+    },
+    LeaveGroup {
+        conversation_id: ConversationId,
     },
 }
 #[derive(Clone, Serialize, Deserialize)]
@@ -206,6 +341,8 @@ pub enum Response {
     Message { message: DirectMessage },
     Call { call: Call },
     EditHistory { history: crate::chat::EditHistory },
+    Group { group: Group },
+    GroupCall { call: GroupCall },
     Done,
 }
 #[derive(Serialize, Deserialize)]
@@ -244,10 +381,15 @@ pub struct ServerFrame {
 #[derive(Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum ServerEvent {
-    Snapshot { snapshot: Snapshot },
+    /// Boxed: snapshots are much larger than the other frames.
+    Snapshot {
+        snapshot: Box<Snapshot>,
+    },
     Pong {},
     Revoked {},
-    Error { error: ApiError },
+    Error {
+        error: ApiError,
+    },
 }
 
 #[cfg(test)]
@@ -354,6 +496,67 @@ mod tests {
             }))
             .is_err()
         );
+    }
+
+    #[test]
+    fn group_fields_are_additive_and_hidden_from_pairs() {
+        let id = "00000000-0000-0000-0000-000000000001";
+        // A released client's snapshot shape: no groups, no group calls.
+        let snapshot: Snapshot = serde_json::from_value(
+            serde_json::json!({"friends":[],"calls":[],"conversation_id":null,"history":null}),
+        )
+        .unwrap();
+        assert!(snapshot.groups.is_empty() && snapshot.group_calls.is_empty());
+        let wire = serde_json::to_value(&snapshot).unwrap();
+        assert!(wire.get("groups").is_none() && wire.get("group_calls").is_none());
+        // Pair messages never carry the system field.
+        let message: DirectMessage = serde_json::from_value(serde_json::json!({
+            "id":id,"conversation_id":id,"client_id":id,"author_id":id,"content":"hi",
+            "created_at":"2026-11-08T00:00:00Z","system":null
+        }))
+        .unwrap();
+        assert!(message.system.is_none());
+        assert!(
+            serde_json::to_value(&message)
+                .unwrap()
+                .get("system")
+                .is_none()
+        );
+        let system = serde_json::json!({"actor_name":"Ada","type":"removed","person":{"id":id,"display_name":"Bob"}});
+        let parsed: SystemMessage = serde_json::from_value(system.clone()).unwrap();
+        assert!(
+            matches!(&parsed.event, SystemEvent::Removed { person } if person.display_name == "Bob")
+        );
+        assert_eq!(serde_json::to_value(parsed).unwrap(), system);
+    }
+
+    #[test]
+    fn group_commands_are_typed_and_strict() {
+        let id = "00000000-0000-0000-0000-000000000001";
+        let create: Request = serde_json::from_value(
+            serde_json::json!({"action":"create_group","client_id":id,"members":[id]}),
+        )
+        .unwrap();
+        assert!(matches!(create, Request::CreateGroup { name, .. } if name.is_empty()));
+        for wire in [
+            serde_json::json!({"action":"add_group_members","conversation_id":id,"revision":3,"members":[id]}),
+            serde_json::json!({"action":"remove_group_member","conversation_id":id,"revision":3,"account_id":id}),
+            serde_json::json!({"action":"transfer_group","conversation_id":id,"revision":3,"account_id":id}),
+            serde_json::json!({"action":"rename_group","conversation_id":id,"revision":3,"name":"Trip"}),
+            serde_json::json!({"action":"leave_group","conversation_id":id}),
+        ] {
+            let command: Request = serde_json::from_value(wire.clone()).unwrap();
+            assert_eq!(serde_json::to_value(command).unwrap(), wire);
+        }
+        assert!(
+            serde_json::from_value::<Request>(
+                serde_json::json!({"action":"leave_group","conversation_id":id,"owner":true})
+            )
+            .is_err()
+        );
+        assert!(valid_group_name("") && valid_group_name("Weekend trip 🏕"));
+        assert!(!valid_group_name("a\u{7}") && !valid_group_name(&"x".repeat(101)));
+        assert_eq!(MAX_GROUP_MEMBERS, 8);
     }
 
     #[test]

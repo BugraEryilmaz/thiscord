@@ -630,6 +630,8 @@ pub(super) fn dispatch(
             let mut changes = Vec::new();
             // Friends list profiles; woken after commit.
             let mut related = Vec::new();
+            // Group histories that lose this account's messages in a deletion cascade.
+            let mut histories = Vec::new();
             // Guild member lists showing this profile; woken after commit.
             let mut guilds = Vec::new();
             let result = c.transaction(|c| {
@@ -748,6 +750,7 @@ pub(super) fn dispatch(
                         execute(c,"SELECT id FROM guilds WHERE id IN (SELECT guild_id FROM guild_members WHERE account_id=$1::uuid) ORDER BY id FOR UPDATE", &[&id.to_string()])?;
                         execute(c,"UPDATE guilds SET revision=revision+1 WHERE id IN (SELECT guild_id FROM guild_members WHERE account_id=$1::uuid)", &[&id.to_string()])?;
                         related = crate::friends::store::related(c,id)?;
+                        histories = crate::friends::groups::of(c,id)?;
                         guilds = crate::chat::members::guilds_of(c,id)?;
                         execute(c,"DELETE FROM accounts WHERE id=$1::uuid", &[&id.to_string()])?;
                         Ok(done("Account and credentials permanently deleted"))
@@ -768,6 +771,9 @@ pub(super) fn dispatch(
                 // last check between rechecks, so wake this account's connections.
                 if !related.is_empty() || !guilds.is_empty() {
                     crate::voice::profile_changed(session.account_id);
+                }
+                for group in histories {
+                    crate::friends::history_changed(group);
                 }
                 crate::friends::changed(related);
                 crate::chat::members::changed(guilds);

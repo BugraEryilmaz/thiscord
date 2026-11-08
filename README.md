@@ -31,7 +31,9 @@ stable wire error code in Turkish and retain the request ID. External provider
 pages, account emails/recovery web pages, and native OS/tray text remain English.
 
 The home screen includes friends, online presence, friend requests, private text
-conversations and one-to-one voice calls (desktop app or browser). Use **Add friend** in the top
+conversations, group conversations of up to eight friends, and one-to-one or group
+voice calls (desktop app or browser). **New group** (or **Add friends** in a 1:1
+conversation) opens a friend picker. Use **Add friend** in the top
 right to search by part of a display name or username. See [friends and private conversations](docs/friends.md)
 for behavior, access rules and current limitations. Private conversations include
 revision-checked editing/deletion, typing and private file/image/video attachments.

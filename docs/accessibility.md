@@ -28,7 +28,7 @@ Defaults:
 
 | Keys | Action |
 | --- | --- |
-| Ctrl/⌘+K | Quick switcher: search joined servers, channels and friends (DMs) |
+| Ctrl/⌘+K | Quick switcher: search joined servers, channels, friends (DMs) and groups |
 | Alt+↑ / Alt+↓ | Previous/next text channel in the open server; on Home, previous/next conversation |
 | Alt+Shift+↑ / Alt+Shift+↓ | Previous/next unread (and unmuted) channel or conversation |
 | Ctrl+Alt+↑ / Ctrl+Alt+↓ | Previous/next server, with Home first (Ctrl+Shift+↑/↓ also works outside text fields) |
@@ -81,6 +81,15 @@ Notes and conflict rules:
   Escape leaves focus mode only while the media view has focus, or nothing
   does and the last click was inside it. A polite live region announces moves, focus and hide/restore; tile animations
   stop under reduced motion.
+
+Group conversations: the conversation list is one roving list of friends and
+groups ordered by title. The group friend picker focuses its search field; Down
+moves into the friend checkboxes, arrows move between them, and Space or Enter
+toggles one. Selected friends appear as removable chips with labelled buttons. The
+group title in the header is a button that turns into a name field (Enter saves,
+Escape cancels). The member panel is a roving list; each owner action menu is
+labelled with the member's name and closes on Escape. The call bar is a polite
+live region, and its ringing pulse stops under reduced motion.
 
 ## Dialogs
 
