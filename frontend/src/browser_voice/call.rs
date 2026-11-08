@@ -536,7 +536,10 @@ async fn supervise(call: Rc<Call>) {
         });
         let mut connected_at = None;
         let ending = attempt(&call, &mut call_id, &mut connected_at).await;
-        let ended_calm = matches!(&ending, Ending::Failed(failure) if failure.calm());
+        // A restart stays calm through the refused retries that follow it,
+        // until an attempt connects again.
+        let ended_calm = matches!(&ending, Ending::Failed(failure) if failure.calm())
+            || (calm && connected_at.is_none());
         if ended_calm && connected_at.is_some() {
             // Read before the attempt ends them: what the user was publishing.
             let published = video::state_untracked();
@@ -568,7 +571,7 @@ async fn supervise(call: Rc<Call>) {
             super::finish(&call, failure.message);
             return;
         }
-        calm = failure.calm();
+        calm = ended_calm;
         let delay = backoff.after_ms(
             &failure,
             stable,

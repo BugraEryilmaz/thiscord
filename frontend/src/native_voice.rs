@@ -650,7 +650,10 @@ impl Connector for Runtime {
             .attempt
             .connected_at
             .is_some_and(|t| t.elapsed() >= Duration::from_secs(30));
-        self.calm = result.as_ref().err().is_some_and(Failure::calm);
+        // A restart stays calm through the refused retries that follow it,
+        // until an attempt connects again.
+        self.calm = result.as_ref().err().is_some_and(Failure::calm)
+            || (self.calm && self.attempt.connected_at.is_none());
         if self.calm && self.attempt.connected_at.is_some() {
             // Read before close() stops them: what the user was publishing.
             let (sharing, _) = self
@@ -708,7 +711,7 @@ impl Connector for Runtime {
             "voice_retry_wait",
             serde_json::json!({"reason":error.diagnostic_reason(),"delay_ms":delay.as_millis()}),
         );
-        let mut waiting = self.connecting(if error.calm() {
+        let mut waiting = self.connecting(if self.calm {
             "Thiscord is restarting. Reconnecting…".into()
         } else {
             format!(
