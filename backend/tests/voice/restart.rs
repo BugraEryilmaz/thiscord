@@ -131,6 +131,7 @@ async fn chat_socket(addr: std::net::SocketAddr, token: &str, notice: bool) -> S
         event: chat::ClientEvent::Connect {
             token: token.into(),
             guild_updates: true,
+            permission_set: None,
         },
     };
     socket

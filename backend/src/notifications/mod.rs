@@ -227,6 +227,8 @@ async fn worker(
         }
     }
 }
+// Each axum extractor is an argument.
+#[allow(clippy::too_many_arguments)]
 async fn upgrade(
     State(pool): State<Option<DbPool>>,
     Extension(id): Extension<RequestId>,

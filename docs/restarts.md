@@ -56,6 +56,16 @@ first join. Nothing from before the restart (grants, rosters, resume capabilitie
 is trusted. A permission removed during the restart refuses the rejoin and ends
 the call with the usual message.
 
+**1:1 and group calls** use the same rooms (the call ID as both scope and room).
+Their leases normally lapse 60 s after signaling stops renewing them, which a
+deploy can outlast, so a drained call member's existing lease is held for the
+clients' three-minute retry window (`friends::store::hold_for_restart`). The
+hold grants nothing: the rejoin goes through the call authorization again, so a
+member removed from the group (or unfriended/blocked in a 1:1 call) meanwhile is
+refused, and a call nobody rejoins ends when the held leases expire. Drains and
+quiet rejoins send no voice join/leave notifications, and the call never rings
+again (rings come only from starting or being invited to a call).
+
 ### Clients
 
 The desktop app and the `/app` web client handle restarts the same way:
@@ -77,6 +87,11 @@ The desktop app and the `/app` web client handle restarts the same way:
   **Not now**. The camera control does not show its device error for this stop.
 - The chat socket opts in to the notice, shows "Thiscord is restarting.
   Reconnecting…" instead of an error and retries on the same steady schedule.
+- Desktop voice messages use their own audio streams, independent of the call
+  engine, so recording, preview and playback of downloaded clips continue through
+  a restart. An upload or download that hits the restart fails with "Upload
+  interrupted. Retry when connected." (or the server's error); the finished
+  recording is kept for a retry.
 
 ### Compatibility
 

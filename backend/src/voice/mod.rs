@@ -2071,6 +2071,21 @@ async fn serve(
             }
         }
         active.store(false, Ordering::Release);
+        // A 1:1 or group call's lease lapses 60 s after signaling stops renewing
+        // it; hold it through the restart so members can rejoin the same call.
+        if restarting && guild_id.as_uuid() == channel_id.as_uuid() && access.bot.is_none() {
+            let pool = access.pool.clone();
+            let held = tokio::time::timeout(
+                Duration::from_secs(1),
+                crate::performance::blocking(move || {
+                    crate::friends::store::hold_for_restart(&pool, profile_account, channel_id)
+                }),
+            )
+            .await;
+            if !matches!(held, Ok(Ok(Ok(())))) {
+                tracing::warn!(request_id = %id, "call lease not held for restart");
+            }
+        }
         if let Some(relay) = &relay {
             relay.abort();
         }

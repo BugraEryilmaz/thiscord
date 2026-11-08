@@ -575,6 +575,32 @@ pub(super) fn snapshot(
     })
 }
 
+/// A planned restart drained `actor`'s media in an active 1:1 or group call.
+/// Holds their existing lease for the clients' restart retry window (instead of
+/// the ordinary 60 s) so the call outlives the restart. This grants nothing:
+/// the rejoin passes `voice` again, so a member removed meanwhile is refused.
+pub(crate) fn hold_for_restart(
+    pool: &DbPool,
+    actor: AccountId,
+    channel: ChannelId,
+) -> Result<(), Failure> {
+    let mut c = connection(pool)?;
+    let (id, actor) = (channel.to_string(), actor.to_string());
+    c.transaction(|c| {
+        execute(
+            c,
+            "UPDATE friend_calls SET caller_until=CASE WHEN caller=$2::uuid THEN GREATEST(caller_until,now()+interval '180 seconds') ELSE caller_until END,callee_until=CASE WHEN callee=$2::uuid THEN GREATEST(callee_until,now()+interval '180 seconds') ELSE callee_until END WHERE id=$1::uuid AND state='active' AND expires_at>now() AND $2::uuid IN (caller,callee)",
+            &[&id, &actor],
+        )?;
+        execute(
+            c,
+            "UPDATE friend_calls SET expires_at=LEAST(caller_until,callee_until) WHERE id=$1::uuid AND state='active' AND expires_at>now()",
+            &[&id],
+        )?;
+        super::groups::hold_for_restart(c, &id, &actor)
+    })
+}
+
 /// SFU authorization for 1:1 and group calls (equal scope/room UUIDs).
 pub(crate) fn voice(
     c: &mut PgConnection,
