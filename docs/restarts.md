@@ -206,6 +206,11 @@ A local backend in WSL served the `/app` web client to Chromium on Windows
   refreshes ran every 48 s (lifetime minus a 12 s margin), each answered in
   148–250 ms and reconnected within about 1.5 s, on the same session.
 
+- **Group call restart (after #123, webrtc transport)**: the browser started a
+  group call and deafened; SIGTERM drained it in 3 ms with the lease held, and
+  after a 6 s gap it rejoined the same group call 0.67 s after the new process
+  started listening, still deafened.
+
 Not covered: the desktop app (its logic is covered by unit tests and the
 webrtc-rs clients in the integration suite), macOS/Linux, real off-site networks
 and a VPS deploy.
