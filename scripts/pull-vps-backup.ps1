@@ -1,3 +1,4 @@
+#Requires -Version 7.0
 <#
 .SYNOPSIS
 Copies the newest VPS database dump to this machine (off-server backup copy).
@@ -36,8 +37,7 @@ if ($Register) {
     $trigger = New-ScheduledTaskTrigger -Daily -At $At
     $settings = New-ScheduledTaskSettingsSet -StartWhenAvailable -AllowStartIfOnBatteries `
         -DontStopIfGoingOnBatteries -RunOnlyIfNetworkAvailable `
-        -ExecutionTimeLimit (New-TimeSpan -Minutes 30) `
-        -RestartCount 3 -RestartInterval (New-TimeSpan -Minutes 30) -MultipleInstances IgnoreNew
+        -ExecutionTimeLimit (New-TimeSpan -Minutes 30) -MultipleInstances IgnoreNew
     # Runs as the signed-in user so it can use that user's SSH key; no stored password.
     $principal = New-ScheduledTaskPrincipal -UserId ([Security.Principal.WindowsIdentity]::GetCurrent().Name) `
         -LogonType Interactive -RunLevel Limited
@@ -63,12 +63,12 @@ function Write-Log([string]$Message) {
 if (!(Test-Path -LiteralPath $Destination)) {
     New-Item -ItemType Directory -Path $Destination | Out-Null
 }
-# Database dumps contain private messages and credential hashes: owner and SYSTEM only.
-$user = [Security.Principal.WindowsIdentity]::GetCurrent().Name
-& icacls $Destination /inheritance:r /grant:r "${user}:(OI)(CI)F" '*S-1-5-18:(OI)(CI)F' | Out-Null
-if ($LASTEXITCODE) { throw 'Could not restrict the backup directory permissions.' }
-
 try {
+    # Database dumps contain private messages and credential hashes: owner and SYSTEM only.
+    $user = [Security.Principal.WindowsIdentity]::GetCurrent().Name
+    & icacls $Destination /inheritance:r /grant:r "${user}:(OI)(CI)F" '*S-1-5-18:(OI)(CI)F' | Out-Null
+    if ($LASTEXITCODE) { throw 'Could not restrict the backup directory permissions.' }
+
     $latest = Invoke-Remote "sudo -n sh -c 'ls -1t $RemoteDirectory/thiscord-*.dump | head -n 1'" |
         Select-Object -First 1
     $name = Split-Path -Leaf "$latest"

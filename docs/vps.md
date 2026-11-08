@@ -88,25 +88,25 @@ These are on-server backups; keep an additional protected off-server copy.
 Attachments, avatars and soundboard clips are stored in PostgreSQL, so a dump is
 a complete copy of the instance data.
 
+```sh
+sudo systemctl start thiscord-backup.service
+sudo systemctl list-timers thiscord-backup.timer certbot.timer
+sudo certbot renew --dry-run
+```
+
 `scripts/pull-vps-backup.ps1` makes that copy on a Windows workstation. It reads
 the newest dump with `sudo -n cat` over the `vps` SSH alias (the server directory
 stays root-only), verifies the SHA-256 and the custom-format header, stores it in
 `%USERPROFILE%\.thiscord\backups` (owner and SYSTEM only) and keeps the newest 30.
 `-Register` installs a stable copy under `%USERPROFILE%\.thiscord\tools` and a daily
-06:00 scheduled task, *Thiscord VPS backup copy*, that runs as the signed-in user,
-catches up after missed runs and retries on failure. Results go to `pull.log` in
-the backup directory. Check a copy by restoring it into a scratch database:
+06:00 scheduled task, *Thiscord VPS backup copy*. It runs as the signed-in user and
+catches up after missed runs; a failed run waits for the next day. Results go to
+`pull.log` in the backup directory. Check a copy by restoring it into a scratch database:
 
 ```sh
 createdb -T template0 thiscord_restore_check
 pg_restore --no-owner --no-acl --exit-on-error -d thiscord_restore_check thiscord-<timestamp>.dump
 dropdb thiscord_restore_check
-```
-
-```sh
-sudo systemctl start thiscord-backup.service
-sudo systemctl list-timers thiscord-backup.timer certbot.timer
-sudo certbot renew --dry-run
 ```
 
 Certbot uses standalone HTTP validation on port 80. Cloudflare must forward
