@@ -553,7 +553,8 @@ fn ResumeNotice(ui: Ui) -> impl IntoView {
     let hidden = RwSignal::new(Vec::<MediaKind>::new());
     Effect::new(move |previous: Option<Vec<MediaKind>>| {
         let current = ui.voice.with(|v| v.resumable.clone());
-        if previous.is_some_and(|previous| previous != current) {
+        // A newly paused publication shows again; a resumed one leaves quietly.
+        if previous.is_some_and(|previous| current.iter().any(|kind| !previous.contains(kind))) {
             hidden.set(vec![]);
         }
         current
