@@ -1211,6 +1211,9 @@ async fn serve(
         return;
     }
     let token = crate::auth::socket_token(token, &upgrade_token);
+    // A 1:1 or group call room (the call ID as scope and room); not a test bot.
+    let call_room = guild_id.as_uuid() == channel_id.as_uuid() && bot.is_none();
+    let hold_pool = pool.clone();
     socket.stage = "authorize";
     let connection_access = match access::identify(&pool, &token, Some(guild_id)).await {
         Ok((identity, access)) => match &bot {
@@ -2071,21 +2074,6 @@ async fn serve(
             }
         }
         active.store(false, Ordering::Release);
-        // A 1:1 or group call's lease lapses 60 s after signaling stops renewing
-        // it; hold it through the restart so members can rejoin the same call.
-        if restarting && guild_id.as_uuid() == channel_id.as_uuid() && access.bot.is_none() {
-            let pool = access.pool.clone();
-            let held = tokio::time::timeout(
-                Duration::from_secs(1),
-                crate::performance::blocking(move || {
-                    crate::friends::store::hold_for_restart(&pool, profile_account, channel_id)
-                }),
-            )
-            .await;
-            if !matches!(held, Ok(Ok(Ok(())))) {
-                tracing::warn!(request_id = %id, "call lease not held for restart");
-            }
-        }
         if let Some(relay) = &relay {
             relay.abort();
         }
@@ -2110,6 +2098,21 @@ async fn serve(
             shutdown.notified();
         }
         restarting_close(&mut socket, id, notice).await;
+        // A call's lease lapses 60 s after signaling stops renewing it; hold it
+        // through the restart so members can rejoin the same call.
+        if call_room {
+            let account = info.account_id;
+            let held = tokio::time::timeout(
+                Duration::from_secs(1),
+                crate::performance::blocking(move || {
+                    crate::friends::store::hold_for_restart(&hold_pool, account, channel_id)
+                }),
+            )
+            .await;
+            if !matches!(held, Ok(Ok(Ok(())))) {
+                tracing::warn!(request_id = %id, "call lease not held for restart");
+            }
+        }
     }
     active.store(false, Ordering::Release);
     // A restart's departures are not announced: everyone rejoins shortly.
