@@ -337,7 +337,8 @@ The backend does not archive: these operations are immediate and permanent.
 | Remove server icon / profile picture | Deletes the stored image; copies already downloaded cannot be recalled. |
 | Delete sound / bot, rotate bot token | Deletes the sound; deletes the bot and revokes its token and connections; rotation invalidates the old token. |
 | Delete message | Leaves a content-free tombstone; removes attachments, reactions and pin. |
-| Remove friend / block | Ends private messages and calls; blocking also stops requests. |
+| Remove friend / block | Ends private messages and calls; blocking also stops requests. Group membership is unaffected. |
+| Leave group / remove member | Ends that account's access to the group's history, files and call immediately; their messages stay. The last member leaving deletes the group. |
 | Remove saved notification settings | The source returns to event defaults; its mute/snooze ends. |
 | Sign out device / all devices, remove login method, delete account | See [accounts.md](accounts.md); deletion keeps typed-username and recent reauthentication. |
 
@@ -399,6 +400,17 @@ disconnects, server mute/deafen and moves enforce the target hierarchy.
 EditOwnMessages/DeleteOwnMessages additionally require message authorship;
 ManageMessages permits moderation. MoveMembers requires the actor and target to have ViewChannel and JoinVoice in
 both source and destination channels. Mute/deafen/move/kick/ban enforce target hierarchy.
+
+## Group conversations
+
+Private group conversations are not guilds and carry no roles, permissions or
+overrides. Their whole rule set (who can add whom, owner powers, blocking,
+revocation and history visibility) is in [friends.md](friends.md#group-conversations).
+They follow the guild write discipline: lock the group, evaluate current membership
+and ownership, and check the submitted group revision in the same transaction;
+access-changing commands (leave, remove) drain socket, download and media access
+before commit and invalidate it afterwards. Instance owners and administrators
+have no implicit access to any group.
 
 ## Storage and tests
 

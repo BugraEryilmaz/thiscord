@@ -23,6 +23,9 @@ media compatibility spike can happen before chat to expose platform constraints.
 - [x] Private attachment upload/view/download with ownership/consent checks, bounded storage and cleanup.
 - [x] Persistent blocking/unblocking, private access revocation and explicit new friendship consent.
 - [x] User/message reporting, scoped immutable evidence, instance/channel review and revision-checked resolution.
+- [x] Group conversations (up to eight members) with friend pickers, owner removal/transfer, renames, system notices, 1:1 feature parity and block-aware membership rules.
+- [x] Group calls with ringing, join/leave while ongoing and membership-revoked media.
+- [ ] Group icons, and physical three-platform validation of group calls.
 - [ ] Validate private attachment codecs/downloads and safety UI interactively on Windows/macOS/Linux.
 
 ## Notifications

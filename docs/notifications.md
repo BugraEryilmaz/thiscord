@@ -11,6 +11,13 @@ Defaults:
 | --- | --- | --- |
 | Direct message | On | On |
 | Incoming direct call | On | On, with Accept and Decline |
+
+Group conversations use the same Direct message and Incoming call preferences,
+per-conversation overrides and mutes. A group set to Mentions only alerts on an
+`@username` mention of you. Messages and call rings from a member you blocked or
+who blocked you are never alerted. Group alerts reach only clients that opened the
+notification socket with `?groups=1`, so released clients never show alerts for
+conversations they cannot open (see [friends.md](friends.md#group-compatibility)).
 | Server message | On | Off |
 | Someone joins/leaves your voice room | On | Off |
 | Application update | Off | On |

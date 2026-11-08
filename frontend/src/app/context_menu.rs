@@ -27,6 +27,7 @@ enum Action {
     ReportUser(AccountId),
     Change(GuildId, i64, GuildChange, String),
     Nickname(GuildId, AccountId),
+    LeaveGroup(thiscord_shared::ids::ConversationId),
 }
 #[derive(Clone)]
 enum Item {
@@ -719,6 +720,7 @@ fn execute(ui: Ui, action: Action) {
         }
         Action::Bots(target) => ui.bot_target.set(Some(target)),
         Action::Friend(command) => super::friends::action(ui, command),
+        Action::LeaveGroup(id) => super::groups::leave(ui, id),
         Action::Unfriend(account_id) => leptos::task::spawn_local(async move {
             let _ = super::friends::remove(ui, account_id).await;
         }),
@@ -806,6 +808,33 @@ fn conversation_menu(ui: Ui, event_target: Option<web_sys::EventTarget>, x: f64,
         return false;
     };
     let target = thiscord_shared::notifications::Target::Conversation { conversation_id };
+    if let Some(group) = ui.friends.group(conversation_id) {
+        let title = super::groups::title(ui, &group);
+        let items = vec![
+            Item::new(
+                crate::i18n::t("Notification settings…"),
+                Action::Notifications(target, title.clone()),
+            ),
+            Item::Mute(target),
+            Item::new(
+                crate::i18n::t("Leave group"),
+                Action::LeaveGroup(conversation_id),
+            )
+            .danger(),
+        ];
+        let (x, y) = menu_position(&element, x, y);
+        close(ui);
+        ui.context_menu.set(Some(Menu {
+            title,
+            items,
+            note: String::new(),
+            x,
+            y,
+            volume: None,
+            member: None,
+        }));
+        return true;
+    }
     let friend = ui
         .friends
         .snapshot

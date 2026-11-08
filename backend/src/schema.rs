@@ -168,6 +168,7 @@ diesel::table! {
         edited_at -> Nullable<Timestamptz>,
         attachments -> Jsonb,
         request_hash -> Nullable<Text>,
+        system -> Nullable<Jsonb>,
     }
 }
 
@@ -195,6 +196,49 @@ diesel::table! {
         last_message_at -> Timestamptz,
         low_read_at -> Nullable<Timestamptz>,
         high_read_at -> Nullable<Timestamptz>,
+    }
+}
+
+diesel::table! {
+    group_call_members (call_id, account_id) {
+        call_id -> Uuid,
+        account_id -> Uuid,
+        state -> Text,
+        until -> Timestamptz,
+    }
+}
+
+diesel::table! {
+    group_calls (id) {
+        id -> Uuid,
+        group_id -> Uuid,
+        started_by -> Nullable<Uuid>,
+        state -> Text,
+        created_at -> Timestamptz,
+        expires_at -> Timestamptz,
+    }
+}
+
+diesel::table! {
+    group_conversations (id) {
+        id -> Uuid,
+        name -> Text,
+        revision -> Int4,
+        created_by -> Nullable<Uuid>,
+        client_id -> Uuid,
+        request_hash -> Text,
+        created_at -> Timestamptz,
+        last_message_at -> Timestamptz,
+    }
+}
+
+diesel::table! {
+    group_members (group_id, account_id) {
+        group_id -> Uuid,
+        account_id -> Uuid,
+        owner -> Bool,
+        joined_at -> Timestamptz,
+        read_at -> Nullable<Timestamptz>,
     }
 }
 
@@ -496,11 +540,16 @@ diesel::joinable!(channel_categories -> guilds (guild_id));
 diesel::joinable!(channels -> guilds (guild_id));
 diesel::joinable!(direct_attachments -> accounts (owner_id));
 diesel::joinable!(direct_attachments -> direct_messages (message_id));
-diesel::joinable!(direct_attachments -> friendships (conversation_id));
 diesel::joinable!(direct_message_edits -> direct_messages (message_id));
 diesel::joinable!(direct_messages -> accounts (author_id));
-diesel::joinable!(direct_messages -> friendships (conversation_id));
 diesel::joinable!(friend_calls -> friendships (conversation_id));
+diesel::joinable!(group_call_members -> accounts (account_id));
+diesel::joinable!(group_call_members -> group_calls (call_id));
+diesel::joinable!(group_calls -> accounts (started_by));
+diesel::joinable!(group_calls -> group_conversations (group_id));
+diesel::joinable!(group_conversations -> accounts (created_by));
+diesel::joinable!(group_members -> accounts (account_id));
+diesel::joinable!(group_members -> group_conversations (group_id));
 diesel::joinable!(guild_audit_log -> guilds (guild_id));
 diesel::joinable!(guild_icons -> guilds (guild_id));
 diesel::joinable!(guild_invites -> accounts (created_by));
@@ -549,6 +598,10 @@ diesel::allow_tables_to_appear_in_same_query!(
     direct_messages,
     friend_calls,
     friendships,
+    group_call_members,
+    group_calls,
+    group_conversations,
+    group_members,
     guild_audit_log,
     guild_icons,
     guild_invites,

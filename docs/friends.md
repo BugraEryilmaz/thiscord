@@ -257,3 +257,148 @@ Physical codec playback/download acceptance on all three platforms remains pendi
 
 See [Safety and reports](safety.md) for persistent block semantics, report consent,
 review authority and retention. Shared guild membership/permissions do not change.
+
+## Group conversations
+
+Group conversations extend private messages beyond a pair. They share the
+direct-message storage, history, attachment, search, report and call machinery,
+but authorize through **current group membership** instead of a friendship.
+`shared/src/friends.rs` owns the additive contracts (`Group`, `GroupCall`,
+`SystemEvent` and the group commands on `POST /api/v1/friends`); the friends
+socket lists groups and their live calls in `Snapshot::groups`/`group_calls`.
+Released clients ignore these fields and never see groups (see
+[compatibility](#group-compatibility)).
+
+### Membership rules
+
+- A group holds **2–8 members including its creator** (`MAX_GROUP_MEMBERS`), the
+  SFU's eight-person room capacity, so every member can always join its call.
+  Each account belongs to at most 100 groups (`MAX_GROUPS`), a soft cap that
+  concurrent additions can briefly exceed by a few.
+- Only **accepted friends of the adder** can be added, at creation or later; each
+  addition rechecks that friendship under its row lock. Pending requests, removed
+  friendships, bots and pending (unverified) accounts cannot be added. Once
+  inside, membership no longer depends on friendship: unfriending the person who
+  added you does not remove you.
+- **Blocks between prospective members refuse the addition.** Nobody can add an
+  account that they blocked or that blocked them (the friendship is gone), and an
+  account cannot be added while a block exists in either direction between it and
+  any current or co-added member. The refusal is generic ("can't be added") and
+  never names the member or direction, so a blocker is never pulled into a room
+  with the account they blocked.
+- "Add friends" from a 1:1 conversation creates a **new** group with that friend
+  preselected. A 1:1 conversation never turns into a group, and its history stays
+  private to the pair.
+- Any member can rename the group (up to 100 characters, no controls; an empty
+  name falls back to the members' display names) and add friends while there is
+  room. The **owner** (initially the creator) can remove members and transfer
+  ownership to another member. Every member can leave. When the owner leaves or
+  deletes their account, ownership passes to the longest-standing remaining
+  member. A group whose last member leaves is deleted with its history and files.
+  Group icons are not implemented; lists show the members' stacked avatars.
+- Creation, renames, additions, removals, ownership transfers and departures post
+  **system messages** into the history (content-free rows with a typed `system`
+  event and the affected display names at that time). They cannot be edited,
+  deleted, reported or searched and never count as unread.
+- **New members see the full retained history**, as in other group chat apps; the
+  add dialog says so. Members who leave or are removed lose access to all of it;
+  being added again restores it.
+
+### Locking, revisions and revocation
+
+Group commands authenticate the session, then lock the group row (`FOR UPDATE` for
+any write, `FOR SHARE` for reads), check current membership/ownership and run the
+write in the same transaction. Metadata commands (rename, add, remove, transfer)
+submit the group `revision` they viewed; every metadata change increments it and a
+stale submission returns 409 without automatic retry. Creation and additions also
+share-lock the added accounts in UUID order. Every checked pair includes one, and
+blocks and friend removal take exclusive locks on both accounts, so neither can
+interleave with the checks. Existing members' account rows are never locked under
+the group lock. A block or unfriend between the adder and an added account at the
+same instant can rarely be aborted as a detected deadlock; it returns a retryable
+error.
+Account deletion locks its groups before the membership cascade. Creation carries
+a client-generated UUID: an exact retry (even a concurrent one) returns the same
+group, a different payload under the same UUID conflicts.
+
+Leaving and removal run under the same access gate as friend removal: the leaving
+account's socket deliveries, private downloads and media drain **before commit**
+and are invalidated after it, so its friends socket reconnects without the group,
+queued attachment chunks fail, and an ongoing group call drops that member. The
+departed member's ringing and call lease rows and unclaimed uploads for that group
+are deleted in the transaction. Remaining members are woken to rebuild their
+snapshots. Instance administrators and guild roles grant no access.
+
+Message writes in a group (send/edit/delete/read) hold the group row lock exactly
+like a friendship's: per-author client UUID deduplication, revisioned edits,
+tombstones, attachment claims, read positions (one per member) and keyset history
+behave identically. Voice messages, spoiler text and spoiler attachments, and edit
+history ([chat.md](chat.md#edit-history)) work as in 1:1 conversations: voice
+uploads use the private attachment path under current membership, and only
+current members can read a message's edit history or download its files. Group
+alerts carry no message text, so spoilers cannot leak through them; search
+results and other previews mask spoilers with `▒▒▒▒▒`. Typing leases are scoped to the authorized selection.
+`@username` mentions of members are passed to notifications, so a group set to
+"Mentions only" still alerts when you are named.
+
+### Blocking inside a group
+
+A block never removes anyone from a group or lets one member evict another; groups
+are shared spaces like guilds. Across a block in either direction, the two members
+do not see each other's presence or typing, the other party's messages and call
+join/leave events are excluded from unread badges and notifications, and starting
+a call does not ring the other party (they still see "call in progress" and may join). Messages stay
+visible in the shared history so conversations remain coherent; leave the group to
+stop seeing them. Reports work as for 1:1 messages.
+
+### Group calls
+
+Starting a call in a group creates one live call per group and rings every other
+member for 45 seconds (except across a block). Members join or leave freely while
+it runs; the conversation header, the conversation list and a "call in progress"
+bar show who is in it and offer Join. Joining holds a 60-second lease that the
+SFU's authoritative checks renew; the call ends when no joined lease remains, and
+leaving or declining never ends it for others. Group calls reuse the direct-call
+namespace (equal scope/room UUIDs from the call ID), the native CPAL/Opus path,
+the browser WebRTC client, cameras and screen sharing. Every join, resume and
+refresh rechecks current membership and a joined lease; leaving or removal drains
+that member's media before commit. Group calls have no soundboard, like 1:1 calls.
+Being in a group call does not make you busy for 1:1 calls; the single-connection
+takeover moves you between rooms.
+
+### Account deletion
+
+Deleting an account removes its memberships, ringing/lease rows, and the messages
+and files it authored in groups, and transfers or deletes groups as above.
+Remaining members keep their own messages; system messages mentioning the deleted
+account keep the display name recorded when they were posted.
+
+### Group compatibility
+
+Version 0.1.61 clients ignore `groups`/`group_calls` and are not offered group
+notifications: the notification socket only routes group alerts to clients that
+open it with `?groups=1` (`notifications::GROUPS_QUERY`), which older servers
+ignore. A released client's broad "all direct messages" search can list hits from
+groups it cannot open; conversation-scoped search is unaffected. New clients
+connected to older servers simply see no groups; the group commands are
+backend-first.
+
+PostgreSQL/socket tests (`backend/tests/chat/groups.rs`) cover friend-only
+additions, block refusals, the member cap, idempotent creation and sends, revision
+conflicts, outsider isolation for history/send/upload/download/select/search,
+removal revoking the friends socket, history, files, search and reports, owner
+transfer and hand-off, unfriending without removal, last-member deletion, hidden
+presence/unread/rings across a block, account deletion, and the call lifecycle
+(ring, join, decline, leave, removal, end with the last member), plus group voice
+messages, spoiler attachments and edit history (outsiders and removed members can
+neither read the history nor download the voice message; message and account
+deletion remove the history). A loopback WebRTC
+test (`backend/tests/voice/friends.rs`) admits only joined members, forwards media
+among three peers and revokes only the removed or departing peer, under both SFU
+transports. Shared tests pin the additive wire format.
+
+Group storage is in migration `20261108500000_group_conversations`. Messages and
+private attachments keep their tables; their conversation foreign key becomes a
+trigger-maintained reference to either a friendship or a group (deleting either
+cascades its messages and files). Rollback permanently deletes groups, their
+messages, files and calls, then restores the friendship-only foreign keys.

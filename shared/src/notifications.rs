@@ -7,6 +7,9 @@ use serde::{Deserialize, Serialize};
 
 pub const PATH: &str = "/api/v1/notifications";
 pub const SOCKET_PATH: &str = "/api/v1/notifications/socket";
+/// Socket query opt-in: this client can open group conversations, so the server
+/// routes group message/call alerts to it. Older servers ignore the query.
+pub const GROUPS_QUERY: &str = "groups=1";
 pub const VERSION: u8 = 1;
 pub const MAX_OVERRIDES: usize = 512;
 

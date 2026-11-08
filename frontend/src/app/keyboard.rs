@@ -383,20 +383,34 @@ fn unread(ui: Ui, guild: GuildId, channel: &Channel) -> bool {
 }
 
 fn conversations(ui: Ui) -> Vec<(ConversationId, String, bool)> {
+    let me = ui.account.with_untracked(|a| a.as_ref().map(|a| a.id));
     ui.friends.snapshot.with_untracked(|s| {
+        let unread = |id: ConversationId, count: u32| {
+            count > 0
+                && !super::notifications::muted(
+                    ui,
+                    Muted::Conversation {
+                        conversation_id: id,
+                    },
+                )
+        };
         s.friends
             .iter()
             .filter(|f| f.relationship == Relationship::Friend)
             .map(|f| {
-                let unread = f.unread_count > 0
-                    && !super::notifications::muted(
-                        ui,
-                        Muted::Conversation {
-                            conversation_id: f.conversation_id,
-                        },
-                    );
-                (f.conversation_id, f.person.display_name.clone(), unread)
+                (
+                    f.conversation_id,
+                    f.person.display_name.clone(),
+                    unread(f.conversation_id, f.unread_count),
+                )
             })
+            .chain(s.groups.iter().map(|g| {
+                (
+                    g.conversation_id,
+                    thiscord_frontend::groups::title(g, me, crate::i18n::language()),
+                    unread(g.conversation_id, g.unread_count),
+                )
+            }))
             .collect()
     })
 }

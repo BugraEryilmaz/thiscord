@@ -157,3 +157,77 @@ async fn blocking_revokes_both_private_media_directions_and_unblock_cannot_rejoi
     bob.close().await;
     server.abort();
 }
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[ignore = "requires TEST_DATABASE_URL and loopback WebRTC"]
+async fn group_calls_admit_joined_members_and_removal_revokes_only_that_peer() {
+    let db = database();
+    let (aid, a) = user(&db, "group_call_a");
+    let (bid, b) = user(&db, "group_call_b");
+    let (cid, c) = user(&db, "group_call_c");
+    let (_, outsider) = user(&db, "group_call_out");
+    for other in [bid, cid] {
+        diesel::sql_query("INSERT INTO friendships(id,low_id,high_id,requester,state) VALUES(gen_random_uuid(),LEAST($1::uuid,$2::uuid),GREATEST($1::uuid,$2::uuid),$1::uuid,'accepted')").bind::<Text,_>(aid.to_string()).bind::<Text,_>(other.to_string()).execute(&mut db.pool.get().unwrap()).unwrap();
+    }
+    let app = api::router(
+        Some(db.pool.clone()),
+        vec!["http://localhost:1420".parse().unwrap()],
+    );
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let address = listener.local_addr().unwrap();
+    let service = app.clone();
+    let server = tokio::spawn(async move {
+        axum::serve(
+            listener,
+            service.into_make_service_with_connect_info::<std::net::SocketAddr>(),
+        )
+        .await
+        .unwrap()
+    });
+    let created = social(
+        &app,
+        &a,
+        json!({"action":"create_group","client_id":Uuid::new_v4(),"members":[bid,cid]}),
+    )
+    .await;
+    let group = created["group"]["conversation_id"].clone();
+    let id = social(
+        &app,
+        &a,
+        json!({"action":"start_call","conversation_id":group}),
+    )
+    .await["call"]["id"]
+        .clone();
+    // Ringing is not a joined lease, and outsiders are never admitted.
+    for token in [&c, &outsider] {
+        let mut early = join(address, token, id.clone(), id.clone()).await;
+        assert!(matches!(event(&mut early).await, ServerEvent::Error { .. }));
+    }
+    social(&app, &b, json!({"action":"accept_call","call_id":id})).await;
+    social(&app, &c, json!({"action":"accept_call","call_id":id})).await;
+    let mut alice = Peer::new(join(address, &a, id.clone(), id.clone()).await).await;
+    let mut bob = Peer::new(join(address, &b, id.clone(), id.clone()).await).await;
+    let mut carol = Peer::new(join(address, &c, id.clone(), id.clone()).await).await;
+    forwarded(&mut alice, &mut bob).await;
+    forwarded(&mut bob, &mut carol).await;
+    forwarded(&mut carol, &mut alice).await;
+    let revision = created["group"]["revision"].clone();
+    social(&app, &a, json!({"action":"remove_group_member","conversation_id":group,"revision":revision,"account_id":cid})).await;
+    revoked(&mut carol.socket).await;
+    let mut late = join(address, &c, id.clone(), id.clone()).await;
+    assert!(matches!(event(&mut late).await, ServerEvent::Error { .. }));
+    // The rest of the group keeps talking.
+    forwarded(&mut alice, &mut bob).await;
+    forwarded(&mut bob, &mut alice).await;
+    // Leaving drains only the leaver; the last member out ends the call.
+    social(&app, &b, json!({"action":"end_call","call_id":id})).await;
+    revoked(&mut bob.socket).await;
+    social(&app, &a, json!({"action":"end_call","call_id":id})).await;
+    revoked(&mut alice.socket).await;
+    let mut ended = join(address, &a, id.clone(), id).await;
+    assert!(matches!(event(&mut ended).await, ServerEvent::Error { .. }));
+    alice.close().await;
+    bob.close().await;
+    carol.close().await;
+    server.abort();
+}

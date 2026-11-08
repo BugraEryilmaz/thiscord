@@ -182,6 +182,8 @@ pub(super) struct Invitation {
     pub conversation_id: thiscord_shared::ids::ConversationId,
     pub caller: AccountId,
     pub remaining_ms: u64,
+    #[serde(default)]
+    pub group: bool,
 }
 impl Invitation {
     pub fn candidate(&self, callee: AccountId) -> Candidate {
@@ -196,14 +198,21 @@ impl Invitation {
         event.id = self.id.to_string();
         event.call_id = Some(self.id);
         event.recipients = Some(vec![callee]);
+        event.group = self.group;
         event
     }
 }
-pub(super) fn initial(pool: &DbPool, token: &str) -> Result<Initial, Failure> {
+/// `groups`: the socket opted into group conversations (`GROUPS_QUERY`).
+pub(super) fn initial(pool: &DbPool, token: &str, groups: bool) -> Result<Initial, Failure> {
     let mut c = connection(pool)?;
     let session = auth::authenticate(&mut c, token)?;
     c.transaction(|c| {
         auth::read_session(c, token, &session)?;
+        let mut calls: Vec<Invitation> = query(c, "SELECT to_jsonb(v) || jsonb_build_object('remaining_ms', CEIL(EXTRACT(EPOCH FROM (v.expires_at-statement_timestamp()))*1000)::bigint) AS data FROM friend_calls v JOIN friendships f ON f.id=v.conversation_id WHERE v.callee=$1::uuid AND v.state='ringing' AND v.expires_at>statement_timestamp() AND f.state='accepted' ORDER BY v.expires_at LIMIT 1", &[&session.account_id.to_string()])?;
+        if groups && calls.is_empty() {
+            // Membership is current: leaving or removal deletes the ringing row.
+            calls = query(c, "SELECT jsonb_build_object('id',k.id,'conversation_id',k.group_id,'caller',k.started_by,'group',true,'remaining_ms',CEIL(EXTRACT(EPOCH FROM (r.until-statement_timestamp()))*1000)::bigint) AS data FROM group_call_members r JOIN group_calls k ON k.id=r.call_id WHERE r.account_id=$1::uuid AND r.state='ringing' AND r.until>statement_timestamp() AND k.state='active' AND k.expires_at>statement_timestamp() AND k.started_by IS NOT NULL ORDER BY r.until LIMIT 1", &[&session.account_id.to_string()])?;
+        }
         Ok(Initial {
             preferences: preferences(c, session.account_id)?,
             release: query(
@@ -214,7 +223,7 @@ pub(super) fn initial(pool: &DbPool, token: &str) -> Result<Initial, Failure> {
             .pop(),
             // Authorization may wait on locks after the transaction starts. Use
             // statement time for both eligibility and the rounded-up duration.
-            calls: query(c, "SELECT to_jsonb(v) || jsonb_build_object('remaining_ms', CEIL(EXTRACT(EPOCH FROM (v.expires_at-statement_timestamp()))*1000)::bigint) AS data FROM friend_calls v JOIN friendships f ON f.id=v.conversation_id WHERE v.callee=$1::uuid AND v.state='ringing' AND v.expires_at>statement_timestamp() AND f.state='accepted' ORDER BY v.expires_at LIMIT 1", &[&session.account_id.to_string()])?,
+            calls,
         })
     })
 }
@@ -270,6 +279,7 @@ pub(super) fn alert(
     pool: &DbPool,
     token: &str,
     mut candidate: Candidate,
+    groups: bool,
 ) -> Result<(Option<Alert>, Option<AlertGrant>), Failure> {
     let mut c = connection(pool)?;
     let session = auth::authenticate(&mut c, token)?;
@@ -279,7 +289,13 @@ pub(super) fn alert(
         if candidate.actor == Some(actor) || candidate.recipients.as_ref().is_some_and(|ids| !ids.contains(&actor)) { return Ok((None, None)); }
         let reuse = reusable(&candidate);
         if let Target::Channel { guild_id, channel_id } = candidate.target && guild_id.as_uuid() == channel_id.as_uuid() {
-            let conversation = query(c, "SELECT to_jsonb(conversation_id) AS data FROM friend_calls WHERE id=$1::uuid AND $2::uuid IN (caller,callee) AND state='active' AND expires_at>now()", &[&channel_id.to_string(), &actor.to_string()])?.pop();
+            let mut conversation = query(c, "SELECT to_jsonb(conversation_id) AS data FROM friend_calls WHERE id=$1::uuid AND $2::uuid IN (caller,callee) AND state='active' AND expires_at>now()", &[&channel_id.to_string(), &actor.to_string()])?.pop();
+            if conversation.is_none() && groups {
+                // Group calls resolve to their group; membership is authorized below.
+                conversation = query(c, "SELECT to_jsonb(group_id) AS data FROM group_calls WHERE id=$1::uuid AND state='active'", &[&channel_id.to_string()])?.pop();
+                // Like group messages and rings: nothing across a block.
+                if let Some(other) = candidate.actor && crate::safety::store::blocked(c, actor, other)? { return Ok((None, None)); }
+            }
             let Some(conversation_id) = conversation else { return Ok((None, None)); };
             candidate.target = Target::Conversation { conversation_id };
         }
@@ -290,7 +306,7 @@ pub(super) fn alert(
         }
         // A call accepted, declined or expired while queued must not ring.
         if let Some(id) = candidate.call_id
-            && query::<bool>(c, "SELECT to_jsonb(TRUE) AS data FROM friend_calls WHERE id=$1::uuid AND callee=$2::uuid AND state='ringing' AND expires_at>now()", &[&id.to_string(), &actor.to_string()])? != [true] { return Ok((None, None)); }
+            && query::<bool>(c, "SELECT to_jsonb(EXISTS(SELECT 1 FROM friend_calls WHERE id=$1::uuid AND callee=$2::uuid AND state='ringing' AND expires_at>now()) OR EXISTS(SELECT 1 FROM group_call_members r JOIN group_calls k ON k.id=r.call_id WHERE r.call_id=$1::uuid AND r.account_id=$2::uuid AND r.state='ringing' AND r.until>now() AND k.state='active')) AS data", &[&id.to_string(), &actor.to_string()])? != [true] { return Ok((None, None)); }
         let preferences = preferences(c, actor)?;
         let guild_icon_id = match candidate.target {
             Target::Channel { guild_id, .. } => query(c, "SELECT to_jsonb(id) AS data FROM guild_icons WHERE guild_id=$1::uuid", &[&guild_id.to_string()])?.pop(),

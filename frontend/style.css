@@ -1551,3 +1551,59 @@ kbd { display: inline-block; padding: 2px 7px; border: 1px solid var(--tint-15);
 @media (prefers-reduced-motion: reduce) {
   *, *::before, *::after { animation-duration: 0.01ms !important; animation-iteration-count: 1 !important; transition-duration: 0.01ms !important; transition-delay: 0s !important; scroll-behavior: auto !important; }
 }
+
+/* Group conversations ----
+   Stacked member avatars stand in for a group icon; the call bar, ringing card
+   and picker reuse the dialog, button and list tokens. */
+.btn-success { background: color-mix(in srgb, var(--color-success) 78%, black); color: var(--color-white); }
+.btn-success:hover:not(:disabled) { background: color-mix(in srgb, var(--color-success) 86%, black); }
+.btn-danger { background: color-mix(in srgb, var(--color-danger) 80%, black); color: var(--color-white); }
+.btn-danger:hover:not(:disabled) { background: color-mix(in srgb, var(--color-danger) 88%, black); }
+.group-avatar { position: relative; display: inline-block; flex-shrink: 0; width: 32px; height: 32px; }
+.group-avatar-large { width: 64px; height: 64px; }
+.group-avatar-back, .group-avatar-front { position: absolute; display: block; border-radius: 50%; }
+.group-avatar-back { top: 0; left: 0; }
+.group-avatar-front { right: 0; bottom: 0; box-shadow: 0 0 0 2px var(--color-sidebar); }
+.group-avatar-large .group-avatar-front { box-shadow: 0 0 0 3px var(--color-surface, var(--color-sidebar)); }
+.group-call-dot { display: inline-grid; flex-shrink: 0; place-items: center; width: 20px; height: 20px; border-radius: 50%; background: color-mix(in srgb, var(--color-success) 18%, transparent); color: var(--success-ink); }
+.group-call-dot svg { width: 12px; height: 12px; }
+.group-call-pill { display: inline-flex; align-items: center; gap: 4px; padding: 2px 8px; border-radius: 999px; background: color-mix(in srgb, var(--color-success) 16%, transparent); color: var(--success-ink); font-size: 12px; font-weight: 600; }
+.group-call-pill svg { width: 13px; height: 13px; }
+.group-call-bar { display: flex; flex-wrap: wrap; align-items: center; gap: 12px; padding: 10px 16px; border-bottom: 1px solid var(--hairline); background: color-mix(in srgb, var(--color-success) 8%, var(--color-sidebar)); }
+.group-call-icon { display: inline-grid; flex-shrink: 0; place-items: center; width: 36px; height: 36px; border-radius: 50%; background: color-mix(in srgb, var(--color-success) 20%, transparent); color: var(--success-ink); }
+.group-call-ringing .group-call-icon { animation: group-ring 1.4s ease-in-out infinite; }
+@keyframes group-ring { 0%, 100% { box-shadow: 0 0 0 0 color-mix(in srgb, var(--color-success) 45%, transparent); } 50% { box-shadow: 0 0 0 8px transparent; } }
+.group-title { display: flex; align-items: center; gap: 6px; max-width: 100%; min-width: 0; border-radius: var(--radius-md); text-align: left; }
+.group-title-edit { display: inline-grid; flex-shrink: 0; color: var(--color-muted); opacity: 0; transition: opacity .12s; }
+.group-title-edit svg { width: 14px; height: 14px; }
+.group-title:hover .group-title-edit, .group-title:focus-visible .group-title-edit { opacity: 1; }
+.group-title-input { width: 100%; min-width: 0; padding: 2px 8px; border: 1px solid var(--color-brand); border-radius: var(--radius-md); background: var(--tint-4); color: var(--color-content); font-weight: 600; outline: none; }
+.sidebar-section-action { display: inline-grid; place-items: center; width: 22px; height: 22px; border-radius: var(--radius-md); color: var(--color-muted); }
+.sidebar-section-action:hover:not(:disabled), .sidebar-section-action:focus-visible { background: var(--tint-6); color: var(--color-content); }
+.sidebar-section-action:disabled { opacity: .4; }
+.sidebar-section-action svg { width: 14px; height: 14px; }
+.group-picker-search { display: flex; align-items: center; gap: 8px; min-height: 42px; padding: 0 12px; border: 1px solid var(--tint-10); border-radius: var(--radius-md); background: var(--tint-4); color: var(--color-muted); }
+.group-picker-search:focus-within { border-color: var(--color-brand); }
+.group-picker-search input { color: var(--color-content); }
+.group-picker-search svg { width: 16px; height: 16px; flex-shrink: 0; }
+.group-picker-chips { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 10px; }
+.group-chip { display: inline-flex; align-items: center; gap: 6px; padding: 3px 4px 3px 4px; border-radius: 999px; background: var(--brand-soft); color: var(--brand-ink); font-size: 13px; font-weight: 600; }
+.group-chip-remove { display: inline-grid; place-items: center; width: 20px; height: 20px; border-radius: 50%; }
+.group-chip-remove:hover, .group-chip-remove:focus-visible { background: var(--tint-10); }
+.group-chip-remove svg { width: 12px; height: 12px; }
+.group-picker-list { max-height: min(320px, 45dvh); margin-top: 10px; overflow-y: auto; overscroll-behavior: contain; }
+.group-picker-row { display: flex; align-items: center; gap: 12px; padding: 8px 10px; border-radius: var(--radius-md); cursor: pointer; transition: background .12s; }
+.group-picker-row:hover, .group-picker-row:focus-within { background: var(--tint-6); }
+.group-picker-row.group-picker-disabled { cursor: default; opacity: .55; }
+.group-picker-check { width: 20px; height: 20px; flex-shrink: 0; accent-color: var(--color-brand); cursor: inherit; }
+.system-row { display: flex; align-items: center; gap: 10px; margin: 4px 0; padding: 4px 12px 4px 18px; color: var(--color-muted); font-size: 13px; }
+.system-row-icon { display: inline-grid; flex-shrink: 0; place-items: center; width: 22px; height: 22px; color: var(--brand-ink); }
+.system-row-icon svg { width: 16px; height: 16px; }
+.system-row .message-time { flex-shrink: 0; }
+@media (pointer: coarse) { .sidebar-section-action { width: 44px; height: 44px; } }
+@media (prefers-reduced-motion: reduce) { .group-call-ringing .group-call-icon { animation: none; } .group-title-edit { transition: none; } }
+.pane-header .group-avatar-front, .friend-row .group-avatar-front { box-shadow: 0 0 0 2px var(--color-surface); }
+/* Owner actions open inside the member panel (bottom sheets on phones, like friend rows). */
+@media (min-width: 768px) { .member-panel .row-menu-panel.member-menu { top: calc(100% - 6px); right: 8px; } }
+/* Phones: secondary header actions stay reachable elsewhere (the member panel adds friends). */
+@media (max-width: 639px) { .pane-header .header-optional { display: none; } }

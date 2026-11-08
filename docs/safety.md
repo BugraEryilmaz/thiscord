@@ -29,7 +29,11 @@ guild notifications, voice rooms/rosters and public profiles remain visible unde
 normal guild permissions. Blocking does not ban, mute, hide a moderator, change a
 channel override or remove anyone from a shared room. Existing guild sockets may
 conservatively reconnect and guild media reauthorizes after account gate invalidation.
-Use guild moderation and personal voice controls for shared-room behavior. The UI
+Use guild moderation and personal voice controls for shared-room behavior.
+Private group conversations are shared spaces too: a block never removes anyone
+from a group, but it prevents adding a blocked/blocking account to a group either
+party is in, and hides presence, typing, unread badges, notifications and call
+rings between the two members (see [friends.md](friends.md#blocking-inside-a-group)). The UI
 explains this before blocking and in Settings → Safety & reports.
 One exception extends the private presence rule to guilds: across a block in either
 direction, guild member lists show the other account as offline and omit its custom
@@ -47,7 +51,7 @@ only the selected message's author ID, content, message ID, revision, UTC timest
 and attachment metadata. Evidence is read from storage after current authorization;
 clients cannot submit fabricated evidence fields or choose a different author.
 Deleted and self-authored messages cannot be reported. A private-message report
-requires current private access, so report the message before blocking. A subsequent
+(1:1 or group) requires current private access, so report the message before blocking. A subsequent
 account report can still describe concerns in the reporter's own words.
 
 Report creation has an immutable client-generated report UUID for lost-response

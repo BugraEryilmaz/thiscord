@@ -37,6 +37,9 @@ pub(crate) struct Candidate {
     pub mentions: Vec<AccountId>,
     pub call_id: Option<thiscord_shared::ids::CallId>,
     pub version: Option<String>,
+    /// Targets a group conversation: routed only to clients that can open it
+    /// (`GROUPS_QUERY`), never to released clients without group support.
+    pub group: bool,
 }
 impl Candidate {
     pub(crate) fn new(target: Target, kind: Kind, title: String, actor: Option<AccountId>) -> Self {
@@ -50,6 +53,7 @@ impl Candidate {
             mentions: vec![],
             call_id: None,
             version: None,
+            group: false,
         }
     }
     fn release(version: String) -> Self {
@@ -67,6 +71,7 @@ impl Candidate {
 struct Route {
     account: AccountId,
     kinds: Vec<Kind>,
+    groups: bool,
     sender: mpsc::Sender<Candidate>,
 }
 fn routes() -> &'static Mutex<HashMap<Uuid, Route>> {
@@ -94,6 +99,7 @@ pub(crate) fn test_listener(account: AccountId) -> TestListener {
         Route {
             account,
             kinds: Kind::ALL.to_vec(),
+            groups: true,
             sender,
         },
     );
@@ -106,6 +112,7 @@ pub(crate) fn test_listener(account: AccountId) -> TestListener {
 pub(crate) fn publish(event: Candidate) {
     routes().lock().unwrap().retain(|_, route| {
         if !route.kinds.contains(&event.kind)
+            || (event.group && !route.groups)
             || event.actor == Some(route.account)
             || event
                 .recipients
@@ -225,6 +232,7 @@ async fn upgrade(
     Extension(id): Extension<RequestId>,
     Extension(origins): Extension<Arc<Vec<HeaderValue>>>,
     Extension(slots): Extension<crate::limits::SocketSlots>,
+    axum::extract::RawQuery(query): axum::extract::RawQuery,
     headers: HeaderMap,
     ws: Result<WebSocketUpgrade, WebSocketUpgradeRejection>,
 ) -> Response {
@@ -242,11 +250,14 @@ async fn upgrade(
     };
     // Web client: cookie-derived bearer, used only when the frame token is empty.
     let upgrade_token = auth::bearer(&headers);
+    let groups = query
+        .as_deref()
+        .is_some_and(|q| q.split('&').any(|p| p == GROUPS_QUERY));
     ws.max_message_size(4096)
         .max_frame_size(4096)
         .on_upgrade(move |socket| async move {
             let _permit = permit;
-            serve(socket, pool, upgrade_token).await
+            serve(socket, pool, upgrade_token, groups).await
         })
 }
 fn frame(message: Message) -> Option<ClientEvent> {
@@ -270,7 +281,7 @@ async fn send(socket: &mut WebSocket, event: ServerEvent) -> Result<(), ()> {
     .map_err(|_| ())?
     .map_err(|_| ())
 }
-async fn serve(mut socket: WebSocket, pool: DbPool, upgrade_token: String) {
+async fn serve(mut socket: WebSocket, pool: DbPool, upgrade_token: String, groups: bool) {
     let Ok(Some(Ok(message))) = tokio::time::timeout(Duration::from_secs(5), socket.recv()).await
     else {
         return;
@@ -321,6 +332,7 @@ async fn serve(mut socket: WebSocket, pool: DbPool, upgrade_token: String) {
         Route {
             account: session.account_id,
             kinds: kinds.clone(),
+            groups,
             sender,
         },
     );
@@ -377,7 +389,7 @@ async fn serve(mut socket: WebSocket, pool: DbPool, upgrade_token: String) {
                     Err(NoWorker::Revoked) => break,
                 };
                 let p = pool.clone(); let t = token.clone();
-                let result = crate::performance::blocking(move || { let _permit = permit; store::initial(&p, &t) }).await;
+                let result = crate::performance::blocking(move || { let _permit = permit; store::initial(&p, &t, groups) }).await;
                 if matches!(&result, Ok(Err(error)) if error.transient()) {
                     let Some(delay) = trouble.failed() else { revoke = false; break; };
                     refresh = true;
@@ -441,7 +453,7 @@ async fn serve(mut socket: WebSocket, pool: DbPool, upgrade_token: String) {
                 };
                 let p = pool.clone(); let t = token.clone();
                 let checked_at = Instant::now();
-                let result = crate::performance::blocking(move || { let _permit = permit; store::alert(&p, &t, candidate) }).await;
+                let result = crate::performance::blocking(move || { let _permit = permit; store::alert(&p, &t, candidate, groups) }).await;
                 if matches!(&result, Ok(Err(error)) if error.transient()) {
                     // Fail closed: this alert is skipped, like one missed while offline.
                     if trouble.failed().is_none() { revoke = false; break; }
@@ -564,5 +576,32 @@ mod tests {
         assert!(!target.receiver.is_closed());
         publish(event.clone());
         assert!(target.receiver.try_recv().is_ok());
+    }
+    #[test]
+    fn group_alerts_reach_only_clients_that_opened_groups() {
+        let recipient = AccountId::from_uuid(Uuid::new_v4());
+        let mut current = test_listener(recipient);
+        // A released client: its socket did not send GROUPS_QUERY.
+        let mut released = test_listener(recipient);
+        routes()
+            .lock()
+            .unwrap()
+            .get_mut(&released._guard.0)
+            .unwrap()
+            .groups = false;
+        let conversation_id = thiscord_shared::ids::ConversationId::from_uuid(Uuid::new_v4());
+        let mut event = Candidate::new(
+            Target::Conversation { conversation_id },
+            Kind::DirectMessage,
+            "New group message".into(),
+            None,
+        );
+        event.group = true;
+        publish(event.clone());
+        assert!(current.receiver.try_recv().is_ok());
+        assert!(released.receiver.try_recv().is_err());
+        event.group = false;
+        publish(event);
+        assert!(current.receiver.try_recv().is_ok() && released.receiver.try_recv().is_ok());
     }
 }

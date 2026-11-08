@@ -16,6 +16,7 @@ mod direct_attachments;
 mod edit_history;
 mod emoji;
 mod friends;
+mod groups;
 mod icons;
 mod identity;
 mod invites;

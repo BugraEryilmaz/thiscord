@@ -197,7 +197,9 @@ trip.
 ### Phones and tablets
 
 Below 768 px the shell shows either navigation (server rail, channel or friends
-list, account dock) or the open channel/conversation. Selecting a channel or
+list, account dock) or the open channel/conversation. Groups are listed above
+friends under **Messages**, and **New group** sits beside **Add friend**; a group's
+member panel opens as a drawer from the header. Selecting a channel or
 direct message switches to content; the back button in the chat header (or above
 a voice channel) returns to the list without closing the channel. `ui.mobile_content`
 holds that choice; content is shown only while something is open. Settings become

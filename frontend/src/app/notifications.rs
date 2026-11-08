@@ -229,15 +229,14 @@ fn receive(ui: Ui, mut alert: Alert, replayed: bool) {
         return;
     }
     if let Target::Conversation { conversation_id } = alert.target
-        && let Some(friend) = ui
-            .friends
-            .snapshot
-            .get_untracked()
-            .friends
-            .iter()
-            .find(|f| f.conversation_id == conversation_id)
+        && let Some(name) = untrack(|| {
+            ui.friends.title(
+                conversation_id,
+                ui.account.with_untracked(|a| a.as_ref().map(|a| a.id)),
+            )
+        })
     {
-        alert.title = format!("{} — {}", friend.person.display_name, alert.title);
+        alert.title = format!("{} — {}", name, alert.title);
     }
     if alert.kind == Kind::Update {
         let Some(version) = &alert.version else {
@@ -561,7 +560,7 @@ async fn connected(
     seen: &mut std::collections::VecDeque<String>,
 ) -> Result<(), ()> {
     let base = client::socket_base();
-    let (mut sink, mut stream) = WebSocket::open(&format!("{base}{SOCKET_PATH}"))
+    let (mut sink, mut stream) = WebSocket::open(&format!("{base}{SOCKET_PATH}?{GROUPS_QUERY}"))
         .map_err(|_| ())?
         .split();
     let encode = |event| {
@@ -707,15 +706,13 @@ pub(super) fn Panel(ui: Ui) -> impl IntoView {
 fn target_name(ui: Ui, target: Target) -> String {
     match target {
         Target::Updates => crate::i18n::t("Application updates").into(),
-        Target::Conversation { conversation_id } => ui
-            .friends
-            .snapshot
-            .get_untracked()
-            .friends
-            .into_iter()
-            .find(|f| f.conversation_id == conversation_id)
-            .map(|f| f.person.display_name)
-            .unwrap_or_else(|| crate::i18n::t("Direct conversation").into()),
+        Target::Conversation { conversation_id } => untrack(|| {
+            ui.friends.title(
+                conversation_id,
+                ui.account.with_untracked(|a| a.as_ref().map(|a| a.id)),
+            )
+        })
+        .unwrap_or_else(|| crate::i18n::t("Direct conversation").into()),
         Target::Channel { channel_id, .. } => ui
             .server
             .get_untracked()

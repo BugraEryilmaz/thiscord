@@ -11,7 +11,7 @@ use thiscord_shared::{
 };
 
 /// Container-valid Ogg Opus with 20 ms CELT packets; the backend never decodes.
-fn voice(milliseconds: u32) -> Vec<u8> {
+pub(super) fn voice(milliseconds: u32) -> Vec<u8> {
     let mut writer = OggOpusWriter::new(3, 1, 312);
     for i in 0..milliseconds / 20 {
         let mut packet = vec![0xF8];
@@ -21,11 +21,11 @@ fn voice(milliseconds: u32) -> Vec<u8> {
     writer.finish()
 }
 
-fn waveform() -> String {
+pub(super) fn waveform() -> String {
     encode_waveform(&(0..WAVEFORM_BARS as u8).map(|v| v * 4).collect::<Vec<_>>())
 }
 
-async fn post(
+pub(super) async fn post(
     app: &Router,
     token: &str,
     uri: String,
@@ -69,7 +69,12 @@ fn guild_upload(guild: &Value, channel: &Value, voice: bool, waveform: Option<&s
     format!("{ATTACHMENTS_PATH}?{}", query.finish())
 }
 
-async fn fetch(app: &Router, token: &str, path: String, expected: StatusCode) -> Vec<u8> {
+pub(super) async fn fetch(
+    app: &Router,
+    token: &str,
+    path: String,
+    expected: StatusCode,
+) -> Vec<u8> {
     let response = app
         .clone()
         .oneshot(
@@ -92,7 +97,7 @@ async fn fetch(app: &Router, token: &str, path: String, expected: StatusCode) ->
         .to_vec()
 }
 
-fn count(db: &Database, sql: &str, id: &Value) -> i64 {
+pub(super) fn count(db: &Database, sql: &str, id: &Value) -> i64 {
     #[derive(QueryableByName)]
     struct Count {
         #[diesel(sql_type = diesel::sql_types::BigInt)]
