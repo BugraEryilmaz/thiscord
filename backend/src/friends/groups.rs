@@ -138,7 +138,8 @@ fn admit(
     // SHARE lock on the added accounts alone serializes those checks. Existing
     // members' rows stay unlocked under the group lock: requests that lock their
     // own account before this group (deletion, notification and report commands)
-    // cannot deadlock with an addition.
+    // never wait on an addition. A simultaneous block/unfriend between the adder
+    // and an added account can still be aborted as a (retryable) detected deadlock.
     let locked: Vec<AccountId> = query(
         c,
         "SELECT to_jsonb(id) AS data FROM accounts WHERE id IN (SELECT value::uuid FROM jsonb_array_elements_text($1::jsonb)) ORDER BY id FOR SHARE",

@@ -313,8 +313,10 @@ submit the group `revision` they viewed; every metadata change increments it and
 stale submission returns 409 without automatic retry. Creation and additions also
 share-lock the added accounts in UUID order. Every checked pair includes one, and
 blocks and friend removal take exclusive locks on both accounts, so neither can
-interleave with the checks; existing members' account rows are never locked under
-the group lock, which keeps additions deadlock-free.
+interleave with the checks. Existing members' account rows are never locked under
+the group lock. A block or unfriend between the adder and an added account at the
+same instant can rarely be aborted as a detected deadlock; it returns a retryable
+error.
 Account deletion locks its groups before the membership cascade. Creation carries
 a client-generated UUID: an exact retry (even a concurrent one) returns the same
 group, a different payload under the same UUID conflicts.
