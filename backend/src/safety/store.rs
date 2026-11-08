@@ -132,7 +132,7 @@ pub(super) fn dispatch(pool: &DbPool, token: &str, request: Request) -> Result<R
                     ReportTarget::DirectMessage {conversation_id,message_id} => {
                         crate::friends::store::pair_access(c,conversation_id,actor,false)?;
                         let m=crate::friends::store::message(c,conversation_id,message_id)?;
-                        if m.deleted || m.author_id==actor {return Err(Failure::Forbidden);}
+                        if m.deleted || m.system.is_some() || m.author_id==actor {return Err(Failure::Forbidden);}
                         (Some(m.author_id),Some(Evidence {message_id:m.id,author_id:Some(m.author_id),content:m.content,revision:m.revision,created_at:m.created_at,attachments:m.attachments}),None,None)
                     }
                     ReportTarget::GuildMessage {guild_id,channel_id,message_id} => {

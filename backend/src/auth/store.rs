@@ -750,6 +750,9 @@ pub(super) fn dispatch(
                         execute(c,"SELECT id FROM guilds WHERE id IN (SELECT guild_id FROM guild_members WHERE account_id=$1::uuid) ORDER BY id FOR UPDATE", &[&id.to_string()])?;
                         execute(c,"UPDATE guilds SET revision=revision+1 WHERE id IN (SELECT guild_id FROM guild_members WHERE account_id=$1::uuid)", &[&id.to_string()])?;
                         related = crate::friends::store::related(c,id)?;
+                        // Membership cascades hand off ownership or delete empty groups;
+                        // lock those groups like any membership change (UUID order).
+                        execute(c,"SELECT id FROM group_conversations WHERE id IN (SELECT group_id FROM group_members WHERE account_id=$1::uuid) ORDER BY id FOR UPDATE", &[&id.to_string()])?;
                         histories = crate::friends::groups::of(c,id)?;
                         guilds = crate::chat::members::guilds_of(c,id)?;
                         execute(c,"DELETE FROM accounts WHERE id=$1::uuid", &[&id.to_string()])?;

@@ -114,8 +114,7 @@ pub(crate) fn blocked_with(
     )?;
     Ok(blocked.into_iter().collect())
 }
-/// Locks every involved account in UUID order, the order used by blocks and
-/// friend requests, then checks that each added account is an accepted friend
+/// Share-locks every involved account in UUID order, then checks that each added account is an accepted friend
 /// of the adder with no block towards anyone in the resulting group.
 fn admit(
     c: &mut PgConnection,
@@ -136,7 +135,10 @@ fn admit(
     let all: Vec<AccountId> = existing.iter().chain(added).copied().collect();
     let locked: Vec<AccountId> = query(
         c,
-        "SELECT to_jsonb(id) AS data FROM accounts WHERE id IN (SELECT value::uuid FROM jsonb_array_elements_text($1::jsonb)) ORDER BY id FOR NO KEY UPDATE",
+        // SHARE conflicts with the NO KEY UPDATE locks that block, unblock and
+        // unfriend take on both accounts, so those checks stay serialized, yet it
+        // never waits on other members' session locks (no deadlock with sends).
+        "SELECT to_jsonb(id) AS data FROM accounts WHERE id IN (SELECT value::uuid FROM jsonb_array_elements_text($1::jsonb)) ORDER BY id FOR SHARE",
         &[&json(&all)?],
     )?;
     if locked.len() != all.len() {
@@ -488,6 +490,29 @@ pub(super) fn command(
         _ => Err(Failure::Invalid("Unsupported group operation")),
     }
 }
+/// The group an earlier request with this client ID created, if any.
+fn retried(
+    c: &mut PgConnection,
+    actor: AccountId,
+    client_id: ClientMessageId,
+    hash: &str,
+) -> Result<Option<Response>, Failure> {
+    #[derive(Deserialize)]
+    struct Previous {
+        id: ConversationId,
+        hash: String,
+    }
+    let Some(old) = query::<Previous>(c, "SELECT jsonb_build_object('id',id,'hash',request_hash) AS data FROM group_conversations WHERE created_by=$1::uuid AND client_id=$2::uuid", &[&actor.to_string(), &client_id.to_string()])?.pop() else {
+        return Ok(None);
+    };
+    if old.hash != hash {
+        return Err(Failure::Conflict);
+    }
+    locked(c, old.id, actor, false)?;
+    Ok(Some(Response::Group {
+        group: view(c, old.id, actor)?,
+    }))
+}
 fn create(
     c: &mut PgConnection,
     actor: AccountId,
@@ -504,37 +529,26 @@ fn create(
     }
     let sorted: BTreeSet<_> = members.iter().collect();
     let hash = auth::digest(&json(&(&sorted, &name))?);
-    // The creator's account lock serializes concurrent retries of one client ID.
     if query::<bool>(
         c,
-        "SELECT to_jsonb(email_verified) AS data FROM accounts WHERE id=$1::uuid FOR NO KEY UPDATE",
+        "SELECT to_jsonb(email_verified) AS data FROM accounts WHERE id=$1::uuid",
         &[&actor.to_string()],
     )? != [true]
     {
         return Err(Failure::Forbidden);
     }
-    #[derive(Deserialize)]
-    struct Previous {
-        id: ConversationId,
-        hash: String,
-    }
-    if let Some(old) = query::<Previous>(c, "SELECT jsonb_build_object('id',id,'hash',request_hash) AS data FROM group_conversations WHERE created_by=$1::uuid AND client_id=$2::uuid", &[&actor.to_string(), &client_id.to_string()])?.pop() {
-        if old.hash != hash {
-            return Err(Failure::Conflict);
-        }
-        locked(c, old.id, actor, false)?;
-        return Ok(Response::Group {
-            group: view(c, old.id, actor)?,
-        });
+    if let Some(response) = retried(c, actor, client_id, &hash)? {
+        return Ok(response);
     }
     admit(c, actor, &[actor], &members)?;
     if !query::<AccountId>(c, "SELECT to_jsonb(account_id) AS data FROM group_members WHERE account_id=$1::uuid GROUP BY account_id HAVING count(*)>=100", &[&actor.to_string()])?.is_empty() {
         return Err(Failure::Invalid("You are already in too many groups"));
     }
     let id = ConversationId::from_uuid(Uuid::new_v4());
-    execute(
+    // A concurrent retry of the same client ID that committed first wins.
+    if execute(
         c,
-        "INSERT INTO group_conversations(id,name,created_by,client_id,request_hash) VALUES($1::uuid,$2,$3::uuid,$4::uuid,$5)",
+        "INSERT INTO group_conversations(id,name,created_by,client_id,request_hash) VALUES($1::uuid,$2,$3::uuid,$4::uuid,$5) ON CONFLICT (created_by,client_id) DO NOTHING",
         &[
             &id.to_string(),
             &name,
@@ -542,7 +556,10 @@ fn create(
             &client_id.to_string(),
             &hash,
         ],
-    )?;
+    )? == 0
+    {
+        return retried(c, actor, client_id, &hash)?.ok_or(Failure::Conflict);
+    }
     execute(
         c,
         "INSERT INTO group_members(group_id,account_id,owner,read_at) VALUES($1::uuid,$2::uuid,true,clock_timestamp())",

@@ -310,10 +310,12 @@ any write, `FOR SHARE` for reads), check current membership/ownership and run th
 write in the same transaction. Metadata commands (rename, add, remove, transfer)
 submit the group `revision` they viewed; every metadata change increments it and a
 stale submission returns 409 without automatic retry. Creation and additions also
-lock every involved account in UUID order (the order used by blocks and friend
-requests), so a concurrent block or unfriend cannot interleave with the checks.
-Creation carries a client-generated UUID: an exact retry returns the same group,
-a different payload under the same UUID conflicts.
+share-lock every involved account in UUID order. That conflicts with the
+exclusive account locks blocks and friend removal take, so neither can interleave
+with the checks, without waiting on other members' ordinary session locks.
+Account deletion locks its groups before the membership cascade. Creation carries
+a client-generated UUID: an exact retry (even a concurrent one) returns the same
+group, a different payload under the same UUID conflicts.
 
 Leaving and removal run under the same access gate as friend removal: the leaving
 account's socket deliveries, private downloads and media drain **before commit**
@@ -334,9 +336,9 @@ behave identically. Typing leases are scoped to the authorized selection.
 
 A block never removes anyone from a group or lets one member evict another; groups
 are shared spaces like guilds. Across a block in either direction, the two members
-do not see each other's presence or typing, the other party's messages are
-excluded from unread badges and notifications, and starting a call does not ring
-the other party (they still see "call in progress" and may join). Messages stay
+do not see each other's presence or typing, the other party's messages and call
+join/leave events are excluded from unread badges and notifications, and starting
+a call does not ring the other party (they still see "call in progress" and may join). Messages stay
 visible in the shared history so conversations remain coherent; leave the group to
 stop seeing them. Reports work as for 1:1 messages.
 
@@ -367,8 +369,10 @@ account keep the display name recorded when they were posted.
 Version 0.1.61 clients ignore `groups`/`group_calls` and are not offered group
 notifications: the notification socket only routes group alerts to clients that
 open it with `?groups=1` (`notifications::GROUPS_QUERY`), which older servers
-ignore. New clients connected to older servers simply see no groups; the group
-commands are backend-first.
+ignore. A released client's broad "all direct messages" search can list hits from
+groups it cannot open; conversation-scoped search is unaffected. New clients
+connected to older servers simply see no groups; the group commands are
+backend-first.
 
 PostgreSQL/socket tests (`backend/tests/chat/groups.rs`) cover friend-only
 additions, block refusals, the member cap, idempotent creation and sends, revision

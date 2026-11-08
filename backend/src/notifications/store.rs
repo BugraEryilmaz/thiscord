@@ -293,6 +293,8 @@ pub(super) fn alert(
             if conversation.is_none() && groups {
                 // Group calls resolve to their group; membership is authorized below.
                 conversation = query(c, "SELECT to_jsonb(group_id) AS data FROM group_calls WHERE id=$1::uuid AND state='active'", &[&channel_id.to_string()])?.pop();
+                // Like group messages and rings: nothing across a block.
+                if let Some(other) = candidate.actor && crate::safety::store::blocked(c, actor, other)? { return Ok((None, None)); }
             }
             let Some(conversation_id) = conversation else { return Ok((None, None)); };
             candidate.target = Target::Conversation { conversation_id };

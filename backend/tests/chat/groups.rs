@@ -208,6 +208,8 @@ async fn group_membership_isolation_and_revocation() {
         StatusCode::FORBIDDEN,
     )
     .await;
+    let reported = call(&app, SAFETY_PATH, &b, json!({"action":"create_report","id":Uuid::new_v4(),"target":{"kind":"direct_message","conversation_id":group,"message_id":notice["id"]},"reason":"notice"})).await;
+    assert_eq!(reported.0, StatusCode::FORBIDDEN, "{}", reported.1);
 
     // Attachments follow membership.
     let file = upload(&app, &b, &group, StatusCode::OK).await;
