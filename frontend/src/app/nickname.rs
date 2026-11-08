@@ -73,9 +73,14 @@ pub(super) fn Host(ui: Ui) -> impl IntoView {
                         guild: home.guild,
                         profile,
                     }));
-                    if !keep_typed && let Some(input) = input.get_untracked() {
-                        let _ = input.focus();
-                        input.select();
+                    if !keep_typed {
+                        // After the loaded value renders into the field.
+                        request_animation_frame(move || {
+                            if let Some(input) = input.get_untracked() {
+                                let _ = input.focus();
+                                input.select();
+                            }
+                        });
                     }
                 }
                 (Err(e), _) | (_, Err(e)) => error.set(e),
@@ -216,7 +221,7 @@ pub(super) fn Host(ui: Ui) -> impl IntoView {
                     <input node_ref=input class="w-full rounded-md border border-white/20 bg-black/20 px-3 py-2 focus:border-brand focus:outline-none"
                         autocomplete="off" spellcheck="false" maxlength=(MAX_NICKNAME_CHARS * 2).to_string()
                         placeholder=profile_name aria-invalid=move || invalid().to_string()
-                        disabled=move || loaded.with(Option::is_none) || saving.get()
+                        autofocus readonly=move || loaded.with(Option::is_none) || saving.get()
                         prop:value=move || value.get() on:input=move |e| value.set(event_target_value(&e))/>
                     <small aria-live="polite">{move || format!("{}/{MAX_NICKNAME_CHARS}", value.with(|v| v.trim().chars().count()))}</small>
                 </label>
