@@ -19,6 +19,7 @@ mod native_soundboard;
 mod native_update;
 mod native_video_diagnostics;
 mod native_voice;
+mod native_voice_message;
 mod native_window;
 #[cfg(any(target_os = "windows", target_os = "macos", target_os = "linux"))]
 mod system_audio;
@@ -55,6 +56,7 @@ fn main() {
         .manage(native_invites::InviteState::default())
         .plugin(tauri_plugin_updater::Builder::new().build())
         .manage(native_update::UpdateState::default())
+        .manage(native_voice_message::VoiceMessageState::default())
         .manage(native_notifications::NotificationState::default())
         .manage(native_overlay::OverlayState::default())
         .manage(native_shortcuts::ShortcutStateStore::default())
@@ -199,6 +201,13 @@ fn main() {
             native_voice::voice_leave,
             native_voice::voice_status,
             native_soundboard::voice_soundboard_play,
+            native_voice_message::voice_message_record_start,
+            native_voice_message::voice_message_record_stop,
+            native_voice_message::voice_message_record_cancel,
+            native_voice_message::voice_message_upload,
+            native_voice_message::voice_message_play,
+            native_voice_message::voice_message_control,
+            native_voice_message::voice_message_reset,
             native_soundboard::soundboard_volume,
             native_soundboard::soundboard_set_volume,
             native_audio::audio_toggle,

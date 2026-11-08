@@ -29,7 +29,7 @@ pub(super) fn hydrate(
         r#"
         SELECT jsonb_build_array(m.id,
           CASE WHEN m.deleted OR m.reply_to IS NULL THEN NULL ELSE
-            jsonb_build_object('id',m.reply_to,'preview',CASE WHEN t.id IS NULL OR t.deleted THEN NULL ELSE left(t.content,160) END,'target_revision',t.revision) END,
+            jsonb_build_object('id',m.reply_to,'preview',CASE WHEN t.id IS NULL OR t.deleted THEN NULL ELSE t.content END,'target_revision',t.revision) END,
           CASE WHEN m.deleted THEN '[]'::jsonb ELSE COALESCE((
             SELECT jsonb_agg(r ORDER BY r.emoji) FROM (
               SELECT emoji,count(*) AS count,bool_or(account_id=$2::uuid) AS mine
@@ -49,11 +49,20 @@ pub(super) fn hydrate(
         .collect();
     for message in messages {
         if let Some((reply, reactions)) = values.get(&message.id) {
-            message.reply = reply.clone();
+            message.reply = reply.clone().map(preview);
             message.reactions = reactions.clone();
         }
     }
     Ok(())
+}
+
+/// Reply previews never reveal spoilers: mask the whole target before the
+/// 160-character cut, so a cut cannot split a spoiler's delimiters.
+fn preview(mut reply: ReplyPreview) -> ReplyPreview {
+    if let Some(text) = &mut reply.preview {
+        *text = mask_spoilers(text).chars().take(160).collect();
+    }
+    reply
 }
 
 pub(super) fn react(

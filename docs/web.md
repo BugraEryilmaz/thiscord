@@ -162,6 +162,8 @@ device tests, microphone boost, per-speaker volumes above 100%, the soundboard a
 per-person soundboard volume, connection diagnostics and focused-page keyboard
 shortcuts (Settings → Keyboard shortcuts) run in the browser; see
 [browser voice](audio.md#browser-voice) and [soundboard](soundboard.md#web-client).
+Voice messages record with MediaRecorder and play through a media element on the
+selected output where `setSinkId` exists ([chat.md](chat.md#voice-messages)).
 Browser system notifications are optional and requested only from Settings →
 Notifications; see [notifications](notifications.md#browser-system-notifications).
 Cameras (getUserMedia) and screen sharing (getDisplayMedia, with tab or system audio

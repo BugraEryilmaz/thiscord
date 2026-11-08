@@ -33,6 +33,7 @@ pub mod safety;
 pub mod screen;
 pub mod video_bridge;
 pub mod video_feedback;
+pub mod voice_clip;
 pub mod voice_overlay;
 pub mod web_notifications;
 pub mod web_shortcuts;

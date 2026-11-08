@@ -570,8 +570,9 @@ pub fn spatial_step(centers: &[(f64, f64)], current: usize, key: &str) -> Option
 }
 
 /// Bounded single-line preview for the polite new-message announcement in
-/// the focused channel; never the full body.
+/// the focused channel; never the full body, and never spoiler text.
 pub fn preview(body: &str, limit: usize) -> String {
+    let body = thiscord_shared::chat::mask_spoilers(body);
     let flattened = body.split_whitespace().collect::<Vec<_>>().join(" ");
     let mut preview: String = flattened.chars().take(limit).collect();
     if flattened.chars().count() > limit {
@@ -952,5 +953,6 @@ there", 100
         assert_eq!(preview("abcdef", 3), "abc…");
         assert_eq!(preview("  ", 10), "");
         assert_eq!(preview(&"ğ".repeat(500), 140).chars().count(), 141);
+        assert!(!preview("look ||the twist|| ok", 140).contains("twist"));
     }
 }

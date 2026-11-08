@@ -138,7 +138,9 @@ default browser on desktop. Drop images, videos or files onto a text channel, or
 button, then send them with an optional message. Images and videos open in a
 full-window viewer; videos have a play overlay and playback controls. Files and the
 download buttons save attachments. Each message supports four files of up to 25 MiB
-each. See [chat protocol and limits](docs/chat.md). Desktop voice channels
+each. Record voice messages (up to five minutes) from the composer's microphone,
+hide text with `||spoilers||` or mark attachments as spoilers, and open a
+message's edit history from its "(edited)" marker. See [chat protocol and limits](docs/chat.md). Desktop voice channels
 use native Rust audio, independent speaker volume controls and a Rust WebRTC SFU.
 The browser web client joins the same voice channels and private calls with the
 browser's own microphone processing and WebRTC (HTTPS required for the microphone),

@@ -157,6 +157,11 @@ affected, and the change is not part of the moderation audit log. `GuildState`
 whether a password is set; the hash and the password itself never leave the backend,
 and `GuildPassword` redacts itself from `Debug` output.
 
+Sending files, voice messages and spoiler marks requires SendMessages, like the
+text of a message; there is no separate attachment or voice-message permission.
+Reading a message's edit history requires ViewChannel and ReadHistory, like
+reading the message.
+
 Everyone is implicit on every membership, cannot be assigned/deleted, and has rank
 zero. Default permissions are view, history, send, edit/delete own messages,
 voice join/speak, use soundboard (see [soundboard](soundboard.md)) and change own nickname. Other roles have ranks 1–10000; equal rank grants no authority

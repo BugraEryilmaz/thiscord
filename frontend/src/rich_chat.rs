@@ -353,8 +353,14 @@ pub fn updated_reply(message: &ChatMessage, updates: &[ChatMessage]) -> Option<R
     (reply != *current).then_some(reply)
 }
 
+/// Mirrors the server: spoilers are masked before the 160-character cut.
 pub fn preview(message: &ChatMessage) -> Option<String> {
-    (!message.deleted).then(|| message.content.chars().take(160).collect())
+    (!message.deleted).then(|| {
+        thiscord_shared::chat::mask_spoilers(&message.content)
+            .chars()
+            .take(160)
+            .collect()
+    })
 }
 
 #[cfg(test)]
@@ -668,6 +674,8 @@ mod tests {
             filename: "private.txt".into(),
             content_type: "text/plain".into(),
             size_bytes: 10,
+            voice: None,
+            spoiler: false,
         });
         let ticket = state.begin_pins();
         assert_eq!(

@@ -125,6 +125,8 @@ See [friends.md](friends.md) for consent, presence, history and private voice ac
 
 `POST /api/v1/chat` and `/api/v1/socket` use shared contracts in `shared/src/chat.rs`.
 See [chat.md](chat.md) for authentication, socket versioning, history, deduplication
-and reconnect behavior. History uses a reverse keyset `before` cursor to load older
+and reconnect behavior. Voice-message uploads, spoiler marks and the bounded
+`edit_history` snapshot (at most 20 versions) are additive; see
+[chat.md](chat.md#voice-messages). History uses a reverse keyset `before` cursor to load older
 pages, returning each page in ascending order; ordinary forward pagination retains
 the strict greater-than convention above.

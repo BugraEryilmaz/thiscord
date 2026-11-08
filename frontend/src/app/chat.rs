@@ -965,6 +965,9 @@ fn MessageRow(
         })
     });
     let edited = move || message.with(|m| m.edited_at.is_some() && !m.deleted);
+    let edited_at = Signal::derive(move || message.with(|m| m.edited_at));
+    let created_at = Signal::derive(move || message.with(|m| m.created_at));
+    let current = Signal::derive(move || message.with(|m| m.content.clone()));
     let full_time = move || message.with(|m| crate::i18n::datetime(m.created_at));
     let author = move || message.with(|m| m.author_id.map(|id| id.to_string()));
     // The member list keeps names and colours current (nicknames, role edits)
@@ -1008,7 +1011,7 @@ fn MessageRow(
                     <rich::Reply chat message/>
                     <div class="message-text whitespace-pre-wrap break-words">
                         {move || message.with(|m| super::message_content::render(if m.deleted { "Message deleted" } else { &m.content }, chat.ui, Some(chat.guild)))}
-                        <Show when=edited><span class="ml-1 text-xs text-white/60">{move || format!("({})", crate::i18n::t("edited"))}</span></Show>
+                        <Show when=edited><super::edit_history::Edited ui=chat.ui scope=super::edit_history::Scope::Guild { guild: chat.guild, channel: chat.channel } message=id edited_at created_at content=current/></Show>
                     </div>
                     <Show when=move || message.with(|m| !m.deleted)>
                         <For each=move || message.with(|m| m.attachments.clone()) key=|a| a.id children=move |attachment| view! { <attachments::Card chat message=id attachment/> }/>
@@ -1258,9 +1261,10 @@ pub(super) fn ChatPanel(
                 .ok()
                 .and_then(|c| c.random_uuid().parse::<ClientMessageId>().ok());
             if let Some(id) = id {
-                let attachments = queue.take();
+                let (attachments, spoilers) = queue.take();
                 chat.send(Pending {
                     attachment_ids: attachments.iter().map(|a| a.id).collect(),
+                    spoilers,
                     filenames: attachments.into_iter().map(|a| a.filename).collect(),
                     id,
                     content,
@@ -1279,6 +1283,47 @@ pub(super) fn ChatPanel(
         ev.prevent_default();
         send();
     };
+    // Voice messages are sent on their own; the draft and queued files stay.
+    let send_voice = Callback::new(move |recorded: super::voice_message::Recorded| {
+        if chat.pending.with_untracked(|p| p.len() >= PENDING_LIMIT) {
+            chat.status
+                .set("Resolve or discard a pending message before sending more".into());
+            return;
+        }
+        let Some(id) = window()
+            .crypto()
+            .ok()
+            .and_then(|c| c.random_uuid().parse::<ClientMessageId>().ok())
+        else {
+            chat.status
+                .set("Secure random IDs are unavailable; use HTTPS or localhost".into());
+            return;
+        };
+        let attachment = recorded.attachment.id;
+        chat.send(Pending {
+            attachment_ids: vec![attachment],
+            spoilers: if recorded.spoiler {
+                vec![attachment]
+            } else {
+                vec![]
+            },
+            filenames: vec![crate::i18n::t("Voice message").into()],
+            id,
+            content: String::new(),
+            failed: false,
+            reply_to: chat.reply_to.get_untracked(),
+        });
+        chat.reply_to.set(None);
+    });
+    // Playback stops when access changes or the channel closes.
+    Effect::new(move |previous: Option<u64>| {
+        let generation = chat.access_generation.get();
+        if previous.is_some_and(|p| p != generation) {
+            super::voice_message::stop_all();
+        }
+        generation
+    });
+    on_cleanup(super::voice_message::stop_all);
     let typing_notice = Memo::new(move |_| {
         let names = chat.online.with(|members| {
             members
@@ -1416,7 +1461,7 @@ pub(super) fn ChatPanel(
             <footer class="composer-area" style:display=move ||if search.active.get(){"none"}else{""}>
                 <p class="composer-hint" class:sr-only=move ||typing_notice.with(String::is_empty) aria-live="polite" aria-atomic="true">{move ||typing_notice.get()}</p>
                 <Show when=move||editing.get().is_some()><p class="composer-banner"><button class="composer-banner-action" on:click=move |_|composer.end_edit()>{move || crate::i18n::t("Cancel edit")}</button>" · "{move || crate::i18n::t("Escape to cancel · Enter to save")}</p></Show>
-                <Show when=move ||chat.reply_to.get().is_some()><div class="composer-banner"><Icon kind=Glyph::Reply/><span class="min-w-0 flex-1 truncate">{move || chat.reply_to.get().map(|id|chat.messages.with(|cache|cache.get(id).map(|m|m.with(|m|thiscord_frontend::localized_format!(crate::i18n::language(), "Reply to {}: {}",m.display_name(),m.content.chars().take(80).collect::<String>()))).unwrap_or_else(||crate::i18n::t("Reply selected").into())))}</span><button class="composer-banner-action" on:click=move |_|chat.reply_to.set(None)>{move ||crate::i18n::t("Cancel reply")}</button></div></Show>
+                <Show when=move ||chat.reply_to.get().is_some()><div class="composer-banner"><Icon kind=Glyph::Reply/><span class="min-w-0 flex-1 truncate">{move || chat.reply_to.get().map(|id|chat.messages.with(|cache|cache.get(id).map(|m|m.with(|m|thiscord_frontend::localized_format!(crate::i18n::language(), "Reply to {}: {}",m.display_name(),thiscord_shared::chat::mask_spoilers(&m.content).chars().take(80).collect::<String>()))).unwrap_or_else(||crate::i18n::t("Reply selected").into())))}</span><button class="composer-banner-action" on:click=move |_|chat.reply_to.set(None)>{move ||crate::i18n::t("Cancel reply")}</button></div></Show>
                 <attachments::QueuedFiles queue/>
                 <form class="composer" on:submit=submit>
                     <div class="relative min-w-0 flex-1 self-stretch">
@@ -1447,6 +1492,9 @@ pub(super) fn ChatPanel(
                     <div class="composer-tools">
                         <super::emoji::ComposerEmoji input=mentions.input draft disabled=Signal::derive(move ||!chat.permissions.with(|p|p.contains(&Permission::SendMessages)))/>
                         <attachments::Picker queue editing/>
+                        <super::voice_message::Recorder ui target=super::voice_message::Target::Guild { guild, channel }
+                            disabled=Signal::derive(move || editing.get().is_some() || !chat.permissions.with(|p| p.contains(&Permission::SendMessages)))
+                            on_send=send_voice/>
                         <button class="composer-send" aria-label=move ||if editing.get().is_some(){crate::i18n::t("Save message")}else{crate::i18n::t("Send message")} data-tip=move ||if editing.get().is_some(){crate::i18n::t("Save")}else{crate::i18n::t("Send")} disabled=move||loading.get()||!composer_ready()||!chat.permissions.with(|p|p.contains(&Permission::SendMessages))><Icon kind=Glyph::Send/></button>
                     </div>
                 </form>

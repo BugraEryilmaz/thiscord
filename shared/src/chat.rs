@@ -200,6 +200,21 @@ pub struct ChatAttachment {
     pub filename: String,
     pub content_type: String,
     pub size_bytes: u64,
+    /// Present on voice messages (validated Ogg Opus). Older clients ignore it
+    /// and offer the file as an ordinary audio download.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub voice: Option<VoiceMetadata>,
+    /// Hidden behind a "Spoiler" cover until the viewer reveals it.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub spoiler: bool,
+}
+
+/// Server-verified duration plus the uploader's compact amplitude outline.
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+pub struct VoiceMetadata {
+    pub duration_ms: u32,
+    /// URL-safe base64 of [`crate::voice_message::WAVEFORM_BARS`] bytes (0-255).
+    pub waveform: String,
 }
 
 /// Raw binary POST query. The server classifies content independently of this hint.
@@ -210,6 +225,52 @@ pub struct AttachmentUpload {
     pub channel_id: ChannelId,
     pub filename: String,
     pub content_type: String,
+    /// Validate the body as an Ogg Opus voice message (length and size bounds).
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub voice: bool,
+    /// Voice messages only: [`VoiceMetadata::waveform`] computed while recording.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub waveform: Option<String>,
+}
+
+/// Previous versions kept per edited message (guild and private). Older
+/// versions are discarded; deleting the message deletes all of them.
+pub const MAX_EDIT_HISTORY: usize = 20;
+
+/// One replaced version of a message's text.
+#[derive(Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct MessageVersion {
+    pub content: String,
+    /// When this version became current (the send or an earlier edit).
+    pub created_at: Timestamp,
+    /// When an edit replaced it.
+    pub replaced_at: Timestamp,
+}
+
+/// Previous versions, newest first, at most [`MAX_EDIT_HISTORY`]. The current
+/// version is the message itself. Edits made before history was kept are absent.
+#[derive(Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct EditHistory {
+    pub message_id: MessageId,
+    pub versions: Vec<MessageVersion>,
+}
+
+/// Fixed-width stand-in for spoiler text in plain-text previews.
+pub const SPOILER_PLACEHOLDER: &str = "\u{2592}\u{2592}\u{2592}\u{2592}\u{2592}";
+
+/// Replaces everything from the first to the last `||` with
+/// [`SPOILER_PLACEHOLDER`] when the text may contain a spoiler. Used for
+/// plain-text previews (replies, announcements, banners). This hides at least
+/// everything the Markdown renderer hides, whose delimiters are literal `||`.
+pub fn mask_spoilers(text: &str) -> std::borrow::Cow<'_, str> {
+    match (text.find("||"), text.rfind("||")) {
+        (Some(first), Some(last)) if last >= first + 2 => std::borrow::Cow::Owned(format!(
+            "{}{SPOILER_PLACEHOLDER}{}",
+            &text[..first],
+            &text[last + 2..]
+        )),
+        _ => std::borrow::Cow::Borrowed(text),
+    }
 }
 #[derive(Clone, Serialize, Deserialize)]
 pub struct ChatMessage {
@@ -310,6 +371,9 @@ pub enum ChatRequest {
         attachment_ids: Vec<AttachmentId>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         reply_to: Option<MessageId>,
+        /// Attachments among `attachment_ids` to publish as spoilers.
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        spoilers: Vec<AttachmentId>,
     },
     Edit {
         guild_id: GuildId,
@@ -360,6 +424,12 @@ pub enum ChatRequest {
         guild_id: GuildId,
         account_id: AccountId,
     },
+    /// Previous versions of an undeleted message; same access as reading it.
+    EditHistory {
+        guild_id: GuildId,
+        channel_id: ChannelId,
+        message_id: MessageId,
+    },
 }
 #[derive(Clone, Serialize, Deserialize)]
 #[serde(tag = "result", rename_all = "snake_case")]
@@ -370,6 +440,7 @@ pub enum ChatResponse {
     Unread { channels: Vec<Unread> },
     Pins { messages: Vec<ChatMessage> },
     MemberProfile { profile: MemberProfile },
+    EditHistory { history: EditHistory },
     Done,
 }
 
@@ -484,6 +555,75 @@ pub enum ServerEvent {
 mod tests {
     use super::*;
     use serde_json::json;
+
+    #[test]
+    fn voice_spoiler_and_edit_history_fields_are_additive() {
+        let id = "00000000-0000-0000-0000-000000000001";
+        // Legacy metadata (stored rows, older servers) decodes without the new fields.
+        let legacy = json!({"id":id,"filename":"a.png","content_type":"image/png","size_bytes":3});
+        let attachment: ChatAttachment = serde_json::from_value(legacy.clone()).unwrap();
+        assert!(attachment.voice.is_none() && !attachment.spoiler);
+        assert_eq!(serde_json::to_value(&attachment).unwrap(), legacy);
+        let voice = ChatAttachment {
+            voice: Some(VoiceMetadata {
+                duration_ms: 1500,
+                waveform: "AA".into(),
+            }),
+            spoiler: true,
+            ..attachment
+        };
+        let wire = serde_json::to_value(&voice).unwrap();
+        assert_eq!(wire["voice"]["duration_ms"], 1500);
+        assert_eq!(wire["spoiler"], true);
+        // Released 0.1.61 clients decode the attachment as an ordinary file:
+        // their struct has exactly the legacy fields and ignores the rest.
+        #[derive(Deserialize)]
+        #[allow(dead_code)]
+        struct Released {
+            id: AttachmentId,
+            filename: String,
+            content_type: String,
+            size_bytes: u64,
+        }
+        let old: Released = serde_json::from_value(wire).unwrap();
+        assert_eq!(old.content_type, "image/png");
+        // Old send payloads omit spoilers and new ones omit an empty list.
+        let send: ChatRequest = serde_json::from_value(json!({"action":"send","guild_id":id,"channel_id":id,"client_id":id,"content":"x","attachment_ids":[id]})).unwrap();
+        assert!(matches!(&send, ChatRequest::Send { spoilers, .. } if spoilers.is_empty()));
+        assert!(
+            serde_json::to_value(&send)
+                .unwrap()
+                .get("spoilers")
+                .is_none()
+        );
+        let upload: AttachmentUpload = serde_json::from_value(
+            json!({"guild_id":id,"channel_id":id,"filename":"f","content_type":"x"}),
+        )
+        .unwrap();
+        assert!(!upload.voice && upload.waveform.is_none());
+        let wire = json!({"action":"edit_history","guild_id":id,"channel_id":id,"message_id":id});
+        let request: ChatRequest = serde_json::from_value(wire.clone()).unwrap();
+        assert_eq!(serde_json::to_value(request).unwrap(), wire);
+        let response = json!({"result":"edit_history","history":{"message_id":id,"versions":[{"content":"old","created_at":"2026-01-01T00:00:00Z","replaced_at":"2026-01-01T00:01:00Z"}]}});
+        let parsed: ChatResponse = serde_json::from_value(response.clone()).unwrap();
+        assert_eq!(serde_json::to_value(parsed).unwrap(), response);
+    }
+
+    #[test]
+    fn spoiler_masking_covers_every_possible_spoiler() {
+        let hidden = SPOILER_PLACEHOLDER;
+        assert_eq!(mask_spoilers("plain | text"), "plain | text");
+        assert_eq!(mask_spoilers("a ||b|| c"), format!("a {hidden} c"));
+        // Unpaired delimiters stay visible; text between separate spoilers is hidden.
+        assert_eq!(mask_spoilers("||open"), "||open");
+        assert_eq!(mask_spoilers("|||"), "|||");
+        assert_eq!(mask_spoilers("x ||a|| y ||b|| z"), format!("x {hidden} z"));
+        assert_eq!(mask_spoilers("||a\n\nb|| c ||d||"), hidden);
+        assert_eq!(
+            mask_spoilers("\u{fc}n ||\u{e7}\u{f6}de|| \u{11f}"),
+            format!("\u{fc}n {hidden} \u{11f}")
+        );
+    }
 
     #[test]
     fn guild_update_hints_are_opt_in() {

@@ -220,6 +220,11 @@ pub(super) fn dispatch(
             guild_id,
             channel_id,
         }
+        | ChatRequest::EditHistory {
+            guild_id,
+            channel_id,
+            ..
+        }
         | ChatRequest::Context {
             guild_id,
             channel_id,
@@ -329,6 +334,7 @@ pub(super) fn dispatch(
                     content,
                     attachment_ids,
                     reply_to,
+                    mut spoilers,
                     ..
                 } => {
                     if reply_to.is_some() {
@@ -341,13 +347,28 @@ pub(super) fn dispatch(
                     }
                     text(&content, !attachment_ids.is_empty())?;
                     super::attachments::validate_ids(&attachment_ids)?;
+                    super::attachments::validate_spoilers(&attachment_ids, &spoilers)?;
+                    spoilers.sort();
                     let existing: Vec<serde_json::Value> = query(
                         c,
                         "SELECT jsonb_build_object('id',id,'guild_id',guild_id,'channel_id',channel_id,'request_hash',request_hash) AS data FROM messages WHERE author_id=$1::uuid AND client_id=$2::uuid",
                         &[&actor.to_string(), &client_id.to_string()],
                     )?;
                     // Preserve legacy text-only hashes across deployment upgrades.
-                    let hash = if reply_to.is_some() {
+                    let hash = if reply_to.is_some() && !spoilers.is_empty() {
+                        format!(
+                            "reply-spoilers:{}",
+                            auth::digest(
+                                &serde_json::to_string(&(
+                                    &content,
+                                    &attachment_ids,
+                                    reply_to,
+                                    &spoilers
+                                ))
+                                .map_err(|_| Failure::Unavailable)?
+                            )
+                        )
+                    } else if reply_to.is_some() {
                         format!(
                             "reply:{}",
                             auth::digest(
@@ -357,6 +378,16 @@ pub(super) fn dispatch(
                         )
                     } else if attachment_ids.is_empty() {
                         auth::digest(&content)
+                    } else if !spoilers.is_empty() {
+                        // Spoiler marks are part of the payload; sends without
+                        // them keep the earlier hash schemes.
+                        format!(
+                            "spoilers:{}",
+                            auth::digest(
+                                &serde_json::to_string(&(&content, &attachment_ids, &spoilers))
+                                    .map_err(|_| Failure::Unavailable)?
+                            )
+                        )
                     } else {
                         format!(
                             "attachments:{}",
@@ -424,7 +455,15 @@ pub(super) fn dispatch(
                             &[&id.to_string(), &target.to_string()],
                         )?;
                     }
-                    super::attachments::attach(c, actor, guild, channel_id, id, &attachment_ids)?;
+                    super::attachments::attach(
+                        c,
+                        actor,
+                        guild,
+                        channel_id,
+                        id,
+                        &attachment_ids,
+                        &spoilers,
+                    )?;
                     event(c, guild, channel_id, id)?;
                     notification_recipients = crate::notifications::guild_recipients(c, guild)?;
                     change = Some(super::notifications::Change::Message(guild, channel_id));
@@ -454,10 +493,11 @@ pub(super) fn dispatch(
                         });
                     }
                     let mentions = mentions(c, guild, &content)?;
+                    let at = keep_version(c, "message_edits", "messages", message_id)?;
                     execute(
                         c,
-                        "UPDATE messages SET content=$2,mentions=$3::jsonb,edited_at=clock_timestamp(),revision=revision+1 WHERE id=$1::uuid",
-                        &[&message_id.to_string(), &content, &mentions],
+                        "UPDATE messages SET content=$2,mentions=$3::jsonb,edited_at=$4::timestamptz,revision=revision+1 WHERE id=$1::uuid",
+                        &[&message_id.to_string(), &content, &mentions, &at],
                     )?;
                     event(c, guild, channel_id, message_id)?;
                     change = Some(super::notifications::Change::Message(guild, channel_id));
@@ -488,6 +528,11 @@ pub(super) fn dispatch(
                     execute(
                         c,
                         "DELETE FROM attachments WHERE message_id=$1::uuid",
+                        &[&message_id.to_string()],
+                    )?;
+                    execute(
+                        c,
+                        "DELETE FROM message_edits WHERE message_id=$1::uuid",
                         &[&message_id.to_string()],
                     )?;
                     event(c, guild, channel_id, message_id)?;
@@ -540,6 +585,28 @@ pub(super) fn dispatch(
                     }
                     Ok(ChatResponse::Message {
                         message: Box::new(message(c, message_id)?),
+                    })
+                }
+                ChatRequest::EditHistory {
+                    channel_id,
+                    message_id,
+                    ..
+                } => {
+                    // Serialize with same-channel edits and deletions.
+                    execute(
+                        c,
+                        "SELECT id FROM channels WHERE guild_id=$1::uuid AND id=$2::uuid FOR SHARE",
+                        &[&guild.to_string(), &channel_id.to_string()],
+                    )?;
+                    let current = message(c, message_id)?;
+                    if current.guild_id != guild
+                        || current.channel_id != channel_id
+                        || current.deleted
+                    {
+                        return Err(Failure::Forbidden);
+                    }
+                    Ok(ChatResponse::EditHistory {
+                        history: versions(c, "message_edits", message_id)?,
                     })
                 }
                 ChatRequest::Pins { channel_id, .. } => Ok(ChatResponse::Pins {
@@ -611,6 +678,55 @@ pub(super) fn dispatch(
         }
     }
     Ok((response, change))
+}
+
+/// Copies the current text into an edit-history table before an edit and keeps
+/// only the newest [`MAX_EDIT_HISTORY`] versions. Returns the edit time, which
+/// the caller stores as the message's `edited_at` so versions chain exactly.
+/// `table`/`source` are fixed identifiers chosen by callers, never input.
+pub(crate) fn keep_version(
+    c: &mut PgConnection,
+    table: &'static str,
+    source: &'static str,
+    id: MessageId,
+) -> Result<String, Failure> {
+    let (insert, prune) = match (table, source) {
+        ("message_edits", "messages") => (
+            "INSERT INTO message_edits(message_id,content,created_at,replaced_at) SELECT id,content,COALESCE(edited_at,created_at),clock_timestamp() FROM messages WHERE id=$1::uuid RETURNING to_jsonb(replaced_at) AS data",
+            "DELETE FROM message_edits WHERE message_id=$1::uuid AND id NOT IN (SELECT id FROM message_edits WHERE message_id=$1::uuid ORDER BY id DESC LIMIT $2::integer)",
+        ),
+        ("direct_message_edits", "direct_messages") => (
+            "INSERT INTO direct_message_edits(message_id,content,created_at,replaced_at) SELECT id,content,COALESCE(edited_at,created_at),clock_timestamp() FROM direct_messages WHERE id=$1::uuid RETURNING to_jsonb(replaced_at) AS data",
+            "DELETE FROM direct_message_edits WHERE message_id=$1::uuid AND id NOT IN (SELECT id FROM direct_message_edits WHERE message_id=$1::uuid ORDER BY id DESC LIMIT $2::integer)",
+        ),
+        _ => return Err(Failure::Unavailable),
+    };
+    let at: thiscord_shared::Timestamp = query(c, insert, &[&id.to_string()])?
+        .pop()
+        .ok_or(Failure::Forbidden)?;
+    execute(c, prune, &[&id.to_string(), &MAX_EDIT_HISTORY.to_string()])?;
+    Ok(at.to_rfc3339_opts(chrono::SecondsFormat::Micros, true))
+}
+
+/// Previous versions, newest first. Callers authorize reading the message first.
+pub(crate) fn versions(
+    c: &mut PgConnection,
+    table: &'static str,
+    id: MessageId,
+) -> Result<EditHistory, Failure> {
+    let sql = match table {
+        "message_edits" => {
+            "SELECT jsonb_build_object('content',content,'created_at',created_at,'replaced_at',replaced_at) AS data FROM message_edits WHERE message_id=$1::uuid ORDER BY id DESC LIMIT $2::integer"
+        }
+        "direct_message_edits" => {
+            "SELECT jsonb_build_object('content',content,'created_at',created_at,'replaced_at',replaced_at) AS data FROM direct_message_edits WHERE message_id=$1::uuid ORDER BY id DESC LIMIT $2::integer"
+        }
+        _ => return Err(Failure::Unavailable),
+    };
+    Ok(EditHistory {
+        message_id: id,
+        versions: query(c, sql, &[&id.to_string(), &MAX_EDIT_HISTORY.to_string()])?,
+    })
 }
 
 fn response_message(

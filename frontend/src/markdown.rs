@@ -1,4 +1,7 @@
 //! Bounded Markdown AST; the UI constructs DOM nodes and never accepts raw HTML.
+//! `||spoilers||` are paired within one inline container. Only literal `||` in
+//! the source delimits them (never escapes or entities), so
+//! `thiscord_shared::chat::mask_spoilers` hides at least everything hidden here.
 use pulldown_cmark::{Event, Options, Parser, Tag};
 #[derive(Clone, Debug, PartialEq)]
 pub enum Kind {
@@ -13,6 +16,8 @@ pub enum Kind {
     List,
     Item,
     Link(String),
+    /// Hidden until the reader reveals it; never inside code or link text.
+    Spoiler,
 }
 #[derive(Clone, Debug, PartialEq)]
 pub enum Node {
@@ -30,7 +35,8 @@ pub fn parse(text: &str) -> Vec<Node> {
         .take(thiscord_shared::chat::MAX_MESSAGE_CHARS)
         .collect();
     let mut stack = vec![(Kind::Plain, Vec::new())];
-    for (count, event) in Parser::new_ext(&bounded, Options::ENABLE_STRIKETHROUGH).enumerate() {
+    let events = Parser::new_ext(&bounded, Options::ENABLE_STRIKETHROUGH).into_offset_iter();
+    for (count, (event, range)) in events.enumerate() {
         if count >= MAX_EVENTS {
             return vec![Node::Literal(bounded)];
         }
@@ -65,11 +71,25 @@ pub fn parse(text: &str) -> Vec<Node> {
                         .push(Node::Element(kind, children));
                 }
             }
-            Event::Text(value) => stack
-                .last_mut()
-                .unwrap()
-                .1
-                .push(Node::Text(value.into_string())),
+            // Escaped or entity-decoded text differs from its source; mark it
+            // literal so it can never form a spoiler delimiter.
+            Event::Text(value) => {
+                let nodes = &mut stack.last_mut().unwrap().1;
+                let escaped = range.start > 0 && bounded.as_bytes()[range.start - 1] == b'\\';
+                if bounded.get(range.clone()) != Some(value.as_ref()) {
+                    nodes.push(Node::Literal(value.into_string()));
+                } else if escaped {
+                    // A backslash escape yields its character as the start of
+                    // a text event; only that first character is literal.
+                    let split = value.chars().next().map_or(0, char::len_utf8);
+                    nodes.push(Node::Literal(value[..split].into()));
+                    if split < value.len() {
+                        nodes.push(Node::Text(value[split..].into()));
+                    }
+                } else {
+                    nodes.push(Node::Text(value.into_string()));
+                }
+            }
             Event::Html(value) | Event::InlineHtml(value) => stack
                 .last_mut()
                 .unwrap()
@@ -85,7 +105,87 @@ pub fn parse(text: &str) -> Vec<Node> {
             _ => {}
         }
     }
-    stack.pop().unwrap().1
+    spoilers(stack.pop().unwrap().1)
+}
+
+fn push_text(nodes: &mut Vec<Node>, text: &str) {
+    if let Some(Node::Text(last)) = nodes.last_mut() {
+        last.push_str(text);
+    } else {
+        nodes.push(Node::Text(text.into()));
+    }
+}
+
+/// Pairs `||` delimiters left to right within each inline sequence. An
+/// unmatched final delimiter and empty pairs stay literal text.
+fn spoilers(nodes: Vec<Node>) -> Vec<Node> {
+    enum Piece {
+        Node(Node),
+        Delimiter,
+    }
+    let mut pieces = Vec::new();
+    let mut delimiters = 0usize;
+    let mut text = String::new();
+    let flush = |text: &mut String, pieces: &mut Vec<Piece>, delimiters: &mut usize| {
+        let mut rest = text.as_str();
+        while let Some(at) = rest.find("||") {
+            if at > 0 {
+                pieces.push(Piece::Node(Node::Text(rest[..at].into())));
+            }
+            pieces.push(Piece::Delimiter);
+            *delimiters += 1;
+            rest = &rest[at + 2..];
+        }
+        if !rest.is_empty() {
+            pieces.push(Piece::Node(Node::Text(rest.into())));
+        }
+        text.clear();
+    };
+    for node in nodes {
+        match node {
+            // Adjacent text events may split a delimiter; merge them first.
+            Node::Text(value) => text.push_str(&value),
+            Node::Element(kind, children) => {
+                flush(&mut text, &mut pieces, &mut delimiters);
+                let children = if matches!(kind, Kind::Code | Kind::CodeBlock | Kind::Link(_)) {
+                    children
+                } else {
+                    spoilers(children)
+                };
+                pieces.push(Piece::Node(Node::Element(kind, children)));
+            }
+            other => {
+                flush(&mut text, &mut pieces, &mut delimiters);
+                pieces.push(Piece::Node(other));
+            }
+        }
+    }
+    flush(&mut text, &mut pieces, &mut delimiters);
+    let mut output = Vec::new();
+    let mut open: Option<Vec<Node>> = None;
+    let mut remaining = delimiters;
+    for piece in pieces {
+        match piece {
+            Piece::Delimiter => {
+                remaining -= 1;
+                match open.take() {
+                    None if remaining > 0 => open = Some(Vec::new()),
+                    None => push_text(&mut output, "||"),
+                    Some(inner) if inner.is_empty() => push_text(&mut output, "||||"),
+                    Some(inner) => output.push(Node::Element(Kind::Spoiler, inner)),
+                }
+            }
+            Piece::Node(Node::Text(value)) => match &mut open {
+                Some(inner) => push_text(inner, &value),
+                None => push_text(&mut output, &value),
+            },
+            Piece::Node(node) => match &mut open {
+                Some(inner) => inner.push(node),
+                None => output.push(node),
+            },
+        }
+    }
+    output
 }
 #[cfg(test)]
 mod tests {
@@ -130,6 +230,91 @@ mod tests {
             &parse("**bold**")[0],
             Node::Element(Kind::Paragraph, _)
         ));
+    }
+    fn spoiler_texts(nodes: &[Node]) -> Vec<String> {
+        fn text(nodes: &[Node]) -> String {
+            nodes
+                .iter()
+                .map(|n| match n {
+                    Node::Text(t) | Node::Literal(t) => t.clone(),
+                    Node::Element(_, c) => text(c),
+                    Node::Break => "
+"
+                    .into(),
+                })
+                .collect()
+        }
+        nodes
+            .iter()
+            .flat_map(|n| match n {
+                Node::Element(Kind::Spoiler, c) => vec![text(c)],
+                Node::Element(_, c) => spoiler_texts(c),
+                _ => vec![],
+            })
+            .collect()
+    }
+    #[test]
+    fn spoilers_pair_within_inline_text_and_skip_code_escapes_and_entities() {
+        assert_eq!(spoiler_texts(&parse("a ||b|| c")), ["b"]);
+        assert_eq!(spoiler_texts(&parse("||one|| and ||two||")), ["one", "two"]);
+        assert_eq!(
+            spoiler_texts(&parse("||**bold** [x](https://a.b)||")),
+            ["bold x"]
+        );
+        assert_eq!(spoiler_texts(&parse("**||inside||**")), ["inside"]);
+        assert_eq!(
+            spoiler_texts(&parse(
+                "||line
+break||"
+            )),
+            ["line
+break"]
+        );
+        for plain in [
+            "||open",
+            "||||",
+            "|||",
+            "`||code||`",
+            "```
+||block||
+```",
+            r"\|\|escaped\|\|",
+            "&#124;&#124;entity&#124;&#124;",
+            "[||link||](https://a.b)",
+            "||first paragraph
+
+second||",
+        ] {
+            assert!(spoiler_texts(&parse(plain)).is_empty(), "{plain}");
+        }
+        // An odd delimiter count leaves the last one literal.
+        let nodes = parse("||a|| b ||");
+        assert_eq!(spoiler_texts(&nodes), ["a"]);
+        assert!(format!("{nodes:?}").contains("b ||"));
+    }
+    #[test]
+    fn preview_masking_hides_every_rendered_spoiler() {
+        for text in [
+            "x ||secret|| y",
+            "||a|| mid ||b||",
+            "**||bold secret||** tail",
+            "> ||quoted secret||",
+            "- ||listed secret||
+- other",
+            "||split
+secret|| after",
+            "start ||a
+
+b|| ||hidden|| end",
+        ] {
+            let masked = thiscord_shared::chat::mask_spoilers(text);
+            for secret in spoiler_texts(&parse(text)) {
+                if secret.trim().is_empty() {
+                    continue;
+                }
+                assert!(!masked.contains(secret.trim()), "{text} leaks {secret}");
+            }
+        }
     }
     #[test]
     fn work_and_nesting_are_bounded() {
