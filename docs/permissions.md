@@ -247,8 +247,8 @@ moderation panel opens a dialog with the current nickname, a character count,
   with the new and previous nickname (and an optional reason through `moderate`);
   self-changes are not audited.
 - The nickname replaces the display name in that server only: messages, member list,
-  voice rosters, typing/online indicators, mention suggestions (which also match
-  nicknames) and notifications. Friends, private messages and other servers keep the
+  voice rosters, mention suggestions (which also match nicknames) and notifications;
+  typing/online indicators and an open moderation panel pick it up on their next refresh. Friends, private messages and other servers keep the
   profile name. Profile cards show the nickname with the profile name and
   `@username`. Leaving or removal drops it.
 - A nickname change is presentation, not access: it bumps the guild revision but
@@ -264,8 +264,9 @@ Released clients reject unknown permission names, so the backend only sends
 (`?permission_set=2` on `POST /api/v1/permissions`, `permission_set` on the chat
 socket's `connect`); others receive role, override, preview, moderation and
 `subscribed` permission sets without them. Their full-replacement role and override
-edits preserve the hidden names. Server-substituted names (messages, rosters,
-suggestions) already show nicknames in released clients; they do not show colors,
+edits preserve the hidden names. Deploy the backend before this client: older servers reject the new
+`permission_set`, `appearance` and `set_nickname` fields. Server-substituted names
+(messages, rosters, suggestions) already show nicknames in released clients; they do not show colors,
 sections or the dialog. Rollback removes nicknames, colors, the toggle and both
 permission names.
 

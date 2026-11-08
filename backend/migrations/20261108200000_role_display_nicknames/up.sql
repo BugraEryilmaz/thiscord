@@ -10,11 +10,12 @@ UPDATE guild_roles SET hoist = TRUE WHERE NOT everyone;
 
 -- A nickname belongs to one membership: leaving or being removed drops it.
 -- Validation matches display names (trimmed, 1-64 characters, no control
--- characters); the backend enforces the same rule before writing.
+-- characters as Rust's char::is_control defines them: C0, DEL and C1); the
+-- backend enforces the same rule before writing.
 ALTER TABLE guild_members
     ADD COLUMN nickname TEXT CHECK (
         nickname IS NULL
-        OR (char_length(nickname) BETWEEN 1 AND 64 AND nickname = btrim(nickname) AND nickname !~ '[[:cntrl:]]')
+        OR (char_length(nickname) BETWEEN 1 AND 64 AND nickname = btrim(nickname) AND nickname !~ '[\x01-\x1f\x7f-\x9f]')
     );
 
 -- Members may set their own nickname by default, like other everyday actions.
