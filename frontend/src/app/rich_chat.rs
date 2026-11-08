@@ -474,7 +474,7 @@ fn PinnedMessage(chat: Chat, id: MessageId) -> impl IntoView {
                     }><Icon kind=Glyph::Close/></button>
                 </Show>
             </div>
-            <div class="pl-7 text-sm text-content">{move ||message.with(|m|super::super::message_content::render(m.as_ref().map(|m|m.content.as_str()).unwrap_or_default(),chat.ui))}</div>
+            <div class="pl-7 text-sm text-content">{move ||message.with(|m|super::super::message_content::render(m.as_ref().map(|m|m.content.as_str()).unwrap_or_default(),chat.ui,Some(chat.guild)))}</div>
             <For each=move ||message.with(|m|m.as_ref().map(|m|m.attachments.clone()).unwrap_or_default()) key=|a|a.id children=move |attachment|view!{
                 <button class="ml-7 mt-2 block max-w-full truncate text-sm text-link hover:underline" title=move ||crate::i18n::t("Jump to pinned message") on:click=move |_|chat.jump(id)>{attachment.filename}</button>
             }/>

@@ -231,7 +231,8 @@ pub(super) fn moderation_target(change: &GuildChange) -> Option<AccountId> {
         | GuildChange::DisconnectVoice { account_id }
         | GuildChange::SetServerMute { account_id, .. }
         | GuildChange::SetServerDeafen { account_id, .. }
-        | GuildChange::MoveVoice { account_id, .. } => Some(*account_id),
+        | GuildChange::MoveVoice { account_id, .. }
+        | GuildChange::SetNickname { account_id, .. } => Some(*account_id),
         _ => None,
     }
 }
@@ -245,12 +246,26 @@ pub(super) fn audit(
     let Some(target) = moderation_target(change) else {
         return Ok(());
     };
+    // Members renaming themselves are not moderation.
+    if target == actor && matches!(change, GuildChange::SetNickname { .. }) {
+        return Ok(());
+    }
     let value = serde_json::to_value(change).map_err(|_| Failure::Unavailable)?;
     let action = value["action"].as_str().ok_or(Failure::Unavailable)?;
     let mut details = value.clone();
     if let Some(object) = details.as_object_mut() {
         object.remove("action");
         object.remove("account_id");
+        if let GuildChange::SetNickname { nickname, .. } = change {
+            // Store what was applied (trimmed) and what it replaced.
+            let previous = state
+                .members
+                .iter()
+                .find(|m| m.account_id == target)
+                .and_then(|m| m.nickname.clone());
+            object.insert("nickname".into(), nickname.as_deref().map(str::trim).into());
+            object.insert("previous".into(), previous.into());
+        }
     }
     let guild = state.guild.id.to_string();
     execute(

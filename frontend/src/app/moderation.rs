@@ -25,6 +25,28 @@ fn audit_description(entry: &AuditEntry) -> String {
                 },
             );
         }
+        "set_nickname" => {
+            let name = |key: &str| details[key].as_str().map(|n| format!("“{n}”"));
+            return match (name("previous"), name("nickname")) {
+                (Some(from), Some(to)) => thiscord_frontend::localized_format!(
+                    crate::i18n::language(),
+                    "Nickname: {} → {}",
+                    from,
+                    to
+                ),
+                (None, Some(to)) => thiscord_frontend::localized_format!(
+                    crate::i18n::language(),
+                    "Nickname set: {}",
+                    to
+                ),
+                (Some(from), None) => thiscord_frontend::localized_format!(
+                    crate::i18n::language(),
+                    "Nickname reset: {}",
+                    from
+                ),
+                (None, None) => crate::i18n::t("Nickname reset").to_owned(),
+            };
+        }
         "move_voice" => {
             return thiscord_frontend::localized_format!(
                 crate::i18n::language(),
@@ -249,6 +271,7 @@ fn ServerModeration(ui: Ui, guild: GuildId) -> impl IntoView {
                             </div>
                         </Show>
                         <div class="flex flex-wrap gap-3">
+                            <Show when=move ||allowed(Permission::ManageNicknames)><button class="rounded-lg border border-white/20 px-4 py-2 hover:bg-white/10" aria-haspopup="dialog" on:click=move |_|if let Some(m)=member(){super::nickname::open(ui,guild,m.account_id);}>{move || crate::i18n::t("Change nickname")}</button></Show>
                             <Show when=move ||allowed(Permission::KickMembers)><button class="rounded-lg border border-red-400/40 px-4 py-2 text-red-300" on:click=move |_|if let Some(m)=member(){confirm(GuildChange::RemoveMember{account_id:m.account_id},thiscord_frontend::localized_format!(crate::i18n::language(), "Kick {} from this server?",m.display_name().to_owned()),"Removes their membership and roles, and disconnects voice. They can rejoin using the server's join credentials.".into());}>{move || crate::i18n::t("Kick from server")}</button></Show>
                             <Show when=move ||allowed(Permission::BanMembers)><button class="rounded-lg bg-red-500/20 px-4 py-2 text-red-300" on:click=move |_|if let Some(m)=member(){confirm(GuildChange::BanMember{account_id:m.account_id},thiscord_frontend::localized_format!(crate::i18n::language(), "Ban {} from this server?",m.display_name().to_owned()),"Removes their membership and roles, disconnects voice, and prevents rejoining until unbanned. Existing messages are retained.".into());}>{move || crate::i18n::t("Ban from server")}</button></Show>
                         </div>

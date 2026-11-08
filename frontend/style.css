@@ -1404,7 +1404,32 @@ html:has(.welcome-page) { scroll-behavior: smooth; scroll-padding-top: 28px; bac
 .presence-dot.online.dnd { background: var(--color-danger); }
 .member-badge { flex-shrink: 0; padding: 0 7px; border-radius: 999px; background: var(--brand-soft); color: var(--brand-ink); font-size: 12px; font-weight: 600; line-height: 18px; }
 /* Role names are user-defined (up to 80 characters); keep rows on one line. */
-.member-role-badge { flex-shrink: 1; min-width: 0; max-width: 9rem; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.member-role-badge { display: inline-flex; flex-shrink: 1; align-items: center; gap: 5px; min-width: 0; max-width: 9rem; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+/* Role colours are user data: decorative dots use the raw colour; names use a
+   theme-adjusted, readable colour set inline by the app. */
+.role-dot { flex-shrink: 0; width: 8px; height: 8px; border-radius: 50%; box-shadow: 0 0 0 1px var(--tint-15); }
+.settings-item-list button:has(.role-list-dot) { display: flex; align-items: center; gap: 8px; }
+.role-list-dot { flex-shrink: 0; width: 10px; height: 10px; border-radius: 50%; box-shadow: 0 0 0 1px var(--tint-15); }
+.role-list-dot-none { background: transparent; box-shadow: inset 0 0 0 1.5px var(--tint-40); }
+.role-display { display: flex; flex-direction: column; gap: 12px; min-width: 0; margin: 4px 0 0; padding: 16px 0 4px; border: 0; border-top: 1px solid var(--tint-6); }
+.role-display legend { padding: 0 8px 0 0; color: color-mix(in srgb, var(--color-muted) 92%, transparent); font-size: 11px; font-weight: 700; letter-spacing: .08em; text-transform: uppercase; }
+.role-colors { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; }
+.role-color { width: 30px; height: 30px; border: 2px solid var(--tint-10); border-radius: 50%; cursor: pointer; }
+.role-color:hover { border-color: var(--tint-40); }
+.role-color[aria-checked="true"] { box-shadow: 0 0 0 2px var(--color-panel), 0 0 0 4px var(--tint-85); }
+.role-color-none { position: relative; background: var(--tint-4); }
+.role-color-none::after { content: ""; position: absolute; inset: 5px 12px; border-radius: 1px; background: var(--color-danger); transform: rotate(45deg); }
+.role-colors .appearance-custom { padding: 3px 12px 3px 3px; }
+.role-colors .appearance-custom input[type="color"] { width: 24px; height: 24px; padding: 0; border: 0; border-radius: 50%; background: none; cursor: pointer; }
+.role-preview { display: flex; flex-wrap: wrap; align-items: center; gap: 8px 10px; padding: 10px 12px; border-radius: var(--radius-md); background: var(--color-surface); }
+.role-preview-label { color: color-mix(in srgb, var(--color-muted) 92%, transparent); font-size: 11px; font-weight: 700; letter-spacing: .08em; text-transform: uppercase; }
+.role-preview-name { overflow: hidden; color: var(--color-white); font-weight: 600; text-overflow: ellipsis; white-space: nowrap; }
+.role-hoist { border-bottom: 0; cursor: pointer; }
+.role-hoist > span { display: flex; flex-direction: column; gap: 2px; min-width: 0; }
+.role-hoist small { color: color-mix(in srgb, var(--color-muted) 95%, transparent); font-size: 13px; line-height: 1.5; }
+.role-hoist input { flex-shrink: 0; width: 18px; height: 18px; accent-color: var(--color-brand); }
+.nickname-dialog { width: min(440px, calc(100vw - 32px)); }
+@media (pointer: coarse) { .role-color { width: 40px; height: 40px; } .role-colors { gap: 10px; } }
 .member-drawer-close, .member-drawer-backdrop { display: none; }
 .profile-card { width: min(420px, calc(100vw - 32px)); }
 .status-emoji-popover { top: calc(100% + 8px); right: auto; bottom: auto; left: 0; }

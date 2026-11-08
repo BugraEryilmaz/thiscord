@@ -153,6 +153,7 @@ pub(super) async fn serve(
     id: RequestId,
     token: String,
     guild_updates: bool,
+    permission_set: u8,
 ) {
     let account_access = match socket_access(&pool, &token).await {
         Ok(access) => access,
@@ -315,7 +316,7 @@ pub(super) async fn serve(
                             cursor = ready.history.as_ref().map_or(0, |h| h.event_cursor);
                             last_unread = ready.unread.clone();
                             last_permissions = ready.permissions.clone();
-                            if send(&mut socket, ServerEvent::Subscribed { subscription: serial, history: ready.history, permissions: ready.permissions }).await.is_err() { break; }
+                            if send(&mut socket, ServerEvent::Subscribed { subscription: serial, history: ready.history, permissions: { let mut p = ready.permissions; thiscord_shared::permissions::restrict(&mut p, permission_set); p } }).await.is_err() { break; }
                             if update(&mut socket, sub, ServerEvent::Unread { channels: ready.unread }).await.is_err() { break; }
                             subscription = Some(sub); listener = Some(route); presence_dirty = sub.channel.is_some();
                             members_dirty = watch_members;

@@ -101,7 +101,7 @@ impl Editor {
             let selection = self.ui.navigation.get_untracked().current();
             let token = self.ui.token.get_untracked();
             let result = crate::account_client::api_request::<_, PermissionResponse>(
-                PERMISSIONS_PATH,
+                &permissions_path(),
                 &command,
                 token.as_deref(),
             )
@@ -220,7 +220,7 @@ impl Editor {
                     if instance_mutation {
                         let refreshed =
                             crate::account_client::api_request::<_, PermissionResponse>(
-                                PERMISSIONS_PATH,
+                                &permissions_path(),
                                 &PermissionRequest::Instance {},
                                 token.as_deref(),
                             )
@@ -362,6 +362,8 @@ fn permission_name(p: Permission) -> &'static str {
         Permission::DeafenMembers => crate::i18n::t("Deafen members"),
         Permission::MoveMembers => crate::i18n::t("Move & disconnect members"),
         Permission::UseSoundboard => crate::i18n::t("Use soundboard"),
+        Permission::ChangeNickname => crate::i18n::t("Change own nickname"),
+        Permission::ManageNicknames => crate::i18n::t("Manage nicknames"),
     }
 }
 #[component]
@@ -613,19 +615,44 @@ fn Roles(editor: Editor) -> impl IntoView {
     let name = RwSignal::new(String::new());
     let position = RwSignal::new("1".to_owned());
     let grants = RwSignal::new(Permissions::new());
+    let appearance = RwSignal::new(RoleAppearance::default());
     let baseline = Memo::new(move |_| {
         editor
             .state
             .get()
             .and_then(|s| s.roles.into_iter().find(|r| r.id.to_string() == role.get()))
-            .map(|r| (r.name, r.position.to_string(), r.permissions))
-            .unwrap_or_else(|| (String::new(), "1".into(), Permissions::new()))
+            .map(|r| {
+                (
+                    r.name.clone(),
+                    r.position.to_string(),
+                    r.permissions.clone(),
+                    r.appearance(),
+                )
+            })
+            .unwrap_or_else(|| {
+                (
+                    String::new(),
+                    "1".into(),
+                    Permissions::new(),
+                    RoleAppearance::default(),
+                )
+            })
+    });
+    let everyone = Memo::new(move |_| {
+        editor.state.with(|s| {
+            s.as_ref().is_some_and(|s| {
+                s.roles
+                    .iter()
+                    .any(|r| r.everyone && r.id.to_string() == role.get())
+            })
+        })
     });
     let reset = move || {
-        let (n, p, g) = baseline.get_untracked();
+        let (n, p, g, a) = baseline.get_untracked();
         name.set(n);
         position.set(p);
         grants.set(g);
+        appearance.set(a);
     };
     Effect::new(move |_| {
         baseline.track();
@@ -633,17 +660,118 @@ fn Roles(editor: Editor) -> impl IntoView {
     });
     Effect::new(move |_| {
         ui.settings_dirty
-            .set((name.get(), position.get(), grants.get()) != baseline.get())
+            .set((name.get(), position.get(), grants.get(), appearance.get()) != baseline.get())
     });
     on_cleanup(move || ui.settings_dirty.set(false));
-    view! {<CapacitySummary editor=editor/><div class="settings-split"><div class="settings-item-list" aria-label=move || crate::i18n::t("Server roles")><button aria-pressed=move ||role.get().is_empty() disabled=move ||ui.settings_dirty.get() on:click=move |_|role.set(String::new())>{move || crate::i18n::t("＋ New role")}</button>{move ||editor.state.get().map(|s|s.roles.into_iter().map(|r|{let id=r.id.to_string();let selected=id.clone();view!{<button aria-pressed=move ||role.get()==selected disabled=move ||ui.settings_dirty.get() on:click=move |_|role.set(id.clone())>{r.name}</button>}}).collect_view())}</div>
-        <form class="settings-card" on:submit=move |e:leptos::ev::SubmitEvent|{e.prevent_default();let Ok(position)=position.get_untracked().parse()else{ui.status.set("Enter a valid rank".into());return;};let change=if let Ok(role_id)=role.get_untracked().parse(){GuildChange::EditRole{role_id,name:name.get_untracked(),position,permissions:grants.get_untracked()}}else{GuildChange::CreateRole{name:name.get_untracked(),position,permissions:grants.get_untracked()}};editor.change(change);}>
+    let submit = move |e: leptos::ev::SubmitEvent| {
+        e.prevent_default();
+        let Ok(position) = position.get_untracked().parse() else {
+            ui.status.set("Enter a valid rank".into());
+            return;
+        };
+        let appearance = Some(appearance.get_untracked());
+        let change = if let Ok(role_id) = role.get_untracked().parse() {
+            GuildChange::EditRole {
+                role_id,
+                name: name.get_untracked(),
+                position,
+                permissions: grants.get_untracked(),
+                appearance,
+            }
+        } else {
+            GuildChange::CreateRole {
+                name: name.get_untracked(),
+                position,
+                permissions: grants.get_untracked(),
+                appearance,
+            }
+        };
+        editor.change(change);
+    };
+    view! {<CapacitySummary editor=editor/><div class="settings-split"><div class="settings-item-list" aria-label=move || crate::i18n::t("Server roles")><button aria-pressed=move ||role.get().is_empty() disabled=move ||ui.settings_dirty.get() on:click=move |_|role.set(String::new())>{move || crate::i18n::t("＋ New role")}</button>{move ||editor.state.get().map(|s|s.roles.into_iter().map(|r|{let id=r.id.to_string();let selected=id.clone();view!{<button aria-pressed=move ||role.get()==selected disabled=move ||ui.settings_dirty.get() on:click=move |_|role.set(id.clone())>
+            <span class="role-list-dot" class:role-list-dot-none=r.color.is_none() style:background-color=r.color.map(|c|c.hex()) aria-hidden="true"></span><span class="min-w-0 truncate">{r.name}</span>
+        </button>}}).collect_view())}</div>
+        <form class="settings-card" on:submit=submit>
             <h3>{move ||if role.get().is_empty(){crate::i18n::t("Create role")}else{crate::i18n::t("Edit role")}}</h3><Field label="Role name" value=name/><Field label="Hierarchy rank" value=position kind="number"/><p class="settings-hint">{move || crate::i18n::t("Higher ranks can manage lower ranks. Everyone stays at rank 0. You can only grant permissions you already have.")}</p>
+            <Show when=move || !everyone.get() fallback=move || view! {<p class="settings-hint">{move || crate::i18n::t("Everyone has no color and is never shown separately: it applies to every member.")}</p>}>
+                <RoleDisplay name appearance/>
+            </Show>
             <details><summary>{move || crate::i18n::t("Permissions")}</summary><PermissionChecks value=grants/></details>
             <Show when=move ||ui.settings_dirty.get()><p class="settings-hint">{move || crate::i18n::t("Unsaved changes. Save or reset before selecting another role.")}</p></Show><div class="settings-actions"><button type="button" class="settings-secondary" disabled=move ||!ui.settings_dirty.get() on:click=move |_|reset()>{move || crate::i18n::t("Reset")}</button><button class="settings-primary" disabled=move ||!ui.settings_dirty.get()||name.get().trim().is_empty()>{move || crate::i18n::t("Save role")}</button></div>
             <Show when=move ||editor.state.get().is_some_and(|s|s.roles.iter().any(|r|!r.everyone&&r.id.to_string()==role.get()))><super::settings::ConfirmButton ui=ui label="Delete role" title="Delete this role?" detail="Members lose the permissions it grants, and its channel permission overrides are removed. This cannot be undone." target=Signal::derive(move ||editor.state.get().and_then(|s|s.roles.into_iter().find(|r|r.id.to_string()==role.get()).map(|r|r.name)).unwrap_or_default()) action=editor.confirmed_then(move ||role.get_untracked().parse().ok().map(|role_id|GuildChange::DeleteRole{role_id}),Callback::new(move |()|role.set(String::new())))/></Show>
         </form>
     </div>}
+}
+
+/// Colour and "show separately" controls with a live preview, part of the
+/// role form; saved with the rest of the role.
+#[component]
+fn RoleDisplay(name: RwSignal<String>, appearance: RwSignal<RoleAppearance>) -> impl IntoView {
+    use thiscord_frontend::appearance::{ROLE_COLORS, Rgb};
+    let to_role = |c: Rgb| RoleColor::new(u32::from_be_bytes([0, c.0, c.1, c.2]));
+    let color = move || appearance.with(|a| a.color);
+    let set_color = move |value: Option<RoleColor>| appearance.update(|a| a.color = value);
+    let custom =
+        move || color().is_some_and(|c| !ROLE_COLORS.iter().any(|(_, p)| to_role(*p) == Some(c)));
+    // The roving tab stop: the selected swatch, or "No color" for custom colours.
+    let stop = move |swatch: Option<RoleColor>| {
+        if color() == swatch || (custom() && swatch.is_none()) {
+            "0"
+        } else {
+            "-1"
+        }
+    };
+    let picked = move |e: &leptos::ev::Event| Rgb::parse(&event_target_value(e)).and_then(to_role);
+    let preview_name = move || {
+        let n = name.get();
+        if n.trim().is_empty() {
+            crate::i18n::t("Role name").to_owned()
+        } else {
+            n
+        }
+    };
+    view! {
+        <fieldset class="role-display">
+            <legend>{move || crate::i18n::t("Display")}</legend>
+            <div class="role-colors" role="radiogroup" aria-label=move || crate::i18n::t("Role color") on:keydown=move |e| super::keyboard::rove_radio(&e)>
+                <button type="button" role="radio" class="role-color role-color-none" tabindex=move || stop(None)
+                    aria-checked=move || color().is_none().to_string() aria-label=move || crate::i18n::t("No color") data-tip=move || crate::i18n::t("No color")
+                    on:click=move |_| set_color(None)></button>
+                {ROLE_COLORS.map(|(label, rgb)| {
+                    let value = to_role(rgb);
+                    view! {
+                        <button type="button" role="radio" class="role-color" tabindex=move || stop(value)
+                            style:background-color=rgb.hex() aria-checked=move || (color() == value).to_string()
+                            aria-label=move || crate::i18n::t(label) data-tip=move || crate::i18n::t(label)
+                            on:click=move |_| set_color(value)></button>
+                    }
+                })}
+                <label class="appearance-custom" class:selected=custom data-tip=move || crate::i18n::t("Custom color")>
+                    <input type="color" aria-label=move || crate::i18n::t("Custom color")
+                        prop:value=move || color().map_or_else(|| "#7c6cf2".to_owned(), |c| c.hex())
+                        on:input=move |e| if let Some(value) = picked(&e) { set_color(Some(value)); }/>
+                    <span>{move || crate::i18n::t("Custom")}</span>
+                </label>
+            </div>
+            <div class="role-preview" aria-hidden="true">
+                <span class="role-preview-label">{move || crate::i18n::t("Preview")}</span>
+                <span class="role-preview-name" style:color=move || super::members::name_color(color())>{preview_name}</span>
+                <span class="member-badge member-role-badge">
+                    {move || color().map(|c| view! {<span class="role-dot" style:background-color=c.hex()></span>})}
+                    <span class="truncate">{preview_name}</span>
+                </span>
+            </div>
+            <p class="settings-hint">{move || crate::i18n::t("Members show the color of their highest colored role. Names are adjusted when needed so they stay readable on every theme.")}</p>
+            <label class="settings-permission-row role-hoist">
+                <span>
+                    <strong>{move || crate::i18n::t("Show members separately")}</strong>
+                    <small>{move || crate::i18n::t("Online members get a section for their highest role with this on; everyone else is listed under Online.")}</small>
+                </span>
+                <input type="checkbox" prop:checked=move || appearance.with(|a| a.hoist)
+                    on:change=move |e| { let on = event_target_checked(&e); appearance.update(|a| a.hoist = on); }/>
+            </label>
+        </fieldset>
+    }
 }
 
 #[component]

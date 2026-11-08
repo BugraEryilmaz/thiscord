@@ -1,8 +1,10 @@
 //! Browser-independent member list and custom status helpers.
+use std::collections::HashMap;
 use thiscord_shared::{
     AccountId,
     account::{CustomStatus, MAX_STATUS_SECONDS},
     chat::{GuildMember, MemberActivity, MemberRole},
+    permissions::RoleColor,
 };
 
 /// Device-local member panel visibility (wide layouts). Contains no account data.
@@ -11,9 +13,9 @@ pub const PANEL_KEY: &str = "thiscord.member_panel.v1";
 /// A member list group heading.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Section {
-    /// Online members whose highest-ranked role is this one.
+    /// Online members whose highest-ranked role shown separately is this one.
     Role(MemberRole),
-    /// Online members without roles (Everyone only).
+    /// Online members without a role shown separately.
     Online,
     Offline,
 }
@@ -31,13 +33,13 @@ impl Section {
 }
 
 /// Groups members once each: online members under their highest-ranked role
-/// (highest rank first, ties by name then ID), then online members without
-/// roles, then everyone offline. Members keep the server's display-name order.
+/// shown separately (highest rank first, ties by name then ID), then the other
+/// online members, then everyone offline. Members keep the server's name order.
 pub fn sections(members: &[GuildMember]) -> Vec<(Section, Vec<&GuildMember>)> {
     let mut roles: Vec<(&MemberRole, Vec<&GuildMember>)> = Vec::new();
     let (mut online, mut offline) = (Vec::new(), Vec::new());
     for member in members {
-        match (member.online, &member.role) {
+        match (member.online, &member.hoisted_role) {
             (false, _) => offline.push(member),
             (true, None) => online.push(member),
             (true, Some(role)) => match roles.iter_mut().find(|(r, _)| r.id == role.id) {
@@ -58,6 +60,48 @@ pub fn sections(members: &[GuildMember]) -> Vec<(Section, Vec<&GuildMember>)> {
         .chain([(Section::Online, online), (Section::Offline, offline)])
         .filter(|(_, group)| !group.is_empty())
         .collect()
+}
+
+/// How a member appears inside one guild: their guild name (nickname or
+/// profile name) and name colour.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Identity {
+    pub name: String,
+    pub color: Option<RoleColor>,
+}
+
+/// Lookup of a guild's listed members by account and by username, rebuilt from
+/// each member list. Presence-only updates compare equal and cause no redraw.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct Directory {
+    by_id: HashMap<AccountId, Identity>,
+    by_username: HashMap<String, AccountId>,
+}
+
+impl Directory {
+    pub fn new(members: &[GuildMember]) -> Self {
+        let mut directory = Self::default();
+        for member in members {
+            directory.by_id.insert(
+                member.account_id,
+                Identity {
+                    name: member.display_name().to_owned(),
+                    color: member.color,
+                },
+            );
+            directory
+                .by_username
+                .insert(member.username.clone(), member.account_id);
+        }
+        directory
+    }
+    pub fn get(&self, id: AccountId) -> Option<&Identity> {
+        self.by_id.get(&id)
+    }
+    /// Resolves a mention's `@username` (case-sensitive, as stored).
+    pub fn username(&self, username: &str) -> Option<&Identity> {
+        self.by_username.get(username).and_then(|id| self.get(*id))
+    }
 }
 
 /// Applies a complete `member_presence` set to the last full list.
@@ -162,6 +206,8 @@ mod tests {
             custom_status: None,
             activity: None,
             role: None,
+            hoisted_role: None,
+            color: None,
             owner: false,
             bot: false,
         }
@@ -172,6 +218,7 @@ mod tests {
             id: format!("00000000-0000-0000-0000-{id:012}").parse().unwrap(),
             name: name.into(),
             position,
+            color: None,
         }
     }
 
@@ -180,17 +227,19 @@ mod tests {
     }
 
     #[test]
-    fn sections_group_online_members_by_highest_role_once() {
+    fn sections_group_online_members_by_highest_hoisted_role_once() {
         let agalar = role(90, "agalar", 20);
         let mods = role(91, "mods", 10);
         let tied = role(92, "aaa", 10);
         let mut members: Vec<_> = (1..=7).map(|id| member(id, id != 6)).collect();
-        members[0].role = Some(mods.clone());
-        members[1].role = Some(agalar.clone());
-        members[3].role = Some(agalar.clone());
-        members[4].role = Some(tied.clone());
+        members[0].hoisted_role = Some(mods.clone());
+        members[1].hoisted_role = Some(agalar.clone());
+        members[3].hoisted_role = Some(agalar.clone());
+        members[4].hoisted_role = Some(tied.clone());
         // Offline role holders are listed under Offline, not their role.
-        members[5].role = Some(agalar.clone());
+        members[5].hoisted_role = Some(agalar.clone());
+        // A role that is not shown separately only tags its members.
+        members[6].role = Some(role(93, "quiet", 50));
         let sections = sections(&members);
         let summary: Vec<_> = sections
             .iter()
@@ -224,6 +273,24 @@ mod tests {
             ["offline"]
         );
         assert!(super::sections(&[]).is_empty());
+    }
+
+    #[test]
+    fn directory_resolves_guild_names_colors_and_mentions() {
+        let mut members = vec![member(1, true), member(2, false)];
+        members[0].display_name = "Gezgin".into();
+        members[0].color = RoleColor::new(0x2fa85a);
+        let directory = Directory::new(&members);
+        let first = directory.get(members[0].account_id).unwrap();
+        assert_eq!(first.name, "Gezgin");
+        assert_eq!(first.color, RoleColor::new(0x2fa85a));
+        // Blank names fall back to the username, as everywhere else.
+        assert_eq!(directory.username("user2").unwrap().name, "user2");
+        assert!(directory.username("User2").is_none());
+        // Presence does not change the directory.
+        let mut moved = members.clone();
+        apply_presence(&mut moved, &[members[1].account_id], &[]);
+        assert_eq!(Directory::new(&moved), directory);
     }
 
     #[test]

@@ -26,6 +26,7 @@ enum Action {
     Block(AccountId),
     ReportUser(AccountId),
     Change(GuildId, i64, GuildChange, String),
+    Nickname(GuildId, AccountId),
 }
 #[derive(Clone)]
 enum Item {
@@ -328,7 +329,14 @@ async fn items(ui: Ui, target: Target) -> Result<(String, Vec<Item>), String> {
                 crate::i18n::t("Your audio settings"),
                 Action::Page(guild.id, "audio", None),
             ));
-        } else {
+        }
+        if own && home.can_change_nickname {
+            items.push(Item::new(
+                crate::i18n::t("Change nickname…"),
+                Action::Nickname(guild.id, member),
+            ));
+        }
+        if !own {
             if home.can_manage_roles
                 && let Ok(PermissionResponse::State { state }) =
                     super::servers::request(ui, PermissionRequest::Inspect { guild_id: guild.id })
@@ -388,7 +396,13 @@ async fn items(ui: Ui, target: Target) -> Result<(String, Vec<Item>), String> {
                         );
                     }
                 }
-                if !m.actions.is_empty() {
+                if m.actions.contains(&Permission::ManageNicknames) {
+                    items.push(Item::new(
+                        crate::i18n::t("Change nickname…"),
+                        Action::Nickname(guild.id, member),
+                    ));
+                }
+                if m.actions.iter().any(|p| *p != Permission::ManageNicknames) {
                     items.push(Item::new(
                         crate::i18n::t("Timeout / moderation…"),
                         Action::Page(guild.id, "moderation", Some(member)),
@@ -534,6 +548,14 @@ async fn items(ui: Ui, target: Target) -> Result<(String, Vec<Item>), String> {
         items.push(Item::new(
             crate::i18n::t("Server moderation…"),
             Action::Page(guild.id, "moderation", None),
+        ));
+    }
+    if home.can_change_nickname
+        && let Some(account) = ui.account.get_untracked()
+    {
+        items.push(Item::new(
+            crate::i18n::t("Change nickname…"),
+            Action::Nickname(guild.id, account.id),
         ));
     }
     if ui
@@ -766,6 +788,7 @@ fn execute(ui: Ui, action: Action) {
         Action::Change(guild_id, revision, change, _) => leptos::task::spawn_local(async move {
             let _ = change_guild(ui, guild_id, revision, change, String::new()).await;
         }),
+        Action::Nickname(guild, account) => super::nickname::open(ui, guild, account),
     }
 }
 

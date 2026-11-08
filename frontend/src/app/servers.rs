@@ -67,7 +67,7 @@ pub(super) async fn request(
 ) -> Result<PermissionResponse, String> {
     let token = ui.token.get_untracked();
     let response =
-        crate::account_client::api_request(PERMISSIONS_PATH, &command, token.as_deref()).await;
+        crate::account_client::api_request(&permissions_path(), &command, token.as_deref()).await;
     if token != ui.token.get_untracked() {
         return Err("Session changed; refresh your servers".into());
     }
@@ -298,7 +298,7 @@ fn VoiceRoster(ui: Ui, guild: GuildId, channel: thiscord_shared::ChannelId) -> i
             view!{<li tabindex="0" aria-haspopup="menu" data-context-server=guild.to_string() data-context-channel=channel.to_string() data-context-member=id.to_string() class="voice-member sidebar-member" class:voice-speaking=move ||speaking.get().contains(&id) data-tip=move ||{let tip=format!("{} (@{})",member.get().display_name(),member.get().username);match ui.members.status(guild,id) {Some(status)=>format!("{tip} · {status}"),None=>tip}}>
                 <button class="voice-person" class:has-stream=move ||member.get().sharing_screen || member.get().camera_active aria-label=move ||if member.get().sharing_screen || member.get().camera_active{thiscord_frontend::localized_format!(crate::i18n::language(), "Watch {}’s stream",member.get().display_name())}else{member.get().display_name().to_owned()} data-tip=move ||if member.get().sharing_screen || member.get().camera_active{crate::i18n::t("Watch stream")}else{crate::i18n::t("Right-click for options")} on:click=move |_|if member.get_untracked().sharing_screen || member.get_untracked().camera_active{super::screen::open_stream(ui,guild,channel,member.get_untracked());}>
                 <span class="voice-avatar"><crate::avatar::Avatar class="size-6 text-xs" name=Signal::derive(move ||member.get().display_name().to_owned()) avatar_id=Signal::derive(move ||member.get().avatar_id)/></span>
-                <span class="min-w-0 flex-1 truncate">{move ||member.get().display_name().to_owned()}</span>
+                <span class="min-w-0 flex-1 truncate" style:color=move ||(!speaking.get().contains(&id)).then(||ui.members.identity(guild,id).and_then(|i|super::members::name_color(i.color))).flatten()>{move ||ui.members.identity(guild,id).map(|i|i.name).unwrap_or_else(||member.get().display_name().to_owned())}</span>
                 </button><Show when=move ||speaking.get().contains(&id)><span class="sr-only">{move || crate::i18n::t("Speaking")}</span></Show>
                 <Show when=move ||member.get().is_deafened()><span role="img" aria-label=move || crate::i18n::t("Deafened")><Icon kind=Glyph::Deafen/></span></Show>
                 <Show when=move ||!member.get().is_deafened() && (member.get().is_muted() || !member.get().can_speak)><span role="img" aria-label=move || crate::i18n::t("Muted")><Icon kind=Glyph::MicOff/></span></Show>

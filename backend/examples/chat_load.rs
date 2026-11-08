@@ -179,6 +179,7 @@ async fn chat_socket(config: &Config, user: usize) -> Result<Socket> {
         frame(chat::ClientEvent::Connect {
             token: common::token(&config.secret, user),
             guild_updates: true,
+            permission_set: None,
         }),
     )
     .await?;

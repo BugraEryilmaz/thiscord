@@ -640,6 +640,7 @@ async fn connected(ui: Ui, token: &str) -> Result<(), String> {
             event: ClientEvent::Connect {
                 token: token.into(),
                 guild_updates: true,
+                permission_set: Some(thiscord_shared::permissions::PERMISSION_SET),
             },
         })
         .map_err(|_| crate::i18n::t("Invalid socket request"))?,
@@ -966,7 +967,20 @@ fn MessageRow(
     let edited = move || message.with(|m| m.edited_at.is_some() && !m.deleted);
     let full_time = move || message.with(|m| crate::i18n::datetime(m.created_at));
     let author = move || message.with(|m| m.author_id.map(|id| id.to_string()));
-    let name = Signal::derive(move || message.with(|m| m.display_name().to_owned()));
+    // The member list keeps names and colours current (nicknames, role edits)
+    // without reloading history; messages carry the name at delivery time.
+    let identity = Memo::new(move |_| {
+        message
+            .with(|m| m.author_id)
+            .and_then(|id| chat.ui.members.identity(chat.guild, id))
+    });
+    let name = Signal::derive(move || {
+        identity
+            .with(|i| i.as_ref().map(|i| i.name.clone()))
+            .unwrap_or_else(|| message.with(|m| m.display_name().to_owned()))
+    });
+    let color =
+        move || identity.with(|i| i.as_ref().and_then(|i| super::members::name_color(i.color)));
     view! {
         <li node_ref=row class="message-row" class:message-grouped=move || grouped.get() data-message-id=id.to_string()>
             <Show when=divider>
@@ -987,13 +1001,13 @@ fn MessageRow(
                 <div class="min-w-0 flex-1">
                     <Show when=move || !grouped.get()>
                         <div class="flex flex-wrap items-baseline gap-x-2">
-                            <button class="message-author" aria-haspopup="menu" data-context-user=author data-context-name=name>{name}</button>
+                            <button class="message-author" aria-haspopup="menu" data-context-user=author data-context-name=name style:color=color>{name}</button>
                             <time class="message-time" title=full_time>{move || message.with(|m| crate::i18n::message_time(m.created_at))}</time>
                         </div>
                     </Show>
                     <rich::Reply chat message/>
                     <div class="message-text whitespace-pre-wrap break-words">
-                        {move || message.with(|m| super::message_content::render(if m.deleted { "Message deleted" } else { &m.content }, chat.ui))}
+                        {move || message.with(|m| super::message_content::render(if m.deleted { "Message deleted" } else { &m.content }, chat.ui, Some(chat.guild)))}
                         <Show when=edited><span class="ml-1 text-xs text-white/60">{move || format!("({})", crate::i18n::t("edited"))}</span></Show>
                     </div>
                     <Show when=move || message.with(|m| !m.deleted)>
@@ -1380,7 +1394,7 @@ pub(super) fn ChatPanel(
                             let pending = Memo::new(move |_| chat.pending.with(|p| p.iter().find(|p| p.id == id).cloned()));
                             view! {
                                 <li class="whitespace-pre-wrap break-words text-white/60">
-                                    <div>{move || pending.with(|p| super::message_content::render(p.as_ref().map(|p| p.content.as_str()).unwrap_or_default(), chat.ui))}</div>
+                                    <div>{move || pending.with(|p| super::message_content::render(p.as_ref().map(|p| p.content.as_str()).unwrap_or_default(), chat.ui, Some(chat.guild)))}</div>
                                     <p class="text-xs">{move || pending.with(|p| p.as_ref().map(|p| p.filenames.join(", ")).unwrap_or_default())}</p>
                                     {move || if pending.with(|p| p.as_ref().is_some_and(|p| p.failed)) { crate::i18n::t("Failed to send") } else { crate::i18n::t("Sending…") }}
                                     <Show when=move || pending.with(|p| p.as_ref().is_some_and(|p| p.failed))>

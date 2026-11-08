@@ -21,6 +21,18 @@ pub const PASSWORD_RESET_PATH: &str = "/api/v1/account/reset-password";
 pub const MAX_STATUS_CHARS: usize = 128;
 /// Longest accepted custom status lifetime: seven days, in seconds.
 pub const MAX_STATUS_SECONDS: u32 = 7 * 24 * 60 * 60;
+/// Display name bound, in Unicode scalar values. Guild nicknames share it.
+pub const MAX_DISPLAY_NAME_CHARS: usize = 64;
+
+/// Display names and guild nicknames: not blank after trimming, at most
+/// [`MAX_DISPLAY_NAME_CHARS`], and no control characters. Servers store the
+/// trimmed value.
+pub fn valid_display_name(name: &str) -> bool {
+    !name.chars().any(char::is_control) && {
+        let name = name.trim();
+        !name.is_empty() && name.chars().count() <= MAX_DISPLAY_NAME_CHARS
+    }
+}
 
 #[derive(Serialize, Deserialize)]
 pub struct PasswordResetQuery {

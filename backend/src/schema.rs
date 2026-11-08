@@ -230,6 +230,7 @@ diesel::table! {
         guild_id -> Uuid,
         account_id -> Uuid,
         joined_at -> Timestamptz,
+        nickname -> Nullable<Text>,
     }
 }
 
@@ -257,6 +258,8 @@ diesel::table! {
         position -> Int4,
         everyone -> Bool,
         permissions -> Jsonb,
+        color -> Nullable<Int4>,
+        hoist -> Bool,
     }
 }
 

@@ -24,6 +24,7 @@ mod media_grid;
 mod members;
 mod message_content;
 mod moderation;
+mod nickname;
 mod notifications;
 mod permissions;
 mod profile;
@@ -591,7 +592,7 @@ pub fn App() -> impl IntoView {
     });
     view! {
         <tooltip::Host/><context_menu::Host ui=ui/><voice_bots::Host ui=ui/><dialog::ConfirmHost ui=ui/><dialog::AvatarHost enlarge/>
-        <invites::Host ui=ui/>
+        <invites::Host ui=ui/><nickname::Host ui=ui/>
         <updates::Host ui=ui/><activity::Host ui=ui/>
         <notifications::Host ui=ui/>
         <Show when=move ||ui.account.get().is_some() fallback=move ||view!{
