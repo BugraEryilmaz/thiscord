@@ -525,7 +525,8 @@ See [screen-sharing.md](docs/screen-sharing.md) for limits and remaining platfor
 - [ ] Reverse proxy, WSL service startup/supervision, Windows networking/firewall,
   SFU/TURN UDP exposure; keep PostgreSQL private.
 - [ ] OAuth redirect registration and per-environment CORS/CSP configuration.
-- [ ] Database backups/restore tests and migration/rollback deployment procedures.
+- [x] Daily VPS database dumps with a verified off-server workstation copy (`scripts/pull-vps-backup.ps1`, docs/vps.md); manual scratch restore checked.
+- [ ] Automated periodic restore tests and migration/rollback deployment procedures.
 - [ ] Logs/metrics, resource/disk limits and operations runbook.
 - [x] Installer metadata/configuration and tagged Windows/Linux/macOS release pipeline.
 - [x] Signed updater artifacts, complete release feed and verification before publishing.
