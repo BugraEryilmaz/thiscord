@@ -43,8 +43,9 @@ docker compose -f infra/coturn/compose.yml restart coturn
 Restart the backend after changing its `.env`: stop the existing backend with
 Ctrl+C in its terminal, then run `./backend/run-wsl.ps1` from the repository root.
 An already-running backend does not reload STUN/TURN settings on SIGHUP; SIGHUP
-only reloads TLS certificates. Rejoin any voice channel to receive fresh ICE
-configuration. Do not start a second backend on the same listening port.
+only reloads TLS certificates. Active calls rejoin the restarted backend on their
+own and receive the fresh ICE configuration ([restarts.md](restarts.md)). Do not
+start a second backend on the same listening port.
 
 After a WSL IP change, rerun setup with the new SFU IP and restart coturn. Only
 that specific private SFU address and coturn's own relay address are permitted;
@@ -163,9 +164,13 @@ peer restrictions; do not allow the entire LAN just to suppress these logs.
 successful or failed relay path. Use selected candidate types and actual packet
 delivery to assess the route; the historical warnings alone do not identify it.
 
-One-hour credentials currently have no automatic refresh/ICE restart. Long calls
-may require leaving and rejoining; this remains tracked in TODO.md. coturn is a
-network relay, not a replacement for the Rust SFU.
+Credentials last `THISCORD_TURN_TTL_SECS` (default one hour; 60–86400 s). Offers
+carry `expires_in_secs`, and current clients on a relayed path restart ICE with
+fresh credentials five minutes before expiry, so long relayed calls continue
+([restarts.md](restarts.md#in-place-ice-restarts-and-relay-credential-refresh)).
+coturn checks the REST username's expiry on allocation refreshes, so older clients
+still need to rejoin within the lifetime. coturn is a network relay, not a
+replacement for the Rust SFU.
 
 References: [official coturn Docker image](https://github.com/coturn/coturn/blob/master/docker/coturn/README.md),
 [coturn TURN REST authentication](https://github.com/coturn/coturn/blob/master/README.turnserver).

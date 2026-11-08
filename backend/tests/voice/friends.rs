@@ -231,3 +231,119 @@ async fn group_calls_admit_joined_members_and_removal_revokes_only_that_peer() {
     carol.close().await;
     server.abort();
 }
+
+#[derive(diesel::QueryableByName)]
+struct Held {
+    #[diesel(sql_type = diesel::sql_types::BigInt)]
+    held: i64,
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[ignore = "requires TEST_DATABASE_URL and loopback WebRTC"]
+async fn group_call_survives_a_restart_and_a_removed_member_cannot_rejoin() {
+    use thiscord_backend::{limits::Limits, shutdown::Shutdown};
+    let db = database();
+    let (aid, a) = user(&db, "restart_group_a");
+    let (bid, b) = user(&db, "restart_group_b");
+    let (cid, c) = user(&db, "restart_group_c");
+    for other in [bid, cid] {
+        diesel::sql_query("INSERT INTO friendships(id,low_id,high_id,requester,state) VALUES(gen_random_uuid(),LEAST($1::uuid,$2::uuid),GREATEST($1::uuid,$2::uuid),$1::uuid,'accepted')").bind::<Text,_>(aid.to_string()).bind::<Text,_>(other.to_string()).execute(&mut db.pool.get().unwrap()).unwrap();
+    }
+    let origins = || vec!["http://localhost:1420".parse().unwrap()];
+    let listen = |app: Router| async move {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let server = tokio::spawn(async move {
+            let _ = axum::serve(
+                listener,
+                app.into_make_service_with_connect_info::<std::net::SocketAddr>(),
+            )
+            .await;
+        });
+        (address, server)
+    };
+    // The process being restarted.
+    let first = Shutdown::default();
+    let app = api::router_with_shutdown(
+        Some(db.pool.clone()),
+        origins(),
+        Limits::default(),
+        first.clone(),
+    );
+    let (address, server) = listen(app.clone()).await;
+    let created = social(
+        &app,
+        &a,
+        json!({"action":"create_group","client_id":Uuid::new_v4(),"members":[bid,cid]}),
+    )
+    .await;
+    let group = created["group"]["conversation_id"].clone();
+    let revision = created["group"]["revision"].clone();
+    let id = social(
+        &app,
+        &a,
+        json!({"action":"start_call","conversation_id":group}),
+    )
+    .await["call"]["id"]
+        .clone();
+    social(&app, &b, json!({"action":"accept_call","call_id":id})).await;
+    social(&app, &c, json!({"action":"accept_call","call_id":id})).await;
+    let attempt = |n: u8, reconnect: bool| {
+        Some(voice::JoinAttempt {
+            call_id: format!("00000000-0000-4000-8000-0000000000c{n}")
+                .parse()
+                .unwrap(),
+            reconnect,
+        })
+    };
+    let mut alice =
+        Peer::resilient(join_attempt(address, &a, id.clone(), id.clone(), attempt(1, false)).await)
+            .await;
+    let mut bob =
+        Peer::resilient(join_attempt(address, &b, id.clone(), id.clone(), attempt(2, false)).await)
+            .await;
+    let carol =
+        Peer::resilient(join_attempt(address, &c, id.clone(), id.clone(), attempt(3, false)).await)
+            .await;
+    forwarded(&mut alice, &mut bob).await;
+
+    first.begin();
+    assert_eq!(first.wait_idle(Duration::from_secs(5)).await, 0);
+    server.abort();
+    // Every drained member keeps a joined lease well past the ordinary 60 s.
+    let held = diesel::sql_query("SELECT count(*) AS held FROM group_call_members WHERE call_id=$1::uuid AND state='joined' AND until>now()+interval '120 seconds'")
+        .bind::<Text, _>(id.as_str().unwrap())
+        .get_result::<Held>(&mut db.pool.get().unwrap())
+        .unwrap()
+        .held;
+    assert_eq!(held, 3);
+    for peer in [alice, bob, carol] {
+        peer.pc.close().await.unwrap();
+    }
+
+    // The next process. The owner removes Carol while everyone is rejoining.
+    let next = Shutdown::with_rejoin_window(Duration::from_secs(60));
+    let app = api::router_with_shutdown(Some(db.pool.clone()), origins(), Limits::default(), next);
+    let (address, server) = listen(app.clone()).await;
+    social(&app, &a, json!({"action":"remove_group_member","conversation_id":group,"revision":revision,"account_id":cid})).await;
+    // Remaining members rejoin the same group call after full admission.
+    let mut alice =
+        Peer::resilient(join_attempt(address, &a, id.clone(), id.clone(), attempt(1, true)).await)
+            .await;
+    let mut bob =
+        Peer::resilient(join_attempt(address, &b, id.clone(), id.clone(), attempt(2, true)).await)
+            .await;
+    forwarded(&mut alice, &mut bob).await;
+    forwarded(&mut bob, &mut alice).await;
+    // A removed member's automatic rejoin is refused: membership is rechecked.
+    let mut refused = join_attempt(address, &c, id.clone(), id.clone(), attempt(3, true)).await;
+    match event(&mut refused).await {
+        ServerEvent::Error { error } => {
+            assert_eq!(error.code, thiscord_shared::ErrorCode::Forbidden)
+        }
+        _ => panic!("a removed member must not rejoin the group call"),
+    }
+    alice.close().await;
+    bob.close().await;
+    server.abort();
+}

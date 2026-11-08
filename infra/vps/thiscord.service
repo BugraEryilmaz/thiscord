@@ -14,6 +14,12 @@ ExecStart=/opt/thiscord/current/thiscord-backend
 ExecReload=/bin/kill -HUP $MAINPID
 Restart=on-failure
 RestartSec=5
+# Planned restarts (deploys, systemctl restart/stop, maintenance) are graceful:
+# SIGTERM makes the backend stop admitting voice joins, tell voice and chat
+# clients it is restarting (they rejoin the next process on their own), wait up
+# to 5 s for rooms to drain and up to 8 s for HTTP requests, then exit. 30 s
+# leaves ample margin before systemd's SIGKILL; do not lower it below ~15 s.
+KillSignal=SIGTERM
 TimeoutStopSec=30
 UMask=0077
 LimitNOFILE=65536

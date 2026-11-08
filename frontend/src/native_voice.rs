@@ -22,6 +22,7 @@ use webrtc::{
     },
     peer_connection::*,
 };
+mod ice;
 
 struct Job {
     guild_id: GuildId,
@@ -428,6 +429,8 @@ pub async fn voice_join(
             settings: configuration,
             status: status.clone(),
             attempt: Attempt::default(),
+            calm: false,
+            resumable: Vec::new(),
         };
         let result = reconnect::supervise(&mut runtime, stopped, rand::random::<u32>).await;
         runtime.close().await;
@@ -547,8 +550,35 @@ struct Runtime {
     settings: Arc<Mutex<AudioSettings>>,
     status: Arc<Mutex<VoiceStatus>>,
     attempt: Attempt,
+    /// The last attempt ended for a restart (or a briefly unavailable server):
+    /// keep the roster on screen and show a calm reconnecting state.
+    calm: bool,
+    /// Publications a restart stopped, offered for resumption once rejoined.
+    resumable: Vec<MediaKind>,
 }
 impl Runtime {
+    /// The status shown while (re)connecting. A calm reconnection keeps the
+    /// last roster visible; publications to resume are carried along.
+    fn connecting(&self, message: String) -> VoiceStatus {
+        let previous = self
+            .status
+            .lock()
+            .map(|status| status.clone())
+            .unwrap_or_default();
+        VoiceStatus {
+            channel_id: Some(self.channel_id),
+            message,
+            reconnecting: self.calm,
+            participants: if self.calm {
+                previous.participants
+            } else {
+                vec![]
+            },
+            own_slot: if self.calm { previous.own_slot } else { None },
+            resumable: self.resumable.clone(),
+            ..Default::default()
+        }
+    }
     async fn close(&mut self) {
         self.attempt.finish("cancelled", false, false);
         self.attempt
@@ -589,12 +619,13 @@ impl Connector for Runtime {
             self.attempt.finish("setup_failed", false, true);
             return (error.into(), false);
         }
+        let connecting = self.connecting(if self.calm {
+            "Reconnecting…".into()
+        } else {
+            "Connecting to voice...".into()
+        });
         if let Ok(mut status) = self.status.lock() {
-            *status = VoiceStatus {
-                channel_id: Some(self.channel_id),
-                message: "Connecting to voice...".into(),
-                ..Default::default()
-            };
+            *status = connecting;
         }
         let result = run(
             &self.app,
@@ -619,9 +650,37 @@ impl Connector for Runtime {
             .attempt
             .connected_at
             .is_some_and(|t| t.elapsed() >= Duration::from_secs(30));
+        // A restart stays calm through the refused retries that follow it,
+        // until an attempt connects again.
+        self.calm = result.as_ref().err().is_some_and(Failure::calm)
+            || (self.calm && self.attempt.connected_at.is_none());
+        if self.calm && self.attempt.connected_at.is_some() {
+            // Read before close() stops them: what the user was publishing.
+            let (sharing, _) = self
+                .app
+                .state::<crate::native_screen::ScreenState>()
+                .sharing();
+            let camera = self
+                .app
+                .state::<crate::native_camera::CameraState>()
+                .active();
+            self.resumable = [
+                (sharing, MediaKind::ScreenVideo),
+                (camera, MediaKind::Camera),
+            ]
+            .into_iter()
+            .filter_map(|(active, kind)| active.then_some(kind))
+            .collect();
+        } else if !self.calm {
+            // Only a restart pauses publications; any other ending forgets them.
+            self.resumable.clear();
+        }
         if let Ok(mut status) = self.status.lock() {
             status.connected = false;
-            status.participants.clear();
+            status.reconnecting = self.calm;
+            if !self.calm {
+                status.participants.clear();
+            }
         }
         let moved_to = self.attempt.moved_to;
         self.close().await;
@@ -652,16 +711,19 @@ impl Connector for Runtime {
             "voice_retry_wait",
             serde_json::json!({"reason":error.diagnostic_reason(),"delay_ms":delay.as_millis()}),
         );
+        let mut waiting = self.connecting(if self.calm {
+            "Thiscord is restarting. Reconnecting…".into()
+        } else {
+            format!(
+                "Reconnecting in {:.1}s - {}",
+                delay.as_secs_f32(),
+                error.message
+            )
+        });
+        // Any automatic retry is a reconnection, not a failure.
+        waiting.reconnecting = true;
         if let Ok(mut status) = self.status.lock() {
-            *status = VoiceStatus {
-                channel_id: Some(self.channel_id),
-                message: format!(
-                    "Reconnecting in {:.1}s - {}",
-                    delay.as_secs_f32(),
-                    error.message
-                ),
-                ..Default::default()
-            };
+            *status = waiting;
         }
     }
 }
@@ -740,6 +802,9 @@ pub(super) fn closed(message: &Message) -> Failure {
         if code == REPLACED_CLOSE_CODE {
             return Failure::replaced();
         }
+        if code == RESTART_CLOSE_CODE {
+            return Failure::restarting(Duration::from_millis(1_500));
+        }
         if !matches!(code, 1000 | 1001 | 1006 | 1011..=1014) {
             // Policy/protocol closes are final; never display arbitrary close bodies.
             return Failure::from("Voice connection rejected or protocol unsupported")
@@ -747,6 +812,20 @@ pub(super) fn closed(message: &Message) -> Failure {
         }
     }
     Failure::temporary("Voice connection closed").with_reason("signaling_close")
+}
+fn ice_configuration(servers: &[IceServer]) -> RTCConfiguration {
+    RTCConfigurationBuilder::new()
+        .with_ice_servers(
+            servers
+                .iter()
+                .map(|s| RTCIceServer {
+                    urls: s.urls.clone(),
+                    username: s.username.clone(),
+                    credential: s.credential.clone(),
+                })
+                .collect(),
+        )
+        .build()
 }
 fn bind() -> Result<String, String> {
     let s = std::net::UdpSocket::bind("0.0.0.0:0").map_err(|e| e.to_string())?;
@@ -828,6 +907,8 @@ async fn run(
         video_diagnostics,
         soundboard,
         screen_profiles,
+        restart_offered,
+        ice_offered,
     ) = match first.event {
         ServerEvent::Offer {
             packet_redundancy,
@@ -845,6 +926,8 @@ async fn run(
             video_diagnostics,
             soundboard,
             screen_profiles,
+            restart_notice,
+            ice_restart,
         } if first.version == VOICE_VERSION && slot < ROOM_CAPACITY => (
             sdp,
             slot,
@@ -862,11 +945,19 @@ async fn run(
             soundboard,
             // Profiles describe this desktop's WebView decoders as a viewer.
             screen_profiles && screen_subscriptions,
+            restart_notice,
+            ice_restart,
         ),
         ServerEvent::Replaced {} => return Err(Failure::replaced()),
         ServerEvent::Error { error } => return Err(server_failure(&attempt.connection, error)),
+        ServerEvent::Restarting { retry_after_ms } => {
+            return Err(Failure::restarting(Duration::from_millis(retry_after_ms)));
+        }
         _ => return Err("Invalid voice offer".into()),
     };
+    // The call's monotonic clock for in-place ICE restarts.
+    let ice_clock = Instant::now();
+    let mut ice = ice::IceRecovery::new(ice_offered, &ice_servers, 0);
     let can_speak = can_speak && attempt.capture_allowed;
     attempt.capture_allowed = can_speak;
     attempt.connection.event(
@@ -904,18 +995,11 @@ async fn run(
         register_default_interceptors(Registry::new(), &mut media).map_err(|e| e.to_string())?;
     let registry =
         thiscord_frontend::audio::adaptive_fec::register(registry, attempt.connection.clone());
-    let configuration = RTCConfigurationBuilder::new()
-        .with_ice_servers(
-            ice_servers
-                .into_iter()
-                .map(|s| RTCIceServer {
-                    urls: s.urls,
-                    username: s.username,
-                    credential: s.credential,
-                })
-                .collect(),
-        )
-        .build();
+    let configuration = ice_configuration(&ice_servers);
+    drop(ice_servers);
+    let local_route = bind().map_err(Failure::temporary)?;
+    let mut route_checked = Instant::now();
+    let mut ice_tasks = tokio::task::JoinSet::<Result<(String, Vec<IceServer>), ()>>::new();
     let pc: Arc<dyn PeerConnection> = Arc::new(
         PeerConnectionBuilder::new()
             .with_runtime(Arc::new(
@@ -940,7 +1024,14 @@ async fn run(
                     .inner()
                     .clone(),
             }))
-            .with_udp_addrs(vec![bind().map_err(Failure::temporary)?])
+            // An ICE restart rebinds and gathers again, so new relay
+            // allocations use the restart's fresh TURN credentials.
+            .with_setting_engine(
+                SettingEngineBuilder::new()
+                    .with_discard_local_candidates_during_ice_restart(true)
+                    .build(),
+            )
+            .with_udp_addrs(vec![local_route.clone()])
             .build()
             .await
             .map_err(|_| Failure::temporary("Cannot initialize voice media connection"))?,
@@ -1037,6 +1128,8 @@ async fn run(
             video_diagnostics: remote_audio && video_diagnostics,
             soundboard,
             screen_profiles,
+            restart_notice: restart_offered,
+            ice_restart: ice_offered,
         },
         &attempt.connection,
     )
@@ -1252,20 +1345,31 @@ async fn run(
                             demand: Default::default(), network_demand: Default::default(), force_keyframe: Default::default(), metrics: Default::default(), video_sequence: Default::default(), audio_sequence: Default::default(), audio_timestamp: Default::default(), started: Instant::now(),
                         }); }
                         engine.notify_control(Command::Roster{connection:attempt.connection.clone(),members:roster.clone()})?;
-                        if let Ok(mut s)=status.lock(){s.connected=true;s.soundboard=soundboard;s.message=if can_speak{"Connected"}else{"Connected as listener. Leave and join again to enable newly granted microphone access."}.into();}
+                        if let Ok(mut s)=status.lock(){s.connected=true;s.reconnecting=false;s.soundboard=soundboard;s.message=if can_speak{"Connected"}else{"Connected as listener. Leave and join again to enable newly granted microphone access."}.into();}
                 } else {
                     if !audio.running {return Err(Failure::from(audio.message).with_reason("audio_stopped"));}
                     if let Ok(mut s)=status.lock(){s.message=audio.message;}
                     // Disconnected is recoverable by ICE itself. Keep this peer
                     // until Failed/Closed; signaling has its own bounded recovery.
+                    let recovering = signaling.recovering() || ice.recovering() || !media_state.connected.load(Ordering::Acquire);
                     if signaling.recovering() && let Ok(mut s)=status.lock() {
                         s.message="Recovering voice signaling...".into();
-                    } else if !media_state.connected.load(Ordering::Acquire) && let Ok(mut s)=status.lock() {
+                    } else if recovering && let Ok(mut s)=status.lock() {
                         s.message="Recovering voice connection...".into();
                     }
+                    if let Ok(mut s)=status.lock() { s.reconnecting = recovering; }
                 }
             },
             _ = transmit_control.changed(), if packet_redundancy => { red_sender.clear(); },
+            Some(result) = ice_tasks.join_next() => {
+                let Ok(Ok((sdp, servers))) = result else {
+                    attempt.connection.event("voice_ice_restart_failed", serde_json::json!({"stage":"answer"}));
+                    return Err(Failure::temporary("Voice connection lost").with_reason("ice_restart_failed"));
+                };
+                signaling.send(ClientEvent::IceRestartAnswer { sdp });
+                ice.answered(&servers, ice::millis(ice_clock));
+                attempt.connection.event("voice_ice_restart_answered", serde_json::json!({}));
+            },
             Some(result) = remote_jobs.join_next() => {
                 if let Ok((id, chunks)) = result {
                     remote_reply = Some((id, chunks));
@@ -1356,6 +1460,29 @@ async fn run(
                         if status.lock().ok().is_some_and(|s| s.participants.iter().any(|m| m.slot == own_slot && m.screen_epoch == epoch && m.sharing_screen)) { if layer != Some(1) { app.state::<crate::native_screen::ScreenState>().keyframe(); }
                             if layer != Some(0) { app.state::<crate::native_screen::ScreenState>().layer_keyframe(); } }
                     },
+                    ServerEvent::Restarting { retry_after_ms } => {
+                        attempt.connection.event("voice_server_restarting", serde_json::json!({"retry_after_ms":retry_after_ms}));
+                        return Err(Failure::restarting(Duration::from_millis(retry_after_ms)));
+                    },
+                    ServerEvent::IceRestart { sdp, ice_servers } => {
+                        if !ice.awaiting_offer() || !ice_tasks.is_empty() { continue; }
+                        ice.offered(ice::millis(ice_clock));
+                        // Renegotiate off the media loop: gathering a relay can take seconds.
+                        let (pc, gathered) = (pc.clone(), gathered.clone());
+                        ice_tasks.spawn(async move {
+                            pc.set_configuration(ice_configuration(&ice_servers)).await.map_err(|_| ())?;
+                            let offer: RTCSessionDescription = serde_json::from_str(&sdp).map_err(|_| ())?;
+                            if offer.sdp_type != RTCSdpType::Offer { return Err(()); }
+                            pc.set_remote_description(offer).await.map_err(|_| ())?;
+                            let answer = pc.create_answer(None).await.map_err(|_| ())?;
+                            // Drop a stale completion so the wait below is this gathering's.
+                            let _ = futures_util::FutureExt::now_or_never(gathered.notified());
+                            pc.set_local_description(answer).await.map_err(|_| ())?;
+                            let _ = tokio::time::timeout(Duration::from_secs(8), gathered.notified()).await;
+                            let local = pc.local_description().await.ok_or(())?;
+                            Ok((serde_json::to_string(&local).map_err(|_| ())?, ice_servers))
+                        });
+                    },
                     ServerEvent::Moved {channel_id:destination}=>{
                         if destination==channel_id {return Err("Invalid move destination".into());}
                         attempt.moved_to=Some(destination);
@@ -1400,6 +1527,35 @@ async fn run(
                         audio_control.start(move||crate::native_audio::start_voice(&audio_app,guild_id,connection,configuration,tx,can_speak));
                     }
                 }
+                if audio_started {
+                    let now = ice::millis(ice_clock);
+                    let can_signal = !signaling.recovering();
+                    let mut action = ice.tick(media_state.connected.load(Ordering::Acquire), can_signal, now);
+                    if action == ice::Action::Wait && can_signal && ice.refresh_due(now) {
+                        let report = tokio::time::timeout(Duration::from_millis(200), pc.get_stats(Instant::now(), rtc::statistics::StatsSelector::None)).await;
+                        action = ice.relay_checked(report.ok().as_ref().and_then(ice::relayed), now);
+                    }
+                    match action {
+                        ice::Action::Request(reason) => {
+                            attempt.connection.event("voice_ice_restart_requested", serde_json::json!({"reason":format!("{reason:?}")}));
+                            signaling.send(ClientEvent::IceRestart {});
+                        }
+                        ice::Action::Reconnect => {
+                            attempt.connection.event("voice_ice_restart_failed", serde_json::json!({"stage":"connect"}));
+                            return Err(Failure::temporary("Voice connection lost").with_reason("ice_restart_failed"));
+                        }
+                        ice::Action::Wait => {}
+                    }
+                    // A new local address cannot be reached through the old socket
+                    // binding; reconnect at once instead of waiting for ICE to fail.
+                    if route_checked.elapsed() >= Duration::from_secs(3) {
+                        route_checked = Instant::now();
+                        if !media_state.connected.load(Ordering::Acquire) && bind().is_ok_and(|route| route != local_route) {
+                            attempt.connection.event("voice_network_changed", serde_json::json!({}));
+                            return Err(Failure::temporary("Network changed").with_reason("network_changed"));
+                        }
+                    }
+                }
                 // Only two flags are needed per tick; no settings clone.
                 let (muted, self_deafened) = settings.lock().map(|s| (s.muted, s.deafened)).map_err(|_|"Settings unavailable")?;
                 // The worker's voice lease is 15 s; a keepalive every 2 s still
@@ -1415,6 +1571,12 @@ async fn run(
                 let screen = app.state::<crate::native_screen::ScreenState>();
                 let camera = app.state::<crate::native_camera::CameraState>();
                 shares.publication(&screen, &camera, allowed, false);
+                // A resumed publication no longer needs the restart's offer.
+                if let Ok(mut s) = status.lock() && !s.resumable.is_empty() {
+                    let (sharing, _) = screen.sharing();
+                    let camera_on = camera.active();
+                    s.resumable.retain(|kind| match kind { MediaKind::ScreenVideo => !sharing, MediaKind::Camera => !camera_on, _ => false });
+                }
                 shares.send_changes(screen.sharing(), camera_video.then(|| camera.active()), || screen_layers.then(|| screen.quality()), |event| signaling.send(event));
                 if packet_redundancy && boundary.control(transmit_control.generation())? {
                     red_sender.clear();

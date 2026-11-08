@@ -95,19 +95,30 @@ async fn handle(
         .insert("cache-control", "no-store".parse().unwrap());
     response
 }
+// Each axum extractor is an argument.
+#[allow(clippy::too_many_arguments)]
 async fn upgrade(
     State(pool): State<Option<DbPool>>,
     Extension(id): Extension<RequestId>,
     Extension(origins): Extension<Arc<Vec<HeaderValue>>>,
     Extension(slots): Extension<crate::limits::SocketSlots>,
+    Extension(shutdown): Extension<crate::shutdown::Shutdown>,
+    uri: axum::http::Uri,
     headers: HeaderMap,
     ws: Result<WebSocketUpgrade, WebSocketUpgradeRejection>,
 ) -> Response {
     if !headers.get("origin").is_some_and(|o| origins.contains(o)) {
         return Failure::Forbidden.response(id);
     }
-    let Some(pool) = pool else {
+    // A restarting server takes no new sockets; clients retry the next process.
+    let Some(pool) = pool.filter(|_| !shutdown.draining()) else {
         return Failure::Unavailable.response(id);
+    };
+    let restart = Restart {
+        notice: uri
+            .query()
+            .is_some_and(|query| query.split('&').any(|pair| pair == RESTART_NOTICE_QUERY)),
+        shutdown,
     };
     let Ok(ws) = ws else {
         return Failure::Invalid("Invalid WebSocket upgrade").response(id);
@@ -121,8 +132,14 @@ async fn upgrade(
         .max_frame_size(16 * 1024)
         .on_upgrade(move |socket| async move {
             let _permit = permit;
-            serve(socket, pool, id, upgrade_token).await
+            serve(socket, pool, id, upgrade_token, restart).await
         })
+}
+/// How a socket learns of a planned restart: `Restarting` if it opted in with
+/// `RESTART_NOTICE_QUERY`, then a close with code 1012 either way.
+struct Restart {
+    shutdown: crate::shutdown::Shutdown,
+    notice: bool,
 }
 async fn send(socket: &mut WebSocket, event: ServerEvent) -> Result<(), ()> {
     let data = serde_json::to_string(&ServerFrame {
@@ -170,7 +187,13 @@ async fn socket_access(pool: &DbPool, token: &str) -> Result<access::SocketAcces
     })
 }
 
-async fn serve(mut socket: WebSocket, pool: DbPool, id: RequestId, upgrade_token: String) {
+async fn serve(
+    mut socket: WebSocket,
+    pool: DbPool,
+    id: RequestId,
+    upgrade_token: String,
+    restart: Restart,
+) {
     let first = tokio::time::timeout(Duration::from_secs(5), socket.recv()).await;
     let Ok(Some(Ok(message))) = first else {
         return;
@@ -185,7 +208,7 @@ async fn serve(mut socket: WebSocket, pool: DbPool, id: RequestId, upgrade_token
         let token = auth::socket_token(token, &upgrade_token);
         // Released clients send no set and reject newer permission names.
         let set = permission_set.unwrap_or(1).clamp(1, PERMISSION_SET);
-        session::serve(socket, pool, id, token, guild_updates, set).await;
+        session::serve(socket, pool, id, token, guild_updates, set, restart).await;
         return;
     }
     let Some(ClientEvent::Authenticate {

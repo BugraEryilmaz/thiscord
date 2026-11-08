@@ -484,7 +484,7 @@ pub(super) fn VoiceBar(ui: Ui) -> impl IntoView {
         <Show when=move||ui.voice.get().channel_id.is_some()><div class="voice-dock">
             <div class="flex items-center gap-2">
                 <span class="text-emerald-400"><Icon kind=Glyph::Signal/></span>
-                <div class="min-w-0 flex-1"><button class="voice-health text-sm font-semibold" aria-label=move || crate::i18n::t("Voice connection diagnostics") data-tip=move ||if !ui.voice.get().connected {"Connecting · diagnostics pending".into()} else if browser_voice(ui) {ui.audio_status.track();crate::browser_voice::connection_brief()} else {ui.audio_status.with(|s|thiscord_frontend::audio_quality::brief(s.as_ref().and_then(|s|s.quality.as_ref())))} class:text-emerald-400=move ||ui.voice.get().connected class:text-amber-300=move ||!ui.voice.get().connected role="status">{move ||if ui.voice.get().connected{crate::i18n::t("Voice connected")}else{crate::i18n::t("Connecting to voice…")}}</button><button class="block max-w-full truncate text-left text-xs text-white/60 hover:text-white" data-tip=move || crate::i18n::t("Open call controls") aria-label=move || crate::i18n::t("Open call controls") on:click=move |_|super::servers::open_voice(ui)>{location}</button></div>
+                <div class="min-w-0 flex-1"><button class="voice-health text-sm font-semibold" class:voice-reconnecting=move ||ui.voice.with(|v|v.reconnecting) aria-label=move || crate::i18n::t("Voice connection diagnostics") data-tip=move ||if ui.voice.with(|v|v.reconnecting) {reconnect_tip(ui).into()} else if !ui.voice.get().connected {"Connecting · diagnostics pending".into()} else if browser_voice(ui) {ui.audio_status.track();crate::browser_voice::connection_brief()} else {ui.audio_status.with(|s|thiscord_frontend::audio_quality::brief(s.as_ref().and_then(|s|s.quality.as_ref())))} class:text-emerald-400=move ||ui.voice.with(|v|v.connected && !v.reconnecting) class:text-amber-300=move ||ui.voice.with(|v|!v.connected || v.reconnecting) role="status">{move ||voice_label(ui)}</button><button class="block max-w-full truncate text-left text-xs text-white/60 hover:text-white" data-tip=move || crate::i18n::t("Open call controls") aria-label=move || crate::i18n::t("Open call controls") on:click=move |_|super::servers::open_voice(ui)>{location}</button></div>
                 <button class="icon-button danger" aria-label=move || crate::i18n::t("Disconnect voice") data-tip=move || crate::i18n::t("Disconnect") disabled=move ||ui.voice_joining.get() on:click=move |_|leave(ui)><Icon kind=Glyph::Disconnect/></button>
             </div>
             <div class="mt-2 flex items-center gap-2">
@@ -500,6 +500,7 @@ pub(super) fn VoiceBar(ui: Ui) -> impl IntoView {
                 <button class="icon-button voice-action" aria-label=move || crate::i18n::t("Audio settings") data-tip=move || crate::i18n::t("Audio settings") on:click=move |_|ui.page.set("audio")><Icon kind=Glyph::Sliders/></button>
                 <Show when=move||!ui.audio_control.is_remote() && ui.audio.get().mode==TransmitMode::PushToTalk><button class="icon-button voice-action touch-none select-none" aria-label=move || crate::i18n::t("Hold to talk") data-tip=move || crate::i18n::t("Hold to talk") on:pointerdown=move |_|pressed(true) on:pointerup=move |_|pressed(false) on:pointerleave=move |_|pressed(false) on:pointercancel=move |_|pressed(false) on:keydown=move|e|{if matches!(e.key().as_str()," "|"Enter"){e.prevent_default();pressed(true);}} on:keyup=move|_|pressed(false) on:blur=move |_|pressed(false)><Icon kind=Glyph::Mic/></button></Show>
             </div>
+        <ResumeNotice ui=ui/>
         <Show when=move ||browser_voice(ui)><BrowserVoiceNotice/><super::browser_media::BrowserMediaError/></Show>
         <super::camera_select::CameraNotice/>
         <Show when=move||ui.audio_status.with(|s|s.as_ref().and_then(|s|s.recording.as_ref()).is_some_and(|r|r.active))>
@@ -519,6 +520,113 @@ pub(super) fn VoiceBar(ui: Ui) -> impl IntoView {
         </div>
     </aside>}
 }
+/// The voice dock's status: connected, calmly reconnecting (restart or a lost
+/// path, the call continues on its own), or connecting.
+fn voice_label(ui: Ui) -> &'static str {
+    ui.voice.with(|v| {
+        if v.reconnecting {
+            crate::i18n::t("Reconnecting…")
+        } else if v.connected {
+            crate::i18n::t("Voice connected")
+        } else {
+            crate::i18n::t("Connecting to voice…")
+        }
+    })
+}
+fn reconnect_tip(ui: Ui) -> &'static str {
+    if ui
+        .voice
+        .with(|v| v.message.starts_with("Thiscord is restarting"))
+    {
+        crate::i18n::t("Thiscord is restarting. You'll be back in the call in a moment.")
+    } else {
+        crate::i18n::t("Connection interrupted. Reconnecting automatically…")
+    }
+}
+
+/// After a server restart, offers to resume the screen share and camera the
+/// reconnection paused: one click each, nothing restarts without the user.
+#[component]
+fn ResumeNotice(ui: Ui) -> impl IntoView {
+    use thiscord_shared::voice::MediaKind;
+    // Hidden kinds: dismissed or already resuming, until the next reconnection.
+    let hidden = RwSignal::new(Vec::<MediaKind>::new());
+    Effect::new(move |previous: Option<Vec<MediaKind>>| {
+        let current = ui.voice.with(|v| v.resumable.clone());
+        // A newly paused publication shows again; a resumed one leaves quietly.
+        if previous.is_some_and(|previous| current.iter().any(|kind| !previous.contains(kind))) {
+            hidden.set(vec![]);
+        }
+        current
+    });
+    let pending = move || {
+        ui.voice.with(|v| {
+            if v.connected && !v.reconnecting {
+                hidden.with(|hidden| {
+                    v.resumable
+                        .iter()
+                        .copied()
+                        .filter(|kind| !hidden.contains(kind))
+                        .collect::<Vec<_>>()
+                })
+            } else {
+                vec![]
+            }
+        })
+    };
+    let has = move |kind| pending().contains(&kind);
+    let hide = move |kind| hidden.update(|hidden| hidden.push(kind));
+    let resume_screen = move |_| {
+        hide(MediaKind::ScreenVideo);
+        if browser_voice(ui) {
+            // getDisplayMedia must start inside this click.
+            let started = crate::browser_voice::video::start_screen(
+                Default::default(),
+                crate::browser_voice::video::screen_audio_supported(),
+            );
+            leptos::task::spawn_local(started);
+        } else {
+            leptos::task::spawn_local(async move {
+                if let Err(error) = super::screen::resume_share().await {
+                    ui.status.set(error);
+                }
+            });
+        }
+    };
+    let resume_camera = move |_| {
+        hide(MediaKind::Camera);
+        if browser_voice(ui) {
+            leptos::task::spawn_local(crate::browser_voice::video::start_camera());
+        } else {
+            super::camera::request_resume();
+        }
+    };
+    let message = move || {
+        let (screen, camera) = (has(MediaKind::ScreenVideo), has(MediaKind::Camera));
+        crate::i18n::t(match (screen, camera) {
+            (true, true) => "Your screen share and camera paused while Thiscord restarted.",
+            (true, false) => "Your screen share paused while Thiscord restarted.",
+            _ => "Your camera paused while Thiscord restarted.",
+        })
+    };
+    view! {
+        <Show when=move ||!pending().is_empty()>
+            <div class="voice-resume mt-2" role="status">
+                <p class="text-xs text-white/70">{message}</p>
+                <div class="mt-2 flex flex-wrap items-center gap-2">
+                    <Show when=move ||has(MediaKind::ScreenVideo)>
+                        <button class="rounded bg-brand px-2.5 py-1 text-xs font-semibold text-white hover:brightness-110" disabled=move ||!media_publish_allowed(ui) on:click=resume_screen>{move || crate::i18n::t("Resume sharing")}</button>
+                    </Show>
+                    <Show when=move ||has(MediaKind::Camera)>
+                        <button class="rounded bg-brand px-2.5 py-1 text-xs font-semibold text-white hover:brightness-110" disabled=move ||!media_publish_allowed(ui) on:click=resume_camera>{move || crate::i18n::t("Turn camera back on")}</button>
+                    </Show>
+                    <button class="rounded px-2 py-1 text-xs text-white/60 hover:text-white" on:click=move |_|hidden.set(vec![MediaKind::ScreenVideo, MediaKind::Camera])>{move || crate::i18n::t("Not now")}</button>
+                </div>
+            </div>
+        </Show>
+    }
+}
+
 /// Browser-only call notices: a refused microphone, and remote audio that the
 /// browser's autoplay policy blocked until the next tap.
 #[component]

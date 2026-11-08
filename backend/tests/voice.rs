@@ -25,6 +25,8 @@ mod moderation;
 mod recovery;
 #[path = "voice/red.rs"]
 mod red;
+#[path = "voice/restart.rs"]
+mod restart;
 #[path = "voice/roster.rs"]
 mod roster;
 #[path = "voice/scripting_bots.rs"]
@@ -339,8 +341,14 @@ struct Peer {
     /// Inbound PLI per SSRC (browser stand-ins only).
     keyframe_requests: KeyframeRequests,
     views: Vec<thiscord_shared::screen::Subscription>,
+    /// Signals each completed ICE gathering (first answer and ICE restarts).
+    gathered: Arc<Notify>,
 }
 impl Peer {
+    /// A current desktop client: accepts restart notices and ICE restarts.
+    async fn resilient(socket: Socket) -> Self {
+        Self::with_resilience(socket, 64, false, false, false, 900, false, true).await
+    }
     async fn new(socket: Socket) -> Self {
         Self::with_packet_capacity(socket, 64).await
     }
@@ -383,7 +391,7 @@ impl Peer {
     /// microphone SSRC models a browser: it adds only one H.264 video track
     /// (when flagged as a browser publisher) and cannot choose its SSRCs.
     async fn with_publisher(
-        mut socket: Socket,
+        socket: Socket,
         capacity: usize,
         packet_redundancy: bool,
         screen_layers: bool,
@@ -391,16 +399,45 @@ impl Peer {
         microphone_ssrc: u32,
         browser_publisher: bool,
     ) -> Self {
+        Self::with_resilience(
+            socket,
+            capacity,
+            packet_redundancy,
+            screen_layers,
+            soundboard,
+            microphone_ssrc,
+            browser_publisher,
+            false,
+        )
+        .await
+    }
+    #[allow(clippy::too_many_arguments)]
+    async fn with_resilience(
+        mut socket: Socket,
+        capacity: usize,
+        packet_redundancy: bool,
+        screen_layers: bool,
+        soundboard: bool,
+        microphone_ssrc: u32,
+        browser_publisher: bool,
+        resilient: bool,
+    ) -> Self {
         let ServerEvent::Offer {
             sdp,
             slot,
             resume_token,
             soundboard: soundboard_offered,
+            restart_notice: restart_offered,
+            ice_restart: ice_restart_offered,
             ..
         } = event(&mut socket).await
         else {
             panic!("Expected offer")
         };
+        assert!(
+            restart_offered && ice_restart_offered,
+            "current servers offer restart notices and ICE restarts"
+        );
         assert!(
             !soundboard || soundboard_offered,
             "guild calls offer the soundboard"
@@ -606,6 +643,8 @@ impl Peer {
                 video_diagnostics: false,
                 soundboard,
                 screen_profiles: false,
+                restart_notice: resilient,
+                ice_restart: resilient,
                 sdp: serde_json::to_string(&pc.local_description().await.unwrap()).unwrap(),
             },
         )
@@ -650,6 +689,7 @@ impl Peer {
             foreign_tracks,
             keyframe_requests,
             views: vec![],
+            gathered,
         }
     }
     async fn publish(&mut self) {

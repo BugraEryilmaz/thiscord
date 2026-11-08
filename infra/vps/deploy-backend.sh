@@ -97,8 +97,12 @@ sudo -n chown -R root:root "$release/app"
 sudo -n find "$release/app" -type d -exec chmod 0755 {} +
 sudo -n find "$release/app" -type f -exec chmod 0644 {} +
 echo "Stopping backend and backing up PostgreSQL before activation: $release"
+echo 'Voice and chat clients are told the server is restarting and rejoin automatically.'
 stopped=true
+stop_started=$SECONDS
+# SIGTERM: graceful drain, bounded by the unit's TimeoutStopSec (docs/vps.md).
 sudo -n systemctl stop thiscord
+echo "Backend drained and stopped in $((SECONDS - stop_started)) s."
 sudo -n systemctl start thiscord-backup.service
 sudo -n systemctl is-failed --quiet thiscord-backup.service && exit 1
 sudo -n ln -s "$release" "$release/current-link"

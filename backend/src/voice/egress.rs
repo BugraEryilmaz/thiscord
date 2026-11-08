@@ -1938,7 +1938,7 @@ mod tests {
         }
         // Production's terminal branch sends a clear Error and follows this
         // same membership cleanup; unrelated membership remains in the room.
-        release_member(&writer.room, 1, source.id).await;
+        release_member(&writer.room, 1, source.id, false).await;
         let members = writer.room.members.read().await;
         assert_eq!(members.len(), 1);
         assert!(members.contains_key(&0));

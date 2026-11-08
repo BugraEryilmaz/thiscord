@@ -65,9 +65,17 @@ pub(super) struct Demux {
 }
 
 impl Demux {
+    /// Routes `ufrag` to `peer`. An ICE restart registers a new ufrag: the old
+    /// one stops routing, while learned addresses keep the current path alive.
     pub fn register(&mut self, peer: PeerId, ufrag: String) {
         self.ufrags.insert(ufrag.clone(), peer);
-        self.peers.entry(peer).or_default().ufrag = Some(ufrag);
+        let previous = self.peers.entry(peer).or_default().ufrag.replace(ufrag);
+        if let Some(previous) = previous
+            && self.ufrags.get(&previous) == Some(&peer)
+            && self.peers[&peer].ufrag.as_ref() != Some(&previous)
+        {
+            self.ufrags.remove(&previous);
+        }
     }
 
     /// The peer for a datagram received from `from`.
@@ -92,8 +100,17 @@ impl Demux {
         }
         let routes = self.peers.entry(peer).or_default();
         if routes.addresses.len() >= MAX_ADDRESSES_PER_PEER {
-            return;
+            if !authoritative {
+                return;
+            }
+            // A credential-checked path (a network change, an ICE restart)
+            // replaces this peer's oldest address instead of being ignored.
+            let oldest = routes.addresses.remove(0);
+            if self.addresses.get(&oldest) == Some(&peer) {
+                self.addresses.remove(&oldest);
+            }
         }
+        let routes = self.peers.entry(peer).or_default();
         routes.addresses.push(address);
         self.addresses.insert(address, peer);
         if let Some(owner) = owner
@@ -226,6 +243,38 @@ mod tests {
         assert_eq!(demux.len(), (1, 1, 1));
         assert_eq!(demux.route(client, &[0x80; 12]), Some(b));
         demux.forget(b);
+        assert_eq!(demux.len(), (0, 0, 0));
+    }
+
+    #[test]
+    fn ice_restart_moves_routing_to_the_new_ufrag_and_new_paths_are_learned() {
+        let a = PeerId {
+            index: 0,
+            generation: 1,
+        };
+        let mut demux = Demux::default();
+        demux.register(a, "old".into());
+        let current: SocketAddr = "203.0.113.5:4000".parse().unwrap();
+        assert_eq!(demux.route(current, &binding(b"old:c", true)), Some(a));
+        demux.register(a, "new".into());
+        // The current path keeps routing media until the restart completes.
+        assert_eq!(demux.route(current, &[0x80; 12]), Some(a));
+        // Only the new credentials teach new addresses.
+        let moved: SocketAddr = "198.51.100.9:4100".parse().unwrap();
+        assert_eq!(demux.route(moved, &binding(b"old:c", true)), None);
+        assert_eq!(demux.route(moved, &binding(b"new:c", true)), Some(a));
+        assert_eq!(demux.len(), (2, 1, 1));
+        // At the bound a credential-checked path evicts the oldest address.
+        for port in 0..MAX_ADDRESSES_PER_PEER as u16 {
+            demux.learn(SocketAddr::from(([198, 51, 100, 1], 6000 + port)), a, false);
+        }
+        assert_eq!(demux.peers[&a].addresses.len(), MAX_ADDRESSES_PER_PEER);
+        let roaming: SocketAddr = "192.0.2.44:7000".parse().unwrap();
+        assert_eq!(demux.route(roaming, &binding(b"new:c", true)), Some(a));
+        assert_eq!(demux.route(roaming, &[0x80; 12]), Some(a));
+        assert_eq!(demux.route(current, &[0x80; 12]), None, "oldest evicted");
+        assert_eq!(demux.peers[&a].addresses.len(), MAX_ADDRESSES_PER_PEER);
+        demux.forget(a);
         assert_eq!(demux.len(), (0, 0, 0));
     }
 }

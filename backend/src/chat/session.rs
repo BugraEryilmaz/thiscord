@@ -154,6 +154,7 @@ pub(super) async fn serve(
     token: String,
     guild_updates: bool,
     permission_set: u8,
+    restart: super::Restart,
 ) {
     let account_access = match socket_access(&pool, &token).await {
         Ok(access) => access,
@@ -260,8 +261,17 @@ pub(super) async fn serve(
     let mut member_tick = tokio::time::interval(Duration::from_secs(1));
     member_tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
     let mut guild_hints = guild_updates.then(|| super::guild_updates().subscribe());
+    let mut restarting = false;
     loop {
         tokio::select! { biased;
+            _ = restart.shutdown.drained() => {
+                if restart.notice {
+                    let retry_after_ms = crate::shutdown::Shutdown::retry_after_ms();
+                    let _ = send(&mut socket, ServerEvent::Restarting { retry_after_ms }).await;
+                }
+                restarting = true;
+                break;
+            }
             _ = session_revoked.changed() => { let _ = send(&mut socket, ServerEvent::Revoked {}).await; break; }
             _ = access::changed(&mut member_revoked) => { let _ = send(&mut socket, ServerEvent::Revoked {}).await; break; }
             _ = access::changed(&mut guild_revoked) => { let _ = send(&mut socket, ServerEvent::Revoked {}).await; break; }
@@ -564,7 +574,11 @@ pub(super) async fn serve(
             }
         }
     }
-    let _ = tokio::time::timeout(Duration::from_secs(1), socket.send(Message::Close(None))).await;
+    let close = restarting.then(|| axum::extract::ws::CloseFrame {
+        code: thiscord_shared::voice::RESTART_CLOSE_CODE,
+        reason: "Server restarting".into(),
+    });
+    let _ = tokio::time::timeout(Duration::from_secs(1), socket.send(Message::Close(close))).await;
     let _ = crate::performance::blocking(move || store::cleanup(&pool, connection)).await;
 }
 

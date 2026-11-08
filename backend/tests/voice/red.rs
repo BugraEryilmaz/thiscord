@@ -259,6 +259,8 @@ async fn pending_and_invalid_sdp_never_publish_legacy_replacement_rosters() {
             screen_subscriptions: false,
             screen_layers: false,
             screen_profiles: false,
+            restart_notice: false,
+            ice_restart: false,
             video_diagnostics: false,
             soundboard: false,
         },

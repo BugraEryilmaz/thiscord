@@ -332,7 +332,7 @@ async fn session(
                 browser_publisher: false,
                 sdp, packet_redundancy: false, remote_audio: false,
                 screen_feedback: false, screen_subscriptions: screen_supported, screen_layers: false,
-                video_diagnostics: false, soundboard: false, screen_profiles: false,
+                video_diagnostics: false, soundboard: false, screen_profiles: false, restart_notice: false, ice_restart: false,
             }).await?;
             loop {
                 match receive(&mut socket).await? {

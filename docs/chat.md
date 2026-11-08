@@ -376,6 +376,10 @@ and reloads a fresh snapshot, recovering missed sends, edits and deletions.
 
 Heartbeats use the socket every ten seconds; clients abandon silent connections
 after 25 seconds and reconnect with exponential backoff plus jitter (1-30 seconds).
+A planned server restart closes every chat socket with code 1012; sockets opened
+with `?restart_notice=1` first receive `Restarting { retry_after_ms }`, and the app
+then reconnects after that hint on a steady 1.5–2.5 s schedule for up to three
+minutes, saying calmly that Thiscord is restarting ([restarts.md](restarts.md)).
 An Unauthorized socket error triggers a bounded HTTP account check. Only a
 confirmed HTTP 401 clears that session and returns to sign-in; transient failures
 keep retrying. The check is tied to the socket's token so an old response cannot

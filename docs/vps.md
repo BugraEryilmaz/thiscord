@@ -35,7 +35,11 @@ only on loopback.
 
 `infra/vps/thiscord.service` runs the backend as an unprivileged system account,
 with only the capability to bind HTTPS port 443. Startup applies embedded Diesel
-migrations. systemd restarts failures and starts the service on reboot.
+migrations. systemd restarts failures and starts the service on reboot. Stops send
+SIGTERM and allow 30 s (`KillSignal`, `TimeoutStopSec`): the backend drains voice
+and sockets for planned restarts in about 13 s at most (see [restarts.md](restarts.md)).
+Install an updated unit with `sudo install -m 0644 infra/vps/thiscord.service
+/etc/systemd/system/` and `sudo systemctl daemon-reload`.
 
 ```sh
 sudo systemctl status thiscord
@@ -76,8 +80,10 @@ production sender. The source checkout's `backend/.env` is not used by systemd,
 and `thiscord-deploy` preserves the production environment file.
 
 After editing, run `sudo systemctl restart thiscord` and check
-`https://thiscord.com.tr/api/v1/ready`. Restarting disconnects active voice calls;
-SIGHUP reloads certificates only and does not reload mail settings.
+`https://thiscord.com.tr/api/v1/ready`. Restarts are graceful: voice and chat
+clients are told the server is restarting and rejoin on their own once it is ready
+([restarts.md](restarts.md)). SIGHUP reloads certificates only and does not reload
+mail settings.
 
 ## Backups and certificate renewal
 
@@ -156,8 +162,10 @@ After a successful build it installs a new release directory, stops the backend,
 runs the database backup service, atomically switches `/opt/thiscord/current`,
 and starts the backend using the existing production environment. Startup applies
 migrations. It checks origin HTTPS/database readiness directly before checking
-public access through Cloudflare. Voice connections disconnect during the brief
-backup/restart window. A lock prevents concurrent runs of this script.
+public access through Cloudflare. Stopping drains voice gracefully: clients hear
+that the server is restarting and rejoin automatically after the brief
+backup/restart window, keeping mute/deafen ([restarts.md](restarts.md)). A lock
+prevents concurrent runs of this script.
 
 A failure before activation restarts the previous backend if it was stopped.
 A failure after activation stops the attempted release for investigation; it does

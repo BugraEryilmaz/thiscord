@@ -82,7 +82,9 @@ async fn main() -> Result<(), BoxError> {
         thiscord_backend::chat::start_attachment_cleanup(pool.clone());
         thiscord_backend::friends::start_attachment_cleanup(pool.clone());
     }
-    let mut app = api::router_with_limits(pool, origins, limits);
+    // Planned restarts drain voice before the HTTP server stops (docs/vps.md).
+    let shutdown = thiscord_backend::shutdown::Shutdown::after_restart();
+    let mut app = api::router_with_shutdown(pool, origins, limits, shutdown.clone());
     // Production bundles live beside the executable. An explicit path must exist.
     let configured = env::var_os("ADMIN_DIST_DIR");
     let directory = configured.clone().map(std::path::PathBuf::from).unwrap_or(
@@ -126,9 +128,10 @@ async fn main() -> Result<(), BoxError> {
         let renewals = tokio::spawn(tls.watch_renewals());
         let handle = axum_server::Handle::new();
         let stopping = handle.clone();
+        let draining = shutdown.clone();
         let signals = tokio::spawn(async move {
-            shutdown().await;
-            stopping.graceful_shutdown(Some(std::time::Duration::from_secs(10)));
+            drain(&draining).await;
+            stopping.graceful_shutdown(Some(HTTP_STOP_TIMEOUT));
         });
         tracing::info!(bind = %address, scheme = "https", "Thiscord backend listening");
         let result = axum_server::from_tcp_rustls(listener.into_std()?, config)?
@@ -143,17 +146,44 @@ async fn main() -> Result<(), BoxError> {
         result?;
     } else {
         tracing::info!(bind = %address, scheme = "http", "Thiscord backend listening");
-        axum::serve(
+        let (stopping, stopped) = tokio::sync::oneshot::channel();
+        let draining = shutdown.clone();
+        let server = axum::serve(
             listener,
             app.into_make_service_with_connect_info::<SocketAddr>(),
         )
-        .with_graceful_shutdown(shutdown())
-        .await?;
+        .with_graceful_shutdown(async move {
+            drain(&draining).await;
+            let _ = stopping.send(());
+        });
+        // Graceful HTTP shutdown waits for open connections; bound it like the
+        // TLS server so a long poll cannot hold a restart past systemd's limit.
+        tokio::select! {
+            result = server => result?,
+            _ = async {
+                let _ = stopped.await;
+                tokio::time::sleep(HTTP_STOP_TIMEOUT).await;
+            } => tracing::warn!("HTTP connections did not close in time; stopping"),
+        }
     }
     Ok(())
 }
 
-async fn shutdown() {
+/// After draining voice, open HTTP requests get this long to finish. The total
+/// (`DRAIN_TIMEOUT` plus this) stays well inside `TimeoutStopSec` of the unit.
+const HTTP_STOP_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(8);
+
+/// Waits for SIGTERM/Ctrl-C, then drains: no new voice joins, restart notices
+/// to voice and chat sockets, and a bounded wait for voice rooms to empty.
+async fn drain(shutdown: &thiscord_backend::shutdown::Shutdown) {
+    signal().await;
+    shutdown.begin();
+    shutdown
+        .wait_idle(thiscord_backend::shutdown::DRAIN_TIMEOUT)
+        .await;
+}
+
+async fn signal() {
     #[cfg(unix)]
     {
         let mut terminate =

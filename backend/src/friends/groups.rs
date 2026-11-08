@@ -714,6 +714,25 @@ pub(super) fn end_call(
     fx.changed.extend(members.iter().map(|m| m.id));
     Ok(Response::Done)
 }
+/// `store::hold_for_restart` for group calls: only an existing joined lease of a
+/// live call is held; nothing is created for a member who no longer has one.
+pub(super) fn hold_for_restart(c: &mut PgConnection, id: &str, actor: &str) -> Result<(), Failure> {
+    let held = execute(
+        c,
+        &format!(
+            "UPDATE group_call_members p SET until=GREATEST(p.until,now()+interval '180 seconds') FROM group_calls k WHERE p.call_id=$1::uuid AND p.account_id=$2::uuid AND p.state='joined' AND p.until>now() AND k.id=p.call_id AND {LIVE}"
+        ),
+        &[id, actor],
+    )?;
+    if held == 1 {
+        execute(
+            c,
+            "UPDATE group_calls SET expires_at=GREATEST(expires_at,now()+interval '180 seconds') WHERE id=$1::uuid AND state='active'",
+            &[id],
+        )?;
+    }
+    Ok(())
+}
 /// SFU authorization for a group call: current membership and a joined lease,
 /// which this renews. `None` when `id` is not a group call.
 pub(super) fn voice(

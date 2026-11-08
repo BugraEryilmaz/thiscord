@@ -172,7 +172,7 @@ Domain ownership alone does not configure the required DNS records.
 On the VPS, edit `/etc/thiscord/backend.env`, not the checkout's `backend/.env`.
 Keep exactly one `RESEND_FROM` entry: a later duplicate overrides the earlier
 sender. Run `sudo systemctl restart thiscord` to load environment changes
-(active voice connections disconnect). See [vps.md](vps.md).
+(active calls rejoin automatically; see [restarts.md](restarts.md)). See [vps.md](vps.md).
 
 The worker retries queued mail every five seconds until its 30-minute expiry.
 Each outbox message uses a stable Resend idempotency key, including after a restart.

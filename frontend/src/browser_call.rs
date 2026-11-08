@@ -6,7 +6,7 @@
 use thiscord_shared::{
     ApiError, ErrorCode,
     audio::{AudioSettings, SpeakerVolumeTarget, TransmitMode},
-    voice::{MediaKind, REPLACED_CLOSE_CODE, ROOM_CAPACITY},
+    voice::{MediaKind, REPLACED_CLOSE_CODE, RESTART_CLOSE_CODE, ROOM_CAPACITY},
 };
 
 /// Remote indicators light at this decoded level (WebRTC `audioLevel`, 0..1).
@@ -355,8 +355,29 @@ pub enum FailureKind {
     Final,
     Replaced,
     ResumeUnavailable,
+    /// A planned server restart: rejoin with a fresh Join after the hint (ms).
+    Restarting(u32),
+    /// The server is briefly unavailable (draining, or its database).
+    Unavailable,
 }
+/// After a restart notice, retry steadily (not exponentially) for this long.
+pub const RESTART_RETRY_WINDOW_MS: f64 = 180_000.0;
+const RESTART_RETRY_MS: u32 = 1_500;
 impl Failure {
+    pub fn restarting(retry_after_ms: u64) -> Self {
+        Self {
+            message: "Thiscord is restarting".into(),
+            retryable: true,
+            kind: FailureKind::Restarting(retry_after_ms.min(30_000) as u32),
+        }
+    }
+    /// A restart or briefly unavailable server: a calm reconnecting state.
+    pub fn calm(&self) -> bool {
+        matches!(
+            self.kind,
+            FailureKind::Restarting(_) | FailureKind::Unavailable
+        )
+    }
     pub fn temporary(message: impl Into<String>) -> Self {
         Self {
             message: message.into(),
@@ -400,7 +421,11 @@ impl Failure {
                     | ErrorCode::ServiceUnavailable
                     | ErrorCode::InternalError
             ),
-            kind: FailureKind::Server,
+            kind: if error.code == ErrorCode::ServiceUnavailable {
+                FailureKind::Unavailable
+            } else {
+                FailureKind::Server
+            },
         }
     }
     /// A WebSocket close. Policy/protocol closes are final and their bodies are
@@ -408,6 +433,8 @@ impl Failure {
     pub fn closed(code: u16) -> Self {
         if code == REPLACED_CLOSE_CODE {
             Self::replaced()
+        } else if code == RESTART_CLOSE_CODE {
+            Self::restarting(1_500)
         } else if matches!(code, 1000 | 1001 | 1005 | 1006 | 1011..=1014) {
             Self::temporary("Voice connection closed")
         } else {
@@ -426,9 +453,27 @@ impl Failure {
 #[derive(Debug, Default)]
 pub struct Backoff {
     failures: u32,
+    restart_until: Option<f64>,
 }
 pub const STABLE_CALL_MS: f64 = 30_000.0;
 impl Backoff {
+    /// The native supervisor's restart pacing: a restart notice waits for its
+    /// hint, then retries steadily while the next server process starts.
+    pub fn after_ms(&mut self, failure: &Failure, stable: bool, jitter: u32, now: f64) -> u32 {
+        if let FailureKind::Restarting(hint) = failure.kind {
+            self.restart_until = Some(now + RESTART_RETRY_WINDOW_MS);
+            self.failures = 0;
+            return hint + jitter % 251;
+        }
+        if failure.kind == FailureKind::Unavailable && self.restart_until.is_none() {
+            self.restart_until = Some(now + RESTART_RETRY_WINDOW_MS);
+        }
+        if self.restart_until.is_some_and(|until| now < until) {
+            return RESTART_RETRY_MS + jitter % 1_001;
+        }
+        self.restart_until = None;
+        self.next_ms(stable, jitter)
+    }
     pub fn next_ms(&mut self, stable: bool, jitter: u32) -> u32 {
         if stable {
             self.failures = 0;
@@ -742,6 +787,10 @@ mod tests {
             assert_eq!(Failure::server(&error).retryable, retryable);
             assert!(!Failure::server(&error).resumable(true, false));
         }
+        // A restart rejoins: it is never resumed into the next process.
+        let restart = Failure::closed(RESTART_CLOSE_CODE);
+        assert!(restart.retryable && restart.calm() && !restart.resumable(true, false));
+        assert!(Failure::restarting(1_800).calm());
         let lost = Failure::temporary("Voice connection closed");
         assert!(lost.resumable(true, false));
         assert!(!lost.resumable(false, false));
@@ -759,6 +808,39 @@ mod tests {
         assert_eq!(backoff.next_ms(false, 1002), 2000);
         assert_eq!(resume_delay_ms(0, 0), 250);
         assert_eq!(resume_delay_ms(9, 255), 1255);
+    }
+
+    #[test]
+    fn restart_pacing_mirrors_the_native_client() {
+        let mut backoff = Backoff::default();
+        backoff.next_ms(false, 0);
+        backoff.next_ms(false, 0);
+        assert_eq!(
+            backoff.after_ms(&Failure::restarting(2_000), false, 100, 0.0),
+            2_100
+        );
+        let down = Failure::temporary("Voice socket failed");
+        for at in [3_000.0, 60_000.0, 179_000.0] {
+            assert_eq!(backoff.after_ms(&down, false, 0, at), 1_500);
+        }
+        let late = RESTART_RETRY_WINDOW_MS + 1_000.0;
+        assert_eq!(backoff.after_ms(&down, false, 0, late), 1_000);
+        assert_eq!(backoff.after_ms(&down, false, 0, late), 2_000);
+        let unavailable = Failure::server(&ApiError {
+            code: ErrorCode::ServiceUnavailable,
+            message: "Thiscord is restarting. Reconnecting shortly.".into(),
+            request_id: "00000000-0000-0000-0000-000000000001".parse().unwrap(),
+            fields: vec![],
+        });
+        assert!(unavailable.calm());
+        assert_eq!(
+            Backoff::default().after_ms(&unavailable, false, 0, 0.0),
+            1_500
+        );
+        assert_eq!(
+            Failure::restarting(900_000).kind,
+            FailureKind::Restarting(30_000)
+        );
     }
 
     #[test]

@@ -153,7 +153,10 @@ impl Worker {
                     _ = tokio::time::sleep_until(heard + Duration::from_secs(20)) => Failure::temporary("Voice signaling timed out").with_reason("signaling_heartbeat_timeout"),
                 }
             };
-            if !failure.retryable || self.credentials.resume_token.is_none() {
+            // A restart ends the media session: rejoin with a fresh Join, never
+            // resume into the next server process.
+            if !failure.retryable || self.credentials.resume_token.is_none() || failure.is_restart()
+            {
                 return failure;
             }
             self.recovering.store(true, Ordering::Release);
@@ -199,7 +202,9 @@ impl Worker {
             match result {
                 Ok(Ok(link)) => return Ok(link),
                 Ok(Err(error))
-                    if !error.retryable || error.diagnostic_reason() == "resume_unavailable" =>
+                    if !error.retryable
+                        || error.is_restart()
+                        || error.diagnostic_reason() == "resume_unavailable" =>
                 {
                     return Err(error);
                 }
@@ -248,6 +253,10 @@ impl Worker {
             .with_reason("resume_unavailable")),
             ServerEvent::Replaced {} => Err(Failure::replaced()),
             ServerEvent::Error { error } => Err(server_failure(&self.connection, error)),
+            // The session belonged to a server process that has restarted.
+            ServerEvent::Restarting { retry_after_ms } => {
+                Err(Failure::restarting(Duration::from_millis(retry_after_ms)))
+            }
             _ => Err("Unexpected resume response".into()),
         }
     }
@@ -611,6 +620,87 @@ mod tests {
             session.close().await;
             server.await.unwrap();
         }
+    }
+
+    #[tokio::test]
+    async fn restart_close_rejoins_instead_of_resuming_into_the_next_process() {
+        use tokio_tungstenite::tungstenite::protocol::{CloseFrame, frame::coding::CloseCode};
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let base = format!("http://{}", listener.local_addr().unwrap());
+        let server = tokio::spawn(async move {
+            let mut socket = accept(&listener).await;
+            reply(
+                &mut socket,
+                ServerEvent::Restarting {
+                    retry_after_ms: 1_800,
+                },
+            )
+            .await;
+            socket
+                .send(Message::Close(Some(CloseFrame {
+                    code: CloseCode::from(RESTART_CLOSE_CODE),
+                    reason: "Server restarting".into(),
+                })))
+                .await
+                .unwrap();
+            // No resume may follow: the next process cannot have this session.
+            assert!(
+                timeout(Duration::from_millis(300), listener.accept())
+                    .await
+                    .is_err()
+            );
+        });
+        let (send, receive) = connect(&base).await.unwrap().split();
+        let mut session = Session::start(send, receive, credentials(base), Connection::default());
+        // The notice reaches the voice loop first (it rejoins after the hint)...
+        let notice = timeout(Duration::from_secs(2), session.events.recv())
+            .await
+            .unwrap()
+            .unwrap()
+            .unwrap();
+        assert!(notice.to_text().unwrap().contains("restarting"));
+        // ...and the close ends signaling as a restart, not a resumable drop.
+        let error = timeout(Duration::from_secs(2), session.events.recv())
+            .await
+            .unwrap()
+            .unwrap()
+            .unwrap_err();
+        assert!(error.is_restart() && error.retryable);
+        session.close().await;
+        server.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn resume_reaching_a_restarted_server_becomes_a_fresh_rejoin() {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let base = format!("http://{}", listener.local_addr().unwrap());
+        let server = tokio::spawn(async move {
+            drop(accept(&listener).await);
+            let mut socket = accept(&listener).await;
+            assert_resume(command(&mut socket).await, 1);
+            reply(
+                &mut socket,
+                ServerEvent::Restarting {
+                    retry_after_ms: 400,
+                },
+            )
+            .await;
+            assert!(
+                timeout(Duration::from_millis(150), listener.accept())
+                    .await
+                    .is_err()
+            );
+        });
+        let (send, receive) = connect(&base).await.unwrap().split();
+        let mut session = Session::start(send, receive, credentials(base), Connection::default());
+        let error = timeout(Duration::from_secs(3), session.events.recv())
+            .await
+            .unwrap()
+            .unwrap()
+            .unwrap_err();
+        assert!(error.is_restart() && error.retryable && error.calm());
+        session.close().await;
+        server.await.unwrap();
     }
 
     #[tokio::test]

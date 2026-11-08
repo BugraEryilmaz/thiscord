@@ -13,6 +13,7 @@ pub mod permissions;
 mod retry;
 pub mod safety;
 pub mod schema;
+pub mod shutdown;
 pub mod soundboard;
 
 pub type BoxError = Box<dyn std::error::Error + Send + Sync>;

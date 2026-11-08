@@ -2,11 +2,18 @@
 use std::time::Duration;
 use thiscord_shared::{ApiError, ErrorCode};
 
+/// After a restart notice, retry steadily (not exponentially) for this long:
+/// the next server process is usually ready within seconds.
+pub const RESTART_RETRY_WINDOW: Duration = Duration::from_secs(180);
+const RESTART_RETRY_MS: u64 = 1_500;
+
 #[derive(Debug)]
 pub struct Failure {
     pub message: String,
     pub retryable: bool,
     reason: &'static str,
+    /// The server's first-retry hint from a restart notice.
+    retry_after: Option<Duration>,
 }
 impl Failure {
     pub fn temporary(message: impl Into<String>) -> Self {
@@ -14,7 +21,25 @@ impl Failure {
             message: message.into(),
             retryable: true,
             reason: "transport",
+            retry_after: None,
         }
+    }
+    /// A planned server restart: rejoin with a fresh Join after `retry_after`.
+    pub fn restarting(retry_after: Duration) -> Self {
+        Self {
+            message: "Thiscord is restarting".into(),
+            retryable: true,
+            reason: "server_restart",
+            retry_after: Some(retry_after.min(Duration::from_secs(30))),
+        }
+    }
+    /// A restart or a temporarily unavailable server: show a calm reconnecting
+    /// state, not an error.
+    pub fn calm(&self) -> bool {
+        matches!(self.reason, "server_restart" | "server_unavailable")
+    }
+    pub fn is_restart(&self) -> bool {
+        self.reason == "server_restart"
     }
     /// Log a fixed category, never a server body, device error or network URL.
     pub fn with_reason(mut self, reason: &'static str) -> Self {
@@ -39,12 +64,17 @@ impl Failure {
                     | ErrorCode::ServiceUnavailable
                     | ErrorCode::InternalError
             ),
-            message: error.message,
             reason: if legacy_closing {
                 "duplicate_join"
+            } else if error.code == ErrorCode::ServiceUnavailable {
+                // A draining server refuses joins this way, as can a briefly
+                // unavailable database.
+                "server_unavailable"
             } else {
                 "server"
             },
+            message: error.message,
+            retry_after: None,
         }
     }
 }
@@ -54,6 +84,7 @@ impl From<String> for Failure {
             message,
             retryable: false,
             reason: "local_or_protocol",
+            retry_after: None,
         }
     }
 }
@@ -70,8 +101,36 @@ impl std::fmt::Display for Failure {
 #[derive(Default)]
 pub struct Backoff {
     failures: u32,
+    restart_until: Option<std::time::Instant>,
 }
 impl Backoff {
+    /// The delay before retrying after `error`. A restart notice waits for its
+    /// hint, then retries steadily while the next server process starts; the
+    /// exponential schedule resumes after `RESTART_RETRY_WINDOW`.
+    pub fn after(&mut self, error: &Failure, stable: bool, jitter: u32) -> Duration {
+        self.after_at(error, stable, jitter, std::time::Instant::now())
+    }
+    fn after_at(
+        &mut self,
+        error: &Failure,
+        stable: bool,
+        jitter: u32,
+        now: std::time::Instant,
+    ) -> Duration {
+        if let Some(hint) = error.retry_after {
+            self.restart_until = Some(now + RESTART_RETRY_WINDOW);
+            self.failures = 0;
+            return hint + Duration::from_millis(u64::from(jitter % 251));
+        }
+        if error.reason == "server_unavailable" && self.restart_until.is_none() {
+            self.restart_until = Some(now + RESTART_RETRY_WINDOW);
+        }
+        if self.restart_until.is_some_and(|until| now < until) {
+            return Duration::from_millis(RESTART_RETRY_MS + u64::from(jitter % 1_001));
+        }
+        self.restart_until = None;
+        self.next(stable, jitter)
+    }
     pub fn next(&mut self, stable: bool, jitter: u32) -> Duration {
         if stable {
             self.failures = 0;
@@ -98,7 +157,7 @@ pub async fn supervise(
             if !error.retryable {
                 return error;
             }
-            let delay = backoff.next(stable, jitter());
+            let delay = backoff.after(&error, stable, jitter());
             connector.waiting(&error, delay);
             tokio::time::sleep(delay).await;
         }
@@ -288,5 +347,54 @@ mod tests {
             assert_eq!(error.diagnostic_reason(), expected);
             assert!(!error.diagnostic_reason().contains(private));
         }
+    }
+
+    #[test]
+    fn restarts_wait_for_the_hint_then_retry_steadily_before_backing_off() {
+        let start = std::time::Instant::now();
+        let mut backoff = Backoff::default();
+        // Ordinary failures before the restart grow the delay.
+        backoff.next(false, 0);
+        backoff.next(false, 0);
+        let restart = Failure::restarting(Duration::from_millis(2_000));
+        assert!(restart.retryable && restart.calm() && restart.is_restart());
+        assert_eq!(
+            backoff.after_at(&restart, false, 100, start),
+            Duration::from_millis(2_100)
+        );
+        // While the next process starts, refused connections retry every ~2 s.
+        let down = Failure::temporary("connection refused");
+        for second in [3, 10, 60, 179] {
+            let delay = backoff.after_at(&down, false, 0, start + Duration::from_secs(second));
+            assert_eq!(delay, Duration::from_millis(1_500));
+        }
+        // Past the window the ordinary bounded schedule resumes from the start.
+        let late = start + RESTART_RETRY_WINDOW + Duration::from_secs(1);
+        assert_eq!(
+            backoff.after_at(&down, false, 0, late),
+            Duration::from_secs(1)
+        );
+        assert_eq!(
+            backoff.after_at(&down, false, 0, late),
+            Duration::from_secs(2)
+        );
+        // Hints are bounded; a draining server's refusal is calm as well.
+        assert_eq!(
+            Failure::restarting(Duration::from_secs(600)).retry_after,
+            Some(Duration::from_secs(30))
+        );
+        let unavailable = Failure::server(ApiError {
+            code: ErrorCode::ServiceUnavailable,
+            message: "Thiscord is restarting. Reconnecting shortly.".into(),
+            request_id: "00000000-0000-0000-0000-000000000001".parse().unwrap(),
+            fields: vec![],
+        });
+        assert!(unavailable.retryable && unavailable.calm() && !unavailable.is_restart());
+        let mut fresh = Backoff::default();
+        assert_eq!(
+            fresh.after_at(&unavailable, false, 0, start),
+            Duration::from_millis(1_500)
+        );
+        assert!(!Failure::replaced().calm());
     }
 }

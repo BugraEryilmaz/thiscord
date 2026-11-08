@@ -16,6 +16,7 @@ use thiscord_frontend::browser_call::{
     self as rules, Activity, Answering, Backoff, Failure, FailureKind, Gate, PLAYBACK_SLOTS,
     SendRoute,
 };
+use thiscord_frontend::ice_recovery::{self, IceRecovery};
 use thiscord_shared::{ChannelId, GuildId, RequestId, audio::AudioSettings, voice::*};
 use wasm_bindgen::JsCast;
 use wasm_bindgen_futures::JsFuture;
@@ -26,6 +27,8 @@ use web_sys::{
 
 const TICK_MS: f64 = 100.0;
 type FetchedStats = (Option<media::Stats>, Option<video::InboundVideo>);
+/// A gathered ICE restart answer and the relay servers it applied.
+type RestartAnswer = Result<(String, Vec<IceServer>), Failure>;
 /// Self state doubles as the signaling keepalive the SFU expects within 20 s.
 const STATE_REFRESH_MS: f64 = 5_000.0;
 const HEARTBEAT_MS: f64 = 20_000.0;
@@ -62,6 +65,9 @@ pub(super) struct Live {
     pub media: video::Media,
     /// Soundboard negotiated: offered by the SFU and opted into here.
     soundboard: bool,
+    /// How answers are rewritten for this browser (also on ICE restarts).
+    strip_red: bool,
+    restrict_video: bool,
 }
 impl Drop for Live {
     fn drop(&mut self) {
@@ -500,19 +506,54 @@ fn request_id() -> Option<RequestId> {
 async fn supervise(call: Rc<Call>) {
     let mut backoff = Backoff::default();
     let mut call_id: Option<RequestId> = None;
+    // A restart keeps the roster on screen and offers to resume publications.
+    let mut calm = false;
+    let mut resumable: Vec<MediaKind> = Vec::new();
     loop {
         if call.closed.get() {
             return;
         }
+        let kept = resumable.clone();
         super::update_voice(&call, |voice| {
             *voice = VoiceStatus {
                 channel_id: Some(call.channel_id.get()),
-                message: "Connecting to voice…".into(),
+                message: if calm {
+                    "Reconnecting…"
+                } else {
+                    "Connecting to voice…"
+                }
+                .into(),
+                reconnecting: calm,
+                participants: if calm {
+                    std::mem::take(&mut voice.participants)
+                } else {
+                    vec![]
+                },
+                own_slot: if calm { voice.own_slot } else { None },
+                resumable: kept,
                 ..Default::default()
             }
         });
         let mut connected_at = None;
         let ending = attempt(&call, &mut call_id, &mut connected_at).await;
+        // A restart stays calm through the refused retries that follow it,
+        // until an attempt connects again.
+        let ended_calm = matches!(&ending, Ending::Failed(failure) if failure.calm())
+            || (calm && connected_at.is_none());
+        if ended_calm && connected_at.is_some() {
+            // Read before the attempt ends them: what the user was publishing.
+            let published = video::state_untracked();
+            resumable = [
+                (published.screen, MediaKind::ScreenVideo),
+                (published.camera, MediaKind::Camera),
+            ]
+            .into_iter()
+            .filter_map(|(active, kind)| active.then_some(kind))
+            .collect();
+        } else if !ended_calm {
+            // Only a restart pauses publications; any other ending forgets them.
+            resumable.clear();
+        }
         call.end_attempt();
         let mut stable = connected_at.is_some_and(|at| now() - at >= rules::STABLE_CALL_MS);
         let failure = match ending {
@@ -530,15 +571,35 @@ async fn supervise(call: Rc<Call>) {
             super::finish(&call, failure.message);
             return;
         }
-        let delay = backoff.next_ms(stable, (js_sys::Math::random() * 501.0) as u32);
+        calm = ended_calm;
+        let delay = backoff.after_ms(
+            &failure,
+            stable,
+            (js_sys::Math::random() * 1001.0) as u32,
+            now(),
+        );
+        let kept = resumable.clone();
         super::update_voice(&call, |voice| {
             *voice = VoiceStatus {
                 channel_id: Some(call.channel_id.get()),
-                message: format!(
-                    "Reconnecting in {:.1}s - {}",
-                    f64::from(delay) / 1000.0,
-                    failure.message
-                ),
+                message: if calm {
+                    "Thiscord is restarting. Reconnecting…".into()
+                } else {
+                    format!(
+                        "Reconnecting in {:.1}s - {}",
+                        f64::from(delay) / 1000.0,
+                        failure.message
+                    )
+                },
+                // Any automatic retry is a reconnection, not a failure.
+                reconnecting: true,
+                participants: if calm {
+                    std::mem::take(&mut voice.participants)
+                } else {
+                    vec![]
+                },
+                own_slot: if calm { voice.own_slot } else { None },
+                resumable: kept,
                 ..Default::default()
             }
         });
@@ -601,7 +662,16 @@ async fn attempt(
             return failure.into();
         }
     };
-    let (sdp, own_slot, can_speak, ice_servers, resume_token, soundboard) = match first {
+    let (
+        sdp,
+        own_slot,
+        can_speak,
+        ice_servers,
+        resume_token,
+        soundboard,
+        restart_notice,
+        ice_restart,
+    ) = match first {
         ServerEvent::Offer {
             sdp,
             slot,
@@ -609,10 +679,24 @@ async fn attempt(
             ice_servers,
             resume_token,
             soundboard,
+            restart_notice,
+            ice_restart,
             ..
-        } if slot < ROOM_CAPACITY => (sdp, slot, can_speak, ice_servers, resume_token, soundboard),
+        } if slot < ROOM_CAPACITY => (
+            sdp,
+            slot,
+            can_speak,
+            ice_servers,
+            resume_token,
+            soundboard,
+            restart_notice,
+            ice_restart,
+        ),
         ServerEvent::Replaced {} => return Failure::replaced().into(),
         ServerEvent::Error { error } => return Failure::server(&error).into(),
+        ServerEvent::Restarting { retry_after_ms } => {
+            return Failure::restarting(retry_after_ms).into();
+        }
         _ => {
             socket.leave();
             return Failure::final_("Invalid voice offer").into();
@@ -632,6 +716,7 @@ async fn attempt(
             return Failure::final_("Cannot initialize voice media connection").into();
         }
     };
+    let ice = IceRecovery::new(ice_restart, &ice_servers, now() as u64);
     drop(ice_servers);
     let microphone = call.microphone.borrow().clone();
     *call.live.borrow_mut() = Some(Live {
@@ -649,6 +734,8 @@ async fn attempt(
         sent_at: 0.0,
         media: Default::default(),
         soundboard,
+        strip_red: false,
+        restrict_video: false,
     });
     let answer = match negotiate(
         call,
@@ -679,9 +766,11 @@ async fn attempt(
             // Opt in whenever the SFU offers it (guild calls only).
             soundboard,
             screen_profiles: false,
+            restart_notice,
+            ice_restart,
         });
     }
-    run(call, inbox, resume_token, connected_at).await
+    run(call, inbox, resume_token, connected_at, ice).await
 }
 
 async fn negotiate(
@@ -800,22 +889,34 @@ async fn negotiate(
         live.sender = sender;
         live.receivers = receivers;
         live.media = video_media;
+        live.strip_red = !opus_only;
+        live.restrict_video = !h264_only;
     }
+    answer_gathered(pc, !opus_only, !h264_only).await
+}
+
+/// Creates, rewrites and applies the answer, then waits for gathering (the SFU
+/// does not trickle candidates). Shared by the first answer and ICE restarts.
+async fn answer_gathered(
+    pc: &RtcPeerConnection,
+    strip_red: bool,
+    restrict_video: bool,
+) -> Result<String, Failure> {
     let answer: RtcSessionDescriptionInit = JsFuture::from(pc.create_answer())
         .await
         .map_err(|_| Failure::final_("Cannot create a voice answer"))?
         .unchecked_into();
-    if !opus_only || !h264_only {
+    if strip_red || restrict_video {
         // Without setCodecPreferences, drop RED from audio and every format
         // but baseline H.264 from video sections of the answer instead.
         let mut created = js_sys::Reflect::get(&answer, &"sdp".into())
             .ok()
             .and_then(|sdp| sdp.as_string())
             .ok_or_else(|| Failure::final_("Cannot create a voice answer"))?;
-        if !opus_only {
+        if strip_red {
             created = rules::strip_red(&created);
         }
-        if !h264_only {
+        if restrict_video {
             created = thiscord_frontend::browser_video::restrict_video(&created);
         }
         answer.set_sdp(&created);
@@ -823,8 +924,7 @@ async fn negotiate(
     JsFuture::from(pc.set_local_description(&answer))
         .await
         .map_err(|_| Failure::final_("Cannot set the voice answer"))?;
-    // The SFU does not trickle candidates: send the answer once gathering ends
-    // (woken by the gathering-state event, not a poll).
+    // Woken by the gathering-state event, not a poll.
     super::ice_gathered(pc, 8_000).await;
     let local = pc
         .local_description()
@@ -836,12 +936,47 @@ async fn negotiate(
     Ok(serde_json::json!({"type": "answer", "sdp": sdp}).to_string())
 }
 
+/// Applies an ICE restart offer with its fresh relay credentials and returns
+/// the gathered answer. Media, tracks and DTLS continue unchanged.
+async fn restart_answer(
+    pc: RtcPeerConnection,
+    offer: String,
+    servers: Vec<IceServer>,
+    strip_red: bool,
+    restrict_video: bool,
+) -> Result<String, Failure> {
+    #[derive(serde::Deserialize)]
+    struct Description {
+        #[serde(rename = "type")]
+        kind: String,
+        sdp: String,
+    }
+    let offer: Description =
+        serde_json::from_str(&offer).map_err(|_| Failure::temporary("Invalid ICE restart"))?;
+    if offer.kind != "offer" {
+        return Err(Failure::temporary("Invalid ICE restart"));
+    }
+    pc.set_configuration_with_configuration(&media::configuration(&servers))
+        .map_err(|_| Failure::temporary("Cannot apply relay credentials"))?;
+    let description = RtcSessionDescriptionInit::new(RtcSdpType::Offer);
+    description.set_sdp(&offer.sdp);
+    JsFuture::from(pc.set_remote_description(&description))
+        .await
+        .map_err(|_| Failure::temporary("Cannot accept the ICE restart"))?;
+    answer_gathered(&pc, strip_red, restrict_video).await
+}
+
 async fn run(
     call: &Rc<Call>,
     mut inbox: socket::SharedInbox,
     resume_token: Option<String>,
     connected_at: &mut Option<f64>,
+    mut ice: IceRecovery,
 ) -> Ending {
+    // An ICE restart renegotiates in its own task; its answer lands here.
+    let restarted: Rc<RefCell<Option<RestartAnswer>>> = Rc::default();
+    let mut restarting = false;
+    let mut online = web_sys::window().is_none_or(|w| w.navigator().on_line());
     let answered = now();
     let mut heard = now();
     let mut next_tick = now();
@@ -866,6 +1001,31 @@ async fn run(
             Some(Incoming::Text(text)) => {
                 heard = now();
                 match parse(&text) {
+                    Ok(ServerEvent::IceRestart { sdp, ice_servers }) => {
+                        let live = call.live.borrow();
+                        if let Some(live) = live
+                            .as_ref()
+                            .filter(|_| ice.awaiting_offer() && !restarting)
+                        {
+                            restarting = true;
+                            ice.offered(now() as u64);
+                            let (pc, strip_red, restrict_video) =
+                                (live.pc.clone(), live.strip_red, live.restrict_video);
+                            let restarted = restarted.clone();
+                            wasm_bindgen_futures::spawn_local(async move {
+                                let result = restart_answer(
+                                    pc,
+                                    sdp,
+                                    ice_servers.clone(),
+                                    strip_red,
+                                    restrict_video,
+                                )
+                                .await;
+                                *restarted.borrow_mut() =
+                                    Some(result.map(|answer| (answer, ice_servers)));
+                            });
+                        }
+                    }
                     Ok(event) => {
                         if let Some(ending) = handle(call, event) {
                             return ending;
@@ -920,6 +1080,59 @@ async fn run(
         if peer_failed {
             return Failure::temporary("Voice connection lost").into();
         }
+        if let Some(result) = restarted.borrow_mut().take() {
+            restarting = false;
+            match result {
+                Ok((sdp, servers)) => {
+                    call.send(ClientEvent::IceRestartAnswer { sdp });
+                    ice.answered(&servers, now() as u64);
+                }
+                Err(_) => return Failure::temporary("Voice connection lost").into(),
+            }
+        }
+        if connected_at.is_some() {
+            let at = now() as u64;
+            let connected = peer_state == Some(RtcPeerConnectionState::Connected);
+            let back_online = web_sys::window().is_none_or(|w| w.navigator().on_line());
+            let mut action = if back_online && !online {
+                // A network change: restart now rather than wait for ICE.
+                ice.network_changed(true, at)
+            } else {
+                ice.tick(connected, true, at)
+            };
+            online = back_online;
+            if action == ice_recovery::Action::Wait && ice.refresh_due(at) {
+                let pc = call.live.borrow().as_ref().map(|live| live.pc.clone());
+                if let Some(pc) = pc {
+                    action = ice.relay_checked(media::relayed(&pc).await, at);
+                }
+            }
+            match action {
+                ice_recovery::Action::Request(_) => call.send(ClientEvent::IceRestart {}),
+                ice_recovery::Action::Reconnect => {
+                    return Failure::temporary("Voice connection lost").into();
+                }
+                ice_recovery::Action::Wait => {}
+            }
+            let recovering = ice.recovering() || !connected;
+            if call
+                .live
+                .borrow()
+                .as_ref()
+                .is_some_and(|live| live.connected)
+            {
+                let published = video::state_untracked();
+                super::update_voice(call, |voice| {
+                    voice.reconnecting = recovering;
+                    // A resumed publication no longer needs the restart's offer.
+                    voice.resumable.retain(|kind| match kind {
+                        MediaKind::ScreenVideo => !published.screen,
+                        MediaKind::Camera => !published.camera,
+                        _ => false,
+                    });
+                });
+            }
+        }
         if peer_state == Some(RtcPeerConnectionState::Connected) {
             let first = call
                 .live
@@ -935,6 +1148,7 @@ async fn run(
                     .map_or((false, false), |l| (l.can_speak, l.soundboard));
                 super::update_voice(call, |voice| {
                     voice.connected = true;
+                    voice.reconnecting = false;
                     voice.soundboard = soundboard;
                     voice.message = if can_speak {
                         "Connected"
@@ -1007,6 +1221,10 @@ fn handle(call: &Rc<Call>, event: ServerEvent) -> Option<Ending> {
         ServerEvent::Revoked {} => Some(Failure::revoked().into()),
         ServerEvent::Replaced {} => Some(Failure::replaced().into()),
         ServerEvent::ResumeUnavailable {} => Some(Failure::resume_unavailable().into()),
+        // Planned restart: rejoin with fresh admission after the hint.
+        ServerEvent::Restarting { retry_after_ms } => {
+            Some(Failure::restarting(retry_after_ms).into())
+        }
         ServerEvent::Error { error } => Some(Failure::server(&error).into()),
         ServerEvent::ScreenTarget {
             kind,
@@ -1069,7 +1287,9 @@ async fn resume(
                 return Ok(inbox);
             }
             Some(Err(failure))
-                if !failure.retryable || failure.kind == FailureKind::ResumeUnavailable =>
+                if !failure.retryable
+                    || failure.calm()
+                    || failure.kind == FailureKind::ResumeUnavailable =>
             {
                 return Err(failure);
             }
@@ -1110,6 +1330,7 @@ async fn resume_once(call: &Call, resume_token: &str, sequence: u64) -> Result<S
         ServerEvent::ResumeUnavailable {} => Err(Failure::resume_unavailable()),
         ServerEvent::Replaced {} => Err(Failure::replaced()),
         ServerEvent::Error { error } => Err(Failure::server(&error)),
+        ServerEvent::Restarting { retry_after_ms } => Err(Failure::restarting(retry_after_ms)),
         _ => Err(Failure::final_("Unexpected resume response")),
     }
 }

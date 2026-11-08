@@ -7,10 +7,18 @@ pub(super) enum Rejected {
     StaleGrant,
 }
 
-pub(super) async fn admit(
+#[cfg(test)]
+pub(super) async fn admit(room: &Room, member: Member, reconnect: bool) -> Result<usize, Rejected> {
+    admit_with(room, member, reconnect, false).await
+}
+
+/// `quiet` admits without a voice-join notification: an automatic rejoin after
+/// a server restart is the same call continuing, not someone joining.
+pub(super) async fn admit_with(
     room: &Room,
     mut member: Member,
     reconnect: bool,
+    quiet: bool,
 ) -> Result<usize, Rejected> {
     let mut members = room.members.write().await;
     // Authorization and replacement commit together. A revoked join must never
@@ -37,7 +45,7 @@ pub(super) async fn admit(
         previous.replaced.send_replace(true);
     }
     member.info.slot = slot;
-    if previous_slot.is_none() {
+    if previous_slot.is_none() && !quiet {
         voice_notification(
             room,
             &members,
@@ -131,7 +139,7 @@ mod tests {
             viewing::participants(&*room.members.read().await)[0].microphone_source_epoch,
             1
         );
-        release_member(&room, slot, original.source_id).await;
+        release_member(&room, slot, original.source_id, false).await;
 
         let mut pending = member(account(), id());
         pending.negotiated = false;
@@ -184,10 +192,18 @@ mod tests {
         assert_eq!(events.receiver.recv().await.unwrap().kind, Kind::VoiceJoin);
         let replacement = member(b.info.account_id, id());
         admit(&room, replacement.clone(), false).await.unwrap();
-        release_member(&room, slot, b.source_id).await;
+        release_member(&room, slot, b.source_id, false).await;
         assert!(events.receiver.try_recv().is_err());
-        release_member(&room, slot, replacement.source_id).await;
+        release_member(&room, slot, replacement.source_id, false).await;
         assert_eq!(events.receiver.recv().await.unwrap().kind, Kind::VoiceLeave);
+        // A restart's quiet rejoin and drain announce neither join nor leave.
+        let rejoined = member(account(), id());
+        let slot = admit_with(&room, rejoined.clone(), true, true)
+            .await
+            .unwrap();
+        release_member(&room, slot, rejoined.source_id, true).await;
+        tokio::task::yield_now().await;
+        assert!(events.receiver.try_recv().is_err());
     }
 
     #[tokio::test]
@@ -207,7 +223,7 @@ mod tests {
         assert!(!old.active.load(Ordering::Acquire));
         assert!(*old.replaced.borrow());
         assert!(new.active.load(Ordering::Acquire));
-        release_member(&room, slot, old.source_id).await;
+        release_member(&room, slot, old.source_id, false).await;
         update_voice_state(&room, slot, true, true, &old.active).await;
         assert!(
             update_screen_state(&room, slot, true, true, &old.active)
@@ -272,7 +288,7 @@ mod tests {
             (&b, &a)
         };
         assert!(!loser.active.load(Ordering::Acquire));
-        release_member(&room, slot, loser.source_id).await;
+        release_member(&room, slot, loser.source_id, false).await;
         assert_eq!(room.members.read().await[&slot].source_id, winner.source_id);
     }
 }

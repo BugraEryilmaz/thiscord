@@ -1998,5 +1998,16 @@
   "You are already in too many groups": "Zaten çok fazla gruptasın",
   "Group names can have at most 100 characters, without control characters": "Grup adları kontrol karakteri içermeden en fazla 100 karakter olabilir",
   "This is the beginning of your group with {}.": "{} ile grubunun başlangıcı burası.",
-  "The message and its attachments are deleted for everyone in the group. This cannot be undone.": "Mesaj ve ekleri gruptaki herkes için silinir. Bu işlem geri alınamaz."
+  "The message and its attachments are deleted for everyone in the group. This cannot be undone.": "Mesaj ve ekleri gruptaki herkes için silinir. Bu işlem geri alınamaz.",
+  "Thiscord is restarting": "Thiscord yeniden başlatılıyor",
+  "Thiscord is restarting. Reconnecting…": "Thiscord yeniden başlatılıyor. Yeniden bağlanılıyor…",
+  "Thiscord is restarting. Reconnecting shortly.": "Thiscord yeniden başlatılıyor. Kısa süre içinde yeniden bağlanılacak.",
+  "Thiscord is restarting. You'll be back in the call in a moment.": "Thiscord yeniden başlatılıyor. Birazdan görüşmeye geri döneceksiniz.",
+  "Connection interrupted. Reconnecting automatically…": "Bağlantı kesildi. Otomatik olarak yeniden bağlanılıyor…",
+  "Your screen share and camera paused while Thiscord restarted.": "Thiscord yeniden başlatılırken ekran paylaşımınız ve kameranız duraklatıldı.",
+  "Your screen share paused while Thiscord restarted.": "Thiscord yeniden başlatılırken ekran paylaşımınız duraklatıldı.",
+  "Your camera paused while Thiscord restarted.": "Thiscord yeniden başlatılırken kameranız duraklatıldı.",
+  "Resume sharing": "Paylaşıma devam et",
+  "Turn camera back on": "Kamerayı yeniden aç",
+  "Choose what to share again from the screen button.": "Paylaşılacak kaynağı ekran düğmesinden yeniden seçin."
 }
