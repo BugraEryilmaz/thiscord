@@ -44,6 +44,12 @@ A new process starts with a three-minute rejoin window (`REJOIN_WINDOW`). In it:
 - Automatic rejoins (`JoinAttempt { reconnect: true }`) do not announce a voice
   join notification.
 
+Trade-offs of the window: a released 0.1.61 client resuming in it reports an
+unexpected resume response instead of "Voice session ended" (its call ends either
+way). A current client whose signaling was lost while a moderator disconnected it
+(without changing permissions) and that then reaches a restarted server rejoins;
+any permission change still refuses the rejoin.
+
 Rejoins are ordinary `Join`s: session, guild membership, channel permissions,
 timeouts and moderation are checked against the database again, the same as any
 first join. Nothing from before the restart (grants, rosters, resume capabilities)

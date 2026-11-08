@@ -161,6 +161,13 @@ impl IceRecovery {
         Action::Request(Reason::RelayRefresh)
     }
 
+    /// The server's offer arrived: local gathering gets its own full timeout.
+    pub fn offered(&mut self, now: u64) {
+        if let Phase::Requested(_) = self.phase {
+            self.phase = Phase::Requested(now);
+        }
+    }
+
     /// The restart answer was sent; the new relay credentials are scheduled.
     pub fn answered(&mut self, servers: &[IceServer], now: u64) {
         self.phase = Phase::Answered(now);
@@ -233,6 +240,13 @@ mod tests {
             Action::Request(Reason::PathLost)
         );
         assert_eq!(unanswered.tick(false, true, 11_001), Action::Reconnect);
+        // An offer that arrived restarts the timer for local gathering.
+        let mut gathering = IceRecovery::new(true, &[], 0);
+        gathering.tick(false, true, 0);
+        gathering.tick(false, true, 1_000);
+        gathering.offered(9_000);
+        assert_eq!(gathering.tick(false, true, 15_000), Action::Wait);
+        assert_eq!(gathering.tick(false, true, 19_001), Action::Reconnect);
         // Older servers cannot restart: the existing failure path applies.
         let mut legacy = IceRecovery::new(false, &[turn(3600)], 0);
         legacy.tick(false, true, 0);

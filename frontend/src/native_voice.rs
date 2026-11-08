@@ -668,6 +668,9 @@ impl Connector for Runtime {
             .into_iter()
             .filter_map(|(active, kind)| active.then_some(kind))
             .collect();
+        } else if !self.calm {
+            // Only a restart pauses publications; any other ending forgets them.
+            self.resumable.clear();
         }
         if let Ok(mut status) = self.status.lock() {
             status.connected = false;
@@ -1460,6 +1463,7 @@ async fn run(
                     },
                     ServerEvent::IceRestart { sdp, ice_servers } => {
                         if !ice.awaiting_offer() || !ice_tasks.is_empty() { continue; }
+                        ice.offered(ice::millis(ice_clock));
                         // Renegotiate off the media loop: gathering a relay can take seconds.
                         let (pc, gathered) = (pc.clone(), gathered.clone());
                         ice_tasks.spawn(async move {
@@ -1543,7 +1547,7 @@ async fn run(
                     // binding; reconnect at once instead of waiting for ICE to fail.
                     if route_checked.elapsed() >= Duration::from_secs(3) {
                         route_checked = Instant::now();
-                        if bind().is_ok_and(|route| route != local_route) {
+                        if !media_state.connected.load(Ordering::Acquire) && bind().is_ok_and(|route| route != local_route) {
                             attempt.connection.event("voice_network_changed", serde_json::json!({}));
                             return Err(Failure::temporary("Network changed").with_reason("network_changed"));
                         }

@@ -551,10 +551,12 @@ fn ResumeNotice(ui: Ui) -> impl IntoView {
     use thiscord_shared::voice::MediaKind;
     // Hidden kinds: dismissed or already resuming, until the next reconnection.
     let hidden = RwSignal::new(Vec::<MediaKind>::new());
-    Effect::new(move |_| {
-        if ui.voice.with(|v| v.reconnecting) {
+    Effect::new(move |previous: Option<Vec<MediaKind>>| {
+        let current = ui.voice.with(|v| v.resumable.clone());
+        if previous.is_some_and(|previous| previous != current) {
             hidden.set(vec![]);
         }
+        current
     });
     let pending = move || {
         ui.voice.with(|v| {

@@ -547,6 +547,9 @@ async fn supervise(call: Rc<Call>) {
             .into_iter()
             .filter_map(|(active, kind)| active.then_some(kind))
             .collect();
+        } else if !ended_calm {
+            // Only a restart pauses publications; any other ending forgets them.
+            resumable.clear();
         }
         call.end_attempt();
         let mut stable = connected_at.is_some_and(|at| now() - at >= rules::STABLE_CALL_MS);
@@ -1002,6 +1005,7 @@ async fn run(
                             .filter(|_| ice.awaiting_offer() && !restarting)
                         {
                             restarting = true;
+                            ice.offered(now() as u64);
                             let (pc, strip_red, restrict_video) =
                                 (live.pc.clone(), live.strip_red, live.restrict_video);
                             let restarted = restarted.clone();
