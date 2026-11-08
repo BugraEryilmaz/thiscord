@@ -170,3 +170,27 @@ that is why refreshes happen only for relayed paths.
   `voice/membership.rs` (quiet rejoin and drain), `ice_recovery.rs` (restart,
   fallback, refresh scheduling), the native and browser retry policies, and the
   native signaling recovery worker (1012 and resume replies become rejoins).
+
+### Local end-to-end run (2026-11-08)
+
+A local backend in WSL served the `/app` web client to Chromium on Windows
+(signed in, joined a voice channel as a listener, self-deafened):
+
+- **Planned restart (webrtc transport)**: SIGTERM drained the room in 1 ms
+  (`notified=1 remaining=0`, reason `server_restart`); the dock showed
+  "Reconnecting…" 0.4 s later. After a 6 s gap standing in for the deploy's backup,
+  the new process accepted the rejoin 0.55 s after it started listening; media
+  connected 1.7 s later, still deafened.
+- **Path loss (shard transport)**: dropping only the SFU's UDP port for 9 s took
+  the server peer to Disconnected; the browser requested an ICE restart, which
+  was answered in 139 ms and reconnected 0.2 s after the port reopened, on the same
+  session (no rejoin, no membership release).
+- **Relay refresh (shard transport, coturn, `THISCORD_TURN_TTL_SECS=60`)**: with
+  direct UDP to the SFU blocked, the call ran over the relay for six minutes, past
+  the credentials' expiry and coturn's five-minute permission refresh. Seven
+  refreshes ran every 48 s (lifetime minus a 12 s margin), each answered in
+  148–250 ms and reconnected within about 1.5 s, on the same session.
+
+Not covered: the desktop app (its logic is covered by unit tests and the
+webrtc-rs clients in the integration suite), macOS/Linux, real off-site networks
+and a VPS deploy.
