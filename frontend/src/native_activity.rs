@@ -508,13 +508,21 @@ mod tests {
         let names = processes::names();
         let own = std::env::current_exe().unwrap();
         let own = game_activity::process_key(own.file_name().unwrap().to_str().unwrap());
-        // Programs for the picker are a subset of what the scanner sees.
-        let programs = processes::programs();
-        assert!(programs.iter().all(|p| {
-            names
-                .iter()
-                .any(|n| game_activity::process_key(n) == game_activity::process_key(p))
-        }));
+        // Programs for the picker are a subset of what the scanner sees. The
+        // listings are separate snapshots, so processes starting or exiting in
+        // between are covered by scans on both sides and a few attempts.
+        let subset = || {
+            let before = processes::names();
+            let programs = processes::programs();
+            let after = processes::names();
+            programs.iter().all(|p| {
+                before
+                    .iter()
+                    .chain(&after)
+                    .any(|n| game_activity::process_key(n) == game_activity::process_key(p))
+            })
+        };
+        assert!((0..3).any(|_| subset()));
         assert!(
             names.iter().any(|n| game_activity::process_key(n) == own),
             "{own} missing from {} processes",
