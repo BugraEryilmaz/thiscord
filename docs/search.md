@@ -37,7 +37,11 @@ support content lookup; no attachment bytes enter search results.
 ## Private access and deletion
 
 Every selected conversation passes `friends::store::pair_access` inside the
-retained session transaction. This shares the history/download rules for accepted
+retained session transaction. For a group conversation it checks current
+membership under a shared group lock instead of a friendship, so leaving or being
+removed ends search and context access at once; rejoining restores it. Broad
+private searches cover accepted friendships and current groups together, within
+the same 500-conversation bound. This shares the history/download rules for accepted
 friendship and blocks in either direction. Queries use the typed `NOT m.deleted`
 predicate. Blocking removes search and context access for both people; unblocking
 alone does not restore consent. A new accepted request restores retained history,
