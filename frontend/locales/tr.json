@@ -1997,5 +1997,6 @@
   "Someone is already in too many groups": "Biri zaten çok fazla grupta",
   "You are already in too many groups": "Zaten çok fazla gruptasın",
   "Group names can have at most 100 characters, without control characters": "Grup adları kontrol karakteri içermeden en fazla 100 karakter olabilir",
-  "This is the beginning of your group with {}.": "{} ile grubunun başlangıcı burası."
+  "This is the beginning of your group with {}.": "{} ile grubunun başlangıcı burası.",
+  "The message and its attachments are deleted for everyone in the group. This cannot be undone.": "Mesaj ve ekleri gruptaki herkes için silinir. Bu işlem geri alınamaz."
 }

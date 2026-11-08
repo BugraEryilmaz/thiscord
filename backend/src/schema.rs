@@ -540,7 +540,6 @@ diesel::joinable!(channel_categories -> guilds (guild_id));
 diesel::joinable!(channels -> guilds (guild_id));
 diesel::joinable!(direct_attachments -> accounts (owner_id));
 diesel::joinable!(direct_attachments -> direct_messages (message_id));
-diesel::joinable!(direct_attachments -> friendships (conversation_id));
 diesel::joinable!(direct_message_edits -> direct_messages (message_id));
 diesel::joinable!(direct_messages -> accounts (author_id));
 diesel::joinable!(friend_calls -> friendships (conversation_id));

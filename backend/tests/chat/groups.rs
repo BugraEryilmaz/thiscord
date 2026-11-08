@@ -586,3 +586,96 @@ async fn group_call_lifecycle_rings_joins_and_ends_with_the_last_member() {
     assert_ne!(next["call"]["id"], id);
     server.abort();
 }
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[ignore = "requires TEST_DATABASE_URL"]
+async fn group_voice_messages_spoilers_and_edit_history_follow_membership() {
+    use super::voice_edits::{count, fetch, post, voice, waveform};
+    let _lock = TEST_LOCK.lock().await;
+    let db = database();
+    let (aid, a) = user(&db, "gvoice_a");
+    let (bid, b) = user(&db, "gvoice_b");
+    let (cid, c) = user(&db, "gvoice_c");
+    let (_, out) = user(&db, "gvoice_out");
+    befriend(&db, aid, bid);
+    befriend(&db, aid, cid);
+    let app = api::router(Some(db.pool.clone()), vec![]);
+    let created = social(
+        &app,
+        &a,
+        json!({"action":"create_group","client_id":Uuid::new_v4(),"members":[bid,cid]}),
+        StatusCode::OK,
+    )
+    .await;
+    let group = created["group"]["conversation_id"].clone();
+    let revision = created["group"]["revision"].clone();
+
+    // Voice messages upload through the private path with membership access.
+    let uri = format!(
+        "{DIRECT_ATTACHMENTS_PATH}?conversation_id={}&filename=x&content_type=audio%2Fogg&voice=true&waveform={}",
+        group.as_str().unwrap(),
+        waveform()
+    );
+    post(&app, &out, uri.clone(), voice(1000), StatusCode::FORBIDDEN).await;
+    let file = post(&app, &b, uri, voice(1000), StatusCode::OK).await;
+    assert!(file["voice"]["duration_ms"].as_u64().unwrap() > 0);
+    let sent = social(&app, &b, json!({"action":"send","conversation_id":group,"client_id":Uuid::new_v4(),"content":"||surprise||","attachments":[file["id"]],"spoilers":[file["id"]]}), StatusCode::OK).await["message"].clone();
+    assert_eq!(sent["attachments"][0]["spoiler"], true);
+    assert_eq!(sent["attachments"][0]["voice"], file["voice"]);
+    let path = format!("{DIRECT_ATTACHMENTS_PATH}/{}", file["id"].as_str().unwrap());
+    assert_eq!(
+        fetch(&app, &c, path.clone(), StatusCode::OK).await,
+        voice(1000)
+    );
+    fetch(&app, &out, path.clone(), StatusCode::FORBIDDEN).await;
+
+    // Edit history: kept for members, refused to outsiders.
+    let mut message = social(&app, &b, json!({"action":"send","conversation_id":group,"client_id":Uuid::new_v4(),"content":"first"}), StatusCode::OK).await["message"].clone();
+    for content in ["second", "third"] {
+        message = social(&app, &b, json!({"action":"edit","conversation_id":group,"message_id":message["id"],"revision":message["revision"],"content":content}), StatusCode::OK).await["message"].clone();
+    }
+    let request =
+        json!({"action":"edit_history","conversation_id":group,"message_id":message["id"]});
+    let history = social(&app, &c, request.clone(), StatusCode::OK).await["history"].clone();
+    let contents: Vec<_> = history["versions"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|v| v["content"].as_str().unwrap().to_owned())
+        .collect();
+    assert_eq!(contents, ["second", "first"]);
+    social(&app, &out, request.clone(), StatusCode::FORBIDDEN).await;
+
+    // A removed member loses the history and the voice message at once.
+    social(&app, &a, json!({"action":"remove_group_member","conversation_id":group,"revision":revision,"account_id":cid}), StatusCode::OK).await;
+    social(&app, &c, request.clone(), StatusCode::FORBIDDEN).await;
+    fetch(&app, &c, path.clone(), StatusCode::FORBIDDEN).await;
+    social(&app, &a, request.clone(), StatusCode::OK).await;
+
+    // Deleting the message deletes its history; deleting the author's account
+    // deletes their messages, voice files and history with them.
+    let edits = "SELECT count(*) AS n FROM direct_message_edits WHERE message_id=$1::uuid";
+    assert_eq!(count(&db, edits, &message["id"]), 2);
+    let other = social(&app, &b, json!({"action":"send","conversation_id":group,"client_id":Uuid::new_v4(),"content":"draft"}), StatusCode::OK).await["message"].clone();
+    let other = social(&app, &b, json!({"action":"edit","conversation_id":group,"message_id":other["id"],"revision":other["revision"],"content":"final"}), StatusCode::OK).await["message"].clone();
+    social(&app, &b, json!({"action":"delete","conversation_id":group,"message_id":other["id"],"revision":other["revision"]}), StatusCode::OK).await;
+    assert_eq!(count(&db, edits, &other["id"]), 0);
+    let (status, body) = call(
+        &app,
+        thiscord_shared::account::ACCOUNT_PATH,
+        &b,
+        json!({"action":"delete_account","confirmation":"gvoice_b"}),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert_eq!(count(&db, edits, &message["id"]), 0);
+    assert_eq!(
+        count(
+            &db,
+            "SELECT count(*) AS n FROM direct_attachments WHERE id=$1::uuid",
+            &file["id"]
+        ),
+        0
+    );
+    social(&app, &a, request, StatusCode::FORBIDDEN).await;
+}

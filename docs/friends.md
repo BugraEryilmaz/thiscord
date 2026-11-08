@@ -332,7 +332,12 @@ snapshots. Instance administrators and guild roles grant no access.
 Message writes in a group (send/edit/delete/read) hold the group row lock exactly
 like a friendship's: per-author client UUID deduplication, revisioned edits,
 tombstones, attachment claims, read positions (one per member) and keyset history
-behave identically. Typing leases are scoped to the authorized selection.
+behave identically. Voice messages, spoiler text and spoiler attachments, and edit
+history ([chat.md](chat.md#edit-history)) work as in 1:1 conversations: voice
+uploads use the private attachment path under current membership, and only
+current members can read a message's edit history or download its files. Group
+alerts carry no message text, so spoilers cannot leak through them; search
+results and other previews mask spoilers with `▒▒▒▒▒`. Typing leases are scoped to the authorized selection.
 `@username` mentions of members are passed to notifications, so a group set to
 "Mentions only" still alerts when you are named.
 
@@ -384,12 +389,15 @@ conflicts, outsider isolation for history/send/upload/download/select/search,
 removal revoking the friends socket, history, files, search and reports, owner
 transfer and hand-off, unfriending without removal, last-member deletion, hidden
 presence/unread/rings across a block, account deletion, and the call lifecycle
-(ring, join, decline, leave, removal, end with the last member). A loopback WebRTC
+(ring, join, decline, leave, removal, end with the last member), plus group voice
+messages, spoiler attachments and edit history (outsiders and removed members can
+neither read the history nor download the voice message; message and account
+deletion remove the history). A loopback WebRTC
 test (`backend/tests/voice/friends.rs`) admits only joined members, forwards media
 among three peers and revokes only the removed or departing peer, under both SFU
 transports. Shared tests pin the additive wire format.
 
-Group storage is in migration `20261108300000_group_conversations`. Messages and
+Group storage is in migration `20261108500000_group_conversations`. Messages and
 private attachments keep their tables; their conversation foreign key becomes a
 trigger-maintained reference to either a friendship or a group (deleting either
 cascades its messages and files). Rollback permanently deletes groups, their

@@ -201,15 +201,19 @@ renderer. Edits made before this feature have no stored versions.
 bounded snapshot like the permission editor's ([api.md](api.md)). Authorization is
 identical to reading the message: guild membership, ViewChannel and ReadHistory
 in a locked transaction (under a shared channel lock, so it serializes with
-edits), or current private pair access (accepted friendship, no block in either
-direction). Deleted messages return 403, and nothing is cached on the client.
+edits), or current private access: an accepted friendship with no block in either
+direction, or current membership of a group conversation (under the group's
+shared lock, so it serializes with edits and membership changes). Deleted
+messages return 403, and nothing is cached on the client.
 
 Deleting a message deletes its history in the same transaction as the tombstone.
 Channel/guild deletion cascades, and account deletion cascades private
 conversations (and so their history). Guild messages of deleted accounts keep
 their content anonymized, and so does their history. Blocking or unfriending
 denies private history like private messages; a newly accepted request restores
-it. History is not searchable and report evidence still copies only the current
+it. In group conversations, leaving or removal denies a member the history at
+once (with the messages and files), being added again restores it, and deleting
+an account deletes the messages it authored in groups together with their history. History is not searchable and report evidence still copies only the current
 version. Migration `20261108400000_voice_spoilers_edit_history` adds the history
 tables and the attachment voice/spoiler columns; rollback discards history and
 the flags (voice messages remain ordinary Ogg files).
