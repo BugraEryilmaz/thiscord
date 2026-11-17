@@ -322,9 +322,15 @@ pub(super) fn accepts(
 pub(super) struct Moving {
     pub account: AccountId,
     pub to: ChannelId,
+    pub avatar: Option<thiscord_shared::AvatarId>,
 }
 thread_local! {
     static MOVING: ArcRwSignal<Option<Moving>> = ArcRwSignal::new(None);
+    static MOVING_NAME: std::cell::RefCell<String> = const { std::cell::RefCell::new(String::new()) };
+}
+/// The name of whoever is being moved, for the destination's placeholder row.
+pub(super) fn moving_name() -> String {
+    MOVING_NAME.with(|n| n.borrow().clone())
 }
 pub(super) fn moving() -> ArcRwSignal<Option<Moving>> {
     MOVING.with(Clone::clone)
@@ -407,10 +413,18 @@ pub(super) fn move_member(ui: Ui, from: Dragged, to: ChannelId) {
         }
         // Keep "Moving…" until the destination roster shows them (they
         // reconnect there), at most ten seconds.
+        let avatar = ui.voice_roster.with_untracked(|r| {
+            r.iter()
+                .flat_map(|c| &c.members)
+                .find(|m| m.account_id == from.account)
+                .and_then(|m| m.avatar_id)
+        });
         moving().set(Some(Moving {
             account: from.account,
             to,
+            avatar,
         }));
+        MOVING_NAME.with(|n| *n.borrow_mut() = target.clone());
         for _ in 0..40 {
             gloo_timers::future::TimeoutFuture::new(250).await;
             let arrived = ui.voice_roster.with_untracked(|r| {

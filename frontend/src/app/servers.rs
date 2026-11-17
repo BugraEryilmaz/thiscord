@@ -371,6 +371,14 @@ fn VoiceRoster(ui: Ui, guild: GuildId, channel: thiscord_shared::ChannelId) -> i
                 <Show when=move ||split.get()><span class="sr-only">{move ||super::huddles::name(member.get().huddle)}</span></Show>
             </li>}.into_any()
         }/>
+        // Someone being moved here shows up at once, until they reconnect.
+        <Show when=move ||super::huddles::moving().get().is_some_and(|m|m.to==channel && !members.with(|list|list.iter().any(|p|p.account_id==m.account)))>
+            <li class="voice-member sidebar-member voice-moving">
+                <span class="voice-person"><span class="voice-avatar"><crate::avatar::Avatar class="size-6 text-xs" name=Signal::derive(super::huddles::moving_name) avatar_id=Signal::derive(move ||super::huddles::moving().get().and_then(|m|m.avatar))/></span>
+                <span class="min-w-0 flex-1 truncate">{super::huddles::moving_name}</span></span>
+                <span class="voice-moving-label" role="status">{move || crate::i18n::t("Moving…")}</span>
+            </li>
+        </Show>
     </ul>}
 }
 
