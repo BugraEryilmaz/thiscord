@@ -1996,7 +1996,7 @@ async fn serve(
                     let Some(_delivery) = connection_access.packet(epoch, epoch) else { continue; };
                     let listening = room.members.read().await.get(&slot).is_some_and(|m| m.source_id == source_id
                         && m.active.load(Ordering::Acquire) && !m.info.is_deafened()
-                        && huddle.is_none_or(|h| !m.info.split || m.info.huddle == h));
+                        && m.info.hears_from(huddle));
                     if listening && send(&mut socket, ServerEvent::Soundboard { sound_id, account_id }).await.is_err() { break; }
                 },
                 _=tick.tick()=>{
@@ -2433,6 +2433,7 @@ mod send_tests {
                         camera_viewers: vec![],
                         huddle: 0,
                         split: false,
+                        split_by: None,
                     },
                     source_id: uuid::Uuid::new_v4(),
                     screen_started: Instant::now(),

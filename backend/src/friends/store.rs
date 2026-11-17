@@ -654,6 +654,7 @@ pub(crate) fn voice(
             camera_viewers: vec![],
             huddle: 0,
             split: false,
+            split_by: None,
         },
         0,
     ))

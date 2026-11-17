@@ -26,7 +26,7 @@ async fn huddles(app: &Router, token: &str, request: Value, expected: StatusCode
 #[ignore = "requires TEST_DATABASE_URL; CI runs with --include-ignored"]
 async fn huddles_need_permission_and_split_voices_without_reconnecting() {
     let db = database();
-    let (_, ot) = user(&db, "huddle_owner");
+    let (owner_id, ot) = user(&db, "huddle_owner");
     let (planner, pt) = user(&db, "huddle_planner");
     let (player, lt) = user(&db, "huddle_player");
     let app = api::router(
@@ -101,6 +101,8 @@ async fn huddles_need_permission_and_split_voices_without_reconnecting() {
 
     let state_after = huddles(&app, &pt, split(true), StatusCode::OK).await;
     assert_eq!(state_after["split"], true);
+    // Everyone can see who split the room.
+    assert_eq!(state_after["split_by"], json!(planner));
     // Same transports, no reconnect: huddle 1 is cut off from the main room
     // in both directions, while the main room still hears itself.
     blocked(&mut playing, &mut owner).await;
@@ -127,7 +129,10 @@ async fn huddles_need_permission_and_split_voices_without_reconnecting() {
         StatusCode::OK,
     )
     .await;
-    assert_eq!(cleared, json!({"split":false,"assignments":[]}));
+    assert_eq!(
+        cleared,
+        json!({"split":false,"split_by":owner_id,"assignments":[]})
+    );
     for peer in [owner, planning, playing] {
         peer.close().await;
     }

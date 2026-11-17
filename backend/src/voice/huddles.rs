@@ -2,10 +2,10 @@
 //! reconnecting (docs/huddles.md). The plan lives with the room: it survives
 //! people leaving and rejoining while anyone stays, and ends with the room.
 //!
-//! Members' `Participant::{huddle, split}` mirror the plan under the room write
-//! lock. `viewing::receives`, which both SFU transports run before admission
-//! and again on every write, reads only those fields, so a split takes effect
-//! for packets already queued as well.
+//! Members' `Participant::{huddle, split, split_by}` mirror the plan under the
+//! room write lock. `viewing::receives`, which both SFU transports run before
+//! admission and again on every write, reads only those fields, so a split
+//! takes effect for packets already queued as well.
 use super::{Member, ROOMS, Room};
 use crate::{
     auth::{
@@ -24,9 +24,10 @@ use axum::{
 };
 use diesel::Connection;
 use std::collections::{BTreeMap, HashMap};
-use std::sync::{Arc, Weak};
+use std::sync::{Arc, Mutex, OnceLock, Weak};
+use std::time::{Duration, Instant};
 use thiscord_shared::{
-    AccountId, ChannelId, GuildId, RequestId,
+    AccountId, RequestId,
     huddles::*,
     permissions::{ChannelKind, Permission},
     voice::ROOM_CAPACITY,
@@ -35,10 +36,15 @@ use thiscord_shared::{
 /// Assignments are kept for people who left while the room lives on. Past this
 /// many, the assignments of people no longer in the room are forgotten.
 const REMEMBERED: usize = 2 * ROOM_CAPACITY;
+/// Changes per account per window: enough to plan a full room twice over and
+/// toggle a few times, far below what could load the SFU or the database.
+const RATE: (usize, Duration) = (30, Duration::from_secs(10));
 
 #[derive(Debug, Default)]
 pub(super) struct Plan {
     split: bool,
+    /// Who last split or regrouped the room, shown to everyone in it.
+    split_by: Option<AccountId>,
     assignments: BTreeMap<AccountId, u8>,
 }
 
@@ -50,9 +56,12 @@ impl Plan {
             .get(&member.info.account_id)
             .copied()
             .unwrap_or(0);
-        let changed = member.info.huddle != huddle || member.info.split != self.split;
-        member.info.huddle = huddle;
-        member.info.split = self.split;
+        let info = &mut member.info;
+        let changed =
+            info.huddle != huddle || info.split != self.split || info.split_by != self.split_by;
+        info.huddle = huddle;
+        info.split = self.split;
+        info.split_by = self.split_by;
         changed
     }
 
@@ -68,6 +77,7 @@ impl Plan {
     fn change(
         &mut self,
         change: HuddleChange,
+        actor: AccountId,
         members: &HashMap<usize, Member>,
     ) -> Result<(), Failure> {
         let present = |account: &AccountId| members.values().any(|m| m.info.account_id == *account);
@@ -85,8 +95,16 @@ impl Plan {
                     self.assignments.retain(|account, _| present(account));
                 }
             }
-            HuddleChange::Split { active } => self.split = active,
+            HuddleChange::Split { active } => {
+                if self.split != active {
+                    self.split_by = Some(actor);
+                }
+                self.split = active;
+            }
             HuddleChange::Clear {} => {
+                if self.split {
+                    self.split_by = Some(actor);
+                }
                 self.split = false;
                 self.assignments.clear();
             }
@@ -106,9 +124,55 @@ impl Plan {
         assignments.sort_by_key(|a| a.account_id);
         HuddleState {
             split: self.split,
+            split_by: self.split_by,
             assignments,
         }
     }
+}
+
+/// Applies a change under the room write lock and returns the resulting plan.
+fn apply(
+    room: &Room,
+    members: &mut HashMap<usize, Member>,
+    change: HuddleChange,
+    actor: AccountId,
+) -> Result<HuddleState, Failure> {
+    let mut plan = room.huddles.lock().unwrap_or_else(|p| p.into_inner());
+    plan.change(change, actor, members)?;
+    if plan.apply(members) {
+        room.changed.send_replace(());
+    }
+    Ok(plan.state(members))
+}
+
+/// Async form for tests and in-process callers that already authorized `actor`.
+#[cfg(test)]
+pub(super) async fn change(
+    room: &Room,
+    change: HuddleChange,
+    actor: AccountId,
+) -> Result<HuddleState, Failure> {
+    let mut members = room.members.write().await;
+    apply(room, &mut members, change, actor)
+}
+
+/// Sliding-window limit per account (in memory, one backend process).
+fn admit(actor: AccountId, now: Instant) -> Result<(), Failure> {
+    static RECENT: OnceLock<Mutex<HashMap<AccountId, Vec<Instant>>>> = OnceLock::new();
+    let mut recent = RECENT
+        .get_or_init(Default::default)
+        .lock()
+        .unwrap_or_else(|p| p.into_inner());
+    recent.retain(|_, times| {
+        times.retain(|t| now.duration_since(*t) < RATE.1);
+        !times.is_empty()
+    });
+    let times = recent.entry(actor).or_default();
+    if times.len() >= RATE.0 {
+        return Err(Failure::Limited);
+    }
+    times.push(now);
+    Ok(())
 }
 
 pub(super) fn router() -> Router<Option<DbPool>> {
@@ -128,19 +192,18 @@ async fn handle(
         }
         let pool = pool.ok_or(Failure::Unavailable)?;
         let token = crate::auth::bearer(&headers);
-        let (guild, channel) = (request.guild_id, request.channel_id);
-        crate::performance::blocking(move || authorize(&pool, &token, guild, channel))
+        crate::performance::blocking(move || authorized_change(&pool, &token, &request))
             .await
-            .map_err(|_| Failure::Unavailable)??;
-        let room = live(guild, channel)
-            .await
-            .ok_or(Failure::Invalid("Nobody is in this voice channel"))?;
-        change(&room, request.change).await
+            .map_err(|_| Failure::Unavailable)?
+            .map(|(actor, state)| (actor, request, state))
     }
     .await;
     let mut response = match result {
-        Ok(state) => {
-            tracing::info!(request_id = %id, "voice huddles changed");
+        Ok((actor, request, state)) => {
+            // Account and channel IDs only: attributable without logging names.
+            tracing::info!(request_id = %id, actor = %actor, guild = %request.guild_id,
+                channel = %request.channel_id, action = action(request.change),
+                split = state.split, "voice huddles changed");
             Json(state).into_response()
         }
         Err(error) => error.response(id),
@@ -151,36 +214,27 @@ async fn handle(
     response
 }
 
-async fn live(guild: GuildId, channel: ChannelId) -> Option<Arc<Room>> {
-    ROOMS
-        .get_or_init(Default::default)
-        .lock()
-        .await
-        .get(&channel)
-        .and_then(Weak::upgrade)
-        .filter(|room| room.notification_target == Some((guild, channel)))
-}
-
-/// Applies an authorized change and returns the resulting plan.
-pub(super) async fn change(room: &Room, change: HuddleChange) -> Result<HuddleState, Failure> {
-    let mut members = room.members.write().await;
-    let mut plan = room.huddles.lock().unwrap();
-    plan.change(change, &members)?;
-    if plan.apply(&mut members) {
-        room.changed.send_replace(());
+fn action(change: HuddleChange) -> &'static str {
+    match change {
+        HuddleChange::Assign { .. } => "assign",
+        HuddleChange::Split { active: true } => "split",
+        HuddleChange::Split { active: false } => "regroup",
+        HuddleChange::Clear {} => "clear",
     }
-    Ok(plan.state(&members))
 }
 
-/// Current session, guild membership, ViewChannel, JoinVoice and ManageHuddles
-/// in that guild voice channel, checked under a shared guild lock. Private
-/// calls have no huddles. The plan grants no access, so no revision is needed.
-fn authorize(
+/// Checks the session, guild membership and ViewChannel, JoinVoice and
+/// ManageHuddles in that guild voice channel under a shared guild lock, and
+/// applies the change before that transaction ends, so a permission change
+/// (which locks the guild exclusively) cannot commit between check and apply.
+/// Private calls have no huddles. The plan grants no access, so no guild
+/// revision is needed. No room lock is ever held while waiting for the guild.
+fn authorized_change(
     pool: &DbPool,
     token: &str,
-    guild: GuildId,
-    channel: ChannelId,
-) -> Result<(), Failure> {
+    request: &HuddleRequest,
+) -> Result<(AccountId, HuddleState), Failure> {
+    let (guild, channel) = (request.guild_id, request.channel_id);
     let mut c = connection(pool)?;
     let session = auth::authenticate(&mut c, token)?;
     session.require_guild(guild)?;
@@ -210,10 +264,40 @@ fn authorize(
             ]
             .iter()
             .all(|p| permissions.contains(p));
-        if allowed {
-            Ok(())
-        } else {
-            Err(Failure::Forbidden)
+        if !allowed {
+            return Err(Failure::Forbidden);
         }
+        admit(actor, Instant::now())?;
+        let room = ROOMS
+            .get_or_init(Default::default)
+            .blocking_lock()
+            .get(&channel)
+            .and_then(Weak::upgrade)
+            .filter(|room| room.notification_target == Some((guild, channel)))
+            .ok_or(Failure::Invalid("Nobody is in this voice channel"))?;
+        let room: Arc<Room> = room;
+        let mut members = room.members.blocking_write();
+        Ok((actor, apply(&room, &mut members, request.change, actor)?))
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn requests_are_rate_limited_per_account() {
+        let (a, b) = (
+            AccountId::from_uuid(uuid::Uuid::new_v4()),
+            AccountId::from_uuid(uuid::Uuid::new_v4()),
+        );
+        let start = Instant::now();
+        for _ in 0..RATE.0 {
+            admit(a, start).unwrap();
+        }
+        assert!(matches!(admit(a, start), Err(Failure::Limited)));
+        // Other accounts are unaffected, and the window slides.
+        admit(b, start).unwrap();
+        admit(a, start + RATE.1).unwrap();
+    }
 }

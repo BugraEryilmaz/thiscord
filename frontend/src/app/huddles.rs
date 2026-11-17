@@ -3,19 +3,21 @@
 //! same button or shortcut. Nobody reconnects; the SFU stops forwarding voices
 //! between huddles. Also moving people between voice channels by dragging them
 //! in the sidebar. The backend checks every change; these checks only decide
-//! which controls to show.
+//! which controls to show. Pure logic lives in `thiscord_frontend::huddles`.
 use super::{
     Ui, client,
     icons::{Glyph, Icon},
 };
 use leptos::{prelude::*, wasm_bindgen::JsCast};
 use serde_json::json;
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, HashSet};
+use thiscord_frontend::huddles::{self as logic, state_of};
 use thiscord_shared::{
     AccountId, ChannelId, GuildId,
     huddles::*,
-    permissions::{GuildChange, PermissionRequest, PermissionResponse},
-    voice::Participant,
+    notifications::Kind,
+    permissions::{GuildChange, Permission, PermissionRequest, PermissionResponse},
+    voice::{Participant, ROOM_CAPACITY},
 };
 
 /// A change the server accepted, shown until rosters (polled about once a
@@ -23,7 +25,7 @@ use thiscord_shared::{
 #[derive(Clone, PartialEq)]
 struct Pending {
     channel: ChannelId,
-    state: HuddleState,
+    change: logic::Pending,
     at: f64,
 }
 const PENDING_MS: f64 = 3000.0;
@@ -36,15 +38,31 @@ pub(super) struct Dragged {
     pub account: AccountId,
 }
 
+/// Who the viewer may move right now (rank and MoveMembers), from the
+/// moderation view, with the guild revision a move must submit.
+#[derive(Clone, PartialEq)]
+struct Movable {
+    guild: GuildId,
+    revision: i64,
+    accounts: HashSet<AccountId>,
+    at: f64,
+}
+const MOVABLE_MS: f64 = 10_000.0;
+
 thread_local! {
     static PENDING: ArcRwSignal<Option<Pending>> = ArcRwSignal::new(None);
     static DRAGGED: ArcRwSignal<Option<Dragged>> = ArcRwSignal::new(None);
+    static MOVABLE: ArcRwSignal<Option<Movable>> = ArcRwSignal::new(None);
+    static MOVABLE_LOADING: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
 }
 fn pending() -> ArcRwSignal<Option<Pending>> {
     PENDING.with(Clone::clone)
 }
 pub(super) fn dragged() -> ArcRwSignal<Option<Dragged>> {
     DRAGGED.with(Clone::clone)
+}
+fn movable_state() -> ArcRwSignal<Option<Movable>> {
+    MOVABLE.with(Clone::clone)
 }
 
 /// `Huddle 2`, or `Main room` for 0.
@@ -56,43 +74,14 @@ pub(super) fn name(huddle: u8) -> String {
     }
 }
 
-/// Rosters with any accepted change that they do not show yet.
+/// Rosters with an accepted change that they do not show yet.
 pub(super) fn overlay(channel: ChannelId, members: Vec<Participant>) -> Vec<Participant> {
-    let Some(p) = pending()
+    match pending()
         .get()
         .filter(|p| p.channel == channel && js_sys::Date::now() - p.at < PENDING_MS)
-    else {
-        return members;
-    };
-    let assigned: BTreeMap<_, _> = p
-        .state
-        .assignments
-        .iter()
-        .map(|a| (a.account_id, a.huddle))
-        .collect();
-    members
-        .into_iter()
-        .map(|mut m| {
-            m.huddle = assigned.get(&m.account_id).copied().unwrap_or(0);
-            m.split = p.state.split;
-            m
-        })
-        .collect()
-}
-
-fn state_of(members: &[Participant]) -> HuddleState {
-    let mut assignments: Vec<_> = members
-        .iter()
-        .filter(|m| m.huddle != 0)
-        .map(|m| HuddleAssignment {
-            account_id: m.account_id,
-            huddle: m.huddle,
-        })
-        .collect();
-    assignments.sort_by_key(|a| a.account_id);
-    HuddleState {
-        split: members.iter().any(|m| m.split),
-        assignments,
+    {
+        Some(p) => p.change.overlay(members),
+        None => members,
     }
 }
 
@@ -117,6 +106,19 @@ fn own(ui: Ui) -> Option<AccountId> {
     ui.account.with(|a| a.as_ref().map(|a| a.id))
 }
 
+/// A call participant's or server member's display name.
+fn display(ui: Ui, guild: Option<GuildId>, account: AccountId) -> String {
+    ui.voice
+        .with_untracked(|v| {
+            v.participants
+                .iter()
+                .find(|m| m.account_id == account)
+                .map(|m| m.display_name().to_owned())
+        })
+        .or_else(|| guild.and_then(|g| ui.members.name(g, account)))
+        .unwrap_or_default()
+}
+
 async fn send(
     ui: Ui,
     guild_id: GuildId,
@@ -131,9 +133,13 @@ async fn send(
     };
     let state: HuddleState = client::api_request(HUDDLES_PATH, &request, token.as_deref()).await?;
     if ui.voice.get_untracked().channel_id == Some(channel_id) {
+        let before = ui.voice.with_untracked(|v| state_of(&v.participants));
         pending().set(Some(Pending {
             channel: channel_id,
-            state: state.clone(),
+            change: logic::Pending {
+                before,
+                after: state.clone(),
+            },
             at: js_sys::Date::now(),
         }));
     }
@@ -148,18 +154,16 @@ pub(super) fn toggle(ui: Ui) {
             .set("Join a server voice channel to use huddles.".into());
         return;
     };
-    let current = untrack(|| state_of(&participants(ui)));
-    if !current.split && current.assignments.is_empty() {
+    let Some(active) = logic::toggle(&untrack(|| state_of(&participants(ui)))) else {
         ui.status
             .set("Plan huddles first: open Huddles in the voice panel.".into());
         return;
-    }
-    let active = !current.split;
+    };
     leptos::task::spawn_local(async move {
         match send(ui, guild, channel, HuddleChange::Split { active }).await {
             Ok(state) => ui.status.set(
                 if state.split {
-                    "Split into huddles"
+                    "Room split into huddles"
                 } else {
                     "Everyone is back together"
                 }
@@ -170,54 +174,112 @@ pub(super) fn toggle(ui: Ui) {
     });
 }
 
+/// Loads who the viewer may move in `guild`, at most every ten seconds. Called
+/// when the pointer reaches a voice roster, so rows are draggable only for
+/// people the server would let you move.
+pub(super) fn refresh_movable(ui: Ui, guild: GuildId) {
+    let fresh = movable_state()
+        .get_untracked()
+        .is_some_and(|m| m.guild == guild && js_sys::Date::now() - m.at < MOVABLE_MS);
+    if fresh || MOVABLE_LOADING.with(|l| l.replace(true)) {
+        return;
+    }
+    leptos::task::spawn_local(async move {
+        let result =
+            super::servers::request(ui, PermissionRequest::InspectModeration { guild_id: guild })
+                .await;
+        MOVABLE_LOADING.with(|l| l.set(false));
+        if let Ok(PermissionResponse::Moderation { state }) = result {
+            movable_state().set(Some(Movable {
+                guild,
+                revision: state.guild.revision,
+                accounts: state
+                    .members
+                    .iter()
+                    .filter(|m| m.actions.contains(&Permission::MoveMembers))
+                    .map(|m| m.account_id)
+                    .collect(),
+                at: js_sys::Date::now(),
+            }));
+        }
+    });
+}
+
+/// Whether the viewer may move `account` (tracked; false until loaded).
+pub(super) fn movable(guild: GuildId, account: AccountId) -> bool {
+    movable_state()
+        .get()
+        .is_some_and(|m| m.guild == guild && m.accounts.contains(&account))
+}
+
+/// Whether a dragged person may be dropped on `channel`: another voice channel
+/// of the same server with room for them.
+pub(super) fn accepts(
+    ui: Ui,
+    dragged: Option<Dragged>,
+    guild: GuildId,
+    channel: ChannelId,
+) -> bool {
+    dragged.is_some_and(|d| d.guild == guild && d.channel != channel)
+        && ui.voice_roster.with(|r| {
+            r.iter()
+                .find(|c| c.channel_id == channel)
+                .is_none_or(|c| c.members.len() < ROOM_CAPACITY)
+        })
+}
+
 /// Moves someone dragged onto another voice channel (MoveMembers). Uses the
-/// existing moderated move: fresh permissions and revision, then the server
-/// reconnects them in the destination.
+/// existing moderated move with fresh server checks; the server reconnects them
+/// in the destination.
 pub(super) fn move_member(ui: Ui, from: Dragged, to: ChannelId) {
     if from.channel == to {
         return;
     }
-    let Some(home) = ui
+    let destination = ui
         .server
-        .get_untracked()
-        .filter(|home| home.guild.id == from.guild)
-    else {
-        return;
-    };
-    let destination = home
-        .channels
-        .iter()
-        .find(|c| c.id == to)
-        .map(|c| c.name.clone())
+        .with_untracked(|home| {
+            home.as_ref()
+                .filter(|home| home.guild.id == from.guild)
+                .and_then(|home| home.channels.iter().find(|c| c.id == to))
+                .map(|c| c.name.clone())
+        })
         .unwrap_or_default();
+    let target = display(ui, Some(from.guild), from.account);
+    ui.status.set(thiscord_frontend::localized_format!(
+        crate::i18n::language(),
+        "Moving {} to {}…",
+        target,
+        destination
+    ));
+    let cached = movable_state()
+        .get_untracked()
+        .filter(|m| m.guild == from.guild && js_sys::Date::now() - m.at < MOVABLE_MS);
     leptos::task::spawn_local(async move {
-        let inspected = super::servers::request(
-            ui,
-            PermissionRequest::InspectModeration {
-                guild_id: from.guild,
-            },
-        )
-        .await;
-        let (revision, target) = match inspected {
-            Ok(PermissionResponse::Moderation { state }) => {
-                let target = state
+        let revision = match cached {
+            Some(m) => m.accounts.contains(&from.account).then_some(m.revision),
+            None => match super::servers::request(
+                ui,
+                PermissionRequest::InspectModeration {
+                    guild_id: from.guild,
+                },
+            )
+            .await
+            {
+                Ok(PermissionResponse::Moderation { state }) => state
                     .members
                     .iter()
-                    .find(|m| m.account_id == from.account)
-                    .filter(|m| {
-                        m.actions
-                            .contains(&thiscord_shared::permissions::Permission::MoveMembers)
+                    .any(|m| {
+                        m.account_id == from.account && m.actions.contains(&Permission::MoveMembers)
                     })
-                    .map(|m| m.display_name().to_owned());
-                (state.guild.revision, target)
-            }
-            Ok(_) => return,
-            Err(error) => {
-                ui.status.set(error);
-                return;
-            }
+                    .then_some(state.guild.revision),
+                Ok(_) => None,
+                Err(error) => {
+                    ui.status.set(error);
+                    return;
+                }
+            },
         };
-        let Some(target) = target else {
+        let Some(revision) = revision else {
             ui.status
                 .set("You can’t move this member to another channel.".into());
             return;
@@ -235,6 +297,8 @@ pub(super) fn move_member(ui: Ui, from: Dragged, to: ChannelId) {
             },
         )
         .await;
+        // The move changed the guild revision; reload before the next drag.
+        movable_state().set(None);
         ui.status.set(match result {
             Ok(_) => thiscord_frontend::localized_format!(
                 crate::i18n::language(),
@@ -288,7 +352,7 @@ fn Person(
     view! {
         <button node_ref=button type="button" class="huddle-person" draggable="true" data-account=id.to_string() aria-pressed=move || (picked.get() == Some(id)).to_string()
             class:picked=move || picked.get() == Some(id)
-            aria-label=move || thiscord_frontend::localized_format!(crate::i18n::language(), "{}, {}. Press 1 to 4 for a huddle or 0 for the main room, or press Enter and choose Move here on a lane.", tip, name(member.huddle))
+            aria-label=move || thiscord_frontend::localized_format!(crate::i18n::language(), "{}, {}. Press 1 to 4 for a huddle or 0 for the main room, or press Enter and choose Move here on a lane. Arrow keys move between people.", tip, name(member.huddle))
             on:dragstart=move |e: web_sys::DragEvent| {
                 if let Some(data) = e.data_transfer() {
                     let _ = data.set_data("text/plain", &id.to_string());
@@ -304,6 +368,9 @@ fn Person(
                     e.prevent_default();
                     picked.set(None);
                     assign.run((id, huddle));
+                } else if let Some(step) = match key.as_str() { "ArrowRight" | "ArrowDown" => Some(1), "ArrowLeft" | "ArrowUp" => Some(-1), _ => None } {
+                    e.prevent_default();
+                    step_focus(&e, step);
                 } else if key == "Escape" && picked.get_untracked().is_some() {
                     e.prevent_default();
                     e.stop_propagation();
@@ -315,6 +382,33 @@ fn Person(
             {you.then(|| view! {<span class="huddle-you">{move || crate::i18n::t("you")}</span>})}
         </button>
     }
+}
+
+/// Moves focus to the previous/next person in the planner, across lanes.
+fn step_focus(e: &web_sys::KeyboardEvent, step: i32) {
+    let Some(current) = e
+        .current_target()
+        .and_then(|t| t.dyn_into::<web_sys::Element>().ok())
+    else {
+        return;
+    };
+    let Some(dialog) = current.closest(".huddle-popover").ok().flatten() else {
+        return;
+    };
+    let Ok(people) = dialog.query_selector_all(".huddle-person") else {
+        return;
+    };
+    let people: Vec<web_sys::HtmlElement> = (0..people.length())
+        .filter_map(|i| people.item(i)?.dyn_into().ok())
+        .collect();
+    let Some(index) = people
+        .iter()
+        .position(|p| p.is_same_node(Some(current.unchecked_ref())))
+    else {
+        return;
+    };
+    let next = (index as i32 + step).rem_euclid(people.len() as i32) as usize;
+    let _ = people[next].focus();
 }
 
 /// One huddle (or the main room): a drop target listing its people.
@@ -432,7 +526,7 @@ pub(super) fn HuddleControls(ui: Ui) -> impl IntoView {
                             )
                         }
                         HuddleChange::Split { .. } => crate::i18n::t(if state.split {
-                            "Split into huddles"
+                            "Room split into huddles"
                         } else {
                             "Everyone is back together"
                         })
@@ -479,11 +573,17 @@ pub(super) fn HuddleControls(ui: Ui) -> impl IntoView {
                 size(window().inner_width(), 800.0),
                 size(window().inner_height(), 600.0),
             );
-            // The planner is at most 520 px wide (style.css); keep it on screen.
-            position.set((
-                (dock.right() + 8.0).min(width - 528.0).max(8.0),
-                (height - dock.bottom()).max(8.0),
-            ));
+            // The planner is at most 520 px wide (style.css); keep it on screen,
+            // and above the message box rather than half over it.
+            let left = (dock.right() + 8.0).min(width - 528.0).max(8.0);
+            let composer = document()
+                .query_selector(".composer-area")
+                .ok()
+                .flatten()
+                .map(|c| c.get_bounding_client_rect())
+                .filter(|c| c.width() > 0.0 && c.left() < left + 520.0 && c.right() > left);
+            let bottom = composer.map_or(dock.bottom(), |c| dock.bottom().min(c.top() - 8.0));
+            position.set((left, (height - bottom).max(8.0)));
         }
         // Move focus into the planner: the first person, else the dialog.
         request_animation_frame(move || {
@@ -583,50 +683,87 @@ pub(super) fn HuddleControls(ui: Ui) -> impl IntoView {
     </Show>}
 }
 
-/// Tells everyone in a split call which huddle they are in and who hears them.
+/// Tells everyone in a split call which huddle they are in, who hears them and
+/// who split the room. A split or regroup is announced to screen readers and
+/// cued with the voice leave/join tone, so someone in a full-screen game hears
+/// it too (unless deafened).
 #[component]
 pub(super) fn HuddleStatus(ui: Ui) -> impl IntoView {
     let line = Memo::new(move |_| {
         let members = participants(ui);
-        let me = own(ui)?;
-        let mine = members.iter().find(|m| m.account_id == me && m.split)?;
-        let others: Vec<_> = members
-            .iter()
-            .filter(|m| m.account_id != me && m.hears(mine))
-            .map(|m| m.display_name().to_owned())
-            .collect();
-        Some((mine.huddle, others))
+        let (huddle, others) = logic::companions(&members, own(ui)?)?;
+        Some((
+            huddle,
+            others.into_iter().map(str::to_owned).collect::<Vec<_>>(),
+            state_of(&members).split_by,
+        ))
     });
-    // Everyone in the call hears about a split or regroup, not just the planner.
+    let by = move |actor: Option<AccountId>| {
+        actor
+            .filter(|a| Some(*a) != own(ui))
+            .map(|a| display(ui, None, a))
+    };
     let announce = RwSignal::new(String::new());
     Effect::new(move |previous: Option<bool>| {
         let split = line.with(Option::is_some);
         if let Some(previous) = previous
             && previous != split
         {
-            announce.set(match line.get_untracked() {
-                Some((huddle, others)) if !others.is_empty() => {
+            let lang = crate::i18n::language();
+            let current = line.get_untracked();
+            let actor = match &current {
+                Some((_, _, actor)) => *actor,
+                None => untrack(|| state_of(&participants(ui)).split_by),
+            };
+            let who = match (by(actor), split) {
+                (Some(name), true) => {
+                    thiscord_frontend::localized_format!(lang, "{} split the room.", name)
+                }
+                (None, true) => crate::i18n::t("The room is split.").to_owned(),
+                (Some(name), false) => thiscord_frontend::localized_format!(
+                    lang,
+                    "{} brought everyone back together.",
+                    name
+                ),
+                (None, false) => crate::i18n::t("Everyone is back together").to_owned(),
+            };
+            announce.set(match current {
+                Some((huddle, others, _)) if !others.is_empty() => format!(
+                    "{who} {}",
                     thiscord_frontend::localized_format!(
-                        crate::i18n::language(),
-                        "The room is split. You are in {} with {}.",
+                        lang,
+                        "You are in {} with {}.",
                         name(huddle),
                         others.join(", ")
                     )
-                }
-                Some((huddle, _)) => thiscord_frontend::localized_format!(
-                    crate::i18n::language(),
-                    "The room is split. You are alone in {}.",
-                    name(huddle)
                 ),
-                None => crate::i18n::t("Everyone is back together").to_owned(),
+                Some((huddle, _, _)) => format!(
+                    "{who} {}",
+                    thiscord_frontend::localized_format!(
+                        lang,
+                        "You are alone in {}.",
+                        name(huddle)
+                    )
+                ),
+                None => who,
             });
+            super::notifications::sound(
+                ui,
+                if split {
+                    Kind::VoiceLeave
+                } else {
+                    Kind::VoiceJoin
+                },
+                70,
+            );
         }
         split
     });
     view! {<p class="sr-only" aria-live="polite">{move || announce.get()}</p><Show when=move || line.with(Option::is_some)>
-        <p class=move || format!("huddle-status huddle-{}", line.get().map_or(0, |l| l.0)) aria-hidden="true">
+        <p class=move || format!("huddle-status huddle-{}", line.get().map_or(0, |l| l.0))
+            data-tip=move || line.get().and_then(|(_, _, actor)| by(actor)).map(|name| thiscord_frontend::localized_format!(crate::i18n::language(), "Split by {}", name))>
             <span class="huddle-dot" aria-hidden="true"></span>
-            <span class="min-w-0 truncate">{move || line.get().map(|(huddle, others)| if others.is_empty() {
+            <span class="min-w-0 truncate">{move || line.get().map(|(huddle, others, _)| if others.is_empty() {
                 thiscord_frontend::localized_format!(crate::i18n::language(), "{} · only you", name(huddle))
             } else {
                 thiscord_frontend::localized_format!(crate::i18n::language(), "{} · with {}", name(huddle), others.join(", "))

@@ -9,7 +9,7 @@ pub const HUDDLES_PATH: &str = "/api/v1/voice/huddles";
 /// eight people fits four pairs.
 pub const MAX_HUDDLES: u8 = 4;
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct HuddleRequest {
     pub guild_id: GuildId,
@@ -41,6 +41,9 @@ pub struct HuddleAssignment {
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct HuddleState {
     pub split: bool,
+    /// Who last split or regrouped the room.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub split_by: Option<AccountId>,
     #[serde(default)]
     pub assignments: Vec<HuddleAssignment>,
 }
@@ -83,6 +86,28 @@ mod tests {
             }))
             .is_err()
         );
+    }
+
+    #[test]
+    fn soundboard_plays_stay_inside_a_split_huddle() {
+        let mut listener: crate::voice::Participant = serde_json::from_value(json!({
+            "account_id": "00000000-0000-0000-0000-000000000001", "username": "l",
+            "slot": 0, "muted": false, "deafened": false, "can_speak": true
+        }))
+        .unwrap();
+        // Together: every play is heard, wherever it came from.
+        assert!(listener.hears_from(None));
+        listener.huddle = 2;
+        assert!(listener.hears_from(Some(1)));
+        listener.split = true;
+        assert!(listener.hears_from(Some(2)));
+        assert!(!listener.hears_from(Some(1)));
+        assert!(!listener.hears_from(Some(0)));
+        assert!(listener.hears_from(None));
+        // Old servers and clients omit the new fields.
+        let wire = serde_json::to_value(&listener).unwrap();
+        assert_eq!(wire["huddle"], 2);
+        assert!(wire.get("split_by").is_none());
     }
 
     #[test]

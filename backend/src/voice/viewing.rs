@@ -397,6 +397,7 @@ mod tests {
                         camera_viewers: vec![],
                         huddle: 0,
                         split: false,
+                        split_by: None,
                     },
                     source_id: uuid::Uuid::new_v4(),
                     screen_started: Instant::now(),
@@ -477,16 +478,19 @@ mod tests {
                     account_id,
                     huddle: 1,
                 },
+                ids[1],
             )
             .await
             .unwrap();
         }
         assert!(allowed(&room, 1, MediaKind::Microphone, now).await);
-        let state = huddles::change(&room, Split { active: true })
+        let state = huddles::change(&room, Split { active: true }, ids[1])
             .await
             .unwrap();
         assert!(state.split);
+        assert_eq!(state.split_by, Some(ids[1]));
         assert_eq!(state.assignments.len(), 2);
+        assert_eq!(audience(&room).await.split_by, Some(ids[1]));
         assert!(!allowed(&room, 1, MediaKind::Microphone, now).await);
         assert!(!allowed(&room, 1, MediaKind::SystemAudio, now).await);
         assert!(allowed(&room, 1, MediaKind::ScreenVideo, now).await);
@@ -494,11 +498,11 @@ mod tests {
         // Rosters carry the plan, and repeating a split converges.
         assert!(audience(&room).await.split);
         assert_eq!(audience(&room).await.huddle, 1);
-        huddles::change(&room, Split { active: true })
+        huddles::change(&room, Split { active: true }, ids[1])
             .await
             .unwrap();
         assert!(!allowed(&room, 1, MediaKind::Microphone, now).await);
-        huddles::change(&room, Split { active: false })
+        huddles::change(&room, Split { active: false }, ids[1])
             .await
             .unwrap();
         for kind in all {
@@ -515,15 +519,16 @@ mod tests {
                 Assign {
                     account_id: stranger,
                     huddle: 2
-                }
+                },
+                ids[1],
             )
             .await
             .is_err()
         );
-        huddles::change(&room, Split { active: true })
+        huddles::change(&room, Split { active: true }, ids[1])
             .await
             .unwrap();
-        let cleared = huddles::change(&room, Clear {}).await.unwrap();
+        let cleared = huddles::change(&room, Clear {}, ids[1]).await.unwrap();
         assert!(!cleared.split && cleared.assignments.is_empty());
         assert!(allowed(&room, 1, MediaKind::Microphone, now).await);
         assert_eq!(audience(&room).await.huddle, 0);

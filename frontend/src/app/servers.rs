@@ -304,13 +304,19 @@ fn VoiceRoster(ui: Ui, guild: GuildId, channel: thiscord_shared::ChannelId) -> i
         let account = ui.account.with(|a| a.as_ref().map(|a| a.id))?;
         members.with(|m| m.iter().find(|m| m.account_id == account).cloned())
     });
+    let can_move = move || {
+        ui.server.with(|h| {
+            h.as_ref()
+                .is_some_and(|h| h.guild.id == guild && h.can_move_members)
+        })
+    };
+    // Only people the server would let you move (rank and permission) drag.
     let can_drag = move |id| {
         ui.account.with(|a| a.as_ref().is_some_and(|a| a.id != id))
-            && ui.server.with(|h| {
-                h.as_ref()
-                    .is_some_and(|h| h.guild.id == guild && h.can_move_members)
-            })
+            && can_move()
+            && super::huddles::movable(guild, id)
     };
+    let drop_here = RwSignal::new(false);
     let rows = Memo::new(move |_| {
         let split = split.get();
         let mut previous = None;
@@ -324,7 +330,11 @@ fn VoiceRoster(ui: Ui, guild: GuildId, channel: thiscord_shared::ChannelId) -> i
         }
         rows
     });
-    view! {<ul class="ml-5 space-y-1 border-l border-white/10 pl-3" class:huddles-split=move || split.get() aria-label=move || crate::i18n::t("In this voice channel")>
+    view! {<ul class="ml-5 space-y-1 border-l border-white/10 pl-3" class:huddles-split=move || split.get() class:roster-drop=move || drop_here.get() aria-label=move || crate::i18n::t("In this voice channel")
+        on:pointerenter=move |_| if can_move() { super::huddles::refresh_movable(ui, guild); }
+        on:dragover=move |e: web_sys::DragEvent| if super::huddles::accepts(ui, super::huddles::dragged().get_untracked(), guild, channel) { e.prevent_default(); if let Some(data)=e.data_transfer(){data.set_drop_effect("move");} drop_here.set(true); }
+        on:dragleave=move |_| drop_here.set(false)
+        on:drop=move |e: web_sys::DragEvent| { drop_here.set(false); if let Some(from)=super::huddles::dragged().get_untracked().filter(|_| super::huddles::accepts(ui, super::huddles::dragged().get_untracked(), guild, channel)) { e.prevent_default(); super::huddles::dragged().set(None); super::huddles::move_member(ui, from, channel); } }>
         <For each=move ||rows.get() key=|row|*row children=move |(huddle,row)|{
             let Some(id)=row else {
                 return view!{<li class="huddle-heading" data-huddle=huddle.to_string() aria-hidden="true"><span class="huddle-dot"></span>{move || super::huddles::name(huddle)}</li>}.into_any();
@@ -349,7 +359,8 @@ fn VoiceRoster(ui: Ui, guild: GuildId, channel: thiscord_shared::ChannelId) -> i
                 <Show when=move ||member.get().is_deafened()><span role="img" aria-label=move || crate::i18n::t("Deafened")><Icon kind=Glyph::Deafen/></span></Show>
                 <Show when=move ||!member.get().is_deafened() && (member.get().is_muted() || !member.get().can_speak)><span role="img" aria-label=move || crate::i18n::t("Muted")><Icon kind=Glyph::MicOff/></span></Show>
                 <Show when=move ||member.get().sharing_screen || member.get().camera_active><button class="stream-live-badge" aria-label=move ||thiscord_frontend::localized_format!(crate::i18n::language(), "Watch {}’s stream",member.get().display_name()) data-tip=move || crate::i18n::t("Watch stream") on:click=move |_|super::screen::open_stream(ui,guild,channel,member.get_untracked())>{move || crate::i18n::t("LIVE")}</button></Show>
-                <Show when=move ||member.get().huddle!=0 && !split.get()><span class="huddle-badge" role="img" aria-label=move ||super::huddles::name(member.get().huddle)>{move ||member.get().huddle}</span></Show>
+                <Show when=move ||member.get().huddle!=0 && !split.get()><span class="huddle-badge" role="img" aria-label=move ||super::huddles::name(member.get().huddle) data-tip=move ||thiscord_frontend::localized_format!(crate::i18n::language(), "Planned for {}", super::huddles::name(member.get().huddle))>{move ||member.get().huddle}</span></Show>
+                <Show when=away><span class="huddle-away-icon" role="img" aria-label=move || crate::i18n::t("Can't hear you") data-tip=move || crate::i18n::t("In another huddle")><Icon kind=Glyph::VolumeOff/></span></Show>
                 <Show when=move ||split.get()><span class="sr-only">{move ||super::huddles::name(member.get().huddle)}</span></Show>
             </li>}.into_any()
         }/>
@@ -759,11 +770,11 @@ pub(super) fn ServerHome(ui: Ui) -> impl IntoView {
                             let id=ch.id; let is_voice=ch.kind==ChannelKind::Voice; let name=ch.name.clone();let guild=channel_guild.clone();let guild_id=guild.id;
                             let heading=if previous!=Some(ch.category_id){previous=Some(ch.category_id);Some(ch.category_id.and_then(|id|categories.iter().find(|cat|cat.id==id).map(|cat|cat.name.clone())).unwrap_or_else(||crate::i18n::t("No category").into()))}else{None};
                             view!{<li>{heading.map(|title|view!{<h4 class="sidebar-section-title px-2 pb-1.5 pt-4">{title}</h4>})}<button data-rove tabindex=channel_roving.tabindex(id) on:focus=move |_|channel_roving.focus(id) data-context-server=guild_id.to_string() data-context-channel=id.to_string() aria-haspopup="menu" class="channel-item" class:channel-unread=move ||!super::notifications::muted(ui, thiscord_shared::notifications::Target::Channel { guild_id, channel_id: id }) && unread.with(|unread|unread.iter().any(|u|u.channel_id==id&&u.count>0)) class:channel-selected=move ||selected.get().is_some_and(|c|c.id==id) class:voice-active=move ||ui.voice.get().channel_id==Some(id)
-                                class:drop-candidate=move ||is_voice && super::huddles::dragged().get().is_some_and(|d|d.guild==guild_id && d.channel!=id)
+                                class:drop-candidate=move ||is_voice && super::huddles::accepts(ui, super::huddles::dragged().get(), guild_id, id)
                                 class:drop-over=move ||drop_over.get()==Some(id)
-                                on:dragover=move |e: web_sys::DragEvent|if is_voice && super::huddles::dragged().get_untracked().is_some_and(|d|d.guild==guild_id && d.channel!=id) {e.prevent_default();if let Some(data)=e.data_transfer(){data.set_drop_effect("move");}drop_over.set(Some(id));}
+                                on:dragover=move |e: web_sys::DragEvent|if is_voice && super::huddles::accepts(ui, super::huddles::dragged().get_untracked(), guild_id, id) {e.prevent_default();if let Some(data)=e.data_transfer(){data.set_drop_effect("move");}drop_over.set(Some(id));}
                                 on:dragleave=move |_|if drop_over.get_untracked()==Some(id){drop_over.set(None);}
-                                on:drop=move |e: web_sys::DragEvent|{drop_over.set(None);if let Some(from)=super::huddles::dragged().get_untracked().filter(|d|is_voice && d.guild==guild_id && d.channel!=id){e.prevent_default();super::huddles::dragged().set(None);super::huddles::move_member(ui,from,id);}}
+                                on:drop=move |e: web_sys::DragEvent|{drop_over.set(None);if let Some(from)=super::huddles::dragged().get_untracked().filter(|_|is_voice && super::huddles::accepts(ui, super::huddles::dragged().get_untracked(), guild_id, id)){e.prevent_default();super::huddles::dragged().set(None);super::huddles::move_member(ui,from,id);}}
                                 aria-current=move ||selected.with(|c|c.as_ref().is_some_and(|c|c.id==id)).then_some("page")
                                 aria-label={let name=name.clone();move ||channel_label(ui,guild_id,id,&name,is_voice)} data-tip=name.clone() data-tip-overflow="" disabled=move ||is_voice && ui.voice_joining.get() on:click=move |_|if is_voice {if selected.with_untracked(|c|c.as_ref().is_some_and(|c|c.id==id)){ui.mobile_content.set(true);}super::audio::join(ui,guild.clone(),ch.clone());}else{selected.set(Some(ch.clone()));ui.mobile_content.set(true);}>
                                 {move || if is_voice {view!{<span class="channel-glyph"><Icon kind=Glyph::Voice/></span>}.into_any()}else{view!{<span class="channel-glyph text-base font-semibold leading-none" aria-hidden="true">"#"</span>}.into_any()}}

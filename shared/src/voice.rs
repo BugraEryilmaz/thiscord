@@ -184,6 +184,9 @@ pub struct Participant {
     /// The room is split: this participant hears only its own huddle.
     #[serde(default, skip_serializing_if = "is_false")]
     pub split: bool,
+    /// Who last split or regrouped the room, so everyone can see who did it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub split_by: Option<AccountId>,
 }
 /// A visible voice channel's live membership, without joining its media transport.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -223,6 +226,11 @@ impl Participant {
     /// Huddles separate audio only; screens and cameras stay watchable.
     pub fn hears(&self, other: &Self) -> bool {
         !(self.split && other.split && self.huddle != other.huddle)
+    }
+    /// Whether this participant hears a soundboard play sent from `huddle`,
+    /// the player's huddle while the room was split (`None` when together).
+    pub fn hears_from(&self, huddle: Option<u8>) -> bool {
+        huddle.is_none_or(|h| !self.split || self.huddle == h)
     }
     /// Profile label, falling back to the username for older servers.
     pub fn display_name(&self) -> &str {

@@ -96,6 +96,7 @@ mod tests {
                 camera_viewers: vec![],
                 huddle: 0,
                 split: false,
+                split_by: None,
             },
             source_id: uuid::Uuid::new_v4(),
             screen_started: Instant::now(),
@@ -190,10 +191,11 @@ mod tests {
                 account_id,
                 huddle: 3,
             },
+            account_id,
         )
         .await
         .unwrap();
-        huddles::change(&room, Split { active: true })
+        huddles::change(&room, Split { active: true }, account_id)
             .await
             .unwrap();
         release_member(&room, slot, b.source_id, false).await;

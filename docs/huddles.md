@@ -27,10 +27,15 @@ server mute/deafen and speaking indicators work as usual.
   one, like the overlay shortcuts. On desktop it is a global shortcut, so it works
   while a game is focused; in the browser it works while the tab is focused. With
   no plan yet, the shortcut explains that one is needed instead of doing nothing.
-- **While split** the sidebar groups the channel by huddle with a colored rail,
-  dims people you cannot hear, and the voice dock says which huddle you are in and
-  who you hear (screen readers hear the split and the regroup announced). The
-  Huddles button turns amber.
+- **While split** the sidebar groups the channel by huddle with a colored rail and
+  marks people you cannot hear (dimmed avatar, muted name and a speaker-off icon),
+  and the voice dock says which huddle you are in and who you hear; hovering it
+  shows who split the room. The Huddles button turns amber.
+- **Everyone is told.** A split plays the voice "leave" tone and a regroup the
+  "join" tone for everyone in the call, including whoever pressed the shortcut
+  from a full-screen game (not while deafened). Screen readers hear "Alice split
+  the room. You are in Huddle 2 with Carol." or "Alice brought everyone back
+  together.", and the dock line stays readable afterwards.
 - **Clear huddles** forgets the plan and regroups.
 
 ### Rules
@@ -43,7 +48,11 @@ server mute/deafen and speaking indicators work as usual.
   anyone, and everyone stays in the call.
 - Requests go to `POST /api/v1/voice/huddles` (`shared/src/huddles.rs`). Each one
   rechecks the session, membership and current channel permissions under a shared
-  guild lock (no cached grants and no client snapshot). Changes are idempotent
+  guild lock (no cached grants and no client snapshot) and applies the change
+  before that transaction ends, so a permission change, which locks the guild
+  exclusively, cannot commit between the check and the change. Each account may
+  make 30 changes per 10 seconds (HTTP 429 beyond that, in memory per backend
+  process). Changes are idempotent
   (assign, split on/off, clear), so two people pressing the shortcut together
   converge instead of toggling back. They need no guild revision: a plan is not
   guild configuration and grants nothing.
@@ -51,6 +60,19 @@ server mute/deafen and speaking indicators work as usual.
   people currently in the channel can be planned, and huddles are numbered 1–4
   (`MAX_HUDDLES`; a full room of eight fits four pairs). A request for an empty
   channel fails with "Nobody is in this voice channel".
+
+### Attribution and abuse
+
+There is deliberately no hierarchy check, so someone with ManageHuddles can put
+anyone, including the owner, in a huddle of their own and split the room. Nobody
+loses access: the isolated person still sees the split and who did it (the dock
+and rosters carry `split_by`, the last person to split or regroup), can leave,
+and anyone with the permission can regroup or clear. Owners and role managers
+can take the permission away; the next request is refused. The backend logs every
+change at info level with the request ID, the actor's account ID, the guild and
+channel IDs and the action (assign, split, regroup, clear), but no names or
+other content. Give the permission only to people you trust to run the room, as
+with Move members.
 
 ### Lifecycle
 
@@ -79,6 +101,10 @@ ends; clients treat it like any other gap.
 
 ### Tests
 
+`huddles.rs` covers the per-account rate limit; `shared/src/huddles.rs` covers the
+wire format, bounds and soundboard filtering; `frontend/src/huddles.rs` covers the
+optimistic overlay (shown only until the roster changes, so a stale overlay never
+decides what the shortcut does), the toggle direction and companions.
 `viewing.rs` unit tests cover separation of microphone and screen audio, video
 staying watchable, idempotent splits, regrouping, unknown people and clearing;
 `membership.rs` covers rejoining into the same huddle. The PostgreSQL voice suite
@@ -89,8 +115,12 @@ live-room requirement and real-peer forwarding before, during and after a split.
 ## Moving people by dragging
 
 People with **MoveMembers** can drag someone from a sidebar voice roster onto
-another voice channel of the same server. Valid channels get an outline while
-dragging and highlight under the pointer. The drop uses the existing moderator move
+another voice channel of the same server, or onto that channel's list of people.
+A row is draggable only when the moderation view (loaded when the pointer reaches
+a voice roster, at most every ten seconds) says you may move that person, and
+never your own row. Channels with room get an outline while dragging and
+highlight under the pointer; full channels are not offered. The status bar shows
+"Moving Frank to AFK…" at once, then the result. The drop uses the existing moderator move
 (`GuildChange::MoveVoice`, see [permissions.md](permissions.md)) with fresh
 permissions and the current guild revision: the target must rank below you, both
 of you need access to both channels, and the destination needs room. The status bar
