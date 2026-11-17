@@ -43,7 +43,8 @@ const RATE: (usize, Duration) = (30, Duration::from_secs(10));
 #[derive(Debug, Default)]
 pub(super) struct Plan {
     split: bool,
-    /// Who last split or regrouped the room, shown to everyone in it.
+    /// Who last changed who hears whom (split, regroup, or moving someone while
+    /// split), shown to everyone in the room.
     split_by: Option<AccountId>,
     assignments: BTreeMap<AccountId, u8>,
 }
@@ -86,10 +87,14 @@ impl Plan {
                 if !present(&account_id) {
                     return Err(Failure::Invalid("That person is not in this voice channel"));
                 }
-                if huddle == 0 {
-                    self.assignments.remove(&account_id);
+                let previous = if huddle == 0 {
+                    self.assignments.remove(&account_id)
                 } else {
-                    self.assignments.insert(account_id, huddle);
+                    self.assignments.insert(account_id, huddle)
+                };
+                // Moving someone while split changes who hears whom.
+                if self.split && previous.unwrap_or(0) != huddle {
+                    self.split_by = Some(actor);
                 }
                 if self.assignments.len() > REMEMBERED {
                     self.assignments.retain(|account, _| present(account));
@@ -156,9 +161,11 @@ pub(super) async fn change(
     apply(room, &mut members, change, actor)
 }
 
-/// Sliding-window limit per account (in memory, one backend process).
-fn admit(actor: AccountId, now: Instant) -> Result<(), Failure> {
-    static RECENT: OnceLock<Mutex<HashMap<AccountId, Vec<Instant>>>> = OnceLock::new();
+/// Sliding-window limit per session credential, checked before any database
+/// work so refused requests are bounded too (in memory, one backend process).
+/// Keys are hashes; the credential itself is not retained.
+fn admit(key: u64, now: Instant) -> Result<(), Failure> {
+    static RECENT: OnceLock<Mutex<HashMap<u64, Vec<Instant>>>> = OnceLock::new();
     let mut recent = RECENT
         .get_or_init(Default::default)
         .lock()
@@ -167,7 +174,7 @@ fn admit(actor: AccountId, now: Instant) -> Result<(), Failure> {
         times.retain(|t| now.duration_since(*t) < RATE.1);
         !times.is_empty()
     });
-    let times = recent.entry(actor).or_default();
+    let times = recent.entry(key).or_default();
     if times.len() >= RATE.0 {
         return Err(Failure::Limited);
     }
@@ -192,6 +199,7 @@ async fn handle(
         }
         let pool = pool.ok_or(Failure::Unavailable)?;
         let token = crate::auth::bearer(&headers);
+        admit(credential_key(&token), Instant::now())?;
         crate::performance::blocking(move || authorized_change(&pool, &token, &request))
             .await
             .map_err(|_| Failure::Unavailable)?
@@ -212,6 +220,12 @@ async fn handle(
         .headers_mut()
         .insert("cache-control", "no-store".parse().unwrap());
     response
+}
+
+fn credential_key(token: &str) -> u64 {
+    use std::hash::BuildHasher;
+    static SEED: OnceLock<std::collections::hash_map::RandomState> = OnceLock::new();
+    SEED.get_or_init(Default::default).hash_one(token)
 }
 
 fn action(change: HuddleChange) -> &'static str {
@@ -267,7 +281,6 @@ fn authorized_change(
         if !allowed {
             return Err(Failure::Forbidden);
         }
-        admit(actor, Instant::now())?;
         let room = ROOMS
             .get_or_init(Default::default)
             .blocking_lock()
@@ -286,17 +299,16 @@ mod tests {
     use super::*;
 
     #[test]
-    fn requests_are_rate_limited_per_account() {
-        let (a, b) = (
-            AccountId::from_uuid(uuid::Uuid::new_v4()),
-            AccountId::from_uuid(uuid::Uuid::new_v4()),
-        );
+    fn requests_are_rate_limited_per_credential() {
+        let (a, b) = (credential_key("token-a"), credential_key("token-b"));
+        assert_ne!(a, b);
+        assert_eq!(a, credential_key("token-a"));
         let start = Instant::now();
         for _ in 0..RATE.0 {
             admit(a, start).unwrap();
         }
         assert!(matches!(admit(a, start), Err(Failure::Limited)));
-        // Other accounts are unaffected, and the window slides.
+        // Other sessions are unaffected, and the window slides.
         admit(b, start).unwrap();
         admit(a, start + RATE.1).unwrap();
     }

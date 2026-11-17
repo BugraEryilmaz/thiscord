@@ -1631,8 +1631,9 @@ kbd { display: inline-block; padding: 2px 7px; border: 1px solid var(--tint-15);
 .huddle-4, [data-huddle="4"] { --huddle: var(--color-huddle-4); }
 .huddle-dot { flex-shrink: 0; width: 8px; height: 8px; border-radius: 50%; background: var(--huddle); }
 .huddle-popover:focus { outline: none; }
-/* Phones: a sheet from the top that leaves the voice dock (hang up, mute) reachable. */
-@media (max-width: 767px) { .huddle-popover { top: calc(8px + env(safe-area-inset-top, 0px)); bottom: calc(var(--dock-height) + 16px + env(safe-area-inset-bottom, 0px)) !important; left: 8px !important; right: 8px; width: auto; max-height: none; } }
+/* Phones: a content-sized sheet right above the voice dock, covering the
+   composer completely and leaving hang up and mute reachable. */
+@media (max-width: 767px) { .huddle-popover { top: auto; bottom: calc(var(--dock-height) + 8px + env(safe-area-inset-bottom, 0px)) !important; left: 8px !important; right: 8px; width: auto; max-height: calc(100dvh - var(--dock-height) - 24px - env(safe-area-inset-top, 0px)); } }
 .huddle-popover { position: fixed; z-index: 120; display: flex; flex-direction: column; gap: 10px; width: min(520px, calc(100vw - 16px)); max-height: min(640px, calc(100dvh - 16px)); overflow-y: auto; padding: 14px; border: 1px solid var(--tint-8); border-radius: var(--radius-lg); background: var(--color-popover); color: var(--color-content); box-shadow: var(--shadow-2); }
 .huddle-head { display: flex; align-items: center; justify-content: space-between; gap: 8px; }
 .huddle-state { padding: 2px 10px; border-radius: 999px; background: var(--tint-6); color: var(--color-muted); font-size: 12px; font-weight: 600; }
@@ -1678,5 +1679,7 @@ kbd { display: inline-block; padding: 2px 7px; border: 1px solid var(--tint-15);
 .huddle-away-icon svg { width: 14px; height: 14px; }
 .roster-drop { border-left-color: var(--brand-ink) !important; background: var(--brand-soft); border-radius: 0 var(--radius-sm) var(--radius-sm) 0; }
 .voice-member[draggable="true"] { cursor: grab; }
-.channel-item.drop-candidate { box-shadow: inset 0 0 0 1px var(--tint-15); }
+.channel-item.drop-candidate { outline: 1px dashed var(--brand-ink); outline-offset: -1px; }
+.voice-member.voice-moving { opacity: .6; }
+.voice-moving-label { flex-shrink: 0; color: var(--color-muted); font-size: 11px; font-style: italic; }
 .channel-item.drop-over { background: var(--brand-soft); box-shadow: inset 0 0 0 2px var(--brand-ink); color: var(--color-white); }

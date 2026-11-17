@@ -54,7 +54,10 @@ pub(super) async fn admit_with(
         );
     }
     moderation::register(room, &member);
-    room.huddles.lock().unwrap().apply_one(&mut member);
+    room.huddles
+        .lock()
+        .unwrap_or_else(|p| p.into_inner())
+        .apply_one(&mut member);
     members.insert(slot, member);
     room.changed.send_replace(());
     Ok(slot)

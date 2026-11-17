@@ -111,8 +111,33 @@ async fn huddles_need_permission_and_split_voices_without_reconnecting() {
     forwarded(&mut owner, &mut planning).await;
     still_connected(&mut playing.socket).await;
     // Splitting twice (two people pressing the shortcut) converges.
-    huddles(&app, &ot, split(true), StatusCode::OK).await;
+    let again = huddles(&app, &ot, split(true), StatusCode::OK).await;
+    assert_eq!(
+        again["split_by"],
+        json!(planner),
+        "no change, no new attribution"
+    );
     blocked(&mut playing, &mut owner).await;
+    // Moving someone while split changes who hears whom, so it is attributed.
+    let moved = huddles(&app, &ot, assign(player, 2), StatusCode::OK).await;
+    assert_eq!(moved["split_by"], json!(owner_id));
+    blocked(&mut playing, &mut owner).await;
+    // Only channels both people may join are offered for moves.
+    let moderation = command(
+        &app,
+        &ot,
+        json!({"action":"inspect_moderation","guild_id":guild}),
+        StatusCode::OK,
+    )
+    .await;
+    let target = moderation["state"]["members"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|m| m["account_id"] == json!(player))
+        .unwrap()
+        .clone();
+    assert_eq!(target["move_channels"], json!([channel]));
 
     // Losing the permission stops further changes.
     change(&app, &ot, &mut state, json!({"action":"set_override","channel_id":channel,"target":{"kind":"member","id":planner},"allow":[],"deny":["manage_huddles"]}), StatusCode::OK).await;

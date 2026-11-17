@@ -138,7 +138,7 @@ pub(super) fn muted(ui: Ui, target: Target) -> bool {
                 }
         })
 }
-pub(super) fn sound(ui: Ui, kind: Kind, volume: u8) {
+fn sound(ui: Ui, kind: Kind, volume: u8) {
     if ui.audio.get_untracked().deafened || volume == 0 {
         return;
     }

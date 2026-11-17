@@ -401,11 +401,22 @@ async fn items(ui: Ui, target: Target) -> Result<(String, Vec<Item>), String> {
                 if let Some(source) = target.channel
                     && m.actions.contains(&Permission::MoveMembers)
                 {
-                    for channel in home
-                        .channels
-                        .iter()
-                        .filter(|c| c.kind == ChannelKind::Voice && c.id != source)
-                    {
+                    let occupants = |id| {
+                        ui.voice_roster.with_untracked(|r| {
+                            r.iter()
+                                .find(|c| c.channel_id == id)
+                                .map_or(0, |c| c.members.len())
+                        })
+                    };
+                    for channel in home.channels.iter().filter(|c| {
+                        c.kind == ChannelKind::Voice
+                            && thiscord_frontend::huddles::can_drop(
+                                source,
+                                c.id,
+                                occupants(c.id),
+                                &m.move_channels,
+                            )
+                    }) {
                         let title = thiscord_frontend::localized_format!(
                             crate::i18n::language(),
                             "Move {} to {}?",

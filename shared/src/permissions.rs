@@ -290,6 +290,10 @@ pub struct ModerationMember {
     pub server_muted: bool,
     #[serde(default)]
     pub server_deafened: bool,
+    /// With MoveMembers: voice channels both you and this member may join, so
+    /// clients offer only channels a move could use. Older servers omit it.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub move_channels: Vec<ChannelId>,
 }
 impl ModerationMember {
     /// Profile label, falling back to the username for older servers.

@@ -31,11 +31,16 @@ server mute/deafen and speaking indicators work as usual.
   marks people you cannot hear (dimmed avatar, muted name and a speaker-off icon),
   and the voice dock says which huddle you are in and who you hear; hovering it
   shows who split the room. The Huddles button turns amber.
-- **Everyone is told.** A split plays the voice "leave" tone and a regroup the
-  "join" tone for everyone in the call, including whoever pressed the shortcut
-  from a full-screen game (not while deafened). Screen readers hear "Alice split
-  the room. You are in Huddle 2 with Carol." or "Alice brought everyone back
-  together.", and the dock line stays readable afterwards.
+- **Everyone is told.** Any change to who hears whom plays a short cue for the
+  people in the call, distinct from the join/leave sounds: falling for a split,
+  rising for a regroup, a double blip for someone moved to another huddle while
+  split. Whoever pressed the shortcut from a full-screen game hears it too (not
+  while deafened), and a shortcut that fails (no plan, not in a server call, no
+  permission, rate limit) plays a low buzz. Screen readers hear "Alice split the
+  room. You are in Huddle 2 with Carol.", "Bob moved you to another huddle…" or
+  "Alice brought everyone back together.", and the dock line stays readable.
+  Joining a room that is already split describes it ("This room is split…")
+  without a cue, and reconnecting announces nothing.
 - **Clear huddles** forgets the plan and regroups.
 
 ### Rules
@@ -50,9 +55,9 @@ server mute/deafen and speaking indicators work as usual.
   rechecks the session, membership and current channel permissions under a shared
   guild lock (no cached grants and no client snapshot) and applies the change
   before that transaction ends, so a permission change, which locks the guild
-  exclusively, cannot commit between the check and the change. Each account may
-  make 30 changes per 10 seconds (HTTP 429 beyond that, in memory per backend
-  process). Changes are idempotent
+  exclusively, cannot commit between the check and the change. Each session may
+  make 30 requests per 10 seconds, counted before any database work so refused
+  requests count too (HTTP 429 beyond that, in memory per backend process). Changes are idempotent
   (assign, split on/off, clear), so two people pressing the shortcut together
   converge instead of toggling back. They need no guild revision: a plan is not
   guild configuration and grants nothing.
@@ -66,7 +71,8 @@ server mute/deafen and speaking indicators work as usual.
 There is deliberately no hierarchy check, so someone with ManageHuddles can put
 anyone, including the owner, in a huddle of their own and split the room. Nobody
 loses access: the isolated person still sees the split and who did it (the dock
-and rosters carry `split_by`, the last person to split or regroup), can leave,
+and rosters carry `split_by`, the last person to split, regroup or move someone
+while split), can leave,
 and anyone with the permission can regroup or clear. Owners and role managers
 can take the permission away; the next request is refused. The backend logs every
 change at info level with the request ID, the actor's account ID, the guild and
@@ -99,12 +105,18 @@ A split is a pause in the forwarded streams, like a listener deafening, so a ver
 long split (more than roughly ten minutes) leaves a large RTP sequence gap when it
 ends; clients treat it like any other gap.
 
+Clients older than this feature ignore the new roster fields: in a split room
+they simply stop hearing other huddles, with no explanation. Update every client
+before using huddles.
+
 ### Tests
 
 `huddles.rs` covers the per-account rate limit; `shared/src/huddles.rs` covers the
 wire format, bounds and soundboard filtering; `frontend/src/huddles.rs` covers the
 optimistic overlay (shown only until the roster changes, so a stale overlay never
-decides what the shortcut does), the toggle direction and companions.
+decides what the shortcut does, and chained changes do not bounce back), the
+toggle direction, companions, which changes are announced (join, reconnect,
+split, regroup, moved) and drop-target filtering.
 `viewing.rs` unit tests cover separation of microphone and screen audio, video
 staying watchable, idempotent splits, regrouping, unknown people and clearing;
 `membership.rs` covers rejoining into the same huddle. The PostgreSQL voice suite
@@ -116,15 +128,15 @@ live-room requirement and real-peer forwarding before, during and after a split.
 
 People with **MoveMembers** can drag someone from a sidebar voice roster onto
 another voice channel of the same server, or onto that channel's list of people.
-A row is draggable only when the moderation view (loaded when the pointer reaches
-a voice roster, at most every ten seconds) says you may move that person, and
-never your own row. Channels with room get an outline while dragging and
-highlight under the pointer; full channels are not offered. The status bar shows
-"Moving Frank to AFK…" at once, then the result. The drop uses the existing moderator move
+A row is draggable only when the moderation view (loaded when the server view
+opens, then at most every ten seconds) says you may move that person. Only
+channels a move could use are offered, with a dashed outline while dragging: with
+room, and where both of you have ViewChannel and JoinVoice (the moderation view's
+`move_channels`). The status bar shows "Moving Frank to AFK…" and the row stays
+marked "Moving…" until Frank appears in AFK, then "Moved Frank to AFK". The drop uses the existing moderator move
 (`GuildChange::MoveVoice`, see [permissions.md](permissions.md)) with fresh
 permissions and the current guild revision: the target must rank below you, both
-of you need access to both channels, and the destination needs room. The status bar
-confirms the move or explains why it failed. Your own row is never draggable.
-Keyboard and touch users can do the same from the participant's right-click (or
-Shift+F10) menu: **Move to <channel>** for each other voice channel, with a
+of you need access to both channels, and the destination needs room; a failure is
+explained in the status bar. Keyboard and touch users can do the same from the participant's right-click (or
+Shift+F10) menu: **Move to <channel>** for each channel a move could use, with a
 confirmation, when you may move that person.
