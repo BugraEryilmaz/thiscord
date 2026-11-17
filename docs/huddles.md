@@ -19,6 +19,8 @@ server mute/deafen and speaking indicators work as usual.
   button to people who may manage huddles there. It opens a planner with the main
   room and four huddle lanes. Drag people between lanes; or click someone and then
   **Move here** on a lane; or focus someone and press 1–4 (0 for the main room).
+  Focus starts on the first person, stays on whoever you just moved, and each
+  change is announced to screen readers.
   The plan shows in the sidebar as a colored number next to each person.
 - **Split or regroup.** The planner's main button, or the **Split or regroup
   huddles** shortcut (Settings > Shortcuts). The shortcut is off until you record
@@ -27,7 +29,8 @@ server mute/deafen and speaking indicators work as usual.
   no plan yet, the shortcut explains that one is needed instead of doing nothing.
 - **While split** the sidebar groups the channel by huddle with a colored rail,
   dims people you cannot hear, and the voice dock says which huddle you are in and
-  who you hear. The Huddles button turns amber.
+  who you hear (screen readers hear the split and the regroup announced). The
+  Huddles button turns amber.
 - **Clear huddles** forgets the plan and regroups.
 
 ### Rules
@@ -92,4 +95,6 @@ dragging and highlight under the pointer. The drop uses the existing moderator m
 permissions and the current guild revision: the target must rank below you, both
 of you need access to both channels, and the destination needs room. The status bar
 confirms the move or explains why it failed. Your own row is never draggable.
-Keyboard and touch users can do the same from the member's **Moderate** panel.
+Keyboard and touch users can do the same from the participant's right-click (or
+Shift+F10) menu: **Move to <channel>** for each other voice channel, with a
+confirmation, when you may move that person.

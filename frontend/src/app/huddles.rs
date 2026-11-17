@@ -267,6 +267,7 @@ fn Person(
     ui: Ui,
     member: Participant,
     picked: RwSignal<Option<AccountId>>,
+    refocus: RwSignal<Option<AccountId>>,
     assign: Callback<(AccountId, u8)>,
 ) -> impl IntoView {
     let id = member.account_id;
@@ -274,10 +275,20 @@ fn Person(
     let you = own(ui) == Some(id);
     let shown = label.clone();
     let tip = label.clone();
+    let button = NodeRef::<leptos::html::Button>::new();
+    // Moving someone re-renders them in another lane; keep keyboard focus on them.
+    Effect::new(move |_| {
+        if refocus.get() == Some(id)
+            && let Some(button) = button.get()
+        {
+            let _ = button.focus();
+            refocus.set(None);
+        }
+    });
     view! {
-        <button type="button" class="huddle-person" draggable="true" aria-pressed=move || (picked.get() == Some(id)).to_string()
+        <button node_ref=button type="button" class="huddle-person" draggable="true" data-account=id.to_string() aria-pressed=move || (picked.get() == Some(id)).to_string()
             class:picked=move || picked.get() == Some(id)
-            aria-label=move || thiscord_frontend::localized_format!(crate::i18n::language(), "{}, {}. Press 1 to 4 to choose a huddle, 0 for the main room.", tip, name(member.huddle))
+            aria-label=move || thiscord_frontend::localized_format!(crate::i18n::language(), "{}, {}. Press 1 to 4 for a huddle or 0 for the main room, or press Enter and choose Move here on a lane.", tip, name(member.huddle))
             on:dragstart=move |e: web_sys::DragEvent| {
                 if let Some(data) = e.data_transfer() {
                     let _ = data.set_data("text/plain", &id.to_string());
@@ -313,9 +324,18 @@ fn Lane(
     huddle: u8,
     members: Memo<Vec<Participant>>,
     picked: RwSignal<Option<AccountId>>,
+    refocus: RwSignal<Option<AccountId>>,
     assign: Callback<(AccountId, u8)>,
 ) -> impl IntoView {
     let over = RwSignal::new(false);
+    let picked_name = move || {
+        let id = picked.get()?;
+        members.with(|m| {
+            m.iter()
+                .find(|m| m.account_id == id)
+                .map(|m| m.display_name().to_owned())
+        })
+    };
     let people = Memo::new(move |_| {
         members
             .get()
@@ -340,11 +360,12 @@ fn Lane(
                 <span class="flex-1 truncate">{move || name(huddle)}</span>
                 <Show when=move || picked.get().is_some_and(|id| people.with(|p| !p.iter().any(|m| m.account_id == id)))
                     fallback=move || view! {<span class="huddle-count">{move || people.with(Vec::len)}</span>}>
-                    <button type="button" class="huddle-move-here" on:click=move |_| drop_here()>{move || crate::i18n::t("Move here")}</button>
+                    <button type="button" class="huddle-move-here" on:click=move |_| drop_here()
+                        aria-label=move || thiscord_frontend::localized_format!(crate::i18n::language(), "Move {} to {}", picked_name().unwrap_or_default(), name(huddle))>{move || crate::i18n::t("Move here")}</button>
                 </Show>
             </header>
             <div class="huddle-people">
-                <For each=move || people.get() key=|m| (m.account_id, m.display_name().to_owned(), m.avatar_id) children=move |m| view! {<Person ui member=m picked assign/>}/>
+                <For each=move || people.get() key=|m| (m.account_id, m.display_name().to_owned(), m.avatar_id) children=move |m| view! {<Person ui member=m picked refocus assign/>}/>
                 <Show when=move || people.with(Vec::is_empty)>
                     <p class="huddle-empty">{move || crate::i18n::t("Drag people here")}</p>
                 </Show>
@@ -361,8 +382,11 @@ pub(super) fn HuddleControls(ui: Ui) -> impl IntoView {
     let busy = RwSignal::new(false);
     let notice = RwSignal::new(String::new());
     let shortcut = RwSignal::new(String::new());
+    let refocus = RwSignal::new(None::<AccountId>);
+    let announce = RwSignal::new(String::new());
     let position = RwSignal::new((8.0, 8.0));
     let group = NodeRef::<leptos::html::Div>::new();
+    let dialog = NodeRef::<leptos::html::Div>::new();
     let trigger = NodeRef::<leptos::html::Button>::new();
     let channels = huddle_channels(ui);
     let allowed = move || {
@@ -389,8 +413,34 @@ pub(super) fn HuddleControls(ui: Ui) -> impl IntoView {
                 return;
             }
             busy.set(false);
-            if let Err(error) = result {
-                notice.set(crate::i18n::message(error));
+            match result {
+                Ok(state) => {
+                    announce.set(match change {
+                        HuddleChange::Assign { account_id, huddle } => {
+                            refocus.set(Some(account_id));
+                            let who = members.with_untracked(|m| {
+                                m.iter()
+                                    .find(|m| m.account_id == account_id)
+                                    .map(|m| m.display_name().to_owned())
+                                    .unwrap_or_default()
+                            });
+                            thiscord_frontend::localized_format!(
+                                crate::i18n::language(),
+                                "{} is now in {}",
+                                who,
+                                name(huddle)
+                            )
+                        }
+                        HuddleChange::Split { .. } => crate::i18n::t(if state.split {
+                            "Split into huddles"
+                        } else {
+                            "Everyone is back together"
+                        })
+                        .to_owned(),
+                        HuddleChange::Clear {} => crate::i18n::t("Huddles cleared").to_owned(),
+                    });
+                }
+                Err(error) => notice.set(crate::i18n::message(error)),
             }
         });
     };
@@ -435,6 +485,24 @@ pub(super) fn HuddleControls(ui: Ui) -> impl IntoView {
                 (height - dock.bottom()).max(8.0),
             ));
         }
+        // Move focus into the planner: the first person, else the dialog.
+        request_animation_frame(move || {
+            if let Some(dialog) = dialog.get_untracked() {
+                let first = dialog
+                    .query_selector(".huddle-person")
+                    .ok()
+                    .flatten()
+                    .and_then(|e| e.dyn_into::<web_sys::HtmlElement>().ok());
+                match first {
+                    Some(first) => {
+                        let _ = first.focus();
+                    }
+                    None => {
+                        let _ = dialog.focus();
+                    }
+                }
+            }
+        });
         leptos::task::spawn_local(async move {
             if let Ok(status) = ui
                 .audio_control
@@ -473,16 +541,16 @@ pub(super) fn HuddleControls(ui: Ui) -> impl IntoView {
                 aria-haspopup="dialog" aria-expanded=move || open.get().to_string()
                 on:click=move |_| open.update(|value| *value = !*value)><Icon kind=Glyph::Grid/></button>
             <Show when=move || open.get()>
-                <div class="huddle-popover" role="dialog" aria-labelledby="huddle-title"
+                <div node_ref=dialog tabindex="-1" class="huddle-popover" role="dialog" aria-labelledby="huddle-title" aria-describedby="huddle-help"
                     style:left=move || format!("{}px", position.get().0) style:bottom=move || format!("{}px", position.get().1)>
                     <div class="huddle-head">
                         <h2 id="huddle-title" class="soundboard-title !mb-0"><Icon kind=Glyph::Grid/><span>{move || crate::i18n::t("Huddles")}</span></h2>
                         <span class="huddle-state" class:split=move || split.get() role="status">{move || crate::i18n::t(if split.get() { "Split" } else { "Together" })}</span>
                     </div>
-                    <p class="huddle-help">{move || crate::i18n::t("Drag people into huddles, or select someone and press 1–4. When split, each huddle hears only itself; screens and cameras stay visible.")}</p>
-                    <Lane ui huddle=0 members picked assign/>
+                    <p id="huddle-help" class="huddle-help">{move || crate::i18n::t("Drag people into huddles, or select someone and press 1–4. When split, each huddle hears only itself; screens and cameras stay visible.")}</p>
+                    <Lane ui huddle=0 members picked refocus assign/>
                     <div class="huddle-grid">
-                        {(1..=MAX_HUDDLES).map(|huddle| view! {<Lane ui huddle members picked assign/>}).collect_view()}
+                        {(1..=MAX_HUDDLES).map(|huddle| view! {<Lane ui huddle members picked refocus assign/>}).collect_view()}
                     </div>
                     <div class="huddle-actions">
                         <button type="button" class="huddle-toggle" class:split=move || split.get()
@@ -508,6 +576,7 @@ pub(super) fn HuddleControls(ui: Ui) -> impl IntoView {
                         </button>
                     </p>
                     <Show when=move || !notice.get().is_empty()><p class="soundboard-notice" role="alert">{move || notice.get()}</p></Show>
+                    <p class="sr-only" aria-live="polite">{move || announce.get()}</p>
                 </div>
             </Show>
         </div>
@@ -528,8 +597,34 @@ pub(super) fn HuddleStatus(ui: Ui) -> impl IntoView {
             .collect();
         Some((mine.huddle, others))
     });
-    view! {<Show when=move || line.with(Option::is_some)>
-        <p class=move || format!("huddle-status huddle-{}", line.get().map_or(0, |l| l.0)) role="status">
+    // Everyone in the call hears about a split or regroup, not just the planner.
+    let announce = RwSignal::new(String::new());
+    Effect::new(move |previous: Option<bool>| {
+        let split = line.with(Option::is_some);
+        if let Some(previous) = previous
+            && previous != split
+        {
+            announce.set(match line.get_untracked() {
+                Some((huddle, others)) if !others.is_empty() => {
+                    thiscord_frontend::localized_format!(
+                        crate::i18n::language(),
+                        "The room is split. You are in {} with {}.",
+                        name(huddle),
+                        others.join(", ")
+                    )
+                }
+                Some((huddle, _)) => thiscord_frontend::localized_format!(
+                    crate::i18n::language(),
+                    "The room is split. You are alone in {}.",
+                    name(huddle)
+                ),
+                None => crate::i18n::t("Everyone is back together").to_owned(),
+            });
+        }
+        split
+    });
+    view! {<p class="sr-only" aria-live="polite">{move || announce.get()}</p><Show when=move || line.with(Option::is_some)>
+        <p class=move || format!("huddle-status huddle-{}", line.get().map_or(0, |l| l.0)) aria-hidden="true">
             <span class="huddle-dot" aria-hidden="true"></span>
             <span class="min-w-0 truncate">{move || line.get().map(|(huddle, others)| if others.is_empty() {
                 thiscord_frontend::localized_format!(crate::i18n::language(), "{} · only you", name(huddle))
