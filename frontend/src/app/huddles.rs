@@ -327,6 +327,12 @@ pub(super) struct Moving {
 }
 thread_local! {
     static MOVING: ArcRwSignal<BTreeMap<AccountId, Moving>> = ArcRwSignal::new(BTreeMap::new());
+    static PLANNING: ArcRwSignal<bool> = ArcRwSignal::new(false);
+}
+/// Whether this window's Huddles planner is open: the sidebar shows planned
+/// huddle numbers only then.
+pub(super) fn planning() -> bool {
+    PLANNING.with(|p| p.get())
 }
 pub(super) fn moving() -> ArcRwSignal<BTreeMap<AccountId, Moving>> {
     MOVING.with(Clone::clone)
@@ -728,6 +734,7 @@ pub(super) fn HuddleControls(ui: Ui) -> impl IntoView {
     let assign = Callback::new(move |(account_id, huddle): (AccountId, u8)| {
         run(HuddleChange::Assign { account_id, huddle });
     });
+    on_cleanup(|| PLANNING.with(|p| p.set(false)));
     // Leaving the call or losing the permission closes the planner.
     Effect::new(move |_| {
         if !allowed() {
@@ -741,7 +748,9 @@ pub(super) fn HuddleControls(ui: Ui) -> impl IntoView {
         open.set(false);
     };
     Effect::new(move |_| {
-        if !open.get() {
+        let opened = open.get();
+        PLANNING.with(|p| p.set(opened));
+        if !opened {
             picked.set(None);
             return;
         }

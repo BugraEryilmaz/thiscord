@@ -21,7 +21,8 @@ server mute/deafen and speaking indicators work as usual.
   **Move here** on a lane; or focus someone and press 1–4 (0 for the main room).
   Focus starts on the first person, stays on whoever you just moved, and each
   change is announced to screen readers.
-  The plan shows in the sidebar as a colored number next to each person.
+  While the planner is open, the sidebar shows each person's planned huddle as a
+  colored number; it is hidden otherwise. A huddle can hold any number of people.
 - **Split or regroup.** The planner's main button, or the **Split or regroup
   huddles** shortcut, recorded right in the planner (or in Settings > Shortcuts). The shortcut is off until you record
   one, like the overlay shortcuts. On desktop it is a global shortcut, so it works
