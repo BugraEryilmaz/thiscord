@@ -140,6 +140,7 @@ mod tests {
         );
         let older: AudioShortcuts = serde_json::from_str(r#"{"mute":"F8","deafen":""}"#).unwrap();
         assert!(older.overlay_visibility.is_empty() && older.overlay_unlock.is_empty());
+        assert!(older.huddles.is_empty());
         let set = AudioShortcuts {
             overlay_corner: "F9".into(),
             ..Default::default()

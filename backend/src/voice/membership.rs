@@ -54,6 +54,7 @@ pub(super) async fn admit_with(
         );
     }
     moderation::register(room, &member);
+    room.huddles.lock().unwrap().apply_one(&mut member);
     members.insert(slot, member);
     room.changed.send_replace(());
     Ok(slot)
@@ -93,6 +94,8 @@ mod tests {
                 camera_epoch: 0,
                 screen_viewers: vec![],
                 camera_viewers: vec![],
+                huddle: 0,
+                split: false,
             },
             source_id: uuid::Uuid::new_v4(),
             screen_started: Instant::now(),
@@ -171,6 +174,42 @@ mod tests {
         let source = roster.iter().find(|m| m.account_id == pending_id).unwrap();
         assert_eq!(source.microphone_source_epoch, 0);
         assert_eq!(source.microphone_epoch, 0);
+    }
+
+    #[tokio::test]
+    async fn rejoining_keeps_a_huddle_while_the_room_lives() {
+        use thiscord_shared::huddles::HuddleChange::{Assign, Split};
+        let room = Room::default();
+        let (a, b) = (member(account(), id()), member(account(), id()));
+        admit(&room, a.clone(), false).await.unwrap();
+        let slot = admit(&room, b.clone(), false).await.unwrap();
+        let account_id = b.info.account_id;
+        huddles::change(
+            &room,
+            Assign {
+                account_id,
+                huddle: 3,
+            },
+        )
+        .await
+        .unwrap();
+        huddles::change(&room, Split { active: true })
+            .await
+            .unwrap();
+        release_member(&room, slot, b.source_id, false).await;
+        // A reconnect (or a moderator move back) lands in the same huddle.
+        let slot = admit(&room, member(account_id, id()), false).await.unwrap();
+        let members = room.members.read().await;
+        assert_eq!(
+            (members[&slot].info.huddle, members[&slot].info.split),
+            (3, true)
+        );
+        let other = members
+            .values()
+            .find(|m| m.info.account_id == a.info.account_id)
+            .unwrap();
+        assert_eq!((other.info.huddle, other.info.split), (0, true));
+        assert!(!other.info.hears(&members[&slot].info));
     }
 
     #[tokio::test]

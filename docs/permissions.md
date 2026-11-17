@@ -400,6 +400,13 @@ disconnects, server mute/deafen and moves enforce the target hierarchy.
 EditOwnMessages/DeleteOwnMessages additionally require message authorship;
 ManageMessages permits moderation. MoveMembers requires the actor and target to have ViewChannel and JoinVoice in
 both source and destination channels. Mute/deafen/move/kick/ban enforce target hierarchy.
+Moves can also be made by dragging a sidebar voice participant onto another voice
+channel; it is the same revision-checked move ([huddles.md](huddles.md#moving-people-by-dragging)).
+ManageHuddles (permission set 3, not granted to Everyone) plans a voice channel's
+huddles and splits or regroups it; it needs ViewChannel and JoinVoice there and has
+no hierarchy check because a split removes nobody's access ([huddles.md](huddles.md)).
+Clients that declare an older permission set never receive the name, and their
+role/override edits keep it.
 
 ## Group conversations
 

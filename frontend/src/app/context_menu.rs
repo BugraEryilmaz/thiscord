@@ -397,6 +397,40 @@ async fn items(ui: Ui, target: Target) -> Result<(String, Vec<Item>), String> {
                         );
                     }
                 }
+                // The keyboard and touch route for dragging someone onto a channel.
+                if let Some(source) = target.channel
+                    && m.actions.contains(&Permission::MoveMembers)
+                {
+                    for channel in home
+                        .channels
+                        .iter()
+                        .filter(|c| c.kind == ChannelKind::Voice && c.id != source)
+                    {
+                        let title = thiscord_frontend::localized_format!(
+                            crate::i18n::language(),
+                            "Move {} to {}?",
+                            m.display_name(),
+                            channel.name
+                        );
+                        items.push(Item::new(
+                            thiscord_frontend::localized_format!(
+                                crate::i18n::language(),
+                                "Move to {}",
+                                channel.name
+                            ),
+                            Action::Change(
+                                guild.id,
+                                state.guild.revision,
+                                GuildChange::MoveVoice {
+                                    account_id: member,
+                                    source_channel_id: source,
+                                    channel_id: channel.id,
+                                },
+                                title,
+                            ),
+                        ));
+                    }
+                }
                 if m.actions.contains(&Permission::ManageNicknames) {
                     items.push(Item::new(
                         crate::i18n::t("Change nickname…"),
@@ -609,6 +643,13 @@ fn confirmation(ui: Ui, action: &Action, name: String) -> Option<super::dialog::
                     t("They are removed from the voice channel and can join again."),
                     t("Disconnect"),
                     true,
+                ),
+                GuildChange::MoveVoice { .. } => (
+                    t(
+                        "They reconnect in that channel with their mute and deafen kept; screen and camera sharing stop. You can also drag people onto a voice channel.",
+                    ),
+                    t("Move"),
+                    false,
                 ),
                 GuildChange::DeleteChannel { .. } => (
                     t(

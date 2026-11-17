@@ -89,11 +89,12 @@ mod tests {
     #[test]
     fn missing_or_malformed_permission_sets_mean_the_released_set() {
         use super::permission_set;
+        use thiscord_shared::permissions::PERMISSION_SET;
         assert_eq!(permission_set(None), 1);
         assert_eq!(permission_set(Some("permission_set=x")), 1);
         assert_eq!(permission_set(Some("other=2")), 1);
         assert_eq!(permission_set(Some("permission_set=0")), 1);
         assert_eq!(permission_set(Some("a=1&permission_set=2")), 2);
-        assert_eq!(permission_set(Some("permission_set=200")), 2);
+        assert_eq!(permission_set(Some("permission_set=200")), PERMISSION_SET);
     }
 }

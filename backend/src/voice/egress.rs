@@ -823,6 +823,8 @@ mod tests {
                         camera_epoch: 0,
                         screen_viewers: vec![],
                         camera_viewers: vec![],
+                        huddle: 0,
+                        split: false,
                     },
                     source_id: endpoint.id,
                     screen_started: Instant::now(),

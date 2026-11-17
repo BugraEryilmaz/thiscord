@@ -440,6 +440,8 @@ Personalized speaker isolation and physical acoustic acceptance remain future wo
   native clip mixing and local per-person soundboard volume.
 - [ ] Physical Windows/macOS/Linux soundboard acceptance (uploads of real MP3/Ogg/FLAC files, overlap, deafen).
 - [ ] Physical Windows/macOS/Linux acceptance of moderator moves, capture shutdown and self-state preservation.
+- [x] Voice huddles: ManageHuddles permission, drag/keyboard planner, split/regroup button and recordable global shortcut, SFU voice separation without reconnecting, sidebar grouping; drag-to-move between voice channels.
+- [ ] Physical Windows/macOS/Linux acceptance of the huddle global shortcut during a fullscreen game, and huddle plans surviving a backend restart.
 - [x] Desktop voice overlay with participant roster, speaking activity and focus visibility.
 - [x] Customizable global mute/deafen shortcuts and clickable self controls on overlay hover.
 - [x] Overlay corner/display/offset settings, drag positioning mode, optional hide/show button and overlay shortcuts.

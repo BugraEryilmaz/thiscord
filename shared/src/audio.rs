@@ -38,6 +38,10 @@ pub struct AudioShortcuts {
     pub overlay_corner: String,
     #[serde(skip_serializing_if = "String::is_empty")]
     pub overlay_unlock: String,
+    /// Splits the current voice channel into its huddles or brings everyone
+    /// back (docs/huddles.md). Off by default, like the overlay shortcuts.
+    #[serde(skip_serializing_if = "String::is_empty")]
+    pub huddles: String,
     /// Held to talk in push-to-talk mode; empty leaves only the hold button.
     /// Omitted while default so older desktops (which deny unknown fields and
     /// always use the default) accept remote edits.
@@ -55,6 +59,7 @@ impl Default for AudioShortcuts {
             overlay_visibility: String::new(),
             overlay_corner: String::new(),
             overlay_unlock: String::new(),
+            huddles: String::new(),
             push_to_talk: Self::DEFAULT_PUSH_TO_TALK.into(),
         }
     }
@@ -65,11 +70,13 @@ impl Default for AudioShortcuts {
 pub enum ShortcutAction {
     Audio(AudioToggle),
     Overlay(crate::overlay::OverlayAction),
+    /// Split or regroup the connected voice channel's huddles.
+    Huddles,
 }
 impl AudioShortcuts {
     pub const MAX_LEN: usize = 128;
     pub const DEFAULT_PUSH_TO_TALK: &str = "Control+Shift+Space";
-    pub fn bindings(&self) -> [(&str, ShortcutAction); 5] {
+    pub fn bindings(&self) -> [(&str, ShortcutAction); 6] {
         use crate::overlay::OverlayAction;
         [
             (&self.mute, ShortcutAction::Audio(AudioToggle::Mute)),
@@ -86,6 +93,7 @@ impl AudioShortcuts {
                 &self.overlay_unlock,
                 ShortcutAction::Overlay(OverlayAction::ToggleUnlock),
             ),
+            (&self.huddles, ShortcutAction::Huddles),
         ]
     }
     pub fn too_long(&self) -> bool {
