@@ -1664,6 +1664,8 @@ kbd { display: inline-block; padding: 2px 7px; border: 1px solid var(--tint-15);
 .huddle-actions .settings-secondary { min-height: 40px; }
 .huddle-shortcut { display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: 8px; color: var(--color-muted); font-size: 13px; }
 .huddle-link { color: var(--brand-ink); font-weight: 600; cursor: pointer; }
+.huddle-link:disabled { color: var(--color-muted); cursor: default; }
+.huddle-shortcut-edit { display: flex; flex-direction: column; gap: 8px; font-size: 13px; }
 .huddle-link:hover { text-decoration: underline; }
 .voice-dock .icon-button.huddles-split { background: color-mix(in srgb, var(--color-warning) 16%, transparent); color: var(--warning-ink); }
 .huddle-status { display: flex; align-items: center; gap: 8px; margin-top: 8px; padding: 6px 10px; border-radius: var(--radius-md); background: color-mix(in srgb, var(--huddle) 12%, transparent); color: color-mix(in srgb, var(--huddle) 35%, var(--color-white)); font-size: 12px; font-weight: 600; }
@@ -1673,13 +1675,13 @@ kbd { display: inline-block; padding: 2px 7px; border: 1px solid var(--tint-15);
 .huddle-heading[data-huddle="0"] { color: var(--color-muted); }
 .huddles-split > .voice-member { box-shadow: inset 2px 0 0 var(--huddle); padding-left: 8px; }
 /* Can't hear each other: dim the avatar and mute the name (still AA), plus an icon. */
-.voice-member.huddle-away .voice-avatar { opacity: .45; }
+.voice-member.huddle-away .voice-avatar { opacity: .6; }
 .voice-member.huddle-away .voice-person > span.truncate { color: var(--color-muted) !important; }
 .huddle-away-icon { display: inline-flex; flex-shrink: 0; color: var(--color-muted); }
 .huddle-away-icon svg { width: 14px; height: 14px; }
 .roster-drop { border-left-color: var(--brand-ink) !important; background: var(--brand-soft); border-radius: 0 var(--radius-sm) var(--radius-sm) 0; }
 .voice-member[draggable="true"] { cursor: grab; }
 .channel-item.drop-candidate { outline: 1px dashed var(--brand-ink); outline-offset: -1px; }
-.voice-member.voice-moving { opacity: .6; }
-.voice-moving-label { flex-shrink: 0; color: var(--color-muted); font-size: 11px; font-style: italic; }
+.voice-member.voice-moving .voice-avatar { opacity: .6; }
+.voice-moving-label { flex-shrink: 0; color: var(--color-muted); font-size: 12px; font-weight: 600; }
 .channel-item.drop-over { background: var(--brand-soft); box-shadow: inset 0 0 0 2px var(--brand-ink); color: var(--color-white); }

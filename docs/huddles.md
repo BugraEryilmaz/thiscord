@@ -23,7 +23,7 @@ server mute/deafen and speaking indicators work as usual.
   change is announced to screen readers.
   The plan shows in the sidebar as a colored number next to each person.
 - **Split or regroup.** The planner's main button, or the **Split or regroup
-  huddles** shortcut (Settings > Shortcuts). The shortcut is off until you record
+  huddles** shortcut, recorded right in the planner (or in Settings > Shortcuts). The shortcut is off until you record
   one, like the overlay shortcuts. On desktop it is a global shortcut, so it works
   while a game is focused; in the browser it works while the tab is focused. With
   no plan yet, the shortcut explains that one is needed instead of doing nothing.
@@ -55,9 +55,12 @@ server mute/deafen and speaking indicators work as usual.
   rechecks the session, membership and current channel permissions under a shared
   guild lock (no cached grants and no client snapshot) and applies the change
   before that transaction ends, so a permission change, which locks the guild
-  exclusively, cannot commit between the check and the change. Each session may
-  make 30 requests per 10 seconds, counted before any database work so refused
-  requests count too (HTTP 429 beyond that, in memory per backend process). Changes are idempotent
+  exclusively, cannot commit between the check and the change. Before any
+  database work each client address may make 120 requests per 10 seconds
+  (taken from the connection, like the account limiter; proxy headers are
+  ignored), so floods of invalid or refused requests stay bounded, and each
+  account may make 30 changes per 10 seconds after authentication (HTTP 429
+  beyond either, in memory per backend process). Changes are idempotent
   (assign, split on/off, clear), so two people pressing the shortcut together
   converge instead of toggling back. They need no guild revision: a plan is not
   guild configuration and grants nothing.
@@ -111,7 +114,9 @@ before using huddles.
 
 ### Tests
 
-`huddles.rs` covers the per-account rate limit; `shared/src/huddles.rs` covers the
+`huddles.rs` covers the per-account and per-address limits, and the voice suite
+checks that a flood of fresh invalid credentials from one address gets 429 before
+authentication; `shared/src/huddles.rs` covers the
 wire format, bounds and soundboard filtering; `frontend/src/huddles.rs` covers the
 optimistic overlay (shown only until the roster changes, so a stale overlay never
 decides what the shortcut does, and chained changes do not bounce back), the
@@ -132,11 +137,12 @@ A row is draggable only when the moderation view (loaded when the server view
 opens, then at most every ten seconds) says you may move that person. Only
 channels a move could use are offered, with a dashed outline while dragging: with
 room, and where both of you have ViewChannel and JoinVoice (the moderation view's
-`move_channels`). The status bar shows "Moving Frank to AFK…" and the row stays
-marked "Moving…" until Frank appears in AFK, then "Moved Frank to AFK". The drop uses the existing moderator move
+`move_channels`). The status bar shows "Moving Frank to AFK…", Frank appears in
+AFK marked "Moving…" while he reconnects, and the status bar says "Moved Frank
+to AFK" once he is there (or that he has not arrived yet, after ten seconds). The drop uses the existing moderator move
 (`GuildChange::MoveVoice`, see [permissions.md](permissions.md)) with fresh
 permissions and the current guild revision: the target must rank below you, both
 of you need access to both channels, and the destination needs room; a failure is
 explained in the status bar. Keyboard and touch users can do the same from the participant's right-click (or
-Shift+F10) menu: **Move to <channel>** for each channel a move could use, with a
-confirmation, when you may move that person.
+Shift+F10) menu: **Move to <channel>** for each channel a move could use, when
+you may move that person, with the same progress and result as dragging.

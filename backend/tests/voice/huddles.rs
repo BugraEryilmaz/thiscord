@@ -24,6 +24,41 @@ async fn huddles(app: &Router, token: &str, request: Value, expected: StatusCode
 
 #[tokio::test]
 #[ignore = "requires TEST_DATABASE_URL; CI runs with --include-ignored"]
+async fn invalid_credential_floods_are_limited_before_authentication() {
+    let db = database();
+    let app = api::router(
+        Some(db.pool.clone()),
+        vec!["http://localhost:1420".parse().unwrap()],
+    );
+    let id = "00000000-0000-0000-0000-000000000001";
+    let body = json!({"guild_id":id,"channel_id":"00000000-0000-0000-0000-000000000002","change":{"action":"clear"}});
+    let peer: std::net::SocketAddr = "203.0.113.9:4000".parse().unwrap();
+    let mut statuses = vec![];
+    for n in 0..121 {
+        let mut request = Request::builder()
+            .method("POST")
+            .uri(HUDDLES_PATH)
+            .header("content-type", "application/json")
+            .header("authorization", format!("Bearer garbage-{n}"))
+            .body(Body::from(body.to_string()))
+            .unwrap();
+        request
+            .extensions_mut()
+            .insert(axum::extract::ConnectInfo(peer));
+        statuses.push(app.clone().oneshot(request).await.unwrap().status());
+    }
+    // Every credential is new, so only the address bound can stop the flood.
+    assert!(
+        statuses[..120]
+            .iter()
+            .all(|s| *s == StatusCode::UNAUTHORIZED),
+        "{statuses:?}"
+    );
+    assert_eq!(statuses[120], StatusCode::TOO_MANY_REQUESTS);
+}
+
+#[tokio::test]
+#[ignore = "requires TEST_DATABASE_URL; CI runs with --include-ignored"]
 async fn huddles_need_permission_and_split_voices_without_reconnecting() {
     let db = database();
     let (owner_id, ot) = user(&db, "huddle_owner");

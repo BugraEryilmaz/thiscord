@@ -17,7 +17,7 @@ use crate::{
 };
 use axum::{
     Extension, Json, Router,
-    extract::{State, rejection::JsonRejection},
+    extract::{ConnectInfo, State, rejection::JsonRejection},
     http::HeaderMap,
     response::{IntoResponse, Response},
     routing::post,
@@ -39,6 +39,10 @@ const REMEMBERED: usize = 2 * ROOM_CAPACITY;
 /// Changes per account per window: enough to plan a full room twice over and
 /// toggle a few times, far below what could load the SFU or the database.
 const RATE: (usize, Duration) = (30, Duration::from_secs(10));
+/// Requests per client address per window, checked before authentication so
+/// floods of refused or invalid-credential requests never reach the database.
+/// Generous enough for a group behind one NAT address.
+const ADDRESS_RATE: (usize, Duration) = (120, Duration::from_secs(10));
 
 #[derive(Debug, Default)]
 pub(super) struct Plan {
@@ -161,21 +165,37 @@ pub(super) async fn change(
     apply(room, &mut members, change, actor)
 }
 
-/// Sliding-window limit per session credential, checked before any database
-/// work so refused requests are bounded too (in memory, one backend process).
-/// Keys are hashes; the credential itself is not retained.
-fn admit(key: u64, now: Instant) -> Result<(), Failure> {
-    static RECENT: OnceLock<Mutex<HashMap<u64, Vec<Instant>>>> = OnceLock::new();
+/// Who a sliding-window limit counts: an address before authentication, an
+/// account after it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+enum Key {
+    Address(std::net::IpAddr),
+    Local,
+    Account(AccountId),
+}
+
+/// Sliding-window limits in memory (one backend process). Expired windows are
+/// pruned only when the map grows, so a request costs O(window) normally.
+fn admit(key: Key, now: Instant) -> Result<(), Failure> {
+    static RECENT: OnceLock<Mutex<HashMap<Key, Vec<Instant>>>> = OnceLock::new();
+    let (limit, window) = match key {
+        Key::Account(_) => RATE,
+        _ => ADDRESS_RATE,
+    };
     let mut recent = RECENT
         .get_or_init(Default::default)
         .lock()
         .unwrap_or_else(|p| p.into_inner());
-    recent.retain(|_, times| {
-        times.retain(|t| now.duration_since(*t) < RATE.1);
-        !times.is_empty()
-    });
+    if recent.len() > 4096 {
+        recent.retain(|_, times| {
+            times
+                .last()
+                .is_some_and(|t| now.duration_since(*t) < window)
+        });
+    }
     let times = recent.entry(key).or_default();
-    if times.len() >= RATE.0 {
+    times.retain(|t| now.duration_since(*t) < window);
+    if times.len() >= limit {
         return Err(Failure::Limited);
     }
     times.push(now);
@@ -189,17 +209,22 @@ pub(super) fn router() -> Router<Option<DbPool>> {
 async fn handle(
     State(pool): State<Option<DbPool>>,
     Extension(id): Extension<RequestId>,
+    peer: Option<Extension<ConnectInfo<std::net::SocketAddr>>>,
     headers: HeaderMap,
     body: Result<Json<HuddleRequest>, JsonRejection>,
 ) -> Response {
     let result = async {
+        // Proxy headers are ignored, like the account limiter (auth/mod.rs).
+        admit(
+            peer.map_or(Key::Local, |p| Key::Address(p.0.0.ip())),
+            Instant::now(),
+        )?;
         let Json(request) = body.map_err(|_| Failure::Invalid("Invalid huddle request"))?;
         if !request.change.valid() {
             return Err(Failure::Invalid("Huddles are numbered 1 to 4"));
         }
         let pool = pool.ok_or(Failure::Unavailable)?;
         let token = crate::auth::bearer(&headers);
-        admit(credential_key(&token), Instant::now())?;
         crate::performance::blocking(move || authorized_change(&pool, &token, &request))
             .await
             .map_err(|_| Failure::Unavailable)?
@@ -220,12 +245,6 @@ async fn handle(
         .headers_mut()
         .insert("cache-control", "no-store".parse().unwrap());
     response
-}
-
-fn credential_key(token: &str) -> u64 {
-    use std::hash::BuildHasher;
-    static SEED: OnceLock<std::collections::hash_map::RandomState> = OnceLock::new();
-    SEED.get_or_init(Default::default).hash_one(token)
 }
 
 fn action(change: HuddleChange) -> &'static str {
@@ -281,6 +300,7 @@ fn authorized_change(
         if !allowed {
             return Err(Failure::Forbidden);
         }
+        admit(Key::Account(actor), Instant::now())?;
         let room = ROOMS
             .get_or_init(Default::default)
             .blocking_lock()
@@ -299,17 +319,21 @@ mod tests {
     use super::*;
 
     #[test]
-    fn requests_are_rate_limited_per_credential() {
-        let (a, b) = (credential_key("token-a"), credential_key("token-b"));
-        assert_ne!(a, b);
-        assert_eq!(a, credential_key("token-a"));
+    fn requests_are_rate_limited_per_account_and_address() {
+        let account = || Key::Account(AccountId::from_uuid(uuid::Uuid::new_v4()));
+        let (a, b) = (account(), account());
         let start = Instant::now();
         for _ in 0..RATE.0 {
             admit(a, start).unwrap();
         }
         assert!(matches!(admit(a, start), Err(Failure::Limited)));
-        // Other sessions are unaffected, and the window slides.
+        // Other accounts are unaffected, and the window slides.
         admit(b, start).unwrap();
         admit(a, start + RATE.1).unwrap();
+        let address = Key::Address("198.51.100.7".parse().unwrap());
+        for _ in 0..ADDRESS_RATE.0 {
+            admit(address, start).unwrap();
+        }
+        assert!(matches!(admit(address, start), Err(Failure::Limited)));
     }
 }

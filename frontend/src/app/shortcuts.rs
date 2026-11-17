@@ -22,7 +22,7 @@ fn keys(text: String) -> impl IntoView {
 
 /// Which recorded keys a shortcut accepts.
 #[derive(Clone, Copy, Default, PartialEq, Eq)]
-enum Rule {
+pub(super) enum Rule {
     #[default]
     Any,
     /// Push-to-talk: no plain letter, number, space or punctuation key.
@@ -34,7 +34,7 @@ enum Rule {
 /// Click, then press the combination. Escape or leaving the control cancels;
 /// Tab moves on. `label` is a UI catalog key.
 #[component]
-fn KeyRecorder(
+pub(super) fn KeyRecorder(
     label: &'static str,
     value: RwSignal<String>,
     busy: RwSignal<bool>,

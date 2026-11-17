@@ -27,7 +27,8 @@ struct Pending {
     change: logic::Pending,
     at: f64,
 }
-const PENDING_MS: f64 = 3000.0;
+/// A safety net only: the overlay ends as soon as rosters catch up or differ.
+const PENDING_MS: f64 = 15_000.0;
 
 /// Someone being dragged out of a sidebar voice roster.
 #[derive(Clone, Copy, PartialEq)]
@@ -317,22 +318,17 @@ pub(super) fn accepts(
     logic::can_drop(d.channel, channel, occupants, &allowed)
 }
 
-/// Someone being moved, shown in the source roster until they arrive.
-#[derive(Clone, Copy, PartialEq)]
+/// Someone being moved, shown in the destination roster until they arrive.
+#[derive(Clone, PartialEq)]
 pub(super) struct Moving {
-    pub account: AccountId,
     pub to: ChannelId,
+    pub name: String,
     pub avatar: Option<thiscord_shared::AvatarId>,
 }
 thread_local! {
-    static MOVING: ArcRwSignal<Option<Moving>> = ArcRwSignal::new(None);
-    static MOVING_NAME: std::cell::RefCell<String> = const { std::cell::RefCell::new(String::new()) };
+    static MOVING: ArcRwSignal<BTreeMap<AccountId, Moving>> = ArcRwSignal::new(BTreeMap::new());
 }
-/// The name of whoever is being moved, for the destination's placeholder row.
-pub(super) fn moving_name() -> String {
-    MOVING_NAME.with(|n| n.borrow().clone())
-}
-pub(super) fn moving() -> ArcRwSignal<Option<Moving>> {
+pub(super) fn moving() -> ArcRwSignal<BTreeMap<AccountId, Moving>> {
     MOVING.with(Clone::clone)
 }
 
@@ -419,15 +415,20 @@ pub(super) fn move_member(ui: Ui, from: Dragged, to: ChannelId) {
                 .find(|m| m.account_id == from.account)
                 .and_then(|m| m.avatar_id)
         });
-        moving().set(Some(Moving {
-            account: from.account,
-            to,
-            avatar,
-        }));
-        MOVING_NAME.with(|n| *n.borrow_mut() = target.clone());
+        moving().update(|m| {
+            m.insert(
+                from.account,
+                Moving {
+                    to,
+                    name: target.clone(),
+                    avatar,
+                },
+            );
+        });
+        let mut arrived = false;
         for _ in 0..40 {
             gloo_timers::future::TimeoutFuture::new(250).await;
-            let arrived = ui.voice_roster.with_untracked(|r| {
+            arrived = ui.voice_roster.with_untracked(|r| {
                 r.iter().any(|c| {
                     c.channel_id == to && c.members.iter().any(|m| m.account_id == from.account)
                 })
@@ -436,18 +437,22 @@ pub(super) fn move_member(ui: Ui, from: Dragged, to: ChannelId) {
                 break;
             }
         }
-        if moving()
-            .get_untracked()
-            .is_some_and(|m| m.account == from.account)
-        {
-            moving().set(None);
-        }
-        ui.status.set(thiscord_frontend::localized_format!(
-            crate::i18n::language(),
-            "Moved {} to {}",
-            target,
-            destination
-        ));
+        moving().update(|m| {
+            if m.get(&from.account).is_some_and(|m| m.to == to) {
+                m.remove(&from.account);
+            }
+        });
+        let lang = crate::i18n::language();
+        ui.status.set(if arrived {
+            thiscord_frontend::localized_format!(lang, "Moved {} to {}", target, destination)
+        } else {
+            thiscord_frontend::localized_format!(
+                lang,
+                "{} was moved but has not reached {} yet",
+                target,
+                destination
+            )
+        });
     });
 }
 
@@ -492,7 +497,7 @@ fn Person(
     view! {
         <button node_ref=button type="button" class="huddle-person" draggable="true" data-account=id.to_string() aria-pressed=move || (picked.get() == Some(id)).to_string()
             class:picked=move || picked.get() == Some(id)
-            aria-label=move || format!("{tip}, {}", name(member.huddle)) aria-describedby="huddle-keys"
+            aria-label=move || format!("{tip}, {}", name(member.huddle))
             on:dragstart=move |e: web_sys::DragEvent| {
                 if let Some(data) = e.data_transfer() {
                     let _ = data.set_data("text/plain", &id.to_string());
@@ -616,6 +621,52 @@ pub(super) fn HuddleControls(ui: Ui) -> impl IntoView {
     let busy = RwSignal::new(false);
     let notice = RwSignal::new(String::new());
     let shortcut = RwSignal::new(String::new());
+    // Recording the shortcut right here, without leaving the planner.
+    let saved_shortcuts = RwSignal::new(None::<thiscord_shared::audio::AudioShortcuts>);
+    let recording = RwSignal::new(false);
+    let shortcut_busy = RwSignal::new(false);
+    let shortcut_dirty = RwSignal::new(false);
+    let shortcut_message = RwSignal::new(String::new());
+    let save_shortcut = move || {
+        let Some(mut settings) = saved_shortcuts.get_untracked() else {
+            return;
+        };
+        settings.huddles = shortcut.get_untracked().trim().to_owned();
+        let voice = [
+            &settings.push_to_talk,
+            &settings.mute,
+            &settings.deafen,
+            &settings.overlay_visibility,
+            &settings.overlay_corner,
+            &settings.overlay_unlock,
+            &settings.huddles,
+        ]
+        .map(String::as_str);
+        if let Err(error) = super::keyboard::bindings_untracked().validate(&voice) {
+            shortcut_message.set(error.into());
+            return;
+        }
+        shortcut_busy.set(true);
+        leptos::task::spawn_local(async move {
+            let result = ui
+                .audio_control
+                .invoke::<()>("audio_shortcuts_save", json!({ "settings": settings }))
+                .await;
+            if shortcut_busy.is_disposed() {
+                return;
+            }
+            shortcut_busy.set(false);
+            match result {
+                Ok(()) => {
+                    saved_shortcuts.set(Some(settings));
+                    shortcut_dirty.set(false);
+                    recording.set(false);
+                    shortcut_message.set(String::new());
+                }
+                Err(error) => shortcut_message.set(error),
+            }
+        });
+    };
     let refocus = RwSignal::new(None::<AccountId>);
     let announce = RwSignal::new(String::new());
     let position = RwSignal::new((8.0, 8.0));
@@ -628,11 +679,8 @@ pub(super) fn HuddleControls(ui: Ui) -> impl IntoView {
             channels.with(|c| c.get(&guild).is_some_and(|c| c.contains(&channel)))
         })
     };
-    let members = Memo::new(move |_| {
-        let mut members = participants(ui);
-        members.sort_by_key(|m| m.display_name().to_lowercase());
-        members
-    });
+    // Roster order, the same as the sidebar.
+    let members = Memo::new(move |_| participants(ui));
     let split = Memo::new(move |_| members.with(|m| m.iter().any(|m| m.split)));
     let planned = Memo::new(move |_| members.with(|m| m.iter().any(|m| m.huddle != 0)));
     let run = move |change: HuddleChange| {
@@ -749,7 +797,8 @@ pub(super) fn HuddleControls(ui: Ui) -> impl IntoView {
                 .await
                 && !shortcut.is_disposed()
             {
-                shortcut.set(status.shortcuts.huddles);
+                shortcut.set(status.shortcuts.huddles.clone());
+                saved_shortcuts.set(Some(status.shortcuts));
             }
         });
         let outside = window_event_listener(leptos::ev::pointerdown, move |e| {
@@ -780,11 +829,11 @@ pub(super) fn HuddleControls(ui: Ui) -> impl IntoView {
                 aria-haspopup="dialog" aria-expanded=move || open.get().to_string()
                 on:click=move |_| open.update(|value| *value = !*value)><Icon kind=Glyph::Grid/></button>
             <Show when=move || open.get()>
-                <div node_ref=dialog tabindex="-1" class="huddle-popover" role="dialog" aria-labelledby="huddle-title" aria-describedby="huddle-help"
+                <div node_ref=dialog tabindex="-1" class="huddle-popover" role="dialog" aria-labelledby="huddle-title" aria-describedby="huddle-help huddle-keys"
                     style:left=move || format!("{}px", position.get().0) style:bottom=move || format!("{}px", position.get().1)>
                     <div class="huddle-head">
                         <h2 id="huddle-title" class="soundboard-title !mb-0"><Icon kind=Glyph::Grid/><span>{move || crate::i18n::t("Huddles")}</span></h2>
-                        <span class="huddle-state" class:split=move || split.get() role="status">{move || crate::i18n::t(if split.get() { "Split" } else { "Together" })}</span>
+                        <span class="huddle-state" class:split=move || split.get()>{move || crate::i18n::t(if split.get() { "Split" } else { "Together" })}</span>
                     </div>
                     <p id="huddle-keys" class="sr-only">{move || crate::i18n::t("Press 1 to 4 for a huddle or 0 for the main room, or press Enter and choose Move here on a lane. Arrow keys move between people.")}</p>
                     <p id="huddle-help" class="huddle-help">{move || crate::i18n::t("Drag people into huddles, or select someone and press 1–4. When split, each huddle hears only itself; screens and cameras stay visible.")}</p>
@@ -802,19 +851,36 @@ pub(super) fn HuddleControls(ui: Ui) -> impl IntoView {
                         <button type="button" class="settings-secondary" disabled=move || busy.get() || (!split.get() && !planned.get())
                             on:click=move |_| run(HuddleChange::Clear {})>{move || crate::i18n::t("Clear huddles")}</button>
                     </div>
-                    <p class="huddle-shortcut">
-                        {move || {
-                            let keys = thiscord_frontend::web_shortcuts::labels(&shortcut.get());
-                            if keys.is_empty() {
-                                view! {<span>{move || crate::i18n::t("No shortcut yet.")}</span>}.into_any()
-                            } else {
-                                view! {<span class="flex flex-wrap items-center gap-1">{move || crate::i18n::t("Shortcut:")}{keys.into_iter().map(|k| view! {<kbd>{k}</kbd>}).collect_view()}</span>}.into_any()
-                            }
-                        }}
-                        <button type="button" class="huddle-link" on:click=move |_| { open.set(false); ui.page.set("shortcuts"); }>
-                            {move || crate::i18n::t(if shortcut.with(String::is_empty) { "Set a shortcut" } else { "Change" })}
-                        </button>
-                    </p>
+                    <Show when=move || recording.get() fallback=move || view! {
+                        <p class="huddle-shortcut">
+                            {move || {
+                                let keys = thiscord_frontend::web_shortcuts::labels(&shortcut.get());
+                                if keys.is_empty() {
+                                    view! {<span>{move || crate::i18n::t("No shortcut yet.")}</span>}.into_any()
+                                } else {
+                                    view! {<span class="flex flex-wrap items-center gap-1">{move || crate::i18n::t("Shortcut:")}{keys.into_iter().map(|k| view! {<kbd>{k}</kbd>}).collect_view()}</span>}.into_any()
+                                }
+                            }}
+                            <button type="button" class="huddle-link" disabled=move || saved_shortcuts.with(Option::is_none)
+                                on:click=move |_| { shortcut_message.set(String::new()); recording.set(true); }>
+                                {move || crate::i18n::t(if shortcut.with(String::is_empty) { "Set a shortcut" } else { "Change" })}
+                            </button>
+                        </p>
+                    }>
+                        <div class="huddle-shortcut-edit">
+                            <super::shortcuts::KeyRecorder label="Split or regroup huddles" value=shortcut busy=shortcut_busy dirty=shortcut_dirty message=shortcut_message/>
+                            <div class="huddle-actions">
+                                <button type="button" class="settings-primary" disabled=move || shortcut_busy.get() || !shortcut_dirty.get() on:click=move |_| save_shortcut()>{move || crate::i18n::t("Save shortcut")}</button>
+                                <button type="button" class="settings-secondary" disabled=move || shortcut_busy.get() on:click=move |_| {
+                                    recording.set(false);
+                                    shortcut_dirty.set(false);
+                                    shortcut_message.set(String::new());
+                                    shortcut.set(saved_shortcuts.get_untracked().map(|s| s.huddles).unwrap_or_default());
+                                }>{move || crate::i18n::t("Cancel")}</button>
+                            </div>
+                            <Show when=move || !shortcut_message.get().is_empty()><p class="soundboard-notice" role="alert">{move || crate::i18n::message(shortcut_message.get())}</p></Show>
+                        </div>
+                    </Show>
                     <Show when=move || !notice.get().is_empty()><p class="soundboard-notice" role="alert">{move || notice.get()}</p></Show>
                     <p class="sr-only" aria-live="polite">{move || announce.get()}</p>
                 </div>

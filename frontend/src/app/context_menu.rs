@@ -28,6 +28,8 @@ enum Action {
     Change(GuildId, i64, GuildChange, String),
     Nickname(GuildId, AccountId),
     LeaveGroup(thiscord_shared::ids::ConversationId),
+    /// Move a voice participant to another voice channel (`huddles::move_member`).
+    Move(super::huddles::Dragged, ChannelId),
 }
 #[derive(Clone)]
 enum Item {
@@ -417,27 +419,20 @@ async fn items(ui: Ui, target: Target) -> Result<(String, Vec<Item>), String> {
                                 &m.move_channels,
                             )
                     }) {
-                        let title = thiscord_frontend::localized_format!(
-                            crate::i18n::language(),
-                            "Move {} to {}?",
-                            m.display_name(),
-                            channel.name
-                        );
+                        // The same move as dragging: pending row, then the result.
                         items.push(Item::new(
                             thiscord_frontend::localized_format!(
                                 crate::i18n::language(),
                                 "Move to {}",
                                 channel.name
                             ),
-                            Action::Change(
-                                guild.id,
-                                state.guild.revision,
-                                GuildChange::MoveVoice {
-                                    account_id: member,
-                                    source_channel_id: source,
-                                    channel_id: channel.id,
+                            Action::Move(
+                                super::huddles::Dragged {
+                                    guild: guild.id,
+                                    channel: source,
+                                    account: member,
                                 },
-                                title,
+                                channel.id,
                             ),
                         ));
                     }
@@ -655,13 +650,6 @@ fn confirmation(ui: Ui, action: &Action, name: String) -> Option<super::dialog::
                     t("Disconnect"),
                     true,
                 ),
-                GuildChange::MoveVoice { .. } => (
-                    t(
-                        "They reconnect in that channel with their mute and deafen kept; screen and camera sharing stop. You can also drag people onto a voice channel.",
-                    ),
-                    t("Move"),
-                    false,
-                ),
                 GuildChange::DeleteChannel { .. } => (
                     t(
                         "Its messages, attachments, pins, reactions and permission overrides are permanently deleted. This cannot be undone.",
@@ -843,6 +831,7 @@ fn execute(ui: Ui, action: Action) {
             let _ = change_guild(ui, guild_id, revision, change, String::new()).await;
         }),
         Action::Nickname(guild, account) => super::nickname::open(ui, guild, account),
+        Action::Move(from, to) => super::huddles::move_member(ui, from, to),
     }
 }
 
