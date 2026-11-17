@@ -11,7 +11,7 @@ use crate::{
 use argon2::{Argon2, PasswordHash, PasswordHasher, PasswordVerifier, password_hash::SaltString};
 use diesel::{Connection, PgConnection};
 use rand::rngs::OsRng;
-use thiscord_shared::{AccountId, GuildId, InstanceRoleId, RoleId, permissions::*};
+use thiscord_shared::{AccountId, ChannelId, GuildId, InstanceRoleId, RoleId, permissions::*};
 use uuid::Uuid;
 
 fn guild_password(password: Option<&str>) -> Result<Option<&str>, Failure> {
@@ -539,7 +539,7 @@ pub(super) fn dispatch(
                     PermissionRequest::ViewGuild {..} => {
                         let channels: Vec<Channel>=state.channels.iter().filter(|ch|effective(&state,actor,Some(ch.id)).contains(&Permission::ViewChannel)).cloned().collect();
                         let categories=state.categories.iter().filter(|cat|channels.iter().any(|ch|ch.category_id==Some(cat.id))).cloned().collect();
-                        Ok(PermissionResponse::Home {home:GuildHome {categories,can_manage_invites:effective(&state,actor,None).contains(&Permission::ManageInvites),can_moderate:can_moderate(&state,actor),can_manage_bots:effective(&state,actor,None).contains(&Permission::ManageGuild),can_manage_roles:effective(&state,actor,None).contains(&Permission::ManageRoles),can_manage_channels:effective(&state,actor,None).contains(&Permission::ManageChannels),can_change_nickname:effective(&state,actor,None).contains(&Permission::ChangeNickname),guild:state.guild,channels}})
+                        Ok(PermissionResponse::Home {home:GuildHome {categories,can_manage_invites:effective(&state,actor,None).contains(&Permission::ManageInvites),can_moderate:can_moderate(&state,actor),can_manage_bots:effective(&state,actor,None).contains(&Permission::ManageGuild),can_manage_roles:effective(&state,actor,None).contains(&Permission::ManageRoles),can_manage_channels:effective(&state,actor,None).contains(&Permission::ManageChannels),can_change_nickname:effective(&state,actor,None).contains(&Permission::ChangeNickname),can_move_members:effective(&state,actor,None).contains(&Permission::MoveMembers),huddle_channels:channels.iter().filter(|ch|ch.kind==ChannelKind::Voice && effective(&state,actor,Some(ch.id)).contains(&Permission::ManageHuddles)).map(|ch|ch.id).collect(),guild:state.guild,channels}})
                     }
                     command @ (PermissionRequest::ListInvites { .. } | PermissionRequest::CreateInvite { .. } | PermissionRequest::RevokeInvite { .. } | PermissionRequest::InspectOrganization { .. } | PermissionRequest::AuditLog { .. }) => organization::request(c,&state,actor,command),
                     PermissionRequest::InspectModeration {..} => Ok(PermissionResponse::Moderation {state:moderation(c,&state,actor)?}),
@@ -1197,10 +1197,38 @@ fn moderation(
         "SELECT jsonb_build_array(account_id,server_muted,server_deafened) AS data FROM guild_moderation WHERE guild_id=$1::uuid AND account_id IN(SELECT account_id FROM guild_members WHERE guild_id=$1::uuid)",
         &[&state.guild.id.to_string()],
     )?;
+    // Voice channels a move could use: both people need ViewChannel and JoinVoice.
+    let joinable = |account: AccountId| -> Vec<ChannelId> {
+        state
+            .channels
+            .iter()
+            .filter(|ch| ch.kind == ChannelKind::Voice)
+            .filter(|ch| {
+                let p = effective(state, account, Some(ch.id));
+                p.contains(&Permission::ViewChannel) && p.contains(&Permission::JoinVoice)
+            })
+            .map(|ch| ch.id)
+            .collect()
+    };
+    let actor_channels = if permissions.contains(&Permission::MoveMembers) {
+        joinable(actor)
+    } else {
+        vec![]
+    };
     let members = state
         .members
         .iter()
         .map(|m| ModerationMember {
+            move_channels: if actor_channels.is_empty()
+                || below(state, actor, m.account_id).is_err()
+            {
+                vec![]
+            } else {
+                joinable(m.account_id)
+                    .into_iter()
+                    .filter(|ch| actor_channels.contains(ch))
+                    .collect()
+            },
             account_id: m.account_id,
             username: m.username.clone(),
             display_name: m.display_name.clone(),

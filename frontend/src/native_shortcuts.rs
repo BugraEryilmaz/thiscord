@@ -5,8 +5,9 @@ use std::sync::{
     Arc, Mutex,
     atomic::{AtomicBool, Ordering},
 };
-use tauri::Manager;
+use tauri::{Emitter, Manager};
 use tauri_plugin_global_shortcut::{GlobalShortcutExt, Shortcut, ShortcutState};
+use thiscord_frontend::web_shortcuts::HUDDLES_EVENT;
 use thiscord_shared::audio::{AudioShortcutStatus, AudioShortcuts, ShortcutAction};
 
 #[derive(Default)]
@@ -119,6 +120,10 @@ fn install(
                         Some(ShortcutAction::Overlay(action)) => {
                             crate::native_overlay::action(app.clone(), action).await
                         }
+                        // The main window owns the session and the call's roster.
+                        Some(ShortcutAction::Huddles) => app
+                            .emit_to("main", HUDDLES_EVENT, ())
+                            .map_err(|_| "Huddles are unavailable".to_owned()),
                         None => Ok(()),
                     };
                     if let Err(error) = result

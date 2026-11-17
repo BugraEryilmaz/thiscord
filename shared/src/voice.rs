@@ -133,6 +133,9 @@ fn accepted_by_default() -> bool {
 pub(crate) fn is_false(value: &bool) -> bool {
     !value
 }
+fn is_zero(value: &u8) -> bool {
+    *value == 0
+}
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Participant {
     /// A synthetic voice participant with no account credentials or profile.
@@ -175,6 +178,15 @@ pub struct Participant {
     pub screen_viewers: Vec<AccountId>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub camera_viewers: Vec<AccountId>,
+    /// Planned huddle (`1..=MAX_HUDDLES`), or 0 for the main room. See docs/huddles.md.
+    #[serde(default, skip_serializing_if = "is_zero")]
+    pub huddle: u8,
+    /// The room is split: this participant hears only its own huddle.
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub split: bool,
+    /// Who last split or regrouped the room, so everyone can see who did it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub split_by: Option<AccountId>,
 }
 /// A visible voice channel's live membership, without joining its media transport.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -209,6 +221,16 @@ impl Participant {
             MediaKind::ScreenVideo => &self.screen_viewers,
             _ => &[],
         }
+    }
+    /// Whether this participant and `other` can hear each other right now.
+    /// Huddles separate audio only; screens and cameras stay watchable.
+    pub fn hears(&self, other: &Self) -> bool {
+        !(self.split && other.split && self.huddle != other.huddle)
+    }
+    /// Whether this participant hears a soundboard play sent from `huddle`,
+    /// the player's huddle while the room was split (`None` when together).
+    pub fn hears_from(&self, huddle: Option<u8>) -> bool {
+        huddle.is_none_or(|h| !self.split || self.huddle == h)
     }
     /// Profile label, falling back to the username for older servers.
     pub fn display_name(&self) -> &str {

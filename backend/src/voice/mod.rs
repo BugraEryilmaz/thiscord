@@ -5,6 +5,7 @@ mod bots;
 mod browser;
 mod diagnostics;
 mod egress;
+mod huddles;
 mod ice;
 mod layers;
 mod logging;
@@ -113,6 +114,8 @@ struct Delivery {
 struct SoundPlay {
     sound_id: thiscord_shared::SoundId,
     account_id: thiscord_shared::AccountId,
+    /// The player's huddle while the room was split; only that huddle hears it.
+    huddle: Option<u8>,
 }
 struct Room {
     notification_target: Option<(GuildId, ChannelId)>,
@@ -121,6 +124,8 @@ struct Room {
     changed: watch::Sender<()>,
     members: RwLock<HashMap<usize, Member>>,
     soundboard: tokio::sync::broadcast::Sender<SoundPlay>,
+    /// Locked only while holding `members` for writing (huddles.rs).
+    huddles: std::sync::Mutex<huddles::Plan>,
 }
 impl Default for Room {
     fn default() -> Self {
@@ -131,6 +136,7 @@ impl Default for Room {
             changed: watch::channel(()).0,
             members: RwLock::new(HashMap::new()),
             soundboard: tokio::sync::broadcast::channel(16).0,
+            huddles: Default::default(),
         }
     }
 }
@@ -364,6 +370,7 @@ pub(crate) fn router_with_limit(
 ) -> Router<Option<DbPool>> {
     Router::new()
         .route(VOICE_PATH, get(upgrade))
+        .merge(huddles::router())
         .merge(bots::router())
         .layer(Extension(Arc::new(origins)))
         .layer(Extension(Arc::new(Semaphore::new(connections))))
@@ -1931,9 +1938,9 @@ async fn serve(
                         if last_sound.is_some_and(|at| at.elapsed() < SOUNDBOARD_INTERVAL) { continue; }
                         last_sound = Some(Instant::now());
                         let epoch = access.generation.load(Ordering::Acquire);
-                        let account_id = match room.members.read().await.get(&slot) {
+                        let (account_id, huddle) = match room.members.read().await.get(&slot) {
                             Some(m) if m.source_id == source_id && m.active.load(Ordering::Acquire)
-                                && m.info.can_speak && !m.info.server_muted && !m.info.is_deafened() => m.info.account_id,
+                                && m.info.can_speak && !m.info.server_muted && !m.info.is_deafened() => (m.info.account_id, m.info.split.then_some(m.info.huddle)),
                             _ => continue,
                         };
                         let (pool, token) = (access.pool.clone(), access.token.clone());
@@ -1947,7 +1954,7 @@ async fn serve(
                         if authorized.is_ok() && active.load(Ordering::Acquire)
                             && let Some(_permit) = connection_access.packet(epoch, access.generation.load(Ordering::Acquire)) {
                             tracing::info!(request_id = %id, "soundboard sound played");
-                            let _ = room.soundboard.send(SoundPlay { sound_id, account_id });
+                            let _ = room.soundboard.send(SoundPlay { sound_id, account_id, huddle });
                         }
                         continue;
                     }
@@ -1979,7 +1986,7 @@ async fn serve(
                     if let Err(reason)=handle_signal(&mut socket, &room, slot, event, &active).await { socket.end(reason); break; }
                 },
                 play = sound_plays.recv(), if soundboard => {
-                    let SoundPlay { sound_id, account_id } = match play {
+                    let SoundPlay { sound_id, account_id, huddle } = match play {
                         Ok(play) => play,
                         Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => continue,
                         Err(tokio::sync::broadcast::error::RecvError::Closed) => { socket.end("soundboard_closed"); break; }
@@ -1988,7 +1995,8 @@ async fn serve(
                     let epoch = access.generation.load(Ordering::Acquire);
                     let Some(_delivery) = connection_access.packet(epoch, epoch) else { continue; };
                     let listening = room.members.read().await.get(&slot).is_some_and(|m| m.source_id == source_id
-                        && m.active.load(Ordering::Acquire) && !m.info.is_deafened());
+                        && m.active.load(Ordering::Acquire) && !m.info.is_deafened()
+                        && m.info.hears_from(huddle));
                     if listening && send(&mut socket, ServerEvent::Soundboard { sound_id, account_id }).await.is_err() { break; }
                 },
                 _=tick.tick()=>{
@@ -2423,6 +2431,9 @@ mod send_tests {
                         camera_epoch: 0,
                         screen_viewers: vec![],
                         camera_viewers: vec![],
+                        huddle: 0,
+                        split: false,
+                        split_by: None,
                     },
                     source_id: uuid::Uuid::new_v4(),
                     screen_started: Instant::now(),

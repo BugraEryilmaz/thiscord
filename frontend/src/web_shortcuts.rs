@@ -346,12 +346,17 @@ pub fn labels(text: &str) -> Vec<String> {
     labels
 }
 
+/// Tauri event the desktop global huddle shortcut sends to the main window,
+/// which toggles the call it shows (the web client handles its own keys).
+pub const HUDDLES_EVENT: &str = "huddles-toggle";
+
 /// Parsed browser bindings for push-to-talk and the self-control shortcuts.
 #[derive(Debug, Clone, Default)]
 pub struct Bindings {
     pub push_to_talk: Option<Chord>,
     pub mute: Option<Chord>,
     pub deafen: Option<Chord>,
+    pub huddles: Option<Chord>,
 }
 impl Bindings {
     /// Validates like the desktop: bounded length, valid syntax, unique keys
@@ -385,7 +390,15 @@ impl Bindings {
             push_to_talk,
             mute: parse(&settings.mute)?,
             deafen: parse(&settings.deafen)?,
+            huddles: parse(&settings.huddles)?,
         })
+    }
+    /// Whether a key press is the huddle split/regroup shortcut, with the same
+    /// typing rule as [`Self::action`].
+    pub fn huddles(&self, pressed: &Pressed, typing: bool) -> bool {
+        self.huddles
+            .as_ref()
+            .is_some_and(|c| c.matches(pressed) && (!typing || c.while_typing()))
     }
     /// The toggle a key press triggers. In text fields only chords with a
     /// command modifier or function key apply, so typing is never captured.

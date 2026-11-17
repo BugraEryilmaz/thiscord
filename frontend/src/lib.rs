@@ -21,6 +21,7 @@ pub mod direct_history;
 pub mod downloads;
 pub mod game_activity;
 pub mod groups;
+pub mod huddles;
 pub mod ice_recovery;
 pub mod invites;
 pub mod localization;

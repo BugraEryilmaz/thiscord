@@ -17,6 +17,8 @@ mod bots;
 mod browser;
 #[path = "voice/friends.rs"]
 mod friends;
+#[path = "voice/huddles.rs"]
+mod huddles;
 #[path = "voice/layers.rs"]
 mod layers;
 #[path = "voice/moderation.rs"]

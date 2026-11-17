@@ -40,9 +40,11 @@ pub enum Permission {
     ChangeNickname,
     /// Set or clear lower-ranked members' nicknames (audited).
     ManageNicknames,
+    /// Plan a voice channel's huddles and split or regroup it (docs/huddles.md).
+    ManageHuddles,
 }
 impl Permission {
-    pub const ALL: [Self; 22] = [
+    pub const ALL: [Self; 23] = [
         Self::Administrator,
         Self::ManageGuild,
         Self::ManageChannels,
@@ -65,6 +67,7 @@ impl Permission {
         Self::UseSoundboard,
         Self::ChangeNickname,
         Self::ManageNicknames,
+        Self::ManageHuddles,
     ];
 
     /// The [permission set](PERMISSION_SET) that introduced this name. Released
@@ -73,14 +76,15 @@ impl Permission {
     pub const fn set(self) -> u8 {
         match self {
             Self::ChangeNickname | Self::ManageNicknames => 2,
+            Self::ManageHuddles => 3,
             _ => 1,
         }
     }
 }
 
 /// Newest permission set this build understands. Set 1 is every name known to
-/// client 0.1.61; set 2 adds the nickname permissions.
-pub const PERMISSION_SET: u8 = 2;
+/// client 0.1.61; set 2 adds the nickname permissions; set 3 adds huddles.
+pub const PERMISSION_SET: u8 = 3;
 /// Query parameter on [`PERMISSIONS_PATH`] declaring the client's permission set.
 /// Omitted means set 1. A query (unlike a header) needs no CORS change and is
 /// ignored by older servers.
@@ -286,6 +290,10 @@ pub struct ModerationMember {
     pub server_muted: bool,
     #[serde(default)]
     pub server_deafened: bool,
+    /// With MoveMembers: voice channels both you and this member may join, so
+    /// clients offer only channels a move could use. Older servers omit it.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub move_channels: Vec<ChannelId>,
 }
 impl ModerationMember {
     /// Profile label, falling back to the username for older servers.
@@ -693,6 +701,12 @@ pub struct GuildHome {
     /// The viewer may set their own nickname here. Absent from older servers.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub can_change_nickname: bool,
+    /// The viewer has guild-wide MoveMembers (targets are still checked on move).
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub can_move_members: bool,
+    /// Voice channels where the viewer has ManageHuddles.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub huddle_channels: Vec<ChannelId>,
 }
 
 impl PermissionResponse {
@@ -906,7 +920,7 @@ mod tests {
         // Every name a 0.1.61 client knows stays in set 1.
         assert_eq!(Permission::ALL.iter().filter(|p| p.set() == 1).count(), 20);
         assert!(Permission::ALL.iter().all(|p| p.set() <= PERMISSION_SET));
-        assert_eq!(permissions_path(), "/api/v1/permissions?permission_set=2");
+        assert_eq!(permissions_path(), "/api/v1/permissions?permission_set=3");
         let id = "00000000-0000-0000-0000-000000000001";
         let mut response = PermissionResponse::Effective {
             permissions: Permission::ALL.into_iter().collect(),

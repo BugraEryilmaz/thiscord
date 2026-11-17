@@ -28,6 +28,8 @@ enum Action {
     Change(GuildId, i64, GuildChange, String),
     Nickname(GuildId, AccountId),
     LeaveGroup(thiscord_shared::ids::ConversationId),
+    /// Move a voice participant to another voice channel (`huddles::move_member`).
+    Move(super::huddles::Dragged, ChannelId),
 }
 #[derive(Clone)]
 enum Item {
@@ -395,6 +397,44 @@ async fn items(ui: Ui, target: Target) -> Result<(String, Vec<Item>), String> {
                             )
                             .danger(),
                         );
+                    }
+                }
+                // The keyboard and touch route for dragging someone onto a channel.
+                if let Some(source) = target.channel
+                    && m.actions.contains(&Permission::MoveMembers)
+                {
+                    let occupants = |id| {
+                        ui.voice_roster.with_untracked(|r| {
+                            r.iter()
+                                .find(|c| c.channel_id == id)
+                                .map_or(0, |c| c.members.len())
+                        })
+                    };
+                    for channel in home.channels.iter().filter(|c| {
+                        c.kind == ChannelKind::Voice
+                            && thiscord_frontend::huddles::can_drop(
+                                source,
+                                c.id,
+                                occupants(c.id),
+                                &m.move_channels,
+                            )
+                    }) {
+                        // The same move as dragging: pending row, then the result.
+                        items.push(Item::new(
+                            thiscord_frontend::localized_format!(
+                                crate::i18n::language(),
+                                "Move to {}",
+                                channel.name
+                            ),
+                            Action::Move(
+                                super::huddles::Dragged {
+                                    guild: guild.id,
+                                    channel: source,
+                                    account: member,
+                                },
+                                channel.id,
+                            ),
+                        ));
                     }
                 }
                 if m.actions.contains(&Permission::ManageNicknames) {
@@ -791,6 +831,7 @@ fn execute(ui: Ui, action: Action) {
             let _ = change_guild(ui, guild_id, revision, change, String::new()).await;
         }),
         Action::Nickname(guild, account) => super::nickname::open(ui, guild, account),
+        Action::Move(from, to) => super::huddles::move_member(ui, from, to),
     }
 }
 

@@ -77,7 +77,7 @@ pub(super) fn authorize(
             screen_epoch: 0,
             microphone_epoch: 0,
             microphone_source_epoch: 0,
-                        camera_active: false, camera_epoch: 0, screen_viewers: vec![], camera_viewers: vec![],
+                        camera_active: false, camera_epoch: 0, screen_viewers: vec![], camera_viewers: vec![], huddle: 0, split: false, split_by: None,
         }, revision))
     })
 }

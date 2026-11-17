@@ -17,6 +17,7 @@ mod edit_history;
 mod emoji;
 mod friends;
 mod groups;
+mod huddles;
 mod icons;
 mod identity;
 mod invites;

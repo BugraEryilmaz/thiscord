@@ -22,7 +22,7 @@ fn keys(text: String) -> impl IntoView {
 
 /// Which recorded keys a shortcut accepts.
 #[derive(Clone, Copy, Default, PartialEq, Eq)]
-enum Rule {
+pub(super) enum Rule {
     #[default]
     Any,
     /// Push-to-talk: no plain letter, number, space or punctuation key.
@@ -34,7 +34,7 @@ enum Rule {
 /// Click, then press the combination. Escape or leaving the control cancels;
 /// Tab moves on. `label` is a UI catalog key.
 #[component]
-fn KeyRecorder(
+pub(super) fn KeyRecorder(
     label: &'static str,
     value: RwSignal<String>,
     busy: RwSignal<bool>,
@@ -171,6 +171,7 @@ pub(super) fn ShortcutSettings(
     let overlay_visibility = RwSignal::new(String::new());
     let overlay_corner = RwSignal::new(String::new());
     let overlay_unlock = RwSignal::new(String::new());
+    let huddles = RwSignal::new(String::new());
     let busy = RwSignal::new(true);
     let message = RwSignal::new(String::new());
     let loaded = RwSignal::new(false);
@@ -193,6 +194,7 @@ pub(super) fn ShortcutSettings(
         overlay_visibility.set(shortcuts.overlay_visibility);
         overlay_corner.set(shortcuts.overlay_corner);
         overlay_unlock.set(shortcuts.overlay_unlock);
+        huddles.set(shortcuts.huddles);
     };
     Effect::new(move |_| {
         let changed = dirty.get();
@@ -247,6 +249,7 @@ pub(super) fn ShortcutSettings(
                     <KeyRecorder label="Push to talk" value=push_to_talk busy dirty message rule=Rule::NoTypingKey/>
                     <KeyRecorder label="Toggle mute" value=mute busy dirty message/>
                     <KeyRecorder label="Toggle deafen" value=deafen busy dirty message/>
+                    <KeyRecorder label="Split or regroup huddles" value=huddles busy dirty message/>
                 </div>
                 <p class="text-sm text-white/60">{move || if browser {
                     crate::i18n::t("Hold the push-to-talk key to speak when Transmit mode is Push to talk.")
@@ -274,6 +277,7 @@ pub(super) fn ShortcutSettings(
                         overlay_visibility: text(overlay_visibility),
                         overlay_corner: text(overlay_corner),
                         overlay_unlock: text(overlay_unlock),
+                        huddles: text(huddles),
                         push_to_talk: text(push_to_talk),
                     };
                     if local {
@@ -281,7 +285,7 @@ pub(super) fn ShortcutSettings(
                         for (command, value) in Command::ALL.into_iter().zip(app) {
                             *shortcuts.get_mut(command) = text(value);
                         }
-                        let voice = [&settings.push_to_talk, &settings.mute, &settings.deafen, &settings.overlay_visibility, &settings.overlay_corner, &settings.overlay_unlock].map(String::as_str);
+                        let voice = [&settings.push_to_talk, &settings.mute, &settings.deafen, &settings.overlay_visibility, &settings.overlay_corner, &settings.overlay_unlock, &settings.huddles].map(String::as_str);
                         if let Err(error) = shortcuts.validate(&voice).map_err(String::from).and_then(|()| super::keyboard::save_bindings(shortcuts)) {
                             message.set(error);
                             return;

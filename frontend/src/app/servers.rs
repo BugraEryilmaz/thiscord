@@ -284,18 +284,80 @@ fn VoiceRoster(ui: Ui, guild: GuildId, channel: thiscord_shared::ChannelId) -> i
         })
     });
     let members = Memo::new(move |_| {
-        ui.voice_roster
+        let members = ui
+            .voice_roster
             .get()
             .into_iter()
             .find(|c| c.channel_id == channel)
             .map(|c| c.members)
-            .unwrap_or_default()
+            .unwrap_or_default();
+        let mut members = super::huddles::overlay(channel, members);
+        // A split room lists each huddle together, main room first.
+        if members.iter().any(|m| m.split) {
+            members.sort_by_key(|m| m.huddle);
+        }
+        members
     });
-    view! {<ul class="ml-5 space-y-1 border-l border-white/10 pl-3" aria-label=move || crate::i18n::t("In this voice channel")>
-        <For each=move ||members.get() key=|m|m.account_id children=move |initial|{
-            let id=initial.account_id;
+    let split = Memo::new(move |_| members.with(|m| m.iter().any(|m| m.split)));
+    // While split, people outside your huddle are dimmed: you can't hear them.
+    let me = Memo::new(move |_| {
+        let account = ui.account.with(|a| a.as_ref().map(|a| a.id))?;
+        members.with(|m| m.iter().find(|m| m.account_id == account).cloned())
+    });
+    let can_move = move || {
+        ui.server.with(|h| {
+            h.as_ref()
+                .is_some_and(|h| h.guild.id == guild && h.can_move_members)
+        })
+    };
+    // Only people the server would let you move (rank and permission) drag.
+    let can_drag = move |id| {
+        ui.account.with(|a| a.as_ref().is_some_and(|a| a.id != id))
+            && can_move()
+            && super::huddles::movable(guild, id)
+    };
+    let drop_here = RwSignal::new(false);
+    // Load who may be moved as soon as the server view shows this roster.
+    Effect::new(move |_| {
+        if can_move() {
+            super::huddles::refresh_movable(ui, guild);
+        }
+    });
+    let rows = Memo::new(move |_| {
+        let split = split.get();
+        let mut previous = None;
+        let mut rows = Vec::new();
+        for m in members.get() {
+            if split && previous != Some(m.huddle) {
+                previous = Some(m.huddle);
+                rows.push((m.huddle, None));
+            }
+            rows.push((m.huddle, Some(m.account_id)));
+        }
+        rows
+    });
+    view! {<ul class="ml-5 space-y-1 border-l border-white/10 pl-3" class:huddles-split=move || split.get() class:roster-drop=move || drop_here.get() aria-label=move || crate::i18n::t("In this voice channel")
+        on:pointerenter=move |_| if can_move() { super::huddles::refresh_movable(ui, guild); }
+        on:dragover=move |e: web_sys::DragEvent| if super::huddles::accepts(ui, super::huddles::dragged().get_untracked(), guild, channel) { e.prevent_default(); if let Some(data)=e.data_transfer(){data.set_drop_effect("move");} drop_here.set(true); }
+        on:dragleave=move |_| drop_here.set(false)
+        on:drop=move |e: web_sys::DragEvent| { drop_here.set(false); if let Some(from)=super::huddles::dragged().get_untracked().filter(|_| super::huddles::accepts(ui, super::huddles::dragged().get_untracked(), guild, channel)) { e.prevent_default(); super::huddles::dragged().set(None); super::huddles::move_member(ui, from, channel); } }>
+        <For each=move ||rows.get() key=|row|*row children=move |(huddle,row)|{
+            let Some(id)=row else {
+                return view!{<li class="huddle-heading" data-huddle=huddle.to_string() aria-hidden="true"><span class="huddle-dot"></span>{move || super::huddles::name(huddle)}</li>}.into_any();
+            };
+            let initial=members.get_untracked().into_iter().find(|m|m.account_id==id);
+            let Some(initial)=initial else { return ().into_any(); };
             let member=Signal::derive(move ||members.get().into_iter().find(|m|m.account_id==id).unwrap_or_else(||initial.clone()));
-            view!{<li tabindex="0" aria-haspopup="menu" data-context-server=guild.to_string() data-context-channel=channel.to_string() data-context-member=id.to_string() class="voice-member sidebar-member" class:voice-speaking=move ||speaking.get().contains(&id) data-tip=move ||{let tip=format!("{} (@{})",member.get().display_name(),member.get().username);match ui.members.status(guild,id) {Some(status)=>format!("{tip} · {status}"),None=>tip}}>
+            let away=move ||me.with(|me|me.as_ref().is_some_and(|me|me.split && !me.hears(&member.get())));
+            view!{<li tabindex="0" aria-haspopup="menu" data-context-server=guild.to_string() data-context-channel=channel.to_string() data-context-member=id.to_string() class="voice-member sidebar-member" class:voice-speaking=move ||speaking.get().contains(&id) class:huddle-away=away class:voice-moving=move ||super::huddles::moving().with(|m|m.get(&id).is_some_and(|m|m.to!=channel)) data-huddle=move ||member.get().huddle.to_string()
+                draggable=move ||if can_drag(id){"true"}else{"false"}
+                on:dragstart=move |e: web_sys::DragEvent|{
+                    if !can_drag(id){e.prevent_default();return;}
+                    if let Some(data)=e.data_transfer(){let _=data.set_data("text/plain",member.get_untracked().display_name());data.set_effect_allowed("move");}
+                    super::huddles::dragged().set(Some(super::huddles::Dragged{guild,channel,account:id}));
+                }
+                on:dragend=move |_|super::huddles::dragged().set(None)
+                data-tip=move ||{let tip=format!("{} (@{})",member.get().display_name(),member.get().username);let tip=match ui.members.status(guild,id) {Some(status)=>format!("{tip} · {status}"),None=>tip};if away(){format!("{tip} · {}",crate::i18n::t("In another huddle"))}else{tip}}>
                 <button class="voice-person" class:has-stream=move ||member.get().sharing_screen || member.get().camera_active aria-label=move ||if member.get().sharing_screen || member.get().camera_active{thiscord_frontend::localized_format!(crate::i18n::language(), "Watch {}’s stream",member.get().display_name())}else{member.get().display_name().to_owned()} data-tip=move ||if member.get().sharing_screen || member.get().camera_active{crate::i18n::t("Watch stream")}else{crate::i18n::t("Right-click for options")} on:click=move |_|if member.get_untracked().sharing_screen || member.get_untracked().camera_active{super::screen::open_stream(ui,guild,channel,member.get_untracked());}>
                 <span class="voice-avatar"><crate::avatar::Avatar class="size-6 text-xs" name=Signal::derive(move ||member.get().display_name().to_owned()) avatar_id=Signal::derive(move ||member.get().avatar_id)/></span>
                 <span class="min-w-0 flex-1 truncate" style:color=move ||(!speaking.get().contains(&id)).then(||ui.members.identity(guild,id).and_then(|i|super::members::name_color(i.color))).flatten()>{move ||ui.members.identity(guild,id).map(|i|i.name).unwrap_or_else(||member.get().display_name().to_owned())}</span>
@@ -303,6 +365,19 @@ fn VoiceRoster(ui: Ui, guild: GuildId, channel: thiscord_shared::ChannelId) -> i
                 <Show when=move ||member.get().is_deafened()><span role="img" aria-label=move || crate::i18n::t("Deafened")><Icon kind=Glyph::Deafen/></span></Show>
                 <Show when=move ||!member.get().is_deafened() && (member.get().is_muted() || !member.get().can_speak)><span role="img" aria-label=move || crate::i18n::t("Muted")><Icon kind=Glyph::MicOff/></span></Show>
                 <Show when=move ||member.get().sharing_screen || member.get().camera_active><button class="stream-live-badge" aria-label=move ||thiscord_frontend::localized_format!(crate::i18n::language(), "Watch {}’s stream",member.get().display_name()) data-tip=move || crate::i18n::t("Watch stream") on:click=move |_|super::screen::open_stream(ui,guild,channel,member.get_untracked())>{move || crate::i18n::t("LIVE")}</button></Show>
+                <Show when=move ||member.get().huddle!=0 && !split.get() && super::huddles::planning()><span class="huddle-badge" role="img" aria-label=move ||super::huddles::name(member.get().huddle) data-tip=move ||thiscord_frontend::localized_format!(crate::i18n::language(), "Planned for {}", super::huddles::name(member.get().huddle))>{move ||member.get().huddle}</span></Show>
+                <Show when=move ||super::huddles::moving().with(|m|m.get(&id).is_some_and(|m|m.to!=channel))><span class="voice-moving-label">{move || crate::i18n::t("Moving…")}</span></Show>
+                <Show when=away><span class="huddle-away-icon" role="img" aria-label=move || crate::i18n::t("Can't hear you") data-tip=move || crate::i18n::t("In another huddle")><Icon kind=Glyph::VolumeOff/></span></Show>
+                <Show when=move ||split.get()><span class="sr-only">{move ||super::huddles::name(member.get().huddle)}</span></Show>
+            </li>}.into_any()
+        }/>
+        // Someone being moved here shows up at once, until they reconnect.
+        <For each=move ||super::huddles::moving().with(|m|m.iter().filter(|(id,m)|m.to==channel && !members.with(|list|list.iter().any(|p|p.account_id==**id))).map(|(id,m)|(*id,m.clone())).collect::<Vec<_>>()) key=|(id,_)|*id children=move |(_,m)|{
+            let name=m.name.clone();
+            view!{<li class="voice-member sidebar-member voice-moving">
+                <span class="voice-person"><span class="voice-avatar"><crate::avatar::Avatar class="size-6 text-xs" name=Signal::derive({let n=m.name.clone();move ||n.clone()}) avatar_id=Signal::derive(move ||m.avatar)/></span>
+                <span class="min-w-0 flex-1 truncate">{name}</span></span>
+                <span class="voice-moving-label">{move || crate::i18n::t("Moving…")}</span>
             </li>}
         }/>
     </ul>}
@@ -649,6 +724,8 @@ pub(super) fn ServerHome(ui: Ui) -> impl IntoView {
         });
     };
     let unread = ui.unread;
+    // The voice channel a dragged member is over (see huddles::move_member).
+    let drop_over = RwSignal::new(None::<thiscord_shared::ChannelId>);
     let channel_roving = super::keyboard::Roving::new(
         move || {
             ui.server.with(|home| {
@@ -709,6 +786,11 @@ pub(super) fn ServerHome(ui: Ui) -> impl IntoView {
                             let id=ch.id; let is_voice=ch.kind==ChannelKind::Voice; let name=ch.name.clone();let guild=channel_guild.clone();let guild_id=guild.id;
                             let heading=if previous!=Some(ch.category_id){previous=Some(ch.category_id);Some(ch.category_id.and_then(|id|categories.iter().find(|cat|cat.id==id).map(|cat|cat.name.clone())).unwrap_or_else(||crate::i18n::t("No category").into()))}else{None};
                             view!{<li>{heading.map(|title|view!{<h4 class="sidebar-section-title px-2 pb-1.5 pt-4">{title}</h4>})}<button data-rove tabindex=channel_roving.tabindex(id) on:focus=move |_|channel_roving.focus(id) data-context-server=guild_id.to_string() data-context-channel=id.to_string() aria-haspopup="menu" class="channel-item" class:channel-unread=move ||!super::notifications::muted(ui, thiscord_shared::notifications::Target::Channel { guild_id, channel_id: id }) && unread.with(|unread|unread.iter().any(|u|u.channel_id==id&&u.count>0)) class:channel-selected=move ||selected.get().is_some_and(|c|c.id==id) class:voice-active=move ||ui.voice.get().channel_id==Some(id)
+                                class:drop-candidate=move ||is_voice && super::huddles::accepts(ui, super::huddles::dragged().get(), guild_id, id)
+                                class:drop-over=move ||drop_over.get()==Some(id)
+                                on:dragover=move |e: web_sys::DragEvent|if is_voice && super::huddles::accepts(ui, super::huddles::dragged().get_untracked(), guild_id, id) {e.prevent_default();if let Some(data)=e.data_transfer(){data.set_drop_effect("move");}drop_over.set(Some(id));}
+                                on:dragleave=move |_|if drop_over.get_untracked()==Some(id){drop_over.set(None);}
+                                on:drop=move |e: web_sys::DragEvent|{drop_over.set(None);if let Some(from)=super::huddles::dragged().get_untracked().filter(|_|is_voice && super::huddles::accepts(ui, super::huddles::dragged().get_untracked(), guild_id, id)){e.prevent_default();super::huddles::dragged().set(None);super::huddles::move_member(ui,from,id);}}
                                 aria-current=move ||selected.with(|c|c.as_ref().is_some_and(|c|c.id==id)).then_some("page")
                                 aria-label={let name=name.clone();move ||channel_label(ui,guild_id,id,&name,is_voice)} data-tip=name.clone() data-tip-overflow="" disabled=move ||is_voice && ui.voice_joining.get() on:click=move |_|if is_voice {if selected.with_untracked(|c|c.as_ref().is_some_and(|c|c.id==id)){ui.mobile_content.set(true);}super::audio::join(ui,guild.clone(),ch.clone());}else{selected.set(Some(ch.clone()));ui.mobile_content.set(true);}>
                                 {move || if is_voice {view!{<span class="channel-glyph"><Icon kind=Glyph::Voice/></span>}.into_any()}else{view!{<span class="channel-glyph text-base font-semibold leading-none" aria-hidden="true">"#"</span>}.into_any()}}

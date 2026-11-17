@@ -364,6 +364,7 @@ fn permission_name(p: Permission) -> &'static str {
         Permission::UseSoundboard => crate::i18n::t("Use soundboard"),
         Permission::ChangeNickname => crate::i18n::t("Change own nickname"),
         Permission::ManageNicknames => crate::i18n::t("Manage nicknames"),
+        Permission::ManageHuddles => crate::i18n::t("Split voice into huddles"),
     }
 }
 #[component]

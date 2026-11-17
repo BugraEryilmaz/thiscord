@@ -11,6 +11,7 @@ pub mod chat;
 pub mod error;
 pub mod friends;
 pub mod h264;
+pub mod huddles;
 pub mod ids;
 pub mod notifications;
 pub mod overlay;

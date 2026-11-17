@@ -652,6 +652,9 @@ pub(crate) fn voice(
             camera_epoch: 0,
             screen_viewers: vec![],
             camera_viewers: vec![],
+            huddle: 0,
+            split: false,
+            split_by: None,
         },
         0,
     ))

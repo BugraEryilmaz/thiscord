@@ -201,6 +201,10 @@ pub(super) fn receives(
     {
         return false;
     }
+    // Huddles separate voices only (huddles.rs); screens and cameras stay watchable.
+    if !kind.is_video() && !receiver.info.hears(&source.info) {
+        return false;
+    }
     if kind == MediaKind::Microphone {
         return true;
     }
@@ -391,6 +395,9 @@ mod tests {
                         camera_epoch: 0,
                         screen_viewers: vec![],
                         camera_viewers: vec![],
+                        huddle: 0,
+                        split: false,
+                        split_by: None,
                     },
                     source_id: uuid::Uuid::new_v4(),
                     screen_started: Instant::now(),
@@ -440,6 +447,93 @@ mod tests {
             .find(|p| p.slot == 0)
             .unwrap()
     }
+    #[tokio::test]
+    async fn huddles_separate_voices_but_keep_screens_watchable() {
+        use thiscord_shared::huddles::HuddleChange::{Assign, Clear, Split};
+        let room = room().await;
+        let live = AtomicBool::new(true);
+        assert!(update(&room, 1, vec![subscription(&room).await], &live).await);
+        let now = Instant::now();
+        let ids: Vec<_> = {
+            let members = room.members.read().await;
+            (0..3).map(|slot| members[&slot].info.account_id).collect()
+        };
+        let all = [
+            MediaKind::Microphone,
+            MediaKind::SystemAudio,
+            MediaKind::ScreenVideo,
+        ];
+        for kind in all {
+            assert!(
+                allowed(&room, 1, kind, now).await,
+                "{kind:?} before huddles"
+            );
+        }
+        // Slots 0 and 2 form huddle 1; slot 1 stays in the main room. A plan
+        // alone changes nothing until the room is split.
+        for account_id in [ids[0], ids[2]] {
+            huddles::change(
+                &room,
+                Assign {
+                    account_id,
+                    huddle: 1,
+                },
+                ids[1],
+            )
+            .await
+            .unwrap();
+        }
+        assert!(allowed(&room, 1, MediaKind::Microphone, now).await);
+        let state = huddles::change(&room, Split { active: true }, ids[1])
+            .await
+            .unwrap();
+        assert!(state.split);
+        assert_eq!(state.split_by, Some(ids[1]));
+        assert_eq!(state.assignments.len(), 2);
+        assert_eq!(audience(&room).await.split_by, Some(ids[1]));
+        assert!(!allowed(&room, 1, MediaKind::Microphone, now).await);
+        assert!(!allowed(&room, 1, MediaKind::SystemAudio, now).await);
+        assert!(allowed(&room, 1, MediaKind::ScreenVideo, now).await);
+        assert!(allowed(&room, 2, MediaKind::Microphone, now).await);
+        // Rosters carry the plan, and repeating a split converges.
+        assert!(audience(&room).await.split);
+        assert_eq!(audience(&room).await.huddle, 1);
+        huddles::change(&room, Split { active: true }, ids[1])
+            .await
+            .unwrap();
+        assert!(!allowed(&room, 1, MediaKind::Microphone, now).await);
+        huddles::change(&room, Split { active: false }, ids[1])
+            .await
+            .unwrap();
+        for kind in all {
+            assert!(
+                allowed(&room, 1, kind, now).await,
+                "{kind:?} after regrouping"
+            );
+        }
+        // Only people in the room can be planned; clearing forgets the plan.
+        let stranger = thiscord_shared::AccountId::from_uuid(uuid::Uuid::new_v4());
+        assert!(
+            huddles::change(
+                &room,
+                Assign {
+                    account_id: stranger,
+                    huddle: 2
+                },
+                ids[1],
+            )
+            .await
+            .is_err()
+        );
+        huddles::change(&room, Split { active: true }, ids[1])
+            .await
+            .unwrap();
+        let cleared = huddles::change(&room, Clear {}, ids[1]).await.unwrap();
+        assert!(!cleared.split && cleared.assignments.is_empty());
+        assert!(allowed(&room, 1, MediaKind::Microphone, now).await);
+        assert_eq!(audience(&room).await.huddle, 0);
+    }
+
     #[tokio::test]
     async fn viewer_presence_follows_kind_epoch_hide_expiry_deafen_and_access() {
         let room = room().await;

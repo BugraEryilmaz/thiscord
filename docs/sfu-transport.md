@@ -42,7 +42,8 @@ whole batch with one `sendmmsg`.
 
 **Changing forwarding or permission rules means changing both `voice/mod.rs` +
 `voice/egress.rs` and `voice/shard/forward.rs`.** CI runs the whole voice integration
-suite under both transports.
+suite under both transports. Rules in `viewing::receives` (deafen, views, huddles)
+are the exception: both transports already call it at admission and at write time.
 
 ## What differs
 

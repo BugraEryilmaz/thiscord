@@ -161,6 +161,11 @@ built-in sounds (cricket, clap, sad horn, ba dum tss) plus up to 24 a server upl
 **Server settings > Soundboard** (Manage server). The Use soundboard permission
 controls who can play them, and right-clicking a participant offers a local
 **Soundboard volume** for that person (0% mutes). See [soundboard](docs/soundboard.md).
+**Huddles** split a voice channel into up to four private sub-calls without anyone
+reconnecting: plan them in the voice dock's Huddles planner (drag people or press
+1–4), then split and regroup with one button or a recordable global shortcut. It
+needs the Split voice into huddles permission. People with Move members can also
+drag someone in the sidebar onto another voice channel. See [huddles](docs/huddles.md).
 Missing saved audio devices immediately fall back to the system default for that
 direction on join or recovery, preserving the other selection and saved preferences.
 Other device failures retry selected devices three times, then system defaults
