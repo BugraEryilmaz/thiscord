@@ -270,7 +270,8 @@ async fn encrypted_screen_nacks_cannot_amplify_or_bypass_lifecycle_and_camera_st
     call.close().await;
 
     // Positive control on the SAME production responder: camera uses the same
-    // H.264 codec yet must retain NACK recovery. Also exercise microphone/audio.
+    // H.264 codec yet must retain NACK recovery, within a per-connection
+    // retransmit budget. Also exercise microphone/audio.
     let mut call = Call::new(false).await;
     send(
         &mut call.source.socket,
@@ -287,39 +288,66 @@ async fn encrypted_screen_nacks_cannot_amplify_or_bypass_lifecycle_and_camera_st
         h264_high: false,
     });
     screen_forwarded(&mut call.source, &mut call.viewer, 2).await;
-    call.source.screen_sequences[2] += 1;
-    call.source.screen_tracks[2]
-        .write_rtp(rtp::Packet {
-            header: rtp::header::Header {
-                version: 2,
-                payload_type: 125,
-                ssrc: 903,
-                sequence_number: call.source.screen_sequences[2],
-                timestamp: u32::from(call.source.screen_sequences[2]) * 9000,
-                marker: true,
-                ..Default::default()
-            },
-            payload: vec![0x65; 1200].into(),
-        })
-        .await
-        .unwrap();
-    let packet = tokio::time::timeout(Duration::from_secs(2), call.viewer.packets.recv())
-        .await
-        .unwrap()
-        .unwrap();
-    assert_eq!(
-        packet.header.ssrc,
-        MediaKind::Camera.relay_ssrc(source.slot)
-    );
+    let mut cached = Vec::new();
+    for _ in 0..8 {
+        call.source.screen_sequences[2] += 1;
+        call.source.screen_tracks[2]
+            .write_rtp(rtp::Packet {
+                header: rtp::header::Header {
+                    version: 2,
+                    payload_type: 125,
+                    ssrc: 903,
+                    sequence_number: call.source.screen_sequences[2],
+                    timestamp: u32::from(call.source.screen_sequences[2]) * 9000,
+                    marker: true,
+                    ..Default::default()
+                },
+                payload: vec![0x65; 1200].into(),
+            })
+            .await
+            .unwrap();
+        cached.push(
+            tokio::time::timeout(Duration::from_secs(2), async {
+                loop {
+                    let packet = call.viewer.packets.recv().await.unwrap();
+                    if packet.header.ssrc == MediaKind::Camera.relay_ssrc(source.slot) {
+                        break packet;
+                    }
+                }
+            })
+            .await
+            .expect("camera packet must be forwarded"),
+        );
+    }
+    // Ordinary loss: each distinct lost packet NACKed once is retransmitted.
     let before = wire_bytes(&call.viewer).await;
-    for _ in 0..30 {
-        nack(&call.viewer, &packet, false).await;
+    for packet in &cached {
+        nack(&call.viewer, packet, false).await;
     }
     tokio::time::sleep(Duration::from_millis(150)).await;
+    let repaired = wire_bytes(&call.viewer).await - before;
     assert!(
-        wire_bytes(&call.viewer).await - before >= 30 * 1200,
-        "camera NACK responder disabled"
+        repaired >= 8 * 1200,
+        "camera NACK recovery disabled: {repaired}"
     );
+
+    // Flood: every cached packet, repeatedly, with full bitmaps. The stock
+    // responder resent each cache hit per request (over 100 MB here). The
+    // per-connection budget allows a 200-packet burst plus 200 packets/second;
+    // 1300 bytes covers RTP/RTX/SRTP/UDP framing, 4000 bytes periodic RTCP/ICE.
+    let before = wire_bytes(&call.viewer).await;
+    let started = std::time::Instant::now();
+    for _ in 0..100 {
+        for packet in &cached {
+            nack(&call.viewer, packet, true).await;
+        }
+        tokio::time::sleep(Duration::from_millis(2)).await;
+    }
+    tokio::time::sleep(Duration::from_millis(150)).await;
+    let received = wire_bytes(&call.viewer).await - before;
+    let envelope = 4000.0 + 1300.0 * (200.0 + 200.0 * started.elapsed().as_secs_f64());
+    println!("camera NACK flood: {received} wire bytes, budget envelope {envelope:.0}");
+    assert!((received as f64) < envelope, "camera NACK flood amplified");
     forwarded(&mut call.source, &mut call.viewer).await;
     screen_forwarded(&mut call.source, &mut call.viewer, 1).await;
     call.close().await;

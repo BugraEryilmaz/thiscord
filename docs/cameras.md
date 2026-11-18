@@ -107,8 +107,12 @@ Camera receiver budgets start at 1.5 Mbit/s and decrease with loss or decoder
 pressure. The lowest active viewer budget caps the WebView sender; no viewers
 pauses network encoding while local preview continues. This is one common encode,
 not simulcast or an aggregate link allocator. Native camera ingress and writes
-are bounded. Remote viewers reuse the screen reorder/frame-age limits and native
-WebRTC-to-WebView playback bridge. Screens retain their existing GPU encode path.
+are bounded. Unlike screens, the SFU answers camera NACKs from a retransmission
+cache, deduplicated and capped per receiving connection at 200 packets/second (see
+[screen-sharing.md](screen-sharing.md), retransmission cache paragraph); excess
+loss relies on the existing keyframe recovery. Remote viewers reuse the screen
+reorder/frame-age limits and native WebRTC-to-WebView playback bridge. Screens
+retain their existing GPU encode path.
 Local screen preview keeps capture alive but does not upload video without remote
 viewers. Hiding it also stops local frame assembly and keyframe requests.
 
