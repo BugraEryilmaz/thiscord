@@ -7,7 +7,7 @@ use axum::{
         ConnectInfo, Query, State,
         rejection::{FormRejection, QueryRejection},
     },
-    http::StatusCode,
+    http::{HeaderMap, StatusCode},
     response::{Html, IntoResponse, Response},
 };
 use std::net::SocketAddr;
@@ -16,7 +16,7 @@ use thiscord_shared::{
     account::{AccountRequest, PASSWORD_RESET_PATH, PasswordResetForm, PasswordResetQuery},
 };
 
-fn valid_token(token: &str) -> bool {
+pub(super) fn valid_token(token: &str) -> bool {
     token.len() == 43
         && token
             .bytes()
@@ -31,6 +31,7 @@ pub(super) async fn open(
     State(pool): State<Option<DbPool>>,
     Extension(id): Extension<RequestId>,
     peer: Option<Extension<ConnectInfo<SocketAddr>>>,
+    headers: HeaderMap,
     input: Result<Query<PasswordResetQuery>, QueryRejection>,
 ) -> Response {
     let input = match input {
@@ -39,7 +40,7 @@ pub(super) async fn open(
         Err(_) => return secure(Failure::Invalid("Invalid password reset link").response(id)),
     };
     let token = input.token.clone();
-    let result = work(pool, peer, move |pool| {
+    let result = work(pool, peer, &headers, move |pool| {
         store::check_reset_code(pool, &token)
     })
     .await;
@@ -59,6 +60,7 @@ pub(super) async fn submit(
     State(pool): State<Option<DbPool>>,
     Extension(id): Extension<RequestId>,
     peer: Option<Extension<ConnectInfo<SocketAddr>>>,
+    headers: HeaderMap,
     input: Result<Form<PasswordResetForm>, FormRejection>,
 ) -> Response {
     let input = match input {
@@ -75,7 +77,7 @@ pub(super) async fn submit(
         return failure(Failure::Unauthorized, None, id);
     }
     let token = input.token.clone();
-    let result = work(pool, peer, move |pool| {
+    let result = work(pool, peer, &headers, move |pool| {
         store::check_reset_code(pool, &input.token)?;
         if input.password != input.confirm_password {
             return Err(Failure::Invalid(
@@ -108,6 +110,7 @@ pub(super) async fn submit(
 async fn work(
     pool: Option<DbPool>,
     peer: Option<Extension<ConnectInfo<SocketAddr>>>,
+    headers: &HeaderMap,
     action: impl FnOnce(&DbPool) -> Result<(), Failure> + Send + 'static,
 ) -> Result<(), Failure> {
     let pool = pool.ok_or(Failure::Unavailable)?;
@@ -115,9 +118,7 @@ async fn work(
         code: String::new(),
         password: String::new(),
     })?;
-    let ip = peer
-        .map(|p| p.0.0.ip().to_string())
-        .unwrap_or_else(|| "local".into());
+    let ip = crate::client_ip::limit_key(peer.map(|p| p.0.0), headers);
     tokio::task::spawn_blocking(move || {
         let _permit = permit;
         store::rate_limit(&pool, &ip, None, true)?;
@@ -196,7 +197,7 @@ fn page(
     response
 }
 
-fn secure(mut response: Response) -> Response {
+pub(super) fn secure(mut response: Response) -> Response {
     for (name, value) in [
         ("cache-control", "no-store"),
         ("referrer-policy", "no-referrer"),

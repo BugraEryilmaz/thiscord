@@ -3,27 +3,29 @@ use crate::{
     auth::{self, Failure},
     chat::access,
     db::DbPool,
+    limits::{Admission, Caps, Ticket},
 };
 use axum::{
     Extension,
     extract::{
-        State, WebSocketUpgrade,
+        ConnectInfo, State, WebSocketUpgrade,
         ws::{Message, WebSocket, rejection::WebSocketUpgradeRejection},
     },
     http::{HeaderMap, HeaderValue},
     response::{IntoResponse, Response},
 };
 use std::{
+    net::SocketAddr,
     sync::{Arc, OnceLock},
     time::{Duration, Instant},
 };
 use thiscord_shared::{ApiError, ErrorCode, RequestId, bots::*};
-use tokio::sync::Semaphore;
 
 pub(super) async fn upgrade(
     State(pool): State<Option<DbPool>>,
     Extension(id): Extension<RequestId>,
     Extension(origins): Extension<Arc<Vec<HeaderValue>>>,
+    peer: Option<Extension<ConnectInfo<SocketAddr>>>,
     headers: HeaderMap,
     ws: Result<WebSocketUpgrade, WebSocketUpgradeRejection>,
 ) -> Response {
@@ -37,20 +39,17 @@ pub(super) async fn upgrade(
     let Ok(ws) = ws else {
         return Failure::Invalid("Invalid bot socket upgrade").response(id);
     };
-    static SOCKETS: OnceLock<Arc<Semaphore>> = OnceLock::new();
-    let Ok(permit) = SOCKETS
-        .get_or_init(|| Arc::new(Semaphore::new(64)))
-        .clone()
-        .try_acquire_owned()
+    // A pending slot until the first frame authenticates (see `limits`).
+    static SOCKETS: OnceLock<Admission> = OnceLock::new();
+    let Some(ticket) = SOCKETS
+        .get_or_init(|| Admission::new(64, Caps::BOTS))
+        .pending(peer.map(|p| p.0.0), &headers)
     else {
         return Failure::Limited.response(id);
     };
     ws.max_message_size(16 * 1024)
         .max_frame_size(16 * 1024)
-        .on_upgrade(move |socket| async move {
-            let _permit = permit;
-            serve(socket, pool, id).await
-        })
+        .on_upgrade(move |socket| serve(socket, pool, id, ticket))
         .into_response()
 }
 fn frame(message: Message) -> Option<ClientEvent> {
@@ -88,7 +87,7 @@ async fn invalid(socket: &mut WebSocket, id: RequestId, code: ErrorCode, message
     )
     .await;
 }
-async fn serve(mut socket: WebSocket, pool: DbPool, id: RequestId) {
+async fn serve(mut socket: WebSocket, pool: DbPool, id: RequestId, mut ticket: Ticket) {
     let Ok(Some(Ok(first))) = tokio::time::timeout(Duration::from_secs(5), socket.recv()).await
     else {
         return;
@@ -145,6 +144,16 @@ async fn serve(mut socket: WebSocket, pool: DbPool, id: RequestId) {
         .await;
         return;
     };
+    if !ticket.promote(bot.account_id) {
+        invalid(
+            &mut socket,
+            id,
+            ErrorCode::RateLimited,
+            "Too many bot connections; try again soon",
+        )
+        .await;
+        return;
+    }
     let account = access::account(bot.account_id);
     let credential = access::session(session.id);
     let guild = access::guild(bot.guild_id);

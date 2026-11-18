@@ -11,7 +11,7 @@ pub use attachments::start_cleanup as start_attachment_cleanup;
 use axum::{
     Extension, Json, Router,
     extract::{
-        DefaultBodyLimit, RawQuery, State, WebSocketUpgrade,
+        ConnectInfo, DefaultBodyLimit, RawQuery, State, WebSocketUpgrade,
         rejection::JsonRejection,
         ws::{Message, WebSocket, rejection::WebSocketUpgradeRejection},
     },
@@ -21,6 +21,7 @@ use axum::{
 };
 use std::{
     collections::HashMap,
+    net::SocketAddr,
     sync::{Arc, Mutex, OnceLock},
     time::{Duration, Instant},
 };
@@ -37,7 +38,10 @@ pub fn router(origins: Vec<HeaderValue>, sockets: usize) -> Router<Option<DbPool
         .route(FRIENDS_PATH, post(handle))
         .route(FRIENDS_SOCKET_PATH, get(upgrade))
         .layer(Extension(Arc::new(origins)))
-        .layer(Extension(crate::limits::SocketSlots::new(sockets)))
+        .layer(Extension(crate::limits::Admission::new(
+            sockets,
+            crate::limits::Caps::SOCKETS,
+        )))
         .layer(DefaultBodyLimit::max(32 * 1024))
         .merge(attachments::router())
 }
@@ -183,7 +187,8 @@ async fn upgrade(
     State(pool): State<Option<DbPool>>,
     Extension(id): Extension<RequestId>,
     Extension(origins): Extension<Arc<Vec<HeaderValue>>>,
-    Extension(slots): Extension<crate::limits::SocketSlots>,
+    Extension(admission): Extension<crate::limits::Admission>,
+    peer: Option<Extension<ConnectInfo<SocketAddr>>>,
     Extension(shutdown): Extension<crate::shutdown::Shutdown>,
     RawQuery(query): RawQuery,
     headers: HeaderMap,
@@ -198,7 +203,8 @@ async fn upgrade(
     let Ok(ws) = ws else {
         return Failure::Invalid("Invalid WebSocket upgrade").response(id);
     };
-    let Ok(permit) = slots.0.clone().try_acquire_owned() else {
+    // A pending slot until the first frame authenticates (see `limits`).
+    let Some(ticket) = admission.pending(peer.map(|p| p.0.0), &headers) else {
         return Failure::Limited.response(id);
     };
     // Web client: cookie-derived bearer, used only when the frame token is empty.
@@ -209,11 +215,10 @@ async fn upgrade(
     ws.max_message_size(16 * 1024)
         .max_frame_size(16 * 1024)
         .on_upgrade(move |socket| async move {
-            let _permit = permit;
             // A planned restart ends the socket; the client reconnects as after
             // any drop and re-reads its bounded live window.
             tokio::select! {
-                _ = serve(socket, pool, upgrade_token, retains) => {}
+                _ = serve(socket, pool, upgrade_token, retains, ticket) => {}
                 _ = shutdown.drained() => {}
             }
         })
@@ -239,7 +244,13 @@ async fn send(socket: &mut WebSocket, event: ServerEvent) -> Result<(), ()> {
     .map_err(|_| ())?
     .map_err(|_| ())
 }
-async fn serve(mut socket: WebSocket, pool: DbPool, upgrade_token: String, retains: bool) {
+async fn serve(
+    mut socket: WebSocket,
+    pool: DbPool,
+    upgrade_token: String,
+    retains: bool,
+    mut ticket: crate::limits::Ticket,
+) {
     let Ok(Some(Ok(message))) = tokio::time::timeout(Duration::from_secs(5), socket.recv()).await
     else {
         return;
@@ -264,6 +275,10 @@ async fn serve(mut socket: WebSocket, pool: DbPool, upgrade_token: String, retai
     else {
         return;
     };
+    // Refused like a failed authentication: the client reconnects later.
+    if !ticket.promote(session.account_id) {
+        return;
+    }
     let account = crate::chat::access::account(session.account_id);
     let session_scope = crate::chat::access::session(session.id);
     let mut changed = account.subscribe();

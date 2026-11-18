@@ -40,8 +40,8 @@ fn well_formed(token: &str) -> bool {
             .all(|b| b.is_ascii_alphanumeric() || b == b'-' || b == b'_')
 }
 
-/// The session cookie value, if exactly one well-formed value is present.
-fn cookie_token(headers: &HeaderMap) -> Option<String> {
+/// The named cookie's value, if exactly one well-formed value is present.
+fn cookie_value(headers: &HeaderMap, cookie: &str) -> Option<String> {
     let mut found = None;
     for value in headers.get_all(header::COOKIE) {
         let Ok(value) = value.to_str() else {
@@ -51,7 +51,7 @@ fn cookie_token(headers: &HeaderMap) -> Option<String> {
             let Some((name, token)) = pair.trim().split_once('=') else {
                 continue;
             };
-            if name == SESSION_COOKIE {
+            if name == cookie {
                 if found.is_some() {
                     // Ambiguous duplicates are ignored rather than guessed.
                     return None;
@@ -61,6 +61,43 @@ fn cookie_token(headers: &HeaderMap) -> Option<String> {
         }
     }
     found.filter(|t| well_formed(t)).map(str::to_owned)
+}
+
+/// The session cookie value, if exactly one well-formed value is present.
+fn cookie_token(headers: &HeaderMap) -> Option<String> {
+    cookie_value(headers, SESSION_COOKIE)
+}
+
+/// Binds a browser Google sign-in attempt to the browser that started it: the
+/// callback must present it (docs/web.md#google-attempt-cookie). It holds a
+/// random 256-bit secret, never a session or provider token. `SameSite=Lax`, not
+/// `Strict`: Google returns to the callback with a cross-site top-level
+/// navigation, which never carries `Strict` cookies.
+pub const GOOGLE_ATTEMPT_COOKIE: &str = "__Host-thiscord_google";
+const GOOGLE_ATTEMPT_ATTRIBUTES: &str = "Path=/; HttpOnly; Secure; SameSite=Lax";
+/// Same lifetime as `oauth_attempts.expires_at` (five minutes).
+const GOOGLE_ATTEMPT_SECONDS: u32 = 300;
+
+/// The Google attempt cookie value, if exactly one well-formed value is present.
+pub(crate) fn google_attempt(headers: &HeaderMap) -> Option<String> {
+    cookie_value(headers, GOOGLE_ATTEMPT_COOKIE)
+}
+
+/// `Set-Cookie` for a newly started browser Google attempt.
+pub(crate) fn issue_google_attempt(secret: &str) -> HeaderValue {
+    let mut value = HeaderValue::from_str(&format!(
+        "{GOOGLE_ATTEMPT_COOKIE}={secret}; Max-Age={GOOGLE_ATTEMPT_SECONDS}; {GOOGLE_ATTEMPT_ATTRIBUTES}"
+    ))
+    .expect("attempt secrets are header-safe");
+    value.set_sensitive(true);
+    value
+}
+
+pub(crate) fn clear_google_attempt() -> HeaderValue {
+    HeaderValue::from_str(&format!(
+        "{GOOGLE_ATTEMPT_COOKIE}=; Max-Age=0; {GOOGLE_ATTEMPT_ATTRIBUTES}"
+    ))
+    .expect("static cookie")
 }
 
 /// CSRF rule for ambient credentials: an allowed `Origin`, or a safe method
@@ -190,5 +227,45 @@ mod tests {
             .unwrap();
         assert!((30 * 86_400 - 5..=30 * 86_400).contains(&age));
         assert!(clear().to_str().unwrap().contains("Max-Age=0"));
+    }
+
+    #[test]
+    fn google_attempt_cookie_is_lax_short_lived_and_separate_from_the_session() {
+        let secret = "g".repeat(43);
+        let issued = issue_google_attempt(&secret);
+        let issued = issued.to_str().unwrap();
+        assert!(issued.starts_with(&format!("{GOOGLE_ATTEMPT_COOKIE}={secret}; ")));
+        for attribute in [
+            "Max-Age=300",
+            "Path=/",
+            "HttpOnly",
+            "Secure",
+            "SameSite=Lax",
+        ] {
+            assert!(issued.contains(attribute), "{attribute}");
+        }
+        assert!(!issued.contains("Strict"));
+        assert!(!issued.to_ascii_lowercase().contains("domain"));
+        let cleared = clear_google_attempt();
+        let cleared = cleared.to_str().unwrap();
+        assert!(cleared.starts_with(&format!("{GOOGLE_ATTEMPT_COOKIE}=;")));
+        assert!(cleared.contains("Max-Age=0") && cleared.contains("SameSite=Lax"));
+        let both = headers(&[&format!(
+            "{SESSION_COOKIE}={}; {GOOGLE_ATTEMPT_COOKIE}={secret}",
+            "s".repeat(43)
+        )]);
+        assert_eq!(google_attempt(&both), Some(secret.clone()));
+        assert_eq!(cookie_token(&both), Some("s".repeat(43)));
+        assert_eq!(
+            google_attempt(&headers(&[
+                &format!("{GOOGLE_ATTEMPT_COOKIE}={secret}"),
+                &format!("{GOOGLE_ATTEMPT_COOKIE}={}", "h".repeat(43))
+            ])),
+            None
+        );
+        assert_eq!(
+            google_attempt(&headers(&[&format!("{GOOGLE_ATTEMPT_COOKIE}=short")])),
+            None
+        );
     }
 }

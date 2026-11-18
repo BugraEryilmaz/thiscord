@@ -261,6 +261,7 @@ async fn reset_browser_links_and_backup_codes_share_single_use_lifecycle() {
     )
     .await;
     let request = json!({"action":"forgot_password","email":"reset@example.test"});
+    sql(&db, COOLDOWN);
     call(&app, request.clone(), None, StatusCode::OK).await;
     let link = url::Url::parse(&mail_value(&db, "reset")).unwrap();
     assert_eq!(link.path(), PASSWORD_RESET_PATH);
@@ -359,8 +360,10 @@ async fn reset_browser_links_and_backup_codes_share_single_use_lifecycle() {
     )
     .await;
     // A resend invalidates the older link, and using the backup invalidates the new one.
+    sql(&db, COOLDOWN);
     call(&app, request.clone(), None, StatusCode::OK).await;
     let old = code(&db, "reset");
+    sql(&db, COOLDOWN);
     call(&app, request.clone(), None, StatusCode::OK).await;
     reset_page(
         &app,
@@ -386,6 +389,7 @@ async fn reset_browser_links_and_backup_codes_share_single_use_lifecycle() {
         StatusCode::BAD_REQUEST,
     )
     .await;
+    sql(&db, COOLDOWN);
     call(&app, request, None, StatusCode::OK).await;
     let expired = code(&db, "reset");
     sql(
@@ -600,46 +604,106 @@ async fn verification_links_are_single_use_and_expire() {
     let url = url::Url::parse(&link).unwrap();
     assert_eq!(url.path(), EMAIL_VERIFICATION_PATH);
     let uri = format!("{}?{}", url.path(), url.query().unwrap());
-    let open = |method: &str| {
-        Request::builder()
-            .method(method)
-            .uri(&uri)
-            .body(Body::empty())
+    let token_value = code(&db, "verify");
+    let verified = async || {
+        call(
+            &app,
+            json!({"action":"current"}),
+            Some(&session),
+            StatusCode::OK,
+        )
+        .await["account"]["email_verified"]
+            .as_bool()
             .unwrap()
     };
-    assert_eq!(
-        app.clone().oneshot(open("HEAD")).await.unwrap().status(),
-        StatusCode::NO_CONTENT
-    );
-    let current = call(
+    let (status, html) = link_request(&app, "HEAD", &uri, &[]).await;
+    assert_eq!((status, html.as_str()), (StatusCode::NO_CONTENT, ""));
+    // Fetchers without Fetch Metadata (mail gateways, scanners, old browsers),
+    // subresource loads and speculative prefetch/prerender only see a form. A
+    // speculative load gets an error status, so the browser does not show it in
+    // place of the real navigation that follows a click.
+    for (headers, expected) in [
+        (&[][..], StatusCode::OK),
+        (
+            &[("sec-fetch-mode", "no-cors"), ("sec-fetch-dest", "image")][..],
+            StatusCode::OK,
+        ),
+        (
+            &[("sec-fetch-mode", "navigate"), ("sec-fetch-dest", "iframe")][..],
+            StatusCode::OK,
+        ),
+        (
+            &[
+                NAVIGATE[0],
+                NAVIGATE[1],
+                ("sec-purpose", "prefetch;prerender"),
+            ][..],
+            StatusCode::SERVICE_UNAVAILABLE,
+        ),
+        (
+            &[NAVIGATE[0], NAVIGATE[1], ("purpose", "prefetch")][..],
+            StatusCode::SERVICE_UNAVAILABLE,
+        ),
+    ] {
+        let (status, html) = link_request(&app, "GET", &uri, headers).await;
+        assert_eq!(status, expected, "{headers:?}");
+        assert!(html.contains("Confirm your email address"), "{headers:?}");
+        assert!(html.contains(&format!(
+            "method=\"post\" action=\"{EMAIL_VERIFICATION_PATH}\""
+        )));
+        assert!(html.contains(&format!("name=\"token\" value=\"{token_value}\"")));
+        assert!(!verified().await, "{headers:?}");
+    }
+    // A link opened in a browser (from a mail app or webmail) verifies at once.
+    let (status, html) = open_link(&app, &uri).await;
+    assert_eq!(status, StatusCode::OK);
+    assert!(html.contains("Email verified"));
+    assert!(!html.contains(&token_value));
+    assert!(verified().await);
+    assert_eq!(open_link(&app, &uri).await.0, StatusCode::BAD_REQUEST);
+    let (status, html) = link_request(&app, "POST", EMAIL_VERIFICATION_PATH, &[]).await;
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+    assert!(html.contains("no longer valid"));
+    // A body the form extractor rejects, and other methods, keep the route's headers.
+    let json = Request::builder()
+        .method("POST")
+        .uri(EMAIL_VERIFICATION_PATH)
+        .header("content-type", "application/json")
+        .body(Body::from(r#"{"token":"x"}"#))
+        .unwrap();
+    let (status, html) = page_response(&app, json).await;
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+    assert!(html.contains("no longer valid"));
+    let (status, body) = link_request(&app, "PUT", &uri, &[]).await;
+    assert_eq!(status, StatusCode::METHOD_NOT_ALLOWED);
+    let error: ApiError = serde_json::from_str(&body).unwrap();
+    assert_eq!(error.code, thiscord_shared::ErrorCode::MethodNotAllowed);
+
+    // The fallback form verifies with the token alone: no cookie or session.
+    sql(&db, "UPDATE accounts SET email_verified=FALSE");
+    sql(&db, COOLDOWN);
+    call(
         &app,
-        json!({"action":"current"}),
+        json!({"action":"send_verification"}),
         Some(&session),
         StatusCode::OK,
     )
     .await;
-    assert_eq!(current["account"]["email_verified"], false);
-    let response = app.clone().oneshot(open("GET")).await.unwrap();
-    assert_eq!(response.status(), StatusCode::OK);
-    assert_eq!(response.headers()["cache-control"], "no-store");
-    assert_eq!(response.headers()["referrer-policy"], "no-referrer");
-    let html =
-        String::from_utf8(to_bytes(response.into_body(), 8192).await.unwrap().to_vec()).unwrap();
+    let token_value = code(&db, "verify");
+    let uri = format!("{EMAIL_VERIFICATION_PATH}?token={token_value}");
+    assert_eq!(link_request(&app, "GET", &uri, &[]).await.0, StatusCode::OK);
+    assert!(!verified().await);
+    let (status, html) = submit_verification(&app, &token_value).await;
+    assert_eq!(status, StatusCode::OK);
     assert!(html.contains("Email verified"));
-    assert!(!html.contains(&code(&db, "verify")));
+    assert!(verified().await);
     assert_eq!(
-        app.clone().oneshot(open("GET")).await.unwrap().status(),
+        submit_verification(&app, &token_value).await.0,
         StatusCode::BAD_REQUEST
     );
-    let current = call(
-        &app,
-        json!({"action":"current"}),
-        Some(&session),
-        StatusCode::OK,
-    )
-    .await;
-    assert_eq!(current["account"]["email_verified"], true);
+
     sql(&db, "UPDATE accounts SET email_verified=FALSE");
+    sql(&db, COOLDOWN);
     call(
         &app,
         json!({"action":"send_verification"}),
@@ -652,16 +716,8 @@ async fn verification_links_are_single_use_and_expire() {
         &db,
         "UPDATE account_codes SET expires_at=now()-interval '1 second'",
     );
-    let response = app
-        .oneshot(
-            Request::builder()
-                .uri(format!("{}?{}", url.path(), url.query().unwrap()))
-                .body(Body::empty())
-                .unwrap(),
-        )
-        .await
-        .unwrap();
-    assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+    let uri = format!("{}?{}", url.path(), url.query().unwrap());
+    assert_eq!(open_link(&app, &uri).await.0, StatusCode::BAD_REQUEST);
 }
 #[tokio::test]
 #[ignore = "requires TEST_DATABASE_URL; CI runs with --include-ignored"]
@@ -772,15 +828,62 @@ fn email_change_link(db: &Database) -> String {
     assert_eq!(url.path(), EMAIL_VERIFICATION_PATH);
     format!("{}?{}", url.path(), url.query().unwrap())
 }
-async fn open_link(app: &Router, uri: &str) -> (StatusCode, String) {
-    let response = app
-        .clone()
-        .oneshot(Request::builder().uri(uri).body(Body::empty()).unwrap())
-        .await
-        .unwrap();
+/// Fetch Metadata of a link the user opens in a current browser.
+const NAVIGATE: [(&str, &str); 2] = [
+    ("sec-fetch-mode", "navigate"),
+    ("sec-fetch-dest", "document"),
+];
+/// Lifts the per-recipient account-mail throttle between steps of a test.
+const COOLDOWN: &str = "DELETE FROM mail_recipient_limits";
+/// A request to the verification route; every response carries the account-page headers.
+async fn link_request(
+    app: &Router,
+    method: &str,
+    uri: &str,
+    headers: &[(&str, &str)],
+) -> (StatusCode, String) {
+    let mut builder = Request::builder().method(method).uri(uri);
+    for (name, value) in headers {
+        builder = builder.header(*name, *value);
+    }
+    let body = if method == "POST" {
+        builder = builder.header("content-type", "application/x-www-form-urlencoded");
+        Body::from("token=malformed")
+    } else {
+        Body::empty()
+    };
+    page_response(app, builder.body(body).unwrap()).await
+}
+async fn page_response(app: &Router, request: Request<Body>) -> (StatusCode, String) {
+    let response = app.clone().oneshot(request).await.unwrap();
+    let headers = response.headers();
+    assert_eq!(headers["cache-control"], "no-store");
+    assert_eq!(headers["referrer-policy"], "no-referrer");
+    let policy = headers["content-security-policy"].to_str().unwrap();
+    assert!(policy.starts_with("default-src 'none'"), "{policy}");
+    assert!(policy.contains("frame-ancestors 'none'"), "{policy}");
+    assert!(policy.contains("form-action 'self'"), "{policy}");
     let status = response.status();
-    let html = to_bytes(response.into_body(), 8192).await.unwrap();
+    let html = to_bytes(response.into_body(), 16384).await.unwrap();
     (status, String::from_utf8(html.to_vec()).unwrap())
+}
+/// Opens a verification link the way a browser does when the user clicks it.
+async fn open_link(app: &Router, uri: &str) -> (StatusCode, String) {
+    link_request(app, "GET", uri, &NAVIGATE).await
+}
+/// Submits the fallback confirmation form, as a plain form post without cookies.
+async fn submit_verification(app: &Router, token: &str) -> (StatusCode, String) {
+    let body = url::form_urlencoded::Serializer::new(String::new())
+        .append_pair("token", token)
+        .finish();
+    let request = Request::builder()
+        .method("POST")
+        .uri(EMAIL_VERIFICATION_PATH)
+        .header("content-type", "application/x-www-form-urlencoded")
+        .header("origin", "null")
+        .body(Body::from(body))
+        .unwrap();
+    page_response(app, request).await
 }
 
 #[tokio::test]
@@ -856,6 +959,7 @@ async fn verified_accounts_change_username_and_confirm_new_email() {
     }
     // A reset requested now goes to the current address; confirming a change revokes it.
     let forgot = json!({"action":"forgot_password","email":"old@example.com"});
+    sql(&db, COOLDOWN);
     call(&app, forgot, None, StatusCode::OK).await;
     let reset = code(&db, "reset");
     let pending = call(
@@ -884,6 +988,20 @@ async fn verified_accounts_change_username_and_confirm_new_email() {
     // Resending issues a new link to the pending address only.
     let second = email_change_link(&db);
     let resend = json!({"action":"send_verification"});
+    // Within a minute of the last mail to that address, nothing is replaced.
+    let refused = call(
+        &app,
+        resend.clone(),
+        Some(&session),
+        StatusCode::TOO_MANY_REQUESTS,
+    )
+    .await;
+    assert_eq!(
+        refused["message"],
+        "An email was just sent to this address. Wait a minute, then try again"
+    );
+    assert_eq!(email_change_link(&db), second);
+    sql(&db, COOLDOWN);
     call(&app, resend, Some(&session), StatusCode::OK).await;
     let resent = email_change_link(&db);
     assert_ne!(second, resent);
@@ -918,7 +1036,23 @@ async fn verified_accounts_change_username_and_confirm_new_email() {
         StatusCode::OK,
     )
     .await;
-    let (status, html) = open_link(&app, &email_change_link(&db)).await;
+    // A fetch without Fetch Metadata (a scanner) changes nothing; the fallback
+    // form then confirms the change like the link itself.
+    let link = email_change_link(&db);
+    let (status, html) = link_request(&app, "GET", &link, &[]).await;
+    assert_eq!(status, StatusCode::OK);
+    assert!(html.contains("Confirm your email address"));
+    let current = call(
+        &app,
+        json!({"action":"current"}),
+        Some(&session),
+        StatusCode::OK,
+    )
+    .await;
+    assert_eq!(current["account"]["email"], "old@example.com");
+    assert_eq!(current["account"]["pending_email"], "final@example.com");
+    let token_value = link.split_once("token=").unwrap().1;
+    let (status, html) = submit_verification(&app, token_value).await;
     assert_eq!(status, StatusCode::OK);
     assert!(html.contains("Email address changed"));
     let current = call(
@@ -1125,6 +1259,7 @@ async fn accounts_sessions_recovery_and_deletion() {
         StatusCode::OK,
     )
     .await;
+    sql(&db, COOLDOWN);
     let existing = call(
         &app,
         json!({"action":"forgot_password","email":"alice@example.com"}),
@@ -1290,10 +1425,12 @@ async fn oauth_cancellation_expiry_and_callback_replay() {
     let app = api::router(Some(db.pool.clone()), vec![]);
     let state = "local-test-state";
     let ticket = URL_SAFE_NO_PAD.encode([7u8; 32]);
+    // The browser attempt's cookie secret, as `google_start` would have set it.
+    let browser = URL_SAFE_NO_PAD.encode([9u8; 32]);
     let digest = |s: &str| URL_SAFE_NO_PAD.encode(Sha256::digest(s.as_bytes()));
     let insert = || {
-        diesel::sql_query("INSERT INTO oauth_attempts(state_hash,ticket_hash,verifier,nonce,purpose,device) VALUES($1,$2,'test-verifier','test-nonce','login','test')")
-        .bind::<Text,_>(digest(state)).bind::<Text,_>(digest(&ticket)).execute(&mut db.pool.get().unwrap()).unwrap()
+        diesel::sql_query("INSERT INTO oauth_attempts(state_hash,ticket_hash,verifier,nonce,purpose,device,browser_hash) VALUES($1,$2,'test-verifier','test-nonce','login','test',$3)")
+        .bind::<Text,_>(digest(state)).bind::<Text,_>(digest(&ticket)).bind::<Text,_>(digest(&browser)).execute(&mut db.pool.get().unwrap()).unwrap()
     };
     insert();
     call(
@@ -1308,13 +1445,19 @@ async fn oauth_cancellation_expiry_and_callback_replay() {
             .uri(format!(
                 "{GOOGLE_CALLBACK_PATH}?state={state}&error=access_denied"
             ))
+            .header(
+                "cookie",
+                format!("__Host-thiscord_google={browser}; __Host-thiscord_session=x"),
+            )
             .body(Body::empty())
             .unwrap()
     };
-    assert_eq!(
-        app.clone().oneshot(callback()).await.unwrap().status(),
-        StatusCode::OK
-    );
+    let response = app.clone().oneshot(callback()).await.unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    // The consumed attempt cookie is cleared; the session cookie is untouched.
+    let cleared = response.headers()["set-cookie"].to_str().unwrap();
+    assert!(cleared.starts_with("__Host-thiscord_google=; Max-Age=0;"));
+    assert_eq!(response.headers()["cache-control"], "no-store");
     assert_eq!(
         app.clone().oneshot(callback()).await.unwrap().status(),
         StatusCode::UNAUTHORIZED
@@ -1356,4 +1499,360 @@ async fn oauth_cancellation_expiry_and_callback_replay() {
         StatusCode::UNAUTHORIZED,
     )
     .await;
+}
+
+#[tokio::test]
+#[ignore = "requires TEST_DATABASE_URL; CI runs with --include-ignored"]
+async fn google_attempts_refuse_other_browsers_and_ticket_only_desktop_completion() {
+    let _fixture = FIXTURES.acquire().await.unwrap();
+    use base64::{Engine, engine::general_purpose::URL_SAFE_NO_PAD};
+    use sha2::{Digest, Sha256};
+    let db = database();
+    let app = api::router(Some(db.pool.clone()), vec![]);
+    let digest = |s: &str| URL_SAFE_NO_PAD.encode(Sha256::digest(s.as_bytes()));
+    let random = || URL_SAFE_NO_PAD.encode(Uuid::new_v4().as_bytes().repeat(2));
+    // Browser attempts: a callback from a browser without the attempt's cookie (the
+    // victim of a forwarded Google link), or with another attempt's cookie, is
+    // refused with a clear page and fails the attempt; nothing reaches Google.
+    for cookie in [None, Some(format!("__Host-thiscord_google={}", random()))] {
+        let (state, ticket) = (random(), random());
+        diesel::sql_query("INSERT INTO oauth_attempts(state_hash,ticket_hash,verifier,nonce,purpose,device,browser_hash) VALUES($1,$2,'v','n','login','test',$3)")
+            .bind::<Text,_>(digest(&state)).bind::<Text,_>(digest(&ticket)).bind::<Text,_>(digest(&random()))
+            .execute(&mut db.pool.get().unwrap()).unwrap();
+        let mut request =
+            Request::builder().uri(format!("{GOOGLE_CALLBACK_PATH}?state={state}&code=c"));
+        if let Some(cookie) = cookie {
+            request = request.header("cookie", cookie);
+        }
+        let response = app
+            .clone()
+            .oneshot(request.body(Body::empty()).unwrap())
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::FORBIDDEN);
+        assert!(response.headers().get("set-cookie").is_none());
+        assert_eq!(response.headers()["cache-control"], "no-store");
+        let body = to_bytes(response.into_body(), 4096).await.unwrap();
+        assert!(String::from_utf8_lossy(&body).contains("not started in this browser"));
+        let body = call(
+            &app,
+            json!({"action":"google_complete","ticket":ticket}),
+            None,
+            StatusCode::BAD_REQUEST,
+        )
+        .await;
+        assert!(
+            body["message"]
+                .as_str()
+                .unwrap()
+                .starts_with("Google sign-in failed")
+        );
+    }
+
+    // Desktop attempt made ready by its callback: the released 0.1.63 payload
+    // (ticket only) parses, is told to update, and does not consume the attempt.
+    let (ticket, completion) = (random(), random());
+    diesel::sql_query("INSERT INTO oauth_attempts(state_hash,ticket_hash,verifier,nonce,purpose,device,callback,status,subject,email,completion_hash) VALUES($1,$2,'','','login','test','http://127.0.0.1:54321/thiscord/x','ready','google-desktop','google-desktop@example.com',$3)")
+        .bind::<Text,_>(digest(&random())).bind::<Text,_>(digest(&ticket)).bind::<Text,_>(digest(&completion))
+        .execute(&mut db.pool.get().unwrap()).unwrap();
+    let body = call(
+        &app,
+        json!({"action":"google_complete","ticket":ticket}),
+        None,
+        StatusCode::BAD_REQUEST,
+    )
+    .await;
+    assert_eq!(body["code"], "validation_failed");
+    assert_eq!(body["message"], "Check for an update first");
+    call(
+        &app,
+        json!({"action":"google_complete","ticket":ticket,"completion":random()}),
+        None,
+        StatusCode::UNAUTHORIZED,
+    )
+    .await;
+    let session = call(
+        &app,
+        json!({"action":"google_complete","ticket":ticket,"completion":completion}),
+        None,
+        StatusCode::OK,
+    )
+    .await;
+    assert_eq!(session["result"], "session");
+    call(
+        &app,
+        json!({"action":"google_complete","ticket":ticket,"completion":completion}),
+        None,
+        StatusCode::UNAUTHORIZED,
+    )
+    .await;
+}
+
+#[tokio::test]
+#[ignore = "requires TEST_DATABASE_URL; CI runs with --include-ignored"]
+async fn reauthentication_is_limited_per_account() {
+    let _fixture = FIXTURES.acquire().await.unwrap();
+    let db = database();
+    let app = api::router(Some(db.pool.clone()), vec![]);
+    let register = |name: &str| json!({"action":"register","username":name,"email":format!("{name}@example.com"),"password":"correct horse battery","device":"test"});
+    let stolen = token(&call(&app, register("alice"), None, StatusCode::OK).await);
+    let other_device =
+        token(&call(&app, login("correct horse battery"), None, StatusCode::OK).await);
+    let bystander = token(&call(&app, register("bob"), None, StatusCode::OK).await);
+    let reauthenticate = |password: &str| json!({"action":"reauthenticate","password":password});
+    // `call` gives every request its own address, so only the account key applies.
+    for _ in 0..6 {
+        call(
+            &app,
+            reauthenticate("guessed password"),
+            Some(&stolen),
+            StatusCode::UNAUTHORIZED,
+        )
+        .await;
+    }
+    call(
+        &app,
+        reauthenticate("guessed password"),
+        Some(&stolen),
+        StatusCode::TOO_MANY_REQUESTS,
+    )
+    .await;
+    // The budget belongs to the account, not the session, and refuses before
+    // the password is checked.
+    call(
+        &app,
+        reauthenticate("correct horse battery"),
+        Some(&other_device),
+        StatusCode::TOO_MANY_REQUESTS,
+    )
+    .await;
+    call(
+        &app,
+        reauthenticate("correct horse battery"),
+        Some(&bystander),
+        StatusCode::OK,
+    )
+    .await;
+    // Other commands keep their own budgets.
+    call(
+        &app,
+        json!({"action":"current"}),
+        Some(&stolen),
+        StatusCode::OK,
+    )
+    .await;
+    // An exhausted budget does not hide a replayed rotated token: it still
+    // revokes its session instead of returning 429.
+    let rotated = token(
+        &call(
+            &app,
+            json!({"action":"rotate"}),
+            Some(&other_device),
+            StatusCode::OK,
+        )
+        .await,
+    );
+    call(
+        &app,
+        reauthenticate("guessed password"),
+        Some(&other_device),
+        StatusCode::UNAUTHORIZED,
+    )
+    .await;
+    call(
+        &app,
+        json!({"action":"current"}),
+        Some(&rotated),
+        StatusCode::UNAUTHORIZED,
+    )
+    .await;
+}
+
+#[tokio::test]
+#[ignore = "requires TEST_DATABASE_URL; CI runs with --include-ignored"]
+async fn account_mail_is_limited_per_recipient_inbox() {
+    let _fixture = FIXTURES.acquire().await.unwrap();
+    let db = database();
+    let app = api::router(Some(db.pool.clone()), vec![]);
+    let password = "a long test password";
+    let register = |username: &str, email: &str| json!({"action":"register","username":username,"email":email,"password":password,"device":"test"});
+    let resend = json!({"action":"send_verification"});
+    let just_sent = "An email was just sent to this address. Wait a minute, then try again";
+    let inbox = "inbox.owner@gmail.com";
+    let queued = |purpose: &str| {
+        count(
+            &db,
+            &format!(
+                "SELECT count(*) AS count FROM mail_outbox WHERE purpose='{purpose}' AND recipient='{inbox}'"
+            ),
+        )
+    };
+    // Registered first, so the owner's mail is always the newest.
+    let other = token(
+        &call(
+            &app,
+            register("inbox_other", "other.inbox@example.com"),
+            None,
+            StatusCode::OK,
+        )
+        .await,
+    );
+    let owner = token(&call(&app, register("inbox_owner", inbox), None, StatusCode::OK).await);
+    let first = code(&db, "verify");
+    // A resend within a minute is refused and keeps the first link working.
+    let refused = call(
+        &app,
+        resend.clone(),
+        Some(&owner),
+        StatusCode::TOO_MANY_REQUESTS,
+    )
+    .await;
+    assert_eq!(refused["message"], just_sent);
+    assert_eq!(code(&db, "verify"), first);
+    assert_eq!(queued("verify"), 1);
+    // After the minute, a resend withdraws the unsent earlier mail and its link.
+    sql(
+        &db,
+        "UPDATE mail_recipient_limits SET last_sent_at=now()-interval '61 seconds'",
+    );
+    call(&app, resend.clone(), Some(&owner), StatusCode::OK).await;
+    assert_eq!(queued("verify"), 1);
+    let second = code(&db, "verify");
+    assert_ne!(second, first);
+    call(
+        &app,
+        json!({"action":"verify_email","code":first}),
+        None,
+        StatusCode::UNAUTHORIZED,
+    )
+    .await;
+
+    // The budget belongs to the inbox, not to the account or requester: another
+    // account cannot mail an alias of the same Gmail inbox either.
+    call(
+        &app,
+        json!({"action":"reauthenticate","password":password}),
+        Some(&other),
+        StatusCode::OK,
+    )
+    .await;
+    for alias in [
+        "InboxOwner+promo@gmail.com",
+        "i.n.b.o.x.owner@googlemail.com",
+    ] {
+        let change = json!({"action":"change_email","email":alias});
+        let refused = call(&app, change, Some(&other), StatusCode::TOO_MANY_REQUESTS).await;
+        assert_eq!(refused["message"], just_sent);
+    }
+    // A refused change rolls back entirely.
+    let current = call(
+        &app,
+        json!({"action":"current"}),
+        Some(&other),
+        StatusCode::OK,
+    )
+    .await;
+    assert_eq!(current["account"]["email"], "other.inbox@example.com");
+
+    // Five an hour: after the fifth, mail waits for the hour to pass.
+    sql(
+        &db,
+        "UPDATE mail_recipient_limits SET sent=5, last_sent_at=now()-interval '61 seconds'",
+    );
+    let refused = call(
+        &app,
+        resend.clone(),
+        Some(&owner),
+        StatusCode::TOO_MANY_REQUESTS,
+    )
+    .await;
+    assert_eq!(
+        refused["message"],
+        "Too many emails were sent to this address. Try again later"
+    );
+    assert_eq!(code(&db, "verify"), second);
+    sql(
+        &db,
+        "UPDATE mail_recipient_limits SET window_start=now()-interval '61 minutes'",
+    );
+    call(&app, resend, Some(&owner), StatusCode::OK).await;
+    let verify = json!({"action":"verify_email","code":code(&db, "verify")});
+    call(&app, verify, None, StatusCode::OK).await;
+
+    // Password reset: inside the cooldown nothing is sent and the victim's code is
+    // not replaced, and the answer matches the one for an address without an account.
+    sql(&db, COOLDOWN);
+    let forgot = json!({"action":"forgot_password","email":inbox});
+    let sent = call(&app, forgot.clone(), None, StatusCode::OK).await;
+    let reset = code(&db, "reset");
+    let throttled = call(&app, forgot, None, StatusCode::OK).await;
+    let absent = json!({"action":"forgot_password","email":"nobody@example.com"});
+    let absent = call(&app, absent, None, StatusCode::OK).await;
+    assert_eq!(sent, throttled);
+    assert_eq!(throttled, absent);
+    assert_eq!(queued("reset"), 1);
+    assert_eq!(code(&db, "reset"), reset);
+    let reset = json!({"action":"reset_password","code":reset,"password":"another long password"});
+    call(&app, reset, None, StatusCode::OK).await;
+    // Only hashes of the addresses are kept.
+    assert_eq!(
+        count(
+            &db,
+            "SELECT count(*) AS count FROM mail_recipient_limits WHERE recipient_hash LIKE '%@%'"
+        ),
+        0
+    );
+}
+
+#[tokio::test]
+#[ignore = "requires TEST_DATABASE_URL; CI runs with --include-ignored"]
+async fn password_reset_cancels_a_pending_email_change() {
+    let _fixture = FIXTURES.acquire().await.unwrap();
+    let db = database();
+    let app = api::router(Some(db.pool.clone()), vec![]);
+    let password = "a long test password";
+    let session = token(&call(&app, json!({"action":"register","username":"reset_change","email":"reset.change@example.com","password":password,"device":"test"}), None, StatusCode::OK).await);
+    let verify = json!({"action":"verify_email","code":code(&db, "verify")});
+    call(&app, verify, None, StatusCode::OK).await;
+    // Someone holding a session starts a change to an address they control.
+    call(
+        &app,
+        json!({"action":"reauthenticate","password":password}),
+        Some(&session),
+        StatusCode::OK,
+    )
+    .await;
+    let change = json!({"action":"change_email","email":"pending.change@example.com"});
+    call(&app, change, Some(&session), StatusCode::OK).await;
+    let link = email_change_link(&db);
+    // The owner recovers the account through the verified address.
+    sql(&db, COOLDOWN);
+    let forgot = json!({"action":"forgot_password","email":"reset.change@example.com"});
+    call(&app, forgot, None, StatusCode::OK).await;
+    let reset = json!({"action":"reset_password","code":code(&db, "reset"),"password":"recovered password"});
+    call(&app, reset, None, StatusCode::OK).await;
+    // The change started before the reset can no longer be confirmed or sent.
+    assert_eq!(open_link(&app, &link).await.0, StatusCode::BAD_REQUEST);
+    let token_value = link.split_once("token=").unwrap().1;
+    assert_eq!(
+        submit_verification(&app, token_value).await.0,
+        StatusCode::BAD_REQUEST
+    );
+    assert_eq!(
+        count(
+            &db,
+            "SELECT count(*) AS count FROM mail_outbox WHERE recipient='pending.change@example.com'"
+        ),
+        0
+    );
+    let session = token(&call(&app, json!({"action":"login","login":"reset.change@example.com","password":"recovered password","device":"test"}), None, StatusCode::OK).await);
+    let current = call(
+        &app,
+        json!({"action":"current"}),
+        Some(&session),
+        StatusCode::OK,
+    )
+    .await;
+    assert_eq!(current["account"]["email"], "reset.change@example.com");
+    assert!(current["account"].get("pending_email").is_none());
 }

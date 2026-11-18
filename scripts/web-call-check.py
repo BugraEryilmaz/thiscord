@@ -220,6 +220,11 @@ def setup():
                 "change": {"action": "add_member", "username": "hcbob"}}, a)
     except urllib.error.HTTPError:
         pass  # already a member
+    try:
+        # Adding by username sends an invitation; bob accepts it.
+        api(P, {"action": "accept_guild_invitation", "guild_id": guild}, tokens["hcbob"])
+    except urllib.error.HTTPError:
+        pass  # already a member, nothing pending
     return guild, voice[0]["id"]
 
 

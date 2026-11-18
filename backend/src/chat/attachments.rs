@@ -102,7 +102,7 @@ async fn upload(
         tokio::task::spawn_blocking(move || {
             let _guard = guard;
             store::checked(&p, &t, u.guild_id, Some(u.channel_id), Some(Permission::SendMessages),
-                |c, actor, _| quota(c, actor, 0))
+                |c, actor, _| { quota(c, actor, 0)?; published(c, actor, u.guild_id, 1) })
         }).await.map_err(|_| Failure::Unavailable)??;
         let bytes = tokio::time::timeout(Duration::from_secs(30), to_bytes(request.into_body(), limit))
             .await.map_err(|_| Failure::Invalid("Attachment upload timed out"))?
@@ -113,10 +113,13 @@ async fn upload(
             // Parse before opening the transaction; no connection is held meanwhile.
             let voice = voice_metadata(&upload, &bytes)?;
             store::checked(&pool, &token, upload.guild_id, Some(upload.channel_id), Some(Permission::SendMessages), |c, actor, _| {
-                // Serialize account-wide quota checks across channels without upgrading account locks.
-                execute(c, "SELECT pg_advisory_xact_lock(hashtextextended($1, 0))", &[&format!("attachment:{actor}")])?;
+                // Take the channel's foreign-key lock before the account lock, as
+                // sends do (channel FOR UPDATE, then the account lock in `attach`).
+                execute(c, "SELECT id FROM channels WHERE guild_id=$1::uuid AND id=$2::uuid FOR KEY SHARE", &[&upload.guild_id.to_string(), &upload.channel_id.to_string()])?;
+                lock_owner(c, actor)?;
                 cleanup(c)?;
                 quota(c, actor, bytes.len())?;
+                published(c, actor, upload.guild_id, bytes.len() as u64)?;
                 let attachment = ChatAttachment { id: AttachmentId::from_uuid(Uuid::new_v4()),
                     filename: if voice.is_some() { VOICE_MESSAGE_FILENAME.into() } else { upload.filename },
                     content_type: classify(&bytes).into(), size_bytes: bytes.len() as u64, voice, spoiler: false };
@@ -151,6 +154,40 @@ fn quota(c: &mut PgConnection, actor: AccountId, incoming: usize) -> Result<(), 
             > MAX_STAGED_ATTACHMENT_BYTES as u64
     {
         return Err(Failure::Limited);
+    }
+    Ok(())
+}
+
+/// Serializes one account's staged and published quota checks across channels
+/// and guilds without upgrading account row locks. Callers lock the channel first.
+fn lock_owner(c: &mut PgConnection, actor: AccountId) -> Result<(), Failure> {
+    execute(
+        c,
+        "SELECT pg_advisory_xact_lock(hashtextextended($1, 0))",
+        &[&format!("attachment:{actor}")],
+    )?;
+    Ok(())
+}
+
+const SERVER_STORAGE_FULL: &str = "Your attachment storage on this server is full (2 GiB). Delete older messages with attachments to free space";
+
+/// Sent attachments count against their owner in that guild until their message
+/// is deleted. Index-only over `attachments_published_owner`; never reads `data`.
+fn published(
+    c: &mut PgConnection,
+    actor: AccountId,
+    guild: GuildId,
+    incoming: u64,
+) -> Result<(), Failure> {
+    let total: i64 = query(
+        c,
+        "SELECT to_jsonb(COALESCE(sum(size_bytes),0)) AS data FROM attachments WHERE owner_id=$1::uuid AND guild_id=$2::uuid AND message_id IS NOT NULL",
+        &[&actor.to_string(), &guild.to_string()],
+    )?
+    .pop()
+    .ok_or(Failure::Unavailable)?;
+    if (total.max(0) as u64).saturating_add(incoming) > MAX_PUBLISHED_ATTACHMENT_BYTES {
+        return Err(Failure::Capacity(SERVER_STORAGE_FULL));
     }
     Ok(())
 }
@@ -248,6 +285,11 @@ pub(super) fn attach(
     ids: &[AttachmentId],
     spoilers: &[AttachmentId],
 ) -> Result<(), Failure> {
+    if ids.is_empty() {
+        return Ok(());
+    }
+    // The send already holds the channel FOR UPDATE; the account lock comes second.
+    lock_owner(c, actor)?;
     static CLAIM: OnceLock<String> = OnceLock::new();
     let sql = CLAIM.get_or_init(|| format!("UPDATE attachments SET message_id=$1::uuid,spoiler=$6::boolean WHERE id=$2::uuid AND owner_id=$3::uuid AND guild_id=$4::uuid AND channel_id=$5::uuid AND message_id IS NULL AND expires_at>now() RETURNING {CLAIMED} AS data"));
     let mut metadata = Vec::<ChatAttachment>::new();
@@ -266,16 +308,16 @@ pub(super) fn attach(
         )?;
         metadata.push(rows.pop().ok_or(Failure::Forbidden)?);
     }
-    if !metadata.is_empty() {
-        execute(
-            c,
-            "UPDATE messages SET attachments=$2::jsonb WHERE id=$1::uuid",
-            &[
-                &message.to_string(),
-                &serde_json::to_string(&metadata).map_err(|_| Failure::Unavailable)?,
-            ],
-        )?;
-    }
+    // Authoritative: the total now includes this send; failure rolls it back.
+    published(c, actor, guild, 0)?;
+    execute(
+        c,
+        "UPDATE messages SET attachments=$2::jsonb WHERE id=$1::uuid",
+        &[
+            &message.to_string(),
+            &serde_json::to_string(&metadata).map_err(|_| Failure::Unavailable)?,
+        ],
+    )?;
     Ok(())
 }
 

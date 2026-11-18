@@ -1,0 +1,2 @@
+DROP INDEX direct_attachments_published_owner;
+DROP INDEX attachments_published_owner;

@@ -225,8 +225,79 @@ On the production layout (both vCPUs shared with PostgreSQL and the OS):
 
 Both variables are validated at startup (`THISCORD_MAX_SOCKETS` 16–4096,
 `THISCORD_MAX_VOICE_CONNECTIONS` 2–1024; see `backend/.env.example`).
-Connections beyond a limit get `rate_limited` before any database work, and
+Upgrades beyond a limit get `rate_limited` before any database work, and
 admitted users keep their capacity (the over-limit run above).
+
+### Admission limits
+
+Both limits count only **authenticated** connections. Every real-time upgrade
+(chat, friends, notifications, voice, scripting bots) first takes a slot from a
+separate pending budget, also capped per client address, and takes its main slot
+only once its first frame has authenticated (voice: once the join is authorized;
+a signaling resume inherits its media connection's slot). The pending slot is
+released then, or when the socket closes or misses the five-second first-frame
+deadline. One account holds a bounded number of main slots of each type. All of
+it is in memory (`backend/src/limits.rs`) and checked before database work.
+
+| Endpoint | Main slots | Pending, all addresses | Pending per address | Per account |
+| --- | --- | --- | --- | --- |
+| Chat, friends, notifications (each) | `THISCORD_MAX_SOCKETS` (512) | 256 | 32 | 16 |
+| Voice signaling | `THISCORD_MAX_VOICE_CONNECTIONS` (96) | 64 | 16 | 8 |
+| Scripting-bot socket | 64 | 32 | 16 | 8 |
+
+Refusals: an upgrade over a pending cap, or arriving while every main slot is
+taken, gets HTTP 429. An authenticated socket that finds its account at the cap
+(or loses the race for the last main slot) is refused on the socket: chat, voice
+and bot sockets with a `rate_limited` error, friends and notification sockets by
+closing, as for a failed authentication. The app (desktop and web) retries each
+of these on its normal reconnect schedule and never signs out; the scripting-bot
+library returns the refusal to its caller, which owns any retry. A main limit no
+larger than the per-account cap (a small `THISCORD_MAX_*` value) lowers that cap
+to one less than the limit, so a single account cannot fill the pool.
+
+How the numbers were chosen:
+
+- **Pending lasts one round trip plus one authentication.** Every client sends its
+  credential frame as soon as the socket opens: the app (desktop and web, where
+  the cookie supplies the empty frame token), voice joins and resumes, the bot
+  library and the load generators. The pending phase is the client's round trip
+  plus the session check; notification sockets additionally queue for one of
+  eight authentication workers during a reconnect storm.
+- **Reconnect storms behind one address pass.** Production reaches the backend
+  through Cloudflare, and until `TRUSTED_PROXY_CIDRS` is set every client behind
+  an edge address shares one key ([vps.md](vps.md)). After a restart, clients
+  reconnect spread over one to two seconds: chat and voice after a per-connection
+  hint of 1.5–3 s, friends and notifications 1–1.5 s after the drop
+  ([restarts.md](restarts.md)).
+  At roughly 0.2 s pending each, 32 pending per address carries about 150 clients
+  per socket type reconnecting in the same second behind one address, and 16
+  voice about 80 rejoins. Anything beyond that gets a 429 and retries one to two
+  seconds later, so a larger storm is spread out rather than failed.
+- **An idle flood does not.** One address holds at most 32 pending sockets per
+  type (16 voice), each for at most five seconds, and never a main slot. Filling
+  a whole pending budget takes at least eight addresses (four for voice); that
+  delays new connections while it lasts but never touches authenticated ones.
+  Without trusted proxies, a flood through Cloudflare shares its edge address's
+  budget with legitimate users there, which is another reason to set it.
+- **Per-account caps fit real use.** The app opens one chat, friends and
+  notification socket per desktop window or browser tab (tabs do not share), and
+  a dropped connection can linger server-side for up to 35 s next to its
+  replacement: 16 per type covers several devices and tabs with that overlap.
+  Voice is one call per app or tab; joining a channel again replaces the old
+  connection in place (`voice/membership.rs`), but it keeps its slot until it
+  closes, and each channel is a separate connection, so 8 leaves room for several
+  devices plus replacements. Owner voice test bots use internal sockets and hold
+  no slot; scripting bots are separate accounts. Voice joins are also limited to
+  six per account per minute, so even the cap takes over a minute to reach.
+- **The first-frame deadline stays at five seconds.** Clients do send promptly,
+  but the deadline also covers a slow link's handshake round trip, and shortening
+  it would only raise the upgrade rate an attacker needs in proportion; the
+  per-address and pending caps already bound what idle sockets can hold.
+
+The load generators stay inside these caps from one address without overrides:
+`chat_load` connects at most 16 users at a time and `voice_load` four, each user
+with its own account, and `load-bench.py --kind mixed` reuses accounts only
+across different socket types, which are counted separately.
 
 ## Caveats
 

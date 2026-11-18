@@ -4,6 +4,7 @@ pub mod auth;
 #[path = "../../bots/server/mod.rs"]
 pub mod bots;
 pub mod chat;
+pub mod client_ip;
 pub mod db;
 pub mod friends;
 pub mod limits;

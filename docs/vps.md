@@ -2,9 +2,15 @@
 
 The backend is deployed through `ssh vps` to Ubuntu 26.04 at `57.129.178.14`.
 The public origin remains `https://thiscord.com.tr`; desktop clients and Google
-OAuth callback URLs do not need changing. Cloudflare proxies this hostname, with
-A origin `57.129.178.14` and AAAA origin `2001:41d0:801:2000::1151`; use SSL/TLS
-Full (strict). The API readiness check passes through Cloudflare.
+OAuth callback URLs do not need changing. In the Cloudflare dashboard this
+hostname's AAAA record (origin `2001:41d0:801:2000::1151`) is proxied and its A
+record (origin `57.129.178.14`) is DNS-only. Cloudflare treats a hostname with any
+proxied A/AAAA record as proxied
+([mixed records](https://developers.cloudflare.com/dns/proxy-status/#mix-proxied-and-unproxied)),
+and public DNS returned only Cloudflare addresses for both families on 2026-11-18.
+Clients therefore arrive through Cloudflare over either family, which may use
+either origin address. Use SSL/TLS Full (strict). The API readiness check passes
+through Cloudflare.
 STUN/TURN must use a separate `turn.thiscord.com.tr` hostname with the same A/AAAA
 addresses and **DNS-only** records. Cloudflare's ordinary HTTP proxy does not
 forward TURN UDP traffic. This exposes the VPS address; media traffic relies on
@@ -62,6 +68,33 @@ UFW allows SSH TCP 22, ACME HTTP TCP 80, backend HTTPS TCP 443, STUN/TURN UDP/TC
 3478 and UDP 32768–60999. The last range covers the OS-selected ephemeral SFU
 ports and coturn's 49160–49259 relay range. Do not expose PostgreSQL 5432.
 If the kernel ephemeral port range changes, review the media firewall rules.
+
+## Client addresses for rate limits
+
+Account, verification and reset rate limits, huddle changes and unauthenticated
+real-time upgrades ([admission limits](load-benchmarks.md#admission-limits))
+count per client address ([accounts.md](accounts.md)). Proxied clients arrive from Cloudflare addresses,
+so set Cloudflare's published ranges (https://www.cloudflare.com/ips/,
+checked 2026-11-18) in `/etc/thiscord/backend.env` and restart the backend:
+
+```dotenv
+TRUSTED_PROXY_CIDRS=173.245.48.0/20,103.21.244.0/22,103.22.200.0/22,103.31.4.0/22,141.101.64.0/18,108.162.192.0/18,190.93.240.0/20,188.114.96.0/20,197.234.240.0/22,198.41.128.0/17,162.158.0.0/15,104.16.0.0/13,104.24.0.0/14,172.64.0.0/13,131.0.72.0/22,2400:cb00::/32,2606:4700::/32,2803:f800::/32,2405:b500::/32,2405:8100::/32,2a06:98c0::/29,2c0f:f248::/32
+```
+
+Without it, every client behind one Cloudflare egress address shares one budget,
+and a few clients can exhaust sign-in and session restore for the rest. Both
+families are needed because Cloudflare may reach either origin address. Update
+the list when Cloudflare changes its ranges. Leave Cloudflare's Pseudo IPv4
+setting off so the header carries the client's real address.
+
+Recommended, not yet applied: limit TCP 443 in UFW to Cloudflare's ranges, at
+least for IPv6. Both origin addresses are public, and direct connections bypass
+Cloudflare; they are counted per IPv4 address or IPv6 /64 but avoid its
+protection, and an IPv6 host can rotate through many /64s more cheaply than
+through IPv4 addresses. Keep port 80 reachable for ACME (below) and the TURN
+ports unchanged. Cloudflare ranges are shared by all its customers; only
+zone-level or per-hostname Authenticated Origin Pulls with a custom certificate,
+enforced by the origin, would restrict trusted peers to this zone's proxy.
 
 ## Account email settings
 

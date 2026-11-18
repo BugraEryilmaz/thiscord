@@ -333,6 +333,13 @@ fn cancel_google(ui: Ui) {
         }
     });
 }
+/// What the desktop loopback received (`native_account::Received`): the
+/// completion secret, or none for a failure notification. Kept only in memory
+/// for this attempt; deliberately not `Debug`.
+#[derive(serde::Deserialize)]
+struct LoopbackReceived {
+    completion: Option<String>,
+}
 fn google(ui: Ui, purpose: GooglePurpose) {
     if ui.busy.get_untracked() {
         return;
@@ -377,14 +384,33 @@ fn google(ui: Ui, purpose: GooglePurpose) {
             }
             ui.status
                 .set("Finish signing in with Google in your browser".into());
+            // A desktop attempt redeems only with the one-time completion secret
+            // that the backend sends to this app's loopback after the Google step,
+            // so it waits for the loopback before asking. Browser attempts are
+            // bound by their cookie and poll with the ticket alone.
+            let mut notified = !client::desktop();
+            let mut completion = None;
             for _ in 0..150 {
                 gloo_timers::future::TimeoutFuture::new(2000).await;
                 if ui.ticket.get_untracked().as_deref() != Some(&ticket) {
                     return Ok(());
                 }
+                if !notified {
+                    let Some(received) = client::native::<Option<LoopbackReceived>>(
+                        "google_callback",
+                        serde_json::json!({}),
+                    )
+                    .await?
+                    else {
+                        continue;
+                    };
+                    notified = true;
+                    completion = received.completion;
+                }
                 let response = client::request(
                     &AccountRequest::GoogleComplete {
                         ticket: ticket.clone(),
+                        completion: completion.clone(),
                     },
                     None,
                 )

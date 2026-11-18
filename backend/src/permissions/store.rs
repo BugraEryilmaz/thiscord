@@ -332,8 +332,9 @@ pub(super) fn dispatch(
     };
     let mut c = connection(pool)?;
     let scope = match &command {
+        // Inviting grants nothing until the invitee accepts (a Member scope then).
         PermissionRequest::Change {
-            change: GuildChange::SetNickname { .. },
+            change: GuildChange::SetNickname { .. } | GuildChange::AddMember { .. },
             ..
         } => None,
         PermissionRequest::Change {
@@ -356,11 +357,22 @@ pub(super) fn dispatch(
             organization::invite_guild(&mut c, code)?,
             session.account_id,
         )),
-        PermissionRequest::JoinGuild { guild_id, .. } => {
+        PermissionRequest::JoinGuild { guild_id, .. }
+        | PermissionRequest::AcceptGuildInvitation { guild_id } => {
             Some(crate::access::Scope::Member(*guild_id, session.account_id))
         }
         _ => None,
     };
+    // Friends sockets list pending server invitations; wake the invitee's (on
+    // creation) or the caller's other devices (on joins and responses) after commit.
+    let mut invited = None;
+    let joins = matches!(
+        command,
+        PermissionRequest::JoinGuild { .. }
+            | PermissionRequest::AcceptInvite { .. }
+            | PermissionRequest::AcceptGuildInvitation { .. }
+            | PermissionRequest::DeclineGuildInvitation { .. }
+    );
     let mut mutations = Vec::new();
     let scopes = match &command {
         PermissionRequest::SetInstanceAdmin { account_id, .. }
@@ -485,6 +497,21 @@ pub(super) fn dispatch(
                 Ok(PermissionResponse::Instance { access: public_instance(c,actor)? })
             }
             PermissionRequest::AcceptInvite { code } => organization::accept(c,actor,&code),
+            PermissionRequest::AcceptGuildInvitation { guild_id } => {
+                verified(c,actor)?;
+                execute(c,"SELECT id FROM guilds WHERE id=$1::uuid FOR UPDATE", &[&guild_id.to_string()])?;
+                // Only the addressed account's own unexpired invitation; never one hidden by a block.
+                // The row lock orders this against a concurrent decline.
+                require(query::<bool>(c,"SELECT to_jsonb(TRUE) AS data FROM guild_invitations v WHERE v.guild_id=$1::uuid AND v.account_id=$2::uuid AND NOT EXISTS(SELECT 1 FROM account_blocks b WHERE (b.blocker_id=v.account_id AND b.blocked_id=v.invited_by) OR (b.blocker_id=v.invited_by AND b.blocked_id=v.account_id)) AND v.created_at>statement_timestamp()-make_interval(hours=>$3::integer) FOR UPDATE OF v", &[&guild_id.to_string(),&actor.to_string(),&INVITATION_HOURS.to_string()])? == [true])?;
+                let state=load(c,guild_id)?;
+                not_banned(c,guild_id,actor)?;
+                join(c,&state,actor)?;
+                Ok(PermissionResponse::Joined {guild:load(c,guild_id)?.guild})
+            }
+            PermissionRequest::DeclineGuildInvitation { guild_id } => {
+                execute(c,"DELETE FROM guild_invitations WHERE guild_id=$1::uuid AND account_id=$2::uuid", &[&guild_id.to_string(),&actor.to_string()])?;
+                Ok(PermissionResponse::Done)
+            }
             PermissionRequest::ListGuilds {} => Ok(PermissionResponse::Guilds { guilds: query(c,"SELECT to_jsonb(g)||jsonb_build_object('icon_id',(SELECT i.id FROM guild_icons i WHERE i.guild_id=g.id)) AS data FROM guilds g JOIN guild_members m ON m.guild_id=g.id WHERE m.account_id=$1::uuid ORDER BY g.id", &[&actor.to_string()])? }),
             PermissionRequest::CreateGuild { name: value, password } => {
                 verified(c,actor)?;
@@ -511,11 +538,8 @@ pub(super) fn dispatch(
                 if !state.members.iter().any(|m|m.account_id==actor) {
                     let hash: Option<String>=query(c,"SELECT COALESCE(to_jsonb(password_hash),'null'::jsonb) AS data FROM guilds WHERE id=$1::uuid", &[&guild_id.to_string()])?.pop().ok_or(Failure::Forbidden)?;
                     if let Some(hash)=hash {require(PasswordHash::new(&hash).ok().is_some_and(|h|Argon2::default().verify_password(password.as_bytes(),&h).is_ok()))?;}
-                    let limits=capacity(c,state.guild.owner)?.limits;
-                    allocation(state.members.len() < limits.members as usize,"Server member limit reached for its owner's instance role")?;
-                    execute(c,"INSERT INTO guild_members(guild_id,account_id) VALUES($1::uuid,$2::uuid)", &[&guild_id.to_string(),&actor.to_string()])?;
-                    execute(c,"UPDATE guilds SET revision=revision+1 WHERE id=$1::uuid", &[&guild_id.to_string()])?;
                 }
+                join(c,&state,actor)?;
                 let guild=query(c,"SELECT to_jsonb(g)||jsonb_build_object('icon_id',(SELECT i.id FROM guild_icons i WHERE i.guild_id=g.id)) AS data FROM guilds g WHERE id=$1::uuid", &[&guild_id.to_string()])?.pop().ok_or(Failure::Forbidden)?;
                 Ok(PermissionResponse::Joined {guild})
             }
@@ -558,7 +582,7 @@ pub(super) fn dispatch(
                         if matches!(change,GuildChange::TransferOwner{..}|GuildChange::Delete {}) { auth::recent(&session)?; }
                         let moderation_change=organization::moderation_target(&change).is_some() && !matches!(change,GuildChange::RemoveMember {..});
                         let audit_change=change.clone();
-                        let gone=change_guild(c,&state,actor,change,set)?;
+                        let gone=change_guild(c,&state,actor,change,set,&mut invited)?;
                         if gone { return Ok(PermissionResponse::Done); }
                         organization::audit(c,&state,actor,&audit_change,&reason)?;
                         execute(c,"UPDATE guilds SET revision=revision+1 WHERE id=$1::uuid", &[&guild_id.to_string()])?;
@@ -585,6 +609,13 @@ pub(super) fn dispatch(
         change.finish(result.is_ok());
     }
     let result = crate::access::complete(result, &mut mutations);
+    if result.is_ok() {
+        crate::friends::changed(
+            invited
+                .into_iter()
+                .chain(joins.then_some(session.account_id)),
+        );
+    }
     if result.is_ok()
         && let Some(guild) = renamed
     {
@@ -599,12 +630,73 @@ pub(super) fn dispatch(
     result
 }
 
+/// A server invitation is outstanding for this many hours (7 days, independent
+/// of the session time zone) from `created_at`; expired ones cannot be listed
+/// or accepted and free their slot. Checks use the statement time, taken after
+/// any guild lock wait.
+const INVITATION_HOURS: u32 = 7 * 24;
+
+/// `account`'s acceptable pending server invitations, newest first: only the
+/// server's name/icon and the inviter's public identity. Invitations across a
+/// block in either direction (whenever it was placed), to a server that banned
+/// the account, or past [`INVITATION_HOURS`] are hidden.
+pub(crate) fn invitations(
+    c: &mut PgConnection,
+    account: AccountId,
+) -> Result<Vec<GuildInvitation>, Failure> {
+    query(
+        c,
+        "SELECT jsonb_strip_nulls(jsonb_build_object('guild_id',g.id,'guild_name',g.name,'guild_icon_id',(SELECT i.id FROM guild_icons i WHERE i.guild_id=g.id),'created_at',v.created_at))||jsonb_build_object('invited_by',CASE WHEN a.id IS NULL THEN NULL ELSE jsonb_strip_nulls(jsonb_build_object('id',a.id,'username',a.username,'display_name',a.display_name,'avatar_id',p.id)) END) AS data FROM guild_invitations v JOIN guilds g ON g.id=v.guild_id LEFT JOIN accounts a ON a.id=v.invited_by LEFT JOIN account_avatars p ON p.account_id=a.id WHERE v.account_id=$1::uuid AND NOT EXISTS(SELECT 1 FROM guild_moderation x WHERE x.guild_id=v.guild_id AND x.account_id=v.account_id AND x.banned) AND NOT EXISTS(SELECT 1 FROM account_blocks b WHERE (b.blocker_id=v.account_id AND b.blocked_id=v.invited_by) OR (b.blocker_id=v.invited_by AND b.blocked_id=v.account_id)) AND v.created_at>statement_timestamp()-make_interval(hours=>$3::integer) ORDER BY v.created_at DESC,v.guild_id LIMIT $2::integer",
+        &[
+            &account.to_string(),
+            &MAX_LISTED_GUILD_INVITATIONS.to_string(),
+            &INVITATION_HOURS.to_string(),
+        ],
+    )
+}
+/// Makes `actor` a member unless they already are: the one membership path for
+/// joining by ID, invite codes and accepted invitations. Capacity follows the
+/// owner's current instance role; callers check bans, while timeouts and
+/// server mutes/deafens deliberately survive a rejoin.
+pub(super) fn join(
+    c: &mut PgConnection,
+    state: &GuildState,
+    actor: AccountId,
+) -> Result<(), Failure> {
+    if state.members.iter().any(|m| m.account_id == actor) {
+        return Ok(());
+    }
+    let guild = state.guild.id.to_string();
+    allocation(
+        state.members.len() < capacity(c, state.guild.owner)?.limits.members as usize,
+        "Server member limit reached for its owner's instance role",
+    )?;
+    execute(
+        c,
+        "INSERT INTO guild_members(guild_id,account_id) VALUES($1::uuid,$2::uuid)",
+        &[&guild, &actor.to_string()],
+    )?;
+    // Joining by any path answers a pending invitation.
+    execute(
+        c,
+        "DELETE FROM guild_invitations WHERE guild_id=$1::uuid AND account_id=$2::uuid",
+        &[&guild, &actor.to_string()],
+    )?;
+    execute(
+        c,
+        "UPDATE guilds SET revision=revision+1 WHERE id=$1::uuid",
+        &[&guild],
+    )?;
+    Ok(())
+}
+
 fn change_guild(
     c: &mut PgConnection,
     state: &GuildState,
     actor: AccountId,
     change: GuildChange,
     set: u8,
+    invited: &mut Option<AccountId>,
 ) -> Result<bool, Failure> {
     let guild = state.guild.id.to_string();
     let permissions = effective(state, actor, None);
@@ -709,25 +801,57 @@ fn change_guild(
             return Ok(true);
         }
         GuildChange::AddMember { username } => {
+            // An invitation, not a membership: see `GuildInvitation`.
             need(Permission::ManageInvites)?;
-            let limits = capacity(c, state.guild.owner)?.limits;
-            allocation(
-                state.members.len() < limits.members as usize,
-                "Server member limit reached for its owner's instance role",
-            )?;
+            // The key-share lock orders the target before its invitation rows, as
+            // account deletion does, so pruning below cannot deadlock with it.
             let id: AccountId = query(
                 c,
-                "SELECT to_jsonb(id) AS data FROM accounts WHERE username=$1 AND email_verified",
+                "SELECT to_jsonb(id) AS data FROM accounts WHERE username=$1 AND email_verified FOR KEY SHARE",
                 &[&username.trim().to_ascii_lowercase()],
             )?
             .pop()
             .ok_or(Failure::Invalid("Verified account not found"))?;
+            // Members (including the actor) keep the former duplicate-membership error.
+            if state.members.iter().any(|m| m.account_id == id) {
+                return Err(Failure::Conflict);
+            }
             not_banned(c, state.guild.id, id)?;
+            let (guild_id, target, inviter) = (&guild, &id.to_string(), &actor.to_string());
+            let hours = &INVITATION_HOURS.to_string();
+            // Expired invitations are gone for good; drop this server's under its lock.
             execute(
                 c,
-                "INSERT INTO guild_members(guild_id,account_id) VALUES($1::uuid,$2::uuid)",
-                &[&guild, &id.to_string()],
+                "DELETE FROM guild_invitations WHERE guild_id=$1::uuid AND created_at<=statement_timestamp()-make_interval(hours=>$2::integer)",
+                &[guild_id, hours],
             )?;
+            // Repeats while outstanding keep the first invitation and its slot.
+            let outstanding: Vec<AccountId> = query(
+                c,
+                "SELECT to_jsonb(account_id) AS data FROM guild_invitations WHERE guild_id=$1::uuid",
+                &[guild_id],
+            )?;
+            if outstanding.contains(&id) {
+                return Ok(false);
+            }
+            // Members plus outstanding invitations stay within the member limit.
+            let limits = capacity(c, state.guild.owner)?.limits;
+            allocation(
+                state.members.len() + outstanding.len() < limits.members as usize,
+                "Server member limit reached for its owner's instance role",
+            )?;
+            // Stored even across a block in either direction, so the slot it takes
+            // and the response are identical and the inviter cannot learn of the
+            // block; the listing and acceptance hide such an invitation, and the
+            // blocked invitee is not woken for it.
+            execute(
+                c,
+                "INSERT INTO guild_invitations(guild_id,account_id,invited_by) VALUES($1::uuid,$2::uuid,$3::uuid)",
+                &[guild_id, target, inviter],
+            )?;
+            if query::<bool>(c, "SELECT to_jsonb(TRUE) AS data FROM account_blocks b WHERE (b.blocker_id=$1::uuid AND b.blocked_id=$2::uuid) OR (b.blocker_id=$2::uuid AND b.blocked_id=$1::uuid) LIMIT 1", &[target, inviter])?.is_empty() {
+                *invited = Some(id);
+            }
         }
         GuildChange::RemoveMember { account_id } => {
             need(Permission::KickMembers)?;

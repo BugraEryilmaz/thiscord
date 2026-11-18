@@ -57,6 +57,36 @@ and requires `Secure` and `Path=/`, so subdomains cannot set or read it. Never
 log cookie or token values. Keep `ALLOWED_ORIGINS` to trusted, exact origins:
 any listed origin can use a user's cookie.
 
+## Google attempt cookie
+
+A Google sign-in started without a desktop loopback callback (the web client,
+`/admin`, the browser preview) is bound to the browser that started it
+([accounts.md](accounts.md#attempt-binding)). `google_start` responds with
+`Set-Cookie: __Host-thiscord_google=<random 256-bit secret>; Max-Age=300; Path=/;
+HttpOnly; Secure; SameSite=Lax` (`cookie::issue_google_attempt`) and stores only
+the secret's hash on the attempt. The Google callback must present exactly one such
+cookie matching the attempt before it is processed; otherwise it answers `403`
+with a plain page saying the sign-in was not started in this browser and fails the
+attempt. A matching callback clears the cookie (`Max-Age=0`, same attributes).
+
+- **Why `Lax`.** Google returns to the callback with a cross-site top-level `GET`
+  navigation from `accounts.google.com`. Browsers withhold `SameSite=Strict`
+  cookies on such navigations (which is also why the session cookie never reaches
+  the callback) but send `Lax` ones. The cookie authorizes nothing by itself: it
+  only marks this browser as the one that started the attempt, and it is useless
+  without the ticket held by the page that started it.
+- **Scope.** It is set for any caller of `google_start` without a callback, not
+  only allowed origins, because it lands only in the caller's own browser; a
+  cross-origin page cannot read the ticket. Five minutes matches the attempt's
+  expiry. One cookie name serves one attempt at a time per browser: starting a
+  second Google sign-in replaces it, so the first one's callback is refused.
+- It is separate from `__Host-thiscord_session`: the session cookie rules (allowed
+  origins, `SameSite=Strict`, never readable by JavaScript) are unchanged, and the
+  cookie middleware never treats the attempt cookie as a credential.
+- The callback page is same-host with the API (`GOOGLE_REDIRECT_URL`), so the
+  browser must have started the sign-in on that host. Cookies ignore ports, but
+  `localhost` and `127.0.0.1` are different hosts.
+
 ## Hosting `/app`
 
 Build from `frontend/` with pinned Trunk 0.21.14 (same `index.html` as desktop
@@ -149,7 +179,11 @@ browser pages other than `/admin`; such pages call the same-origin API
   state, and the server clears the cookie.
 - Google sign-in starts as in the old browser preview: the page polls the ticket
   and tries `window.open(url, "_blank", "noopener,noreferrer")`, keeping a visible
-  **Continue in Google** link for popup blockers and mobile Safari.
+  **Continue in Google** link for popup blockers and mobile Safari. The new tab
+  shares this browser's cookies, so it carries the
+  [Google attempt cookie](#google-attempt-cookie) back to the callback. Finishing
+  the Google step in another browser (or a home-screen web app whose links open in
+  a separate browser, as on iOS) is refused.
 - The device name is **Thiscord web**.
 - Keep every request same-origin: the server only honors the cookie with an
   allowed `Origin`.
@@ -236,6 +270,12 @@ sessions work as in production. The backend's `ALLOWED_ORIGINS` must include
 `http://127.0.0.1:1420`. Chromium treats `http://127.0.0.1` as secure and stores
 the `Secure` session cookie there; Safari does not, so test Safari (and confirm
 other browsers) against an HTTPS deployment.
+Google sign-in from `trunk serve` needs the callback on the same host as the page:
+the preview runs on `127.0.0.1`, so set `GOOGLE_REDIRECT_URL` to
+`http://127.0.0.1:3000/api/v1/account/google/callback` (and register it with
+Google). With the example `localhost` URL the browser does not send the attempt
+cookie to the callback, which refuses the sign-in as started in another browser.
+The hosted bundle at `http://localhost:3000/app/` works with the `localhost` URL.
 `cargo tauri dev` also runs `trunk serve`, but the desktop app ignores the proxy
 and keeps using `THISCORD_API_URL`. Build the web bundle like production with
 `trunk build --release --locked --public-url /app/ --dist dist-app` from `frontend/`.

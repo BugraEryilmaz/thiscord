@@ -264,6 +264,15 @@ diesel::table! {
 }
 
 diesel::table! {
+    guild_invitations (guild_id, account_id) {
+        guild_id -> Uuid,
+        account_id -> Uuid,
+        invited_by -> Nullable<Uuid>,
+        created_at -> Timestamptz,
+    }
+}
+
+diesel::table! {
     guild_invites (id) {
         id -> Uuid,
         guild_id -> Uuid,
@@ -400,6 +409,16 @@ diesel::table! {
         recipient -> Text,
         body -> Text,
         created_at -> Timestamptz,
+        purpose -> Text,
+    }
+}
+
+diesel::table! {
+    mail_recipient_limits (recipient_hash) {
+        recipient_hash -> Text,
+        window_start -> Timestamptz,
+        sent -> Int4,
+        last_sent_at -> Timestamptz,
     }
 }
 
@@ -479,6 +498,10 @@ diesel::table! {
         callback -> Nullable<Text>,
         status -> Text,
         expires_at -> Timestamptz,
+        browser_hash -> Nullable<Text>,
+        completion_hash -> Nullable<Text>,
+        subject -> Nullable<Text>,
+        email -> Nullable<Text>,
     }
 }
 
@@ -552,6 +575,7 @@ diesel::joinable!(group_members -> accounts (account_id));
 diesel::joinable!(group_members -> group_conversations (group_id));
 diesel::joinable!(guild_audit_log -> guilds (guild_id));
 diesel::joinable!(guild_icons -> guilds (guild_id));
+diesel::joinable!(guild_invitations -> guilds (guild_id));
 diesel::joinable!(guild_invites -> accounts (created_by));
 diesel::joinable!(guild_invites -> guilds (guild_id));
 diesel::joinable!(guild_members -> accounts (account_id));
@@ -604,6 +628,7 @@ diesel::allow_tables_to_appear_in_same_query!(
     group_members,
     guild_audit_log,
     guild_icons,
+    guild_invitations,
     guild_invites,
     guild_member_roles,
     guild_members,
@@ -617,6 +642,7 @@ diesel::allow_tables_to_appear_in_same_query!(
     instance_role_assignments,
     instance_role_limits,
     mail_outbox,
+    mail_recipient_limits,
     message_edits,
     message_events,
     message_reactions,

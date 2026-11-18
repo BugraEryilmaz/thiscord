@@ -16,8 +16,10 @@ in shared models, logs or checked-in configuration.
    validated and unique. Passwords need 12 characters and may use up to 1024 bytes.
 2. Within five seconds the email worker writes a `.txt` message to `backend/.mail/`.
    Open the verification URL in that local file. With Resend or SMTP configured, click the
-   link directly in your email. It automatically verifies the address and opens a
-   confirmation page; there is no verification-code input. Tokens are never
+   link directly in your email. Opened in a browser, it verifies the address at once
+   and shows a confirmation page; there is no verification-code input (see
+   [Verification links and link scanners](#verification-links-and-link-scanners)
+   for the rare **Confirm email address** page). Tokens are never
    printed in the terminal. The directory is ignored by Git. On Linux, newly
    created directories/files use 0700/0600; Windows-mounted files inherit Windows
    ACLs. Set `MAIL_DIRECTORY` to a private Linux directory if needed.
@@ -26,7 +28,8 @@ in shared models, logs or checked-in configuration.
    voice. The screen checks every five seconds and on window focus (or **I've
    verified my email**) and opens the app as soon as the link was used on any
    device. It offers **Resend email** (a 60-second client cooldown on top of the
-   server rate limits), **Change email** for a mistyped address and **Sign out**.
+   server rate limits and the [account mail limits](#account-mail-limits)),
+   **Change email** for a mistyped address and **Sign out**.
    The backend independently refuses pending accounts for creating/joining servers,
    invites and friend requests, and hides them from friend search and requests, so
    other people never see a half-created account. Google sign-in creates verified
@@ -36,14 +39,17 @@ in shared models, logs or checked-in configuration.
    new password directly in your browser; you do not need to reopen the app.
    The email also includes a backup code for **I already have a reset code** in
    the app's Forgot password dialog. Links and codes expire after 30 minutes,
-   are single-use and are replaced on resend. The reset link and backup code
+   are single-use and are replaced on resend, unless the resend comes within the
+   [account mail limits](#account-mail-limits): then nothing is sent and the earlier
+   link stays valid, with the same response. The reset link and backup code
    represent the same credential: using either invalidates both. Opening or
    previewing a reset link does not consume it; submitting a valid new password does.
    The worker removes expired mail files and database codes. Production email
    already delivered to an inbox cannot be recalled.
 4. **Reauthenticate** before changing/adding a password, linking/unlinking Google,
    or deleting your account. Confirmation lasts five minutes. Setting a password
-   also requires a verified email. Changes/reset revoke every existing session.
+   also requires a verified email, and so does linking Google. Changes/reset revoke
+   every existing session; a reset also cancels a pending email change.
 5. **Devices & identities** lists active sessions and lets you revoke a device
    or sign out everywhere. Removing an identity revokes all sessions and cannot
    remove the last login method. A Google-only account can add a password after
@@ -132,9 +138,12 @@ device, switches the address, marks it verified, revokes outstanding password-re
 codes (they went to the old address) and emails the old address a notice without the
 new one. If another account took the address meanwhile, the link page reports it and
 nothing changes. The open settings page picks up the change when Thiscord regains
-focus. The pending address and its code hash live in `account_codes` (purpose
-`email`); migration `20261107000000_identifier_changes` rolls back by discarding
-pending changes.
+focus. A completed password reset deletes the pending change and withdraws its
+unsent link, so a change started before the reset (for example by someone who
+briefly held a session) cannot be confirmed afterwards; a password *change* from
+settings leaves it visible for the owner to cancel. The pending address and its
+code hash live in `account_codes` (purpose `email`); migration
+`20261107000000_identifier_changes` rolls back by discarding pending changes.
 
 ### Account deletion
 
@@ -200,6 +209,70 @@ and third-party resources; reset forms submit only to the same origin.
 HEAD requests do not consume either link. **Resend email** on the verification
 screen replaces any older code-only email.
 
+### Verification links and link scanners
+
+Mail gateways and link scanners fetch URLs in incoming mail. If such a fetch
+verified the address, someone could register with another person's address at
+such a provider and have the account verified without ever controlling the inbox.
+The verification route (`/api/v1/account/verify-email`, used for first verification
+and for confirming an email change) therefore consumes a token on `GET` only for a
+real top-level browser navigation, judged by Fetch Metadata request headers:
+`Sec-Fetch-Mode: navigate` and `Sec-Fetch-Dest: document`, each sent once, and no
+`Sec-Purpose`, `Purpose` or `X-Moz` header mentioning `prefetch` or `prerender`.
+`Sec-Fetch-User` and `Sec-Fetch-Site` are not checked, because links opened from a
+mail app (`none`) and from webmail (`cross-site`, often through a redirector) differ.
+Chrome/Edge 80+, Firefox 90+ and Safari 16.4+ send these headers
+on such navigations, but only to HTTPS and localhost origins, which are the only
+origins `PUBLIC_BACKEND_URL` allows. A person who clicks the link therefore lands
+directly on **Email verified** or **Email address changed**, with no extra step.
+
+Every other `GET` (no Fetch Metadata at all, as from plain HTTP fetchers and older
+browsers, a subresource or frame load, or a prefetch/prerender) leaves the token
+unused and returns a **Confirm your email address** page with one button (with
+status 503 for a prefetch/prerender, such as Chrome preloading a link pasted into
+its address bar, so the browser discards it and the real navigation verifies
+directly). It posts
+the token to the same path, and that `POST` performs the same operation as the
+link, with the same result pages. The token is the only capability: the form needs
+no cookie or session, so a cross-site submission can do nothing the link itself
+could not. `HEAD` returns 204 and never consumes. Every response of the route uses
+`Cache-Control: no-store`, `Referrer-Policy: no-referrer` and the account-page CSP
+(`default-src 'none'`, inline styles only, `form-action 'self'`,
+`frame-ancestors 'none'`, `base-uri 'none'`); consuming requests keep the per-address
+rate limit.
+
+This stops scanners that only fetch URLs. It does not stop scanners that open
+links in a real browser engine (some sandbox "detonation" services do), or that
+submit forms they find; those still verify an address they were delivered to. The
+app's `verify_email` API command also still takes the token directly.
+
+### Account mail limits
+
+All account mail is queued in one place (`queue_mail` in `backend/src/auth/store.rs`).
+Verification, email-change and reset messages are limited per recipient inbox,
+whichever account, session or address asks: at most one message a minute and five
+an hour (a fixed window started by the first message). That leaves room for a
+first email, a resend or two and a password reset, while bounding how far one
+account, or many, can fill someone's inbox or spend the provider quota on it.
+Sub-address tags (`name+tag@`) and, for Gmail, dots and `googlemail.com` count as
+the same inbox; other provider aliases and catch-all domains do not. Only a SHA-256
+hash of the normalized address is stored (`mail_recipient_limits`), and the mail
+worker drops entries once they no longer limit anything (after an hour).
+
+A refused request changes nothing: earlier links and codes stay valid.
+`send_verification`, `register` and `change_email` answer HTTP 429 with "An email
+was just sent to this address. Wait a minute, then try again" or, after five in an
+hour, "Too many emails were sent to this address. Try again later" (both
+translated in Turkish); a refused registration or address change is rolled back.
+`forgot_password` sends nothing and answers exactly as for an address without an
+account, so its response reveals nothing, and a victim's still-valid reset code is
+not replaced. The shared budget itself is observable: a reset email spends it only
+for a verified account, so changing an address to an unused alias of that inbox
+within the hour can show a 429. Registration already reveals whether an address
+is taken, so this adds little. An accepted message withdraws the same account's
+unsent message of the same kind instead of adding another. The notice sent to the
+previous address after a confirmed email change is not limited.
+
 `change_email` on `POST /api/v1/account` corrects the address of a pending account
 only. It requires recent reauthentication (the screen asks for the current password
 and sends `reauthenticate` first), validates the address like registration and
@@ -252,22 +325,123 @@ Missing configuration produces a safe unavailable response; there is no fake
 Google login. This implementation uses the [`openidconnect` crate](https://docs.rs/openidconnect/4.0.1/openidconnect/)
 and [Google's OIDC flow](https://developers.google.com/identity/openid-connect/openid-connect).
 
-The desktop binds an ephemeral `127.0.0.1` port with a random path before opening
-the system browser. Google redirects to the backend's registered callback, which
-verifies the authorization code and redirects a completion notification to that
-loopback path. No credentials travel to the local listener. The desktop redeems
-an independent random ticket through the account API; that ticket never enters
-the browser URL. Browser preview displays a link and polls the same ticket without
-a loopback redirect. Cancellation and five-minute expiry discard the attempt;
-late/replayed provider callbacks cannot exchange it again. Cancelling after a
-completed identity operation does not undo the operation.
+### Attempt binding
+
+`google_start` needs no session for `login` and returns both the Google URL and the
+redemption ticket to its caller, who may be an attacker forwarding that genuine
+Google link to someone else. Every attempt is therefore bound to the user agent
+that started it, and the binding is checked before any identity is applied:
+
+- **Desktop** (`start` with a loopback `callback`). The desktop binds an ephemeral
+  `127.0.0.1` port with a random 43-character path before opening the system
+  browser. Google returns to the backend's registered callback. Only after it has
+  verified Google's response does the callback generate a fresh one-time
+  256-bit completion secret, store its SHA-256 on the attempt, and redirect the
+  browser to `<loopback>?completion=<secret>`. `start` never returns it, because
+  it does not exist yet. A failed callback still notifies the bare loopback path,
+  without a secret. The listener accepts only that exact path, optionally with
+  exactly one `completion` parameter of 43 base64url characters (4 KiB, 2 s,
+  single hit, five-minute timeout), answers with a `no-store` page that does not
+  repeat the secret, and keeps the secret in memory until the sign-in flow takes
+  it (`google_callback`); it is never persisted or logged. `google_complete` for
+  such an attempt requires the ticket **and** the secret (hash comparison). The
+  secret expires with the attempt and is single use, because a successful
+  completion deletes the attempt. It is not a session or provider token and is
+  useless without the ticket, which never enters a browser URL.
+- **Browser** (`start` without `callback`: `/app`, `/admin`, browser preview).
+  `google_start` sets the `__Host-thiscord_google` cookie holding a random 256-bit
+  attempt secret and stores its hash (cookie attributes in
+  [web.md](web.md#google-attempt-cookie)). The callback must present exactly that
+  cookie before the attempt is processed. Without it, or with another attempt's,
+  the callback answers `403` with a page saying the sign-in was not started in
+  this browser, fails the attempt and never contacts Google; polling then reports
+  the failure. A matching callback clears the cookie.
+
+The callback only records the verified Google subject and email on the attempt.
+Account creation, linking and reauthentication happen at a bound completion, so
+someone who merely clicks a forwarded link changes nothing. A missing or wrong
+completion secret fails without consuming the attempt, so its legitimate holder
+can still finish it. Desktop clients released before this binding (0.1.63 and
+earlier) send only the ticket: once the attempt is ready they receive HTTP 400
+`validation_failed` "Check for an update first" instead of a session, which those
+clients show after the Google step, translated in Turkish ("Önce güncellemeleri
+kontrol et"), because their catalogs already contain it (their loopback listener
+also shows the browser a blank 404, because it does not expect the parameter). Binding is enforced as soon as the backend is deployed;
+there is no compatibility window. The migration discards in-flight attempts, and
+database constraints require exactly one binding per attempt and a completion
+secret on every ready loopback attempt.
+
+Cancellation and five-minute expiry discard the attempt; late/replayed provider
+callbacks cannot exchange it again. Cancelling after a completed identity
+operation does not undo the operation.
+
+Threat boundary: the binding stops a party that started an attempt from redeeming
+someone else's Google consent (session theft for `login`, attaching a victim's
+Google identity with `link`, or refreshing a stolen session with
+`reauthenticate`). It does not protect against malware on the user's computer,
+which can read loopback traffic and browser history (where the completion secret
+appears, as the authorization code does), or against a browser that is already
+compromised. A web page cannot read the secret: it travels only in the redirect to
+`127.0.0.1` on the user's own machine, and the callback and loopback responses send
+`Referrer-Policy: no-referrer`. Some browser setups cannot satisfy the cookie and
+are refused rather than left unbound: a page opened on a different host than
+`GOOGLE_REDIRECT_URL` (for example the `trunk serve` preview on `127.0.0.1:1420`
+with a `localhost` redirect URL, see [web.md](web.md#local-development)), Safari on
+plain HTTP, and installed home-screen web apps whose links open in a separate
+browser with its own cookies (iOS); use the same browser, or the desktop app.
 
 The backend uses PKCE S256, random state and nonce, Google's HTTPS discovery/JWKS,
 and validates signature, issuer, audience, expiry, nonce, verified email and
-`at_hash` when present. Reauthentication additionally requires recent `auth_time`.
-Provider access/refresh tokens are not persisted. Only the Google subject identifies
+`at_hash` when present. The authorization URL sends `prompt=select_account` and
+no `max_age`. Provider access/refresh tokens are not persisted. Only the Google subject identifies
 a linked account: an email collision fails, even if Google reports it verified.
 Sign into the existing account, reauthenticate, then explicitly link Google.
+Linking requires the account's email to be verified, checked when the attempt
+starts ("Verify your email before linking Google") and again under the account
+lock when it completes. Otherwise someone who registered with another person's
+address could attach their own Google login and keep it after that person
+recovers the account. Google login, account creation and reauthentication are
+unaffected.
+
+### Confirming identity with Google
+
+**Confirm with Google** (`google_start` with purpose `reauthenticate`) is how an
+account without a password proves it is still its owner before changing login
+methods, email or username, or deleting the account. It succeeds only when all
+of these hold:
+
+- the person completes a new Google sign-in, and the ID token Google returns was
+  issued (`iat`) within the last five minutes, the same window as an attempt and
+  as recent reauthentication, and at most 60 seconds ahead of the backend's clock
+  (checked at the provider callback, when the token is verified);
+- the attempt is bound to the browser or desktop app that started it (see
+  [Attempt binding](#attempt-binding));
+- the session that started it is still valid when it completes, and only that
+  session is marked as recently reauthenticated;
+- the Google account chosen is the one already linked to this Thiscord account.
+  Any other Google account is refused with "Google confirmation failed. Choose
+  the Google account that is linked to this Thiscord account and try again".
+
+It does not check when Google last authenticated the person (for example, when
+they last entered their Google password). OpenID Connect's `auth_time` claim
+would say that, but Google sends it only when it is
+requested through a separate claims setting, which this client does not use, and
+Google does not document `max_age` or a `prompt` value that forces a new login.
+An earlier version required `auth_time`, so every Google confirmation failed. The
+owner accepted the resulting weakness: someone at a computer that is already
+signed in to the linked Google account, with access to the Thiscord session, can
+confirm without knowing any password. A stolen Thiscord session (its token) alone
+still cannot: the thief would have to sign in to the linked Google account
+themselves, and forwarding their attempt's Google link to the account's owner
+fails because the attempt is bound to the thief's browser or app.
+
+Each purpose reports its own failure text: login keeps "Google sign-in failed. If
+the email already has an account, sign in there first and link Google", which
+released clients translate; linking reports "Connecting Google failed. A Thiscord
+account can have only one Google account, and a Google account can belong to only
+one Thiscord account".
+Clients released before these two texts existed show them in English, or the
+generic "Check the information you entered." in Turkish.
 
 ## Session model and desktop storage
 
@@ -312,15 +486,27 @@ ambient cookies, so cross-origin forms cannot authenticate mutations. The web
 client's session cookie is ambient, so the backend honors it only when the request
 `Origin` is in `ALLOWED_ORIGINS`, or for GET/HEAD without `Origin`; otherwise the
 request is anonymous, and an explicit bearer header always wins. CORS permits
-only configured origins and the Authorization/Content-Type headers, without credentials. Proxy headers
-are ignored for rate limiting: deploy a trusted proxy policy before using forwarded
-client addresses. As written, proxied clients share the proxy IP's rate budget.
+only configured origins and the Authorization/Content-Type headers, without credentials.
+
+Per-address rate limits (account API, email verification and browser password
+reset) count the TCP peer, through one helper in `backend/src/client_ip.rs`. The
+`CF-Connecting-IP` header names the client only when the peer is inside
+`TRUSTED_PROXY_CIDRS` (comma-separated CIDRs read at startup; an invalid entry, a
+`/0` or a range with host bits fails startup). A missing, repeated or malformed
+header from such a peer counts against the proxy's own address, never against
+header text. `X-Forwarded-For` and headers from any other peer are ignored. When
+the variable is unset, clients behind a proxy share the proxy address's budget.
+IPv4-mapped IPv6 peers count as IPv4. IPv6 clients count per /64, so a host cannot
+gain budgets by rotating addresses inside its prefix; devices sharing one /64 share
+a budget, like devices behind one IPv4 NAT. See [vps.md](vps.md) for production.
 
 Argon2id uses the RustCrypto default v19 parameters (19 MiB, two iterations, one
 lane), random salts and a maximum of four concurrent account blocking workers.
 PostgreSQL rate counters survive restarts: 180 account requests/IP/minute, 30
-sensitive operations/IP/minute, and six registration/login/recovery attempts per
-normalized identifier/minute. Limits apply to successes and failures; HTTP 429
+sensitive operations/IP/minute, six registration/login/recovery attempts per
+normalized identifier/minute, and six password reauthentications per account/minute
+across all its sessions, so a stolen session cannot guess the password at the
+per-address rates. Limits apply to successes and failures; HTTP 429
 includes `Retry-After: 60`. Request bodies are limited to 16 KiB. Tokens and
 password request types deliberately lack `Debug` implementations.
 
@@ -335,10 +521,18 @@ password request types deliberately lack `Debug` implementations.
 Run backend/shared tests in WSL with `--include-ignored` and a dedicated
 `TEST_DATABASE_URL`. They create/drop only random schemas. Tests cover real
 PostgreSQL migrations, credentials, verification/reset replay, browser reset links
-and backup-code equivalence, validation, expiry/resend, session rotation,
+and backup-code equivalence, verification links under each kind of request
+(navigation, no Fetch Metadata, subresource, prefetch, HEAD, fallback form; for
+first verification and email changes), per-inbox mail limits, linking only with a
+verified email, reset cancelling a pending email change, validation, expiry/resend, session rotation,
 expiry/revocation, reauthentication, throttling, deletion, callback cancellation
 and OAuth failures. Signed offline OIDC fixtures exercise token validation;
 the RSA fixture key is deliberately public and never used by the application.
+`google_attempts_complete_only_where_they_started` drives the real callback with
+that offline provider for all three purposes: desktop attempts cannot be redeemed
+with the ticket alone or a wrong secret (and are not consumed), and succeed once
+with the loopback's secret; browser callbacks without the attempt's own cookie are
+refused and never become ready. A live Google sign-in still needs a manual check.
 
 Native callback tests run in the desktop CI matrix. The optional
 `credential_store_round_trip` test needs an unlocked OS store and uses a separate

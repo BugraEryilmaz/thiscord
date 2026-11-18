@@ -14,7 +14,8 @@ pub(super) struct Socket {
         tokio::sync::mpsc::Sender<Message>,
     )>,
     inner: Option<WebSocket>,
-    pub permit: Option<tokio::sync::OwnedSemaphorePermit>,
+    /// The connection's admission (see `limits`); in-process bots have none.
+    pub permit: Option<crate::limits::Ticket>,
     pub recoverable: bool,
     detached: Option<Instant>,
     pub id: RequestId,

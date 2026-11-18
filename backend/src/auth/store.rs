@@ -172,12 +172,9 @@ fn enqueue_email_change(c: &mut PgConnection, a: &Account, address: &str) -> Res
         "Thiscord confirm your new email (valid for 30 minutes):\n\n{link}\n\nClick the link to make this the email address of your Thiscord account @{}. Until then, your current address stays in use. If you did not request this, ignore this email.",
         a.username
     );
-    // Withdraw unsent mail for an earlier pending address.
-    execute(
-        c,
-        "DELETE FROM mail_outbox WHERE account_id=$1::uuid AND recipient IN (SELECT email FROM account_codes WHERE account_id=$1::uuid AND purpose='email')",
-        &[&a.id.to_string()],
-    )?;
+    // Throttled first: a refused request leaves the pending link working.
+    // Withdraws unsent mail for an earlier pending address.
+    queue_mail(c, a.id, address, "email", &body)?;
     execute(
         c,
         "DELETE FROM account_codes WHERE account_id=$1::uuid AND purpose='email'",
@@ -188,12 +185,71 @@ fn enqueue_email_change(c: &mut PgConnection, a: &Account, address: &str) -> Res
         "INSERT INTO account_codes(token_hash,account_id,purpose,email) VALUES($1,$2::uuid,'email',$3)",
         &[&digest(&code), &a.id.to_string(), address],
     )?;
+    Ok(())
+}
+/// The only place account mail is queued. Link mail (`verify`, `email`, `reset`)
+/// is limited per recipient inbox, whichever account or requester asks: one
+/// message a minute and five an hour, which leaves room for a first email, a
+/// resend or two and a password reset. A refused request changes nothing and
+/// fails with `Throttled`, before any code is replaced. An accepted one withdraws
+/// the account's unsent mail of the same kind instead of appending to it.
+/// `notice` mail (the email-change notice to the previous address) is neither
+/// limited nor withdrawn; only a confirmed change sends it.
+fn queue_mail(
+    c: &mut PgConnection,
+    account: AccountId,
+    recipient: &str,
+    purpose: &str,
+    body: &str,
+) -> Result<(), Failure> {
+    if purpose != "notice" {
+        let key = recipient_key(recipient);
+        // Atomic per recipient: the conflicting row stays locked until commit.
+        let accepted: Vec<bool> = query(
+            c,
+            "INSERT INTO mail_recipient_limits(recipient_hash) VALUES($1) ON CONFLICT(recipient_hash) DO UPDATE SET sent=CASE WHEN mail_recipient_limits.window_start<=now()-interval '1 hour' THEN 1 ELSE mail_recipient_limits.sent+1 END, window_start=CASE WHEN mail_recipient_limits.window_start<=now()-interval '1 hour' THEN now() ELSE mail_recipient_limits.window_start END, last_sent_at=now() WHERE mail_recipient_limits.last_sent_at<=now()-interval '1 minute' AND (mail_recipient_limits.window_start<=now()-interval '1 hour' OR mail_recipient_limits.sent<5) RETURNING to_jsonb(TRUE) AS data",
+            &[&key],
+        )?;
+        if accepted.is_empty() {
+            let hourly: Vec<bool> = query(
+                c,
+                "SELECT to_jsonb(last_sent_at<=now()-interval '1 minute') AS data FROM mail_recipient_limits WHERE recipient_hash=$1",
+                &[&key],
+            )?;
+            return Err(Failure::Throttled(if hourly == [true] {
+                "Too many emails were sent to this address. Try again later"
+            } else {
+                "An email was just sent to this address. Wait a minute, then try again"
+            }));
+        }
+        execute(
+            c,
+            "DELETE FROM mail_outbox WHERE account_id=$1::uuid AND purpose=$2",
+            &[&account.to_string(), purpose],
+        )?;
+    }
     execute(
         c,
-        "INSERT INTO mail_outbox(account_id,recipient,body) VALUES($1::uuid,$2,$3)",
-        &[&a.id.to_string(), address, &body],
+        "INSERT INTO mail_outbox(account_id,recipient,purpose,body) VALUES($1::uuid,$2,$3,$4)",
+        &[&account.to_string(), recipient, purpose, body],
     )?;
     Ok(())
+}
+/// Throttle key of an inbox: `+tags` and, for Gmail, dots and `googlemail.com`
+/// reach the same mailbox, so they share one budget. Only the hash is stored.
+fn recipient_key(address: &str) -> String {
+    let address = address.to_ascii_lowercase();
+    let (local, domain) = address.rsplit_once('@').unwrap_or((&address, ""));
+    let mut local = local.split('+').next().unwrap_or_default().to_owned();
+    let domain = if domain == "googlemail.com" {
+        "gmail.com"
+    } else {
+        domain
+    };
+    if domain == "gmail.com" {
+        local.retain(|c| c != '.');
+    }
+    digest(&format!("{local}@{domain}"))
 }
 /// Replaces (or with `None`, clears) the account's custom status. The caller
 /// holds the account/session lock; expiry uses the database clock.
@@ -464,6 +520,29 @@ pub(crate) fn rate_limit(
     sensitive: bool,
 ) -> Result<(), Failure> {
     let mut c = connection(pool)?;
+    limit(&mut c, limit_keys(ip, identifier, sensitive))
+}
+
+/// Password reauthentication also counts against the session's account, so a
+/// stolen session cannot guess the password at the per-address rates.
+pub(super) fn reauthentication_limit(pool: &DbPool, ip: &str, token: &str) -> Result<(), Failure> {
+    let mut c = connection(pool)?;
+    // Address budgets first, before any session work.
+    limit(&mut c, limit_keys(ip, None, true))?;
+    // Full authentication: stale tokens neither spend the account budget nor
+    // escape replay revocation behind the account-level 429.
+    match authenticate(&mut c, token) {
+        Ok(session) => limit(
+            &mut c,
+            vec![(format!("reauthenticate:{}", session.account_id), 6)],
+        ),
+        // Dispatch rejects the token.
+        Err(Failure::Unauthorized) => Ok(()),
+        Err(error) => Err(error),
+    }
+}
+
+fn limit_keys(ip: &str, identifier: Option<&str>, sensitive: bool) -> Vec<(String, i32)> {
     let mut keys = vec![(format!("ip:{ip}"), 180)];
     if sensitive {
         keys.push((format!("sensitive:{ip}"), 30));
@@ -471,7 +550,11 @@ pub(crate) fn rate_limit(
     if let Some(identifier) = identifier {
         keys.push((format!("account:{}", digest(identifier)), 6));
     }
-    // One transaction: one commit (and WAL flush) per limited request. Every
+    keys
+}
+
+fn limit(c: &mut PgConnection, keys: Vec<(String, i32)>) -> Result<(), Failure> {
+    // One transaction: one commit (and WAL flush) per limiter call. Every
     // counter increment commits, including on a limited request, as before.
     let limited = c.transaction(|c| {
         execute(
@@ -512,6 +595,8 @@ fn enqueue_code(c: &mut PgConnection, a: &Account, purpose: &str) -> Result<(), 
             "Thiscord reset password (valid for 30 minutes):\n\n{link}\n\nClick the link to choose a new password in your browser.\n\nBackup reset code:\n\n{code}\n\nIf the link does not work, open Forgot password in Thiscord and select I already have a reset code. The link and code are single-use; using either invalidates both. If you did not request this, ignore this email."
         )
     };
+    // Throttled first: a refused request leaves the current code valid.
+    queue_mail(c, a.id, &a.email, purpose, &body)?;
     execute(
         c,
         "DELETE FROM account_codes WHERE account_id=$1::uuid AND purpose=$2",
@@ -521,11 +606,6 @@ fn enqueue_code(c: &mut PgConnection, a: &Account, purpose: &str) -> Result<(), 
         c,
         "INSERT INTO account_codes(token_hash,account_id,purpose) VALUES($1,$2::uuid,$3)",
         &[&digest(&code), &a.id.to_string(), purpose],
-    )?;
-    execute(
-        c,
-        "INSERT INTO mail_outbox(account_id,recipient,body) VALUES($1::uuid,$2,$3)",
-        &[&a.id.to_string(), &a.email, &body],
     )?;
     Ok(())
 }
@@ -593,7 +673,12 @@ pub(super) fn dispatch(
             let address = email(&address)?;
             c.transaction(|c| {
                 let ids: Vec<AccountId> = query(c,"SELECT to_jsonb(id) AS data FROM accounts WHERE email=$1 AND email_verified FOR UPDATE", &[&address])?;
-                if let Some(id) = ids.first() { let a = account(c,*id)?; enqueue_code(c,&a,"reset")?; }
+                // A throttled request sends nothing and keeps the current code; the
+                // response stays the same, so it reveals nothing about the address.
+                if let Some(id) = ids.first() {
+                    let a = account(c,*id)?;
+                    match enqueue_code(c,&a,"reset") { Err(Failure::Throttled(_)) => {}, other => other? }
+                }
                 Ok(done("If a verified account exists, we’ll email a link to reset your password in your browser, plus a backup code"))
             })
         }
@@ -607,7 +692,9 @@ pub(super) fn dispatch(
         AccountRequest::ResetPassword { code, password } => {
             consume_code(&mut c, &code, Some(password_hash(&password)?))
         }
-        AccountRequest::GoogleComplete { ticket } => super::google::complete(&mut c, &ticket),
+        AccountRequest::GoogleComplete { ticket, completion } => {
+            super::google::complete(&mut c, &ticket, completion.as_deref())
+        }
         AccountRequest::GoogleCancel { ticket } => {
             execute(
                 &mut c,
@@ -673,15 +760,14 @@ pub(super) fn dispatch(
                             return Ok(AccountResponse::Account { account: account(c,id)? });
                         }
                         execute(c,"UPDATE accounts SET email=$2 WHERE id=$1::uuid", &[&id.to_string(), &address])?;
-                        // Unsent mail to the mistyped address is withdrawn; replacing
-                        // the code invalidates links already delivered there.
-                        execute(c,"DELETE FROM mail_outbox WHERE account_id=$1::uuid AND recipient<>$2", &[&id.to_string(), &address])?;
+                        // Queueing withdraws unsent mail to the mistyped address;
+                        // replacing the code invalidates links already delivered there.
                         let a = account(c,id)?;
                         enqueue_code(c,&a,"verify")?;
                         Ok(AccountResponse::Account { account: a })
                     }
                     AccountRequest::CancelEmailChange => {
-                        execute(c,"DELETE FROM mail_outbox WHERE account_id=$1::uuid AND recipient IN (SELECT email FROM account_codes WHERE account_id=$1::uuid AND purpose='email')", &[&id.to_string()])?;
+                        execute(c,"DELETE FROM mail_outbox WHERE account_id=$1::uuid AND purpose='email'", &[&id.to_string()])?;
                         execute(c,"DELETE FROM account_codes WHERE account_id=$1::uuid AND purpose='email'", &[&id.to_string()])?;
                         Ok(AccountResponse::Account { account: account(c,id)? })
                     }
@@ -848,14 +934,18 @@ fn consume_code(
             execute(c,"UPDATE accounts SET email=$2, email_verified=TRUE WHERE id=$1::uuid", &[&id.to_string(), &address])?;
             // Reset links went to the previous address; they stop working.
             execute(c,"DELETE FROM account_codes WHERE account_id=$1::uuid AND purpose='reset'", &[&id.to_string()])?;
-            execute(c,"INSERT INTO mail_outbox(account_id,recipient,body) VALUES($1::uuid,$2,$3)", &[&id.to_string(), &previous.email, &format!(
+            queue_mail(c, id, &previous.email, "notice", &format!(
                 "Thiscord email address changed\n\nThe email address of your Thiscord account @{} was changed, and this address is no longer used to sign in or recover it.\n\nIf you did not make this change, contact your Thiscord administrator right away.",
                 previous.username
-            )])?;
+            ))?;
             return Ok(done("Email changed"));
         }
         if let Some(hash) = hash {
             set_password(c,id,&hash)?; revoke_all(c,id)?;
+            // An email change started before the reset (perhaps by whoever held a
+            // session) cannot be confirmed after it; its unsent link is withdrawn.
+            execute(c,"DELETE FROM mail_outbox WHERE account_id=$1::uuid AND purpose='email'", &[&id.to_string()])?;
+            execute(c,"DELETE FROM account_codes WHERE account_id=$1::uuid AND purpose='email'", &[&id.to_string()])?;
             change = Some(access::pause(Scope::Account(id)));
             Ok(done("Password reset. Sign in again"))
         } else {
@@ -893,5 +983,34 @@ mod prepared_tests {
         };
         let mut builder = diesel::pg::PgQueryBuilder::default();
         assert!(missing.to_sql(&mut builder, &Pg).is_err());
+    }
+}
+
+#[cfg(test)]
+mod recipient_tests {
+    use super::recipient_key;
+
+    #[test]
+    fn aliases_of_one_inbox_share_a_mail_budget() {
+        let inbox = recipient_key("inbox.owner@gmail.com");
+        for alias in [
+            "inboxowner@gmail.com",
+            "Inbox.Owner+promo@gmail.com",
+            "i.n.b.o.x.owner+a+b@googlemail.com",
+        ] {
+            assert_eq!(recipient_key(alias), inbox, "{alias}");
+        }
+        let work = recipient_key("first.last@example.com");
+        assert_eq!(recipient_key("first.last+tag@example.com"), work);
+        // Dots are significant outside Gmail; other inboxes are separate.
+        for other in [
+            "firstlast@example.com",
+            "first.last@example.org",
+            "inbox.owner@example.com",
+        ] {
+            assert_ne!(recipient_key(other), work, "{other}");
+            assert_ne!(recipient_key(other), inbox, "{other}");
+        }
+        assert!(!inbox.contains('@'));
     }
 }

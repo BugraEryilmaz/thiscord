@@ -122,12 +122,14 @@ impl State {
             })
     }
 
+    /// Incoming friend requests and pending server invitations.
     pub fn pending_count(self) -> u32 {
         self.snapshot.with(|s| {
-            s.friends
+            (s.friends
                 .iter()
                 .filter(|f| f.relationship == Relationship::Incoming)
-                .count() as u32
+                .count()
+                + s.guild_invitations.len()) as u32
         })
     }
 
@@ -695,7 +697,15 @@ fn FriendList(ui: Ui, filter: RwSignal<&'static str>) -> impl IntoView {
             .map(|(id, _)| id)
             .collect::<Vec<_>>()
     });
+    let invited = Memo::new(move |_| {
+        filter.get() == "pending"
+            && ui
+                .friends
+                .snapshot
+                .with(|s| !s.guild_invitations.is_empty())
+    });
     view! {<div class="friend-list h-full overflow-y-auto p-6" data-rove-list on:keydown=move |e| super::keyboard::rove(&e)>
+        <Show when=move ||filter.get()=="pending"><super::invites::PendingServers ui=ui/></Show>
         <Show when=move ||!groups.with(Vec::is_empty)>
             <p class="sidebar-section-title mb-3">{move ||format!("{} — {}",crate::i18n::t("Groups"),groups.with(Vec::len))}</p>
             <For each=move ||groups.get() key=|id|*id children=move |id|view!{<super::groups::ListRow ui id/>}/>
@@ -703,7 +713,7 @@ fn FriendList(ui: Ui, filter: RwSignal<&'static str>) -> impl IntoView {
         </Show>
         <Show when=move ||!friends.get().is_empty()><p class="sidebar-section-title mb-3">{move ||format!("{} — {}",if filter.get()=="pending"{crate::i18n::t("Requests")}else if filter.get()=="online"{crate::i18n::t("Online friends")}else if filter.get()=="messages"{crate::i18n::t("Direct messages")}else{crate::i18n::t("All friends")},friends.get().len())}</p></Show>
         <Show when=move ||!ui.friends.connected.get()><p role="status" class="mb-4 text-sm text-amber-200">{move || crate::i18n::t("Connecting to friends…")}</p></Show>
-        <Show when=move ||friends.get().is_empty()><div class="empty-state min-h-72"><span class="empty-state-icon"><Icon kind=Glyph::Friends/></span><h2 class="empty-state-title">{move ||if filter.get()=="pending"{crate::i18n::t("No pending requests")}else if filter.get()=="online"{crate::i18n::t("No friends online right now")}else{crate::i18n::t("Make yourself at home")}}</h2><p class="max-w-sm">{move ||if filter.get()=="pending"{crate::i18n::t("Friend requests you send or receive will appear here.")}else if filter.get()=="online"{crate::i18n::t("When your friends come online, they’ll show up here.")}else{crate::i18n::t("Use Add friend to find someone by display name or username. Your conversations will appear here.")}}</p>
+        <Show when=move ||friends.get().is_empty() && !invited.get()><div class="empty-state min-h-72"><span class="empty-state-icon"><Icon kind=Glyph::Friends/></span><h2 class="empty-state-title">{move ||if filter.get()=="pending"{crate::i18n::t("No pending requests")}else if filter.get()=="online"{crate::i18n::t("No friends online right now")}else{crate::i18n::t("Make yourself at home")}}</h2><p class="max-w-sm">{move ||if filter.get()=="pending"{crate::i18n::t("Friend requests you send or receive and server invitations you receive will appear here.")}else if filter.get()=="online"{crate::i18n::t("When your friends come online, they’ll show up here.")}else{crate::i18n::t("Use Add friend to find someone by display name or username. Your conversations will appear here.")}}</p>
             <Show when=move ||filter.get()=="online" && has_friends.get() fallback=move ||view!{
                 <button type="button" class="btn btn-secondary mt-2" on:click=move |_|{if let Some(button)=document().query_selector("[data-add-friend]").ok().flatten().and_then(|b|b.dyn_into::<web_sys::HtmlElement>().ok()){button.click();}}><Icon kind=Glyph::Plus/>{move || crate::i18n::t("Add friend")}</button>
             }><button type="button" class="btn btn-secondary mt-2" on:click=move |_|filter.set("all")><Icon kind=Glyph::Friends/>{move || crate::i18n::t("Show all friends")}</button></Show></div></Show>

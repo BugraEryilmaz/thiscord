@@ -84,7 +84,7 @@ async fn upload(
         let Query(upload)=query.map_err(|_|Failure::Invalid("Invalid private attachment query"))?;validate(&upload)?;
         let pool=pool.ok_or(Failure::Unavailable)?;let token=auth::bearer(request.headers());
         let (p,t,u,guard)=(pool.clone(),token.clone(),upload.clone(),permit.clone());
-        tokio::task::spawn_blocking(move ||{let _guard=guard;store::checked(&p,&t,u.conversation_id,false,|c,actor|quota(c,actor,0))}).await.map_err(|_|Failure::Unavailable)??;
+        tokio::task::spawn_blocking(move ||{let _guard=guard;store::checked(&p,&t,u.conversation_id,false,|c,actor|{quota(c,actor,0)?;published(c,actor,u.conversation_id,1)})}).await.map_err(|_|Failure::Unavailable)??;
         let limit=crate::chat::attachments::upload_limit(upload.voice);
         let bytes=tokio::time::timeout(Duration::from_secs(30),to_bytes(request.into_body(),limit)).await.map_err(|_|Failure::Invalid("Attachment upload timed out"))?.map_err(|_|Failure::Invalid("Attachment exceeds 25 MiB (voice messages 5 MiB)"))?;
         if bytes.is_empty(){return Err(Failure::Invalid("Attachment is empty"));}
@@ -92,8 +92,9 @@ async fn upload(
             let _permit=permit;
             let voice=crate::chat::attachments::voice_metadata(&upload,&bytes)?;
             store::checked(&pool,&token,upload.conversation_id,true,|c,actor| {
-                execute(c,"SELECT pg_advisory_xact_lock(hashtextextended($1,0))", &[&format!("direct-attachment:{actor}")])?;
-                cleanup(c)?;quota(c,actor,bytes.len())?;
+                // The write check above locked the conversation; the account lock comes second, as in `attach`.
+                lock_owner(c,actor)?;
+                cleanup(c)?;quota(c,actor,bytes.len())?;published(c,actor,upload.conversation_id,bytes.len() as u64)?;
                 let filename=if voice.is_some(){thiscord_shared::voice_message::VOICE_MESSAGE_FILENAME.into()}else{upload.filename};
                 let a=ChatAttachment {id:AttachmentId::from_uuid(Uuid::new_v4()),filename,content_type:crate::chat::attachments::classify(&bytes).into(),size_bytes:bytes.len() as u64,voice,spoiler:false};
                 diesel::sql_query("INSERT INTO direct_attachments(id,conversation_id,owner_id,filename,content_type,size_bytes,data,voice_duration_ms,voice_waveform) VALUES($1,$2,$3,$4,$5,octet_length($6),$6,$7,$8)")
@@ -122,6 +123,36 @@ fn quota(c: &mut PgConnection, actor: AccountId, incoming: usize) -> Result<(), 
     }
     Ok(())
 }
+/// Serializes one account's staged and published private quota checks.
+fn lock_owner(c: &mut PgConnection, actor: AccountId) -> Result<(), Failure> {
+    execute(
+        c,
+        "SELECT pg_advisory_xact_lock(hashtextextended($1,0))",
+        &[&format!("direct-attachment:{actor}")],
+    )?;
+    Ok(())
+}
+const CONVERSATION_STORAGE_FULL: &str = "Your attachment storage in this conversation is full (2 GiB). Delete older messages with attachments to free space";
+/// Sent attachments count against their owner in that conversation until their
+/// message is deleted. Index-only over `direct_attachments_published_owner`.
+fn published(
+    c: &mut PgConnection,
+    actor: AccountId,
+    conversation: ConversationId,
+    incoming: u64,
+) -> Result<(), Failure> {
+    let total: i64 = query(
+        c,
+        "SELECT to_jsonb(COALESCE(sum(size_bytes),0)) AS data FROM direct_attachments WHERE owner_id=$1::uuid AND conversation_id=$2::uuid AND message_id IS NOT NULL",
+        &[&actor.to_string(), &conversation.to_string()],
+    )?
+    .pop()
+    .ok_or(Failure::Unavailable)?;
+    if (total.max(0) as u64).saturating_add(incoming) > MAX_PUBLISHED_ATTACHMENT_BYTES {
+        return Err(Failure::Capacity(CONVERSATION_STORAGE_FULL));
+    }
+    Ok(())
+}
 pub(super) fn validate_ids(ids: &[AttachmentId]) -> Result<(), Failure> {
     if ids.len() > MAX_MESSAGE_ATTACHMENTS
         || ids.iter().collect::<std::collections::BTreeSet<_>>().len() != ids.len()
@@ -138,6 +169,11 @@ pub(super) fn attach(
     ids: &[AttachmentId],
     spoilers: &[AttachmentId],
 ) -> Result<(), Failure> {
+    if !ids.is_empty() {
+        // The send already holds the conversation FOR UPDATE, which queues sends
+        // to this conversation; the account lock keeps the quota from relying on it.
+        lock_owner(c, actor)?;
+    }
     static CLAIM: OnceLock<String> = OnceLock::new();
     let sql = CLAIM.get_or_init(|| format!("UPDATE direct_attachments SET message_id=$1::uuid,spoiler=$5::boolean WHERE id=$2::uuid AND owner_id=$3::uuid AND conversation_id=$4::uuid AND message_id IS NULL AND expires_at>now() RETURNING {} AS data", crate::chat::attachments::CLAIMED));
     let mut metadata = Vec::<ChatAttachment>::new();
@@ -157,6 +193,10 @@ pub(super) fn attach(
             .pop()
             .ok_or(Failure::Forbidden)?,
         );
+    }
+    if !ids.is_empty() {
+        // Authoritative: the total now includes this send; failure rolls it back.
+        published(c, actor, conversation, 0)?;
     }
     execute(
         c,
