@@ -474,7 +474,7 @@ pub(super) fn reauthentication_limit(pool: &DbPool, ip: &str, token: &str) -> Re
     // Address budgets first, before any session work.
     limit(&mut c, limit_keys(ip, None, true))?;
     // Full authentication: stale tokens neither spend the account budget nor
-    // escape replay revocation behind a 429.
+    // escape replay revocation behind the account-level 429.
     match authenticate(&mut c, token) {
         Ok(session) => limit(
             &mut c,
@@ -498,7 +498,7 @@ fn limit_keys(ip: &str, identifier: Option<&str>, sensitive: bool) -> Vec<(Strin
 }
 
 fn limit(c: &mut PgConnection, keys: Vec<(String, i32)>) -> Result<(), Failure> {
-    // One transaction: one commit (and WAL flush) per limited request. Every
+    // One transaction: one commit (and WAL flush) per limiter call. Every
     // counter increment commits, including on a limited request, as before.
     let limited = c.transaction(|c| {
         execute(
