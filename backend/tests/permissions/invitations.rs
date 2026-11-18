@@ -438,13 +438,27 @@ async fn invitations_reach_only_the_invitee_live_with_public_fields() {
     assert_eq!(parsed.guild_name, "Live");
 
     // Across a block the invitation is stored but never wakes, lists to or is
-    // acceptable by the invitee, in either direction.
+    // acceptable by the invitee, in either direction. Each invitee also holds a
+    // visible invitation from the bystander that expires after its snapshot, so
+    // any wake would push a changed snapshot.
+    let mut visible = command(
+        &app,
+        &bystander,
+        json!({"action":"create_guild","name":"Visible"}),
+        StatusCode::OK,
+    )
+    .await["state"]
+        .clone();
+    let visible_id = visible["guild"]["id"].clone();
     for (account, token, username) in [
         (blocker, &bt, "live_blocker"),
         (blocked, &blt, "live_blocked"),
     ] {
+        invite(&app, &bystander, &mut visible, username).await;
         let mut socket = open(address, token).await;
-        snapshot(&mut socket, |_| true).await;
+        let listed = snapshot(&mut socket, |_| true).await;
+        assert_eq!(listed["guild_invitations"][0]["guild_id"], visible_id);
+        age(&db, &visible_id, account, "7 days");
         invite(&app, &ot, &mut state, username).await;
         assert!(pending(&db, &guild, account));
         assert!(quiet(&mut socket).await, "{username} was woken");
@@ -532,6 +546,19 @@ async fn members_and_outstanding_invitations_share_the_member_limit_without_an_o
     let (status, body) = invite(&app, &ot, &mut state, "slot_late").await;
     assert_eq!(status, StatusCode::OK, "{body}");
     assert!(pending(&db, &guild, late));
+    let (status, body) = invite(&app, &ot, &mut state, "slot_plain").await;
+    assert_eq!(status, StatusCode::CONFLICT, "{body}");
+    assert_eq!(body["code"], "limit_exceeded");
+    // Even when members alone fill a lowered limit, repeats stay idempotent
+    // (with identical responses; the state now shows the lowered limit).
+    member_limit(&db, 2);
+    let mut repeats = vec![];
+    for username in ["slot_late", "slot_blocker"] {
+        let (status, body) = invite(&app, &ot, &mut state, username).await;
+        assert_eq!(status, StatusCode::OK, "{body}");
+        repeats.push(shape(&body));
+    }
+    assert_eq!(repeats[0], repeats[1]);
     let (status, body) = invite(&app, &ot, &mut state, "slot_plain").await;
     assert_eq!(status, StatusCode::CONFLICT, "{body}");
     assert_eq!(body["code"], "limit_exceeded");
