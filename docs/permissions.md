@@ -516,13 +516,14 @@ either direction.
   submitted revision and ManageInvites like other guild changes, bumps the revision,
   and returns the same `State`/`Done` response. Unknown or unverified usernames are
   rejected; current members keep the conflict error; banned accounts are refused.
-  Repeating it while an invitation is outstanding changes nothing and always
-  succeeds: there is at most one per server and account (`guild_invitations`,
+  Repeating it while an invitation is outstanding changes nothing and is never
+  refused for capacity: there is at most one per server and account (`guild_invitations`,
   primary key `(guild_id, account_id)`), and the per-account permission rate
   limit covers it.
-- **Cap**: a server's members plus its outstanding invitations may not exceed its
-  owner's member limit; a new invitation beyond that returns the usual
-  `limit_exceeded` error. Declining, expiry and invitee account deletion free a
+- **Cap**: a new invitation is refused with the usual `limit_exceeded` error
+  unless the server's members plus its outstanding invitations are below its
+  owner's member limit. Joins by other paths and lowered limits can still leave
+  the total above the limit; they only block new invitations. Declining, expiry and invitee account deletion free a
   slot; accepting turns it into a membership. Invitations hidden by a block or a ban still take
   their slot until they expire or are answered.
 - **Expiry**: an invitation is outstanding for 7 days from its creation. After

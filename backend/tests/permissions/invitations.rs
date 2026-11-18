@@ -458,7 +458,7 @@ async fn invitations_reach_only_the_invitee_live_with_public_fields() {
         let mut socket = open(address, token).await;
         let listed = snapshot(&mut socket, |_| true).await;
         assert_eq!(listed["guild_invitations"][0]["guild_id"], visible_id);
-        age(&db, &visible_id, account, "7 days");
+        age(&db, &visible_id, account, "168 hours");
         invite(&app, &ot, &mut state, username).await;
         assert!(pending(&db, &guild, account));
         assert!(quiet(&mut socket).await, "{username} was woken");
@@ -597,8 +597,8 @@ async fn expired_invitations_free_their_slot_and_cannot_be_listed_or_accepted() 
     assert_eq!(status, StatusCode::CONFLICT);
 
     // Seven days old is expired; six days old is still outstanding.
-    age(&db, &guild, expired, "7 days");
-    age(&db, &guild, recent, "6 days");
+    age(&db, &guild, expired, "168 hours");
+    age(&db, &guild, recent, "144 hours");
     let listed = snapshot(&mut open(address, &et).await, |_| true).await;
     assert!(listed.get("guild_invitations").is_none(), "{listed}");
     let listed = snapshot(&mut open(address, &rt).await, |_| true).await;

@@ -502,7 +502,7 @@ pub(super) fn dispatch(
                 execute(c,"SELECT id FROM guilds WHERE id=$1::uuid FOR UPDATE", &[&guild_id.to_string()])?;
                 // Only the addressed account's own unexpired invitation; never one hidden by a block.
                 // The row lock orders this against a concurrent decline.
-                require(query::<bool>(c,"SELECT to_jsonb(TRUE) AS data FROM guild_invitations v WHERE v.guild_id=$1::uuid AND v.account_id=$2::uuid AND NOT EXISTS(SELECT 1 FROM account_blocks b WHERE (b.blocker_id=v.account_id AND b.blocked_id=v.invited_by) OR (b.blocker_id=v.invited_by AND b.blocked_id=v.account_id)) AND v.created_at>now()-make_interval(hours=>$3::integer) FOR UPDATE OF v", &[&guild_id.to_string(),&actor.to_string(),&INVITATION_HOURS.to_string()])? == [true])?;
+                require(query::<bool>(c,"SELECT to_jsonb(TRUE) AS data FROM guild_invitations v WHERE v.guild_id=$1::uuid AND v.account_id=$2::uuid AND NOT EXISTS(SELECT 1 FROM account_blocks b WHERE (b.blocker_id=v.account_id AND b.blocked_id=v.invited_by) OR (b.blocker_id=v.invited_by AND b.blocked_id=v.account_id)) AND v.created_at>statement_timestamp()-make_interval(hours=>$3::integer) FOR UPDATE OF v", &[&guild_id.to_string(),&actor.to_string(),&INVITATION_HOURS.to_string()])? == [true])?;
                 let state=load(c,guild_id)?;
                 not_banned(c,guild_id,actor)?;
                 join(c,&state,actor)?;
@@ -632,7 +632,8 @@ pub(super) fn dispatch(
 
 /// A server invitation is outstanding for this many hours (7 days, independent
 /// of the session time zone) from `created_at`; expired ones cannot be listed
-/// or accepted and free their slot.
+/// or accepted and free their slot. Checks use the statement time, taken after
+/// any guild lock wait.
 const INVITATION_HOURS: u32 = 7 * 24;
 
 /// `account`'s acceptable pending server invitations, newest first: only the
@@ -645,7 +646,7 @@ pub(crate) fn invitations(
 ) -> Result<Vec<GuildInvitation>, Failure> {
     query(
         c,
-        "SELECT jsonb_strip_nulls(jsonb_build_object('guild_id',g.id,'guild_name',g.name,'guild_icon_id',(SELECT i.id FROM guild_icons i WHERE i.guild_id=g.id),'created_at',v.created_at))||jsonb_build_object('invited_by',CASE WHEN a.id IS NULL THEN NULL ELSE jsonb_strip_nulls(jsonb_build_object('id',a.id,'username',a.username,'display_name',a.display_name,'avatar_id',p.id)) END) AS data FROM guild_invitations v JOIN guilds g ON g.id=v.guild_id LEFT JOIN accounts a ON a.id=v.invited_by LEFT JOIN account_avatars p ON p.account_id=a.id WHERE v.account_id=$1::uuid AND NOT EXISTS(SELECT 1 FROM guild_moderation x WHERE x.guild_id=v.guild_id AND x.account_id=v.account_id AND x.banned) AND NOT EXISTS(SELECT 1 FROM account_blocks b WHERE (b.blocker_id=v.account_id AND b.blocked_id=v.invited_by) OR (b.blocker_id=v.invited_by AND b.blocked_id=v.account_id)) AND v.created_at>now()-make_interval(hours=>$3::integer) ORDER BY v.created_at DESC,v.guild_id LIMIT $2::integer",
+        "SELECT jsonb_strip_nulls(jsonb_build_object('guild_id',g.id,'guild_name',g.name,'guild_icon_id',(SELECT i.id FROM guild_icons i WHERE i.guild_id=g.id),'created_at',v.created_at))||jsonb_build_object('invited_by',CASE WHEN a.id IS NULL THEN NULL ELSE jsonb_strip_nulls(jsonb_build_object('id',a.id,'username',a.username,'display_name',a.display_name,'avatar_id',p.id)) END) AS data FROM guild_invitations v JOIN guilds g ON g.id=v.guild_id LEFT JOIN accounts a ON a.id=v.invited_by LEFT JOIN account_avatars p ON p.account_id=a.id WHERE v.account_id=$1::uuid AND NOT EXISTS(SELECT 1 FROM guild_moderation x WHERE x.guild_id=v.guild_id AND x.account_id=v.account_id AND x.banned) AND NOT EXISTS(SELECT 1 FROM account_blocks b WHERE (b.blocker_id=v.account_id AND b.blocked_id=v.invited_by) OR (b.blocker_id=v.invited_by AND b.blocked_id=v.account_id)) AND v.created_at>statement_timestamp()-make_interval(hours=>$3::integer) ORDER BY v.created_at DESC,v.guild_id LIMIT $2::integer",
         &[
             &account.to_string(),
             &MAX_LISTED_GUILD_INVITATIONS.to_string(),
@@ -821,7 +822,7 @@ fn change_guild(
             // Expired invitations are gone for good; drop this server's under its lock.
             execute(
                 c,
-                "DELETE FROM guild_invitations WHERE guild_id=$1::uuid AND created_at<=now()-make_interval(hours=>$2::integer)",
+                "DELETE FROM guild_invitations WHERE guild_id=$1::uuid AND created_at<=statement_timestamp()-make_interval(hours=>$2::integer)",
                 &[guild_id, hours],
             )?;
             // Repeats while outstanding keep the first invitation and its slot.
