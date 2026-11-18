@@ -241,6 +241,11 @@ rechecks that each row is still unclaimed and expired after waiting for concurre
 sends, preserving files claimed before expiry even if the send commits afterward.
 Block also deletes that pair's unclaimed files. Published files remain until message or
 account deletion; removing a friendship hides them while retaining the history.
+Sent files count toward 2 GiB per account per direct or group conversation
+(`MAX_PUBLISHED_ATTACHMENT_BYTES`, the guild rule in [chat.md](chat.md#attachments)),
+checked in the send transaction under the per-account private attachment lock and
+early at upload; exceeding it returns `limit_exceeded`, and deleting older messages
+with attachments frees space.
 Bytes are PostgreSQL `bytea`, included in DB backups. Download MIME is classified
 from bytes: PNG/JPEG/GIF/WebP and MP4/WebM can be previewed, everything else is a
 file download. Responses are `no-store`, `nosniff` and attachment disposition.

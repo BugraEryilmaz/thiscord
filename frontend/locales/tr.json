@@ -1372,6 +1372,8 @@
   "The sound must be at least 50 ms long": "Ses en az 50 ms uzunluğunda olmalı",
   "Sound names need 1 to 32 characters; an emoji is optional": "Ses adı 1 ile 32 karakter arasında olmalı; emoji isteğe bağlıdır",
   "Server soundboard limit reached (24 sounds)": "Sunucunun ses panosu sınırına ulaşıldı (24 ses)",
+  "Your attachment storage on this server is full (2 GiB). Delete older messages with attachments to free space": "Bu sunucudaki ek depolama alanın dolu (2 GiB). Yer açmak için ek içeren eski mesajlarını sil",
+  "Your attachment storage in this conversation is full (2 GiB). Delete older messages with attachments to free space": "Bu sohbetteki ek depolama alanın dolu (2 GiB). Yer açmak için ek içeren eski mesajlarını sil",
   "Invalid soundboard request": "Geçersiz ses panosu isteği",
   "Invalid sound path": "Geçersiz ses yolu",
   "Built-in sounds are available in every server and do not count toward the limit.": "Yerleşik sesler her sunucuda kullanılabilir ve sınıra dahil edilmez.",

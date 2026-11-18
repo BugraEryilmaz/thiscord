@@ -739,3 +739,69 @@ struct JsonRow {
     #[diesel(sql_type=diesel::sql_types::Jsonb)]
     data: Value,
 }
+
+#[tokio::test]
+#[ignore = "requires TEST_DATABASE_URL"]
+async fn published_private_attachments_are_capped_per_account_per_conversation() {
+    use super::attachments::{assert_one_refused, assert_storage_full, inflate, published_total};
+    use thiscord_shared::{chat::MAX_PUBLISHED_ATTACHMENT_BYTES, friends::FRIENDS_PATH};
+    let _lock = TEST_LOCK.lock().await;
+    let cap = MAX_PUBLISHED_ATTACHMENT_BYTES;
+    let db = database();
+    let (aid, a) = user(&db, "cap_a");
+    let (bid, b) = user(&db, "cap_b");
+    let (cid, _) = user(&db, "cap_c");
+    let (one, two) = (pair(&db, aid, bid), pair(&db, aid, cid));
+    let app = api::router(Some(db.pool.clone()), vec![]);
+    let send = |conversation: Uuid, file: &Value| json!({"action":"send","conversation_id":conversation,"client_id":Uuid::new_v4(),"content":"","attachments":[file["id"]]});
+    let (owner, scope) = (aid.to_string(), json!(one));
+
+    // An older sent attachment leaves room for exactly two more bytes.
+    let base = upload(&app, &a, one, vec![1], StatusCode::OK).await;
+    let sent = social(&app, &a, send(one, &base), StatusCode::OK).await;
+    inflate(&db, "direct_attachments", &base["id"], cap - 2);
+    let first = upload(&app, &a, one, vec![1], StatusCode::OK).await;
+    social(&app, &a, send(one, &first), StatusCode::OK).await;
+    let second = upload(&app, &a, one, vec![1], StatusCode::OK).await;
+    let third = upload(&app, &a, one, vec![1], StatusCode::OK).await;
+    // Sends succeed up to the cap and fail past it, leaving the file staged.
+    social(&app, &a, send(one, &second), StatusCode::OK).await;
+    assert_eq!(
+        published_total(&db, "direct_attachments", &owner, "conversation_id", &scope),
+        cap
+    );
+    let refused = social(&app, &a, send(one, &third), StatusCode::CONFLICT).await;
+    assert_storage_full(&refused, "in this conversation");
+    // At the cap, uploads are refused before the body is buffered.
+    let early = upload(&app, &a, one, vec![1], StatusCode::CONFLICT).await;
+    assert_storage_full(&early, "in this conversation");
+
+    // The other participant and the same account elsewhere are unaffected.
+    let theirs = upload(&app, &b, one, vec![1], StatusCode::OK).await;
+    social(&app, &b, send(one, &theirs), StatusCode::OK).await;
+    let elsewhere = upload(&app, &a, two, vec![1], StatusCode::OK).await;
+    social(&app, &a, send(two, &elsewhere), StatusCode::OK).await;
+
+    // Deleting a message frees its attachments' quota.
+    social(&app, &a, json!({"action":"delete","conversation_id":one,"message_id":sent["message"]["id"],"revision":sent["message"]["revision"]}), StatusCode::OK).await;
+    social(&app, &a, send(one, &third), StatusCode::OK).await;
+    assert_eq!(
+        published_total(&db, "direct_attachments", &owner, "conversation_id", &scope),
+        3
+    );
+
+    // Two overlapping sends cannot both take the last byte. Sends to one
+    // conversation queue on its row lock before the account lock.
+    inflate(&db, "direct_attachments", &first["id"], cap - 3);
+    let x = upload(&app, &a, one, vec![1], StatusCode::OK).await;
+    let y = upload(&app, &a, one, vec![1], StatusCode::OK).await;
+    let (r1, r2) = tokio::join!(
+        super::call(&app, FRIENDS_PATH, &a, send(one, &x)),
+        super::call(&app, FRIENDS_PATH, &a, send(one, &y))
+    );
+    assert_one_refused(&[r1, r2], "in this conversation");
+    assert_eq!(
+        published_total(&db, "direct_attachments", &owner, "conversation_id", &scope),
+        cap
+    );
+}

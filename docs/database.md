@@ -133,7 +133,10 @@ introducing longer-running data migrations.
 Chat attachments are stored as bounded PostgreSQL `bytea` rows, alongside message
 metadata. Include them in normal database backups and capacity planning; there is
 no separate public upload directory. Abandoned uploads expire after one hour and
-the backend reclaims them periodically. Reverting the attachment migration
+the backend reclaims them periodically. Sent attachments are capped at 2 GiB per
+account per guild or private conversation ([chat.md](chat.md#attachments)); there is
+no instance-wide ceiling, so the number of accounts and conversations still bounds
+total storage. Reverting the attachment migration
 permanently removes file bytes and attachment metadata; retained message text is
 unaffected. Attachment-only messages have no text to retain after that rollback.
 
