@@ -47,26 +47,12 @@ pub(super) fn accept(
                 &[&invite.to_string()],
             )? == [true],
         )?;
-        allocation(
-            state.members.len() < capacity(c, state.guild.owner)?.limits.members as usize,
-            "Server member limit reached for its owner's instance role",
-        )?;
-        execute(
-            c,
-            "INSERT INTO guild_members(guild_id,account_id) VALUES($1::uuid,$2::uuid)",
-            &[&guild.to_string(), &actor.to_string()],
-        )?;
+        join(c, &state, actor)?;
         execute(
             c,
             "UPDATE guild_invites SET uses=LEAST(uses::bigint+1,2147483647)::integer WHERE id=$1::uuid",
             &[&invite.to_string()],
         )?;
-        execute(
-            c,
-            "UPDATE guilds SET revision=revision+1 WHERE id=$1::uuid",
-            &[&guild.to_string()],
-        )?;
-        // Existing timeout/moderator voice restrictions are deliberately retained.
     }
     Ok(PermissionResponse::Joined {
         guild: load(c, guild)?.guild,

@@ -119,7 +119,9 @@ moves, timeouts, kicks, bans and unbans, with reasons, audit history and server-
 permission and hierarchy checks.
 The server header and context menu offer **Copy invite link** to members with
 invite permission: unlimited uses, no expiry, and revocation in **Server settings >
-Invite links**. Settings also offer bounded invites. Invitation pages open or focus
+Invite links**. Settings also offer bounded invites, and inviting a username sends
+a server invitation that person accepts or declines under Friends → Requests.
+Invitation pages open or focus
 the installed desktop app or continue in the web client (the primary action on
 phones), preserve the invitation through sign-in, and offer the same installers
 as the welcome page. A browser may require an explicit **Open the Thiscord app**

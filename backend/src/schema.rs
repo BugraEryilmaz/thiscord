@@ -264,6 +264,15 @@ diesel::table! {
 }
 
 diesel::table! {
+    guild_invitations (guild_id, account_id) {
+        guild_id -> Uuid,
+        account_id -> Uuid,
+        invited_by -> Nullable<Uuid>,
+        created_at -> Timestamptz,
+    }
+}
+
+diesel::table! {
     guild_invites (id) {
         id -> Uuid,
         guild_id -> Uuid,
@@ -552,6 +561,7 @@ diesel::joinable!(group_members -> accounts (account_id));
 diesel::joinable!(group_members -> group_conversations (group_id));
 diesel::joinable!(guild_audit_log -> guilds (guild_id));
 diesel::joinable!(guild_icons -> guilds (guild_id));
+diesel::joinable!(guild_invitations -> guilds (guild_id));
 diesel::joinable!(guild_invites -> accounts (created_by));
 diesel::joinable!(guild_invites -> guilds (guild_id));
 diesel::joinable!(guild_members -> accounts (account_id));
@@ -604,6 +614,7 @@ diesel::allow_tables_to_appear_in_same_query!(
     group_members,
     guild_audit_log,
     guild_icons,
+    guild_invitations,
     guild_invites,
     guild_member_roles,
     guild_members,

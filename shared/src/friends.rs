@@ -230,6 +230,11 @@ pub struct Snapshot {
     pub groups: Vec<Group>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub group_calls: Vec<GroupCall>,
+    /// The connected account's pending server invitations, newest first (at
+    /// most [`MAX_LISTED_GUILD_INVITATIONS`](crate::permissions::MAX_LISTED_GUILD_INVITATIONS)).
+    /// Older clients ignore them; older servers omit them.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub guild_invitations: Vec<crate::permissions::GuildInvitation>,
 }
 #[derive(Clone, Serialize, Deserialize)]
 #[serde(tag = "action", rename_all = "snake_case", deny_unknown_fields)]

@@ -346,7 +346,7 @@ fn permission_name(p: Permission) -> &'static str {
         Permission::ManageGuild => crate::i18n::t("Manage server"),
         Permission::ManageChannels => crate::i18n::t("Manage channels"),
         Permission::ManageRoles => crate::i18n::t("Manage roles & permissions"),
-        Permission::ManageInvites => crate::i18n::t("Add members"),
+        Permission::ManageInvites => crate::i18n::t("Invite members"),
         Permission::ViewChannel => crate::i18n::t("View channel"),
         Permission::ReadHistory => crate::i18n::t("Read message history"),
         Permission::SendMessages => crate::i18n::t("Send messages"),
@@ -779,6 +779,8 @@ fn RoleDisplay(name: RwSignal<String>, appearance: RwSignal<RoleAppearance>) -> 
 fn Members(editor: Editor) -> impl IntoView {
     let ui = editor.ui;
     let username = RwSignal::new(String::new());
+    // The username whose invitation was just sent (never confirms delivery).
+    let invited = RwSignal::new(None::<String>);
     let selected = RwSignal::new(
         ui.role_target
             .get_untracked()
@@ -804,7 +806,8 @@ fn Members(editor: Editor) -> impl IntoView {
     };
     view! {
         <CapacitySummary editor=editor/>
-        <Show when=move ||editor.allowed(Permission::ManageInvites)><form class="settings-card" on:submit=move |e:leptos::ev::SubmitEvent|{e.prevent_default();editor.change(GuildChange::AddMember{username:username.get_untracked()});}><h3>{move || crate::i18n::t("Add a member")}</h3><p class="settings-hint">{move || crate::i18n::t("Enter the username of an existing verified account. Requires permission to add members.")}</p><Field label="Username" value=username/><button class="settings-primary" disabled=move ||username.get().trim().is_empty()>{move || crate::i18n::t("Add member")}</button></form></Show>
+        <Show when=move ||editor.allowed(Permission::ManageInvites)><form class="settings-card" on:submit=move |e:leptos::ev::SubmitEvent|{e.prevent_default();invited.set(None);let name=username.get_untracked().trim().to_owned();editor.change_then(GuildChange::AddMember{username:name.clone()},Some(Callback::new(move |()|{username.set(String::new());invited.set(Some(name.clone()));})));}><h3>{move || crate::i18n::t("Invite a member")}</h3><p class="settings-hint">{move || crate::i18n::t("Enter the username of an existing verified account. They join after accepting the invitation. Requires permission to invite members.")}</p><Field label="Username" value=username/><button class="settings-primary" disabled=move ||username.get().trim().is_empty()>{move || crate::i18n::t("Send invitation")}</button>
+            <Show when=move ||invited.get().is_some()><p class="settings-hint" role="status">{move ||thiscord_frontend::localized_format!(crate::i18n::language(), "Invitation sent to @{username}. They become a member once they accept.", username = invited.get().unwrap_or_default())}</p></Show></form></Show>
         <section class="settings-card"><label class="settings-field"><span>{move || crate::i18n::t("Member")}</span><select prop:value=move ||selected.get() on:change=move |e|selected.set(event_target_value(&e))><option value="">{move || crate::i18n::t("Choose a member")}</option>{move ||editor.state.get().map(|s|s.members.into_iter().map(|m|view!{<option value=m.account_id.to_string()>{format!("{}{}",m.display_name(),if m.account_id==s.guild.owner{crate::i18n::t(" · Owner")}else{""})}</option>}).collect_view())}</select></label>
             <Show when=move ||member.get().is_some()><h3>{move ||member.get().map(|m|m.display_name().to_owned())}</h3><p class="settings-hint">{move || crate::i18n::t("Role changes save immediately. Everyone applies to every member.")}</p>
                 {move ||editor.state.get().map(|s|s.roles.into_iter().map(move |r|{let role_id=r.id;view!{<label class="settings-permission-row"><span>{r.name}</span><input type="checkbox" disabled=move ||r.everyone||!lower() prop:checked=move ||r.everyone||member.get().is_some_and(|m|m.roles.contains(&role_id)) on:change=move |e|if let Some(m)=member.get_untracked(){editor.change(GuildChange::AssignRole{account_id:m.account_id,role_id,assigned:event_target_checked(&e)});}/></label>}}).collect_view())}

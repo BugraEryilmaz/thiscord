@@ -59,9 +59,10 @@ also retains its aggregate 100-server safety ceiling. Storage, bandwidth, billin
 expiring subscriptions and voice concurrency are not part of these allocations.
 
 Every guild derives its limits from its **current owner's** current instance role,
-including when another member creates a channel, adds members or creates guild
-roles. Server settings display usage and limits. Both join-by-ID and direct member
-addition enforce capacity, while existing members may rejoin/open at capacity.
+including when another member creates a channel, invites members or creates guild
+roles. Server settings display usage and limits. Join-by-ID, invite codes and
+accepting a member invitation enforce capacity (sending an invitation also needs
+room), while existing members may rejoin/open at capacity.
 Exceeding an allocation returns HTTP 409 with `limit_exceeded`, a specific safe
 message and the standard request ID.
 
@@ -104,8 +105,9 @@ transfer or delete each owned guild before account deletion or leaving a guild.
 Each guild has exactly one owner who is also a member. Ownership transfer requires
 recent reauthentication and an existing verified member. The former owner keeps
 their ordinary membership and previously assigned roles, losing the owner bypass.
-A member with ManageInvites may add an existing verified username directly or
-create a shareable invite with optional lifetime and use limits (see below).
+A member with ManageInvites may invite an existing verified username, who joins
+only after accepting (see [Member invitations](#member-invitations)), or create a
+shareable invite with optional lifetime and use limits (see below).
 
 The main screen has a left server rail with server icons (initials when no icon is
 set or it fails to load) and immediate server names on hover or keyboard focus,
@@ -137,9 +139,9 @@ name and optional password. The **Join a server** icon opens a dialog for a serv
 password. Verified accounts can join unprotected servers by ID; protected servers
 require the password. Existing members can reopen/join their server without
 creating another membership. A removal is not a ban: someone who still knows the
-join credentials can rejoin. A ban blocks both join-by-ID and direct additions until
-a member with BanMembers removes it. ManageInvites permits
-direct member additions without requiring the server password.
+join credentials can rejoin. A ban blocks join-by-ID, invite codes, new member
+invitations and accepting earlier ones until a member with BanMembers removes it.
+Accepting a member invitation does not require the server password.
 
 Server passwords are salted Argon2id hashes on the backend, never returned in DTOs
 or logged. Empty passwords mean no protection; passwords are bounded to 1024 bytes.
@@ -333,6 +335,7 @@ The backend does not archive: these operations are immediate and permanent.
 | Kick / ban | Removes membership and roles and disconnects voice; bans block rejoining until unbanned. Messages are retained. |
 | Timeout / remove timeout, mute, deafen, move, disconnect | Moderation state changes; no data is deleted. |
 | Revoke invite | The link stops admitting members; existing members stay. |
+| Decline server invitation | Removes the pending invitation; nothing else changes. The server can invite again. |
 | Transfer ownership | The new owner gets full control; the former owner remains a member. |
 | Remove server icon / profile picture | Deletes the stored image; copies already downloaded cannot be recalled. |
 | Delete sound / bot, rotate bot token | Deletes the sound; deletes the bot and revokes its token and connections; rotation invalidates the old token. |
@@ -499,6 +502,52 @@ rejoin persistence, chat restrictions, both banned join paths, unban, socket exp
 and live voice/screen removal with unaffected participants and explicit rejoining.
 Three-platform interactive moderation acceptance remains a manual check.
 
+
+## Member invitations
+
+**Server settings > Members > Invite a member** (ManageInvites) takes a username.
+It never adds anyone: it creates a pending invitation addressed to that verified
+account, and that account alone decides. Until it accepts there is no membership,
+role, member-list entry, presence, profile card, mention or channel access in
+either direction.
+
+- **Sending** is the released `GuildChange::AddMember { username }` command, so
+  0.1.63 clients keep working: it is evaluated under the guild lock with the
+  submitted revision and ManageInvites like other guild changes, bumps the revision,
+  and returns the same `State`/`Done` response. Unknown or unverified usernames are
+  rejected; current members keep the conflict error; banned accounts are refused;
+  the server must have room under its owner's member limit. Repeating it while an
+  invitation is pending changes nothing: there is at most one per server and
+  account (`guild_invitations`, primary key `(guild_id, account_id)`), and the
+  per-account permission rate limit covers it.
+- **Blocks**: if either the inviter or the invitee has blocked the other, nothing
+  is stored or delivered, but the response is exactly the same as for a delivered
+  invitation, so the inviter cannot detect the block. Pending invitations are not
+  listed to anyone but the invitee, which keeps that indistinguishable. A block
+  placed later hides a pending invitation and refuses its acceptance while it lasts.
+- **Delivery**: the invitee's friends socket snapshot carries
+  `guild_invitations` (newest first, at most 100): server ID, name and icon, the
+  inviter's ID, username, display name and avatar, and the time. Commits wake that
+  socket, so invitations appear without a reload. Home → Friends → **Requests**
+  lists them above friend requests with **Accept** and **Decline**, and they count
+  in the Requests, Friends and Home badges.
+- **Accepting** (`AcceptGuildInvitation { guild_id }`) works only for the invited
+  account's own invitation; the ID of a server is not a capability. Under the guild
+  lock it rechecks that the invitation is still pending and not hidden by a block,
+  that the server exists, that the account is not banned and that the owner's
+  member limit has room, then joins through the same path as join-by-ID and invite
+  codes (revision bump, chat access gate, subscription invalidation; retained
+  timeouts and server mutes/deafens apply). It responds `Joined`, like other joins.
+- **Declining** (`DeclineGuildInvitation { guild_id }`) deletes the caller's own
+  invitation, if any. Joining by any other path also consumes it.
+- **Inviter changes**: like invite codes, an invitation stays valid if its sender
+  later leaves, loses ManageInvites or deletes their account (then it shows no
+  sender). Server deletion and invitee account deletion delete it. There is no
+  outgoing-invitation list or cancel yet; banning prevents acceptance.
+
+Released clients show a sent invitation as a silent success (the member list does
+not change) and do not display received invitations; they need the next client
+release to accept one. The migration's rollback discards pending invitations.
 
 ## Invite links and channel organization
 
