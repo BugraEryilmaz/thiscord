@@ -196,7 +196,7 @@ const OTHER_BROWSER: &str = "This Google sign-in was not started in this browser
 pub(super) const UPDATE_REQUIRED: &str = "Check for an update first";
 /// Released clients translate these by exact text; never reword the login one.
 const FAILED: &str = "Google sign-in failed. If the email already has an account, sign in there first and link Google";
-const LINK_FAILED: &str = "Connecting Google failed. Use a Google account that is not linked to another Thiscord account and try again";
+const LINK_FAILED: &str = "Connecting Google failed. A Thiscord account can have only one Google account, and a Google account can belong to only one Thiscord account";
 const REAUTH_FAILED: &str = "Google confirmation failed. Choose the Google account that is linked to this Thiscord account and try again";
 /// How long a Google ID token counts as a fresh sign-in for confirmation: the
 /// same five minutes as an attempt and as recent reauthentication.
@@ -854,26 +854,28 @@ mod tests {
             assert_eq!(verify(issued(at), true).is_ok(), fresh, "iat {at}");
             assert!(verify(issued(at), false).is_ok(), "iat {at}");
         }
-        assert!(
-            verify_token(
-                &sign(base.clone()),
-                &access,
-                &verifier,
-                "wrong-nonce",
-                false
-            )
-            .is_err()
-        );
-        assert!(
-            verify_token(
-                &sign(base.clone()),
-                &AccessToken::new("substituted".into()),
-                &verifier,
-                "expected-nonce",
-                false
-            )
-            .is_err()
-        );
+        for reauthenticate in [false, true] {
+            assert!(
+                verify_token(
+                    &sign(base.clone()),
+                    &access,
+                    &verifier,
+                    "wrong-nonce",
+                    reauthenticate
+                )
+                .is_err()
+            );
+            assert!(
+                verify_token(
+                    &sign(base.clone()),
+                    &AccessToken::new("substituted".into()),
+                    &verifier,
+                    "expected-nonce",
+                    reauthenticate
+                )
+                .is_err()
+            );
+        }
         for claims in [
             base.clone()
                 .set_issuer(IssuerUrl::new("https://evil.test".into()).unwrap()),
@@ -903,18 +905,45 @@ mod tests {
             String::from_utf8(forged).unwrap(),
         ))
         .unwrap();
-        assert!(verify_token(&forged, &access, &verifier, "expected-nonce", false).is_err());
-        assert!(verify_token(&sign(base), &access, &wrong_keys, "expected-nonce", false).is_err());
+        for reauthenticate in [false, true] {
+            assert!(
+                verify_token(
+                    &forged,
+                    &access,
+                    &verifier,
+                    "expected-nonce",
+                    reauthenticate
+                )
+                .is_err()
+            );
+            assert!(
+                verify_token(
+                    &sign(base.clone()),
+                    &access,
+                    &wrong_keys,
+                    "expected-nonce",
+                    reauthenticate
+                )
+                .is_err()
+            );
+        }
     }
     #[test]
     fn confirmation_freshness_window_and_skew() {
         let now = chrono::Utc::now();
         let at = |seconds| now + chrono::Duration::seconds(seconds);
-        assert!(fresh(now, now));
-        assert!(fresh(at(-REAUTH_WINDOW_SECONDS + 1), now));
-        assert!(!fresh(at(-REAUTH_WINDOW_SECONDS), now));
-        assert!(fresh(at(CLOCK_SKEW_SECONDS), now));
-        assert!(!fresh(at(CLOCK_SKEW_SECONDS + 1), now));
+        // Five minutes back (exclusive), 60 seconds ahead (inclusive).
+        for (seconds, expected) in [
+            (-301, false),
+            (-300, false),
+            (-299, true),
+            (0, true),
+            (59, true),
+            (60, true),
+            (61, false),
+        ] {
+            assert_eq!(fresh(at(seconds), now), expected, "{seconds} s");
+        }
     }
     #[test]
     fn each_purpose_has_its_own_failure_text() {
@@ -1079,20 +1108,19 @@ mod tests {
         register(c, "other");
         // A second session of the same account, which a confirmation started
         // elsewhere must never mark.
-        let AccountResponse::Session { session: second } = dispatch(
-            &pool,
-            "",
-            AccountRequest::Login {
-                login: "owner".into(),
-                password: "correct test password".into(),
-                device: "second".into(),
-            },
-        )
-        .unwrap() else {
-            panic!("expected session")
-        };
+        assert!(matches!(
+            dispatch(
+                &pool,
+                "",
+                AccountRequest::Login {
+                    login: "owner".into(),
+                    password: "correct test password".into(),
+                    device: "second".into(),
+                },
+            ),
+            Ok(AccountResponse::Session { .. })
+        ));
         let first = authenticate(c, &owner).unwrap().id.to_string();
-        let second = authenticate(c, &second.token).unwrap().id.to_string();
         let marked = |c: &mut PgConnection| {
             query::<String>(
                 c,
@@ -1130,7 +1158,8 @@ mod tests {
         let ticket = confirm(c, "google-owner", now).await;
         assert!(complete(c, &ticket, None).is_ok());
         assert_eq!(marked(c), vec![first.clone()]);
-        assert!(!marked(c).contains(&second));
+        // ...recently enough to authorize protected actions.
+        assert!(recent(&authenticate(c, &owner).unwrap()).is_ok());
 
         // A token issued before the window is refused at the callback.
         let ticket = confirm(c, "google-owner", now - chrono::Duration::minutes(6)).await;

@@ -412,7 +412,8 @@ of these hold:
 
 - the person completes a new Google sign-in, and the ID token Google returns was
   issued (`iat`) within the last five minutes, the same window as an attempt and
-  as recent reauthentication, and at most 60 seconds ahead of the backend's clock;
+  as recent reauthentication, and at most 60 seconds ahead of the backend's clock
+  (checked at the provider callback, when the token is verified);
 - the attempt is bound to the browser or desktop app that started it (see
   [Attempt binding](#attempt-binding));
 - the session that started it is still valid when it completes, and only that
@@ -421,8 +422,9 @@ of these hold:
   Any other Google account is refused with "Google confirmation failed. Choose
   the Google account that is linked to this Thiscord account and try again".
 
-It does not check when the person last typed their Google password. OpenID
-Connect's `auth_time` claim would say that, but Google sends it only when it is
+It does not check when Google last authenticated the person (for example, when
+they last entered their Google password). OpenID Connect's `auth_time` claim
+would say that, but Google sends it only when it is
 requested through a separate claims setting, which this client does not use, and
 Google does not document `max_age` or a `prompt` value that forces a new login.
 An earlier version required `auth_time`, so every Google confirmation failed. The
@@ -435,8 +437,9 @@ fails because the attempt is bound to the thief's browser or app.
 
 Each purpose reports its own failure text: login keeps "Google sign-in failed. If
 the email already has an account, sign in there first and link Google", which
-released clients translate; linking reports "Connecting Google failed. Use a
-Google account that is not linked to another Thiscord account and try again".
+released clients translate; linking reports "Connecting Google failed. A Thiscord
+account can have only one Google account, and a Google account can belong to only
+one Thiscord account".
 Clients released before these two texts existed show them in English, or the
 generic "Check the information you entered." in Turkish.
 

@@ -227,7 +227,7 @@
   "Confirmation": "Onay",
   "Connect Google": "Google'ı bağla",
   "Connected": "Bağlandı",
-  "Connecting Google failed. Use a Google account that is not linked to another Thiscord account and try again": "Google bağlanamadı. Başka bir Thiscord hesabına bağlı olmayan bir Google hesabı kullanıp tekrar dene",
+  "Connecting Google failed. A Thiscord account can have only one Google account, and a Google account can belong to only one Thiscord account": "Google bağlanamadı. Bir Thiscord hesabına yalnızca bir Google hesabı bağlanabilir ve bir Google hesabı yalnızca bir Thiscord hesabına ait olabilir",
   "Connecting to friends…": "Arkadaşlara bağlanılıyor…",
   "Connecting to voice…": "Sese bağlanılıyor…",
   "Connecting video...": "Video bağlanıyor...",
