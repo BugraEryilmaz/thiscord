@@ -1357,3 +1357,83 @@ async fn oauth_cancellation_expiry_and_callback_replay() {
     )
     .await;
 }
+
+#[tokio::test]
+#[ignore = "requires TEST_DATABASE_URL; CI runs with --include-ignored"]
+async fn reauthentication_is_limited_per_account() {
+    let _fixture = FIXTURES.acquire().await.unwrap();
+    let db = database();
+    let app = api::router(Some(db.pool.clone()), vec![]);
+    let register = |name: &str| json!({"action":"register","username":name,"email":format!("{name}@example.com"),"password":"correct horse battery","device":"test"});
+    let stolen = token(&call(&app, register("alice"), None, StatusCode::OK).await);
+    let other_device =
+        token(&call(&app, login("correct horse battery"), None, StatusCode::OK).await);
+    let bystander = token(&call(&app, register("bob"), None, StatusCode::OK).await);
+    let reauthenticate = |password: &str| json!({"action":"reauthenticate","password":password});
+    // `call` gives every request its own address, so only the account key applies.
+    for _ in 0..6 {
+        call(
+            &app,
+            reauthenticate("guessed password"),
+            Some(&stolen),
+            StatusCode::UNAUTHORIZED,
+        )
+        .await;
+    }
+    call(
+        &app,
+        reauthenticate("guessed password"),
+        Some(&stolen),
+        StatusCode::TOO_MANY_REQUESTS,
+    )
+    .await;
+    // The budget belongs to the account, not the session, and refuses before
+    // the password is checked.
+    call(
+        &app,
+        reauthenticate("correct horse battery"),
+        Some(&other_device),
+        StatusCode::TOO_MANY_REQUESTS,
+    )
+    .await;
+    call(
+        &app,
+        reauthenticate("correct horse battery"),
+        Some(&bystander),
+        StatusCode::OK,
+    )
+    .await;
+    // Other commands keep their own budgets.
+    call(
+        &app,
+        json!({"action":"current"}),
+        Some(&stolen),
+        StatusCode::OK,
+    )
+    .await;
+    // An exhausted budget does not hide a replayed rotated token: it still
+    // revokes its session instead of returning 429.
+    let rotated = token(
+        &call(
+            &app,
+            json!({"action":"rotate"}),
+            Some(&other_device),
+            StatusCode::OK,
+        )
+        .await,
+    );
+    call(
+        &app,
+        reauthenticate("guessed password"),
+        Some(&other_device),
+        StatusCode::UNAUTHORIZED,
+    )
+    .await;
+    call(
+        &app,
+        json!({"action":"current"}),
+        Some(&rotated),
+        StatusCode::UNAUTHORIZED,
+    )
+    .await;
+}
