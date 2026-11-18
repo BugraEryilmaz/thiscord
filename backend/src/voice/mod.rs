@@ -459,7 +459,7 @@ async fn fail(socket: &mut logging::Socket, id: RequestId, failure: Failure) {
         Failure::Invalid(_) => "invalid_request",
         Failure::Conflict => "conflict",
         Failure::Capacity(_) => "limit_exceeded",
-        Failure::Limited => "rate_limited",
+        Failure::Limited | Failure::Throttled(_) => "rate_limited",
         Failure::Unavailable => "unavailable",
         Failure::Configuration(_) => "configuration",
         Failure::Database(_) => "database",

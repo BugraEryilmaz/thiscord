@@ -161,6 +161,12 @@ fn pending(pool: &DbPool) -> Result<Vec<Mail>, Failure> {
         &[],
     )?;
     execute(&mut c, "DELETE FROM sessions WHERE expires_at<now()", &[])?;
+    // A recipient counter that limits nothing any more equals a missing one.
+    execute(
+        &mut c,
+        "DELETE FROM mail_recipient_limits WHERE window_start<=now()-interval '1 hour' AND last_sent_at<=now()-interval '1 minute'",
+        &[],
+    )?;
     let messages: Vec<Mail> = query(
         &mut c,
         "SELECT to_jsonb(m) AS data FROM mail_outbox m ORDER BY created_at LIMIT 20",

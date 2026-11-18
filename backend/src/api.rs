@@ -218,7 +218,7 @@ async fn not_found(Extension(id): Extension<RequestId>) -> Response {
     )
 }
 
-async fn method_not_allowed(Extension(id): Extension<RequestId>) -> Response {
+pub(crate) async fn method_not_allowed(Extension(id): Extension<RequestId>) -> Response {
     error_response(
         StatusCode::METHOD_NOT_ALLOWED,
         ErrorCode::MethodNotAllowed,

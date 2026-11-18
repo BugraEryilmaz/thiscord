@@ -154,7 +154,7 @@ fn record(
     let ticket = secret();
     let browser = callback.is_none().then(secret);
     c.transaction::<_,Failure,_>(|c| {
-        if let Some(s) = &session { lock_session(c,token,s)?; if purpose==GooglePurpose::Link { recent(s)?; } }
+        if let Some(s) = &session { lock_session(c,token,s)?; if purpose==GooglePurpose::Link { recent(s)?; verified(c,s.account_id)?; } }
         execute(c,"DELETE FROM oauth_attempts WHERE expires_at<now()", &[])?;
         execute(c,"INSERT INTO oauth_attempts(state_hash,ticket_hash,verifier,nonce,purpose,session_id,account_id,device,callback,browser_hash) VALUES($1,$2,$3,$4,$5,NULLIF($6,'')::uuid,NULLIF($7,'')::uuid,$8,NULLIF($9,''),NULLIF($10,''))", &[state_hash,&digest(&ticket),verifier,nonce,match purpose {GooglePurpose::Login=>"login",GooglePurpose::Link=>"link",GooglePurpose::Reauthenticate=>"reauthenticate"},&session.as_ref().map(|s|s.id.to_string()).unwrap_or_default(),&session.as_ref().map(|s|s.account_id.to_string()).unwrap_or_default(),name,callback.unwrap_or(""),&browser.as_deref().map(digest).unwrap_or_default()])?;
         Ok(())
@@ -196,6 +196,22 @@ const OTHER_BROWSER: &str = "This Google sign-in was not started in this browser
 /// and earlier) already translate ("Önce güncellemeleri kontrol et").
 pub(super) const UPDATE_REQUIRED: &str = "Check for an update first";
 const FAILED: &str = "Google sign-in failed. If the email already has an account, sign in there first and link Google";
+const UNVERIFIED: &str = "Verify your email before linking Google";
+
+/// Google is linked only to an account whose current address is verified, so a
+/// registration with someone else's address cannot gain a lasting Google login.
+fn verified(c: &mut PgConnection, id: AccountId) -> Result<(), Failure> {
+    let verified: Vec<bool> = query(
+        c,
+        "SELECT to_jsonb(email_verified) AS data FROM accounts WHERE id=$1::uuid",
+        &[&id.to_string()],
+    )?;
+    if verified == [true] {
+        Ok(())
+    } else {
+        Err(Failure::Invalid(UNVERIFIED))
+    }
+}
 
 pub(super) async fn callback(
     State(pool): State<Option<DbPool>>,
@@ -473,6 +489,8 @@ fn apply(
             if existing.is_some() {
                 return Err(Failure::Conflict);
             }
+            // Rechecked under the account lock taken by `complete`.
+            verified(c, id)?;
             execute(
                 c,
                 "INSERT INTO identities(account_id,provider,subject) VALUES($1::uuid,'google',$2)",
@@ -527,9 +545,10 @@ pub(super) fn complete(
         // attempt is marked failed, as a failed callback would have marked it.
         match c.transaction(|c| apply(c, &a, &mut mutations)) {
             Ok(response) => Ok(Ok(response)),
-            Err(_) => {
+            Err(error) => {
                 execute(c,"UPDATE oauth_attempts SET status='failed' WHERE ticket_hash=$1", &[&ticket_hash])?;
-                Ok(Err(Failure::Invalid(FAILED)))
+                let message = if matches!(error, Failure::Invalid(UNVERIFIED)) { UNVERIFIED } else { FAILED };
+                Ok(Err(Failure::Invalid(message)))
             }
         }
     }).and_then(|outcome| outcome);
@@ -630,6 +649,38 @@ mod tests {
             },
         )
         .unwrap();
+        // Linking also requires a verified email, both when an attempt starts and
+        // when it is applied (the account may have started it before this rule).
+        let start_link = |c: &mut PgConnection| {
+            record(
+                c,
+                &grant1.token,
+                GooglePurpose::Link,
+                None,
+                "test",
+                [&digest(&secret()), "verifier", "nonce"],
+            )
+        };
+        assert!(matches!(
+            start_link(&mut c),
+            Err(Failure::Invalid(UNVERIFIED))
+        ));
+        let ticket = create(&mut c, "link", Some(&session), "google-owner");
+        assert!(matches!(
+            complete(&mut c, &ticket, None),
+            Err(Failure::Invalid(UNVERIFIED))
+        ));
+        assert_eq!(
+            account(&mut c, session.account_id).unwrap().identities,
+            vec![IdentityProvider::Password]
+        );
+        execute(
+            &mut c,
+            "UPDATE accounts SET email_verified=TRUE WHERE id=$1::uuid",
+            &[&session.account_id.to_string()],
+        )
+        .unwrap();
+        assert!(start_link(&mut c).is_ok());
         let ticket = create(&mut c, "link", Some(&session), "google-owner");
         complete(&mut c, &ticket, None).unwrap();
         assert!(matches!(
@@ -643,8 +694,6 @@ mod tests {
                 .len(),
             2
         );
-        // Identity linking does not verify the existing account's email implicitly.
-        assert!(!account(&mut c, session.account_id).unwrap().email_verified);
         let ticket = create(&mut c, "reauthenticate", Some(&session), "different-owner");
         assert!(failed(&mut c, &ticket));
         let ticket = create(&mut c, "login", None, "google-owner");
@@ -663,12 +712,6 @@ mod tests {
             AccountRequest::Reauthenticate {
                 password: "correct test password".into(),
             },
-        )
-        .unwrap();
-        execute(
-            &mut c,
-            "UPDATE accounts SET email_verified=TRUE WHERE id=$1::uuid",
-            &[&session.account_id.to_string()],
         )
         .unwrap();
         drop(c);
@@ -961,6 +1004,13 @@ mod tests {
                 let token = match purpose {
                     GooglePurpose::Login => "",
                     GooglePurpose::Link => {
+                        // Linking needs a verified email (tested above).
+                        execute(
+                            c,
+                            "UPDATE accounts SET email_verified=TRUE WHERE id=$1::uuid",
+                            &[&session.account_id.to_string()],
+                        )
+                        .unwrap();
                         dispatch(
                             &pool,
                             &grant.token,
