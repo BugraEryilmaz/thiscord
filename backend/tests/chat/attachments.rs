@@ -490,3 +490,295 @@ async fn attachment_admission_and_auth_precede_buffering_and_recheck_after_body(
     }));
     upload_body(&app, &owner, &uri, broken, StatusCode::BAD_REQUEST).await;
 }
+
+/// Lets one sent row stand for gigabytes without storing them: this test schema
+/// drops the table's size/data checks and records an inflated `size_bytes`.
+pub(super) fn inflate(db: &Database, table: &str, id: &Value, size: u64) {
+    let mut c = db.pool.get().unwrap();
+    c.batch_execute(&format!(
+        "DO $$ DECLARE r record; BEGIN FOR r IN SELECT conname FROM pg_constraint WHERE conrelid='{table}'::regclass AND contype='c' LOOP EXECUTE format('ALTER TABLE {table} DROP CONSTRAINT %I', r.conname); END LOOP; END $$"
+    ))
+    .unwrap();
+    let updated = diesel::sql_query(format!(
+        "UPDATE {table} SET size_bytes=$2::bigint WHERE id=$1::uuid AND message_id IS NOT NULL"
+    ))
+    .bind::<Text, _>(id.as_str().unwrap())
+    .bind::<Text, _>(size.to_string())
+    .execute(&mut c)
+    .unwrap();
+    assert_eq!(updated, 1);
+}
+
+/// Holds an account's attachment quota lock until both requests wait on it, so
+/// the requests really overlap; returns their statuses and bodies in order.
+async fn contend(
+    db: &Database,
+    lock: String,
+    requests: [(&'static str, String, Value); 2],
+) -> Vec<(StatusCode, Value)> {
+    #[derive(QueryableByName)]
+    struct Waiting {
+        #[diesel(sql_type = diesel::sql_types::BigInt)]
+        waiting: i64,
+    }
+    let mut holder = db.pool.get().unwrap();
+    holder.batch_execute("BEGIN").unwrap();
+    diesel::sql_query("SELECT pg_advisory_xact_lock(hashtextextended($1,0))")
+        .bind::<Text, _>(&lock)
+        .execute(&mut holder)
+        .unwrap();
+    let app = api::router(Some(db.pool.clone()), vec![]);
+    let tasks: Vec<_> = requests
+        .into_iter()
+        .map(|(path, token, body)| {
+            let app = app.clone();
+            tokio::spawn(async move { call(&app, path, &token, body).await })
+        })
+        .collect();
+    let deadline = std::time::Instant::now() + Duration::from_secs(10);
+    loop {
+        let waiting = diesel::sql_query("SELECT count(*)::bigint AS waiting FROM pg_locks WHERE locktype='advisory' AND NOT granted AND ((classid::bigint<<32)|objid::bigint)=hashtextextended($1,0)")
+            .bind::<Text, _>(&lock)
+            .get_result::<Waiting>(&mut db.pool.get().unwrap())
+            .unwrap()
+            .waiting;
+        if waiting == 2 {
+            break;
+        }
+        assert!(
+            std::time::Instant::now() < deadline,
+            "requests never contended for the quota lock ({waiting} waiting)"
+        );
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+    holder.batch_execute("COMMIT").unwrap();
+    let mut results = Vec::new();
+    for task in tasks {
+        results.push(task.await.unwrap());
+    }
+    results
+}
+
+/// Exactly one of two contended sends wins; the loser sees the quota message.
+pub(super) fn assert_one_refused(results: &[(StatusCode, Value)], place: &str) {
+    let statuses: Vec<_> = results.iter().map(|(s, _)| *s).collect();
+    assert!(
+        statuses == [StatusCode::OK, StatusCode::CONFLICT]
+            || statuses == [StatusCode::CONFLICT, StatusCode::OK],
+        "{results:?}"
+    );
+    let (_, body) = results
+        .iter()
+        .find(|(s, _)| *s == StatusCode::CONFLICT)
+        .unwrap();
+    assert_storage_full(body, place);
+}
+
+pub(super) fn assert_storage_full(body: &Value, place: &str) {
+    assert_eq!(body["code"], "limit_exceeded", "{body}");
+    let message = body["message"].as_str().unwrap();
+    assert!(
+        message.starts_with(&format!("Your attachment storage {place} is full (2 GiB)"))
+            && message.ends_with("Delete older messages with attachments to free space"),
+        "{message}"
+    );
+}
+
+/// Sum of an account's sent attachment sizes, as the quota counts them.
+pub(super) fn published_total(
+    db: &Database,
+    table: &str,
+    owner: &str,
+    scope: &str,
+    id: &Value,
+) -> u64 {
+    #[derive(QueryableByName)]
+    struct Total {
+        #[diesel(sql_type = diesel::sql_types::BigInt)]
+        total: i64,
+    }
+    diesel::sql_query(format!("SELECT COALESCE(sum(size_bytes),0)::bigint AS total FROM {table} WHERE owner_id=$1::uuid AND {scope}=$2::uuid AND message_id IS NOT NULL"))
+        .bind::<Text, _>(owner)
+        .bind::<Text, _>(id.as_str().unwrap())
+        .get_result::<Total>(&mut db.pool.get().unwrap())
+        .unwrap()
+        .total as u64
+}
+
+#[tokio::test]
+#[ignore = "requires TEST_DATABASE_URL; CI runs with --include-ignored"]
+async fn published_attachments_are_capped_per_account_per_guild() {
+    #[derive(QueryableByName)]
+    struct Owner {
+        #[diesel(sql_type = Text)]
+        id: String,
+    }
+    let _guard = TEST_LOCK.lock().await;
+    let cap = MAX_PUBLISHED_ATTACHMENT_BYTES;
+    assert_eq!(cap, 2 << 30);
+    let db = database();
+    let (app, owner, guest, _, mut state, channel) = setup(&db).await;
+    let owner_id = diesel::sql_query("SELECT id::text FROM accounts WHERE username='owner'")
+        .get_result::<Owner>(&mut db.pool.get().unwrap())
+        .unwrap()
+        .id;
+    let guild = state["guild"]["id"].clone();
+    let uri = upload_url(&guild, &channel, "file.bin", "text/plain");
+    let one = |token: &str, uri: &str| {
+        let (app, token, uri) = (app.clone(), token.to_owned(), uri.to_owned());
+        async move {
+            upload_body(&app, &token, &uri, Body::from("x"), StatusCode::OK).await["id"].clone()
+        }
+    };
+
+    // An older sent attachment leaves room for exactly two more bytes.
+    let base = one(&owner, &uri).await;
+    let sent = chat(
+        &app,
+        &owner,
+        send(&guild, &channel, json!([base])),
+        StatusCode::OK,
+    )
+    .await;
+    inflate(&db, "attachments", &base, cap - 2);
+    let a = one(&owner, &uri).await;
+    chat(
+        &app,
+        &owner,
+        send(&guild, &channel, json!([a])),
+        StatusCode::OK,
+    )
+    .await;
+    let (b, c) = (one(&owner, &uri).await, one(&owner, &uri).await);
+    // Sends succeed up to the cap and fail past it, leaving the file staged.
+    chat(
+        &app,
+        &owner,
+        send(&guild, &channel, json!([b])),
+        StatusCode::OK,
+    )
+    .await;
+    assert_eq!(
+        published_total(&db, "attachments", &owner_id, "guild_id", &guild),
+        cap
+    );
+    let messages = crate_count(&db, "SELECT count(*)::bigint AS count FROM messages");
+    let refused = chat(
+        &app,
+        &owner,
+        send(&guild, &channel, json!([c])),
+        StatusCode::CONFLICT,
+    )
+    .await;
+    assert_storage_full(&refused, "on this server");
+    assert_eq!(
+        crate_count(&db, "SELECT count(*)::bigint AS count FROM messages"),
+        messages
+    );
+    assert_eq!(
+        crate_count(
+            &db,
+            "SELECT count(*)::bigint AS count FROM attachments WHERE message_id IS NULL"
+        ),
+        1
+    );
+    // At the cap, uploads are refused before the body is buffered.
+    let early = upload_body(&app, &owner, &uri, Body::from("x"), StatusCode::CONFLICT).await;
+    assert_storage_full(&early, "on this server");
+
+    // Another member of the same guild is unaffected.
+    let theirs = one(&guest, &uri).await;
+    chat(
+        &app,
+        &guest,
+        send(&guild, &channel, json!([theirs])),
+        StatusCode::OK,
+    )
+    .await;
+    // The same account in another guild is unaffected.
+    let mut other = command(
+        &app,
+        &owner,
+        json!({"action":"create_guild","name":"elsewhere"}),
+        StatusCode::OK,
+    )
+    .await["state"]
+        .clone();
+    change(
+        &app,
+        &owner,
+        &mut other,
+        json!({"action":"create_channel","name":"two","kind":"text"}),
+        StatusCode::OK,
+    )
+    .await;
+    let (other_guild, other_channel) = (
+        other["guild"]["id"].clone(),
+        other["channels"][0]["id"].clone(),
+    );
+    let elsewhere = one(
+        &owner,
+        &upload_url(&other_guild, &other_channel, "file.bin", "text/plain"),
+    )
+    .await;
+    chat(
+        &app,
+        &owner,
+        send(&other_guild, &other_channel, json!([elsewhere])),
+        StatusCode::OK,
+    )
+    .await;
+
+    // Deleting a message frees its attachments' quota.
+    chat(&app, &owner, json!({"action":"delete","guild_id":guild,"channel_id":channel,"message_id":sent["message"]["id"],"revision":sent["message"]["revision"]}), StatusCode::OK).await;
+    chat(
+        &app,
+        &owner,
+        send(&guild, &channel, json!([c])),
+        StatusCode::OK,
+    )
+    .await;
+    assert_eq!(
+        published_total(&db, "attachments", &owner_id, "guild_id", &guild),
+        3
+    );
+
+    // Sends in different channels hold different channel locks; the account
+    // lock still keeps both from taking the last byte.
+    change(
+        &app,
+        &owner,
+        &mut state,
+        json!({"action":"create_channel","name":"three","kind":"text"}),
+        StatusCode::OK,
+    )
+    .await;
+    let second = state["channels"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|c| c["id"] != channel)
+        .unwrap()["id"]
+        .clone();
+    inflate(&db, "attachments", &a, cap - 3);
+    let d = one(&owner, &uri).await;
+    let e = one(
+        &owner,
+        &upload_url(&guild, &second, "file.bin", "text/plain"),
+    )
+    .await;
+    let results = contend(
+        &db,
+        format!("attachment:{owner_id}"),
+        [
+            (CHAT_PATH, owner.clone(), send(&guild, &channel, json!([d]))),
+            (CHAT_PATH, owner.clone(), send(&guild, &second, json!([e]))),
+        ],
+    )
+    .await;
+    assert_one_refused(&results, "on this server");
+    assert_eq!(
+        published_total(&db, "attachments", &owner_id, "guild_id", &guild),
+        cap
+    );
+}

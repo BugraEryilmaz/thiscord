@@ -187,6 +187,9 @@ pub const MAX_MESSAGE_ATTACHMENTS: usize = 4;
 pub const MAX_ATTACHMENT_FILENAME_BYTES: usize = 255;
 pub const MAX_STAGED_ATTACHMENT_BYTES: usize = 100 * 1024 * 1024;
 pub const MAX_STAGED_ATTACHMENTS: usize = 16;
+/// Total bytes of sent (claimed, not deleted) attachments one account may keep
+/// in one guild, and separately in one direct or group conversation.
+pub const MAX_PUBLISHED_ATTACHMENT_BYTES: u64 = 2 * 1024 * 1024 * 1024;
 pub const ATTACHMENT_STAGE_TTL_SECONDS: u64 = 3600;
 
 /// Native WebView download completion, delivered only to its owning window.

@@ -115,7 +115,20 @@ Removing a message removes its attachment data; channel/guild deletion also
 cascades. Editing text preserves the attached files. Send deduplication includes
 attachment IDs, so retrying a message does not attach the same files to a second
 message. Abandoned staged uploads expire after one hour, with at most 16 staged
-files / 100 MiB per account. This bounded, buffered implementation is intended for
+files / 100 MiB per account.
+
+Sent attachments count toward a total of 2 GiB per account per guild
+(`MAX_PUBLISHED_ATTACHMENT_BYTES`) until their message is deleted; deleting older
+messages with attachments frees space. A send that would exceed it fails with
+`limit_exceeded` (HTTP 409) and a message naming this limit, and publishes nothing;
+its files stay staged. Uploads are refused the same way once the uploader has no
+room left for the file in that guild, but the send-time check is authoritative.
+It runs in the send transaction, after the channel lock, under the per-account
+attachment lock that also serializes upload quota checks; uploads take the channel's
+key-share lock before that account lock to keep one lock order. The total is an
+index-only sum (`attachments_published_owner`) that never reads file bytes. Bytes
+of deleted accounts stop counting while their messages remain, and there is no
+instance-wide or per-guild ceiling. This bounded, buffered implementation is intended for
 the personal deployment; it does not transcode videos or provide resumable uploads.
 
 ## Voice messages
