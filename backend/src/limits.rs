@@ -130,6 +130,11 @@ struct Shared {
 impl Admission {
     pub(crate) fn new(main: usize, caps: Caps) -> Self {
         assert!(main > 0 && caps.pending > 0 && caps.per_address > 0 && caps.per_account > 0);
+        // A small configured limit still leaves a slot for another account.
+        let caps = Caps {
+            per_account: caps.per_account.min(main.saturating_sub(1).max(1)),
+            ..caps
+        };
         Self(Arc::new(Shared {
             main: Arc::new(Semaphore::new(main)),
             pending: Arc::new(Semaphore::new(caps.pending)),
@@ -347,6 +352,17 @@ mod tests {
         assert_eq!(counts(&admission), (0, 0));
         assert_eq!(admission.0.main.available_permits(), 3);
         assert_eq!(admission.0.pending.available_permits(), CAPS.pending);
+    }
+
+    #[test]
+    fn small_limits_leave_a_slot_for_another_account() {
+        let admission = Admission::new(2, CAPS);
+        let mut first = admission.pending_from(ip(1)).unwrap();
+        let mut second = admission.pending_from(ip(1)).unwrap();
+        let one = account();
+        assert!(first.promote(one));
+        assert!(!second.promote(one));
+        assert!(second.promote(account()));
     }
 
     #[test]

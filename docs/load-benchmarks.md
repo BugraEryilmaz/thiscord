@@ -249,8 +249,11 @@ Refusals: an upgrade over a pending cap, or arriving while every main slot is
 taken, gets HTTP 429. An authenticated socket that finds its account at the cap
 (or loses the race for the last main slot) is refused on the socket: chat, voice
 and bot sockets with a `rate_limited` error, friends and notification sockets by
-closing, as for a failed authentication. Clients retry each of these on their
-normal reconnect schedule; none signs out.
+closing, as for a failed authentication. The app (desktop and web) retries each
+of these on its normal reconnect schedule and never signs out; the scripting-bot
+library returns the refusal to its caller, which owns any retry. A main limit no
+larger than the per-account cap (a small `THISCORD_MAX_*` value) lowers that cap
+to one less than the limit, so another account always keeps a slot.
 
 How the numbers were chosen:
 

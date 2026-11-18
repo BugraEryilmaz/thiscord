@@ -193,6 +193,13 @@ async fn chat_socket(config: &Config, user: usize) -> Result<Socket> {
         {
             return Err("Chat socket service unavailable at connect");
         }
+        // Concurrent upgrades can all pass the 429 check and race for the
+        // last slot after authenticating; the loser is refused here instead.
+        Ok(chat::ServerEvent::Error { error })
+            if error.code == thiscord_shared::ErrorCode::RateLimited =>
+        {
+            return Err(REJECTED);
+        }
         _ => return Err("Chat socket authentication rejected"),
     }
     send_json(
