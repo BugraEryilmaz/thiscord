@@ -674,8 +674,10 @@ async fn verification_links_are_single_use_and_expire() {
     let (status, html) = page_response(&app, json).await;
     assert_eq!(status, StatusCode::BAD_REQUEST);
     assert!(html.contains("no longer valid"));
-    let (status, _) = link_request(&app, "PUT", &uri, &[]).await;
+    let (status, body) = link_request(&app, "PUT", &uri, &[]).await;
     assert_eq!(status, StatusCode::METHOD_NOT_ALLOWED);
+    let error: ApiError = serde_json::from_str(&body).unwrap();
+    assert_eq!(error.code, thiscord_shared::ErrorCode::MethodNotAllowed);
 
     // The fallback form verifies with the token alone: no cookie or session.
     sql(&db, "UPDATE accounts SET email_verified=FALSE");

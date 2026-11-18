@@ -72,9 +72,10 @@ fn speculative(headers: &HeaderMap) -> bool {
     })
 }
 
-/// Any method other than GET, HEAD and POST, with the route's headers.
-pub(super) async fn unsupported() -> Response {
-    secure(StatusCode::METHOD_NOT_ALLOWED.into_response())
+/// Any method other than GET, HEAD and POST: the shared 405 envelope, with the
+/// route's headers.
+pub(super) async fn unsupported(id: Extension<thiscord_shared::RequestId>) -> Response {
+    secure(crate::api::method_not_allowed(id).await)
 }
 
 pub(super) async fn open(
