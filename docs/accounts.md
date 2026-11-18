@@ -252,15 +252,70 @@ Missing configuration produces a safe unavailable response; there is no fake
 Google login. This implementation uses the [`openidconnect` crate](https://docs.rs/openidconnect/4.0.1/openidconnect/)
 and [Google's OIDC flow](https://developers.google.com/identity/openid-connect/openid-connect).
 
-The desktop binds an ephemeral `127.0.0.1` port with a random path before opening
-the system browser. Google redirects to the backend's registered callback, which
-verifies the authorization code and redirects a completion notification to that
-loopback path. No credentials travel to the local listener. The desktop redeems
-an independent random ticket through the account API; that ticket never enters
-the browser URL. Browser preview displays a link and polls the same ticket without
-a loopback redirect. Cancellation and five-minute expiry discard the attempt;
-late/replayed provider callbacks cannot exchange it again. Cancelling after a
-completed identity operation does not undo the operation.
+### Attempt binding
+
+`google_start` needs no session for `login` and returns both the Google URL and the
+redemption ticket to its caller, who may be an attacker forwarding that genuine
+Google link to someone else. Every attempt is therefore bound to the user agent
+that started it, and the binding is checked before any identity is applied:
+
+- **Desktop** (`start` with a loopback `callback`). The desktop binds an ephemeral
+  `127.0.0.1` port with a random 43-character path before opening the system
+  browser. Google returns to the backend's registered callback. Only after it has
+  verified Google's response does the callback generate a fresh one-time
+  256-bit completion secret, store its SHA-256 on the attempt, and redirect the
+  browser to `<loopback>?completion=<secret>`. `start` never returns it, because
+  it does not exist yet. A failed callback still notifies the bare loopback path,
+  without a secret. The listener accepts only that exact path, optionally with
+  exactly one `completion` parameter of 43 base64url characters (4 KiB, 2 s,
+  single hit, five-minute timeout), answers with a `no-store` page that does not
+  repeat the secret, and keeps the secret in memory until the sign-in flow takes
+  it (`google_callback`); it is never persisted or logged. `google_complete` for
+  such an attempt requires the ticket **and** the secret (hash comparison). The
+  secret expires with the attempt and is single use, because a successful
+  completion deletes the attempt. It is not a session or provider token and is
+  useless without the ticket, which never enters a browser URL.
+- **Browser** (`start` without `callback`: `/app`, `/admin`, browser preview).
+  `google_start` sets the `__Host-thiscord_google` cookie holding a random 256-bit
+  attempt secret and stores its hash (cookie attributes in
+  [web.md](web.md#google-attempt-cookie)). The callback must present exactly that
+  cookie before the attempt is processed. Without it, or with another attempt's,
+  the callback answers `403` with a page saying the sign-in was not started in
+  this browser, fails the attempt and never contacts Google; polling then reports
+  the failure. A matching callback clears the cookie.
+
+The callback only records the verified Google subject and email on the attempt.
+Account creation, linking and reauthentication happen at a bound completion, so
+someone who merely clicks a forwarded link changes nothing. A missing or wrong
+completion secret fails without consuming the attempt, so its legitimate holder
+can still finish it. Desktop clients released before this binding (0.1.63 and
+earlier) send only the ticket: once the attempt is ready they receive HTTP 400
+`validation_failed` "Check for an update first" instead of a session, which those
+clients show after the Google step, translated in Turkish ("Önce güncellemeleri
+kontrol et"), because their catalogs already contain it (their loopback listener
+also shows the browser a blank 404, because it does not expect the parameter). Binding is enforced as soon as the backend is deployed;
+there is no compatibility window. The migration discards in-flight attempts, and
+database constraints require exactly one binding per attempt and a completion
+secret on every ready loopback attempt.
+
+Cancellation and five-minute expiry discard the attempt; late/replayed provider
+callbacks cannot exchange it again. Cancelling after a completed identity
+operation does not undo the operation.
+
+Threat boundary: the binding stops a party that started an attempt from redeeming
+someone else's Google consent (session theft for `login`, attaching a victim's
+Google identity with `link`, or refreshing a stolen session with
+`reauthenticate`). It does not protect against malware on the user's computer,
+which can read loopback traffic and browser history (where the completion secret
+appears, as the authorization code does), or against a browser that is already
+compromised. A web page cannot read the secret: it travels only in the redirect to
+`127.0.0.1` on the user's own machine, and the callback and loopback responses send
+`Referrer-Policy: no-referrer`. Some browser setups cannot satisfy the cookie and
+are refused rather than left unbound: a page opened on a different host than
+`GOOGLE_REDIRECT_URL` (for example the `trunk serve` preview on `127.0.0.1:1420`
+with a `localhost` redirect URL, see [web.md](web.md#local-development)), Safari on
+plain HTTP, and installed home-screen web apps whose links open in a separate
+browser with its own cookies (iOS); use the same browser, or the desktop app.
 
 The backend uses PKCE S256, random state and nonce, Google's HTTPS discovery/JWKS,
 and validates signature, issuer, audience, expiry, nonce, verified email and
@@ -351,6 +406,11 @@ and backup-code equivalence, validation, expiry/resend, session rotation,
 expiry/revocation, reauthentication, throttling, deletion, callback cancellation
 and OAuth failures. Signed offline OIDC fixtures exercise token validation;
 the RSA fixture key is deliberately public and never used by the application.
+`google_attempts_complete_only_where_they_started` drives the real callback with
+that offline provider for all three purposes: desktop attempts cannot be redeemed
+with the ticket alone or a wrong secret (and are not consumed), and succeed once
+with the loopback's secret; browser callbacks without the attempt's own cookie are
+refused and never become ready. A live Google sign-in still needs a manual check.
 
 Native callback tests run in the desktop CI matrix. The optional
 `credential_store_round_trip` test needs an unlocked OS store and uses a separate

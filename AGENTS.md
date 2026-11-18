@@ -64,8 +64,9 @@
 - Desktop tokens belong in the OS credential store, admin/browser-preview tokens in
   memory. The `/app` web client uses HttpOnly SameSite=Strict cookie sessions issued
   only to allowed origins (`docs/web.md`); never expose them to JavaScript. Do not
-  add plaintext persistence or token logging. Google callback URLs carry
-  notifications only; session tickets are redeemed separately. Provider configuration
+  add plaintext persistence or token logging. Google callback URLs carry only a
+  one-time completion secret that is useless without the separately redeemed
+  ticket; never a session or provider token. Provider configuration
   is local-only; development mail files contain sensitive codes and stay ignored.
 - Select Rust WebRTC/SFU libraries after a three-platform compatibility spike.
   Do not silently substitute a non-Rust application server. Document native codec,
