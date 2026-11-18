@@ -138,7 +138,9 @@ failed reauthorization shuts down the peer; no automatic reconnect occurs.
 Bots expire after one hour and do not survive backend restart. Settings are
 ephemeral. The process admits at most 16 bots and four simultaneous management
 requests. Bots count toward the existing eight-participant room limit, so one
-human can test with seven bots. Normal public voice connection limits are unchanged.
+human can test with seven bots. Normal public voice connection limits are unchanged:
+bots connect through the internal socket, so they take no voice connection slot
+and do not count toward the creator's per-account voice connection cap.
 
 ## Build and run
 

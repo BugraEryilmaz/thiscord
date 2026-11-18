@@ -276,7 +276,12 @@ Migration rollback permanently deletes chat data.
 socket after login/session restoration, even before a guild/channel is selected,
 and closes it on logout/token replacement. Its first version-1 `connect` frame
 contains the bearer token; tokens never appear in URLs. `authenticated` confirms
-session validation. `subscribe` replaces the selected guild and optional text
+session validation. Until then the socket holds only a pending admission slot,
+capped per client address; it takes one of the process's chat socket slots, at
+most 16 per account, only after authenticating. A socket refused at that point
+receives a `rate_limited` error and the app retries on its reconnect schedule
+([admission limits](load-benchmarks.md#admission-limits)). Friends and
+notification sockets are admitted the same way and simply close when refused. `subscribe` replaces the selected guild and optional text
 channel without replacing the socket. Null guild/channel unsubscribes everything.
 An incrementing subscription ID labels snapshots and updates; the UI ignores
 late events from an old view. Every subscription is authorized server-side.
@@ -431,8 +436,10 @@ need shared invalidation and are not supported.
   local account operations per process. Google discovery has a separate 4-request
   budget and holds no access barrier during provider I/O. Excess requests return 429.
 - Per-account chat HTTP budget: 180 requests/minute, at most 30 writes.
-- 30 socket events per ten seconds; `THISCORD_MAX_SOCKETS` (default 512) live/pending
-  chat sockets per process (see [load benchmarks](load-benchmarks.md)).
+- 30 socket events per ten seconds; `THISCORD_MAX_SOCKETS` (default 512)
+  authenticated chat sockets per process, at most 16 per account; unauthenticated
+  upgrades share a separate budget of 256, at most 32 per client address (see
+  [admission limits](load-benchmarks.md#admission-limits)).
 - Database checkout/queries and socket writes have deadlines. Blocking Diesel
   runs off async workers. Slow sockets close rather than buffer without a bound.
 - Frontend HTTP requests time out after 15 seconds; failed sends retain retry IDs.
