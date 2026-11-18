@@ -253,7 +253,7 @@ closing, as for a failed authentication. The app (desktop and web) retries each
 of these on its normal reconnect schedule and never signs out; the scripting-bot
 library returns the refusal to its caller, which owns any retry. A main limit no
 larger than the per-account cap (a small `THISCORD_MAX_*` value) lowers that cap
-to one less than the limit, so another account always keeps a slot.
+to one less than the limit, so a single account cannot fill the pool.
 
 How the numbers were chosen:
 
