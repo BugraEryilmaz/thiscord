@@ -147,6 +147,7 @@ async fn update(socket: &mut WebSocket, sub: Subscription, event: ServerEvent) -
     .await
 }
 
+#[allow(clippy::too_many_arguments)]
 pub(super) async fn serve(
     mut socket: WebSocket,
     pool: DbPool,
@@ -155,6 +156,7 @@ pub(super) async fn serve(
     guild_updates: bool,
     permission_set: u8,
     restart: super::Restart,
+    mut ticket: crate::limits::Ticket,
 ) {
     let account_access = match socket_access(&pool, &token).await {
         Ok(access) => access,
@@ -205,6 +207,10 @@ pub(super) async fn serve(
             return;
         }
     };
+    if !ticket.promote(account) {
+        let _ = send(&mut socket, super::limited(id)).await;
+        return;
+    }
     let Some(delivery) = initial.deliver() else {
         return;
     };

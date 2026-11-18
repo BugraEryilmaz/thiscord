@@ -242,12 +242,32 @@ async fn sockets_beyond_each_limit_are_refused_before_database_work() {
             .insert("origin", "http://localhost:1420".parse().unwrap());
         connect_async(request)
     };
-    for path in [
-        thiscord_shared::chat::SOCKET_PATH,
-        thiscord_shared::friends::FRIENDS_SOCKET_PATH,
-        thiscord_shared::notifications::SOCKET_PATH,
+    for (path, connect, ready) in [
+        (
+            thiscord_shared::chat::SOCKET_PATH,
+            json!({"type":"connect","token":token}),
+            "authenticated",
+        ),
+        (
+            thiscord_shared::friends::FRIENDS_SOCKET_PATH,
+            json!({"type":"connect","token":token}),
+            "snapshot",
+        ),
+        (
+            thiscord_shared::notifications::SOCKET_PATH,
+            json!({"type":"connect","token":token,"kinds":[]}),
+            "ready",
+        ),
     ] {
+        // Main slots are taken only by authenticated sockets.
         let (mut admitted, _) = open(path).await.unwrap();
+        admitted
+            .send(WsMessage::Text(
+                json!({"version":1,"event":connect}).to_string().into(),
+            ))
+            .await
+            .unwrap();
+        event(&mut admitted, ready).await;
         match open(path).await {
             Err(tokio_tungstenite::tungstenite::Error::Http(response)) => {
                 assert_eq!(response.status(), StatusCode::TOO_MANY_REQUESTS, "{path}")
@@ -255,17 +275,15 @@ async fn sockets_beyond_each_limit_are_refused_before_database_work() {
             other => panic!("{path}: expected 429, got {:?}", other.map(|_| ())),
         }
         // The admitted socket is unaffected by the refusal.
-        if path == thiscord_shared::chat::SOCKET_PATH {
-            admitted
-                .send(WsMessage::Text(
-                    json!({"version":1,"event":{"type":"connect","token":token}})
-                        .to_string()
-                        .into(),
-                ))
-                .await
-                .unwrap();
-            event(&mut admitted, "authenticated").await;
-        }
+        admitted
+            .send(WsMessage::Text(
+                json!({"version":1,"event":{"type":"ping"}})
+                    .to_string()
+                    .into(),
+            ))
+            .await
+            .unwrap();
+        event(&mut admitted, "pong").await;
         drop(admitted);
         // Its slot frees when it closes.
         tokio::time::timeout(Duration::from_secs(5), async {

@@ -214,9 +214,11 @@ async fn handle(
     body: Result<Json<HuddleRequest>, JsonRejection>,
 ) -> Response {
     let result = async {
-        // Proxy headers are ignored, like the account limiter (auth/mod.rs).
+        // The client address as the account limiter resolves it (client_ip.rs).
         admit(
-            peer.map_or(Key::Local, |p| Key::Address(p.0.0.ip())),
+            peer.map_or(Key::Local, |p| {
+                Key::Address(crate::client_ip::limit_address(p.0.0, &headers))
+            }),
             Instant::now(),
         )?;
         let Json(request) = body.map_err(|_| Failure::Invalid("Invalid huddle request"))?;

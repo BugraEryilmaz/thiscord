@@ -373,13 +373,19 @@ pub(crate) fn router_with_limit(
         .merge(huddles::router())
         .merge(bots::router())
         .layer(Extension(Arc::new(origins)))
-        .layer(Extension(Arc::new(Semaphore::new(connections))))
+        .layer(Extension(crate::limits::Admission::new(
+            connections,
+            crate::limits::Caps::VOICE,
+        )))
 }
+// Each axum extractor is an argument.
+#[allow(clippy::too_many_arguments)]
 async fn upgrade(
     State(pool): State<Option<DbPool>>,
     Extension(id): Extension<RequestId>,
     Extension(origins): Extension<Arc<Vec<HeaderValue>>>,
-    Extension(limit): Extension<Arc<Semaphore>>,
+    Extension(admission): Extension<crate::limits::Admission>,
+    peer: Option<Extension<axum::extract::ConnectInfo<std::net::SocketAddr>>>,
     Extension(shutdown): Extension<crate::shutdown::Shutdown>,
     headers: HeaderMap,
     ws: Result<WebSocketUpgrade, WebSocketUpgradeRejection>,
@@ -395,7 +401,8 @@ async fn upgrade(
     let Ok(ws) = ws else {
         return Failure::Invalid("Invalid voice socket upgrade").response(id);
     };
-    let Ok(permit) = limit.try_acquire_owned() else {
+    // A pending slot until `Join` or `Resume` is authorized (see `limits`).
+    let Some(ticket) = admission.pending(peer.map(|p| p.0.0), &headers) else {
         return Failure::Limited.response(id);
     };
     // Web client: cookie-derived bearer, used only when the frame token is empty.
@@ -404,7 +411,7 @@ async fn upgrade(
         .max_frame_size(128 * 1024)
         .on_upgrade(move |socket| async move {
             let mut socket = logging::Socket::new(socket, id);
-            socket.permit = Some(permit);
+            socket.permit = Some(ticket);
             // The connection, its relay/egress tasks and its webrtc-rs tasks all
             // live on the media runtime from here on.
             let _ = media_runtime()
@@ -1274,6 +1281,14 @@ async fn serve(
             return;
         }
     }
+    // Authorized: take a main voice slot counted against the account. In-process
+    // test bots never went through an upgrade and hold no admission.
+    if let Some(ticket) = &mut socket.permit
+        && !ticket.promote(account)
+    {
+        fail(&mut socket, id, Failure::Limited).await;
+        return;
+    }
     let generation = Arc::new(AtomicU64::new(epoch));
     let ice_servers = match ice::servers(info.account_id) {
         Ok(servers) => servers,
@@ -1857,6 +1872,8 @@ async fn serve(
                     };
                     socket.end("signaling_reattached");
                     tracing::info!(request_id = %resume.socket.id, media_request_id = %id, sequence = resume.sequence, "voice signaling reattached");
+                    // The same media connection continues: keep its main slot.
+                    resume.socket.permit = socket.permit.take();
                     socket = resume.socket;
                     socket.stage = "active";
                     socket.recoverable = true;
