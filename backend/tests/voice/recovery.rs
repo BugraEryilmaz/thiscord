@@ -289,7 +289,7 @@ async fn encrypted_screen_nacks_cannot_amplify_or_bypass_lifecycle_and_camera_st
     });
     screen_forwarded(&mut call.source, &mut call.viewer, 2).await;
     let mut cached = Vec::new();
-    for _ in 0..8 {
+    for _ in 0..64 {
         call.source.screen_sequences[2] += 1;
         call.source.screen_tracks[2]
             .write_rtp(rtp::Packet {
@@ -321,7 +321,7 @@ async fn encrypted_screen_nacks_cannot_amplify_or_bypass_lifecycle_and_camera_st
     }
     // Ordinary loss: each distinct lost packet NACKed once is retransmitted.
     let before = wire_bytes(&call.viewer).await;
-    for packet in &cached {
+    for packet in &cached[..8] {
         nack(&call.viewer, packet, false).await;
     }
     tokio::time::sleep(Duration::from_millis(150)).await;
@@ -331,13 +331,14 @@ async fn encrypted_screen_nacks_cannot_amplify_or_bypass_lifecycle_and_camera_st
         "camera NACK recovery disabled: {repaired}"
     );
 
-    // Flood: every cached packet, repeatedly, with full bitmaps. The stock
-    // responder resent each cache hit per request (over 100 MB here). The
+    // Flood: 64 distinct cached packets, repeatedly, with full bitmaps, for
+    // 500 ms. The stock responder resent each cache hit per request; the 50 ms
+    // repeat window alone measured about 1.8x this envelope. The
     // per-connection budget allows a 200-packet burst plus 200 packets/second;
     // 1300 bytes covers RTP/RTX/SRTP/UDP framing, 4000 bytes periodic RTCP/ICE.
     let before = wire_bytes(&call.viewer).await;
     let started = std::time::Instant::now();
-    for _ in 0..100 {
+    while started.elapsed() < Duration::from_millis(500) {
         for packet in &cached {
             nack(&call.viewer, packet, true).await;
         }

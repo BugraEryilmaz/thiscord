@@ -13,7 +13,10 @@ use rtc::{
     sansio::Protocol,
     shared::error::Error,
 };
-use std::time::{Duration, Instant};
+use std::{
+    collections::HashMap,
+    time::{Duration, Instant},
+};
 
 /// A sequence number retransmitted this recently is not resent again. Shorter
 /// than a typical NACK retry interval, so a lost retransmission is still repaired.
@@ -25,6 +28,8 @@ const REPEAT_WINDOW: Duration = Duration::from_millis(50);
 const BUDGET: f64 = 200.0;
 /// Direct-mapped dedup slots: constant memory; a collision only forgets a request.
 const RECENT: usize = 256;
+/// The stock responder's send buffer size (`NackResponderBuilder` default).
+const CACHE: u16 = 1024;
 
 #[derive(Clone, Copy)]
 struct Sent {
@@ -33,8 +38,46 @@ struct Sent {
     at: Instant,
 }
 
+/// Mirrors which sequence numbers the stock send buffer can answer, so requests
+/// for packets it never cached (upstream or SFU drops, which receivers keep
+/// re-requesting) cost no budget and cannot crowd out repairable losses.
+struct Cached {
+    highest: Option<u16>,
+    seqs: Box<[Option<u16>; CACHE as usize]>,
+}
+impl Cached {
+    /// Same bookkeeping as the stock `SendBuffer::add`.
+    fn add(&mut self, seq: u16) {
+        let mask = usize::from(CACHE - 1);
+        if let Some(highest) = self.highest {
+            let diff = seq.wrapping_sub(highest);
+            if diff == 0 {
+                return;
+            }
+            if diff < 1 << 15 {
+                for skipped in 1..diff.min(CACHE + 1) {
+                    self.seqs[usize::from(highest.wrapping_add(skipped)) & mask] = None;
+                }
+                self.highest = Some(seq);
+            }
+        } else {
+            self.highest = Some(seq);
+        }
+        self.seqs[usize::from(seq) & mask] = Some(seq);
+    }
+    /// Same answer as the stock `SendBuffer::get(seq).is_some()`.
+    fn has(&self, seq: u16) -> bool {
+        self.highest.is_some_and(|highest| {
+            highest.wrapping_sub(seq) < CACHE
+                && self.seqs[usize::from(seq) & usize::from(CACHE - 1)] == Some(seq)
+        })
+    }
+}
+
 pub(super) struct Responder {
     inner: NackResponderInterceptor,
+    /// Bound camera relay SSRCs only: at most one per room slot.
+    cached: HashMap<u32, Cached>,
     recent: Box<[Option<Sent>; RECENT]>,
     tokens: f64,
     refilled: Option<Instant>,
@@ -42,7 +85,8 @@ pub(super) struct Responder {
 impl Default for Responder {
     fn default() -> Self {
         Self {
-            inner: NackResponderBuilder::new().build(),
+            inner: NackResponderBuilder::new().with_size(CACHE).build(),
+            cached: HashMap::new(),
             recent: Box::new([None; RECENT]),
             tokens: BUDGET,
             refilled: None,
@@ -55,13 +99,12 @@ fn camera(ssrc: u32) -> bool {
 }
 
 impl Responder {
-    /// Rewrites a camera NACK to the sequence numbers admitted by the repeat
-    /// window and budget, or `None` to discard it. Once the budget is spent the
-    /// remaining pairs are not expanded; the result holds at most `BUDGET` entries.
+    /// Rewrites a camera NACK to the cached sequence numbers admitted by the
+    /// repeat window and budget, or `None` to discard it. Once the budget is spent
+    /// the remaining pairs are not expanded; the result holds at most `BUDGET`
+    /// entries. Only bound camera streams have a cache to answer from.
     fn admit(&mut self, now: Instant, nack: &TransportLayerNack) -> Option<TransportLayerNack> {
-        if !camera(nack.media_ssrc) {
-            return None;
-        }
+        let cached = self.cached.get(&nack.media_ssrc)?;
         if let Some(last) = self.refilled {
             let elapsed = now.saturating_duration_since(last).as_secs_f64();
             self.tokens = (self.tokens + elapsed * BUDGET).min(BUDGET);
@@ -75,6 +118,9 @@ impl Responder {
             {
                 if self.tokens < 1.0 {
                     break 'pairs;
+                }
+                if !cached.has(seq) {
+                    continue;
                 }
                 let index = (usize::from(seq)
                     ^ (nack.media_ssrc.wrapping_mul(0x9E37_79B1) >> 24) as usize)
@@ -146,6 +192,11 @@ impl Protocol<TaggedPacket, TaggedPacket, ()> for Responder {
         self.inner.poll_read()
     }
     fn handle_write(&mut self, msg: TaggedPacket) -> Result<(), Error> {
+        if let Packet::Rtp(packet) = &msg.message.packet
+            && let Some(cached) = self.cached.get_mut(&packet.header.ssrc)
+        {
+            cached.add(packet.header.sequence_number);
+        }
         self.inner.handle_write(msg)
     }
     fn poll_write(&mut self) -> Option<TaggedPacket> {
@@ -163,11 +214,24 @@ impl Interceptor for Responder {
     fn bind_local_stream(&mut self, info: &StreamInfo) {
         // SSRC-based, not codec-based: screen also uses H.264. Never create a
         // screen cache, even if a peer negotiates NACK/RTX for that codec.
-        if camera(info.ssrc) {
+        // The mirror follows the stock rule: only streams negotiating plain NACK.
+        let nack = info
+            .rtcp_feedback
+            .iter()
+            .any(|fb| fb.typ == "nack" && fb.parameter.is_empty());
+        if camera(info.ssrc) && nack {
             self.inner.bind_local_stream(info);
+            self.cached.insert(
+                info.ssrc,
+                Cached {
+                    highest: None,
+                    seqs: Box::new([None; CACHE as usize]),
+                },
+            );
         }
     }
     fn unbind_local_stream(&mut self, info: &StreamInfo) {
+        self.cached.remove(&info.ssrc);
         self.inner.unbind_local_stream(info);
     }
     fn bind_remote_stream(&mut self, info: &StreamInfo) {
@@ -322,6 +386,74 @@ mod tests {
         // A retry one RTT later (the retransmission was lost again) is served.
         let retry = start + Duration::from_millis(60);
         assert_eq!(nack(&mut responder, retry, ssrc, lost), 5);
+    }
+
+    #[test]
+    fn uncached_gaps_cost_no_budget_and_cannot_crowd_out_repairable_loss() {
+        let (mut responder, ssrc) = bound(MediaKind::Camera, false);
+        send(&mut responder, ssrc, 64);
+        responder.tokens = 5.0;
+        // Oldest first, as receivers retry: 340 gaps the SFU never sent, then 60..=63.
+        let mut pairs: Vec<_> = (0..20)
+            .map(|n| NackPair {
+                packet_id: 65000 + n * 17,
+                lost_packets: u16::MAX,
+            })
+            .collect();
+        pairs.push(NackPair {
+            packet_id: 60,
+            lost_packets: 0b111,
+        });
+        assert_eq!(nack(&mut responder, Instant::now(), ssrc, pairs), 4);
+        assert_eq!(responder.tokens, 1.0);
+    }
+
+    #[test]
+    fn cache_mirror_matches_the_stock_send_buffer() {
+        let (mut responder, ssrc) = bound(MediaKind::Camera, false);
+        // Gaps, reordering, duplicates, wrap, a jump past the cache and late packets.
+        for seq in [
+            10_u16, 11, 13, 12, 500, 400, 2000, 1999, 3100, 64000, 65535, 0, 1, 1, 65534, 30000,
+            29990, 62000, 61000, 61500, 62001,
+        ] {
+            responder
+                .handle_write(tagged(
+                    Instant::now(),
+                    Packet::Rtp(rtp::Packet {
+                        header: rtp::header::Header {
+                            version: 2,
+                            ssrc,
+                            sequence_number: seq,
+                            ..Default::default()
+                        },
+                        payload: vec![0x65; 4].into(),
+                    }),
+                ))
+                .unwrap();
+            while responder.poll_write().is_some() {}
+        }
+        let mut hits = 0;
+        for seq in 0..=u16::MAX {
+            responder
+                .inner
+                .handle_read(tagged(
+                    Instant::now(),
+                    Packet::Rtcp(vec![Box::new(TransportLayerNack {
+                        sender_ssrc: 900,
+                        media_ssrc: ssrc,
+                        nacks: vec![NackPair {
+                            packet_id: seq,
+                            lost_packets: 0,
+                        }],
+                    })]),
+                ))
+                .unwrap();
+            while responder.inner.poll_read().is_some() {}
+            let stock = std::iter::from_fn(|| responder.inner.poll_write()).count() == 1;
+            assert_eq!(responder.cached[&ssrc].has(seq), stock, "{seq}");
+            hits += usize::from(stock);
+        }
+        assert_eq!(hits, 4); // 61000, 61500, 62000, 62001
     }
 
     #[test]

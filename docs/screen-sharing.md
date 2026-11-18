@@ -649,17 +649,21 @@ negotiated RTX) and discards their authenticated NACKs before bitmap expansion
 or retransmit queueing. Screen NACKs cause no extra media or keyframe work.
 Only camera relay SSRCs (H.264 like screens, but distinct SSRCs) bind the stock
 1024-packet cache. Before the stock responder sees a camera NACK, the wrapper
-expands it itself and admits a sequence number only if it was not already
-retransmitted to that connection within 50 ms and the connection's token bucket
-has credit: 200 retransmitted packets/second with a 200-packet burst, about one
-extra 1.5 Mbit/s camera stream. The rewritten NACK names only admitted numbers;
-once credit runs out the remaining pairs are dropped without expansion. Dedup
-state is a fixed 256-entry table per connection, so a flood allocates nothing it
-controls. Microphone and other NACKs are discarded (Opus negotiates no NACK
-cache). Each peer connection, in either SFU transport, builds its own responder
-through `media_setup`, so the bound is per receiving connection; on the shard
-transport it also bounds work on the shared shard thread. Camera retransmits
-still bypass application byte accounting, but only within this budget.
+expands it itself and admits a sequence number only if that cache holds it (a
+mirror of the cache's sequence bookkeeping, so re-requested gaps the SFU never
+sent cost nothing), it was not already retransmitted to that connection within
+50 ms, and the connection's token bucket has credit: 200 retransmitted
+packets/second with a 200-packet burst, about one extra 1.5 Mbit/s camera stream.
+The rewritten NACK names only admitted numbers; once credit runs out the
+remaining pairs are dropped without expansion. Repeat suppression is best effort
+(a fixed 256-entry direct-mapped table per connection, where collisions forget
+entries); the token bucket is the hard bound on retransmissions and on the
+rewritten-NACK allocations, which exist only for admitted requests. Microphone
+and other NACKs are discarded (Opus negotiates no NACK cache). Each peer
+connection, in either SFU transport, builds its own responder through
+`media_setup`, so the bound is per receiving connection; on the shard transport
+it also bounds work on the shared shard thread. Camera retransmits still bypass
+application byte accounting, but only within this budget.
 RTCP reports, TWCC and upstream loss feedback remain enabled.
 Screen receivers recover dependency loss through the existing explicit,
 authorized, coalesced `ScreenKeyframe` command and periodic publisher IDRs.
