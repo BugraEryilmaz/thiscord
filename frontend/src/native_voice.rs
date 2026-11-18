@@ -363,6 +363,20 @@ pub fn voice_status(state: State<'_, VoiceState>) -> Result<VoiceStatus, String>
         .map_err(|_| "Voice state unavailable")?
         .clone())
 }
+#[derive(Clone, Copy, serde::Serialize)]
+#[serde(rename_all = "snake_case")]
+enum JoinOutcome {
+    InvalidSettings,
+    AdmissionBusy,
+    UpdateInstalling,
+    InvalidSession,
+    AlreadyOwned,
+    PttRegistrationFailed,
+    SettingsUnavailable,
+    StatusUnavailable,
+    SupervisorStarted,
+}
+
 #[tauri::command]
 pub async fn voice_join(
     app: tauri::AppHandle,
@@ -372,17 +386,29 @@ pub async fn voice_join(
     channel_id: ChannelId,
     settings: AudioSettings,
 ) -> Result<(), String> {
-    settings.validate()?;
+    static NEXT_JOIN: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
+    let join_id = NEXT_JOIN.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    let outcome = |code: JoinOutcome| {
+        thiscord_frontend::audio::diagnostics::event_with(
+            "voice_join_outcome",
+            || serde_json::json!({"join_id":join_id,"outcome":code}),
+        )
+    };
+    settings
+        .validate()
+        .inspect_err(|_| outcome(JoinOutcome::InvalidSettings))?;
     let update_app = app.clone();
     let update_state = update_app.state::<crate::native_update::UpdateState>();
-    let _voice_admission = update_state
-        .voice_admission
-        .try_lock()
-        .map_err(|_| "An update or voice connection is already starting")?;
+    let _voice_admission = update_state.voice_admission.try_lock().map_err(|_| {
+        outcome(JoinOutcome::AdmissionBusy);
+        "An update or voice connection is already starting"
+    })?;
     if crate::native_update::installing(&app) {
+        outcome(JoinOutcome::UpdateInstalling);
         return Err("Wait for the update to finish before joining voice.".into());
     }
     if token.len() != 43 {
+        outcome(JoinOutcome::InvalidSession);
         return Err("Sign in before joining voice".into());
     }
     let mut job = state.job.lock().await;
@@ -392,18 +418,20 @@ pub async fn voice_join(
         .as_ref()
         .is_some_and(|job| job.owns(guild_id, channel_id))
     {
+        outcome(JoinOutcome::AlreadyOwned);
         return Ok(());
     }
     stop_job(&app, &state, &mut job).await;
-    crate::native_audio::register_ptt(&app, &settings)?;
-    *state
-        .settings
-        .lock()
-        .map_err(|_| "Voice settings unavailable")? = settings.clone();
-    *state
-        .status
-        .lock()
-        .map_err(|_| "Voice status unavailable")? = VoiceStatus {
+    crate::native_audio::register_ptt(&app, &settings)
+        .inspect_err(|_| outcome(JoinOutcome::PttRegistrationFailed))?;
+    *state.settings.lock().map_err(|_| {
+        outcome(JoinOutcome::SettingsUnavailable);
+        "Voice settings unavailable"
+    })? = settings.clone();
+    *state.status.lock().map_err(|_| {
+        outcome(JoinOutcome::StatusUnavailable);
+        "Voice status unavailable"
+    })? = VoiceStatus {
         channel_id: Some(channel_id),
         message: "Connecting to voice…".into(),
         ..Default::default()
@@ -419,6 +447,7 @@ pub async fn voice_join(
     let task_channel = current_channel.clone();
     let task = tokio::spawn(async move {
         let mut runtime = Runtime {
+            join_id,
             app: app.clone(),
             current_channel: task_channel,
             capture_limit: true,
@@ -444,6 +473,7 @@ pub async fn voice_join(
             };
         }
     });
+    outcome(JoinOutcome::SupervisorStarted);
     *job = Some(Job {
         guild_id,
         channel_id: current_channel,
@@ -497,7 +527,7 @@ impl Attempt {
         self.connection.event(
             "voice_attempt_finished",
             serde_json::json!({
-                "reason":reason,"retryable":retryable,"failed":failed,"stage":self.stage,
+                "join_id":self.connection.join_id,"reason":reason,"retryable":retryable,"failed":failed,"stage":self.stage,
                 "elapsed_ms":self.started_at.elapsed().as_millis(),
                 "connected_ms":self.connected_at.map(|at|at.elapsed().as_millis()),
                 "signaling_age_ms":self.last_received.map(|at|at.elapsed().as_millis()),
@@ -540,6 +570,7 @@ impl Drop for Attempt {
     }
 }
 struct Runtime {
+    join_id: u64,
     current_channel: Arc<Mutex<ChannelId>>,
     capture_limit: bool,
     app: tauri::AppHandle,
@@ -605,6 +636,7 @@ impl Connector for Runtime {
     async fn attempt(&mut self) -> (Failure, bool) {
         let call_id = self.attempt.call_id;
         self.attempt = Attempt::default();
+        self.attempt.connection.join_id = Some(self.join_id);
         self.attempt.call_id = call_id;
         self.attempt.capture_allowed = self.capture_limit;
         self.attempt.stage = "setup";
@@ -1962,4 +1994,35 @@ mod tests {
         assert!(!queued_start.active());
         assert!(*closed.borrow());
     }
+}
+
+#[cfg(test)]
+#[test]
+fn join_outcomes_are_fixed_privacy_safe_codes() {
+    use JoinOutcome::*;
+    assert_eq!(
+        serde_json::to_value([
+            InvalidSettings,
+            AdmissionBusy,
+            UpdateInstalling,
+            InvalidSession,
+            AlreadyOwned,
+            PttRegistrationFailed,
+            SettingsUnavailable,
+            StatusUnavailable,
+            SupervisorStarted
+        ])
+        .unwrap(),
+        serde_json::json!([
+            "invalid_settings",
+            "admission_busy",
+            "update_installing",
+            "invalid_session",
+            "already_owned",
+            "ptt_registration_failed",
+            "settings_unavailable",
+            "status_unavailable",
+            "supervisor_started"
+        ])
+    );
 }

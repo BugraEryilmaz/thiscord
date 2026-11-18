@@ -49,59 +49,110 @@ fn select(
         })
 }
 
-pub(super) fn config(device: &cpal::Device, input: bool) -> Result<SupportedStreamConfig, String> {
-    let direction = if input { "Microphone" } else { "Output" };
-    let name: String = device
+pub(super) fn name(device: &cpal::Device) -> String {
+    device
         .description()
         .map(|description| description.name().chars().take(80).collect())
-        .unwrap_or_else(|_| "selected device".into());
-    let ranges: Result<Vec<_>, _> = if input {
-        device.supported_input_configs().map(Iterator::collect)
-    } else {
-        device.supported_output_configs().map(Iterator::collect)
-    };
-    let default = if input {
-        device.default_input_config()
-    } else {
-        device.default_output_config()
+        .unwrap_or_else(|_| "selected device".into())
+}
+
+pub(super) fn config(device: &cpal::Device, input: bool) -> Result<SupportedStreamConfig, String> {
+    let name = name(device);
+    let queries = Queries::run(device, input);
+    queries
+        .selected(input)
+        .ok_or_else(|| queries.message(&name, input))
+}
+
+pub(super) struct Queries {
+    ranges: Result<Vec<SupportedStreamConfigRange>, cpal::Error>,
+    default: Result<SupportedStreamConfig, cpal::Error>,
+}
+
+impl Queries {
+    pub fn run(device: &cpal::Device, input: bool) -> Self {
+        let ranges: Result<Vec<_>, _> = if input {
+            device.supported_input_configs().map(Iterator::collect)
+        } else {
+            device.supported_output_configs().map(Iterator::collect)
+        };
+        let default = if input {
+            device.default_input_config()
+        } else {
+            device.default_output_config()
+        };
+        Self { ranges, default }
     }
-    .ok();
-    // Some backends expose a usable default even if range enumeration is empty
-    // or unavailable. Never invent a format or change its reported sample rate.
-    if let Some(config) = select(ranges.as_deref().unwrap_or(&[]), default, input) {
-        return Ok(config);
+    pub fn selected(&self, input: bool) -> Option<SupportedStreamConfig> {
+        select(
+            self.ranges.as_deref().unwrap_or(&[]),
+            self.default.as_ref().ok().copied(),
+            input,
+        )
     }
-    let default = default
-        .map(|c| {
-            format!(
-                "{} Hz, {} channels, {}",
-                c.sample_rate(),
-                c.channels(),
-                c.sample_format()
-            )
-        })
-        .unwrap_or_else(|| "unavailable".into());
-    let reported = match ranges {
-        Ok(ranges) if !ranges.is_empty() => ranges
-            .iter()
-            .take(6)
+    pub fn details(&self) -> serde_json::Value {
+        let result = |description: String, error: Option<&cpal::Error>| match error {
+            Some(e) => {
+                serde_json::json!({"kind":format!("{:?}",e.kind()),"error":super::bounded(&e.to_string())})
+            }
+            None => serde_json::json!({"reported":description}),
+        };
+        let mut ranges = result(self.reported(), self.ranges.as_ref().err());
+        if let Ok(reported) = &self.ranges
+            && reported.len() > 6
+        {
+            ranges["total_ranges"] = reported.len().into();
+        }
+        serde_json::json!([
+            {"query":"supported_configs","result":ranges},
+            {"query":"default_config","result":result(self.default_description(),self.default.as_ref().err())}
+        ])
+    }
+    fn default_description(&self) -> String {
+        self.default
+            .as_ref()
             .map(|c| {
                 format!(
-                    "{}-{} Hz/{} channels/{}",
-                    c.min_sample_rate(),
-                    c.max_sample_rate(),
+                    "{} Hz, {} channels, {}",
+                    c.sample_rate(),
                     c.channels(),
                     c.sample_format()
                 )
             })
-            .collect::<Vec<_>>()
-            .join(", "),
-        Ok(_) => "no formats reported".into(),
-        Err(error) => format!("format query failed ({:?})", error.kind()),
-    };
-    Err(format!(
-        "{direction} \"{name}\" has no supported PCM format at {MIN_RATE}-{MAX_RATE} Hz with 1-{MAX_CHANNELS} channels. Default: {default}. Reported: {reported}. Select another device or compatible OS format."
-    ))
+            .unwrap_or_else(error_description)
+    }
+    fn reported(&self) -> String {
+        match &self.ranges {
+            Ok(ranges) if !ranges.is_empty() => ranges
+                .iter()
+                .take(6)
+                .map(|c| {
+                    format!(
+                        "{}-{} Hz/{} channels/{}",
+                        c.min_sample_rate(),
+                        c.max_sample_rate(),
+                        c.channels(),
+                        c.sample_format()
+                    )
+                })
+                .collect::<Vec<_>>()
+                .join(", "),
+            Ok(_) => "no formats reported".into(),
+            Err(error) => error_description(error),
+        }
+    }
+    pub fn message(&self, name: &str, input: bool) -> String {
+        let direction = if input { "Microphone" } else { "Output" };
+        let default = self.default_description();
+        let reported = self.reported();
+        format!(
+            "{direction} \"{name}\" has no supported PCM format at {MIN_RATE}-{MAX_RATE} Hz with 1-{MAX_CHANNELS} channels. Default: {default}. Reported: {reported}. Select another device or compatible OS format."
+        )
+    }
+}
+
+fn error_description(error: &cpal::Error) -> String {
+    format!("{:?}: {}", error.kind(), super::bounded(&error.to_string()))
 }
 
 #[cfg(test)]
@@ -111,6 +162,30 @@ mod tests {
 
     fn range(channels: u16, rate: u32, format: SampleFormat) -> SupportedStreamConfigRange {
         SupportedStreamConfigRange::new(channels, rate, rate, SupportedBufferSize::Unknown, format)
+    }
+
+    #[test]
+    fn failed_negotiation_records_both_queries_in_order() {
+        let q = Queries {
+            ranges: Err(cpal::Error::new(cpal::ErrorKind::DeviceBusy)),
+            default: Ok(range(64, RATE, SampleFormat::F32).with_sample_rate(RATE)),
+        };
+        assert!(q.selected(false).is_none());
+        let details = q.details();
+        assert_eq!(details[0]["query"], "supported_configs");
+        assert_eq!(details[0]["result"]["kind"], "DeviceBusy");
+        assert!(
+            details[0]["result"]["error"]
+                .as_str()
+                .is_some_and(|e| !e.is_empty())
+        );
+        assert_eq!(details[1]["query"], "default_config");
+        assert!(
+            details[1]["result"]["reported"]
+                .as_str()
+                .unwrap()
+                .contains("64 channels")
+        );
     }
 
     #[test]
