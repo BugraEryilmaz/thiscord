@@ -17,6 +17,7 @@ struct Job {
 }
 #[derive(Default)]
 pub(super) struct Recovery {
+    pub join_id: Option<u64>,
     initial: bool,
     attempts: usize,
     active: bool,
@@ -172,6 +173,9 @@ impl Recovery {
             None => "Audio recovery exhausted; checking audio-session processes…".into(),
         });
         let (tx, result) = mpsc::channel();
+        let caller = if self.initial { "join" } else { "recovery" };
+        let attempt = self.attempts;
+        let join_id = self.join_id;
         let spawn = thread::Builder::new()
             .name("thiscord-audio-recovery".into())
             .spawn(move || {
@@ -183,7 +187,13 @@ impl Recovery {
                 }
                 let _release = Release;
                 let result = match configuration {
-                    Some(settings) => ResultKind::Device(Devices::prepare(&settings, microphone)),
+                    Some(settings) => ResultKind::Device(Devices::prepare(
+                        &settings,
+                        microphone,
+                        caller,
+                        Some(attempt),
+                        join_id,
+                    )),
                     None => ResultKind::Diagnosis(device_users::describe(&selected, microphone)),
                 };
                 // A cancelled session drops its receiver; paused streams are destroyed here.

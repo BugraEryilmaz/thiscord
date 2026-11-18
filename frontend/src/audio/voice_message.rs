@@ -166,7 +166,7 @@ fn record(
                 health.clone()
             )
         )?;
-        let managed = lifecycle::Managed::new(Single(stream), permit, health.clone());
+        let managed = lifecycle::Managed::new(Single(stream), permit, health.clone(), None);
         managed.play()?;
         Ok::<_, String>((managed, consumer, peak, health, rate))
     })();
@@ -451,7 +451,7 @@ fn open_output(device: Option<&str>, volume: f32) -> Result<Output, String> {
             health.clone()
         )
     )?;
-    let managed = lifecycle::Managed::new(Single(stream), permit, health.clone());
+    let managed = lifecycle::Managed::new(Single(stream), permit, health.clone(), None);
     managed.play()?;
     Ok(Output {
         _managed: managed,

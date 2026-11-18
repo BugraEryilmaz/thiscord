@@ -1574,6 +1574,36 @@ retry, audio-failure and audio-session-end events carry that `request_id`, which
 matches the backend HTTP and voice lifecycle logs. A retry gets a new connection
 and request ID. Older servers or proxies that omit the header leave it null.
 
+Native join admission emits `voice_join_outcome` with a local `join_id` and a
+fixed outcome code. Follow that ID to `voice_attempt_finished` and device opens.
+A click suppressed by a webview guard never reaches native admission.
+
+`device_open_begin` assigns an `open_id` before validation. It identifies join,
+recovery or settings preparation, the retry number when applicable, the need for
+a microphone and the requested routes. `device_open_complete` means the required
+streams are prepared. Activation (`device_active` or `device_reconfigured`) and
+stream cleanup carry the same ID and effective routes. A null effective route
+means selection has not succeeded for that direction. Only the first attempt of
+a session is labelled `join`; its retries are labelled `recovery` and keep the
+same `join_id`. A null `join_id` is an open outside a call, such as a device test.
+`device_open_failed` identifies the direction and stage, including playback
+startup after preparation. The visible error includes the stage and bounded device
+error text even with logging off. Format failures record the range query followed
+by the default-config query, including CPAL error kinds and the reported OS text.
+Opening records include thread context at completion or failure (on Windows,
+COM apartment type/qualifier or the HRESULT from reading it). For play failures,
+read the opening thread from the prepared record and the play thread from the failure.
+
+On Windows an effective-default format failure can trigger `device_format_probe`.
+A separate worker looks up the console endpoint, queries its formats by concrete
+ID, then looks up the default again. Compare the results, endpoint aliases and
+elapsed times with the failing open. Aliases are local to this process.
+`device_default_lookup` reports the raw console lookup after selection fails.
+Both observations happen after the failure, and share one probe slot so a stuck
+driver cannot accumulate diagnostic threads. The probe opens its own audio client
+on the endpoint while the next retry may be starting, so it runs only while
+diagnostic logging is on.
+
 For a call drop, start with `voice_attempt_finished`: it records the reason,
 retryability, connection stage, elapsed/connected time, last received signaling
 age and received-message count. `voice_socket_error` adds the send/receive

@@ -31,7 +31,7 @@ impl Pending {
                 let prepared = (|| {
                     let processing = processing::Prepared::new(&requested)?;
                     let devices = devices
-                        .then(|| Devices::prepare(&requested, microphone))
+                        .then(|| Devices::prepare(&requested, microphone, "settings", None, None))
                         .transpose()?;
                     Ok(Replacement {
                         processing,

@@ -12,8 +12,20 @@ impl Drop for Permit {
     }
 }
 struct Retired {
+    trace: Option<OpenTrace>,
     streams: Box<dyn DeviceStreams>,
     _permit: Permit,
+}
+fn cleanup_event(
+    trace: Option<OpenTrace>,
+    name: &'static str,
+    details: impl FnOnce() -> serde_json::Value,
+) {
+    if let Some(trace) = trace {
+        trace.event(name, details)
+    } else {
+        diagnostics::event_with(name, details)
+    }
 }
 fn reaper() -> Option<&'static mpsc::SyncSender<Retired>> {
     REAPER.get_or_init(|| {
@@ -21,9 +33,10 @@ fn reaper() -> Option<&'static mpsc::SyncSender<Retired>> {
         thread::Builder::new().name("thiscord-audio-cleanup".into()).spawn(move || {
             while let Ok(retired) = rx.recv() {
                 let start = Instant::now();
-                diagnostics::event("stream_cleanup_begin", serde_json::json!({"live_device_sets":live()}));
+                let trace = retired.trace;
+                cleanup_event(trace,"stream_cleanup_begin", ||serde_json::json!({"live_device_sets":live()}));
                 let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| drop(retired)));
-                diagnostics::event("stream_cleanup_end", serde_json::json!({"elapsed_ms":start.elapsed().as_millis(),"panicked":result.is_err(),"live_device_sets":live()}));
+                cleanup_event(trace,"stream_cleanup_end", ||serde_json::json!({"elapsed_ms":start.elapsed().as_millis(),"panicked":result.is_err(),"live_device_sets":live()}));
             }
         }).ok().map(|_|tx)
     }).as_ref()
@@ -47,9 +60,11 @@ impl Managed {
         streams: impl DeviceStreams + 'static,
         permit: Permit,
         health: Arc<StreamHealth>,
+        trace: Option<OpenTrace>,
     ) -> Self {
         Self {
             retired: Some(Retired {
+                trace,
                 streams: Box::new(streams),
                 _permit: permit,
             }),
@@ -77,10 +92,12 @@ impl Drop for Managed {
                     // an unbounded pile of driver threads if cleanup has failed.
                     let (mpsc::TrySendError::Full(retired)
                     | mpsc::TrySendError::Disconnected(retired)) = error;
+                    let trace = retired.trace;
                     std::mem::forget(retired);
-                    diagnostics::event(
+                    cleanup_event(
+                        trace,
                         "stream_cleanup_unavailable",
-                        serde_json::json!({"live_device_sets":live()}),
+                        || serde_json::json!({"live_device_sets":live()}),
                     );
                 }
             } else {
@@ -110,7 +127,12 @@ mod tests {
         let (release, wait) = mpsc::channel();
         let (began, started) = mpsc::channel();
         let health = Arc::new(StreamHealth::default());
-        let managed = Managed::new(Blocking(wait, began), acquire().unwrap(), health.clone());
+        let managed = Managed::new(
+            Blocking(wait, began),
+            acquire().unwrap(),
+            health.clone(),
+            None,
+        );
         let start = Instant::now();
         drop(managed);
         assert!(start.elapsed() < Duration::from_secs(1));
