@@ -1411,4 +1411,29 @@ async fn reauthentication_is_limited_per_account() {
         StatusCode::OK,
     )
     .await;
+    // An exhausted budget does not hide a replayed rotated token: it still
+    // revokes its session instead of returning 429.
+    let rotated = token(
+        &call(
+            &app,
+            json!({"action":"rotate"}),
+            Some(&other_device),
+            StatusCode::OK,
+        )
+        .await,
+    );
+    call(
+        &app,
+        reauthenticate("guessed password"),
+        Some(&other_device),
+        StatusCode::UNAUTHORIZED,
+    )
+    .await;
+    call(
+        &app,
+        json!({"action":"current"}),
+        Some(&rotated),
+        StatusCode::UNAUTHORIZED,
+    )
+    .await;
 }

@@ -472,9 +472,11 @@ pub(crate) fn rate_limit(
 pub(super) fn reauthentication_limit(pool: &DbPool, ip: &str, token: &str) -> Result<(), Failure> {
     let mut c = connection(pool)?;
     let mut keys = limit_keys(ip, None, true);
-    match token_session(&mut c, token) {
+    // Full authentication: stale tokens neither spend the account budget nor
+    // escape replay revocation behind a 429.
+    match authenticate(&mut c, token) {
         Ok(session) => keys.push((format!("reauthenticate:{}", session.account_id), 6)),
-        // Dispatch rejects the unknown token; the address budgets still count it.
+        // Dispatch rejects the token; the address budgets still count it.
         Err(Failure::Unauthorized) => {}
         Err(error) => return Err(error),
     }
