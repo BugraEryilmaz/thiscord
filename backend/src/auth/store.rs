@@ -471,16 +471,19 @@ pub(crate) fn rate_limit(
 /// stolen session cannot guess the password at the per-address rates.
 pub(super) fn reauthentication_limit(pool: &DbPool, ip: &str, token: &str) -> Result<(), Failure> {
     let mut c = connection(pool)?;
-    let mut keys = limit_keys(ip, None, true);
+    // Address budgets first, before any session work.
+    limit(&mut c, limit_keys(ip, None, true))?;
     // Full authentication: stale tokens neither spend the account budget nor
     // escape replay revocation behind a 429.
     match authenticate(&mut c, token) {
-        Ok(session) => keys.push((format!("reauthenticate:{}", session.account_id), 6)),
-        // Dispatch rejects the token; the address budgets still count it.
-        Err(Failure::Unauthorized) => {}
-        Err(error) => return Err(error),
+        Ok(session) => limit(
+            &mut c,
+            vec![(format!("reauthenticate:{}", session.account_id), 6)],
+        ),
+        // Dispatch rejects the token.
+        Err(Failure::Unauthorized) => Ok(()),
+        Err(error) => Err(error),
     }
-    limit(&mut c, keys)
 }
 
 fn limit_keys(ip: &str, identifier: Option<&str>, sensitive: bool) -> Vec<(String, i32)> {
