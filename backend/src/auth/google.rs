@@ -192,7 +192,9 @@ struct ProviderCheck {
 /// Plain-text page for a browser callback without the attempt's own cookie.
 const OTHER_BROWSER: &str = "This Google sign-in was not started in this browser, so it was stopped and nothing was signed in. If you started it, try again from Thiscord in this same browser. You can close this tab.";
 /// Desktop clients released before completion secrets existed cannot send one.
-pub(super) const UPDATE_REQUIRED: &str = "Update Thiscord to sign in with Google";
+/// Only they ever see this, so it is a message their bundled catalogs (0.1.63
+/// and earlier) already translate ("Önce güncellemeleri kontrol et").
+pub(super) const UPDATE_REQUIRED: &str = "Check for an update first";
 const FAILED: &str = "Google sign-in failed. If the email already has an account, sign in there first and link Google";
 
 pub(super) async fn callback(

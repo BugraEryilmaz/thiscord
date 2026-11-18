@@ -1428,7 +1428,7 @@ async fn google_attempts_refuse_other_browsers_and_ticket_only_desktop_completio
     )
     .await;
     assert_eq!(body["code"], "validation_failed");
-    assert_eq!(body["message"], "Update Thiscord to sign in with Google");
+    assert_eq!(body["message"], "Check for an update first");
     call(
         &app,
         json!({"action":"google_complete","ticket":ticket,"completion":random()}),

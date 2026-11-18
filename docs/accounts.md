@@ -290,9 +290,10 @@ someone who merely clicks a forwarded link changes nothing. A missing or wrong
 completion secret fails without consuming the attempt, so its legitimate holder
 can still finish it. Desktop clients released before this binding (0.1.63 and
 earlier) send only the ticket: once the attempt is ready they receive HTTP 400
-`validation_failed` "Update Thiscord to sign in with Google" instead of a session
-(their loopback listener also shows the browser a blank 404, because it does not
-expect the parameter). Binding is enforced as soon as the backend is deployed;
+`validation_failed` "Check for an update first" instead of a session, which those
+clients show after the Google step, translated in Turkish ("Önce güncellemeleri
+kontrol et"), because their catalogs already contain it (their loopback listener
+also shows the browser a blank 404, because it does not expect the parameter). Binding is enforced as soon as the backend is deployed;
 there is no compatibility window. The migration discards in-flight attempts, and
 database constraints require exactly one binding per attempt and a completion
 secret on every ready loopback attempt.
