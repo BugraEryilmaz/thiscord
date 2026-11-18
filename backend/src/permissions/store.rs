@@ -500,9 +500,9 @@ pub(super) fn dispatch(
             PermissionRequest::AcceptGuildInvitation { guild_id } => {
                 verified(c,actor)?;
                 execute(c,"SELECT id FROM guilds WHERE id=$1::uuid FOR UPDATE", &[&guild_id.to_string()])?;
-                // Only the addressed account's own invitation; never one hidden by a block.
+                // Only the addressed account's own unexpired invitation; never one hidden by a block.
                 // The row lock orders this against a concurrent decline.
-                require(query::<bool>(c,"SELECT to_jsonb(TRUE) AS data FROM guild_invitations v WHERE v.guild_id=$1::uuid AND v.account_id=$2::uuid AND NOT EXISTS(SELECT 1 FROM account_blocks b WHERE (b.blocker_id=v.account_id AND b.blocked_id=v.invited_by) OR (b.blocker_id=v.invited_by AND b.blocked_id=v.account_id)) FOR UPDATE OF v", &[&guild_id.to_string(),&actor.to_string()])? == [true])?;
+                require(query::<bool>(c,"SELECT to_jsonb(TRUE) AS data FROM guild_invitations v WHERE v.guild_id=$1::uuid AND v.account_id=$2::uuid AND NOT EXISTS(SELECT 1 FROM account_blocks b WHERE (b.blocker_id=v.account_id AND b.blocked_id=v.invited_by) OR (b.blocker_id=v.invited_by AND b.blocked_id=v.account_id)) AND v.created_at>now()-make_interval(days=>$3::integer) FOR UPDATE OF v", &[&guild_id.to_string(),&actor.to_string(),&INVITATION_DAYS.to_string()])? == [true])?;
                 let state=load(c,guild_id)?;
                 not_banned(c,guild_id,actor)?;
                 join(c,&state,actor)?;
@@ -630,19 +630,25 @@ pub(super) fn dispatch(
     result
 }
 
+/// A server invitation is outstanding for this many days from `created_at`;
+/// expired ones cannot be listed or accepted and free their slot.
+const INVITATION_DAYS: u32 = 7;
+
 /// `account`'s acceptable pending server invitations, newest first: only the
 /// server's name/icon and the inviter's public identity. Invitations across a
-/// block in either direction, or to a server that banned the account, are hidden.
+/// block in either direction (whenever it was placed), to a server that banned
+/// the account, or past [`INVITATION_DAYS`] are hidden.
 pub(crate) fn invitations(
     c: &mut PgConnection,
     account: AccountId,
 ) -> Result<Vec<GuildInvitation>, Failure> {
     query(
         c,
-        "SELECT jsonb_strip_nulls(jsonb_build_object('guild_id',g.id,'guild_name',g.name,'guild_icon_id',(SELECT i.id FROM guild_icons i WHERE i.guild_id=g.id),'created_at',v.created_at))||jsonb_build_object('invited_by',CASE WHEN a.id IS NULL THEN NULL ELSE jsonb_strip_nulls(jsonb_build_object('id',a.id,'username',a.username,'display_name',a.display_name,'avatar_id',p.id)) END) AS data FROM guild_invitations v JOIN guilds g ON g.id=v.guild_id LEFT JOIN accounts a ON a.id=v.invited_by LEFT JOIN account_avatars p ON p.account_id=a.id WHERE v.account_id=$1::uuid AND NOT EXISTS(SELECT 1 FROM guild_moderation x WHERE x.guild_id=v.guild_id AND x.account_id=v.account_id AND x.banned) AND NOT EXISTS(SELECT 1 FROM account_blocks b WHERE (b.blocker_id=v.account_id AND b.blocked_id=v.invited_by) OR (b.blocker_id=v.invited_by AND b.blocked_id=v.account_id)) ORDER BY v.created_at DESC,v.guild_id LIMIT $2::integer",
+        "SELECT jsonb_strip_nulls(jsonb_build_object('guild_id',g.id,'guild_name',g.name,'guild_icon_id',(SELECT i.id FROM guild_icons i WHERE i.guild_id=g.id),'created_at',v.created_at))||jsonb_build_object('invited_by',CASE WHEN a.id IS NULL THEN NULL ELSE jsonb_strip_nulls(jsonb_build_object('id',a.id,'username',a.username,'display_name',a.display_name,'avatar_id',p.id)) END) AS data FROM guild_invitations v JOIN guilds g ON g.id=v.guild_id LEFT JOIN accounts a ON a.id=v.invited_by LEFT JOIN account_avatars p ON p.account_id=a.id WHERE v.account_id=$1::uuid AND NOT EXISTS(SELECT 1 FROM guild_moderation x WHERE x.guild_id=v.guild_id AND x.account_id=v.account_id AND x.banned) AND NOT EXISTS(SELECT 1 FROM account_blocks b WHERE (b.blocker_id=v.account_id AND b.blocked_id=v.invited_by) OR (b.blocker_id=v.invited_by AND b.blocked_id=v.account_id)) AND v.created_at>now()-make_interval(days=>$3::integer) ORDER BY v.created_at DESC,v.guild_id LIMIT $2::integer",
         &[
             &account.to_string(),
             &MAX_LISTED_GUILD_INVITATIONS.to_string(),
+            &INVITATION_DAYS.to_string(),
         ],
     )
 }
@@ -812,15 +818,38 @@ fn change_guild(
                 return Err(Failure::Conflict);
             }
             not_banned(c, state.guild.id, id)?;
-            // A block in either direction drops the invitation silently: the
-            // response is identical, so the inviter cannot learn of the block.
-            // Repeats while pending keep the first invitation.
-            if execute(
+            let (guild_id, target, inviter) = (&guild, &id.to_string(), &actor.to_string());
+            let days = &INVITATION_DAYS.to_string();
+            // Expired invitations are gone for good; drop this server's under its lock.
+            execute(
                 c,
-                "INSERT INTO guild_invitations(guild_id,account_id,invited_by) SELECT $1::uuid,$2::uuid,$3::uuid WHERE NOT EXISTS(SELECT 1 FROM account_blocks b WHERE (b.blocker_id=$2::uuid AND b.blocked_id=$3::uuid) OR (b.blocker_id=$3::uuid AND b.blocked_id=$2::uuid)) ON CONFLICT (guild_id,account_id) DO NOTHING",
-                &[&guild, &id.to_string(), &actor.to_string()],
-            )? == 1
-            {
+                "DELETE FROM guild_invitations WHERE guild_id=$1::uuid AND created_at<=now()-make_interval(days=>$2::integer)",
+                &[guild_id, days],
+            )?;
+            // Repeats while outstanding keep the first invitation and its slot.
+            let outstanding: Vec<AccountId> = query(
+                c,
+                "SELECT to_jsonb(account_id) AS data FROM guild_invitations WHERE guild_id=$1::uuid",
+                &[guild_id],
+            )?;
+            if outstanding.contains(&id) {
+                return Ok(false);
+            }
+            // Members plus outstanding invitations stay within the member limit.
+            allocation(
+                state.members.len() + outstanding.len() < limits.members as usize,
+                "Server member limit reached for its owner's instance role",
+            )?;
+            // Stored even across a block in either direction, so the slot it takes
+            // and the response are identical and the inviter cannot learn of the
+            // block; the listing and acceptance hide such an invitation, and the
+            // blocked invitee is not woken for it.
+            execute(
+                c,
+                "INSERT INTO guild_invitations(guild_id,account_id,invited_by) VALUES($1::uuid,$2::uuid,$3::uuid)",
+                &[guild_id, target, inviter],
+            )?;
+            if query::<bool>(c, "SELECT to_jsonb(TRUE) AS data FROM account_blocks b WHERE (b.blocker_id=$1::uuid AND b.blocked_id=$2::uuid) OR (b.blocker_id=$2::uuid AND b.blocked_id=$1::uuid) LIMIT 1", &[target, inviter])?.is_empty() {
                 *invited = Some(id);
             }
         }
