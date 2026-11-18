@@ -108,7 +108,6 @@ pub(super) async fn start(
         .add_scope(Scope::new("email".into()))
         .set_pkce_challenge(challenge)
         .add_extra_param("prompt", "select_account")
-        .add_extra_param("max_age", "0")
         .url();
     let state_hash = digest(state.secret());
     let (ticket, browser) = tokio::task::spawn_blocking(move || {
@@ -195,7 +194,24 @@ const OTHER_BROWSER: &str = "This Google sign-in was not started in this browser
 /// Only they ever see this, so it is a message their bundled catalogs (0.1.63
 /// and earlier) already translate ("Önce güncellemeleri kontrol et").
 pub(super) const UPDATE_REQUIRED: &str = "Check for an update first";
+/// Released clients translate these by exact text; never reword the login one.
 const FAILED: &str = "Google sign-in failed. If the email already has an account, sign in there first and link Google";
+const LINK_FAILED: &str = "Connecting Google failed. Use a Google account that is not linked to another Thiscord account and try again";
+const REAUTH_FAILED: &str = "Google confirmation failed. Choose the Google account that is linked to this Thiscord account and try again";
+/// How long a Google ID token counts as a fresh sign-in for confirmation: the
+/// same five minutes as an attempt and as recent reauthentication.
+const REAUTH_WINDOW_SECONDS: i64 = 5 * 60;
+/// Tolerated clock difference for an `iat` slightly ahead of this server's clock.
+const CLOCK_SKEW_SECONDS: i64 = 60;
+
+/// The failure text for an attempt's purpose, as stored on the attempt.
+fn failed(purpose: &str) -> &'static str {
+    match purpose {
+        "link" => LINK_FAILED,
+        "reauthenticate" => REAUTH_FAILED,
+        _ => FAILED,
+    }
+}
 const UNVERIFIED: &str = "Verify your email before linking Google";
 
 /// Google is linked only to an account whose current address is verified, so a
@@ -366,11 +382,11 @@ fn verify_token(
     if claims.email_verified() != Some(true) {
         return Err(Failure::Unauthorized);
     }
-    if reauthenticate
-        && !claims
-            .auth_time()
-            .is_some_and(|t| t > chrono::Utc::now() - chrono::Duration::minutes(5))
-    {
+    // Google sends `auth_time` only when it is requested through a setting this
+    // client does not use, and ignores `max_age`, so confirmation cannot prove how
+    // recently the person typed their Google password. It accepts a token issued
+    // for this flow just now instead; `auth_time` is deliberately not read.
+    if reauthenticate && !fresh(claims.issue_time(), chrono::Utc::now()) {
         return Err(Failure::Unauthorized);
     }
     if let Some(expected) = claims.access_token_hash() {
@@ -390,6 +406,12 @@ fn verify_token(
         subject: claims.subject().as_str().to_owned(),
         email: email(claims.email().ok_or(Failure::Unauthorized)?.as_str())?,
     })
+}
+/// Whether an ID token issued at `issued` is a fresh sign-in at `now`: within the
+/// confirmation window and not more than the tolerated skew in the future.
+fn fresh(issued: chrono::DateTime<chrono::Utc>, now: chrono::DateTime<chrono::Utc>) -> bool {
+    issued > now - chrono::Duration::seconds(REAUTH_WINDOW_SECONDS)
+        && issued <= now + chrono::Duration::seconds(CLOCK_SKEW_SECONDS)
 }
 /// Records the verified Google identity on the claimed attempt. Nothing is applied
 /// yet: account creation, linking and reauthentication wait for a bound completion.
@@ -534,12 +556,12 @@ pub(super) fn complete(
     let result = c.transaction(|c| {
         let initial = query_attempt(c,"SELECT to_jsonb(o) AS data FROM oauth_attempts o WHERE ticket_hash=$1 AND expires_at>now()", &ticket_hash)?;
         if initial.status=="pending" || initial.status=="processing" { return Ok(Ok(AccountResponse::Pending)); }
-        if initial.status!="ready" { return Ok(Err(Failure::Invalid(FAILED))); }
+        if initial.status!="ready" { return Ok(Err(Failure::Invalid(failed(&initial.purpose)))); }
         bound(&initial, completion)?;
         // Match the normal account-before-session lock order.
         if let Some(id) = initial.account_id { execute(c,"SELECT id FROM accounts WHERE id=$1::uuid FOR UPDATE", &[&id.to_string()])?; }
         let a = query_attempt(c,"SELECT to_jsonb(o) AS data FROM oauth_attempts o WHERE ticket_hash=$1 AND expires_at>now() FOR UPDATE", &ticket_hash)?;
-        if a.status!="ready" || a.account_id!=initial.account_id { return Ok(Err(Failure::Invalid(FAILED))); }
+        if a.status!="ready" || a.account_id!=initial.account_id { return Ok(Err(Failure::Invalid(failed(&a.purpose)))); }
         bound(&a, completion)?;
         // A savepoint: a refused identity operation rolls back alone and the
         // attempt is marked failed, as a failed callback would have marked it.
@@ -547,7 +569,7 @@ pub(super) fn complete(
             Ok(response) => Ok(Ok(response)),
             Err(error) => {
                 execute(c,"UPDATE oauth_attempts SET status='failed' WHERE ticket_hash=$1", &[&ticket_hash])?;
-                let message = if matches!(error, Failure::Invalid(UNVERIFIED)) { UNVERIFIED } else { FAILED };
+                let message = if matches!(error, Failure::Invalid(UNVERIFIED)) { UNVERIFIED } else { failed(&a.purpose) };
                 Ok(Err(Failure::Invalid(message)))
             }
         }
@@ -628,19 +650,20 @@ mod tests {
             .unwrap();
             ticket
         };
-        let failed = |c: &mut PgConnection, ticket: &str| {
-            matches!(complete(c, ticket, None), Err(Failure::Invalid(FAILED)))
-        };
+        let failed = |c: &mut PgConnection, ticket: &str, message: &str| matches!(complete(c, ticket, None), Err(Failure::Invalid(m)) if m == message);
         let ticket = create(&mut c, "login", None, "google-owner");
-        assert!(failed(&mut c, &ticket));
-        assert!(failed(&mut c, &ticket), "a refused attempt stays failed");
+        assert!(failed(&mut c, &ticket, FAILED));
+        assert!(
+            failed(&mut c, &ticket, FAILED),
+            "a refused attempt stays failed"
+        );
         assert_eq!(
             account(&mut c, session.account_id).unwrap().identities,
             vec![IdentityProvider::Password]
         );
         // Linking requires recent reauthentication.
         let ticket = create(&mut c, "link", Some(&session), "google-owner");
-        assert!(failed(&mut c, &ticket));
+        assert!(failed(&mut c, &ticket, LINK_FAILED));
         dispatch(
             &pool,
             &grant1.token,
@@ -695,7 +718,7 @@ mod tests {
             2
         );
         let ticket = create(&mut c, "reauthenticate", Some(&session), "different-owner");
-        assert!(failed(&mut c, &ticket));
+        assert!(failed(&mut c, &ticket, REAUTH_FAILED));
         let ticket = create(&mut c, "login", None, "google-owner");
         let AccountResponse::Session { session: grant2 } = complete(&mut c, &ticket, None).unwrap()
         else {
@@ -782,8 +805,7 @@ mod tests {
                 .set_email_verified(Some(true)),
             EmptyAdditionalClaims {},
         )
-        .set_nonce(Some(Nonce::new("expected-nonce".into())))
-        .set_auth_time(Some(chrono::Utc::now()));
+        .set_nonce(Some(Nonce::new("expected-nonce".into())));
         let sign = |claims| {
             CoreIdToken::new(
                 claims,
@@ -794,16 +816,44 @@ mod tests {
             )
             .unwrap()
         };
-        assert!(
+        let verify = |claims, reauthenticate| {
             verify_token(
-                &sign(base.clone()),
+                &sign(claims),
                 &access,
                 &verifier,
                 "expected-nonce",
+                reauthenticate,
+            )
+        };
+        // Google sends no `auth_time` unless asked through a setting this client
+        // does not use: every purpose, confirmation included, succeeds without it.
+        assert!(base.auth_time().is_none());
+        for reauthenticate in [false, true] {
+            assert!(verify(base.clone(), reauthenticate).is_ok());
+        }
+        let now = chrono::Utc::now();
+        // A stale `auth_time`, if Google ever sent one, is ignored.
+        assert!(
+            verify(
+                base.clone()
+                    .set_auth_time(Some(now - chrono::Duration::days(30))),
                 true
             )
             .is_ok()
         );
+        // Confirmation needs a token issued within the window, allowing only a
+        // small clock skew ahead; login and link do not apply that rule.
+        let issued = |at| base.clone().set_issue_time(at);
+        for (at, fresh) in [
+            (now - chrono::Duration::minutes(4), true),
+            (now + chrono::Duration::seconds(30), true),
+            (now - chrono::Duration::minutes(6), false),
+            (now - chrono::Duration::hours(2), false),
+            (now + chrono::Duration::minutes(2), false),
+        ] {
+            assert_eq!(verify(issued(at), true).is_ok(), fresh, "iat {at}");
+            assert!(verify(issued(at), false).is_ok(), "iat {at}");
+        }
         assert!(
             verify_token(
                 &sign(base.clone()),
@@ -832,12 +882,10 @@ mod tests {
             base.clone()
                 .set_expiration(chrono::Utc::now() - chrono::Duration::minutes(10)),
             base.clone().set_email_verified(Some(false)),
-            base.clone()
-                .set_auth_time(Some(chrono::Utc::now() - chrono::Duration::minutes(10))),
         ] {
-            assert!(
-                verify_token(&sign(claims), &access, &verifier, "expected-nonce", true).is_err()
-            );
+            for reauthenticate in [false, true] {
+                assert!(verify(claims.clone(), reauthenticate).is_err());
+            }
         }
         let wrong_keys = CoreIdTokenVerifier::new_public_client(
             ClientId::new("test-client".into()),
@@ -859,6 +907,38 @@ mod tests {
         assert!(verify_token(&sign(base), &access, &wrong_keys, "expected-nonce", false).is_err());
     }
     #[test]
+    fn confirmation_freshness_window_and_skew() {
+        let now = chrono::Utc::now();
+        let at = |seconds| now + chrono::Duration::seconds(seconds);
+        assert!(fresh(now, now));
+        assert!(fresh(at(-REAUTH_WINDOW_SECONDS + 1), now));
+        assert!(!fresh(at(-REAUTH_WINDOW_SECONDS), now));
+        assert!(fresh(at(CLOCK_SKEW_SECONDS), now));
+        assert!(!fresh(at(CLOCK_SKEW_SECONDS + 1), now));
+    }
+    #[test]
+    fn each_purpose_has_its_own_failure_text() {
+        // Released clients translate the login text by exact match.
+        assert_eq!(
+            failed("login"),
+            "Google sign-in failed. If the email already has an account, sign in there first and link Google"
+        );
+        assert_eq!(failed("link"), LINK_FAILED);
+        assert_eq!(failed("reauthenticate"), REAUTH_FAILED);
+        assert!(REAUTH_FAILED.contains("linked to this Thiscord account"));
+        let catalog: std::collections::BTreeMap<String, String> =
+            serde_json::from_str(include_str!("../../../frontend/locales/tr.json")).unwrap();
+        for message in [
+            FAILED,
+            LINK_FAILED,
+            REAUTH_FAILED,
+            UNVERIFIED,
+            UPDATE_REQUIRED,
+        ] {
+            assert!(catalog.contains_key(message), "untranslated: {message}");
+        }
+    }
+    #[test]
     fn desktop_redirects_are_strictly_loopback_notifications() {
         let path = format!("/thiscord/{}", secret());
         assert!(valid_callback(&format!("http://127.0.0.1:54321{path}")));
@@ -876,9 +956,11 @@ mod tests {
     /// The offline test provider: whoever completes the Google step picks the
     /// account `subject`; the ID token is signed with the public test key and
     /// verified exactly like Google's, against the attempt's nonce.
-    async fn test_provider(
+    /// Google's `iat` is `issued`; like Google by default, it sends no `auth_time`.
+    fn issued_provider(
         subject: String,
         check: ProviderCheck,
+        issued: chrono::DateTime<chrono::Utc>,
     ) -> Result<GoogleIdentity, Failure> {
         let key = CoreRsaPrivateSigningKey::from_pem(
             include_str!("../../tests/fixtures/oidc-test-only.pem"),
@@ -896,14 +978,13 @@ mod tests {
             issuer,
             vec![Audience::new("test-client".into())],
             chrono::Utc::now() + chrono::Duration::minutes(5),
-            chrono::Utc::now(),
+            issued,
             StandardClaims::new(SubjectIdentifier::new(subject.clone()))
                 .set_email(Some(EndUserEmail::new(format!("{subject}@example.com"))))
                 .set_email_verified(Some(true)),
             EmptyAdditionalClaims {},
         )
-        .set_nonce(Some(Nonce::new(check.nonce.clone())))
-        .set_auth_time(Some(chrono::Utc::now()));
+        .set_nonce(Some(Nonce::new(check.nonce.clone())));
         let token = CoreIdToken::new(
             claims,
             &key,
@@ -929,6 +1010,16 @@ mod tests {
         cookie: Option<&str>,
         subject: Option<&str>,
     ) -> Response {
+        hit_callback_issued(pool, state, cookie, subject, chrono::Utc::now()).await
+    }
+    /// `hit_callback`, with Google's ID token issued at `issued`.
+    async fn hit_callback_issued(
+        pool: &DbPool,
+        state: &str,
+        cookie: Option<&str>,
+        subject: Option<&str>,
+        issued: chrono::DateTime<chrono::Utc>,
+    ) -> Response {
         let mut headers = HeaderMap::new();
         if let Some(cookie) = cookie {
             headers.insert(
@@ -948,9 +1039,132 @@ mod tests {
             RequestId::from_uuid(uuid::Uuid::new_v4()),
             &headers,
             Ok(input),
-            test_provider,
+            |code, check| async move { issued_provider(code, check, issued) },
         )
         .await
+    }
+
+    /// Without `auth_time`, Google confirmation rests on a fresh token, the Google
+    /// identity already linked to the account, and the session that started it.
+    #[tokio::test(flavor = "multi_thread")]
+    #[ignore = "requires TEST_DATABASE_URL; CI runs with --include-ignored"]
+    async fn google_confirmation_needs_linked_identity_starting_session_and_fresh_token() {
+        let (_cleanup, pool) = test_pool();
+        let mut conn = connection(&pool).unwrap();
+        let c: &mut PgConnection = &mut conn;
+        let register = |c: &mut PgConnection, name: &str| {
+            let AccountResponse::Session { session: grant } = dispatch(
+                &pool,
+                "",
+                AccountRequest::Register {
+                    username: name.into(),
+                    email: format!("{name}@example.com"),
+                    password: "correct test password".into(),
+                    device: "test".into(),
+                },
+            )
+            .unwrap() else {
+                panic!("expected session")
+            };
+            let session = authenticate(c, &grant.token).unwrap();
+            execute(
+                c,
+                "INSERT INTO identities(account_id,provider,subject) VALUES($1::uuid,'google',$2)",
+                &[&session.account_id.to_string(), &format!("google-{name}")],
+            )
+            .unwrap();
+            grant.token
+        };
+        let owner = register(c, "owner");
+        register(c, "other");
+        // A second session of the same account, which a confirmation started
+        // elsewhere must never mark.
+        let AccountResponse::Session { session: second } = dispatch(
+            &pool,
+            "",
+            AccountRequest::Login {
+                login: "owner".into(),
+                password: "correct test password".into(),
+                device: "second".into(),
+            },
+        )
+        .unwrap() else {
+            panic!("expected session")
+        };
+        let first = authenticate(c, &owner).unwrap().id.to_string();
+        let second = authenticate(c, &second.token).unwrap().id.to_string();
+        let marked = |c: &mut PgConnection| {
+            query::<String>(
+                c,
+                "SELECT to_jsonb(id::text) AS data FROM sessions WHERE reauthenticated_at IS NOT NULL ORDER BY id",
+                &[],
+            )
+            .unwrap()
+        };
+        // From a browser that started the attempt, Google's step returns `subject`
+        // in a token issued at `issued`.
+        let confirm = async |c: &mut PgConnection,
+                             subject: &str,
+                             issued: chrono::DateTime<chrono::Utc>| {
+            execute(c, "UPDATE sessions SET reauthenticated_at=NULL", &[]).unwrap();
+            let state = secret();
+            let (ticket, browser) = record(
+                c,
+                &owner,
+                GooglePurpose::Reauthenticate,
+                None,
+                "test",
+                [&digest(&state), "verifier", "nonce"],
+            )
+            .unwrap();
+            let response =
+                hit_callback_issued(&pool, &state, browser.as_deref(), Some(subject), issued).await;
+            assert_eq!(response.status(), StatusCode::OK);
+            ticket
+        };
+        let refused = |result: Result<AccountResponse, Failure>| matches!(result, Err(Failure::Invalid(m)) if m == REAUTH_FAILED);
+        let now = chrono::Utc::now();
+
+        // The linked Google account, a token without `auth_time`: only the session
+        // that started the confirmation becomes recently reauthenticated.
+        let ticket = confirm(c, "google-owner", now).await;
+        assert!(complete(c, &ticket, None).is_ok());
+        assert_eq!(marked(c), vec![first.clone()]);
+        assert!(!marked(c).contains(&second));
+
+        // A token issued before the window is refused at the callback.
+        let ticket = confirm(c, "google-owner", now - chrono::Duration::minutes(6)).await;
+        assert!(refused(complete(c, &ticket, None)));
+        assert!(marked(c).is_empty());
+
+        // Another person's Google account, linked to a different Thiscord account,
+        // or one linked to no account, does not confirm this one.
+        for subject in ["google-other", "google-unlinked"] {
+            let ticket = confirm(c, subject, now).await;
+            assert!(refused(complete(c, &ticket, None)), "{subject}");
+            assert!(marked(c).is_empty(), "{subject}");
+        }
+        assert!(
+            query::<serde_json::Value>(
+                c,
+                "SELECT to_jsonb(subject) AS data FROM identities WHERE subject=$1",
+                &["google-unlinked"],
+            )
+            .unwrap()
+            .is_empty()
+        );
+
+        // A starting session revoked (for example after theft was noticed) before
+        // completion cannot be confirmed, and no other session is marked instead.
+        let ticket = confirm(c, "google-owner", now).await;
+        execute(
+            c,
+            "UPDATE sessions SET revoked=TRUE WHERE id=$1::uuid",
+            &[&first],
+        )
+        .unwrap();
+        assert!(refused(complete(c, &ticket, None)));
+        assert!(marked(c).is_empty());
     }
 
     #[tokio::test(flavor = "multi_thread")]
@@ -1032,6 +1246,14 @@ mod tests {
                         grant.token.as_str()
                     }
                 };
+                let refused = |result: Result<AccountResponse, Failure>| {
+                    let expected = match purpose {
+                        GooglePurpose::Login => FAILED,
+                        GooglePurpose::Link => LINK_FAILED,
+                        GooglePurpose::Reauthenticate => REAUTH_FAILED,
+                    };
+                    matches!(result, Err(Failure::Invalid(m)) if m == expected)
+                };
                 let applied = |c: &mut PgConnection| match purpose {
                     GooglePurpose::Login | GooglePurpose::Link => exists(
                         c,
@@ -1069,10 +1291,7 @@ mod tests {
                     let (state, ticket, _) = start(c);
                     let response = hit_callback(&pool, &state, None, None).await;
                     assert_eq!(response.headers()[header::LOCATION], loopback.as_str());
-                    assert!(matches!(
-                        complete(c, &ticket, None),
-                        Err(Failure::Invalid(FAILED))
-                    ));
+                    assert!(refused(complete(c, &ticket, None)));
                     // Any browser may finish the Google step of a loopback attempt...
                     let (state, ticket, _) = start(c);
                     let response = hit_callback(&pool, &state, None, Some(&subject)).await;
@@ -1120,20 +1339,14 @@ mod tests {
                     assert_eq!(response.status(), StatusCode::FORBIDDEN);
                     assert!(response.headers().get(header::SET_COOKIE).is_none());
                     assert_eq!(status(c, &ticket).as_deref(), Some("failed"));
-                    assert!(matches!(
-                        complete(c, &ticket, None),
-                        Err(Failure::Invalid(FAILED))
-                    ));
+                    assert!(refused(complete(c, &ticket, None)));
                     // Another attempt's cookie does not bind this one either.
                     let (_, other_ticket, other) = start(c);
                     let (state, ticket, _) = start(c);
                     let response =
                         hit_callback(&pool, &state, other.as_deref(), Some(&subject)).await;
                     assert_eq!(response.status(), StatusCode::FORBIDDEN);
-                    assert!(matches!(
-                        complete(c, &ticket, None),
-                        Err(Failure::Invalid(FAILED))
-                    ));
+                    assert!(refused(complete(c, &ticket, None)));
                     assert_eq!(status(c, &other_ticket).as_deref(), Some("pending"));
                     assert!(!applied(c));
                     // The starting browser, with its own cookie, succeeds once and the
