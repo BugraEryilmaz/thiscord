@@ -169,6 +169,7 @@ pub fn router() -> Router<Option<DbPool>> {
             get(verification::open)
                 .head(password_reset::head)
                 .post(verification::submit)
+                .fallback(verification::unsupported)
                 .layer(DefaultBodyLimit::max(16 * 1024)),
         )
         .layer(DefaultBodyLimit::max(MAX_AVATAR_BASE64 + 1024))

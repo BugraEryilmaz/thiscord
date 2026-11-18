@@ -228,7 +228,10 @@ directly on **Email verified** or **Email address changed**, with no extra step.
 
 Every other `GET` (no Fetch Metadata at all, as from plain HTTP fetchers and older
 browsers, a subresource or frame load, or a prefetch/prerender) leaves the token
-unused and returns a **Confirm your email address** page with one button. It posts
+unused and returns a **Confirm your email address** page with one button (with
+status 503 for a prefetch/prerender, such as Chrome preloading a link pasted into
+its address bar, so the browser discards it and the real navigation verifies
+directly). It posts
 the token to the same path, and that `POST` performs the same operation as the
 link, with the same result pages. The token is the only capability: the form needs
 no cookie or session, so a cross-site submission can do nothing the link itself
@@ -262,8 +265,11 @@ was just sent to this address. Wait a minute, then try again" or, after five in 
 hour, "Too many emails were sent to this address. Try again later" (both
 translated in Turkish); a refused registration or address change is rolled back.
 `forgot_password` sends nothing and answers exactly as for an address without an
-account, so the limit reveals nothing about accounts, and a victim's still-valid
-reset code is not replaced. An accepted message withdraws the same account's
+account, so its response reveals nothing, and a victim's still-valid reset code is
+not replaced. The shared budget itself is observable: a reset email spends it only
+for a verified account, so changing an address to an unused alias of that inbox
+within the hour can show a 429. Registration already reveals whether an address
+is taken, so this adds little. An accepted message withdraws the same account's
 unsent message of the same kind instead of adding another. The notice sent to the
 previous address after a confirmed email change is not limited.
 

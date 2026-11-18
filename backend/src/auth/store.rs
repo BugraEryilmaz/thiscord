@@ -767,7 +767,7 @@ pub(super) fn dispatch(
                         Ok(AccountResponse::Account { account: a })
                     }
                     AccountRequest::CancelEmailChange => {
-                        execute(c,"DELETE FROM mail_outbox WHERE account_id=$1::uuid AND recipient IN (SELECT email FROM account_codes WHERE account_id=$1::uuid AND purpose='email')", &[&id.to_string()])?;
+                        execute(c,"DELETE FROM mail_outbox WHERE account_id=$1::uuid AND purpose='email'", &[&id.to_string()])?;
                         execute(c,"DELETE FROM account_codes WHERE account_id=$1::uuid AND purpose='email'", &[&id.to_string()])?;
                         Ok(AccountResponse::Account { account: account(c,id)? })
                     }

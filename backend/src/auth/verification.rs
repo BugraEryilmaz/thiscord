@@ -57,14 +57,24 @@ fn navigation(headers: &HeaderMap) -> bool {
             .is_some_and(|value| value.as_bytes().eq_ignore_ascii_case(expected.as_bytes()))
             && values.next().is_none()
     };
-    let speculative = ["sec-purpose", "purpose", "x-moz"].iter().any(|name| {
+    is("sec-fetch-mode", "navigate") && is("sec-fetch-dest", "document") && !speculative(headers)
+}
+
+/// A prefetch or prerender (for example while a link is pasted into Chrome's
+/// address bar), which the browser may later show in place of a real navigation.
+fn speculative(headers: &HeaderMap) -> bool {
+    ["sec-purpose", "purpose", "x-moz"].iter().any(|name| {
         headers.get_all(*name).iter().any(|value| {
             let value = value.as_bytes().to_ascii_lowercase();
             value.windows(8).any(|w| w == b"prefetch")
                 || value.windows(9).any(|w| w == b"prerender")
         })
-    });
-    is("sec-fetch-mode", "navigate") && is("sec-fetch-dest", "document") && !speculative
+    })
+}
+
+/// Any method other than GET, HEAD and POST, with the route's headers.
+pub(super) async fn unsupported() -> Response {
+    secure(StatusCode::METHOD_NOT_ALLOWED.into_response())
 }
 
 pub(super) async fn open(
@@ -82,8 +92,14 @@ pub(super) async fn open(
     }
     // Anything else (no Fetch Metadata, a subresource or a prefetch) leaves the
     // token unused and offers the same operation as an explicit form submission.
+    // Browsers discard a speculative load answered with an error status, so a
+    // later click still makes a real navigation that verifies directly.
     page(
-        StatusCode::OK,
+        if speculative(&headers) {
+            StatusCode::SERVICE_UNAVAILABLE
+        } else {
+            StatusCode::OK
+        },
         "Confirm your email address",
         "Select the button below to finish confirming this email address for your Thiscord account.",
         &format!(

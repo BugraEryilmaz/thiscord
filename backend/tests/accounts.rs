@@ -619,20 +619,34 @@ async fn verification_links_are_single_use_and_expire() {
     let (status, html) = link_request(&app, "HEAD", &uri, &[]).await;
     assert_eq!((status, html.as_str()), (StatusCode::NO_CONTENT, ""));
     // Fetchers without Fetch Metadata (mail gateways, scanners, old browsers),
-    // subresource loads and speculative prefetch/prerender only see a form.
-    for headers in [
-        &[][..],
-        &[("sec-fetch-mode", "no-cors"), ("sec-fetch-dest", "image")][..],
-        &[("sec-fetch-mode", "navigate"), ("sec-fetch-dest", "iframe")][..],
-        &[
-            NAVIGATE[0],
-            NAVIGATE[1],
-            ("sec-purpose", "prefetch;prerender"),
-        ][..],
-        &[NAVIGATE[0], NAVIGATE[1], ("purpose", "prefetch")][..],
+    // subresource loads and speculative prefetch/prerender only see a form. A
+    // speculative load gets an error status, so the browser does not show it in
+    // place of the real navigation that follows a click.
+    for (headers, expected) in [
+        (&[][..], StatusCode::OK),
+        (
+            &[("sec-fetch-mode", "no-cors"), ("sec-fetch-dest", "image")][..],
+            StatusCode::OK,
+        ),
+        (
+            &[("sec-fetch-mode", "navigate"), ("sec-fetch-dest", "iframe")][..],
+            StatusCode::OK,
+        ),
+        (
+            &[
+                NAVIGATE[0],
+                NAVIGATE[1],
+                ("sec-purpose", "prefetch;prerender"),
+            ][..],
+            StatusCode::SERVICE_UNAVAILABLE,
+        ),
+        (
+            &[NAVIGATE[0], NAVIGATE[1], ("purpose", "prefetch")][..],
+            StatusCode::SERVICE_UNAVAILABLE,
+        ),
     ] {
         let (status, html) = link_request(&app, "GET", &uri, headers).await;
-        assert_eq!(status, StatusCode::OK, "{headers:?}");
+        assert_eq!(status, expected, "{headers:?}");
         assert!(html.contains("Confirm your email address"), "{headers:?}");
         assert!(html.contains(&format!(
             "method=\"post\" action=\"{EMAIL_VERIFICATION_PATH}\""
@@ -650,6 +664,18 @@ async fn verification_links_are_single_use_and_expire() {
     let (status, html) = link_request(&app, "POST", EMAIL_VERIFICATION_PATH, &[]).await;
     assert_eq!(status, StatusCode::BAD_REQUEST);
     assert!(html.contains("no longer valid"));
+    // A body the form extractor rejects, and other methods, keep the route's headers.
+    let json = Request::builder()
+        .method("POST")
+        .uri(EMAIL_VERIFICATION_PATH)
+        .header("content-type", "application/json")
+        .body(Body::from(r#"{"token":"x"}"#))
+        .unwrap();
+    let (status, html) = page_response(&app, json).await;
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+    assert!(html.contains("no longer valid"));
+    let (status, _) = link_request(&app, "PUT", &uri, &[]).await;
+    assert_eq!(status, StatusCode::METHOD_NOT_ALLOWED);
 
     // The fallback form verifies with the token alone: no cookie or session.
     sql(&db, "UPDATE accounts SET email_verified=FALSE");
