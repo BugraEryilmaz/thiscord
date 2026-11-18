@@ -409,6 +409,16 @@ diesel::table! {
         recipient -> Text,
         body -> Text,
         created_at -> Timestamptz,
+        purpose -> Text,
+    }
+}
+
+diesel::table! {
+    mail_recipient_limits (recipient_hash) {
+        recipient_hash -> Text,
+        window_start -> Timestamptz,
+        sent -> Int4,
+        last_sent_at -> Timestamptz,
     }
 }
 
@@ -632,6 +642,7 @@ diesel::allow_tables_to_appear_in_same_query!(
     instance_role_assignments,
     instance_role_limits,
     mail_outbox,
+    mail_recipient_limits,
     message_edits,
     message_events,
     message_reactions,

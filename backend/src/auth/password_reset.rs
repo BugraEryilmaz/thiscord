@@ -16,7 +16,7 @@ use thiscord_shared::{
     account::{AccountRequest, PASSWORD_RESET_PATH, PasswordResetForm, PasswordResetQuery},
 };
 
-fn valid_token(token: &str) -> bool {
+pub(super) fn valid_token(token: &str) -> bool {
     token.len() == 43
         && token
             .bytes()
@@ -197,7 +197,7 @@ fn page(
     response
 }
 
-fn secure(mut response: Response) -> Response {
+pub(super) fn secure(mut response: Response) -> Response {
     for (name, value) in [
         ("cache-control", "no-store"),
         ("referrer-policy", "no-referrer"),

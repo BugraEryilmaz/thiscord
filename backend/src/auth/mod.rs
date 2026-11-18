@@ -30,6 +30,8 @@ pub(super) enum Failure {
     Capacity(&'static str),
     Forbidden,
     Limited,
+    /// Account mail to this recipient is throttled (`store::queue_mail`).
+    Throttled(&'static str),
     Unavailable,
     Configuration(&'static str),
     Database(diesel::result::Error),
@@ -106,6 +108,7 @@ impl Failure {
                 ErrorCode::RateLimited,
                 "Too many attempts. Try again in one minute",
             ),
+            Self::Throttled(m) => (StatusCode::TOO_MANY_REQUESTS, ErrorCode::RateLimited, m),
             Self::Unavailable => (
                 StatusCode::SERVICE_UNAVAILABLE,
                 ErrorCode::ServiceUnavailable,
@@ -163,8 +166,10 @@ pub fn router() -> Router<Option<DbPool>> {
         )
         .route(
             EMAIL_VERIFICATION_PATH,
-            get(verification::verify)
-                .head(|| async { (StatusCode::NO_CONTENT, [("cache-control", "no-store")]) }),
+            get(verification::open)
+                .head(password_reset::head)
+                .post(verification::submit)
+                .layer(DefaultBodyLimit::max(16 * 1024)),
         )
         .layer(DefaultBodyLimit::max(MAX_AVATAR_BASE64 + 1024))
 }

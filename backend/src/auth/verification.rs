@@ -1,8 +1,18 @@
-use super::{Failure, store};
+//! Email verification links. A link is consumed only by a real top-level browser
+//! navigation or by the confirmation form; plain fetchers (mail gateways, link
+//! scanners) see the form and change nothing. See docs/accounts.md.
+use super::{
+    Failure,
+    password_reset::{secure, valid_token},
+    store,
+};
 use crate::db::DbPool;
 use axum::{
-    Extension,
-    extract::{ConnectInfo, Query, State, rejection::QueryRejection},
+    Extension, Form,
+    extract::{
+        ConnectInfo, Query, State,
+        rejection::{FormRejection, QueryRejection},
+    },
     http::{HeaderMap, StatusCode},
     response::{Html, IntoResponse, Response},
 };
@@ -35,27 +45,90 @@ pub(super) fn account_link(path: &str, token: &str) -> Result<String, Failure> {
     Ok(url.into())
 }
 
-pub(super) async fn verify(
+/// Fetch Metadata of a top-level document navigation that is not a speculative
+/// prefetch/prerender. Browsers send it only to HTTPS and localhost origins,
+/// which are the only origins `account_link` builds. Neither `Sec-Fetch-User`
+/// nor `Sec-Fetch-Site` is required: links opened from mail apps and webmail differ.
+fn navigation(headers: &HeaderMap) -> bool {
+    let is = |name: &str, expected: &str| {
+        let mut values = headers.get_all(name).iter();
+        values
+            .next()
+            .is_some_and(|value| value.as_bytes().eq_ignore_ascii_case(expected.as_bytes()))
+            && values.next().is_none()
+    };
+    let speculative = ["sec-purpose", "purpose", "x-moz"].iter().any(|name| {
+        headers.get_all(*name).iter().any(|value| {
+            let value = value.as_bytes().to_ascii_lowercase();
+            value.windows(8).any(|w| w == b"prefetch")
+                || value.windows(9).any(|w| w == b"prerender")
+        })
+    });
+    is("sec-fetch-mode", "navigate") && is("sec-fetch-dest", "document") && !speculative
+}
+
+pub(super) async fn open(
     State(pool): State<Option<DbPool>>,
     peer: Option<Extension<ConnectInfo<SocketAddr>>>,
     headers: HeaderMap,
     input: Result<Query<EmailVerificationQuery>, QueryRejection>,
 ) -> Response {
-    let result = async {
-        let Query(input) = input.map_err(|_| Failure::Unauthorized)?;
-        if input.token.len() != 43 {
-            return Err(Failure::Unauthorized);
-        }
-        let pool = pool.ok_or(Failure::Unavailable)?;
-        let ip = crate::client_ip::limit_key(peer.map(|p| p.0.0), &headers);
-        tokio::task::spawn_blocking(move || {
-            store::rate_limit(&pool, &ip, None, true)?;
-            store::dispatch(&pool, "", AccountRequest::VerifyEmail { code: input.token })
-        })
-        .await
-        .map_err(|_| Failure::Unavailable)?
+    let token = match input {
+        Ok(Query(input)) if valid_token(&input.token) => input.token,
+        _ => return outcome(Err(Failure::Unauthorized)),
+    };
+    if navigation(&headers) {
+        return outcome(consume(pool, peer, &headers, token).await);
     }
-    .await;
+    // Anything else (no Fetch Metadata, a subresource or a prefetch) leaves the
+    // token unused and offers the same operation as an explicit form submission.
+    page(
+        StatusCode::OK,
+        "Confirm your email address",
+        "Select the button below to finish confirming this email address for your Thiscord account.",
+        &format!(
+            r#"
+        <form method="post" action="{EMAIL_VERIFICATION_PATH}">
+            <input type="hidden" name="token" value="{token}">
+            <button type="submit" autofocus>Confirm email address</button>
+        </form>"#
+        ),
+    )
+}
+
+/// The fallback form. The token in the body is the only capability; no cookie or
+/// session is read, so a cross-site submission can do no more than the link can.
+pub(super) async fn submit(
+    State(pool): State<Option<DbPool>>,
+    peer: Option<Extension<ConnectInfo<SocketAddr>>>,
+    headers: HeaderMap,
+    input: Result<Form<EmailVerificationQuery>, FormRejection>,
+) -> Response {
+    match input {
+        Ok(Form(input)) if valid_token(&input.token) => {
+            outcome(consume(pool, peer, &headers, input.token).await)
+        }
+        _ => outcome(Err(Failure::Unauthorized)),
+    }
+}
+
+async fn consume(
+    pool: Option<DbPool>,
+    peer: Option<Extension<ConnectInfo<SocketAddr>>>,
+    headers: &HeaderMap,
+    token: String,
+) -> Result<AccountResponse, Failure> {
+    let pool = pool.ok_or(Failure::Unavailable)?;
+    let ip = crate::client_ip::limit_key(peer.map(|p| p.0.0), headers);
+    tokio::task::spawn_blocking(move || {
+        store::rate_limit(&pool, &ip, None, true)?;
+        store::dispatch(&pool, "", AccountRequest::VerifyEmail { code: token })
+    })
+    .await
+    .map_err(|_| Failure::Unavailable)?
+}
+
+fn outcome(result: Result<AccountResponse, Failure>) -> Response {
     let (status, title, message) = match result {
         Ok(AccountResponse::Done { message }) if message == "Email changed" => (
             StatusCode::OK,
@@ -89,26 +162,80 @@ pub(super) async fn verify(
             "Please try opening the same link again shortly.",
         ),
     };
-    // All HTML is static text. No scripts, third-party assets, tokens or redirects.
-    let html = format!(
-        "<!doctype html><html lang=\"en\"><head><meta charset=\"utf-8\"><meta name=\"viewport\" content=\"width=device-width,initial-scale=1\"><title>{title} · Thiscord</title></head><body><main><h1>{title}</h1><p>{message}</p></main></body></html>"
-    );
-    let mut response = (status, Html(html)).into_response();
-    for (name, value) in [
-        ("cache-control", "no-store"),
-        ("referrer-policy", "no-referrer"),
-        (
-            "content-security-policy",
-            "default-src 'none'; frame-ancestors 'none'; base-uri 'none'",
-        ),
-        ("x-content-type-options", "nosniff"),
-    ] {
-        response.headers_mut().insert(name, value.parse().unwrap());
-    }
+    let mut response = page(status, title, message, "");
     if status == StatusCode::TOO_MANY_REQUESTS {
         response
             .headers_mut()
             .insert("retry-after", "60".parse().unwrap());
     }
     response
+}
+
+/// Only static text and a validated URL-safe token enter the page. No scripts,
+/// third-party assets or redirects; the shared account-page CSP applies.
+fn page(status: StatusCode, title: &str, message: &str, form: &str) -> Response {
+    let html = include_str!("password_reset.html")
+        .replace("{{title}}", title)
+        .replace("{{message}}", message)
+        .replace("{{form}}", form)
+        .replace("{{support}}", "");
+    secure((status, Html(html)).into_response())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn headers(pairs: &[(&'static str, &'static str)]) -> HeaderMap {
+        let mut map = HeaderMap::new();
+        for (name, value) in pairs {
+            map.append(*name, value.parse().unwrap());
+        }
+        map
+    }
+
+    #[test]
+    fn only_top_level_non_speculative_navigations_consume_links() {
+        let link = [
+            ("sec-fetch-mode", "navigate"),
+            ("sec-fetch-dest", "document"),
+        ];
+        // Mail apps (site none) and webmail (cross-site), with or without a user gesture.
+        assert!(navigation(&headers(&link)));
+        assert!(navigation(&headers(&[
+            ("sec-fetch-mode", "Navigate"),
+            ("sec-fetch-dest", "document"),
+            ("sec-fetch-site", "cross-site"),
+            ("sec-fetch-user", "?1"),
+        ])));
+        for refused in [
+            &[][..],
+            &[("sec-fetch-mode", "navigate")][..],
+            &[
+                ("sec-fetch-mode", "no-cors"),
+                ("sec-fetch-dest", "document"),
+            ][..],
+            &[("sec-fetch-mode", "navigate"), ("sec-fetch-dest", "iframe")][..],
+            &[("sec-fetch-mode", "navigate"), ("sec-fetch-dest", "empty")][..],
+            &[
+                ("sec-fetch-mode", "navigate"),
+                ("sec-fetch-mode", "navigate"),
+                ("sec-fetch-dest", "document"),
+            ][..],
+        ] {
+            assert!(!navigation(&headers(refused)), "{refused:?}");
+        }
+        for purpose in [
+            ("sec-purpose", "prefetch"),
+            ("sec-purpose", "prefetch;prerender"),
+            ("sec-purpose", "prefetch;anonymous-client-ip"),
+            ("purpose", "prefetch"),
+            ("purpose", "Prerender"),
+            ("x-moz", "prefetch"),
+        ] {
+            let mut map = headers(&link);
+            map.append(purpose.0, purpose.1.parse().unwrap());
+            assert!(!navigation(&map), "{purpose:?}");
+        }
+    }
 }

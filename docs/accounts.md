@@ -16,8 +16,10 @@ in shared models, logs or checked-in configuration.
    validated and unique. Passwords need 12 characters and may use up to 1024 bytes.
 2. Within five seconds the email worker writes a `.txt` message to `backend/.mail/`.
    Open the verification URL in that local file. With Resend or SMTP configured, click the
-   link directly in your email. It automatically verifies the address and opens a
-   confirmation page; there is no verification-code input. Tokens are never
+   link directly in your email. Opened in a browser, it verifies the address at once
+   and shows a confirmation page; there is no verification-code input (see
+   [Verification links and link scanners](#verification-links-and-link-scanners)
+   for the rare **Confirm email address** page). Tokens are never
    printed in the terminal. The directory is ignored by Git. On Linux, newly
    created directories/files use 0700/0600; Windows-mounted files inherit Windows
    ACLs. Set `MAIL_DIRECTORY` to a private Linux directory if needed.
@@ -26,7 +28,8 @@ in shared models, logs or checked-in configuration.
    voice. The screen checks every five seconds and on window focus (or **I've
    verified my email**) and opens the app as soon as the link was used on any
    device. It offers **Resend email** (a 60-second client cooldown on top of the
-   server rate limits), **Change email** for a mistyped address and **Sign out**.
+   server rate limits and the [account mail limits](#account-mail-limits)),
+   **Change email** for a mistyped address and **Sign out**.
    The backend independently refuses pending accounts for creating/joining servers,
    invites and friend requests, and hides them from friend search and requests, so
    other people never see a half-created account. Google sign-in creates verified
@@ -36,14 +39,17 @@ in shared models, logs or checked-in configuration.
    new password directly in your browser; you do not need to reopen the app.
    The email also includes a backup code for **I already have a reset code** in
    the app's Forgot password dialog. Links and codes expire after 30 minutes,
-   are single-use and are replaced on resend. The reset link and backup code
+   are single-use and are replaced on resend, unless the resend comes within the
+   [account mail limits](#account-mail-limits): then nothing is sent and the earlier
+   link stays valid, with the same response. The reset link and backup code
    represent the same credential: using either invalidates both. Opening or
    previewing a reset link does not consume it; submitting a valid new password does.
    The worker removes expired mail files and database codes. Production email
    already delivered to an inbox cannot be recalled.
 4. **Reauthenticate** before changing/adding a password, linking/unlinking Google,
    or deleting your account. Confirmation lasts five minutes. Setting a password
-   also requires a verified email. Changes/reset revoke every existing session.
+   also requires a verified email, and so does linking Google. Changes/reset revoke
+   every existing session; a reset also cancels a pending email change.
 5. **Devices & identities** lists active sessions and lets you revoke a device
    or sign out everywhere. Removing an identity revokes all sessions and cannot
    remove the last login method. A Google-only account can add a password after
@@ -132,9 +138,12 @@ device, switches the address, marks it verified, revokes outstanding password-re
 codes (they went to the old address) and emails the old address a notice without the
 new one. If another account took the address meanwhile, the link page reports it and
 nothing changes. The open settings page picks up the change when Thiscord regains
-focus. The pending address and its code hash live in `account_codes` (purpose
-`email`); migration `20261107000000_identifier_changes` rolls back by discarding
-pending changes.
+focus. A completed password reset deletes the pending change and withdraws its
+unsent link, so a change started before the reset (for example by someone who
+briefly held a session) cannot be confirmed afterwards; a password *change* from
+settings leaves it visible for the owner to cancel. The pending address and its
+code hash live in `account_codes` (purpose `email`); migration
+`20261107000000_identifier_changes` rolls back by discarding pending changes.
 
 ### Account deletion
 
@@ -199,6 +208,64 @@ reverse-proxy logs. Both pages use no-store and no-referrer headers, block frami
 and third-party resources; reset forms submit only to the same origin.
 HEAD requests do not consume either link. **Resend email** on the verification
 screen replaces any older code-only email.
+
+### Verification links and link scanners
+
+Mail gateways and link scanners fetch URLs in incoming mail. If such a fetch
+verified the address, someone could register with another person's address at
+such a provider and have the account verified without ever controlling the inbox.
+The verification route (`/api/v1/account/verify-email`, used for first verification
+and for confirming an email change) therefore consumes a token on `GET` only for a
+real top-level browser navigation, judged by Fetch Metadata request headers:
+`Sec-Fetch-Mode: navigate` and `Sec-Fetch-Dest: document`, each sent once, and no
+`Sec-Purpose`, `Purpose` or `X-Moz` header mentioning `prefetch` or `prerender`.
+`Sec-Fetch-User` and `Sec-Fetch-Site` are not checked, because links opened from a
+mail app (`none`) and from webmail (`cross-site`, often through a redirector) differ.
+Chrome/Edge 80+, Firefox 90+ and Safari 16.4+ send these headers
+on such navigations, but only to HTTPS and localhost origins, which are the only
+origins `PUBLIC_BACKEND_URL` allows. A person who clicks the link therefore lands
+directly on **Email verified** or **Email address changed**, with no extra step.
+
+Every other `GET` (no Fetch Metadata at all, as from plain HTTP fetchers and older
+browsers, a subresource or frame load, or a prefetch/prerender) leaves the token
+unused and returns a **Confirm your email address** page with one button. It posts
+the token to the same path, and that `POST` performs the same operation as the
+link, with the same result pages. The token is the only capability: the form needs
+no cookie or session, so a cross-site submission can do nothing the link itself
+could not. `HEAD` returns 204 and never consumes. Every response of the route uses
+`Cache-Control: no-store`, `Referrer-Policy: no-referrer` and the account-page CSP
+(`default-src 'none'`, inline styles only, `form-action 'self'`,
+`frame-ancestors 'none'`, `base-uri 'none'`); consuming requests keep the per-address
+rate limit.
+
+This stops scanners that only fetch URLs. It does not stop scanners that open
+links in a real browser engine (some sandbox "detonation" services do), or that
+submit forms they find; those still verify an address they were delivered to. The
+app's `verify_email` API command also still takes the token directly.
+
+### Account mail limits
+
+All account mail is queued in one place (`queue_mail` in `backend/src/auth/store.rs`).
+Verification, email-change and reset messages are limited per recipient inbox,
+whichever account, session or address asks: at most one message a minute and five
+an hour (a fixed window started by the first message). That leaves room for a
+first email, a resend or two and a password reset, while bounding how far one
+account, or many, can fill someone's inbox or spend the provider quota on it.
+Sub-address tags (`name+tag@`) and, for Gmail, dots and `googlemail.com` count as
+the same inbox; other provider aliases and catch-all domains do not. Only a SHA-256
+hash of the normalized address is stored (`mail_recipient_limits`), and the mail
+worker drops entries once they no longer limit anything (after an hour).
+
+A refused request changes nothing: earlier links and codes stay valid.
+`send_verification`, `register` and `change_email` answer HTTP 429 with "An email
+was just sent to this address. Wait a minute, then try again" or, after five in an
+hour, "Too many emails were sent to this address. Try again later" (both
+translated in Turkish); a refused registration or address change is rolled back.
+`forgot_password` sends nothing and answers exactly as for an address without an
+account, so the limit reveals nothing about accounts, and a victim's still-valid
+reset code is not replaced. An accepted message withdraws the same account's
+unsent message of the same kind instead of adding another. The notice sent to the
+previous address after a confirmed email change is not limited.
 
 `change_email` on `POST /api/v1/account` corrects the address of a pending account
 only. It requires recent reauthentication (the screen asks for the current password
@@ -323,6 +390,12 @@ and validates signature, issuer, audience, expiry, nonce, verified email and
 Provider access/refresh tokens are not persisted. Only the Google subject identifies
 a linked account: an email collision fails, even if Google reports it verified.
 Sign into the existing account, reauthenticate, then explicitly link Google.
+Linking requires the account's email to be verified, checked when the attempt
+starts ("Verify your email before linking Google") and again under the account
+lock when it completes. Otherwise someone who registered with another person's
+address could attach their own Google login and keep it after that person
+recovers the account. Google login, account creation and reauthentication are
+unaffected.
 
 ## Session model and desktop storage
 
@@ -402,7 +475,10 @@ password request types deliberately lack `Debug` implementations.
 Run backend/shared tests in WSL with `--include-ignored` and a dedicated
 `TEST_DATABASE_URL`. They create/drop only random schemas. Tests cover real
 PostgreSQL migrations, credentials, verification/reset replay, browser reset links
-and backup-code equivalence, validation, expiry/resend, session rotation,
+and backup-code equivalence, verification links under each kind of request
+(navigation, no Fetch Metadata, subresource, prefetch, HEAD, fallback form; for
+first verification and email changes), per-inbox mail limits, linking only with a
+verified email, reset cancelling a pending email change, validation, expiry/resend, session rotation,
 expiry/revocation, reauthentication, throttling, deletion, callback cancellation
 and OAuth failures. Signed offline OIDC fixtures exercise token validation;
 the RSA fixture key is deliberately public and never used by the application.
