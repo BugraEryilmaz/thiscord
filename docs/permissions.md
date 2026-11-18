@@ -61,8 +61,8 @@ expiring subscriptions and voice concurrency are not part of these allocations.
 Every guild derives its limits from its **current owner's** current instance role,
 including when another member creates a channel, invites members or creates guild
 roles. Server settings display usage and limits. Join-by-ID, invite codes and
-accepting a member invitation enforce capacity (sending an invitation also needs
-room), while existing members may rejoin/open at capacity.
+accepting a member invitation enforce capacity (sending an invitation needs room
+beside outstanding invitations), while existing members may rejoin/open at capacity.
 Exceeding an allocation returns HTTP 409 with `limit_exceeded`, a specific safe
 message and the standard request ID.
 
@@ -515,16 +515,29 @@ either direction.
   0.1.63 clients keep working: it is evaluated under the guild lock with the
   submitted revision and ManageInvites like other guild changes, bumps the revision,
   and returns the same `State`/`Done` response. Unknown or unverified usernames are
-  rejected; current members keep the conflict error; banned accounts are refused;
-  the server must have room under its owner's member limit. Repeating it while an
-  invitation is pending changes nothing: there is at most one per server and
-  account (`guild_invitations`, primary key `(guild_id, account_id)`), and the
-  per-account permission rate limit covers it.
-- **Blocks**: if either the inviter or the invitee has blocked the other, nothing
-  is stored or delivered, but the response is exactly the same as for a delivered
-  invitation, so the inviter cannot detect the block. Pending invitations are not
-  listed to anyone but the invitee, which keeps that indistinguishable. A block
-  placed later hides a pending invitation and refuses its acceptance while it lasts.
+  rejected; current members keep the conflict error; banned accounts are refused.
+  Repeating it while an invitation is outstanding changes nothing and is never
+  refused for capacity: there is at most one per server and account (`guild_invitations`,
+  primary key `(guild_id, account_id)`), and the per-account permission rate
+  limit covers it.
+- **Cap**: a new invitation is refused with the usual `limit_exceeded` error
+  unless the server's members plus its outstanding invitations are below its
+  owner's member limit. Joins by other paths and lowered limits can still leave
+  the total above the limit; they only block new invitations. Declining, expiry and invitee account deletion free a
+  slot; accepting turns it into a membership. Invitations hidden by a block or a ban still take
+  their slot until they expire or are answered.
+- **Expiry**: an invitation is outstanding for 7 days from its creation. After
+  that it is no longer listed, cannot be accepted and frees its slot; declining it
+  is harmless. Creating an invitation deletes the server's expired ones under the
+  guild lock.
+- **Blocks**: if either the inviter or the invitee has blocked the other, the
+  invitation is still stored and takes a slot exactly like a delivered one, and
+  the response is identical, so neither the response nor the cap reveals the
+  block. It is never listed to the blocked/blocking invitee, cannot be accepted
+  and does not wake their socket while the block lasts; it becomes visible only if
+  the block is removed before it expires. Pending invitations are not listed to
+  anyone but the invitee, which keeps that indistinguishable. A block placed later
+  likewise hides a pending invitation and refuses its acceptance while it lasts.
 - **Delivery**: the invitee's friends socket snapshot carries
   `guild_invitations` (newest first, at most 100): server ID, name and icon, the
   inviter's ID, username, display name and avatar, and the time. Commits wake that
@@ -543,7 +556,8 @@ either direction.
 - **Inviter changes**: like invite codes, an invitation stays valid if its sender
   later leaves, loses ManageInvites or deletes their account (then it shows no
   sender). Server deletion and invitee account deletion delete it. There is no
-  outgoing-invitation list or cancel yet; banning prevents acceptance.
+  outgoing-invitation list or cancel yet; banning prevents acceptance, and
+  unanswered invitations expire.
 
 Released clients show a sent invitation as a silent success (the member list does
 not change) and do not display received invitations; they need the next client
