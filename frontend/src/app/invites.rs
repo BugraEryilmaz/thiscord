@@ -217,12 +217,13 @@ fn respond(ui: Ui, guild_id: GuildId, accept: bool, busy: RwSignal<bool>) {
     } else {
         PermissionRequest::DeclineGuildInvitation { guild_id }
     };
+    let selection = ui.navigation.get_untracked().current();
     leptos::task::spawn_local(async move {
         let result = servers::request(ui, command).await;
-        if busy.is_disposed() {
-            return;
+        // The friends socket may already have removed this row (and its signal).
+        if !busy.is_disposed() {
+            busy.set(false);
         }
-        busy.set(false);
         match result {
             Ok(response) => {
                 ui.friends
@@ -230,7 +231,10 @@ fn respond(ui: Ui, guild_id: GuildId, accept: bool, busy: RwSignal<bool>) {
                     .update(|s| s.guild_invitations.retain(|i| i.guild_id != guild_id));
                 if let PermissionResponse::Joined { guild } = response {
                     servers::refresh(ui).await;
-                    servers::navigate(ui, guild.id);
+                    // Open it only if the user is still where they accepted.
+                    if servers::current(ui, selection) {
+                        servers::navigate(ui, guild.id);
+                    }
                 }
             }
             Err(message) => ui.status.set(message),
@@ -246,17 +250,19 @@ pub(super) fn PendingServers(ui: Ui) -> impl IntoView {
     view! {
         <Show when=move ||!invitations.with(Vec::is_empty)>
             <p class="sidebar-section-title mb-3">{move ||format!("{} — {}",crate::i18n::t("Server invitations"),invitations.with(Vec::len))}</p>
-            <For each=move ||invitations.get() key=|i|i.guild_id children=move |invitation| {
+            <For each=move ||invitations.get() key=|i|i.guild_id children=move |initial| {
                 let busy = RwSignal::new(false);
-                let guild_id = invitation.guild_id;
-                let name = invitation.guild_name.clone();
-                let from = invitation.invited_by.as_ref().map_or_else(
+                let guild_id = initial.guild_id;
+                // Later snapshots update this row's details (renames, icons, inviter).
+                let invitation = Memo::new(move |_| invitations.with(|list| list.iter().find(|i| i.guild_id == guild_id).cloned()).unwrap_or_else(|| initial.clone()));
+                let name = Signal::derive(move || invitation.with(|i| i.guild_name.clone()));
+                let from = move || invitation.with(|i| i.invited_by.as_ref().map_or_else(
                     || crate::i18n::t("Invitation to join this server").to_owned(),
                     |by| thiscord_frontend::localized_format!(crate::i18n::language(), "Invited by {name} (@{username})", name = by.display_name, username = by.username),
-                );
-                view!{<div data-rove tabindex="0" class="friend-row" aria-label=thiscord_frontend::localized_format!(crate::i18n::language(), "Invitation to {name}", name = name.clone())>
-                    <span class="relative grid size-10 shrink-0 place-items-center overflow-hidden rounded-[12px] bg-raised text-sm font-semibold"><crate::avatar::GuildIcon name=name.clone() icon_id=invitation.guild_icon_id/></span>
-                    <div class="friend-row-name min-w-0 flex-1"><p class="truncate font-semibold">{name.clone()}</p><p class="truncate text-xs text-white/60">{from}</p></div>
+                ));
+                view!{<div data-rove tabindex="0" class="friend-row" aria-label=move ||thiscord_frontend::localized_format!(crate::i18n::language(), "Invitation to {name}", name = name.get())>
+                    <span class="relative grid size-10 shrink-0 place-items-center overflow-hidden rounded-[12px] bg-raised text-sm font-semibold"><crate::avatar::GuildIcon name=name icon_id=Signal::derive(move || invitation.with(|i| i.guild_icon_id))/></span>
+                    <div class="friend-row-name min-w-0 flex-1"><p class="truncate font-semibold">{name}</p><p class="truncate text-xs text-white/60">{from}</p></div>
                     <button type="button" class="btn btn-primary min-h-9 px-3.5" disabled=move ||busy.get() on:click=move |_|respond(ui,guild_id,true,busy)>{move ||crate::i18n::t("Accept")}</button>
                     <button type="button" class="btn btn-secondary min-h-9 px-3.5" disabled=move ||busy.get() on:click=move |_|respond(ui,guild_id,false,busy)>{move ||crate::i18n::t("Decline")}</button>
                 </div>}

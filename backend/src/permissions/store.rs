@@ -501,7 +501,8 @@ pub(super) fn dispatch(
                 verified(c,actor)?;
                 execute(c,"SELECT id FROM guilds WHERE id=$1::uuid FOR UPDATE", &[&guild_id.to_string()])?;
                 // Only the addressed account's own invitation; never one hidden by a block.
-                require(query::<bool>(c,"SELECT to_jsonb(TRUE) AS data FROM guild_invitations v WHERE v.guild_id=$1::uuid AND v.account_id=$2::uuid AND NOT EXISTS(SELECT 1 FROM account_blocks b WHERE (b.blocker_id=v.account_id AND b.blocked_id=v.invited_by) OR (b.blocker_id=v.invited_by AND b.blocked_id=v.account_id))", &[&guild_id.to_string(),&actor.to_string()])? == [true])?;
+                // The row lock orders this against a concurrent decline.
+                require(query::<bool>(c,"SELECT to_jsonb(TRUE) AS data FROM guild_invitations v WHERE v.guild_id=$1::uuid AND v.account_id=$2::uuid AND NOT EXISTS(SELECT 1 FROM account_blocks b WHERE (b.blocker_id=v.account_id AND b.blocked_id=v.invited_by) OR (b.blocker_id=v.invited_by AND b.blocked_id=v.account_id)) FOR UPDATE OF v", &[&guild_id.to_string(),&actor.to_string()])? == [true])?;
                 let state=load(c,guild_id)?;
                 not_banned(c,guild_id,actor)?;
                 join(c,&state,actor)?;

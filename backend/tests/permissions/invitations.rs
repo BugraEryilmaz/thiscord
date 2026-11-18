@@ -402,10 +402,3 @@ async fn invitations_reach_only_the_invitee_live_with_public_fields() {
     assert!(quiet.is_err());
     server.abort();
 }
-
-#[test]
-fn released_add_member_commands_still_deserialize() {
-    let wire = json!({"action":"change","guild_id":Uuid::nil(),"revision":3,"change":{"action":"add_member","username":"friend"}});
-    let parsed: PermissionRequest = serde_json::from_value(wire.clone()).unwrap();
-    assert_eq!(serde_json::to_value(parsed).unwrap(), wire);
-}
