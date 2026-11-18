@@ -120,6 +120,8 @@ pub(super) async fn attach(
     .await;
     match result {
         Ok(Ok(permit)) => {
+            // Authorized: the media owner hands this socket its existing slot.
+            socket.permit = None;
             permit.send(Incoming { socket, sequence });
         }
         Ok(Err(event)) => {

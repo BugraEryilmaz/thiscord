@@ -9,7 +9,7 @@ use crate::{
 use axum::{
     Extension, Json, Router,
     extract::{
-        DefaultBodyLimit, State, WebSocketUpgrade,
+        ConnectInfo, DefaultBodyLimit, State, WebSocketUpgrade,
         rejection::JsonRejection,
         ws::{Message, WebSocket, rejection::WebSocketUpgradeRejection},
     },
@@ -19,6 +19,7 @@ use axum::{
 };
 use std::{
     collections::{HashMap, HashSet, VecDeque},
+    net::SocketAddr,
     sync::{Arc, Mutex, OnceLock},
     time::{Duration, Instant},
 };
@@ -161,7 +162,10 @@ pub fn router(origins: Vec<HeaderValue>, sockets: usize) -> Router<Option<DbPool
         .route(PATH, post(handle))
         .route(SOCKET_PATH, get(upgrade))
         .layer(Extension(Arc::new(origins)))
-        .layer(Extension(crate::limits::SocketSlots::new(sockets)))
+        .layer(Extension(crate::limits::Admission::new(
+            sockets,
+            crate::limits::Caps::SOCKETS,
+        )))
         .layer(DefaultBodyLimit::max(16 * 1024))
 }
 async fn handle(
@@ -233,7 +237,8 @@ async fn upgrade(
     State(pool): State<Option<DbPool>>,
     Extension(id): Extension<RequestId>,
     Extension(origins): Extension<Arc<Vec<HeaderValue>>>,
-    Extension(slots): Extension<crate::limits::SocketSlots>,
+    Extension(admission): Extension<crate::limits::Admission>,
+    peer: Option<Extension<ConnectInfo<SocketAddr>>>,
     axum::extract::RawQuery(query): axum::extract::RawQuery,
     Extension(shutdown): Extension<crate::shutdown::Shutdown>,
     headers: HeaderMap,
@@ -248,7 +253,8 @@ async fn upgrade(
     let Ok(ws) = ws else {
         return Failure::Invalid("Invalid WebSocket upgrade").response(id);
     };
-    let Ok(permit) = slots.0.clone().try_acquire_owned() else {
+    // A pending slot until the first frame authenticates (see `limits`).
+    let Some(ticket) = admission.pending(peer.map(|p| p.0.0), &headers) else {
         return Failure::Limited.response(id);
     };
     // Web client: cookie-derived bearer, used only when the frame token is empty.
@@ -259,11 +265,10 @@ async fn upgrade(
     ws.max_message_size(4096)
         .max_frame_size(4096)
         .on_upgrade(move |socket| async move {
-            let _permit = permit;
             // A planned restart ends the socket; the client reconnects to the
             // next process (and replays still-ringing calls) as after any drop.
             tokio::select! {
-                _ = serve(socket, pool, upgrade_token, groups) => {}
+                _ = serve(socket, pool, upgrade_token, groups, ticket) => {}
                 _ = shutdown.drained() => {}
             }
         })
@@ -289,7 +294,13 @@ async fn send(socket: &mut WebSocket, event: ServerEvent) -> Result<(), ()> {
     .map_err(|_| ())?
     .map_err(|_| ())
 }
-async fn serve(mut socket: WebSocket, pool: DbPool, upgrade_token: String, groups: bool) {
+async fn serve(
+    mut socket: WebSocket,
+    pool: DbPool,
+    upgrade_token: String,
+    groups: bool,
+    mut ticket: crate::limits::Ticket,
+) {
     let Ok(Some(Ok(message))) = tokio::time::timeout(Duration::from_secs(5), socket.recv()).await
     else {
         return;
@@ -303,7 +314,7 @@ async fn serve(mut socket: WebSocket, pool: DbPool, upgrade_token: String, group
     }
     let Ok(Ok(permit)) =
         // Connect storms (such as every client reconnecting after a restart)
-        // queue here; the socket limit already bounds how many wait.
+        // queue here; the pending admission budget bounds how many wait.
         tokio::time::timeout(Duration::from_secs(30), workers().acquire_owned()).await
     else {
         return;
@@ -325,6 +336,10 @@ async fn serve(mut socket: WebSocket, pool: DbPool, upgrade_token: String, group
     else {
         return;
     };
+    // Refused like a failed authentication: the client reconnects later.
+    if !ticket.promote(session.account_id) {
+        return;
+    }
     let account = access::account(session.account_id);
     let session_scope = access::session(session.id);
     let preference_scope = access::notification_preferences(session.account_id);

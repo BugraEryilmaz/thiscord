@@ -71,8 +71,9 @@ If the kernel ephemeral port range changes, review the media firewall rules.
 
 ## Client addresses for rate limits
 
-Account, verification and reset rate limits count per client address
-([accounts.md](accounts.md)). Proxied clients arrive from Cloudflare addresses,
+Account, verification and reset rate limits, huddle changes and unauthenticated
+real-time upgrades ([admission limits](load-benchmarks.md#admission-limits))
+count per client address ([accounts.md](accounts.md)). Proxied clients arrive from Cloudflare addresses,
 so set Cloudflare's published ranges (https://www.cloudflare.com/ips/,
 checked 2026-11-18) in `/etc/thiscord/backend.env` and restart the backend:
 

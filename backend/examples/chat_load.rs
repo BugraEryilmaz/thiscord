@@ -35,8 +35,9 @@ type Socket = WebSocketStream<MaybeTlsStream<tokio::net::TcpStream>>;
 const PREFIX: &str = "chatload";
 /// Same per-account send budget as the server's sensitive chat limiter (30/min).
 const MAX_SENDS_PER_ACCOUNT_PER_MINUTE: f64 = 30.0;
-/// A socket refused at the server's connection limit before any database work.
-const REJECTED: &str = "Refused at the server's connection limit (429)";
+/// A socket refused at the server's connection limit: HTTP 429 at the upgrade, or
+/// `rate_limited` right after authenticating when it lost the race for a slot.
+const REJECTED: &str = "Refused at the server's connection limit";
 
 struct Config {
     http: url::Url,
@@ -192,6 +193,13 @@ async fn chat_socket(config: &Config, user: usize) -> Result<Socket> {
             if error.code == thiscord_shared::ErrorCode::ServiceUnavailable =>
         {
             return Err("Chat socket service unavailable at connect");
+        }
+        // Concurrent upgrades can all pass the 429 check and race for the
+        // last slot after authenticating; the loser is refused here instead.
+        Ok(chat::ServerEvent::Error { error })
+            if error.code == thiscord_shared::ErrorCode::RateLimited =>
+        {
+            return Err(REJECTED);
         }
         _ => return Err("Chat socket authentication rejected"),
     }

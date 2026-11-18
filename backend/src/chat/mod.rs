@@ -14,7 +14,7 @@ use crate::{
 use axum::{
     Extension, Json, Router,
     extract::{
-        DefaultBodyLimit, State, WebSocketUpgrade,
+        ConnectInfo, DefaultBodyLimit, State, WebSocketUpgrade,
         rejection::JsonRejection,
         ws::{Message, WebSocket, rejection::WebSocketUpgradeRejection},
     },
@@ -24,6 +24,7 @@ use axum::{
 };
 use notifications::notifications;
 use std::{
+    net::SocketAddr,
     sync::{Arc, OnceLock},
     time::{Duration, Instant},
 };
@@ -52,7 +53,10 @@ pub fn router(origins: Vec<HeaderValue>, sockets: usize) -> Router<Option<DbPool
         .route(CHAT_PATH, post(handle))
         .route(SOCKET_PATH, get(upgrade))
         .layer(Extension(Arc::new(origins)))
-        .layer(Extension(crate::limits::SocketSlots::new(sockets)))
+        .layer(Extension(crate::limits::Admission::new(
+            sockets,
+            crate::limits::Caps::SOCKETS,
+        )))
         .layer(DefaultBodyLimit::max(32 * 1024))
         .merge(attachments::router())
 }
@@ -101,7 +105,8 @@ async fn upgrade(
     State(pool): State<Option<DbPool>>,
     Extension(id): Extension<RequestId>,
     Extension(origins): Extension<Arc<Vec<HeaderValue>>>,
-    Extension(slots): Extension<crate::limits::SocketSlots>,
+    Extension(admission): Extension<crate::limits::Admission>,
+    peer: Option<Extension<ConnectInfo<SocketAddr>>>,
     Extension(shutdown): Extension<crate::shutdown::Shutdown>,
     uri: axum::http::Uri,
     headers: HeaderMap,
@@ -123,17 +128,24 @@ async fn upgrade(
     let Ok(ws) = ws else {
         return Failure::Invalid("Invalid WebSocket upgrade").response(id);
     };
-    let Ok(permit) = slots.0.clone().try_acquire_owned() else {
+    // A pending slot until the first frame authenticates (see `limits`).
+    let Some(ticket) = admission.pending(peer.map(|p| p.0.0), &headers) else {
         return Failure::Limited.response(id);
     };
     // Web client: cookie-derived bearer, used only when the frame token is empty.
     let upgrade_token = auth::bearer(&headers);
     ws.max_message_size(16 * 1024)
         .max_frame_size(16 * 1024)
-        .on_upgrade(move |socket| async move {
-            let _permit = permit;
-            serve(socket, pool, id, upgrade_token, restart).await
-        })
+        .on_upgrade(move |socket| serve(socket, pool, id, upgrade_token, restart, ticket))
+}
+/// Refusal of an authenticated socket whose account is at its connection cap,
+/// or that lost the race for the last slot. Clients retry it like a 429.
+fn limited(id: RequestId) -> ServerEvent {
+    error(
+        id,
+        ErrorCode::RateLimited,
+        "Too many connections; try again soon",
+    )
 }
 /// How a socket learns of a planned restart: `Restarting` if it opted in with
 /// `RESTART_NOTICE_QUERY`, then a close with code 1012 either way.
@@ -193,6 +205,7 @@ async fn serve(
     id: RequestId,
     upgrade_token: String,
     restart: Restart,
+    mut ticket: crate::limits::Ticket,
 ) {
     let first = tokio::time::timeout(Duration::from_secs(5), socket.recv()).await;
     let Ok(Some(Ok(message))) = first else {
@@ -208,7 +221,7 @@ async fn serve(
         let token = auth::socket_token(token, &upgrade_token);
         // Released clients send no set and reject newer permission names.
         let set = permission_set.unwrap_or(1).clamp(1, PERMISSION_SET);
-        session::serve(socket, pool, id, token, guild_updates, set, restart).await;
+        session::serve(socket, pool, id, token, guild_updates, set, restart, ticket).await;
         return;
     }
     let Some(ClientEvent::Authenticate {
@@ -282,6 +295,10 @@ async fn serve(
             .await;
             return;
         };
+        if !ticket.promote(account_access.account_id) {
+            let _ = send(&mut socket, limited(id)).await;
+            return;
+        }
         let Some(_delivery) = snapshot.deliver() else {
             return;
         };

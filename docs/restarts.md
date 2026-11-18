@@ -110,7 +110,9 @@ drain needs at most about 13 s. `thiscord-deploy` stops the backend (drain),
 backs up the database, switches the release and starts it; clients rejoin as soon
 as the new process is ready (the backup's duration is the main part of the gap).
 Do not lower `TimeoutStopSec` below about 15 s, and do not use `kill -9` for
-planned restarts.
+planned restarts. The reconnecting clients pass socket admission while they
+authenticate; its per-address caps are sized for such a storm behind one proxy
+address ([admission limits](load-benchmarks.md#admission-limits)).
 
 ## In-place ICE restarts and relay credential refresh
 
