@@ -138,6 +138,8 @@ and single-process chat/media enforcement.
 - [x] Custom server icons: upload/replace/remove with ManageGuild, live rail/header/banner updates.
 - [x] Server join-password change/removal in Overview (ManageGuild, revision-checked).
 - [x] Invite links with optional expiry/use limits, revocation and join validation.
+- [x] Username invitations that the invitee accepts or declines (no direct add; blocks suppress them).
+- [ ] Outgoing server invitation list and cancellation for ManageInvites holders.
 - [x] Browser invite landing with desktop handoff, web client handoff, installer links and unlimited invite copying.
 - [ ] Validate installed invite activation on Windows, macOS and Linux (cold start, running/tray and signed out).
 - [x] Ownership transfer, kick/ban/unban and per-server moderation controls.

@@ -99,7 +99,42 @@ fn user(db: &Database, name: &str) -> (AccountId, String) {
     .bind::<Text, _>(sid.to_string())
     .execute(&mut c)
     .unwrap();
+    remember(name, &token);
     (id, token)
+}
+
+/// Tokens of accounts created by `user`, so `change` can accept the invitation
+/// an `add_member` sends, as the invitee would. Names repeat across tests.
+static TOKENS: std::sync::Mutex<Vec<(String, String)>> = std::sync::Mutex::new(Vec::new());
+fn remember(name: &str, token: &str) {
+    TOKENS
+        .lock()
+        .unwrap()
+        .push((name.to_ascii_lowercase(), token.to_owned()));
+}
+/// Accepts `username`'s pending invitation to this guild. Tokens are tried
+/// newest first: accounts from other tests' schemas fail authentication here.
+async fn accept_invitation(app: &Router, guild_id: &Value, username: &str) {
+    let username = username.trim().to_ascii_lowercase();
+    let tokens: Vec<String> = TOKENS
+        .lock()
+        .unwrap()
+        .iter()
+        .rev()
+        .filter(|(name, _)| *name == username)
+        .map(|(_, token)| token.clone())
+        .collect();
+    for token in tokens {
+        let accept = json!({"action":"accept_guild_invitation","guild_id":guild_id});
+        if call(app, PERMISSIONS_PATH, &token, accept)
+            .await
+            .0
+            .is_success()
+        {
+            return;
+        }
+    }
+    panic!("{username} could not accept an invitation");
 }
 async fn call(app: &Router, path: &str, token: &str, command: Value) -> (StatusCode, Value) {
     let response = app
@@ -140,9 +175,24 @@ async fn change(
     change: Value,
     expected: StatusCode,
 ) -> Value {
+    // `add_member` invites; the fixture accepts at once, as before (add then accept).
+    let invitee = (change["action"] == "add_member" && expected.is_success())
+        .then(|| change["username"].as_str().unwrap().to_owned());
     let body=command(app,token,json!({"action":"change","guild_id":state["guild"]["id"],"revision":state["guild"]["revision"],"change":change}),expected).await;
     if body["result"] == "state" {
         *state = body["state"].clone();
+    }
+    if let Some(invitee) = invitee {
+        accept_invitation(app, &state["guild"]["id"], &invitee).await;
+        // Accepting bumped the revision again: refresh what the actor can inspect,
+        // or keep the actor exactly one revision behind, as a plain change would.
+        if body["result"] == "state" {
+            let inspect = json!({"action":"inspect","guild_id":state["guild"]["id"]});
+            let refreshed = command(app, token, inspect, StatusCode::OK).await;
+            *state = refreshed["state"].clone();
+            return refreshed;
+        }
+        state["guild"]["revision"] = json!(state["guild"]["revision"].as_i64().unwrap() + 1);
     }
     body
 }

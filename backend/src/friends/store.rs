@@ -565,11 +565,12 @@ pub(super) fn snapshot(
         let history=selected.filter(|_|load_history).map(|id|history(c,id,before.clone(),Default::default())).transpose()?;
         let calls:Vec<CallRow>=query(c,"SELECT to_jsonb(v) AS data FROM friend_calls v JOIN friendships f ON f.id=v.conversation_id WHERE $1::uuid IN (v.caller,v.callee) AND v.state IN ('ringing','active') AND v.expires_at>now() AND f.state='accepted' AND NOT EXISTS(SELECT 1 FROM account_blocks b WHERE (b.blocker_id=f.low_id AND b.blocked_id=f.high_id) OR (b.blocker_id=f.high_id AND b.blocked_id=f.low_id)) ORDER BY v.id", &[&actor.to_string()])?;
         let group_calls=super::groups::calls(c,actor)?;
+        let guild_invitations=crate::permissions::store::invitations(c,actor)?;
         let own_status:Option<thiscord_shared::account::CustomStatus>=query(c,"SELECT jsonb_strip_nulls(jsonb_build_object('emoji',s.emoji,'text',s.status_text,'expires_at',s.expires_at)) AS data FROM account_custom_statuses s WHERE s.account_id=$1::uuid AND (s.expires_at IS NULL OR s.expires_at>now())", &[&actor.to_string()])?.pop();
         // Calls, call leases and custom statuses expire without a write; rebuild then.
         let statuses=friends.iter().filter_map(|f|f.person.custom_status.as_ref()).chain(own_status.as_ref()).filter_map(|s|s.expires_at);
         let expiry=calls.iter().map(|v|v.expires_at).chain(group_calls.iter().map(|v|v.expires_at)).chain(statuses).min().map(|at|(at-chrono::Utc::now()).to_std().unwrap_or_default()+std::time::Duration::from_millis(50));
-        let mut snapshot=Snapshot {friends,calls:calls.into_iter().map(|v|v.call).collect(),conversation_id:selected,history,before,typing:vec![],own_status,accepts_activity:true,groups,group_calls:group_calls.into_iter().map(|v|v.call).collect()};
+        let mut snapshot=Snapshot {friends,calls:calls.into_iter().map(|v|v.call).collect(),conversation_id:selected,history,before,typing:vec![],own_status,accepts_activity:true,groups,group_calls:group_calls.into_iter().map(|v|v.call).collect(),guild_invitations};
         live(&mut snapshot,actor,&hidden);
         Ok((snapshot,expiry,hidden))
     })

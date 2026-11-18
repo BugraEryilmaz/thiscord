@@ -30,6 +30,10 @@ normal guild permissions. Blocking does not ban, mute, hide a moderator, change 
 channel override or remove anyone from a shared room. Existing guild sockets may
 conservatively reconnect and guild media reauthorizes after account gate invalidation.
 Use guild moderation and personal voice controls for shared-room behavior.
+Blocks do stop server invitations: inviting someone by username across a block in
+either direction delivers nothing, while the inviter sees the usual success, and a
+block placed later hides a pending invitation and prevents accepting it (see
+[Member invitations](permissions.md#member-invitations)).
 Private group conversations are shared spaces too: a block never removes anyone
 from a group, but it prevents adding a blocked/blocking account to a group either
 party is in, and hides presence, typing, unread badges, notifications and call

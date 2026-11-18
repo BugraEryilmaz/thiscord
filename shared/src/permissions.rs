@@ -363,6 +363,32 @@ pub struct GuildInvite {
     pub uses: u32,
     pub revoked: bool,
 }
+/// A pending invitation to join a server, addressed to one account (sent by
+/// [`GuildChange::AddMember`]). It grants nothing until that account accepts it
+/// with [`PermissionRequest::AcceptGuildInvitation`]. Delivered to the invited
+/// account only, in the friends socket snapshot; it carries no more than the
+/// server name/icon and the inviter's public identity.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct GuildInvitation {
+    pub guild_id: GuildId,
+    pub guild_name: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub guild_icon_id: Option<GuildIconId>,
+    /// None when the inviting account has since been deleted.
+    pub invited_by: Option<GuildInviter>,
+    pub created_at: crate::Timestamp,
+}
+/// The inviter's public identity (as shown in account search).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct GuildInviter {
+    pub id: AccountId,
+    pub username: String,
+    pub display_name: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub avatar_id: Option<crate::AvatarId>,
+}
+/// Most pending server invitations listed for one account.
+pub const MAX_LISTED_GUILD_INVITATIONS: usize = 100;
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct AuditEntry {
     pub id: AuditId,
@@ -422,6 +448,16 @@ impl std::fmt::Debug for GuildPassword {
 pub enum PermissionRequest {
     AcceptInvite {
         code: String,
+    },
+    /// Accepts the caller's own pending [`GuildInvitation`] to this server and
+    /// joins it. Responds with `Joined`; fails if no such invitation is pending.
+    AcceptGuildInvitation {
+        guild_id: GuildId,
+    },
+    /// Removes the caller's own pending invitation to this server, if any.
+    /// Responds with `Done`.
+    DeclineGuildInvitation {
+        guild_id: GuildId,
     },
     ListInvites {
         guild_id: GuildId,
@@ -559,6 +595,11 @@ pub enum GuildChange {
         password: Option<GuildPassword>,
     },
     Delete {},
+    /// Requires ManageInvites. Invites the verified account with this username:
+    /// it becomes a member only after accepting the resulting [`GuildInvitation`].
+    /// Repeating it while the invitation is pending is a no-op. The response is
+    /// the same as for other changes (and identical whether or not the
+    /// invitation could be delivered, so it never reveals a block).
     AddMember {
         username: String,
     },
@@ -758,6 +799,51 @@ mod tests {
                 json!({"guild_id":id,"revision":3,"image_base64":null,"path":"x"})
             )
             .is_err()
+        );
+    }
+
+    #[test]
+    fn guild_invitations_have_stable_additive_wire_formats() {
+        let id = "00000000-0000-0000-0000-000000000001";
+        // Released clients keep sending `add_member`; it now invites.
+        let add = json!({"action":"change","guild_id":id,"revision":4,"change":{"action":"add_member","username":"friend"}});
+        let parsed: PermissionRequest = serde_json::from_value(add.clone()).unwrap();
+        assert_eq!(serde_json::to_value(parsed).unwrap(), add);
+        for action in ["accept_guild_invitation", "decline_guild_invitation"] {
+            let wire = json!({"action":action,"guild_id":id});
+            let parsed: PermissionRequest = serde_json::from_value(wire.clone()).unwrap();
+            assert_eq!(serde_json::to_value(parsed).unwrap(), wire);
+            let mut extra = wire;
+            extra["account_id"] = json!(id);
+            assert!(serde_json::from_value::<PermissionRequest>(extra).is_err());
+        }
+        let full = json!({"guild_id":id,"guild_name":"Home","guild_icon_id":id,"created_at":"2026-11-18T00:00:00Z","invited_by":{"id":id,"username":"ada","display_name":"Ada","avatar_id":id}});
+        let invitation: GuildInvitation = serde_json::from_value(full.clone()).unwrap();
+        assert_eq!(serde_json::to_value(&invitation).unwrap(), full);
+        // No icon or avatar; a deleted inviter is null.
+        let bare = json!({"guild_id":id,"guild_name":"Home","created_at":"2026-11-18T00:00:00Z","invited_by":null});
+        let invitation: GuildInvitation = serde_json::from_value(bare.clone()).unwrap();
+        assert!(invitation.invited_by.is_none() && invitation.guild_icon_id.is_none());
+        assert_eq!(serde_json::to_value(&invitation).unwrap(), bare);
+        // Older servers omit the snapshot field; empty lists are omitted for older clients.
+        let snapshot: crate::friends::Snapshot = serde_json::from_value(
+            json!({"friends":[],"calls":[],"conversation_id":null,"history":null}),
+        )
+        .unwrap();
+        assert!(snapshot.guild_invitations.is_empty());
+        assert!(
+            serde_json::to_value(&snapshot)
+                .unwrap()
+                .get("guild_invitations")
+                .is_none()
+        );
+        let snapshot = crate::friends::Snapshot {
+            guild_invitations: vec![invitation],
+            ..Default::default()
+        };
+        assert_eq!(
+            serde_json::to_value(&snapshot).unwrap()["guild_invitations"][0],
+            bare
         );
     }
 

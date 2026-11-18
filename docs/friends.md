@@ -12,8 +12,10 @@ a verified email. The recipient explicitly accepts; crossing requests do not
 silently establish a friendship. Requests can be declined or cancelled, and either
 friend can remove the relationship. Each account can have at most 200 accepted or
 pending relationships, enforced while locking both accounts in UUID order.
-The Home bubble totals incoming requests and unread direct messages. Requests
-shows incoming requests only (outgoing requests still appear in the list).
+The Home bubble totals incoming requests, pending server invitations and unread
+direct messages. Requests shows incoming requests only (outgoing requests still
+appear in the list), with server invitations above them (see
+[Member invitations](permissions.md#member-invitations)).
 Messages, the direct-message sidebar and individual conversations show unread
 message bubbles. Zero counts are hidden; counts above 99 display `99+`.
 Muting sounds/banners does not hide unread counts.
