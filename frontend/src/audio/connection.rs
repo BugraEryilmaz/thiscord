@@ -12,6 +12,7 @@ static NEXT_ID: AtomicU64 = AtomicU64::new(1);
 pub struct ConnectionId(u64);
 #[derive(Clone)]
 pub struct Connection {
+    pub join_id: Option<u64>,
     alive: Arc<AtomicBool>,
     diagnostic_id: u64,
     request_id: Arc<OnceLock<RequestId>>,
@@ -21,6 +22,7 @@ pub struct Connection {
 impl Default for Connection {
     fn default() -> Self {
         Self {
+            join_id: None,
             alive: Arc::new(AtomicBool::new(true)),
             diagnostic_id: NEXT_ID.fetch_add(1, Ordering::Relaxed),
             request_id: Arc::default(),

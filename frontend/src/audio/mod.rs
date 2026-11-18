@@ -23,6 +23,8 @@ mod lifecycle;
 pub mod media_runtime;
 pub mod mixer;
 mod network;
+mod open_trace;
+use open_trace::OpenTrace;
 pub mod outgoing;
 mod playout_rate;
 #[cfg(test)]
@@ -796,6 +798,7 @@ trait DeviceStreams: Send {
     fn play(&self) -> Result<(), String>;
 }
 struct CpalStreams {
+    trace: OpenTrace,
     output: cpal::Stream,
     input: Option<cpal::Stream>,
 }
@@ -807,12 +810,30 @@ impl DeviceStreams for SilentStreams {
 }
 impl DeviceStreams for CpalStreams {
     fn play(&self) -> Result<(), String> {
-        self.output.play().map_err(|e| e.to_string())?;
+        self.output.play().map_err(|e| {
+            self.trace
+                .fail("output", "play", bounded(&e.to_string()), None)
+        })?;
         if let Some(input) = &self.input {
-            input.play().map_err(|e| e.to_string())?;
+            input.play().map_err(|e| {
+                self.trace
+                    .fail("input", "play", bounded(&e.to_string()), None)
+            })?;
         }
         Ok(())
     }
+}
+fn bounded(text: &str) -> String {
+    // Preserve the OS code at the end of a long backend context string.
+    if text.chars().take(241).count() <= 240 {
+        return text.to_owned();
+    }
+    let tail = text.char_indices().rev().nth(79).unwrap().0;
+    format!(
+        "{}…{}",
+        text.chars().take(159).collect::<String>(),
+        &text[tail..]
+    )
 }
 impl Devices {
     fn silent(settings: &AudioSettings) -> Self {
@@ -829,17 +850,29 @@ impl Devices {
             health: Arc::new(StreamHealth::default()),
         }
     }
-    fn prepare(settings: &AudioSettings, microphone: bool) -> Result<Self, String> {
-        settings.validate()?;
+    fn prepare(
+        settings: &AudioSettings,
+        microphone: bool,
+        caller: &'static str,
+        attempt: Option<usize>,
+        join_id: Option<u64>,
+    ) -> Result<Self, String> {
+        let mut trace = OpenTrace::begin(settings, microphone, caller, attempt, join_id);
+        settings
+            .validate()
+            .map_err(|e| trace.fail("devices", "validate", e.into(), None))?;
         #[cfg(feature = "voice-bot")]
         if virtual_devices::enabled() {
-            return virtual_devices::prepare(settings, microphone);
+            let mut devices = virtual_devices::prepare(settings, microphone)
+                .map_err(|e| trace.fail("devices", "virtual_prepare", e, None))?;
+            devices.info["open_id"] = trace.id.into();
+            trace.event(
+                "device_open_complete",
+                || serde_json::json!({"thread":open_trace::thread_context()}),
+            );
+            return Ok(devices);
         }
-        let permit = lifecycle::acquire()?;
-        diagnostics::event(
-            "device_open_begin",
-            serde_json::json!({"microphone":microphone,"default_input":settings.input.is_none(),"default_output":settings.output.is_none()}),
-        );
+        let permit = lifecycle::acquire().map_err(|e| trace.fail("devices", "permit", e, None))?;
         let control = Arc::new(Controls::default());
         let health = Arc::new(StreamHealth::default());
         apply(&control, settings);
@@ -848,17 +881,23 @@ impl Devices {
         let mixer = mixer.with_reference(reference_writer);
         // Resolve both endpoints before allocating any streams. A stale saved ID
         // falls back independently, leaving the other selected device intact.
-        let selected_output = selection::device(settings.output.as_deref(), false)?;
+        let selected_output = selection::device(settings.output.as_deref(), false)
+            .map_err(|e| trace.fail("output", "select", bounded(&e), None))?;
+        trace.selected(false, selected_output.fallback);
         let selected_input = microphone
             .then(|| selection::device(settings.input.as_deref(), true))
-            .transpose()?;
+            .transpose()
+            .map_err(|e| trace.fail("input", "select", bounded(&e), None))?;
+        if let Some(input) = &selected_input {
+            trace.selected(true, input.fallback);
+        }
         let output_device = selected_output.device;
         let output_name = output_device
             .description()
             .ok()
             .map(|d| d.name().to_owned())
             .unwrap_or_else(|| "selected output".into());
-        let output_config = config(&output_device, false)?;
+        let output_config = trace.config(&output_device, false)?;
         diagnostics::event(
             "output_stream_open",
             serde_json::json!({"name":output_name,"rate":output_config.sample_rate(),"channels":output_config.channels(),"format":format!("{:?}",output_config.sample_format())}),
@@ -872,13 +911,20 @@ impl Devices {
                 health.clone()
             )
         )
-        .map_err(|e| format!("Output \"{output_name}\": {e}"))?;
+        .map_err(|e| {
+            trace.fail(
+                "output",
+                "build",
+                format!("Output \"{}\": {}", bounded(&output_name), bounded(&e)),
+                None,
+            )
+        })?;
         diagnostics::event("output_stream_prepared", serde_json::json!({}));
         let (producer, capture) = frames::queue();
         let mut input_info = serde_json::Value::Null;
         let input = if let Some(selected) = selected_input {
             let d = selected.device;
-            let c = config(&d, true)?;
+            let c = trace.config(&d, true)?;
             input_info = serde_json::json!({"name":d.description().ok().map(|d|d.name().to_owned()),"fallback":selected.fallback,
                 "channels":c.channels(),"sample_rate":c.sample_rate(),"format":format!("{:?}",c.sample_format())});
             diagnostics::event("input_stream_open", input_info.clone());
@@ -892,25 +938,37 @@ impl Devices {
                     c.sample_format(),
                     input(&d, &c.config(), producer, control.clone(), health.clone())
                 )
-                .map_err(|e| format!("Microphone \"{input_name}\": {e}"))?,
+                .map_err(|e| {
+                    trace.fail(
+                        "input",
+                        "build",
+                        format!("Microphone \"{}\": {}", bounded(&input_name), bounded(&e)),
+                        None,
+                    )
+                })?,
             )
         } else {
             None
         };
-        diagnostics::event(
+        trace.event(
             "device_open_complete",
-            serde_json::json!({"microphone":microphone}),
+            || serde_json::json!({"thread":open_trace::thread_context()}),
         );
         Ok(Self {
-            info: serde_json::json!({"input":input_info,"output":{
+            info: serde_json::json!({"open_id":trace.id,"effective_output":trace.effective[0],"effective_input":trace.effective[1],"input":input_info,"output":{
                 "fallback":selected_output.fallback,
                 "name":output_device.description().ok().map(|d|d.name().to_owned()),
                 "channels":output_config.channels(),"sample_rate":output_config.sample_rate(),
                 "format":format!("{:?}",output_config.sample_format())}}),
             streams: Box::new(lifecycle::Managed::new(
-                CpalStreams { output, input },
+                CpalStreams {
+                    output,
+                    input,
+                    trace,
+                },
                 permit,
                 health.clone(),
+                Some(trace),
             )),
             capture,
             reference,
@@ -1875,6 +1933,7 @@ fn run(
                                 .control
                                 .receive_guard
                                 .set(s.transmit_control.clone());
+                            s.recovery.join_id = connection.join_id;
                             s.connection = Some(connection);
                             session = Some(s);
                             lease = Instant::now();

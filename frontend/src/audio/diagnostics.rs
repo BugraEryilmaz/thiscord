@@ -123,13 +123,17 @@ pub fn event(name: &'static str, details: serde_json::Value) {
     logger.event(name, details);
 }
 
+pub(super) fn collecting() -> bool {
+    LOGGER
+        .get()
+        .is_some_and(|logger| logger.active.try_lock().is_ok_and(|s| s.is_some()))
+}
+
 /// Like [`event`], but builds the details only while logging is on, so periodic
 /// snapshots cost nothing on audio threads when diagnostics are off.
 pub fn event_with(name: &'static str, details: impl FnOnce() -> serde_json::Value) {
-    if let Some(logger) = LOGGER.get()
-        && logger.active.try_lock().is_ok_and(|s| s.is_some())
-    {
-        logger.event(name, details());
+    if collecting() {
+        event(name, details());
     }
 }
 
@@ -439,6 +443,8 @@ mod tests {
             "token",
             "sdp",
             "model_path",
+            "endpoint_id",
+            "credential",
         ] {
             assert!(!text.contains(forbidden));
         }
