@@ -312,15 +312,27 @@ ambient cookies, so cross-origin forms cannot authenticate mutations. The web
 client's session cookie is ambient, so the backend honors it only when the request
 `Origin` is in `ALLOWED_ORIGINS`, or for GET/HEAD without `Origin`; otherwise the
 request is anonymous, and an explicit bearer header always wins. CORS permits
-only configured origins and the Authorization/Content-Type headers, without credentials. Proxy headers
-are ignored for rate limiting: deploy a trusted proxy policy before using forwarded
-client addresses. As written, proxied clients share the proxy IP's rate budget.
+only configured origins and the Authorization/Content-Type headers, without credentials.
+
+Per-address rate limits (account API, email verification and browser password
+reset) count the TCP peer, through one helper in `backend/src/client_ip.rs`. The
+`CF-Connecting-IP` header names the client only when the peer is inside
+`TRUSTED_PROXY_CIDRS` (comma-separated CIDRs read at startup; an invalid entry, a
+`/0` or a range with host bits fails startup). A missing, repeated or malformed
+header from such a peer counts against the proxy's own address, never against
+header text. `X-Forwarded-For` and headers from any other peer are ignored. When
+the variable is unset, clients behind a proxy share the proxy address's budget.
+IPv4-mapped IPv6 peers count as IPv4. IPv6 clients count per /64, so a host cannot
+gain budgets by rotating addresses inside its prefix; devices sharing one /64 share
+a budget, like devices behind one IPv4 NAT. See [vps.md](vps.md) for production.
 
 Argon2id uses the RustCrypto default v19 parameters (19 MiB, two iterations, one
 lane), random salts and a maximum of four concurrent account blocking workers.
 PostgreSQL rate counters survive restarts: 180 account requests/IP/minute, 30
-sensitive operations/IP/minute, and six registration/login/recovery attempts per
-normalized identifier/minute. Limits apply to successes and failures; HTTP 429
+sensitive operations/IP/minute, six registration/login/recovery attempts per
+normalized identifier/minute, and six password reauthentications per account/minute
+across all its sessions, so a stolen session cannot guess the password at the
+per-address rates. Limits apply to successes and failures; HTTP 429
 includes `Retry-After: 60`. Request bodies are limited to 16 KiB. Tokens and
 password request types deliberately lack `Debug` implementations.
 

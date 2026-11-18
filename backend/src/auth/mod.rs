@@ -258,10 +258,8 @@ async fn handle(
         let token = bearer(&headers);
         let permit = admit(&command)?;
         let limit_permit = permit.clone();
-        // Proxy headers are deliberately ignored. Configure a trusted proxy before deployment.
-        let ip = peer
-            .map(|p| p.0.0.ip().to_string())
-            .unwrap_or_else(|| "local".into());
+        // CF-Connecting-IP counts only from TRUSTED_PROXY_CIDRS peers (client_ip.rs).
+        let ip = crate::client_ip::limit_key(peer.map(|p| p.0.0), &headers);
         let limit_pool = pool.clone();
         let identifier = match &command {
             AccountRequest::Login { login, .. } => Some(login.trim().to_lowercase()),
@@ -278,9 +276,14 @@ async fn handle(
                 | AccountRequest::Sessions
                 | AccountRequest::GoogleComplete { .. }
         );
+        let reauthenticate =
+            matches!(command, AccountRequest::Reauthenticate { .. }).then(|| token.clone());
         tokio::task::spawn_blocking(move || {
             let _permit = limit_permit;
-            store::rate_limit(&limit_pool, &ip, identifier.as_deref(), sensitive)
+            match reauthenticate {
+                Some(token) => store::reauthentication_limit(&limit_pool, &ip, &token),
+                None => store::rate_limit(&limit_pool, &ip, identifier.as_deref(), sensitive),
+            }
         })
         .await
         .map_err(|_| Failure::Unavailable)??;

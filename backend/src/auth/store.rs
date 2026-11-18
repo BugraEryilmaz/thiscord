@@ -464,6 +464,24 @@ pub(crate) fn rate_limit(
     sensitive: bool,
 ) -> Result<(), Failure> {
     let mut c = connection(pool)?;
+    limit(&mut c, limit_keys(ip, identifier, sensitive))
+}
+
+/// Password reauthentication also counts against the session's account, so a
+/// stolen session cannot guess the password at the per-address rates.
+pub(super) fn reauthentication_limit(pool: &DbPool, ip: &str, token: &str) -> Result<(), Failure> {
+    let mut c = connection(pool)?;
+    let mut keys = limit_keys(ip, None, true);
+    match token_session(&mut c, token) {
+        Ok(session) => keys.push((format!("reauthenticate:{}", session.account_id), 6)),
+        // Dispatch rejects the unknown token; the address budgets still count it.
+        Err(Failure::Unauthorized) => {}
+        Err(error) => return Err(error),
+    }
+    limit(&mut c, keys)
+}
+
+fn limit_keys(ip: &str, identifier: Option<&str>, sensitive: bool) -> Vec<(String, i32)> {
     let mut keys = vec![(format!("ip:{ip}"), 180)];
     if sensitive {
         keys.push((format!("sensitive:{ip}"), 30));
@@ -471,6 +489,10 @@ pub(crate) fn rate_limit(
     if let Some(identifier) = identifier {
         keys.push((format!("account:{}", digest(identifier)), 6));
     }
+    keys
+}
+
+fn limit(c: &mut PgConnection, keys: Vec<(String, i32)>) -> Result<(), Failure> {
     // One transaction: one commit (and WAL flush) per limited request. Every
     // counter increment commits, including on a limited request, as before.
     let limited = c.transaction(|c| {

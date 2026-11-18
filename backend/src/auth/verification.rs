@@ -3,7 +3,7 @@ use crate::db::DbPool;
 use axum::{
     Extension,
     extract::{ConnectInfo, Query, State, rejection::QueryRejection},
-    http::StatusCode,
+    http::{HeaderMap, StatusCode},
     response::{Html, IntoResponse, Response},
 };
 use std::net::SocketAddr;
@@ -38,6 +38,7 @@ pub(super) fn account_link(path: &str, token: &str) -> Result<String, Failure> {
 pub(super) async fn verify(
     State(pool): State<Option<DbPool>>,
     peer: Option<Extension<ConnectInfo<SocketAddr>>>,
+    headers: HeaderMap,
     input: Result<Query<EmailVerificationQuery>, QueryRejection>,
 ) -> Response {
     let result = async {
@@ -46,9 +47,7 @@ pub(super) async fn verify(
             return Err(Failure::Unauthorized);
         }
         let pool = pool.ok_or(Failure::Unavailable)?;
-        let ip = peer
-            .map(|p| p.0.0.ip().to_string())
-            .unwrap_or_else(|| "local".into());
+        let ip = crate::client_ip::limit_key(peer.map(|p| p.0.0), &headers);
         tokio::task::spawn_blocking(move || {
             store::rate_limit(&pool, &ip, None, true)?;
             store::dispatch(&pool, "", AccountRequest::VerifyEmail { code: input.token })
