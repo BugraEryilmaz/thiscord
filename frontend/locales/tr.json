@@ -2062,10 +2062,10 @@
   "Invitation to join this server": "Bu sunucuya katılma daveti",
   "Invited by {name} (@{username})": "Davet eden: {name} (@{username})",
   "Invitation to {name}": "{name} daveti",
-  "Friend requests and server invitations you send or receive will appear here.": "Gönderdiğin veya aldığın arkadaşlık istekleri ve sunucu davetleri burada görünecek.",
   "Invite a member": "Üye davet et",
   "Invite members": "Üyeleri davet et",
   "Enter the username of an existing verified account. They join after accepting the invitation. Requires permission to invite members.": "Mevcut ve doğrulanmış bir hesabın kullanıcı adını gir. Daveti kabul ettikten sonra katılır. Üye davet etme izni gerektirir.",
   "Send invitation": "Davet gönder",
-  "Invitation sent to @{username}. They become a member once they accept.": "@{username} kullanıcısına davet gönderildi. Kabul ettiğinde üye olur."
+  "Invitation sent to @{username}. They become a member once they accept.": "@{username} kullanıcısına davet gönderildi. Kabul ettiğinde üye olur.",
+  "Friend requests you send or receive and server invitations you receive will appear here.": "Gönderdiğin veya aldığın arkadaşlık istekleri ve aldığın sunucu davetleri burada görünecek."
 }

@@ -218,6 +218,7 @@ fn respond(ui: Ui, guild_id: GuildId, accept: bool, busy: RwSignal<bool>) {
         PermissionRequest::DeclineGuildInvitation { guild_id }
     };
     let selection = ui.navigation.get_untracked().current();
+    let page = ui.page.get_untracked();
     leptos::task::spawn_local(async move {
         let result = servers::request(ui, command).await;
         // The friends socket may already have removed this row (and its signal).
@@ -232,7 +233,7 @@ fn respond(ui: Ui, guild_id: GuildId, accept: bool, busy: RwSignal<bool>) {
                 if let PermissionResponse::Joined { guild } = response {
                     servers::refresh(ui).await;
                     // Open it only if the user is still where they accepted.
-                    if servers::current(ui, selection) {
+                    if servers::current(ui, selection) && ui.page.get_untracked() == page {
                         servers::navigate(ui, guild.id);
                     }
                 }
